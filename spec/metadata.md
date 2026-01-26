@@ -65,6 +65,24 @@ High-volume, loss-tolerant:
 
 Keep in ETS, aggregate periodically, don't replicate.
 
+### How the Consistency Models Interact
+
+NeonFS uses multiple consistency mechanisms that are **layered**, not competing:
+
+| Layer | Mechanism | Scope | Purpose |
+|-------|-----------|-------|---------|
+| Control plane | Ra (Raft) | Cluster-wide | Who replicates what (membership, segment assignments) |
+| Data plane | Leaderless quorum | Per-segment | Actual metadata operations (files, directories, chunks) |
+| Conflict resolution | HLC | Per-record | Ordering concurrent writes within quorum |
+
+These don't interfere because they operate on different data:
+
+- **Ra leader election** doesn't affect in-flight quorum writes. Quorum writes target replica sets determined by segment assignments, not the Ra leader. Segment assignments are stable unless explicitly changed via Ra.
+- **HLC timestamps** operate within the quorum system for per-record conflict resolution. They don't interact with Ra's Raft log.
+- **Quorum operations** (R+W>N) provide consistency for metadata reads/writes. Ra provides the configuration that determines which nodes form each replica set.
+
+This is similar to how Cassandra separates gossip (membership) from quorum (data operations), or how CockroachDB separates Raft groups by key range.
+
 ## Leaderless Quorum Model
 
 Instead of single-node ownership, metadata segments use leaderless quorum replication. Each segment has a replica set, and operations require agreement from a quorum.
@@ -148,14 +166,21 @@ def quorum_read(segment_id, key) do
 
   {latest, stale_replicas} = find_latest_and_stale(responses)
 
-  # Background repair - don't block the read
+  # Background repair via I/O scheduler - don't block the read
+  # Scheduler handles backpressure, coalescing, and priority
   if stale_replicas != [] do
-    spawn(fn -> repair_replicas(stale_replicas, key, latest) end)
+    IOScheduler.submit(:read_repair,
+      key: key,
+      stale: stale_replicas,
+      latest: latest
+    )
   end
 
   {:ok, latest.value}
 end
 ```
+
+See [Architecture - I/O Scheduler](architecture.md#io-scheduler) for how read repairs are prioritised and coalesced.
 
 ## Conflict Resolution: Hybrid Logical Clocks
 
@@ -237,6 +262,20 @@ To enable efficient directory listings while evenly distributing file metadata:
 1. Quorum write to `hash("/documents/")`: remove child
 2. Quorum write to `hash("/archive/")`: add child
 3. File metadata unchanged
+
+### Limitation: Flat Directory Hot Spots
+
+Sharding by `hash(parent_path)` means all children of a directory reside in the same segment. This enables efficient single-segment directory listings but creates a potential hot spot for directories with very large numbers of children (e.g., upload buckets, log directories, mail spools).
+
+**Guidance for current design:**
+
+- Directories with tens of thousands of entries will work but may show increased latency
+- For large collections, prefer hierarchical organisation (e.g., date-based subdirectories) over flat structures
+- Monitor segment load distribution via telemetry
+
+**Future optimisation:**
+
+If flat directory performance becomes a bottleneck, implement segmented directory sharding: directories exceeding a threshold would shard children by `hash(parent_path + child_name_prefix)`, spreading load across multiple segments while preserving locality for prefix-based listings. This is deferred until real-world usage indicates the need.
 
 ## Consistent Hashing with Virtual Nodes
 

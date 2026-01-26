@@ -2,6 +2,8 @@
 
 This document describes network security, authentication, encryption, access control, and the threat model.
 
+> **Critical Trust Model**: NeonFS clusters operate on a full-trust model between nodes. Once a node joins the cluster, it has complete access to all data, metadata, and cluster operations. All security features (encryption, ACLs) protect against external threats and access control between *users*—they do not provide isolation between cluster nodes. A single compromised node means complete cluster compromise. See [Accepted Risks](#accepted-risks--cluster-node-trust) for full implications.
+
 ## Network Security (Deployment Recommendation)
 
 NeonFS itself doesn't mandate a specific network security model — this is a deployment concern. However, we strongly recommend running nodes on a private network, such as:
@@ -70,7 +72,26 @@ Nodes authenticate to join the cluster via a single-use invite token system.
 - **Short-lived**: Default 1 hour expiry limits exposure window
 - **Auditable**: Token usage recorded with timestamp and joining node
 
-This prevents random nodes from joining but doesn't require complex PKI. For production deployments requiring stronger authentication, implement TLS on BEAM distribution with mutual certificate verification — but this is optional and deployment-specific.
+This prevents random nodes from joining but doesn't require complex PKI.
+
+**Limitations of Cookie-Based Authentication:**
+
+After joining, ongoing node authentication relies on Erlang's cookie mechanism—a shared secret that all cluster nodes know. This has known weaknesses:
+
+- Cookies are long-lived with no automatic rotation
+- Cookie rotation requires cluster restart
+- Anyone who obtains the cookie can connect to the cluster (mitigated by network isolation)
+- No per-node identity verification after initial join
+
+**Future improvement: TLS Distribution**
+
+A future enhancement is to enable TLS-encrypted Erlang distribution with mutual certificate verification. This would provide:
+
+- Encrypted node-to-node traffic (currently plaintext, relies on network-level encryption)
+- Per-node certificate identity, enabling revocation of individual nodes
+- Standard PKI practices for certificate lifecycle
+
+This is on the roadmap but not required for initial development. The current design prioritises a working system with network-level security (WireGuard/VPN), with stronger node authentication added later.
 
 ## Key Hierarchy
 
@@ -178,16 +199,17 @@ Read flow (envelope encryption):
 
 ## Deduplication and Encryption Interaction
 
-Content hashing is always performed on **original (plaintext) data**, enabling duplicate detection regardless of encryption. However, actual storage savings depend on whether the ciphertext can be shared.
+**TL;DR**: Encryption usually prevents storage savings from deduplication. Within a single volume using the same encryption key, deduplication works normally. Across volumes with different keys, identical files are stored twice.
 
-**Key distinction**: Duplicate *detection* vs storage *savings*
+Content hashing is always performed on **original (plaintext) data**, so the system can *detect* duplicates regardless of encryption. However, *storage savings* require identical ciphertext, which only happens when the same key encrypts the same data.
 
-| Scenario | Detection | Storage Savings | Why |
-|----------|-----------|-----------------|-----|
+| Scenario | Detects Duplicates | Saves Storage | Why |
+|----------|-------------------|---------------|-----|
 | No encryption | ✓ | ✓ | Same bytes stored |
 | Same volume, server-side encryption | ✓ | ✓ | Same key → same ciphertext |
-| Cross-volume, different encryption keys | ✓ | ✗ | Different keys → different ciphertext |
-| Same volume, envelope encryption | ✓ | ✓ | Same DEK reused → same ciphertext |
+| Cross-volume, different keys | ✓ | ✗ | Different keys → different ciphertext |
+| Envelope encryption (same DEK) | ✓ | ✓ | Same DEK → same ciphertext |
+| Envelope encryption (random DEK) | ✓ | ✗ | Different DEK per chunk |
 
 **Example: Cross-volume with different keys**
 

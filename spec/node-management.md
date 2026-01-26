@@ -29,10 +29,11 @@ NeonFS relies on Ra (Raft) for cluster-wide consensus and quorum operations for 
 
 **Practical implications:**
 
-- Minority partition becomes effectively read-only for data on local node
+- Minority partition becomes effectively read-only for local data
 - No split-brain writes: quorum requirement prevents conflicting writes
 - Operations in flight when partition occurs may timeout and fail
 - HLC timestamps ensure write ordering is preserved across partition heal
+- Each access protocol handles read-only mode differently — see [API Surfaces - Degraded Mode Behaviour](api-surfaces.md#degraded-mode-behaviour) for details
 
 **After partition heals:**
 
@@ -310,3 +311,168 @@ def write_with_async_remote(chunk, data, volume) do
   :ok
 end
 ```
+
+## Rebalancing on Node Join/Leave
+
+When nodes join or leave the cluster, data must be redistributed to maintain consistent hashing assignments and durability guarantees.
+
+### Scheduling Priority
+
+Rebalancing uses the I/O scheduler (see [Architecture - I/O Scheduler](architecture.md#io-scheduler)) with lower priority than user operations:
+
+| Scenario | Rebalancing Priority |
+|----------|---------------------|
+| Normal operation | Lowest (below scrubbing) |
+| Storage pressure > 85% | Elevated (above scrubbing) |
+| Storage pressure > 95% | High (only user reads higher) |
+| Under-replicated chunks at risk | High |
+
+This ensures rebalancing makes progress without impacting user experience, except when storage constraints force more aggressive migration. During periods of low user activity, the I/O scheduler naturally allocates more capacity to rebalancing.
+
+### Inter-Node Rate Limiting
+
+Operators can configure bandwidth limits for rebalancing traffic to prevent network saturation:
+
+```yaml
+rebalancing:
+  # Per-node outbound limit for rebalancing traffic
+  max_outbound_bandwidth: 100mbps
+
+  # Per-node inbound limit
+  max_inbound_bandwidth: 100mbps
+
+  # Maximum concurrent chunk transfers per node
+  max_concurrent_transfers: 10
+```
+
+### Node Join Flow
+
+```
+1. New node joins cluster (via invite token)
+2. Ra updates segment assignments to include new node
+3. Rebalancing scheduler identifies chunks to migrate:
+   - Chunks where new node should be a replica (consistent hashing)
+   - Prioritised by: at-risk chunks first, then over-replicated sources
+4. Migration proceeds via I/O scheduler at background priority
+5. Progress tracked in Ra; resumable if interrupted
+6. Once complete, segment assignments finalised
+```
+
+### Node Leave Flow (Unplanned)
+
+When a node becomes unreachable and is eventually marked dead:
+
+```
+1. Node marked :dead after escalation ladder completes
+2. Repair scheduler identifies under-replicated chunks
+3. Chunks re-replicated from surviving replicas
+4. Priority based on risk level (see Repair Prioritisation)
+5. Segment assignments updated to exclude dead node
+```
+
+## Node Decommissioning
+
+Graceful removal of a node from the cluster, allowing controlled migration of data.
+
+### Decommissioning Flow
+
+```
+$ neonfs node decommission node3
+
+Calculating migration requirements...
+
+Option 1: Full migration (recommended)
+  - Chunks to migrate: 145,000
+  - Data volume: 2.3 TB
+  - Estimated time: 4h 30m (at current rate limits)
+
+Option 2: Critical only (faster, then remove)
+  - Under-replicated chunks: 12,000
+  - Data volume: 180 GB
+  - Estimated time: 25m
+  - Note: Fully-replicated chunks will re-replicate from other nodes after removal
+
+Select option [1/2]:
+```
+
+### Decommissioning States
+
+```
+:online → :draining → :decommissioning → (removed)
+```
+
+**:draining**
+- Complete all in-flight read operations
+- Complete all in-flight write operations (with timeout)
+- Reject new write requests (return appropriate error)
+- Continue serving reads from local data
+- Timeout: configurable, default 5 minutes
+
+**:decommissioning**
+- Reject all new requests
+- Migrate data according to selected option
+- Track progress, resumable if interrupted
+
+```elixir
+%DecommissionState{
+  node: :node3,
+  started_at: ~U[...],
+  option: :full,                    # :full | :critical_only
+
+  # Progress tracking
+  chunks_total: 145_000,
+  chunks_migrated: 87_000,
+  bytes_total: 2_300_000_000_000,
+  bytes_migrated: 1_380_000_000_000,
+
+  # Rate tracking
+  current_rate_mbps: 95,
+  estimated_completion: ~U[...],
+
+  # Draining state
+  drain_started_at: ~U[...],
+  in_flight_ops: 3,
+  drain_timeout_at: ~U[...]
+}
+```
+
+### Capacity Validation
+
+Before starting decommissioning, verify remaining nodes have sufficient capacity:
+
+```elixir
+def validate_decommission(node) do
+  chunks_to_migrate = get_chunks_on_node(node)
+  bytes_to_migrate = total_bytes(chunks_to_migrate)
+
+  remaining_capacity = cluster_nodes()
+    |> Enum.reject(& &1 == node)
+    |> Enum.map(&available_capacity/1)
+    |> Enum.sum()
+
+  if bytes_to_migrate > remaining_capacity do
+    {:error, :insufficient_capacity,
+      "Need #{bytes_to_migrate}, only #{remaining_capacity} available"}
+  else
+    :ok
+  end
+end
+```
+
+### Cancellation
+
+Decommissioning can be cancelled before completion:
+
+```
+$ neonfs node decommission --cancel node3
+
+Cancelling decommission of node3...
+- Chunks already migrated: 87,000 (will remain on new locations)
+- Node returning to :online state
+```
+
+Already-migrated chunks remain in their new locations (this is fine — they're just additional replicas until GC runs).
+
+### Future Enhancement: Request Hand-off
+
+A future enhancement could implement request hand-off during draining, where the draining node forwards requests to other replicas rather than rejecting them. This would provide seamless client experience during planned maintenance. Deferred to post-initial implementation.

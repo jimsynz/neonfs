@@ -2,7 +2,7 @@
 
 ## Overview
 
-NeonFS is a distributed, content-addressed filesystem that combines the coordination strengths of Elixir/BEAM with the performance characteristics of Rust for low-level storage operations. It provides network-transparent storage with configurable durability, tiered storage, and multiple access methods including FUSE, S3-compatible API, and CIFS.
+NeonFS is a distributed, content-addressed filesystem that combines the coordination strengths of Elixir/BEAM with the performance characteristics of Rust for low-level storage operations. It provides location-transparent storage (data accessible from any node regardless of where it's physically stored) with configurable durability, tiered storage, and multiple access methods including FUSE, S3-compatible API, and CIFS.
 
 ### Design Principles
 

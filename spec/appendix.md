@@ -16,11 +16,13 @@ This document contains open questions and the glossary.
 
 6. **Small file optimisation:** Pack many small files into single chunks to reduce metadata overhead? Or just accept the overhead?
 
-7. ~~**Partial stripe writes:**~~ Resolved: Use hybrid approach—replicate small files and partial final stripes, erasure code full stripes. See [Replication - Partial Stripe Handling](replication.md#partial-stripe-handling).
+7. ~~**Partial stripe writes:**~~ Resolved: Pad partial stripes with zeros and mark as partial in metadata. This maintains consistent durability semantics (all data gets full erasure coding protection) at the cost of storage efficiency. Future compaction can pack multiple partial stripes together to reclaim space. See [Replication - Partial Stripe Handling](replication.md#partial-stripe-handling).
 
-8. **POSIX compliance level:** Full POSIX semantics are expensive. Which features do we actually need? (Hard links probably not, what about flock?)
+8. **POSIX compliance level:** Goal is full POSIX compliance, but features are prioritised for incremental delivery. Initial version focuses on core read/write/directory operations. Deferred to later phases: hard links, extended attributes, extended ACLs (POSIX.1e), advisory locking (flock/fcntl). This reduces initial complexity and allows validating the core model before adding advanced features.
 
-9. **Concurrent writers:** What happens when two clients write to the same file simultaneously? Last-writer-wins? Conflict detection?
+9. ~~**Concurrent writers:**~~ Resolved: Advisory locks (using quorum) are available for coordination but optional. If two writers modify the same file concurrently without holding a lock, both writes are rejected. This fails safe (no silent data loss) while allowing users to opt out of locking overhead when they know they're the only writer.
+
+10. **Timestamp handling review:** Audit all uses of timestamps (TTLs, HLC, lease expiry, access statistics) for robustness against: daylight savings transitions, leap seconds, clock drift from poorly calibrated RTCs, and systems without hardware RTC (e.g., Raspberry Pi). Consider using monotonic clocks where wall-clock time isn't semantically required.
 
 ---
 
