@@ -49,3 +49,7 @@ This document contains open questions and the glossary.
 | erl_rpc | Rust crate providing RPC client for Erlang nodes (built on erl_dist) |
 | HLC | Hybrid Logical Clock, combines wall clock with logical counter for ordering |
 | LWW | Last-Writer-Wins, conflict resolution strategy where highest timestamp wins |
+| StreamData | Property testing library for Elixir |
+| proptest | Property testing library for Rust |
+| cargo-fuzz | Fuzzing framework for Rust using libFuzzer |
+| TestCluster | Elixir module for managing containerised test clusters |

@@ -79,6 +79,12 @@ The full specification is organised into the following documents. Each contains 
 | [Implementation](implementation.md) | Implementation phases (1-7), technical dependencies (Elixir and Rust crates, external services), node and volume configuration reference. | Planning work, understanding dependencies, configuration options. |
 | [Appendix](appendix.md) | Open questions (unresolved design decisions) and glossary of terms. | Terminology reference, understanding areas needing design decisions. |
 
+### Quality Assurance
+
+| Document | Description | When to read |
+|----------|-------------|--------------|
+| [Testing](testing.md) | Testing strategy: static analysis (Dialyzer, Clippy, Credo), unit testing (ExUnit, cargo test), property testing (StreamData, proptest), fuzzing (cargo-fuzz), NIF boundary testing, containerised integration testing with failure injection, manual testing with dev-cluster script. | Writing tests, setting up CI, understanding test infrastructure, exploratory testing during development. |
+
 ---
 
 ## Quick Reference
