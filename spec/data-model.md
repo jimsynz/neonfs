@@ -340,7 +340,7 @@ Minimal everything, rely on Linux page cache:
     max_memory: 0
   },
 
-  verification: %{on_read: :never, scrub_interval: nil},
+  verification: %{on_read: :never, scrub_interval: days(90)},
   repair_priority: :low
 }
 ```

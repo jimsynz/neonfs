@@ -77,22 +77,24 @@ Each volume runs in its own supervision tree, providing isolation and independen
                     └─────────────────────────────────┘
 ```
 
-This architecture provides:
+This architecture isolates volumes at the **coordination layer** (Elixir), not the **I/O layer** (Rust/disk). Each volume has independent supervision, backpressure, and rate limits, but all volumes contend for shared disk I/O and blob store memory.
 
-- **Process isolation**: Volume supervisor crashes and restarts independently without affecting other volumes
-- **Independent backpressure**: Each volume manages its own request queue
-- **Per-volume resource limits**: Memory caps, operation rate limits at the Elixir layer
-- **Independent scheduling**: Documents scrubs daily, media monthly, scratch never
-- **Natural concurrency**: BEAM scheduler distributes volume work across cores
+**What's isolated (per-volume):**
 
-**Shared resources (not isolated):**
+- **Supervision**: Volume supervisor crashes and restarts independently without affecting other volumes
+- **Backpressure**: Each volume manages its own request queue and rate limits
+- **Scheduling**: Documents scrubs daily, media monthly, scratch never
+- **Concurrency**: BEAM scheduler distributes volume work across cores
 
-All volumes share the underlying Rust blob store and physical storage. This means:
-- Disk I/O contention between volumes on same drives
-- NIF scheduler impact from long-running Rust operations
-- Memory pressure in the blob store affects all volumes
+**What's shared (contention possible):**
 
-The isolation is at the **Elixir coordination layer**, not the **I/O layer**. A volume doing heavy sequential reads will impact latency for other volumes sharing the same drives. For true I/O isolation, place volumes on separate physical drives.
+- **Disk I/O**: Volumes on the same drives compete for bandwidth
+- **Blob store memory**: Memory pressure affects all volumes
+- **Physical storage**: Capacity is shared unless volumes are pinned to specific drives
+
+Rust NIFs use async message passing via channels and Rustler resources to avoid blocking the BEAM scheduler. Long-running I/O operations yield back to Elixir promptly, preserving scheduler fairness across volumes.
+
+For true I/O isolation, place volumes on separate physical drives.
 
 ### Backpressure and Graceful Degradation
 
@@ -338,10 +340,12 @@ Verification behaviour is configured per-volume:
   name: "scratch",
   verification: %{
     on_read: :never,         # Trust the filesystem for temp data
-    scrub_interval: nil      # No background scrubbing
+    scrub_interval: days(90) # Infrequent but still required
   }
 }
 ```
+
+**Scrubbing is mandatory**: While `on_read` verification can be disabled for performance, background scrubbing cannot be completely disabled. Volumes with `on_read: :never` must still have a `scrub_interval` set (though it can be infrequent, e.g., 90 days). This ensures eventual detection of corruption even when per-read verification is skipped.
 
 On read, Rust verifies content matches hash if requested:
 
@@ -491,3 +495,246 @@ NeonFS.Blob.Native.write_chunk(store, data, :hot,
   level: 3            # Compression level
 )
 ```
+
+## I/O Scheduler
+
+All I/O operations between the Elixir coordinator and the Rust storage engine flow through a demand-driven scheduler. This provides unified backpressure, priority management, and per-drive load balancing.
+
+### Why a Scheduler?
+
+Without centralised scheduling, background operations (repair, scrubbing, read repair) would compete uncontrolled with user-facing I/O:
+
+```
+# Bad: ad-hoc spawning with no backpressure
+spawn(fn -> repair_chunk(chunk) end)  # Could spawn thousands
+spawn(fn -> scrub_chunk(chunk) end)   # Competing with repairs
+# Meanwhile, user reads are starved
+```
+
+The I/O scheduler ensures user-facing operations take priority while background work proceeds at a sustainable pace.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Elixir Coordinator                          │
+│                                                                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
+│  │  User    │  │  Read    │  │  Repair  │  │  Scrub   │        │
+│  │  Reads   │  │  Repair  │  │  Manager │  │  Worker  │        │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘        │
+│       │             │             │             │               │
+│       └─────────────┴──────┬──────┴─────────────┘               │
+│                            ▼                                    │
+│              ┌─────────────────────────────┐                    │
+│              │       I/O Scheduler         │                    │
+│              │  (GenStage / Broadway)      │                    │
+│              │                             │                    │
+│              │  • Priority queues          │                    │
+│              │  • Per-drive demand         │                    │
+│              │  • Work coalescing          │                    │
+│              └─────────────┬───────────────┘                    │
+│                            │                                    │
+│       ┌────────────────────┼────────────────────┐               │
+│       ▼                    ▼                    ▼               │
+│  ┌─────────┐          ┌─────────┐          ┌─────────┐          │
+│  │ /nvme0  │          │ /ssd0   │          │ /hdd0   │          │
+│  │ worker  │          │ worker  │          │ worker  │          │
+│  └────┬────┘          └────┬────┘          └────┬────┘          │
+└───────┼────────────────────┼────────────────────┼───────────────┘
+        │                    │                    │
+        ▼                    ▼                    ▼
+   Rust NIF             Rust NIF             Rust NIF
+```
+
+### Priority Classes
+
+Operations are assigned priority classes that determine scheduling order:
+
+| Priority | Class | Examples |
+|----------|-------|----------|
+| 1 (highest) | User read | FUSE read, S3 GET |
+| 2 | User write | FUSE write, S3 PUT |
+| 3 | Replication | Synchronous replica writes |
+| 4 | Read repair | Background consistency repair |
+| 5 | Repair/resilver | Chunk re-replication after node failure |
+| 6 (lowest) | Scrubbing | Background integrity verification |
+
+Higher priority work preempts lower priority. Within a priority class, work is processed fairly (round-robin or FIFO).
+
+### Per-Drive Demand Management
+
+Each physical drive has its own worker with configurable concurrency:
+
+```elixir
+%DriveWorker{
+  path: "/mnt/nvme0",
+  tier: :hot,
+
+  # Concurrency limits by priority class
+  max_concurrent: %{
+    user_read: 32,      # NVMe can handle many parallel reads
+    user_write: 16,
+    replication: 8,
+    background: 4       # Repair, scrub, etc.
+  },
+
+  # Current utilisation (updated dynamically)
+  active: %{user_read: 12, user_write: 3, ...},
+  queue_depth: 47
+}
+```
+
+When a drive is saturated (queue_depth exceeds threshold), the scheduler:
+1. Stops accepting new background work for that drive
+2. Continues accepting user I/O (may queue)
+3. Signals upstream producers to reduce demand
+
+### Drive-Type Scheduling Strategies
+
+Different storage media require different I/O patterns for optimal performance:
+
+**SSD (NVMe, SATA SSD):**
+
+```elixir
+%DriveSchedulingStrategy{
+  type: :ssd,
+
+  # SSDs handle random I/O well - maximise parallelism
+  io_pattern: :parallel,
+  max_concurrent_ops: 32,
+
+  # Can freely interleave reads and writes
+  interleave_reads_writes: true,
+
+  # No seek penalty, process in submission order
+  ordering: :fifo
+}
+```
+
+**HDD (spinning disk):**
+
+```elixir
+%DriveSchedulingStrategy{
+  type: :hdd,
+
+  # Minimise seeking - lower parallelism, batch by operation type
+  io_pattern: :batched,
+  max_concurrent_ops: 4,
+
+  # Interleaving reads/writes causes constant seeking
+  interleave_reads_writes: false,
+
+  # Batch operations: process all pending reads, then all pending writes
+  # Within each batch, sort by on-disk location if known
+  ordering: :elevator,
+
+  # Batch size before switching operation type
+  batch_size: 16,
+  batch_timeout_ms: 50   # Don't starve one type waiting for full batch
+}
+```
+
+The batched strategy for HDDs:
+1. Collect pending reads until batch is full or timeout
+2. Sort by chunk hash prefix (approximates disk locality)
+3. Execute read batch
+4. Collect pending writes, sort, execute
+5. Repeat
+
+This dramatically reduces seek time compared to interleaved random I/O.
+
+**Configuration per drive:**
+
+```yaml
+storage:
+  drives:
+    - path: /mnt/nvme0
+      tier: hot
+      type: ssd              # Uses SSD strategy
+
+    - path: /mnt/hdd0
+      tier: cold
+      type: hdd              # Uses HDD strategy
+      scheduling:
+        batch_size: 32       # Override default
+        max_concurrent_ops: 2
+```
+
+### Work Coalescing
+
+The scheduler coalesces duplicate work requests:
+
+```elixir
+# Multiple read repairs for the same chunk become one
+IOScheduler.submit(:read_repair, chunk_hash: "abc123", ...)
+IOScheduler.submit(:read_repair, chunk_hash: "abc123", ...)  # Coalesced
+
+# Multiple scrub requests for the same chunk
+IOScheduler.submit(:scrub, chunk_hash: "abc123", ...)  # Only runs once
+```
+
+This prevents thundering herd problems when many concurrent reads discover the same stale replica.
+
+### Dynamic Priority Adjustment
+
+The scheduler can temporarily boost or reduce priorities based on system state:
+
+```elixir
+# Storage pressure: boost GC and repair priority
+if storage_pressure > 0.9 do
+  IOScheduler.boost_priority(:repair, by: 2)
+  IOScheduler.boost_priority(:gc, by: 2)
+end
+
+# Partition recovery: boost repair after partition heals
+on_partition_healed do
+  IOScheduler.boost_priority(:read_repair, by: 1, duration: minutes(30))
+end
+```
+
+### Configuration
+
+```yaml
+io_scheduler:
+  # Global settings
+  implementation: gen_stage    # gen_stage | broadway | simple_pool
+
+  # Per-priority concurrency (default, overridable per-drive)
+  default_concurrency:
+    user_read: 16
+    user_write: 8
+    replication: 4
+    background: 2
+
+  # Backpressure thresholds
+  queue_high_watermark: 100    # Start shedding background work
+  queue_low_watermark: 20      # Resume background work
+
+  # Coalescing
+  coalesce_window_ms: 50       # Group duplicate requests within window
+```
+
+### Impact on Other Components
+
+With the I/O scheduler in place, other components submit work rather than spawning directly:
+
+**Read repair** (metadata.md):
+```elixir
+# Instead of: spawn(fn -> repair_replicas(...) end)
+IOScheduler.submit(:read_repair, key: key, stale: stale_replicas, latest: latest)
+```
+
+**Scrubbing** (architecture.md):
+```elixir
+# Instead of direct iteration
+IOScheduler.submit_batch(:scrub, chunks, priority: :lowest)
+```
+
+**Chunk reaper** (replication.md):
+```elixir
+# Cleanup uses background priority
+IOScheduler.submit(:delete, chunk_hash: hash, priority: :background)
+```
+
+This unified approach ensures all I/O is coordinated, preventing any single operation type from starving others.

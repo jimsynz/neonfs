@@ -350,3 +350,31 @@ $ neonfs backup create documents \
 $ neonfs backup restore documents \
     --source s3://backup-bucket/neonfs/documents-2025-01-15/
 ```
+
+### Suspected Node Compromise
+
+Due to BEAM's full-trust distribution model, if a node is suspected of compromise, the entire cluster should be considered compromised. The compromised node had access to:
+
+- All chunk data across the cluster
+- Decryption keys for server-side encrypted volumes
+- All metadata (file paths, permissions, user definitions)
+- Ability to modify or delete audit logs stored within the cluster
+
+**Response steps:**
+
+1. **Isolate immediately**: Remove the suspected node from the network (WireGuard/VPN/firewall) to prevent further access
+2. **Remove from cluster**: Use Ra to remove the node from cluster membership
+3. **Rotate Erlang cookie**: Generate a new cookie and distribute to all remaining nodes (requires cluster restart)
+4. **Rotate encryption keys**: Generate new volume encryption keys and re-encrypt affected data if server-side encryption was in use
+5. **Review external audit logs**: Logs within NeonFS may have been tampered with; rely only on logs shipped to external systems
+6. **Assess data exposure**: Assume all data was exfiltrated; notify affected users if applicable
+7. **Consider full restore**: If data tampering is suspected, restore from a known-good backup predating the compromise
+
+**Prevention:**
+
+- Run nodes only on trusted, isolated networks (WireGuard mesh recommended)
+- Minimise the number of people with physical/root access to nodes
+- Ship audit logs to external, append-only storage that cluster nodes cannot modify
+- Monitor for unexpected node join attempts or Ra membership changes
+
+This is a fundamental limitation of Erlang distribution. More granular trust boundaries would require abandoning BEAM's operational benefits (hot code reload, distributed shell, cluster-wide debugging).

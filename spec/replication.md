@@ -50,16 +50,40 @@ UncommittedChunk {
   hash: SHA256
   write_id: WriteId
   created_at: DateTime
-  ttl: Duration              # Default: 24 hours
+  last_activity: DateTime    # Updated with each chunk written
+  ttl: Duration              # Inactivity timeout (default: 1 hour)
   state: :uncommitted | :abandoned
 }
 ```
+
+**TTL behaviour:**
+
+The TTL is an *inactivity* timeout, not an absolute deadline. Each time a chunk is written for a given `write_id`, the `last_activity` timestamp is updated. The write expires only after `ttl` has elapsed with no new chunks.
+
+This means:
+- **Slow uploads** (e.g., large file over poor connection) stay alive as long as chunks keep arriving
+- **Crashed clients** get cleaned up after the inactivity timeout
+- **Explicit aborts** trigger immediate cleanup regardless of TTL
+
+**Per-volume configuration:**
+
+```elixir
+%Volume{
+  name: "documents",
+  gc: %{
+    uncommitted_ttl: hours(1),    # Inactivity timeout for uncommitted writes
+    age_threshold: hours(2)       # GC ignores chunks younger than this
+  }
+}
+```
+
+**Validation:** The system must reject volume configurations where `age_threshold <= uncommitted_ttl`. This prevents race conditions where GC could consider chunks that are still part of an active (but slow) write.
 
 **Lifecycle:**
 
 ```
                     ┌─────────────┐
-  write arrives ──▶ │ uncommitted │
+  write arrives ──▶ │ uncommitted │ ◀─── activity resets TTL
                     └─────────────┘
                           │
            ┌──────────────┼──────────────┐
@@ -67,7 +91,7 @@ UncommittedChunk {
            ▼              ▼              ▼
     ┌───────────┐  ┌───────────┐  ┌───────────┐
     │ committed │  │ abandoned │  │  expired  │
-    │ (success) │  │  (abort)  │  │  (ttl)    │
+    │ (success) │  │  (abort)  │  │(inactivity│
     └───────────┘  └───────────┘  └───────────┘
            │              │              │
            │              └──────┬───────┘
@@ -210,52 +234,64 @@ Recommended configurations:
 
 Erasure coding requires a minimum amount of data to form a stripe (e.g., 10 data chunks × 256KB = 2.5MB for a 10+4 config). Files smaller than this, or the tail end of larger files, need special handling.
 
-**Strategy: Hybrid Replication Fallback**
+**Strategy: Pad and Mark as Partial**
 
-| Scenario | Strategy |
+All data on erasure-coded volumes uses erasure coding, even for small files. Partial stripes are padded with zeros to form complete stripes:
+
+| Scenario | Handling |
 |----------|----------|
-| File < min_stripe_size | Replicate using fallback replica count |
+| File < stripe capacity | Pad to fill stripe, mark as partial |
 | Full stripes in large file | Erasure code normally |
-| Partial final stripe | Replicate the remainder |
+| Partial final stripe | Pad to fill stripe, mark as partial |
 
-This avoids:
-- Massive overhead from padding small files (50KB → 2.5MB)
-- Complexity of packing unrelated files into shared stripes
-- Under-protected partial stripes waiting for more data
+**Why padding instead of fallback replication:**
 
-**Configuration:**
+- **Consistent durability**: Users who choose "10+4 erasure coding" get 4-failure tolerance for all data, not just large files
+- **No semantic surprises**: Small files have the same fault tolerance as large files
+- **Future-proof format**: Partial stripes can later be compacted (packing multiple small files together) without changing the on-disk format
+
+**Tradeoff**: A 50KB file on a 10+4 volume wastes ~2.5MB in padding. This is the price of consistent semantics. For workloads with many small files where storage efficiency matters more than consistent durability, consider using replication instead of erasure coding.
+
+**Stripe metadata:**
 
 ```elixir
-%Volume{
-  name: "media",
-  durability: %{
-    type: :erasure,
-    data_chunks: 10,
-    parity_chunks: 4,
+%Stripe{
+  id: stripe_id,
+  config: %{data_chunks: 10, parity_chunks: 4},
+  chunks: [...],  # All 14 chunk hashes
 
-    # Handling data that doesn't fill a stripe
-    small_file_strategy: :replicate,    # :replicate | :pad
-    small_file_replicas: 3,             # Replica count when using :replicate
-    min_stripe_threshold: 2_500_000     # Bytes; below this, use small_file_strategy
-  }
+  # Partial stripe tracking
+  partial: true,
+  data_bytes: 52_428,        # Actual data (before padding)
+  padded_bytes: 2_568_532,   # Zero-fill padding
+
+  state: :healthy | :degraded | :critical
 }
 ```
 
-**Example: 5MB file on 10+4 volume (256KB chunks)**
+**Example: 50KB file on 10+4 volume (256KB chunks)**
 
 ```
-File: 5MB total
+File: 50KB total
 Stripe capacity: 10 × 256KB = 2.56MB
 
-Stripe 1: chunks 0-9 (2.56MB) → erasure coded (10 data + 4 parity)
-Remainder: ~2.44MB (chunks 10-18) → replicated (3 copies each)
+Stripe 1:
+  - Chunk 0: 50KB data + 206KB padding (256KB total)
+  - Chunks 1-9: 256KB padding each
+  - Chunks 10-13: parity (computed including padding)
+  - Marked as: partial, data_bytes: 51200
 ```
 
-The remainder doesn't fill a stripe, so it falls back to replication. If the file grows later (append), the replicated chunks can be promoted into a full stripe.
+**Future optimisation: Compaction**
 
-**Alternative: Padding (not recommended)**
+A future compaction process could pack multiple partial stripes together, reclaiming wasted space:
 
-Setting `small_file_strategy: :pad` will pad partial stripes with zero-filled chunks. This wastes storage but keeps all data under the same durability model. Only use if consistency of durability model matters more than storage efficiency.
+1. Identify partial stripes on the same volume
+2. Combine their data into fewer, fuller stripes
+3. Update file metadata to point to new stripes
+4. Delete old partial stripes
+
+This is deferred to post-initial implementation. The current padding approach ensures the on-disk format already supports compaction without migration.
 
 ## Garbage Collection
 
@@ -280,6 +316,8 @@ GC is a background operation—it can afford to be slow and thorough.
 ```elixir
 defmodule NeonFS.GarbageCollector do
   def collect(volume) do
+    age_threshold = volume.gc.age_threshold
+
     # Phase 1: Build set of all referenced chunks
     referenced = volume
       |> stream_all_files()
@@ -294,7 +332,7 @@ defmodule NeonFS.GarbageCollector do
 
     # Phase 3: Delete with grace period
     for chunk <- garbage do
-      if chunk.created_at < hours_ago(24) do
+      if chunk.last_activity < ago(age_threshold) do
         schedule_deletion(chunk, grace_period: hours(1))
       end
     end
@@ -305,7 +343,7 @@ end
 **Safety measures:**
 
 - **Grace period**: Chunks aren't deleted immediately; scheduled for deletion after 1 hour. Allows cancellation if a race condition is detected.
-- **Age threshold**: Only chunks older than 24 hours are considered for GC. Recent chunks may be part of in-progress writes.
+- **Age threshold**: Only chunks older than `gc.age_threshold` are considered. This must be greater than `gc.uncommitted_ttl` (validated at volume creation) to ensure GC never races with active writes.
 - **Uncommitted chunk exclusion**: Chunks with `write_id` set (uncommitted) are never collected by GC—handled separately by the ChunkReaper.
 
 **Scheduling:**
@@ -315,9 +353,11 @@ end
 - Per-volume scheduling: critical volumes checked more frequently
 
 ```yaml
+# Global defaults (can be overridden per-volume)
 gc:
-  schedule: "0 3 * * *"      # Daily at 3 AM
+  schedule: "0 3 * * *"              # Daily at 3 AM
   storage_pressure_threshold: 0.85  # Also run if >85% full
   grace_period: 1h
-  age_threshold: 24h
+  uncommitted_ttl: 1h               # Default inactivity timeout
+  age_threshold: 2h                 # Must be > uncommitted_ttl
 ```
