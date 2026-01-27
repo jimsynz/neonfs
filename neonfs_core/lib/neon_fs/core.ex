@@ -1,6 +1,6 @@
-defmodule NeonFS do
+defmodule NeonFS.Core do
   @moduledoc """
-  Documentation for `NeonFS`.
+  Documentation for `NeonFS.Core`.
   """
 
   @doc """
@@ -8,7 +8,7 @@ defmodule NeonFS do
 
   ## Examples
 
-      iex> NeonFS.hello()
+      iex> NeonFS.Core.hello()
       :world
 
   """

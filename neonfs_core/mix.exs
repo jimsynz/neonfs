@@ -1,4 +1,4 @@
-defmodule NeonFS.MixProject do
+defmodule NeonFS.Core.MixProject do
   use Mix.Project
 
   @moduledoc """
@@ -9,7 +9,7 @@ defmodule NeonFS.MixProject do
   def project do
     [
       aliases: aliases(),
-      app: :neonfs,
+      app: :neonfs_core,
       consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       description: @moduledoc,
@@ -33,13 +33,13 @@ defmodule NeonFS.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {NeonFS.Application, []}
+      mod: {NeonFS.Core.Application, []}
     ]
   end
 
   defp aliases, do: []
   defp docs, do: [main: "readme", extras: ["README.md"]]
-  defp elixirc_paths(:text), do: ["lib", "test/support"]
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
   # Run "mix help deps" to learn about dependencies.
