@@ -20,9 +20,23 @@ This document contains open questions and the glossary.
 
 8. **POSIX compliance level:** Goal is full POSIX compliance, but features are prioritised for incremental delivery. Initial version focuses on core read/write/directory operations. Deferred to later phases: hard links, extended attributes, extended ACLs (POSIX.1e), advisory locking (flock/fcntl). This reduces initial complexity and allows validating the core model before adding advanced features.
 
-9. ~~**Concurrent writers:**~~ Resolved: Advisory locks (using quorum) are available for coordination but optional. If two writers modify the same file concurrently without holding a lock, both writes are rejected. This fails safe (no silent data loss) while allowing users to opt out of locking overhead when they know they're the only writer.
+9. ~~**Concurrent writers:**~~ Resolved: The intent log provides automatic exclusive access for file writes. Before writing, a writer must acquire an exclusive intent via Ra; if another writer already holds an intent for the same file, the second writer receives a `:concurrent_modification` error. This fails safe (no silent data loss) without requiring explicit locking from applications. See [Metadata - Intent Log: Transaction Safety and Write Coordination](metadata.md#intent-log-transaction-safety-and-write-coordination).
 
-10. **Timestamp handling review:** Audit all uses of timestamps (TTLs, HLC, lease expiry, access statistics) for robustness against: daylight savings transitions, leap seconds, clock drift from poorly calibrated RTCs, and systems without hardware RTC (e.g., Raspberry Pi). Consider using monotonic clocks where wall-clock time isn't semantically required.
+10. **Timestamp handling review:** ~~HLC clock skew~~ Resolved: HLC timestamps are bounded by `max_clock_skew_ms` (default 1 second). Nodes with excessive skew are quarantined from writes. See [Metadata - Clock Skew Bounds](metadata.md#clock-skew-bounds). **Remaining:** Audit other timestamp uses (TTLs, lease expiry, access statistics) for robustness against: daylight savings transitions, clock drift from poorly calibrated RTCs, and systems without hardware RTC (e.g., Raspberry Pi). Consider using monotonic clocks where wall-clock time isn't semantically required.
+
+11. ~~**Drive spin-down race conditions:**~~ Resolved: When all replicas of a chunk reside on spun-down drives, NeonFS races all available replicas in parallel and serves whichever responds first. This avoids arbitrary waits and naturally handles variable spin-up times. A drive state machine coordinates concurrent access, and multiple readers waiting for the same drive share the spin-up wait. See [Storage Tiering - Drive Spin-Up Coordination](storage-tiering.md#drive-spin-up-coordination).
+
+12. ~~**I/O scheduling and fairness:**~~ Resolved: A GenStage-based scheduler coordinates all I/O operations. Priority queues ensure critical repairs happen before background tasks. Weighted fair queuing within each priority level prevents any single volume from monopolising I/O. The BEAM handles waiting processes efficiently, so no admission control or backpressure signalling is needed—clients simply wait until their operation completes. See [Storage Tiering - I/O Scheduling](storage-tiering.md#io-scheduling).
+
+13. ~~**Intent log growth:**~~ Resolved: Completed, failed, and expired intents are archived to daily log files on the system volume (JSONL format with configurable retention), then removed from Ra state. Expired intents from crashed nodes are handled by any available node—most operations can be recovered or rolled back; only `write_ack: :local` writes require the original node. Physical chunk cleanup is delegated to GC. See [Metadata - Intent Cleanup and Archival](metadata.md#intent-cleanup-and-archival).
+
+14. ~~**Metrics collection:**~~ Resolved: NeonFS uses Telemetry for instrumentation and exposes metrics via Prometheus endpoint. Defined metrics cover chunk operations, replication, repair, storage, cluster health, and FUSE operations. Service Level Indicators (SLIs) with thresholds for good/degraded/critical states. Health check endpoint for load balancers and Kubernetes probes. Example alerting rules provided. See [Observability](observability.md).
+
+15. **S3 API consistency semantics**: The S3-compatible API needs defined consistency guarantees. NeonFS's quorum writes likely provide stronger consistency than S3's historical eventual consistency, but this should be explicitly documented. Key questions: LIST consistency after PUT/DELETE, read-after-write guarantees, behaviour during network partitions. Defer until core system is operational.
+
+16. **Recovery procedures**: Operational runbooks for node failure, disk failure, quorum loss, split-brain resolution, and data corruption. Defer until system is deployed and real operational experience is gained.
+
+17. **CSI driver timeout handling**: Kubernetes CSI operations have strict timeouts. Need to define behaviour when NeonFS can't meet deadlines (mount during degraded state, unmount with pending writes, volume creation during partition). Defer until CSI driver implementation.
 
 ---
 
@@ -35,6 +49,9 @@ This document contains open questions and the glossary.
 | Volume | Logical storage container with its own policy |
 | Tier | Storage class (hot, warm, cold) based on media type |
 | Ra | Raft consensus library for Erlang/Elixir |
+| Reactor | Saga orchestration library for Elixir, handles step execution and rollback |
+| Intent Log | Crash-safe record of in-flight multi-segment operations, stored in Ra |
+| Active Write Refs | Set of write_ids currently using a chunk (created it or reusing it); protects chunks from GC during writes |
 | Rustler | Library for writing Erlang NIFs in Rust |
 | FUSE | Filesystem in Userspace |
 | CDC | Content-Defined Chunking |
@@ -51,6 +68,8 @@ This document contains open questions and the glossary.
 | erl_rpc | Rust crate providing RPC client for Erlang nodes (built on erl_dist) |
 | HLC | Hybrid Logical Clock, combines wall clock with logical counter for ordering |
 | LWW | Last-Writer-Wins, conflict resolution strategy where highest timestamp wins |
+| Telemetry | Elixir library for metrics and instrumentation, ecosystem standard |
+| SLI | Service Level Indicator, metric that measures service health |
 | StreamData | Property testing library for Elixir |
 | proptest | Property testing library for Rust |
 | cargo-fuzz | Fuzzing framework for Rust using libFuzzer |

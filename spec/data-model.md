@@ -48,20 +48,49 @@ Elixir tracks everything about chunks across the cluster:
     %{node: :node3, tier: :warm}
   ],
 
-  # Durability state
+  # Durability configuration
   target_replicas: 3,
-  state: :satisfied,  # :satisfied | :under_replicated | :over_replicated
+
+  # Note: replication_state is derived at query time from locations + current
+  # node states, not stored. See node-management.md#replication-state.
+  # This ensures immediate awareness when nodes become unreachable.
 
   # For erasure-coded chunks
   stripe_id: nil,     # or stripe reference
   stripe_index: nil,  # position in stripe (0-9 data, 10-13 parity)
 
+  # Commit state (see replication.md for details)
+  commit_state: :uncommitted | :committed,
+
+  # Active write references: which in-flight writes are using this chunk
+  # - For uncommitted chunks: writes that created or are sharing this chunk
+  # - For committed chunks: writes that are reusing this existing chunk
+  # When a write commits or aborts, it removes itself from this set
+  # GC only deletes chunks when this set is empty (regardless of commit_state)
+  active_write_refs: MapSet.t(write_id),
+
   # Lifecycle
   created_at: ~U[...],
-  last_verified: ~U[...],
-  write_id: nil       # non-nil if uncommitted
+  last_verified: ~U[...]
 }
 ```
+
+### Chunk Commit State and Active Write Refs
+
+Chunks go through a lifecycle tied to write operations, with `active_write_refs` tracking all in-flight writes that depend on the chunk:
+
+1. **Created as uncommitted**: When a write stores a new chunk, it's created with `commit_state: :uncommitted` and the write_id added to `active_write_refs`
+2. **Shared between writes**: If another concurrent write produces the same content (same hash), it adds its write_id to `active_write_refs` rather than creating a duplicate
+3. **Reusing committed chunks**: When a write reuses an already-committed chunk, it adds its write_id to `active_write_refs` (protecting the chunk from GC during the write)
+4. **Committed**: When any write that references an uncommitted chunk commits successfully, the chunk transitions to `commit_state: :committed`. The committing write removes itself from `active_write_refs`, but other active writes remain.
+5. **Write completion**: When any write commits or aborts, it removes itself from `active_write_refs` for all its chunks
+6. **Deletion**: GC only deletes chunks when `active_write_refs` is empty. For uncommitted chunks, this means all writes aborted. For committed chunks, this means no file references it AND no active writes are using it.
+
+This design ensures:
+- No duplicate storage for identical concurrent uploads
+- No orphaned chunks from failed writes
+- No race conditions between GC and active writes (even for committed chunks)
+- No grace periods needed anywhere in the system
 
 ### Chunking Strategy
 
@@ -113,8 +142,14 @@ Logical files are purely an Elixir metadata concept. Rust has no concept of file
   volume_id: volume_id,
   path: "/documents/report.pdf",
 
-  # Content: ordered list of chunk hashes
+  # Content reference depends on volume durability type
+  # For replicated volumes: ordered list of chunk hashes
   chunks: ["sha256:abc...", "sha256:def...", ...],
+
+  # For erasure-coded volumes: stripe references with byte ranges (chunks is nil)
+  # See "File References for Erasure-Coded Volumes" below
+  stripes: nil,
+
   size: 15_728_640,
 
   # POSIX metadata
@@ -132,6 +167,34 @@ Logical files are purely an Elixir metadata concept. Rust has no concept of file
   previous_version_id: prev_file_id
 }
 ```
+
+### File References for Erasure-Coded Volumes
+
+Files on erasure-coded volumes reference stripes instead of individual chunks. Each stripe reference includes the byte range it covers within the file:
+
+```elixir
+%File{
+  id: file_id,
+  volume_id: volume_id,
+  path: "/media/video.mp4",
+
+  # Replicated: nil for erasure-coded volumes
+  chunks: nil,
+
+  # Erasure-coded: stripe references with byte ranges
+  stripes: [
+    %{stripe_id: "s1", byte_range: {0, 2_621_440}},           # Full stripe (2.5MB)
+    %{stripe_id: "s2", byte_range: {2_621_440, 5_242_880}},   # Full stripe
+    %{stripe_id: "s3", byte_range: {5_242_880, 7_864_320}},   # Full stripe
+    %{stripe_id: "s4", byte_range: {7_864_320, 10_485_760}},  # Partial stripe
+  ],
+
+  size: 10_485_760,  # Must equal sum of stripe byte ranges
+  # ...
+}
+```
+
+The byte ranges must be contiguous and sum to `size`. The read path uses these ranges to determine which stripes to fetch for a given file offset.
 
 When a client reads a file:
 1. FUSE request arrives at Rust (neonfs_fuse)

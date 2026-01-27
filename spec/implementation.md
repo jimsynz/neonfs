@@ -107,6 +107,7 @@ Deliverables:
 | Dependency | Purpose |
 |------------|---------|
 | Ra | Raft consensus for metadata |
+| Reactor | Saga orchestration for cross-segment operations |
 | Rustler | NIF integration with Rust |
 | Plug + Bandit | HTTP server for S3 API |
 | GRPC | CSI driver protocol |

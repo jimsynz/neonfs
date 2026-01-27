@@ -164,24 +164,57 @@ Ensure NTP is running and synchronised before joining a cluster. The `neonfs clu
 | 30 min - 2 hours | Escalate to operator for decision |
 | > 2 hours (no response) | Begin repair if capacity available |
 
+## Replication State
+
+Replication state is derived at query time from chunk locations and current node states, not stored in chunk metadata. This ensures the system immediately recognises when replicas become unreachable without requiring metadata updates.
+
+```elixir
+def calculate_replication_state(chunk, volume_policy) do
+  healthy_count = chunk.locations
+    |> Enum.count(fn loc -> get_node_state(loc.node) == :online end)
+
+  target = volume_policy.durability.factor
+  minimum = volume_policy.durability.min_copies
+
+  cond do
+    healthy_count == 0 -> :critical    # No reachable replicas
+    healthy_count < minimum -> :at_risk # Below minimum copies
+    healthy_count < target -> :degraded # Below target but functional
+    true -> :satisfied
+  end
+end
+```
+
+This approach means:
+- When a node becomes `:unreachable`, its chunks are immediately considered degraded
+- No synchronisation delay between node state changes and replication awareness
+- Read routing and repair prioritisation always use current state
+
 ## Repair Prioritisation
 
 When repair is triggered, chunks are processed in priority order:
 
-1. **Risk tier**: At-risk (0 healthy copies) > Degraded (below minimum) > Below target > Satisfied
+1. **Risk tier**: Critical (0 healthy) > At-risk (below minimum) > Degraded (below target) > Satisfied
 2. **Volume priority**: Per-policy priority (critical > high > normal > low)
 3. **Access recency**: Hot data before cold
 4. **Repair cost**: Cheaper repairs first within tier (tiebreaker)
 
 ```elixir
-def repair_priority(chunk) do
+def repair_priority(chunk, volume) do
+  state = calculate_replication_state(chunk, volume)
+
   {
-    risk_tier(chunk),           # 0 = at-risk, 3 = satisfied
-    volume_priority(chunk),     # Per policy
+    state_priority(state),      # :critical = 0, :satisfied = 3
+    volume.repair_priority,     # Per policy
     -access_recency(chunk),     # More recent = higher priority
     repair_cost(chunk)          # Cheaper first
   }
 end
+
+defp state_priority(:critical), do: 0
+defp state_priority(:at_risk), do: 1
+defp state_priority(:degraded), do: 2
+defp state_priority(:satisfied), do: 3
 ```
 
 ## Node Cost Function
@@ -220,8 +253,21 @@ Each node has a cost function used for placement decisions, read routing, and mu
 
 ### Placement Cost Calculation
 
+Write placement incorporates node state to avoid placing data on unhealthy nodes:
+
 ```elixir
 def placement_cost(source_node, target_node, chunk_size) do
+  case get_node_state(target_node) do
+    :online ->
+      calculate_base_placement_cost(source_node, target_node, chunk_size)
+
+    _ ->
+      # Don't write to any non-online node
+      :infinity
+  end
+end
+
+defp calculate_base_placement_cost(source_node, target_node, chunk_size) do
   costs = get_node_costs(source_node)
   target = get_node_costs(target_node)
 
@@ -242,22 +288,50 @@ end
 
 ### Read Routing
 
+Read routing incorporates node state to avoid attempting reads from unreachable nodes:
+
 ```elixir
 def select_read_source(chunk_hash, requesting_node) do
   locations = get_chunk_locations(chunk_hash)
 
-  locations
-  |> Enum.map(fn loc ->
-    {loc, read_cost(requesting_node, loc.node, loc.tier)}
-  end)
-  |> Enum.min_by(fn {_loc, cost} -> cost end)
-  |> elem(0)
+  costs = locations
+    |> Enum.map(fn loc -> {loc, read_cost(requesting_node, loc.node, loc.tier)} end)
+    |> Enum.reject(fn {_loc, cost} -> cost == :infinity end)
+
+  case costs do
+    [] ->
+      # All replicas on unreachable nodes
+      {:error, :no_healthy_replicas}
+
+    _ ->
+      {:ok, costs |> Enum.min_by(fn {_loc, cost} -> cost end) |> elem(0)}
+  end
 end
 
 def read_cost(from, to, tier) do
+  case get_node_state(to) do
+    :online ->
+      base = if from == to, do: 0, else: get_latency(from, to)
+      tier_cost = tier_latency(tier)  # SSD fast, HDD slow/maybe spinning
+      base + tier_cost
+
+    :draining ->
+      # Still readable, slight penalty to prefer other nodes
+      base_read_cost(from, to, tier) + 100
+
+    :maintenance ->
+      # Expected back, moderate penalty
+      base_read_cost(from, to, tier) + 500
+
+    state when state in [:unreachable, :suspect, :dead, :decommissioning] ->
+      # Don't attempt reads from these nodes
+      :infinity
+  end
+end
+
+defp base_read_cost(from, to, tier) do
   base = if from == to, do: 0, else: get_latency(from, to)
-  tier_cost = tier_latency(tier)  # SSD fast, HDD slow/maybe spinning
-  base + tier_cost
+  base + tier_latency(tier)
 end
 ```
 
