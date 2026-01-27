@@ -37,10 +37,10 @@ Nodes authenticate to join the cluster via a single-use invite token system. For
 ```
 1. Operator creates invite token (short-lived, single-use)
    $ neonfs cluster create-invite --expires 1h
-   Token: bfs_inv_7x8k2m9p...
+   Token: nfs_inv_7x8k2m9p...
 
 2. New node presents token and specifies a known cluster node
-   $ neonfs cluster join --token bfs_inv_7x8k2m9p... --via neonfs@node1.tailnet
+   $ neonfs cluster join --token nfs_inv_7x8k2m9p... --via neonfs@node1.tailnet
 
 3. Cluster validates token:
    - Check token exists and not expired
@@ -59,7 +59,7 @@ Nodes authenticate to join the cluster via a single-use invite token system. For
 
 ```elixir
 %InviteToken{
-  id: "bfs_inv_7x8k2m9p...",
+  id: "nfs_inv_7x8k2m9p...",
   created_at: ~U[...],
   expires_at: ~U[...],
   created_by: :node1,
