@@ -187,12 +187,301 @@ The CLI provides clear, actionable error messages:
 │   ├── warm/
 │   └── cold/
 ├── meta/
-│   └── node.json        # Node identity
+│   ├── node.json        # Node identity
+│   └── cluster.json     # Cluster membership (survives restarts)
 └── wal/                 # Write-ahead log
 
 /run/neonfs/
 ├── node_name            # Runtime node name (for CLI discovery)
 └── daemon.pid           # PID file
+```
+
+## Cluster Bootstrap and Discovery
+
+NeonFS clusters require explicit initialisation and peer discovery. This section describes how nodes bootstrap, join clusters, and reconnect after restarts.
+
+### Cluster Initialisation
+
+The first node creates the cluster:
+
+```bash
+$ neonfs cluster init --name home-lab
+Initialising new cluster 'home-lab'...
+- Generated cluster ID: clust_8x7k9m2p
+- Generated master key (store securely!)
+- Initialised Ra cluster with single node
+- Cluster ready.
+
+Create invite tokens with: neonfs cluster create-invite
+```
+
+```elixir
+defmodule NeonFS.Cluster.Init do
+  def init_cluster(name) do
+    if cluster_state_exists?() do
+      {:error, :already_initialised}
+    else
+      node_address = get_configured_node_address()
+      cluster_id = generate_cluster_id()
+
+      # Persist cluster identity
+      save_cluster_state(%ClusterState{
+        id: cluster_id,
+        name: name,
+        created_at: DateTime.utc_now(),
+        this_node: %{
+          name: node_address,
+          id: generate_node_id()
+        },
+        known_peers: [],
+        ra_cluster_members: [node_address]
+      })
+
+      # Bootstrap Ra with single node
+      Ra.start_cluster(:neonfs_meta, [node_address])
+
+      {:ok, cluster_id}
+    end
+  end
+end
+```
+
+### Persistent Cluster State
+
+Cluster membership is persisted locally to survive restarts:
+
+```json
+// /var/lib/neonfs/meta/cluster.json
+{
+  "cluster_id": "clust_8x7k9m2p",
+  "cluster_name": "home-lab",
+  "this_node": {
+    "id": "node_3k8x9m2p",
+    "name": "neonfs@node1.tail1234.ts.net",
+    "joined_at": "2024-01-15T10:30:00Z"
+  },
+  "known_peers": [
+    {"id": "node_7j2k8m1p", "name": "neonfs@node2.tail1234.ts.net", "last_seen": "2024-01-20T14:22:00Z"},
+    {"id": "node_9x3k2m5p", "name": "neonfs@node3.tail1234.ts.net", "last_seen": "2024-01-20T14:22:00Z"}
+  ],
+  "ra_cluster_members": [
+    "neonfs@node1.tail1234.ts.net",
+    "neonfs@node2.tail1234.ts.net",
+    "neonfs@node3.tail1234.ts.net"
+  ]
+}
+```
+
+### Node Startup and Reconnection
+
+On startup, the daemon uses persisted state to reconnect:
+
+```elixir
+defmodule NeonFS.Cluster.Startup do
+  def start do
+    case load_cluster_state() do
+      {:ok, state} ->
+        reconnect_to_cluster(state)
+
+      {:error, :not_found} ->
+        # Not initialised - wait for cluster init or join
+        {:ok, :awaiting_init}
+    end
+  end
+
+  defp reconnect_to_cluster(state) do
+    # Try to connect to known peers
+    connected = state.known_peers
+      |> Enum.map(fn peer -> {peer, try_connect(peer.name)} end)
+      |> Enum.filter(fn {_peer, result} -> result == :ok end)
+
+    case connected do
+      [] ->
+        handle_no_peers_reachable(state)
+
+      _peers ->
+        # Connected to some peers - rejoin Ra cluster
+        rejoin_ra_cluster(state.ra_cluster_members)
+
+        # Update peer list from Ra (authoritative source)
+        sync_peers_from_ra()
+
+        {:ok, :reconnected}
+    end
+  end
+
+  defp handle_no_peers_reachable(state) do
+    Logger.warning("No cluster peers reachable",
+      known_peers: state.known_peers)
+
+    # Don't serve requests until we can confirm cluster state
+    # (prevents serving stale data during network partition)
+    {:ok, :isolated, state.known_peers}
+  end
+end
+```
+
+### Join Flow with Persistence
+
+When joining a cluster, peer information is persisted:
+
+```elixir
+def join_cluster(token, cluster_address) do
+  # Connect to existing cluster node
+  {:ok, cluster_info} = RPC.call(
+    cluster_address,
+    NeonFS.Cluster,
+    :join_with_token,
+    [token, Node.self()]
+  )
+
+  # Persist locally for restart recovery
+  save_cluster_state(%ClusterState{
+    id: cluster_info.cluster_id,
+    name: cluster_info.cluster_name,
+    this_node: %{
+      id: cluster_info.assigned_node_id,
+      name: Node.self(),
+      joined_at: DateTime.utc_now()
+    },
+    known_peers: cluster_info.peers,
+    ra_cluster_members: cluster_info.ra_members
+  })
+
+  # Join Ra consensus group
+  Ra.add_member(:neonfs_meta, Node.self())
+
+  {:ok, cluster_info}
+end
+```
+
+### Peer List Synchronisation
+
+The local peer list is periodically synced with Ra (the authoritative source):
+
+```elixir
+defmodule NeonFS.Cluster.PeerSync do
+  use GenServer
+
+  @sync_interval :timer.minutes(5)
+
+  def handle_info(:sync, state) do
+    # Get authoritative peer list from Ra
+    case Ra.members(:neonfs_meta) do
+      {:ok, ra_members} ->
+        update_known_peers(ra_members)
+        persist_cluster_state()
+
+      {:error, _} ->
+        # Ra unavailable - keep existing peer list
+        :ok
+    end
+
+    schedule_sync()
+    {:noreply, state}
+  end
+end
+```
+
+### Node Addressing
+
+For multi-node clusters, nodes need addressable names. Use stable DNS names when possible:
+
+```yaml
+# /etc/neonfs/daemon.conf
+cluster:
+  # Tailscale MagicDNS (recommended - stable even if IP changes)
+  node_address: neonfs@mynode.tail1234.ts.net
+
+  # Or Headscale
+  # node_address: neonfs@mynode.headscale.example.com
+
+  # Or static IP (less resilient to network changes)
+  # node_address: neonfs@192.168.1.10
+```
+
+**Why stable names matter:**
+
+BEAM distribution uses node names for identity. If `neonfs@192.168.1.10` restarts as `neonfs@192.168.1.11` (DHCP change), the cluster sees it as a different node. Using Tailscale/Headscale DNS names avoids this issue.
+
+### Handling Isolated Nodes
+
+When a node can't reach any peers:
+
+| Scenario | Behaviour |
+|----------|-----------|
+| Network partition | Node goes read-only; won't serve writes that need quorum |
+| All other nodes down | Same as partition - can't distinguish |
+| Single-node cluster | Normal operation (if `min_peers_for_operation: 0`) |
+
+```elixir
+defmodule NeonFS.Cluster.HealthCheck do
+  def can_serve_writes? do
+    connected_peers = count_connected_peers()
+    min_required = Application.get_env(:neonfs, :min_peers_for_operation, 1)
+
+    connected_peers >= min_required or single_node_cluster?()
+  end
+end
+```
+
+### CLI Commands
+
+```bash
+# Initialise new cluster (first node only)
+$ neonfs cluster init --name home-lab
+Cluster 'home-lab' initialised.
+Cluster ID: clust_8x7k9m2p
+
+# Check cluster status
+$ neonfs cluster status
+Cluster: home-lab (clust_8x7k9m2p)
+This node: neonfs@node1.tail1234.ts.net (online)
+Peers:
+  neonfs@node2.tail1234.ts.net - online (last seen: 2s ago)
+  neonfs@node3.tail1234.ts.net - online (last seen: 1s ago)
+Ra consensus: healthy (leader: node2)
+
+# List known peers
+$ neonfs cluster peers
+NAME                            STATUS    LAST SEEN
+neonfs@node1.tail1234.ts.net    online    (this node)
+neonfs@node2.tail1234.ts.net    online    2s ago
+neonfs@node3.tail1234.ts.net    offline   3h ago
+
+# Force peer list refresh from Ra
+$ neonfs cluster sync-peers
+Synchronised 3 peers from Ra consensus.
+
+# Create invite for new node
+$ neonfs cluster create-invite --expires 1h
+Invite token: bfs_inv_7x8k2m9p...
+
+# Join existing cluster (on new node)
+$ neonfs cluster join --token bfs_inv_7x8k2m9p... --via neonfs@node1.tail1234.ts.net
+Joined cluster 'home-lab'.
+```
+
+### Configuration
+
+```yaml
+# /etc/neonfs/daemon.conf
+cluster:
+  # This node's address (required for multi-node)
+  node_address: neonfs@mynode.tail1234.ts.net
+
+  # How often to sync peer list from Ra
+  peer_sync_interval: 5m
+
+  # Connection timeout when trying to reach peers on startup
+  peer_connect_timeout: 10s
+
+  # Minimum connected peers to serve write requests
+  # Set to 0 for single-node clusters
+  min_peers_for_operation: 1
+
+  # How long to wait for peers before giving up on startup
+  startup_peer_timeout: 30s
 ```
 
 ## systemd Integration

@@ -41,116 +41,200 @@ This pipelining means a large file upload can have chunks replicating to other n
 4. On abort: mark abandoned, cleanup later
 ```
 
-## Uncommitted Chunks and Orphan Cleanup
+## Uncommitted Chunks and Deduplication
 
-Chunks from incomplete writes must not leak storage.
+Chunks from incomplete writes must not leak storage. Additionally, concurrent writes producing identical content must share chunks rather than creating duplicates (which would break content-addressing and waste storage for large identical uploads).
 
-```
-UncommittedChunk {
-  hash: SHA256
-  write_id: WriteId
-  created_at: DateTime
-  last_activity: DateTime    # Updated with each chunk written
-  ttl: Duration              # Inactivity timeout (default: 1 hour)
-  state: :uncommitted | :abandoned
+### Reference-Counted Chunks
+
+Each chunk tracks which active writes are using it, regardless of commit state:
+
+```elixir
+%ChunkMeta{
+  hash: <<sha256 bytes>>,
+  commit_state: :uncommitted | :committed,
+
+  # All in-flight writes using this chunk (created it OR reusing it)
+  # GC checks this is empty before deleting any chunk
+  active_write_refs: MapSet.new(["write_abc", "write_def"])
 }
 ```
 
-**TTL behaviour:**
-
-The TTL is an *inactivity* timeout, not an absolute deadline. Each time a chunk is written for a given `write_id`, the `last_activity` timestamp is updated. The write expires only after `ttl` has elapsed with no new chunks.
-
-This means:
-- **Slow uploads** (e.g., large file over poor connection) stay alive as long as chunks keep arriving
-- **Crashed clients** get cleaned up after the inactivity timeout
-- **Explicit aborts** trigger immediate cleanup regardless of TTL
-
-**Per-volume configuration:**
+### Chunk Storage Operations
 
 ```elixir
-%Volume{
-  name: "documents",
-  gc: %{
-    uncommitted_ttl: hours(1),    # Inactivity timeout for uncommitted writes
-    age_threshold: hours(2)       # GC ignores chunks younger than this
-  }
-}
-```
+defmodule NeonFS.ChunkStore do
+  @doc """
+  Store a chunk for a write operation.
+  - If chunk doesn't exist: create uncommitted with write_id in active_write_refs
+  - If chunk exists (committed or not): add write_id to active_write_refs
+  This protects the chunk from GC while the write is in progress.
+  """
+  def store_chunk(hash, data, write_id) do
+    case ChunkIndex.lookup(hash) do
+      nil ->
+        ChunkIndex.create(%ChunkMeta{
+          hash: hash,
+          commit_state: :uncommitted,
+          active_write_refs: MapSet.new([write_id]),
+          created_at: DateTime.utc_now()
+        }, data)
+        {:ok, :created}
 
-**Validation:** The system must reject volume configurations where `age_threshold <= uncommitted_ttl`. This prevents race conditions where GC could consider chunks that are still part of an active (but slow) write.
+      %ChunkMeta{commit_state: :committed} = chunk ->
+        # Already committed - add our ref to protect from GC during our write
+        ChunkIndex.update(hash, %{
+          active_write_refs: MapSet.put(chunk.active_write_refs, write_id)
+        })
+        {:ok, :existing}
 
-**Lifecycle:**
-
-```
-                    ┌─────────────┐
-  write arrives ──▶ │ uncommitted │ ◀─── activity resets TTL
-                    └─────────────┘
-                          │
-           ┌──────────────┼──────────────┐
-           │              │              │
-           ▼              ▼              ▼
-    ┌───────────┐  ┌───────────┐  ┌───────────┐
-    │ committed │  │ abandoned │  │  expired  │
-    │ (success) │  │  (abort)  │  │(inactivity│
-    └───────────┘  └───────────┘  └───────────┘
-           │              │              │
-           │              └──────┬───────┘
-           │                     │
-           ▼                     ▼
-      permanent             GC eligible
-```
-
-**Message-driven cleanup:**
-
-Rather than periodic sweeps, the system uses message-driven cleanup:
-
-```elixir
-defmodule ChunkReaper do
-  use GenServer
-
-  # Called when a write is explicitly abandoned
-  def handle_cast({:write_abandoned, write_id}, state) do
-    schedule_cleanup(write_id, delay: :soon)
-    {:noreply, state}
-  end
-
-  # Called when TTL expires (via Process.send_after)
-  def handle_info({:ttl_expired, write_id}, state) do
-    schedule_cleanup(write_id, delay: :soon)
-    {:noreply, state}
-  end
-
-  # Actual cleanup considers current system state
-  def handle_info({:do_cleanup, write_id}, state) do
-    if good_time_to_cleanup?() do
-      chunks = get_uncommitted_chunks(write_id)
-      Enum.each(chunks, &delete_chunk/1)
-    else
-      # System busy, try again later
-      schedule_cleanup(write_id, delay: :later)
+      %ChunkMeta{commit_state: :uncommitted} = chunk ->
+        # Another write's uncommitted chunk - share it
+        ChunkIndex.update(hash, %{
+          active_write_refs: MapSet.put(chunk.active_write_refs, write_id)
+        })
+        {:ok, :shared}
     end
-    {:noreply, state}
   end
 
-  defp good_time_to_cleanup? do
-    # Don't compete with active I/O
-    io_pressure = Metrics.current_io_pressure()
-    storage_pressure = Metrics.storage_pressure()
+  @doc """
+  Called when a write commits successfully.
+  Transitions uncommitted chunks to committed and removes our ref from all chunks.
+  """
+  def commit_chunks(write_id, chunk_hashes) do
+    for hash <- chunk_hashes do
+      case ChunkIndex.lookup(hash) do
+        %ChunkMeta{commit_state: :uncommitted} = chunk ->
+          # Transition to committed and remove our ref
+          ChunkIndex.update(hash, %{
+            commit_state: :committed,
+            active_write_refs: MapSet.delete(chunk.active_write_refs, write_id)
+          })
 
-    cond do
-      storage_pressure > 0.9 -> true   # Need space now
-      io_pressure < 0.3 -> true        # System is idle
-      true -> false                     # Wait for better time
+        %ChunkMeta{commit_state: :committed} = chunk ->
+          # Already committed - just remove our ref
+          ChunkIndex.update(hash, %{
+            active_write_refs: MapSet.delete(chunk.active_write_refs, write_id)
+          })
+      end
+    end
+  end
+
+  @doc """
+  Called when a write aborts.
+  Removes write_id from active_write_refs; deletes uncommitted chunk if no refs remain.
+  """
+  def abort_chunks(write_id, chunk_hashes) do
+    for hash <- chunk_hashes do
+      case ChunkIndex.lookup(hash) do
+        %ChunkMeta{commit_state: :uncommitted} = chunk ->
+          new_refs = MapSet.delete(chunk.active_write_refs, write_id)
+
+          if MapSet.size(new_refs) == 0 do
+            # Last reference gone - delete immediately
+            ChunkIndex.delete(hash)
+          else
+            # Other writes still need this chunk
+            ChunkIndex.update(hash, %{active_write_refs: new_refs})
+          end
+
+        %ChunkMeta{commit_state: :committed} = chunk ->
+          # Committed chunk - just remove our ref (GC handles deletion later)
+          ChunkIndex.update(hash, %{
+            active_write_refs: MapSet.delete(chunk.active_write_refs, write_id)
+          })
+      end
     end
   end
 end
 ```
 
-This approach:
-- Responds immediately to explicit aborts
-- Handles TTL expiry via scheduled messages
-- Defers actual deletion to low-contention periods
-- Prioritises cleanup when storage is tight
+### Lifecycle
+
+```
+                         store_chunk(write_A)
+                                │
+                                ▼
+                    ┌───────────────────────┐
+                    │     :uncommitted      │
+                    │ active_write_refs: [A]│
+                    └───────────────────────┘
+                                │
+              store_chunk(write_B, same hash)
+                                │
+                                ▼
+                    ┌───────────────────────┐
+                    │     :uncommitted      │
+                    │ active_write_refs:[A,B]│
+                    └───────────────────────┘
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         │                      │                      │
+    A commits              A aborts                A aborts
+         │                      │                 then B aborts
+         ▼                      ▼                      │
+┌─────────────────┐  ┌───────────────────────┐         │
+│   :committed    │  │     :uncommitted      │         │
+│ refs: [B]       │  │ active_write_refs: [B]│         │
+│                 │  │                       │         │
+│ Referenced by   │  │ B can still commit    │         │
+│ FileMeta (A's)  │  │ or abort later        │         │
+│ Protected by B  │  │                       │         │
+└─────────────────┘  └───────────────────────┘         │
+         │                      │                      │
+    B commits              B commits                   │
+         │                      │                      │
+         ▼                      ▼                      ▼
+┌─────────────────┐  ┌─────────────────┐    ┌─────────────────┐
+│   :committed    │  │   :committed    │    │ refs: []        │
+│ refs: []        │  │ refs: []        │    │                 │
+│                 │  │                 │    │ DELETED         │
+│ Referenced by   │  │ Referenced by   │    │ (no refs left)  │
+│ FileMeta (A+B)  │  │ FileMeta (B's)  │    └─────────────────┘
+│ GC eligible if  │  │ GC eligible if  │
+│ files deleted   │  │ files deleted   │
+└─────────────────┘  └─────────────────┘
+```
+
+### Why No Grace Period?
+
+Previous designs used a TTL/grace period before deleting orphaned uncommitted chunks. This is unnecessary because:
+
+1. **Intent log handles crashes**: The intent log (see [metadata.md](metadata.md#intent-log-transaction-safety-and-write-coordination)) ensures that crashed writes are properly recovered and aborted on node restart
+2. **Reference counting is precise**: A chunk is only deleted when *all* referencing writes have explicitly committed or aborted
+3. **Late-arriving writes recreate if needed**: If a write arrives after a chunk was deleted, it simply creates the chunk fresh
+
+The grace period was defending against incomplete cleanup, but the intent log already guarantees cleanup completes.
+
+### Edge Cases
+
+| Scenario | Behaviour |
+|----------|-----------|
+| A creates chunk, B shares, A commits | Chunk committed with refs: [B]; B's commit removes its ref |
+| A creates chunk, B shares, A aborts | Chunk kept for B (active_write_refs: [B]) |
+| A creates chunk, B shares, both abort | Chunk deleted when second abort removes last ref |
+| A creates chunk, commits before B starts | B adds ref to committed chunk, protects from GC |
+| GC runs while write in progress | Chunk protected by active_write_refs, not deleted |
+| Crash during write | Intent log recovery calls abort_chunks on restart |
+| C arrives after chunk deleted | C creates chunk fresh (normal path) |
+
+### Integration with Intent Log
+
+Write operations are wrapped with intent log acquisition (see [metadata.md](metadata.md#intent-log-transaction-safety-and-write-coordination)). The intent log ensures:
+
+1. **Exclusive access**: Only one write can modify a file at a time
+2. **Crash recovery**: Incomplete writes are detected and aborted on restart
+3. **Proper cleanup**: `abort_chunks` is always called for failed/crashed writes
+
+```elixir
+# In intent log recovery (runs on node startup)
+def recover_intent(%Intent{operation: :write_file, state: :pending} = intent) do
+  # Write was in progress when node crashed - abort it
+  chunk_hashes = get_chunks_for_write(intent.id)
+  ChunkStore.abort_chunks(intent.id, chunk_hashes)
+  IntentLog.mark_rolled_back(intent.id, :recovered_after_crash)
+end
+```
 
 ## Quorum Configurations
 
@@ -230,6 +314,160 @@ Recommended configurations:
 
 **Repair:** More expensive than replication (must read K chunks to rebuild 1) but storage-efficient.
 
+### Reading from Erasure-Coded Files
+
+Files on erasure-coded volumes reference stripes with byte ranges (see [Data Model - File References for Erasure-Coded Volumes](data-model.md#file-references-for-erasure-coded-volumes)). The read path handles both full and partial stripes:
+
+```elixir
+def read_file(file_meta, offset, length) do
+  case file_meta.stripes do
+    nil ->
+      # Replicated volume - read chunks directly
+      read_from_chunks(file_meta.chunks, offset, length)
+
+    stripes ->
+      # Erasure-coded volume - read from stripes
+      read_from_stripes(stripes, offset, length, file_meta.size)
+  end
+end
+
+defp read_from_stripes(stripes, offset, length, file_size) do
+  end_offset = min(offset + length, file_size)
+
+  # Find stripes that overlap the requested range
+  relevant_stripes = Enum.filter(stripes, fn %{byte_range: {start, end_}} ->
+    start < end_offset and end_ > offset
+  end)
+
+  # Read from each stripe, respecting byte boundaries
+  data = Enum.map(relevant_stripes, fn %{stripe_id: id, byte_range: {start, end_}} ->
+    # Calculate offset within this stripe
+    stripe_offset = max(0, offset - start)
+    stripe_length = min(end_ - start - stripe_offset, end_offset - max(offset, start))
+
+    read_stripe(id, stripe_offset, stripe_length)
+  end)
+
+  IO.iodata_to_binary(data)
+end
+```
+
+### Reading from Stripes (Healthy and Degraded)
+
+Stripe reads must respect the `data_bytes` boundary to avoid returning padding:
+
+```elixir
+def read_stripe(stripe_id, offset_in_stripe, length) do
+  stripe = Metadata.get_stripe(stripe_id)
+
+  # Can't read past data_bytes (rest is padding)
+  max_readable = max(0, stripe.data_bytes - offset_in_stripe)
+  actual_length = min(length, max_readable)
+
+  if actual_length <= 0 do
+    <<>>  # Requested range is entirely in padding region
+  else
+    raw_data = case calculate_stripe_state(stripe) do
+      :healthy -> read_stripe_healthy(stripe, offset_in_stripe, actual_length)
+      :degraded -> read_stripe_degraded(stripe, offset_in_stripe, actual_length)
+      :critical -> {:error, :insufficient_chunks}
+    end
+
+    case raw_data do
+      {:error, _} = err -> err
+      data -> binary_part(data, 0, actual_length)  # Defensive truncation
+    end
+  end
+end
+
+defp read_stripe_healthy(stripe, offset, length) do
+  # All data chunks available - read directly without decoding
+  # Calculate which data chunks contain the requested range
+  chunk_size = stripe.config.chunk_size
+  start_chunk = div(offset, chunk_size)
+  end_chunk = div(offset + length - 1, chunk_size)
+
+  data_chunks = start_chunk..end_chunk
+    |> Enum.map(fn idx -> Enum.at(stripe.chunks, idx) end)
+    |> Enum.map(&ChunkStore.read/1)
+    |> IO.iodata_to_binary()
+
+  # Extract the exact range from concatenated chunks
+  chunk_offset = rem(offset, chunk_size)
+  binary_part(data_chunks, chunk_offset, length)
+end
+
+defp read_stripe_degraded(stripe, offset, length) do
+  # Some chunks missing - need Reed-Solomon reconstruction
+  available = stripe.chunks
+    |> Enum.with_index()
+    |> Enum.filter(fn {hash, _idx} -> chunk_available?(hash) end)
+
+  k = stripe.config.data_chunks
+
+  if length(available) < k do
+    {:error, :insufficient_chunks}
+  else
+    # Fetch K chunks (mix of data and parity as available)
+    chunks_to_fetch = Enum.take(available, k)
+    chunk_data = Enum.map(chunks_to_fetch, fn {hash, idx} ->
+      {idx, ChunkStore.read(hash)}
+    end)
+
+    # Reconstruct all data chunks (including padding)
+    all_data = ReedSolomon.decode(chunk_data, stripe.config)
+
+    # Extract just the requested range
+    binary_part(all_data, offset, length)
+  end
+end
+```
+
+### Stripe State Calculation
+
+```elixir
+def calculate_stripe_state(stripe) do
+  available_count = Enum.count(stripe.chunks, &chunk_available?/1)
+  k = stripe.config.data_chunks
+  n = k + stripe.config.parity_chunks
+
+  cond do
+    available_count == n -> :healthy   # All chunks present
+    available_count >= k -> :degraded  # Can reconstruct
+    true -> :critical                  # Data loss - cannot reconstruct
+  end
+end
+```
+
+### Write Validation
+
+When finalising a file write, validate stripe consistency:
+
+```elixir
+def validate_file_stripes(file_meta) do
+  total_data_bytes = file_meta.stripes
+    |> Enum.map(fn %{stripe_id: id} -> Metadata.get_stripe(id).data_bytes end)
+    |> Enum.sum()
+
+  if total_data_bytes != file_meta.size do
+    {:error, :stripe_size_mismatch,
+      "Stripe data_bytes (#{total_data_bytes}) != file size (#{file_meta.size})"}
+  else
+    :ok
+  end
+end
+```
+
+### Edge Cases
+
+| Scenario | Handling |
+|----------|----------|
+| Read spans full and partial stripes | Each stripe read respects its own `data_bytes` |
+| Read entirely within padding region | Returns empty binary |
+| Degraded partial stripe | Reconstruct full stripe data, truncate to `data_bytes` |
+| Read beyond file size | Truncated to `file_meta.size` at top level |
+| Stripe with 0 available chunks | Returns `{:error, :insufficient_chunks}` |
+
 ## Partial Stripe Handling
 
 Erasure coding requires a minimum amount of data to form a stripe (e.g., 10 data chunks × 256KB = 2.5MB for a 10+4 config). Files smaller than this, or the tail end of larger files, need special handling.
@@ -295,46 +533,53 @@ This is deferred to post-initial implementation. The current padding approach en
 
 ## Garbage Collection
 
-GC uses a simple metadata-walk approach rather than distributed reference counting. This trades some efficiency for correctness and simplicity.
+GC handles **committed chunks** that are no longer referenced by any file AND have no active writes using them. Uncommitted chunks are handled separately via reference counting (see above).
 
-**Approach: Mark and Sweep**
+**Approach: Mark and Sweep with Active Write Protection**
 
 ```
 1. Mark phase: Walk all committed file metadata, collect referenced chunk hashes
-2. Sweep phase: Any chunk not in the referenced set is garbage
-3. Delete phase: Remove garbage chunks (with grace period)
+2. Sweep phase: Any committed chunk not in the referenced set AND with empty
+   active_write_refs is garbage
+3. Delete phase: Remove garbage chunks immediately (no grace period needed)
 ```
 
-**Why not reference counting?**
+**Why no grace period?**
+
+The `active_write_refs` mechanism provides precise protection:
+- Any write that reuses a committed chunk adds itself to `active_write_refs` before using the chunk
+- GC checks `active_write_refs` is empty before deleting
+- This eliminates the race condition between GC and in-flight writes without needing a grace period
+
+**Why not reference counting for committed chunks?**
 
 Distributed reference counting (including weighted variants) has failure modes where lost messages can prevent chunks from ever being collected, or worse, cause premature deletion. The coordination required to handle these failures correctly negates the performance benefit.
 
-GC is a background operation—it can afford to be slow and thorough.
+The `active_write_refs` approach is simpler: it only tracks in-flight writes (a small, bounded set) rather than all references. File-to-chunk references are handled by mark-and-sweep.
 
 **Implementation:**
 
 ```elixir
 defmodule NeonFS.GarbageCollector do
   def collect(volume) do
-    age_threshold = volume.gc.age_threshold
-
-    # Phase 1: Build set of all referenced chunks
+    # Phase 1: Build set of all referenced chunks from committed files
     referenced = volume
       |> stream_all_files()
       |> Stream.flat_map(& &1.chunks)
       |> MapSet.new()
 
-    # Phase 2: Find unreferenced chunks
+    # Phase 2: Find unreferenced committed chunks with no active writes
     garbage = volume
-      |> stream_all_chunks()
-      |> Stream.reject(&MapSet.member?(referenced, &1.hash))
+      |> stream_committed_chunks()
+      |> Stream.reject(fn chunk ->
+        MapSet.member?(referenced, chunk.hash) or
+        MapSet.size(chunk.active_write_refs) > 0
+      end)
       |> Enum.to_list()
 
-    # Phase 3: Delete with grace period
+    # Phase 3: Delete immediately (active_write_refs protects in-flight writes)
     for chunk <- garbage do
-      if chunk.last_activity < ago(age_threshold) do
-        schedule_deletion(chunk, grace_period: hours(1))
-      end
+      ChunkIndex.delete(chunk.hash)
     end
   end
 end
@@ -342,9 +587,8 @@ end
 
 **Safety measures:**
 
-- **Grace period**: Chunks aren't deleted immediately; scheduled for deletion after 1 hour. Allows cancellation if a race condition is detected.
-- **Age threshold**: Only chunks older than `gc.age_threshold` are considered. This must be greater than `gc.uncommitted_ttl` (validated at volume creation) to ensure GC never races with active writes.
-- **Uncommitted chunk exclusion**: Chunks with `write_id` set (uncommitted) are never collected by GC—handled separately by the ChunkReaper.
+- **Active write protection**: Chunks with non-empty `active_write_refs` are never deleted, even if unreferenced by files. This handles the race where a write is about to commit and reference the chunk.
+- **Committed chunks only**: GC only considers chunks with `commit_state: :committed`. Uncommitted chunks are managed by write operations via reference counting.
 
 **Scheduling:**
 
@@ -357,7 +601,4 @@ end
 gc:
   schedule: "0 3 * * *"              # Daily at 3 AM
   storage_pressure_threshold: 0.85  # Also run if >85% full
-  grace_period: 1h
-  uncommitted_ttl: 1h               # Default inactivity timeout
-  age_threshold: 2h                 # Must be > uncommitted_ttl
 ```

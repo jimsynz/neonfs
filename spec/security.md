@@ -30,7 +30,7 @@ BEAM distribution is trusting by default. Once a node connects, it has full RPC 
 
 ## Cluster Authentication
 
-Nodes authenticate to join the cluster via a single-use invite token system.
+Nodes authenticate to join the cluster via a single-use invite token system. For cluster initialisation and peer discovery details, see [Deployment - Cluster Bootstrap and Discovery](deployment.md#cluster-bootstrap-and-discovery).
 
 **Node Join Flow:**
 
@@ -39,8 +39,8 @@ Nodes authenticate to join the cluster via a single-use invite token system.
    $ neonfs cluster create-invite --expires 1h
    Token: bfs_inv_7x8k2m9p...
 
-2. New node presents token
-   $ neonfs cluster join --token bfs_inv_7x8k2m9p...
+2. New node presents token and specifies a known cluster node
+   $ neonfs cluster join --token bfs_inv_7x8k2m9p... --via neonfs@node1.tailnet
 
 3. Cluster validates token:
    - Check token exists and not expired
@@ -48,9 +48,11 @@ Nodes authenticate to join the cluster via a single-use invite token system.
    - Mark token as used in Ra (before returning success)
 
 4. Cluster registers new node
-   Returns: cluster state, peer list
+   Returns: cluster state, peer list, Ra members
 
-5. New node joins BEAM cluster and Ra consensus
+5. New node persists cluster state locally (for restart recovery)
+
+6. New node joins BEAM cluster and Ra consensus
 ```
 
 **Token Properties:**
@@ -140,6 +142,7 @@ Three encryption modes, with different tradeoffs for multi-user scenarios and de
 Chunk on disk:
   ciphertext: AES-256-GCM(data, volume_key)
   nonce: unique per chunk
+  key_version: 3  # Which volume key version encrypted this
 ```
 
 ### Mode 3: Envelope encryption with user keys (`mode: :envelope`)
@@ -268,6 +271,286 @@ Default is `:random` for maximum security. Use `:content_derived` only when dedu
 
 - Server-side: volume keys stored in metadata, wrapped with cluster master key
 - Envelope: user public keys stored in metadata; private keys managed by users (or a separate key service)
+
+## Key Rotation
+
+Key rotation is supported for all encryption components: master keys, volume keys, and user keys.
+
+### Key Versioning
+
+All keys are versioned to support rotation without downtime. Chunk metadata tracks which key version was used for encryption:
+
+```elixir
+%ChunkCrypto{
+  algorithm: :aes_256_gcm,
+  nonce: <<12 bytes>>,
+  key_version: 3,          # Which volume key version
+
+  # For envelope mode:
+  wrapped_deks: [
+    %{user_id: "alice", key_version: 2, wrapped_dek: <<...>>},
+    %{user_id: "bob", key_version: 1, wrapped_dek: <<...>>}
+  ]
+}
+```
+
+Volume encryption state tracks all active key versions:
+
+```elixir
+%VolumeEncryption{
+  mode: :server_side,
+
+  # Current key for new writes
+  current_key_version: 3,
+
+  # All key versions (wrapped with master key)
+  keys: %{
+    1 => %{wrapped_key: <<...>>, created_at: ~U[...], deprecated_at: ~U[...]},
+    2 => %{wrapped_key: <<...>>, created_at: ~U[...], deprecated_at: ~U[...]},
+    3 => %{wrapped_key: <<...>>, created_at: ~U[...], deprecated_at: nil}
+  },
+
+  # Rotation state (nil when not rotating)
+  rotation: nil | %RotationState{
+    from_version: 2,
+    to_version: 3,
+    started_at: ~U[...],
+    progress: %{total_chunks: 1_000_000, migrated: 450_000}
+  }
+}
+```
+
+### Read Path with Key Version Lookup
+
+Reads use the key version stored in chunk metadata:
+
+```elixir
+def decrypt_chunk(chunk_hash, volume) do
+  chunk = ChunkStore.read(chunk_hash)
+  crypto = ChunkIndex.get_crypto_metadata(chunk_hash)
+
+  # Look up the correct key version
+  key = get_key_version(volume, crypto.key_version)
+
+  AES.decrypt(chunk.ciphertext, key, crypto.nonce)
+end
+
+defp get_key_version(volume, version) do
+  case Map.get(volume.encryption.keys, version) do
+    nil -> {:error, :unknown_key_version}
+    %{wrapped_key: wrapped} -> unwrap_key(wrapped, master_key())
+  end
+end
+```
+
+### Volume Key Rotation (Server-Side Encryption)
+
+Volume key rotation is a long-running background operation that re-encrypts all chunks. It uses the intent log to prevent concurrent rotations and track progress:
+
+```elixir
+def start_rotation(volume_id) do
+  volume = Metadata.get_volume(volume_id)
+  new_version = volume.encryption.current_key_version + 1
+  new_key = :crypto.strong_rand_bytes(32)
+
+  intent = %Intent{
+    id: UUID.uuid4(),
+    operation: :rotate_volume_key,
+    conflict_key: {:volume_key_rotation, volume_id},
+    params: %{volume_id: volume_id, new_version: new_version},
+    state: :pending,
+    started_at: DateTime.utc_now(),
+    expires_at: nil  # Long-running, uses lease extension
+  }
+
+  case IntentLog.try_acquire(intent) do
+    {:error, :conflict, _} ->
+      {:error, :rotation_already_in_progress}
+
+    {:ok, intent_id} ->
+      # Add new key version (old keys still work for reads)
+      Metadata.add_volume_key(volume_id, new_version, new_key)
+      Metadata.set_current_key_version(volume_id, new_version)
+
+      # Start background re-encryption
+      spawn_reencryption_worker(volume_id, new_version, intent_id)
+
+      {:ok, intent_id}
+  end
+end
+```
+
+**Re-encryption worker:**
+
+```elixir
+defmodule NeonFS.KeyRotation.Worker do
+  @batch_size 1000
+
+  def run(volume_id, target_version, intent_id) do
+    volume = Metadata.get_volume(volume_id)
+    old_versions = Map.keys(volume.encryption.keys) -- [target_version]
+
+    # Find chunks still on old key versions
+    chunks_to_migrate = ChunkIndex.chunks_with_key_versions(volume_id, old_versions)
+    total = length(chunks_to_migrate)
+
+    chunks_to_migrate
+    |> Stream.chunk_every(@batch_size)
+    |> Stream.with_index()
+    |> Enum.each(fn {batch, batch_idx} ->
+      reencrypt_batch(batch, volume_id, target_version)
+
+      # Update progress
+      migrated = min((batch_idx + 1) * @batch_size, total)
+      Metadata.update_rotation_progress(volume_id, total, migrated)
+
+      # Extend intent lease
+      IntentLog.extend(intent_id)
+    end)
+
+    # Rotation complete - schedule old key removal after retention period
+    schedule_key_removal(volume_id, old_versions)
+
+    Metadata.clear_rotation_state(volume_id)
+    IntentLog.complete(intent_id)
+  end
+
+  defp reencrypt_batch(chunk_hashes, volume_id, target_version) do
+    volume = Metadata.get_volume(volume_id)
+    new_key = get_key_version(volume, target_version)
+
+    for hash <- chunk_hashes do
+      # Read and decrypt with old key
+      {:ok, plaintext} = decrypt_chunk(hash, volume)
+
+      # Re-encrypt with new key
+      nonce = :crypto.strong_rand_bytes(12)
+      ciphertext = AES.encrypt(plaintext, new_key, nonce)
+
+      # Atomic update
+      ChunkStore.update_encrypted(hash, ciphertext, nonce, target_version)
+    end
+  end
+end
+```
+
+**Reads during rotation:**
+
+Reads work throughout rotation because:
+- Old key versions remain available until rotation completes
+- Each chunk's metadata specifies which key version to use
+- New writes use the new key version
+
+### Master Key Rotation
+
+Master key rotation is simpler—it only re-wraps volume keys, not chunk data:
+
+```elixir
+def rotate_master_key(new_master_key) do
+  old_master_key = get_master_key()
+
+  # Re-wrap all volume keys with new master key
+  for volume <- Metadata.list_volumes() do
+    for {version, key_data} <- volume.encryption.keys do
+      unwrapped = unwrap_key(key_data.wrapped_key, old_master_key)
+      rewrapped = wrap_key(unwrapped, new_master_key)
+
+      Metadata.update_wrapped_key(volume.id, version, rewrapped)
+    end
+  end
+
+  # Store new master key (implementation-dependent)
+  store_master_key(new_master_key)
+end
+```
+
+### User Key Rotation (Envelope Mode)
+
+User key rotation re-wraps DEKs to the user's new public key without re-encrypting chunk data:
+
+```elixir
+def rotate_user_key(user_id, new_public_key, dek_provider) do
+  # dek_provider is a function that returns the DEK for a chunk
+  # (user provides via their old private key, or admin recovery)
+
+  chunks = ChunkIndex.chunks_with_user_dek(user_id)
+
+  for chunk_hash <- chunks do
+    crypto = ChunkIndex.get_crypto_metadata(chunk_hash)
+
+    # Get the DEK (unwrapped by user's old key)
+    dek = dek_provider.(chunk_hash, crypto)
+
+    # Re-wrap to new public key
+    new_wrapped = RSA.encrypt(dek, new_public_key)
+
+    # Update metadata
+    new_wrapped_deks = crypto.wrapped_deks
+      |> Enum.reject(& &1.user_id == user_id)
+      |> List.insert_at(0, %{
+        user_id: user_id,
+        key_version: next_user_key_version(user_id),
+        wrapped_dek: new_wrapped
+      })
+
+    ChunkIndex.update_wrapped_deks(chunk_hash, new_wrapped_deks)
+  end
+
+  Metadata.update_user_public_key(user_id, new_public_key)
+end
+```
+
+### Rotation Configuration
+
+```yaml
+encryption:
+  key_rotation:
+    # Re-encryption batch size
+    batch_size: 1000
+
+    # Rate limit to avoid overwhelming the system
+    chunks_per_second: 1000
+
+    # Priority in I/O scheduler
+    priority: low
+
+    # Keep old key versions after rotation completes
+    # (allows late reads to still work during cleanup)
+    key_retention_after_rotation: 24h
+```
+
+### CLI Commands
+
+```bash
+# Start volume key rotation
+$ neonfs volume rotate-key documents
+Starting key rotation for volume 'documents'...
+New key version: 4
+Progress: 0 / 1,234,567 chunks
+
+# Check rotation status
+$ neonfs volume rotation-status documents
+Volume: documents
+Status: in_progress
+From version: 3
+To version: 4
+Progress: 567,890 / 1,234,567 chunks (46%)
+Estimated completion: 2h 15m
+
+# Rotate master key (requires current key)
+$ neonfs cluster rotate-master-key
+Enter current master key passphrase: ****
+Enter new master key passphrase: ****
+Confirm new passphrase: ****
+Re-wrapping 12 volume keys...
+Master key rotated successfully.
+
+# Rotate user key (envelope mode)
+$ neonfs user rotate-key alice --new-pubkey /path/to/new_key.pub
+This will re-wrap DEKs for 45,678 chunks.
+User must provide DEKs using their old private key.
+Continue? [y/N]
+```
 
 ## Identity and Access Control
 
