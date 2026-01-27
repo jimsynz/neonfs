@@ -455,10 +455,10 @@ Synchronised 3 peers from Ra consensus.
 
 # Create invite for new node
 $ neonfs cluster create-invite --expires 1h
-Invite token: bfs_inv_7x8k2m9p...
+Invite token: nfs_inv_7x8k2m9p...
 
 # Join existing cluster (on new node)
-$ neonfs cluster join --token bfs_inv_7x8k2m9p... --via neonfs@node1.tail1234.ts.net
+$ neonfs cluster join --token nfs_inv_7x8k2m9p... --via neonfs@node1.tail1234.ts.net
 Joined cluster 'home-lab'.
 ```
 
