@@ -1,7 +1,7 @@
 # Task 0002: Configure .check.exs with Rust Tool Integration
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,14 +10,14 @@ Not Started
 Create `.check.exs` configuration files for both neonfs_core and neonfs_fuse packages that integrate Rust tooling (clippy, cargo test, cargo fmt) into the `mix check` workflow. This ensures all code quality checks run from a single command.
 
 ## Acceptance Criteria
-- [ ] `neonfs_core/.check.exs` created with Rust integration
-- [ ] `neonfs_fuse/.check.exs` created with Rust integration
-- [ ] `mix check` runs all Elixir checks (credo, dialyzer, doctor, etc.)
-- [ ] `mix check` runs `cargo fmt --check` for any native crates
-- [ ] `mix check` runs `cargo clippy --all-targets -- -D warnings` for any native crates
-- [ ] `mix check` runs `cargo test` for any native crates
-- [ ] Rust checks only run if native/ directory exists (graceful skip otherwise)
-- [ ] All checks pass on current codebase
+- [x] `neonfs_core/.check.exs` created with Rust integration
+- [x] `neonfs_fuse/.check.exs` created with Rust integration
+- [x] `mix check` runs all Elixir checks (credo, dialyzer, doctor, etc.)
+- [x] `mix check` runs `cargo fmt --check` for any native crates
+- [x] `mix check` runs `cargo clippy --all-targets -- -D warnings` for any native crates
+- [x] `mix check` runs `cargo test` for any native crates
+- [x] Rust checks only run if native/ directory exists (graceful skip otherwise)
+- [x] All checks pass on current codebase
 
 ## Configuration Template
 ```elixir
