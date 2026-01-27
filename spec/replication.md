@@ -2,6 +2,32 @@
 
 This document describes write flows, durability guarantees, erasure coding, and garbage collection.
 
+## Replica Placement
+
+Replicas are placed to maximize failure domain separation. The placement policy considers:
+
+1. **Zones** (if configured) - different physical sites
+2. **Nodes** - different machines
+3. **Drives** - different storage devices
+
+See [Storage Tiering - Replica Placement Policy](storage-tiering.md#replica-placement-policy) for the full algorithm.
+
+**Key points:**
+
+- A single node with multiple drives can provide drive-level redundancy
+- Replicas prefer same-tier placement but fall back to other tiers if needed
+- If requested replication factor exceeds available failure domains, writes proceed with a warning (some redundancy is better than none)
+- Chunk locations track `{node, drive_id, tier}` not just `{node, tier}`
+
+**Examples:**
+
+| Hardware | Replication Factor | Result |
+|----------|-------------------|--------|
+| 3 nodes × 1 drive | 3 | 1 replica per node (node redundancy) |
+| 1 node × 3 drives | 3 | 1 replica per drive (drive redundancy) |
+| 2 nodes × 2 drives | 3 | Spread across nodes and drives |
+| 1 node × 1 drive | 3 | Only 1 copy possible (warning logged) |
+
 ## Write Flow (Replicated Volume)
 
 Writes are streamed — chunks are created and replicated as bytes arrive, with metadata committed only on completion.

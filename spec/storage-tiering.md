@@ -12,6 +12,298 @@ This document describes the storage tier system, drive management, power managem
 
 Linux's page cache provides automatic caching of recently accessed file data, which covers most caching needs for raw (unencrypted, uncompressed) chunks. Application-level caching is only used for transformed data — see the Caching Strategy section below.
 
+## Storage Topology
+
+NeonFS supports heterogeneous storage configurations. Not all tiers need to be present, and different nodes can have different storage configurations.
+
+### Tier Flexibility
+
+Tiers are optional. A cluster can have any subset:
+
+| Configuration | Valid? | Notes |
+|---------------|--------|-------|
+| Hot only | ✓ | No tiering, just replication |
+| Hot + cold | ✓ | Skip warm in promotion/demotion |
+| Warm + cold | ✓ | No hot tier available |
+| Cold only | ✓ | Archive-only cluster |
+| Mixed across nodes | ✓ | Each node contributes what it has |
+
+**Tier availability is discovered at runtime:**
+
+```elixir
+defmodule NeonFS.Storage.Topology do
+  @doc """
+  Returns available tiers across the cluster, ordered hot → warm → cold.
+  Only includes tiers that have at least one healthy drive.
+  """
+  def available_tiers do
+    all_drives()
+    |> Enum.filter(&healthy?/1)
+    |> Enum.map(& &1.tier)
+    |> Enum.uniq()
+    |> Enum.sort_by(&tier_order/1)
+  end
+
+  defp tier_order(:hot), do: 0
+  defp tier_order(:warm), do: 1
+  defp tier_order(:cold), do: 2
+
+  @doc """
+  Returns the next colder tier that actually exists in the cluster.
+  Returns nil if already at coldest available tier.
+  """
+  def next_colder_tier(current_tier) do
+    available = available_tiers()
+    current_index = Enum.find_index(available, &(&1 == current_tier))
+
+    case current_index do
+      nil -> List.first(available)  # Tier doesn't exist, return coldest available
+      i -> Enum.at(available, i + 1)  # Next tier, or nil if at end
+    end
+  end
+
+  @doc """
+  Returns the next warmer tier that actually exists in the cluster.
+  Returns nil if already at hottest available tier.
+  """
+  def next_warmer_tier(current_tier) do
+    available = available_tiers()
+    current_index = Enum.find_index(available, &(&1 == current_tier))
+
+    case current_index do
+      nil -> List.last(available)  # Tier doesn't exist, return hottest available
+      0 -> nil  # Already at hottest
+      i -> Enum.at(available, i - 1)
+    end
+  end
+end
+```
+
+**Volume configuration validation:**
+
+When creating a volume, the `initial_tier` is validated against available tiers:
+
+```elixir
+def validate_volume_config(config) do
+  available = Topology.available_tiers()
+
+  cond do
+    config.initial_tier not in available ->
+      {:error, {:tier_unavailable, config.initial_tier, available}}
+
+    config.durability.type == :erasure and length(available_drives()) < stripe_width(config) ->
+      {:error, :insufficient_drives_for_erasure_coding}
+
+    true ->
+      :ok
+  end
+end
+```
+
+### Failure Domains
+
+Redundancy is about placing replicas in different **failure domains**. NeonFS recognises three levels:
+
+| Level | Protects Against | Example |
+|-------|------------------|---------|
+| Drive | Single drive failure | 2 SSDs on same node |
+| Node | Node failure (power, OS, hardware) | 2 different machines |
+| Zone | Rack/site failure | Different physical locations |
+
+**Failure domain hierarchy:**
+
+```
+Zone (optional)
+└── Node
+    └── Drive
+```
+
+Replicas should be placed to maximize failure domain separation. Losing a higher-level domain loses all lower-level domains within it (node failure loses all drives on that node).
+
+### Chunk Location Tracking
+
+Chunk locations include the drive, not just node and tier:
+
+```elixir
+%ChunkLocation{
+  node: :neonfs@node1,
+  drive_id: "nvme0",           # Specific drive
+  tier: :hot,
+  stored_at: ~U[...],
+  last_verified: ~U[...]
+}
+```
+
+This enables:
+- Drive-level replica placement (redundancy on single node)
+- Accurate failure impact assessment (which chunks affected by drive failure)
+- Drive-aware read path (avoid failed/slow drives)
+
+### Replica Placement Policy
+
+When placing replicas, maximize failure domain separation:
+
+```elixir
+defmodule NeonFS.Placement do
+  @doc """
+  Select drives for placing `count` replicas of a chunk.
+  Maximizes failure domain separation while respecting tier preference.
+  """
+  def select_replica_targets(count, preferred_tier, opts \\ []) do
+    exclude_drives = Keyword.get(opts, :exclude, [])
+
+    candidates = available_drives()
+      |> Enum.reject(&(&1.id in exclude_drives))
+      |> Enum.filter(&has_capacity?/1)
+      |> score_and_sort(preferred_tier)
+
+    select_with_domain_separation(candidates, count)
+  end
+
+  defp score_and_sort(drives, preferred_tier) do
+    Enum.sort_by(drives, fn drive ->
+      {
+        # Primary: prefer requested tier (0 = match, 1 = different)
+        if(drive.tier == preferred_tier, do: 0, else: 1),
+
+        # Secondary: prefer drives with more free space
+        -available_space(drive),
+
+        # Tertiary: prefer lower current I/O load
+        current_load(drive)
+      }
+    end)
+  end
+
+  defp select_with_domain_separation(candidates, count) do
+    select_with_domain_separation(candidates, count, [], MapSet.new(), MapSet.new())
+  end
+
+  defp select_with_domain_separation(_candidates, 0, selected, _used_nodes, _used_drives) do
+    Enum.reverse(selected)
+  end
+
+  defp select_with_domain_separation([], _remaining, selected, _used_nodes, _used_drives) do
+    # Not enough candidates - return what we have
+    Enum.reverse(selected)
+  end
+
+  defp select_with_domain_separation([candidate | rest], remaining, selected, used_nodes, used_drives) do
+    # Score this candidate based on failure domain separation
+    node_penalty = if candidate.node in used_nodes, do: 1000, else: 0
+    drive_penalty = if candidate.id in used_drives, do: 10000, else: 0  # Should never happen
+
+    # Find best candidate considering domain separation
+    all_candidates = [candidate | rest]
+
+    best = Enum.min_by(all_candidates, fn c ->
+      node_p = if c.node in used_nodes, do: 1000, else: 0
+      {node_p, -available_space(c)}
+    end)
+
+    new_selected = [best | selected]
+    new_used_nodes = MapSet.put(used_nodes, best.node)
+    new_used_drives = MapSet.put(used_drives, best.id)
+    remaining_candidates = List.delete(all_candidates, best)
+
+    select_with_domain_separation(
+      remaining_candidates,
+      remaining - 1,
+      new_selected,
+      new_used_nodes,
+      new_used_drives
+    )
+  end
+end
+```
+
+**Placement priority:**
+
+1. **Different nodes** (best redundancy)
+2. **Different drives on same node** (if not enough nodes)
+3. **Same drive** (only if `replication_factor: 1` or no other option)
+
+**Examples:**
+
+| Cluster | Replication Factor | Placement |
+|---------|-------------------|-----------|
+| 3 nodes, 1 SSD each | 3 | One replica per node |
+| 1 node, 3 SSDs | 3 | One replica per drive |
+| 2 nodes, 2 SSDs each | 3 | Node A drive 1, Node B drive 1, Node A drive 2 (or Node B drive 2) |
+| 1 node, 1 SSD | 3 | Only 1 replica possible (warning logged) |
+
+**Insufficient failure domains:**
+
+If the requested replication factor exceeds available failure domains:
+
+```elixir
+def check_placement_feasibility(replication_factor, preferred_tier) do
+  drives = available_drives_for_tier(preferred_tier)
+  nodes = drives |> Enum.map(& &1.node) |> Enum.uniq()
+
+  cond do
+    length(drives) < replication_factor ->
+      {:warning, :insufficient_drives,
+        "Requested #{replication_factor} replicas but only #{length(drives)} drives available"}
+
+    length(nodes) < replication_factor ->
+      {:warning, :insufficient_nodes,
+        "Requested #{replication_factor} replicas but only #{length(nodes)} nodes available. " <>
+        "Data is protected against drive failure but not node failure."}
+
+    true ->
+      :ok
+  end
+end
+```
+
+Writes proceed with a warning rather than failing - some redundancy is better than none.
+
+### Cross-Tier Replication
+
+Replicas can span tiers when necessary:
+
+```elixir
+# Preferred: all replicas on same tier
+Chunk on hot tier, replication_factor: 2
+  → Node A /mnt/nvme0 (hot)
+  → Node B /mnt/nvme0 (hot)
+
+# Fallback: mixed tiers if preferred tier lacks capacity
+Chunk on hot tier, replication_factor: 2, but only 1 hot drive has space
+  → Node A /mnt/nvme0 (hot)
+  → Node B /mnt/ssd0 (warm)  # Fallback to warm
+```
+
+The read path prefers hotter replicas, so performance remains optimal when a hot copy exists.
+
+### Zone Awareness (Optional)
+
+For multi-site deployments, nodes can be assigned to zones:
+
+```yaml
+# /etc/neonfs/daemon.conf
+cluster:
+  node_address: neonfs@node1.site-a.example.com
+  zone: site-a  # Optional zone identifier
+```
+
+When zones are configured, placement prioritises zone separation:
+
+1. **Different zones** (survives site failure)
+2. **Different nodes in same zone** (survives node failure)
+3. **Different drives on same node** (survives drive failure)
+
+```elixir
+defp domain_separation_score(candidate, used_zones, used_nodes, used_drives) do
+  zone_penalty = if candidate.zone in used_zones, do: 10000, else: 0
+  node_penalty = if candidate.node in used_nodes, do: 1000, else: 0
+  drive_penalty = if candidate.id in used_drives, do: 100, else: 0
+
+  zone_penalty + node_penalty + drive_penalty
+end
+```
+
 ## Drive State Tracking
 
 Each node can have multiple drives, including multiple drives at the same tier.
