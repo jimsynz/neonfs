@@ -19,4 +19,27 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec add(integer(), integer()) :: integer()
   def add(_a, _b), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Computes the SHA-256 hash of the given binary data.
+
+  The hash is computed on the raw data as provided - no compression or
+  encryption is applied. This ensures consistent content addressing
+  regardless of storage format.
+
+  ## Parameters
+    - `data` - Binary data to hash
+
+  ## Returns
+    - A 32-byte binary containing the SHA-256 hash
+
+  ## Examples
+
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash("hello world")
+      iex> byte_size(hash)
+      32
+
+  """
+  @spec compute_hash(binary()) :: binary()
+  def compute_hash(_data), do: :erlang.nif_error(:nif_not_loaded)
 end

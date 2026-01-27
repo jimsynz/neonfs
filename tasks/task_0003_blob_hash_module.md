@@ -1,7 +1,7 @@
 # Task 0003: Implement SHA-256 Hashing Module
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,18 +10,18 @@ Not Started
 Implement the SHA-256 hashing module in the neonfs_blob crate. This module computes content hashes for chunks, which form the basis of content-addressed storage. The hash is always computed on the original (uncompressed, unencrypted) data to enable deduplication.
 
 ## Acceptance Criteria
-- [ ] Add `sha2` dependency to Cargo.toml
-- [ ] Hash module at `neonfs_blob/src/hash.rs`
-- [ ] `Hash` type wrapping `[u8; 32]` with Display, Debug, Clone, PartialEq, Eq, Hash traits
-- [ ] `sha256(data: &[u8]) -> Hash` function
-- [ ] `Hash::to_hex()` method returning lowercase hex string
-- [ ] `Hash::from_hex()` method parsing hex string with error handling
-- [ ] `Hash::from_bytes()` method from raw bytes
-- [ ] `Hash::as_bytes()` method returning `&[u8; 32]`
-- [ ] Proper error types for invalid hex input
-- [ ] NIF function `compute_hash/1` exported to Elixir returning binary
-- [ ] Rust unit tests for all functions
-- [ ] Property test: `from_hex(hash.to_hex()) == hash`
+- [x] Add `sha2` dependency to Cargo.toml
+- [x] Hash module at `neonfs_blob/src/hash.rs`
+- [x] `Hash` type wrapping `[u8; 32]` with Display, Debug, Clone, PartialEq, Eq, Hash traits
+- [x] `sha256(data: &[u8]) -> Hash` function
+- [x] `Hash::to_hex()` method returning lowercase hex string
+- [x] `Hash::from_hex()` method parsing hex string with error handling
+- [x] `Hash::from_bytes()` method from raw bytes
+- [x] `Hash::as_bytes()` method returning `&[u8; 32]`
+- [x] Proper error types for invalid hex input
+- [x] NIF function `compute_hash/1` exported to Elixir returning binary
+- [x] Rust unit tests for all functions
+- [x] Property test: `from_hex(hash.to_hex()) == hash`
 
 ## Cargo.toml Addition
 ```toml
