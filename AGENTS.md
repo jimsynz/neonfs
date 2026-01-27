@@ -20,6 +20,7 @@ mix format                     # Format code
 mix format --check-formatted   # Check formatting
 mix credo --strict             # Code style checker
 mix dialyzer                   # Static type analysis
+mix check --no-retry           # Run the full suite
 ```
 
 ### Rust (from native/ crates)
