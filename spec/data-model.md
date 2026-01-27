@@ -41,11 +41,12 @@ Elixir tracks everything about chunks across the cluster:
   compression: :zstd | :none,   # Compression algorithm used
   encrypted: false,             # Whether chunk is encrypted
 
-  # Cluster-wide location tracking
+  # Cluster-wide location tracking (see storage-tiering.md#chunk-location-tracking)
+  # Each location identifies a specific drive, enabling drive-level redundancy
   locations: [
-    %{node: :node1, tier: :hot},
-    %{node: :node2, tier: :cold},
-    %{node: :node3, tier: :warm}
+    %{node: :node1, drive_id: "nvme0", tier: :hot},
+    %{node: :node1, drive_id: "nvme1", tier: :hot},  # Same node, different drive
+    %{node: :node2, drive_id: "ssd0", tier: :warm}
   ],
 
   # Durability configuration

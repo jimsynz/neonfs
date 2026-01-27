@@ -70,6 +70,8 @@ This document contains open questions and the glossary.
 | LWW | Last-Writer-Wins, conflict resolution strategy where highest timestamp wins |
 | Telemetry | Elixir library for metrics and instrumentation, ecosystem standard |
 | SLI | Service Level Indicator, metric that measures service health |
+| Failure Domain | Blast radius of a failure - drive, node, or zone level |
+| Zone | Optional grouping of nodes by physical location (rack, site) for multi-site redundancy |
 | StreamData | Property testing library for Elixir |
 | proptest | Property testing library for Rust |
 | cargo-fuzz | Fuzzing framework for Rust using libFuzzer |
