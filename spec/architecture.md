@@ -738,3 +738,228 @@ IOScheduler.submit(:delete, chunk_hash: hash, priority: :background)
 ```
 
 This unified approach ensures all I/O is coordinated, preventing any single operation type from starving others.
+
+## Package Structure
+
+NeonFS is organised as a collection of separate Elixir applications, each deployable as an independent service or container. Services discover each other and coordinate using Erlang distribution over the WireGuard mesh.
+
+### Design Rationale
+
+Different deployment scenarios benefit from different service topologies:
+
+| Scenario | Topology |
+|----------|----------|
+| Home NAS (single node) | All services on one machine |
+| Edge + central storage | FUSE services at edge, core services centralised |
+| Kubernetes cluster | CSI driver pods, separate S3 gateway pods |
+| Multi-site | Core services per site, cross-site replication |
+
+By packaging each API surface as a separate application, operators can:
+- Deploy services independently with their own resource limits
+- Scale API surfaces horizontally (multiple S3 gateways)
+- Isolate failures (FUSE crash doesn't affect S3 service)
+- Run services on appropriate hardware (FUSE near clients, core near storage)
+
+### Service Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    WireGuard Mesh (Tailscale/Headscale)                 │
+│                                                                         │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐          │
+│  │  Storage Node   │  │  Storage Node   │  │  Gateway Node   │          │
+│  │                 │  │                 │  │                 │          │
+│  │  ┌───────────┐  │  │  ┌───────────┐  │  │  ┌───────────┐  │          │
+│  │  │neonfs_core│  │  │  │neonfs_core│  │  │  │ neonfs_s3 │  │          │
+│  │  └───────────┘  │  │  └───────────┘  │  │  └───────────┘  │          │
+│  │  ┌───────────┐  │  │  ┌───────────┐  │  │                 │          │
+│  │  │neonfs_fuse│  │  │  │neonfs_fuse│  │  │                 │          │
+│  │  └───────────┘  │  │  └───────────┘  │  │                 │          │
+│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘          │
+│           │                    │                    │                   │
+│           └────────────────────┴────────────────────┘                   │
+│                        Erlang Distribution                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Services connect to each other via Erlang distribution. A `neonfs_s3` gateway on one node calls `neonfs_core` on storage nodes to read/write data. The distribution layer handles service discovery, load balancing, and failover.
+
+### Elixir Applications
+
+| Application | Namespace | Purpose | Rust NIFs |
+|-------------|-----------|---------|-----------|
+| `neonfs_core` | `NeonFS.Core` | Storage engine, metadata, coordination | `neonfs_blob` |
+| `neonfs_fuse` | `NeonFS.FUSE` | FUSE filesystem mounting | `neonfs_fuse` |
+| `neonfs_s3` | `NeonFS.S3` | S3-compatible HTTP API | — |
+| `neonfs_docker` | `NeonFS.Docker` | Docker/Podman volume plugin | — |
+| `neonfs_csi` | `NeonFS.CSI` | Kubernetes CSI driver | — |
+| `neonfs_cifs` | `NeonFS.CIFS` | CIFS/SMB via Samba VFS | — |
+
+Each application is a complete OTP application with its own supervision tree, configuration, and release.
+
+**neonfs_core** (`:neonfs_core`)
+
+The storage engine service. Nodes running `neonfs_core` participate in:
+- Ra consensus cluster for metadata
+- Blob storage (via embedded `neonfs_blob` Rust NIF)
+- Replication and repair
+- I/O scheduling
+
+Core nodes form the storage cluster. Other services connect to core nodes to access data.
+
+**neonfs_fuse** (`:neonfs_fuse`)
+
+FUSE filesystem service. Provides local filesystem access by:
+- Mounting FUSE filesystems (via embedded `neonfs_fuse` Rust NIF)
+- Translating POSIX operations to NeonFS calls
+- Connecting to `neonfs_core` nodes for data access
+
+Can run on the same nodes as `neonfs_core` (co-located) or on separate client machines.
+
+**neonfs_s3** (`:neonfs_s3`)
+
+S3-compatible HTTP gateway:
+- Bucket and object operations
+- S3 signature v4 authentication
+- Connects to `neonfs_core` nodes for storage
+
+Stateless — can be horizontally scaled behind a load balancer.
+
+**neonfs_docker** (`:neonfs_docker`)
+
+Container volume plugin:
+- Implements Docker/Podman plugin protocol
+- Coordinates with `neonfs_fuse` for mounts
+- Manages volume lifecycle
+
+**neonfs_csi** (`:neonfs_csi`)
+
+Kubernetes CSI driver:
+- Controller service (volume provisioning)
+- Node service (volume mounting via `neonfs_fuse`)
+- gRPC interface
+
+**neonfs_cifs** (`:neonfs_cifs`)
+
+Windows/macOS file sharing:
+- Samba VFS module integration
+- SMB protocol translation
+- Connects to `neonfs_core` for data
+
+### Embedded Rust NIFs
+
+Rust crates are embedded within the Elixir applications that need them using Rustler:
+
+```
+neonfs_core/
+├── lib/
+│   └── neon_fs/core/
+│       └── blob/native.ex      # NIF module
+└── native/
+    └── neonfs_blob/            # Rust crate
+        ├── Cargo.toml
+        └── src/
+            └── lib.rs
+
+neonfs_fuse/
+├── lib/
+│   └── neon_fs/fuse/
+│       └── native.ex           # NIF module
+└── native/
+    └── neonfs_fuse/            # Rust crate
+        ├── Cargo.toml
+        └── src/
+            └── lib.rs
+```
+
+The Rust crates are not separately deployable — they're compiled into the Elixir releases that contain them.
+
+### Service Discovery and Clustering
+
+Services find each other using Erlang distribution:
+
+```elixir
+# neonfs_s3 connecting to core nodes
+defmodule NeonFS.S3.CoreClient do
+  def read_chunk(hash) do
+    core_node = NeonFS.S3.NodeRegistry.select_core_node()
+    :rpc.call(core_node, NeonFS.Core.BlobStore, :read, [hash])
+  end
+end
+```
+
+Configuration specifies which core nodes to connect to:
+
+```yaml
+# neonfs_s3 config
+core_nodes:
+  - neonfs_core@storage1.tail1234.ts.net
+  - neonfs_core@storage2.tail1234.ts.net
+  - neonfs_core@storage3.tail1234.ts.net
+```
+
+Services can also discover core nodes dynamically via the Ra cluster membership.
+
+### Deployment Examples
+
+**Single-node (home NAS):**
+
+```yaml
+# All services in one release
+services:
+  - neonfs_core
+  - neonfs_fuse
+  - neonfs_cifs
+```
+
+**Separated (edge + central):**
+
+```yaml
+# Storage nodes
+storage1:
+  services: [neonfs_core]
+storage2:
+  services: [neonfs_core]
+
+# Edge/client nodes
+desktop1:
+  services: [neonfs_fuse]
+  core_nodes: [storage1, storage2]
+
+laptop1:
+  services: [neonfs_fuse]
+  core_nodes: [storage1, storage2]
+```
+
+**Kubernetes:**
+
+```yaml
+# Core StatefulSet
+neonfs-core:
+  replicas: 3
+  services: [neonfs_core]
+
+# S3 gateway Deployment
+neonfs-s3:
+  replicas: 2
+  services: [neonfs_s3]
+  core_nodes: [neonfs-core-0, neonfs-core-1, neonfs-core-2]
+
+# CSI driver DaemonSet
+neonfs-csi-node:
+  services: [neonfs_csi, neonfs_fuse]
+  core_nodes: [neonfs-core-0, neonfs-core-1, neonfs-core-2]
+```
+
+### Module Namespaces
+
+Each application uses a distinct top-level namespace:
+
+| Application | Namespace | File path |
+|-------------|-----------|-----------|
+| `neonfs_core` | `NeonFS.Core.*` | `lib/neon_fs/core/*.ex` |
+| `neonfs_fuse` | `NeonFS.FUSE.*` | `lib/neon_fs/fuse/*.ex` |
+| `neonfs_s3` | `NeonFS.S3.*` | `lib/neon_fs/s3/*.ex` |
+| `neonfs_docker` | `NeonFS.Docker.*` | `lib/neon_fs/docker/*.ex` |
+| `neonfs_csi` | `NeonFS.CSI.*` | `lib/neon_fs/csi/*.ex` |
+| `neonfs_cifs` | `NeonFS.CIFS.*` | `lib/neon_fs/cifs/*.ex` |
