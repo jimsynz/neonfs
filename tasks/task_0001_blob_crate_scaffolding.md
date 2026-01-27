@@ -1,7 +1,7 @@
 # Task 0001: Create neonfs_blob Rust Crate with Rustler
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,15 +10,15 @@ Not Started
 Create the neonfs_blob Rust crate using `mix rustler.new` inside the neonfs_core package. This crate will handle content-addressed chunk storage, chunking algorithms, compression, and encryption. The scaffolding should use Rustler's generator to ensure proper integration.
 
 ## Acceptance Criteria
-- [ ] Run `mix rustler.new` in neonfs_core directory to create `neonfs_blob` crate
-- [ ] Crate created at `neonfs_core/native/neonfs_blob/`
-- [ ] Elixir NIF module created at `lib/neon_fs/core/blob/native.ex`
-- [ ] mix.exs updated with rustler configuration pointing to the crate
-- [ ] Default `add/2` NIF function works when called from Elixir
-- [ ] Mix project compiles successfully with `mix compile`
-- [ ] `cargo clippy --all-targets -- -D warnings` passes in native/neonfs_blob
-- [ ] `cargo fmt --check` passes in native/neonfs_blob
-- [ ] `cargo test` passes in native/neonfs_blob
+- [x] Run `mix rustler.new` in neonfs_core directory to create `neonfs_blob` crate
+- [x] Crate created at `neonfs_core/native/neonfs_blob/`
+- [x] Elixir NIF module created at `lib/neon_fs/core/blob/native.ex`
+- [x] mix.exs updated with rustler configuration pointing to the crate
+- [x] Default `add/2` NIF function works when called from Elixir
+- [x] Mix project compiles successfully with `mix compile`
+- [x] `cargo clippy --all-targets -- -D warnings` passes in native/neonfs_blob
+- [x] `cargo fmt --check` passes in native/neonfs_blob
+- [x] `cargo test` passes in native/neonfs_blob
 
 ## Commands to Run
 ```bash
