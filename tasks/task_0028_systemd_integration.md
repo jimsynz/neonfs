@@ -1,7 +1,7 @@
 # Task 0028: Implement systemd Integration
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,16 +10,16 @@ Not Started
 Create systemd unit files and supporting scripts for running NeonFS as a system service. This includes the main daemon service, proper dependencies, and integration with systemd features.
 
 ## Acceptance Criteria
-- [ ] `neonfs.service` systemd unit file
-- [ ] Service runs as `neonfs` user
-- [ ] Proper After/Wants dependencies
-- [ ] Type=notify for proper startup signalling
-- [ ] RuntimeDirectory and StateDirectory configured
-- [ ] Environment variables for BEAM configuration
-- [ ] Restart on failure with backoff
-- [ ] `neonfs-daemon` wrapper script for release commands
-- [ ] Pre-start script creates data directories if needed
-- [ ] Graceful shutdown via ExecStop
+- [x] `neonfs.service` systemd unit file
+- [x] Service runs as `neonfs` user
+- [x] Proper After/Wants dependencies
+- [x] Type=notify for proper startup signalling
+- [x] RuntimeDirectory and StateDirectory configured
+- [x] Environment variables for BEAM configuration
+- [x] Restart on failure with backoff
+- [x] `neonfs-daemon` wrapper script for release commands
+- [x] Pre-start script creates data directories if needed
+- [x] Graceful shutdown via ExecStop
 
 ## systemd Unit File
 ```ini

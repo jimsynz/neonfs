@@ -742,3 +742,33 @@
   - MountManager unmounts filesystem before stopping handler to prevent orphaned mounts
   - Test isolation: handlers started per mount, not globally registered
 ---
+
+## 2026-01-28 - Task 0028
+- What was implemented:
+  - Created systemd unit file for NeonFS service at `packaging/systemd/neonfs.service`
+  - Created daemon wrapper script at `packaging/systemd/neonfs-daemon`
+  - Created environment configuration file at `packaging/systemd/neonfs.conf`
+  - Created pre-installation script at `packaging/scripts/pre-install.sh`
+  - Created comprehensive README documentation at `packaging/README.md`
+- Files changed:
+  - `packaging/systemd/neonfs.service` (new - systemd unit file)
+  - `packaging/systemd/neonfs-daemon` (new - 91 lines, wrapper script)
+  - `packaging/systemd/neonfs.conf` (new - environment variables)
+  - `packaging/scripts/pre-install.sh` (new - 135 lines, installation script)
+  - `packaging/README.md` (new - comprehensive documentation)
+  - `tasks/task_0028_systemd_integration.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - systemd Type=notify allows proper startup signaling from BEAM releases
+  - RuntimeDirectory and StateDirectory are automatically created and cleaned up by systemd
+  - Security hardening: use NoNewPrivileges, ProtectSystem=strict, ProtectHome, ReadWritePaths for data dirs
+  - Erlang cookie generation: use `tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20` for 20-char alphanumeric cookie
+  - Pre-install script pattern: check if user/group exists with getent before creating
+  - useradd flags: --system (system user), --gid (primary group), --no-create-home, --shell /usr/sbin/nologin
+  - Wrapper script responsibilities: ensure dirs exist, generate cookie, write runtime info, exec release command
+  - Use `exec` in start function so release becomes PID 1 for proper signal handling
+  - systemd service files should be mode 644, daemon scripts mode 755, data directories mode 750
+  - FUSE support: add neonfs user to fuse group if it exists, warn if /dev/fuse not found
+  - Environment file pattern: one variable per line, sourced by systemd, can be overridden per-instance
+  - Package deployment: create user/dirs → install daemon wrapper → install unit file → install release
+  - Directory layout: /etc/neonfs (config), /var/lib/neonfs (data), /run/neonfs (runtime), /usr/lib/neonfs (release)
+---
