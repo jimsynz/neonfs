@@ -1,7 +1,7 @@
 # Task 0009: Implement Chunk Tier Migration
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,13 +10,13 @@ Not Started
 Implement the ability to move chunks between storage tiers (hot, warm, cold). Migration reads the chunk from the source tier, writes to the destination tier, verifies the write, then deletes from the source. This is used for tiering policies (promoting hot data, demoting cold data).
 
 ## Acceptance Criteria
-- [ ] `migrate_chunk(hash, from_tier, to_tier) -> Result<()>` function
-- [ ] Migration is atomic: destination written and verified before source deleted
-- [ ] Verification enabled during migration (detect corruption during copy)
-- [ ] No-op if source and destination tier are the same
-- [ ] Error if chunk doesn't exist in source tier
-- [ ] NIF function `store_migrate_chunk/4`
-- [ ] Unit tests for migration scenarios
+- [x] `migrate_chunk(hash, from_tier, to_tier) -> Result<()>` function
+- [x] Migration is atomic: destination written and verified before source deleted
+- [x] Verification enabled during migration (detect corruption during copy)
+- [x] No-op if source and destination tier are the same
+- [x] Error if chunk doesn't exist in source tier
+- [x] NIF function `store_migrate_chunk/4`
+- [x] Unit tests for migration scenarios
 
 ## Migration Flow
 ```rust

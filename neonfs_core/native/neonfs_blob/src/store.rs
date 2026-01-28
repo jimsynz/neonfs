@@ -325,6 +325,59 @@ impl BlobStore {
         self.chunk_path(hash, tier).exists()
     }
 
+    /// Migrates a chunk from one tier to another.
+    ///
+    /// This operation is atomic: the chunk is written to the destination tier,
+    /// verified, and only then deleted from the source tier. If any step fails,
+    /// the migration is aborted and the source chunk remains intact.
+    ///
+    /// # Arguments
+    /// * `hash` - The SHA-256 hash of the chunk to migrate.
+    /// * `from_tier` - The source storage tier.
+    /// * `to_tier` - The destination storage tier.
+    ///
+    /// # Errors
+    /// Returns `ChunkNotFound` if the chunk does not exist in the source tier.
+    /// Returns `IoError` if any read/write/delete operation fails.
+    /// Returns `CorruptChunk` if verification fails during migration.
+    ///
+    /// # Note
+    /// If `from_tier` equals `to_tier`, this is a no-op and returns Ok(()).
+    /// Verification is enabled during migration to ensure data integrity.
+    pub fn migrate_chunk(
+        &self,
+        hash: &Hash,
+        from_tier: Tier,
+        to_tier: Tier,
+    ) -> Result<(), StoreError> {
+        // No-op if migrating to the same tier
+        if from_tier == to_tier {
+            return Ok(());
+        }
+
+        // Read from source with verification enabled
+        let options = ReadOptions {
+            verify: true,
+            decompress: false, // Read raw data (may be compressed)
+        };
+        let data = self.read_chunk_with_options(hash, from_tier, &options)?;
+
+        // Write to destination tier
+        self.write_chunk(hash, &data, to_tier)?;
+
+        // Verify the destination (belt and suspenders approach)
+        let verify_options = ReadOptions {
+            verify: true,
+            decompress: false,
+        };
+        let _ = self.read_chunk_with_options(hash, to_tier, &verify_options)?;
+
+        // Only delete source after successful destination write and verification
+        self.delete_chunk(hash, from_tier)?;
+
+        Ok(())
+    }
+
     /// Generates a temporary file path for atomic writes.
     fn temp_path(&self, final_path: &Path) -> PathBuf {
         let random_id: u64 = rand::rng().random();
@@ -800,5 +853,137 @@ mod tests {
             .unwrap();
 
         assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_migrate_chunk_hot_to_cold() {
+        let (store, _temp) = create_test_store();
+        let data = b"data to migrate from hot to cold";
+        let hash = sha256(data);
+
+        // Write to hot tier
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+        assert!(store.chunk_exists(&hash, Tier::Hot));
+        assert!(!store.chunk_exists(&hash, Tier::Cold));
+
+        // Migrate to cold tier
+        store.migrate_chunk(&hash, Tier::Hot, Tier::Cold).unwrap();
+
+        // Verify chunk moved: in cold, not in hot
+        assert!(!store.chunk_exists(&hash, Tier::Hot));
+        assert!(store.chunk_exists(&hash, Tier::Cold));
+
+        // Verify data integrity
+        let read_data = store.read_chunk(&hash, Tier::Cold).unwrap();
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_migrate_chunk_cold_to_hot() {
+        let (store, _temp) = create_test_store();
+        let data = b"data to migrate from cold to hot";
+        let hash = sha256(data);
+
+        // Write to cold tier
+        store.write_chunk(&hash, data, Tier::Cold).unwrap();
+
+        // Migrate to hot tier
+        store.migrate_chunk(&hash, Tier::Cold, Tier::Hot).unwrap();
+
+        // Verify chunk moved
+        assert!(store.chunk_exists(&hash, Tier::Hot));
+        assert!(!store.chunk_exists(&hash, Tier::Cold));
+
+        // Verify data integrity
+        let read_data = store.read_chunk(&hash, Tier::Hot).unwrap();
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_migrate_chunk_same_tier_is_noop() {
+        let (store, _temp) = create_test_store();
+        let data = b"no-op migration";
+        let hash = sha256(data);
+
+        // Write to hot tier
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+
+        // "Migrate" to same tier should be no-op
+        store.migrate_chunk(&hash, Tier::Hot, Tier::Hot).unwrap();
+
+        // Verify: still in hot tier
+        assert!(store.chunk_exists(&hash, Tier::Hot));
+        let read_data = store.read_chunk(&hash, Tier::Hot).unwrap();
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_migrate_nonexistent_chunk_returns_error() {
+        let (store, _temp) = create_test_store();
+        let hash = sha256(b"nonexistent");
+
+        let result = store.migrate_chunk(&hash, Tier::Hot, Tier::Cold);
+        assert!(matches!(result, Err(StoreError::ChunkNotFound(_))));
+    }
+
+    #[test]
+    fn test_migrate_preserves_data_integrity() {
+        let (store, _temp) = create_test_store();
+        // Use larger data to test integrity
+        let data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
+        let hash = sha256(&data);
+
+        // Write to hot tier
+        store.write_chunk(&hash, &data, Tier::Hot).unwrap();
+
+        // Migrate through all tiers
+        store.migrate_chunk(&hash, Tier::Hot, Tier::Warm).unwrap();
+        let read1 = store.read_chunk(&hash, Tier::Warm).unwrap();
+        assert_eq!(read1, data);
+
+        store.migrate_chunk(&hash, Tier::Warm, Tier::Cold).unwrap();
+        let read2 = store.read_chunk(&hash, Tier::Cold).unwrap();
+        assert_eq!(read2, data);
+
+        store.migrate_chunk(&hash, Tier::Cold, Tier::Hot).unwrap();
+        let read3 = store.read_chunk(&hash, Tier::Hot).unwrap();
+        assert_eq!(read3, data);
+
+        // Verify hash still matches
+        assert_eq!(sha256(&read3), hash);
+    }
+
+    #[test]
+    fn test_migrate_empty_chunk() {
+        let (store, _temp) = create_test_store();
+        let data = b"";
+        let hash = sha256(data);
+
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+        store.migrate_chunk(&hash, Tier::Hot, Tier::Cold).unwrap();
+
+        assert!(!store.chunk_exists(&hash, Tier::Hot));
+        assert!(store.chunk_exists(&hash, Tier::Cold));
+
+        let read_data = store.read_chunk(&hash, Tier::Cold).unwrap();
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_migrate_chunk_verifies_integrity() {
+        let (store, _temp) = create_test_store();
+        let data = b"test verification during migration";
+        let hash = sha256(data);
+
+        // Write to hot tier
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+
+        // Migration should succeed with valid data
+        // (internally uses verification)
+        store.migrate_chunk(&hash, Tier::Hot, Tier::Cold).unwrap();
+
+        // Chunk should be in cold, not hot
+        assert!(!store.chunk_exists(&hash, Tier::Hot));
+        assert!(store.chunk_exists(&hash, Tier::Cold));
     }
 }
