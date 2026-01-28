@@ -465,3 +465,32 @@
   - Locations structure: [%{node: node(), drive_id: "default", tier: :hot}] for Phase 1
   - For nested functions with depth > 2, extract helpers to satisfy credo nesting checks
 ---
+## 2026-01-28 - Task 0019
+- What was implemented:
+  - Created `NeonFS.Core.ReadOperation` module for basic read path
+  - Implemented `read_file/3` function with optional offset and length parameters
+  - File metadata lookup by path via `FileIndex.get_by_path/2`
+  - `calculate_needed_chunks/3` determines which chunks contain requested byte range
+  - `fetch_chunks/2` retrieves chunk data from blob store with optional verification
+  - `assemble_data/4` combines chunk portions into final result
+  - Verification based on volume settings (:always, :never, :sampling)
+  - Comprehensive telemetry events (start, stop, exception) for read operations
+  - Proper error handling (file_not_found, volume_not_found, chunk_not_found)
+  - Comprehensive test suite with 21 tests covering all scenarios
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` (new - 254 lines)
+  - `neonfs_core/test/neon_fs/core/read_operation_test.exs` (new - 21 tests)
+  - `tasks/task_0019_elixir_read_path.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Decompression detection: use `stored_size != original_size` not just `compression != :none`
+  - Task 0018 has a bug: Rust NIF returns compression="none" even when data is compressed
+  - Workaround: check if stored_size differs from original_size to determine if decompression needed
+  - Chunk data must be decompressed when stored_size != original_size (handles both compression and zstd framing)
+  - Partial reads: calculate byte ranges within each chunk using chunk_start/chunk_end positions
+  - Offset/length handling: filter chunks by overlap, then extract precise portions with binary_part
+  - Verification sampling: use `:rand.uniform() < sampling_rate` for probabilistic verification
+  - Empty reads: when offset >= file_size, return empty byte array (not error)
+  - Chunk positions: build cumulative offset map from chunk metadata original_size values
+  - Pattern: match on `with` result directly instead of wrapping in `{:ok, _}` to avoid credo warning
+  - Read path complements write path: chunks stored in order, read reconstructs by concatenation
+---
