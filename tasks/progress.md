@@ -370,3 +370,32 @@
   - MapSet provides clean API for tracking active write references with idempotent operations
   - GenServer + ETS pattern: GenServer for writes (serialized), ETS for reads (concurrent)
 ---
+## 2026-01-28 - Task 0016
+- What was implemented:
+  - Created `NeonFS.Core.FileMeta` struct with all required fields (id, volume_id, path, chunks, stripes, size, POSIX attrs, timestamps, version tracking)
+  - Helper functions: `new/3`, `update/2`, `touch/1`, `validate_path/1`, `normalize_path/1`, `parent_path/1`
+  - Integrated UUIDv7 library (uuid_v7) for time-ordered file IDs
+  - Created `NeonFS.Core.FileIndex` GenServer with dual ETS table storage
+  - Implemented CRUD operations: `create/1`, `get/1`, `get_by_path/2`, `update/2`, `delete/1`
+  - Implemented query operations: `list_dir/2`, `list_volume/1`, `list_all/0`
+  - Added FileIndex to supervision tree in `NeonFS.Core.Application`
+  - Comprehensive test suite with 40 tests covering all operations
+- Files changed:
+  - `neonfs_core/mix.exs` (added uuid_v7 ~> 0.6 dependency)
+  - `neonfs_core/lib/neon_fs/core/file_meta.ex` (new - struct and helpers)
+  - `neonfs_core/lib/neon_fs/core/file_index.ex` (new - GenServer with dual ETS tables)
+  - `neonfs_core/lib/neon_fs/core/application.ex` (added FileIndex to supervision)
+  - `neonfs_core/test/neon_fs/core/file_index_test.exs` (new - 40 comprehensive tests)
+  - `tasks/task_0016_elixir_file_metadata.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - UUIDv7 provides time-ordered IDs which help with Phase 2 distributed systems (Ra consensus, range queries)
+  - The uuid_v7 library (ryanwinchester) has optional Ecto dependency and 18-bit monotonic counter
+  - Dual ETS tables pattern: one by ID (primary key), one by {volume_id, path} (secondary index)
+  - Path normalization: strip trailing slashes except for root "/"
+  - Path validation: must start with "/", no "..", no trailing "/" except root
+  - Version increments on any update via `FileMeta.update/2`, but `touch/1` preserves version
+  - Handle path updates carefully: delete old path entry, insert new path entry, update both tables
+  - Group all handle_call clauses together before private helpers to avoid compiler warnings
+  - Extract nested logic to private helpers to satisfy credo max nesting depth (2)
+  - list_dir implementation: simple filter on list_volume results rather than complex ETS select
+---

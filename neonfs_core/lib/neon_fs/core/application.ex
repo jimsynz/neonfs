@@ -13,6 +13,7 @@ defmodule NeonFS.Core.Application do
 
     children = [
       NeonFS.Core.ChunkIndex,
+      NeonFS.Core.FileIndex,
       {NeonFS.Core.BlobStore, base_dir: base_dir, prefix_depth: prefix_depth}
     ]
 

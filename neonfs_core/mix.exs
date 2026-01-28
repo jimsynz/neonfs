@@ -47,6 +47,7 @@ defmodule NeonFS.Core.MixProject do
     [
       {:rustler, "~> 0.37", runtime: false},
       {:telemetry, "~> 1.2"},
+      {:uuid_v7, "~> 0.6"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
