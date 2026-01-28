@@ -1,7 +1,7 @@
 # Task 0023: Implement CLI Daemon Connection
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,15 +10,15 @@ Not Started
 Implement the connection logic that allows the CLI to communicate with the NeonFS daemon via Erlang distribution protocol. This uses erl_dist/erl_rpc crates to connect and make RPC calls.
 
 ## Acceptance Criteria
-- [ ] Add `erl_dist` and `erl_rpc` dependencies (or equivalent)
-- [ ] `DaemonConnection` struct managing connection state
-- [ ] Read cookie from `/var/lib/neonfs/.erlang.cookie`
-- [ ] Connect to EPMD on localhost:4369
-- [ ] Query for `neonfs` node name
-- [ ] Establish Erlang distribution connection
-- [ ] `call/4` method for RPC calls (module, function, args)
-- [ ] Proper error handling with user-friendly messages
-- [ ] Connection timeout handling
+- [x] Add `erl_dist` and `erl_rpc` dependencies (or equivalent)
+- [x] `DaemonConnection` struct managing connection state
+- [x] Read cookie from `/var/lib/neonfs/.erlang.cookie`
+- [x] Connect to EPMD on localhost:4369
+- [x] Query for `neonfs` node name
+- [x] Establish Erlang distribution connection
+- [x] `call/4` method for RPC calls (module, function, args)
+- [x] Proper error handling with user-friendly messages
+- [x] Connection timeout handling
 - [ ] Automatic retry logic (configurable)
 
 ## Connection Flow

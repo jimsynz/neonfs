@@ -592,3 +592,34 @@
   - thiserror 2.0 provides clean error type derivation with `#[error("...")]` attributes
   - Use `env!("CARGO_PKG_VERSION")` for automatic version from Cargo.toml
 ---
+## 2026-01-28 - Task 0023
+- What was implemented:
+  - Created daemon connection module at `neonfs-cli/src/daemon.rs`
+  - Added `eetf` crate for Erlang External Term Format encoding/decoding
+  - Implemented `DaemonConnection` struct with connection state management
+  - Implemented cookie reading from `/var/lib/neonfs/.erlang.cookie` with proper error handling
+  - Implemented EPMD (Erlang Port Mapper Daemon) lookup on port 4369
+  - Implemented simplified RPC protocol using ETF encoding over TCP
+  - Added comprehensive error types for connection failures
+  - Added 6 unit tests for cookie reading and RPC request building
+- Files changed:
+  - `neonfs-cli/Cargo.toml` (added eetf, hex, rand, tempfile dependencies)
+  - `neonfs-cli/src/daemon.rs` (new - 398 lines)
+  - `neonfs-cli/src/error.rs` (added connection error variants)
+  - `neonfs-cli/src/main.rs` (added daemon module)
+  - `tasks/task_0023_cli_daemon_connection.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - eetf 0.6 uses wrapper types (Atom, Binary, List, Tuple) instead of direct String/Vec
+  - eetf::Atom::from("string") creates an Atom, not Atom("string".to_string())
+  - eetf::Term::decode expects io::Read, use std::io::Cursor to wrap Vec<u8>
+  - eetf 0.6 encode takes &mut Vec<u8> writer, not returning Vec<u8>
+  - Tuple and List types have `.elements` field to access inner Vec<Term>
+  - FixInteger type for small integers, not Integer variant
+  - EPMD protocol: send [length:16, 'z', name...], receive ['w', result, port:16, ...]
+  - Phase 1 uses simplified ETF-based RPC instead of full Erlang distribution protocol
+  - RPC protocol: length-prefixed ETF messages (4-byte big-endian length, then ETF data)
+  - Request format: {:rpc, cookie, module, function, args} as ETF tuple
+  - Use #[allow(dead_code)] on infrastructure that will be used in future tasks
+  - Cookie error messages should be user-friendly and actionable
+  - EPMD lookup returns node name and port for distribution connection
+---

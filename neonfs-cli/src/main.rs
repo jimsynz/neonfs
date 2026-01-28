@@ -1,6 +1,7 @@
 //! NeonFS CLI - Command-line interface for NeonFS distributed filesystem
 
 mod commands;
+mod daemon;
 mod error;
 mod output;
 
