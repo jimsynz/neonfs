@@ -1,7 +1,7 @@
 # Task 0027: Implement FUSE Supervision Tree
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,14 +10,14 @@ Not Started
 Design and implement the supervision tree for neonfs_fuse. This manages mount handlers and ensures proper cleanup when mounts fail.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.FUSE.Application` starts supervision tree
-- [ ] `NeonFS.FUSE.Supervisor` as top-level supervisor
-- [ ] MountManager as supervised child
-- [ ] DynamicSupervisor for mount handlers
-- [ ] Each mount gets its own supervised handler process
-- [ ] Mount handler crash triggers unmount cleanup
-- [ ] Application depends on neonfs_core
-- [ ] Graceful shutdown unmounts all filesystems
+- [x] `NeonFS.FUSE.Application` starts supervision tree
+- [x] `NeonFS.FUSE.Supervisor` as top-level supervisor
+- [x] MountManager as supervised child
+- [x] DynamicSupervisor for mount handlers
+- [x] Each mount gets its own supervised handler process
+- [x] Mount handler crash triggers unmount cleanup
+- [x] Application depends on neonfs_core
+- [x] Graceful shutdown unmounts all filesystems
 
 ## Supervision Tree
 ```

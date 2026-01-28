@@ -24,7 +24,7 @@ defmodule NeonFS.FUSE.MountManager do
   require Logger
 
   alias NeonFS.Core.VolumeRegistry
-  alias NeonFS.FUSE.{Handler, MountInfo, Native}
+  alias NeonFS.FUSE.{MountInfo, MountSupervisor, Native}
 
   @type mount_id :: String.t()
 
@@ -229,13 +229,13 @@ defmodule NeonFS.FUSE.MountManager do
     normalized_path = Path.expand(mount_point)
     mount_id = generate_mount_id()
 
-    # Start the handler process for this mount
+    # Start the handler process for this mount under the DynamicSupervisor
     handler_opts = [
       volume: volume_id,
       mount_id: mount_id
     ]
 
-    case Handler.start_link(handler_opts) do
+    case MountSupervisor.start_handler(handler_opts) do
       {:ok, handler_pid} ->
         # Monitor the handler process
         Process.monitor(handler_pid)
@@ -259,14 +259,14 @@ defmodule NeonFS.FUSE.MountManager do
               {:reply, {:ok, mount_id}, new_state}
 
             {:error, reason} ->
-              # Mount failed, stop the handler
-              GenServer.stop(handler_pid)
+              # Mount failed, stop the handler via supervisor
+              MountSupervisor.stop_handler(handler_pid)
               {:reply, {:error, {:mount_failed, reason}}, state}
           end
         catch
           :error, :nif_not_loaded ->
             # FUSE NIF not available (not compiled or system libraries missing)
-            GenServer.stop(handler_pid)
+            MountSupervisor.stop_handler(handler_pid)
             {:reply, {:error, {:mount_failed, "FUSE NIF not loaded"}}, state}
         end
 
@@ -276,13 +276,15 @@ defmodule NeonFS.FUSE.MountManager do
   end
 
   defp unmount_filesystem(mount_info) do
-    # Stop the handler first
+    # Unmount the filesystem first
+    result = Native.unmount(mount_info.mount_session)
+
+    # Stop the handler via supervisor (if still alive)
     if Process.alive?(mount_info.handler_pid) do
-      GenServer.stop(mount_info.handler_pid)
+      MountSupervisor.stop_handler(mount_info.handler_pid)
     end
 
-    # Unmount the filesystem
-    Native.unmount(mount_info.mount_session)
+    result
   end
 
   defp generate_mount_id do

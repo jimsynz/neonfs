@@ -712,3 +712,33 @@
   - Credo warning: prefer `list == []` over `length(list) == 0` for performance
   - Phase 1 supervision is flat - per-volume supervisors come in later phases
 ---
+## 2026-01-28 - Task 0027
+- What was implemented:
+  - Created `NeonFS.FUSE.Supervisor` module as top-level supervisor
+  - Created `NeonFS.FUSE.MountSupervisor` (DynamicSupervisor) for mount handler processes
+  - Updated `NeonFS.FUSE.Application` to delegate to supervisor and handle graceful shutdown
+  - Updated `NeonFS.FUSE.MountManager` to start handlers via MountSupervisor instead of directly
+  - Implemented proper startup order: InodeTable → MountSupervisor → MountManager
+  - Configured one_for_one restart strategy for independent component restarts
+  - Handler crash triggers automatic unmount cleanup via monitor
+  - Application.stop callback unmounts all filesystems before shutdown
+  - Comprehensive test suite with 14 tests covering all scenarios
+- Files changed:
+  - `neonfs_fuse/lib/neon_fs/fuse/supervisor.ex` (new - 37 lines)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_supervisor.ex` (new - 56 lines)
+  - `neonfs_fuse/lib/neon_fs/fuse/application.ex` (updated with stop/1 callback)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_manager.ex` (updated to use MountSupervisor)
+  - `neonfs_fuse/test/neon_fs/fuse/supervisor_test.exs` (new - 237 lines, 14 tests)
+  - `tasks/task_0027_fuse_supervision_tree.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - DynamicSupervisor allows adding/removing mount handlers at runtime without affecting other mounts
+  - Each mount handler is isolated - one mount failing doesn't affect others
+  - Use `:supervisor.which_children/1` (lowercase atom) for Erlang supervisor module, not `Supervisor.which_children/1`
+  - DynamicSupervisor init returns strategy: :one_for_one with max_restarts and max_seconds
+  - Application.stop/1 callback is called during graceful shutdown - use it to clean up resources
+  - Handler processes started under DynamicSupervisor should be stopped via DynamicSupervisor.terminate_child/2
+  - Process.monitor/1 in MountManager tracks handler crashes even though handlers are supervised
+  - Supervision tree structure: Supervisor → [InodeTable, MountSupervisor, MountManager] → [Handler, Handler, ...]
+  - MountManager unmounts filesystem before stopping handler to prevent orphaned mounts
+  - Test isolation: handlers started per mount, not globally registered
+---
