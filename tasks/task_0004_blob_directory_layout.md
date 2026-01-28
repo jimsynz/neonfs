@@ -1,7 +1,7 @@
 # Task 0004: Implement Blob Store Directory Layout
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,14 +10,14 @@ Not Started
 Implement the directory sharding structure for blob storage. Chunks are stored in a content-addressed directory hierarchy using the first characters of the hash as directory prefixes. This prevents any single directory from containing too many entries.
 
 ## Acceptance Criteria
-- [ ] Path module at `neonfs_blob/src/path.rs`
-- [ ] `Tier` enum with `Hot`, `Warm`, `Cold` variants (derives Serialize/Deserialize for NIF)
-- [ ] `chunk_path(base_dir, hash, tier, prefix_depth) -> PathBuf` function
-- [ ] Configurable prefix depth (1=256 dirs, 2=65K dirs)
-- [ ] Path format: `{base_dir}/blobs/{tier}/{hash[0:2]}/{hash[2:4]}/{hash}`
-- [ ] Tier converts to lowercase string in path ("hot", "warm", "cold")
-- [ ] `ensure_parent_dirs(path)` creates parent directories atomically
-- [ ] Unit tests for path generation with different prefix depths and tiers
+- [x] Path module at `neonfs_blob/src/path.rs`
+- [x] `Tier` enum with `Hot`, `Warm`, `Cold` variants (derives Serialize/Deserialize for NIF)
+- [x] `chunk_path(base_dir, hash, tier, prefix_depth) -> PathBuf` function
+- [x] Configurable prefix depth (1=256 dirs, 2=65K dirs)
+- [x] Path format: `{base_dir}/blobs/{tier}/{hash[0:2]}/{hash[2:4]}/{hash}`
+- [x] Tier converts to lowercase string in path ("hot", "warm", "cold")
+- [x] `ensure_parent_dirs(path)` creates parent directories atomically
+- [x] Unit tests for path generation with different prefix depths and tiers
 
 ## Example Paths
 ```

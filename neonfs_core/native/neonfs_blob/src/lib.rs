@@ -1,4 +1,5 @@
 pub mod hash;
+pub mod path;
 
 use rustler::{Binary, Env, NewBinary};
 

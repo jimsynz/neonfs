@@ -61,3 +61,21 @@
   - `hex::FromHexError` doesn't implement `Eq`, so custom error handling needed for `#[derive(Eq)]` on error types
   - Use thiserror 2.0 (not 1.0 as specified in task) for current Rust ecosystem compatibility
 ---
+
+## 2026-01-28 - Task 0004
+- What was implemented:
+  - Blob store directory layout module in Rust at `neonfs_blob/src/path.rs`
+  - `Tier` enum with `Hot`, `Warm`, `Cold` variants deriving Serialize/Deserialize
+  - `chunk_path(base_dir, hash, tier, prefix_depth) -> PathBuf` function for content-addressed paths
+  - `ensure_parent_dirs(path)` function for atomic directory creation
+  - Comprehensive unit tests for path generation with different prefix depths and tiers
+  - Tests for ensure_parent_dirs idempotence and directory creation
+- Files changed:
+  - `neonfs_core/native/neonfs_blob/Cargo.toml` (added serde, serde_json deps)
+  - `neonfs_core/native/neonfs_blob/src/path.rs` (new module)
+  - `neonfs_core/native/neonfs_blob/src/lib.rs` (added path module export)
+- **Learnings for future iterations:**
+  - Serde's `#[serde(rename_all = "lowercase")]` attribute makes enum variants serialize to lowercase strings
+  - cargo fmt has specific line-length preferences for long strings - let it handle formatting
+  - `fs::create_dir_all` is already atomic and idempotent, no need for additional locking
+---
