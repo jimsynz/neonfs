@@ -689,3 +689,26 @@
   - CLI table output uses column headers (uppercase) for consistency
   - Human-readable formatting: uptime_string() and format_size() helper methods on response types
 ---
+## 2026-01-28 - Task 0026
+- What was implemented:
+  - Created `NeonFS.Core.Supervisor` module as top-level supervisor
+  - Implemented correct component startup order: BlobStore → ChunkIndex → FileIndex → VolumeRegistry
+  - Configured one_for_one restart strategy for independent component restarts
+  - Simplified `NeonFS.Core.Application` to delegate to supervisor
+  - Comprehensive supervisor tests: startup, restart behavior, child management
+  - All 13 new tests pass, 255 total tests pass
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (new - 43 lines)
+  - `neonfs_core/lib/neon_fs/core/application.ex` (simplified from 27 to 18 lines)
+  - `neonfs_core/test/neon_fs/core/supervisor_test.exs` (new - 132 lines, 13 tests)
+  - `tasks/task_0026_elixir_supervision_tree.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Startup order is critical: BlobStore must start before components that depend on it
+  - one_for_one strategy: each child restarts independently without affecting siblings
+  - `Supervisor.init/2` for child specs, `Supervisor.start_link/3` for application integration
+  - `Supervisor.which_children/1` returns children in reverse startup order
+  - `:supervisor.get_childspec/2` returns map (not tuple) with :restart, :shutdown, :type fields
+  - Test restart behavior by killing processes with `Process.exit(pid, :kill)`
+  - Credo warning: prefer `list == []` over `length(list) == 0` for performance
+  - Phase 1 supervision is flat - per-volume supervisors come in later phases
+---
