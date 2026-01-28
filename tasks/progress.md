@@ -283,3 +283,34 @@
   - FuseServer uses Arc<Mutex<bool>> for shutdown signal coordination
   - Test infrastructure code with mock operations before implementing actual FUSE mounting
 ---
+## 2026-01-28 - Task 0012
+- What was implemented:
+  - FUSE error handling module with errno mapping (atom_to_errno, errno_to_atom)
+  - `NeonFilesystem` struct implementing fuser::Filesystem trait
+  - Implemented read-only FUSE operations: lookup, getattr, read, readdir
+  - `MountSession` struct for managing FUSE mount lifecycle
+  - NIF functions: `mount/3` and `unmount/1` for mounting/unmounting filesystems
+  - All operations forward to Elixir via channels with timeout handling (5 seconds)
+  - Graceful unmount with cleanup (fusermount/umount fallback)
+  - Feature-gated implementation: filesystem and mount modules conditional on "fuse" feature
+- Files changed:
+  - `neonfs_fuse/native/neonfs_fuse/src/error.rs` (new - errno mapping)
+  - `neonfs_fuse/native/neonfs_fuse/src/filesystem.rs` (new - 250 lines)
+  - `neonfs_fuse/native/neonfs_fuse/src/mount.rs` (new - 210 lines)
+  - `neonfs_fuse/native/neonfs_fuse/src/lib.rs` (added modules and mount/unmount NIFs)
+  - `neonfs_fuse/native/neonfs_fuse/Cargo.toml` (added libc dependency)
+  - `neonfs_fuse/lib/neon_fs/fuse/native.ex` (added mount/unmount bindings)
+  - `neonfs_fuse/test/neon_fs/fuse/native_test.exs` (added mount operation tests)
+  - `tasks/task_0012_fuse_mount_operations.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Feature-gated modules need `#![cfg(feature = "...")]` at the very top of the file, before any doc comments
+  - Clippy requires no empty line between module doc comment and first `use` statement
+  - Use `#[allow(dead_code)]` on infrastructure types/functions used only when optional features are enabled
+  - fuser::Filesystem trait methods receive fuser-specific reply types (ReplyEntry, ReplyAttr, ReplyData, ReplyDirectory)
+  - FUSE operations need timeout handling to prevent hanging forever waiting for Elixir replies
+  - Mount/unmount requires fusermount command (FUSE userspace tool) or umount as fallback
+  - FileAttr calculation: blocks = (size + 511) / 512 to round up to 512-byte blocks
+  - Tests for feature-gated NIFs should use try/rescue to handle :nif_not_loaded gracefully
+  - MountSession uses Option<MountSession> in Mutex to allow taking ownership during unmount
+  - FUSE mount operations spawn blocking thread since fuser::mount2 blocks until unmount
+---

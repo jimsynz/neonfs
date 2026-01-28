@@ -84,6 +84,7 @@ name = "neonfs_fuse"
 version = "0.1.0"
 dependencies = [
  "fuser",
+ "libc",
  "log",
  "rustler",
  "thiserror",

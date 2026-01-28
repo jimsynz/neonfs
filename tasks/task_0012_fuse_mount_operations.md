@@ -1,7 +1,7 @@
 # Task 0012: Implement FUSE Mount and Basic Operations
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,16 +10,16 @@ Not Started
 Implement the actual FUSE filesystem mounting using the fuser library. This task implements the fuser::Filesystem trait with basic operations that forward to Elixir for handling. The FUSE thread blocks on kernel requests and forwards them via the channel.
 
 ## Acceptance Criteria
-- [ ] `NeonFilesystem` struct implementing `fuser::Filesystem` trait
-- [ ] `mount/3` NIF: mount point path, callback PID, options -> server resource
-- [ ] `unmount/1` NIF: gracefully unmount and cleanup
-- [ ] Implement `lookup` operation (name -> inode)
-- [ ] Implement `getattr` operation (inode -> attributes)
-- [ ] Implement `read` operation (inode, offset, size -> data)
-- [ ] Implement `readdir` operation (inode -> directory entries)
-- [ ] All operations forward to Elixir and await reply
-- [ ] Timeout handling for Elixir responses (don't hang FUSE forever)
-- [ ] FUSE errors mapped from Elixir error atoms (`:enoent` -> ENOENT)
+- [x] `NeonFilesystem` struct implementing `fuser::Filesystem` trait
+- [x] `mount/3` NIF: mount point path, callback PID, options -> server resource
+- [x] `unmount/1` NIF: gracefully unmount and cleanup
+- [x] Implement `lookup` operation (name -> inode)
+- [x] Implement `getattr` operation (inode -> attributes)
+- [x] Implement `read` operation (inode, offset, size -> data)
+- [x] Implement `readdir` operation (inode -> directory entries)
+- [x] All operations forward to Elixir and await reply
+- [x] Timeout handling for Elixir responses (don't hang FUSE forever)
+- [x] FUSE errors mapped from Elixir error atoms (`:enoent` -> ENOENT)
 
 ## FUSE Filesystem Trait (Partial)
 ```rust

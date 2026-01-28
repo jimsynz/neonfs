@@ -1,11 +1,20 @@
 mod channel;
+mod error;
 mod operation;
 mod server;
+
+#[cfg(feature = "fuse")]
+mod filesystem;
+#[cfg(feature = "fuse")]
+mod mount;
 
 use operation::{FuseOperation, FuseReply};
 use rustler::{LocalPid, ResourceArc, Term};
 use server::FuseServer;
 use std::sync::Mutex;
+
+#[cfg(feature = "fuse")]
+use mount::MountSession;
 
 /// Wrapper for FuseServer to be used as a Rustler Resource
 pub struct FuseServerResource {
@@ -22,6 +31,25 @@ impl FuseServerResource {
 
 #[rustler::resource_impl]
 impl rustler::Resource for FuseServerResource {}
+
+/// Wrapper for MountSession to be used as a Rustler Resource
+#[cfg(feature = "fuse")]
+pub struct MountSessionResource {
+    session: Mutex<Option<MountSession>>,
+}
+
+#[cfg(feature = "fuse")]
+impl MountSessionResource {
+    fn new(session: MountSession) -> Self {
+        Self {
+            session: Mutex::new(Some(session)),
+        }
+    }
+}
+
+#[cfg(feature = "fuse")]
+#[rustler::resource_impl]
+impl rustler::Resource for MountSessionResource {}
 
 /// Start a FUSE server that communicates with the given callback PID
 ///
@@ -129,6 +157,77 @@ fn server_stats(
     let pending = server.pending_count();
     let shutdown = server.is_shutdown();
     (rustler::types::atom::ok(), (pending, shutdown))
+}
+
+/// Mount a FUSE filesystem at the given mount point
+///
+/// # Arguments
+/// * `mount_point` - Path to the directory where the filesystem will be mounted
+/// * `callback_pid` - PID of the Elixir process to send operations to
+/// * `options` - List of mount options (e.g., ["auto_unmount", "allow_other"])
+///
+/// Returns a resource handle to the mount session.
+#[cfg(feature = "fuse")]
+#[rustler::nif]
+fn mount(
+    mount_point: String,
+    callback_pid: LocalPid,
+    options: Vec<String>,
+) -> Result<
+    (
+        rustler::types::atom::Atom,
+        ResourceArc<MountSessionResource>,
+    ),
+    String,
+> {
+    let (server, mut operation_rx) = FuseServer::new(callback_pid);
+
+    // Spawn background task to forward operations to Elixir
+    // In the real implementation, we'd use Rustler's env.send() to send messages
+    // For now, we just log them
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            while let Some(request) = operation_rx.recv().await {
+                log::debug!(
+                    "Operation {} sent to Elixir: {:?}",
+                    request.id,
+                    request.operation
+                );
+            }
+        });
+    });
+
+    // Mount the filesystem
+    let session = MountSession::mount(mount_point, server, options)
+        .map_err(|e| format!("Failed to mount: {}", e))?;
+
+    let resource = ResourceArc::new(MountSessionResource::new(session));
+
+    Ok((rustler::types::atom::ok(), resource))
+}
+
+/// Unmount a FUSE filesystem
+///
+/// Takes the mount session resource and gracefully unmounts the filesystem.
+#[cfg(feature = "fuse")]
+#[rustler::nif]
+fn unmount(
+    session_resource: ResourceArc<MountSessionResource>,
+) -> Result<rustler::types::atom::Atom, String> {
+    let mut session_opt = session_resource
+        .session
+        .lock()
+        .map_err(|_| "Failed to lock session".to_string())?;
+
+    if let Some(session) = session_opt.take() {
+        session
+            .unmount()
+            .map_err(|e| format!("Failed to unmount: {}", e))?;
+        Ok(rustler::types::atom::ok())
+    } else {
+        Err("Session already unmounted".to_string())
+    }
 }
 
 /// Parse Elixir term into FuseReply

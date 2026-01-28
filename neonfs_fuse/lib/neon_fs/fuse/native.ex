@@ -11,6 +11,7 @@ defmodule NeonFS.FUSE.Native do
     crate: :neonfs_fuse
 
   @type fuse_server :: reference()
+  @type mount_session :: reference()
   @type request_id :: non_neg_integer()
 
   @doc """
@@ -64,4 +65,36 @@ defmodule NeonFS.FUSE.Native do
   @spec server_stats(fuse_server()) ::
           {:ok, {non_neg_integer(), boolean()}} | {:error, String.t()}
   def server_stats(_server), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Mount a FUSE filesystem at the given mount point.
+
+  This function spawns a FUSE session that handles filesystem operations
+  by forwarding them to the callback process. Operations will be sent as
+  messages in the format: `{:fuse_op, request_id, operation}`.
+
+  ## Options
+  - `"auto_unmount"` - Automatically unmount when the process exits
+  - `"allow_other"` - Allow other users to access the filesystem
+  - `"allow_root"` - Allow root to access the filesystem
+  - `"ro"` - Mount read-only
+
+  Returns `{:ok, session}` where session is an opaque reference to the mount.
+
+  Note: This function requires the "fuse" feature to be enabled at compile time.
+  If the feature is not enabled, it will return an error.
+  """
+  @spec mount(String.t(), pid(), [String.t()]) ::
+          {:ok, mount_session()} | {:error, String.t()}
+  def mount(_mount_point, _callback_pid, _options),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Unmount a FUSE filesystem.
+
+  Gracefully unmounts the filesystem and cleans up resources.
+  This function blocks until the unmount is complete.
+  """
+  @spec unmount(mount_session()) :: :ok | {:error, String.t()}
+  def unmount(_session), do: :erlang.nif_error(:nif_not_loaded)
 end

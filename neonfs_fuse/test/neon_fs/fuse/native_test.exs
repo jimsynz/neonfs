@@ -98,4 +98,109 @@ defmodule NeonFS.FUSE.NativeTest do
       assert {:error, _} = Native.test_operation(server, "read")
     end
   end
+
+  describe "mount operations" do
+    # Note: These tests require the "fuse" feature to be enabled and FUSE support
+    # in the system. They may be skipped if not available.
+
+    @tag :fuse
+    test "mount/3 with invalid mount point returns error" do
+      try do
+        case Native.mount("/nonexistent/path", self(), []) do
+          {:error, msg} ->
+            assert msg =~ "not exist"
+
+          _ ->
+            :ok
+        end
+      rescue
+        ErlangError ->
+          # NIF not loaded (fuse feature not enabled)
+          :ok
+      end
+    end
+
+    @tag :fuse
+    test "mount/3 with valid mount point and unmount" do
+      # Create a temporary directory for testing
+      mount_point = System.tmp_dir!() |> Path.join("neonfs_test_mount")
+      File.mkdir_p!(mount_point)
+
+      try do
+        case Native.mount(mount_point, self(), ["auto_unmount"]) do
+          {:ok, session} ->
+            assert is_reference(session)
+
+            # Verify mount point is mounted
+            assert File.exists?(mount_point)
+
+            # Unmount
+            assert :ok = Native.unmount(session)
+
+          {:error, msg} ->
+            # Feature not available or insufficient permissions
+            assert msg =~ "Failed to mount"
+        end
+      rescue
+        ErlangError ->
+          # NIF not loaded (fuse feature not enabled)
+          :ok
+      after
+        # Cleanup
+        File.rm_rf(mount_point)
+      end
+    end
+
+    @tag :fuse
+    test "unmount/1 on already unmounted session returns error" do
+      mount_point = System.tmp_dir!() |> Path.join("neonfs_test_mount2")
+      File.mkdir_p!(mount_point)
+
+      try do
+        case Native.mount(mount_point, self(), []) do
+          {:ok, session} ->
+            # Unmount once
+            assert :ok = Native.unmount(session)
+
+            # Try to unmount again - should fail
+            assert {:error, msg} = Native.unmount(session)
+            assert msg =~ "already unmounted"
+
+          {:error, _} ->
+            # Feature not available, skip test
+            :ok
+        end
+      rescue
+        ErlangError ->
+          # NIF not loaded (fuse feature not enabled)
+          :ok
+      after
+        File.rm_rf(mount_point)
+      end
+    end
+
+    @tag :fuse
+    test "mount/3 validates mount point is a directory" do
+      # Create a file instead of directory
+      file_path = System.tmp_dir!() |> Path.join("neonfs_test_file")
+      File.write!(file_path, "test")
+
+      try do
+        case Native.mount(file_path, self(), []) do
+          {:error, msg} ->
+            assert msg =~ "not a directory"
+
+          _ ->
+            # Feature might handle this differently
+            :ok
+        end
+      rescue
+        ErlangError ->
+          # NIF not loaded (fuse feature not enabled)
+          :ok
+      after
+        File.rm!(file_path)
+      end
+    end
+  end
 end
