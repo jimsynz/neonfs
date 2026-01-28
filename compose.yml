@@ -1,7 +1,5 @@
-version: '3.8'
-
 services:
-  neonfs-dev:
+  dev:
     build:
       context: .
       dockerfile: Containerfile.dev
