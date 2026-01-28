@@ -204,3 +204,25 @@
   - Migration reads raw data (possibly compressed) to preserve storage optimizations
   - Test integrity with multi-hop migrations (hot→warm→cold→hot) to ensure no data loss
 ---
+## 2026-01-28 - Task 0010
+- What was implemented:
+  - Created neonfs_fuse Rust crate using `mix rustler.new`
+  - Created Elixir NIF module at `lib/neon_fs/fuse/native.ex`
+  - Added dependencies: fuser (optional), tokio, log, thiserror to Cargo.toml
+  - Made fuser dependency optional with feature flag due to system library requirements
+  - Created test file at `test/neon_fs/fuse/native_test.exs`
+  - `.check.exs` already configured for Rust tools (from earlier setup)
+- Files changed:
+  - `neonfs_fuse/native/neonfs_fuse/` (new crate via rustler)
+  - `neonfs_fuse/lib/neon_fs/fuse/native.ex` (new module)
+  - `neonfs_fuse/test/neon_fs/fuse/native_test.exs` (new test)
+  - `neonfs_fuse/Cargo.toml` (workspace config added by rustler)
+  - `tasks/task_0010_fuse_crate_scaffolding.md` (status updated)
+- **Learnings for future iterations:**
+  - The fuser crate requires system FUSE libraries (libfuse3-dev or libfuse2-dev) at build time
+  - Make system-dependent crates optional using Cargo features: `fuser = { version = "0.15", optional = true }`
+  - Add feature flag in Cargo.toml: `[features]` section with `fuse = ["dep:fuser"]`
+  - This allows building/testing the NIF scaffolding without system dependencies
+  - Enable the feature when deploying to environments with FUSE libraries installed
+  - Rustler 0.37+ auto-updated to 0.37.2 by `mix rustler.new`
+---

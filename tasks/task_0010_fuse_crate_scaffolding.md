@@ -1,7 +1,7 @@
 # Task 0010: Create neonfs_fuse Rust Crate with Rustler
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,15 +10,15 @@ Not Started
 Create the neonfs_fuse Rust crate using `mix rustler.new` inside the neonfs_fuse package. This crate will handle FUSE filesystem operations, translating POSIX calls into requests to the Elixir control plane.
 
 ## Acceptance Criteria
-- [ ] Run `mix rustler.new` in neonfs_fuse directory to create `neonfs_fuse` crate
-- [ ] Crate created at `neonfs_fuse/native/neonfs_fuse/`
-- [ ] Elixir NIF module created at `lib/neon_fs/fuse/native.ex`
-- [ ] mix.exs updated with rustler configuration
-- [ ] Add `fuser` dependency to Cargo.toml (FUSE library)
-- [ ] Add `tokio` dependency for async runtime
-- [ ] Default NIF function works when called from Elixir
-- [ ] Update `.check.exs` to include this crate's Rust checks
-- [ ] All checks pass: clippy, fmt, test
+- [x] Run `mix rustler.new` in neonfs_fuse directory to create `neonfs_fuse` crate
+- [x] Crate created at `neonfs_fuse/native/neonfs_fuse/`
+- [x] Elixir NIF module created at `lib/neon_fs/fuse/native.ex`
+- [x] mix.exs updated with rustler configuration
+- [x] Add `fuser` dependency to Cargo.toml (FUSE library, made optional due to system dependencies)
+- [x] Add `tokio` dependency for async runtime
+- [x] Default NIF function works when called from Elixir
+- [x] Update `.check.exs` to include this crate's Rust checks
+- [x] All checks pass: clippy, fmt, test
 
 ## Commands to Run
 ```bash
@@ -62,3 +62,5 @@ thiserror = "1.0"
 
 ## Notes
 The actual FUSE implementation comes in subsequent tasks. This task establishes the crate structure and NIF communication channel.
+
+**Important:** The `fuser` dependency has been made optional (behind a `fuse` feature flag) because it requires system FUSE libraries (libfuse3-dev or libfuse2-dev) at build time. In environments without these system libraries, the crate can still be built and tested with the basic NIF scaffolding. The `fuse` feature should be enabled when deploying to environments with FUSE libraries installed.

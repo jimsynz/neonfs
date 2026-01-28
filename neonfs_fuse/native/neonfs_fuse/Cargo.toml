@@ -1,0 +1,19 @@
+[package]
+name = "neonfs_fuse"
+version = "0.1.0"
+authors = []
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+fuse = ["dep:fuser"]
+
+[dependencies]
+rustler = "0.37.2"
+fuser = { version = "0.15", optional = true }
+tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
+log = "0.4"
+thiserror = "2.0"
