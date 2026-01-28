@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  neonfs-dev:
+    build:
+      context: .
+      dockerfile: Containerfile.dev
+    container_name: neonfs-dev
+    hostname: neonfs-dev
+    volumes:
+      - .:/workdir
+      - asdf-cache:/home/dev/.asdf
+      - cargo-cache:/home/dev/.cargo
+      - mix-cache:/home/dev/.mix
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    stdin_open: true
+    tty: true
+    working_dir: /workdir
+    environment:
+      # Enable FUSE feature for Rust builds
+      - CARGO_FEATURE_FUSE=1
+      # Development environment
+      - MIX_ENV=dev
+      - RUST_BACKTRACE=1
+    command: /bin/zsh
+
+volumes:
+  asdf-cache:
+  cargo-cache:
+  mix-cache:

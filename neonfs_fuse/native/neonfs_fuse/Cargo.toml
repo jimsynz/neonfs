@@ -8,11 +8,15 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [features]
-default = []
+# FUSE support is enabled by default in containerized environments
+# Disable with --no-default-features if building without FUSE libraries
+default = ["fuse"]
 fuse = ["dep:fuser"]
 
 [dependencies]
 rustler = "0.37.2"
+# FUSE is optional to support building on systems without libfuse-dev
+# But default feature enables it for container builds
 fuser = { version = "0.15", optional = true }
 tokio = { version = "1", features = ["sync", "rt-multi-thread"] }
 log = "0.4"

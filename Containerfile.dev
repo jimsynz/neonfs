@@ -1,5 +1,12 @@
 FROM harton.dev/james/asdf_container:latest
 
+# Install FUSE support for neonfs_fuse development and testing
+RUN apt-get update && apt-get install -y \
+    libfuse3-dev \
+    fuse3 \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd dev
 RUN mkdir /home/dev
 RUN mkdir /workdir
