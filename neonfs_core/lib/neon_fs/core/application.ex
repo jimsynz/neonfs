@@ -12,6 +12,7 @@ defmodule NeonFS.Core.Application do
     prefix_depth = Application.get_env(:neonfs_core, :blob_store_prefix_depth, 2)
 
     children = [
+      NeonFS.Core.ChunkIndex,
       {NeonFS.Core.BlobStore, base_dir: base_dir, prefix_depth: prefix_depth}
     ]
 

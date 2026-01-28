@@ -1,7 +1,7 @@
 # Task 0015: Implement Chunk Metadata Structure
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,16 +10,16 @@ Not Started
 Define the Elixir-side chunk metadata structure that tracks everything about chunks across the cluster. This includes location tracking, commit state, compression info, and active write references. For Phase 1, this is stored in-memory (ETS); Ra integration comes in Phase 2.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.ChunkMeta` struct defined with all fields from spec
-- [ ] `NeonFS.Core.ChunkIndex` GenServer managing chunk metadata
-- [ ] ETS table for fast chunk lookups by hash
-- [ ] `put/2` - store/update chunk metadata
-- [ ] `get/1` - retrieve by hash
-- [ ] `delete/1` - remove metadata
-- [ ] `list_by_location/1` - find chunks on a specific node/drive
-- [ ] `list_uncommitted/0` - find uncommitted chunks
-- [ ] Commit state transitions enforced
-- [ ] Active write refs management (add/remove write_id)
+- [x] `NeonFS.Core.ChunkMeta` struct defined with all fields from spec
+- [x] `NeonFS.Core.ChunkIndex` GenServer managing chunk metadata
+- [x] ETS table for fast chunk lookups by hash
+- [x] `put/2` - store/update chunk metadata
+- [x] `get/1` - retrieve by hash
+- [x] `delete/1` - remove metadata
+- [x] `list_by_location/1` - find chunks on a specific node/drive
+- [x] `list_uncommitted/0` - find uncommitted chunks
+- [x] Commit state transitions enforced
+- [x] Active write refs management (add/remove write_id)
 
 ## ChunkMeta Struct
 ```elixir

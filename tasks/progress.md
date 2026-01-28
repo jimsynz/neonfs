@@ -343,3 +343,30 @@
   - SetAttr operation allows partial updates via Option<T> for each field
   - Operations use OsStr for file names, convert to String via to_string_lossy()
 ---
+## 2026-01-28 - Task 0015
+- What was implemented:
+  - Created `NeonFS.Core.ChunkMeta` struct with all required fields
+  - Helper functions: `new/4`, `add_location/2`, `remove_location/2`, `add_write_ref/2`, `remove_write_ref/2`, `commit/1`
+  - Created `NeonFS.Core.ChunkIndex` GenServer with ETS-backed storage
+  - CRUD operations: `put/1`, `get/1`, `delete/1`
+  - Query operations: `list_by_location/1`, `list_by_node/1`, `list_uncommitted/0`
+  - Write reference management: `add_write_ref/2`, `remove_write_ref/2`
+  - Commit state transitions with validation (cannot commit if active write refs exist)
+  - Added ChunkIndex to supervision tree in `NeonFS.Core.Application`
+  - Comprehensive test suite with 19 tests covering all operations
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_meta.ex` (new - struct and helpers)
+  - `neonfs_core/lib/neon_fs/core/chunk_index.ex` (new - GenServer with ETS)
+  - `neonfs_core/lib/neon_fs/core/application.ex` (added ChunkIndex to supervision)
+  - `neonfs_core/test/neon_fs/core/chunk_index_test.exs` (new - 19 comprehensive tests)
+  - `tasks/task_0015_elixir_chunk_metadata.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - ETS tables with `:public` and `read_concurrency: true` allow fast concurrent reads from any process
+  - For singleton GenServers started by application, tests need to stop/restart application for clean state
+  - Use `:ets.delete_all_objects/1` to clear ETS table between tests
+  - `async: false` required for tests that restart the application
+  - Dialyzer sometimes reports false positives with opaque types (MapSet, DateTime) - use `%__MODULE__{}` instead of `t()` in specs
+  - Commit state transitions should validate preconditions (no active writes) before allowing state change
+  - MapSet provides clean API for tracking active write references with idempotent operations
+  - GenServer + ETS pattern: GenServer for writes (serialized), ETS for reads (concurrent)
+---
