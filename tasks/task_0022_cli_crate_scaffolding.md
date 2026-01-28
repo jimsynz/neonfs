@@ -1,7 +1,7 @@
 # Task 0022: Create neonfs-cli Rust Crate Scaffolding
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,15 +10,15 @@ Not Started
 Create the standalone Rust CLI crate that communicates with the NeonFS daemon via Erlang distribution protocol. This is a separate binary (not a NIF) that provides fast startup times for CLI operations.
 
 ## Acceptance Criteria
-- [ ] Crate created at project root: `cli/` or `neonfs-cli/`
-- [ ] Cargo.toml with dependencies: clap, erl_dist, erl_rpc, tokio, thiserror
-- [ ] Basic CLI structure with clap argument parsing
-- [ ] Subcommands defined: `cluster`, `volume`, `mount`, `node`
-- [ ] `--help` works for main command and subcommands
-- [ ] `--version` shows version
-- [ ] `--json` flag for JSON output mode
-- [ ] Project compiles with `cargo build`
-- [ ] Clippy and fmt pass
+- [x] Crate created at project root: `cli/` or `neonfs-cli/`
+- [x] Cargo.toml with dependencies: clap, erl_dist, erl_rpc, tokio, thiserror
+- [x] Basic CLI structure with clap argument parsing
+- [x] Subcommands defined: `cluster`, `volume`, `mount`, `node`
+- [x] `--help` works for main command and subcommands
+- [x] `--version` shows version
+- [x] `--json` flag for JSON output mode
+- [x] Project compiles with `cargo build`
+- [x] Clippy and fmt pass
 
 ## Crate Structure
 ```

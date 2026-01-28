@@ -563,3 +563,32 @@
   - Handler tests should start their own handler instances in setup for proper isolation
   - Tests should gracefully skip FUSE operations when NIF is not loaded (FUSE not installed)
 ---
+## 2026-01-28 - Task 0022
+- What was implemented:
+  - Created neonfs-cli Rust crate as standalone binary (not a NIF)
+  - Implemented CLI structure with clap v4 using derive macros
+  - Created four command modules: cluster, volume, mount, node
+  - Implemented output formatting: table and JSON modes
+  - Added --help, --version, and --json global flags
+  - All commands return placeholder data with proper structure
+  - Comprehensive error types for future daemon communication
+  - 12 unit tests covering CLI parsing and command execution
+- Files changed:
+  - `neonfs-cli/Cargo.toml` (new crate)
+  - `neonfs-cli/src/main.rs` (CLI entry point with clap setup)
+  - `neonfs-cli/src/error.rs` (error types)
+  - `neonfs-cli/src/commands/*.rs` (cluster, volume, mount, node modules)
+  - `neonfs-cli/src/output/*.rs` (table and JSON formatters)
+  - `tasks/task_0022_cli_crate_scaffolding.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Clap v4 derive macros provide clean CLI structure with `#[derive(Parser, Subcommand)]`
+  - Global flags require `#[arg(global = true)]` attribute to be available to subcommands
+  - Enum subcommands automatically generate help text from doc comments
+  - Use `#[allow(dead_code)]` on infrastructure code (traits, error variants) that will be used in later tasks
+  - Rust format specifier `{:<width$}` captures `width` from scope, don't pass as named argument
+  - Table rendering: calculate column widths first, then render with padding
+  - Placeholder implementations useful for scaffolding - return realistic data structures
+  - Separate binary crates (not NIFs) provide fast CLI startup times
+  - thiserror 2.0 provides clean error type derivation with `#[error("...")]` attributes
+  - Use `env!("CARGO_PKG_VERSION")` for automatic version from Cargo.toml
+---

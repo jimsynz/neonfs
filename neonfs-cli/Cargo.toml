@@ -1,0 +1,21 @@
+[package]
+name = "neonfs-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["NeonFS Contributors"]
+description = "Command-line interface for NeonFS distributed filesystem"
+license = "MIT"
+
+[[bin]]
+name = "neonfs-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+thiserror = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Erlang distribution (for daemon communication)
+# Note: these will be added in a later task when implementing connection
