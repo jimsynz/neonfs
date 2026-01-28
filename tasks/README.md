@@ -17,7 +17,7 @@ Each task file follows this structure:
 
 ## Phase Overview
 
-### Phase 1: Foundation (Tasks 0001-0030)
+### Phase 1: Foundation (Tasks 0001-0030, 0040-0044)
 **Goal:** Basic single-node operation with local storage and CLI
 
 | Task Range | Component |
@@ -29,6 +29,17 @@ Each task file follows this structure:
 | 0022-0025 | CLI crate and commands |
 | 0026-0029 | Supervision, deployment, releases |
 | 0030 | Phase 1 integration test |
+| 0040-0044 | Phase 1 addendum (fixes and gaps discovered in audit) |
+
+#### Phase 1 Addendum Tasks (0040-0044)
+
+| Task | Description | Blocks |
+|------|-------------|--------|
+| 0040 | Metadata persistence with DETS | Restart tests |
+| 0041 | Fix FUSE Rust compilation errors | FUSE tests |
+| 0042 | Implement CLI RPC server | CLI functionality |
+| 0043 | Split systemd units (core + fuse) | Production deployment |
+| 0044 | Acceptance testing and Forgejo CI | Phase 2 readiness |
 
 **Milestone:** Mount a directory, read/write files, data persists across restarts, CLI can query status
 
@@ -95,6 +106,16 @@ Phase 1 Foundation:
                                   │
                                   ▼
                              0030 (integration)
+
+Phase 1 Addendum (must complete before Phase 2):
+
+0040 (persistence) ────────────────────────────────────────────┐
+                                                               │
+0041 (fuse rust fixes) ────────────────────────────────────────┤
+                                                               │
+0042 (cli rpc server) ─────────────────────────────────────────┼──▶ 0044 (acceptance/CI)
+                                                               │
+0043 (systemd split) ──────────────────────────────────────────┘
 
 Phase 2 Clustering:
 
