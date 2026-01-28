@@ -11,12 +11,12 @@ if config_env() == :prod do
   node_name = System.get_env("RELEASE_NODE", "neonfs_core@localhost")
 
   # Blob store configuration
-  config :neonfs_core, NeonFS.Core.BlobStore,
-    data_dir: data_dir,
-    prefix_depth: String.to_integer(System.get_env("NEONFS_PREFIX_DEPTH", "2"))
-
-  # Configure node name
   config :neonfs_core,
+    blob_store_base_dir: "#{data_dir}/blobs",
+    blob_store_prefix_depth: String.to_integer(System.get_env("NEONFS_PREFIX_DEPTH", "2")),
+    meta_dir: "#{data_dir}/meta",
+    snapshot_interval_ms:
+      String.to_integer(System.get_env("NEONFS_SNAPSHOT_INTERVAL_MS", "30000")),
     node_name: node_name
 
   # BEAM VM will use RELEASE_NODE environment variable for actual node name

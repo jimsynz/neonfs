@@ -83,11 +83,10 @@ defmodule NeonFS.Integration.Phase1Test do
       assert is_binary(status[:node])
     end
 
-    @tag :skip
-    test "data persists across application restart (Phase 2+)", _context do
-      # NOTE: This test is skipped in Phase 1 because metadata is not persisted to disk.
-      # Phase 1 stores metadata in ETS tables which are cleared on restart.
-      # Phase 2 will add Ra consensus for persistent metadata storage.
+    test "data persists across application restart (DETS persistence)", _context do
+      # Phase 1 uses DETS-backed persistence for metadata (Task 0040).
+      # Metadata is periodically snapshotted to DETS and restored on startup.
+      # Phase 2 will add Ra consensus for distributed metadata storage.
 
       # Create volume and write data
       {:ok, _volume} = Helpers.create_test_volume("test_volume")
@@ -98,16 +97,16 @@ defmodule NeonFS.Integration.Phase1Test do
       {:ok, file} = WriteOperation.write_file(volume_rec.id, "/persist.bin", test_data)
       original_file_id = file.id
 
-      # Blob data is persisted to disk, but metadata is not in Phase 1
-      # The chunk data will be on disk, but the volume and file metadata will be lost
+      # Trigger persistence snapshot before restart
+      :ok = NeonFS.Core.Persistence.snapshot_now()
 
       # Stop and restart core application
       :ok = Application.stop(:neonfs_core)
-      Process.sleep(100)
+      Process.sleep(200)
       {:ok, _} = Application.ensure_all_started(:neonfs_core)
 
-      # In Phase 1: Volume and file metadata would be lost (ETS cleared)
-      # In Phase 2+: Ra would restore this from persistent storage
+      # Wait for persistence to restore data
+      Process.sleep(300)
       {:ok, restored_volume} = VolumeRegistry.get_by_name("test_volume")
       assert restored_volume.id == volume_rec.id
 

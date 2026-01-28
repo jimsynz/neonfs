@@ -16,6 +16,10 @@ defmodule NeonFS.Core.SupervisorTest do
   end
 
   describe "child processes" do
+    test "Persistence is running" do
+      assert Process.whereis(NeonFS.Core.Persistence) != nil
+    end
+
     test "BlobStore is running" do
       assert Process.whereis(NeonFS.Core.BlobStore) != nil
     end
@@ -35,13 +39,14 @@ defmodule NeonFS.Core.SupervisorTest do
     test "all children are supervised" do
       children = Supervisor.which_children(CoreSupervisor)
 
-      # Should have 4 children
-      assert length(children) == 4
+      # Should have 5 children (including Persistence)
+      assert length(children) == 5
 
       # Extract child names
       child_names = Enum.map(children, fn {name, _pid, _type, _modules} -> name end)
 
       # Verify all expected children are present
+      assert NeonFS.Core.Persistence in child_names
       assert NeonFS.Core.BlobStore in child_names
       assert NeonFS.Core.ChunkIndex in child_names
       assert NeonFS.Core.FileIndex in child_names
@@ -57,11 +62,12 @@ defmodule NeonFS.Core.SupervisorTest do
       startup_order =
         children |> Enum.reverse() |> Enum.map(fn {name, _pid, _type, _mods} -> name end)
 
-      # Verify startup order
-      assert Enum.at(startup_order, 0) == NeonFS.Core.BlobStore
-      assert Enum.at(startup_order, 1) == NeonFS.Core.ChunkIndex
-      assert Enum.at(startup_order, 2) == NeonFS.Core.FileIndex
-      assert Enum.at(startup_order, 3) == NeonFS.Core.VolumeRegistry
+      # Verify startup order: Persistence first, then BlobStore, then metadata modules
+      assert Enum.at(startup_order, 0) == NeonFS.Core.Persistence
+      assert Enum.at(startup_order, 1) == NeonFS.Core.BlobStore
+      assert Enum.at(startup_order, 2) == NeonFS.Core.ChunkIndex
+      assert Enum.at(startup_order, 3) == NeonFS.Core.FileIndex
+      assert Enum.at(startup_order, 4) == NeonFS.Core.VolumeRegistry
     end
   end
 
@@ -76,6 +82,7 @@ defmodule NeonFS.Core.SupervisorTest do
 
     test "child restart does not affect other children" do
       # Get PIDs of all children before crash
+      persistence_pid = Process.whereis(NeonFS.Core.Persistence)
       blob_store_pid = Process.whereis(NeonFS.Core.BlobStore)
       chunk_index_pid = Process.whereis(NeonFS.Core.ChunkIndex)
       file_index_pid = Process.whereis(NeonFS.Core.FileIndex)
@@ -93,6 +100,7 @@ defmodule NeonFS.Core.SupervisorTest do
       assert new_chunk_index_pid != chunk_index_pid
 
       # Other children should still have same PIDs
+      assert Process.whereis(NeonFS.Core.Persistence) == persistence_pid
       assert Process.whereis(NeonFS.Core.BlobStore) == blob_store_pid
       assert Process.whereis(NeonFS.Core.FileIndex) == file_index_pid
       assert Process.whereis(NeonFS.Core.VolumeRegistry) == volume_registry_pid
@@ -122,8 +130,8 @@ defmodule NeonFS.Core.SupervisorTest do
         Supervisor.which_children(CoreSupervisor)
         |> Enum.filter(fn {_name, _pid, type, _modules} -> type == :worker end)
 
-      # Should have 4 workers
-      assert length(workers) == 4
+      # Should have 5 workers (including Persistence)
+      assert length(workers) == 5
     end
   end
 end

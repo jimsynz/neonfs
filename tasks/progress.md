@@ -845,3 +845,33 @@
   - FUSE tests handle mount failures gracefully with case statements
   - Empty data_dir parameter in setup should be passed to mount_point but unused in most tests
 ---
+## 2026-01-28 - Task 0040
+- What was implemented:
+  - Created `NeonFS.Core.Persistence` GenServer for DETS-backed metadata persistence
+  - Atomic write-then-move pattern: writes to `.tmp` files, syncs, then renames
+  - Periodic snapshots every 30 seconds (configurable)
+  - Graceful shutdown triggers immediate snapshot
+  - On startup, loads DETS → ETS for all metadata tables
+  - ChunkIndex, FileIndex, VolumeRegistry metadata now persists across restarts
+  - Updated integration test to verify restart persistence
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/persistence.ex` (new - 287 lines)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added Persistence as first child)
+  - `neonfs_core/config/config.exs` (added test environment config)
+  - `neonfs_core/config/runtime.exs` (added production meta_dir config)
+  - `neonfs_core/test/neon_fs/core/persistence_test.exs` (new - 199 lines, 9 tests)
+  - `neonfs_core/test/neon_fs/core/supervisor_test.exs` (updated for 5 children)
+  - `neonfs_fuse/test/integration/phase1_test.exs` (enabled restart test)
+  - `tasks/task_0040_metadata_persistence_dets.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - DETS has 2GB file size limit - sufficient for Phase 1 single-node
+  - Use `handle_continue` to defer restoration until after other modules start their ETS tables
+  - Atomic writes: write to .tmp, sync, rename - prevents corruption during crash
+  - Test isolation: clean up DETS files in test setup to prevent pollution between tests
+  - Extract nested helper functions to satisfy credo nesting depth limit (max 2)
+  - Configure test environment to use /tmp paths, production uses /var/lib/neonfs
+  - Persistence must start before metadata modules but after their ETS tables are created
+  - `wait_for_ets_table` polls until ETS table exists before attempting restoration
+  - Phase 1 milestone "data persists across restarts" is now complete with DETS persistence
+  - Phase 2 will replace DETS with Ra consensus for distributed metadata storage
+---

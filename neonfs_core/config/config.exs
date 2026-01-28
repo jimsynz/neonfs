@@ -1,5 +1,13 @@
 import Config
 
+# Test environment configuration
+if Mix.env() == :test do
+  config :neonfs_core,
+    blob_store_base_dir: "/tmp/neonfs_test/blobs",
+    meta_dir: "/tmp/neonfs_test/meta",
+    snapshot_interval_ms: 100
+end
+
 if Mix.env() in [:dev, :test] do
   config :git_ops,
     mix_project: Mix.Project.get!(),
