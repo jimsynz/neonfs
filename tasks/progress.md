@@ -809,3 +809,39 @@
   - Release start command works in foreground (for systemd Type=simple or containers)
   - Graceful shutdown via SIGTERM (systemd compatibility)
 ---
+## 2026-01-28 - Task 0030
+- What was implemented:
+  - Created integration test module `NeonFS.Integration.Phase1Test` for end-to-end validation
+  - Created integration helpers module with utilities for temp dirs, volume creation, FUSE detection
+  - Implemented 8 comprehensive integration tests covering core operations
+  - Test: Create volume, write/read file via API, verify directory listing, check cluster status
+  - Test: Multiple files in directory structure with subdirectories
+  - Test: Partial file reads with offset and length parameters
+  - Test: Large file chunking and reassembly (>1MB triggers FastCDC)
+  - Test: Volume statistics tracking (logical_size, physical_size, chunk_count)
+  - Test: FUSE mount operations (gracefully skips if FUSE not available)
+  - Test: Data persistence across unmount/remount (FUSE)
+  - Skipped test: Data persistence across application restart (Phase 2+ feature with Ra)
+  - Updated test_helper.exs to exclude :integration and :fuse tags by default
+- Files changed:
+  - `neonfs_fuse/test/support/integration_helpers.ex` (new - helper utilities)
+  - `neonfs_fuse/test/integration/phase1_test.exs` (new - 8 integration tests)
+  - `neonfs_fuse/test/test_helper.exs` (updated to exclude integration tests by default)
+  - `tasks/task_0030_integration_test_single_node.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Integration tests tagged with @moduletag :integration run with `mix test --only integration`
+  - FUSE tests tagged with @tag :fuse can be excluded when FUSE libraries not available
+  - Handler.list_volumes() returns list of maps with atom keys, not string keys
+  - Handler.cluster_status() returns map with atom keys (:name, :node, :status, :volumes, :uptime)
+  - Handler.get_volume() returns volume with stats as top-level fields (:logical_size, :physical_size, :chunk_count)
+  - FileIndex.list_dir returns [FileMeta.t()] directly, not {:ok, list}
+  - VolumeRegistry.create expects keyword list with atom keys and values (not strings in nested maps)
+  - Phase 1 metadata (volumes, files) stored in ETS - not persisted across restarts
+  - Phase 1 chunk data IS persisted to disk in blob store
+  - Phase 2 will add Ra consensus for persistent metadata storage
+  - Test setup should clear ETS tables to avoid conflicts between tests
+  - Use `_context` parameter when test doesn't need specific context values
+  - Integration tests verify the full stack: blob store → metadata → CLI handlers
+  - FUSE tests handle mount failures gracefully with case statements
+  - Empty data_dir parameter in setup should be passed to mount_point but unused in most tests
+---
