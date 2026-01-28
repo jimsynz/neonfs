@@ -36,15 +36,11 @@ defmodule NeonFS.Core.SupervisorTest do
       assert Process.whereis(NeonFS.Core.VolumeRegistry) != nil
     end
 
-    test "RpcServer is running" do
-      assert Process.whereis(NeonFS.Core.RpcServer) != nil
-    end
-
     test "all children are supervised" do
       children = Supervisor.which_children(CoreSupervisor)
 
-      # Should have 6 children (including Persistence and RpcServer)
-      assert length(children) == 6
+      # Should have 5 children (including Persistence)
+      assert length(children) == 5
 
       # Extract child names
       child_names = Enum.map(children, fn {name, _pid, _type, _modules} -> name end)
@@ -55,7 +51,6 @@ defmodule NeonFS.Core.SupervisorTest do
       assert NeonFS.Core.ChunkIndex in child_names
       assert NeonFS.Core.FileIndex in child_names
       assert NeonFS.Core.VolumeRegistry in child_names
-      assert NeonFS.Core.RpcServer in child_names
     end
 
     test "startup order is correct" do
@@ -67,13 +62,12 @@ defmodule NeonFS.Core.SupervisorTest do
       startup_order =
         children |> Enum.reverse() |> Enum.map(fn {name, _pid, _type, _mods} -> name end)
 
-      # Verify startup order: Persistence first, then BlobStore, then metadata modules, then RpcServer
+      # Verify startup order: Persistence first, then BlobStore, then metadata modules
       assert Enum.at(startup_order, 0) == NeonFS.Core.Persistence
       assert Enum.at(startup_order, 1) == NeonFS.Core.BlobStore
       assert Enum.at(startup_order, 2) == NeonFS.Core.ChunkIndex
       assert Enum.at(startup_order, 3) == NeonFS.Core.FileIndex
       assert Enum.at(startup_order, 4) == NeonFS.Core.VolumeRegistry
-      assert Enum.at(startup_order, 5) == NeonFS.Core.RpcServer
     end
   end
 
@@ -136,8 +130,8 @@ defmodule NeonFS.Core.SupervisorTest do
         Supervisor.which_children(CoreSupervisor)
         |> Enum.filter(fn {_name, _pid, type, _modules} -> type == :worker end)
 
-      # Should have 6 workers (including Persistence and RpcServer)
-      assert length(workers) == 6
+      # Should have 5 workers (including Persistence)
+      assert length(workers) == 5
     end
   end
 end

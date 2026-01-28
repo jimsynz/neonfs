@@ -8,7 +8,6 @@ defmodule NeonFS.Core.Supervisor do
   3. ChunkIndex - Chunk metadata, depends on BlobStore
   4. FileIndex - File metadata, depends on ChunkIndex
   5. VolumeRegistry - Volume configuration, depends on FileIndex
-  6. RpcServer - TCP server for CLI communication, depends on all components
   """
 
   use Supervisor
@@ -24,8 +23,6 @@ defmodule NeonFS.Core.Supervisor do
     prefix_depth = Application.get_env(:neonfs_core, :blob_store_prefix_depth, 2)
     meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
     snapshot_interval_ms = Application.get_env(:neonfs_core, :snapshot_interval_ms, 30_000)
-    rpc_port = Application.get_env(:neonfs_core, :rpc_port, 4370)
-    rpc_port_file = Application.get_env(:neonfs_core, :rpc_port_file, "/run/neonfs/rpc_port")
 
     children = [
       # Persistence must start first - restores metadata from DETS
@@ -41,10 +38,7 @@ defmodule NeonFS.Core.Supervisor do
       NeonFS.Core.FileIndex,
 
       # VolumeRegistry depends on FileIndex
-      NeonFS.Core.VolumeRegistry,
-
-      # RpcServer depends on all components being available
-      {NeonFS.Core.RpcServer, port: rpc_port, port_file: rpc_port_file}
+      NeonFS.Core.VolumeRegistry
     ]
 
     # Use one_for_one strategy: if a child crashes, only that child is restarted
