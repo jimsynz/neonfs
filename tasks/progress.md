@@ -106,3 +106,24 @@
   - Use `rand::rng().random()` for rand 0.9+ (not `rand::thread_rng().gen()`)
   - Mutex-wrapped resources need `store.store.lock()` pattern to access inner BlobStore
 ---
+
+## 2026-01-28 - Task 0006
+- What was implemented:
+  - `ReadOptions` struct with `verify: bool` field for configurable read behavior
+  - `read_chunk_with_options()` method that optionally verifies data integrity
+  - Enhanced `CorruptChunk` error variant with `expected` and `actual` hash fields
+  - `read_chunk()` convenience function defaulting to no verification
+  - NIF function `store_read_chunk_verified/5` accepting verify boolean
+  - Comprehensive Rust tests for verification scenarios (valid/corrupt chunks)
+  - Elixir tests for verification including manual chunk corruption
+- Files changed:
+  - `neonfs_core/native/neonfs_blob/src/error.rs` (enhanced CorruptChunk variant)
+  - `neonfs_core/native/neonfs_blob/src/store.rs` (added ReadOptions, read_chunk_with_options)
+  - `neonfs_core/native/neonfs_blob/src/lib.rs` (added store_read_chunk_verified NIF)
+  - `neonfs_core/lib/neon_fs/core/blob/native.ex` (added store_read_chunk_verified/4)
+  - `neonfs_core/test/neon_fs/core/blob/native_test.exs` (added verification tests)
+- **Learnings for future iterations:**
+  - Verification computes SHA-256 of read data and compares to expected hash
+  - Test corruption by manually writing corrupt data to the chunk path using `fs::write`
+  - In Elixir tests, construct chunk path from hash hex: `prefix1/prefix2/hash_hex`
+---

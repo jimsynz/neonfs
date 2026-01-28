@@ -19,9 +19,14 @@ pub enum StoreError {
         source: io::Error,
     },
 
-    /// The chunk data is corrupt (e.g., verification failure).
-    #[error("corrupt chunk: {0}")]
-    CorruptChunk(String),
+    /// The chunk data is corrupt (hash mismatch during verification).
+    #[error("corrupt chunk: expected {expected}, got {actual}")]
+    CorruptChunk {
+        /// The expected hash (from the chunk identifier).
+        expected: String,
+        /// The actual hash computed from the data.
+        actual: String,
+    },
 
     /// The base directory does not exist and could not be created.
     #[error("invalid base directory: {0}")]

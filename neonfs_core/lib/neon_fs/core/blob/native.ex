@@ -126,6 +126,39 @@ defmodule NeonFS.Core.Blob.Native do
   def store_read_chunk(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Reads a chunk from the blob store with optional verification.
+
+  When `verify` is true, the function computes the SHA-256 hash of the data
+  after reading and compares it to the expected hash. If they don't match,
+  an error is returned indicating the chunk is corrupt.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the chunk
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+    - `verify` - If true, verify the data matches the expected hash
+
+  ## Returns
+    - `{:ok, data}` - The chunk data as a binary
+    - `{:error, reason}` - If the chunk does not exist, read fails, or verification fails
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> data = "hello world"
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
+      iex> {:ok, read_data} = NeonFS.Core.Blob.Native.store_read_chunk_verified(store, hash, "hot", true)
+      iex> read_data == data
+      true
+
+  """
+  @spec store_read_chunk_verified(store(), hash(), tier(), boolean()) ::
+          {:ok, binary()} | {:error, String.t()}
+  def store_read_chunk_verified(_store, _hash, _tier, _verify),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Deletes a chunk from the blob store.
 
   ## Parameters

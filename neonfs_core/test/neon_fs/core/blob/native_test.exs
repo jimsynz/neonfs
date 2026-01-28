@@ -244,6 +244,74 @@ defmodule NeonFS.Core.Blob.NativeTest do
     end
   end
 
+  describe "chunk verification" do
+    setup do
+      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_verify_test_#{:rand.uniform(1_000_000)}")
+      {:ok, store} = Native.store_open(tmp_dir, 2)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      {:ok, store: store, tmp_dir: tmp_dir}
+    end
+
+    test "read with verify=true on valid chunk succeeds", %{store: store} do
+      data = "valid data for verification"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, read_data} = Native.store_read_chunk_verified(store, hash, "hot", true)
+      assert read_data == data
+    end
+
+    test "read with verify=false on valid chunk succeeds", %{store: store} do
+      data = "valid data no verification"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, read_data} = Native.store_read_chunk_verified(store, hash, "hot", false)
+      assert read_data == data
+    end
+
+    test "read with verify=true on corrupt chunk fails", %{store: store, tmp_dir: tmp_dir} do
+      data = "original data"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      # Manually corrupt the chunk file
+      hash_hex = Base.encode16(hash, case: :lower)
+      prefix1 = String.slice(hash_hex, 0, 2)
+      prefix2 = String.slice(hash_hex, 2, 2)
+      chunk_path = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2, hash_hex])
+      File.write!(chunk_path, "corrupted data")
+
+      # Read with verification should fail
+      assert {:error, reason} = Native.store_read_chunk_verified(store, hash, "hot", true)
+      assert reason =~ "corrupt chunk"
+    end
+
+    test "read with verify=false on corrupt chunk returns corrupt data", %{
+      store: store,
+      tmp_dir: tmp_dir
+    } do
+      data = "original data"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      # Manually corrupt the chunk file
+      hash_hex = Base.encode16(hash, case: :lower)
+      prefix1 = String.slice(hash_hex, 0, 2)
+      prefix2 = String.slice(hash_hex, 2, 2)
+      chunk_path = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2, hash_hex])
+      corrupt_data = "corrupted data"
+      File.write!(chunk_path, corrupt_data)
+
+      # Read without verification returns corrupt data without error
+      assert {:ok, read_data} = Native.store_read_chunk_verified(store, hash, "hot", false)
+      assert read_data == corrupt_data
+      assert read_data != data
+    end
+  end
+
   describe "resource cleanup" do
     test "store can be garbage collected" do
       tmp_dir = Path.join(System.tmp_dir!(), "neonfs_gc_test_#{:rand.uniform(1_000_000)}")

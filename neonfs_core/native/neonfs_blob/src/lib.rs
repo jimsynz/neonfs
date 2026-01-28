@@ -5,7 +5,7 @@ pub mod store;
 
 use crate::hash::Hash;
 use crate::path::Tier;
-use crate::store::{BlobStore, StoreConfig};
+use crate::store::{BlobStore, ReadOptions, StoreConfig};
 use rustler::{Binary, Env, NewBinary, Resource, ResourceArc};
 use std::sync::Mutex;
 
@@ -84,7 +84,7 @@ fn store_write_chunk(
         .map_err(|e| e.to_string())
 }
 
-/// Reads a chunk from the blob store.
+/// Reads a chunk from the blob store without verification.
 ///
 /// # Arguments
 /// * `env` - Rustler environment.
@@ -107,6 +107,41 @@ fn store_read_chunk<'a>(
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
     let data = store_guard
         .read_chunk(&hash, tier)
+        .map_err(|e| e.to_string())?;
+
+    let mut output = NewBinary::new(env, data.len());
+    output.copy_from_slice(&data);
+    Ok(output.into())
+}
+
+/// Reads a chunk from the blob store with optional verification.
+///
+/// # Arguments
+/// * `env` - Rustler environment.
+/// * `store` - Resource reference to the blob store.
+/// * `hash` - 32-byte binary hash of the chunk.
+/// * `tier` - Storage tier ("hot", "warm", or "cold").
+/// * `verify` - If true, verify the data matches the hash after reading.
+///
+/// # Returns
+/// The chunk data as a binary, or an error tuple.
+/// If `verify` is true and the data is corrupt, returns an error.
+#[rustler::nif]
+fn store_read_chunk_verified<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    tier: String,
+    verify: bool,
+) -> Result<Binary<'a>, String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let tier = parse_tier(&tier)?;
+
+    let options = ReadOptions { verify };
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let data = store_guard
+        .read_chunk_with_options(&hash, tier, &options)
         .map_err(|e| e.to_string())?;
 
     let mut output = NewBinary::new(env, data.len());

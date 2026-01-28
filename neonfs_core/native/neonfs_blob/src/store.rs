@@ -5,7 +5,7 @@
 //! to prevent partial chunks.
 
 use crate::error::StoreError;
-use crate::hash::Hash;
+use crate::hash::{sha256, Hash};
 use crate::path::{chunk_path, ensure_parent_dirs, Tier};
 use rand::Rng;
 use std::fs::{self, File};
@@ -22,6 +22,21 @@ pub struct StoreConfig {
 impl Default for StoreConfig {
     fn default() -> Self {
         Self { prefix_depth: 2 }
+    }
+}
+
+/// Options for reading chunks from the store.
+#[derive(Debug, Clone, Default)]
+pub struct ReadOptions {
+    /// If true, verify the chunk data matches the expected hash after reading.
+    /// This adds CPU overhead but detects corruption.
+    pub verify: bool,
+}
+
+impl ReadOptions {
+    /// Creates options with verification enabled.
+    pub fn with_verify() -> Self {
+        Self { verify: true }
     }
 }
 
@@ -110,7 +125,11 @@ impl BlobStore {
         Ok(())
     }
 
-    /// Reads a chunk from the store.
+    /// Reads a chunk from the store without verification.
+    ///
+    /// This is a convenience method that calls `read_chunk_with_options` with
+    /// verification disabled. For verified reads, use `read_chunk_with_options`
+    /// with `ReadOptions::with_verify()`.
     ///
     /// # Arguments
     /// * `hash` - The SHA-256 hash of the chunk to read.
@@ -120,13 +139,46 @@ impl BlobStore {
     /// Returns `ChunkNotFound` if the chunk does not exist.
     /// Returns `IoError` if the read fails.
     pub fn read_chunk(&self, hash: &Hash, tier: Tier) -> Result<Vec<u8>, StoreError> {
+        self.read_chunk_with_options(hash, tier, &ReadOptions::default())
+    }
+
+    /// Reads a chunk from the store with configurable options.
+    ///
+    /// # Arguments
+    /// * `hash` - The SHA-256 hash of the chunk to read.
+    /// * `tier` - The storage tier to read from.
+    /// * `options` - Options controlling read behavior (e.g., verification).
+    ///
+    /// # Errors
+    /// Returns `ChunkNotFound` if the chunk does not exist.
+    /// Returns `IoError` if the read fails.
+    /// Returns `CorruptChunk` if verification is enabled and the data doesn't match.
+    pub fn read_chunk_with_options(
+        &self,
+        hash: &Hash,
+        tier: Tier,
+        options: &ReadOptions,
+    ) -> Result<Vec<u8>, StoreError> {
         let path = self.chunk_path(hash, tier);
 
         if !path.exists() {
             return Err(StoreError::ChunkNotFound(hash.to_hex()));
         }
 
-        fs::read(&path).map_err(|e| StoreError::io_error(&path, e))
+        let data = fs::read(&path).map_err(|e| StoreError::io_error(&path, e))?;
+
+        // Optionally verify the data matches the expected hash
+        if options.verify {
+            let actual_hash = sha256(&data);
+            if &actual_hash != hash {
+                return Err(StoreError::CorruptChunk {
+                    expected: hash.to_hex(),
+                    actual: actual_hash.to_hex(),
+                });
+            }
+        }
+
+        Ok(data)
     }
 
     /// Deletes a chunk from the store.
@@ -175,7 +227,6 @@ impl BlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha256;
     use tempfile::TempDir;
 
     fn create_test_store() -> (BlobStore, TempDir) {
@@ -330,5 +381,112 @@ mod tests {
     fn test_config_default() {
         let config = StoreConfig::default();
         assert_eq!(config.prefix_depth, 2);
+    }
+
+    #[test]
+    fn test_read_options_default() {
+        let options = ReadOptions::default();
+        assert!(!options.verify);
+    }
+
+    #[test]
+    fn test_read_options_with_verify() {
+        let options = ReadOptions::with_verify();
+        assert!(options.verify);
+    }
+
+    #[test]
+    fn test_read_with_verify_valid_chunk_succeeds() {
+        let (store, _temp) = create_test_store();
+        let data = b"valid data for verification";
+        let hash = sha256(data);
+
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+        let options = ReadOptions::with_verify();
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &options)
+            .unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_read_without_verify_valid_chunk_succeeds() {
+        let (store, _temp) = create_test_store();
+        let data = b"valid data no verification";
+        let hash = sha256(data);
+
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+        let options = ReadOptions::default();
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &options)
+            .unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_read_with_verify_corrupt_chunk_fails() {
+        let (store, temp_dir) = create_test_store();
+        let data = b"original data";
+        let hash = sha256(data);
+
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+
+        // Manually corrupt the chunk file
+        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2);
+        fs::write(&chunk_path, b"corrupted data").unwrap();
+
+        let options = ReadOptions::with_verify();
+        let result = store.read_chunk_with_options(&hash, Tier::Hot, &options);
+
+        match result {
+            Err(StoreError::CorruptChunk { expected, actual }) => {
+                assert_eq!(expected, hash.to_hex());
+                assert_ne!(actual, hash.to_hex());
+            }
+            _ => panic!("Expected CorruptChunk error"),
+        }
+    }
+
+    #[test]
+    fn test_read_without_verify_corrupt_chunk_returns_corrupt_data() {
+        let (store, temp_dir) = create_test_store();
+        let data = b"original data";
+        let hash = sha256(data);
+
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+
+        // Manually corrupt the chunk file
+        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2);
+        let corrupt_data = b"corrupted data";
+        fs::write(&chunk_path, corrupt_data).unwrap();
+
+        // Without verification, we get the corrupt data back without error
+        let options = ReadOptions::default();
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &options)
+            .unwrap();
+
+        assert_eq!(read_data, corrupt_data);
+        assert_ne!(read_data, data);
+    }
+
+    #[test]
+    fn test_convenience_read_chunk_uses_no_verify() {
+        let (store, temp_dir) = create_test_store();
+        let data = b"original data for convenience test";
+        let hash = sha256(data);
+
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+
+        // Corrupt the file
+        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2);
+        let corrupt_data = b"corrupted convenience data";
+        fs::write(&chunk_path, corrupt_data).unwrap();
+
+        // read_chunk should return corrupt data without error (no verification)
+        let read_data = store.read_chunk(&hash, Tier::Hot).unwrap();
+        assert_eq!(read_data, corrupt_data);
     }
 }
