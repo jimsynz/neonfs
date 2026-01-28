@@ -11,10 +11,21 @@ packaging/
 │   ├── neonfs-daemon      # Daemon wrapper script
 │   └── neonfs.conf        # Environment configuration
 └── scripts/           # Installation scripts
-    └── pre-install.sh     # Pre-installation setup script
+    ├── pre-install.sh     # Pre-installation setup script
+    └── validate-systemd.sh # Validate systemd unit files
 ```
 
 ## systemd Integration
+
+### Validation
+
+Validate systemd unit files before deployment:
+
+```bash
+./scripts/validate-systemd.sh
+```
+
+This uses `systemd-analyze verify` to check for common configuration issues. The script gracefully skips validation if systemd is not available (e.g., in containers or CI environments).
 
 ### Files
 
@@ -121,10 +132,10 @@ After installation, NeonFS uses the following directories:
 
 /var/lib/neonfs/          # Persistent data (StateDirectory)
 ├── .erlang.cookie            # Erlang authentication cookie (mode 0600)
-├── data/                     # Chunk storage
-│   ├── hot/                  # Hot tier storage
-│   ├── warm/                 # Warm tier storage
-│   └── cold/                 # Cold tier storage
+├── data/                     # Chunk storage (base directory)
+│   ├── hot/                  # Hot tier storage (created on-demand by BlobStore)
+│   ├── warm/                 # Warm tier storage (created on-demand by BlobStore)
+│   └── cold/                 # Cold tier storage (created on-demand by BlobStore)
 ├── meta/                     # Metadata storage
 │   ├── node.json             # Node identity
 │   └── cluster.json          # Cluster membership

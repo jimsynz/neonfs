@@ -771,4 +771,6 @@
   - Environment file pattern: one variable per line, sourced by systemd, can be overridden per-instance
   - Package deployment: create user/dirs → install daemon wrapper → install unit file → install release
   - Directory layout: /etc/neonfs (config), /var/lib/neonfs (data), /run/neonfs (runtime), /usr/lib/neonfs (release)
+  - **Important**: Tier directories (hot/warm/cold) should NOT be created by deployment scripts - they are created on-demand by BlobStore based on volume configuration
+  - systemd units can be validated with `systemd-analyze verify` - added validation script that gracefully skips if systemd not available
 ---

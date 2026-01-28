@@ -42,11 +42,13 @@ create_user() {
 }
 
 # Create necessary directories
+# Note: Tier subdirectories (hot/warm/cold) are NOT created here.
+# They are created by BlobStore based on actual volume configuration.
 create_directories() {
-    log_info "Creating directories..."
+    log_info "Creating base directories..."
 
-    # Data directory structure
-    mkdir -p /var/lib/neonfs/data/{hot,warm,cold}
+    # Base data directory structure
+    mkdir -p /var/lib/neonfs/data
     mkdir -p /var/lib/neonfs/meta
     mkdir -p /var/lib/neonfs/wal
 

@@ -11,9 +11,11 @@ NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
 RELEASE_NODE="${RELEASE_NODE:-neonfs@localhost}"
 RELEASE_COOKIE_PATH="${RELEASE_COOKIE_PATH:-/var/lib/neonfs/.erlang.cookie}"
 
-# Ensure data directories exist
+# Ensure base data directories exist
+# Note: Tier subdirectories (hot/warm/cold) are created by BlobStore
+# based on volume configuration, not at daemon startup
 ensure_directories() {
-    mkdir -p "${NEONFS_DATA_DIR}/data"/{hot,warm,cold}
+    mkdir -p "${NEONFS_DATA_DIR}/data"
     mkdir -p "${NEONFS_DATA_DIR}/meta"
     mkdir -p "${NEONFS_DATA_DIR}/wal"
 
