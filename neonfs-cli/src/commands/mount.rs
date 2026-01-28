@@ -53,7 +53,7 @@ impl MountCommand {
 
         // Connect to daemon and mount volume
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "mount",
@@ -97,7 +97,7 @@ impl MountCommand {
 
         // Connect to daemon and unmount
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "unmount",
@@ -134,7 +134,7 @@ impl MountCommand {
 
         // Connect to daemon and list mounts
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "list_mounts", vec![])
                 .await
         })?;

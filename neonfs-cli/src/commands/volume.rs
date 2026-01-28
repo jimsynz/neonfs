@@ -66,7 +66,7 @@ impl VolumeCommand {
 
         // Connect to daemon and list volumes
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "list_volumes", vec![])
                 .await
         })?;
@@ -144,7 +144,7 @@ impl VolumeCommand {
 
         // Connect to daemon and create volume
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "create_volume",
@@ -186,7 +186,7 @@ impl VolumeCommand {
 
         // Connect to daemon and delete volume
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "delete_volume",
@@ -227,7 +227,7 @@ impl VolumeCommand {
 
         // Connect to daemon and get volume info
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "get_volume", vec![name_term])
                 .await
         })?;

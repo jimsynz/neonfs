@@ -59,12 +59,12 @@ pub fn term_to_u64(term: &Term) -> Result<u64> {
 pub fn term_to_map(term: &Term) -> Result<std::collections::HashMap<String, Term>> {
     match term {
         Term::Map(Map { entries }) => {
-            let mut map = std::collections::HashMap::new();
+            let mut result = std::collections::HashMap::new();
             for (key, value) in entries {
                 let key_str = term_to_string(key)?;
-                map.insert(key_str, value.clone());
+                result.insert(key_str, value.clone());
             }
-            Ok(map)
+            Ok(result)
         }
         _ => Err(CliError::TermConversionError(format!(
             "Cannot convert {:?} to map",

@@ -44,6 +44,10 @@ pub enum CliError {
     #[error("RPC call failed: {0}")]
     RpcError(String),
 
+    /// RPC call failed
+    #[error("{0}")]
+    RpcFailed(String),
+
     /// Operation failed on the daemon side
     #[error("Daemon operation failed: {0}")]
     #[allow(dead_code)]

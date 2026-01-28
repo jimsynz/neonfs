@@ -72,7 +72,7 @@ impl ClusterCommand {
 
         // Connect to daemon and call cluster_status
         let result = runtime.block_on(async {
-            let conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "cluster_status", vec![])
                 .await
         })?;

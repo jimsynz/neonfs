@@ -875,3 +875,31 @@
   - Phase 1 milestone "data persists across restarts" is now complete with DETS persistence
   - Phase 2 will replace DETS with Ra consensus for distributed metadata storage
 ---
+## 2026-01-28 - Task 0042 (Fixed)
+- What was implemented:
+  - Replaced custom TCP/ETF RPC server with proper Erlang distribution using `erl_rpc` crate
+  - CLI now connects to daemon via standard Erlang distribution protocol
+  - Uses `erl_rpc::RpcClient` for high-level RPC calls to `NeonFS.CLI.Handler`
+  - No custom server needed - leverages Erlang's built-in `:rpc` module and distribution
+  - CLI generates unique node names (e.g., `neonfs_cli_12345@localhost`)
+  - Proper cookie-based authentication via Erlang distribution
+  - EPMD integration for node discovery
+- Files changed:
+  - `neonfs-cli/Cargo.toml` (changed from erl_dist to erl_rpc, downgraded eetf to 0.8)
+  - `neonfs-cli/src/daemon.rs` (complete rewrite using erl_rpc)
+  - `neonfs-cli/src/error.rs` (added RpcFailed variant)
+  - `neonfs-cli/src/term/mod.rs` (fixed for eetf 0.8 compatibility)
+  - `neonfs-cli/src/commands/*.rs` (made connections mutable)
+  - `tasks/task_0042_implement_cli_rpc_server.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Use `erl_rpc` crate for high-level Erlang RPC, not low-level `erl_dist`
+  - `erl_rpc` provides simple `RpcClient::connect()` and `handle.call()` API
+  - RPC client must run as background task: `tokio::spawn(client.run())`
+  - `erl_rpc` uses eetf 0.8, must match dependency versions
+  - eetf 0.8: Map has `entries: Vec<(Term, Term)>`, List has `elements: Vec<Term>`
+  - No custom RPC server needed - Erlang nodes have distribution built-in
+  - CLI connects as ephemeral Erlang node with unique generated name
+  - `NeonFS.CLI.Handler` functions are called via standard `:rpc.call/4` mechanism
+  - Erlang distribution handles authentication, message routing, and protocol details
+  - Previous custom TCP/ETF approach was architectural mistake - distribution is the right way
+---
