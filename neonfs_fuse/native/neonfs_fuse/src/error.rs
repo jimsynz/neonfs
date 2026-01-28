@@ -28,6 +28,12 @@ pub enum FuseError {
     Errno(i32),
 }
 
+impl From<String> for FuseError {
+    fn from(s: String) -> Self {
+        FuseError::ChannelSend(s)
+    }
+}
+
 impl FuseError {
     /// Convert to POSIX errno code
     #[allow(dead_code)] // Used when fuse feature is enabled

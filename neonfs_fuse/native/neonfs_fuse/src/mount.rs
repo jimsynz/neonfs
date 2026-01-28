@@ -1,5 +1,3 @@
-#![cfg(feature = "fuse")]
-
 /// FUSE mount and session management
 ///
 /// This module handles mounting the NeonFS filesystem at a mount point,
@@ -7,7 +5,6 @@
 use crate::error::FuseError;
 use crate::filesystem::NeonFilesystem;
 use crate::server::FuseServer;
-use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -98,7 +95,7 @@ impl MountSession {
             let fs = NeonFilesystem::new(new_server);
 
             // Mount the filesystem - this blocks until unmount
-            fuser::mount2(fs, &mount_point_clone, &fuser_options).map_err(|e| FuseError::Io(e))?;
+            fuser::mount2(fs, &mount_point_clone, &fuser_options).map_err(FuseError::Io)?;
 
             Ok(())
         });
@@ -111,6 +108,7 @@ impl MountSession {
     }
 
     /// Get the mount point path
+    #[allow(dead_code)] // May be used in future for mount info queries
     pub fn mount_point(&self) -> &Path {
         &self.mount_point
     }

@@ -407,8 +407,9 @@ defmodule NeonFS.FUSE.Handler do
     # Ensure path ends with "/"
     dir_path = if String.ends_with?(path, "/"), do: path, else: path <> "/"
 
-    with {:ok, _dir} <- FileIndex.get_by_path(volume_id, dir_path),
-         {:ok, files} <- FileIndex.list_dir(volume_id, dir_path) do
+    with {:ok, _dir} <- FileIndex.get_by_path(volume_id, dir_path) do
+      files = FileIndex.list_dir(volume_id, dir_path)
+
       entries =
         Enum.map(files, fn file ->
           relative = String.trim_leading(file.path, dir_path)

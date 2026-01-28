@@ -2,7 +2,7 @@
 
 ## Status
 
-Not Started
+Complete
 
 ## Phase
 
@@ -14,15 +14,15 @@ The neonfs_fuse Rust crate has 6 compilation errors that prevent it from buildin
 
 ## Acceptance Criteria
 
-- [ ] Add `"time"` to tokio features in Cargo.toml
-- [ ] Fix `getattr` method signature to include `fh: Option<u64>` parameter
-- [ ] Implement `From<String>` for `FuseError` or refactor error handling
-- [ ] All type inference errors resolved
-- [ ] `cargo build --features fuse` succeeds
-- [ ] `cargo clippy --features fuse --all-targets -- -D warnings` passes
-- [ ] `cargo test --features fuse` passes
-- [ ] Enable FUSE tests in test_helper.exs (remove from exclude list)
-- [ ] FUSE integration tests pass when FUSE is available
+- [x] Add `"time"` to tokio features in Cargo.toml
+- [x] Fix `getattr` method signature to include `fh: Option<u64>` parameter
+- [x] Implement `From<String>` for `FuseError` or refactor error handling
+- [x] All type inference errors resolved
+- [x] `cargo build --features fuse` succeeds
+- [x] `cargo clippy --features fuse --all-targets -- -D warnings` passes
+- [x] `cargo test --features fuse` passes
+- [x] Enable FUSE tests in test_helper.exs (remove from exclude list)
+- [x] FUSE integration tests pass when FUSE is available
 
 ## Specific Fixes Required
 

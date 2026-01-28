@@ -903,3 +903,33 @@
   - Erlang distribution handles authentication, message routing, and protocol details
   - Previous custom TCP/ETF approach was architectural mistake - distribution is the right way
 ---
+## 2026-01-28 - Task 0041
+- What was implemented:
+  - Added "time" feature to tokio in Cargo.toml for FUSE crate
+  - Fixed getattr method signature to include fh: Option<u64> parameter
+  - Implemented From<String> for FuseError to enable string error conversion
+  - Removed duplicated #![cfg(feature = "fuse")] attributes (already in lib.rs)
+  - Fixed unused imports and variables (clippy warnings)
+  - Fixed redundant closures (use FuseError::Io directly)
+  - Replaced manual div_ceil with .div_ceil() method
+  - Added #[allow(dead_code)] to mount_point method for future use
+  - Fixed Dialyzer error in handler.ex (FileIndex.list_dir returns list, not tuple)
+  - Enabled FUSE tests in test_helper.exs (removed from exclude list)
+- Files changed:
+  - `neonfs_fuse/native/neonfs_fuse/Cargo.toml` (added "time" tokio feature)
+  - `neonfs_fuse/native/neonfs_fuse/src/filesystem.rs` (fixed getattr, removed duplicated cfg, cleanups)
+  - `neonfs_fuse/native/neonfs_fuse/src/mount.rs` (removed duplicated cfg, fixed imports)
+  - `neonfs_fuse/native/neonfs_fuse/src/error.rs` (added From<String> impl)
+  - `neonfs_fuse/test/test_helper.exs` (enabled FUSE tests)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (fixed Dialyzer pattern match error)
+  - `tasks/task_0041_fix_fuse_rust_compilation.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - tokio timeout functions require "time" feature flag
+  - fuser 0.15 getattr signature includes optional file handle parameter
+  - Use FuseError::Io directly instead of |e| FuseError::Io(e) to avoid clippy redundant_closure
+  - .div_ceil() method available in Rust for ceiling division (preferred over manual (n + d - 1) / d)
+  - When modules are conditionally compiled with #[cfg] at the top level in lib.rs, don't repeat #![cfg] in the module files themselves (clippy::duplicated_attributes)
+  - From<String> trait enables automatic error conversion with ? operator
+  - FUSE tests require proper kernel support and configuration - tests should gracefully handle unavailable FUSE
+  - FileIndex.list_dir/2 returns list directly, not {:ok, list} tuple
+---

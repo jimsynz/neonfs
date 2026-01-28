@@ -1,16 +1,13 @@
-#![cfg(feature = "fuse")]
-
 /// FUSE filesystem implementation using fuser library
 ///
 /// This module implements the fuser::Filesystem trait, which is the core interface
 /// for handling FUSE operations. Each FUSE kernel request is forwarded to Elixir
 /// for handling, and the reply is sent back through channels.
-use crate::error::{atom_to_errno, FuseError};
-use crate::operation::{DirEntry, FileKind, FuseOperation, FuseReply};
+use crate::error::FuseError;
+use crate::operation::{FileKind, FuseOperation, FuseReply};
 use crate::server::FuseServer;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
-    FUSE_ROOT_ID,
 };
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
@@ -61,7 +58,7 @@ impl NeonFilesystem {
             }
             Err(_) => {
                 // Create a new runtime for this operation
-                let rt = tokio::runtime::Runtime::new().map_err(|e| FuseError::Io(e))?;
+                let rt = tokio::runtime::Runtime::new().map_err(FuseError::Io)?;
                 rt.block_on(async {
                     tokio::time::timeout(REPLY_TIMEOUT, reply_rx)
                         .await
@@ -87,7 +84,7 @@ impl NeonFilesystem {
         FileAttr {
             ino,
             size,
-            blocks: (size + 511) / 512, // Round up to 512-byte blocks
+            blocks: size.div_ceil(512), // Round up to 512-byte blocks
             atime: now,
             mtime: now,
             ctime: now,
@@ -138,7 +135,7 @@ impl Filesystem for NeonFilesystem {
     }
 
     /// Get file attributes
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         let operation = FuseOperation::GetAttr { ino };
 
         match self.call_elixir(operation) {
@@ -330,7 +327,7 @@ impl Filesystem for NeonFilesystem {
         name: &OsStr,
         mode: u32,
         _umask: u32,
-        flags: i32,
+        _flags: i32,
         reply: fuser::ReplyCreate,
     ) {
         let name_str = name.to_string_lossy().to_string();
@@ -507,7 +504,7 @@ impl Filesystem for NeonFilesystem {
         atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
-        fh: Option<u64>,
+        _fh: Option<u64>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
