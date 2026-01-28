@@ -155,3 +155,52 @@
   - Rust layer is stateless - Elixir metadata tracks which chunks are compressed
   - zstd creates a small frame even for empty data, so stored_size > 0 for empty chunks
 ---
+
+## 2026-01-28 - Task 0008
+- What was implemented:
+  - Chunking module in Rust at `neonfs_blob/src/chunking.rs`
+  - `ChunkStrategy` enum: `Single`, `Fixed { size }`, `FastCDC { min, avg, max }` with serde
+  - `ChunkResult` struct: `{ data, hash, offset, size }` for each chunk
+  - `chunk_data(data, strategy) -> Vec<ChunkResult>` function for splitting data
+  - `auto_strategy(data_len) -> ChunkStrategy` automatic strategy selection
+  - Strategy selection: < 64KB → Single, 64KB-1MB → Fixed 256KB, >= 1MB → FastCDC
+  - `chunk_single()`, `chunk_fixed()`, `chunk_fastcdc()` implementation functions
+  - NIF functions: `nif_chunk_data/3`, `nif_auto_chunk_strategy/1`
+  - Comprehensive Rust tests: single, fixed, FastCDC, empty data, reconstruction, stability
+  - Comprehensive Elixir tests: all strategies, hash verification, reconstruction, errors
+- Files changed:
+  - `neonfs_core/native/neonfs_blob/Cargo.toml` (added fastcdc dependency)
+  - `neonfs_core/native/neonfs_blob/src/chunking.rs` (new module)
+  - `neonfs_core/native/neonfs_blob/src/lib.rs` (added module, NIFs, parsing helpers)
+  - `neonfs_core/lib/neon_fs/core/blob/native.ex` (added chunk_data/3, auto_chunk_strategy/1)
+  - `neonfs_core/test/neon_fs/core/blob/native_test.exs` (added chunking tests)
+- **Learnings for future iterations:**
+  - fastcdc v3.2+ requires u32 for size parameters - use `as u32` conversion
+  - FastCDC returns iterator with `chunk.offset` and `chunk.length` fields
+  - Content-shift stability tests need careful data patterns - sequential bytes don't always demonstrate CDC benefits
+  - Strategy parsing pattern: match string to enum, delegate size params to auto_strategy helper
+  - Return tuples to Elixir as `(Binary, Binary, usize, usize)` for efficient data transfer
+  - Use proptest for roundtrip verification: chunks always reconstruct to original data
+---
+
+## 2026-01-28 - Task 0009
+- What was implemented:
+  - `migrate_chunk(hash, from_tier, to_tier) -> Result<()>` method in BlobStore
+  - Atomic migration: read with verification → write → verify destination → delete source
+  - No-op optimization when source and destination tiers are the same
+  - Verification enabled during migration to detect corruption
+  - NIF function `store_migrate_chunk/4` exposed to Elixir
+  - Comprehensive Rust tests: hot↔cold, warm↔hot, same-tier noop, nonexistent error, integrity
+  - Comprehensive Elixir tests: all tier combinations, data integrity, empty chunks
+- Files changed:
+  - `neonfs_core/native/neonfs_blob/src/store.rs` (added migrate_chunk method, 7 new tests)
+  - `neonfs_core/native/neonfs_blob/src/lib.rs` (added store_migrate_chunk NIF)
+  - `neonfs_core/lib/neon_fs/core/blob/native.ex` (added store_migrate_chunk/4 binding)
+  - `neonfs_core/test/neon_fs/core/blob/native_test.exs` (added migration tests)
+- **Learnings for future iterations:**
+  - Migration pattern: verify on read, write, verify destination, then delete source
+  - "Belt and suspenders" approach for critical operations - double verification
+  - No-op early return optimization avoids unnecessary work
+  - Migration reads raw data (possibly compressed) to preserve storage optimizations
+  - Test integrity with multi-hop migrations (hot→warm→cold→hot) to ensure no data loss
+---

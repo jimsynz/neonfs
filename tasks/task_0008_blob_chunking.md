@@ -1,7 +1,7 @@
 # Task 0008: Implement FastCDC Content-Defined Chunking
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,18 +10,18 @@ Not Started
 Implement content-defined chunking using the FastCDC algorithm. This splits data into variable-sized chunks based on content, enabling deduplication even when data shifts within files. For small data, fixed-size or single-chunk strategies are used.
 
 ## Acceptance Criteria
-- [ ] Add `fastcdc` dependency to Cargo.toml
-- [ ] Chunking module at `neonfs_blob/src/chunking.rs`
-- [ ] `ChunkStrategy` enum: `Single`, `Fixed { size: usize }`, `FastCDC { min, avg, max }`
-- [ ] `chunk_data(data, strategy) -> Vec<ChunkResult>` function
-- [ ] `ChunkResult` struct: `{ data: Vec<u8>, hash: Hash, offset: usize, size: usize }`
-- [ ] Strategy selection based on data size:
+- [x] Add `fastcdc` dependency to Cargo.toml
+- [x] Chunking module at `neonfs_blob/src/chunking.rs`
+- [x] `ChunkStrategy` enum: `Single`, `Fixed { size: usize }`, `FastCDC { min, avg, max }`
+- [x] `chunk_data(data, strategy) -> Vec<ChunkResult>` function
+- [x] `ChunkResult` struct: `{ data: Vec<u8>, hash: Hash, offset: usize, size: usize }`
+- [x] Strategy selection based on data size:
   - < 64KB: Single chunk
   - 64KB - 1MB: Fixed 256KB blocks
   - > 1MB: FastCDC with 256KB avg, 64KB min, 1MB max
-- [ ] `auto_strategy(data_len) -> ChunkStrategy` helper
-- [ ] NIF function `chunk_data/2` returning list of chunk info maps
-- [ ] Unit tests for each strategy
+- [x] `auto_strategy(data_len) -> ChunkStrategy` helper
+- [x] NIF function `chunk_data/2` returning list of chunk info maps
+- [x] Unit tests for each strategy
 
 ## FastCDC Configuration
 ```rust

@@ -205,6 +205,39 @@ defmodule NeonFS.Core.Blob.Native do
   @spec store_chunk_exists(store(), hash(), tier()) :: {:ok, boolean()} | {:error, String.t()}
   def store_chunk_exists(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Migrates a chunk from one storage tier to another.
+
+  This operation is atomic: the chunk is copied to the destination tier,
+  verified for integrity, and only then deleted from the source tier.
+  If any step fails, the migration is aborted and the source chunk remains intact.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - SHA-256 hash of the chunk (32 bytes)
+    - `from_tier` - Source tier: "hot", "warm", or "cold"
+    - `to_tier` - Destination tier: "hot", "warm", or "cold"
+
+  ## Returns
+    - `{:ok, {}}` on successful migration
+    - `{:error, reason}` if the chunk doesn't exist or migration fails
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/store", 2)
+      iex> data = "migrate me"
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_migrate_chunk(store, hash, "hot", "cold")
+      iex> {:ok, false} = NeonFS.Core.Blob.Native.store_chunk_exists(store, hash, "hot")
+      iex> {:ok, true} = NeonFS.Core.Blob.Native.store_chunk_exists(store, hash, "cold")
+
+  """
+  @spec store_migrate_chunk(store(), hash(), tier(), tier()) ::
+          {:ok, {}} | {:error, String.t()}
+  def store_migrate_chunk(_store, _hash, _from_tier, _to_tier),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   @type compression :: String.t()
   @type chunk_info :: {non_neg_integer(), non_neg_integer(), compression()}
 
@@ -297,5 +330,98 @@ defmodule NeonFS.Core.Blob.Native do
   @spec store_read_chunk_with_options(store(), hash(), tier(), boolean(), boolean()) ::
           {:ok, binary()} | {:error, String.t()}
   def store_read_chunk_with_options(_store, _hash, _tier, _verify, _decompress),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  # Chunking types
+  @type chunk_result :: {binary(), hash(), non_neg_integer(), non_neg_integer()}
+  @type chunk_strategy :: String.t()
+
+  @doc """
+  Splits data into chunks using the specified strategy.
+
+  The chunking strategy determines how data is divided:
+  - "single": Store as a single chunk (good for small files)
+  - "fixed": Split into fixed-size chunks (good for medium files)
+  - "fastcdc": Use content-defined chunking (good for deduplication)
+  - "auto": Automatically select based on data length
+
+  ## Parameters
+    - `data` - Binary data to split into chunks
+    - `strategy` - Chunking strategy: "single", "fixed", "fastcdc", or "auto"
+    - `strategy_param` - Strategy-specific parameter:
+      - For "single": ignored (pass 0)
+      - For "fixed": chunk size in bytes (required, must be > 0)
+      - For "fastcdc": average chunk size in bytes (0 for default 256KB)
+      - For "auto": data length (used to select appropriate strategy)
+
+  ## Returns
+    - `{:ok, chunks}` - A list of tuples, each containing:
+      - `data` - The chunk data as a binary
+      - `hash` - SHA-256 hash of the chunk (32 bytes)
+      - `offset` - Byte offset of this chunk in the original data
+      - `size` - Size of this chunk in bytes
+    - `{:error, reason}` - If the strategy is invalid
+
+  ## Examples
+
+      iex> data = String.duplicate("hello world ", 100)
+      iex> {:ok, chunks} = NeonFS.Core.Blob.Native.chunk_data(data, "single", 0)
+      iex> length(chunks)
+      1
+      iex> {chunk_data, _hash, offset, size} = hd(chunks)
+      iex> chunk_data == data
+      true
+      iex> offset
+      0
+      iex> size == byte_size(data)
+      true
+
+  """
+  @spec chunk_data(binary(), chunk_strategy(), non_neg_integer()) ::
+          {:ok, [chunk_result()]} | {:error, String.t()}
+  def chunk_data(data, strategy, strategy_param) do
+    nif_chunk_data(data, strategy, strategy_param)
+  end
+
+  @doc false
+  @spec nif_chunk_data(binary(), chunk_strategy(), non_neg_integer()) ::
+          {:ok, [chunk_result()]} | {:error, String.t()}
+  def nif_chunk_data(_data, _strategy, _strategy_param),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Determines the appropriate chunking strategy for the given data length.
+
+  This function implements the automatic strategy selection:
+  - < 64KB: "single" strategy (avoid chunking overhead)
+  - 64KB - 1MB: "fixed" strategy with 256KB chunks
+  - >= 1MB: "fastcdc" strategy for content-defined chunking
+
+  ## Parameters
+    - `data_len` - Length of the data in bytes
+
+  ## Returns
+    - `{strategy, param}` - A tuple of the recommended strategy name and parameter
+
+  ## Examples
+
+      iex> NeonFS.Core.Blob.Native.auto_chunk_strategy(1000)
+      {"single", 0}
+
+      iex> NeonFS.Core.Blob.Native.auto_chunk_strategy(100_000)
+      {"fixed", 262144}
+
+      iex> NeonFS.Core.Blob.Native.auto_chunk_strategy(2_000_000)
+      {"fastcdc", 262144}
+
+  """
+  @spec auto_chunk_strategy(non_neg_integer()) :: {String.t(), non_neg_integer()}
+  def auto_chunk_strategy(data_len) do
+    nif_auto_chunk_strategy(data_len)
+  end
+
+  @doc false
+  @spec nif_auto_chunk_strategy(non_neg_integer()) :: {String.t(), non_neg_integer()}
+  def nif_auto_chunk_strategy(_data_len),
     do: :erlang.nif_error(:nif_not_loaded)
 end

@@ -15,6 +15,7 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 rand = "0.9"
 zstd = "0.13"
+fastcdc = "3.1"
 
 [dev-dependencies]
 proptest = "1.6"

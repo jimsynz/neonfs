@@ -1,9 +1,11 @@
+pub mod chunking;
 pub mod compression;
 pub mod error;
 pub mod hash;
 pub mod path;
 pub mod store;
 
+use crate::chunking::{auto_strategy, chunk_data, ChunkStrategy};
 use crate::compression::Compression;
 use crate::hash::Hash;
 use crate::path::Tier;
@@ -282,6 +284,36 @@ fn store_chunk_exists(
     Ok(store_guard.chunk_exists(&hash, tier))
 }
 
+/// Migrates a chunk from one tier to another.
+///
+/// This operation is atomic: the chunk is written to the destination tier,
+/// verified, and only then deleted from the source tier.
+///
+/// # Arguments
+/// * `store` - Resource reference to the blob store.
+/// * `hash` - 32-byte binary hash of the chunk.
+/// * `from_tier` - Source storage tier ("hot", "warm", or "cold").
+/// * `to_tier` - Destination storage tier ("hot", "warm", or "cold").
+///
+/// # Returns
+/// `:ok` on success, or an error tuple.
+#[rustler::nif]
+fn store_migrate_chunk(
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    from_tier: String,
+    to_tier: String,
+) -> Result<(), String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let from = parse_tier(&from_tier)?;
+    let to = parse_tier(&to_tier)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    store_guard
+        .migrate_chunk(&hash, from, to)
+        .map_err(|e| e.to_string())
+}
+
 /// Parses a 32-byte binary into a Hash.
 fn parse_hash(hash_bytes: &Binary) -> Result<Hash, String> {
     if hash_bytes.len() != 32 {
@@ -316,6 +348,96 @@ fn parse_compression(compression: &str, level: i32) -> Result<Compression, Strin
         _ => Err(format!(
             "invalid compression: expected 'none' or 'zstd', got '{}'",
             compression
+        )),
+    }
+}
+
+/// Chunk result as returned to Elixir.
+/// Each chunk is a tuple of (data_binary, hash_binary, offset, size).
+type ChunkResultTuple<'a> = (Binary<'a>, Binary<'a>, usize, usize);
+
+/// Splits data into chunks using the specified strategy.
+///
+/// # Arguments
+/// * `env` - Rustler environment.
+/// * `data` - Binary data to split.
+/// * `strategy` - Chunking strategy: "single", "fixed", or "auto".
+/// * `strategy_param` - Additional parameter for strategy:
+///   - For "fixed": chunk size in bytes
+///   - For "auto": ignored (pass 0)
+///   - For "single": ignored (pass 0)
+///
+/// # Returns
+/// A list of tuples, each containing (data, hash, offset, size).
+#[rustler::nif]
+fn nif_chunk_data<'a>(
+    env: Env<'a>,
+    data: Binary,
+    strategy: String,
+    strategy_param: usize,
+) -> Result<Vec<ChunkResultTuple<'a>>, String> {
+    let chunk_strategy = parse_chunk_strategy(&strategy, strategy_param)?;
+    let chunks = chunk_data(data.as_slice(), &chunk_strategy);
+
+    let results: Vec<ChunkResultTuple<'a>> = chunks
+        .into_iter()
+        .map(|chunk| {
+            // Create binary for chunk data
+            let mut data_bin = NewBinary::new(env, chunk.data.len());
+            data_bin.copy_from_slice(&chunk.data);
+
+            // Create binary for hash
+            let mut hash_bin = NewBinary::new(env, 32);
+            hash_bin.copy_from_slice(chunk.hash.as_bytes());
+
+            (data_bin.into(), hash_bin.into(), chunk.offset, chunk.size)
+        })
+        .collect();
+
+    Ok(results)
+}
+
+/// Determines the appropriate chunking strategy for the given data length.
+///
+/// # Arguments
+/// * `data_len` - Length of the data to be chunked.
+///
+/// # Returns
+/// A tuple of (strategy_name, strategy_param) where:
+/// - "single" with param 0 for small data (< 64KB)
+/// - "fixed" with param 262144 (256KB) for medium data (64KB - 1MB)
+/// - "fastcdc" with param 262144 (avg chunk size) for large data (>= 1MB)
+#[rustler::nif]
+fn nif_auto_chunk_strategy(data_len: usize) -> (String, usize) {
+    match auto_strategy(data_len) {
+        ChunkStrategy::Single => ("single".to_string(), 0),
+        ChunkStrategy::Fixed { size } => ("fixed".to_string(), size),
+        ChunkStrategy::FastCDC { avg, .. } => ("fastcdc".to_string(), avg),
+    }
+}
+
+/// Parses a strategy string and parameter into a ChunkStrategy.
+fn parse_chunk_strategy(strategy: &str, param: usize) -> Result<ChunkStrategy, String> {
+    match strategy {
+        "single" => Ok(ChunkStrategy::Single),
+        "fixed" => {
+            if param == 0 {
+                Err("fixed strategy requires non-zero chunk size".to_string())
+            } else {
+                Ok(ChunkStrategy::Fixed { size: param })
+            }
+        }
+        "auto" => Ok(auto_strategy(param)), // param is data length for auto
+        "fastcdc" => {
+            // Use param as average size, derive min/max from it
+            let avg = if param == 0 { 256 * 1024 } else { param };
+            let min = avg / 4;
+            let max = avg * 4;
+            Ok(ChunkStrategy::FastCDC { min, avg, max })
+        }
+        _ => Err(format!(
+            "invalid strategy: expected 'single', 'fixed', 'auto', or 'fastcdc', got '{}'",
+            strategy
         )),
     }
 }

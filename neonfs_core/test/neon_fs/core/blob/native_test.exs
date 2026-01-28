@@ -506,4 +506,292 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert reason =~ "invalid compression"
     end
   end
+
+  describe "auto_chunk_strategy/1" do
+    test "returns single for small data" do
+      assert {"single", 0} = Native.auto_chunk_strategy(0)
+      assert {"single", 0} = Native.auto_chunk_strategy(1000)
+      # 64KB - 1 = 65535
+      assert {"single", 0} = Native.auto_chunk_strategy(65_535)
+    end
+
+    test "returns fixed for medium data" do
+      # 64KB = 65536
+      assert {"fixed", 262_144} = Native.auto_chunk_strategy(65_536)
+      assert {"fixed", 262_144} = Native.auto_chunk_strategy(500_000)
+      # 1MB - 1 = 1048575
+      assert {"fixed", 262_144} = Native.auto_chunk_strategy(1_048_575)
+    end
+
+    test "returns fastcdc for large data" do
+      # 1MB = 1048576
+      assert {"fastcdc", 262_144} = Native.auto_chunk_strategy(1_048_576)
+      assert {"fastcdc", 262_144} = Native.auto_chunk_strategy(10_000_000)
+    end
+  end
+
+  describe "chunk_data/3" do
+    test "returns empty list for empty data" do
+      assert {:ok, []} = Native.chunk_data("", "single", 0)
+      assert {:ok, []} = Native.chunk_data("", "auto", 0)
+    end
+
+    test "single strategy produces one chunk" do
+      data = "hello world, this is test data"
+
+      assert {:ok, [{chunk_data, hash, offset, size}]} =
+               Native.chunk_data(data, "single", 0)
+
+      assert chunk_data == data
+      assert hash == Native.compute_hash(data)
+      assert offset == 0
+      assert size == byte_size(data)
+    end
+
+    test "fixed strategy splits data into chunks" do
+      # 1000 bytes with 300 byte chunks = 4 chunks
+      data = :binary.copy(<<0>>, 1000)
+
+      assert {:ok, chunks} = Native.chunk_data(data, "fixed", 300)
+      assert length(chunks) == 4
+
+      # Check sizes
+      [{_, _, _, size1}, {_, _, _, size2}, {_, _, _, size3}, {_, _, _, size4}] = chunks
+      assert size1 == 300
+      assert size2 == 300
+      assert size3 == 300
+      assert size4 == 100
+
+      # Check offsets
+      [{_, _, offset1, _}, {_, _, offset2, _}, {_, _, offset3, _}, {_, _, offset4, _}] = chunks
+      assert offset1 == 0
+      assert offset2 == 300
+      assert offset3 == 600
+      assert offset4 == 900
+
+      # Verify reconstruction
+      reconstructed = Enum.map_join(chunks, fn {d, _, _, _} -> d end)
+
+      assert reconstructed == data
+    end
+
+    test "chunk hashes are correct" do
+      data = :binary.copy(<<42>>, 1000)
+
+      assert {:ok, chunks} = Native.chunk_data(data, "fixed", 300)
+
+      for {chunk_data, hash, _, _} <- chunks do
+        assert hash == Native.compute_hash(chunk_data)
+      end
+    end
+
+    test "auto strategy selects appropriate strategy based on size" do
+      # Small data (< 64KB) -> single chunk
+      small_data = String.duplicate("x", 1000)
+      assert {:ok, chunks} = Native.chunk_data(small_data, "auto", byte_size(small_data))
+      assert length(chunks) == 1
+
+      # Medium data (64KB - 1MB) -> fixed chunks
+      medium_data = :binary.copy(<<0>>, 100_000)
+      assert {:ok, chunks} = Native.chunk_data(medium_data, "auto", byte_size(medium_data))
+      # With 256KB chunks, 100KB should be single chunk
+      assert length(chunks) == 1
+
+      # Medium data that gets split
+      medium_data2 = :binary.copy(<<0>>, 500_000)
+      assert {:ok, chunks} = Native.chunk_data(medium_data2, "auto", byte_size(medium_data2))
+      # 500KB with 256KB chunks = 2 chunks
+      assert length(chunks) == 2
+    end
+
+    test "fastcdc strategy produces variable-size chunks" do
+      # Create 2MB of semi-random data
+      data = Enum.map_join(0..2_097_151, fn i -> <<rem(i, 256)>> end)
+
+      assert {:ok, chunks} = Native.chunk_data(data, "fastcdc", 262_144)
+
+      # Should have multiple chunks
+      assert length(chunks) > 1
+
+      # Verify reconstruction
+      reconstructed = Enum.map_join(chunks, fn {d, _, _, _} -> d end)
+
+      assert reconstructed == data
+
+      # Verify offsets are contiguous
+      expected_offset =
+        Enum.reduce(chunks, 0, fn {_, _, offset, size}, expected ->
+          assert offset == expected
+          expected + size
+        end)
+
+      assert expected_offset == byte_size(data)
+    end
+
+    test "invalid strategy returns error" do
+      data = "test"
+
+      assert {:error, reason} = Native.chunk_data(data, "invalid", 0)
+      assert reason =~ "invalid strategy"
+    end
+
+    test "fixed strategy with zero size returns error" do
+      data = "test"
+
+      assert {:error, reason} = Native.chunk_data(data, "fixed", 0)
+      assert reason =~ "non-zero"
+    end
+
+    test "handles large binary data" do
+      # 1MB of data
+      data = :binary.copy(<<99>>, 1_048_576)
+
+      assert {:ok, chunks} = Native.chunk_data(data, "fixed", 262_144)
+
+      # 1MB / 256KB = 4 chunks
+      assert length(chunks) == 4
+
+      # Verify all hashes are valid
+      for {chunk_data, hash, _, _} <- chunks do
+        assert byte_size(hash) == 32
+        assert hash == :crypto.hash(:sha256, chunk_data)
+      end
+    end
+
+    test "handles binary with null bytes" do
+      data = <<0, 1, 2, 0, 3, 4, 0, 0, 0>>
+
+      assert {:ok, [{chunk_data, hash, offset, size}]} =
+               Native.chunk_data(data, "single", 0)
+
+      assert chunk_data == data
+      assert hash == :crypto.hash(:sha256, data)
+      assert offset == 0
+      assert size == 9
+    end
+  end
+
+  describe "chunk tier migration" do
+    setup do
+      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_migrate_test_#{:rand.uniform(1_000_000)}")
+      {:ok, store} = Native.store_open(tmp_dir, 2)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      {:ok, store: store}
+    end
+
+    test "migrates chunk from hot to cold", %{store: store} do
+      data = "data to migrate hot to cold"
+      hash = Native.compute_hash(data)
+
+      # Write to hot tier
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold")
+
+      # Migrate to cold tier
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "cold")
+
+      # Verify: chunk now in cold, not in hot
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "cold")
+
+      # Verify data integrity
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "cold")
+      assert read_data == data
+    end
+
+    test "migrates chunk from cold to hot", %{store: store} do
+      data = "data to migrate cold to hot"
+      hash = Native.compute_hash(data)
+
+      # Write to cold tier
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "cold")
+
+      # Migrate to hot tier
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "cold", "hot")
+
+      # Verify: chunk now in hot, not in cold
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold")
+
+      # Verify data integrity
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
+      assert read_data == data
+    end
+
+    test "migrates chunk from warm to hot", %{store: store} do
+      data = "data to migrate warm to hot"
+      hash = Native.compute_hash(data)
+
+      # Write to warm tier
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "warm")
+
+      # Migrate to hot tier
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "warm", "hot")
+
+      # Verify: chunk now in hot, not in warm
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "warm")
+    end
+
+    test "migrating to same tier is a no-op", %{store: store} do
+      data = "no-op migration"
+      hash = Native.compute_hash(data)
+
+      # Write to hot tier
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      # "Migrate" to same tier
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "hot")
+
+      # Verify: still in hot tier
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
+      assert read_data == data
+    end
+
+    test "migration of nonexistent chunk returns error", %{store: store} do
+      hash = Native.compute_hash("nonexistent")
+
+      assert {:error, reason} = Native.store_migrate_chunk(store, hash, "hot", "cold")
+      assert reason =~ "not found"
+    end
+
+    test "migration preserves data integrity", %{store: store} do
+      # Use larger data to ensure integrity is important
+      data = :binary.copy(<<42>>, 100_000)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      # Migrate through all tiers
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "warm")
+      assert {:ok, read1} = Native.store_read_chunk(store, hash, "warm")
+      assert read1 == data
+
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "warm", "cold")
+      assert {:ok, read2} = Native.store_read_chunk(store, hash, "cold")
+      assert read2 == data
+
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "cold", "hot")
+      assert {:ok, read3} = Native.store_read_chunk(store, hash, "hot")
+      assert read3 == data
+
+      # Verify hash still matches
+      assert hash == Native.compute_hash(read3)
+    end
+
+    test "handles empty chunk migration", %{store: store} do
+      data = ""
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "cold")
+
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "cold")
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "cold")
+      assert read_data == data
+    end
+  end
 end
