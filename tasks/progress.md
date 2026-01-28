@@ -427,3 +427,41 @@
   - Compression config: zstd level 1-22, min_size threshold to avoid compressing small chunks
   - Verification config: :always/:never/:sampling with optional sampling_rate 0.0-1.0
 ---
+## 2026-01-28 - Task 0018
+- What was implemented:
+  - Created `NeonFS.Core.WriteOperation` module for basic write path
+  - Implemented `write_file/4` function with chunking, deduplication, and commit workflow
+  - Generate unique write_id using UUIDv7 for tracking write operations
+  - Chunk data using BlobStore with configurable strategies (auto, single, fixed, fastcdc)
+  - Deduplication: check for existing chunks before storing new ones
+  - Store new chunks with uncommitted state and write_refs tracking
+  - Create file metadata with chunk list and size
+  - Commit chunks on successful write (remove write_refs, mark as committed)
+  - Cleanup on failure: abort_chunks removes write_refs and deletes uncommitted chunks
+  - Respect volume compression settings (algorithm, level, min_size)
+  - Telemetry events for write operations (start, stop, exception)
+  - File overwrite support: delete old file at same path before creating new one
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (new - write path implementation)
+  - `neonfs_core/test/neon_fs/core/write_operation_test.exs` (new - 15 comprehensive tests)
+  - `tasks/task_0018_elixir_write_path.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Write flow: chunk → deduplicate → store uncommitted → create metadata → commit chunks
+  - Write_refs track active writes for each chunk - prevents premature cleanup
+  - Commit state transitions: uncommitted → committed only when write_refs is empty
+  - Deduplication: ChunkIndex.get returns {:ok, chunk} or {:error, :not_found}, not nil
+  - Abort flow: find uncommitted chunks with write_id, remove refs, delete if no refs remain
+  - Volume compression config: %{algorithm: :zstd, level: 3, min_size: 4096}, not %{enabled: true}
+  - Chunk strategy format: BlobStore expects {:single}, {:fixed, size}, {:fastcdc, avg}, not :single
+  - Auto chunking: < 64KB → Single, 64KB-1MB → Fixed 256KB, >= 1MB → FastCDC (variable sizes)
+  - FileMeta.new/3 expects keyword list for opts: FileMeta.new(vol, path, chunks: hashes, size: size)
+  - FileIndex get/get_by_path return {:ok, file} or {:error, :not_found}, not just file or nil
+  - VolumeRegistry create/update expect keyword lists, not maps
+  - File overwrite: check FileIndex.get_by_path and delete existing file before creating new one
+  - Telemetry pattern: emit start event, perform operation, emit stop/exception based on result
+  - Compression in BlobStore: pass [compression: "zstd", compression_level: level] as options
+  - BlobStore.write_chunk returns {:ok, hash, chunk_info} with hash as second element
+  - ChunkMeta structure uses original_size, stored_size, commit_state, active_write_refs, locations
+  - Locations structure: [%{node: node(), drive_id: "default", tier: :hot}] for Phase 1
+  - For nested functions with depth > 2, extract helpers to satisfy credo nesting checks
+---
