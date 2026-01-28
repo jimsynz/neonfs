@@ -40,12 +40,16 @@ defmodule NeonFS.FUSE.Handler do
   Start the FUSE handler GenServer.
 
   Options:
-  - `:fuse_server` - Reference to the FUSE server (required for reply)
-  - `:volume` - Default volume ID (default: "default")
+  - `:volume` - Volume ID to use for this mount (default: "default")
+  - `:mount_id` - Mount ID for logging purposes
+  - `:name` - Optional name for registration (default: no registration)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+    case Keyword.get(opts, :name) do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
   end
 
   ## GenServer Callbacks

@@ -34,11 +34,15 @@ defmodule NeonFS.FUSE.HandlerTest do
           vol.id
       end
 
-    # Handler is already started by the application supervision tree
-    # Just get a reference to it
-    handler = Process.whereis(Handler)
+    # Start a handler for testing
+    {:ok, handler} = Handler.start_link(volume: volume_id)
 
     on_exit(fn ->
+      # Stop the handler
+      if Process.alive?(handler) do
+        GenServer.stop(handler)
+      end
+
       # Clean up test files
       case FileIndex.list_volume(volume_id) do
         {:ok, files} -> Enum.each(files, fn file -> FileIndex.delete(file.id) end)

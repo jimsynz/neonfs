@@ -530,3 +530,36 @@
   - FUSE write operations require merging new data with existing file content at specified offset
   - Handler processes operations asynchronously - tests need :timer.sleep for message processing
 ---
+## 2026-01-28 - Task 0021
+- What was implemented:
+  - Created `NeonFS.FUSE.MountInfo` struct to track mount information
+  - Created `NeonFS.FUSE.MountManager` GenServer to coordinate FUSE mounts
+  - Implemented mount/unmount lifecycle with Native NIF integration
+  - Added validation for mount points (exists, is directory, not already mounted)
+  - Implemented volume lookup and verification before mounting
+  - Added handler process management (start per mount, monitor for crashes)
+  - Implemented query operations: list_mounts, get_mount, get_mount_by_path
+  - Updated Handler to support per-mount instances (removed global registration)
+  - Added MountManager to neonfs_fuse supervision tree
+  - Comprehensive test suite with 17 tests (all passing)
+- Files changed:
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_info.ex` (new - mount info struct)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_manager.ex` (new - mount manager GenServer)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (updated start_link to support per-mount instances)
+  - `neonfs_fuse/lib/neon_fs/fuse/application.ex` (replaced Handler with MountManager in supervision tree)
+  - `neonfs_fuse/test/neon_fs/fuse/mount_manager_test.exs` (new - 17 comprehensive tests)
+  - `neonfs_fuse/test/neon_fs/fuse/handler_test.exs` (updated setup to start handler directly)
+  - `tasks/task_0021_elixir_fuse_mount_manager.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Each mount gets its own handler process for isolation and independent failure/recovery
+  - Handler processes should not be globally registered when multiple instances are needed
+  - MountManager tracks mounts in two maps: by mount_id and by normalized mount_point path
+  - Use `Process.monitor/1` to track handler crashes and clean up mounts automatically
+  - NIF errors like `:nif_not_loaded` need try/catch handling in GenServer calls
+  - Test setup should handle both creating new volumes and using existing ones
+  - Mount point normalization with `Path.expand/1` handles relative paths and trailing slashes
+  - Build mount options from keyword list to string list for NIF: ["auto_unmount", "allow_other", etc.]
+  - Generate unique mount IDs using `:crypto.strong_rand_bytes/1` and Base.encode16
+  - Handler tests should start their own handler instances in setup for proper isolation
+  - Tests should gracefully skip FUSE operations when NIF is not loaded (FUSE not installed)
+---

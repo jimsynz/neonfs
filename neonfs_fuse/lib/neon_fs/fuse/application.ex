@@ -10,8 +10,8 @@ defmodule NeonFS.FUSE.Application do
     children = [
       # Inode table for FUSE inode <-> path mapping
       NeonFS.FUSE.InodeTable,
-      # FUSE operation handler
-      NeonFS.FUSE.Handler
+      # Mount manager coordinates FUSE mounts and handlers
+      NeonFS.FUSE.MountManager
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
