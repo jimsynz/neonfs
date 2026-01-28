@@ -623,3 +623,28 @@
   - Cookie error messages should be user-friendly and actionable
   - EPMD lookup returns node name and port for distribution connection
 ---
+## 2026-01-28 - Task 0024
+- What was implemented:
+  - Created `NeonFS.CLI.Handler` module in neonfs_fuse for RPC handler interface
+  - Implemented 8 public functions: cluster_status, list_volumes, create_volume, delete_volume, get_volume, mount, unmount, list_mounts
+  - All functions return serializable data ({:ok, map} or {:error, reason})
+  - DateTime values converted to ISO8601 strings for serialization
+  - PIDs and references excluded from mount info responses
+  - Helper functions for cluster name extraction, uptime calculation, data conversion
+  - Comprehensive test suite with 22 tests covering all operations
+- Files changed:
+  - `neonfs_fuse/lib/neon_fs/cli/handler.ex` (new - 260 lines)
+  - `neonfs_fuse/test/neon_fs/cli/handler_test.exs` (new - 305 lines)
+  - `tasks/task_0024_cli_handler_module.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - CLI handler should be placed in neonfs_fuse (not neonfs_core) since it needs access to both VolumeRegistry and MountManager
+  - VolumeRegistry ETS tables are named `:volumes_by_id` and `:volumes_by_name` (not prefixed with registry)
+  - VolumeRegistry.create returns error strings like "volume with name 'X' already exists", not atoms
+  - VolumeRegistry.delete returns `:ok` (atom) not `{:ok, {}}` (tuple)
+  - Mount operations may fail with `{:mount_failed, "FUSE NIF not loaded"}` in environments without FUSE
+  - Test setup should check if ETS tables exist before calling `:ets.delete_all_objects` using `:ets.whereis`
+  - Serializable data must exclude PIDs, references, and convert DateTime to ISO8601 strings
+  - Map to keyword list conversion: use `String.to_existing_atom` for keys that should exist as atoms
+  - Cluster name extraction from Node.self() for Phase 1 (Phase 2 will use Ra consensus for proper cluster naming)
+  - Uptime calculation: `:erlang.statistics(:wall_clock)` returns {uptime_ms, _}, convert to seconds
+---
