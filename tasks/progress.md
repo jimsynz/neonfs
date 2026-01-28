@@ -399,3 +399,31 @@
   - Extract nested logic to private helpers to satisfy credo max nesting depth (2)
   - list_dir implementation: simple filter on list_volume results rather than complex ETS select
 ---
+## 2026-01-28 - Task 0017
+- What was implemented:
+  - Created `NeonFS.Core.Volume` struct with all configuration fields (durability, tiering, compression, verification)
+  - Helper functions: `new/2`, `update/2`, `update_stats/3`, `default_durability/0`, `default_compression/0`, `default_verification/0`
+  - Comprehensive validation with `validate/1` function checking all configuration constraints
+  - Created `NeonFS.Core.VolumeRegistry` GenServer with dual ETS table storage (by ID and by name)
+  - CRUD operations: `create/2`, `get/1`, `get_by_name/1`, `update/2`, `update_stats/2`, `delete/1`, `list/0`
+  - Delete protection: prevents deletion of volumes containing files
+  - Added VolumeRegistry to supervision tree in `NeonFS.Core.Application`
+  - Comprehensive test suite with 36 tests covering all operations and validation rules
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/volume.ex` (new - struct, validation, helpers)
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` (new - GenServer with ETS)
+  - `neonfs_core/lib/neon_fs/core/application.ex` (added VolumeRegistry to supervision)
+  - `neonfs_core/test/neon_fs/core/volume_registry_test.exs` (new - 36 comprehensive tests)
+  - `tasks/task_0017_elixir_volume_config.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Volume configuration includes durability, tiering, compression, and verification policies
+  - UUIDv7 uses `UUIDv7.generate()` not `UUID.uuid7()` for time-ordered IDs
+  - Validation pattern: chain multiple validation functions with `with` statement
+  - Credo flags redundant `:ok` return in `with` - make last validation the return value
+  - Delete operations should check for dependencies (e.g., files in volume) before allowing deletion
+  - Dual ETS tables pattern: one by ID (primary key), one by name (secondary index) for fast lookups
+  - Volume statistics (logical_size, physical_size, chunk_count) updated separately from config
+  - Default configurations provide sensible settings for quick setup (3-way replication, zstd level 3, no verification)
+  - Compression config: zstd level 1-22, min_size threshold to avoid compressing small chunks
+  - Verification config: :always/:never/:sampling with optional sampling_rate 0.0-1.0
+---
