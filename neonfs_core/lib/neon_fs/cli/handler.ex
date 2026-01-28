@@ -158,26 +158,9 @@ defmodule NeonFS.CLI.Handler do
   @spec unmount(String.t()) :: {:ok, map()} | {:error, term()}
   def unmount(mount_id_or_path) when is_binary(mount_id_or_path) do
     with_fuse_manager(fn manager ->
-      # Try mount_id first, then try path
-      result =
-        case manager.get_mount(mount_id_or_path) do
-          {:ok, _mount} ->
-            manager.unmount(mount_id_or_path)
-
-          {:error, :not_found} ->
-            case manager.get_mount_by_path(mount_id_or_path) do
-              {:ok, mount} ->
-                manager.unmount(mount.id)
-
-              {:error, :not_found} ->
-                {:error, :mount_not_found}
-            end
-        end
-
-      case result do
-        :ok -> {:ok, %{}}
-        {:error, reason} -> {:error, reason}
-      end
+      mount_id_or_path
+      |> do_unmount(manager)
+      |> format_unmount_result()
     end)
   end
 
@@ -253,6 +236,26 @@ defmodule NeonFS.CLI.Handler do
       updated_at: DateTime.to_iso8601(volume.updated_at)
     }
   end
+
+  defp do_unmount(mount_id_or_path, manager) do
+    # Try mount_id first, then try path
+    case manager.get_mount(mount_id_or_path) do
+      {:ok, _mount} ->
+        manager.unmount(mount_id_or_path)
+
+      {:error, :not_found} ->
+        case manager.get_mount_by_path(mount_id_or_path) do
+          {:ok, mount} ->
+            manager.unmount(mount.id)
+
+          {:error, :not_found} ->
+            {:error, :mount_not_found}
+        end
+    end
+  end
+
+  defp format_unmount_result(:ok), do: {:ok, %{}}
+  defp format_unmount_result({:error, reason}), do: {:error, reason}
 
   defp mount_info_to_map(mount_info) do
     # Convert mount info to map, excluding PIDs and references
