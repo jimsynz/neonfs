@@ -1,7 +1,7 @@
 # Task 0014: Implement Elixir Blob Store Wrapper Module
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,18 +10,18 @@ Not Started
 Create a higher-level Elixir wrapper around the blob store NIF that provides a clean API for the rest of the system. This module manages the blob store resource lifecycle and provides convenient functions with proper error handling and telemetry.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.BlobStore` module wrapping NIF calls
-- [ ] `start_link/1` for supervised blob store initialisation
-- [ ] GenServer holding the blob store resource
-- [ ] `write_chunk/3` - write data, return hash and chunk info
-- [ ] `read_chunk/2` - read by hash, return data
-- [ ] `read_chunk/3` - read with options (verify, decompress)
-- [ ] `delete_chunk/2` - delete by hash
-- [ ] `migrate_chunk/3` - move between tiers
-- [ ] `chunk_data/2` - split data into chunks
-- [ ] Proper error tuple returns `{:ok, result} | {:error, reason}`
-- [ ] Telemetry events for operations (latency, bytes, errors)
-- [ ] Documentation with examples
+- [x] `NeonFS.Core.BlobStore` module wrapping NIF calls
+- [x] `start_link/1` for supervised blob store initialisation
+- [x] GenServer holding the blob store resource
+- [x] `write_chunk/3` - write data, return hash and chunk info
+- [x] `read_chunk/2` - read by hash, return data
+- [x] `read_chunk/3` - read with options (verify, decompress)
+- [x] `delete_chunk/2` - delete by hash
+- [x] `migrate_chunk/3` - move between tiers
+- [x] `chunk_data/2` - split data into chunks
+- [x] Proper error tuple returns `{:ok, result} | {:error, reason}`
+- [x] Telemetry events for operations (latency, bytes, errors)
+- [x] Documentation with examples
 
 ## Module Structure
 ```elixir

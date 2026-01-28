@@ -226,3 +226,28 @@
   - Enable the feature when deploying to environments with FUSE libraries installed
   - Rustler 0.37+ auto-updated to 0.37.2 by `mix rustler.new`
 ---
+
+## 2026-01-28 - Task 0014
+- What was implemented:
+  - Created `NeonFS.Core.BlobStore` GenServer wrapping the blob store NIF
+  - Implemented all blob store operations: write_chunk, read_chunk, delete_chunk, migrate_chunk, chunk_data
+  - Added comprehensive telemetry events for all operations (start, stop, exception)
+  - Added to supervision tree in `NeonFS.Core.Application`
+  - Created comprehensive test suite with 37 tests covering all operations
+- Files changed:
+  - `neonfs_core/mix.exs` (added telemetry dependency)
+  - `neonfs_core/lib/neon_fs/core/blob_store.ex` (new module)
+  - `neonfs_core/lib/neon_fs/core/application.ex` (added BlobStore to supervision tree)
+  - `neonfs_core/test/neon_fs/core/blob_store_test.exs` (new test file)
+  - `tasks/task_0014_elixir_blob_wrapper.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - GenServer pattern provides clean API boundary and resource lifecycle management
+  - Telemetry events use `[:neonfs, :module, :operation, :phase]` naming convention
+  - Always emit start/stop/exception events with consistent metadata (duration, bytes, error)
+  - Use `System.monotonic_time()` for duration measurement, not system_time
+  - Configuration can be read from application environment with defaults
+  - Supervision tree automatically restarts GenServer on crash
+  - Pattern matching in tests (`assert {:ok, [_first | _rest]} = ...`) is cleaner than `length/1`
+  - Use aliases for nested modules to satisfy credo design checks
+  - Empty data chunking behavior may return 0 chunks depending on strategy
+---

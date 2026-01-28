@@ -7,9 +7,12 @@ defmodule NeonFS.Core.Application do
 
   @impl true
   def start(_type, _args) do
+    # Get blob store configuration from application environment
+    base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs/blobs")
+    prefix_depth = Application.get_env(:neonfs_core, :blob_store_prefix_depth, 2)
+
     children = [
-      # Starts a worker by calling: NeonFS.Core.Worker.start_link(arg)
-      # {NeonFS.Core.Worker, arg}
+      {NeonFS.Core.BlobStore, base_dir: base_dir, prefix_depth: prefix_depth}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
