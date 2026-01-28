@@ -314,3 +314,32 @@
   - MountSession uses Option<MountSession> in Mutex to allow taking ownership during unmount
   - FUSE mount operations spawn blocking thread since fuser::mount2 blocks until unmount
 ---
+## 2026-01-28 - Task 0013
+- What was implemented:
+  - Added new FUSE operations to operation.rs: Open, Release, Rename, SetAttr
+  - Added reply types: EntryOk (for create with file handle), OpenOk (for open with file handle)
+  - Implemented write operation: forwards data to Elixir, returns bytes written
+  - Implemented create operation: creates file and opens it, returns entry and file handle
+  - Implemented mkdir operation: creates directory, returns entry attributes
+  - Implemented unlink operation: removes file
+  - Implemented rmdir operation: removes directory
+  - Implemented rename operation: renames/moves files and directories
+  - Implemented setattr operation: modifies file attributes (mode, uid, gid, size, atime, mtime)
+  - Implemented open/release operations: file handle lifecycle management
+  - All operations include proper error handling with errno codes
+- Files changed:
+  - `neonfs_fuse/native/neonfs_fuse/src/operation.rs` (added 4 operations, 2 reply types, encode implementations)
+  - `neonfs_fuse/native/neonfs_fuse/src/filesystem.rs` (added 9 write operation implementations)
+  - `tasks/task_0013_fuse_write_operations.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - FUSE write operations use different reply types: ReplyWrite, ReplyCreate, ReplyEntry, ReplyEmpty, ReplyOpen, ReplyAttr
+  - create operation returns both entry attributes and file handle (via ReplyCreate)
+  - mkdir returns entry attributes but no file handle (uses ReplyEntry)
+  - unlink/rmdir/release return empty success (ReplyEmpty)
+  - setattr accepts multiple optional parameters, convert fuser::TimeOrNow to Unix timestamp tuples
+  - TimeOrNow::Now needs to be expanded to current time before sending to Elixir
+  - All FUSE operations follow same pattern: build operation, call_elixir, match reply, handle errors
+  - File handle management (open/release) is tracked on Elixir side, Rust just forwards operations
+  - SetAttr operation allows partial updates via Option<T> for each field
+  - Operations use OsStr for file names, convert to String via to_string_lossy()
+---

@@ -231,6 +231,344 @@ impl Filesystem for NeonFilesystem {
             }
         }
     }
+
+    /// Write data to a file
+    fn write(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyWrite,
+    ) {
+        let operation = FuseOperation::Write {
+            ino,
+            offset: offset as u64,
+            data: data.to_vec(),
+        };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::WriteOk { size }) => {
+                reply.written(size);
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Write error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for write operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Open a file
+    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
+        let operation = FuseOperation::Open { ino, flags };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::OpenOk { fh }) => {
+                reply.opened(fh, 0);
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Open error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for open operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Release (close) a file
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        fh: u64,
+        flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let operation = FuseOperation::Release { ino, fh, flags };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::Ok) => {
+                reply.ok();
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Release error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for release operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Create a file
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: fuser::ReplyCreate,
+    ) {
+        let name_str = name.to_string_lossy().to_string();
+
+        let operation = FuseOperation::Create {
+            parent,
+            name: name_str,
+            mode,
+        };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::EntryOk {
+                ino,
+                size,
+                kind,
+                fh,
+            }) => {
+                let attr = Self::make_file_attr(ino, size, kind);
+                reply.created(&TTL, &attr, 0, fh, 0);
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Create error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for create operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Create a directory
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let name_str = name.to_string_lossy().to_string();
+
+        let operation = FuseOperation::MkDir {
+            parent,
+            name: name_str,
+            mode,
+        };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::LookupOk { ino, size, kind }) => {
+                let attr = Self::make_file_attr(ino, size, kind);
+                reply.entry(&TTL, &attr, 0);
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Mkdir error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for mkdir operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Remove a file
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let name_str = name.to_string_lossy().to_string();
+
+        let operation = FuseOperation::Unlink {
+            parent,
+            name: name_str,
+        };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::Ok) => {
+                reply.ok();
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Unlink error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for unlink operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Remove a directory
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let name_str = name.to_string_lossy().to_string();
+
+        let operation = FuseOperation::RmDir {
+            parent,
+            name: name_str,
+        };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::Ok) => {
+                reply.ok();
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Rmdir error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for rmdir operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Rename a file or directory
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let old_name = name.to_string_lossy().to_string();
+        let new_name = newname.to_string_lossy().to_string();
+
+        let operation = FuseOperation::Rename {
+            old_parent: parent,
+            old_name,
+            new_parent: newparent,
+            new_name,
+        };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::Ok) => {
+                reply.ok();
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Rename error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for rename operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Set file attributes
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // Convert TimeOrNow to Option<(i64, u32)>
+        let atime_tuple = atime.and_then(|t| match t {
+            fuser::TimeOrNow::SpecificTime(st) => st
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|d| (d.as_secs() as i64, d.subsec_nanos())),
+            fuser::TimeOrNow::Now => {
+                let now = SystemTime::now();
+                now.duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
+            }
+        });
+
+        let mtime_tuple = mtime.and_then(|t| match t {
+            fuser::TimeOrNow::SpecificTime(st) => st
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|d| (d.as_secs() as i64, d.subsec_nanos())),
+            fuser::TimeOrNow::Now => {
+                let now = SystemTime::now();
+                now.duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
+            }
+        });
+
+        let operation = FuseOperation::SetAttr {
+            ino,
+            mode,
+            uid,
+            gid,
+            size,
+            atime: atime_tuple,
+            mtime: mtime_tuple,
+        };
+
+        match self.call_elixir(operation) {
+            Ok(FuseReply::AttrOk { ino, size, kind }) => {
+                let attr = Self::make_file_attr(ino, size, kind);
+                reply.attr(&TTL, &attr);
+            }
+            Ok(FuseReply::Error { errno }) => {
+                reply.error(errno);
+            }
+            Err(e) => {
+                log::error!("Setattr error: {}", e);
+                reply.error(e.to_errno());
+            }
+            _ => {
+                log::error!("Invalid reply for setattr operation");
+                reply.error(libc::EIO);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

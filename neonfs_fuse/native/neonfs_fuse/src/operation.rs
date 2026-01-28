@@ -39,6 +39,27 @@ pub enum FuseOperation {
     },
     /// Remove a directory
     RmDir { parent: u64, name: String },
+    /// Open a file
+    Open { ino: u64, flags: i32 },
+    /// Release (close) a file
+    Release { ino: u64, fh: u64, flags: i32 },
+    /// Rename a file or directory
+    Rename {
+        old_parent: u64,
+        old_name: String,
+        new_parent: u64,
+        new_name: String,
+    },
+    /// Set file attributes
+    SetAttr {
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+    },
 }
 
 impl FuseOperation {
@@ -103,6 +124,63 @@ impl FuseOperation {
                 map.insert("name", name.encode(env));
                 ("rmdir", map).encode(env)
             }
+            FuseOperation::Open { ino, flags } => {
+                let mut map = HashMap::new();
+                map.insert("ino", ino.encode(env));
+                map.insert("flags", flags.encode(env));
+                ("open", map).encode(env)
+            }
+            FuseOperation::Release { ino, fh, flags } => {
+                let mut map = HashMap::new();
+                map.insert("ino", ino.encode(env));
+                map.insert("fh", fh.encode(env));
+                map.insert("flags", flags.encode(env));
+                ("release", map).encode(env)
+            }
+            FuseOperation::Rename {
+                old_parent,
+                old_name,
+                new_parent,
+                new_name,
+            } => {
+                let mut map = HashMap::new();
+                map.insert("old_parent", old_parent.encode(env));
+                map.insert("old_name", old_name.encode(env));
+                map.insert("new_parent", new_parent.encode(env));
+                map.insert("new_name", new_name.encode(env));
+                ("rename", map).encode(env)
+            }
+            FuseOperation::SetAttr {
+                ino,
+                mode,
+                uid,
+                gid,
+                size,
+                atime,
+                mtime,
+            } => {
+                let mut map = HashMap::new();
+                map.insert("ino", ino.encode(env));
+                if let Some(m) = mode {
+                    map.insert("mode", m.encode(env));
+                }
+                if let Some(u) = uid {
+                    map.insert("uid", u.encode(env));
+                }
+                if let Some(g) = gid {
+                    map.insert("gid", g.encode(env));
+                }
+                if let Some(s) = size {
+                    map.insert("size", s.encode(env));
+                }
+                if let Some((sec, nsec)) = atime {
+                    map.insert("atime", (sec, nsec).encode(env));
+                }
+                if let Some((sec, nsec)) = mtime {
+                    map.insert("mtime", (sec, nsec).encode(env));
+                }
+                ("setattr", map).encode(env)
+            }
         }
     }
 }
@@ -123,6 +201,15 @@ pub enum FuseReply {
     ReadDirOk { entries: Vec<DirEntry> },
     /// Successful create with inode
     CreateOk { ino: u64 },
+    /// Successful create with entry (for create operation)
+    EntryOk {
+        ino: u64,
+        size: u64,
+        kind: FileKind,
+        fh: u64,
+    },
+    /// Successful open with file handle
+    OpenOk { fh: u64 },
     /// Successful operation with no data
     Ok,
     /// Error with errno code

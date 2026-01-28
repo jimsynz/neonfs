@@ -1,7 +1,7 @@
 # Task 0013: Implement FUSE Write Operations
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,16 +10,16 @@ Not Started
 Implement FUSE write operations: write, create, mkdir, unlink, rmdir, rename, setattr. These operations modify the filesystem and require careful coordination with the Elixir metadata layer.
 
 ## Acceptance Criteria
-- [ ] Implement `write` operation (inode, offset, data -> bytes written)
-- [ ] Implement `create` operation (parent, name, mode -> inode, handle)
-- [ ] Implement `mkdir` operation (parent, name, mode -> inode)
-- [ ] Implement `unlink` operation (parent, name -> success)
-- [ ] Implement `rmdir` operation (parent, name -> success)
-- [ ] Implement `rename` operation (old_parent, old_name, new_parent, new_name)
-- [ ] Implement `setattr` operation (inode, attributes to set)
-- [ ] Implement `open` and `release` for file handle management
-- [ ] All operations forward to Elixir for handling
-- [ ] Proper error handling and propagation
+- [x] Implement `write` operation (inode, offset, data -> bytes written)
+- [x] Implement `create` operation (parent, name, mode -> inode, handle)
+- [x] Implement `mkdir` operation (parent, name, mode -> inode)
+- [x] Implement `unlink` operation (parent, name -> success)
+- [x] Implement `rmdir` operation (parent, name -> success)
+- [x] Implement `rename` operation (old_parent, old_name, new_parent, new_name)
+- [x] Implement `setattr` operation (inode, attributes to set)
+- [x] Implement `open` and `release` for file handle management
+- [x] All operations forward to Elixir for handling
+- [x] Proper error handling and propagation
 
 ## File Handle Management
 ```rust
