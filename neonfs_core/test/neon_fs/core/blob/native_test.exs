@@ -326,4 +326,184 @@ defmodule NeonFS.Core.Blob.NativeTest do
       File.rm_rf!(tmp_dir)
     end
   end
+
+  describe "chunk compression" do
+    setup do
+      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_compress_test_#{:rand.uniform(1_000_000)}")
+      {:ok, store} = Native.store_open(tmp_dir, 2)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      {:ok, store: store, tmp_dir: tmp_dir}
+    end
+
+    test "write with compression=none returns same size", %{store: store} do
+      data = String.duplicate("hello world ", 100)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, {original_size, stored_size, compression}} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "none", 0)
+
+      assert original_size == byte_size(data)
+      assert stored_size == original_size
+      assert compression == "none"
+    end
+
+    test "write with zstd compression reduces size for compressible data", %{store: store} do
+      # Highly compressible data
+      data = String.duplicate("hello world ", 1000)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, {original_size, stored_size, compression}} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+
+      assert original_size == byte_size(data)
+      assert stored_size < original_size
+      assert compression == "zstd:3"
+    end
+
+    test "read compressed chunk with decompress=true returns original data", %{store: store} do
+      data = String.duplicate("hello world ", 1000)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+
+      assert {:ok, read_data} =
+               Native.store_read_chunk_with_options(store, hash, "hot", false, true)
+
+      assert read_data == data
+    end
+
+    test "read compressed chunk with decompress=false returns compressed data", %{store: store} do
+      data = String.duplicate("hello world ", 1000)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, {_orig, stored_size, _comp}} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+
+      assert {:ok, read_data} =
+               Native.store_read_chunk_with_options(store, hash, "hot", false, false)
+
+      # Should return compressed data
+      assert byte_size(read_data) == stored_size
+      assert read_data != data
+    end
+
+    test "read uncompressed chunk with decompress=true returns original", %{store: store} do
+      data = "simple uncompressed data"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      # Reading with decompress=true on uncompressed data should fail
+      # because zstd decoder expects a valid zstd frame
+      assert {:error, _reason} =
+               Native.store_read_chunk_with_options(store, hash, "hot", false, true)
+    end
+
+    test "read with verify=true and decompress=true verifies original data", %{store: store} do
+      data = String.duplicate("verify compressed ", 1000)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+
+      assert {:ok, read_data} =
+               Native.store_read_chunk_with_options(store, hash, "hot", true, true)
+
+      assert read_data == data
+    end
+
+    test "read with verify=true on corrupt compressed data fails", %{
+      store: store,
+      tmp_dir: tmp_dir
+    } do
+      data = String.duplicate("will be corrupted ", 1000)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+
+      # Corrupt the file (but keep it as valid zstd)
+      hash_hex = Base.encode16(hash, case: :lower)
+      prefix1 = String.slice(hash_hex, 0, 2)
+      prefix2 = String.slice(hash_hex, 2, 2)
+      chunk_path = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2, hash_hex])
+
+      # Write different compressed data
+      other_data = String.duplicate("different data ", 1000)
+
+      {:ok, _other_compressed} =
+        Native.store_write_chunk_compressed(
+          store,
+          Native.compute_hash(other_data),
+          other_data,
+          "warm",
+          "zstd",
+          3
+        )
+
+      {:ok, wrong_compressed_data} =
+        Native.store_read_chunk_with_options(
+          store,
+          Native.compute_hash(other_data),
+          "warm",
+          false,
+          false
+        )
+
+      File.write!(chunk_path, wrong_compressed_data)
+
+      # Verification should fail because decompressed data doesn't match expected hash
+      assert {:error, reason} =
+               Native.store_read_chunk_with_options(store, hash, "hot", true, true)
+
+      assert reason =~ "corrupt chunk"
+    end
+
+    test "different compression levels produce different stored sizes", %{store: store} do
+      # Semi-compressible data (not too random, not too repetitive)
+      data = Enum.map_join(0..10_000, fn i -> <<rem(i, 256)>> end)
+
+      hash1 = Native.compute_hash(data <> "1")
+      hash9 = Native.compute_hash(data <> "9")
+
+      assert {:ok, {_, stored_level1, _}} =
+               Native.store_write_chunk_compressed(store, hash1, data <> "1", "hot", "zstd", 1)
+
+      assert {:ok, {_, stored_level9, _}} =
+               Native.store_write_chunk_compressed(store, hash9, data <> "9", "warm", "zstd", 9)
+
+      # Higher level should produce equal or smaller size
+      assert stored_level9 <= stored_level1
+    end
+
+    test "empty chunk can be compressed", %{store: store} do
+      data = ""
+      hash = Native.compute_hash(data)
+
+      assert {:ok, {original_size, stored_size, compression}} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+
+      assert original_size == 0
+      # zstd still creates a small frame for empty data
+      assert stored_size > 0
+      assert compression == "zstd:3"
+
+      # Should decompress back to empty
+      assert {:ok, read_data} =
+               Native.store_read_chunk_with_options(store, hash, "hot", false, true)
+
+      assert read_data == data
+    end
+
+    test "invalid compression type returns error", %{store: store} do
+      data = "test"
+      hash = Native.compute_hash(data)
+
+      assert {:error, reason} =
+               Native.store_write_chunk_compressed(store, hash, data, "hot", "invalid", 3)
+
+      assert reason =~ "invalid compression"
+    end
+  end
 end

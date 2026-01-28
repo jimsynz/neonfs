@@ -1,11 +1,13 @@
+pub mod compression;
 pub mod error;
 pub mod hash;
 pub mod path;
 pub mod store;
 
+use crate::compression::Compression;
 use crate::hash::Hash;
 use crate::path::Tier;
-use crate::store::{BlobStore, ReadOptions, StoreConfig};
+use crate::store::{BlobStore, ReadOptions, StoreConfig, WriteOptions};
 use rustler::{Binary, Env, NewBinary, Resource, ResourceArc};
 use std::sync::Mutex;
 
@@ -58,7 +60,7 @@ fn store_open(
     }
 }
 
-/// Writes a chunk to the blob store.
+/// Writes a chunk to the blob store without compression.
 ///
 /// # Arguments
 /// * `store` - Resource reference to the blob store.
@@ -84,7 +86,53 @@ fn store_write_chunk(
         .map_err(|e| e.to_string())
 }
 
-/// Reads a chunk from the blob store without verification.
+/// Writes a chunk to the blob store with optional compression.
+///
+/// # Arguments
+/// * `store` - Resource reference to the blob store.
+/// * `hash` - 32-byte binary hash of the original (uncompressed) chunk data.
+/// * `data` - Binary data to write.
+/// * `tier` - Storage tier ("hot", "warm", or "cold").
+/// * `compression` - Compression type: "none" or "zstd".
+/// * `compression_level` - Compression level (1-19, used for zstd only).
+///
+/// # Returns
+/// A map with chunk info: original_size, stored_size, compression.
+#[rustler::nif]
+fn store_write_chunk_compressed(
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    data: Binary,
+    tier: String,
+    compression: String,
+    compression_level: i32,
+) -> Result<(usize, usize, String), String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let tier = parse_tier(&tier)?;
+    let compression = parse_compression(&compression, compression_level)?;
+
+    let options = WriteOptions {
+        compression: Some(compression),
+    };
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let chunk_info = store_guard
+        .write_chunk_with_options(&hash, data.as_slice(), tier, &options)
+        .map_err(|e| e.to_string())?;
+
+    let compression_str = match chunk_info.compression {
+        Compression::None => "none".to_string(),
+        Compression::Zstd { level } => format!("zstd:{}", level),
+    };
+
+    Ok((
+        chunk_info.original_size,
+        chunk_info.stored_size,
+        compression_str,
+    ))
+}
+
+/// Reads a chunk from the blob store without verification or decompression.
 ///
 /// # Arguments
 /// * `env` - Rustler environment.
@@ -137,7 +185,46 @@ fn store_read_chunk_verified<'a>(
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
 
-    let options = ReadOptions { verify };
+    let options = ReadOptions {
+        verify,
+        decompress: false,
+    };
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let data = store_guard
+        .read_chunk_with_options(&hash, tier, &options)
+        .map_err(|e| e.to_string())?;
+
+    let mut output = NewBinary::new(env, data.len());
+    output.copy_from_slice(&data);
+    Ok(output.into())
+}
+
+/// Reads a chunk from the blob store with optional verification and decompression.
+///
+/// # Arguments
+/// * `env` - Rustler environment.
+/// * `store` - Resource reference to the blob store.
+/// * `hash` - 32-byte binary hash of the original (uncompressed) chunk data.
+/// * `tier` - Storage tier ("hot", "warm", or "cold").
+/// * `verify` - If true, verify the data matches the hash after reading/decompression.
+/// * `decompress` - If true, decompress the data after reading.
+///
+/// # Returns
+/// The chunk data as a binary, or an error tuple.
+#[rustler::nif]
+fn store_read_chunk_with_options<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    tier: String,
+    verify: bool,
+    decompress: bool,
+) -> Result<Binary<'a>, String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let tier = parse_tier(&tier)?;
+
+    let options = ReadOptions { verify, decompress };
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
     let data = store_guard
@@ -217,6 +304,18 @@ fn parse_tier(tier: &str) -> Result<Tier, String> {
         _ => Err(format!(
             "invalid tier: expected 'hot', 'warm', or 'cold', got '{}'",
             tier
+        )),
+    }
+}
+
+/// Parses compression string into a Compression enum.
+fn parse_compression(compression: &str, level: i32) -> Result<Compression, String> {
+    match compression {
+        "none" => Ok(Compression::None),
+        "zstd" => Ok(Compression::Zstd { level }),
+        _ => Err(format!(
+            "invalid compression: expected 'none' or 'zstd', got '{}'",
+            compression
         )),
     }
 }

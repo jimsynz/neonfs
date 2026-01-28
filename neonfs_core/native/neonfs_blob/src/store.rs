@@ -4,6 +4,7 @@
 //! and reading them back. Writes are atomic (write to temp file, then rename)
 //! to prevent partial chunks.
 
+use crate::compression::{compress, decompress, Compression};
 use crate::error::StoreError;
 use crate::hash::{sha256, Hash};
 use crate::path::{chunk_path, ensure_parent_dirs, Tier};
@@ -31,13 +32,65 @@ pub struct ReadOptions {
     /// If true, verify the chunk data matches the expected hash after reading.
     /// This adds CPU overhead but detects corruption.
     pub verify: bool,
+    /// If true, decompress the data after reading.
+    /// The Rust layer doesn't track compression state - the caller must know
+    /// whether the chunk was compressed.
+    pub decompress: bool,
 }
 
 impl ReadOptions {
     /// Creates options with verification enabled.
     pub fn with_verify() -> Self {
-        Self { verify: true }
+        Self {
+            verify: true,
+            decompress: false,
+        }
     }
+
+    /// Creates options with decompression enabled.
+    pub fn with_decompress() -> Self {
+        Self {
+            verify: false,
+            decompress: true,
+        }
+    }
+
+    /// Creates options with both verification and decompression enabled.
+    pub fn with_verify_and_decompress() -> Self {
+        Self {
+            verify: true,
+            decompress: true,
+        }
+    }
+}
+
+/// Options for writing chunks to the store.
+#[derive(Debug, Clone, Default)]
+pub struct WriteOptions {
+    /// Compression to apply to the chunk data before writing.
+    pub compression: Option<Compression>,
+}
+
+impl WriteOptions {
+    /// Creates options with the specified compression.
+    pub fn with_compression(compression: Compression) -> Self {
+        Self {
+            compression: Some(compression),
+        }
+    }
+}
+
+/// Information about a written chunk.
+#[derive(Debug, Clone)]
+pub struct ChunkInfo {
+    /// The hash of the original (uncompressed) data.
+    pub hash: Hash,
+    /// The size of the original data in bytes.
+    pub original_size: usize,
+    /// The size of the stored data in bytes (may differ if compressed).
+    pub stored_size: usize,
+    /// The compression applied to the chunk.
+    pub compression: Compression,
 }
 
 /// A content-addressed blob store.
@@ -88,7 +141,7 @@ impl BlobStore {
         chunk_path(&self.base_dir, hash, tier, self.config.prefix_depth)
     }
 
-    /// Writes a chunk to the store atomically.
+    /// Writes a chunk to the store atomically without compression.
     ///
     /// The chunk is first written to a temporary file, then renamed to its
     /// final location. This ensures that partial writes never leave corrupt
@@ -106,15 +159,58 @@ impl BlobStore {
     /// If a chunk with the same hash already exists, this operation is idempotent
     /// (the existing chunk is replaced with identical content).
     pub fn write_chunk(&self, hash: &Hash, data: &[u8], tier: Tier) -> Result<(), StoreError> {
+        self.write_chunk_with_options(hash, data, tier, &WriteOptions::default())?;
+        Ok(())
+    }
+
+    /// Writes a chunk to the store atomically with configurable options.
+    ///
+    /// The chunk is first written to a temporary file, then renamed to its
+    /// final location. Compression is applied if specified in options.
+    ///
+    /// # Arguments
+    /// * `hash` - The SHA-256 hash of the original (uncompressed) chunk data.
+    /// * `data` - The chunk data to write (will be compressed if options specify).
+    /// * `tier` - The storage tier for this chunk.
+    /// * `options` - Options controlling write behavior (e.g., compression).
+    ///
+    /// # Returns
+    /// `ChunkInfo` with details about the written chunk.
+    ///
+    /// # Errors
+    /// Returns an error if the write or compression fails.
+    pub fn write_chunk_with_options(
+        &self,
+        hash: &Hash,
+        data: &[u8],
+        tier: Tier,
+        options: &WriteOptions,
+    ) -> Result<ChunkInfo, StoreError> {
         let final_path = self.chunk_path(hash, tier);
         let temp_path = self.temp_path(&final_path);
+        let original_size = data.len();
+
+        // Apply compression if specified
+        let (data_to_write, compression) = if let Some(ref compression) = options.compression {
+            if compression.is_none() {
+                (data.to_vec(), Compression::None)
+            } else {
+                let compressed = compress(data, compression)
+                    .map_err(|e| StoreError::io_error(&final_path, e))?;
+                (compressed, compression.clone())
+            }
+        } else {
+            (data.to_vec(), Compression::None)
+        };
+
+        let stored_size = data_to_write.len();
 
         // Ensure parent directories exist
         ensure_parent_dirs(&final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
 
         // Write to temporary file
         let mut file = File::create(&temp_path).map_err(|e| StoreError::io_error(&temp_path, e))?;
-        file.write_all(data)
+        file.write_all(&data_to_write)
             .map_err(|e| StoreError::io_error(&temp_path, e))?;
         file.sync_all()
             .map_err(|e| StoreError::io_error(&temp_path, e))?;
@@ -122,7 +218,12 @@ impl BlobStore {
         // Atomic rename to final path
         fs::rename(&temp_path, &final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
 
-        Ok(())
+        Ok(ChunkInfo {
+            hash: *hash,
+            original_size,
+            stored_size,
+            compression,
+        })
     }
 
     /// Reads a chunk from the store without verification.
@@ -147,12 +248,16 @@ impl BlobStore {
     /// # Arguments
     /// * `hash` - The SHA-256 hash of the chunk to read.
     /// * `tier` - The storage tier to read from.
-    /// * `options` - Options controlling read behavior (e.g., verification).
+    /// * `options` - Options controlling read behavior (e.g., verification, decompression).
     ///
     /// # Errors
     /// Returns `ChunkNotFound` if the chunk does not exist.
-    /// Returns `IoError` if the read fails.
+    /// Returns `IoError` if the read or decompression fails.
     /// Returns `CorruptChunk` if verification is enabled and the data doesn't match.
+    ///
+    /// # Note
+    /// When both `decompress` and `verify` are enabled, verification is performed
+    /// on the decompressed data (which should match the original hash).
     pub fn read_chunk_with_options(
         &self,
         hash: &Hash,
@@ -165,9 +270,17 @@ impl BlobStore {
             return Err(StoreError::ChunkNotFound(hash.to_hex()));
         }
 
-        let data = fs::read(&path).map_err(|e| StoreError::io_error(&path, e))?;
+        let raw_data = fs::read(&path).map_err(|e| StoreError::io_error(&path, e))?;
+
+        // Optionally decompress the data
+        let data = if options.decompress {
+            decompress(&raw_data).map_err(|e| StoreError::io_error(&path, e))?
+        } else {
+            raw_data
+        };
 
         // Optionally verify the data matches the expected hash
+        // Verification is done on the decompressed data (original content)
         if options.verify {
             let actual_hash = sha256(&data);
             if &actual_hash != hash {
@@ -387,12 +500,40 @@ mod tests {
     fn test_read_options_default() {
         let options = ReadOptions::default();
         assert!(!options.verify);
+        assert!(!options.decompress);
     }
 
     #[test]
     fn test_read_options_with_verify() {
         let options = ReadOptions::with_verify();
         assert!(options.verify);
+        assert!(!options.decompress);
+    }
+
+    #[test]
+    fn test_read_options_with_decompress() {
+        let options = ReadOptions::with_decompress();
+        assert!(!options.verify);
+        assert!(options.decompress);
+    }
+
+    #[test]
+    fn test_read_options_with_verify_and_decompress() {
+        let options = ReadOptions::with_verify_and_decompress();
+        assert!(options.verify);
+        assert!(options.decompress);
+    }
+
+    #[test]
+    fn test_write_options_default() {
+        let options = WriteOptions::default();
+        assert!(options.compression.is_none());
+    }
+
+    #[test]
+    fn test_write_options_with_compression() {
+        let options = WriteOptions::with_compression(Compression::zstd(5));
+        assert_eq!(options.compression, Some(Compression::Zstd { level: 5 }));
     }
 
     #[test]
@@ -488,5 +629,176 @@ mod tests {
         // read_chunk should return corrupt data without error (no verification)
         let read_data = store.read_chunk(&hash, Tier::Hot).unwrap();
         assert_eq!(read_data, corrupt_data);
+    }
+
+    // Compression tests
+
+    #[test]
+    fn test_write_compressed_read_decompressed_returns_original() {
+        let (store, _temp) = create_test_store();
+        let data = b"hello world, this is some test data for compression";
+        let hash = sha256(data);
+
+        // Write with compression
+        let write_options = WriteOptions::with_compression(Compression::zstd(3));
+        let chunk_info = store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_options)
+            .unwrap();
+
+        assert_eq!(chunk_info.original_size, data.len());
+        assert_eq!(chunk_info.hash, hash);
+
+        // Read with decompression
+        let read_options = ReadOptions::with_decompress();
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_options)
+            .unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_write_uncompressed_read_returns_original() {
+        let (store, _temp) = create_test_store();
+        let data = b"uncompressed test data";
+        let hash = sha256(data);
+
+        // Write without compression
+        let write_options = WriteOptions::default();
+        let chunk_info = store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_options)
+            .unwrap();
+
+        assert_eq!(chunk_info.original_size, data.len());
+        assert_eq!(chunk_info.stored_size, data.len());
+        assert_eq!(chunk_info.compression, Compression::None);
+
+        // Read without decompression
+        let read_data = store.read_chunk(&hash, Tier::Hot).unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_compression_reduces_size_for_compressible_data() {
+        let (store, _temp) = create_test_store();
+        // Create highly compressible data (repeated pattern)
+        let data: Vec<u8> = (0..10000).map(|_| b'a').collect();
+        let hash = sha256(&data);
+
+        let write_options = WriteOptions::with_compression(Compression::zstd(3));
+        let chunk_info = store
+            .write_chunk_with_options(&hash, &data, Tier::Hot, &write_options)
+            .unwrap();
+
+        // Stored size should be smaller than original
+        assert!(chunk_info.stored_size < chunk_info.original_size);
+    }
+
+    #[test]
+    fn test_compression_different_levels() {
+        let (store, _temp) = create_test_store();
+        let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
+        let hash = sha256(&data);
+
+        // Write with level 1
+        let write_options_1 = WriteOptions::with_compression(Compression::zstd(1));
+        let chunk_info_1 = store
+            .write_chunk_with_options(&hash, &data, Tier::Hot, &write_options_1)
+            .unwrap();
+
+        // Delete and write again with level 9
+        store.delete_chunk(&hash, Tier::Hot).unwrap();
+        let write_options_9 = WriteOptions::with_compression(Compression::zstd(9));
+        let chunk_info_9 = store
+            .write_chunk_with_options(&hash, &data, Tier::Hot, &write_options_9)
+            .unwrap();
+
+        // Higher level typically produces smaller or equal output
+        assert!(chunk_info_9.stored_size <= chunk_info_1.stored_size);
+    }
+
+    #[test]
+    fn test_compressed_chunk_with_verification() {
+        let (store, _temp) = create_test_store();
+        let data = b"data for compression and verification";
+        let hash = sha256(data);
+
+        // Write compressed
+        let write_options = WriteOptions::with_compression(Compression::zstd(3));
+        store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_options)
+            .unwrap();
+
+        // Read with decompression and verification
+        let read_options = ReadOptions::with_verify_and_decompress();
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_options)
+            .unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_chunk_info_fields() {
+        let (store, _temp) = create_test_store();
+        let data = b"test data for chunk info";
+        let hash = sha256(data);
+
+        let write_options = WriteOptions::with_compression(Compression::zstd(5));
+        let chunk_info = store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_options)
+            .unwrap();
+
+        assert_eq!(chunk_info.hash, hash);
+        assert_eq!(chunk_info.original_size, data.len());
+        assert_eq!(chunk_info.compression, Compression::Zstd { level: 5 });
+        // stored_size can vary
+        assert!(chunk_info.stored_size > 0);
+    }
+
+    #[test]
+    fn test_compression_with_empty_data() {
+        let (store, _temp) = create_test_store();
+        let data = b"";
+        let hash = sha256(data);
+
+        let write_options = WriteOptions::with_compression(Compression::zstd(3));
+        let chunk_info = store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_options)
+            .unwrap();
+
+        assert_eq!(chunk_info.original_size, 0);
+
+        // Read with decompression
+        let read_options = ReadOptions::with_decompress();
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_options)
+            .unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_compression_with_large_data() {
+        let (store, _temp) = create_test_store();
+        // 1MB of data
+        let data: Vec<u8> = (0..1_048_576).map(|i| (i % 256) as u8).collect();
+        let hash = sha256(&data);
+
+        let write_options = WriteOptions::with_compression(Compression::zstd(3));
+        let chunk_info = store
+            .write_chunk_with_options(&hash, &data, Tier::Hot, &write_options)
+            .unwrap();
+
+        assert_eq!(chunk_info.original_size, 1_048_576);
+
+        // Read with decompression
+        let read_options = ReadOptions::with_decompress();
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_options)
+            .unwrap();
+
+        assert_eq!(read_data, data);
     }
 }

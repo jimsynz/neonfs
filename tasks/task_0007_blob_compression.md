@@ -1,7 +1,7 @@
 # Task 0007: Implement Chunk Compression
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,16 +10,16 @@ Not Started
 Add zstd compression support to the blob store. Compression is applied after hashing (hash is always of original data) and before writing to disk. Decompression happens after reading and before returning data. The compression state must be tracked so reads know whether to decompress.
 
 ## Acceptance Criteria
-- [ ] Add `zstd` dependency to Cargo.toml
-- [ ] `Compression` enum: `None`, `Zstd { level: i32 }`
-- [ ] `WriteOptions` struct with `compression: Option<Compression>` field
-- [ ] `write_chunk_with_options(hash, data, tier, options) -> Result<ChunkInfo>`
-- [ ] `ChunkInfo` struct: `{ hash, original_size, stored_size, compression }`
-- [ ] Compressed chunks stored with same path (no filename change)
-- [ ] `ReadOptions` extended with `compressed: bool` to indicate if decompression needed
-- [ ] Compression level configurable (zstd levels 1-19, default 3)
-- [ ] NIF functions accept compression options
-- [ ] Unit tests for compression roundtrip
+- [x] Add `zstd` dependency to Cargo.toml
+- [x] `Compression` enum: `None`, `Zstd { level: i32 }`
+- [x] `WriteOptions` struct with `compression: Option<Compression>` field
+- [x] `write_chunk_with_options(hash, data, tier, options) -> Result<ChunkInfo>`
+- [x] `ChunkInfo` struct: `{ hash, original_size, stored_size, compression }`
+- [x] Compressed chunks stored with same path (no filename change)
+- [x] `ReadOptions` extended with `decompress: bool` to indicate if decompression needed
+- [x] Compression level configurable (zstd levels 1-19, default 3)
+- [x] NIF functions accept compression options
+- [x] Unit tests for compression roundtrip
 
 ## Important Design Note
 The Rust layer does NOT track which chunks are compressed - it's stateless storage. The Elixir metadata layer tracks compression state per-chunk and passes the `compressed` flag on reads. This keeps Rust simple.

@@ -204,4 +204,98 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec store_chunk_exists(store(), hash(), tier()) :: {:ok, boolean()} | {:error, String.t()}
   def store_chunk_exists(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
+
+  @type compression :: String.t()
+  @type chunk_info :: {non_neg_integer(), non_neg_integer(), compression()}
+
+  @doc """
+  Writes a chunk to the blob store with optional compression.
+
+  The hash is computed on the original (uncompressed) data. If compression is
+  enabled, the data is compressed before writing to disk, but the hash still
+  refers to the original data for content addressing.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the original (uncompressed) chunk data
+    - `data` - Binary data to write
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+    - `compression` - Compression type: "none" or "zstd"
+    - `compression_level` - Compression level (1-19, used for zstd only)
+
+  ## Returns
+    - `{:ok, {original_size, stored_size, compression}}` - On success, where:
+      - `original_size` - Size of the original uncompressed data
+      - `stored_size` - Size of the data as stored on disk (compressed or not)
+      - `compression` - The compression used ("none" or "zstd:N")
+    - `{:error, reason}` - If the write fails
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> data = String.duplicate("hello world", 1000)
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
+      iex> {:ok, {orig, stored, comp}} = NeonFS.Core.Blob.Native.store_write_chunk_compressed(
+      ...>   store, hash, data, "hot", "zstd", 3
+      ...> )
+      iex> stored < orig
+      true
+      iex> comp
+      "zstd:3"
+
+  """
+  @spec store_write_chunk_compressed(
+          store(),
+          hash(),
+          binary(),
+          tier(),
+          compression(),
+          integer()
+        ) :: {:ok, chunk_info()} | {:error, String.t()}
+  def store_write_chunk_compressed(_store, _hash, _data, _tier, _compression, _compression_level),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Reads a chunk from the blob store with optional verification and decompression.
+
+  This is the most flexible read function, supporting both integrity verification
+  and transparent decompression.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the original (uncompressed) chunk data
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+    - `verify` - If true, verify the data matches the expected hash after decompression
+    - `decompress` - If true, decompress the data after reading
+
+  ## Returns
+    - `{:ok, data}` - The chunk data as a binary (decompressed if requested)
+    - `{:error, reason}` - If the chunk does not exist, read fails, decompression
+      fails, or verification fails
+
+  ## Notes
+    - When both `verify` and `decompress` are true, verification happens AFTER
+      decompression since the hash is of the original uncompressed data.
+    - The Elixir metadata layer tracks which chunks are compressed and passes
+      the appropriate `decompress` flag.
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> data = String.duplicate("hello world", 1000)
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk_compressed(
+      ...>   store, hash, data, "hot", "zstd", 3
+      ...> )
+      iex> {:ok, read_data} = NeonFS.Core.Blob.Native.store_read_chunk_with_options(
+      ...>   store, hash, "hot", true, true
+      ...> )
+      iex> read_data == data
+      true
+
+  """
+  @spec store_read_chunk_with_options(store(), hash(), tier(), boolean(), boolean()) ::
+          {:ok, binary()} | {:error, String.t()}
+  def store_read_chunk_with_options(_store, _hash, _tier, _verify, _decompress),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

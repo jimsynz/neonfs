@@ -127,3 +127,31 @@
   - Test corruption by manually writing corrupt data to the chunk path using `fs::write`
   - In Elixir tests, construct chunk path from hash hex: `prefix1/prefix2/hash_hex`
 ---
+
+## 2026-01-28 - Task 0007
+- What was implemented:
+  - Compression module in Rust at `neonfs_blob/src/compression.rs`
+  - `Compression` enum: `None`, `Zstd { level: i32 }` with serde serialization
+  - `compress()` and `decompress()` functions using zstd library
+  - `WriteOptions` struct with optional compression configuration
+  - `ChunkInfo` struct: `{ hash, original_size, stored_size, compression }`
+  - `write_chunk_with_options()` method supporting optional compression
+  - Extended `ReadOptions` with `decompress: bool` flag
+  - Updated `read_chunk_with_options()` to support decompression
+  - NIF functions: `store_write_chunk_compressed/6`, `store_read_chunk_with_options/5`
+  - Comprehensive Rust tests for compression roundtrip, size reduction, different levels
+  - Elixir tests for compression read/write with verify and decompress options
+- Files changed:
+  - `neonfs_core/native/neonfs_blob/Cargo.toml` (added zstd dependency)
+  - `neonfs_core/native/neonfs_blob/src/compression.rs` (new module)
+  - `neonfs_core/native/neonfs_blob/src/store.rs` (added WriteOptions, ChunkInfo, compression support)
+  - `neonfs_core/native/neonfs_blob/src/lib.rs` (added compression module, new NIFs)
+  - `neonfs_core/lib/neon_fs/core/blob/native.ex` (added compression NIF bindings)
+  - `neonfs_core/test/neon_fs/core/blob/native_test.exs` (added compression tests)
+- **Learnings for future iterations:**
+  - Use `#[derive(Default)]` with `#[default]` attribute on enum variant instead of manual impl
+  - Clippy catches clone on Copy types - use `*hash` dereference instead of `hash.clone()`
+  - Hash is always computed on original (uncompressed) data for content addressing
+  - Rust layer is stateless - Elixir metadata tracks which chunks are compressed
+  - zstd creates a small frame even for empty data, so stored_size > 0 for empty chunks
+---
