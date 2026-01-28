@@ -49,6 +49,10 @@ pub enum CliError {
     #[allow(dead_code)]
     DaemonOperation(String),
 
+    /// Term conversion error
+    #[error("Term conversion error: {0}")]
+    TermConversionError(String),
+
     // General errors
     /// Invalid command-line arguments
     #[error("Invalid argument: {0}")]

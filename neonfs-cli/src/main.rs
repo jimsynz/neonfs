@@ -4,6 +4,7 @@ mod commands;
 mod daemon;
 mod error;
 mod output;
+mod term;
 
 use clap::{Parser, Subcommand};
 use commands::{

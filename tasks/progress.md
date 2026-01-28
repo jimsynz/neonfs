@@ -656,3 +656,36 @@
   - Cluster name extraction from Node.self() for Phase 1 (Phase 2 will use Ra consensus for proper cluster naming)
   - Uptime calculation: `:erlang.statistics(:wall_clock)` returns {uptime_ms, _}, convert to seconds
 ---
+## 2026-01-28 - Task 0025
+- What was implemented:
+  - Created term conversion module (`src/term/mod.rs`) for Erlang term to Rust type conversion
+  - Created term types module (`src/term/types.rs`) with response structures (ClusterStatus, VolumeInfo, MountInfo)
+  - Implemented cluster status command calling `NeonFS.CLI.Handler.cluster_status/0` via RPC
+  - Implemented volume commands: list, create, delete, show (info) via RPC
+  - Implemented mount commands: mount, unmount, list via RPC
+  - All commands support both table and JSON output formats
+  - Added proper error handling with error message extraction from Erlang responses
+  - Tokio runtime integration for async daemon calls from synchronous CLI
+- Files changed:
+  - `neonfs-cli/src/main.rs` (added term module)
+  - `neonfs-cli/src/term/mod.rs` (new - 174 lines, term conversion utilities)
+  - `neonfs-cli/src/term/types.rs` (new - 159 lines, response types)
+  - `neonfs-cli/src/error.rs` (added TermConversionError variant)
+  - `neonfs-cli/src/commands/cluster.rs` (implemented status command with RPC)
+  - `neonfs-cli/src/commands/volume.rs` (implemented list, create, delete, show commands with RPC)
+  - `neonfs-cli/src/commands/mount.rs` (implemented mount, unmount, list commands with RPC)
+  - `tasks/task_0025_cli_commands_implementation.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - eetf 0.6 BigInteger doesn't have to_i64/to_u64 methods - return error for unsupported large integers
+  - eetf 0.6 doesn't have Term::Nil variant - use List with empty elements instead
+  - Tokio runtime can be created synchronously with `Runtime::new()` and used with `block_on()` for async calls
+  - Erlang RPC responses are `{:ok, value}` or `{:error, reason}` tuples - need helper functions to unwrap
+  - Extract error messages with helper: check tuple structure, extract string from second element
+  - Volume creation needs JSON-encoded config map sent as Binary term to Elixir
+  - Rust ownership rules: clone strings before adding to table rows to avoid borrow checker issues
+  - Iterate over references (`&volumes`) when values are needed after the loop
+  - Remove old placeholder tests that require daemon - integration tests should be separate
+  - Term conversion pattern: create conversion utilities, define response types, parse in command handlers
+  - CLI table output uses column headers (uppercase) for consistency
+  - Human-readable formatting: uptime_string() and format_size() helper methods on response types
+---

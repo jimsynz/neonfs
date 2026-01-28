@@ -1,9 +1,12 @@
 //! Volume management commands
 
+use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
+use crate::term::types::VolumeInfo;
+use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
-use serde::Serialize;
+use eetf::{Binary, Term};
 
 /// Volume management subcommands
 #[derive(Debug, Subcommand)]
@@ -42,14 +45,6 @@ pub enum VolumeCommand {
     },
 }
 
-#[derive(Debug, Serialize)]
-struct VolumeInfo {
-    name: String,
-    replicas: u32,
-    compression: String,
-    size: String,
-}
-
 impl VolumeCommand {
     /// Execute the volume command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
@@ -66,43 +61,53 @@ impl VolumeCommand {
     }
 
     fn list(&self, format: OutputFormat) -> Result<()> {
-        // Placeholder implementation
-        let volumes = vec![
-            VolumeInfo {
-                name: "data".to_string(),
-                replicas: 3,
-                compression: "zstd".to_string(),
-                size: "10.5 GB".to_string(),
-            },
-            VolumeInfo {
-                name: "backup".to_string(),
-                replicas: 2,
-                compression: "none".to_string(),
-                size: "5.2 GB".to_string(),
-            },
-        ];
+        // Create tokio runtime for async calls
+        let runtime = tokio::runtime::Runtime::new()?;
 
+        // Connect to daemon and list volumes
+        let result = runtime.block_on(async {
+            let conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "list_volumes", vec![])
+                .await
+        })?;
+
+        // Check for error response
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        // Unwrap {:ok, value} tuple
+        let data = unwrap_ok_tuple(result)?;
+
+        // Parse list of volumes
+        let volume_terms = term_to_list(&data)?;
+        let volumes: Result<Vec<VolumeInfo>> = volume_terms
+            .into_iter()
+            .map(VolumeInfo::from_term)
+            .collect();
+        let volumes = volumes?;
+
+        // Format output
         match format {
             OutputFormat::Json => {
                 println!("{}", json::format(&volumes)?);
             }
             OutputFormat::Table => {
                 let mut tbl = table::Table::new(vec![
-                    "Name".to_string(),
-                    "Replicas".to_string(),
-                    "Compression".to_string(),
-                    "Size".to_string(),
+                    "NAME".to_string(),
+                    "SIZE".to_string(),
+                    "CHUNKS".to_string(),
+                    "DURABILITY".to_string(),
                 ]);
-                for vol in volumes {
+                for vol in &volumes {
                     tbl.add_row(vec![
-                        vol.name,
-                        vol.replicas.to_string(),
-                        vol.compression,
-                        vol.size,
+                        vol.name.clone(),
+                        VolumeInfo::format_size(vol.logical_size),
+                        vol.chunk_count.to_string(),
+                        vol.durability_string(),
                     ]);
                 }
                 print!("{}", tbl.render()?);
-                println!("(Placeholder data - not yet implemented)");
             }
         }
         Ok(())
@@ -115,86 +120,152 @@ impl VolumeCommand {
         compression: &str,
         format: OutputFormat,
     ) -> Result<()> {
-        // Placeholder implementation
+        // Create tokio runtime for async calls
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        // Build volume configuration
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+        let config_term = Term::Binary(Binary {
+            bytes: serde_json::to_vec(&serde_json::json!({
+                "durability": {
+                    "type": "replicate",
+                    "factor": replicas,
+                    "min_copies": std::cmp::min(replicas, 2)
+                },
+                "compression": {
+                    "algorithm": compression,
+                    "level": 3,
+                    "min_size": 4096
+                }
+            }))?,
+        });
+
+        // Connect to daemon and create volume
+        let result = runtime.block_on(async {
+            let conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "create_volume",
+                vec![name_term, config_term],
+            )
+            .await
+        })?;
+
+        // Check for error response
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        // Unwrap {:ok, volume} tuple and parse
+        let data = unwrap_ok_tuple(result)?;
+        let volume = VolumeInfo::from_term(data)?;
+
+        // Format output
         match format {
             OutputFormat::Json => {
-                let result = serde_json::json!({
-                    "status": "success",
-                    "volume": name,
-                    "replicas": replicas,
-                    "compression": compression,
-                    "message": "Volume created (placeholder)"
-                });
-                println!("{}", json::format(&result)?);
+                println!("{}", json::format(&volume)?);
             }
             OutputFormat::Table => {
-                println!("Creating volume '{}'", name);
-                println!("  Replicas: {}", replicas);
-                println!("  Compression: {}", compression);
-                println!("(Placeholder - not yet implemented)");
+                println!("✓ Volume '{}' created successfully", volume.name);
+                println!("  ID: {}", volume.id);
+                println!("  Durability: {}", volume.durability_string());
             }
         }
         Ok(())
     }
 
-    fn delete(&self, name: &str, force: bool, format: OutputFormat) -> Result<()> {
-        // Placeholder implementation
+    fn delete(&self, name: &str, _force: bool, format: OutputFormat) -> Result<()> {
+        // Create tokio runtime for async calls
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        // Connect to daemon and delete volume
+        let result = runtime.block_on(async {
+            let conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "delete_volume",
+                vec![name_term],
+            )
+            .await
+        })?;
+
+        // Check for error response
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        // Format output
         match format {
             OutputFormat::Json => {
-                let result = serde_json::json!({
+                let response = serde_json::json!({
                     "status": "success",
                     "volume": name,
-                    "force": force,
-                    "message": "Volume deleted (placeholder)"
+                    "message": "Volume deleted"
                 });
-                println!("{}", json::format(&result)?);
+                println!("{}", json::format(&response)?);
             }
             OutputFormat::Table => {
-                println!("Deleting volume '{}'", name);
-                if force {
-                    println!("  Force: yes");
-                }
-                println!("(Placeholder - not yet implemented)");
+                println!("✓ Volume '{}' deleted successfully", name);
             }
         }
         Ok(())
     }
 
     fn show(&self, name: &str, format: OutputFormat) -> Result<()> {
-        // Placeholder implementation
-        let volume = VolumeInfo {
-            name: name.to_string(),
-            replicas: 3,
-            compression: "zstd".to_string(),
-            size: "10.5 GB".to_string(),
-        };
+        // Create tokio runtime for async calls
+        let runtime = tokio::runtime::Runtime::new()?;
 
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        // Connect to daemon and get volume info
+        let result = runtime.block_on(async {
+            let conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "get_volume", vec![name_term])
+                .await
+        })?;
+
+        // Check for error response
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        // Unwrap {:ok, volume} tuple
+        let data = unwrap_ok_tuple(result)?;
+        let volume = VolumeInfo::from_term(data)?;
+
+        // Format output
         match format {
             OutputFormat::Json => {
                 println!("{}", json::format(&volume)?);
             }
             OutputFormat::Table => {
                 let mut tbl = table::Table::new(vec!["Property".to_string(), "Value".to_string()]);
-                tbl.add_row(vec!["Name".to_string(), volume.name]);
-                tbl.add_row(vec!["Replicas".to_string(), volume.replicas.to_string()]);
-                tbl.add_row(vec!["Compression".to_string(), volume.compression]);
-                tbl.add_row(vec!["Size".to_string(), volume.size]);
+                tbl.add_row(vec!["Name".to_string(), volume.name.clone()]);
+                tbl.add_row(vec!["ID".to_string(), volume.id.clone()]);
+                tbl.add_row(vec![
+                    "Logical Size".to_string(),
+                    VolumeInfo::format_size(volume.logical_size),
+                ]);
+                tbl.add_row(vec![
+                    "Physical Size".to_string(),
+                    VolumeInfo::format_size(volume.physical_size),
+                ]);
+                tbl.add_row(vec!["Chunks".to_string(), volume.chunk_count.to_string()]);
+                tbl.add_row(vec!["Durability".to_string(), volume.durability_string()]);
                 print!("{}", tbl.render()?);
-                println!("(Placeholder data - not yet implemented)");
             }
         }
         Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_volume_list_placeholder() {
-        let cmd = VolumeCommand::List;
-        let result = cmd.execute(OutputFormat::Table);
-        assert!(result.is_ok());
-    }
-}
+// Tests for volume commands would require a running daemon (integration tests)
+// Unit tests for output formatting are in the output module

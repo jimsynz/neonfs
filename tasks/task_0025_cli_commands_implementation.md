@@ -1,7 +1,7 @@
 # Task 0025: Implement CLI Commands
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
