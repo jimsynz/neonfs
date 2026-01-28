@@ -186,10 +186,21 @@ defmodule NeonFS.CLI.Handler do
   # Private helper functions
 
   # Conditionally execute FUSE operations if the application is available
+  #
+  # TODO: Phase 1 uses Code.ensure_loaded?/1 which only checks the local VM.
+  # Per spec/architecture.md, neonfs_core and neonfs_fuse are separate Erlang nodes
+  # (e.g., neonfs_core@localhost and neonfs_fuse@localhost) that communicate via
+  # Erlang distribution. For proper multi-node/container deployment, this should use:
+  #
+  #   :rpc.call(fuse_node_name(), NeonFS.FUSE.MountManager, function, args)
+  #
+  # where fuse_node_name() returns the configured FUSE node name (from config or
+  # service discovery). The current implementation works for Phase 1 where both apps
+  # run in the same node, but will need updating for separate container deployment.
   defp with_fuse_manager(fun) do
     case Code.ensure_loaded?(NeonFS.FUSE.MountManager) do
       true ->
-        # FUSE application is loaded, execute the function
+        # FUSE application is loaded in local VM, execute the function
         fun.(NeonFS.FUSE.MountManager)
 
       false ->

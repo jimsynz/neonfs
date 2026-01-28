@@ -641,7 +641,10 @@
 - **Learnings for future iterations:**
   - CLI handler belongs in neonfs_core (not neonfs_fuse) - core commands always available, mount commands conditional
   - Mount operations are node-local and FUSE-specific, not cluster-wide operations
-  - Use `Code.ensure_loaded?/1` to check if module is available at runtime without creating compile-time dependency
+  - **IMPORTANT - Phase 1 Limitation**: Current implementation uses `Code.ensure_loaded?/1` to check if FUSE module is available in the local VM
+  - **Future architecture**: Per spec/architecture.md, neonfs_core and neonfs_fuse are separate Erlang nodes (e.g., neonfs_core@localhost and neonfs_fuse@localhost) communicating via Erlang distribution/RPC
+  - **TODO for multi-node deployment**: Replace `Code.ensure_loaded?/1` with `:rpc.call(fuse_node_name(), NeonFS.FUSE.MountManager, ...)` to support separate container/node deployment
+  - Phase 1 workaround: Both apps run in same node, so local module check works for now
   - Pattern: `with_fuse_manager(fn manager -> manager.operation() end)` for conditional FUSE operations
   - Returns `{:error, :fuse_not_available}` when neonfs_fuse app not running on node
   - VolumeRegistry ETS tables are `:volumes_by_id` and `:volumes_by_name` (not prefixed with registry)
