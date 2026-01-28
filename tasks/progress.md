@@ -875,3 +875,33 @@
   - Phase 1 milestone "data persists across restarts" is now complete with DETS persistence
   - Phase 2 will replace DETS with Ra consensus for distributed metadata storage
 ---
+## 2026-01-28 - Task 0042
+- What was implemented:
+  - Created `NeonFS.Core.RpcServer` GenServer for TCP-based RPC communication with CLI
+  - Listens on configurable port (default: 4370) with ETF-encoded request/response protocol
+  - Request format: `{:rpc, cookie, module, function, args}` validated against RELEASE_COOKIE
+  - Dispatches to `NeonFS.CLI.Handler` functions for all CLI operations
+  - Added RpcServer to supervision tree after all core components
+  - Created comprehensive test suite (13 tests covering authentication, operations, concurrency)
+  - Updated supervisor tests to account for 6 children (including RpcServer)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/rpc_server.ex` (new - TCP RPC server)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added RpcServer as last child)
+  - `neonfs_core/config/config.exs` (test configuration for RPC server)
+  - `neonfs_core/test/neon_fs/core/rpc_server_test.exs` (new - comprehensive tests)
+  - `neonfs_core/test/neon_fs/core/supervisor_test.exs` (updated for 6 children)
+  - `tasks/task_0042_implement_cli_rpc_server.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - RPC protocol uses ETF (Erlang External Term Format) for binary encoding, not JSON
+  - CLI sends maps with string keys but atom values for enums (e.g., `:replicate`)
+  - Handler's `map_to_opts` only converts top-level keys, not nested maps
+  - RPC server must convert nested maps: top-level to strings, nested to atoms for validation
+  - Use `:safe` flag with `binary_to_term` to prevent code execution attacks
+  - TCP server uses `packet: 4` for automatic length-prefixed framing (4-byte big-endian length header)
+  - Cookie validation reads from RELEASE_COOKIE env var or ~/.erlang.cookie file
+  - Implicit try/rescue (rescue at function level) preferred over explicit try blocks by credo
+  - Test RPC server by connecting to application-started instance, not start_supervised (avoids :already_started)
+  - RPC server writes port file for CLI discovery (permission errors acceptable in test/dev)
+  - VolumeRegistry.delete returns `{:ok, %{}}` not `:ok` for consistency with other operations
+  - Handler returns maps with atom keys for ETF encoding (CLI receives atom-keyed maps via ETF)
+---
