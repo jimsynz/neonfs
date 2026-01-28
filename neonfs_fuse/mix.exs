@@ -17,6 +17,7 @@ defmodule NeonFS.FUSE.MixProject do
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       package: package(),
+      releases: releases(),
       start_permanent: Mix.env() == :prod,
       version: @version
     ]
@@ -34,6 +35,15 @@ defmodule NeonFS.FUSE.MixProject do
     [
       extra_applications: [:logger, :neonfs_core],
       mod: {NeonFS.FUSE.Application, []}
+    ]
+  end
+
+  defp releases do
+    [
+      neonfs_fuse: [
+        include_executables_for: [:unix],
+        steps: [:assemble, :tar]
+      ]
     ]
   end
 

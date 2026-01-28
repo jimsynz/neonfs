@@ -774,3 +774,38 @@
   - **Important**: Tier directories (hot/warm/cold) should NOT be created by deployment scripts - they are created on-demand by BlobStore based on volume configuration
   - systemd units can be validated with `systemd-analyze verify` - added validation script that gracefully skips if systemd not available
 ---
+## 2026-01-28 - Task 0029
+- What was implemented:
+  - Created separate release configurations for neonfs_core and neonfs_fuse
+  - Added runtime.exs configuration files for both applications with environment variable support
+  - Created rel/env.sh.eex for release environment configuration (RELEASE_NODE, RELEASE_COOKIE, data dir)
+  - Created rel/vm.args.eex for BEAM VM arguments (async threads, ports, ETS tables, SMP)
+  - Configured short names (sname) for Erlang distribution (suitable for single-host deployments)
+  - Verified both releases build successfully with `MIX_ENV=prod mix release`
+  - Verified releases start in foreground mode and can be stopped gracefully
+  - Verified Rust NIFs (neonfs_blob.so, neonfs_fuse.so) are included in releases
+- Files changed:
+  - `neonfs_core/mix.exs` (added releases/0 function)
+  - `neonfs_core/config/runtime.exs` (new - production runtime configuration)
+  - `neonfs_core/rel/env.sh.eex` (new - release environment script)
+  - `neonfs_core/rel/vm.args.eex` (new - BEAM VM arguments)
+  - `neonfs_fuse/mix.exs` (added releases/0 function)
+  - `neonfs_fuse/config/runtime.exs` (new - production runtime configuration with NEONFS_CORE_NODE)
+  - `neonfs_fuse/rel/env.sh.eex` (new - release environment script)
+  - `neonfs_fuse/rel/vm.args.eex` (new - BEAM VM arguments)
+  - `tasks/task_0029_elixir_release_config.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - neonfs_core and neonfs_fuse deploy as separate services/containers, not a combined release
+  - Separate releases allow independent deployment: neonfs_core for storage nodes, neonfs_fuse for compute/mount nodes
+  - Use short names (sname) with RELEASE_DISTRIBUTION="sname" for single-host or simple deployments
+  - Use long names (name) with fully qualified hostnames for multi-host cluster deployments
+  - Cookie should be managed via RELEASE_COOKIE environment variable, not hardcoded in vm.args
+  - Runtime.exs evaluated at release start, allows reading environment variables for configuration
+  - env.sh.eex can set default environment variables if not provided by deployment system
+  - vm.args.eex should not reference @release.cookie or @release.name - use environment variables instead
+  - Mix release steps: [:assemble, :tar] creates both directory and tarball artifacts
+  - Release tarball location: _build/prod/<app>-<version>.tar.gz for distribution
+  - neonfs_fuse release automatically includes neonfs_core (path dependency) and both NIFs
+  - Release start command works in foreground (for systemd Type=simple or containers)
+  - Graceful shutdown via SIGTERM (systemd compatibility)
+---

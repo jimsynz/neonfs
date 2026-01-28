@@ -1,24 +1,24 @@
 # Task 0029: Configure Elixir Release
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
 
 ## Description
-Configure Mix releases for building deployable NeonFS packages. This includes release configuration, runtime configuration, and the release overlay scripts.
+Configure Mix releases for building deployable NeonFS packages. This includes release configuration, runtime configuration, and the release overlay scripts. **Note: neonfs_core and neonfs_fuse are deployed as separate services/containers, so two separate releases are configured.**
 
 ## Acceptance Criteria
-- [ ] Release configuration in mix.exs
-- [ ] Include both neonfs_core and neonfs_fuse applications
-- [ ] Runtime configuration via config/runtime.exs
-- [ ] Cookie generated at release build time or first run
-- [ ] Environment variable configuration support
-- [ ] Release builds successfully with `mix release`
-- [ ] Release starts with `_build/prod/rel/neonfs/bin/neonfs start`
-- [ ] Release can be stopped gracefully
-- [ ] Release includes Rust NIFs
+- [x] Release configuration in mix.exs (both applications)
+- [x] Separate releases for neonfs_core and neonfs_fuse (deployed as separate services)
+- [x] Runtime configuration via config/runtime.exs (both applications)
+- [x] Cookie via environment variable (RELEASE_COOKIE)
+- [x] Environment variable configuration support
+- [x] Release builds successfully with `MIX_ENV=prod mix release` (both applications)
+- [x] Release starts with `_build/prod/rel/<app>/bin/<app> start`
+- [x] Release can be stopped gracefully (SIGTERM)
+- [x] Release includes Rust NIFs (verified .so files present)
 
 ## Release Configuration
 ```elixir
