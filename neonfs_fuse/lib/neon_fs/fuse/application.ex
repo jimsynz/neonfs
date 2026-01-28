@@ -8,8 +8,10 @@ defmodule NeonFS.FUSE.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # Starts a worker by calling: NeonFS.FUSE.Worker.start_link(arg)
-      # {NeonFS.FUSE.Worker, arg}
+      # Inode table for FUSE inode <-> path mapping
+      NeonFS.FUSE.InodeTable,
+      # FUSE operation handler
+      NeonFS.FUSE.Handler
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

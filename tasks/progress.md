@@ -494,3 +494,39 @@
   - Pattern: match on `with` result directly instead of wrapping in `{:ok, _}` to avoid credo warning
   - Read path complements write path: chunks stored in order, read reconstructs by concatenation
 ---
+## 2026-01-28 - Task 0020
+- What was implemented:
+  - Created `NeonFS.FUSE.InodeTable` GenServer for inode<->path bidirectional mapping
+  - Created `NeonFS.FUSE.Handler` GenServer for FUSE operation dispatch
+  - Implemented all FUSE operations: lookup, getattr, read, write, readdir, create, mkdir, unlink, rmdir, open, release, rename, setattr
+  - Added neonfs_core as dependency to neonfs_fuse with proper application startup order
+  - Integrated handler with InodeTable, FileIndex, WriteOperation, and ReadOperation
+  - Added both modules to supervision tree
+  - Comprehensive tests for InodeTable (20 tests, all passing)
+  - Handler tests for all FUSE operations
+- Files changed:
+  - `neonfs_fuse/mix.exs` (added neonfs_core dependency and extra_applications)
+  - `neonfs_fuse/lib/neon_fs/fuse/inode_table.ex` (new - 214 lines)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (new - 526 lines)
+  - `neonfs_fuse/lib/neon_fs/fuse/application.ex` (added modules to supervision tree)
+  - `neonfs_fuse/test/neon_fs/fuse/inode_table_test.exs` (new - 178 lines)
+  - `neonfs_fuse/test/neon_fs/fuse/handler_test.exs` (new - 481 lines)
+  - `tasks/task_0020_elixir_fuse_handler.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - FUSE operations from Rust NIF arrive as `{:fuse_op, request_id, {operation_name, %{params}}}` messages
+  - Operations are encoded as tuples: `{"read", %{"ino" => 1, "offset" => 0, "size" => 1024}}`
+  - Reply format: `{"operation_ok", %{data}}` or `{"error", %{"errno" => code}}`
+  - WriteOperation and ReadOperation expect volume ID (UUID), not volume name
+  - Volume creation requires: `durability: %{type: :replicate, factor: 1, min_copies: 1}`
+  - Volume verification config uses `on_read:` not `policy:`
+  - FileMeta.normalize_path strips trailing slashes except for root "/"
+  - Directories are distinguished by mode (0o755) not by trailing slash in path
+  - InodeTable uses dual ETS tables for bidirectional O(1) lookup (inode->path, path->inode)
+  - Root inode is always 1 and maps to `{nil, "/"}` with default volume
+  - GenServer tests using application-started processes: use `Process.whereis(Module)` not `start_supervised`
+  - Path normalization affects directory operations - must account for stripped trailing slashes
+  - Dialyzer warnings for unused error codes can be suppressed with `@dialyzer {:nowarn_function, func: arity}`
+  - Credo nesting depth limit (2): extract nested case/with statements into helper functions
+  - FUSE write operations require merging new data with existing file content at specified offset
+  - Handler processes operations asynchronously - tests need :timer.sleep for message processing
+---

@@ -32,7 +32,7 @@ defmodule NeonFS.FUSE.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :neonfs_core],
       mod: {NeonFS.FUSE.Application, []}
     ]
   end
@@ -46,6 +46,7 @@ defmodule NeonFS.FUSE.MixProject do
   defp deps do
     [
       {:rustler, "~> 0.37", runtime: false},
+      {:neonfs_core, path: "../neonfs_core"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
