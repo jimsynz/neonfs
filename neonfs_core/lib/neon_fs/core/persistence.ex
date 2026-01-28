@@ -63,6 +63,9 @@ defmodule NeonFS.Core.Persistence do
     # Ensure metadata directory exists
     File.mkdir_p!(meta_dir)
 
+    # Clean up any leftover .tmp files from previous failed snapshots
+    cleanup_temp_files(meta_dir)
+
     # Define table configurations
     tables = [
       %{ets_table: :chunk_index, dets_path: Path.join(meta_dir, "chunk_index.dets")},
@@ -259,6 +262,8 @@ defmodule NeonFS.Core.Persistence do
 
       {:error, reason} ->
         Logger.error("Failed to rename #{temp_path} to #{dets_path}: #{inspect(reason)}")
+        # Clean up the temp file since rename failed
+        File.rm(temp_path)
         {:error, {:rename_failed, reason}}
     end
   end
@@ -266,5 +271,28 @@ defmodule NeonFS.Core.Persistence do
   @spec schedule_snapshot(non_neg_integer()) :: reference()
   defp schedule_snapshot(interval_ms) do
     Process.send_after(self(), :snapshot, interval_ms)
+  end
+
+  @spec cleanup_temp_files(String.t()) :: :ok
+  defp cleanup_temp_files(meta_dir) do
+    # Find and remove all .tmp files from previous failed snapshots
+    case File.ls(meta_dir) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&String.ends_with?(&1, ".tmp"))
+        |> Enum.each(fn tmp_file ->
+          tmp_path = Path.join(meta_dir, tmp_file)
+          File.rm(tmp_path)
+          Logger.info("Cleaned up leftover temp file: #{tmp_path}")
+        end)
+
+      {:error, :enoent} ->
+        # Directory doesn't exist yet, nothing to clean up
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to list directory #{meta_dir} for cleanup: #{inspect(reason)}")
+        :ok
+    end
   end
 end

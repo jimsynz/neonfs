@@ -7,7 +7,7 @@ defmodule NeonFS.Core.PersistenceTest do
 
   setup do
     # Persistence is already started as part of the application
-    # Just ensure it exists and clean up test directory
+    # Just ensure it exists
     persistence_pid = Process.whereis(Persistence)
     assert is_pid(persistence_pid), "Persistence should be running"
 
@@ -15,9 +15,21 @@ defmodule NeonFS.Core.PersistenceTest do
     File.rm_rf!(@test_meta_dir)
     File.mkdir_p!(@test_meta_dir)
 
-    # Clean up ETS tables and DETS files
+    # Get the actual meta directory used by the application
     test_meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
 
+    # CRITICAL: Clean up DETS files FIRST to prevent restoration of stale data
+    for file <- [
+          "chunk_index.dets",
+          "file_index_by_id.dets",
+          "file_index_by_path.dets",
+          "volume_registry_by_id.dets",
+          "volume_registry_by_name.dets"
+        ] do
+      File.rm(Path.join(test_meta_dir, file))
+    end
+
+    # Then clean up ETS tables
     for table <- [
           :chunk_index,
           :file_index_by_id,
@@ -31,19 +43,32 @@ defmodule NeonFS.Core.PersistenceTest do
       end
     end
 
-    # Clean up DETS files to prevent test pollution
-    for file <- [
-          "chunk_index.dets",
-          "file_index_by_id.dets",
-          "file_index_by_path.dets",
-          "volume_registry_by_id.dets",
-          "volume_registry_by_name.dets"
-        ] do
-      File.rm(Path.join(test_meta_dir, file))
-    end
-
     on_exit(fn ->
+      # Clean up again on exit to prevent pollution of other test modules
       File.rm_rf!(@test_meta_dir)
+
+      for file <- [
+            "chunk_index.dets",
+            "file_index_by_id.dets",
+            "file_index_by_path.dets",
+            "volume_registry_by_id.dets",
+            "volume_registry_by_name.dets"
+          ] do
+        File.rm(Path.join(test_meta_dir, file))
+      end
+
+      for table <- [
+            :chunk_index,
+            :file_index_by_id,
+            :file_index_by_path,
+            :volumes_by_id,
+            :volumes_by_name
+          ] do
+        case :ets.whereis(table) do
+          :undefined -> :ok
+          _ref -> :ets.delete_all_objects(table)
+        end
+      end
     end)
 
     %{persistence_pid: persistence_pid}
@@ -129,6 +154,53 @@ defmodule NeonFS.Core.PersistenceTest do
       # NOTE: This test requires stopping the application to test shutdown behavior
       # This is covered by the integration test which stops/restarts the application
       :ok
+    end
+  end
+
+  describe "temp file cleanup" do
+    test "cleans up temp files on startup" do
+      test_meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
+
+      # Create a fake temp file
+      temp_file = Path.join(test_meta_dir, "test_cleanup.dets.tmp")
+      File.write!(temp_file, "fake temp data")
+      assert File.exists?(temp_file)
+
+      # Restart application to trigger cleanup
+      :ok = Application.stop(:neonfs_core)
+      Process.sleep(100)
+      {:ok, _} = Application.ensure_all_started(:neonfs_core)
+      Process.sleep(200)
+
+      # Temp file should be cleaned up
+      refute File.exists?(temp_file)
+    end
+
+    test "cleanup function removes all .tmp files from directory" do
+      test_meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
+
+      # Create multiple temp files
+      tmp_files = [
+        Path.join(test_meta_dir, "chunk_index.dets.tmp"),
+        Path.join(test_meta_dir, "file_index.dets.tmp"),
+        Path.join(test_meta_dir, "volume_registry.dets.tmp")
+      ]
+
+      Enum.each(tmp_files, fn tmp ->
+        File.write!(tmp, "fake temp data")
+        assert File.exists?(tmp)
+      end)
+
+      # Restart to trigger cleanup
+      :ok = Application.stop(:neonfs_core)
+      Process.sleep(100)
+      {:ok, _} = Application.ensure_all_started(:neonfs_core)
+      Process.sleep(200)
+
+      # All temp files should be cleaned up
+      Enum.each(tmp_files, fn tmp ->
+        refute File.exists?(tmp), "#{tmp} should have been cleaned up"
+      end)
     end
   end
 
