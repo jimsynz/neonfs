@@ -178,10 +178,12 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "proptest",
+ "rand",
  "rustler",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
 ]
 

@@ -1,7 +1,7 @@
 # Task 0005: Implement Blob Store Read/Write Operations
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,17 +10,17 @@ Not Started
 Implement the core blob store operations: writing chunks to disk and reading them back. Writes must be atomic (write to temp file, then rename) to prevent partial chunks. Reads verify the file exists and return the raw bytes.
 
 ## Acceptance Criteria
-- [ ] Store module at `neonfs_blob/src/store.rs`
-- [ ] `BlobStore` struct holding base_dir and prefix_depth configuration
-- [ ] `BlobStore::new(base_dir, config) -> Result<BlobStore>`
-- [ ] `write_chunk(hash, data, tier) -> Result<()>` with atomic write via rename
-- [ ] `read_chunk(hash, tier) -> Result<Vec<u8>>`
-- [ ] `delete_chunk(hash, tier) -> Result<()>`
-- [ ] `chunk_exists(hash, tier) -> bool`
-- [ ] Proper error types: `ChunkNotFound`, `IoError`, `CorruptChunk`
-- [ ] Atomic writes: write to `.tmp.{random}` then rename to final path
-- [ ] NIF functions exported: `store_open/2`, `store_write_chunk/4`, `store_read_chunk/3`, `store_delete_chunk/3`
-- [ ] BlobStore wrapped as Rustler Resource for NIF
+- [x] Store module at `neonfs_blob/src/store.rs`
+- [x] `BlobStore` struct holding base_dir and prefix_depth configuration
+- [x] `BlobStore::new(base_dir, config) -> Result<BlobStore>`
+- [x] `write_chunk(hash, data, tier) -> Result<()>` with atomic write via rename
+- [x] `read_chunk(hash, tier) -> Result<Vec<u8>>`
+- [x] `delete_chunk(hash, tier) -> Result<()>`
+- [x] `chunk_exists(hash, tier) -> bool`
+- [x] Proper error types: `ChunkNotFound`, `IoError`, `CorruptChunk`
+- [x] Atomic writes: write to `.tmp.{random}` then rename to final path
+- [x] NIF functions exported: `store_open/2`, `store_write_chunk/4`, `store_read_chunk/3`, `store_delete_chunk/3`
+- [x] BlobStore wrapped as Rustler Resource for NIF
 
 ## Atomic Write Pattern
 ```rust

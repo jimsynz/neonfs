@@ -1,0 +1,39 @@
+//! Error types for blob store operations.
+
+use std::io;
+use std::path::PathBuf;
+use thiserror::Error;
+
+/// Errors that can occur during blob store operations.
+#[derive(Error, Debug)]
+pub enum StoreError {
+    /// The requested chunk does not exist in the store.
+    #[error("chunk not found: {0}")]
+    ChunkNotFound(String),
+
+    /// An I/O error occurred during store operations.
+    #[error("I/O error at {path}: {source}")]
+    IoError {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    /// The chunk data is corrupt (e.g., verification failure).
+    #[error("corrupt chunk: {0}")]
+    CorruptChunk(String),
+
+    /// The base directory does not exist and could not be created.
+    #[error("invalid base directory: {0}")]
+    InvalidBaseDir(PathBuf),
+}
+
+impl StoreError {
+    /// Creates a new `IoError` variant with the given path and error.
+    pub fn io_error(path: impl Into<PathBuf>, source: io::Error) -> Self {
+        Self::IoError {
+            path: path.into(),
+            source,
+        }
+    }
+}

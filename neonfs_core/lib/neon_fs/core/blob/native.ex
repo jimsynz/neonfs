@@ -11,6 +11,10 @@ defmodule NeonFS.Core.Blob.Native do
     otp_app: :neonfs_core,
     crate: :neonfs_blob
 
+  @type store :: reference()
+  @type hash :: binary()
+  @type tier :: String.t()
+
   @doc """
   Test function that adds two integers.
 
@@ -42,4 +46,129 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec compute_hash(binary()) :: binary()
   def compute_hash(_data), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Opens a blob store at the given base directory.
+
+  The store manages content-addressed chunk storage on disk using a sharded
+  directory hierarchy based on hash prefixes.
+
+  ## Parameters
+    - `base_dir` - Path to the base directory for blob storage
+    - `prefix_depth` - Number of prefix directory levels (e.g., 2 for 65K directories)
+
+  ## Returns
+    - `{:ok, store}` - A reference to the opened store
+    - `{:error, reason}` - If the store could not be opened
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> is_reference(store)
+      true
+
+  """
+  @spec store_open(String.t(), non_neg_integer()) :: {:ok, store()} | {:error, String.t()}
+  def store_open(_base_dir, _prefix_depth), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Writes a chunk to the blob store.
+
+  The chunk is written atomically using a write-then-rename pattern to prevent
+  partial chunks on disk. If a chunk with the same hash already exists, this
+  operation is idempotent.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the chunk data
+    - `data` - Binary data to write
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+
+  ## Returns
+    - `{:ok, {}}` - On success
+    - `{:error, reason}` - If the write fails
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> data = "hello world"
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
+
+  """
+  @spec store_write_chunk(store(), hash(), binary(), tier()) :: {:ok, {}} | {:error, String.t()}
+  def store_write_chunk(_store, _hash, _data, _tier), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Reads a chunk from the blob store.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the chunk
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+
+  ## Returns
+    - `{:ok, data}` - The chunk data as a binary
+    - `{:error, reason}` - If the chunk does not exist or read fails
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> data = "hello world"
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
+      iex> {:ok, read_data} = NeonFS.Core.Blob.Native.store_read_chunk(store, hash, "hot")
+      iex> read_data == data
+      true
+
+  """
+  @spec store_read_chunk(store(), hash(), tier()) :: {:ok, binary()} | {:error, String.t()}
+  def store_read_chunk(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Deletes a chunk from the blob store.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the chunk
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+
+  ## Returns
+    - `{:ok, {}}` - On success
+    - `{:error, reason}` - If the chunk does not exist or delete fails
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> data = "hello world"
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
+      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_delete_chunk(store, hash, "hot")
+
+  """
+  @spec store_delete_chunk(store(), hash(), tier()) :: {:ok, {}} | {:error, String.t()}
+  def store_delete_chunk(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Checks if a chunk exists in the blob store.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the chunk
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+
+  ## Returns
+    - `{:ok, true}` - If the chunk exists
+    - `{:ok, false}` - If the chunk does not exist
+    - `{:error, reason}` - If the check fails
+
+  ## Examples
+
+      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
+      iex> hash = NeonFS.Core.Blob.Native.compute_hash("test")
+      iex> {:ok, false} = NeonFS.Core.Blob.Native.store_chunk_exists(store, hash, "hot")
+
+  """
+  @spec store_chunk_exists(store(), hash(), tier()) :: {:ok, boolean()} | {:error, String.t()}
+  def store_chunk_exists(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
 end

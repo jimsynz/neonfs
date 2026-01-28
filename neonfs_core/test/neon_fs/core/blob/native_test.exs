@@ -87,4 +87,175 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert hash == :crypto.hash(:sha256, data)
     end
   end
+
+  describe "store_open/2" do
+    setup do
+      # Create a temporary directory for each test
+      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_test_#{:rand.uniform(1_000_000)}")
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      {:ok, tmp_dir: tmp_dir}
+    end
+
+    test "opens a store at new directory", %{tmp_dir: tmp_dir} do
+      assert {:ok, store} = Native.store_open(tmp_dir, 2)
+      assert is_reference(store)
+    end
+
+    test "opens a store at existing directory", %{tmp_dir: tmp_dir} do
+      File.mkdir_p!(tmp_dir)
+      assert {:ok, store} = Native.store_open(tmp_dir, 2)
+      assert is_reference(store)
+    end
+
+    test "creates base directory if not exists", %{tmp_dir: tmp_dir} do
+      refute File.exists?(tmp_dir)
+      assert {:ok, _store} = Native.store_open(tmp_dir, 2)
+      assert File.exists?(tmp_dir)
+    end
+  end
+
+  describe "store operations" do
+    setup do
+      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_store_test_#{:rand.uniform(1_000_000)}")
+      {:ok, store} = Native.store_open(tmp_dir, 2)
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      {:ok, store: store, tmp_dir: tmp_dir}
+    end
+
+    test "write then read returns same data", %{store: store} do
+      data = "hello world"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
+      assert read_data == data
+    end
+
+    test "read nonexistent chunk returns error", %{store: store} do
+      hash = Native.compute_hash("nonexistent")
+      assert {:error, reason} = Native.store_read_chunk(store, hash, "hot")
+      assert reason =~ "not found"
+    end
+
+    test "delete removes chunk from disk", %{store: store} do
+      data = "to be deleted"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+
+      assert {:ok, _} = Native.store_delete_chunk(store, hash, "hot")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
+    end
+
+    test "delete nonexistent chunk returns error", %{store: store} do
+      hash = Native.compute_hash("nonexistent")
+      assert {:error, reason} = Native.store_delete_chunk(store, hash, "hot")
+      assert reason =~ "not found"
+    end
+
+    test "chunk_exists returns correct boolean", %{store: store} do
+      data = "existence test"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+    end
+
+    test "handles different tiers independently", %{store: store} do
+      data = "tier test data"
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "warm")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold")
+    end
+
+    test "write is idempotent", %{store: store} do
+      data = "idempotent data"
+      hash = Native.compute_hash(data)
+
+      # Write twice
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+
+      # Should still read correctly
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
+      assert read_data == data
+    end
+
+    test "handles large chunk (1MB)", %{store: store} do
+      data = :binary.copy(<<42>>, 1_048_576)
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
+      assert read_data == data
+    end
+
+    test "handles empty chunk", %{store: store} do
+      data = ""
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
+      assert read_data == data
+    end
+
+    test "handles binary with null bytes", %{store: store} do
+      data = <<0, 1, 2, 0, 3, 4, 0>>
+      hash = Native.compute_hash(data)
+
+      assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
+      assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
+      assert read_data == data
+    end
+
+    test "supports all tiers", %{store: store} do
+      for tier <- ["hot", "warm", "cold"] do
+        data = "data for #{tier}"
+        hash = Native.compute_hash(data)
+
+        assert {:ok, _} = Native.store_write_chunk(store, hash, data, tier)
+        assert {:ok, read_data} = Native.store_read_chunk(store, hash, tier)
+        assert read_data == data
+      end
+    end
+
+    test "invalid tier returns error", %{store: store} do
+      data = "test"
+      hash = Native.compute_hash(data)
+
+      assert {:error, reason} = Native.store_write_chunk(store, hash, data, "invalid")
+      assert reason =~ "invalid tier"
+    end
+
+    test "invalid hash length returns error", %{store: store} do
+      data = "test"
+      invalid_hash = "not32bytes"
+
+      assert {:error, reason} = Native.store_write_chunk(store, invalid_hash, data, "hot")
+      assert reason =~ "invalid hash length"
+    end
+  end
+
+  describe "resource cleanup" do
+    test "store can be garbage collected" do
+      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_gc_test_#{:rand.uniform(1_000_000)}")
+
+      # Open store in a function so it goes out of scope
+      {:ok, _store} = Native.store_open(tmp_dir, 2)
+
+      # Force garbage collection
+      :erlang.garbage_collect()
+
+      # If we got here without crash, cleanup is working
+      File.rm_rf!(tmp_dir)
+    end
+  end
 end
