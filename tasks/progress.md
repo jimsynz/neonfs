@@ -251,3 +251,35 @@
   - Use aliases for nested modules to satisfy credo design checks
   - Empty data chunking behavior may return 0 chunks depending on strategy
 ---
+
+## 2026-01-28 - Task 0011
+- What was implemented:
+  - Channel communication infrastructure for FUSE-Elixir message passing
+  - `FuseOperation` enum with 9 operation types (Read, Write, Lookup, GetAttr, ReadDir, Create, Unlink, MkDir, RmDir)
+  - `FuseReply` enum with success/error variants for operation responses
+  - `ReplyManager` for tracking pending operations and routing replies
+  - `Channels` struct with tokio unbounded channels for bidirectional communication
+  - `FuseServer` managing server lifecycle and operation submission
+  - NIF functions: `start_fuse_server/1`, `stop_fuse_server/1`, `reply_fuse_operation/3`, `test_operation/2`, `server_stats/1`
+  - FuseServerResource wrapped as Rustler Resource for Elixir reference
+  - Comprehensive Rust unit tests for channel management and server lifecycle
+  - Comprehensive Elixir tests for server lifecycle, operation submission, and graceful shutdown
+- Files changed:
+  - `neonfs_fuse/native/neonfs_fuse/src/channel.rs` (new - 149 lines)
+  - `neonfs_fuse/native/neonfs_fuse/src/operation.rs` (new - 193 lines)
+  - `neonfs_fuse/native/neonfs_fuse/src/server.rs` (new - 129 lines)
+  - `neonfs_fuse/native/neonfs_fuse/src/lib.rs` (updated with NIFs and resource)
+  - `neonfs_fuse/lib/neon_fs/fuse/native.ex` (added 5 NIF function bindings)
+  - `neonfs_fuse/test/neon_fs/fuse/native_test.exs` (updated with 12 comprehensive tests)
+  - `tasks/task_0011_fuse_channel_communication.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Rustler NIFs should return bare tuples/atoms, not `Result<(atom, value), _>` which double-wraps
+  - Use `term.atom_to_string()` to decode Elixir atoms in Rust
+  - Decode Elixir tuples as `term.decode::<(Term, Term)>()` not `Vec<Term>`
+  - Add `#[allow(dead_code)]` to infrastructure types/methods that will be used in future tasks
+  - Use tokio unbounded_channel for operation flow, oneshot channel for individual replies
+  - `ReplyManager` pattern: register returns ID, reply with ID routes response to correct receiver
+  - Background tokio runtime in std::thread for async channel processing
+  - FuseServer uses Arc<Mutex<bool>> for shutdown signal coordination
+  - Test infrastructure code with mock operations before implementing actual FUSE mounting
+---

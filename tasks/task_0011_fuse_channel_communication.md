@@ -1,7 +1,7 @@
 # Task 0011: Implement FUSE-Elixir Channel Communication
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 1 - Foundation
@@ -10,17 +10,17 @@ Not Started
 Implement the communication channel between the FUSE Rust thread and Elixir processes. FUSE operations run in a dedicated Rust thread and communicate with Elixir via channels. This task sets up the message passing infrastructure without implementing actual FUSE operations.
 
 ## Acceptance Criteria
-- [ ] `FuseServer` struct managing the FUSE session and channels
-- [ ] `FuseOperation` enum representing operations (Read, Write, Lookup, etc.)
-- [ ] `FuseReply` enum for responses back to FUSE
-- [ ] Rustler Resource wrapping FuseServer for Elixir to hold
-- [ ] `start_fuse_server/2` NIF that spawns FUSE thread and returns resource
-- [ ] `stop_fuse_server/1` NIF that signals shutdown
-- [ ] Channel from FUSE thread to Elixir (operation requests)
-- [ ] Channel from Elixir to FUSE thread (operation replies)
-- [ ] Operations sent to Elixir process via `send` with ref for reply matching
-- [ ] `reply_fuse_operation/3` NIF to send reply back to FUSE thread
-- [ ] Graceful shutdown when Elixir process terminates
+- [x] `FuseServer` struct managing the FUSE session and channels
+- [x] `FuseOperation` enum representing operations (Read, Write, Lookup, etc.)
+- [x] `FuseReply` enum for responses back to FUSE
+- [x] `Rustler` Resource wrapping FuseServer for Elixir to hold
+- [x] `start_fuse_server/2` NIF that spawns FUSE thread and returns resource
+- [x] `stop_fuse_server/1` NIF that signals shutdown
+- [x] Channel from FUSE thread to Elixir (operation requests)
+- [x] Channel from Elixir to FUSE thread (operation replies)
+- [x] Operations sent to Elixir process via `send` with ref for reply matching
+- [x] `reply_fuse_operation/3` NIF to send reply back to FUSE thread
+- [x] Graceful shutdown when Elixir process terminates
 
 ## Message Format
 ```elixir
