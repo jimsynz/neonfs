@@ -1,10 +1,12 @@
 FROM harton.dev/james/asdf_container:latest
 
 # Install FUSE support for neonfs_fuse development and testing
+# Install systemd for systemd-analyze validation
 RUN apt-get update && apt-get install -y \
     libfuse3-dev \
     fuse3 \
     pkg-config \
+    systemd \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd dev
