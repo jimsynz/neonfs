@@ -198,7 +198,7 @@ defmodule NeonFS.CLI.Handler do
   # service discovery). The current implementation works for Phase 1 where both apps
   # run in the same node, but will need updating for separate container deployment.
   defp with_fuse_manager(fun) do
-    fuse_node = Application.get_env(:neonfs_core, :fuse_node, :"neonfs_fuse@localhost")
+    fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
 
     # Check if FUSE node is reachable via RPC
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do

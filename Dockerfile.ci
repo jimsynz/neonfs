@@ -1,0 +1,40 @@
+FROM debian:bookworm
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    curl wget git build-essential \
+    libssl-dev libncurses-dev \
+    libfuse3-dev fuse3 \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install asdf for version management
+RUN git clone https://github.com/asdf-vm/asdf.git ~/.asdf --branch v0.14.0
+ENV PATH="/root/.asdf/bin:/root/.asdf/shims:$PATH"
+
+# Copy .tool-versions for consistent versioning
+COPY .tool-versions /tmp/.tool-versions
+
+# Install Erlang, Elixir, Rust via asdf
+RUN cd /tmp && \
+    . ~/.asdf/asdf.sh && \
+    asdf plugin add erlang && \
+    asdf plugin add elixir && \
+    asdf plugin add rust && \
+    asdf install erlang 28.3.1 && \
+    asdf install elixir 1.19.5 && \
+    asdf install rust 1.93.0 && \
+    asdf global erlang 28.3.1 && \
+    asdf global elixir 1.19.5 && \
+    asdf global rust 1.93.0
+
+# Setup Hex and Rebar
+RUN . ~/.asdf/asdf.sh && \
+    mix local.hex --force && \
+    mix local.rebar --force
+
+# Set working directory
+WORKDIR /workspace
+
+# Default command
+CMD ["/bin/bash"]

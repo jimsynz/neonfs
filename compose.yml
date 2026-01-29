@@ -1,15 +1,17 @@
 services:
   dev:
+    image: harton.dev/project-neon/neonfs-dev:latest
     build:
       context: .
       dockerfile: Containerfile.dev
+      cache_from:
+        - harton.dev/james/asdf_container:latest
+        - harton.dev/project-neon/neonfs-dev:latest
     container_name: neonfs-dev
     hostname: neonfs-dev
     volumes:
       - .:/workdir
-      - asdf-cache:/home/dev/.asdf
-      - cargo-cache:/home/dev/.cargo
-      - mix-cache:/home/dev/.mix
+      - home:/home/dev
     devices:
       - /dev/fuse:/dev/fuse
     cap_add:
@@ -28,6 +30,4 @@ services:
     command: /bin/zsh
 
 volumes:
-  asdf-cache:
-  cargo-cache:
-  mix-cache:
+  home:

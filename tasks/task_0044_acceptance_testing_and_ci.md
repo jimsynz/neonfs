@@ -2,7 +2,7 @@
 
 ## Status
 
-Not Started
+Complete
 
 ## Phase
 
@@ -16,36 +16,36 @@ Create a comprehensive acceptance testing system that can be run both locally by
 
 ### Acceptance Test Script
 
-- [ ] `scripts/acceptance-test.sh` runs complete Phase 1 test suite
-- [ ] Builds both releases (`neonfs_core`, `neonfs_fuse`)
-- [ ] Starts both services (either via systemd or direct execution)
-- [ ] Runs CLI commands to verify functionality
-- [ ] Tests FUSE mount/unmount cycle (if FUSE available)
-- [ ] Tests file write/read through FUSE
-- [ ] Tests data persistence across restart
-- [ ] Produces clear pass/fail output with details on failures
-- [ ] Exits with non-zero code on any failure
-- [ ] Can run in containerized environment (for CI)
+- [x] `scripts/acceptance-test.sh` runs complete Phase 1 test suite
+- [x] Builds both releases (`neonfs_core`, `neonfs_fuse`)
+- [x] Starts both services (either via systemd or direct execution)
+- [x] Runs CLI commands to verify functionality
+- [x] Tests FUSE mount/unmount cycle (if FUSE available)
+- [x] Tests file write/read through FUSE
+- [x] Tests data persistence across restart
+- [x] Produces clear pass/fail output with details on failures
+- [x] Exits with non-zero code on any failure
+- [x] Can run in containerized environment (for CI)
 
 ### Forgejo Actions CI
 
-- [ ] `.forgejo/workflows/ci.yml` workflow file
-- [ ] Jobs for: lint, unit tests, integration tests, release build
-- [ ] Lint job runs: `mix format --check-formatted`, `mix credo`, `cargo fmt --check`, `cargo clippy`
-- [ ] Unit test job runs: `mix test --exclude integration`, `cargo test`
-- [ ] Dialyzer job with PLT caching
-- [ ] Integration test job runs acceptance script
-- [ ] Release build job produces artifacts
-- [ ] FUSE tests run when FUSE available (may need privileged container)
-- [ ] Caching for Mix deps, Cargo deps, Dialyzer PLTs
-- [ ] Runs on push to main and on pull requests
+- [x] `.forgejo/workflows/ci.yml` workflow file
+- [x] Jobs for: lint, unit tests, integration tests, release build
+- [x] Lint job runs: `mix format --check-formatted`, `mix credo`, `cargo fmt --check`, `cargo clippy`
+- [x] Unit test job runs: `mix test --exclude integration`, `cargo test`
+- [x] Dialyzer job with PLT caching
+- [x] Integration test job runs acceptance script
+- [x] Release build job produces artifacts
+- [x] FUSE tests run when FUSE available (may need privileged container)
+- [x] Caching for Mix deps, Cargo deps, Dialyzer PLTs
+- [x] Runs on push to main and on pull requests
 
 ### Container Support
 
-- [ ] `Dockerfile.ci` for CI runner environment
-- [ ] Includes: Elixir 1.19.5, Erlang/OTP 28, Rust 1.93.0
-- [ ] Includes: FUSE libraries, build essentials
-- [ ] Published to container registry or built inline
+- [x] `Dockerfile.ci` for CI runner environment
+- [x] Includes: Elixir 1.19.5, Erlang/OTP 28, Rust 1.93.0
+- [x] Includes: FUSE libraries, build essentials
+- [x] Published to container registry or built inline
 
 ## Implementation Notes
 

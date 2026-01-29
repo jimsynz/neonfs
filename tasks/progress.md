@@ -972,3 +972,46 @@
   - Documentation should cover both single-node and split deployment scenarios
   - Security: Erlang distribution is unauthenticated except for cookie, consider VPN/WireGuard for production
 ---
+## 2026-01-29 - Task 0044
+- What was implemented:
+  - Created comprehensive acceptance test script at `scripts/acceptance-test.sh`
+  - Script performs full Phase 1 validation: build releases, start services, CLI tests, FUSE tests, persistence tests
+  - Created Forgejo Actions CI workflow at `.forgejo/workflows/ci.yml`
+  - CI jobs: lint, unit-tests, dialyzer, integration-tests, build-release
+  - Lint job validates code formatting (mix format, cargo fmt) and style (credo, clippy)
+  - Unit test job runs Elixir and Rust tests with dependency caching
+  - Dialyzer job with PLT caching for faster static analysis
+  - Integration test job runs acceptance script in privileged container (for FUSE)
+  - Build release job creates production artifacts and uploads them
+  - Created CI Dockerfile (`Dockerfile.ci`) with all build dependencies (Elixir 1.19.5, Erlang 28, Rust 1.93.0, FUSE3)
+  - Created `.forgejo/README.md` documenting CI workflows, caching strategy, and local usage
+  - Fixed test_helper.exs in neonfs_fuse to ensure applications start before tests
+  - Fixed formatting issue in CLI handler (atom syntax)
+- Files changed:
+  - `scripts/acceptance-test.sh` (new - 358 lines, comprehensive acceptance testing)
+  - `.forgejo/workflows/ci.yml` (new - 270 lines, complete CI pipeline)
+  - `.forgejo/README.md` (new - comprehensive CI documentation)
+  - `Dockerfile.ci` (new - CI container image definition)
+  - `neonfs_fuse/test/test_helper.exs` (updated to ensure applications start)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (fixed atom formatting)
+  - `tasks/task_0044_acceptance_testing_and_ci.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Acceptance tests should handle cleanup gracefully with trap EXIT for all scenarios
+  - Use tempfile directories for test data to ensure isolation (`mktemp -d`)
+  - Service startup needs sufficient sleep time (5s) for Erlang VM initialization
+  - FUSE availability should be detected early and tests skipped gracefully if not available
+  - CI workflows benefit from inline dependency installation rather than pre-built images (flexibility)
+  - GitHub Actions-compatible caching works with Forgejo Actions (same syntax)
+  - Use `--privileged` container option for FUSE support in CI
+  - PLT caching dramatically speeds up Dialyzer (5-10min first run → 1-2min cached)
+  - Separate build-release job allows artifact publishing without running tests
+  - Test helpers should explicitly ensure_all_started for dependent applications
+  - Elixir formatter prefers bare atoms (`:neonfs_fuse@localhost`) over quoted atoms (:`"..."`)
+  - Acceptance script should track failed tests and provide detailed summary at end
+  - CLI cookie file location is configurable via NEONFS_COOKIE_FILE environment variable
+  - Release builds need `--overwrite` flag when running multiple times in same directory
+  - Service PIDs should be tracked for cleanup in acceptance tests (graceful shutdown)
+  - Forgejo Actions uses standard GitHub Actions syntax (actions/checkout@v4, actions/cache@v4, etc.)
+  - Integration tests require both FUSE kernel module and fusermount/umount utilities
+  - Bash script best practices: `set -euo pipefail`, trap cleanup, color-coded logging
+---
