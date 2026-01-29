@@ -1,0 +1,8 @@
+[Unit]
+Description=NeonFS Distributed Filesystem
+Documentation=https://neonfs.dev/docs
+After=network.target
+Requires=neonfs-core.service neonfs-fuse.service
+
+[Install]
+WantedBy=multi-user.target

@@ -198,14 +198,39 @@ defmodule NeonFS.CLI.Handler do
   # service discovery). The current implementation works for Phase 1 where both apps
   # run in the same node, but will need updating for separate container deployment.
   defp with_fuse_manager(fun) do
-    case Code.ensure_loaded?(NeonFS.FUSE.MountManager) do
-      true ->
-        # FUSE application is loaded in local VM, execute the function
-        fun.(NeonFS.FUSE.MountManager)
+    fuse_node = Application.get_env(:neonfs_core, :fuse_node, :"neonfs_fuse@localhost")
 
-      false ->
-        # FUSE not available on this node
+    # Check if FUSE node is reachable via RPC
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
+      {:badrpc, _} ->
+        # FUSE node not available (not running or not reachable)
         {:error, :fuse_not_available}
+
+      NeonFS.FUSE.MountManager ->
+        # FUSE module exists, create RPC wrapper for manager operations
+        rpc_manager = %{
+          mount: fn volume_name, mount_point, opts ->
+            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :mount, [
+              volume_name,
+              mount_point,
+              opts
+            ])
+          end,
+          unmount: fn mount_id ->
+            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :unmount, [mount_id])
+          end,
+          list_mounts: fn ->
+            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :list_mounts, [])
+          end,
+          get_mount: fn mount_id ->
+            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount, [mount_id])
+          end,
+          get_mount_by_path: fn path ->
+            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_path, [path])
+          end
+        }
+
+        fun.(rpc_manager)
     end
   end
 

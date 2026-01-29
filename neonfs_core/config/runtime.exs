@@ -10,6 +10,11 @@ if config_env() == :prod do
   # Node name for Erlang distribution
   node_name = System.get_env("RELEASE_NODE", "neonfs_core@localhost")
 
+  # FUSE node name for RPC calls (default assumes single-host deployment)
+  fuse_node =
+    System.get_env("NEONFS_FUSE_NODE", "neonfs_fuse@localhost")
+    |> String.to_atom()
+
   # Blob store configuration
   config :neonfs_core,
     blob_store_base_dir: "#{data_dir}/blobs",
@@ -17,7 +22,8 @@ if config_env() == :prod do
     meta_dir: "#{data_dir}/meta",
     snapshot_interval_ms:
       String.to_integer(System.get_env("NEONFS_SNAPSHOT_INTERVAL_MS", "30000")),
-    node_name: node_name
+    node_name: node_name,
+    fuse_node: fuse_node
 
   # BEAM VM will use RELEASE_NODE environment variable for actual node name
   # This is set via rel/env.sh.eex or systemd environment

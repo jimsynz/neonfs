@@ -1,0 +1,91 @@
+#!/bin/bash
+# NeonFS Core daemon wrapper script
+# This script provides systemd-compatible start/stop commands for the neonfs_core release
+
+set -e
+
+# Default paths (can be overridden by environment variables)
+RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/core}"
+RELEASE_NAME="${RELEASE_NAME:-neonfs_core}"
+NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
+RELEASE_NODE="${RELEASE_NODE:-neonfs_core@localhost}"
+RELEASE_COOKIE_PATH="${RELEASE_COOKIE_PATH:-/var/lib/neonfs/.erlang.cookie}"
+
+# Ensure base data directories exist
+# Note: Tier subdirectories (hot/warm/cold) are created by BlobStore
+# based on volume configuration, not at daemon startup
+ensure_directories() {
+    mkdir -p "${NEONFS_DATA_DIR}/data"
+    mkdir -p "${NEONFS_DATA_DIR}/meta"
+    mkdir -p "${NEONFS_DATA_DIR}/wal"
+
+    # Set ownership if running as root
+    if [ "$EUID" -eq 0 ]; then
+        chown -R neonfs:neonfs "${NEONFS_DATA_DIR}"
+    fi
+}
+
+# Generate cookie if it doesn't exist
+ensure_cookie() {
+    if [ ! -f "${RELEASE_COOKIE_PATH}" ]; then
+        # Generate a secure random cookie (20 characters, alphanumeric)
+        tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20 > "${RELEASE_COOKIE_PATH}"
+        chmod 600 "${RELEASE_COOKIE_PATH}"
+
+        # Set ownership if running as root
+        if [ "$EUID" -eq 0 ]; then
+            chown neonfs:neonfs "${RELEASE_COOKIE_PATH}"
+        fi
+    fi
+}
+
+# Write runtime information for CLI discovery
+write_runtime_info() {
+    local runtime_dir="${RUNTIME_DIR:-/run/neonfs}"
+    mkdir -p "${runtime_dir}"
+
+    echo "${RELEASE_NODE}" > "${runtime_dir}/core_node_name"
+    echo $$ > "${runtime_dir}/core.pid"
+
+    # Set ownership if running as root
+    if [ "$EUID" -eq 0 ]; then
+        chown -R neonfs:neonfs "${runtime_dir}"
+    fi
+}
+
+# Start the daemon
+start_daemon() {
+    ensure_directories
+    ensure_cookie
+    write_runtime_info
+
+    # Start the release in foreground mode (systemd will manage daemonization)
+    exec "${RELEASE_ROOT}/bin/${RELEASE_NAME}" start
+}
+
+# Stop the daemon gracefully
+stop_daemon() {
+    "${RELEASE_ROOT}/bin/${RELEASE_NAME}" stop
+}
+
+# Get daemon status
+status_daemon() {
+    "${RELEASE_ROOT}/bin/${RELEASE_NAME}" pid
+}
+
+# Main command dispatcher
+case "$1" in
+    start)
+        start_daemon
+        ;;
+    stop)
+        stop_daemon
+        ;;
+    status)
+        status_daemon
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac

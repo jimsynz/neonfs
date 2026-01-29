@@ -933,3 +933,42 @@
   - FUSE tests require proper kernel support and configuration - tests should gracefully handle unavailable FUSE
   - FileIndex.list_dir/2 returns list directly, not {:ok, list} tuple
 ---
+## 2026-01-28 - Task 0043
+- What was implemented:
+  - Created neonfs-core.service for neonfs_core release (storage daemon)
+  - Created neonfs-fuse.service for neonfs_fuse release (FUSE daemon) with dependency on core
+  - Created neonfs.target to group both services for convenient management
+  - Created neonfs-core-daemon wrapper script for core service
+  - Created neonfs-fuse-daemon wrapper script for FUSE service
+  - Updated neonfs.conf with both node names and separate release roots
+  - Updated CLI handler to use :rpc.call for FUSE operations instead of Code.ensure_loaded?
+  - Added fuse_node configuration to neonfs_core runtime.exs
+  - Created RPC wrapper in with_fuse_manager for remote MountManager operations
+  - Updated packaging/README.md with comprehensive deployment documentation
+  - Documented single-node and split deployment scenarios
+- Files changed:
+  - `packaging/systemd/neonfs-core.service` (new - core storage daemon unit)
+  - `packaging/systemd/neonfs-fuse.service` (new - FUSE daemon unit with CAP_SYS_ADMIN)
+  - `packaging/systemd/neonfs.target` (new - groups both services)
+  - `packaging/systemd/neonfs-core-daemon` (new - core daemon wrapper script)
+  - `packaging/systemd/neonfs-fuse-daemon` (new - FUSE daemon wrapper script)
+  - `packaging/systemd/neonfs.conf` (updated with both node names)
+  - `packaging/README.md` (comprehensive documentation update)
+  - `neonfs_core/config/runtime.exs` (added fuse_node configuration)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (updated with_fuse_manager to use :rpc.call)
+  - `tasks/task_0043_split_systemd_units.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - neonfs_core and neonfs_fuse are separate Erlang nodes communicating via distribution
+  - FUSE service requires CAP_SYS_ADMIN capability and NoNewPrivileges=false for mounting
+  - Use :rpc.call(node, Module, :function, args) for inter-node communication
+  - RPC wrappers can mimic local module interface for transparent remote calls
+  - systemd Requires= directive ensures dependency service starts first
+  - systemd After= directive ensures proper ordering (core starts before FUSE)
+  - systemd targets group related services for convenient management
+  - Separate daemon wrappers allow different initialization logic per service
+  - Core daemon creates cookie, FUSE daemon verifies it exists
+  - Runtime node names set via RELEASE_NODE environment variable
+  - Phase 1 uses short names (@localhost), Phase 2+ will use long names for multi-host
+  - Documentation should cover both single-node and split deployment scenarios
+  - Security: Erlang distribution is unauthenticated except for cookie, consider VPN/WireGuard for production
+---

@@ -1,0 +1,34 @@
+[Unit]
+Description=NeonFS FUSE Filesystem Daemon
+After=network.target neonfs-core.service
+Requires=neonfs-core.service
+Documentation=https://neonfs.dev/docs
+
+[Service]
+Type=notify
+User=neonfs
+Group=neonfs
+ExecStart=/usr/bin/neonfs-fuse-daemon start
+ExecStop=/usr/bin/neonfs-fuse-daemon stop
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+Environment=RELEASE_NODE=neonfs_fuse@localhost
+Environment=RELEASE_COOKIE_PATH=/var/lib/neonfs/.erlang.cookie
+Environment=NEONFS_CORE_NODE=neonfs_core@localhost
+
+RuntimeDirectory=neonfs
+StateDirectory=neonfs
+
+# FUSE requires CAP_SYS_ADMIN for mounting
+AmbientCapabilities=CAP_SYS_ADMIN
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/neonfs /mnt
+
+[Install]
+WantedBy=multi-user.target

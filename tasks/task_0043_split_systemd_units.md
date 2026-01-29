@@ -2,7 +2,7 @@
 
 ## Status
 
-Not Started
+Complete
 
 ## Phase
 
@@ -18,16 +18,16 @@ This matches the release configuration which defines two separate releases:
 
 ## Acceptance Criteria
 
-- [ ] `neonfs-core.service` unit for neonfs_core release
-- [ ] `neonfs-fuse.service` unit for neonfs_fuse release
-- [ ] `neonfs-fuse.service` has `After=neonfs-core.service` and `Requires=neonfs-core.service`
-- [ ] Separate daemon wrapper scripts for each service
-- [ ] Each service has its own node name (e.g., `neonfs_core@localhost`, `neonfs_fuse@localhost`)
-- [ ] Both share the same Erlang cookie for inter-node communication
-- [ ] FUSE service has additional capability for FUSE mounting (`AmbientCapabilities=CAP_SYS_ADMIN`)
-- [ ] `neonfs.target` groups both services for convenience (`systemctl start neonfs.target`)
-- [ ] Configuration file updated with both node names
-- [ ] Documentation for running single-node (both services) vs split deployment
+- [x] `neonfs-core.service` unit for neonfs_core release
+- [x] `neonfs-fuse.service` unit for neonfs_fuse release
+- [x] `neonfs-fuse.service` has `After=neonfs-core.service` and `Requires=neonfs-core.service`
+- [x] Separate daemon wrapper scripts for each service
+- [x] Each service has its own node name (e.g., `neonfs_core@localhost`, `neonfs_fuse@localhost`)
+- [x] Both share the same Erlang cookie for inter-node communication
+- [x] FUSE service has additional capability for FUSE mounting (`AmbientCapabilities=CAP_SYS_ADMIN`)
+- [x] `neonfs.target` groups both services for convenience (`systemctl start neonfs.target`)
+- [x] Configuration file updated with both node names
+- [x] Documentation for running single-node (both services) vs split deployment
 
 ## Implementation Notes
 
