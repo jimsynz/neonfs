@@ -1088,3 +1088,37 @@
   - Effects list can be empty `[]` for simple operations
   - Ra consensus provides foundation for Phase 2 distributed metadata storage
 ---
+## 2026-01-31 - Task 0032
+- What was implemented:
+  - Created `NeonFS.Cluster.State` module for cluster state management with JSON persistence
+  - Created `NeonFS.Cluster.Init` module for cluster initialization
+  - Implemented cluster_init/1 that generates cluster ID, node ID, and master key
+  - Added atomic write pattern for cluster state file (write to temp, sync, rename)
+  - Added cluster_init/1 to NeonFS.CLI.Handler for RPC interface
+  - Updated CLI Rust code with working cluster init command
+  - CLI command: `neonfs-cli cluster init --name <name>`
+  - Cluster state persisted to /var/lib/neonfs/meta/cluster.json
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` (new - 205 lines)
+  - `neonfs_core/lib/neon_fs/cluster/init.ex` (new - 109 lines)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (added cluster_init/1 function)
+  - `neonfs_core/lib/neon_fs/core/ra_server.ex` (added alias for MetadataStateMachine)
+  - `neonfs-cli/src/term/types.rs` (added ClusterInitResult type)
+  - `neonfs-cli/src/commands/cluster.rs` (implemented cluster init with RPC)
+  - `neonfs_core/test/neon_fs/cluster/state_test.exs` (new - 220 lines, 16 tests)
+  - `neonfs_core/test/neon_fs/cluster/init_test.exs` (new - 164 lines, 14 tests)
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` (added 5 cluster_init tests)
+  - `tasks/task_0032_cluster_bootstrap.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Ra cluster is already managed by RaSupervisor/RaServer - no need to call `:ra.start_cluster` in init
+  - Cluster init just saves state file; Ra server starts automatically on node startup
+  - Use base32 encoding for cluster/node IDs (lowercase, 8 chars) for URL-safe identifiers
+  - Master key is 256-bit (32 bytes) base64-encoded for future encryption (Phase 5)
+  - Cluster state includes: cluster_id, cluster_name, master_key, this_node, known_peers, ra_cluster_members
+  - Node info structure: %{id: string, name: atom, joined_at: DateTime}
+  - Peer info structure: %{id: string, name: atom, last_seen: DateTime}
+  - CLI removed node_name parameter - uses current Erlang node automatically
+  - Credo prefers implicit try/rescue (rescue at function level, not nested in try/do/end)
+  - Credo flags redundant :ok in final with clause - just return the result directly
+  - Alias nested modules at the top (e.g., `alias NeonFS.Core.MetadataStateMachine`)
+---

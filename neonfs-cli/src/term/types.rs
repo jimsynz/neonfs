@@ -13,6 +13,41 @@ pub struct ClusterStatus {
     pub uptime_seconds: u64,
 }
 
+/// Cluster initialization response
+#[derive(Debug, Serialize)]
+pub struct ClusterInitResult {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub node_id: String,
+    pub node_name: String,
+    pub created_at: String,
+}
+
+impl ClusterInitResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            cluster_id: term_to_string(map.get("cluster_id").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'cluster_id' field".to_string())
+            })?)?,
+            cluster_name: term_to_string(map.get("cluster_name").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'cluster_name' field".to_string())
+            })?)?,
+            node_id: term_to_string(map.get("node_id").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node_id' field".to_string())
+            })?)?,
+            node_name: term_to_string(map.get("node_name").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node_name' field".to_string())
+            })?)?,
+            created_at: term_to_string(map.get("created_at").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'created_at' field".to_string())
+            })?)?,
+        })
+    }
+}
+
 impl ClusterStatus {
     /// Parse from Erlang term (map)
     pub fn from_term(term: Term) -> Result<Self> {

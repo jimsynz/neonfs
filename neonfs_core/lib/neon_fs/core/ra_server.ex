@@ -8,6 +8,8 @@ defmodule NeonFS.Core.RaServer do
 
   use GenServer
 
+  alias NeonFS.Core.MetadataStateMachine
+
   require Logger
 
   @cluster_name :neonfs_meta
@@ -40,8 +42,8 @@ defmodule NeonFS.Core.RaServer do
     server_id = {@cluster_name, node_name}
 
     machine_config = %{
-      module: NeonFS.Core.MetadataStateMachine,
-      init: fn -> NeonFS.Core.MetadataStateMachine.init(%{}) end
+      module: MetadataStateMachine,
+      init: fn -> MetadataStateMachine.init(%{}) end
     }
 
     ra_config = %{

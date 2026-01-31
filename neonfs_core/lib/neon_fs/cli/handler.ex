@@ -10,6 +10,7 @@ defmodule NeonFS.CLI.Handler do
   consists only of serializable terms (maps, lists, atoms, strings, numbers).
   """
 
+  alias NeonFS.Cluster.{Init, State}
   alias NeonFS.Core.{Volume, VolumeRegistry}
 
   @doc """
@@ -28,6 +29,42 @@ defmodule NeonFS.CLI.Handler do
        volumes: count_volumes(),
        uptime_seconds: get_uptime()
      }}
+  end
+
+  @doc """
+  Initializes a new cluster with the given name.
+
+  ## Parameters
+  - `cluster_name` - Name for the new cluster (string)
+
+  ## Returns
+  - `{:ok, map}` - Success map with cluster_id
+  - `{:error, reason}` - Error tuple
+  """
+  @spec cluster_init(String.t()) :: {:ok, map()} | {:error, term()}
+  def cluster_init(cluster_name) when is_binary(cluster_name) do
+    case Init.init_cluster(cluster_name) do
+      {:ok, cluster_id} ->
+        # Load the state to get full details
+        case State.load() do
+          {:ok, state} ->
+            {:ok,
+             %{
+               cluster_id: cluster_id,
+               cluster_name: state.cluster_name,
+               node_id: state.this_node.id,
+               node_name: Atom.to_string(state.this_node.name),
+               created_at: DateTime.to_iso8601(state.created_at)
+             }}
+
+          {:error, _} ->
+            # Fallback if load fails
+            {:ok, %{cluster_id: cluster_id}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc """

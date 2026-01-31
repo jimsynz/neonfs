@@ -2,7 +2,10 @@ defmodule NeonFS.CLI.HandlerTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.CLI.Handler
+  alias NeonFS.Cluster.State
   alias NeonFS.Core.VolumeRegistry
+
+  @tmp_dir "/tmp/neonfs_handler_test"
 
   setup do
     # Clean up state before each test
@@ -14,6 +17,16 @@ defmodule NeonFS.CLI.HandlerTest do
     if :ets.whereis(:volumes_by_name) != :undefined do
       :ets.delete_all_objects(:volumes_by_name)
     end
+
+    # Clean up cluster state
+    File.rm_rf!(@tmp_dir)
+    File.mkdir_p!(@tmp_dir)
+    Application.put_env(:neonfs_core, :meta_dir, @tmp_dir)
+
+    on_exit(fn ->
+      File.rm_rf!(@tmp_dir)
+      Application.delete_env(:neonfs_core, :meta_dir)
+    end)
 
     :ok
   end
@@ -36,6 +49,61 @@ defmodule NeonFS.CLI.HandlerTest do
       # Verify no non-serializable keys are present (PIDs, references)
       refute Map.has_key?(status, :pid)
       refute Map.has_key?(status, :ref)
+    end
+  end
+
+  describe "cluster_init/1" do
+    @tag :ra
+    test "initializes cluster successfully" do
+      assert {:ok, result} = Handler.cluster_init("test-cluster")
+
+      assert is_binary(result.cluster_id)
+      assert String.starts_with?(result.cluster_id, "clust_")
+      assert result.cluster_name == "test-cluster"
+      assert is_binary(result.node_id)
+      assert String.starts_with?(result.node_id, "node_")
+      assert is_binary(result.node_name)
+      assert is_binary(result.created_at)
+    end
+
+    @tag :ra
+    test "creates cluster state file" do
+      assert {:ok, _result} = Handler.cluster_init("my-cluster")
+
+      assert State.exists?()
+      assert {:ok, state} = State.load()
+      assert state.cluster_name == "my-cluster"
+    end
+
+    @tag :ra
+    test "returns error if already initialized" do
+      # Initialize once
+      assert {:ok, _result} = Handler.cluster_init("first-cluster")
+
+      # Try again
+      assert {:error, :already_initialised} = Handler.cluster_init("second-cluster")
+    end
+
+    test "returns error if node is not named" do
+      # This test only works if running without named node
+      if Node.self() == :nonode@nohost do
+        assert {:error, :node_not_named} = Handler.cluster_init("test-cluster")
+      else
+        # Skip if running with named node
+        :ok
+      end
+    end
+
+    @tag :ra
+    test "returns serializable data" do
+      assert {:ok, result} = Handler.cluster_init("test-cluster")
+
+      # Should be able to encode as Erlang terms
+      assert is_map(result)
+      # All values should be basic types
+      for {_key, value} <- result do
+        assert is_binary(value) or is_atom(value) or is_number(value)
+      end
     end
   end
 

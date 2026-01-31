@@ -3,9 +3,10 @@
 use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
-use crate::term::types::ClusterStatus;
+use crate::term::types::{ClusterInitResult, ClusterStatus};
 use crate::term::{extract_error, unwrap_ok_tuple};
 use clap::Subcommand;
+use eetf::{Binary, Term};
 
 /// Cluster management subcommands
 #[derive(Debug, Subcommand)]
@@ -15,10 +16,6 @@ pub enum ClusterCommand {
         /// Cluster name
         #[arg(long)]
         name: String,
-
-        /// Node name for this node
-        #[arg(long)]
-        node_name: String,
     },
 
     /// Show cluster status
@@ -40,27 +37,53 @@ impl ClusterCommand {
     /// Execute the cluster command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            ClusterCommand::Init { name, node_name } => self.init(name, node_name, format),
+            ClusterCommand::Init { name } => self.init(name, format),
             ClusterCommand::Status => self.status(format),
             ClusterCommand::Join { node, node_name } => self.join(node, node_name, format),
         }
     }
 
-    fn init(&self, name: &str, node_name: &str, format: OutputFormat) -> Result<()> {
-        // Placeholder implementation
+    fn init(&self, name: &str, format: OutputFormat) -> Result<()> {
+        // Create tokio runtime for async calls
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        // Connect to daemon and call cluster_init
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            let name_binary = Binary::from(name.as_bytes().to_vec());
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "cluster_init",
+                vec![Term::Binary(name_binary)],
+            )
+            .await
+        })?;
+
+        // Check for error response
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        // Unwrap {:ok, value} tuple
+        let data = unwrap_ok_tuple(result)?;
+
+        // Parse response
+        let init_result = ClusterInitResult::from_term(data)?;
+
+        // Format output
         match format {
             OutputFormat::Json => {
-                let result = serde_json::json!({
-                    "status": "success",
-                    "cluster": name,
-                    "node": node_name,
-                    "message": "Cluster initialized (placeholder)"
-                });
-                println!("{}", json::format(&result)?);
+                println!("{}", json::format(&init_result)?);
             }
             OutputFormat::Table => {
-                println!("Initializing cluster '{}' with node '{}'", name, node_name);
-                println!("(Placeholder - not yet implemented)");
+                println!("✓ Initialized cluster '{}'", init_result.cluster_name);
+                println!();
+                println!("  Cluster ID:  {}", init_result.cluster_id);
+                println!("  Node ID:     {}", init_result.node_id);
+                println!("  Node Name:   {}", init_result.node_name);
+                println!("  Created:     {}", init_result.created_at);
+                println!();
+                println!("Create invite tokens with: neonfs cluster create-invite");
             }
         }
         Ok(())
