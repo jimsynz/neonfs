@@ -1052,3 +1052,39 @@
   - FUSE container operations need `--privileged` flag for fuse device access
   - Graceful container shutdown: use release stop command before docker stop
 ---
+## 2026-01-31 - Task 0031
+- What was implemented:
+  - Added Ra 2.17 dependency to neonfs_core
+  - Created `NeonFS.Core.MetadataStateMachine` implementing :ra_machine behaviour
+  - Created `NeonFS.Core.RaSupervisor` for Ra cluster management
+  - Created `NeonFS.Core.RaServer` GenServer wrapper for asynchronous Ra initialization
+  - Added Ra configuration to config.exs and runtime.exs (ra_data_dir)
+  - Made RaSupervisor optional in supervision tree (enabled only with named nodes)
+  - Ra requires named Erlang node (not :nonode@nohost) to function
+  - Comprehensive test suite for state machine and Ra operations
+- Files changed:
+  - `neonfs_core/mix.exs` (added ra dependency, added :ra to extra_applications)
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (new - Ra state machine)
+  - `neonfs_core/lib/neon_fs/core/ra_supervisor.ex` (new - Ra cluster supervisor)
+  - `neonfs_core/lib/neon_fs/core/ra_server.ex` (new - GenServer wrapper for Ra initialization)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added conditional RaSupervisor)
+  - `neonfs_core/config/config.exs` (added ra_data_dir for test environment)
+  - `neonfs_core/config/runtime.exs` (added ra_data_dir for production)
+  - `neonfs_core/test/neon_fs/core/ra_test.exs` (new - comprehensive Ra tests)
+  - `neonfs_core/test/test_helper.exs` (attempt to start distribution for Ra tests)
+  - `tasks/task_0031_ra_integration_setup.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Ra requires a named Erlang node to function - `:nonode@nohost` returns `:system_not_started` error
+  - To run with Ra: `elixir --sname nodename -S mix run` or `MIX_ENV=test elixir --sname test -S mix test --only ra`
+  - Ra UIDs must only contain letters, numbers, and underscores - sanitize node names with `String.replace(~r/[@\.]/, "_")`
+  - Ra's `:ra` application must be in `extra_applications` list in mix.exs
+  - Ra servers are started via `:ra.start_server/1` with config including id, uid, cluster_name, machine, log_init_args
+  - Ra state machines implement `:ra_machine` behaviour with callbacks: init/1, apply/3, state_enter/2, snapshot_installed/4, version/0, which_module/1
+  - Use `handle_continue` in GenServer to defer Ra server startup until after GenServer initialization
+  - Phase 1 uses DETS for persistence, Ra is optional until Phase 2 distributed operations
+  - Make Ra conditional in supervision tree: check `Node.self() != :nonode@nohost` before starting
+  - Ra configuration via `Application.put_env(:ra, :data_dir, path)` for cluster-wide data directory
+  - Ra state machine `apply/3` returns `{new_state, result, effects}` tuple
+  - Effects list can be empty `[]` for simple operations
+  - Ra consensus provides foundation for Phase 2 distributed metadata storage
+---

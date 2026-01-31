@@ -4,10 +4,11 @@ defmodule NeonFS.Core.Supervisor do
 
   Supervises all core components in the correct dependency order:
   1. Persistence - Restores metadata from DETS on startup
-  2. BlobStore - Storage layer, required by all other components
-  3. ChunkIndex - Chunk metadata, depends on BlobStore
-  4. FileIndex - File metadata, depends on ChunkIndex
-  5. VolumeRegistry - Volume configuration, depends on FileIndex
+  2. RaSupervisor - Raft consensus for cluster-wide state (Phase 2+)
+  3. BlobStore - Storage layer, required by all other components
+  4. ChunkIndex - Chunk metadata, depends on BlobStore
+  5. FileIndex - File metadata, depends on ChunkIndex
+  6. VolumeRegistry - Volume configuration, depends on FileIndex
   """
 
   use Supervisor
@@ -24,7 +25,13 @@ defmodule NeonFS.Core.Supervisor do
     meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
     snapshot_interval_ms = Application.get_env(:neonfs_core, :snapshot_interval_ms, 30_000)
 
-    children = [
+    # Ra requires a named Erlang node (not :nonode@nohost) to function
+    # For Phase 1 single-node operation, Ra is optional
+    # Enable Ra by starting with: elixir --sname nodename -S mix run
+    enable_ra =
+      Node.self() != :nonode@nohost and Application.get_env(:neonfs_core, :enable_ra, false)
+
+    base_children = [
       # Persistence must start first - restores metadata from DETS
       # Give it extra shutdown time to complete the final snapshot
       %{
@@ -47,6 +54,14 @@ defmodule NeonFS.Core.Supervisor do
       # VolumeRegistry depends on FileIndex
       NeonFS.Core.VolumeRegistry
     ]
+
+    # Conditionally add RaSupervisor for Phase 2+ distributed operation
+    children =
+      if enable_ra do
+        List.insert_at(base_children, 1, NeonFS.Core.RaSupervisor)
+      else
+        base_children
+      end
 
     # Use one_for_one strategy: if a child crashes, only that child is restarted
     # This is appropriate because components are independent after initialization

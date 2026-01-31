@@ -39,18 +39,18 @@ defmodule NeonFS.Core.SupervisorTest do
     test "all children are supervised" do
       children = Supervisor.which_children(CoreSupervisor)
 
-      # Should have 5 children (including Persistence)
-      assert length(children) == 5
-
       # Extract child names
       child_names = Enum.map(children, fn {name, _pid, _type, _modules} -> name end)
 
-      # Verify all expected children are present
+      # Verify core children are present
       assert NeonFS.Core.Persistence in child_names
       assert NeonFS.Core.BlobStore in child_names
       assert NeonFS.Core.ChunkIndex in child_names
       assert NeonFS.Core.FileIndex in child_names
       assert NeonFS.Core.VolumeRegistry in child_names
+
+      # RaSupervisor is optional (requires named node)
+      # Phase 1 runs without Ra, Phase 2+ enables it
     end
 
     test "startup order is correct" do

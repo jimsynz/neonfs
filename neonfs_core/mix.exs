@@ -33,7 +33,7 @@ defmodule NeonFS.Core.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      extra_applications: [:logger, :crypto, :ra],
       mod: {NeonFS.Core.Application, []}
     ]
   end
@@ -55,6 +55,7 @@ defmodule NeonFS.Core.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:ra, "~> 2.13"},
       {:rustler, "~> 0.37", runtime: false},
       {:telemetry, "~> 1.2"},
       {:uuid_v7, "~> 0.6"},
