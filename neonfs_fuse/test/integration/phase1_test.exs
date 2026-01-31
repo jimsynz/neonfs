@@ -2,7 +2,7 @@ defmodule NeonFS.Integration.Phase1Test do
   use ExUnit.Case, async: false
 
   alias NeonFS.CLI.Handler
-  alias NeonFS.Core.{FileIndex, VolumeRegistry, WriteOperation, ReadOperation}
+  alias NeonFS.Core.{FileIndex, Persistence, ReadOperation, VolumeRegistry, WriteOperation}
   alias NeonFS.Integration.Helpers
 
   @moduletag :integration
@@ -66,7 +66,7 @@ defmodule NeonFS.Integration.Phase1Test do
 
       {:ok, file} = WriteOperation.write_file(volume_rec.id, "/test.bin", test_data)
       assert file.size == byte_size(test_data)
-      assert length(file.chunks) > 0
+      assert file.chunks != []
 
       # Read data back via ReadOperation
       {:ok, read_data} = ReadOperation.read_file(volume_rec.id, "/test.bin")
@@ -98,7 +98,7 @@ defmodule NeonFS.Integration.Phase1Test do
       original_file_id = file.id
 
       # Trigger persistence snapshot before restart
-      :ok = NeonFS.Core.Persistence.snapshot_now()
+      :ok = Persistence.snapshot_now()
 
       # Stop and restart core application
       :ok = Application.stop(:neonfs_core)

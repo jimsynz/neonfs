@@ -1,13 +1,23 @@
 defmodule NeonFS.FUSE.MountManagerTest do
   use ExUnit.Case, async: false
 
+  # Tests in this module require FUSE to be available
+  # Run with: mix test --include fuse_integration
+  @moduletag :fuse_integration
+
   alias NeonFS.Core.VolumeRegistry
-  alias NeonFS.FUSE.{MountInfo, MountManager}
+  alias NeonFS.FUSE.{InodeTable, MountInfo, MountManager, MountSupervisor}
 
   @test_volume "test_volume"
   @test_mount_point "/tmp/neonfs_test_mount"
 
   setup do
+    # Start required processes under test supervision
+    # When the test ends, ExUnit stops these in reverse order
+    start_supervised!(InodeTable)
+    start_supervised!(MountSupervisor)
+    start_supervised!(MountManager)
+
     # Ensure test mount point exists
     File.mkdir_p!(@test_mount_point)
 
@@ -27,8 +37,8 @@ defmodule NeonFS.FUSE.MountManagerTest do
           vol.id
       end
 
-    on_exit(fn ->
-      # Clean up any remaining mounts
+    # Cleanup function to be called at end of test (before processes are stopped)
+    cleanup = fn ->
       case MountManager.list_mounts() do
         mounts when is_list(mounts) ->
           for mount <- mounts do
@@ -38,15 +48,16 @@ defmodule NeonFS.FUSE.MountManagerTest do
         _ ->
           :ok
       end
+    end
 
-      # Delete test volume
+    on_exit(fn ->
+      # These run after supervised processes are stopped, so only clean up
+      # things outside of test supervision
       VolumeRegistry.delete(volume_id)
-
-      # Clean up mount point
       File.rm_rf!(@test_mount_point)
     end)
 
-    %{volume_id: volume_id}
+    %{volume_id: volume_id, cleanup: cleanup}
   end
 
   describe "mount/3" do

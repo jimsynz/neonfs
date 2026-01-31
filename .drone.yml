@@ -1,0 +1,117 @@
+kind: pipeline
+type: docker
+name: build-test-push
+
+trigger:
+  event: [push, pull_request]
+
+services:
+  - name: docker
+    image: docker:29.1.1-dind
+    privileged: true
+    commands:
+      - dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz --dns=192.168.1.1
+    volumes:
+      - name: dockersock
+        path: /var/run
+
+steps:
+  # ─────────────────────────────────────────────────────────────
+  # Phase 1: Build containers with tests (single arch for speed)
+  # ─────────────────────────────────────────────────────────────
+  - name: build and test
+    image: docker:29.1.1-dind
+    volumes:
+      - name: dockersock
+        path: /var/run
+    environment:
+      DOCKER_PASSWORD:
+        from_secret: REGISTRY_TOKEN
+    commands:
+      - sleep 5
+      - docker login --username=james --password=$DOCKER_PASSWORD forgejo.dmz
+      - docker run --privileged --rm tonistiigi/binfmt --install all
+      - |
+        cat > /tmp/buildkitd.toml << 'TOML'
+        [registry."forgejo.dmz"]
+          http = true
+          insecure = true
+        TOML
+      - docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+      - docker buildx use builder
+      # Build with tests enabled (single platform, load locally)
+      - RUN_TESTS=true PLATFORMS=linux/amd64 docker buildx bake -f bake.hcl --load
+
+  # ─────────────────────────────────────────────────────────────
+  # Phase 2: Container-based acceptance tests
+  # ─────────────────────────────────────────────────────────────
+  - name: acceptance tests
+    image: docker:29.1.1
+    depends_on: [build and test]
+    volumes:
+      - name: dockersock
+        path: /var/run
+    commands:
+      - ./scripts/acceptance-test-containers.sh
+
+  # ─────────────────────────────────────────────────────────────
+  # Phase 3: Push containers (multi-arch, tests already passed)
+  # ─────────────────────────────────────────────────────────────
+  - name: push containers (main)
+    image: docker:29.1.1-dind
+    when:
+      event:
+        exclude: [pull_request]
+      branch: [main]
+    depends_on: [acceptance tests]
+    volumes:
+      - name: dockersock
+        path: /var/run
+    environment:
+      DOCKER_PASSWORD:
+        from_secret: REGISTRY_TOKEN
+    commands:
+      - docker login --username=james --password=$DOCKER_PASSWORD forgejo.dmz
+      - docker run --privileged --rm tonistiigi/binfmt --install all
+      - |
+        cat > /tmp/buildkitd.toml << 'TOML'
+        [registry."forgejo.dmz"]
+          http = true
+          insecure = true
+        TOML
+      - docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+      - docker buildx use builder
+      # Main branch: push as :latest
+      - docker buildx bake -f bake.hcl --push
+
+  - name: push containers (branch)
+    image: docker:29.1.1-dind
+    when:
+      event:
+        exclude: [pull_request]
+      branch:
+        exclude: [main]
+    depends_on: [acceptance tests]
+    volumes:
+      - name: dockersock
+        path: /var/run
+    environment:
+      DOCKER_PASSWORD:
+        from_secret: REGISTRY_TOKEN
+    commands:
+      - docker login --username=james --password=$DOCKER_PASSWORD forgejo.dmz
+      - docker run --privileged --rm tonistiigi/binfmt --install all
+      - |
+        cat > /tmp/buildkitd.toml << 'TOML'
+        [registry."forgejo.dmz"]
+          http = true
+          insecure = true
+        TOML
+      - docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+      - docker buildx use builder
+      # Branch builds: push with branch name as tag
+      - TAG=${DRONE_BRANCH/\//-} docker buildx bake -f bake.hcl --push
+
+volumes:
+  - name: dockersock
+    temp: {}

@@ -1,0 +1,8 @@
+FROM harton.dev/james/asdf_container:latest
+
+RUN apt-get update && apt-get install -y \
+    libfuse3-dev \
+    fuse3 \
+    pkg-config \
+    systemd \
+    && rm -rf /var/lib/apt/lists/*

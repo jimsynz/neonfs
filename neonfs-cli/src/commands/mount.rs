@@ -6,7 +6,7 @@ use crate::output::{json, table, OutputFormat};
 use crate::term::types::MountInfo;
 use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
-use eetf::{Binary, Term};
+use eetf::{Binary, Map, Term};
 
 /// Mount management subcommands
 #[derive(Debug, Subcommand)]
@@ -50,6 +50,8 @@ impl MountCommand {
         let mountpoint_term = Term::Binary(Binary {
             bytes: mountpoint.as_bytes().to_vec(),
         });
+        // Empty options map
+        let options_term = Term::Map(Map { entries: vec![] });
 
         // Connect to daemon and mount volume
         let result = runtime.block_on(async {
@@ -57,7 +59,7 @@ impl MountCommand {
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "mount",
-                vec![volume_term, mountpoint_term],
+                vec![volume_term, mountpoint_term, options_term],
             )
             .await
         })?;
@@ -81,7 +83,7 @@ impl MountCommand {
                     "✓ Volume '{}' mounted at '{}'",
                     mount.volume_name, mount.mount_point
                 );
-                println!("  Mount ID: {}", mount.mount_id);
+                println!("  Mount ID: {}", mount.id);
             }
         }
         Ok(())
@@ -168,7 +170,7 @@ impl MountCommand {
                         "MOUNTED AT".to_string(),
                     ]);
                     for mount in mounts {
-                        tbl.add_row(vec![mount.volume_name, mount.mount_point, mount.mounted_at]);
+                        tbl.add_row(vec![mount.volume_name, mount.mount_point, mount.started_at]);
                     }
                     print!("{}", tbl.render()?);
                 }

@@ -113,6 +113,9 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   @impl true
   def init(_opts) do
+    # Trap exits so terminate/2 is called during shutdown
+    Process.flag(:trap_exit, true)
+
     # Create ETS tables for fast lookups
     :ets.new(:volumes_by_id, [
       :named_table,
@@ -130,6 +133,26 @@ defmodule NeonFS.Core.VolumeRegistry do
 
     Logger.info("VolumeRegistry started")
     {:ok, %{}}
+  end
+
+  @impl true
+  def terminate(_reason, _state) do
+    # Save ETS tables to DETS before shutdown
+    Logger.info("VolumeRegistry shutting down, saving tables...")
+    meta_dir = NeonFS.Core.Persistence.meta_dir()
+
+    NeonFS.Core.Persistence.snapshot_table(
+      :volumes_by_id,
+      Path.join(meta_dir, "volume_registry_by_id.dets")
+    )
+
+    NeonFS.Core.Persistence.snapshot_table(
+      :volumes_by_name,
+      Path.join(meta_dir, "volume_registry_by_name.dets")
+    )
+
+    Logger.info("VolumeRegistry tables saved")
+    :ok
   end
 
   @impl true

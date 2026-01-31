@@ -179,21 +179,23 @@ defmodule NeonFS.Core.PersistenceTest do
     test "cleanup function removes all .tmp files from directory" do
       test_meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
 
-      # Create multiple temp files
+      # Stop the application first to prevent periodic snapshots from racing with our test
+      :ok = Application.stop(:neonfs_core)
+      Process.sleep(100)
+
+      # Create multiple temp files (using unique names that won't conflict with real snapshots)
       tmp_files = [
-        Path.join(test_meta_dir, "chunk_index.dets.tmp"),
-        Path.join(test_meta_dir, "file_index.dets.tmp"),
-        Path.join(test_meta_dir, "volume_registry.dets.tmp")
+        Path.join(test_meta_dir, "test_leftover_1.dets.tmp"),
+        Path.join(test_meta_dir, "test_leftover_2.dets.tmp"),
+        Path.join(test_meta_dir, "test_leftover_3.dets.tmp")
       ]
 
       Enum.each(tmp_files, fn tmp ->
         File.write!(tmp, "fake temp data")
-        assert File.exists?(tmp)
+        assert File.exists?(tmp), "Failed to create #{tmp}"
       end)
 
       # Restart to trigger cleanup
-      :ok = Application.stop(:neonfs_core)
-      Process.sleep(100)
       {:ok, _} = Application.ensure_all_started(:neonfs_core)
       Process.sleep(200)
 

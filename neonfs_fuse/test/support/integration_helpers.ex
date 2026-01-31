@@ -3,6 +3,10 @@ defmodule NeonFS.Integration.Helpers do
   Helper functions for integration tests.
   """
 
+  alias NeonFS.CLI.Handler
+  alias NeonFS.Core.VolumeRegistry
+  alias NeonFS.FUSE.MountManager
+
   @doc """
   Creates a temporary directory for test artifacts.
   Returns the path to the directory.
@@ -22,7 +26,7 @@ defmodule NeonFS.Integration.Helpers do
   def cleanup(temp_dir, mount_point \\ nil) do
     # Try to unmount if mount point is provided
     if mount_point && File.exists?(mount_point) do
-      case NeonFS.CLI.Handler.unmount(mount_point) do
+      case Handler.unmount(mount_point) do
         :ok -> :ok
         {:error, _} -> :ok
       end
@@ -40,10 +44,10 @@ defmodule NeonFS.Integration.Helpers do
   Checks if FUSE support is available in the current environment.
   """
   def fuse_available? do
-    case Code.ensure_loaded?(NeonFS.FUSE.MountManager) do
+    case Code.ensure_loaded?(MountManager) do
       true ->
         # Try to call a simple function to see if NIF is loaded
-        case NeonFS.CLI.Handler.list_mounts() do
+        case Handler.list_mounts() do
           {:ok, _} -> true
           {:error, :fuse_not_available} -> false
           _ -> false
@@ -68,7 +72,7 @@ defmodule NeonFS.Integration.Helpers do
     merged_opts = Keyword.merge(default_opts, opts)
 
     # Use VolumeRegistry directly instead of CLI Handler to avoid string conversion issues
-    case NeonFS.Core.VolumeRegistry.create(name, merged_opts) do
+    case VolumeRegistry.create(name, merged_opts) do
       {:ok, volume} ->
         # Convert to map format similar to CLI Handler
         {:ok,

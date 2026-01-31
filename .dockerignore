@@ -1,0 +1,7 @@
+neonfs_core/deps
+neonfs_core/_build
+neonfs_core/target
+neonfs_fuse/deps
+neonfs_fuse/_build
+neonfs_fuse/target
+neonfs-cli/target

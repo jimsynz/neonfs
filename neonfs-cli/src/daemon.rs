@@ -29,11 +29,14 @@ impl DaemonConnection {
     /// Connect to the NeonFS daemon
     ///
     /// This performs the following steps:
-    /// 1. Read the authentication cookie
-    /// 2. Connect to the daemon via Erlang distribution
-    /// 3. Start the RPC client as a background task
+    /// 1. Read the authentication cookie (from NEONFS_COOKIE env or file)
+    /// 2. Determine daemon node (from NEONFS_NODE env or default)
+    /// 3. Connect to the daemon via Erlang distribution
+    /// 4. Start the RPC client as a background task
     pub async fn connect() -> Result<Self> {
-        Self::connect_with_options(DEFAULT_COOKIE_PATH, DEFAULT_DAEMON_NODE).await
+        let daemon_node =
+            std::env::var("NEONFS_NODE").unwrap_or_else(|_| DEFAULT_DAEMON_NODE.to_string());
+        Self::connect_with_options(DEFAULT_COOKIE_PATH, &daemon_node).await
     }
 
     /// Connect with custom options (for testing or multi-node setups)
@@ -43,7 +46,9 @@ impl DaemonConnection {
         // Connect to the Erlang node using erl_rpc
         let client = RpcClient::connect(daemon_node, &cookie)
             .await
-            .map_err(|e| CliError::ConnectionFailed(format!("Failed to connect to daemon: {}", e)))?;
+            .map_err(|e| {
+                CliError::ConnectionFailed(format!("Failed to connect to daemon: {}", e))
+            })?;
 
         let handle = client.handle();
 
@@ -77,8 +82,21 @@ impl DaemonConnection {
     }
 }
 
-/// Read the Erlang cookie from a file
+/// Read the Erlang cookie from environment variable or file
+///
+/// Checks in order:
+/// 1. NEONFS_COOKIE environment variable
+/// 2. Cookie file at the given path
 fn read_cookie(path: &str) -> Result<String> {
+    // First check environment variable
+    if let Ok(cookie) = std::env::var("NEONFS_COOKIE") {
+        let cookie = cookie.trim().to_string();
+        if !cookie.is_empty() {
+            return Ok(cookie);
+        }
+    }
+
+    // Fall back to file
     let path_obj = Path::new(path);
 
     if !path_obj.exists() {

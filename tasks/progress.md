@@ -1015,3 +1015,40 @@
   - Integration tests require both FUSE kernel module and fusermount/umount utilities
   - Bash script best practices: `set -euo pipefail`, trap cleanup, color-coded logging
 ---
+## 2026-02-01 - Human intervention to get tests passing
+- What was fixed:
+  - Container acceptance tests failing due to multiple issues with multi-node RPC, FUSE operations, and persistence
+  - Handler RPC refactor: replaced anonymous functions in maps pattern with direct RPC calls
+    - The `with_fuse_manager` callback pattern caused `badarg` in `erlang:apply` when the map of functions was used
+    - Created separate `rpc_mount`, `rpc_unmount`, `rpc_list_mounts`, `rpc_get_mount`, `rpc_get_mount_by_path` helpers
+  - FUSE mount operations: fixed volume lookup via RPC from FUSE node to core node
+  - CLI field alignment: ensured CLI expects same field names as handler returns
+  - Persistence shutdown: ETS tables were destroyed before Persistence could snapshot them
+    - Supervisor shuts down children in reverse order (VolumeRegistry first, Persistence last)
+    - Added `Process.flag(:trap_exit, true)` to VolumeRegistry
+    - VolumeRegistry now saves its own ETS tables in terminate callback
+    - Added public `Persistence.snapshot_table/2` function for other GenServers to call
+  - Unmount handling: fixed Rustler Result wrapper (`{:ok, :ok}` instead of `:ok`)
+  - Fusermount configuration: made command configurable, added lazy unmount flags
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (refactored RPC, removed anonymous function map pattern)
+  - `neonfs_core/lib/neon_fs/core/application.ex` (added stop/1 callback for logging)
+  - `neonfs_core/lib/neon_fs/core/persistence.ex` (added trap_exit, public snapshot_table/2, meta_dir/0)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (increased Persistence shutdown timeout to 30s)
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` (added trap_exit, terminate callback for self-persistence)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_manager.ex` (fixed unmount result handling)
+  - `neonfs_fuse/native/neonfs_fuse/src/mount.rs` (configurable fusermount, lazy unmount)
+  - `neonfs_fuse/config/runtime.exs` (added fusermount_cmd config)
+  - `scripts/acceptance-test-containers.sh` (Docker volume for persistence, graceful shutdown)
+- **Learnings for future iterations:**
+  - Docker buildx bake: use `--load` flag to load images into local Docker daemon (not just push to registry)
+  - Docker buildx multi-platform: override PLATFORMS for single-arch local builds: `PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load`
+  - GenServer terminate callbacks only called if `Process.flag(:trap_exit, true)` is set in init
+  - Supervisor shutdown order is REVERSE of start order - plan persistence accordingly
+  - For ETS tables owned by GenServers: each GenServer should persist its own tables in terminate, while tables still exist
+  - Anonymous functions stored in maps can cause issues - prefer explicit function calls for clarity
+  - Multi-container Erlang distribution: configure node names via env vars, ensure cookie matches
+  - Rustler wraps Result<(), E> as `{:ok, {}}` and Result<T, E> success as `{:ok, value}` - handle accordingly
+  - FUSE container operations need `--privileged` flag for fuse device access
+  - Graceful container shutdown: use release stop command before docker stop
+---

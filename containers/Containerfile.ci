@@ -1,0 +1,16 @@
+FROM base
+
+RUN useradd dev
+RUN mkdir /home/dev
+RUN mkdir /workdir
+RUN chown dev:dev /home/dev
+RUN chown dev:dev /workdir
+USER dev
+ENV HOME=/home/dev
+COPY resources/dev_zshrc /home/dev/.zshrc
+
+WORKDIR /workdir
+COPY .tool-versions /workdir
+RUN /usr/local/bin/asdf_install
+RUN export PATH="/home/dev/.asdf/shims:$PATH"; mix local.hex --force && mix local.rebar --force
+

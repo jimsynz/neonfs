@@ -1,0 +1,28 @@
+ARG RUN_TESTS=false
+
+FROM builder AS deps
+RUN mkdir /workdir/neonfs-cli
+COPY --from=src . /workdir/neonfs-cli
+WORKDIR /workdir/neonfs-cli
+
+FROM deps AS test
+ARG RUN_TESTS
+RUN export PATH="/root/.asdf/shims:$PATH"; \
+    if [ "$RUN_TESTS" = "true" ]; then \
+      echo "Running tests..."; \
+      cargo fmt --check && \
+      cargo clippy --all-targets -- -D warnings && \
+      cargo test --release; \
+    else \
+      echo "Skipping tests (RUN_TESTS=$RUN_TESTS)"; \
+    fi
+
+FROM deps AS releaser
+# Copy from test stage to ensure tests ran before release
+COPY --from=test /workdir/neonfs-cli/Cargo.toml /tmp/test-complete
+RUN export PATH="/root/.asdf/shims:$PATH"; cargo build --release
+
+FROM debian:trixie
+COPY --from=releaser /workdir/neonfs-cli/target/release/neonfs-cli /bin/neonfs
+
+ENTRYPOINT ["/bin/neonfs"]

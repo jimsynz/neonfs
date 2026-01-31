@@ -132,11 +132,12 @@ impl VolumeInfo {
 /// Mount information response
 #[derive(Debug, Serialize)]
 pub struct MountInfo {
-    pub mount_id: String,
-    pub volume_id: String,
+    #[serde(rename = "mount_id")]
+    pub id: String,
     pub volume_name: String,
     pub mount_point: String,
-    pub mounted_at: String,
+    #[serde(rename = "mounted_at")]
+    pub started_at: String,
 }
 
 impl MountInfo {
@@ -145,20 +146,19 @@ impl MountInfo {
         let map = term_to_map(&term)?;
 
         Ok(Self {
-            mount_id: term_to_string(map.get("mount_id").ok_or_else(|| {
-                CliError::TermConversionError("Missing 'mount_id' field".to_string())
-            })?)?,
-            volume_id: term_to_string(map.get("volume_id").ok_or_else(|| {
-                CliError::TermConversionError("Missing 'volume_id' field".to_string())
-            })?)?,
+            id: term_to_string(
+                map.get("id").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'id' field".to_string())
+                })?,
+            )?,
             volume_name: term_to_string(map.get("volume_name").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'volume_name' field".to_string())
             })?)?,
             mount_point: term_to_string(map.get("mount_point").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'mount_point' field".to_string())
             })?)?,
-            mounted_at: term_to_string(map.get("mounted_at").ok_or_else(|| {
-                CliError::TermConversionError("Missing 'mounted_at' field".to_string())
+            started_at: term_to_string(map.get("started_at").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'started_at' field".to_string())
             })?)?,
         })
     }

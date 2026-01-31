@@ -94,7 +94,11 @@ defmodule NeonFS.FUSE.Native do
 
   Gracefully unmounts the filesystem and cleans up resources.
   This function blocks until the unmount is complete.
+
+  ## Parameters
+  - `session` - The mount session returned from `mount/3`
+  - `fusermount_cmd` - The fusermount command to use (e.g., "fusermount3")
   """
-  @spec unmount(mount_session()) :: :ok | {:error, String.t()}
-  def unmount(_session), do: :erlang.nif_error(:nif_not_loaded)
+  @spec unmount(mount_session(), String.t()) :: {:ok, :ok} | {:error, String.t()}
+  def unmount(_session, _fusermount_cmd), do: :erlang.nif_error(:nif_not_loaded)
 end

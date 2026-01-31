@@ -180,8 +180,9 @@ defmodule NeonFS.FUSE.MountManager do
           "Handler for mount #{mount_id} (#{mount_info.volume_name}) crashed: #{inspect(reason)}"
         )
 
-        # Try to unmount the filesystem
-        _ = Native.unmount(mount_info.mount_session)
+        # Try to unmount the filesystem (ignore result since handler already crashed)
+        fusermount_cmd = Application.get_env(:neonfs_fuse, :fusermount_cmd, "fusermount3")
+        _ = Native.unmount(mount_info.mount_session, fusermount_cmd)
         new_state = remove_mount(state, mount_id)
         {:noreply, new_state}
 
@@ -219,9 +220,12 @@ defmodule NeonFS.FUSE.MountManager do
   end
 
   defp get_volume(volume_name) do
-    case VolumeRegistry.get_by_name(volume_name) do
+    core_node = Application.get_env(:neonfs_fuse, :core_node, :neonfs_core@localhost)
+
+    case :rpc.call(core_node, VolumeRegistry, :get_by_name, [volume_name]) do
       {:ok, volume} -> {:ok, volume}
       {:error, :not_found} -> {:error, :volume_not_found}
+      {:badrpc, reason} -> {:error, {:core_unreachable, reason}}
     end
   end
 
@@ -276,8 +280,16 @@ defmodule NeonFS.FUSE.MountManager do
   end
 
   defp unmount_filesystem(mount_info) do
+    # Get the fusermount command from config
+    fusermount_cmd = Application.get_env(:neonfs_fuse, :fusermount_cmd, "fusermount3")
+
     # Unmount the filesystem first
-    result = Native.unmount(mount_info.mount_session)
+    # Native.unmount returns {:ok, :ok} or {:error, reason} due to Rustler Result type
+    result =
+      case Native.unmount(mount_info.mount_session, fusermount_cmd) do
+        {:ok, :ok} -> :ok
+        {:error, _} = error -> error
+      end
 
     # Stop the handler via supervisor (if still alive)
     if Process.alive?(mount_info.handler_pid) do

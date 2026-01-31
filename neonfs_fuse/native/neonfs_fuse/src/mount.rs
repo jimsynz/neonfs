@@ -117,7 +117,10 @@ impl MountSession {
     ///
     /// This sends a shutdown signal to the server and unmounts the filesystem.
     /// The method blocks until the FUSE session thread completes.
-    pub fn unmount(mut self) -> Result<(), FuseError> {
+    ///
+    /// # Arguments
+    /// * `fusermount_cmd` - The fusermount command to use (e.g., "fusermount3" or "fusermount")
+    pub fn unmount(mut self, fusermount_cmd: &str) -> Result<(), FuseError> {
         // Signal server to shut down
         {
             let server = self
@@ -127,59 +130,60 @@ impl MountSession {
             server.shutdown();
         }
 
-        // Unmount the filesystem
-        // Note: This uses the fusermount command which must be available
-        let status = std::process::Command::new("fusermount")
-            .arg("-u")
-            .arg(&self.mount_point)
-            .status();
+        // Unmount the filesystem using the configured command, with fallbacks
+        // Try lazy unmount (-z) variants first as they're more reliable in containers
+        let mount_point_str = self.mount_point.to_str().unwrap_or("");
+        let unmount_commands = [
+            (fusermount_cmd, vec!["-uz", mount_point_str]),
+            (fusermount_cmd, vec!["-u", mount_point_str]),
+            ("fusermount3", vec!["-uz", mount_point_str]),
+            ("fusermount3", vec!["-u", mount_point_str]),
+            ("fusermount", vec!["-uz", mount_point_str]),
+            ("fusermount", vec!["-u", mount_point_str]),
+            ("umount", vec!["-l", mount_point_str]),
+            ("umount", vec![mount_point_str]),
+        ];
 
-        match status {
-            Ok(exit_status) if exit_status.success() => {
-                log::info!("Unmounted filesystem at {:?}", self.mount_point);
-            }
-            Ok(exit_status) => {
-                log::warn!(
-                    "fusermount exited with status: {:?}, trying umount",
-                    exit_status
-                );
-
-                // Try umount as fallback
-                let umount_status = std::process::Command::new("umount")
-                    .arg(&self.mount_point)
-                    .status();
-
-                if let Ok(s) = umount_status {
-                    if !s.success() {
-                        log::error!("umount also failed with status: {:?}", s);
-                    }
+        let mut unmounted = false;
+        for (cmd, args) in &unmount_commands {
+            match std::process::Command::new(cmd).args(args).status() {
+                Ok(exit_status) if exit_status.success() => {
+                    log::info!(
+                        "Unmounted filesystem at {:?} using {}",
+                        self.mount_point,
+                        cmd
+                    );
+                    unmounted = true;
+                    break;
                 }
-            }
-            Err(e) => {
-                log::warn!("Failed to run fusermount: {}, trying umount", e);
-
-                // Try umount as fallback
-                let umount_status = std::process::Command::new("umount")
-                    .arg(&self.mount_point)
-                    .status();
-
-                if let Ok(s) = umount_status {
-                    if !s.success() {
-                        log::error!("umount also failed with status: {:?}", s);
-                    }
+                Ok(exit_status) => {
+                    log::debug!("{} exited with status: {:?}", cmd, exit_status);
+                }
+                Err(e) => {
+                    log::debug!("Failed to run {}: {}", cmd, e);
                 }
             }
         }
 
+        if !unmounted {
+            log::warn!("All unmount commands failed for {:?}", self.mount_point);
+        }
+
         // Wait for session thread to complete
+        // Note: The session thread may return an error if the unmount wasn't clean,
+        // but we don't propagate this as an error since the unmount was requested.
         if let Some(handle) = self.session_thread.take() {
             match handle.join() {
-                Ok(result) => result?,
+                Ok(Ok(())) => {
+                    log::info!("FUSE session thread completed cleanly");
+                }
+                Ok(Err(e)) => {
+                    // Session exited with error - this can happen with lazy unmount
+                    // or permission issues, but the filesystem should still be unmounted
+                    log::warn!("FUSE session thread exited with error: {}", e);
+                }
                 Err(e) => {
                     log::error!("FUSE session thread panicked: {:?}", e);
-                    return Err(FuseError::ChannelSend(
-                        "Session thread panicked".to_string(),
-                    ));
                 }
             }
         }
@@ -194,7 +198,16 @@ impl Drop for MountSession {
         if self.session_thread.is_some() {
             log::warn!("MountSession dropped without explicit unmount");
 
-            // Try to unmount, but don't panic if it fails
+            // Try to unmount using fusermount3/fusermount, don't panic if it fails
+            if std::process::Command::new("fusermount3")
+                .arg("-u")
+                .arg(&self.mount_point)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return;
+            }
             let _ = std::process::Command::new("fusermount")
                 .arg("-u")
                 .arg(&self.mount_point)

@@ -1,0 +1,55 @@
+ARG RUN_TESTS=false
+
+FROM builder AS deps
+RUN mkdir /workdir/neonfs_core
+COPY --from=src . /workdir/neonfs_core
+WORKDIR /workdir/neonfs_core
+RUN export PATH="/root/.asdf/shims:$PATH"; mix deps.get
+
+FROM deps AS test
+ARG RUN_TESTS
+RUN export PATH="/root/.asdf/shims:$PATH"; \
+    if [ "$RUN_TESTS" = "true" ]; then \
+      echo "Running tests..."; \
+      mix check --no-retry; \
+    else \
+      echo "Skipping tests (RUN_TESTS=$RUN_TESTS)"; \
+    fi
+
+FROM deps AS releaser
+# Copy from test stage to ensure tests ran before release
+COPY --from=test /workdir/neonfs_core/mix.exs /tmp/test-complete
+ENV MIX_ENV=prod
+RUN export PATH="/root/.asdf/shims:$PATH"; mix compile
+RUN export PATH="/root/.asdf/shims:$PATH"; mix release --overwrite
+
+FROM debian:trixie
+
+RUN apt-get update -y && \
+  apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates \
+  && apt-get clean && rm -f /var/lib/apt/lists/*_*
+
+# Set the locale
+RUN sed -i '/en_NZ.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
+
+ENV LANG=en_NZ.UTF-8
+ENV LANGUAGE=en_NZ:en
+ENV LC_ALL=en_NZ.UTF-8
+
+WORKDIR "/app"
+RUN chown nobody /app
+
+# Create data directory with correct ownership
+RUN mkdir -p /var/lib/neonfs && chown -R nobody:nogroup /var/lib/neonfs
+
+VOLUME ["/var/lib/neonfs"]
+
+# set runner ENV
+ENV MIX_ENV="prod"
+
+# Only copy the final release from the build stage
+COPY --from=releaser --chown=nobody:root /workdir/neonfs_core/_build/${MIX_ENV}/rel/neonfs_core ./
+
+USER nobody
+
+CMD ["/app/bin/neonfs_core", "start"]

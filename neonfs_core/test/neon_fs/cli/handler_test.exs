@@ -25,8 +25,8 @@ defmodule NeonFS.CLI.HandlerTest do
       assert is_binary(status.node)
       assert status.status == :running
       assert is_integer(status.volumes)
-      assert is_integer(status.uptime)
-      assert status.uptime >= 0
+      assert is_integer(status.uptime_seconds)
+      assert status.uptime_seconds >= 0
     end
 
     test "returns serializable data" do

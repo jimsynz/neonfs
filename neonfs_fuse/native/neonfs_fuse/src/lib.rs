@@ -166,20 +166,14 @@ fn server_stats(
 /// * `callback_pid` - PID of the Elixir process to send operations to
 /// * `options` - List of mount options (e.g., ["auto_unmount", "allow_other"])
 ///
-/// Returns a resource handle to the mount session.
+/// Returns `{:ok, session}` where session is a resource handle to the mount session.
 #[cfg(feature = "fuse")]
 #[rustler::nif]
 fn mount(
     mount_point: String,
     callback_pid: LocalPid,
     options: Vec<String>,
-) -> Result<
-    (
-        rustler::types::atom::Atom,
-        ResourceArc<MountSessionResource>,
-    ),
-    String,
-> {
+) -> Result<ResourceArc<MountSessionResource>, String> {
     let (server, mut operation_rx) = FuseServer::new(callback_pid);
 
     // Spawn background task to forward operations to Elixir
@@ -204,16 +198,17 @@ fn mount(
 
     let resource = ResourceArc::new(MountSessionResource::new(session));
 
-    Ok((rustler::types::atom::ok(), resource))
+    Ok(resource)
 }
 
 /// Unmount a FUSE filesystem
 ///
-/// Takes the mount session resource and gracefully unmounts the filesystem.
+/// Takes the mount session resource and fusermount command, then gracefully unmounts.
 #[cfg(feature = "fuse")]
 #[rustler::nif]
 fn unmount(
     session_resource: ResourceArc<MountSessionResource>,
+    fusermount_cmd: String,
 ) -> Result<rustler::types::atom::Atom, String> {
     let mut session_opt = session_resource
         .session
@@ -222,7 +217,7 @@ fn unmount(
 
     if let Some(session) = session_opt.take() {
         session
-            .unmount()
+            .unmount(&fusermount_cmd)
             .map_err(|e| format!("Failed to unmount: {}", e))?;
         Ok(rustler::types::atom::ok())
     } else {

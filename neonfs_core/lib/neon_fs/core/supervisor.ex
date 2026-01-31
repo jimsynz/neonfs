@@ -26,7 +26,14 @@ defmodule NeonFS.Core.Supervisor do
 
     children = [
       # Persistence must start first - restores metadata from DETS
-      {NeonFS.Core.Persistence, meta_dir: meta_dir, snapshot_interval_ms: snapshot_interval_ms},
+      # Give it extra shutdown time to complete the final snapshot
+      %{
+        id: NeonFS.Core.Persistence,
+        start:
+          {NeonFS.Core.Persistence, :start_link,
+           [[meta_dir: meta_dir, snapshot_interval_ms: snapshot_interval_ms]]},
+        shutdown: 30_000
+      },
 
       # BlobStore provides storage layer for all components
       {NeonFS.Core.BlobStore, base_dir: base_dir, prefix_depth: prefix_depth},

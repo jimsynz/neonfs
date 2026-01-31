@@ -9,3 +9,9 @@ if Mix.env() in [:dev, :test] do
     manage_mix_version?: true,
     manage_readme_version: true
 end
+
+# In test mode, don't start the supervisor - tests use start_supervised
+# for the specific components they need, ensuring proper isolation
+if Mix.env() == :test do
+  config :neonfs_fuse, start_supervisor: false
+end

@@ -348,9 +348,12 @@ defmodule NeonFS.Core.ChunkIndexTest do
       # Wait for all tasks to complete
       Task.await_many(tasks)
 
-      # Verify all chunks are committed
-      chunks = ChunkIndex.list_uncommitted()
-      assert chunks == []
+      # Verify all chunks created by this test are committed
+      for hash <- hashes do
+        {:ok, chunk} = ChunkIndex.get(hash)
+        assert chunk.commit_state == :committed, "Chunk should be committed"
+        assert MapSet.size(chunk.active_write_refs) == 0, "No active write refs should remain"
+      end
     end
   end
 end

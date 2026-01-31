@@ -6,7 +6,7 @@ use crate::output::{json, table, OutputFormat};
 use crate::term::types::VolumeInfo;
 use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
-use eetf::{Binary, Term};
+use eetf::{Atom, Binary, FixInteger, Map, Term};
 
 /// Volume management subcommands
 #[derive(Debug, Subcommand)]
@@ -123,23 +123,50 @@ impl VolumeCommand {
         // Create tokio runtime for async calls
         let runtime = tokio::runtime::Runtime::new()?;
 
-        // Build volume configuration
+        // Build volume configuration as Erlang map
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
-        let config_term = Term::Binary(Binary {
-            bytes: serde_json::to_vec(&serde_json::json!({
-                "durability": {
-                    "type": "replicate",
-                    "factor": replicas,
-                    "min_copies": std::cmp::min(replicas, 2)
-                },
-                "compression": {
-                    "algorithm": compression,
-                    "level": 3,
-                    "min_size": 4096
-                }
-            }))?,
+
+        let durability_map = Term::Map(Map {
+            entries: vec![
+                (
+                    Term::Atom(Atom::from("type")),
+                    Term::Atom(Atom::from("replicate")),
+                ),
+                (
+                    Term::Atom(Atom::from("factor")),
+                    Term::FixInteger(FixInteger::from(replicas as i32)),
+                ),
+                (
+                    Term::Atom(Atom::from("min_copies")),
+                    Term::FixInteger(FixInteger::from(std::cmp::min(replicas, 2) as i32)),
+                ),
+            ],
+        });
+
+        let compression_map = Term::Map(Map {
+            entries: vec![
+                (
+                    Term::Atom(Atom::from("algorithm")),
+                    Term::Atom(Atom::from(compression)),
+                ),
+                (
+                    Term::Atom(Atom::from("level")),
+                    Term::FixInteger(FixInteger::from(3)),
+                ),
+                (
+                    Term::Atom(Atom::from("min_size")),
+                    Term::FixInteger(FixInteger::from(4096)),
+                ),
+            ],
+        });
+
+        let config_term = Term::Map(Map {
+            entries: vec![
+                (Term::Atom(Atom::from("durability")), durability_map),
+                (Term::Atom(Atom::from("compression")), compression_map),
+            ],
         });
 
         // Connect to daemon and create volume

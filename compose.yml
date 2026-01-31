@@ -1,12 +1,6 @@
 services:
   dev:
-    image: harton.dev/project-neon/neonfs-dev:latest
-    build:
-      context: .
-      dockerfile: Containerfile.dev
-      cache_from:
-        - harton.dev/james/asdf_container:latest
-        - harton.dev/project-neon/neonfs-dev:latest
+    image: harton.dev/project-neon/neonfs/dev:latest
     container_name: neonfs-dev
     hostname: neonfs-dev
     volumes:

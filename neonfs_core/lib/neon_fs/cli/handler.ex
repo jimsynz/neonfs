@@ -26,7 +26,7 @@ defmodule NeonFS.CLI.Handler do
        node: Atom.to_string(Node.self()),
        status: :running,
        volumes: count_volumes(),
-       uptime: get_uptime()
+       uptime_seconds: get_uptime()
      }}
   end
 
@@ -132,15 +132,12 @@ defmodule NeonFS.CLI.Handler do
   @spec mount(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def mount(volume_name, mount_point, options)
       when is_binary(volume_name) and is_binary(mount_point) and is_map(options) do
-    with_fuse_manager(fn manager ->
-      # Convert options map to keyword list
-      opts = map_to_opts(options)
-
-      case manager.mount(volume_name, mount_point, opts) do
-        {:ok, mount_info} -> {:ok, mount_info_to_map(mount_info)}
-        {:error, reason} -> {:error, reason}
-      end
-    end)
+    with {:ok, fuse_node} <- get_fuse_node(),
+         opts = map_to_opts(options),
+         {:ok, mount_id} <- rpc_mount(fuse_node, volume_name, mount_point, opts),
+         {:ok, mount_info} <- rpc_get_mount(fuse_node, mount_id) do
+      {:ok, mount_info_to_map(mount_info)}
+    end
   end
 
   @doc """
@@ -157,11 +154,11 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec unmount(String.t()) :: {:ok, map()} | {:error, term()}
   def unmount(mount_id_or_path) when is_binary(mount_id_or_path) do
-    with_fuse_manager(fn manager ->
+    with {:ok, fuse_node} <- get_fuse_node() do
       mount_id_or_path
-      |> do_unmount(manager)
+      |> do_unmount(fuse_node)
       |> format_unmount_result()
-    end)
+    end
   end
 
   @doc """
@@ -174,63 +171,58 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec list_mounts() :: {:ok, [map()]}
   def list_mounts do
-    with_fuse_manager(fn manager ->
-      mounts =
-        manager.list_mounts()
-        |> Enum.map(&mount_info_to_map/1)
-
-      {:ok, mounts}
-    end)
+    with {:ok, fuse_node} <- get_fuse_node(),
+         {:ok, mounts} <- rpc_list_mounts(fuse_node) do
+      {:ok, Enum.map(mounts, &mount_info_to_map/1)}
+    end
   end
 
   # Private helper functions
 
-  # Conditionally execute FUSE operations if the application is available
-  #
-  # TODO: Phase 1 uses Code.ensure_loaded?/1 which only checks the local VM.
-  # Per spec/architecture.md, neonfs_core and neonfs_fuse are separate Erlang nodes
-  # (e.g., neonfs_core@localhost and neonfs_fuse@localhost) that communicate via
-  # Erlang distribution. For proper multi-node/container deployment, this should use:
-  #
-  #   :rpc.call(fuse_node_name(), NeonFS.FUSE.MountManager, function, args)
-  #
-  # where fuse_node_name() returns the configured FUSE node name (from config or
-  # service discovery). The current implementation works for Phase 1 where both apps
-  # run in the same node, but will need updating for separate container deployment.
-  defp with_fuse_manager(fun) do
+  # Get the FUSE node and verify it's reachable
+  defp get_fuse_node do
     fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
 
-    # Check if FUSE node is reachable via RPC
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
-      {:badrpc, _} ->
-        # FUSE node not available (not running or not reachable)
-        {:error, :fuse_not_available}
+      {:badrpc, _} -> {:error, :fuse_not_available}
+      NeonFS.FUSE.MountManager -> {:ok, fuse_node}
+    end
+  end
 
-      NeonFS.FUSE.MountManager ->
-        # FUSE module exists, create RPC wrapper for manager operations
-        rpc_manager = %{
-          mount: fn volume_name, mount_point, opts ->
-            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :mount, [
-              volume_name,
-              mount_point,
-              opts
-            ])
-          end,
-          unmount: fn mount_id ->
-            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :unmount, [mount_id])
-          end,
-          list_mounts: fn ->
-            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :list_mounts, [])
-          end,
-          get_mount: fn mount_id ->
-            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount, [mount_id])
-          end,
-          get_mount_by_path: fn path ->
-            :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_path, [path])
-          end
-        }
+  # RPC wrappers for MountManager operations
+  defp rpc_mount(fuse_node, volume_name, mount_point, opts) do
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :mount, [volume_name, mount_point, opts]) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+      result -> result
+    end
+  end
 
-        fun.(rpc_manager)
+  defp rpc_unmount(fuse_node, mount_id) do
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :unmount, [mount_id]) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+      result -> result
+    end
+  end
+
+  defp rpc_list_mounts(fuse_node) do
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :list_mounts, []) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+      mounts when is_list(mounts) -> {:ok, mounts}
+      result -> result
+    end
+  end
+
+  defp rpc_get_mount(fuse_node, mount_id) do
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount, [mount_id]) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+      result -> result
+    end
+  end
+
+  defp rpc_get_mount_by_path(fuse_node, path) do
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_path, [path]) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+      result -> result
     end
   end
 
@@ -273,16 +265,16 @@ defmodule NeonFS.CLI.Handler do
     }
   end
 
-  defp do_unmount(mount_id_or_path, manager) do
+  defp do_unmount(mount_id_or_path, fuse_node) do
     # Try mount_id first, then try path
-    case manager.get_mount(mount_id_or_path) do
+    case rpc_get_mount(fuse_node, mount_id_or_path) do
       {:ok, _mount} ->
-        manager.unmount(mount_id_or_path)
+        rpc_unmount(fuse_node, mount_id_or_path)
 
       {:error, :not_found} ->
-        case manager.get_mount_by_path(mount_id_or_path) do
+        case rpc_get_mount_by_path(fuse_node, mount_id_or_path) do
           {:ok, mount} ->
-            manager.unmount(mount.id)
+            rpc_unmount(fuse_node, mount.id)
 
           {:error, :not_found} ->
             {:error, :mount_not_found}

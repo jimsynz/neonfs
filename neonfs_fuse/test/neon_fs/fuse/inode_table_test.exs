@@ -4,8 +4,8 @@ defmodule NeonFS.FUSE.InodeTableTest do
   alias NeonFS.FUSE.InodeTable
 
   setup do
-    # Clear the inode table before each test
-    InodeTable.clear()
+    # Start InodeTable under test supervision for proper isolation
+    start_supervised!(InodeTable)
     :ok
   end
 

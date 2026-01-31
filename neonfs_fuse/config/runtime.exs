@@ -10,9 +10,13 @@ if config_env() == :prod do
   # Core node to connect to for metadata operations
   core_node = System.get_env("NEONFS_CORE_NODE", "neonfs_core@localhost")
 
+  # Unmount command - fusermount3 for fuse3 systems, fusermount for fuse2
+  fusermount_cmd = System.get_env("NEONFS_FUSERMOUNT_CMD", "fusermount3")
+
   config :neonfs_fuse,
     node_name: node_name,
-    core_node: String.to_atom(core_node)
+    core_node: String.to_atom(core_node),
+    fusermount_cmd: fusermount_cmd
 
   # Default mount options
   config :neonfs_fuse, NeonFS.FUSE.MountManager, default_mount_options: []

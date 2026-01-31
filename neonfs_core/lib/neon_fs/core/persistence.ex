@@ -53,10 +53,37 @@ defmodule NeonFS.Core.Persistence do
     GenServer.call(__MODULE__, :snapshot_now, :infinity)
   end
 
+  @doc """
+  Snapshots a single ETS table to a DETS file.
+
+  This is a direct function (not a GenServer call) so it can be called
+  from other GenServers' terminate callbacks even after Persistence
+  has terminated.
+
+  Uses atomic write-then-rename to prevent corruption.
+  """
+  @spec snapshot_table(atom(), String.t()) :: :ok | {:error, term()}
+  def snapshot_table(ets_table, dets_path) do
+    # Ensure parent directory exists
+    dets_path |> Path.dirname() |> File.mkdir_p!()
+    do_atomic_snapshot(ets_table, dets_path)
+  end
+
+  @doc """
+  Returns the configured metadata directory.
+  """
+  @spec meta_dir() :: String.t()
+  def meta_dir do
+    Application.get_env(:neonfs_core, :meta_dir, @default_meta_dir)
+  end
+
   # Server Callbacks
 
   @impl true
   def init(opts) do
+    # Trap exits so terminate/2 is called during supervisor shutdown
+    Process.flag(:trap_exit, true)
+
     meta_dir = Keyword.get(opts, :meta_dir, @default_meta_dir)
     snapshot_interval_ms = Keyword.get(opts, :snapshot_interval_ms, @default_snapshot_interval_ms)
 

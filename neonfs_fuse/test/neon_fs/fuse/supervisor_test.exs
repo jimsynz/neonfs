@@ -4,6 +4,14 @@ defmodule NeonFS.FUSE.SupervisorTest do
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.FUSE.{InodeTable, MountManager, MountSupervisor, Supervisor}
 
+  # Start the full FUSE supervisor for this test module since it tests the supervisor itself
+  setup do
+    # Start the full supervisor (which starts InodeTable, MountSupervisor, MountManager)
+    start_supervised!(Supervisor)
+
+    :ok
+  end
+
   describe "Supervisor" do
     test "starts without errors" do
       # Supervisor is started by application, verify it's running
@@ -132,6 +140,8 @@ defmodule NeonFS.FUSE.SupervisorTest do
   end
 
   describe "Mount integration with supervision" do
+    @describetag :fuse_integration
+
     setup do
       # Create a test volume
       {:ok, _vol_id} = create_test_volume("test_vol")
@@ -230,27 +240,20 @@ defmodule NeonFS.FUSE.SupervisorTest do
   # Helper functions
 
   defp create_test_volume(name \\ "test_volume_#{:rand.uniform(10000)}") do
-    # Ensure VolumeRegistry is available
-    case Process.whereis(VolumeRegistry) do
-      nil ->
-        {:error, :volume_registry_not_started}
-
-      _pid ->
-        # Create a volume if it doesn't exist
-        case VolumeRegistry.get_by_name(name) do
-          {:ok, volume} ->
-            {:ok, volume.id}
-
-          {:error, :not_found} ->
-            case VolumeRegistry.create(name,
-                   durability: %{type: :replicate, factor: 1, min_copies: 1},
-                   compression: %{algorithm: :zstd, level: 3, min_size: 4096},
-                   verification: %{on_read: :never}
-                 ) do
-              {:ok, volume} -> {:ok, volume.id}
-              {:error, reason} -> {:error, reason}
-            end
-        end
+    with {:registry, pid} when is_pid(pid) <- {:registry, Process.whereis(VolumeRegistry)},
+         {:get, {:error, :not_found}} <- {:get, VolumeRegistry.get_by_name(name)},
+         {:create, {:ok, volume}} <-
+           {:create,
+            VolumeRegistry.create(name,
+              durability: %{type: :replicate, factor: 1, min_copies: 1},
+              compression: %{algorithm: :zstd, level: 3, min_size: 4096},
+              verification: %{on_read: :never}
+            )} do
+      {:ok, volume.id}
+    else
+      {:registry, nil} -> {:error, :volume_registry_not_started}
+      {:get, {:ok, volume}} -> {:ok, volume.id}
+      {:create, {:error, reason}} -> {:error, reason}
     end
   end
 end

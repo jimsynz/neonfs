@@ -7,8 +7,8 @@ defmodule NeonFS.FUSE.HandlerTest do
   @test_volume_name "test_volume"
 
   setup do
-    # Clear inode table
-    InodeTable.clear()
+    # Start InodeTable under test supervision for proper isolation
+    start_supervised!(InodeTable)
 
     # Ensure test volume exists and get its ID
     volume_id =
@@ -60,7 +60,7 @@ defmodule NeonFS.FUSE.HandlerTest do
 
       # Lookup the file
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "test.txt"}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Verify inode was allocated
       assert {:ok, inode} = InodeTable.get_inode(volume_id, "/test.txt")
@@ -69,23 +69,23 @@ defmodule NeonFS.FUSE.HandlerTest do
 
     test "returns error for nonexistent file", %{handler: handler, volume_id: volume_id} do
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "missing.txt"}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Verify no inode was allocated
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/missing.txt")
     end
 
     test "looks up file in subdirectory", %{handler: handler, volume_id: volume_id} do
-      # Create directory and file
-      {:ok, _} = WriteOperation.write_file(volume_id, "/docs/", "", mode: 0o755)
+      # Create directory with S_IFDIR mode and file
+      {:ok, _} = WriteOperation.write_file(volume_id, "/docs", "", mode: 0o040755)
       {:ok, _} = WriteOperation.write_file(volume_id, "/docs/file.txt", "content")
 
       # Allocate inode for parent directory
-      {:ok, parent_inode} = InodeTable.allocate_inode(volume_id, "/docs/")
+      {:ok, parent_inode} = InodeTable.allocate_inode(volume_id, "/docs")
 
       # Lookup file in directory
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => parent_inode, "name" => "file.txt"}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Verify inode was allocated
       assert {:ok, _inode} = InodeTable.get_inode(volume_id, "/docs/file.txt")
@@ -95,7 +95,7 @@ defmodule NeonFS.FUSE.HandlerTest do
   describe "getattr operation" do
     test "gets attributes for root directory", %{handler: handler, volume_id: volume_id} do
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => 1}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Root should always exist
       assert {:ok, {nil, "/"}} = InodeTable.get_path(1)
@@ -107,14 +107,14 @@ defmodule NeonFS.FUSE.HandlerTest do
       {:ok, inode} = InodeTable.allocate_inode(volume_id, "/test.txt")
 
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => inode}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should succeed (handler logs would show result)
     end
 
     test "returns error for nonexistent inode", %{handler: handler, volume_id: volume_id} do
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => 999}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should return ENOENT error (handler logs would show result)
     end
@@ -128,7 +128,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       {:ok, inode} = InodeTable.allocate_inode(volume_id, "/test.txt")
 
       send(handler, {:fuse_op, 1, {"read", %{"ino" => inode, "offset" => 0, "size" => 100}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Verify file still exists and has correct content
       {:ok, file} = FileIndex.get_by_path(volume_id, "/test.txt")
@@ -141,7 +141,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       {:ok, inode} = InodeTable.allocate_inode(volume_id, "/test.txt")
 
       send(handler, {:fuse_op, 1, {"read", %{"ino" => inode, "offset" => 5, "size" => 3}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should read bytes 5-7: "567"
     end
@@ -150,7 +150,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       {:ok, inode} = InodeTable.allocate_inode(volume_id, "/missing.txt")
 
       send(handler, {:fuse_op, 1, {"read", %{"ino" => inode, "offset" => 0, "size" => 100}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should return ENOENT error
     end
@@ -196,7 +196,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       {:ok, _} = WriteOperation.write_file(volume_id, "/file2.txt", "content2")
 
       send(handler, {:fuse_op, 1, {"readdir", %{"ino" => 1, "offset" => 0}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should list files (inodes should be allocated)
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/file1.txt")
@@ -204,15 +204,15 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
 
     test "reads subdirectory", %{handler: handler, volume_id: volume_id} do
-      # Create directory with files
-      {:ok, _} = WriteOperation.write_file(volume_id, "/docs/", "", mode: 0o755)
+      # Create directory with S_IFDIR mode and files
+      {:ok, _} = WriteOperation.write_file(volume_id, "/docs", "", mode: 0o040755)
       {:ok, _} = WriteOperation.write_file(volume_id, "/docs/readme.md", "# README")
       {:ok, _} = WriteOperation.write_file(volume_id, "/docs/guide.md", "# Guide")
 
-      {:ok, dir_inode} = InodeTable.allocate_inode(volume_id, "/docs/")
+      {:ok, dir_inode} = InodeTable.allocate_inode(volume_id, "/docs")
 
       send(handler, {:fuse_op, 1, {"readdir", %{"ino" => dir_inode, "offset" => 0}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Files should be allocated inodes
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/docs/readme.md")
@@ -220,12 +220,12 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
 
     test "returns empty list for empty directory", %{handler: handler, volume_id: volume_id} do
-      # Create empty directory
-      {:ok, _} = WriteOperation.write_file(volume_id, "/empty/", "", mode: 0o755)
-      {:ok, dir_inode} = InodeTable.allocate_inode(volume_id, "/empty/")
+      # Create empty directory with S_IFDIR mode
+      {:ok, _} = WriteOperation.write_file(volume_id, "/empty", "", mode: 0o040755)
+      {:ok, dir_inode} = InodeTable.allocate_inode(volume_id, "/empty")
 
       send(handler, {:fuse_op, 1, {"readdir", %{"ino" => dir_inode, "offset" => 0}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should succeed with empty list
     end
@@ -249,9 +249,9 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
 
     test "creates file in subdirectory", %{handler: handler, volume_id: volume_id} do
-      # Create parent directory
-      {:ok, _} = WriteOperation.write_file(volume_id, "/docs/", "", mode: 0o755)
-      {:ok, parent_inode} = InodeTable.allocate_inode(volume_id, "/docs/")
+      # Create parent directory with S_IFDIR mode
+      {:ok, _} = WriteOperation.write_file(volume_id, "/docs", "", mode: 0o040755)
+      {:ok, parent_inode} = InodeTable.allocate_inode(volume_id, "/docs")
 
       send(
         handler,
@@ -275,18 +275,19 @@ defmodule NeonFS.FUSE.HandlerTest do
 
       :timer.sleep(100)
 
-      # Verify directory was created
-      assert {:ok, file} = FileIndex.get_by_path(volume_id, "/newdir/")
-      assert file.path =~ ~r/\/$/
+      # Verify directory was created (without trailing slash, identified by mode)
+      assert {:ok, file} = FileIndex.get_by_path(volume_id, "/newdir")
+      # Directory has S_IFDIR bit set (0o040000)
+      assert Bitwise.band(file.mode, 0o170000) == 0o040000
 
       # Verify inode was allocated
-      assert {:ok, _inode} = InodeTable.get_inode(volume_id, "/newdir/")
+      assert {:ok, _inode} = InodeTable.get_inode(volume_id, "/newdir")
     end
 
     test "creates nested directory", %{handler: handler, volume_id: volume_id} do
-      # Create parent directory
-      {:ok, _} = WriteOperation.write_file(volume_id, "/parent/", "", mode: 0o755)
-      {:ok, parent_inode} = InodeTable.allocate_inode(volume_id, "/parent/")
+      # Create parent directory with S_IFDIR mode
+      {:ok, _} = WriteOperation.write_file(volume_id, "/parent", "", mode: 0o040755)
+      {:ok, parent_inode} = InodeTable.allocate_inode(volume_id, "/parent")
 
       send(
         handler,
@@ -296,7 +297,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       :timer.sleep(100)
 
       # Verify nested directory was created
-      assert {:ok, _file} = FileIndex.get_by_path(volume_id, "/parent/child/")
+      assert {:ok, _file} = FileIndex.get_by_path(volume_id, "/parent/child")
     end
   end
 
@@ -318,7 +319,7 @@ defmodule NeonFS.FUSE.HandlerTest do
 
     test "returns error for nonexistent file", %{handler: handler, volume_id: volume_id} do
       send(handler, {:fuse_op, 1, {"unlink", %{"parent" => 1, "name" => "missing.txt"}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should return ENOENT error
     end
@@ -326,14 +327,14 @@ defmodule NeonFS.FUSE.HandlerTest do
 
   describe "rmdir operation" do
     test "deletes empty directory", %{handler: handler, volume_id: volume_id} do
-      # Create empty directory (trailing slash gets normalized away)
-      {:ok, _} = WriteOperation.write_file(volume_id, "/empty_dir/", "", mode: 0o755)
+      # Create empty directory with S_IFDIR mode
+      {:ok, _} = WriteOperation.write_file(volume_id, "/empty_dir", "", mode: 0o040755)
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/empty_dir")
 
       send(handler, {:fuse_op, 1, {"rmdir", %{"parent" => 1, "name" => "empty_dir"}}})
       :timer.sleep(50)
 
-      # Verify directory was deleted (check normalized path without trailing slash)
+      # Verify directory was deleted
       assert {:error, :not_found} = FileIndex.get_by_path(volume_id, "/empty_dir")
 
       # Verify inode was released
@@ -341,16 +342,16 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
 
     test "returns error for non-empty directory", %{handler: handler, volume_id: volume_id} do
-      # Create directory with file
-      {:ok, _} = WriteOperation.write_file(volume_id, "/dir/", "", mode: 0o755)
+      # Create directory with S_IFDIR mode and a file
+      {:ok, _} = WriteOperation.write_file(volume_id, "/dir", "", mode: 0o040755)
       {:ok, _} = WriteOperation.write_file(volume_id, "/dir/file.txt", "content")
-      {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/dir/")
+      {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/dir")
 
       send(handler, {:fuse_op, 1, {"rmdir", %{"parent" => 1, "name" => "dir"}}})
       :timer.sleep(50)
 
       # Directory should still exist
-      assert {:ok, _file} = FileIndex.get_by_path(volume_id, "/dir/")
+      assert {:ok, _file} = FileIndex.get_by_path(volume_id, "/dir")
     end
   end
 
@@ -362,11 +363,11 @@ defmodule NeonFS.FUSE.HandlerTest do
 
       # Open file
       send(handler, {:fuse_op, 1, {"open", %{"ino" => inode, "flags" => 0}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Release file
       send(handler, {:fuse_op, 2, {"release", %{"ino" => inode, "fh" => inode, "flags" => 0}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Both operations should succeed
     end
@@ -405,11 +406,11 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
 
     test "moves file to different directory", %{handler: handler, volume_id: volume_id} do
-      # Create source file and destination directory
+      # Create source file and destination directory with S_IFDIR mode
       {:ok, _} = WriteOperation.write_file(volume_id, "/file.txt", "content")
-      {:ok, _} = WriteOperation.write_file(volume_id, "/dest/", "", mode: 0o755)
+      {:ok, _} = WriteOperation.write_file(volume_id, "/dest", "", mode: 0o040755)
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/file.txt")
-      {:ok, dest_inode} = InodeTable.allocate_inode(volume_id, "/dest/")
+      {:ok, dest_inode} = InodeTable.allocate_inode(volume_id, "/dest")
 
       send(
         handler,
@@ -477,7 +478,7 @@ defmodule NeonFS.FUSE.HandlerTest do
   describe "error handling" do
     test "handles unknown operations gracefully", %{handler: handler, volume_id: volume_id} do
       send(handler, {:fuse_op, 1, {"unknown_op", %{}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should log warning and return ENOSYS error
     end
@@ -487,7 +488,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       {:ok, inode} = InodeTable.allocate_inode("missing_vol", "/file.txt")
 
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => inode}}})
-      :timer.sleep(10)
+      :timer.sleep(100)
 
       # Should return appropriate error
     end

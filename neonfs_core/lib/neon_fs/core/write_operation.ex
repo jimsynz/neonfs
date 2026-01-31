@@ -45,7 +45,7 @@ defmodule NeonFS.Core.WriteOperation do
     result =
       with {:ok, volume} <- get_volume(volume_id),
            {:ok, chunks} <- chunk_and_store(data, volume, write_id, opts),
-           {:ok, file_meta} <- create_file_metadata(volume_id, path, chunks, data),
+           {:ok, file_meta} <- create_file_metadata(volume_id, path, chunks, data, opts),
            :ok <- commit_chunks(write_id, chunks) do
         {:ok, file_meta}
       else
@@ -228,7 +228,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp should_compress_chunk?(_size, _config), do: {false, :none}
 
-  defp create_file_metadata(volume_id, path, chunks, data) do
+  defp create_file_metadata(volume_id, path, chunks, data, opts) do
     # Sort chunks by offset to maintain file order
     sorted_chunks = Enum.sort_by(chunks, & &1.offset)
 
@@ -245,8 +245,17 @@ defmodule NeonFS.Core.WriteOperation do
         :ok
     end
 
+    # Build FileMeta options, including mode if provided
+    file_opts = [chunks: chunk_hashes, size: byte_size(data)]
+
+    file_opts =
+      case Keyword.fetch(opts, :mode) do
+        {:ok, mode} -> Keyword.put(file_opts, :mode, mode)
+        :error -> file_opts
+      end
+
     # Create file metadata
-    file_meta = FileMeta.new(volume_id, path, chunks: chunk_hashes, size: byte_size(data))
+    file_meta = FileMeta.new(volume_id, path, file_opts)
 
     # Store in file index
     case FileIndex.create(file_meta) do
