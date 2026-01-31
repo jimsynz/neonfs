@@ -10,17 +10,17 @@ Complete
 Implement the read path that takes a file path, looks up metadata, fetches chunks from the blob store, and assembles the data. This handles offset and length parameters for partial reads.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.ReadOperation` module handling reads
-- [ ] `read_file/3` - (volume, path, opts) -> {:ok, data}
-- [ ] `read_file/4` - (volume, path, offset, length) -> {:ok, data}
-- [ ] Look up file metadata by path
-- [ ] Determine which chunks are needed for the read range
-- [ ] Fetch chunks from blob store
-- [ ] Handle decompression based on chunk metadata
-- [ ] Assemble data from chunks, respecting offset/length
-- [ ] Verification based on volume settings
-- [ ] Telemetry events for read operations
-- [ ] Proper error handling (file not found, chunk not found)
+- [x] `NeonFS.Core.ReadOperation` module handling reads
+- [x] `read_file/3` - (volume, path, opts) -> {:ok, data}
+- [x] `read_file/4` - (volume, path, offset, length) -> {:ok, data}
+- [x] Look up file metadata by path
+- [x] Determine which chunks are needed for the read range
+- [x] Fetch chunks from blob store
+- [x] Handle decompression based on chunk metadata
+- [x] Assemble data from chunks, respecting offset/length
+- [x] Verification based on volume settings
+- [x] Telemetry events for read operations
+- [x] Proper error handling (file not found, chunk not found)
 
 ## Read Flow
 ```elixir

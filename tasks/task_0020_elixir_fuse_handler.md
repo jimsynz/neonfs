@@ -10,19 +10,19 @@ Complete
 Implement the Elixir GenServer that receives FUSE operations from the Rust NIF and dispatches them to the appropriate handlers. This bridges the FUSE crate with the core storage operations.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.FUSE.Handler` GenServer receiving FUSE operations
-- [ ] Handle `{:fuse_op, ref, operation}` messages
-- [ ] Dispatch to read/write operations based on operation type
-- [ ] Map inode numbers to file paths/metadata
-- [ ] Implement `lookup` - name resolution
-- [ ] Implement `getattr` - return file attributes
-- [ ] Implement `read` - delegate to ReadOperation
-- [ ] Implement `write` - delegate to WriteOperation
-- [ ] Implement `readdir` - list directory contents
-- [ ] Implement `create`, `mkdir`, `unlink`, `rmdir`
-- [ ] Reply via NIF with results
-- [ ] Inode allocation and tracking
-- [ ] Root inode (1) handling
+- [x] `NeonFS.FUSE.Handler` GenServer receiving FUSE operations
+- [x] Handle `{:fuse_op, ref, operation}` messages
+- [x] Dispatch to read/write operations based on operation type
+- [x] Map inode numbers to file paths/metadata
+- [x] Implement `lookup` - name resolution
+- [x] Implement `getattr` - return file attributes
+- [x] Implement `read` - delegate to ReadOperation
+- [x] Implement `write` - delegate to WriteOperation
+- [x] Implement `readdir` - list directory contents
+- [x] Implement `create`, `mkdir`, `unlink`, `rmdir`
+- [x] Reply via NIF with results
+- [x] Inode allocation and tracking
+- [x] Root inode (1) handling
 
 ## Inode Management
 ```elixir

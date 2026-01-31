@@ -10,17 +10,17 @@ Complete
 Design and implement the core supervision tree for neonfs_core. This establishes the process hierarchy, restart strategies, and ensures proper startup order for all components.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.Application` starts supervision tree
-- [ ] `NeonFS.Core.Supervisor` as top-level supervisor
-- [ ] BlobStore started first (other components depend on it)
-- [ ] ChunkIndex started after BlobStore
-- [ ] FileIndex started after ChunkIndex
-- [ ] VolumeRegistry started after FileIndex
-- [ ] CLI.Handler registered for RPC access
-- [ ] Proper restart strategies (one_for_one vs one_for_all)
-- [ ] Startup order enforced via child spec ordering
-- [ ] Application starts successfully with `mix run`
-- [ ] Graceful shutdown on SIGTERM
+- [x] `NeonFS.Core.Application` starts supervision tree
+- [x] `NeonFS.Core.Supervisor` as top-level supervisor
+- [x] BlobStore started first (other components depend on it)
+- [x] ChunkIndex started after BlobStore
+- [x] FileIndex started after ChunkIndex
+- [x] VolumeRegistry started after FileIndex
+- [x] CLI.Handler registered for RPC access
+- [x] Proper restart strategies (one_for_one vs one_for_all)
+- [x] Startup order enforced via child spec ordering
+- [x] Application starts successfully with `mix run`
+- [x] Graceful shutdown on SIGTERM
 
 ## Supervision Tree
 ```

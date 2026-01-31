@@ -10,17 +10,17 @@ Complete
 Implement the Elixir module that receives RPC calls from the CLI and dispatches them to the appropriate handlers. This is the daemon-side interface that the CLI connects to.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.CLI.Handler` module with RPC-callable functions
-- [ ] `cluster_status/0` - return cluster status map
-- [ ] `list_volumes/0` - return list of volumes
-- [ ] `create_volume/2` - create volume with config
-- [ ] `delete_volume/1` - delete volume by name
-- [ ] `get_volume/1` - get volume details
-- [ ] `mount/3` - mount volume at path
-- [ ] `unmount/1` - unmount by mount_id or path
-- [ ] `list_mounts/0` - return active mounts
-- [ ] All functions return `{:ok, data}` or `{:error, reason}`
-- [ ] Data returned as maps (easy term conversion)
+- [x] `NeonFS.CLI.Handler` module with RPC-callable functions
+- [x] `cluster_status/0` - return cluster status map
+- [x] `list_volumes/0` - return list of volumes
+- [x] `create_volume/2` - create volume with config
+- [x] `delete_volume/1` - delete volume by name
+- [x] `get_volume/1` - get volume details
+- [x] `mount/3` - mount volume at path
+- [x] `unmount/1` - unmount by mount_id or path
+- [x] `list_mounts/0` - return active mounts
+- [x] All functions return `{:ok, data}` or `{:error, reason}`
+- [x] Data returned as maps (easy term conversion)
 
 ## Module Structure
 ```elixir

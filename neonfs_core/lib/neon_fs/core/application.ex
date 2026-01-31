@@ -12,6 +12,8 @@ defmodule NeonFS.Core.Application do
   use Application
   require Logger
 
+  alias NeonFS.Core.Persistence
+
   @impl true
   def start(_type, _args) do
     # Start the core supervision tree
@@ -26,7 +28,7 @@ defmodule NeonFS.Core.Application do
     # in reverse order (Persistence last, but ETS tables are already gone).
     Logger.info("Application stopping, triggering final snapshot...")
 
-    case NeonFS.Core.Persistence.snapshot_now() do
+    case Persistence.snapshot_now() do
       :ok ->
         Logger.info("Final snapshot completed successfully")
 

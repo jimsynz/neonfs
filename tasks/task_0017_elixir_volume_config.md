@@ -10,15 +10,15 @@ Complete
 Define the volume configuration structure that holds all settings for a storage volume: durability, tiering, compression, encryption, caching, and verification policies. For Phase 1, implement a basic subset; full policies come in Phase 3.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.Volume` struct with configuration fields
-- [ ] `NeonFS.Core.VolumeRegistry` GenServer managing volumes
-- [ ] Create volume with configuration
-- [ ] Get volume by name or ID
-- [ ] List all volumes
-- [ ] Update volume configuration (limited fields)
-- [ ] Delete volume (with checks for existing files)
-- [ ] Validation of configuration values
-- [ ] Default configuration for quick setup
+- [x] `NeonFS.Core.Volume` struct with configuration fields
+- [x] `NeonFS.Core.VolumeRegistry` GenServer managing volumes
+- [x] Create volume with configuration
+- [x] Get volume by name or ID
+- [x] List all volumes
+- [x] Update volume configuration (limited fields)
+- [x] Delete volume (with checks for existing files)
+- [x] Validation of configuration values
+- [x] Default configuration for quick setup
 
 ## Volume Struct (Phase 1 Subset)
 ```elixir

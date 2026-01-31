@@ -16,18 +16,18 @@ This task implements DETS-backed persistence for all three metadata tables with 
 
 ## Acceptance Criteria
 
-- [ ] New `NeonFS.Core.Persistence` module coordinates metadata persistence
-- [ ] ChunkIndex persists to `/var/lib/neonfs/meta/chunk_index.dets`
-- [ ] FileIndex persists to `/var/lib/neonfs/meta/file_index.dets`
-- [ ] VolumeRegistry persists to `/var/lib/neonfs/meta/volume_registry.dets`
-- [ ] On startup, DETS tables are loaded into ETS via `:dets.to_ets/2`
-- [ ] Periodic snapshots occur every N seconds (configurable, default 30s)
-- [ ] Graceful shutdown triggers immediate snapshot before termination
-- [ ] Atomic write-then-move: writes go to `.tmp` file, then `File.rename!/2`
-- [ ] `:dets.sync/1` called before rename to ensure data is flushed
-- [ ] Recovery from crash uses last valid snapshot (no corruption)
-- [ ] Tests verify data survives simulated restart
-- [ ] Tests verify partial write during crash doesn't corrupt existing data
+- [x] New `NeonFS.Core.Persistence` module coordinates metadata persistence
+- [x] ChunkIndex persists to `/var/lib/neonfs/meta/chunk_index.dets`
+- [x] FileIndex persists to `/var/lib/neonfs/meta/file_index.dets`
+- [x] VolumeRegistry persists to `/var/lib/neonfs/meta/volume_registry.dets`
+- [x] On startup, DETS tables are loaded into ETS via `:dets.to_ets/2`
+- [x] Periodic snapshots occur every N seconds (configurable, default 30s)
+- [x] Graceful shutdown triggers immediate snapshot before termination
+- [x] Atomic write-then-move: writes go to `.tmp` file, then `File.rename!/2`
+- [x] `:dets.sync/1` called before rename to ensure data is flushed
+- [x] Recovery from crash uses last valid snapshot (no corruption)
+- [x] Tests verify data survives simulated restart
+- [x] Tests verify partial write during crash doesn't corrupt existing data
 
 ## Implementation Notes
 

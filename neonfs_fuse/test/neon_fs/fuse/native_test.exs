@@ -135,8 +135,8 @@ defmodule NeonFS.FUSE.NativeTest do
             assert File.exists?(mount_point)
 
             # Unmount - may fail with permission error in unprivileged environments
-            case Native.unmount(session) do
-              :ok ->
+            case Native.unmount(session, "fusermount3") do
+              {:ok, :ok} ->
                 :ok
 
               {:error, msg} when is_binary(msg) ->
@@ -167,10 +167,10 @@ defmodule NeonFS.FUSE.NativeTest do
         case Native.mount(mount_point, self(), []) do
           {:ok, session} ->
             # Unmount once
-            assert :ok = Native.unmount(session)
+            assert {:ok, :ok} = Native.unmount(session, "fusermount3")
 
             # Try to unmount again - should fail
-            assert {:error, msg} = Native.unmount(session)
+            assert {:error, msg} = Native.unmount(session, "fusermount3")
             assert msg =~ "already unmounted"
 
           {:error, _} ->

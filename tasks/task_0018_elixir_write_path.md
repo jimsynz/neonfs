@@ -10,18 +10,18 @@ Complete
 Implement the write path that takes file data, chunks it, stores chunks in the blob store, and creates file metadata. This is the core data flow for writing files. For Phase 1, this is single-node only (no replication).
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.WriteOperation` module handling writes
-- [ ] `write_file/4` - (volume, path, data, opts) -> {:ok, file_meta}
-- [ ] Generate unique write_id for tracking
-- [ ] Chunk data using blob store chunking
-- [ ] Compute hash for each chunk
-- [ ] Check for existing chunks (deduplication)
-- [ ] Store new chunks with uncommitted state
-- [ ] Create file metadata with chunk list
-- [ ] Commit chunks on successful write
-- [ ] Cleanup on failure (abort uncommitted chunks)
-- [ ] Respect volume compression settings
-- [ ] Telemetry events for write operations
+- [x] `NeonFS.Core.WriteOperation` module handling writes
+- [x] `write_file/4` - (volume, path, data, opts) -> {:ok, file_meta}
+- [x] Generate unique write_id for tracking
+- [x] Chunk data using blob store chunking
+- [x] Compute hash for each chunk
+- [x] Check for existing chunks (deduplication)
+- [x] Store new chunks with uncommitted state
+- [x] Create file metadata with chunk list
+- [x] Commit chunks on successful write
+- [x] Cleanup on failure (abort uncommitted chunks)
+- [x] Respect volume compression settings
+- [x] Telemetry events for write operations
 
 ## Write Flow
 ```elixir

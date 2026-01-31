@@ -10,18 +10,18 @@ Complete
 Implement the actual CLI commands that use the daemon connection to perform operations. Each command calls the appropriate RPC function and formats the output.
 
 ## Acceptance Criteria
-- [ ] `neonfs cluster status` - show cluster status
-- [ ] `neonfs volume list` - list all volumes
-- [ ] `neonfs volume create <name> [options]` - create volume
-- [ ] `neonfs volume delete <name>` - delete volume
-- [ ] `neonfs volume info <name>` - show volume details
-- [ ] `neonfs mount <volume> <path>` - mount volume
-- [ ] `neonfs unmount <path>` - unmount
-- [ ] `neonfs mount list` - list active mounts
-- [ ] Table output by default
-- [ ] JSON output with `--json` flag
-- [ ] Proper exit codes (0 success, 1 error)
-- [ ] Error messages to stderr
+- [x] `neonfs cluster status` - show cluster status
+- [x] `neonfs volume list` - list all volumes
+- [x] `neonfs volume create <name> [options]` - create volume
+- [x] `neonfs volume delete <name>` - delete volume
+- [x] `neonfs volume info <name>` - show volume details
+- [x] `neonfs mount <volume> <path>` - mount volume
+- [x] `neonfs unmount <path>` - unmount
+- [x] `neonfs mount list` - list active mounts
+- [x] Table output by default
+- [x] JSON output with `--json` flag
+- [x] Proper exit codes (0 success, 1 error)
+- [x] Error messages to stderr
 
 ## Command Examples
 ```bash

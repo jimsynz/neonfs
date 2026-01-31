@@ -10,17 +10,17 @@ Complete
 Implement a manager that coordinates FUSE mounts. This handles starting the FUSE server, associating it with a volume, managing the lifecycle, and providing a clean API for mounting/unmounting volumes.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.FUSE.MountManager` GenServer
-- [ ] `mount/3` - (volume_name, mount_point, opts) -> {:ok, mount_id}
-- [ ] `unmount/1` - (mount_id) -> :ok
-- [ ] `list_mounts/0` - return all active mounts
-- [ ] `get_mount/1` - get mount info by id or path
-- [ ] Track active mounts in state
-- [ ] Start FUSE server via NIF on mount
-- [ ] Stop FUSE server on unmount
-- [ ] Handle FUSE server crashes (restart or report)
-- [ ] Verify mount point is valid directory
-- [ ] Prevent duplicate mounts to same point
+- [x] `NeonFS.FUSE.MountManager` GenServer
+- [x] `mount/3` - (volume_name, mount_point, opts) -> {:ok, mount_id}
+- [x] `unmount/1` - (mount_id) -> :ok
+- [x] `list_mounts/0` - return all active mounts
+- [x] `get_mount/1` - get mount info by id or path
+- [x] Track active mounts in state
+- [x] Start FUSE server via NIF on mount
+- [x] Stop FUSE server on unmount
+- [x] Handle FUSE server crashes (restart or report)
+- [x] Verify mount point is valid directory
+- [x] Prevent duplicate mounts to same point
 
 ## Mount Info
 ```elixir

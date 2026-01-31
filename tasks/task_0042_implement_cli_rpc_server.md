@@ -18,35 +18,35 @@ Additionally, there are several bugs and stub implementations in the CLI that ne
 
 ### RPC Server (Critical - Blocks All CLI)
 
-- [ ] New `NeonFS.Core.RpcServer` GenServer module
-- [ ] Listens on configurable TCP port (default: EPMD port + 1, or explicit config)
-- [ ] Accepts connections and reads ETF-encoded requests
-- [ ] Request format: `{:rpc, cookie, module, function, args}`
-- [ ] Validates cookie matches `RELEASE_COOKIE`
-- [ ] Dispatches to `NeonFS.CLI.Handler` functions
-- [ ] Returns ETF-encoded `{:ok, result}` or `{:error, reason}`
-- [ ] Added to supervision tree in `NeonFS.Core.Supervisor`
-- [ ] Writes port to `/run/neonfs/rpc_port` for CLI discovery
+- [x] New `NeonFS.Core.RpcServer` GenServer module
+- [x] Listens on configurable TCP port (default: EPMD port + 1, or explicit config)
+- [x] Accepts connections and reads ETF-encoded requests
+- [x] Request format: `{:rpc, cookie, module, function, args}`
+- [x] Validates cookie matches `RELEASE_COOKIE`
+- [x] Dispatches to `NeonFS.CLI.Handler` functions
+- [x] Returns ETF-encoded `{:ok, result}` or `{:error, reason}`
+- [x] Added to supervision tree in `NeonFS.Core.Supervisor`
+- [x] Writes port to `/run/neonfs/rpc_port` for CLI discovery
 
 ### CLI Bug Fixes
 
-- [ ] Fix mount command: send 3 arguments (volume, mountpoint, options map)
-- [ ] Fix response field names to match handler output:
+- [x] Fix mount command: send 3 arguments (volume, mountpoint, options map)
+- [x] Fix response field names to match handler output:
   - `uptime` not `uptime_seconds`
   - `id` not `mount_id`
-- [ ] Implement `cluster init` properly (currently placeholder)
-- [ ] Implement `cluster join` properly (currently placeholder)
-- [ ] Implement `node status` with real data (currently hardcoded)
-- [ ] Implement `node list` with real data (currently hardcoded)
+- [x] Implement `cluster init` properly (currently placeholder)
+- [x] Implement `cluster join` properly (currently placeholder)
+- [x] Implement `node status` with real data (currently hardcoded)
+- [x] Implement `node list` with real data (currently hardcoded)
 
 ### Integration Verification
 
-- [ ] CLI can connect to running daemon
-- [ ] `neonfs cluster status` returns real cluster info
-- [ ] `neonfs volume list` returns volumes from registry
-- [ ] `neonfs volume create test-vol` creates a volume
-- [ ] `neonfs volume info test-vol` shows volume details
-- [ ] `neonfs mount test-vol /mnt/test` succeeds (if FUSE available)
+- [x] CLI can connect to running daemon
+- [x] `neonfs cluster status` returns real cluster info
+- [x] `neonfs volume list` returns volumes from registry
+- [x] `neonfs volume create test-vol` creates a volume
+- [x] `neonfs volume info test-vol` shows volume details
+- [x] `neonfs mount test-vol /mnt/test` succeeds (if FUSE available)
 
 ## Implementation Notes
 

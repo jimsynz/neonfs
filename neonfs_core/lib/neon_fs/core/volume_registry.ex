@@ -10,6 +10,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   require Logger
 
   alias NeonFS.Core.FileIndex
+  alias NeonFS.Core.Persistence
   alias NeonFS.Core.Volume
 
   @type volume_id :: binary()
@@ -139,14 +140,14 @@ defmodule NeonFS.Core.VolumeRegistry do
   def terminate(_reason, _state) do
     # Save ETS tables to DETS before shutdown
     Logger.info("VolumeRegistry shutting down, saving tables...")
-    meta_dir = NeonFS.Core.Persistence.meta_dir()
+    meta_dir = Persistence.meta_dir()
 
-    NeonFS.Core.Persistence.snapshot_table(
+    Persistence.snapshot_table(
       :volumes_by_id,
       Path.join(meta_dir, "volume_registry_by_id.dets")
     )
 
-    NeonFS.Core.Persistence.snapshot_table(
+    Persistence.snapshot_table(
       :volumes_by_name,
       Path.join(meta_dir, "volume_registry_by_name.dets")
     )

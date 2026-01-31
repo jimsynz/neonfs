@@ -33,8 +33,9 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, status} = Handler.cluster_status()
       # Should be able to encode as Erlang terms
       assert is_map(status)
-      refute match?(%{pid: _}, status)
-      refute match?(%{ref: _}, status)
+      # Verify no non-serializable keys are present (PIDs, references)
+      refute Map.has_key?(status, :pid)
+      refute Map.has_key?(status, :ref)
     end
   end
 

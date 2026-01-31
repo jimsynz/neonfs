@@ -10,17 +10,17 @@ Complete
 Define the Elixir-side file metadata structure that tracks logical files. Files map paths to ordered lists of chunk hashes. This includes POSIX attributes (mode, uid, gid, timestamps) and version tracking for copy-on-write semantics.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.FileMeta` struct with all fields from spec
-- [ ] `NeonFS.Core.FileIndex` GenServer managing file metadata
-- [ ] ETS tables for lookups by id and by path
-- [ ] `create/2` - create new file metadata
-- [ ] `get/1` - retrieve by file_id
-- [ ] `get_by_path/2` - retrieve by volume + path
-- [ ] `update/2` - update file metadata
-- [ ] `delete/1` - remove file (soft delete for versioning)
-- [ ] `list_dir/2` - list files in a directory path
-- [ ] Path parsing and validation
-- [ ] Version tracking (previous_version_id link)
+- [x] `NeonFS.Core.FileMeta` struct with all fields from spec
+- [x] `NeonFS.Core.FileIndex` GenServer managing file metadata
+- [x] ETS tables for lookups by id and by path
+- [x] `create/2` - create new file metadata
+- [x] `get/1` - retrieve by file_id
+- [x] `get_by_path/2` - retrieve by volume + path
+- [x] `update/2` - update file metadata
+- [x] `delete/1` - remove file (soft delete for versioning)
+- [x] `list_dir/2` - list files in a directory path
+- [x] Path parsing and validation
+- [x] Version tracking (previous_version_id link)
 
 ## FileMeta Struct
 ```elixir

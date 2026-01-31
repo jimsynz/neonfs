@@ -56,12 +56,17 @@ defmodule NeonFS.Core.ChunkIndex do
   @spec list_by_location(location()) :: [ChunkMeta.t()]
   def list_by_location(%{node: node, drive_id: drive_id, tier: tier}) do
     :ets.foldl(
-      fn {_hash, chunk_meta}, acc ->
-        if has_location?(chunk_meta, node, drive_id, tier) do
-          [chunk_meta | acc]
-        else
+      fn
+        {_hash, %ChunkMeta{} = chunk_meta}, acc ->
+          if has_location?(chunk_meta, node, drive_id, tier) do
+            [chunk_meta | acc]
+          else
+            acc
+          end
+
+        # Skip non-ChunkMeta entries (can happen with stale DETS data)
+        _, acc ->
           acc
-        end
       end,
       [],
       :chunk_index
@@ -74,12 +79,17 @@ defmodule NeonFS.Core.ChunkIndex do
   @spec list_by_node(atom()) :: [ChunkMeta.t()]
   def list_by_node(node) when is_atom(node) do
     :ets.foldl(
-      fn {_hash, chunk_meta}, acc ->
-        if has_node?(chunk_meta, node) do
-          [chunk_meta | acc]
-        else
+      fn
+        {_hash, %ChunkMeta{} = chunk_meta}, acc ->
+          if has_node?(chunk_meta, node) do
+            [chunk_meta | acc]
+          else
+            acc
+          end
+
+        # Skip non-ChunkMeta entries (can happen with stale DETS data)
+        _, acc ->
           acc
-        end
       end,
       [],
       :chunk_index
@@ -92,12 +102,13 @@ defmodule NeonFS.Core.ChunkIndex do
   @spec list_uncommitted() :: [ChunkMeta.t()]
   def list_uncommitted do
     :ets.foldl(
-      fn {_hash, chunk_meta}, acc ->
-        if chunk_meta.commit_state == :uncommitted do
+      fn
+        {_hash, %ChunkMeta{commit_state: :uncommitted} = chunk_meta}, acc ->
           [chunk_meta | acc]
-        else
+
+        # Skip committed chunks or non-ChunkMeta entries
+        _, acc ->
           acc
-        end
       end,
       [],
       :chunk_index
