@@ -7,7 +7,7 @@ defmodule NeonFS.Core.ReadOperation do
   For Phase 1, this assumes all chunks are local (no remote fetching).
   """
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex, FileIndex, VolumeRegistry}
+  alias NeonFS.Core.{ChunkFetcher, ChunkIndex, FileIndex, VolumeRegistry}
 
   require Logger
 
@@ -204,7 +204,7 @@ defmodule NeonFS.Core.ReadOperation do
   end
 
   defp fetch_chunk_data(chunk_meta, should_verify) do
-    # Determine tier (use first location for Phase 1)
+    # Determine tier (use first location for Phase 1/2)
     tier =
       case chunk_meta.locations do
         [location | _] -> Atom.to_string(location.tier)
@@ -219,13 +219,15 @@ defmodule NeonFS.Core.ReadOperation do
     needs_decompress =
       chunk_meta.compression != :none or chunk_meta.stored_size != chunk_meta.original_size
 
-    read_opts = [
+    fetch_opts = [
+      tier: tier,
       verify: should_verify,
       decompress: needs_decompress
     ]
 
-    case BlobStore.read_chunk_with_options(chunk_meta.hash, tier, read_opts) do
-      {:ok, data} -> {:ok, data}
+    # Use ChunkFetcher to get chunk from local or remote node
+    case ChunkFetcher.fetch_chunk(chunk_meta.hash, fetch_opts) do
+      {:ok, data, _source} -> {:ok, data}
       {:error, reason} -> {:error, reason}
     end
   end

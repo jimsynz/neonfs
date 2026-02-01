@@ -1,7 +1,7 @@
 # Task 0036: Implement Remote Chunk Reading
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 2 - Clustering
@@ -10,15 +10,15 @@ Not Started
 Enable reading chunks from remote nodes. When a chunk isn't available locally, fetch it from a node that has it. This completes the distributed read path.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.ChunkFetcher` module
-- [ ] `fetch_chunk/2` - get chunk, local or remote
-- [ ] Check local blob store first
-- [ ] Look up chunk locations from metadata
-- [ ] Fetch from remote node via Erlang distribution
-- [ ] Prefer "closest" node (same rack/zone if configured)
-- [ ] Handle fetch failures, try alternate locations
-- [ ] Cache policy for remote chunks (configurable)
-- [ ] Telemetry for local vs remote reads
+- [x] `NeonFS.Core.ChunkFetcher` module
+- [x] `fetch_chunk/2` - get chunk, local or remote
+- [x] Check local blob store first
+- [x] Look up chunk locations from metadata
+- [x] Fetch from remote node via Erlang distribution
+- [x] Prefer "closest" node (same rack/zone if configured)
+- [x] Handle fetch failures, try alternate locations
+- [x] Cache policy for remote chunks (configurable)
+- [x] Telemetry for local vs remote reads
 
 ## Fetch Flow
 ```elixir

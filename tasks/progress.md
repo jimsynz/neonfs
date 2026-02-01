@@ -1231,3 +1231,26 @@
   - Use Enum.empty?/1 instead of length/1 >= 1 for performance (credo warning)
   - Logger.warning when requested replicas exceed available nodes - "some redundancy better than none"
 ---
+
+## 2026-02-01 - Task 0036
+- What was implemented:
+  - Created `NeonFS.Core.ChunkFetcher` module for location-transparent chunk access
+  - Implemented `fetch_chunk/2` that tries local storage first, then remote nodes
+  - Remote fetching uses `:rpc.call` to read chunks from remote BlobStore instances
+  - Handles failures by trying alternate replica locations sequentially
+  - Preference sorting uses random shuffling to distribute load across nodes
+  - Optional caching of remotely fetched chunks locally (via `:cache_remote` option)
+  - Comprehensive telemetry events: `:local_hit`, `:remote_fetch` (start/stop/exception)
+  - Updated `ReadOperation` to use `ChunkFetcher` instead of directly calling `BlobStore`
+  - Comprehensive unit tests including telemetry verification
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (new module)
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` (use ChunkFetcher)
+  - `neonfs_core/test/neon_fs/core/chunk_fetcher_test.exs` (new test)
+- **Learnings for future iterations:**
+  - ChunkFetcher filters out local node from remote locations to avoid unnecessary RPC calls
+  - Location preference can be enhanced later with rack/zone awareness from metadata
+  - Cache policy is configurable per-call, allowing flexibility for different use cases
+  - Refactored nested functions to reduce credo complexity warnings
+  - Tests should clear ETS tables instead of trying to restart application-level GenServers
+---
