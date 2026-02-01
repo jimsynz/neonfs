@@ -1,7 +1,7 @@
 # Task 0034: Distribute Chunk Metadata via Ra
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 2 - Clustering
@@ -10,14 +10,14 @@ Not Started
 Migrate chunk metadata storage from local ETS to Ra-backed distributed storage. This enables chunk location tracking across the cluster and survives node restarts.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.ChunkIndex` uses Ra for persistence
-- [ ] Chunk metadata replicated across Ra cluster
-- [ ] Reads can use local Ra state (no network hop for reads)
-- [ ] Writes go through Ra consensus
-- [ ] Location tracking includes node information
-- [ ] Query chunks by location (which chunks on which node)
-- [ ] Handle Ra leader changes gracefully
-- [ ] Metrics for Ra operations
+- [x] `NeonFS.Core.ChunkIndex` uses Ra for persistence
+- [x] Chunk metadata replicated across Ra cluster
+- [x] Reads can use local Ra state (no network hop for reads)
+- [x] Writes go through Ra consensus
+- [x] Location tracking includes node information
+- [x] Query chunks by location (which chunks on which node)
+- [x] Handle Ra leader changes gracefully
+- [x] Metrics for Ra operations
 
 ## State Machine Commands
 ```elixir

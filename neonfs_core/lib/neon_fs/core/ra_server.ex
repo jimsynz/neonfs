@@ -32,6 +32,23 @@ defmodule NeonFS.Core.RaServer do
     # Configure Ra's data directory
     Application.put_env(:ra, :data_dir, data_dir)
 
+    # Ensure Ra system is started
+    # This is required before any Ra servers can be started
+    case :ra.start() do
+      :ok ->
+        :ok
+
+      {:error, {:already_started, _}} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Ra system already running or failed: #{inspect(reason)}")
+    end
+
+    # Wait for Ra system to be fully ready
+    # Ra starts asynchronously, so we need to wait for the directory ETS table
+    wait_for_ra_system()
+
     # Get node name
     node_name = Node.self()
 
@@ -92,5 +109,26 @@ defmodule NeonFS.Core.RaServer do
     end
 
     :ok
+  end
+
+  # Wait for Ra system to be fully initialized
+  # Ra starts asynchronously and creates ETS tables that we need
+  defp wait_for_ra_system(attempts \\ 0, max_attempts \\ 50) do
+    if attempts >= max_attempts do
+      Logger.error("Ra system did not initialize after #{max_attempts} attempts")
+      :timeout
+    else
+      # Check if the ra_directory ETS table exists
+      case :ets.whereis(:ra_directory) do
+        :undefined ->
+          # Not ready yet, wait a bit and try again
+          Process.sleep(100)
+          wait_for_ra_system(attempts + 1, max_attempts)
+
+        _tid ->
+          # Ra system is ready
+          :ok
+      end
+    end
   end
 end

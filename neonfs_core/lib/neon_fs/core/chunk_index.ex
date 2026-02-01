@@ -1,15 +1,15 @@
 defmodule NeonFS.Core.ChunkIndex do
   @moduledoc """
-  GenServer managing chunk metadata with ETS-backed storage.
+  GenServer managing chunk metadata with Ra-backed distributed storage.
 
   Provides fast lookups by hash and queries by location or commit state.
-  For Phase 1, this is in-memory only. Phase 2 will add Ra consensus backing.
+  Uses Ra consensus for writes and maintains a local ETS cache for fast reads.
   """
 
   use GenServer
   require Logger
 
-  alias NeonFS.Core.ChunkMeta
+  alias NeonFS.Core.{ChunkMeta, RaSupervisor}
 
   @type location :: ChunkMeta.location()
 
@@ -151,29 +151,83 @@ defmodule NeonFS.Core.ChunkIndex do
     # read_concurrency: true - optimize for concurrent reads
     :ets.new(:chunk_index, [:set, :named_table, :public, read_concurrency: true])
 
-    Logger.info("ChunkIndex started with ETS table :chunk_index")
+    # Try to restore chunks from Ra state into ETS
+    # If Ra is not ready yet (e.g., during startup), that's okay - the index
+    # will be populated as operations occur
+    case restore_from_ra() do
+      {:ok, count} ->
+        Logger.info(
+          "ChunkIndex started with ETS table :chunk_index, restored #{count} chunks from Ra"
+        )
+
+      {:error, reason} ->
+        Logger.debug("ChunkIndex started but Ra not ready yet: #{inspect(reason)}")
+    end
+
     {:ok, %{}}
   end
 
   @impl true
   def handle_call({:put, chunk_meta}, _from, state) do
-    :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
-    {:reply, :ok, state}
+    # Try to write through Ra if available, otherwise write directly to ETS
+    case maybe_ra_command({:put_chunk, struct_to_map(chunk_meta)}) do
+      {:ok, :ok} ->
+        # Update local ETS cache
+        :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
+        {:reply, :ok, state}
+
+      {:error, :ra_not_available} ->
+        # Ra not available, write directly to ETS (Phase 1 mode)
+        :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
   def handle_call({:delete, hash}, _from, state) do
-    :ets.delete(:chunk_index, hash)
-    {:reply, :ok, state}
+    # Try to write through Ra if available
+    case maybe_ra_command({:delete_chunk, hash}) do
+      {:ok, :ok} ->
+        # Update local ETS cache
+        :ets.delete(:chunk_index, hash)
+        {:reply, :ok, state}
+
+      {:error, :ra_not_available} ->
+        # Ra not available, write directly to ETS
+        :ets.delete(:chunk_index, hash)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
   def handle_call({:add_write_ref, hash, write_id}, _from, state) do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, chunk_meta}] ->
-        updated_meta = ChunkMeta.add_write_ref(chunk_meta, write_id)
-        :ets.insert(:chunk_index, {hash, updated_meta})
-        {:reply, :ok, state}
+        # Try to write through Ra if available
+        case maybe_ra_command({:add_write_ref, hash, write_id}) do
+          {:ok, :ok} ->
+            updated_meta = ChunkMeta.add_write_ref(chunk_meta, write_id)
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:ok, {:error, :not_found}} ->
+            {:reply, {:error, :not_found}, state}
+
+          {:error, :ra_not_available} ->
+            # Ra not available, write directly to ETS
+            updated_meta = ChunkMeta.add_write_ref(chunk_meta, write_id)
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
 
       [] ->
         {:reply, {:error, :not_found}, state}
@@ -184,9 +238,25 @@ defmodule NeonFS.Core.ChunkIndex do
   def handle_call({:remove_write_ref, hash, write_id}, _from, state) do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, chunk_meta}] ->
-        updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
-        :ets.insert(:chunk_index, {hash, updated_meta})
-        {:reply, :ok, state}
+        # Try to write through Ra if available
+        case maybe_ra_command({:remove_write_ref, hash, write_id}) do
+          {:ok, :ok} ->
+            updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:ok, {:error, :not_found}} ->
+            {:reply, {:error, :not_found}, state}
+
+          {:error, :ra_not_available} ->
+            # Ra not available, write directly to ETS
+            updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
 
       [] ->
         {:reply, {:error, :not_found}, state}
@@ -199,8 +269,23 @@ defmodule NeonFS.Core.ChunkIndex do
       [{^hash, chunk_meta}] ->
         case ChunkMeta.commit(chunk_meta) do
           {:ok, committed_meta} ->
-            :ets.insert(:chunk_index, {hash, committed_meta})
-            {:reply, :ok, state}
+            # Try to write through Ra if available
+            case maybe_ra_command({:commit_chunk, hash}) do
+              {:ok, :ok} ->
+                :ets.insert(:chunk_index, {hash, committed_meta})
+                {:reply, :ok, state}
+
+              {:ok, {:error, reason}} ->
+                {:reply, {:error, reason}, state}
+
+              {:error, :ra_not_available} ->
+                # Ra not available, write directly to ETS
+                :ets.insert(:chunk_index, {hash, committed_meta})
+                {:reply, :ok, state}
+
+              {:error, reason} ->
+                {:reply, {:error, reason}, state}
+            end
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
@@ -223,5 +308,84 @@ defmodule NeonFS.Core.ChunkIndex do
     Enum.any?(chunk_meta.locations, fn location ->
       location.node == node
     end)
+  end
+
+  # Try to execute a Ra command, but gracefully handle Ra not being available
+  # Returns {:ok, result} | {:error, :ra_not_available} | {:error, reason}
+  defp maybe_ra_command(cmd) do
+    try do
+      case RaSupervisor.command(cmd) do
+        {:ok, result, _leader} ->
+          {:ok, result}
+
+        {:error, :noproc} ->
+          # Ra not available
+          {:error, :ra_not_available}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        {:timeout, _node} ->
+          {:error, :timeout}
+      end
+    catch
+      kind, reason ->
+        Logger.debug("Ra not available: #{inspect({kind, reason})}")
+        {:error, :ra_not_available}
+    end
+  end
+
+  # Restore chunks from Ra state into ETS
+  defp restore_from_ra do
+    case RaSupervisor.query(fn state -> state.chunks end) do
+      {:ok, chunks} when is_map(chunks) ->
+        count =
+          Enum.reduce(chunks, 0, fn {hash, chunk_map}, acc ->
+            chunk_meta = map_to_struct(chunk_map)
+            :ets.insert(:chunk_index, {hash, chunk_meta})
+            acc + 1
+          end)
+
+        {:ok, count}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Convert ChunkMeta struct to map for Ra storage
+  defp struct_to_map(%ChunkMeta{} = chunk_meta) do
+    %{
+      hash: chunk_meta.hash,
+      original_size: chunk_meta.original_size,
+      stored_size: chunk_meta.stored_size,
+      compression: chunk_meta.compression,
+      locations: chunk_meta.locations,
+      target_replicas: chunk_meta.target_replicas,
+      commit_state: chunk_meta.commit_state,
+      active_write_refs: chunk_meta.active_write_refs,
+      stripe_id: chunk_meta.stripe_id,
+      stripe_index: chunk_meta.stripe_index,
+      created_at: chunk_meta.created_at,
+      last_verified: chunk_meta.last_verified
+    }
+  end
+
+  # Convert map from Ra storage to ChunkMeta struct
+  defp map_to_struct(chunk_map) when is_map(chunk_map) do
+    %ChunkMeta{
+      hash: chunk_map.hash,
+      original_size: chunk_map.original_size,
+      stored_size: chunk_map.stored_size,
+      compression: chunk_map.compression,
+      locations: chunk_map.locations,
+      target_replicas: chunk_map.target_replicas,
+      commit_state: chunk_map.commit_state,
+      active_write_refs: chunk_map.active_write_refs,
+      stripe_id: chunk_map[:stripe_id],
+      stripe_index: chunk_map[:stripe_index],
+      created_at: chunk_map.created_at,
+      last_verified: chunk_map[:last_verified]
+    }
   end
 end

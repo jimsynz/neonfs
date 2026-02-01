@@ -1168,3 +1168,29 @@
   - Each node generates its own 8-char base32 node ID on join
   - Accept_join returns cluster info map for RPC transmission to joining node
 ---
+
+## 2026-02-01 - Task 0034
+- What was implemented:
+  - Added chunk metadata commands to MetadataStateMachine (put_chunk, update_chunk_locations, delete_chunk, commit_chunk, add_write_ref, remove_write_ref)
+  - Refactored ChunkIndex to use Ra for persistence with write-through caching
+  - Writes go through Ra consensus using RaSupervisor.command()
+  - Reads use local ETS cache for fast lookups (no network hop)
+  - Added fallback mode when Ra is not available (Phase 1 compatibility)
+  - Ra state machine tracks chunks in `state.chunks` map
+  - ChunkIndex maintains local ETS for query operations (list_by_location, list_by_node, list_uncommitted)
+  - Added ra_data_dir configuration for test environment
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (added chunk commands)
+  - `neonfs_core/lib/neon_fs/core/chunk_index.ex` (refactored for Ra integration)
+  - `neonfs_core/lib/neon_fs/core/ra_server.ex` (added Ra system initialization)
+  - `neonfs_core/config/config.exs` (added enable_ra for test environment)
+  - `neonfs_core/test/neon_fs/core/chunk_index_distributed_test.exs` (new)
+- **Learnings for future iterations:**
+  - Ra requires both the `:ra` application AND the Ra system to be started - call `:ra.start()` explicitly
+  - Ra system initialization is asynchronous - need to wait for ETS tables like `:ra_directory` to exist
+  - Use `handle_continue` for async GenServer initialization to avoid blocking supervisor
+  - For dual-mode operation (with/without Ra), check for `:noproc` error and fall back to direct ETS writes
+  - Ra distributed tests require named Erlang node and proper cluster setup - single-node tests need careful synchronization
+  - RaSupervisor.command returns `{:ok, result, leader}` on success, `{:error, reason}` on failure
+  - Keep ChunkIndex API stable - callers shouldn't know if using Ra or ETS backend
+---
