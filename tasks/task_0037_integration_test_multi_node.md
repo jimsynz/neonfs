@@ -1,7 +1,7 @@
 # Task 0037: Phase 2 Integration Test - Multi-Node Cluster
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 2 - Clustering
@@ -10,16 +10,16 @@ Not Started
 Create an end-to-end integration test that validates the Phase 2 milestone: "3-node cluster, data replicated, survives single node failure."
 
 ## Acceptance Criteria
-- [ ] Integration test using containerised cluster (TestCluster)
-- [ ] Create 3-node cluster
-- [ ] Init cluster on node 1
-- [ ] Join nodes 2 and 3
-- [ ] Create volume with replication factor 3
-- [ ] Write file, verify replicated to all nodes
-- [ ] Kill one node
-- [ ] Verify file still readable from surviving nodes
-- [ ] Restart killed node
-- [ ] Verify node rejoins and syncs
+- [x] Integration test using containerised cluster (TestCluster)
+- [x] Create 3-node cluster
+- [x] Init cluster on node 1
+- [x] Join nodes 2 and 3
+- [x] Create volume with replication factor 3
+- [x] Write file, verify replicated to all nodes
+- [x] Kill one node
+- [x] Verify file still readable from surviving nodes
+- [x] Restart killed node
+- [x] Verify node rejoins and syncs
 
 ## Test Implementation
 ```elixir

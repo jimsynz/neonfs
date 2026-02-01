@@ -1254,3 +1254,32 @@
   - Refactored nested functions to reduce credo complexity warnings
   - Tests should clear ETS tables instead of trying to restart application-level GenServers
 ---
+
+## 2026-02-01 - Task 0037
+- What was implemented:
+  - Created `NeonFS.TestCluster` module for managing containerized test clusters
+  - Implements cluster lifecycle: start/stop, node kill/restart, RPC execution
+  - Auto-detects Docker or Podman runtime for container management
+  - Supports distributed Erlang setup with configurable cookies and node names
+  - Created `NeonFS.TestHelpers` module with volume I/O helpers for integration tests
+  - Implemented Phase 2 integration test: 3-node cluster with replication and failure recovery
+  - Test validates cluster survives single node failure and data remains accessible
+  - Test verifies node rejoin and data synchronization after restart
+- Files changed:
+  - `neonfs_core/test/support/test_cluster.ex` (new)
+  - `neonfs_core/test/support/test_helpers.ex` (new)
+  - `neonfs_core/test/integration/phase2_test.exs` (new)
+  - `neonfs_core/test/test_helper.exs` (added support file loading)
+  - `tasks/task_0037_integration_test_multi_node.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - TestCluster manages Docker/Podman containers with proper networking and distribution
+  - Use VolumeRegistry.get_by_name/1 to look up volumes (not lookup/1)
+  - WriteOperation.write_file and ReadOperation.read_file take volume_id (not volume_name)
+  - FileIndex.list_volume/1 returns all files for a volume (not list_files/1)
+  - FileIndex.delete/1 takes file_id (need to get_by_path first to get file_id)
+  - Logger.warning/1 replaces deprecated Logger.warn/1 in Elixir 1.19+
+  - Integration tests require @moduletag :integration and async: false
+  - Container networking requires RELEASE_COOKIE, RELEASE_NODE, RELEASE_DISTRIBUTION env vars
+  - Test support modules in test/support/ need Code.require_file in test_helper.exs
+  - Node.ping/1 can be used to wait for distributed nodes to become ready (returns :pong/:pang)
+---
