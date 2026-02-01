@@ -223,7 +223,10 @@ impl ClusterCommand {
                 println!("{}", json::format(&join_result)?);
             }
             OutputFormat::Table => {
-                println!("✓ Successfully joined cluster '{}'", join_result.cluster_name);
+                println!(
+                    "✓ Successfully joined cluster '{}'",
+                    join_result.cluster_name
+                );
                 println!();
                 println!("  Cluster ID:  {}", join_result.cluster_id);
                 println!("  Node ID:     {}", join_result.node_id);
@@ -251,9 +254,9 @@ fn parse_duration(duration: &str) -> Result<i64> {
     }
 
     let (value_str, unit) = duration.split_at(len - 1);
-    let value = value_str
-        .parse::<i64>()
-        .map_err(|_| crate::error::CliError::InvalidArgument("Invalid duration value".to_string()))?;
+    let value = value_str.parse::<i64>().map_err(|_| {
+        crate::error::CliError::InvalidArgument("Invalid duration value".to_string())
+    })?;
 
     let multiplier = match unit {
         "s" => 1,
