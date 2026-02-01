@@ -78,6 +78,28 @@ Only update AGENTS.md if you have **genuinely reusable knowledge** that would he
 - Keep changes focused and minimal.
 - Follow existing code patterns.
 
+## Phase Completion Requirements
+
+**CRITICAL: A phase is NOT complete until full integration testing passes.**
+
+When completing the final task of an implementation phase:
+
+1. **Run the full acceptance test suite**: `./scripts/acceptance-test-containers.sh`
+2. **ALL tests must pass** - unit tests alone are NOT sufficient
+3. **Verify all services communicate correctly in containers**:
+   - CLI → Core (Erlang distribution)
+   - Core → FUSE (RPC)
+   - Multi-node Ra cluster (if Phase 2+)
+4. **Document any integration fixes** in progress.md
+
+Do NOT mark a phase as complete if acceptance tests fail. Integration issues (missing env vars, nodes not connecting, RPC failures) must be resolved before proceeding.
+
+Common issues to check:
+- `NEONFS_FUSE_NODE` / `NEONFS_CORE_NODE` environment variables
+- `RELEASE_COOKIE` matching across all nodes
+- `Node.connect/1` called on startup for service discovery
+- `Node.list()` showing expected peer nodes
+
 ## Browser Testing (Required for Frontend Stories)
 
 For any story that changes UI, you MUST verify it works in the browser:

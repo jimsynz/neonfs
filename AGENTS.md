@@ -6,7 +6,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 NeonFS is a BEAM-orchestrated distributed filesystem combining Elixir's coordination strengths with Rust's performance for storage operations. The project follows a strict separation of concerns: Elixir handles coordination, policy, and APIs; Rust handles I/O, chunking, and cryptography via Rustler NIFs.
 
-**Current Status:** Phase 1 (Foundation) - building basic single-node operation with local storage and CLI.
+**Current Status:** Phase 2 (Distributed) complete - multi-node Ra cluster with replication, node failure recovery, and full acceptance tests passing.
 
 ## Build Commands
 
@@ -149,3 +149,30 @@ Rustler wraps Rust `Result<T, E>` types:
 - `Result<T, E>` error → `{:error, reason}`
 
 Handle the `{:ok, {}}` case explicitly when expecting simple `:ok`.
+
+## Phase Completion Requirements
+
+**A phase is NOT complete until all components are fully integrated and tested together.**
+
+Before declaring any implementation phase complete:
+
+1. **Run the full acceptance test suite**: `./scripts/acceptance-test-containers.sh`
+2. **All 54+ tests must pass** - both Phase 1 (single-node) and Phase 2 (multi-node)
+3. **Verify inter-service communication works**:
+   - CLI → Core (via Erlang distribution)
+   - Core → FUSE (via RPC/distribution)
+   - FUSE → Core (for data operations)
+4. **Test failure scenarios**: node restart, node failure, recovery
+
+Unit tests passing is necessary but NOT sufficient. Integration between:
+- neonfs_core and neonfs_fuse containers
+- CLI and daemon communication
+- Multi-node Ra cluster coordination
+
+must all work in the containerised environment before moving to the next phase.
+
+**Common integration issues to check:**
+- Erlang nodes not connected (need explicit `Node.connect/1` or matching cookies)
+- Environment variables missing (NEONFS_FUSE_NODE, NEONFS_CORE_NODE, RELEASE_COOKIE)
+- Service discovery failing (check `Node.list()` shows expected peers)
+- RPC calls returning `{:badrpc, _}` (nodes not reachable)

@@ -43,9 +43,17 @@ defmodule NeonFS.Core.RaSupervisor do
   def init(_opts) do
     # Get Ra data directory from config
     data_dir = ra_data_dir()
-    File.mkdir_p!(data_dir)
 
-    Logger.info("Initializing Ra supervisor with data dir: #{data_dir}")
+    # Ra appends the node name to create a subdirectory, so we need to create that too
+    # e.g., /var/lib/neonfs/data/ra -> /var/lib/neonfs/data/ra/neonfs_core@neonfs-core-1
+    node_data_dir = Path.join(data_dir, Atom.to_string(Node.self()))
+
+    File.mkdir_p!(data_dir)
+    File.mkdir_p!(node_data_dir)
+
+    Logger.info(
+      "Initializing Ra supervisor with data dir: #{data_dir} (node dir: #{node_data_dir})"
+    )
 
     # Start RaServer GenServer which will initialize the Ra server asynchronously
     children = [

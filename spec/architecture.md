@@ -876,7 +876,7 @@ The Rust crates are not separately deployable — they're compiled into the Elix
 
 ### Service Discovery and Clustering
 
-Services find each other using Erlang distribution:
+Services find each other using Erlang distribution and Ra-based service registry. See [Discovery](discovery.md) for full details.
 
 ```elixir
 # neonfs_s3 connecting to core nodes
@@ -888,17 +888,15 @@ defmodule NeonFS.S3.CoreClient do
 end
 ```
 
-Configuration specifies which core nodes to connect to:
+Services discover core nodes dynamically via the Ra cluster membership, with fallback to configured nodes:
 
 ```yaml
-# neonfs_s3 config
+# neonfs_s3 config (fallback)
 core_nodes:
   - neonfs_core@storage1.tail1234.ts.net
   - neonfs_core@storage2.tail1234.ts.net
   - neonfs_core@storage3.tail1234.ts.net
 ```
-
-Services can also discover core nodes dynamically via the Ra cluster membership.
 
 ### Deployment Examples
 

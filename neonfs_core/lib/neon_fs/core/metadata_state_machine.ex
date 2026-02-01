@@ -24,10 +24,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:commit_chunk, hash :: binary()}
           | {:add_write_ref, hash :: binary(), write_id :: String.t()}
           | {:remove_write_ref, hash :: binary(), write_id :: String.t()}
+          | {:put_volume, volume_data :: map()}
+          | {:delete_volume, volume_id :: binary()}
 
   @type state :: %{
           data: %{optional(term()) => term()},
           chunks: %{optional(binary()) => map()},
+          volumes: %{optional(binary()) => map()},
           version: non_neg_integer()
         }
 
@@ -39,6 +42,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     %{
       data: %{},
       chunks: %{},
+      volumes: %{},
       version: 0
     }
   end
@@ -77,6 +81,17 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {new_state, :ok, []}
+  end
+
+  # Handle Ra builtin command for machine version upgrades
+  def apply(_meta, {:machine_version, from_version, to_version}, state) do
+    # Ra sends this command when upgrading the state machine version
+    # For now, we don't need to migrate state, just acknowledge the upgrade
+    require Logger
+
+    Logger.info("Ra machine version upgrade: #{from_version} -> #{to_version}")
+
+    {state, :ok, []}
   end
 
   def apply(_meta, {:put_chunk, chunk_meta}, state) do
@@ -203,6 +218,39 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  def apply(_meta, {:put_volume, volume_data}, state) do
+    # Ensure volumes map exists (for backwards compatibility with existing Ra state)
+    volumes = Map.get(state, :volumes, %{})
+    id = volume_data.id
+    new_volumes = Map.put(volumes, id, volume_data)
+    new_state = %{state | volumes: new_volumes, version: state.version + 1}
+
+    # Emit telemetry
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_volume],
+      %{version: new_state.version},
+      %{id: id, name: volume_data.name}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:delete_volume, volume_id}, state) do
+    # Ensure volumes map exists (for backwards compatibility with existing Ra state)
+    volumes = Map.get(state, :volumes, %{})
+    new_volumes = Map.delete(volumes, volume_id)
+    new_state = %{state | volumes: new_volumes, version: state.version + 1}
+
+    # Emit telemetry
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :delete_volume],
+      %{version: new_state.version},
+      %{id: volume_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
   @doc """
   Handle state transitions. Called when the Ra server enters a new state.
   """
@@ -214,12 +262,14 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   @doc """
-  Take a snapshot of the current state for persistence.
+  Called when a snapshot is installed (e.g., during cluster catch-up).
+
+  Returns a list of effects to execute after snapshot installation.
   """
   @impl :ra_machine
-  def snapshot_installed(_snapshot_meta, _snapshot_data, _snapshot_ref, state) do
-    # Called when a snapshot is installed (e.g., during cluster catch-up)
-    {state, :ok}
+  def snapshot_installed(_meta, _state, _old_meta, _old_state) do
+    # No effects needed after snapshot installation
+    []
   end
 
   @doc """
@@ -230,7 +280,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @doc """
   Return the module to handle a specific state machine version.
+
+  All versions use this same module - we don't have multiple versions yet.
   """
   @impl :ra_machine
-  def which_module(1), do: __MODULE__
+  def which_module(_version), do: __MODULE__
 end

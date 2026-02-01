@@ -74,14 +74,14 @@ defmodule NeonFS.CLI.Handler do
   - `expires_in` - Duration in seconds the token is valid for
 
   ## Returns
-  - `{:ok, %{token: string}}` - Success map with invite token
+  - `{:ok, %{"token" => string}}` - Success map with invite token
   - `{:error, reason}` - Error tuple
   """
   @spec create_invite(pos_integer()) :: {:ok, map()} | {:error, term()}
   def create_invite(expires_in) when is_integer(expires_in) and expires_in > 0 do
     case Invite.create_invite(expires_in) do
       {:ok, token} ->
-        {:ok, %{token: token}}
+        {:ok, %{"token" => token}}
 
       {:error, reason} ->
         {:error, reason}
@@ -109,17 +109,18 @@ defmodule NeonFS.CLI.Handler do
       {:ok, state} ->
         {:ok,
          %{
-           cluster_id: state.cluster_id,
-           cluster_name: state.cluster_name,
-           node_id: state.this_node.id,
-           node_name: Atom.to_string(state.this_node.name),
-           joined_at: DateTime.to_iso8601(state.this_node.joined_at),
-           known_peers:
+           "cluster_id" => state.cluster_id,
+           "cluster_name" => state.cluster_name,
+           "created_at" => DateTime.to_iso8601(state.created_at),
+           "node_id" => state.this_node.id,
+           "node_name" => Atom.to_string(state.this_node.name),
+           "joined_at" => DateTime.to_iso8601(state.this_node.joined_at),
+           "known_peers" =>
              Enum.map(state.known_peers, fn peer ->
                %{
-                 id: peer.id,
-                 name: Atom.to_string(peer.name),
-                 last_seen: DateTime.to_iso8601(peer.last_seen)
+                 "id" => peer.id,
+                 "name" => Atom.to_string(peer.name),
+                 "last_seen" => DateTime.to_iso8601(peer.last_seen)
                }
              end)
          }}
@@ -280,11 +281,33 @@ defmodule NeonFS.CLI.Handler do
 
   # Get the FUSE node and verify it's reachable
   defp get_fuse_node do
-    fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
+    # First try to discover FUSE node via connected nodes
+    case discover_fuse_node() do
+      {:ok, fuse_node} ->
+        {:ok, fuse_node}
 
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
-      {:badrpc, _} -> {:error, :fuse_not_available}
-      NeonFS.FUSE.MountManager -> {:ok, fuse_node}
+      :not_found ->
+        # Fall back to configured node (for backwards compatibility)
+        fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
+
+        case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
+          {:badrpc, _} -> {:error, :fuse_not_available}
+          NeonFS.FUSE.MountManager -> {:ok, fuse_node}
+        end
+    end
+  end
+
+  # Discover FUSE node by looking for connected nodes with neonfs_fuse prefix
+  defp discover_fuse_node do
+    Node.list()
+    |> Enum.find(fn node ->
+      node
+      |> Atom.to_string()
+      |> String.starts_with?("neonfs_fuse@")
+    end)
+    |> case do
+      nil -> :not_found
+      fuse_node -> {:ok, fuse_node}
     end
   end
 

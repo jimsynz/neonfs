@@ -11,6 +11,7 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.Persistence
+  alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
 
   @type volume_id :: binary()
@@ -71,9 +72,23 @@ defmodule NeonFS.Core.VolumeRegistry do
   """
   @spec list() :: [Volume.t()]
   def list do
-    :ets.tab2list(:volumes_by_id)
-    |> Enum.map(fn {_id, volume} -> volume end)
-    |> Enum.sort_by(& &1.name)
+    local_volumes =
+      :ets.tab2list(:volumes_by_id)
+      |> Enum.map(fn {_id, volume} -> volume end)
+
+    # If local ETS is empty, try to sync from Ra (handles case where
+    # VolumeRegistry started before Ra was ready)
+    volumes =
+      if Enum.empty?(local_volumes) do
+        case sync_from_ra() do
+          {:ok, synced_volumes} -> synced_volumes
+          {:error, _} -> local_volumes
+        end
+      else
+        local_volumes
+      end
+
+    Enum.sort_by(volumes, & &1.name)
   end
 
   @doc """
@@ -132,7 +147,17 @@ defmodule NeonFS.Core.VolumeRegistry do
       read_concurrency: true
     ])
 
-    Logger.info("VolumeRegistry started")
+    # Try to restore volumes from Ra state into ETS
+    # If Ra is not ready yet (e.g., during startup), that's okay - the index
+    # will be populated as operations occur or when Ra becomes available
+    case restore_from_ra() do
+      {:ok, count} ->
+        Logger.info("VolumeRegistry started, restored #{count} volumes from Ra")
+
+      {:error, reason} ->
+        Logger.debug("VolumeRegistry started but Ra not ready yet: #{inspect(reason)}")
+    end
+
     {:ok, %{}}
   end
 
@@ -168,8 +193,20 @@ defmodule NeonFS.Core.VolumeRegistry do
 
           case Volume.validate(volume) do
             :ok ->
-              insert_volume(volume)
-              {:ok, volume}
+              # Write through Ra if available
+              case maybe_ra_command({:put_volume, volume_to_map(volume)}) do
+                {:ok, :ok} ->
+                  insert_volume(volume)
+                  {:ok, volume}
+
+                {:error, :ra_not_available} ->
+                  # Ra not available, write directly to ETS (Phase 1 mode)
+                  insert_volume(volume)
+                  {:ok, volume}
+
+                {:error, reason} ->
+                  {:error, reason}
+              end
 
             {:error, reason} ->
               {:error, reason}
@@ -188,8 +225,19 @@ defmodule NeonFS.Core.VolumeRegistry do
 
           case Volume.validate(updated) do
             :ok ->
-              insert_volume(updated)
-              {:ok, updated}
+              # Write through Ra if available
+              case maybe_ra_command({:put_volume, volume_to_map(updated)}) do
+                {:ok, :ok} ->
+                  insert_volume(updated)
+                  {:ok, updated}
+
+                {:error, :ra_not_available} ->
+                  insert_volume(updated)
+                  {:ok, updated}
+
+                {:error, reason} ->
+                  {:error, reason}
+              end
 
             {:error, reason} ->
               {:error, reason}
@@ -208,8 +256,20 @@ defmodule NeonFS.Core.VolumeRegistry do
       case get(id) do
         {:ok, volume} ->
           updated = Volume.update_stats(volume, stats)
-          insert_volume(updated)
-          {:ok, updated}
+
+          # Write through Ra if available
+          case maybe_ra_command({:put_volume, volume_to_map(updated)}) do
+            {:ok, :ok} ->
+              insert_volume(updated)
+              {:ok, updated}
+
+            {:error, :ra_not_available} ->
+              insert_volume(updated)
+              {:ok, updated}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
 
         {:error, :not_found} ->
           {:error, :not_found}
@@ -223,7 +283,26 @@ defmodule NeonFS.Core.VolumeRegistry do
     reply =
       case get(id) do
         {:ok, volume} ->
-          check_and_delete_volume(volume)
+          # Check if volume has any files
+          files = FileIndex.list_volume(volume.id)
+
+          if Enum.empty?(files) do
+            # Write through Ra if available
+            case maybe_ra_command({:delete_volume, id}) do
+              {:ok, :ok} ->
+                delete_volume_from_ets(volume)
+                :ok
+
+              {:error, :ra_not_available} ->
+                delete_volume_from_ets(volume)
+                :ok
+
+              {:error, reason} ->
+                {:error, reason}
+            end
+          else
+            {:error, "volume contains #{length(files)} file(s), cannot delete"}
+          end
 
         {:error, :not_found} ->
           {:error, :not_found}
@@ -239,16 +318,117 @@ defmodule NeonFS.Core.VolumeRegistry do
     :ets.insert(:volumes_by_name, {volume.name, volume.id})
   end
 
-  defp check_and_delete_volume(%Volume{} = volume) do
-    # Check if volume has any files
-    files = FileIndex.list_volume(volume.id)
+  defp delete_volume_from_ets(%Volume{} = volume) do
+    :ets.delete(:volumes_by_id, volume.id)
+    :ets.delete(:volumes_by_name, volume.name)
+  end
 
-    if Enum.empty?(files) do
-      :ets.delete(:volumes_by_id, volume.id)
-      :ets.delete(:volumes_by_name, volume.name)
-      :ok
-    else
-      {:error, "volume contains #{length(files)} file(s), cannot delete"}
+  # Try to execute a Ra command, but gracefully handle Ra not being available
+  # Returns {:ok, result} | {:error, :ra_not_available} | {:error, reason}
+  defp maybe_ra_command(cmd) do
+    try do
+      case RaSupervisor.command(cmd) do
+        {:ok, result, _leader} ->
+          {:ok, result}
+
+        {:error, :noproc} ->
+          {:error, :ra_not_available}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        {:timeout, _node} ->
+          {:error, :timeout}
+      end
+    catch
+      kind, reason ->
+        Logger.debug("Ra not available: #{inspect({kind, reason})}")
+        {:error, :ra_not_available}
     end
+  end
+
+  # Restore volumes from Ra state into ETS
+  defp restore_from_ra do
+    case RaSupervisor.query(fn state -> Map.get(state, :volumes, %{}) end) do
+      {:ok, volumes} when is_map(volumes) ->
+        count =
+          Enum.reduce(volumes, 0, fn {_id, volume_map}, acc ->
+            volume = map_to_volume(volume_map)
+            insert_volume(volume)
+            acc + 1
+          end)
+
+        {:ok, count}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Sync volumes from Ra into ETS and return the list
+  # Used when local ETS is empty but Ra might have data
+  # NOTE: No logging here - this can be called during RPC from CLI,
+  # and Logger output causes RegSend messages that crash erl_rpc
+  defp sync_from_ra do
+    try do
+      case RaSupervisor.query(fn state -> Map.get(state, :volumes, %{}) end) do
+        {:ok, volumes} when is_map(volumes) and map_size(volumes) > 0 ->
+          volume_list =
+            Enum.map(volumes, fn {_id, volume_map} ->
+              volume = map_to_volume(volume_map)
+              insert_volume(volume)
+              volume
+            end)
+
+          {:ok, volume_list}
+
+        {:ok, _} ->
+          {:ok, []}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    catch
+      _kind, _reason ->
+        {:error, :ra_not_available}
+    end
+  end
+
+  # Convert Volume struct to map for Ra storage
+  defp volume_to_map(%Volume{} = volume) do
+    %{
+      id: volume.id,
+      name: volume.name,
+      owner: volume.owner,
+      durability: volume.durability,
+      write_ack: volume.write_ack,
+      initial_tier: volume.initial_tier,
+      compression: volume.compression,
+      verification: volume.verification,
+      logical_size: volume.logical_size,
+      physical_size: volume.physical_size,
+      chunk_count: volume.chunk_count,
+      created_at: volume.created_at,
+      updated_at: volume.updated_at
+    }
+  end
+
+  # Convert map from Ra storage to Volume struct
+  defp map_to_volume(volume_map) when is_map(volume_map) do
+    %Volume{
+      id: volume_map.id,
+      name: volume_map.name,
+      owner: volume_map[:owner],
+      durability: volume_map.durability,
+      write_ack: volume_map.write_ack,
+      initial_tier: volume_map.initial_tier,
+      compression: volume_map.compression,
+      verification: volume_map.verification,
+      logical_size: volume_map[:logical_size] || 0,
+      physical_size: volume_map[:physical_size] || 0,
+      chunk_count: volume_map[:chunk_count] || 0,
+      created_at: volume_map.created_at,
+      updated_at: volume_map.updated_at
+    }
   end
 end

@@ -1283,3 +1283,30 @@
   - Test support modules in test/support/ need Code.require_file in test_helper.exs
   - Node.ping/1 can be used to wait for distributed nodes to become ready (returns :pong/:pang)
 ---
+
+## 2026-02-02 - Service Discovery Integration (Phase 2 Integration)
+- What was implemented:
+  - Fixed container acceptance tests failing with `fuse_not_available` error
+  - Added `NEONFS_FUSE_NODE` environment variable to core container in acceptance tests
+  - Implemented dynamic FUSE node discovery via Erlang distribution
+  - FUSE application now connects to core node on startup (`Node.connect/1`)
+  - Core CLI handler discovers FUSE nodes via `Node.list()` with fallback to configured node
+  - Created comprehensive `spec/discovery.md` documenting service discovery architecture
+  - Linked discovery.md from specification.md and architecture.md
+  - All 54 acceptance tests now pass (Phase 1 single-node + Phase 2 multi-node)
+- Files changed:
+  - `scripts/acceptance-test-containers.sh` (added NEONFS_FUSE_NODE to core container)
+  - `neonfs_fuse/lib/neon_fs/fuse/application.ex` (connect to core on startup)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (discover FUSE via Node.list())
+  - `spec/discovery.md` (new - comprehensive service discovery spec)
+  - `spec/specification.md` (linked discovery.md)
+  - `spec/architecture.md` (updated service discovery section)
+- **Learnings for future iterations:**
+  - Erlang nodes must be explicitly connected for RPC to work - use `Node.connect/1`
+  - `Node.list()` returns all connected nodes - filter by naming pattern for discovery
+  - Service discovery has three layers: Ra registry (future), Erlang distribution, explicit config
+  - Container tests need all inter-node communication configured (both directions)
+  - FUSE node needs `NEONFS_CORE_NODE`, core node needs `NEONFS_FUSE_NODE` (or dynamic discovery)
+  - Phase completion requires full integration testing, not just unit tests passing
+  - Always run `acceptance-test-containers.sh` before declaring a phase complete
+---

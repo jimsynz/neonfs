@@ -115,7 +115,7 @@ defmodule NeonFS.Cluster.Invite do
 
   defp parse_token(token) do
     case String.split(token, "_") do
-      [@token_prefix, "inv", random, expiry_str, signature] ->
+      ["nfs", "inv", random, expiry_str, signature] ->
         case Integer.parse(expiry_str) do
           {expiry, ""} -> {:ok, {random, expiry, signature}}
           _ -> {:error, :invalid_format}

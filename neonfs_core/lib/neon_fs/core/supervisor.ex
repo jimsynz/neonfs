@@ -17,6 +17,8 @@ defmodule NeonFS.Core.Supervisor do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
   end
 
+  require Logger
+
   @impl true
   def init(_init_arg) do
     # Get configuration from application environment
@@ -28,8 +30,13 @@ defmodule NeonFS.Core.Supervisor do
     # Ra requires a named Erlang node (not :nonode@nohost) to function
     # For Phase 1 single-node operation, Ra is optional
     # Enable Ra by starting with: elixir --sname nodename -S mix run
-    enable_ra =
-      Node.self() != :nonode@nohost and Application.get_env(:neonfs_core, :enable_ra, false)
+    node_named = Node.self() != :nonode@nohost
+    ra_config = Application.get_env(:neonfs_core, :enable_ra, false)
+    enable_ra = node_named and ra_config
+
+    Logger.info(
+      "Supervisor init: node=#{inspect(Node.self())}, node_named=#{node_named}, ra_config=#{ra_config}, enable_ra=#{enable_ra}"
+    )
 
     base_children = [
       # Persistence must start first - restores metadata from DETS

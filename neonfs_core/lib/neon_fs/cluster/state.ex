@@ -87,7 +87,7 @@ defmodule NeonFS.Cluster.State do
     |> Path.dirname()
     |> File.mkdir_p!()
 
-    # Convert to JSON-serializable map
+    # Convert to JSON-serialisable map
     data = %{
       "cluster_id" => state.cluster_id,
       "cluster_name" => state.cluster_name,
@@ -109,7 +109,7 @@ defmodule NeonFS.Cluster.State do
       "ra_cluster_members" => Enum.map(state.ra_cluster_members, &Atom.to_string/1)
     }
 
-    json = Jason.encode!(data, pretty: true)
+    json = :json.format(data)
 
     # Atomic write
     temp_path = "#{path}.tmp"
@@ -155,12 +155,11 @@ defmodule NeonFS.Cluster.State do
   end
 
   defp parse_json(content) do
-    case Jason.decode(content) do
-      {:ok, data} ->
-        parse_state(data)
-
-      {:error, _} ->
-        {:error, :invalid_json}
+    try do
+      data = :json.decode(content)
+      parse_state(data)
+    rescue
+      _ -> {:error, :invalid_json}
     end
   end
 
