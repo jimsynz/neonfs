@@ -140,6 +140,14 @@ defmodule NeonFS.Core.ChunkIndex do
     GenServer.call(__MODULE__, {:commit, hash})
   end
 
+  @doc """
+  Updates the locations for a chunk (used during replication).
+  """
+  @spec update_locations(binary(), [location()]) :: :ok | {:error, :not_found}
+  def update_locations(hash, locations) when is_binary(hash) and is_list(locations) do
+    GenServer.call(__MODULE__, {:update_locations, hash, locations})
+  end
+
   # Server Callbacks
 
   @impl true
@@ -286,6 +294,35 @@ defmodule NeonFS.Core.ChunkIndex do
               {:error, reason} ->
                 {:reply, {:error, reason}, state}
             end
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      [] ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:update_locations, hash, locations}, _from, state) do
+    case :ets.lookup(:chunk_index, hash) do
+      [{^hash, chunk_meta}] ->
+        updated_meta = %{chunk_meta | locations: locations}
+
+        # Try to write through Ra if available
+        case maybe_ra_command({:update_chunk_locations, hash, locations}) do
+          {:ok, :ok} ->
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:ok, {:error, reason}} ->
+            {:reply, {:error, reason}, state}
+
+          {:error, :ra_not_available} ->
+            # Ra not available, write directly to ETS
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}

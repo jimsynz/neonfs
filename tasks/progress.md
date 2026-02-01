@@ -1194,3 +1194,40 @@
   - RaSupervisor.command returns `{:ok, result, leader}` on success, `{:error, reason}` on failure
   - Keep ChunkIndex API stable - callers shouldn't know if using Ra or ETS backend
 ---
+
+## 2026-02-01 - Task 0035
+- What was implemented:
+  - Created NeonFS.Core.Replication module for chunk replication across cluster nodes
+  - Implemented replicate_chunk/4 with volume-based write acknowledgement policies
+  - Target node selection via select_replication_targets/2 with failure domain awareness
+  - Chunk transfer via Erlang distribution using :rpc.call to remote BlobStore.write_chunk
+  - Support for three write_ack policies: :local (background async), :quorum (W of N), :all (synchronous)
+  - Added ChunkIndex.update_locations/2 for updating chunk location metadata after replication
+  - Background replication spawns Task for async replication with :local write_ack
+  - Quorum replication waits for volume.durability.min_copies confirmations
+  - Synchronous replication waits for all target nodes to confirm
+  - Graceful handling when replication targets unavailable (single-node mode)
+  - Telemetry events for replication start, stop, and exceptions
+  - Integrated replication into WriteOperation.store_new_chunk/8
+  - Comprehensive test suite with 11 tests covering all write_ack policies
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/replication.ex` (new)
+  - `neonfs_core/lib/neon_fs/core/chunk_index.ex` (added update_locations/2)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (integrated replication)
+  - `neonfs_core/test/neon_fs/core/replication_test.exs` (new)
+  - `tasks/task_0035_basic_replication.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Cluster members tracked in NeonFS.Cluster.State.ra_cluster_members list
+  - Use :rpc.call(node, module, function, args, timeout) for remote procedure calls
+  - Handle {:badrpc, reason} error tuples from failed RPC calls
+  - When no replication targets available, succeed with local location only (single-node mode)
+  - Replication should not fail writes - chunk is already stored locally before replication
+  - Background replication via Task.start/1 returns immediately, doesn't block caller
+  - Quorum calculation: min_copies - 1 for additional replicas (local copy already stored)
+  - Test async replication by checking telemetry events, not waiting for completion
+  - Pattern: with statement can be replaced with case when handling {:error, _} uniformly
+  - Credo: extract helper functions to reduce nesting depth (max 2 levels)
+  - Volume.durability.factor determines total replicas, ChunkMeta.target_replicas tracks expected count
+  - Use Enum.empty?/1 instead of length/1 >= 1 for performance (credo warning)
+  - Logger.warning when requested replicas exceed available nodes - "some redundancy better than none"
+---

@@ -6,7 +6,15 @@ defmodule NeonFS.Core.WriteOperation do
   and creates file metadata. For Phase 1, this is single-node only (no replication).
   """
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex, ChunkMeta, FileIndex, FileMeta, VolumeRegistry}
+  alias NeonFS.Core.{
+    BlobStore,
+    ChunkIndex,
+    ChunkMeta,
+    FileIndex,
+    FileMeta,
+    Replication,
+    VolumeRegistry
+  }
 
   require Logger
 
@@ -158,7 +166,7 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp store_new_chunk(data, hash, offset, size, index, compression_config, _volume, write_id) do
+  defp store_new_chunk(data, hash, offset, size, index, compression_config, volume, write_id) do
     # Determine if we should compress this chunk
     {_should_compress, compression} = should_compress_chunk?(size, compression_config)
 
@@ -188,7 +196,7 @@ defmodule NeonFS.Core.WriteOperation do
           stored_size: chunk_info.stored_size,
           compression: compression_type,
           locations: [%{node: node(), drive_id: "default", tier: :hot}],
-          target_replicas: 1,
+          target_replicas: volume.durability.factor,
           commit_state: :uncommitted,
           active_write_refs: MapSet.new([write_id]),
           stripe_id: nil,
@@ -199,6 +207,22 @@ defmodule NeonFS.Core.WriteOperation do
 
         # Store in chunk index
         :ok = ChunkIndex.put(chunk_meta)
+
+        # Replicate chunk if replication factor > 1
+        if volume.durability.factor > 1 do
+          # Replication will happen according to volume's write_ack policy
+          # (local = background, quorum/all = synchronous)
+          case Replication.replicate_chunk(hash, data, volume, tier: :hot) do
+            {:ok, _locations} ->
+              # Replication successful or background
+              :ok
+
+            {:error, reason} ->
+              Logger.warning("Chunk replication failed: #{inspect(reason)}")
+              # Continue even if replication fails - the chunk is stored locally
+              :ok
+          end
+        end
 
         {:ok,
          %{

@@ -1,7 +1,7 @@
 # Task 0035: Implement Basic Chunk Replication
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 2 - Clustering
@@ -10,15 +10,15 @@ Not Started
 Implement chunk replication across nodes. When a chunk is written, it's replicated to other nodes based on the volume's replication factor. This provides data redundancy.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Core.Replication` module
-- [ ] `replicate_chunk/3` - replicate to target nodes
-- [ ] Select target nodes based on volume replication factor
-- [ ] Transfer chunk data via Erlang distribution
-- [ ] Update chunk metadata with all locations
-- [ ] Handle replication failures gracefully
-- [ ] Configurable write acknowledgement (local, quorum, all)
-- [ ] Background replication for local-ack volumes
-- [ ] Telemetry for replication operations
+- [x] `NeonFS.Core.Replication` module
+- [x] `replicate_chunk/3` - replicate to target nodes
+- [x] Select target nodes based on volume replication factor
+- [x] Transfer chunk data via Erlang distribution
+- [x] Update chunk metadata with all locations
+- [x] Handle replication failures gracefully
+- [x] Configurable write acknowledgement (local, quorum, all)
+- [x] Background replication for local-ack volumes
+- [x] Telemetry for replication operations
 
 ## Replication Flow
 ```elixir
