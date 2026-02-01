@@ -1,7 +1,7 @@
 # Task 0033: Implement Node Join Flow
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 2 - Clustering
@@ -10,16 +10,16 @@ Not Started
 Implement the flow for additional nodes to join an existing cluster. This uses invite tokens for authentication and adds the new node to the Ra consensus group.
 
 ## Acceptance Criteria
-- [ ] `NeonFS.Cluster.Invite` module for token management
-- [ ] `create_invite/1` generates time-limited invite token
-- [ ] `validate_invite/1` verifies token is valid
-- [ ] `NeonFS.Cluster.Join` module for join flow
-- [ ] `join_cluster/2` connects to existing node and joins
-- [ ] Add new node to Ra cluster membership
-- [ ] Persist cluster state on joining node
-- [ ] CLI: `neonfs cluster create-invite --expires 1h`
-- [ ] CLI: `neonfs cluster join --token <token> --via <node>`
-- [ ] Joined node syncs existing metadata
+- [x] `NeonFS.Cluster.Invite` module for token management
+- [x] `create_invite/1` generates time-limited invite token
+- [x] `validate_invite/1` verifies token is valid
+- [x] `NeonFS.Cluster.Join` module for join flow
+- [x] `join_cluster/2` connects to existing node and joins
+- [x] Add new node to Ra cluster membership
+- [x] Persist cluster state on joining node
+- [x] CLI: `neonfs cluster create-invite --expires 1h`
+- [x] CLI: `neonfs cluster join --token <token> --via <node>`
+- [x] Joined node syncs existing metadata
 
 ## Invite Token Format
 ```

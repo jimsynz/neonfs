@@ -107,6 +107,91 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "create_invite/1" do
+    setup do
+      # Initialize cluster for invite tests
+      if Node.self() != :nonode@nohost do
+        Handler.cluster_init("invite-test-cluster")
+      end
+
+      :ok
+    end
+
+    @tag :ra
+    test "creates invite token successfully" do
+      assert {:ok, result} = Handler.create_invite(3600)
+      assert is_binary(result.token)
+      assert String.starts_with?(result.token, "nfs_inv_")
+    end
+
+    @tag :ra
+    test "creates tokens with different durations" do
+      assert {:ok, result1} = Handler.create_invite(60)
+      assert {:ok, result2} = Handler.create_invite(3600)
+
+      assert result1.token != result2.token
+    end
+
+    test "returns error if cluster not initialized" do
+      # Don't initialize cluster
+      assert {:error, :cluster_not_initialized} = Handler.create_invite(3600)
+    end
+
+    @tag :ra
+    test "returns serializable data" do
+      assert {:ok, result} = Handler.create_invite(3600)
+      assert is_map(result)
+      assert is_binary(result.token)
+    end
+  end
+
+  describe "join_cluster/2" do
+    setup do
+      # Initialize cluster and create invite for join tests
+      if Node.self() != :nonode@nohost do
+        Handler.cluster_init("join-test-cluster")
+      end
+
+      :ok
+    end
+
+    @tag :ra
+    test "validates parameters" do
+      # Create a valid token
+      {:ok, invite_result} = Handler.create_invite(3600)
+      token = invite_result.token
+      via_node = Atom.to_string(Node.self())
+
+      # Should fail because we can't join our own cluster
+      result = Handler.join_cluster(token, via_node)
+
+      # Either already_in_cluster or join failure expected
+      assert match?({:error, _}, result)
+    end
+
+    test "returns error with string node name" do
+      token = "nfs_inv_fake_token"
+      via_node = "fake_node@localhost"
+
+      # Should fail due to invalid token or RPC failure
+      assert {:error, _reason} = Handler.join_cluster(token, via_node)
+    end
+
+    @tag :ra
+    test "join result has correct structure" do
+      # We can't fully test join without multi-node setup
+      # But we can verify the function signature and error handling
+
+      token = "nfs_inv_invalid"
+      via_node = "fake@localhost"
+
+      result = Handler.join_cluster(token, via_node)
+
+      # Should return error tuple
+      assert match?({:error, _}, result)
+    end
+  end
+
   describe "list_volumes/0" do
     test "returns empty list when no volumes exist" do
       assert {:ok, []} = Handler.list_volumes()

@@ -1122,3 +1122,49 @@
   - Credo flags redundant :ok in final with clause - just return the result directly
   - Alias nested modules at the top (e.g., `alias NeonFS.Core.MetadataStateMachine`)
 ---
+## 2026-02-01 - Task 0033
+- What was implemented:
+  - Created `NeonFS.Cluster.Invite` module for time-limited invite token management
+  - Implemented `create_invite/1` to generate tokens with HMAC-SHA256 signatures using cluster master_key
+  - Implemented `validate_invite/1` with format, expiry, and signature verification
+  - Created `NeonFS.Cluster.Join` module for join flow
+  - Implemented `accept_join/2` on existing cluster nodes to validate tokens and add peers
+  - Implemented `join_cluster/2` on new nodes to request cluster membership
+  - Added nodes to Ra cluster membership using `:ra.add_member/2`
+  - Persist cluster state on both existing and joining nodes
+  - Added CLI handler functions: `create_invite/1`, `join_cluster/2`
+  - Updated Rust CLI with `cluster create-invite` and `cluster join` commands
+  - Duration parsing supports units (s, m, h, d) and raw seconds
+  - Token format: `nfs_inv_<random>_<expiry_timestamp>_<signature>`
+  - Comprehensive test suites for Invite, Join, and CLI handler functions
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cluster/invite.ex` (new - 169 lines)
+  - `neonfs_core/lib/neon_fs/cluster/join.ex` (new - 207 lines)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (added create_invite, join_cluster functions)
+  - `neonfs_core/test/neon_fs/cluster/invite_test.exs` (new - 12 tests)
+  - `neonfs_core/test/neon_fs/cluster/join_test.exs` (new - 12 tests)
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` (added invite/join tests)
+  - `neonfs-cli/src/commands/cluster.rs` (implemented create-invite and join commands)
+  - `neonfs-cli/src/error.rs` (added InvalidArgument error variant)
+  - `tasks/task_0033_node_join_flow.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Import Bitwise (not use) for bitwise operators like `|||` and `bxor`
+  - Constant-time string comparison prevents timing attacks on signature verification
+  - HMAC-SHA256 provides cryptographically secure token signatures with master_key
+  - Token format includes random nonce to prevent replay attacks
+  - Invite tokens are single-use in practice (Ra adds node to cluster only once)
+  - Ra cluster membership updates via `:ra.add_member(server_id, new_server_id)`
+  - New node receives cluster info (ID, name, master_key, peers) via RPC
+  - Cluster state persisted to JSON file on both existing and joining nodes
+  - Ra server starts automatically via RaServer GenServer on node startup
+  - Tests requiring named nodes must use `@moduletag :ra` to skip when Node.self() == :nonode@nohost
+  - eetf 0.8 uses Term::FixInteger with value field, not Term::Integer
+  - Credo warns when last clause in `with` just returns :ok - let the function return directly
+  - Pattern match on struct in function head: `defp func(%State{} = state)` for dialyzer
+  - Use map update syntax `%{state | ...}` instead of `%State{state | ...}` when already pattern matched
+  - Duration parsing: support both raw seconds and suffix notation (1h, 30m, 3600s)
+  - CLI join command uses `--token` and `--via <node_name>` for clarity
+  - Peer info includes unique ID, node name, and last_seen timestamp
+  - Each node generates its own 8-char base32 node ID on join
+  - Accept_join returns cluster info map for RPC transmission to joining node
+---

@@ -1,6 +1,8 @@
 defmodule NeonFS.Cluster.InitTest do
   use ExUnit.Case, async: false
 
+  @moduletag :ra
+
   alias NeonFS.Cluster.{Init, State}
 
   @tmp_dir "/tmp/neonfs_cluster_init_test"

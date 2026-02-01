@@ -32,6 +32,10 @@ pub enum CliError {
     #[error("Term conversion error: {0}")]
     TermConversionError(String),
 
+    /// Invalid argument
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(String),
+
     // General errors
     /// JSON serialization/deserialization error
     #[error("JSON error: {0}")]

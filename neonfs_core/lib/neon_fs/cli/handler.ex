@@ -10,7 +10,7 @@ defmodule NeonFS.CLI.Handler do
   consists only of serializable terms (maps, lists, atoms, strings, numbers).
   """
 
-  alias NeonFS.Cluster.{Init, State}
+  alias NeonFS.Cluster.{Init, Invite, Join, State}
   alias NeonFS.Core.{Volume, VolumeRegistry}
 
   @doc """
@@ -61,6 +61,68 @@ defmodule NeonFS.CLI.Handler do
             # Fallback if load fails
             {:ok, %{cluster_id: cluster_id}}
         end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Creates an invite token for joining nodes.
+
+  ## Parameters
+  - `expires_in` - Duration in seconds the token is valid for
+
+  ## Returns
+  - `{:ok, %{token: string}}` - Success map with invite token
+  - `{:error, reason}` - Error tuple
+  """
+  @spec create_invite(pos_integer()) :: {:ok, map()} | {:error, term()}
+  def create_invite(expires_in) when is_integer(expires_in) and expires_in > 0 do
+    case Invite.create_invite(expires_in) do
+      {:ok, token} ->
+        {:ok, %{token: token}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Joins an existing cluster using an invite token.
+
+  ## Parameters
+  - `token` - Invite token from existing cluster
+  - `via_node` - Node name of existing cluster member (string)
+
+  ## Returns
+  - `{:ok, map}` - Success map with cluster information
+  - `{:error, reason}` - Error tuple
+  """
+  @spec join_cluster(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def join_cluster(token, via_node_str)
+      when is_binary(token) and is_binary(via_node_str) do
+    # Convert node name string to atom
+    via_node = String.to_atom(via_node_str)
+
+    case Join.join_cluster(token, via_node) do
+      {:ok, state} ->
+        {:ok,
+         %{
+           cluster_id: state.cluster_id,
+           cluster_name: state.cluster_name,
+           node_id: state.this_node.id,
+           node_name: Atom.to_string(state.this_node.name),
+           joined_at: DateTime.to_iso8601(state.this_node.joined_at),
+           known_peers:
+             Enum.map(state.known_peers, fn peer ->
+               %{
+                 id: peer.id,
+                 name: Atom.to_string(peer.name),
+                 last_seen: DateTime.to_iso8601(peer.last_seen)
+               }
+             end)
+         }}
 
       {:error, reason} ->
         {:error, reason}
