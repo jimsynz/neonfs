@@ -10,8 +10,9 @@ NeonFS is a BEAM-orchestrated distributed filesystem combining Elixir's coordina
 
 ## Build Commands
 
-### Elixir (from neonfs_core/ or neonfs_fuse/)
+### Elixir (from repository root or individual packages)
 ```bash
+mix check --no-retry           # Run all checks in all subprojects (from root)
 mix compile                    # Compile Elixir + Rustler NIFs
 mix test                       # Run ExUnit tests
 mix test path/to/test.exs      # Run specific test file
@@ -20,7 +21,6 @@ mix format                     # Format code
 mix format --check-formatted   # Check formatting
 mix credo --strict             # Code style checker
 mix dialyzer                   # Static type analysis
-mix check --no-retry           # Run the full suite
 ```
 
 ### Rust (from native/ crates)
@@ -46,6 +46,11 @@ neonfs_fuse/          # FUSE filesystem package
 │   └── fuse.ex
 ├── native/
 └── test/
+
+neonfs_integration/   # Peer-based integration tests
+├── lib/neonfs/integration/
+│   └── peer_cluster.ex   # Spawns real peer nodes for testing
+└── test/integration/     # Multi-node integration tests
 
 spec/                 # Specification documents (start here)
 ├── specification.md     # Entry point & overview
@@ -80,17 +85,17 @@ Implementation follows 37 task specifications in `/workspace/tasks/`. Each task 
 
 ## Testing
 
+**CRITICAL: Never bypass or exclude tests.** Skipped tests create a false sense of confidence. If a test requires specific environment setup (FUSE support, privileges, etc.), the CI environment must be configured correctly - not the tests excluded. A failing build due to missing infrastructure is preferable to silently skipped tests.
+
 **Testing layers (bottom to top):**
 1. Static analysis: Dialyzer, Clippy, Credo
 2. Unit/property tests: ExUnit + StreamData (Elixir), cargo test + proptest (Rust)
 3. NIF boundary tests: Elixir calling Rust NIFs
-4. Integration tests: Containerized multi-node clusters
+4. Integration tests: Peer-based multi-node clusters (neonfs_integration/)
 
 **Running tests:**
 ```bash
 mix test                       # All Elixir tests
-mix test --only integration    # Integration tests only
-mix test --exclude integration # Unit tests only
 cargo test                     # Rust tests
 ```
 
@@ -108,11 +113,12 @@ Always consult these before implementing:
 - `spec/architecture.md` - System design, NIF boundaries
 - `spec/implementation.md` - Phase roadmap, dependency tables
 - `spec/testing.md` - Test examples and patterns
+- `spec/service_discovery.md` - Node discovery and cluster formation
 - `tasks/README.md` - Task dependency graph
 
 ## Module Naming
 
-- Top-level: `NeonFS.Core.*` and `NeonFS.FUSE.*`
+- Top-level: `NeonFS.Core.*`, `NeonFS.FUSE.*`, and `NeonFS.Integration.*`
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
 
@@ -156,8 +162,8 @@ Handle the `{:ok, {}}` case explicitly when expecting simple `:ok`.
 
 Before declaring any implementation phase complete:
 
-1. **Run the full acceptance test suite**: `./scripts/acceptance-test-containers.sh`
-2. **All 54+ tests must pass** - both Phase 1 (single-node) and Phase 2 (multi-node)
+1. **Run the full test suite**: `mix check --no-retry` from the repository root (runs checks in all subprojects)
+2. **All integration tests must pass** - the neonfs_integration package spawns real peer nodes to test multi-node scenarios
 3. **Verify inter-service communication works**:
    - CLI → Core (via Erlang distribution)
    - Core → FUSE (via RPC/distribution)
@@ -165,14 +171,13 @@ Before declaring any implementation phase complete:
 4. **Test failure scenarios**: node restart, node failure, recovery
 
 Unit tests passing is necessary but NOT sufficient. Integration between:
-- neonfs_core and neonfs_fuse containers
+- neonfs_core and neonfs_fuse
 - CLI and daemon communication
 - Multi-node Ra cluster coordination
 
-must all work in the containerised environment before moving to the next phase.
+must all work via the peer-based integration tests before moving to the next phase.
 
 **Common integration issues to check:**
 - Erlang nodes not connected (need explicit `Node.connect/1` or matching cookies)
-- Environment variables missing (NEONFS_FUSE_NODE, NEONFS_CORE_NODE, RELEASE_COOKIE)
 - Service discovery failing (check `Node.list()` shows expected peers)
 - RPC calls returning `{:badrpc, _}` (nodes not reachable)

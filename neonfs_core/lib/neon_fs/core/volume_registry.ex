@@ -11,6 +11,7 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.Persistence
+  alias NeonFS.Core.RaServer
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
 
@@ -34,34 +35,44 @@ defmodule NeonFS.Core.VolumeRegistry do
   - Name already exists
   - Configuration is invalid
   """
-  @spec create(String.t(), keyword()) :: {:ok, Volume.t()} | {:error, String.t()}
+  @spec create(String.t(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def create(name, opts \\ []) do
-    GenServer.call(__MODULE__, {:create, name, opts})
+    GenServer.call(__MODULE__, {:create, name, opts}, 10_000)
   end
 
   @doc """
   Gets a volume by its ID.
 
+  First checks local ETS cache, then falls back to Ra if not found locally.
   Returns `{:ok, volume}` if found, or `{:error, :not_found}` otherwise.
   """
   @spec get(volume_id()) :: {:ok, Volume.t()} | {:error, :not_found}
   def get(id) do
     case :ets.lookup(:volumes_by_id, id) do
-      [{^id, volume}] -> {:ok, volume}
-      [] -> {:error, :not_found}
+      [{^id, volume}] ->
+        {:ok, volume}
+
+      [] ->
+        # Not in local cache, try Ra
+        get_from_ra(id)
     end
   end
 
   @doc """
   Gets a volume by its name.
 
+  First checks local ETS cache, then falls back to Ra if not found locally.
   Returns `{:ok, volume}` if found, or `{:error, :not_found}` otherwise.
   """
   @spec get_by_name(volume_name()) :: {:ok, Volume.t()} | {:error, :not_found}
   def get_by_name(name) do
     case :ets.lookup(:volumes_by_name, name) do
-      [{^name, volume_id}] -> get(volume_id)
-      [] -> {:error, :not_found}
+      [{^name, volume_id}] ->
+        get(volume_id)
+
+      [] ->
+        # Not in local cache, try Ra
+        get_by_name_from_ra(name)
     end
   end
 
@@ -98,9 +109,9 @@ defmodule NeonFS.Core.VolumeRegistry do
   - Volume not found
   - New configuration is invalid
   """
-  @spec update(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, String.t()}
+  @spec update(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def update(id, opts) do
-    GenServer.call(__MODULE__, {:update, id, opts})
+    GenServer.call(__MODULE__, {:update, id, opts}, 10_000)
   end
 
   @doc """
@@ -108,9 +119,9 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   Returns `{:ok, updated_volume}` if successful, or `{:error, :not_found}` if not found.
   """
-  @spec update_stats(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, :not_found}
+  @spec update_stats(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def update_stats(id, stats) do
-    GenServer.call(__MODULE__, {:update_stats, id, stats})
+    GenServer.call(__MODULE__, {:update_stats, id, stats}, 10_000)
   end
 
   @doc """
@@ -120,9 +131,9 @@ defmodule NeonFS.Core.VolumeRegistry do
   - Volume not found
   - Volume contains files (must be empty)
   """
-  @spec delete(volume_id()) :: :ok | {:error, String.t()}
+  @spec delete(volume_id()) :: :ok | {:error, term()}
   def delete(id) do
-    GenServer.call(__MODULE__, {:delete, id})
+    GenServer.call(__MODULE__, {:delete, id}, 10_000)
   end
 
   # Server callbacks
@@ -183,132 +194,102 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   @impl true
   def handle_call({:create, name, opts}, _from, state) do
-    reply =
-      case get_by_name(name) do
-        {:ok, _} ->
-          {:error, "volume with name '#{name}' already exists"}
-
-        {:error, :not_found} ->
-          volume = Volume.new(name, opts)
-
-          case Volume.validate(volume) do
-            :ok ->
-              # Write through Ra if available
-              case maybe_ra_command({:put_volume, volume_to_map(volume)}) do
-                {:ok, :ok} ->
-                  insert_volume(volume)
-                  {:ok, volume}
-
-                {:error, :ra_not_available} ->
-                  # Ra not available, write directly to ETS (Phase 1 mode)
-                  insert_volume(volume)
-                  {:ok, volume}
-
-                {:error, reason} ->
-                  {:error, reason}
-              end
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-      end
-
+    reply = do_create_volume(name, opts)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:update, id, opts}, _from, state) do
-    reply =
-      case get(id) do
-        {:ok, volume} ->
-          updated = Volume.update(volume, opts)
-
-          case Volume.validate(updated) do
-            :ok ->
-              # Write through Ra if available
-              case maybe_ra_command({:put_volume, volume_to_map(updated)}) do
-                {:ok, :ok} ->
-                  insert_volume(updated)
-                  {:ok, updated}
-
-                {:error, :ra_not_available} ->
-                  insert_volume(updated)
-                  {:ok, updated}
-
-                {:error, reason} ->
-                  {:error, reason}
-              end
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-
-        {:error, :not_found} ->
-          {:error, :not_found}
-      end
-
+    reply = do_update_volume(id, opts)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:update_stats, id, stats}, _from, state) do
-    reply =
-      case get(id) do
-        {:ok, volume} ->
-          updated = Volume.update_stats(volume, stats)
-
-          # Write through Ra if available
-          case maybe_ra_command({:put_volume, volume_to_map(updated)}) do
-            {:ok, :ok} ->
-              insert_volume(updated)
-              {:ok, updated}
-
-            {:error, :ra_not_available} ->
-              insert_volume(updated)
-              {:ok, updated}
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-
-        {:error, :not_found} ->
-          {:error, :not_found}
-      end
-
+    reply = do_update_stats(id, stats)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:delete, id}, _from, state) do
-    reply =
-      case get(id) do
-        {:ok, volume} ->
-          # Check if volume has any files
-          files = FileIndex.list_volume(volume.id)
-
-          if Enum.empty?(files) do
-            # Write through Ra if available
-            case maybe_ra_command({:delete_volume, id}) do
-              {:ok, :ok} ->
-                delete_volume_from_ets(volume)
-                :ok
-
-              {:error, :ra_not_available} ->
-                delete_volume_from_ets(volume)
-                :ok
-
-              {:error, reason} ->
-                {:error, reason}
-            end
-          else
-            {:error, "volume contains #{length(files)} file(s), cannot delete"}
-          end
-
-        {:error, :not_found} ->
-          {:error, :not_found}
-      end
-
+    reply = do_delete_volume(id)
     {:reply, reply, state}
+  end
+
+  defp do_create_volume(name, opts) do
+    with {:error, :not_found} <- get_by_name(name),
+         volume = Volume.new(name, opts),
+         :ok <- Volume.validate(volume),
+         :ok <- persist_volume(volume) do
+      {:ok, volume}
+    else
+      {:ok, _} -> {:error, "volume with name '#{name}' already exists"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_update_volume(id, opts) do
+    with {:ok, volume} <- get(id),
+         updated = Volume.update(volume, opts),
+         :ok <- Volume.validate(updated),
+         :ok <- persist_volume(updated) do
+      {:ok, updated}
+    end
+  end
+
+  defp do_update_stats(id, stats) do
+    with {:ok, volume} <- get(id),
+         updated = Volume.update_stats(volume, stats),
+         :ok <- persist_volume(updated) do
+      {:ok, updated}
+    end
+  end
+
+  defp do_delete_volume(id) do
+    with {:ok, volume} <- get(id),
+         :ok <- check_volume_empty(volume) do
+      delete_volume_persisted(id, volume)
+    end
+  end
+
+  defp check_volume_empty(volume) do
+    files = FileIndex.list_volume(volume.id)
+
+    if Enum.empty?(files) do
+      :ok
+    else
+      {:error, "volume contains #{length(files)} file(s), cannot delete"}
+    end
+  end
+
+  defp persist_volume(volume) do
+    case maybe_ra_command({:put_volume, volume_to_map(volume)}) do
+      {:ok, :ok} ->
+        insert_volume(volume)
+        :ok
+
+      {:error, :ra_not_available} ->
+        insert_volume(volume)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp delete_volume_persisted(id, volume) do
+    case maybe_ra_command({:delete_volume, id}) do
+      {:ok, :ok} ->
+        delete_volume_from_ets(volume)
+        :ok
+
+      {:error, :ra_not_available} ->
+        delete_volume_from_ets(volume)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   # Private helpers
@@ -323,28 +304,93 @@ defmodule NeonFS.Core.VolumeRegistry do
     :ets.delete(:volumes_by_name, volume.name)
   end
 
+  # Query Ra for a volume by ID, caching the result locally if found
+  defp get_from_ra(id) do
+    query_fn = fn state ->
+      state
+      |> Map.get(:volumes, %{})
+      |> Map.get(id)
+    end
+
+    case RaSupervisor.query(query_fn) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, volume_map} -> cache_and_return_volume(volume_map)
+      {:error, _} -> {:error, :not_found}
+    end
+  catch
+    :exit, _ -> {:error, :not_found}
+  end
+
+  # Query Ra for a volume by name, caching the result locally if found
+  defp get_by_name_from_ra(name) do
+    query_fn = fn state ->
+      state
+      |> Map.get(:volumes, %{})
+      |> find_volume_by_name(name)
+    end
+
+    case RaSupervisor.query(query_fn) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, volume_map} -> cache_and_return_volume(volume_map)
+      {:error, _} -> {:error, :not_found}
+    end
+  catch
+    :exit, _ -> {:error, :not_found}
+  end
+
+  defp find_volume_by_name(volumes, name) do
+    Enum.find_value(volumes, fn {_id, volume_map} ->
+      if volume_map[:name] == name, do: volume_map
+    end)
+  end
+
+  defp cache_and_return_volume(volume_map) do
+    volume = map_to_volume(volume_map)
+    insert_volume(volume)
+    {:ok, volume}
+  end
+
   # Try to execute a Ra command, but gracefully handle Ra not being available
   # Returns {:ok, result} | {:error, :ra_not_available} | {:error, reason}
+  #
+  # IMPORTANT: Only returns :ra_not_available when Ra has not been initialized yet
+  # (Phase 1 single-node mode). Once Ra is initialized, errors are propagated
+  # so that quorum loss is properly detected.
   defp maybe_ra_command(cmd) do
-    try do
-      case RaSupervisor.command(cmd) do
-        {:ok, result, _leader} ->
-          {:ok, result}
+    case RaSupervisor.command(cmd) do
+      {:ok, result, _leader} ->
+        {:ok, result}
 
-        {:error, :noproc} ->
+      {:error, :noproc} ->
+        # Ra server not running - check if it was ever initialized
+        if RaServer.initialized?() do
+          {:error, :ra_unavailable}
+        else
           {:error, :ra_not_available}
+        end
 
-        {:error, reason} ->
-          {:error, reason}
+      {:error, reason} ->
+        {:error, reason}
 
-        {:timeout, _node} ->
-          {:error, :timeout}
-      end
-    catch
-      kind, reason ->
-        Logger.debug("Ra not available: #{inspect({kind, reason})}")
-        {:error, :ra_not_available}
+      {:timeout, _node} ->
+        {:error, :timeout}
     end
+  catch
+    :exit, {:noproc, _} ->
+      if RaServer.initialized?() do
+        {:error, :ra_unavailable}
+      else
+        {:error, :ra_not_available}
+      end
+
+    kind, reason ->
+      Logger.debug("Ra command error: #{inspect({kind, reason})}")
+
+      if RaServer.initialized?() do
+        {:error, {:ra_error, {kind, reason}}}
+      else
+        {:error, :ra_not_available}
+      end
   end
 
   # Restore volumes from Ra state into ETS
@@ -370,28 +416,26 @@ defmodule NeonFS.Core.VolumeRegistry do
   # NOTE: No logging here - this can be called during RPC from CLI,
   # and Logger output causes RegSend messages that crash erl_rpc
   defp sync_from_ra do
-    try do
-      case RaSupervisor.query(fn state -> Map.get(state, :volumes, %{}) end) do
-        {:ok, volumes} when is_map(volumes) and map_size(volumes) > 0 ->
-          volume_list =
-            Enum.map(volumes, fn {_id, volume_map} ->
-              volume = map_to_volume(volume_map)
-              insert_volume(volume)
-              volume
-            end)
+    case RaSupervisor.query(fn state -> Map.get(state, :volumes, %{}) end) do
+      {:ok, volumes} when is_map(volumes) and map_size(volumes) > 0 ->
+        volume_list =
+          Enum.map(volumes, fn {_id, volume_map} ->
+            volume = map_to_volume(volume_map)
+            insert_volume(volume)
+            volume
+          end)
 
-          {:ok, volume_list}
+        {:ok, volume_list}
 
-        {:ok, _} ->
-          {:ok, []}
+      {:ok, _} ->
+        {:ok, []}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    catch
-      _kind, _reason ->
-        {:error, :ra_not_available}
+      {:error, reason} ->
+        {:error, reason}
     end
+  catch
+    _kind, _reason ->
+      {:error, :ra_not_available}
   end
 
   # Convert Volume struct to map for Ra storage

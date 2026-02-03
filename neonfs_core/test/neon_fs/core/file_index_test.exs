@@ -1,13 +1,17 @@
 defmodule NeonFS.Core.FileIndexTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
 
-  setup do
-    # Clear ETS tables before each test
-    :ets.delete_all_objects(:file_index_by_id)
-    :ets.delete_all_objects(:file_index_by_path)
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+    stop_ra()
+    start_file_index()
+    on_exit(fn -> cleanup_test_dirs() end)
     :ok
   end
 

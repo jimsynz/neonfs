@@ -9,33 +9,75 @@ defmodule NeonFS.Core.Supervisor do
   4. ChunkIndex - Chunk metadata, depends on BlobStore
   5. FileIndex - File metadata, depends on ChunkIndex
   6. VolumeRegistry - Volume configuration, depends on FileIndex
+
+  ## Test Configuration
+
+  In test environment, set `config :neonfs_core, start_children?: false` to prevent
+  automatic child startup. Tests are then responsible for starting the subsystems
+  they need via `start_supervised!/1`.
   """
 
   use Supervisor
+
+  require Logger
 
   def start_link(init_arg) do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
   end
 
-  require Logger
-
   @impl true
   def init(_init_arg) do
-    # Get configuration from application environment
+    children =
+      if start_children?() do
+        build_children()
+      else
+        Logger.info("Supervisor starting with no children (start_children?: false)")
+        []
+      end
+
+    # Use one_for_one strategy: if a child crashes, only that child is restarted
+    # This is appropriate because components are independent after initialization
+    Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  @doc """
+  Returns the child specs for all core components.
+
+  This is useful for tests that need to start specific children manually.
+  """
+  @spec child_specs() :: [Supervisor.child_spec()]
+  def child_specs, do: build_children()
+
+  @doc """
+  Returns the child spec for a specific component by module name.
+  """
+  @spec child_spec_for(module()) :: Supervisor.child_spec() | nil
+  def child_spec_for(module) do
+    Enum.find(build_children(), fn
+      %{id: ^module} -> true
+      {^module, _opts} -> true
+      ^module -> true
+      _ -> false
+    end)
+  end
+
+  # Private functions
+
+  defp start_children?, do: Application.get_env(:neonfs_core, :start_children?, true)
+
+  defp build_children do
     base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs/blobs")
     prefix_depth = Application.get_env(:neonfs_core, :blob_store_prefix_depth, 2)
     meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
     snapshot_interval_ms = Application.get_env(:neonfs_core, :snapshot_interval_ms, 30_000)
 
     # Ra requires a named Erlang node (not :nonode@nohost) to function
-    # For Phase 1 single-node operation, Ra is optional
-    # Enable Ra by starting with: elixir --sname nodename -S mix run
     node_named = Node.self() != :nonode@nohost
     ra_config = Application.get_env(:neonfs_core, :enable_ra, false)
     enable_ra = node_named and ra_config
 
     Logger.info(
-      "Supervisor init: node=#{inspect(Node.self())}, node_named=#{node_named}, ra_config=#{ra_config}, enable_ra=#{enable_ra}"
+      "Building children: node=#{inspect(Node.self())}, node_named=#{node_named}, ra_config=#{ra_config}, enable_ra=#{enable_ra}"
     )
 
     base_children = [
@@ -63,15 +105,10 @@ defmodule NeonFS.Core.Supervisor do
     ]
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation
-    children =
-      if enable_ra do
-        List.insert_at(base_children, 1, NeonFS.Core.RaSupervisor)
-      else
-        base_children
-      end
-
-    # Use one_for_one strategy: if a child crashes, only that child is restarted
-    # This is appropriate because components are independent after initialization
-    Supervisor.init(children, strategy: :one_for_one)
+    if enable_ra do
+      List.insert_at(base_children, 1, NeonFS.Core.RaSupervisor)
+    else
+      base_children
+    end
   end
 end

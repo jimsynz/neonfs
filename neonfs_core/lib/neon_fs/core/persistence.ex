@@ -254,7 +254,14 @@ defmodule NeonFS.Core.Persistence do
   defp do_atomic_snapshot(ets_table, dets_path) do
     temp_path = "#{dets_path}.tmp"
 
-    case :dets.open_file(:temp_snapshot, type: :set, file: String.to_charlist(temp_path)) do
+    # Delete any existing temp file from a previous failed snapshot
+    File.rm(temp_path)
+
+    # Use a unique DETS reference name based on the ETS table to avoid conflicts
+    # when multiple snapshots run concurrently or from different processes
+    dets_ref_name = :"temp_snapshot_#{ets_table}"
+
+    case :dets.open_file(dets_ref_name, type: :set, file: String.to_charlist(temp_path)) do
       {:ok, dets_ref} ->
         copy_and_rename(ets_table, dets_ref, temp_path, dets_path)
 

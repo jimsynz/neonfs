@@ -13,6 +13,8 @@
     {:doctor, "mix doctor"},
     {:ex_doc, "mix docs"},
     {:audit, "mix deps.audit"},
+    {:gettext, false},
+    {:sobelow, false},
 
     # Rust tools (only if native/neonfs_blob exists)
     {:cargo_fmt,

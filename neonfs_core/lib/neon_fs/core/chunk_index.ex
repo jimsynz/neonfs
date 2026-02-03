@@ -9,7 +9,7 @@ defmodule NeonFS.Core.ChunkIndex do
   use GenServer
   require Logger
 
-  alias NeonFS.Core.{ChunkMeta, RaSupervisor}
+  alias NeonFS.Core.{ChunkMeta, RaServer, RaSupervisor}
 
   @type location :: ChunkMeta.location()
 
@@ -25,29 +25,39 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @doc """
   Stores or updates chunk metadata.
+
+  Returns `:ok` on success, or `{:error, reason}` if the operation fails
+  (e.g., Ra cluster unavailable due to quorum loss).
   """
-  @spec put(ChunkMeta.t()) :: :ok
+  @spec put(ChunkMeta.t()) :: :ok | {:error, term()}
   def put(%ChunkMeta{} = chunk_meta) do
-    GenServer.call(__MODULE__, {:put, chunk_meta})
+    # Timeout must be longer than Ra timeout (5s) to allow Ra to timeout first
+    GenServer.call(__MODULE__, {:put, chunk_meta}, 10_000)
   end
 
   @doc """
   Retrieves chunk metadata by hash.
+
+  First checks local ETS cache, then falls back to Ra if not found locally.
   """
   @spec get(binary()) :: {:ok, ChunkMeta.t()} | {:error, :not_found}
   def get(hash) when is_binary(hash) do
     case :ets.lookup(:chunk_index, hash) do
-      [{^hash, chunk_meta}] -> {:ok, chunk_meta}
-      [] -> {:error, :not_found}
+      [{^hash, chunk_meta}] ->
+        {:ok, chunk_meta}
+
+      [] ->
+        # Not in local cache, try Ra
+        get_from_ra(hash)
     end
   end
 
   @doc """
   Deletes chunk metadata by hash.
   """
-  @spec delete(binary()) :: :ok
+  @spec delete(binary()) :: :ok | {:error, term()}
   def delete(hash) when is_binary(hash) do
-    GenServer.call(__MODULE__, {:delete, hash})
+    GenServer.call(__MODULE__, {:delete, hash}, 10_000)
   end
 
   @doc """
@@ -118,34 +128,34 @@ defmodule NeonFS.Core.ChunkIndex do
   @doc """
   Adds a write reference to a chunk.
   """
-  @spec add_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, :not_found}
+  @spec add_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, term()}
   def add_write_ref(hash, write_id) do
-    GenServer.call(__MODULE__, {:add_write_ref, hash, write_id})
+    GenServer.call(__MODULE__, {:add_write_ref, hash, write_id}, 10_000)
   end
 
   @doc """
   Removes a write reference from a chunk.
   """
-  @spec remove_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, :not_found}
+  @spec remove_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, term()}
   def remove_write_ref(hash, write_id) do
-    GenServer.call(__MODULE__, {:remove_write_ref, hash, write_id})
+    GenServer.call(__MODULE__, {:remove_write_ref, hash, write_id}, 10_000)
   end
 
   @doc """
   Commits a chunk, transitioning from uncommitted to committed.
   Only succeeds if there are no active write refs.
   """
-  @spec commit(binary()) :: :ok | {:error, :not_found | :has_active_writes}
+  @spec commit(binary()) :: :ok | {:error, term()}
   def commit(hash) do
-    GenServer.call(__MODULE__, {:commit, hash})
+    GenServer.call(__MODULE__, {:commit, hash}, 10_000)
   end
 
   @doc """
   Updates the locations for a chunk (used during replication).
   """
-  @spec update_locations(binary(), [location()]) :: :ok | {:error, :not_found}
+  @spec update_locations(binary(), [location()]) :: :ok | {:error, term()}
   def update_locations(hash, locations) when is_binary(hash) and is_list(locations) do
-    GenServer.call(__MODULE__, {:update_locations, hash, locations})
+    GenServer.call(__MODULE__, {:update_locations, hash, locations}, 10_000)
   end
 
   # Server Callbacks
@@ -273,35 +283,8 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @impl true
   def handle_call({:commit, hash}, _from, state) do
-    case :ets.lookup(:chunk_index, hash) do
-      [{^hash, chunk_meta}] ->
-        case ChunkMeta.commit(chunk_meta) do
-          {:ok, committed_meta} ->
-            # Try to write through Ra if available
-            case maybe_ra_command({:commit_chunk, hash}) do
-              {:ok, :ok} ->
-                :ets.insert(:chunk_index, {hash, committed_meta})
-                {:reply, :ok, state}
-
-              {:ok, {:error, reason}} ->
-                {:reply, {:error, reason}, state}
-
-              {:error, :ra_not_available} ->
-                # Ra not available, write directly to ETS
-                :ets.insert(:chunk_index, {hash, committed_meta})
-                {:reply, :ok, state}
-
-              {:error, reason} ->
-                {:reply, {:error, reason}, state}
-            end
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
-
-      [] ->
-        {:reply, {:error, :not_found}, state}
-    end
+    reply = do_commit_chunk(hash)
+    {:reply, reply, state}
   end
 
   @impl true
@@ -335,6 +318,35 @@ defmodule NeonFS.Core.ChunkIndex do
 
   # Private Helpers
 
+  defp do_commit_chunk(hash) do
+    with [{^hash, chunk_meta}] <- :ets.lookup(:chunk_index, hash),
+         {:ok, committed_meta} <- ChunkMeta.commit(chunk_meta),
+         :ok <- persist_committed_chunk(hash, committed_meta) do
+      :ok
+    else
+      [] -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp persist_committed_chunk(hash, committed_meta) do
+    case maybe_ra_command({:commit_chunk, hash}) do
+      {:ok, :ok} ->
+        :ets.insert(:chunk_index, {hash, committed_meta})
+        :ok
+
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:error, :ra_not_available} ->
+        :ets.insert(:chunk_index, {hash, committed_meta})
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp has_location?(chunk_meta, node, drive_id, tier) do
     Enum.any?(chunk_meta.locations, fn location ->
       location.node == node and location.drive_id == drive_id and location.tier == tier
@@ -347,17 +359,54 @@ defmodule NeonFS.Core.ChunkIndex do
     end)
   end
 
+  # Query Ra for chunk metadata by hash, caching the result locally if found
+  defp get_from_ra(hash) do
+    case RaSupervisor.query(fn state ->
+           chunks = Map.get(state, :chunks, %{})
+           Map.get(chunks, hash)
+         end) do
+      {:ok, nil} ->
+        {:error, :not_found}
+
+      {:ok, chunk_map} ->
+        chunk_meta = map_to_struct(chunk_map)
+        # Cache locally for future lookups
+        :ets.insert(:chunk_index, {hash, chunk_meta})
+        {:ok, chunk_meta}
+
+      {:error, :noproc} ->
+        {:error, :not_found}
+
+      {:error, _reason} ->
+        {:error, :not_found}
+    end
+  catch
+    :exit, _ -> {:error, :not_found}
+  end
+
   # Try to execute a Ra command, but gracefully handle Ra not being available
   # Returns {:ok, result} | {:error, :ra_not_available} | {:error, reason}
+  #
+  # IMPORTANT: Only returns :ra_not_available when Ra has not been initialized yet
+  # (Phase 1 single-node mode). Once Ra is initialized, errors are propagated
+  # so that quorum loss is properly detected.
+  #
+  # credo:disable-for-next-line Credo.Check.Refactor.Try
   defp maybe_ra_command(cmd) do
+    initialized = RaServer.initialized?()
+
     try do
       case RaSupervisor.command(cmd) do
         {:ok, result, _leader} ->
           {:ok, result}
 
         {:error, :noproc} ->
-          # Ra not available
-          {:error, :ra_not_available}
+          # Ra server not running - check if it was ever initialized
+          if initialized do
+            {:error, :ra_unavailable}
+          else
+            {:error, :ra_not_available}
+          end
 
         {:error, reason} ->
           {:error, reason}
@@ -366,9 +415,21 @@ defmodule NeonFS.Core.ChunkIndex do
           {:error, :timeout}
       end
     catch
+      :exit, {:noproc, _} ->
+        if initialized do
+          {:error, :ra_unavailable}
+        else
+          {:error, :ra_not_available}
+        end
+
       kind, reason ->
-        Logger.debug("Ra not available: #{inspect({kind, reason})}")
-        {:error, :ra_not_available}
+        Logger.debug("Ra command error: #{inspect({kind, reason})}")
+
+        if initialized do
+          {:error, {:ra_error, {kind, reason}}}
+        else
+          {:error, :ra_not_available}
+        end
     end
   end
 

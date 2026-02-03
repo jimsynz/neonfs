@@ -8,12 +8,19 @@ defmodule NeonFS.Core.FileIndex do
 
   The GenServer serializes write operations while allowing concurrent reads
   from any process via the public ETS tables.
+
+  ## Ra Integration
+
+  When Ra is available (Phase 2+), file metadata is replicated across the cluster
+  via the Ra consensus protocol. All mutations (create, update, delete) are first
+  written to Ra, then the local ETS cache is updated. On startup, the ETS cache
+  is restored from Ra state.
   """
 
   use GenServer
   require Logger
 
-  alias NeonFS.Core.FileMeta
+  alias NeonFS.Core.{FileMeta, RaServer, RaSupervisor}
 
   @type file_id :: String.t()
   @type volume_id :: String.t()
@@ -41,27 +48,33 @@ defmodule NeonFS.Core.FileIndex do
       iex> FileIndex.create(file)
       {:ok, %FileMeta{...}}
   """
-  @spec create(FileMeta.t()) :: {:ok, FileMeta.t()} | {:error, :already_exists}
+  @spec create(FileMeta.t()) :: {:ok, FileMeta.t()} | {:error, term()}
   def create(%FileMeta{} = file) do
-    GenServer.call(__MODULE__, {:create, file})
+    GenServer.call(__MODULE__, {:create, file}, 10_000)
   end
 
   @doc """
   Retrieves a file by its ID.
 
+  First checks local ETS cache, then falls back to Ra if not found locally.
   Returns `{:ok, file}` if found, `{:error, :not_found}` otherwise.
   """
   @spec get(file_id()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get(file_id) do
     case :ets.lookup(:file_index_by_id, file_id) do
-      [{^file_id, file}] -> {:ok, file}
-      [] -> {:error, :not_found}
+      [{^file_id, file}] ->
+        {:ok, file}
+
+      [] ->
+        # Not in local cache, try Ra
+        get_from_ra(file_id)
     end
   end
 
   @doc """
   Retrieves a file by volume ID and path.
 
+  First checks local ETS cache, then falls back to Ra if not found locally.
   Returns `{:ok, file}` if found, `{:error, :not_found}` otherwise.
   """
   @spec get_by_path(volume_id(), path()) :: {:ok, FileMeta.t()} | {:error, :not_found}
@@ -69,8 +82,12 @@ defmodule NeonFS.Core.FileIndex do
     normalized_path = FileMeta.normalize_path(path)
 
     case :ets.lookup(:file_index_by_path, {volume_id, normalized_path}) do
-      [{_, file}] -> {:ok, file}
-      [] -> {:error, :not_found}
+      [{_, file}] ->
+        {:ok, file}
+
+      [] ->
+        # Not in local cache, try Ra
+        get_by_path_from_ra(volume_id, normalized_path)
     end
   end
 
@@ -87,9 +104,9 @@ defmodule NeonFS.Core.FileIndex do
       iex> FileIndex.update("file-id", size: 2048, mode: 0o755)
       {:ok, %FileMeta{size: 2048, mode: 0o755, version: 2}}
   """
-  @spec update(file_id(), keyword()) :: {:ok, FileMeta.t()} | {:error, :not_found}
+  @spec update(file_id(), keyword()) :: {:ok, FileMeta.t()} | {:error, term()}
   def update(file_id, updates) do
-    GenServer.call(__MODULE__, {:update, file_id, updates})
+    GenServer.call(__MODULE__, {:update, file_id, updates}, 10_000)
   end
 
   @doc """
@@ -100,9 +117,9 @@ defmodule NeonFS.Core.FileIndex do
 
   Returns `:ok` if successful, `{:error, :not_found}` if file doesn't exist.
   """
-  @spec delete(file_id()) :: :ok | {:error, :not_found}
+  @spec delete(file_id()) :: :ok | {:error, term()}
   def delete(file_id) do
-    GenServer.call(__MODULE__, {:delete, file_id})
+    GenServer.call(__MODULE__, {:delete, file_id}, 10_000)
   end
 
   @doc """
@@ -178,30 +195,29 @@ defmodule NeonFS.Core.FileIndex do
     ])
 
     Logger.info("FileIndex started with ETS tables")
+
+    # Try to restore state from Ra if available
+    case restore_from_ra() do
+      {:ok, count} when count > 0 ->
+        Logger.info("FileIndex restored #{count} files from Ra")
+
+      {:ok, 0} ->
+        Logger.debug("FileIndex: no files to restore from Ra")
+
+      {:error, :ra_not_available} ->
+        Logger.debug("FileIndex started but Ra not ready yet: :noproc")
+
+      {:error, reason} ->
+        Logger.warning("FileIndex failed to restore from Ra: #{inspect(reason)}")
+    end
+
     {:ok, %{}}
   end
 
   @impl true
   def handle_call({:create, file}, _from, state) do
-    # Check if file already exists by ID or path
-    id_exists? = :ets.member(:file_index_by_id, file.id)
-    path_key = {file.volume_id, file.path}
-    path_exists? = :ets.member(:file_index_by_path, path_key)
-
-    if id_exists? or path_exists? do
-      {:reply, {:error, :already_exists}, state}
-    else
-      # Validate path before creating
-      case FileMeta.validate_path(file.path) do
-        :ok ->
-          :ets.insert(:file_index_by_id, {file.id, file})
-          :ets.insert(:file_index_by_path, {path_key, file})
-          {:reply, {:ok, file}, state}
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
-    end
+    reply = do_create_file(file)
+    {:reply, reply, state}
   end
 
   @impl true
@@ -222,16 +238,71 @@ defmodule NeonFS.Core.FileIndex do
         {:reply, {:error, :not_found}, state}
 
       [{^file_id, file}] ->
-        # Delete from both tables
-        :ets.delete(:file_index_by_id, file_id)
-        path_key = {file.volume_id, file.path}
-        :ets.delete(:file_index_by_path, path_key)
+        # Try to write through Ra if available
+        case maybe_ra_command({:delete_file, file_id}) do
+          {:ok, :ok} ->
+            # Update local ETS cache
+            :ets.delete(:file_index_by_id, file_id)
+            path_key = {file.volume_id, file.path}
+            :ets.delete(:file_index_by_path, path_key)
+            {:reply, :ok, state}
 
-        {:reply, :ok, state}
+          {:error, :ra_not_available} ->
+            # Ra not available, delete directly from ETS
+            :ets.delete(:file_index_by_id, file_id)
+            path_key = {file.volume_id, file.path}
+            :ets.delete(:file_index_by_path, path_key)
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
     end
   end
 
   ## Private helpers
+
+  defp do_create_file(file) do
+    with :ok <- check_file_not_exists(file),
+         :ok <- FileMeta.validate_path(file.path),
+         :ok <- persist_file(file) do
+      {:ok, file}
+    end
+  end
+
+  defp check_file_not_exists(file) do
+    id_exists? = :ets.member(:file_index_by_id, file.id)
+    path_key = {file.volume_id, file.path}
+    path_exists? = :ets.member(:file_index_by_path, path_key)
+
+    if id_exists? or path_exists? do
+      {:error, :already_exists}
+    else
+      :ok
+    end
+  end
+
+  defp persist_file(file) do
+    path_key = {file.volume_id, file.path}
+
+    case maybe_ra_command({:put_file, struct_to_map(file)}) do
+      {:ok, :ok} ->
+        insert_file_to_ets(file, path_key)
+        :ok
+
+      {:error, :ra_not_available} ->
+        insert_file_to_ets(file, path_key)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp insert_file_to_ets(file, path_key) do
+    :ets.insert(:file_index_by_id, {file.id, file})
+    :ets.insert(:file_index_by_path, {path_key, file})
+  end
 
   # Handle path updates separately to reduce nesting
   defp do_update(file_id, old_file, updates, state) do
@@ -249,16 +320,32 @@ defmodule NeonFS.Core.FileIndex do
 
     case FileMeta.validate_path(new_path) do
       :ok ->
-        # Remove old path entry
-        old_path_key = {old_file.volume_id, old_file.path}
-        :ets.delete(:file_index_by_path, old_path_key)
+        # Build the updates map for Ra
+        updates = struct_to_map(updated_file)
 
-        # Insert new path entry
-        new_path_key = {updated_file.volume_id, updated_file.path}
-        :ets.insert(:file_index_by_path, {new_path_key, updated_file})
-        :ets.insert(:file_index_by_id, {file_id, updated_file})
+        # Try to write through Ra if available
+        case maybe_ra_command({:update_file, file_id, updates}) do
+          {:ok, :ok} ->
+            # Update local ETS cache
+            old_path_key = {old_file.volume_id, old_file.path}
+            :ets.delete(:file_index_by_path, old_path_key)
+            new_path_key = {updated_file.volume_id, updated_file.path}
+            :ets.insert(:file_index_by_path, {new_path_key, updated_file})
+            :ets.insert(:file_index_by_id, {file_id, updated_file})
+            {:reply, {:ok, updated_file}, state}
 
-        {:reply, {:ok, updated_file}, state}
+          {:error, :ra_not_available} ->
+            # Ra not available, update directly in ETS
+            old_path_key = {old_file.volume_id, old_file.path}
+            :ets.delete(:file_index_by_path, old_path_key)
+            new_path_key = {updated_file.volume_id, updated_file.path}
+            :ets.insert(:file_index_by_path, {new_path_key, updated_file})
+            :ets.insert(:file_index_by_id, {file_id, updated_file})
+            {:reply, {:ok, updated_file}, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -266,10 +353,157 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   defp update_without_path_change(file_id, updated_file, state) do
-    path_key = {updated_file.volume_id, updated_file.path}
-    :ets.insert(:file_index_by_id, {file_id, updated_file})
-    :ets.insert(:file_index_by_path, {path_key, updated_file})
+    # Build the updates map for Ra
+    updates = struct_to_map(updated_file)
 
-    {:reply, {:ok, updated_file}, state}
+    # Try to write through Ra if available
+    case maybe_ra_command({:update_file, file_id, updates}) do
+      {:ok, :ok} ->
+        # Update local ETS cache
+        path_key = {updated_file.volume_id, updated_file.path}
+        :ets.insert(:file_index_by_id, {file_id, updated_file})
+        :ets.insert(:file_index_by_path, {path_key, updated_file})
+        {:reply, {:ok, updated_file}, state}
+
+      {:error, :ra_not_available} ->
+        # Ra not available, update directly in ETS
+        path_key = {updated_file.volume_id, updated_file.path}
+        :ets.insert(:file_index_by_id, {file_id, updated_file})
+        :ets.insert(:file_index_by_path, {path_key, updated_file})
+        {:reply, {:ok, updated_file}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Ra integration helpers
+
+  # Query Ra for a file by ID, caching the result locally if found
+  defp get_from_ra(file_id) do
+    query_fn = fn state ->
+      state
+      |> Map.get(:files, %{})
+      |> Map.get(file_id)
+    end
+
+    case RaSupervisor.query(query_fn) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, file_map} -> cache_and_return_file(file_map)
+      {:error, _} -> {:error, :not_found}
+    end
+  catch
+    :exit, _ -> {:error, :not_found}
+  end
+
+  # Query Ra for a file by volume_id and path, caching the result locally if found
+  defp get_by_path_from_ra(volume_id, path) do
+    query_fn = fn state ->
+      state
+      |> Map.get(:files, %{})
+      |> find_file_by_path(volume_id, path)
+    end
+
+    case RaSupervisor.query(query_fn) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, file_map} -> cache_and_return_file(file_map)
+      {:error, _} -> {:error, :not_found}
+    end
+  catch
+    :exit, _ -> {:error, :not_found}
+  end
+
+  defp find_file_by_path(files, volume_id, path) do
+    Enum.find_value(files, fn {_id, file_map} ->
+      if file_map[:volume_id] == volume_id and file_map[:path] == path, do: file_map
+    end)
+  end
+
+  defp cache_and_return_file(file_map) do
+    file = map_to_struct(file_map)
+    path_key = {file.volume_id, file.path}
+    :ets.insert(:file_index_by_id, {file.id, file})
+    :ets.insert(:file_index_by_path, {path_key, file})
+    {:ok, file}
+  end
+
+  # Try to execute a Ra command, but gracefully handle Ra not being available
+  # Returns {:ok, result} | {:error, :ra_not_available} | {:error, reason}
+  #
+  # IMPORTANT: Only returns :ra_not_available when Ra has not been initialized yet
+  # (Phase 1 single-node mode). Once Ra is initialized, errors are propagated
+  # so that quorum loss is properly detected.
+  defp maybe_ra_command(cmd) do
+    case RaSupervisor.command(cmd) do
+      {:ok, result, _leader} ->
+        {:ok, result}
+
+      {:error, :noproc} ->
+        # Ra server not running - check if it was ever initialized
+        if RaServer.initialized?() do
+          {:error, :ra_unavailable}
+        else
+          {:error, :ra_not_available}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:timeout, _} ->
+        {:error, :timeout}
+    end
+  catch
+    :exit, {:noproc, _} ->
+      if RaServer.initialized?() do
+        {:error, :ra_unavailable}
+      else
+        {:error, :ra_not_available}
+      end
+
+    :exit, reason ->
+      if RaServer.initialized?() do
+        {:error, {:ra_exit, reason}}
+      else
+        {:error, :ra_not_available}
+      end
+  end
+
+  # Restore files from Ra state into ETS
+  defp restore_from_ra do
+    case RaSupervisor.query(fn state -> Map.get(state, :files, %{}) end) do
+      {:ok, files} when is_map(files) ->
+        count =
+          Enum.reduce(files, 0, fn {_id, file_map}, acc ->
+            file_meta = map_to_struct(file_map)
+            :ets.insert(:file_index_by_id, {file_meta.id, file_meta})
+            path_key = {file_meta.volume_id, file_meta.path}
+            :ets.insert(:file_index_by_path, {path_key, file_meta})
+            acc + 1
+          end)
+
+        {:ok, count}
+
+      {:error, :noproc} ->
+        {:error, :ra_not_available}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  catch
+    :exit, {:noproc, _} ->
+      {:error, :ra_not_available}
+
+    :exit, reason ->
+      {:error, {:ra_exit, reason}}
+  end
+
+  # Convert a FileMeta struct to a map for Ra storage
+  defp struct_to_map(%FileMeta{} = file) do
+    Map.from_struct(file)
+  end
+
+  # Convert a map from Ra storage back to a FileMeta struct
+  defp map_to_struct(file_map) when is_map(file_map) do
+    struct(FileMeta, file_map)
   end
 end

@@ -1,24 +1,21 @@
 defmodule NeonFS.Core.RaTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
-  alias NeonFS.Core.MetadataStateMachine
-  alias NeonFS.Core.RaSupervisor
+  alias NeonFS.Core.{MetadataStateMachine, RaServer, RaSupervisor}
 
-  @moduletag :ra
+  @moduletag :tmp_dir
 
-  setup do
-    # Ensure Ra data directory is clean for each test
-    ra_dir = Application.get_env(:neonfs_core, :ra_data_dir)
-    File.rm_rf!(ra_dir)
-    File.mkdir_p!(ra_dir)
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
 
-    # Wait for Ra server to be ready
-    :timer.sleep(100)
+    # Start Ra supervisor (which includes RaServer)
+    start_ra()
 
-    on_exit(fn ->
-      # Clean up Ra data after test
-      File.rm_rf!(ra_dir)
-    end)
+    # Initialize Ra cluster
+    :ok = RaServer.init_cluster()
+
+    on_exit(fn -> cleanup_test_dirs() end)
 
     :ok
   end
@@ -148,36 +145,13 @@ defmodule NeonFS.Core.RaTest do
 
       # Stop the Ra server
       server_id = RaSupervisor.server_id()
-      :ok = :ra.stop_server(server_id)
+      :ok = :ra.stop_server(:default, server_id)
 
       # Wait for shutdown
       :timer.sleep(500)
 
-      # Start it again with the same configuration
-      ra_dir = Application.get_env(:neonfs_core, :ra_data_dir)
-      node_name = Node.self()
-      cluster_name = RaSupervisor.cluster_name()
-
-      server_id = {cluster_name, node_name}
-
-      machine_config = %{
-        module: MetadataStateMachine,
-        init: fn -> MetadataStateMachine.init(%{}) end
-      }
-
-      ra_config = %{
-        id: server_id,
-        uid: "neonfs_meta_#{node_name}",
-        cluster_name: cluster_name,
-        machine: machine_config,
-        log_init_args: %{
-          uid: "neonfs_meta_#{node_name}",
-          data_dir: ra_dir
-        },
-        initial_members: [server_id]
-      }
-
-      {:ok, _pid} = :ra.start_server(ra_config)
+      # Restart the server (not start - it already exists in Ra's registry)
+      :ok = :ra.restart_server(:default, server_id)
 
       # Wait for server to be ready
       :timer.sleep(500)
@@ -190,7 +164,8 @@ defmodule NeonFS.Core.RaTest do
 
   describe "telemetry events" do
     test "put command emits telemetry" do
-      # Attach a test handler
+      # Use a unique key to avoid test pollution from previous tests
+      unique_key = :"telemetry_put_#{System.unique_integer([:positive])}"
       test_pid = self()
 
       :telemetry.attach(
@@ -202,20 +177,20 @@ defmodule NeonFS.Core.RaTest do
         nil
       )
 
-      # Execute command
-      {:ok, :ok, _} = RaSupervisor.command({:put, :telemetry_test, :value})
+      # Execute command with unique key
+      {:ok, :ok, _} = RaSupervisor.command({:put, unique_key, :value})
 
-      # Wait for telemetry event
-      assert_receive {:telemetry, measurements, metadata}, 1000
+      # Wait for telemetry event matching our unique key
+      assert_receive {:telemetry, measurements, %{key: ^unique_key}}, 1000
       assert is_integer(measurements.version)
-      assert metadata.key == :telemetry_test
 
       # Clean up
       :telemetry.detach("test-ra-put")
     end
 
     test "delete command emits telemetry" do
-      # Attach a test handler
+      # Use a unique key to avoid test pollution from previous tests
+      unique_key = :"telemetry_delete_#{System.unique_integer([:positive])}"
       test_pid = self()
 
       :telemetry.attach(
@@ -227,14 +202,13 @@ defmodule NeonFS.Core.RaTest do
         nil
       )
 
-      # Put then delete
-      {:ok, :ok, _} = RaSupervisor.command({:put, :to_delete, :value})
-      {:ok, :ok, _} = RaSupervisor.command({:delete, :to_delete})
+      # Put then delete with unique key
+      {:ok, :ok, _} = RaSupervisor.command({:put, unique_key, :value})
+      {:ok, :ok, _} = RaSupervisor.command({:delete, unique_key})
 
-      # Wait for telemetry event
-      assert_receive {:telemetry, measurements, metadata}, 1000
+      # Wait for telemetry event matching our unique key
+      assert_receive {:telemetry, measurements, %{key: ^unique_key}}, 1000
       assert is_integer(measurements.version)
-      assert metadata.key == :to_delete
 
       # Clean up
       :telemetry.detach("test-ra-delete")

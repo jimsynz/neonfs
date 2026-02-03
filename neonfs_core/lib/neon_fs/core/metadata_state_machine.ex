@@ -26,10 +26,14 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:remove_write_ref, hash :: binary(), write_id :: String.t()}
           | {:put_volume, volume_data :: map()}
           | {:delete_volume, volume_id :: binary()}
+          | {:put_file, file_meta :: map()}
+          | {:update_file, file_id :: binary(), updates :: map()}
+          | {:delete_file, file_id :: binary()}
 
   @type state :: %{
           data: %{optional(term()) => term()},
           chunks: %{optional(binary()) => map()},
+          files: %{optional(binary()) => map()},
           volumes: %{optional(binary()) => map()},
           version: non_neg_integer()
         }
@@ -42,6 +46,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     %{
       data: %{},
       chunks: %{},
+      files: %{},
       volumes: %{},
       version: 0
     }
@@ -246,6 +251,63 @@ defmodule NeonFS.Core.MetadataStateMachine do
       [:neonfs, :ra, :command, :delete_volume],
       %{version: new_state.version},
       %{id: volume_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  # File metadata commands
+
+  def apply(_meta, {:put_file, file_meta}, state) do
+    # Ensure files map exists (for backwards compatibility with existing Ra state)
+    files = Map.get(state, :files, %{})
+    id = file_meta.id
+    new_files = Map.put(files, id, file_meta)
+    new_state = %{state | files: new_files, version: state.version + 1}
+
+    # Emit telemetry
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_file],
+      %{version: new_state.version},
+      %{id: id, path: file_meta[:path]}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:update_file, file_id, updates}, state) do
+    files = Map.get(state, :files, %{})
+
+    case Map.get(files, file_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      file_meta ->
+        updated_meta = Map.merge(file_meta, updates)
+        new_files = Map.put(files, file_id, updated_meta)
+        new_state = %{state | files: new_files, version: state.version + 1}
+
+        # Emit telemetry
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :update_file],
+          %{version: new_state.version},
+          %{id: file_id}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:delete_file, file_id}, state) do
+    files = Map.get(state, :files, %{})
+    new_files = Map.delete(files, file_id)
+    new_state = %{state | files: new_files, version: state.version + 1}
+
+    # Emit telemetry
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :delete_file],
+      %{version: new_state.version},
+      %{id: file_id}
     )
 
     {new_state, :ok, []}

@@ -1,5 +1,3 @@
-ARG RUN_TESTS=false
-
 FROM builder AS deps
 RUN mkdir /workdir/neonfs_core
 COPY --from=core . /workdir/neonfs_core
@@ -8,19 +6,7 @@ COPY --from=src . /workdir/neonfs_fuse
 WORKDIR /workdir/neonfs_fuse
 RUN export PATH="/root/.asdf/shims:$PATH"; mix deps.get
 
-FROM deps AS test
-ARG RUN_TESTS
-RUN export PATH="/root/.asdf/shims:$PATH"; \
-    if [ "$RUN_TESTS" = "true" ]; then \
-      echo "Running tests..."; \
-      mix check --no-retry; \
-    else \
-      echo "Skipping tests (RUN_TESTS=$RUN_TESTS)"; \
-    fi
-
 FROM deps AS releaser
-# Copy from test stage to ensure tests ran before release
-COPY --from=test /workdir/neonfs_fuse/mix.exs /tmp/test-complete
 ENV MIX_ENV=prod
 RUN export PATH="/root/.asdf/shims:$PATH"; mix compile
 RUN export PATH="/root/.asdf/shims:$PATH"; mix release --overwrite

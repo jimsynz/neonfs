@@ -2,8 +2,13 @@ defmodule NeonFS.Core.RaServer do
   @moduledoc """
   GenServer wrapper for starting and managing the Ra server.
 
-  This wrapper handles the asynchronous initialization of the Ra server,
-  ensuring it starts after Ra's system is fully ready.
+  This wrapper handles the initialization of the Ra server. Ra is NOT started
+  automatically - it must be explicitly started via either:
+  - `init_cluster/0` - for founding a new cluster
+  - `join_cluster/1` - for joining an existing cluster
+
+  This deferred startup ensures nodes don't form independent single-node clusters
+  before they have a chance to join an existing cluster.
   """
 
   use GenServer
@@ -19,11 +24,47 @@ defmodule NeonFS.Core.RaServer do
   end
 
   @doc """
-  Reconfigure the Ra server to join an existing cluster.
+  Initialize Ra as a founding single-node cluster.
+
+  This should be called on the first node when creating a new cluster.
+  Other nodes should use `join_cluster/1` instead.
+  """
+  @spec init_cluster() :: :ok | {:error, term()}
+  def init_cluster do
+    GenServer.call(__MODULE__, :init_cluster, 60_000)
+  end
+
+  @doc """
+  Check if the Ra server has been initialized (either as founder or by joining).
+
+  Returns false if the RaServer process is not running (e.g., Ra disabled).
+  """
+  @spec initialized?() :: boolean()
+  def initialized? do
+    GenServer.call(__MODULE__, :initialized?)
+  catch
+    :exit, {:noproc, _} -> false
+  end
+
+  @doc """
+  Reset the Ra server for testing purposes.
+
+  Stops the Ra server if running, deletes its state, and resets
+  internal status to allow re-initialization. This should only be
+  used in tests to achieve proper isolation between test cases.
+  """
+  @spec reset!() :: :ok
+  def reset! do
+    GenServer.call(__MODULE__, :reset!, 10_000)
+  catch
+    :exit, {:noproc, _} -> :ok
+  end
+
+  @doc """
+  Start Ra and join an existing cluster.
 
   This should be called after the node has been added to the cluster via add_member
-  on the leader. It will stop the current Ra server (which was running as single-node),
-  delete its state, and restart it with the proper cluster configuration.
+  on the leader. It will start the Ra server configured to join the existing cluster.
   """
   @spec join_cluster([atom()]) :: :ok | {:error, term()}
   def join_cluster(existing_members) when is_list(existing_members) do
@@ -32,26 +73,64 @@ defmodule NeonFS.Core.RaServer do
 
   @impl true
   def init(opts) do
-    # Use handle_continue to defer Ra server startup until after the GenServer is initialized
-    {:ok, %{opts: opts}, {:continue, :start_ra_server}}
+    # Use handle_continue to ensure Ra application is ready, but don't start the server
+    {:ok, %{opts: opts, status: :not_initialized, ra_pid: nil}, {:continue, :ensure_ra_ready}}
   end
 
   @impl true
-  def handle_continue(:start_ra_server, state) do
+  def handle_continue(:ensure_ra_ready, state) do
     # Ensure Ra application is started and system is initialized
+    # But DON'T start the actual Ra server - wait for init_cluster or join_cluster
     ensure_ra_started()
+    Logger.info("Ra system ready, waiting for cluster init or join")
+    {:noreply, %{state | status: :waiting_for_cluster}}
+  end
 
-    # Get node name
+  @impl true
+  def handle_call(:initialized?, _from, state) do
+    initialized = state.status in [:running, :joined]
+    {:reply, initialized, state}
+  end
+
+  @impl true
+  def handle_call(:reset!, _from, state) do
+    # Stop and delete Ra server - always attempt regardless of internal state
+    # Ra's registry may have stale data from previous test runs
+    server_id = {@cluster_name, Node.self()}
+
+    Logger.info("Resetting Ra server for testing")
+
+    # Always attempt to stop, even if we think it's not running
+    case :ra.stop_server(:default, server_id) do
+      :ok -> Logger.debug("Stopped Ra server")
+      {:error, reason} -> Logger.debug("Could not stop Ra server: #{inspect(reason)}")
+    end
+
+    # Always attempt to delete, to clear Ra's registry
+    case :ra.force_delete_server(:default, server_id) do
+      :ok -> Logger.debug("Deleted Ra server state")
+      {:error, reason} -> Logger.debug("Could not delete Ra server state: #{inspect(reason)}")
+    end
+
+    # Small delay to ensure cleanup completes
+    Process.sleep(100)
+
+    {:reply, :ok, %{state | status: :waiting_for_cluster}}
+  end
+
+  @impl true
+  def handle_call(:init_cluster, _from, %{status: status} = state)
+      when status in [:running, :joined] do
+    {:reply, {:error, :already_initialized}, state}
+  end
+
+  @impl true
+  def handle_call(:init_cluster, _from, state) do
     node_name = Node.self()
-
-    # Sanitize node name for UID
+    server_id = {@cluster_name, node_name}
     sanitized_node = node_name |> to_string() |> String.replace(~r/[@\.]/, "_")
 
-    # Ra server configuration
-    server_id = {@cluster_name, node_name}
-
     # Ra expects machine config as tuple: {module, Mod, Args}
-    # Args is passed to Mod.init/1 to create the initial state
     machine_config = {:module, MetadataStateMachine, %{}}
 
     ra_config = %{
@@ -65,65 +144,77 @@ defmodule NeonFS.Core.RaServer do
       initial_members: [server_id]
     }
 
-    Logger.info("Starting Ra server: #{inspect(@cluster_name)} on #{inspect(node_name)}")
+    Logger.info("Initializing Ra cluster: #{inspect(@cluster_name)} on #{inspect(node_name)}")
     Logger.debug("Ra config: #{inspect(ra_config)}")
 
-    # Start the Ra server
     case start_or_restart_ra_server(ra_config, server_id) do
       {:ok, pid} when is_pid(pid) ->
         Logger.info("Ra server started successfully: #{inspect(pid)}")
         trigger_and_wait_for_election(server_id)
-        {:noreply, Map.put(state, :ra_pid, pid)}
+        {:reply, :ok, %{state | status: :running, ra_pid: pid}}
+
+      {:ok, :started} ->
+        Logger.info("Ra server started successfully")
+        trigger_and_wait_for_election(server_id)
+        {:reply, :ok, %{state | status: :running}}
 
       {:ok, :restarted} ->
         Logger.info("Ra server restarted from persisted state")
         trigger_and_wait_for_election(server_id)
-        {:noreply, Map.put(state, :ra_status, :restarted)}
+        {:reply, :ok, %{state | status: :running}}
 
       {:error, {:already_started, pid}} ->
         Logger.info("Ra server already running: #{inspect(pid)}")
-        # Still trigger election in case it hasn't happened yet
         trigger_and_wait_for_election(server_id)
-        {:noreply, Map.put(state, :ra_pid, pid)}
+        {:reply, :ok, %{state | status: :running, ra_pid: pid}}
 
       {:error, reason} ->
         Logger.error("Failed to start Ra server: #{inspect(reason)}")
-        {:stop, {:ra_start_failed, reason}, state}
+        {:reply, {:error, reason}, state}
     end
   end
 
   @impl true
+  def handle_call({:join_cluster, existing_members}, _from, %{status: status} = state)
+      when status in [:running, :joined] do
+    # Already running - this might be a restart scenario, try to reconfigure
+    Logger.info("Ra already running, attempting to reconfigure for cluster join")
+    do_join_cluster(existing_members, state)
+  end
+
+  @impl true
   def handle_call({:join_cluster, existing_members}, _from, state) do
+    do_join_cluster(existing_members, state)
+  end
+
+  defp do_join_cluster(existing_members, state) do
     node_name = Node.self()
     server_id = {@cluster_name, node_name}
     sanitized_node = node_name |> to_string() |> String.replace(~r/[@\.]/, "_")
 
-    Logger.info(
-      "Reconfiguring Ra server to join cluster with members: #{inspect(existing_members)}"
-    )
+    Logger.info("Starting Ra server to join cluster with members: #{inspect(existing_members)}")
 
-    # Step 1: Stop the current Ra server
+    # If there's an existing Ra server, stop and delete it first
     case :ra.stop_server(:default, server_id) do
       :ok ->
-        Logger.info("Stopped current Ra server")
+        Logger.info("Stopped existing Ra server")
 
       {:error, reason} ->
-        Logger.debug("Could not stop Ra server: #{inspect(reason)}")
+        Logger.debug("No existing Ra server to stop: #{inspect(reason)}")
     end
 
-    # Step 2: Force delete the server's state
     case :ra.force_delete_server(:default, server_id) do
       :ok ->
-        Logger.info("Deleted Ra server state")
+        Logger.info("Deleted existing Ra server state")
 
       {:error, reason} ->
-        Logger.debug("Could not delete Ra server state: #{inspect(reason)}")
+        Logger.debug("No existing Ra server state to delete: #{inspect(reason)}")
     end
 
-    # Give Ra time to clean up
-    Process.sleep(1000)
+    # Small delay for cleanup
+    Process.sleep(100)
 
-    # Step 3: Start fresh with proper cluster configuration
+    # Build cluster configuration with existing members
     existing_server_ids = Enum.map(existing_members, &{@cluster_name, &1})
 
     ra_config = %{
@@ -143,15 +234,13 @@ defmodule NeonFS.Core.RaServer do
     case :ra.start_server(:default, ra_config) do
       {:ok, pid} ->
         Logger.info("Ra server joined cluster successfully")
-        # Trigger election - we might become a follower in the existing cluster
         :ra.trigger_election(server_id)
-        {:reply, :ok, Map.put(state, :ra_pid, pid)}
+        {:reply, :ok, %{state | status: :joined, ra_pid: pid}}
 
       :ok ->
-        # Ra 2.x can return just :ok for restarted servers
-        Logger.info("Ra server joined cluster successfully (restarted)")
+        Logger.info("Ra server joined cluster successfully")
         :ra.trigger_election(server_id)
-        {:reply, :ok, Map.put(state, :ra_status, :joined)}
+        {:reply, :ok, %{state | status: :joined}}
 
       {:error, reason} ->
         Logger.error("Failed to start Ra server for cluster join: #{inspect(reason)}")
@@ -160,9 +249,16 @@ defmodule NeonFS.Core.RaServer do
   end
 
   @impl true
+  def handle_info(msg, state) do
+    # Handle unexpected messages (e.g., late replies from async operations)
+    Logger.debug("RaServer received unexpected message: #{inspect(msg)}")
+    {:noreply, state}
+  end
+
+  @impl true
   def terminate(_reason, state) do
     # Only try to stop if we successfully started the Ra server
-    if Map.has_key?(state, :ra_pid) do
+    if state.status in [:running, :joined] do
       server_id = {@cluster_name, Node.self()}
 
       case :ra.stop_server(server_id) do
@@ -241,11 +337,12 @@ defmodule NeonFS.Core.RaServer do
     result = :ra.trigger_election(server_id)
     Logger.debug("trigger_election result: #{inspect(result)}")
 
-    # Give the election some time to complete
-    Process.sleep(500)
+    # Brief delay to allow election to start, then check for leader
+    # Single-node clusters elect instantly; multi-node may need retries
+    Process.sleep(50)
 
-    # Check if we have a leader
-    case :ra.members(server_id, 5000) do
+    # Check if we have a leader with a short timeout
+    case :ra.members(server_id, 1000) do
       {:ok, members, leader} when leader != :undefined ->
         Logger.info(
           "Ra election complete, leader: #{inspect(leader)}, members: #{inspect(members)}"
@@ -286,28 +383,35 @@ defmodule NeonFS.Core.RaServer do
   # Start a new Ra server, or restart an existing one if it has persisted state
   defp start_or_restart_ra_server(ra_config, server_id) do
     case :ra.start_server(ra_config) do
-      {:ok, pid} ->
-        {:ok, pid}
+      {:ok, pid} -> {:ok, pid}
+      :ok -> {:ok, :started}
+      {:error, {:already_started, pid}} -> {:error, {:already_started, pid}}
+      {:error, :not_new} -> restart_existing_server(ra_config, server_id)
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-      {:error, {:already_started, pid}} ->
-        {:error, {:already_started, pid}}
+  # Handle restarting a server that has persisted state from a previous run
+  defp restart_existing_server(ra_config, server_id) do
+    Logger.info("Ra server has persisted state, restarting...")
 
-      {:error, :not_new} ->
-        # Server has persisted state from a previous run - restart it instead
-        Logger.info("Ra server has persisted state, restarting...")
+    case :ra.restart_server(server_id) do
+      :ok -> {:ok, :restarted}
+      {:error, :enoent} -> force_fresh_start(ra_config, server_id)
+      {:error, reason} -> {:error, {:restart_failed, reason}}
+    end
+  end
 
-        case :ra.restart_server(server_id) do
-          :ok ->
-            # restart_server returns :ok, not {:ok, pid}
-            # Get the actual pid from the ra process
-            {:ok, :restarted}
+  # Data files were deleted but registry still thinks server exists
+  defp force_fresh_start(ra_config, server_id) do
+    Logger.info("Restart failed (files missing), cleaning up and starting fresh...")
+    :ra.force_delete_server(:default, server_id)
+    Process.sleep(50)
 
-          {:error, reason} ->
-            {:error, {:restart_failed, reason}}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    case :ra.start_server(ra_config) do
+      {:ok, pid} -> {:ok, pid}
+      :ok -> {:ok, :started}
+      {:error, reason} -> {:error, {:fresh_start_failed, reason}}
     end
   end
 end

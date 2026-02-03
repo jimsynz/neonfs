@@ -1,3 +1,0 @@
-[registry."forgejo.dmz"]
-  http = true
-  insecure = true

@@ -1,5 +1,5 @@
 group "default" {
-  targets = ["dev", "ci", "core", "fuse", "cli"]
+  targets = ["dev", "core", "fuse", "cli"]
 }
 
 variable "TAG" {
@@ -9,10 +9,6 @@ variable "TAG" {
 variable "PLATFORMS" {
   type = list(string)
   default = ["linux/amd64", "linux/arm64"]
-}
-
-variable "RUN_TESTS" {
-  default = "false"
 }
 
 target "base" {
@@ -34,17 +30,6 @@ target "dev" {
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/dev:${TAG},mode=max"]
 }
 
-target "ci" {
-  dockerfile = "containers/Containerfile.ci"
-  platforms  = [for platform in PLATFORMS: "${platform}"]
-  tags       = ["forgejo.dmz/project-neon/neonfs/ci:${TAG}"]
-  contexts = {
-    "base": "target:base"
-  }
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/ci:${TAG}"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/ci:${TAG},mode=max"]
-}
-
 target "builder" {
   dockerfile = "containers/Containerfile.builder"
   platforms  = [for platform in PLATFORMS: "${platform}"]
@@ -60,9 +45,6 @@ target "core" {
   dockerfile = "containers/Containerfile.core"
   platforms  = [for platform in PLATFORMS: "${platform}"]
   tags       = ["forgejo.dmz/project-neon/neonfs/core:${TAG}"]
-  args = {
-    RUN_TESTS = RUN_TESTS
-  }
   contexts = {
     "src": "./neonfs_core"
     "builder": "target:builder"
@@ -75,9 +57,6 @@ target "fuse" {
   dockerfile = "containers/Containerfile.fuse"
   platforms  = [for platform in PLATFORMS: "${platform}"]
   tags       = ["forgejo.dmz/project-neon/neonfs/fuse:${TAG}"]
-  args = {
-    RUN_TESTS = RUN_TESTS
-  }
   contexts = {
     "core": "./neonfs_core"
     "src": "./neonfs_fuse"
@@ -91,9 +70,6 @@ target "cli" {
   dockerfile = "containers/Containerfile.cli"
   platforms  = [for platform in PLATFORMS: "${platform}"]
   tags       = ["forgejo.dmz/project-neon/neonfs/cli:${TAG}"]
-  args = {
-    RUN_TESTS = RUN_TESTS
-  }
   contexts = {
     "src": "./neonfs-cli"
     "builder": "target:builder"

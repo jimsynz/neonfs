@@ -1,20 +1,18 @@
 defmodule NeonFS.Core.WriteOperationTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
-  alias NeonFS.Core.{
-    ChunkIndex,
-    FileIndex,
-    VolumeRegistry,
-    WriteOperation
-  }
+  alias NeonFS.Core.{ChunkIndex, FileIndex, VolumeRegistry, WriteOperation}
 
-  setup do
-    # Clear all data
-    :ets.delete_all_objects(:chunk_index)
-    :ets.delete_all_objects(:file_index_by_id)
-    :ets.delete_all_objects(:file_index_by_path)
-    :ets.delete_all_objects(:volumes_by_id)
-    :ets.delete_all_objects(:volumes_by_name)
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+    stop_ra()
+    start_blob_store()
+    start_chunk_index()
+    start_file_index()
+    start_volume_registry()
 
     # Set up telemetry test handler
     :telemetry.attach_many(
@@ -30,10 +28,12 @@ defmodule NeonFS.Core.WriteOperationTest do
 
     on_exit(fn ->
       :telemetry.detach("write-operation-test")
+      cleanup_test_dirs()
     end)
 
-    # Create test volume with default settings
-    {:ok, volume} = VolumeRegistry.create("test-volume", [])
+    # Create test volume with unique name
+    vol_name = "test-volume-#{:rand.uniform(999_999)}"
+    {:ok, volume} = VolumeRegistry.create(vol_name, [])
 
     {:ok, volume: volume}
   end

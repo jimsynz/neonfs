@@ -100,87 +100,41 @@ defmodule NeonFS.FUSE.NativeTest do
   end
 
   describe "mount operations" do
-    # Note: These tests require the "fuse" feature to be enabled and FUSE support
-    # in the system. They may be skipped if not available.
-
     @tag :fuse_integration
     test "mount/3 with invalid mount point returns error" do
-      try do
-        case Native.mount("/nonexistent/path", self(), []) do
-          {:error, msg} ->
-            assert msg =~ "not exist"
-
-          _ ->
-            :ok
-        end
-      rescue
-        ErlangError ->
-          # NIF not loaded (fuse feature not enabled)
-          :ok
-      end
+      assert {:error, msg} = Native.mount("/nonexistent/path", self(), [])
+      assert msg =~ "not exist"
     end
 
     @tag :fuse_integration
     test "mount/3 with valid mount point and unmount" do
-      # Create a temporary directory for testing
-      mount_point = System.tmp_dir!() |> Path.join("neonfs_test_mount")
+      mount_point =
+        System.tmp_dir!() |> Path.join("neonfs_test_mount_#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(mount_point)
 
       try do
-        case Native.mount(mount_point, self(), ["auto_unmount"]) do
-          {:ok, session} ->
-            assert is_reference(session)
-
-            # Verify mount point is mounted
-            assert File.exists?(mount_point)
-
-            # Unmount - may fail with permission error in unprivileged environments
-            case Native.unmount(session, "fusermount3") do
-              {:ok, :ok} ->
-                :ok
-
-              {:error, msg} when is_binary(msg) ->
-                # Permission errors are expected in unprivileged environments
-                assert msg =~ "Operation not permitted" or msg =~ "Failed to unmount"
-            end
-
-          {:error, msg} ->
-            # Feature not available or insufficient permissions
-            assert msg =~ "Failed to mount"
-        end
-      rescue
-        ErlangError ->
-          # NIF not loaded (fuse feature not enabled)
-          :ok
+        assert {:ok, session} = Native.mount(mount_point, self(), ["auto_unmount"])
+        assert is_reference(session)
+        assert File.exists?(mount_point)
+        assert {:ok, :ok} = Native.unmount(session, "fusermount3")
       after
-        # Cleanup
         File.rm_rf(mount_point)
       end
     end
 
     @tag :fuse_integration
     test "unmount/1 on already unmounted session returns error" do
-      mount_point = System.tmp_dir!() |> Path.join("neonfs_test_mount2")
+      mount_point =
+        System.tmp_dir!() |> Path.join("neonfs_test_mount_#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(mount_point)
 
       try do
-        case Native.mount(mount_point, self(), []) do
-          {:ok, session} ->
-            # Unmount once
-            assert {:ok, :ok} = Native.unmount(session, "fusermount3")
-
-            # Try to unmount again - should fail
-            assert {:error, msg} = Native.unmount(session, "fusermount3")
-            assert msg =~ "already unmounted"
-
-          {:error, _} ->
-            # Feature not available, skip test
-            :ok
-        end
-      rescue
-        ErlangError ->
-          # NIF not loaded (fuse feature not enabled)
-          :ok
+        assert {:ok, session} = Native.mount(mount_point, self(), ["auto_unmount"])
+        assert {:ok, :ok} = Native.unmount(session, "fusermount3")
+        assert {:error, msg} = Native.unmount(session, "fusermount3")
+        assert msg =~ "already unmounted"
       after
         File.rm_rf(mount_point)
       end
@@ -188,23 +142,14 @@ defmodule NeonFS.FUSE.NativeTest do
 
     @tag :fuse_integration
     test "mount/3 validates mount point is a directory" do
-      # Create a file instead of directory
-      file_path = System.tmp_dir!() |> Path.join("neonfs_test_file")
+      file_path =
+        System.tmp_dir!() |> Path.join("neonfs_test_file_#{System.unique_integer([:positive])}")
+
       File.write!(file_path, "test")
 
       try do
-        case Native.mount(file_path, self(), []) do
-          {:error, msg} ->
-            assert msg =~ "not a directory"
-
-          _ ->
-            # Feature might handle this differently
-            :ok
-        end
-      rescue
-        ErlangError ->
-          # NIF not loaded (fuse feature not enabled)
-          :ok
+        assert {:error, msg} = Native.mount(file_path, self(), [])
+        assert msg =~ "not a directory"
       after
         File.rm!(file_path)
       end

@@ -220,6 +220,35 @@ defmodule NeonFS.FUSE.MountManager do
   end
 
   defp get_volume(volume_name) do
+    # Temporary implementation: check local first, then RPC to configured core_node.
+    # See spec/service_discovery.md for the planned Ra-based service discovery.
+    case local_volume_lookup(volume_name) do
+      {:ok, volume} ->
+        {:ok, volume}
+
+      {:error, _reason} = error ->
+        error
+
+      :not_local ->
+        remote_volume_lookup(volume_name)
+    end
+  end
+
+  defp local_volume_lookup(volume_name) do
+    # Check if VolumeRegistry is running locally
+    case Process.whereis(VolumeRegistry) do
+      nil ->
+        :not_local
+
+      _pid ->
+        case VolumeRegistry.get_by_name(volume_name) do
+          {:ok, volume} -> {:ok, volume}
+          {:error, :not_found} -> {:error, :volume_not_found}
+        end
+    end
+  end
+
+  defp remote_volume_lookup(volume_name) do
     core_node = Application.get_env(:neonfs_fuse, :core_node, :neonfs_core@localhost)
 
     case :rpc.call(core_node, VolumeRegistry, :get_by_name, [volume_name]) do

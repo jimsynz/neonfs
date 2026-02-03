@@ -54,7 +54,8 @@ defmodule NeonFS.Core.WriteOperation do
       with {:ok, volume} <- get_volume(volume_id),
            {:ok, chunks} <- chunk_and_store(data, volume, write_id, opts),
            {:ok, file_meta} <- create_file_metadata(volume_id, path, chunks, data, opts),
-           :ok <- commit_chunks(write_id, chunks) do
+           :ok <- commit_chunks(write_id, chunks),
+           :ok <- update_volume_stats(volume_id, data, chunks) do
         {:ok, file_meta}
       else
         {:error, _reason} = error ->
@@ -133,8 +134,12 @@ defmodule NeonFS.Core.WriteOperation do
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {{data, hash, offset, size}, index}, {:ok, acc} ->
       case process_chunk(data, hash, offset, size, index, compression_config, volume, write_id) do
-        {:ok, chunk_info} -> {:cont, {:ok, [chunk_info | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, chunk_info} ->
+          {:cont, {:ok, [chunk_info | acc]}}
+
+        {:error, reason} ->
+          Logger.debug("process_chunks: chunk processing failed with #{inspect(reason)}")
+          {:halt, {:error, reason}}
       end
     end)
     |> case do
@@ -144,21 +149,25 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp process_chunk(data, hash, offset, size, index, compression_config, volume, write_id) do
-    # Check if chunk already exists
     case ChunkIndex.get(hash) do
       {:ok, existing_chunk} ->
-        # Chunk exists - add write reference
-        :ok = ChunkIndex.add_write_ref(hash, write_id)
+        # Chunk exists - add write reference (deduplication)
+        case ChunkIndex.add_write_ref(hash, write_id) do
+          :ok ->
+            {:ok,
+             %{
+               hash: hash,
+               offset: offset,
+               size: size,
+               stored_size: existing_chunk.stored_size,
+               compression: existing_chunk.compression,
+               index: index,
+               new: false
+             }}
 
-        {:ok,
-         %{
-           hash: hash,
-           offset: offset,
-           size: size,
-           stored_size: existing_chunk.stored_size,
-           compression: existing_chunk.compression,
-           index: index
-         }}
+          {:error, reason} ->
+            {:error, {:add_write_ref_failed, reason}}
+        end
 
       {:error, :not_found} ->
         # New chunk - store it
@@ -167,76 +176,67 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp store_new_chunk(data, hash, offset, size, index, compression_config, volume, write_id) do
-    # Determine if we should compress this chunk
     {_should_compress, compression} = should_compress_chunk?(size, compression_config)
+    write_opts = build_write_opts(compression)
 
-    # Write to blob store
-    tier = "hot"
-
-    write_opts =
-      case compression do
-        :none -> []
-        {:zstd, level} -> [compression: "zstd", compression_level: level]
-      end
-
-    case BlobStore.write_chunk(data, tier, write_opts) do
-      {:ok, _returned_hash, chunk_info} ->
-        # Parse compression string back to atom
-        compression_type =
-          case chunk_info.compression do
-            "none" -> :none
-            "zstd" -> :zstd
-            _ -> :none
-          end
-
-        # Create chunk metadata (uncommitted)
-        chunk_meta = %ChunkMeta{
-          hash: hash,
-          original_size: size,
-          stored_size: chunk_info.stored_size,
-          compression: compression_type,
-          locations: [%{node: node(), drive_id: "default", tier: :hot}],
-          target_replicas: volume.durability.factor,
-          commit_state: :uncommitted,
-          active_write_refs: MapSet.new([write_id]),
-          stripe_id: nil,
-          stripe_index: nil,
-          created_at: DateTime.utc_now(),
-          last_verified: nil
-        }
-
-        # Store in chunk index
-        :ok = ChunkIndex.put(chunk_meta)
-
-        # Replicate chunk if replication factor > 1
-        if volume.durability.factor > 1 do
-          # Replication will happen according to volume's write_ack policy
-          # (local = background, quorum/all = synchronous)
-          case Replication.replicate_chunk(hash, data, volume, tier: :hot) do
-            {:ok, _locations} ->
-              # Replication successful or background
-              :ok
-
-            {:error, reason} ->
-              Logger.warning("Chunk replication failed: #{inspect(reason)}")
-              # Continue even if replication fails - the chunk is stored locally
-              :ok
-          end
-        end
-
-        {:ok,
-         %{
-           hash: hash,
-           offset: offset,
-           size: size,
-           stored_size: chunk_info.stored_size,
-           compression: compression_type,
-           index: index
-         }}
-
-      {:error, _reason} = error ->
-        error
+    with {:ok, _returned_hash, chunk_info} <- BlobStore.write_chunk(data, "hot", write_opts),
+         chunk_meta <- build_chunk_meta(hash, size, chunk_info, volume, write_id),
+         :ok <- ChunkIndex.put(chunk_meta) do
+      maybe_replicate_chunk(hash, data, volume)
+      build_chunk_result(hash, offset, size, chunk_info, index)
+    else
+      {:error, reason} when is_tuple(reason) -> {:error, reason}
+      {:error, reason} -> {:error, {:chunk_index_failed, reason}}
     end
+  end
+
+  defp build_write_opts(:none), do: []
+  defp build_write_opts({:zstd, level}), do: [compression: "zstd", compression_level: level]
+
+  defp build_chunk_meta(hash, size, chunk_info, volume, write_id) do
+    %ChunkMeta{
+      hash: hash,
+      original_size: size,
+      stored_size: chunk_info.stored_size,
+      compression: parse_compression(chunk_info.compression),
+      locations: [%{node: node(), drive_id: "default", tier: :hot}],
+      target_replicas: volume.durability.factor,
+      commit_state: :uncommitted,
+      active_write_refs: MapSet.new([write_id]),
+      stripe_id: nil,
+      stripe_index: nil,
+      created_at: DateTime.utc_now(),
+      last_verified: nil
+    }
+  end
+
+  defp parse_compression("zstd"), do: :zstd
+  defp parse_compression(_), do: :none
+
+  defp maybe_replicate_chunk(hash, data, volume) do
+    if volume.durability.factor > 1 do
+      case Replication.replicate_chunk(hash, data, volume, tier: :hot) do
+        {:ok, _locations} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Chunk replication failed: #{inspect(reason)}")
+          :ok
+      end
+    end
+  end
+
+  defp build_chunk_result(hash, offset, size, chunk_info, index) do
+    {:ok,
+     %{
+       hash: hash,
+       offset: offset,
+       size: size,
+       stored_size: chunk_info.stored_size,
+       compression: parse_compression(chunk_info.compression),
+       index: index,
+       new: true
+     }}
   end
 
   defp should_compress_chunk?(_size, %{algorithm: :none}), do: {false, :none}
@@ -334,10 +334,11 @@ defmodule NeonFS.Core.WriteOperation do
     # Find all uncommitted chunks with this write_id
     uncommitted = ChunkIndex.list_uncommitted()
 
-    uncommitted
-    |> Enum.filter(fn meta -> MapSet.member?(meta.active_write_refs, write_id) end)
-    |> Enum.each(&abort_single_chunk(&1, write_id))
+    to_abort =
+      uncommitted
+      |> Enum.filter(fn meta -> MapSet.member?(meta.active_write_refs, write_id) end)
 
+    Enum.each(to_abort, &abort_single_chunk(&1, write_id))
     :ok
   end
 
@@ -373,6 +374,38 @@ defmodule NeonFS.Core.WriteOperation do
 
       [] ->
         :ok
+    end
+  end
+
+  defp update_volume_stats(volume_id, data, chunks) do
+    # Get current volume to read existing stats
+    case VolumeRegistry.get(volume_id) do
+      {:ok, volume} ->
+        # Calculate new chunks only (not deduplicated)
+        new_chunks = Enum.filter(chunks, & &1.new)
+
+        # Update statistics:
+        # - logical_size: total logical size of all files (add file size)
+        # - physical_size: actual bytes stored (add only new chunk sizes)
+        # - chunk_count: total unique chunks (add only new chunks)
+        new_logical_size = volume.logical_size + byte_size(data)
+
+        new_physical_size =
+          volume.physical_size + Enum.sum(Enum.map(new_chunks, & &1.stored_size))
+
+        new_chunk_count = volume.chunk_count + length(new_chunks)
+
+        case VolumeRegistry.update_stats(volume_id,
+               logical_size: new_logical_size,
+               physical_size: new_physical_size,
+               chunk_count: new_chunk_count
+             ) do
+          {:ok, _updated} -> :ok
+          {:error, reason} -> {:error, {:stats_update_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:volume_lookup_failed, reason}}
     end
   end
 end

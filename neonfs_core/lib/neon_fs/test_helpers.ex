@@ -18,15 +18,21 @@ defmodule NeonFS.TestHelpers do
   """
   @spec write_file(String.t(), String.t(), binary()) :: {:ok, term()} | {:error, term()}
   def write_file(volume_name, path, content) when is_binary(content) do
-    # Lookup volume by name
-    case VolumeRegistry.get_by_name(volume_name) do
-      {:ok, volume} ->
-        # Write the file using the write operation
-        WriteOperation.write_file(volume.id, path, content)
+    require Logger
 
-      {:error, _} = error ->
-        error
-    end
+    # Lookup volume by name
+    result =
+      case VolumeRegistry.get_by_name(volume_name) do
+        {:ok, volume} ->
+          # Write the file using the write operation
+          WriteOperation.write_file(volume.id, path, content)
+
+        {:error, _} = error ->
+          error
+      end
+
+    Logger.info("TestHelpers.write_file(#{volume_name}, #{path}) returned: #{inspect(result)}")
+    result
   end
 
   @doc """
@@ -85,6 +91,52 @@ defmodule NeonFS.TestHelpers do
           {:error, _} = error ->
             error
         end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Read a partial file from a volume with offset and length.
+
+  Returns `{:ok, content}` on success.
+  """
+  @spec read_file_partial(String.t(), String.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_file_partial(volume_name, path, offset, length) do
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} ->
+        ReadOperation.read_file(volume.id, path, offset: offset, length: length)
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  List files in a directory within a volume.
+  """
+  @spec list_dir(String.t(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  def list_dir(volume_name, dir_path) do
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} ->
+        files = FileIndex.list_dir(volume.id, dir_path)
+        {:ok, files}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Get file metadata by path.
+  """
+  @spec get_file(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def get_file(volume_name, path) do
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} ->
+        FileIndex.get_by_path(volume.id, path)
 
       {:error, _} = error ->
         error

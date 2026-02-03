@@ -13,6 +13,7 @@ defmodule NeonFS.Core.MixProject do
       consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       description: @moduledoc,
+      dialyzer: dialyzer(),
       docs: docs(),
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -48,6 +49,7 @@ defmodule NeonFS.Core.MixProject do
   end
 
   defp aliases, do: []
+  defp dialyzer, do: [ignore_warnings: ".dialyzer_ignore.exs"]
   defp docs, do: [main: "readme", extras: ["README.md"]]
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]

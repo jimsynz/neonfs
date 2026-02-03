@@ -8,6 +8,7 @@ defmodule NeonFS.Cluster.Join do
   """
 
   alias NeonFS.Cluster.{Invite, State}
+  alias NeonFS.Core.RaServer
 
   require Logger
 
@@ -232,27 +233,42 @@ defmodule NeonFS.Cluster.Join do
     # Wait for the Ra server to be ready and have a leader
     case wait_for_leader(server_id) do
       :ok ->
-        # Use a longer timeout for cluster membership changes (30 seconds)
-        case :ra.add_member(server_id, new_server_id, 30_000) do
-          {:ok, _, _leader} ->
-            Logger.info("Added #{inspect(joining_node)} to Ra cluster")
-            :ok
-
-          {:timeout, _} ->
-            Logger.warning("Timeout adding #{inspect(joining_node)} to Ra cluster")
-            {:error, :ra_add_timeout}
-
-          {:error, reason} ->
-            Logger.error(
-              "Failed to add #{inspect(joining_node)} to Ra cluster: #{inspect(reason)}"
-            )
-
-            {:error, {:ra_add_failed, reason}}
-        end
+        # Ra only allows one cluster membership change at a time.
+        # Retry with backoff if a change is already in progress.
+        add_member_with_retry(server_id, new_server_id, joining_node, 0, 10)
 
       {:error, reason} ->
         Logger.error("Ra cluster not ready: #{inspect(reason)}")
         {:error, {:ra_not_ready, reason}}
+    end
+  end
+
+  # Retry add_member with exponential backoff for :cluster_change_not_permitted
+  defp add_member_with_retry(server_id, new_server_id, joining_node, attempt, max_attempts) do
+    case :ra.add_member(server_id, new_server_id, 30_000) do
+      {:ok, _, _leader} ->
+        Logger.info("Added #{inspect(joining_node)} to Ra cluster")
+        :ok
+
+      {:timeout, _} ->
+        Logger.warning("Timeout adding #{inspect(joining_node)} to Ra cluster")
+        {:error, :ra_add_timeout}
+
+      {:error, :cluster_change_not_permitted} when attempt < max_attempts ->
+        # Another cluster change is in progress, wait and retry
+        backoff = min(100 * :math.pow(2, attempt), 5000) |> trunc()
+
+        Logger.debug(
+          "Cluster change in progress, retrying in #{backoff}ms (attempt #{attempt + 1}/#{max_attempts})"
+        )
+
+        Process.sleep(backoff)
+        add_member_with_retry(server_id, new_server_id, joining_node, attempt + 1, max_attempts)
+
+      {:error, reason} ->
+        Logger.error("Failed to add #{inspect(joining_node)} to Ra cluster: #{inspect(reason)}")
+
+        {:error, {:ra_add_failed, reason}}
     end
   end
 
@@ -303,7 +319,7 @@ defmodule NeonFS.Cluster.Join do
     )
 
     # Call RaServer to reconfigure for cluster join
-    case NeonFS.Core.RaServer.join_cluster(existing_members) do
+    case RaServer.join_cluster(existing_members) do
       :ok ->
         Logger.info("Ra server successfully joined cluster")
         :ok

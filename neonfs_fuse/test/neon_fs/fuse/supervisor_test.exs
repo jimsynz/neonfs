@@ -139,78 +139,8 @@ defmodule NeonFS.FUSE.SupervisorTest do
     end
   end
 
-  describe "Mount integration with supervision" do
-    @describetag :fuse_integration
-
-    setup do
-      # Create a test volume
-      {:ok, _vol_id} = create_test_volume("test_vol")
-
-      # Create a temporary mount point
-      mount_point = System.tmp_dir!() |> Path.join("neonfs_test_#{:rand.uniform(1000)}")
-      File.mkdir_p!(mount_point)
-
-      on_exit(fn ->
-        File.rm_rf(mount_point)
-      end)
-
-      %{volume_name: "test_vol", mount_point: mount_point}
-    end
-
-    test "mount creates handler under MountSupervisor", %{
-      volume_name: volume_name,
-      mount_point: mount_point
-    } do
-      # Get initial handler count
-      initial_children = DynamicSupervisor.count_children(MountSupervisor)
-
-      # Mount should fail with NIF not loaded, but handler should be started and stopped
-      result = MountManager.mount(volume_name, mount_point)
-
-      # Either mount succeeds (if FUSE available) or fails with expected error
-      case result do
-        {:ok, mount_id} ->
-          # FUSE is available, mount succeeded
-          # Verify handler was created
-          children = DynamicSupervisor.count_children(MountSupervisor)
-          assert children.active == initial_children.active + 1
-
-          # Cleanup
-          MountManager.unmount(mount_id)
-
-        {:error, {:mount_failed, _reason}} ->
-          # Expected when FUSE NIF not loaded
-          # Handler should have been stopped, count back to initial
-          :timer.sleep(50)
-          children = DynamicSupervisor.count_children(MountSupervisor)
-          assert children.active == initial_children.active
-      end
-    end
-
-    test "handler crash triggers unmount cleanup", %{
-      volume_name: volume_name,
-      mount_point: mount_point
-    } do
-      # Attempt to mount
-      case MountManager.mount(volume_name, mount_point) do
-        {:ok, mount_id} ->
-          # Mount succeeded, get the mount info
-          {:ok, mount_info} = MountManager.get_mount(mount_id)
-          handler_pid = mount_info.handler_pid
-
-          # Kill the handler
-          Process.exit(handler_pid, :kill)
-          :timer.sleep(100)
-
-          # Mount should be cleaned up
-          assert {:error, :not_found} = MountManager.get_mount(mount_id)
-
-        {:error, {:mount_failed, _reason}} ->
-          # FUSE not available, skip this test
-          :ok
-      end
-    end
-  end
+  # NOTE: Mount integration tests that require a core node have been moved to
+  # neonfs_integration/test/integration/mount_manager_test.exs
 
   describe "Application graceful shutdown" do
     test "stop callback unmounts all filesystems" do

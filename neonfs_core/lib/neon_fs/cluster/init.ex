@@ -11,6 +11,7 @@ defmodule NeonFS.Cluster.Init do
   """
 
   alias NeonFS.Cluster.State
+  alias NeonFS.Core.RaServer
 
   @doc """
   Initializes a new cluster with the given name.
@@ -52,13 +53,12 @@ defmodule NeonFS.Cluster.Init do
 
     state = State.new(cluster_id, cluster_name, master_key, node_info)
 
-    case State.save(state) do
-      :ok ->
-        # Ra cluster is already managed by RaSupervisor/RaServer
-        # The Ra server is started automatically on node startup
-        # We just save the cluster state for future node joins
-        {:ok, cluster_id}
-
+    # Save cluster state first
+    with :ok <- State.save(state),
+         # Then start Ra as a founding single-node cluster
+         :ok <- RaServer.init_cluster() do
+      {:ok, cluster_id}
+    else
       {:error, reason} ->
         {:error, reason}
     end

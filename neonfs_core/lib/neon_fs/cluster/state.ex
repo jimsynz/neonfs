@@ -155,12 +155,10 @@ defmodule NeonFS.Cluster.State do
   end
 
   defp parse_json(content) do
-    try do
-      data = :json.decode(content)
-      parse_state(data)
-    rescue
-      _ -> {:error, :invalid_json}
-    end
+    data = :json.decode(content)
+    parse_state(data)
+  rescue
+    _ -> {:error, :invalid_json}
   end
 
   defp parse_state(data) do

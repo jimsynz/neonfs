@@ -1,14 +1,17 @@
 defmodule NeonFS.Core.ReplicationTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
-  alias NeonFS.Core.{ChunkIndex, Replication, Volume}
+  alias NeonFS.Core.{Replication, Volume}
 
-  setup do
-    # Start ChunkIndex if not already running
-    case Process.whereis(ChunkIndex) do
-      nil -> start_supervised!(ChunkIndex)
-      _ -> :ok
-    end
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+    stop_ra()
+    start_chunk_index()
+
+    on_exit(fn -> cleanup_test_dirs() end)
 
     # Create a test volume with 3-way replication
     volume = Volume.new("test-volume", durability: %{type: :replicate, factor: 3, min_copies: 2})

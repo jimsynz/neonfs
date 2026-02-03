@@ -3,3 +3,5 @@
 .mcp.json
 erl_crash.dump
 .elixir_ls
+_build/
+deps/

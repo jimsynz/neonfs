@@ -280,34 +280,46 @@ defmodule NeonFS.CLI.Handler do
   # Private helper functions
 
   # Get the FUSE node and verify it's reachable
+  # Checks in order: local node, connected nodes, configured fallback
   defp get_fuse_node do
-    # First try to discover FUSE node via connected nodes
-    case discover_fuse_node() do
-      {:ok, fuse_node} ->
-        {:ok, fuse_node}
+    with :not_available <- check_local_fuse(),
+         :not_found <- discover_fuse_node() do
+      check_configured_fuse_node()
+    else
+      :available -> {:ok, Node.self()}
+      {:ok, fuse_node} -> {:ok, fuse_node}
+    end
+  end
 
-      :not_found ->
-        # Fall back to configured node (for backwards compatibility)
-        fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
-
-        case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
-          {:badrpc, _} -> {:error, :fuse_not_available}
-          NeonFS.FUSE.MountManager -> {:ok, fuse_node}
-        end
+  # Check if FUSE MountManager is available on the local node
+  defp check_local_fuse do
+    case Process.whereis(NeonFS.FUSE.MountManager) do
+      nil -> :not_available
+      _pid -> :available
     end
   end
 
   # Discover FUSE node by looking for connected nodes with neonfs_fuse prefix
   defp discover_fuse_node do
     Node.list()
-    |> Enum.find(fn node ->
-      node
-      |> Atom.to_string()
-      |> String.starts_with?("neonfs_fuse@")
-    end)
+    |> Enum.find(&fuse_node?/1)
     |> case do
       nil -> :not_found
       fuse_node -> {:ok, fuse_node}
+    end
+  end
+
+  defp fuse_node?(node) do
+    node |> Atom.to_string() |> String.starts_with?("neonfs_fuse@")
+  end
+
+  # Fall back to configured node (for backwards compatibility)
+  defp check_configured_fuse_node do
+    fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
+
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
+      {:badrpc, _} -> {:error, :fuse_not_available}
+      NeonFS.FUSE.MountManager -> {:ok, fuse_node}
     end
   end
 

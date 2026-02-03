@@ -1,19 +1,17 @@
 defmodule NeonFS.Core.ChunkIndexTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
   alias NeonFS.Core.ChunkIndex
   alias NeonFS.Core.ChunkMeta
 
-  setup do
-    # Stop the application to get a clean ChunkIndex state for each test
-    Application.stop(:neonfs_core)
+  @moduletag :tmp_dir
 
-    # Start it again with ChunkIndex in supervision tree
-    {:ok, _} = Application.ensure_all_started(:neonfs_core)
-
-    # Clean the ETS table for this test
-    :ets.delete_all_objects(:chunk_index)
-
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+    stop_ra()
+    start_chunk_index()
+    on_exit(fn -> cleanup_test_dirs() end)
     :ok
   end
 

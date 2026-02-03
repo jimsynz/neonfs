@@ -1,18 +1,20 @@
 defmodule NeonFS.Core.VolumeRegistryTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeRegistry
 
-  setup do
-    # Clear ETS tables before each test
-    :ets.delete_all_objects(:volumes_by_id)
-    :ets.delete_all_objects(:volumes_by_name)
-    :ets.delete_all_objects(:file_index_by_id)
-    :ets.delete_all_objects(:file_index_by_path)
+  @moduletag :tmp_dir
 
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+    stop_ra()
+    start_file_index()
+    start_volume_registry()
+    on_exit(fn -> cleanup_test_dirs() end)
     :ok
   end
 

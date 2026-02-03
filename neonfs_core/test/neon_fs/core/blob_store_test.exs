@@ -367,14 +367,41 @@ defmodule NeonFS.Core.BlobStoreTest do
   end
 
   describe "supervision" do
-    test "blob store starts with application" do
-      # The default BlobStore should be running
-      assert Process.whereis(NeonFS.Core.BlobStore) != nil
+    test "blob store starts and registers name" do
+      # Start a named BlobStore with truly unique name and ID
+      unique_id = System.unique_integer([:positive, :monotonic])
+      tmp_dir = Path.join(System.tmp_dir!(), "blob_store_sup_test_#{unique_id}")
+      File.mkdir_p!(tmp_dir)
+      name = :"test_blob_store_#{unique_id}"
+
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      {:ok, pid} =
+        start_supervised(
+          {BlobStore, base_dir: tmp_dir, prefix_depth: 2, name: name},
+          id: name,
+          restart: :permanent
+        )
+
+      assert Process.whereis(name) == pid
     end
 
-    test "blob store restarts on crash" do
-      # Get the original PID
-      original_pid = Process.whereis(NeonFS.Core.BlobStore)
+    test "blob store restarts on crash when supervised" do
+      # Start under test supervisor with permanent restart, unique name and ID
+      unique_id = System.unique_integer([:positive, :monotonic])
+      tmp_dir = Path.join(System.tmp_dir!(), "blob_store_restart_test_#{unique_id}")
+      File.mkdir_p!(tmp_dir)
+      name = :"restart_test_blob_store_#{unique_id}"
+
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      {:ok, original_pid} =
+        start_supervised(
+          {BlobStore, base_dir: tmp_dir, prefix_depth: 2, name: name},
+          id: name,
+          restart: :permanent
+        )
+
       assert original_pid != nil
 
       # Kill the process
@@ -384,7 +411,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       Process.sleep(100)
 
       # Should have a new PID
-      new_pid = Process.whereis(NeonFS.Core.BlobStore)
+      new_pid = Process.whereis(name)
       assert new_pid != nil
       assert new_pid != original_pid
     end

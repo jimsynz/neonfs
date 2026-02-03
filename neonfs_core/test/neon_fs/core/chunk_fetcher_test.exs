@@ -1,22 +1,17 @@
 defmodule NeonFS.Core.ChunkFetcherTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
   alias NeonFS.Core.{BlobStore, ChunkFetcher, ChunkIndex, ChunkMeta}
 
-  @test_base_dir "/tmp/neonfs_test_chunk_fetcher"
+  @moduletag :tmp_dir
 
-  setup do
-    # Clean up test directory
-    File.rm_rf!(@test_base_dir)
-    File.mkdir_p!(@test_base_dir)
-
-    # Clear all data from ETS tables (services are already started by the application)
-    :ets.delete_all_objects(:chunk_index)
-
-    on_exit(fn ->
-      File.rm_rf!(@test_base_dir)
-    end)
-
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+    stop_ra()
+    start_blob_store()
+    start_chunk_index()
+    on_exit(fn -> cleanup_test_dirs() end)
     :ok
   end
 

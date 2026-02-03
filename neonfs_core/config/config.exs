@@ -7,7 +7,9 @@ if Mix.env() == :test do
     meta_dir: "/tmp/neonfs_test/meta",
     ra_data_dir: "/tmp/neonfs_test/ra",
     snapshot_interval_ms: 100,
-    enable_ra: true
+    enable_ra: true,
+    # Don't auto-start children in tests - each test starts what it needs
+    start_children?: false
 end
 
 if Mix.env() in [:dev, :test] do
