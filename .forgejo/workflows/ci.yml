@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore toolchain cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .asdf
@@ -41,7 +41,7 @@ jobs:
           asdf reshim
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             neonfs_core/deps
@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore toolchain cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .asdf
@@ -106,7 +106,7 @@ jobs:
           asdf reshim
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             neonfs_fuse/deps
@@ -152,7 +152,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore toolchain cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .asdf
@@ -172,7 +172,7 @@ jobs:
           asdf reshim
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             neonfs-cli/target
@@ -231,7 +231,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore toolchain cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .asdf
@@ -251,7 +251,7 @@ jobs:
           asdf reshim
 
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             neonfs_integration/deps
