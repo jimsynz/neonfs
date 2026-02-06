@@ -17,7 +17,7 @@ fuse = ["dep:fuser"]
 rustler = "0.37.2"
 # FUSE is optional to support building on systems without libfuse-dev
 # But default feature enables it for container builds
-fuser = { version = "0.15", optional = true }
+fuser = { version = "0.16", optional = true }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "time"] }
 log = "0.4"
 thiserror = "2.0"
