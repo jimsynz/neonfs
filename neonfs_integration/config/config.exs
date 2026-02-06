@@ -1,5 +1,10 @@
 import Config
 
+# Suppress log output during tests (ExUnit's capture_log handles test-specific logs)
+if Mix.env() == :test do
+  config :logger, level: :warning
+end
+
 if Mix.env() in [:dev, :test] do
   config :git_ops,
     mix_project: Mix.Project.get!(),

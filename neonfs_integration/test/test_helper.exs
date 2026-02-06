@@ -16,4 +16,8 @@ case System.cmd("cargo", ["build", "--release"],
     System.halt(1)
 end
 
+# Note: FUSE integration tests have been moved to Rust because FUSE mounting
+# cannot work from within the BEAM VM (Erlang's SIGCHLD handling breaks
+# fusermount's fork/waitpid). See neonfs_fuse/native/neonfs_fuse/tests/mount_integration.rs
+
 ExUnit.start(capture_log: true)

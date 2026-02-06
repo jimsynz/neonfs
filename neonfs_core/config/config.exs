@@ -2,6 +2,9 @@ import Config
 
 # Test environment configuration
 if Mix.env() == :test do
+  # Suppress log output during tests (ExUnit's capture_log handles test-specific logs)
+  config :logger, level: :warning
+
   config :neonfs_core,
     blob_store_base_dir: "/tmp/neonfs_test/blobs",
     meta_dir: "/tmp/neonfs_test/meta",

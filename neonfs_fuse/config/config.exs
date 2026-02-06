@@ -14,4 +14,7 @@ end
 # for the specific components they need, ensuring proper isolation
 if Mix.env() == :test do
   config :neonfs_fuse, start_supervisor: false
+
+  # Suppress log output during tests (ExUnit's capture_log handles test-specific logs)
+  config :logger, level: :warning
 end

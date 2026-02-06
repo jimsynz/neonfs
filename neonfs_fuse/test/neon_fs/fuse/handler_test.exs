@@ -93,7 +93,7 @@ defmodule NeonFS.FUSE.HandlerTest do
   end
 
   describe "getattr operation" do
-    test "gets attributes for root directory", %{handler: handler, volume_id: volume_id} do
+    test "gets attributes for root directory", %{handler: handler, volume_id: _volume_id} do
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => 1}}})
       :timer.sleep(100)
 
@@ -112,7 +112,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       # Should succeed (handler logs would show result)
     end
 
-    test "returns error for nonexistent inode", %{handler: handler, volume_id: volume_id} do
+    test "returns error for nonexistent inode", %{handler: handler, volume_id: _volume_id} do
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => 999}}})
       :timer.sleep(100)
 
@@ -317,7 +317,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/delete_me.txt")
     end
 
-    test "returns error for nonexistent file", %{handler: handler, volume_id: volume_id} do
+    test "returns error for nonexistent file", %{handler: handler, volume_id: _volume_id} do
       send(handler, {:fuse_op, 1, {"unlink", %{"parent" => 1, "name" => "missing.txt"}}})
       :timer.sleep(100)
 
@@ -476,14 +476,14 @@ defmodule NeonFS.FUSE.HandlerTest do
   end
 
   describe "error handling" do
-    test "handles unknown operations gracefully", %{handler: handler, volume_id: volume_id} do
+    test "handles unknown operations gracefully", %{handler: handler, volume_id: _volume_id} do
       send(handler, {:fuse_op, 1, {"unknown_op", %{}}})
       :timer.sleep(100)
 
       # Should log warning and return ENOSYS error
     end
 
-    test "handles missing volume gracefully", %{handler: handler, volume_id: volume_id} do
+    test "handles missing volume gracefully", %{handler: handler, volume_id: _volume_id} do
       # Allocate inode for non-existent volume
       {:ok, inode} = InodeTable.allocate_inode("missing_vol", "/file.txt")
 

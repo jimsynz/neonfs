@@ -7,7 +7,6 @@ variable "TAG" {
 }
 
 variable "PLATFORMS" {
-  type = list(string)
   default = ["linux/amd64", "linux/arm64"]
 }
 

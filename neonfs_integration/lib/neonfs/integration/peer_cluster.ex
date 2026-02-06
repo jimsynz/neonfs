@@ -38,6 +38,11 @@ defmodule NeonFS.Integration.PeerCluster do
   def start_peer(peer_opts, applications, app_config \\ []) do
     case :peer.start_link(peer_opts) do
       {:ok, peer, node} ->
+        # Suppress debug/info logs on peer nodes during tests
+        # Configure both Elixir's Logger and Erlang's :logger
+        :peer.call(peer, Logger, :configure, [[level: :warning]])
+        :peer.call(peer, :logger, :set_primary_config, [:level, :warning])
+
         # Use :peer.call since nodes aren't connected yet (connection: 0)
         apply_app_config(peer, app_config)
         start_applications(peer, node, applications)
@@ -100,6 +105,10 @@ defmodule NeonFS.Integration.PeerCluster do
         # IMPORTANT: Ra expects data_dir as a charlist, not a binary!
         # DETS in Erlang requires charlist file paths.
         app_config = [
+          # Suppress debug/info logs on peer nodes during tests
+          logger: [
+            level: :warning
+          ],
           neonfs_core: [
             data_dir: data_dir,
             meta_dir: meta_dir,

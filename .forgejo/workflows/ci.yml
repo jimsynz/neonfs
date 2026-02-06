@@ -1,0 +1,333 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  ASDF_DIR: /root/.asdf
+  MIX_ENV: test
+
+jobs:
+  # =========================================================================
+  # neonfs_core - Elixir + Rustler NIFs
+  # =========================================================================
+  neonfs_core:
+    runs-on: docker
+    container:
+      image: harton.dev/james/asdf_container:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .asdf
+            .hex
+            .mix
+            .cargo
+          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
+
+      - name: Install ASDF tools
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          asdf_install
+          asdf reshim
+
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            neonfs_core/deps
+            neonfs_core/_build
+            neonfs_core/target
+            neonfs_core/priv/native
+          key: build-neonfs_core-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_core/mix.lock', 'neonfs_core/Cargo.lock') }}
+          restore-keys: build-neonfs_core-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_core
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix deps.get
+          mix deps.compile
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt; fi
+
+      - name: Check
+        working-directory: neonfs_core
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          epmd -daemon
+          mix check
+
+  # =========================================================================
+  # neonfs_fuse - Elixir + Rustler NIFs
+  # =========================================================================
+  neonfs_fuse:
+    runs-on: docker
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged --device /dev/fuse
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .asdf
+            .hex
+            .mix
+            .cargo
+          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
+
+      - name: Install ASDF tools
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          asdf_install
+          asdf reshim
+
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            neonfs_fuse/deps
+            neonfs_fuse/_build
+            neonfs_fuse/target
+            neonfs_fuse/priv/native
+            neonfs_core/target
+            neonfs_core/priv/native
+          key: build-neonfs_fuse-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock', 'neonfs_core/Cargo.lock') }}
+          restore-keys: build-neonfs_fuse-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_fuse
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix deps.get
+          mix deps.compile
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt; fi
+
+      - name: Check
+        working-directory: neonfs_fuse
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          epmd -daemon
+          mix check
+
+  # =========================================================================
+  # neonfs-cli - Rust CLI
+  # =========================================================================
+  neonfs-cli:
+    runs-on: docker
+    container:
+      image: harton.dev/james/asdf_container:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .asdf
+            .hex
+            .mix
+            .cargo
+          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
+
+      - name: Install ASDF tools
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          asdf_install
+          asdf reshim
+
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            neonfs-cli/target
+          key: build-neonfs-cli-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs-cli/Cargo.lock') }}
+          restore-keys: build-neonfs-cli-${{ runner.arch }}-
+
+      - name: Setup clippy
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          rustup component add clippy
+
+      - name: Build
+        working-directory: neonfs-cli
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          cargo fetch
+          cargo test --no-run --release
+
+      - name: Test
+        working-directory: neonfs-cli
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          cargo test --jobs 1 --release
+
+      - name: Clippy
+        working-directory: neonfs-cli
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          cargo clippy --all-targets --all-features -- -D warnings
+
+  # =========================================================================
+  # neonfs_integration - Integration tests
+  # =========================================================================
+  neonfs_integration:
+    runs-on: docker
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged --device /dev/fuse
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .asdf
+            .hex
+            .mix
+            .cargo
+          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
+
+      - name: Install ASDF tools
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          asdf_install
+          asdf reshim
+
+      - name: Restore build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            neonfs_integration/deps
+            neonfs_integration/_build
+            neonfs_integration/target
+            neonfs_integration/priv/native
+            neonfs_core/target
+            neonfs_core/priv/native
+            neonfs_fuse/target
+            neonfs_fuse/priv/native
+          key: build-neonfs_integration-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_fuse/Cargo.lock') }}
+          restore-keys: build-neonfs_integration-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_integration
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix deps.get
+          mix deps.compile
+          mix compile
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt; fi
+
+      - name: Check
+        working-directory: neonfs_integration
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          epmd -daemon
+          mix check
+
+  # =========================================================================
+  # containers - Docker buildx multi-platform builds
+  # Only runs on push (not PRs), after integration tests pass
+  # Uses the runner's own Docker daemon (configured with insecure registry)
+  # =========================================================================
+  containers:
+    runs-on: docker
+    needs: [neonfs_core, neonfs_fuse, neonfs_integration]
+    if: forgejo.event_name == 'push'
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Docker daemon
+        run: |
+          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
+          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Set up QEMU
+        run: docker run --privileged --rm tonistiigi/binfmt --install all
+
+      - name: Login to Registry
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
+
+      - name: Set up Docker Buildx
+        run: |
+          cat > /tmp/buildkitd.toml << 'TOML'
+          [registry."forgejo.dmz"]
+            http = true
+            insecure = true
+          TOML
+          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+          docker buildx use builder
+
+      - name: Build and push
+        run: |
+          # Replace / with - for branch names like feature/foo
+          TAG=${GITHUB_REF_NAME//\//-}
+          TAG=$TAG docker buildx bake -f bake.hcl --push

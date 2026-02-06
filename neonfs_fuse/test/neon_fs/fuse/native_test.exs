@@ -99,60 +99,9 @@ defmodule NeonFS.FUSE.NativeTest do
     end
   end
 
-  describe "mount operations" do
-    @tag :fuse_integration
-    test "mount/3 with invalid mount point returns error" do
-      assert {:error, msg} = Native.mount("/nonexistent/path", self(), [])
-      assert msg =~ "not exist"
-    end
-
-    @tag :fuse_integration
-    test "mount/3 with valid mount point and unmount" do
-      mount_point =
-        System.tmp_dir!() |> Path.join("neonfs_test_mount_#{System.unique_integer([:positive])}")
-
-      File.mkdir_p!(mount_point)
-
-      try do
-        assert {:ok, session} = Native.mount(mount_point, self(), ["auto_unmount"])
-        assert is_reference(session)
-        assert File.exists?(mount_point)
-        assert {:ok, :ok} = Native.unmount(session, "fusermount3")
-      after
-        File.rm_rf(mount_point)
-      end
-    end
-
-    @tag :fuse_integration
-    test "unmount/1 on already unmounted session returns error" do
-      mount_point =
-        System.tmp_dir!() |> Path.join("neonfs_test_mount_#{System.unique_integer([:positive])}")
-
-      File.mkdir_p!(mount_point)
-
-      try do
-        assert {:ok, session} = Native.mount(mount_point, self(), ["auto_unmount"])
-        assert {:ok, :ok} = Native.unmount(session, "fusermount3")
-        assert {:error, msg} = Native.unmount(session, "fusermount3")
-        assert msg =~ "already unmounted"
-      after
-        File.rm_rf(mount_point)
-      end
-    end
-
-    @tag :fuse_integration
-    test "mount/3 validates mount point is a directory" do
-      file_path =
-        System.tmp_dir!() |> Path.join("neonfs_test_file_#{System.unique_integer([:positive])}")
-
-      File.write!(file_path, "test")
-
-      try do
-        assert {:error, msg} = Native.mount(file_path, self(), [])
-        assert msg =~ "not a directory"
-      after
-        File.rm!(file_path)
-      end
-    end
-  end
+  # Note: FUSE mount operation tests have been moved to Rust integration tests
+  # (native/neonfs_fuse/tests/mount_integration.rs) because FUSE mounting cannot
+  # work from within the BEAM VM. Erlang sets SIGCHLD to SIG_IGN which causes
+  # fusermount's fork/waitpid to fail with ECHILD. The Rust tests run as normal
+  # OS processes outside of BEAM, so FUSE works correctly there.
 end
