@@ -18,7 +18,7 @@ jobs:
     container:
       image: harton.dev/james/asdf_container:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Restore toolchain cache
         uses: actions/cache@v5
@@ -83,7 +83,7 @@ jobs:
       image: harton.dev/james/asdf_container:latest
       options: --privileged --device /dev/fuse
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Restore toolchain cache
         uses: actions/cache@v5
@@ -149,7 +149,7 @@ jobs:
     container:
       image: harton.dev/james/asdf_container:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Restore toolchain cache
         uses: actions/cache@v5
@@ -228,7 +228,7 @@ jobs:
       image: harton.dev/james/asdf_container:latest
       options: --privileged --device /dev/fuse
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Restore toolchain cache
         uses: actions/cache@v5
@@ -303,7 +303,7 @@ jobs:
       options: --privileged
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Start Docker daemon
         run: |
