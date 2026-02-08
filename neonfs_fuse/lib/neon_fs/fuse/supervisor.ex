@@ -21,7 +21,11 @@ defmodule NeonFS.FUSE.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      # Inode table must start first - used by handlers
+      # Client connectivity — must start before anything that needs core nodes
+      {NeonFS.Client.Connection, bootstrap_nodes: bootstrap_nodes()},
+      NeonFS.Client.Discovery,
+      NeonFS.Client.CostFunction,
+      # Inode table must start before handlers
       NeonFS.FUSE.InodeTable,
       # DynamicSupervisor for mount handlers
       NeonFS.FUSE.MountSupervisor,
@@ -29,10 +33,13 @@ defmodule NeonFS.FUSE.Supervisor do
       NeonFS.FUSE.MountManager
     ]
 
-    # one_for_one: each child restarts independently
-    # InodeTable failure would break all mounts, but restart quickly
-    # MountSupervisor failure loses all handlers, but restart allows new mounts
-    # MountManager failure loses tracking but DynamicSupervisor keeps handlers alive
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  defp bootstrap_nodes do
+    case Application.get_env(:neonfs_fuse, :core_node) do
+      nil -> Application.get_env(:neonfs_client, :bootstrap_nodes, [])
+      core_node -> [core_node]
+    end
   end
 end

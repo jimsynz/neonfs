@@ -9,6 +9,7 @@ defmodule NeonFS.Core.Supervisor do
   4. ChunkIndex - Chunk metadata, depends on BlobStore
   5. FileIndex - File metadata, depends on ChunkIndex
   6. VolumeRegistry - Volume configuration, depends on FileIndex
+  7. ServiceRegistry - Service discovery, depends on Ra being available
 
   ## Test Configuration
 
@@ -101,7 +102,10 @@ defmodule NeonFS.Core.Supervisor do
       NeonFS.Core.FileIndex,
 
       # VolumeRegistry depends on FileIndex
-      NeonFS.Core.VolumeRegistry
+      NeonFS.Core.VolumeRegistry,
+
+      # ServiceRegistry depends on Ra being available
+      NeonFS.Core.ServiceRegistry
     ]
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation

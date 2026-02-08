@@ -27,7 +27,8 @@ defmodule NeonFS.Cluster.State do
           master_key: String.t(),
           this_node: node_info(),
           known_peers: [peer_info()],
-          ra_cluster_members: [atom()]
+          ra_cluster_members: [atom()],
+          node_type: atom()
         }
 
   @enforce_keys [:cluster_id, :cluster_name, :created_at, :master_key, :this_node]
@@ -38,7 +39,8 @@ defmodule NeonFS.Cluster.State do
     :master_key,
     :this_node,
     known_peers: [],
-    ra_cluster_members: []
+    ra_cluster_members: [],
+    node_type: :core
   ]
 
   @doc """
@@ -106,7 +108,8 @@ defmodule NeonFS.Cluster.State do
             "last_seen" => DateTime.to_iso8601(peer.last_seen)
           }
         end),
-      "ra_cluster_members" => Enum.map(state.ra_cluster_members, &Atom.to_string/1)
+      "ra_cluster_members" => Enum.map(state.ra_cluster_members, &Atom.to_string/1),
+      "node_type" => Atom.to_string(state.node_type)
     }
 
     json = :json.format(data)
@@ -180,13 +183,18 @@ defmodule NeonFS.Cluster.State do
             last_seen: parse_datetime!(peer["last_seen"])
           }
         end),
-      ra_cluster_members: Enum.map(data["ra_cluster_members"] || [], &String.to_atom/1)
+      ra_cluster_members: Enum.map(data["ra_cluster_members"] || [], &String.to_atom/1),
+      node_type: parse_node_type(data["node_type"])
     }
 
     {:ok, state}
   rescue
     _ -> {:error, :invalid_json}
   end
+
+  defp parse_node_type(nil), do: :core
+  defp parse_node_type(type) when is_binary(type), do: String.to_existing_atom(type)
+  defp parse_node_type(type) when is_atom(type), do: type
 
   defp parse_datetime!(iso8601) do
     case DateTime.from_iso8601(iso8601) do

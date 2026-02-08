@@ -1,7 +1,6 @@
 defmodule NeonFS.FUSE.SupervisorTest do
   use ExUnit.Case, async: false
 
-  alias NeonFS.Core.VolumeRegistry
   alias NeonFS.FUSE.{InodeTable, MountManager, MountSupervisor, Supervisor}
 
   # Start the full FUSE supervisor for this test module since it tests the supervisor itself
@@ -79,10 +78,7 @@ defmodule NeonFS.FUSE.SupervisorTest do
     end
 
     test "can start handlers dynamically" do
-      # Create a test volume first
-      {:ok, vol_id} = create_test_volume()
-
-      handler_opts = [volume: vol_id, mount_id: "test_mount_1"]
+      handler_opts = [volume: "test_vol", mount_id: "test_mount_1"]
 
       {:ok, handler_pid} = MountSupervisor.start_handler(handler_opts)
 
@@ -93,10 +89,7 @@ defmodule NeonFS.FUSE.SupervisorTest do
     end
 
     test "can stop handlers" do
-      # Create a test volume first
-      {:ok, vol_id} = create_test_volume()
-
-      handler_opts = [volume: vol_id, mount_id: "test_mount_2"]
+      handler_opts = [volume: "test_vol", mount_id: "test_mount_2"]
       {:ok, handler_pid} = MountSupervisor.start_handler(handler_opts)
 
       assert Process.alive?(handler_pid)
@@ -117,12 +110,9 @@ defmodule NeonFS.FUSE.SupervisorTest do
     end
 
     test "isolates handler failures" do
-      # Create a test volume
-      {:ok, vol_id} = create_test_volume()
-
       # Start two handlers
-      {:ok, handler1} = MountSupervisor.start_handler(volume: vol_id, mount_id: "mount1")
-      {:ok, handler2} = MountSupervisor.start_handler(volume: vol_id, mount_id: "mount2")
+      {:ok, handler1} = MountSupervisor.start_handler(volume: "test_vol", mount_id: "mount1")
+      {:ok, handler2} = MountSupervisor.start_handler(volume: "test_vol", mount_id: "mount2")
 
       assert Process.alive?(handler1)
       assert Process.alive?(handler2)
@@ -152,38 +142,6 @@ defmodule NeonFS.FUSE.SupervisorTest do
 
       # Call stop directly (won't actually stop application in test)
       assert :ok = NeonFS.FUSE.Application.stop(:normal)
-    end
-  end
-
-  describe "neonfs_core dependency" do
-    test "neonfs_core application is available" do
-      # Verify neonfs_core is loaded
-      assert Application.spec(:neonfs_core) != nil
-    end
-
-    test "can access VolumeRegistry from neonfs_core" do
-      # Verify we can interact with core components
-      assert Process.whereis(VolumeRegistry) != nil
-    end
-  end
-
-  # Helper functions
-
-  defp create_test_volume(name \\ "test_volume_#{:rand.uniform(10000)}") do
-    with {:registry, pid} when is_pid(pid) <- {:registry, Process.whereis(VolumeRegistry)},
-         {:get, {:error, :not_found}} <- {:get, VolumeRegistry.get_by_name(name)},
-         {:create, {:ok, volume}} <-
-           {:create,
-            VolumeRegistry.create(name,
-              durability: %{type: :replicate, factor: 1, min_copies: 1},
-              compression: %{algorithm: :zstd, level: 3, min_size: 4096},
-              verification: %{on_read: :never}
-            )} do
-      {:ok, volume.id}
-    else
-      {:registry, nil} -> {:error, :volume_registry_not_started}
-      {:get, {:ok, volume}} -> {:ok, volume.id}
-      {:create, {:error, reason}} -> {:error, reason}
     end
   end
 end

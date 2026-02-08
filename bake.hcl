@@ -45,6 +45,7 @@ target "core" {
   platforms  = [for platform in PLATFORMS: "${platform}"]
   tags       = ["forgejo.dmz/project-neon/neonfs/core:${TAG}"]
   contexts = {
+    "client": "./neonfs_client"
     "src": "./neonfs_core"
     "builder": "target:builder"
   }
@@ -57,7 +58,7 @@ target "fuse" {
   platforms  = [for platform in PLATFORMS: "${platform}"]
   tags       = ["forgejo.dmz/project-neon/neonfs/fuse:${TAG}"]
   contexts = {
-    "core": "./neonfs_core"
+    "client": "./neonfs_client"
     "src": "./neonfs_fuse"
     "builder": "target:builder"
   }

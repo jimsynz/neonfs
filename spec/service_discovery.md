@@ -1,210 +1,217 @@
 # Service Discovery Specification
 
-**Status**: Draft
-**Phase**: Future (post Phase 2)
+**Status**: Implemented (Phase 2)
+**Phase**: Phase 2 (Distributed)
 
 ## Overview
 
-NeonFS requires a service discovery mechanism for FUSE nodes to locate and communicate with Core nodes in a distributed cluster. The current implementation uses static configuration, which doesn't scale to multi-node deployments or handle node failures gracefully.
+NeonFS uses a service discovery mechanism for non-core nodes (FUSE, S3, Docker, etc.) to locate and communicate with core nodes in a distributed cluster. The implementation lives in the `neonfs_client` package — a pure Elixir library that any cluster participant can depend on without pulling in core's heavy dependencies (Ra, Rustler NIFs, etc.).
 
-## Current State (Temporary)
+## Architecture
 
-`MountManager` in neonfs_fuse currently:
-1. Checks if `VolumeRegistry` is running locally (same node)
-2. Falls back to RPC to a configured `core_node` if not local
+### Package Structure
 
-This works for:
-- Single-node deployments
-- Test environments where both apps run on the same node
-
-This does NOT work for:
-- Multi-node production deployments
-- Automatic failover when a core node goes down
-- Load balancing across multiple core nodes
-
-## Requirements
-
-### Functional Requirements
-
-1. **Node Discovery**: FUSE nodes must discover available Core nodes without static configuration
-2. **Leader Awareness**: For Ra-backed operations, FUSE nodes should route requests to the Ra leader when possible
-3. **Failover**: If a Core node becomes unavailable, FUSE nodes must automatically route to another available node
-4. **Health Checking**: Unhealthy nodes should be excluded from routing decisions
-
-### Non-Functional Requirements
-
-1. **Low Latency**: Service discovery should not add significant latency to operations
-2. **Consistency**: All FUSE nodes should eventually converge on the same view of available Core nodes
-3. **Partition Tolerance**: Service discovery should degrade gracefully during network partitions
-
-## Proposed Architecture
-
-### Node Registry
-
-A distributed registry of available nodes, stored in Ra state:
-
-```elixir
-defmodule NeonFS.Core.NodeRegistry do
-  @moduledoc """
-  Distributed registry of NeonFS nodes, backed by Ra consensus.
-  """
-
-  @type node_info :: %{
-    node: node(),
-    roles: [:core | :fuse],
-    cost: cost_function_result(),
-    last_heartbeat: DateTime.t(),
-    capabilities: [atom()]
-  }
-
-  @type cost_function_result :: %{
-    load: float(),          # 0.0 - 1.0, current load
-    latency_ms: integer(),  # estimated latency from requester
-    capacity: integer(),    # available capacity units
-    priority: integer()     # static priority (for preferred nodes)
-  }
-
-  @doc "Register this node with the cluster"
-  @spec register(roles :: [atom()]) :: :ok | {:error, term()}
-
-  @doc "Deregister this node from the cluster"
-  @spec deregister() :: :ok
-
-  @doc "List all nodes with a given role"
-  @spec list_nodes(role :: atom()) :: [node_info()]
-
-  @doc "Select the best node for a given operation"
-  @spec select_node(role :: atom(), opts :: keyword()) :: {:ok, node()} | {:error, :no_nodes}
-end
+```
+neonfs_client/
+├── lib/neon_fs/client.ex                # Top-level convenience API
+├── lib/neon_fs/client/connection.ex     # Bootstrap node connectivity
+├── lib/neon_fs/client/cost_function.ex  # Latency/load-based node selection
+├── lib/neon_fs/client/discovery.ex      # Service discovery cache (ETS)
+├── lib/neon_fs/client/router.ex         # RPC routing with failover
+├── lib/neon_fs/client/service_info.ex   # Service registration data
+├── lib/neon_fs/client/service_metrics.ex # Load metrics for routing
+└── lib/neon_fs/client/service_type.ex   # Service type identifiers
 ```
 
-### Cost Functions
+### Dependency Graph
 
-Node selection should consider multiple factors:
-
-```elixir
-defmodule NeonFS.Core.NodeCost do
-  @moduledoc """
-  Cost functions for node selection.
-
-  Lower cost = more preferred node.
-  """
-
-  @doc """
-  Calculate composite cost for a node.
-
-  Factors:
-  - load: Current CPU/memory utilisation (0.0 - 1.0)
-  - latency: Network round-trip time to the node
-  - queue_depth: Number of pending operations
-  - is_leader: Whether this node is the Ra leader (bonus for metadata ops)
-  """
-  @spec calculate(node_info(), operation_type()) :: float()
-
-  @doc """
-  Update cost metrics for the local node.
-  Called periodically by a background process.
-  """
-  @spec update_local_metrics() :: :ok
-end
+```
+neonfs_client  ← neonfs_core  (shared types, service registry)
+neonfs_client  ← neonfs_fuse  (service discovery, RPC routing)
+neonfs_client  ← neonfs_s3    (future)
+neonfs_client  ← neonfs_csi   (future)
 ```
 
-### Integration with Ra
+`neonfs_fuse` has **no dependency** on `neonfs_core`. All communication happens via Erlang distribution, routed through `NeonFS.Client.Router`.
 
-For metadata operations (volume lookups, file index queries), the system should prefer routing to the Ra leader to avoid redirects:
+## Components
+
+### NeonFS.Client.Connection
+
+Manages Erlang distribution connections to bootstrap nodes.
+
+- On init, connects to configured bootstrap nodes via `Node.connect/1`
+- Monitors connections via `Node.monitor/2`
+- Automatically reconnects on `:nodedown` (5s interval)
+- Bootstrap nodes configured via child spec option or application env:
 
 ```elixir
-defmodule NeonFS.Core.ClusterRouter do
-  @moduledoc """
-  Routes requests to appropriate cluster nodes.
-  """
-
-  @doc """
-  Execute a metadata operation, routing to the Ra leader if possible.
-  """
-  @spec metadata_call(module(), atom(), [term()]) :: term()
-  def metadata_call(module, function, args) do
-    case get_ra_leader() do
-      {:ok, leader_node} ->
-        :rpc.call(leader_node, module, function, args)
-
-      :error ->
-        # Fall back to any available core node
-        {:ok, node} = NodeRegistry.select_node(:core)
-        :rpc.call(node, module, function, args)
-    end
-  end
-
-  @doc """
-  Execute a data operation (read/write), selecting node by cost function.
-  """
-  @spec data_call(module(), atom(), [term()], keyword()) :: term()
-  def data_call(module, function, args, opts \\ []) do
-    {:ok, node} = NodeRegistry.select_node(:core, opts)
-    :rpc.call(node, module, function, args)
-  end
-end
+{NeonFS.Client.Connection, bootstrap_nodes: [:neonfs_core@host1]}
+# or
+config :neonfs_client, bootstrap_nodes: [:neonfs_core@host1]
 ```
+
+### NeonFS.Client.Discovery
+
+Discovers and caches service information from the cluster's `ServiceRegistry`.
+
+- Queries `NeonFS.Core.ServiceRegistry.list/0` on a connected core node via RPC
+- Caches results in a local ETS table (`:neonfs_client_services`) with `read_concurrency: true`
+- Indexes by type (`{:by_type, type}`) and by node (`{:by_node, node}`)
+- Subscribes to `:nodedown`/`:nodeup` via `:net_kernel.monitor_nodes/2` for cache invalidation
+- Periodic refresh every 5 seconds (configurable)
+
+### NeonFS.Client.CostFunction
+
+Calculates routing costs for core nodes based on latency and load.
+
+- Periodically probes known core nodes (10s interval, configurable)
+- Measures latency via `:rpc.call(node, :erlang, :node, [])`
+- Fetches CPU load via `:cpu_sup.avg1/0` and run queue via `:erlang.statistics(:run_queue)`
+- Composite cost function:
+
+```
+cost = 0.3 * latency_score + 0.4 * load_score + 0.3 * queue_score
+```
+
+- Supports `prefer_leader: true` option for metadata operations (selects Ra leader if cost is within tolerance)
+
+### NeonFS.Client.Router
+
+Routes RPC calls to the best available core node with retry and failover.
+
+- Uses `CostFunction` for node selection
+- Retries on `:badrpc` with failover to next-best node (max 2 retries)
+- Falls back to direct discovery if `CostFunction` has no nodes yet
+- Two entry points:
+  - `call/4` — general-purpose routing
+  - `metadata_call/3` — prefers Ra leader node
+
+### NeonFS.Core.ServiceRegistry
+
+Ra-backed service registry running on core nodes.
+
+- Dual-path: ETS for fast reads, Ra for persistence and replication
+- Two ETS tables: `:services` (by node) and `:services_by_type` (by type)
+- Ra commands: `{:register_service, info}` and `{:deregister_service, node}`
+- Monitors remote nodes via `Node.monitor/2`, deregisters on `:nodedown`
+- Integrated into `MetadataStateMachine` (v2) alongside existing volume/file commands
+- Bootstraps from Ra state on startup (`init_from_ra/0`)
 
 ## Node Lifecycle
 
-### Registration
+### Core Node Registration
 
-When a Core node starts:
-1. Wait for Ra cluster to be ready
-2. Register with `NodeRegistry.register([:core])`
-3. Start periodic heartbeat/metrics updates
+When a core node starts:
+1. `ServiceRegistry` starts as part of the supervision tree
+2. Registers itself as `type: :core` via `ServiceRegistry.register/1`
+3. Begins accepting discovery queries from non-core nodes
 
-When a FUSE node starts:
-1. Connect to any known cluster node (bootstrap list or mDNS)
-2. Register with `NodeRegistry.register([:fuse])`
-3. Cache the current node list locally
+### Non-Core Node Registration
+
+When a FUSE (or other non-core) node starts:
+1. `NeonFS.Client.Connection` connects to bootstrap nodes
+2. `NeonFS.Client.Discovery` queries `ServiceRegistry` for available services
+3. `NeonFS.Client.CostFunction` begins probing core nodes
+4. Application optionally registers itself via `NeonFS.Client.register(:fuse, metadata)`
+
+### Cluster Join (Non-Core)
+
+Non-core nodes can join an existing cluster via the invite token mechanism:
+1. `Cluster.Join.join_cluster(token, via_node, :fuse)` — type parameter determines behaviour
+2. Non-core nodes skip Ra membership (no `ra:add_member`)
+3. Instead, they register as services in `ServiceRegistry`
+4. They receive the cluster state (ID, name, peers) but don't participate in consensus
 
 ### Deregistration
 
 On graceful shutdown:
-1. Call `NodeRegistry.deregister()`
-2. Allow in-flight operations to complete
-3. Stop accepting new operations
+- `NeonFS.Client.deregister/0` sends RPC to `ServiceRegistry.deregister/1`
 
-On crash:
-1. Heartbeat timeout triggers automatic deregistration
-2. Other nodes remove the crashed node from their local caches
+On crash / node down:
+- `ServiceRegistry` receives `:nodedown` from `Node.monitor/2`
+- Automatically deregisters the downed node and removes from ETS
+- Persists removal to Ra for cluster-wide consistency
 
-### Health Checking
+## Supervision Trees
 
-Options to evaluate:
-1. **Heartbeat-based**: Nodes send periodic heartbeats to Ra
-2. **Gossip-based**: Nodes exchange health info with neighbours
-3. **Active probing**: Nodes periodically ping each other
+### Non-Core Node (e.g. neonfs_fuse)
 
-Recommendation: Start with heartbeat-based (simplest), evaluate gossip if heartbeat creates too much Ra traffic.
+```
+NeonFS.FUSE.Supervisor
+├── NeonFS.Client.Connection     # Connect to bootstrap nodes
+├── NeonFS.Client.Discovery      # Cache service registry data
+├── NeonFS.Client.CostFunction   # Probe and rank core nodes
+├── NeonFS.FUSE.InodeTable
+├── NeonFS.FUSE.MountSupervisor
+└── NeonFS.FUSE.MountManager
+```
 
-## Migration Path
+### Core Node
 
-### Phase 1 (Current)
-- Static `core_node` configuration
-- Local-first lookup (check if VolumeRegistry is local)
+```
+NeonFS.Core.Supervisor
+├── ...existing children...
+└── NeonFS.Core.ServiceRegistry  # Ra-backed service registry
+```
 
-### Phase 2 (This Spec)
-- Implement `NodeRegistry` backed by Ra
-- Implement basic cost function (load-based)
-- Update `MountManager` to use `ClusterRouter`
+## Service Types
 
-### Phase 3 (Future)
-- Add latency-aware routing
-- Implement read replicas for data operations
-- Add mDNS/DNS-SD for zero-config bootstrap
+Defined in `NeonFS.Client.ServiceType`:
 
-## Open Questions
+| Type | Description |
+|------|-------------|
+| `:core` | Core storage/metadata node (Ra member) |
+| `:fuse` | FUSE filesystem mount node |
+| `:s3` | S3-compatible API gateway (future) |
+| `:docker` | Docker volume plugin (future) |
+| `:csi` | Kubernetes CSI driver (future) |
+| `:cifs` | CIFS/SMB share server (future) |
 
-1. **Heartbeat frequency**: How often should nodes update their metrics? (Proposed: every 5 seconds)
-2. **Stale node timeout**: How long before a non-responsive node is considered dead? (Proposed: 30 seconds)
-3. **Bootstrap mechanism**: How do new nodes discover the cluster initially?
-4. **Cross-datacenter**: Should cost functions consider datacenter locality?
+## Configuration
 
-## References
+### Bootstrap Nodes
 
-- [Ra documentation](https://github.com/rabbitmq/ra)
-- [Erlang `:pg` module](https://www.erlang.org/doc/man/pg.html) - potential alternative to custom registry
-- [HashiCorp Serf](https://www.serf.io/) - gossip-based membership (for reference)
+Non-core nodes need at least one bootstrap node to connect to:
+
+```elixir
+# In neonfs_fuse config
+config :neonfs_fuse, core_node: :neonfs_core@host1
+
+# Or via neonfs_client directly
+config :neonfs_client, bootstrap_nodes: [:neonfs_core@host1, :neonfs_core@host2]
+```
+
+### Timing Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Discovery refresh | 5s | How often Discovery re-queries ServiceRegistry |
+| CostFunction probe | 10s | How often CostFunction measures latency/load |
+| Connection reconnect | 5s | How often Connection retries failed bootstrap nodes |
+| Router max retries | 2 | Number of RPC retry attempts before giving up |
+
+## Testing
+
+### Unit Tests (neonfs_client)
+
+77 tests covering:
+- Service types, info, and metrics data structures
+- Volume and FileMeta shared types (validation, normalisation, round-tripping)
+- GenServer initial states (Connection, Discovery, CostFunction)
+- Router behaviour when no nodes are reachable
+
+### Integration Tests (neonfs_integration)
+
+10 FUSE handler tests exercising the full client stack end-to-end:
+- Connection → Discovery → CostFunction → Router → core node RPC
+- File operations (lookup, getattr, create, read, write, mkdir, readdir, unlink, rmdir, rename)
+- Error handling for unreachable nodes
+
+## Future Work
+
+- **Leader-aware routing**: `CostFunction.select_core_node(prefer_leader: true)` is implemented but leader detection is not yet wired up — currently selects cheapest node regardless
+- **mDNS/DNS-SD**: Zero-configuration bootstrap for local network clusters
+- **Cross-datacenter**: Cost function could incorporate datacenter locality
+- **Service health status**: `ServiceInfo.status` supports `:online`, `:offline`, `:draining` but draining/offline transitions are not yet automated
+- **Read replicas**: Route read-heavy operations to non-leader nodes

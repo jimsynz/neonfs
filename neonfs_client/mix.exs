@@ -1,15 +1,15 @@
-defmodule NeonFS.Core.MixProject do
+defmodule NeonFS.Client.MixProject do
   use Mix.Project
 
   @moduledoc """
-  TODO: Write a description!
+  Shared types and service discovery client for NeonFS cluster members.
   """
   @version "0.1.0"
 
   def project do
     [
       aliases: aliases(),
-      app: :neonfs_core,
+      app: :neonfs_client,
       consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       description: @moduledoc,
@@ -18,7 +18,6 @@ defmodule NeonFS.Core.MixProject do
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       package: package(),
-      releases: releases(),
       start_permanent: Mix.env() == :prod,
       version: @version
     ]
@@ -31,20 +30,10 @@ defmodule NeonFS.Core.MixProject do
     ]
   end
 
-  # Run "mix help compile.app" to learn about applications.
+  # No OTP application module — pure library
   def application do
     [
-      extra_applications: [:logger, :crypto],
-      mod: {NeonFS.Core.Application, []}
-    ]
-  end
-
-  defp releases do
-    [
-      neonfs_core: [
-        include_executables_for: [:unix],
-        steps: [:assemble, :tar]
-      ]
+      extra_applications: [:logger]
     ]
   end
 
@@ -54,12 +43,10 @@ defmodule NeonFS.Core.MixProject do
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
-  # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:neonfs_client, path: "../neonfs_client"},
-      {:ra, "~> 2.13"},
-      {:rustler, "~> 0.37", runtime: false},
+      {:telemetry, "~> 1.2"},
+      {:uuid_v7, "~> 0.6"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

@@ -11,7 +11,7 @@ defmodule NeonFS.CLI.Handler do
   """
 
   alias NeonFS.Cluster.{Init, Invite, Join, State}
-  alias NeonFS.Core.{Volume, VolumeRegistry}
+  alias NeonFS.Core.{ServiceRegistry, Volume, VolumeRegistry}
 
   @doc """
   Returns cluster status information.
@@ -94,18 +94,19 @@ defmodule NeonFS.CLI.Handler do
   ## Parameters
   - `token` - Invite token from existing cluster
   - `via_node` - Node name of existing cluster member (string)
+  - `type` - Service type string (e.g. "core", "fuse"). Defaults to "core".
 
   ## Returns
   - `{:ok, map}` - Success map with cluster information
   - `{:error, reason}` - Error tuple
   """
-  @spec join_cluster(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def join_cluster(token, via_node_str)
-      when is_binary(token) and is_binary(via_node_str) do
-    # Convert node name string to atom
+  @spec join_cluster(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def join_cluster(token, via_node_str, type_str \\ "core")
+      when is_binary(token) and is_binary(via_node_str) and is_binary(type_str) do
     via_node = String.to_atom(via_node_str)
+    type = String.to_existing_atom(type_str)
 
-    case Join.join_cluster(token, via_node) do
+    case Join.join_cluster(token, via_node, type) do
       {:ok, state} ->
         {:ok,
          %{
@@ -114,6 +115,7 @@ defmodule NeonFS.CLI.Handler do
            "created_at" => DateTime.to_iso8601(state.created_at),
            "node_id" => state.this_node.id,
            "node_name" => Atom.to_string(state.this_node.name),
+           "node_type" => Atom.to_string(state.node_type),
            "joined_at" => DateTime.to_iso8601(state.this_node.joined_at),
            "known_peers" =>
              Enum.map(state.known_peers, fn peer ->
@@ -128,6 +130,21 @@ defmodule NeonFS.CLI.Handler do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  Lists all registered services in the cluster.
+
+  ## Returns
+  - `{:ok, [map]}` - List of service info maps
+  """
+  @spec list_services() :: {:ok, [map()]}
+  def list_services do
+    services =
+      ServiceRegistry.list()
+      |> Enum.map(&service_info_to_map/1)
+
+    {:ok, services}
   end
 
   @doc """
@@ -280,15 +297,27 @@ defmodule NeonFS.CLI.Handler do
   # Private helper functions
 
   # Get the FUSE node and verify it's reachable
-  # Checks in order: local node, connected nodes, configured fallback
+  # Checks in order: ServiceRegistry, local node, connected nodes, configured fallback
   defp get_fuse_node do
-    with :not_available <- check_local_fuse(),
+    with :not_found <- discover_fuse_node_from_registry(),
+         :not_available <- check_local_fuse(),
          :not_found <- discover_fuse_node() do
       check_configured_fuse_node()
     else
       :available -> {:ok, Node.self()}
       {:ok, fuse_node} -> {:ok, fuse_node}
     end
+  end
+
+  # Try ServiceRegistry first — this is the authoritative source
+  defp discover_fuse_node_from_registry do
+    case ServiceRegistry.list_by_type(:fuse) do
+      [first | _] -> {:ok, first.node}
+      [] -> :not_found
+    end
+  rescue
+    # ServiceRegistry may not be started yet
+    ArgumentError -> :not_found
   end
 
   # Check if FUSE MountManager is available on the local node
@@ -426,6 +455,16 @@ defmodule NeonFS.CLI.Handler do
       volume_name: mount_info.volume_name,
       mount_point: mount_info.mount_point,
       started_at: DateTime.to_iso8601(mount_info.started_at)
+    }
+  end
+
+  defp service_info_to_map(info) do
+    %{
+      node: Atom.to_string(info.node),
+      type: Atom.to_string(info.type),
+      status: Atom.to_string(info.status),
+      registered_at: DateTime.to_iso8601(info.registered_at),
+      metadata: info.metadata
     }
   end
 

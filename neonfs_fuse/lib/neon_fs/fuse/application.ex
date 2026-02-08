@@ -12,42 +12,42 @@ defmodule NeonFS.FUSE.Application do
 
   @impl true
   def start(_type, _args) do
-    # Connect to core node for service discovery
-    # This makes this FUSE node visible to core via Node.list()
-    connect_to_core_node()
-
     # In test mode, don't start the supervisor - tests use start_supervised
     # for the specific components they need
-    if Application.get_env(:neonfs_fuse, :start_supervisor, true) do
-      Supervisor.start_link()
-    else
-      # Return a minimal supervisor for test mode
-      Elixir.Supervisor.start_link([], strategy: :one_for_one, name: __MODULE__)
+    result =
+      if Application.get_env(:neonfs_fuse, :start_supervisor, true) do
+        Supervisor.start_link()
+      else
+        # Return a minimal supervisor for test mode
+        Elixir.Supervisor.start_link([], strategy: :one_for_one, name: __MODULE__)
+      end
+
+    # Register with the cluster after supervisor is running
+    # (Connection GenServer must be started first)
+    case result do
+      {:ok, _} -> register_with_cluster()
+      _ -> :ok
     end
+
+    result
   end
 
-  defp connect_to_core_node do
-    case Application.get_env(:neonfs_fuse, :core_node) do
-      nil ->
-        Logger.debug("No core_node configured, skipping cluster connection")
+  defp register_with_cluster do
+    # Async registration — don't block startup if core is unreachable
+    spawn(fn ->
+      Process.sleep(500)
 
-      core_node when is_atom(core_node) ->
-        Logger.info("Connecting to core node: #{core_node}")
+      case NeonFS.Client.register(:fuse, %{
+             capabilities: [:mount, :unmount],
+             version: to_string(Application.spec(:neonfs_fuse, :vsn) || "0.0.0")
+           }) do
+        :ok ->
+          Logger.info("Registered as FUSE service with cluster")
 
-        case Node.connect(core_node) do
-          true ->
-            Logger.info("Connected to core node: #{core_node}")
-
-          false ->
-            Logger.warning(
-              "Failed to connect to core node: #{core_node}. " <>
-                "Mount operations from CLI may not work until connection is established."
-            )
-
-          :ignored ->
-            Logger.debug("Node connection ignored (distribution not started)")
-        end
-    end
+        {:error, reason} ->
+          Logger.warning("Failed to register with cluster: #{inspect(reason)}")
+      end
+    end)
   end
 
   @impl true

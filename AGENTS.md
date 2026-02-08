@@ -33,14 +33,25 @@ cargo fmt --check                                 # Format check
 ## Architecture
 
 ```
-neonfs_core/          # Elixir control plane
+neonfs_client/        # Shared types & service discovery (pure Elixir library)
+├── lib/neon_fs/client/
+│   ├── connection.ex     # Bootstrap node connectivity
+│   ├── cost_function.ex  # Latency/load-based node selection
+│   ├── discovery.ex      # Service discovery cache (ETS)
+│   └── router.ex         # RPC routing with failover
+└── lib/neon_fs/core/
+    ├── file_meta.ex      # Shared file metadata type
+    └── volume.ex         # Shared volume type
+
+neonfs_core/          # Elixir control plane (depends on neonfs_client)
 ├── lib/neon_fs/core/
 │   ├── application.ex    # Supervision tree root
+│   ├── service_registry.ex  # Ra-backed service registry
 │   └── core.ex           # Main module
 ├── native/               # Rustler NIFs (via mix rustler.new)
 └── test/
 
-neonfs_fuse/          # FUSE filesystem package
+neonfs_fuse/          # FUSE filesystem package (depends on neonfs_client only)
 ├── lib/neon_fs/fuse/
 │   ├── application.ex
 │   └── fuse.ex
@@ -62,6 +73,17 @@ tasks/                # Implementation task specifications
 ├── README.md         # Task overview & dependency graph
 └── task_NNNN_*.md    # Individual tasks with acceptance criteria
 ```
+
+### Dependency Graph
+
+```
+neonfs_client  ← neonfs_core  (shared types, service registry)
+neonfs_client  ← neonfs_fuse  (service discovery, RPC routing)
+neonfs_core    ← neonfs_integration (all packages for integration tests)
+neonfs_fuse    ← neonfs_integration
+```
+
+neonfs_fuse has **no dependency** on neonfs_core. All communication between FUSE and core nodes happens via Erlang distribution, routed through the `NeonFS.Client.Router` module.
 
 ### Key Design Principles
 - All data flows through Elixir for single code path and consistency
@@ -118,9 +140,18 @@ Always consult these before implementing:
 
 ## Module Naming
 
-- Top-level: `NeonFS.Core.*`, `NeonFS.FUSE.*`, and `NeonFS.Integration.*`
+- Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, and `NeonFS.Integration.*`
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
+
+## Forgejo
+
+This repository is hosted on a Forgejo instance at `harton.dev`. Use the `fj` CLI (not `gh`) for pull requests, issues, and other forge operations:
+```bash
+fj pr create --base main "PR title"    # Create a pull request
+fj pr list                              # List pull requests
+fj issue list                           # List issues
+```
 
 ## Container Building
 
@@ -134,10 +165,20 @@ The `--load` flag is required to load images into the local Docker daemon. Witho
 ## Multi-Node Architecture
 
 neonfs_core and neonfs_fuse run as separate Erlang nodes communicating via distribution:
-- Core node: `neonfs_core@neonfs-core` (storage, metadata, CLI handler)
-- FUSE node: `neonfs_fuse@neonfs-fuse` (FUSE mount operations)
+- Core node: `neonfs_core@neonfs-core` (storage, metadata, CLI handler, service registry)
+- FUSE node: `neonfs_fuse@neonfs-fuse` (FUSE mount operations, routes to core via neonfs_client)
 - CLI connects to core node, core makes RPC calls to FUSE node for mount operations
 - Ensure matching `RELEASE_COOKIE` across all nodes
+
+### Service Discovery
+
+Non-core nodes (FUSE, S3, Docker, etc.) use `neonfs_client` to discover and communicate with core nodes:
+- `NeonFS.Client.Connection` — connects to bootstrap nodes via `Node.connect/1`
+- `NeonFS.Client.Discovery` — queries `NeonFS.Core.ServiceRegistry` on core nodes, caches in local ETS
+- `NeonFS.Client.CostFunction` — measures latency and load to select optimal core node
+- `NeonFS.Client.Router` — routes RPC calls with automatic failover
+
+Non-core nodes join the cluster using the same invite token mechanism but skip Ra membership. They register as services in `NeonFS.Core.ServiceRegistry`, which is backed by Ra consensus and replicated across core nodes.
 
 ## GenServer Persistence Patterns
 
@@ -167,7 +208,7 @@ Before declaring any implementation phase complete:
 3. **Verify inter-service communication works**:
    - CLI → Core (via Erlang distribution)
    - Core → FUSE (via RPC/distribution)
-   - FUSE → Core (for data operations)
+   - FUSE → Core (via neonfs_client Router/Discovery)
 4. **Test failure scenarios**: node restart, node failure, recovery
 
 Unit tests passing is necessary but NOT sufficient. Integration between:
@@ -179,5 +220,6 @@ must all work via the peer-based integration tests before moving to the next pha
 
 **Common integration issues to check:**
 - Erlang nodes not connected (need explicit `Node.connect/1` or matching cookies)
-- Service discovery failing (check `Node.list()` shows expected peers)
-- RPC calls returning `{:badrpc, _}` (nodes not reachable)
+- Service discovery failing (check `NeonFS.Client.Discovery.get_core_nodes/0` or `Node.list()`)
+- RPC calls returning `{:badrpc, _}` or `{:error, :all_nodes_unreachable}` (nodes not reachable)
+- Client infrastructure not ready (Connection, Discovery, CostFunction need time to probe after startup)

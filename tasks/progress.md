@@ -1310,3 +1310,45 @@
   - Phase completion requires full integration testing, not just unit tests passing
   - Always run `acceptance-test-containers.sh` before declaring a phase complete
 ---
+
+## 2026-02-08 - Service Discovery & Decouple neonfs_fuse from neonfs_core
+- What was implemented:
+  - Created `neonfs_client` package — pure Elixir library with shared types (Volume, FileMeta) and service discovery infrastructure (Connection, Discovery, CostFunction, Router)
+  - Added Ra-backed `ServiceRegistry` to neonfs_core with ETS caching, node monitoring, and automatic deregistration on node down
+  - Extended `MetadataStateMachine` from v1 to v2 with service registry commands (`register_service`, `deregister_service`)
+  - Extended `Cluster.Join` to support non-core node types (fuse, s3, etc.) which register as services without joining Ra
+  - Fully decoupled neonfs_fuse from neonfs_core — all core communication now routes through `NeonFS.Client.core_call/3`
+  - Added 77 unit tests for neonfs_client and 10 FUSE handler integration tests in neonfs_integration
+  - Updated Containerfiles, bake.hcl, CI workflow, and AGENTS.md for the new package structure
+  - Updated spec/service_discovery.md to document the implemented architecture
+- Files changed:
+  - `neonfs_client/` (new package — 10 lib modules, 9 test files, mix.exs, .check.exs)
+  - `neonfs_core/lib/neon_fs/core/service_registry.ex` (new — Ra-backed registry)
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (v1→v2, service commands)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added ServiceRegistry child)
+  - `neonfs_core/lib/neon_fs/cluster/join.ex` (non-core node join support)
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` (added node_type field)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (join_cluster/3, list_services, fuse discovery via registry)
+  - `neonfs_core/mix.exs` (added neonfs_client dependency)
+  - `neonfs_fuse/mix.exs` (replaced neonfs_core dep with neonfs_client)
+  - `neonfs_fuse/lib/neon_fs/fuse/supervisor.ex` (added client GenServers)
+  - `neonfs_fuse/lib/neon_fs/fuse/application.ex` (replaced core connect with cluster register)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (replaced direct core calls with core_call wrappers)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_manager.ex` (replaced VolumeRegistry with core_call)
+  - `neonfs_fuse/test/` (removed handler_test.exs, updated supervisor_test.exs and test_helper.exs)
+  - `neonfs_integration/test/integration/fuse_handler_test.exs` (new — 10 integration tests)
+  - `containers/Containerfile.core` (added neonfs_client build context)
+  - `containers/Containerfile.fuse` (replaced neonfs_core context with neonfs_client)
+  - `bake.hcl` (added client context to core and fuse targets)
+  - `.forgejo/workflows/ci.yml` (added neonfs_client job, updated caches)
+  - `AGENTS.md` (updated architecture, added service discovery docs, added fj CLI)
+  - `spec/service_discovery.md` (rewritten to document implemented architecture)
+- **Learnings for future iterations:**
+  - `ServiceInfo.from_map/1` must handle both structs and maps — RPC returns structs, not maps. Use `Map.get/2` not bracket access on structs
+  - All `with` blocks in handler.ex need `{:error, reason}` catch-all clauses — remote calls can return unexpected errors like `:all_nodes_unreachable`
+  - Client infrastructure (Connection, Discovery, CostFunction) needs time to probe after startup. Integration tests must `wait_until` Discovery has cached nodes
+  - `Node.monitor/2` returns a reference but takes `(node_atom, flag)` — use `Process.demonitor(ref)` to cancel, not `Node.monitor(ref, false)`
+  - `:ets.lookup/2` always returns a list — guard clauses like `when is_list(entries)` with a `_ -> []` fallback trigger dialyzer warnings
+  - When removing a path dependency (neonfs_core from neonfs_fuse), run `mix deps.clean --unused --unlock` to clean stale lockfile entries
+  - Use `fj` CLI (not `gh`) for Forgejo-hosted repos — e.g. `fj pr create --base main "title"`
+---

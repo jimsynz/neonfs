@@ -28,7 +28,6 @@ defmodule NeonFS.FUSE.Handler do
   import Bitwise
   require Logger
 
-  alias NeonFS.Core.{FileIndex, ReadOperation, WriteOperation}
   alias NeonFS.FUSE.{InodeTable, Native}
 
   @default_volume "default"
@@ -94,13 +93,17 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, file} <- FileIndex.get_by_path(volume_id, child_path) do
+         {:ok, file} <- file_index_get_by_path(volume_id, child_path) do
       {:ok, inode} = InodeTable.allocate_inode(volume_id, file.path)
 
       {"lookup_ok", %{"ino" => inode, "size" => file.size, "kind" => file_kind(file.mode)}}
     else
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, reason} ->
+        Logger.warning("Lookup failed: #{inspect(reason)}")
+        {"error", %{"errno" => errno(:eio)}}
     end
   end
 
@@ -114,6 +117,10 @@ defmodule NeonFS.FUSE.Handler do
     else
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, reason} ->
+        Logger.warning("Getattr failed: #{inspect(reason)}")
+        {"error", %{"errno" => errno(:eio)}}
     end
   end
 
@@ -124,7 +131,7 @@ defmodule NeonFS.FUSE.Handler do
     size = params["size"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, data} <- ReadOperation.read_file(volume_id, path, offset: offset, length: size) do
+         {:ok, data} <- read_file(volume_id, path, offset: offset, length: size) do
       {"read_ok", %{"data" => data}}
     else
       {:error, :not_found} ->
@@ -143,9 +150,9 @@ defmodule NeonFS.FUSE.Handler do
     data = params["data"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, existing_file} <- FileIndex.get_by_path(volume_id, path),
+         {:ok, existing_file} <- file_index_get_by_path(volume_id, path),
          merged_data <- merge_write_data(existing_file, offset, data),
-         {:ok, _file} <- WriteOperation.write_file(volume_id, path, merged_data) do
+         {:ok, _file} <- write_file(volume_id, path, merged_data) do
       {"write_ok", %{"size" => byte_size(data)}}
     else
       {:error, :not_found} ->
@@ -173,6 +180,10 @@ defmodule NeonFS.FUSE.Handler do
     else
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, reason} ->
+        Logger.warning("Readdir failed: #{inspect(reason)}")
+        {"error", %{"errno" => errno(:eio)}}
     end
   end
 
@@ -184,8 +195,7 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <-
-           WriteOperation.write_file(volume_id, child_path, <<>>, mode: @default_mode),
+         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: @default_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       # Allocate file handle (for now, just use inode as handle)
       fh = inode
@@ -206,8 +216,7 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          child_path <- build_child_path(parent_path, name),
-         # Create directory with S_IFDIR mode bit (no trailing slash needed)
-         {:ok, _file} <- WriteOperation.write_file(volume_id, child_path, <<>>, mode: @dir_mode),
+         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: @dir_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "directory", "fh" => 0}}
     else
@@ -225,8 +234,8 @@ defmodule NeonFS.FUSE.Handler do
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          child_path <- build_child_path(parent_path, name),
          {:ok, inode} <- InodeTable.get_inode(volume_id, child_path),
-         {:ok, file} <- FileIndex.get_by_path(volume_id, child_path),
-         :ok <- FileIndex.delete(file.id),
+         {:ok, file} <- file_index_get_by_path(volume_id, child_path),
+         :ok <- file_index_delete(file.id),
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
@@ -235,6 +244,10 @@ defmodule NeonFS.FUSE.Handler do
 
       {:error, :cannot_release_root} ->
         {"error", %{"errno" => errno(:eacces)}}
+
+      {:error, reason} ->
+        Logger.warning("Unlink failed: #{inspect(reason)}")
+        {"error", %{"errno" => errno(:eio)}}
     end
   end
 
@@ -248,8 +261,8 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, inode} <- InodeTable.get_inode(volume_id, child_path),
          {:ok, files} <- list_directory(volume_id, child_path),
          true <- Enum.empty?(files) || {:error, :directory_not_empty},
-         {:ok, file} <- FileIndex.get_by_path(volume_id, child_path),
-         :ok <- FileIndex.delete(file.id),
+         {:ok, file} <- file_index_get_by_path(volume_id, child_path),
+         :ok <- file_index_delete(file.id),
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
@@ -261,6 +274,10 @@ defmodule NeonFS.FUSE.Handler do
 
       {:error, :cannot_release_root} ->
         {"error", %{"errno" => errno(:eacces)}}
+
+      {:error, reason} ->
+        Logger.warning("Rmdir failed: #{inspect(reason)}")
+        {"error", %{"errno" => errno(:eio)}}
     end
   end
 
@@ -288,9 +305,9 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, {^volume_id, new_parent_path}} <- resolve_inode(new_parent, state),
          old_path <- build_child_path(old_parent_path, old_name),
          new_path <- build_child_path(new_parent_path, new_name),
-         {:ok, file} <- FileIndex.get_by_path(volume_id, old_path),
+         {:ok, file} <- file_index_get_by_path(volume_id, old_path),
          {:ok, old_inode} <- InodeTable.get_inode(volume_id, old_path),
-         {:ok, _updated_file} <- FileIndex.update(file.id, path: new_path),
+         {:ok, _updated_file} <- file_index_update(file.id, path: new_path),
          :ok <- InodeTable.release_inode(old_inode),
          {:ok, _new_inode} <- InodeTable.allocate_inode(volume_id, new_path) do
       {"ok", %{}}
@@ -300,6 +317,10 @@ defmodule NeonFS.FUSE.Handler do
 
       {:error, :cannot_release_root} ->
         {"error", %{"errno" => errno(:eacces)}}
+
+      {:error, reason} ->
+        Logger.warning("Rename failed: #{inspect(reason)}")
+        {"error", %{"errno" => errno(:eio)}}
     end
   end
 
@@ -308,11 +329,10 @@ defmodule NeonFS.FUSE.Handler do
     ino = params["ino"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, file} <- FileIndex.get_by_path(volume_id, path) do
-      # Build update list from params
+         {:ok, file} <- file_index_get_by_path(volume_id, path) do
       updates = build_setattr_updates(params)
 
-      case FileIndex.update(file.id, updates) do
+      case file_index_update(file.id, updates) do
         {:ok, updated_file} ->
           {"attr_ok",
            %{"ino" => ino, "size" => updated_file.size, "kind" => file_kind(updated_file.mode)}}
@@ -324,6 +344,10 @@ defmodule NeonFS.FUSE.Handler do
     else
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, reason} ->
+        Logger.warning("Setattr failed: #{inspect(reason)}")
+        {"error", %{"errno" => errno(:eio)}}
     end
   end
 
@@ -363,13 +387,12 @@ defmodule NeonFS.FUSE.Handler do
   end
 
   defp fetch_file_or_root(volume_id, path) do
-    FileIndex.get_by_path(volume_id, path)
+    file_index_get_by_path(volume_id, path)
   end
 
   # List directory contents, returning [{name, full_path, mode}, ...]
   defp list_directory(volume_id, "/") do
-    # FileIndex.list_volume returns a list directly (not {:ok, list})
-    files = FileIndex.list_volume(volume_id)
+    files = file_index_list_volume(volume_id)
 
     entries =
       files
@@ -383,17 +406,14 @@ defmodule NeonFS.FUSE.Handler do
   end
 
   defp list_directory(volume_id, path) do
-    # Directories are stored without trailing slash (normalized)
     dir_path = String.trim_trailing(path, "/")
 
-    case FileIndex.get_by_path(volume_id, dir_path) do
+    case file_index_get_by_path(volume_id, dir_path) do
       {:ok, _dir} ->
-        # FileIndex.list_dir returns a list directly
-        files = FileIndex.list_dir(volume_id, dir_path)
+        files = file_index_list_dir(volume_id, dir_path)
 
         entries =
           Enum.map(files, fn file ->
-            # Get relative path from directory
             relative = String.trim_leading(file.path, dir_path <> "/")
             name = Path.basename(relative)
             {name, file.path, file.mode}
@@ -425,8 +445,7 @@ defmodule NeonFS.FUSE.Handler do
 
   # Merge write data at offset with existing file data
   defp merge_write_data(file, offset, new_data) do
-    # Read existing data
-    case ReadOperation.read_file(file.volume_id, file.path) do
+    case read_file(file.volume_id, file.path) do
       {:ok, existing} ->
         # Pad if offset is beyond current size
         padded =
@@ -477,6 +496,45 @@ defmodule NeonFS.FUSE.Handler do
   defp maybe_add_setattr_time(updates, key, {sec, nsec}) do
     dt = DateTime.from_unix!(sec * 1_000_000_000 + nsec, :nanosecond)
     [{key, dt} | updates]
+  end
+
+  # RPC wrappers — route all core operations through the client
+  defp core_call(module, function, args) do
+    NeonFS.Client.core_call(module, function, args)
+  end
+
+  defp file_index_get_by_path(volume_id, path) do
+    core_call(NeonFS.Core.FileIndex, :get_by_path, [volume_id, path])
+  end
+
+  defp file_index_list_volume(volume_id) do
+    case core_call(NeonFS.Core.FileIndex, :list_volume, [volume_id]) do
+      files when is_list(files) -> files
+      {:error, _} -> []
+    end
+  end
+
+  defp file_index_list_dir(volume_id, path) do
+    case core_call(NeonFS.Core.FileIndex, :list_dir, [volume_id, path]) do
+      files when is_list(files) -> files
+      {:error, _} -> []
+    end
+  end
+
+  defp file_index_delete(file_id) do
+    core_call(NeonFS.Core.FileIndex, :delete, [file_id])
+  end
+
+  defp file_index_update(file_id, updates) do
+    core_call(NeonFS.Core.FileIndex, :update, [file_id, updates])
+  end
+
+  defp read_file(volume_id, path, opts \\ []) do
+    core_call(NeonFS.Core.ReadOperation, :read_file, [volume_id, path, opts])
+  end
+
+  defp write_file(volume_id, path, data, opts \\ []) do
+    core_call(NeonFS.Core.WriteOperation, :write_file, [volume_id, path, data, opts])
   end
 
   # Convert error reason to errno code

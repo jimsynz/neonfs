@@ -7,10 +7,13 @@ defmodule NeonFS.Cluster.Join do
   - Joining a cluster using an invite token
   """
 
+  alias NeonFS.Client.{ServiceInfo, ServiceType}
   alias NeonFS.Cluster.{Invite, State}
-  alias NeonFS.Core.RaServer
+  alias NeonFS.Core.{RaServer, ServiceRegistry}
 
   require Logger
+
+  import NeonFS.Client.ServiceType, only: [is_service_type: 1]
 
   @cluster_name :neonfs_meta
 
@@ -27,6 +30,8 @@ defmodule NeonFS.Cluster.Join do
   ## Parameters
   - `token` - The invite token provided by the existing cluster
   - `via_node` - The node name of an existing cluster member (e.g., :neonfs_core@node1)
+  - `type` - Service type for this node (default: `:core`). Non-core types
+    skip Ra cluster membership but are registered in ServiceRegistry.
 
   ## Returns
   - `{:ok, state}` on successful join
@@ -36,19 +41,24 @@ defmodule NeonFS.Cluster.Join do
 
       iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", :neonfs_core@node1)
       {:ok, %NeonFS.Cluster.State{}}
+
+      iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", :neonfs_core@node1, :fuse)
+      {:ok, %NeonFS.Cluster.State{}}
   """
-  @spec join_cluster(String.t(), atom()) :: {:ok, State.t()} | {:error, term()}
-  def join_cluster(token, via_node) when is_binary(token) and is_atom(via_node) do
+  @spec join_cluster(String.t(), atom(), ServiceType.t()) ::
+          {:ok, State.t()} | {:error, term()}
+  def join_cluster(token, via_node, type \\ :core)
+      when is_binary(token) and is_atom(via_node) and is_service_type(type) do
     this_node = Node.self()
 
     with :ok <- validate_not_in_cluster(),
-         {:ok, cluster_info} <- request_join(via_node, token, this_node),
-         {:ok, state} <- build_cluster_state(cluster_info),
+         {:ok, cluster_info} <- request_join(via_node, token, this_node, type),
+         {:ok, state} <- build_cluster_state(cluster_info, type),
          :ok <- State.save(state) do
-      # Schedule Ra cluster join to happen asynchronously AFTER this RPC completes.
-      # The Rust CLI's erl_rpc crate crashes on RegSend messages (from Logger),
-      # so we must ensure all logging happens after the RPC connection is closed.
-      schedule_ra_join_async(state)
+      # Only core nodes join the Ra cluster
+      if ServiceType.core?(type) do
+        schedule_ra_join_async(state)
+      end
 
       {:ok, state}
     end
@@ -83,18 +93,24 @@ defmodule NeonFS.Cluster.Join do
   ## Parameters
   - `token` - The invite token from the joining node
   - `joining_node` - The node name of the joining node
+  - `type` - Service type of the joining node (default: `:core`). Non-core
+    types are registered in ServiceRegistry but not added to Ra cluster.
 
   ## Returns
   - `{:ok, cluster_info}` containing cluster details for the joining node
   - `{:error, reason}` on failure
   """
-  @spec accept_join(String.t(), atom()) :: {:ok, map()} | {:error, term()}
-  def accept_join(token, joining_node) when is_binary(token) and is_atom(joining_node) do
+  @spec accept_join(String.t(), atom(), ServiceType.t()) :: {:ok, map()} | {:error, term()}
+  def accept_join(token, joining_node, type \\ :core)
+      when is_binary(token) and is_atom(joining_node) and is_service_type(type) do
     with :ok <- Invite.validate_invite(token),
          {:ok, state} <- State.load(),
-         {:ok, updated_state} <- add_peer_to_state(state, joining_node),
+         {:ok, updated_state} <- add_peer_to_state(state, joining_node, type),
          :ok <- State.save(updated_state),
-         :ok <- add_to_ra_cluster(joining_node) do
+         :ok <- maybe_add_to_ra_cluster(joining_node, type) do
+      # Register in ServiceRegistry for all node types
+      register_service(joining_node, type)
+
       cluster_info = %{
         cluster_id: state.cluster_id,
         cluster_name: state.cluster_name,
@@ -113,7 +129,7 @@ defmodule NeonFS.Cluster.Join do
         ra_cluster_members: Enum.map(updated_state.ra_cluster_members, &Atom.to_string/1)
       }
 
-      Logger.info("Accepted join request from #{inspect(joining_node)}")
+      Logger.info("Accepted #{type} join request from #{inspect(joining_node)}")
       {:ok, cluster_info}
     end
   end
@@ -128,8 +144,8 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp request_join(via_node, token, this_node) do
-    case :rpc.call(via_node, __MODULE__, :accept_join, [token, this_node]) do
+  defp request_join(via_node, token, this_node, type) do
+    case :rpc.call(via_node, __MODULE__, :accept_join, [token, this_node, type]) do
       {:ok, cluster_info} ->
         {:ok, cluster_info}
 
@@ -141,7 +157,7 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp build_cluster_state(cluster_info) do
+  defp build_cluster_state(cluster_info, type) do
     this_node = Node.self()
     node_id = generate_node_id()
 
@@ -174,6 +190,14 @@ defmodule NeonFS.Cluster.Join do
         parse_atom(member)
       end)
 
+    # Non-core nodes don't add themselves to ra_cluster_members
+    ra_cluster_members =
+      if ServiceType.core?(type) do
+        [this_node | ra_members]
+      else
+        ra_members
+      end
+
     state = %State{
       cluster_id: cluster_info.cluster_id,
       cluster_name: cluster_info.cluster_name,
@@ -181,7 +205,8 @@ defmodule NeonFS.Cluster.Join do
       master_key: cluster_info.master_key,
       this_node: node_info,
       known_peers: known_peers,
-      ra_cluster_members: [this_node | ra_members]
+      ra_cluster_members: ra_cluster_members,
+      node_type: type
     }
 
     {:ok, state}
@@ -207,7 +232,7 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp add_peer_to_state(%State{} = state, joining_node) do
+  defp add_peer_to_state(%State{} = state, joining_node, type) do
     node_id = generate_node_id()
 
     peer_info = %{
@@ -216,13 +241,43 @@ defmodule NeonFS.Cluster.Join do
       last_seen: DateTime.utc_now()
     }
 
+    # Only core nodes are added to ra_cluster_members
+    ra_cluster_members =
+      if ServiceType.core?(type) do
+        [joining_node | state.ra_cluster_members]
+      else
+        state.ra_cluster_members
+      end
+
     updated_state = %{
       state
       | known_peers: [peer_info | state.known_peers],
-        ra_cluster_members: [joining_node | state.ra_cluster_members]
+        ra_cluster_members: ra_cluster_members
     }
 
     {:ok, updated_state}
+  end
+
+  defp maybe_add_to_ra_cluster(joining_node, type) do
+    if ServiceType.core?(type) do
+      add_to_ra_cluster(joining_node)
+    else
+      :ok
+    end
+  end
+
+  defp register_service(joining_node, type) do
+    info = ServiceInfo.new(joining_node, type)
+
+    case ServiceRegistry.register(info) do
+      :ok ->
+        Logger.info("Registered #{type} service for #{inspect(joining_node)}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "Failed to register service for #{inspect(joining_node)}: #{inspect(reason)}"
+        )
+    end
   end
 
   defp add_to_ra_cluster(joining_node) do

@@ -8,6 +8,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   - User and group definitions
   - Segment assignments
   - Active write sessions
+  - Service registry (nodes and their service types)
 
   For Phase 2, this provides the foundation for distributed consensus.
   Future phases will expand this to handle full cluster coordination.
@@ -29,11 +30,16 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:put_file, file_meta :: map()}
           | {:update_file, file_id :: binary(), updates :: map()}
           | {:delete_file, file_id :: binary()}
+          | {:register_service, service_info :: map()}
+          | {:deregister_service, node()}
+          | {:update_service_status, node(), atom()}
+          | {:update_service_metrics, node(), map()}
 
   @type state :: %{
           data: %{optional(term()) => term()},
           chunks: %{optional(binary()) => map()},
           files: %{optional(binary()) => map()},
+          services: %{optional(node()) => map()},
           volumes: %{optional(binary()) => map()},
           version: non_neg_integer()
         }
@@ -47,6 +53,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       data: %{},
       chunks: %{},
       files: %{},
+      services: %{},
       volumes: %{},
       version: 0
     }
@@ -89,11 +96,16 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   # Handle Ra builtin command for machine version upgrades
-  def apply(_meta, {:machine_version, from_version, to_version}, state) do
-    # Ra sends this command when upgrading the state machine version
-    # For now, we don't need to migrate state, just acknowledge the upgrade
+  def apply(_meta, {:machine_version, 1, 2}, state) do
     require Logger
+    Logger.info("Ra machine version upgrade: 1 -> 2 (adding services registry)")
 
+    new_state = Map.put_new(state, :services, %{})
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, from_version, to_version}, state) do
+    require Logger
     Logger.info("Ra machine version upgrade: #{from_version} -> #{to_version}")
 
     {state, :ok, []}
@@ -313,6 +325,81 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  # Service registry commands
+
+  def apply(_meta, {:register_service, service_info}, state) do
+    services = Map.get(state, :services, %{})
+    node = service_info.node
+    new_services = Map.put(services, node, service_info)
+    new_state = %{state | services: new_services, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :register_service],
+      %{version: new_state.version},
+      %{node: node, type: service_info.type}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:deregister_service, node}, state) do
+    services = Map.get(state, :services, %{})
+    new_services = Map.delete(services, node)
+    new_state = %{state | services: new_services, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :deregister_service],
+      %{version: new_state.version},
+      %{node: node}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:update_service_status, node, status}, state) do
+    services = Map.get(state, :services, %{})
+
+    case Map.get(services, node) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      service_info ->
+        updated = Map.put(service_info, :status, status)
+        new_services = Map.put(services, node, updated)
+        new_state = %{state | services: new_services, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :update_service_status],
+          %{version: new_state.version},
+          %{node: node, status: status}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:update_service_metrics, node, metrics}, state) do
+    services = Map.get(state, :services, %{})
+
+    case Map.get(services, node) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      service_info ->
+        updated = Map.put(service_info, :metrics, metrics)
+        new_services = Map.put(services, node, updated)
+        new_state = %{state | services: new_services, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :update_service_metrics],
+          %{version: new_state.version},
+          %{node: node}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
   @doc """
   Handle state transitions. Called when the Ra server enters a new state.
   """
@@ -338,7 +425,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 1
+  def version, do: 2
 
   @doc """
   Return the module to handle a specific state machine version.
