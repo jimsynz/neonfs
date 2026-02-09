@@ -303,6 +303,161 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "create_volume/2 with durability strings" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "parses replicate:3 durability string" do
+      vol_name = "rep-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "replicate:3"}
+      assert {:ok, volume} = Handler.create_volume(vol_name, config)
+      assert volume.durability == %{type: :replicate, factor: 3, min_copies: 2}
+      assert volume.durability_display == "replicate:3"
+    end
+
+    test "parses replicate:1 durability string" do
+      vol_name = "rep1-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "replicate:1"}
+      assert {:ok, volume} = Handler.create_volume(vol_name, config)
+      assert volume.durability == %{type: :replicate, factor: 1, min_copies: 1}
+      assert volume.durability_display == "replicate:1"
+    end
+
+    test "parses erasure:10:4 durability string" do
+      vol_name = "ec-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:10:4"}
+      assert {:ok, volume} = Handler.create_volume(vol_name, config)
+      assert volume.durability == %{type: :erasure, data_chunks: 10, parity_chunks: 4}
+      assert volume.durability_display == "erasure:10+4 (1.40x overhead)"
+    end
+
+    test "parses erasure:4:2 durability string" do
+      vol_name = "ec2-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:4:2"}
+      assert {:ok, volume} = Handler.create_volume(vol_name, config)
+      assert volume.durability == %{type: :erasure, data_chunks: 4, parity_chunks: 2}
+      assert volume.durability_display == "erasure:4+2 (1.50x overhead)"
+    end
+
+    test "parses erasure:8:3 durability string" do
+      vol_name = "ec3-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:8:3"}
+      assert {:ok, volume} = Handler.create_volume(vol_name, config)
+      assert volume.durability == %{type: :erasure, data_chunks: 8, parity_chunks: 3}
+      assert volume.durability_display == "erasure:8+3 (1.38x overhead)"
+    end
+
+    test "rejects erasure:0:4 (data_chunks < 1)" do
+      vol_name = "bad-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:0:4"}
+      assert {:error, msg} = Handler.create_volume(vol_name, config)
+      assert msg =~ "Invalid durability format"
+    end
+
+    test "rejects erasure:4:0 (parity_chunks < 1)" do
+      vol_name = "bad2-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:4:0"}
+      assert {:error, msg} = Handler.create_volume(vol_name, config)
+      assert msg =~ "Invalid durability format"
+    end
+
+    test "rejects erasure:abc (malformed)" do
+      vol_name = "bad3-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:abc"}
+      assert {:error, msg} = Handler.create_volume(vol_name, config)
+      assert msg =~ "Invalid durability format"
+    end
+
+    test "rejects replicate:0 (factor < 1)" do
+      vol_name = "bad4-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "replicate:0"}
+      assert {:error, msg} = Handler.create_volume(vol_name, config)
+      assert msg =~ "Invalid durability format"
+    end
+
+    test "rejects replicate:abc (non-integer)" do
+      vol_name = "bad5-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "replicate:abc"}
+      assert {:error, msg} = Handler.create_volume(vol_name, config)
+      assert msg =~ "Invalid durability format"
+    end
+
+    test "rejects unknown durability format" do
+      vol_name = "bad6-vol-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "mirror:3"}
+      assert {:error, msg} = Handler.create_volume(vol_name, config)
+      assert msg =~ "Invalid durability format"
+    end
+
+    test "default durability when no durability specified" do
+      vol_name = "default-vol-#{:rand.uniform(999_999)}"
+      assert {:ok, volume} = Handler.create_volume(vol_name, %{})
+      assert volume.durability == %{type: :replicate, factor: 3, min_copies: 2}
+      assert volume.durability_display == "replicate:3"
+    end
+
+    test "map durability config passes through unchanged" do
+      vol_name = "map-vol-#{:rand.uniform(999_999)}"
+      dur = %{type: :erasure, data_chunks: 6, parity_chunks: 3}
+      config = %{"durability" => dur}
+      assert {:ok, volume} = Handler.create_volume(vol_name, config)
+      assert volume.durability == dur
+      assert volume.durability_display == "erasure:6+3 (1.50x overhead)"
+    end
+  end
+
+  describe "volume display with erasure config" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "get_volume returns durability_display for erasure volume" do
+      vol_name = "disp-ec-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:10:4"}
+      {:ok, _} = Handler.create_volume(vol_name, config)
+
+      assert {:ok, vol} = Handler.get_volume(vol_name)
+      assert vol.durability_display == "erasure:10+4 (1.40x overhead)"
+    end
+
+    test "list_volumes includes durability_display" do
+      vol_name = "list-ec-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "erasure:4:2"}
+      {:ok, _} = Handler.create_volume(vol_name, config)
+
+      assert {:ok, volumes} = Handler.list_volumes()
+      vol = Enum.find(volumes, fn v -> v.name == vol_name end)
+      assert vol.durability_display == "erasure:4+2 (1.50x overhead)"
+    end
+
+    test "list_volumes shows mixed durability types" do
+      rep_name = "mix-rep-#{:rand.uniform(999_999)}"
+      ec_name = "mix-ec-#{:rand.uniform(999_999)}"
+
+      {:ok, _} = Handler.create_volume(rep_name, %{"durability" => "replicate:3"})
+      {:ok, _} = Handler.create_volume(ec_name, %{"durability" => "erasure:10:4"})
+
+      assert {:ok, volumes} = Handler.list_volumes()
+
+      rep_vol = Enum.find(volumes, fn v -> v.name == rep_name end)
+      ec_vol = Enum.find(volumes, fn v -> v.name == ec_name end)
+
+      assert rep_vol.durability_display == "replicate:3"
+      assert ec_vol.durability_display == "erasure:10+4 (1.40x overhead)"
+    end
+  end
+
   describe "mount/3" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)

@@ -322,5 +322,37 @@ defmodule NeonFS.Core.VolumeTest do
       vol = %{Volume.new("x") | verification: %{on_read: :sampling, sampling_rate: 0.5}}
       assert :ok = Volume.validate(vol)
     end
+
+    test "accepts erasure durability config" do
+      vol = %{Volume.new("x") | durability: %{type: :erasure, data_chunks: 10, parity_chunks: 4}}
+      assert :ok = Volume.validate(vol)
+    end
+
+    test "rejects erasure with zero data_chunks" do
+      vol = %{Volume.new("x") | durability: %{type: :erasure, data_chunks: 0, parity_chunks: 4}}
+      assert {:error, "invalid durability" <> _} = Volume.validate(vol)
+    end
+
+    test "rejects erasure with zero parity_chunks" do
+      vol = %{Volume.new("x") | durability: %{type: :erasure, data_chunks: 10, parity_chunks: 0}}
+      assert {:error, "invalid durability" <> _} = Volume.validate(vol)
+    end
+
+    test "rejects unknown durability type" do
+      vol = %{Volume.new("x") | durability: %{type: :unknown}}
+      assert {:error, "invalid durability" <> _} = Volume.validate(vol)
+    end
+  end
+
+  describe "erasure?/1" do
+    test "returns true for erasure durability" do
+      vol = %{Volume.new("x") | durability: %{type: :erasure, data_chunks: 10, parity_chunks: 4}}
+      assert Volume.erasure?(vol)
+    end
+
+    test "returns false for replicate durability" do
+      vol = Volume.new("x")
+      refute Volume.erasure?(vol)
+    end
   end
 end

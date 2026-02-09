@@ -9,11 +9,17 @@ defmodule NeonFS.Core.Volume do
 
   alias __MODULE__
 
-  @type durability_config :: %{
-          type: :replicate,
-          factor: pos_integer(),
-          min_copies: pos_integer()
-        }
+  @type durability_config ::
+          %{
+            type: :replicate,
+            factor: pos_integer(),
+            min_copies: pos_integer()
+          }
+          | %{
+              type: :erasure,
+              data_chunks: pos_integer(),
+              parity_chunks: pos_integer()
+            }
 
   @type compression_config :: %{
           algorithm: :zstd | :none,
@@ -224,6 +230,13 @@ defmodule NeonFS.Core.Volume do
   end
 
   @doc """
+  Returns true if the volume uses erasure coding durability.
+  """
+  @spec erasure?(t()) :: boolean()
+  def erasure?(%Volume{durability: %{type: :erasure}}), do: true
+  def erasure?(%Volume{}), do: false
+
+  @doc """
   Validates a volume configuration.
 
   Returns `:ok` if valid, or `{:error, reason}` if invalid.
@@ -266,8 +279,15 @@ defmodule NeonFS.Core.Volume do
     :ok
   end
 
+  defp validate_durability(%{type: :erasure, data_chunks: dc, parity_chunks: pc})
+       when is_integer(dc) and dc >= 1 and is_integer(pc) and pc >= 1 do
+    :ok
+  end
+
   defp validate_durability(_),
-    do: {:error, "invalid durability: factor >= 1, min_copies >= 1 and <= factor"}
+    do:
+      {:error,
+       "invalid durability: replicate requires factor >= 1, min_copies >= 1 and <= factor; erasure requires data_chunks >= 1, parity_chunks >= 1"}
 
   defp validate_write_ack(ack) when ack in [:local, :quorum, :all], do: :ok
   defp validate_write_ack(_), do: {:error, "write_ack must be :local, :quorum, or :all"}

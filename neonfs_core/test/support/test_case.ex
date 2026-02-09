@@ -161,6 +161,15 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts StripeIndex.
+  """
+  def start_stripe_index do
+    stop_if_running(NeonFS.Core.StripeIndex)
+    cleanup_ets_table(:stripe_index)
+    start_supervised!(NeonFS.Core.StripeIndex, restart: :temporary)
+  end
+
+  @doc """
   Starts VolumeRegistry.
   """
   def start_volume_registry do
@@ -305,7 +314,8 @@ defmodule NeonFS.TestCase do
       :volumes_by_name,
       :file_index_by_id,
       :file_index_by_path,
-      :chunk_index
+      :chunk_index,
+      :stripe_index
     ]
 
     for table <- tables do

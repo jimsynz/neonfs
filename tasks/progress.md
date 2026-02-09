@@ -11,6 +11,7 @@
 - Rustler encodes `Result<(), E>` as `{:ok, {}}` not `:ok` - adjust Elixir specs accordingly
 - Volume config uses nested maps: `volume.tiering.initial_tier` (not `volume.initial_tier`), `volume.caching.*`, and `volume.io_weight`
 - Ra machine version migrations: wrap old fields into new structures with defaults, handle both old and new format in deserializers
+- `solana-reed-solomon-erasure` v4.0.1 is yanked — use `4.0.1-3` (pre-release); `++` has higher precedence than `|>` in Elixir
 
 ---
 
@@ -1713,4 +1714,238 @@
   - `mix test` may not properly detect `MIX_ENV=test` for `elixirc_paths` in umbrella-adjacent projects — use explicit `MIX_ENV=test` prefix
   - PeerCluster.rpc uses `:rpc.call` (requires connected nodes), while `:peer.call` works before connection — the distinction matters for startup sequences
   - CLI.Handler wraps core module APIs with map-based configs — prefer CLI.Handler for integration tests for realistic call paths
+---
+
+## 2026-02-09 - Task 0057
+- What was implemented:
+  - Reed-Solomon erasure coding module in Rust at `neonfs_blob/src/erasure.rs`
+  - `encode(data_shards, parity_count)` — takes equal-sized data shard buffers, returns parity shards
+  - `decode(shards_with_indices, data_count, parity_count, shard_size)` — reconstructs missing data shards from any K-of-N available shards
+  - NIF functions `erasure_encode/2` and `erasure_decode/4` exposed to Elixir
+  - Error handling for: empty data, zero parity/data count, unequal shard sizes, insufficient shards, index out of range, shard size mismatch
+  - 15 Rust tests (11 unit + 2 proptest) and 14 Elixir tests
+- Files changed:
+  - `neonfs_core/native/neonfs_blob/Cargo.toml` (added `solana-reed-solomon-erasure` v4.0.1-3)
+  - `neonfs_core/native/neonfs_blob/src/erasure.rs` (new module)
+  - `neonfs_core/native/neonfs_blob/src/lib.rs` (added `mod erasure`, NIF functions)
+  - `neonfs_core/lib/neon_fs/core/blob/native.ex` (added `erasure_encode/2` and `erasure_decode/4`)
+  - `neonfs_core/test/neon_fs/core/blob/native_erasure_test.exs` (new test file)
+  - `tasks/task_0057_reed_solomon_nif.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - `solana-reed-solomon-erasure` v4.0.1 is yanked — use `4.0.1-3` pre-release version
+  - The crate uses `Option<Vec<u8>>` for reconstruction: `None` marks missing shards, `Some` for present ones
+  - Elixir `++` has higher precedence than `|>` — use explicit parentheses or intermediate variables when combining list concat with pipes
+  - Reed-Solomon on typical stripe sizes (10-14 x 256KB) completes in single-digit ms, safe for normal BEAM schedulers
+---
+
+## 2026-02-09 - Task 0058
+- What was implemented:
+  - `NeonFS.Core.Stripe` struct in neonfs_client with config, chunks, partial stripe metadata
+  - `Stripe.new/1`, `Stripe.validate/1`, `Stripe.total_chunks/1`, `Stripe.data_chunk_hashes/1`, `Stripe.parity_chunk_hashes/1`
+  - Extended `Volume.durability_config` type to support `%{type: :erasure, data_chunks, parity_chunks}`
+  - Added `Volume.erasure?/1` helper and updated `Volume.validate/1` for erasure configs
+  - Default durability unchanged (`:replicate` with factor 3, min_copies 2)
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/stripe.ex` (new)
+  - `neonfs_client/lib/neon_fs/core/volume.ex` (modified — durability type, erasure?/1, validation)
+  - `neonfs_client/test/neon_fs/core/stripe_test.exs` (new — 16 tests)
+  - `neonfs_client/test/neon_fs/core/volume_test.exs` (modified — 6 new erasure tests)
+  - `tasks/task_0058_stripe_struct_and_volume_durability.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Credo strict flags redundant last clause in `with` — use the last function call directly instead of wrapping in `:ok`
+  - Stripe chunks list ordering is significant: data indices first, then parity — matches Reed-Solomon NIF expectations
+---
+
+## 2026-02-09 - Task 0059
+- What was implemented:
+  - MetadataStateMachine v4: bumped version from 3 to 4, added `stripes` map to state
+  - Migration handler for `{:machine_version, 3, 4}` — adds empty `stripes` map via `Map.put_new`
+  - New Ra commands: `{:put_stripe, data}`, `{:update_stripe, id, updates}`, `{:delete_stripe, id}`
+  - `StripeIndex` GenServer following ChunkIndex/FileIndex pattern: ETS `:stripe_index` cache + Ra-backed writes
+  - `StripeIndex.put/1`, `get/1`, `delete/1`, `list_by_volume/1` — all with Ra fallback and local ETS caching
+  - Restore from Ra on startup, graceful fallback when Ra not available
+  - Added StripeIndex to supervision tree (after FileIndex, before VolumeRegistry)
+  - Added `:stripe_index` ETS table to Persistence module for DETS snapshotting
+  - Added `start_stripe_index/0` helper to NeonFS.TestCase and `:stripe_index` to `clear_ets_tables`
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (modified — v4, stripes state, commands, migration)
+  - `neonfs_core/lib/neon_fs/core/stripe_index.ex` (new — GenServer + ETS + Ra pattern)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (modified — added StripeIndex child)
+  - `neonfs_core/lib/neon_fs/core/persistence.ex` (modified — added stripe_index table config)
+  - `neonfs_core/test/neon_fs/core/metadata_state_machine_test.exs` (modified — v4 tests, stripe command tests)
+  - `neonfs_core/test/neon_fs/core/stripe_index_test.exs` (new — 11 tests)
+  - `neonfs_core/test/neon_fs/core/ra_test.exs` (modified — updated version assertion to 4)
+  - `neonfs_core/test/support/test_case.ex` (modified — start_stripe_index helper)
+- **Learnings for future iterations:**
+  - Must use `MIX_ENV=test` prefix when running tests from neonfs_core — config/config.exs uses `if Mix.env() == :test` for start_children? and other test settings
+  - New index GenServers need: ETS table in Persistence, TestCase helper with stop_if_running + cleanup_ets_table, and supervisor child entry
+  - Credo strict requires alphabetical ordering of grouped aliases: `{RaServer, RaSupervisor, Stripe}` not `{Stripe, RaServer, RaSupervisor}`
+---
+
+## 2026-02-09 - Task 0060
+- What was implemented:
+  - Erasure-coded write path in WriteOperation: branches on `volume.durability.type` (`:replicate` vs `:erasure`)
+  - Data chunks grouped into stripe-sized batches based on `volume.durability.data_chunks`
+  - Chunks padded to equal size within each stripe; partial stripes padded with zero-fill chunks
+  - Parity chunks computed via `Native.erasure_encode/2` on padded data shards
+  - All chunks (data + zero-fill + parity) stored via BlobStore with ChunkMeta having stripe_id/stripe_index
+  - Stripe metadata created via StripeIndex for each stripe (complete and partial)
+  - FileMeta created with `stripes` field (list of `%{stripe_id, byte_range}`) instead of chunks for erasure volumes
+  - Commit validation: sum of stripe data_bytes must equal file size
+  - Abort cleanup: stripe chunks cleaned up via existing active_write_refs mechanism
+  - Telemetry events for stripe creation (stripe_id, data_chunks, parity_chunks, partial flag)
+  - 10 new erasure-coded write path tests: partial stripe, exact stripes, mixed stripes, chunk metadata, byte ranges, commit validation, telemetry, overwrite, volume stats
+  - All 529 existing tests pass (0 failures)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (modified — erasure write path, stripe accumulation, parity generation)
+  - `neonfs_core/test/neon_fs/core/write_operation_test.exs` (modified — added erasure-coded write tests)
+  - `tasks/task_0060_erasure_coded_write_path.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - For partial stripes, zero-fill padding chunks must be stored (not just used for parity computation) so stripe chunk indices are consistent with config.data_chunks + config.parity_chunks
+  - Credo max arity is 8 — use context maps to bundle related parameters when functions exceed this
+  - Parity index offset should be `data_chunks_per_stripe` (not `length(actual_data_entries)`) for consistent stripe indexing
+---
+
+## 2026-02-09 - Task 0061
+- What was implemented:
+  - Erasure-coded read path in ReadOperation: branches on `file_meta.stripes` (nil → chunk path, list → stripe path)
+  - Stripe state calculation: healthy (all N chunks), degraded (>= K chunks), critical (< K)
+  - Healthy read: fetches only needed data chunks based on offset/chunk_size, extracts exact byte range
+  - Degraded read: fetches any K available chunks (data or parity), calls `Native.erasure_decode/4`, extracts data
+  - Critical: returns `{:error, :insufficient_chunks}`
+  - Partial stripe handling: reads clamped to `stripe.data_bytes` to avoid returning padding
+  - Multi-stripe reads: data from overlapping stripes concatenated correctly
+  - Stripe read telemetry events (stripe_id, state, degraded_count)
+  - Fixed write path bug: erasure chunk `original_size` now uses padded data size (`byte_size(data)`) for correct decompression detection
+  - 11 new tests: healthy reads (small, multi-stripe, 3-stripe), offset reads, boundary spanning, degraded reconstruction, critical error, partial stripe, overwrite
+  - All 540 existing tests pass (0 failures)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` (modified — stripe-based read path, state calculation, healthy/degraded/critical handlers)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (modified — fixed erasure chunk original_size to use padded size)
+  - `neonfs_core/test/neon_fs/core/read_operation_test.exs` (modified — added erasure-coded read tests)
+  - `tasks/task_0061_erasure_coded_read_path.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Erasure chunk `original_size` must be the padded data size, not pre-padding size — otherwise decompression detection (`stored_size != original_size`) incorrectly triggers decompression on non-compressed padded data
+  - Credo max nesting depth of 2 — extract nested if/else blocks into private helpers
+  - For degraded reads, need exactly K shards of equal size — padded storage ensures this invariant
+---
+
+## 2026-02-09 - Task 0065
+- What was implemented:
+  - CLI handler parses `durability: "erasure:D:P"` → `%{type: :erasure, data_chunks: D, parity_chunks: P}`
+  - CLI handler parses `durability: "replicate:N"` → `%{type: :replicate, factor: N, min_copies: max(1, N-1)}`
+  - Validation rejects: D<1, P<1, non-integer, malformed strings with clear error message
+  - Map durability configs pass through unchanged
+  - `volume_to_map/1` includes `durability_display` field (e.g. "erasure:10+4 (1.40x overhead)", "replicate:3")
+  - `get_volume` and `list_volumes` both include durability_display
+  - 17 new tests: parsing both formats, all error cases, display in get/list, mixed types
+  - All 556 existing tests pass (0 failures)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — parse_durability_opt, parse_durability, format_durability, updated create_volume and volume_to_map)
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` (modified — added durability string parsing and display tests)
+  - `tasks/task_0065_cli_erasure_coding_support.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Extract multi-step parsing into helper fns (e.g. `parse_erasure_parts`) to stay under Credo nesting depth limit
+  - `:erlang.float_to_binary(float, decimals: 2)` for clean float formatting without printf
+---
+
+## 2026-02-09 - Task 0062
+- What was implemented:
+  - New `NeonFS.Core.StripePlacement` module with `select_targets/2` and `validate_placement/2`
+  - Placement maximises failure domain separation: round-robin across nodes, then across drives within nodes
+  - Drives filtered by: tier, active state, capacity < 90% utilization
+  - When more chunks than nodes: distributes evenly with warning about reduced fault tolerance
+  - Single-node/single-drive: works with warning
+  - `validate_placement/2` checks for `parity_chunks + 1` distinct failure domains
+  - Write path updated: `process_stripe_batch` calls `StripePlacement.select_targets/2`, passes targets to `store_data_chunks` and `store_parity_chunks`
+  - New `write_chunk_to_target/4` helper: writes locally via BlobStore or remotely via RPC
+  - ChunkMeta locations now reflect target node (not always local node)
+  - Telemetry for placement decisions (target_count, distinct_nodes, distinct_drives)
+  - 16 new tests: multi-node distribution, single-node/multi-drive, single-drive, capacity filtering, tier filtering, standby filtering, validate_placement, mixed topology
+  - All 572 existing tests pass (0 failures)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/stripe_placement.ex` (new — placement algorithm)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (modified — use StripePlacement, write_chunk_to_target, context map for build_erasure_chunk_meta)
+  - `neonfs_core/test/neon_fs/core/stripe_placement_test.exs` (new — placement tests)
+  - `tasks/task_0062_stripe_chunk_placement.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - DriveRegistry `start_drive_registry()` helper registers a default drive — tests needing custom topology must start with empty drives list
+  - `stop_if_running`/`cleanup_ets_table` are private in TestCase — use `GenServer.stop` and `:ets.delete` directly
+  - Round-robin placement: track passes through node list to cycle drives within each node
+---
+
+## 2026-02-09 - Task 0063
+- What was implemented:
+  - New `NeonFS.Core.GarbageCollector` module with `collect/0`
+  - Mark-and-sweep GC: builds referenced set from files, sweeps uncommitted chunks
+  - Mark phase handles both: replicated files (direct chunks) and erasure-coded files (stripes → chunks)
+  - Sweep phase: deletes committed unreferenced chunks from ChunkIndex and BlobStore
+  - Active write ref protection: chunks with `active_write_refs` are never deleted
+  - Orphaned stripe cleanup: stripes not referenced by any file are deleted from StripeIndex
+  - Added `StripeIndex.list_all/0` for orphan detection
+  - Telemetry event for GC pass (chunks_deleted, stripes_deleted, chunks_protected, duration)
+  - 11 new tests: keep referenced chunks, delete unreferenced, active write protection, stripe chunks deletion, orphaned stripe cleanup, mixed volumes, direct orphan stripe
+  - All 583 existing tests pass (0 failures)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/garbage_collector.ex` (new — mark-and-sweep GC)
+  - `neonfs_core/lib/neon_fs/core/stripe_index.ex` (modified — added list_all/0)
+  - `neonfs_core/test/neon_fs/core/garbage_collector_test.exs` (new — GC tests)
+  - `tasks/task_0063_stripe_aware_garbage_collection.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Mark phase needs two passes: one for chunk hashes (union of direct chunks + stripe chunks), one for stripe IDs
+  - Credo nesting: use pattern-matched function heads instead of case-in-reduce
+---
+
+## 2026-02-09 - Task 0064
+- What was implemented:
+  - New `NeonFS.Core.StripeRepair` GenServer with `scan_stripes/0` and `repair_stripe/1`
+  - `scan_stripes/0` iterates all stripes, calculates state (healthy/degraded/critical), returns sorted by priority
+  - `repair_stripe/1` fetches K available chunks, calls `Native.erasure_decode/4`, stores reconstructed data chunks on available nodes
+  - Priority ordering: critical before degraded
+  - Concurrent repair protection via `StripeRepair.LockTable` (ETS-based, same pattern as TierMigration.LockTable)
+  - Periodic scan via GenServer (configurable interval, default 5 minutes)
+  - Submits repair tasks to BackgroundWorker with priority-based scheduling
+  - Only reconstructs missing data chunks (not parity — would need re-encode)
+  - Reconstructed chunks placed via StripePlacement and stored as :committed
+  - Telemetry events: scan (stripes_scanned, degraded_found, critical_found), repair (stripe_id, state, outcome)
+  - 12 new tests: healthy scan, degraded detection, critical detection, priority sorting, repair reconstruction, critical error, not-found, concurrent prevention, telemetry, lock table
+  - All 595 existing tests pass (0 failures)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/stripe_repair.ex` (new — scan, repair, periodic GenServer)
+  - `neonfs_core/lib/neon_fs/core/stripe_repair/lock_table.ex` (new — ETS lock table)
+  - `neonfs_core/test/neon_fs/core/stripe_repair_test.exs` (new — stripe repair tests)
+  - `tasks/task_0064_stripe_repair.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - ChunkFetcher uses ChunkAccessTracker internally — must `ensure_chunk_access_tracker()` in test setup
+  - Repair stores chunks as `:committed` directly since they're replacing lost data, not new writes
+---
+
+## 2026-02-09 - Task 0066
+- What was implemented:
+  - 9 integration tests for erasure coding in `neonfs_integration/test/integration/erasure_coding_test.exs`
+  - Test: write file to erasure volume (2+1) and read back — verifies contents match
+  - Test: small file on erasure volume (single partial stripe, 512 bytes) — verifies no padding leaked
+  - Test: large file spanning multiple stripes (100KB) — verifies full read and partial reads at offsets
+  - Test: degraded read — delete one chunk (within parity tolerance), read succeeds via reconstruction
+  - Test: critical failure — delete 2 chunks (> parity_chunks=1), read returns `{:error, :insufficient_chunks}`
+  - Test: stripe repair — delete one chunk, scan detects degraded, repair_stripe restores it
+  - Test: GC on erasure-coded volume — create file, delete file, run GC, verify all chunks and stripe metadata cleaned up
+  - Test: mixed cluster — replicated and erasure-coded volumes coexist, both write/read correctly
+  - Test: CLI handler volume creation with `"erasure:4:2"` durability string — parses correctly, displays overhead
+  - All 53 integration tests pass (9 new + 44 existing)
+  - All 595 neonfs_core unit tests pass
+  - All 115 neonfs_client tests pass
+  - All 42 neonfs_fuse tests pass
+  - Credo strict clean across all subprojects
+  - Rust cargo test: 114 passed (including erasure proptests)
+  - Rust cargo clippy: clean
+  - Phase 4 dependency graph already in tasks/README.md
+- Files changed:
+  - `neonfs_integration/test/integration/erasure_coding_test.exs` (new — 9 erasure coding integration tests)
+  - `tasks/task_0066_phase4_integration_tests.md` (status updated to Complete)
+  - `tasks/progress.md` (updated with Task 0066 entry)
+- **Learnings for future iterations:**
+  - Integration tests use CLI.Handler for volume creation (wraps core APIs with map configs) — best for PeerCluster tests
+  - `init_erasure_cluster` helper creates volume with `"erasure:2:1"` (smallest config for fast tests)
+  - Degraded read test must delete chunks from StripeIndex lookup (not file.stripes which only has stripe_ids)
 ---

@@ -183,12 +183,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec create_volume(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def create_volume(name, config) when is_binary(name) and is_map(config) do
-    # Convert map to keyword list for VolumeRegistry
     opts = map_to_opts(config)
 
-    case VolumeRegistry.create(name, opts) do
-      {:ok, volume} -> {:ok, volume_to_map(volume)}
-      {:error, reason} -> {:error, reason}
+    case parse_durability_opt(opts) do
+      {:ok, parsed_opts} ->
+        case VolumeRegistry.create(name, parsed_opts) do
+          {:ok, volume} -> {:ok, volume_to_map(volume)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -418,6 +423,7 @@ defmodule NeonFS.CLI.Handler do
       name: volume.name,
       owner: volume.owner,
       durability: volume.durability,
+      durability_display: format_durability(volume.durability),
       write_ack: volume.write_ack,
       tiering: volume.tiering,
       caching: volume.caching,
@@ -471,6 +477,66 @@ defmodule NeonFS.CLI.Handler do
       metadata: info.metadata
     }
   end
+
+  defp parse_durability_opt(opts) do
+    case Keyword.get(opts, :durability) do
+      nil ->
+        {:ok, opts}
+
+      durability when is_binary(durability) ->
+        case parse_durability(durability) do
+          {:ok, config} -> {:ok, Keyword.put(opts, :durability, config)}
+          {:error, _} = err -> err
+        end
+
+      _map ->
+        {:ok, opts}
+    end
+  end
+
+  defp parse_durability("replicate:" <> rest) do
+    case Integer.parse(rest) do
+      {n, ""} when n >= 1 ->
+        {:ok, %{type: :replicate, factor: n, min_copies: max(1, n - 1)}}
+
+      _ ->
+        {:error, durability_format_error()}
+    end
+  end
+
+  defp parse_durability("erasure:" <> rest) do
+    parse_erasure_parts(String.split(rest, ":"))
+  end
+
+  defp parse_durability(_), do: {:error, durability_format_error()}
+
+  defp parse_erasure_parts([d_str, p_str]) do
+    with {d, ""} <- Integer.parse(d_str),
+         {p, ""} <- Integer.parse(p_str),
+         true <- d >= 1 and p >= 1 do
+      {:ok, %{type: :erasure, data_chunks: d, parity_chunks: p}}
+    else
+      _ -> {:error, durability_format_error()}
+    end
+  end
+
+  defp parse_erasure_parts(_), do: {:error, durability_format_error()}
+
+  defp durability_format_error do
+    "Invalid durability format. Use 'replicate:N' or 'erasure:D:P'"
+  end
+
+  defp format_durability(%{type: :replicate, factor: factor}) do
+    "replicate:#{factor}"
+  end
+
+  defp format_durability(%{type: :erasure, data_chunks: d, parity_chunks: p}) do
+    overhead = (d + p) / d
+    overhead_str = :erlang.float_to_binary(overhead, decimals: 2)
+    "erasure:#{d}+#{p} (#{overhead_str}x overhead)"
+  end
+
+  defp format_durability(_), do: "unknown"
 
   defp map_to_opts(map) when is_map(map) do
     map

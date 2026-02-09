@@ -78,8 +78,23 @@ Each task file follows this structure:
 
 **Milestone:** Multiple volumes with different policies, compression working, intelligent drive management
 
-### Phase 4: Erasure Coding (Future)
+### Phase 4: Erasure Coding (Tasks 0057-0066)
 **Goal:** Space-efficient durability for large files
+
+| Task | Description |
+|------|-------------|
+| 0057 | Reed-Solomon NIF (Rust encode/decode via solana-reed-solomon-erasure) |
+| 0058 | Stripe struct and Volume durability extension |
+| 0059 | MetadataStateMachine v4 and StripeIndex |
+| 0060 | Erasure-coded write path (stripe batching, parity generation) |
+| 0061 | Erasure-coded read path (healthy, degraded, multi-stripe) |
+| 0062 | Stripe chunk placement (failure domain distribution) |
+| 0063 | Stripe-aware garbage collection |
+| 0064 | Stripe repair (background reconstruction) |
+| 0065 | CLI and volume creation for erasure coding |
+| 0066 | Phase 4 integration tests and full verification |
+
+**Milestone:** Volumes can use erasure coding, ~1.4x overhead with 4-fault tolerance
 
 ### Phase 5: Security (Future)
 **Goal:** Production-ready security model
@@ -183,6 +198,35 @@ Full dependency graph:
 0053 (background worker) ──▶ 0054 ──▶ 0055 (reactor migration) ───────┤
                                                                        │
 0056 (integration tests) ◀────────────────────────────────────────────┘
+
+Phase 4 Erasure Coding:
+
+Parallel starting points (2 independent streams):
+
+Stream A — Rust NIF:
+0057 (Reed-Solomon NIF)
+
+Stream B — Data structures:
+0058 (Stripe struct + Volume durability) ──▶ 0059 (MSM v4 + StripeIndex)
+                                           └──▶ 0065 (CLI erasure support)
+
+Convergence:
+0060 (write path)      ◀── 0057 + 0058 + 0059
+0061 (read path)       ◀── 0057 + 0059 + 0060
+0062 (placement)       ◀── 0060
+0063 (GC)              ◀── 0059 + 0060
+0064 (stripe repair)   ◀── 0057 + 0059 + 0061
+0066 (integration)     ◀── all Phase 4 tasks (0057–0065)
+
+Full dependency graph:
+
+0057 (RS NIF) ──────────┬──▶ 0060 (write path) ──┬──▶ 0061 (read path) ──▶ 0064 (repair)
+                         │                         ├──▶ 0062 (placement)
+0058 (Stripe+Volume) ──┬─┤                         └──▶ 0063 (GC)
+                        │ └──▶ 0059 (MSM v4) ─────┘
+                        └──▶ 0065 (CLI)
+
+0066 (integration tests) ◀── all tasks 0057–0065
 ```
 
 ## Task Status Values
@@ -212,6 +256,7 @@ Some task chains can be worked on in parallel:
 - **Elixir metadata** (0015-0017) can start once blob store scaffolding is done
 - **CLI** (0022-0025) can be developed alongside core Elixir work
 - **Phase 3** has 4 independent starting points: 0045 (volume config), 0046 (multi-drive), 0053 (background worker) can all start in parallel; 0047 follows 0046
+- **Phase 4** has 2 independent starting points: 0057 (Rust NIF) and 0058 (Stripe struct) can start in parallel; critical path is 0058 → 0059 → 0060 → 0061 → 0064 → 0066
 
 ## Adding New Tasks
 

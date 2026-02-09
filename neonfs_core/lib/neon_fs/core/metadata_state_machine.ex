@@ -34,6 +34,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:deregister_service, node()}
           | {:update_service_status, node(), atom()}
           | {:update_service_metrics, node(), map()}
+          | {:put_stripe, stripe_data :: map()}
+          | {:update_stripe, stripe_id :: binary(), updates :: map()}
+          | {:delete_stripe, stripe_id :: binary()}
 
   @type state :: %{
           data: %{optional(term()) => term()},
@@ -41,6 +44,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           files: %{optional(binary()) => map()},
           services: %{optional(node()) => map()},
           volumes: %{optional(binary()) => map()},
+          stripes: %{optional(binary()) => map()},
           version: non_neg_integer()
         }
 
@@ -55,6 +59,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       files: %{},
       services: %{},
       volumes: %{},
+      stripes: %{},
       version: 0
     }
   end
@@ -123,6 +128,14 @@ defmodule NeonFS.Core.MetadataStateMachine do
       end)
 
     new_state = %{state | volumes: migrated_volumes}
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 3, 4}, state) do
+    require Logger
+    Logger.info("Ra machine version upgrade: 3 -> 4 (adding stripes registry)")
+
+    new_state = Map.put_new(state, :stripes, %{})
     {new_state, :ok, []}
   end
 
@@ -422,6 +435,59 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  # Stripe commands
+
+  def apply(_meta, {:put_stripe, stripe_data}, state) do
+    stripes = Map.get(state, :stripes, %{})
+    id = stripe_data.id
+    new_stripes = Map.put(stripes, id, stripe_data)
+    new_state = %{state | stripes: new_stripes, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_stripe],
+      %{version: new_state.version},
+      %{id: id}
+    )
+
+    {new_state, {:ok, id}, []}
+  end
+
+  def apply(_meta, {:update_stripe, stripe_id, updates}, state) do
+    stripes = Map.get(state, :stripes, %{})
+
+    case Map.get(stripes, stripe_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      stripe_data ->
+        updated = Map.merge(stripe_data, updates)
+        new_stripes = Map.put(stripes, stripe_id, updated)
+        new_state = %{state | stripes: new_stripes, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :update_stripe],
+          %{version: new_state.version},
+          %{id: stripe_id}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:delete_stripe, stripe_id}, state) do
+    stripes = Map.get(state, :stripes, %{})
+    new_stripes = Map.delete(stripes, stripe_id)
+    new_state = %{state | stripes: new_stripes, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :delete_stripe],
+      %{version: new_state.version},
+      %{id: stripe_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
   @doc """
   Handle state transitions. Called when the Ra server enters a new state.
   """
@@ -447,7 +513,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 3
+  def version, do: 4
 
   @doc """
   Return the module to handle a specific state machine version.

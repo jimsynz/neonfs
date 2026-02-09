@@ -7,9 +7,6 @@
 # `:undefined` as the leader value, but the spec says `ra_server_id()`.
 
 [
-  # Ra machine behaviour callback info
-  ~r"callback_info_missing",
-
   # Ra return type pattern matching issues
   # Ra's type specs are incomplete - functions return values not in the specs:
   # - start_server can return {:ok, pid} but spec says ok | {:error, _}
@@ -20,7 +17,7 @@
   ~r"lib/neon_fs/core/ra_server\.ex:\d+:\d+:guard_fail",
   ~r"lib/neon_fs/cluster/join\.ex:\d+:\d+:pattern_match",
 
-  # Test support module uses ExUnit macros that inject functions at compile time
-  # Dialyzer doesn't see these injected functions when analysing test support
-  ~r"test/support/test_case\.ex:\d+.*ExUnit"
+  # MapSet is an opaque type - Dialyzer tracks its internal structure through
+  # struct construction and flags it when passed to other functions
+  ~r"lib/neon_fs/core/stripe_repair\.ex:\d+:\d+:call_without_opaque"
 ]
