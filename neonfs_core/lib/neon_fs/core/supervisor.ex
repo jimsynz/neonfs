@@ -130,6 +130,9 @@ defmodule NeonFS.Core.Supervisor do
           # FileIndex depends on ChunkIndex
           NeonFS.Core.FileIndex,
 
+          # StripeIndex for erasure-coded stripe metadata
+          NeonFS.Core.StripeIndex,
+
           # VolumeRegistry depends on FileIndex
           NeonFS.Core.VolumeRegistry,
 

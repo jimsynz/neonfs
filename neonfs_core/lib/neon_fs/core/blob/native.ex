@@ -424,4 +424,75 @@ defmodule NeonFS.Core.Blob.Native do
   @spec nif_auto_chunk_strategy(non_neg_integer()) :: {String.t(), non_neg_integer()}
   def nif_auto_chunk_strategy(_data_len),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  # Erasure coding types
+  @type shard :: binary()
+  @type shard_with_index :: {non_neg_integer(), binary()}
+
+  @doc """
+  Encodes data shards using Reed-Solomon erasure coding and returns parity shards.
+
+  All data shards must be the same size. The returned parity shards will also
+  be the same size as the data shards.
+
+  ## Parameters
+    - `data_shards` - List of equal-sized binary data shards
+    - `parity_count` - Number of parity shards to generate
+
+  ## Returns
+    - `{:ok, parity_shards}` - List of parity shard binaries
+    - `{:error, reason}` - If encoding fails
+
+  ## Examples
+
+      iex> data = [<<1, 2, 3, 4>>, <<5, 6, 7, 8>>, <<9, 10, 11, 12>>]
+      iex> {:ok, parity} = NeonFS.Core.Blob.Native.erasure_encode(data, 2)
+      iex> length(parity)
+      2
+      iex> byte_size(hd(parity))
+      4
+
+  """
+  @spec erasure_encode([shard()], non_neg_integer()) ::
+          {:ok, [shard()]} | {:error, String.t()}
+  def erasure_encode(_data_shards, _parity_count),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Decodes (reconstructs) missing data shards from available shards using
+  Reed-Solomon erasure coding.
+
+  Takes a list of `{index, binary}` tuples representing available shards.
+  Indices 0..data_count-1 are data shards, data_count..total-1 are parity shards.
+  At least `data_count` shards must be provided for reconstruction.
+
+  ## Parameters
+    - `shards_with_indices` - List of `{index, binary}` tuples for available shards
+    - `data_count` - Number of data shards in the original encoding
+    - `parity_count` - Number of parity shards in the original encoding
+    - `shard_size` - Expected size of each shard in bytes
+
+  ## Returns
+    - `{:ok, data_shards}` - List of all reconstructed data shard binaries
+    - `{:error, reason}` - If decoding fails
+
+  ## Examples
+
+      iex> data = [<<1, 2, 3, 4>>, <<5, 6, 7, 8>>, <<9, 10, 11, 12>>]
+      iex> {:ok, parity} = NeonFS.Core.Blob.Native.erasure_encode(data, 2)
+      iex> available = [{0, <<1, 2, 3, 4>>}, {2, <<9, 10, 11, 12>>}, {3, hd(parity)}]
+      iex> {:ok, recovered} = NeonFS.Core.Blob.Native.erasure_decode(available, 3, 2, 4)
+      iex> recovered == data
+      true
+
+  """
+  @spec erasure_decode(
+          [shard_with_index()],
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
+          {:ok, [shard()]} | {:error, String.t()}
+  def erasure_decode(_shards_with_indices, _data_count, _parity_count, _shard_size),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

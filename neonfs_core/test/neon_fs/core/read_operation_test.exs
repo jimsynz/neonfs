@@ -2,7 +2,7 @@ defmodule NeonFS.Core.ReadOperationTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{ReadOperation, VolumeRegistry, WriteOperation}
+  alias NeonFS.Core.{ChunkIndex, ReadOperation, StripeIndex, VolumeRegistry, WriteOperation}
 
   @moduletag :tmp_dir
 
@@ -13,6 +13,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     start_blob_store()
     start_chunk_index()
     start_file_index()
+    start_stripe_index()
     start_volume_registry()
     ensure_chunk_access_tracker()
 
@@ -22,7 +23,8 @@ defmodule NeonFS.Core.ReadOperationTest do
       [
         [:neonfs, :read_operation, :start],
         [:neonfs, :read_operation, :stop],
-        [:neonfs, :read_operation, :exception]
+        [:neonfs, :read_operation, :exception],
+        [:neonfs, :read_operation, :stripe_read]
       ],
       &handle_telemetry_event/4,
       nil
@@ -369,6 +371,180 @@ defmodule NeonFS.Core.ReadOperationTest do
       for {{_path, expected_data}, {:ok, read_data}} <- Enum.zip(files, results) do
         assert read_data == expected_data
       end
+    end
+  end
+
+  describe "erasure-coded read path" do
+    setup %{volume: _volume} do
+      vol_name = "erasure-read-vol-#{:rand.uniform(999_999)}"
+
+      {:ok, ec_volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1},
+          compression: %{algorithm: :none}
+        )
+
+      {:ok, ec_volume: ec_volume}
+    end
+
+    test "reads entire small file (single partial stripe)", %{ec_volume: volume} do
+      data = "Hello, erasure coding read test!"
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/small_ec.txt", data, chunk_strategy: :single)
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/small_ec.txt")
+      assert read_data == data
+    end
+
+    test "reads entire multi-stripe file", %{ec_volume: volume} do
+      data = :crypto.strong_rand_bytes(4096)
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/multi_ec.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/multi_ec.bin")
+      assert read_data == data
+    end
+
+    test "reads file spanning 3 stripes (2 complete + 1 partial)", %{ec_volume: volume} do
+      data = :crypto.strong_rand_bytes(5120)
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/three_ec.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/three_ec.bin")
+      assert read_data == data
+    end
+
+    test "reads with offset within single stripe", %{ec_volume: volume} do
+      data = :crypto.strong_rand_bytes(2048)
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/offset_ec.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/offset_ec.bin", offset: 100, length: 500)
+
+      assert read_data == binary_part(data, 100, 500)
+    end
+
+    test "reads spanning stripe boundary", %{ec_volume: volume} do
+      # 4096 bytes with 1024-byte chunks, 2 per stripe → stripe 0: bytes 0-2047, stripe 1: bytes 2048-4095
+      data = :crypto.strong_rand_bytes(4096)
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/boundary_ec.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      # Read spanning the boundary at 2048
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/boundary_ec.bin",
+                 offset: 2000,
+                 length: 200
+               )
+
+      assert read_data == binary_part(data, 2000, 200)
+    end
+
+    test "reads beyond file size returns available data", %{ec_volume: volume} do
+      data = "Short erasure file"
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/short_ec.txt", data, chunk_strategy: :single)
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/short_ec.txt", offset: 0, length: 1000)
+
+      assert read_data == data
+    end
+
+    test "reads with offset beyond file size returns empty", %{ec_volume: volume} do
+      data = "Short"
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/past_ec.txt", data, chunk_strategy: :single)
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/past_ec.txt", offset: 1000, length: 10)
+
+      assert read_data == <<>>
+    end
+
+    test "degraded read reconstructs missing data chunk", %{ec_volume: volume} do
+      data = :crypto.strong_rand_bytes(2048)
+
+      {:ok, fm} =
+        WriteOperation.write_file(volume.id, "/degraded_ec.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      # Get the stripe and delete one data chunk from ChunkIndex
+      [stripe_ref] = fm.stripes
+      {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
+
+      # Delete the first data chunk (index 0) from ChunkIndex
+      first_data_hash = Enum.at(stripe.chunks, 0)
+      ChunkIndex.delete(first_data_hash)
+
+      # Read should still succeed via degraded reconstruction
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/degraded_ec.bin")
+      assert read_data == data
+    end
+
+    test "critical stripe returns error when too many chunks missing", %{ec_volume: volume} do
+      data = :crypto.strong_rand_bytes(2048)
+
+      {:ok, fm} =
+        WriteOperation.write_file(volume.id, "/critical_ec.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      # Get the stripe and delete 2 chunks (more than parity_chunks=1 can handle)
+      [stripe_ref] = fm.stripes
+      {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
+
+      # Delete first two chunks
+      ChunkIndex.delete(Enum.at(stripe.chunks, 0))
+      ChunkIndex.delete(Enum.at(stripe.chunks, 1))
+
+      assert {:error, :insufficient_chunks} =
+               ReadOperation.read_file(volume.id, "/critical_ec.bin")
+    end
+
+    test "reads partial stripe respects data_bytes boundary", %{ec_volume: volume} do
+      # Single chunk → partial stripe. The stripe has padding beyond data_bytes.
+      data = "Partial stripe data only"
+
+      {:ok, _fm} =
+        WriteOperation.write_file(volume.id, "/partial_ec.txt", data, chunk_strategy: :single)
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/partial_ec.txt")
+      # Should return only actual data, not padding
+      assert read_data == data
+      assert byte_size(read_data) == byte_size(data)
+    end
+
+    test "reads file after overwrite", %{ec_volume: volume} do
+      {:ok, _} =
+        WriteOperation.write_file(volume.id, "/overwrite_ec.txt", "Version 1",
+          chunk_strategy: :single
+        )
+
+      {:ok, _} =
+        WriteOperation.write_file(volume.id, "/overwrite_ec.txt", "Version 2 longer",
+          chunk_strategy: :single
+        )
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/overwrite_ec.txt")
+      assert read_data == "Version 2 longer"
     end
   end
 

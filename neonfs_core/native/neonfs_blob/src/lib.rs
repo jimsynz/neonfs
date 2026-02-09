@@ -1,5 +1,6 @@
 pub mod chunking;
 pub mod compression;
+pub mod erasure;
 pub mod error;
 pub mod hash;
 pub mod path;
@@ -440,6 +441,76 @@ fn parse_chunk_strategy(strategy: &str, param: usize) -> Result<ChunkStrategy, S
             strategy
         )),
     }
+}
+
+/// Encodes data shards and returns parity shards using Reed-Solomon erasure coding.
+///
+/// # Arguments
+/// * `env` - Rustler environment
+/// * `data_shards` - List of equal-sized binary data shards
+/// * `parity_count` - Number of parity shards to generate
+///
+/// # Returns
+/// A list of parity shard binaries, or an error string.
+#[rustler::nif]
+fn erasure_encode<'a>(
+    env: Env<'a>,
+    data_shards: Vec<Binary>,
+    parity_count: usize,
+) -> Result<Vec<Binary<'a>>, String> {
+    let data: Vec<Vec<u8>> = data_shards.iter().map(|b| b.as_slice().to_vec()).collect();
+
+    let parity = erasure::encode(data, parity_count).map_err(|e| e.to_string())?;
+
+    let result: Vec<Binary<'a>> = parity
+        .into_iter()
+        .map(|shard| {
+            let mut bin = NewBinary::new(env, shard.len());
+            bin.copy_from_slice(&shard);
+            bin.into()
+        })
+        .collect();
+
+    Ok(result)
+}
+
+/// Decodes (reconstructs) missing data shards from available shards.
+///
+/// # Arguments
+/// * `env` - Rustler environment
+/// * `shards_with_indices` - List of `(index, binary)` tuples for available shards
+/// * `data_count` - Number of data shards in the original encoding
+/// * `parity_count` - Number of parity shards in the original encoding
+/// * `shard_size` - Expected size of each shard in bytes
+///
+/// # Returns
+/// A list of all data shard binaries (reconstructed), or an error string.
+#[rustler::nif]
+fn erasure_decode<'a>(
+    env: Env<'a>,
+    shards_with_indices: Vec<(usize, Binary<'a>)>,
+    data_count: usize,
+    parity_count: usize,
+    shard_size: usize,
+) -> Result<Vec<Binary<'a>>, String> {
+    let indexed: Vec<(usize, Vec<u8>)> = shards_with_indices
+        .into_iter()
+        .map(|(i, b)| (i, b.as_slice().to_vec()))
+        .collect();
+
+    let data_shards = erasure::decode(indexed, data_count, parity_count, shard_size)
+        .map_err(|e| e.to_string())?;
+
+    let result: Vec<Binary<'a>> = data_shards
+        .into_iter()
+        .map(|shard| {
+            let mut bin = NewBinary::new(env, shard.len());
+            bin.copy_from_slice(&shard);
+            bin.into()
+        })
+        .collect();
+
+    Ok(result)
 }
 
 rustler::init!("Elixir.NeonFS.Core.Blob.Native");

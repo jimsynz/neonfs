@@ -18,6 +18,7 @@ defmodule NeonFS.Core.Persistence do
   - ChunkIndex: `:chunk_index` → `/var/lib/neonfs/meta/chunk_index.dets`
   - FileIndex: `:file_index_by_id`, `:file_index_by_path` → `file_index_*.dets`
   - VolumeRegistry: `:volumes_by_id`, `:volumes_by_name` → `volume_registry_*.dets`
+  - StripeIndex: `:stripe_index` → `stripe_index.dets`
   """
 
   use GenServer
@@ -108,7 +109,8 @@ defmodule NeonFS.Core.Persistence do
       %{
         ets_table: :volumes_by_name,
         dets_path: Path.join(meta_dir, "volume_registry_by_name.dets")
-      }
+      },
+      %{ets_table: :stripe_index, dets_path: Path.join(meta_dir, "stripe_index.dets")}
     ]
 
     state = %{tables: tables, snapshot_interval_ms: snapshot_interval_ms}

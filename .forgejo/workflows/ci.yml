@@ -56,7 +56,7 @@ jobs:
           export PATH="$ASDF_DATA_DIR/shims:$PATH"
           mix deps.get
           mix deps.compile
-          if grep -sL dialyxir mix.exs; then mix dialyzer --plt; fi
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
       - name: Check
         working-directory: neonfs_client
@@ -121,7 +121,7 @@ jobs:
           export PATH="$ASDF_DATA_DIR/shims:$PATH"
           mix deps.get
           mix deps.compile
-          if grep -sL dialyxir mix.exs; then mix dialyzer --plt; fi
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
       - name: Check
         working-directory: neonfs_core
@@ -188,7 +188,7 @@ jobs:
           export PATH="$ASDF_DATA_DIR/shims:$PATH"
           mix deps.get
           mix deps.compile
-          if grep -sL dialyxir mix.exs; then mix dialyzer --plt; fi
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
       - name: Check
         working-directory: neonfs_fuse
@@ -338,7 +338,7 @@ jobs:
           mix deps.get
           mix deps.compile
           mix compile
-          if grep -sL dialyxir mix.exs; then mix dialyzer --plt; fi
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
       - name: Check
         working-directory: neonfs_integration

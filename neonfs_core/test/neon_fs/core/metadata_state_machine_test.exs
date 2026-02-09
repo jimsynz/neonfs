@@ -3,9 +3,21 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
   alias NeonFS.Core.MetadataStateMachine
 
+  defp base_state do
+    %{
+      data: %{},
+      chunks: %{},
+      files: %{},
+      services: %{},
+      volumes: %{},
+      stripes: %{},
+      version: 0
+    }
+  end
+
   describe "version/0" do
     test "returns current version" do
-      assert MetadataStateMachine.version() == 3
+      assert MetadataStateMachine.version() == 4
     end
   end
 
@@ -14,6 +26,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert MetadataStateMachine.which_module(1) == MetadataStateMachine
       assert MetadataStateMachine.which_module(2) == MetadataStateMachine
       assert MetadataStateMachine.which_module(3) == MetadataStateMachine
+      assert MetadataStateMachine.which_module(4) == MetadataStateMachine
     end
   end
 
@@ -26,6 +39,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert state.files == %{}
       assert state.services == %{}
       assert state.volumes == %{}
+      assert state.stripes == %{}
       assert state.version == 0
     end
   end
@@ -175,6 +189,154 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
       vol = new_state.volumes["vol-1"]
       assert vol.tiering.initial_tier == :hot
+    end
+  end
+
+  describe "machine version migration 3 -> 4" do
+    test "adds empty stripes map to state" do
+      state = %{
+        data: %{},
+        chunks: %{},
+        files: %{},
+        services: %{},
+        volumes: %{},
+        version: 50
+      }
+
+      {new_state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 3, 4}, state)
+
+      assert new_state.stripes == %{}
+    end
+
+    test "preserves existing stripes map if already present" do
+      existing_stripe = %{id: "stripe-1", volume_id: "vol-1", chunks: []}
+
+      state = %{
+        data: %{},
+        chunks: %{},
+        files: %{},
+        services: %{},
+        volumes: %{},
+        stripes: %{"stripe-1" => existing_stripe},
+        version: 50
+      }
+
+      {new_state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 3, 4}, state)
+
+      assert new_state.stripes == %{"stripe-1" => existing_stripe}
+    end
+
+    test "preserves all other state fields" do
+      state = %{
+        data: %{key: "value"},
+        chunks: %{"hash1" => %{hash: "hash1"}},
+        files: %{"file1" => %{id: "file1"}},
+        services: %{node1: %{type: :core}},
+        volumes: %{"vol1" => %{id: "vol1"}},
+        version: 100
+      }
+
+      {new_state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 3, 4}, state)
+
+      assert new_state.data == state.data
+      assert new_state.chunks == state.chunks
+      assert new_state.files == state.files
+      assert new_state.services == state.services
+      assert new_state.volumes == state.volumes
+      assert new_state.version == state.version
+    end
+  end
+
+  describe "{:put_stripe, stripe_data}" do
+    test "stores stripe in state and returns {:ok, stripe_id}" do
+      stripe_data = %{
+        id: "stripe-abc",
+        volume_id: "vol-1",
+        config: %{data_chunks: 10, parity_chunks: 4, chunk_size: 262_144},
+        chunks: [],
+        partial: false,
+        data_bytes: 0,
+        padded_bytes: 0
+      }
+
+      {new_state, {:ok, "stripe-abc"}, []} =
+        MetadataStateMachine.apply(%{}, {:put_stripe, stripe_data}, base_state())
+
+      assert Map.has_key?(new_state.stripes, "stripe-abc")
+      assert new_state.stripes["stripe-abc"] == stripe_data
+      assert new_state.version == 1
+    end
+
+    test "overwrites existing stripe with same id" do
+      stripe1 = %{id: "s1", volume_id: "vol-1", chunks: ["a", "b"]}
+      stripe2 = %{id: "s1", volume_id: "vol-1", chunks: ["c", "d"]}
+
+      state = %{base_state() | stripes: %{"s1" => stripe1}}
+
+      {new_state, {:ok, "s1"}, []} =
+        MetadataStateMachine.apply(%{}, {:put_stripe, stripe2}, state)
+
+      assert new_state.stripes["s1"].chunks == ["c", "d"]
+    end
+  end
+
+  describe "{:update_stripe, stripe_id, updates}" do
+    test "merges updates into existing stripe" do
+      stripe = %{
+        id: "s1",
+        volume_id: "vol-1",
+        chunks: [],
+        partial: false,
+        data_bytes: 0,
+        padded_bytes: 0
+      }
+
+      state = %{base_state() | stripes: %{"s1" => stripe}}
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:update_stripe, "s1", %{chunks: ["h1", "h2"], partial: true}},
+          state
+        )
+
+      updated = new_state.stripes["s1"]
+      assert updated.chunks == ["h1", "h2"]
+      assert updated.partial == true
+      assert updated.volume_id == "vol-1"
+      assert new_state.version == 1
+    end
+
+    test "returns error for non-existent stripe" do
+      {state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:update_stripe, "nonexistent", %{partial: true}},
+          base_state()
+        )
+
+      assert state.version == 0
+    end
+  end
+
+  describe "{:delete_stripe, stripe_id}" do
+    test "removes stripe from state" do
+      stripe = %{id: "s1", volume_id: "vol-1", chunks: []}
+      state = %{base_state() | stripes: %{"s1" => stripe}}
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_stripe, "s1"}, state)
+
+      refute Map.has_key?(new_state.stripes, "s1")
+      assert new_state.version == 1
+    end
+
+    test "is idempotent for non-existent stripe" do
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_stripe, "nonexistent"}, base_state())
+
+      assert new_state.stripes == %{}
+      assert new_state.version == 1
     end
   end
 end

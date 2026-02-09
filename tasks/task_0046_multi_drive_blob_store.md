@@ -1,11 +1,7 @@
 # Task 0046: Multi-Drive BlobStore
 
 ## Status
-<<<<<<< HEAD
 Complete
-=======
-Not Started
->>>>>>> bc4d2af (docs: add Phase 3 task specifications (0045-0056))
 
 ## Phase
 3 - Policies, Tiering, and Compression
@@ -14,7 +10,6 @@ Not Started
 Refactor the BlobStore GenServer to manage multiple NIF store handles — one per configured physical drive. A node with 2 NVMes and 8 SATA disks gets 10 separate `Native.store_open/2` calls and 10 handles. No Rust changes are needed. Drive configuration is required (no single-base_dir fallback). The state changes from a single handle to a `%{drive_id => handle}` map, and all operations gain an explicit `drive_id` parameter.
 
 ## Acceptance Criteria
-<<<<<<< HEAD
 - [x] BlobStore `init/1` reads drive config from application environment
 - [x] Each configured drive gets its own `Native.store_open/2` call
 - [x] State holds `%{stores: %{drive_id => handle}, drives: %{drive_id => drive_config}}`
@@ -30,23 +25,6 @@ Refactor the BlobStore GenServer to manage multiple NIF store handles — one pe
 - [x] All existing tests updated for new API
 - [x] New tests for multi-drive scenarios (2+ drives, operations routed correctly)
 - [x] Telemetry events include `drive_id` in metadata
-=======
-- [ ] BlobStore `init/1` reads drive config from application environment
-- [ ] Each configured drive gets its own `Native.store_open/2` call
-- [ ] State holds `%{stores: %{drive_id => handle}, drives: %{drive_id => drive_config}}`
-- [ ] `write_chunk/4` accepts `(data, drive_id, tier, opts)` — the old 3-arity form is removed
-- [ ] `read_chunk/3` accepts `(hash, drive_id, opts)`
-- [ ] `delete_chunk/2` accepts `(hash, drive_id)`
-- [ ] `migrate_chunk/4` accepts `(hash, drive_id, from_tier, to_tier)` — local migration within one drive
-- [ ] `list_drives/0` returns configured drives and their status
-- [ ] Drive config requires at least one drive; startup fails with clear error if no drives configured
-- [ ] Drive config shape: `%{id: string, path: string, tier: atom, capacity: integer}`
-- [ ] Tier subdirectories remain within drives (e.g. `{drive_path}/blobs/hot/...`)
-- [ ] All existing BlobStore callers updated to pass `drive_id`
-- [ ] All existing tests updated for new API
-- [ ] New tests for multi-drive scenarios (2+ drives, operations routed correctly)
-- [ ] Telemetry events include `drive_id` in metadata
->>>>>>> bc4d2af (docs: add Phase 3 task specifications (0045-0056))
 
 ## Testing Strategy
 - Unit tests with multiple tmp dirs simulating multiple drives
