@@ -58,6 +58,7 @@ The full specification is organised into the following documents. Each contains 
 | [Node Management](node-management.md) | Node lifecycle: states, state transitions, partition behaviour, clock synchronisation, escalation ladder, repair prioritisation, cost functions for read/write routing. | Node lifecycle code, failure handling, implementing read/write routing, partition recovery. |
 | [Storage Tiering](storage-tiering.md) | Tier definitions (hot/warm/cold), drive state tracking, read path optimisation, power management (spin-down), promotion/demotion logic, caching strategy. | Drive management, tier migration, implementing caching, power management features. |
 | [Replication](replication.md) | Write flows (replicated and erasure-coded), uncommitted chunk cleanup, quorum configurations, write hole mitigation, partial stripe handling, garbage collection. | Write path implementation, chunk replication, garbage collection, erasure coding. |
+| [Event Notification](pubsub.md) | Cluster-wide event notification via `:pg` process groups: event types, subscription model, broadcasting from core nodes, partition recovery (cache invalidation on reconnect), gap detection. | Implementing metadata caching on interface nodes, adding cache invalidation, working on FUSE/S3 performance. |
 
 ### Security and Access
 

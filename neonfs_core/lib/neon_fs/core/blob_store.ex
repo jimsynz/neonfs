@@ -2,8 +2,20 @@ defmodule NeonFS.Core.BlobStore do
   @moduledoc """
   High-level Elixir wrapper around the blob store NIF.
 
-  This GenServer manages the blob store resource lifecycle and provides
-  a clean API for chunk operations with proper error handling and telemetry.
+  This GenServer manages multiple blob store NIF handles — one per configured
+  physical drive. A node with 2 NVMes and 8 SATA disks gets 10 separate
+  `Native.store_open/2` calls and 10 handles.
+
+  ## Drive Configuration
+
+  Drives are configured via application environment or `start_link/1` options:
+
+      config :neonfs_core, :drives, [
+        %{id: "nvme0", path: "/data/nvme0", tier: :hot, capacity: 1_000_000_000_000},
+        %{id: "sata0", path: "/data/sata0", tier: :cold, capacity: 4_000_000_000_000}
+      ]
+
+  At least one drive must be configured; startup fails if no drives are present.
 
   ## Telemetry Events
 
@@ -22,18 +34,18 @@ defmodule NeonFS.Core.BlobStore do
   - `[:neonfs, :blob_store, :migrate_chunk, :stop]` - After chunk migration
   - `[:neonfs, :blob_store, :migrate_chunk, :exception]` - On migration error
 
-  All events include metadata with operation details.
+  All events include `drive_id` in metadata.
 
   ## Example
 
       {:ok, _pid} = NeonFS.Core.BlobStore.start_link(
-        base_dir: "/tmp/blobs",
+        drives: [%{id: "default", path: "/tmp/blobs", tier: :hot, capacity: 100_000_000}],
         prefix_depth: 2
       )
 
       data = "hello world"
-      {:ok, hash, info} = NeonFS.Core.BlobStore.write_chunk(data, "hot")
-      {:ok, ^data} = NeonFS.Core.BlobStore.read_chunk(hash, "hot")
+      {:ok, hash, info} = NeonFS.Core.BlobStore.write_chunk(data, "default", "hot")
+      {:ok, ^data} = NeonFS.Core.BlobStore.read_chunk(hash, "default", tier: "hot")
 
   """
 
@@ -41,14 +53,24 @@ defmodule NeonFS.Core.BlobStore do
   require Logger
 
   alias NeonFS.Core.Blob.Native
+  alias NeonFS.Core.DriveState
 
   @type chunk_hash :: binary()
   @type tier :: String.t()
+  @type drive_id :: String.t()
   @type chunk_info :: %{
           original_size: non_neg_integer(),
           stored_size: non_neg_integer(),
           compression: String.t()
         }
+  @type drive_config :: %{
+          id: String.t(),
+          path: String.t(),
+          tier: atom(),
+          capacity: non_neg_integer()
+        }
+
+  @tiers ["hot", "warm", "cold"]
 
   ## Client API
 
@@ -57,10 +79,11 @@ defmodule NeonFS.Core.BlobStore do
 
   ## Options
 
-    * `:base_dir` (required) - Base directory for blob storage
+    * `:drives` (required) - List of drive configurations, each with `:id`, `:path`, `:tier`, `:capacity`
     * `:prefix_depth` (optional) - Number of prefix directory levels, defaults to 2
     * `:name` (optional) - Name for the GenServer, defaults to `__MODULE__`
 
+  Falls back to `Application.get_env(:neonfs_core, :drives)` if `:drives` not provided.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -69,14 +92,12 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @doc """
-  Writes a chunk to the blob store.
-
-  The chunk is hashed using SHA-256, and the hash is used for content-addressed
-  storage. Optional compression can be applied.
+  Writes a chunk to a specific drive in the blob store.
 
   ## Parameters
 
     * `data` - Binary data to write
+    * `drive_id` - Target drive identifier
     * `tier` - Storage tier: "hot", "warm", or "cold"
     * `opts` - Optional keyword list:
       * `:compression` - Compression type: "none" (default) or "zstd"
@@ -88,30 +109,25 @@ defmodule NeonFS.Core.BlobStore do
     * `{:ok, hash, chunk_info}` - Hash and chunk metadata on success
     * `{:error, reason}` - On failure
 
-  ## Example
-
-      {:ok, hash, info} = BlobStore.write_chunk("hello", "hot")
-      {:ok, hash, info} = BlobStore.write_chunk(data, "warm",
-        compression: "zstd",
-        compression_level: 5
-      )
-
   """
-  @spec write_chunk(binary(), tier(), keyword()) ::
+  @spec write_chunk(binary(), drive_id(), tier(), keyword()) ::
           {:ok, chunk_hash(), chunk_info()} | {:error, String.t()}
-  def write_chunk(data, tier, opts \\ []) do
+  def write_chunk(data, drive_id, tier, opts \\ []) do
     {server, opts} = Keyword.pop(opts, :server, __MODULE__)
-    GenServer.call(server, {:write_chunk, data, tier, opts})
+    GenServer.call(server, {:write_chunk, data, drive_id, tier, opts})
   end
 
   @doc """
-  Reads a chunk from the blob store by hash.
+  Reads a chunk from a specific drive in the blob store.
 
   ## Parameters
 
     * `hash` - SHA-256 hash of the chunk (32 bytes)
-    * `tier` - Storage tier: "hot", "warm", or "cold"
+    * `drive_id` - Drive identifier to read from
     * `opts` - Optional keyword list:
+      * `:tier` - Storage tier (default: "hot")
+      * `:verify` - Verify data integrity (default: false)
+      * `:decompress` - Decompress data (default: false)
       * `:server` - GenServer name, defaults to `__MODULE__`
 
   ## Returns
@@ -119,23 +135,24 @@ defmodule NeonFS.Core.BlobStore do
     * `{:ok, data}` - The chunk data on success
     * `{:error, reason}` - On failure
 
-  ## Example
-
-      {:ok, data} = BlobStore.read_chunk(hash, "hot")
-
   """
-  @spec read_chunk(chunk_hash(), tier(), keyword()) :: {:ok, binary()} | {:error, String.t()}
-  def read_chunk(hash, tier, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:read_chunk, hash, tier, []})
+  @spec read_chunk(chunk_hash(), drive_id(), keyword()) :: {:ok, binary()} | {:error, String.t()}
+  def read_chunk(hash, drive_id, opts \\ []) do
+    DriveState.ensure_active(drive_id)
+    {server, opts} = Keyword.pop(opts, :server, __MODULE__)
+    tier = Keyword.get(opts, :tier, "hot")
+    verify = Keyword.get(opts, :verify, false)
+    decompress = Keyword.get(opts, :decompress, false)
+    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress})
   end
 
   @doc """
-  Reads a chunk from the blob store with options.
+  Reads a chunk from a specific drive with explicit tier and options.
 
   ## Parameters
 
     * `hash` - SHA-256 hash of the chunk (32 bytes)
+    * `drive_id` - Drive identifier to read from
     * `tier` - Storage tier: "hot", "warm", or "cold"
     * `read_opts` - Keyword list:
       * `:verify` - Verify data integrity (default: false)
@@ -147,25 +164,26 @@ defmodule NeonFS.Core.BlobStore do
     * `{:ok, data}` - The chunk data on success
     * `{:error, reason}` - On failure
 
-  ## Example
-
-      {:ok, data} = BlobStore.read_chunk(hash, "hot", verify: true, decompress: true)
-
   """
-  @spec read_chunk_with_options(chunk_hash(), tier(), keyword()) ::
+  @spec read_chunk_with_options(chunk_hash(), drive_id(), tier(), keyword()) ::
           {:ok, binary()} | {:error, String.t()}
-  def read_chunk_with_options(hash, tier, read_opts) do
+  def read_chunk_with_options(hash, drive_id, tier, read_opts) do
+    DriveState.ensure_active(drive_id)
     {server, read_opts} = Keyword.pop(read_opts, :server, __MODULE__)
-    GenServer.call(server, {:read_chunk, hash, tier, read_opts})
+    verify = Keyword.get(read_opts, :verify, false)
+    decompress = Keyword.get(read_opts, :decompress, false)
+    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress})
   end
 
   @doc """
-  Deletes a chunk from the blob store.
+  Deletes a chunk from a specific drive.
+
+  Searches all tier subdirectories within the drive to find and delete the chunk.
 
   ## Parameters
 
     * `hash` - SHA-256 hash of the chunk (32 bytes)
-    * `tier` - Storage tier: "hot", "warm", or "cold"
+    * `drive_id` - Drive identifier
     * `opts` - Optional keyword list:
       * `:server` - GenServer name, defaults to `__MODULE__`
 
@@ -174,19 +192,15 @@ defmodule NeonFS.Core.BlobStore do
     * `{:ok, {}}` - On success
     * `{:error, reason}` - On failure
 
-  ## Example
-
-      {:ok, {}} = BlobStore.delete_chunk(hash, "hot")
-
   """
-  @spec delete_chunk(chunk_hash(), tier(), keyword()) :: {:ok, {}} | {:error, String.t()}
-  def delete_chunk(hash, tier, opts \\ []) do
+  @spec delete_chunk(chunk_hash(), drive_id(), keyword()) :: {:ok, {}} | {:error, String.t()}
+  def delete_chunk(hash, drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:delete_chunk, hash, tier})
+    GenServer.call(server, {:delete_chunk, hash, drive_id})
   end
 
   @doc """
-  Migrates a chunk from one storage tier to another.
+  Migrates a chunk between tiers within a single drive.
 
   The operation is atomic: the chunk is copied to the destination tier,
   verified for integrity, and only then deleted from the source tier.
@@ -194,6 +208,7 @@ defmodule NeonFS.Core.BlobStore do
   ## Parameters
 
     * `hash` - SHA-256 hash of the chunk (32 bytes)
+    * `drive_id` - Drive identifier (migration is within this drive)
     * `from_tier` - Source tier: "hot", "warm", or "cold"
     * `to_tier` - Destination tier: "hot", "warm", or "cold"
     * `opts` - Optional keyword list:
@@ -204,16 +219,26 @@ defmodule NeonFS.Core.BlobStore do
     * `{:ok, {}}` - On success
     * `{:error, reason}` - On failure
 
-  ## Example
+  """
+  @spec migrate_chunk(chunk_hash(), drive_id(), tier(), tier(), keyword()) ::
+          {:ok, {}} | {:error, String.t()}
+  def migrate_chunk(hash, drive_id, from_tier, to_tier, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:migrate_chunk, hash, drive_id, from_tier, to_tier})
+  end
 
-      {:ok, {}} = BlobStore.migrate_chunk(hash, "hot", "cold")
+  @doc """
+  Returns configured drives and their status.
+
+  ## Returns
+
+    * `{:ok, drives}` - Map of `%{drive_id => drive_config}`
 
   """
-  @spec migrate_chunk(chunk_hash(), tier(), tier(), keyword()) ::
-          {:ok, {}} | {:error, String.t()}
-  def migrate_chunk(hash, from_tier, to_tier, opts \\ []) do
+  @spec list_drives(keyword()) :: {:ok, %{String.t() => drive_config()}}
+  def list_drives(opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:migrate_chunk, hash, from_tier, to_tier})
+    GenServer.call(server, :list_drives)
   end
 
   @doc """
@@ -236,11 +261,6 @@ defmodule NeonFS.Core.BlobStore do
       `{data, hash, offset, size}`
     * `{:error, reason}` - On failure
 
-  ## Example
-
-      {:ok, chunks} = BlobStore.chunk_data(data, :auto)
-      {:ok, chunks} = BlobStore.chunk_data(data, {:fixed, 256 * 1024})
-
   """
   @spec chunk_data(binary(), chunk_strategy, keyword()) ::
           {:ok, [chunk_result]} | {:error, String.t()}
@@ -256,25 +276,161 @@ defmodule NeonFS.Core.BlobStore do
 
   @impl true
   def init(opts) do
-    base_dir = Keyword.fetch!(opts, :base_dir)
+    drives_config = Keyword.get(opts, :drives) || Application.get_env(:neonfs_core, :drives, [])
     prefix_depth = Keyword.get(opts, :prefix_depth, 2)
 
-    case Native.store_open(base_dir, prefix_depth) do
-      {:ok, store} ->
-        {:ok, %{store: store, base_dir: base_dir, prefix_depth: prefix_depth}}
+    if drives_config == [] do
+      Logger.error("No drives configured for BlobStore — at least one drive is required")
+      {:stop, {:error, :no_drives_configured}}
+    else
+      case open_all_stores(drives_config, prefix_depth) do
+        {:ok, stores, drives} ->
+          {:ok, %{stores: stores, drives: drives, prefix_depth: prefix_depth}}
 
-      {:error, reason} ->
-        Logger.error("Failed to open blob store at #{base_dir}: #{reason}")
-        {:stop, {:error, reason}}
+        {:error, reason} ->
+          {:stop, {:error, reason}}
+      end
     end
   end
 
   @impl true
-  def handle_call({:write_chunk, data, tier, opts}, _from, state) do
+  def handle_call({:write_chunk, data, drive_id, tier, opts}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        result = do_write_chunk(store, data, drive_id, tier, opts)
+        if match?({:ok, _, _}, result), do: DriveState.record_io(drive_id)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:read_chunk, hash, drive_id, tier, verify, decompress}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        result = do_read_chunk(store, hash, drive_id, tier, verify, decompress)
+        if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:delete_chunk, hash, drive_id}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        result = do_delete_chunk(store, hash, drive_id)
+        if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:migrate_chunk, hash, drive_id, from_tier, to_tier}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        result = do_migrate_chunk(store, hash, drive_id, from_tier, to_tier)
+        if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:list_drives, _from, state) do
+    {:reply, {:ok, state.drives}, state}
+  end
+
+  @impl true
+  def handle_call({:chunk_data, data, strategy}, _from, state) do
+    {strategy_str, param} =
+      case strategy do
+        :auto ->
+          Native.auto_chunk_strategy(byte_size(data))
+
+        {:single} ->
+          {"single", 0}
+
+        {:fixed, size} ->
+          {"fixed", size}
+
+        {:fastcdc, avg_size} ->
+          {"fastcdc", avg_size}
+      end
+
+    result = Native.chunk_data(data, strategy_str, param)
+    {:reply, result, state}
+  end
+
+  ## Private: Store lookup
+
+  defp get_store(state, drive_id) do
+    case Map.fetch(state.stores, drive_id) do
+      {:ok, store} -> {:ok, store}
+      :error -> {:error, "unknown drive_id: #{drive_id}"}
+    end
+  end
+
+  ## Private: Init helpers
+
+  defp open_all_stores(drives_config, prefix_depth) do
+    results =
+      Enum.map(drives_config, fn drive ->
+        drive = normalize_drive_config(drive)
+
+        case Native.store_open(drive.path, prefix_depth) do
+          {:ok, handle} -> {:ok, drive.id, handle, drive}
+          {:error, reason} -> {:error, drive.id, reason}
+        end
+      end)
+
+    errors = Enum.filter(results, &match?({:error, _, _}, &1))
+
+    if Enum.empty?(errors) do
+      stores = Map.new(results, fn {:ok, id, handle, _} -> {id, handle} end)
+      drives = Map.new(results, fn {:ok, id, _, config} -> {id, config} end)
+      {:ok, stores, drives}
+    else
+      [{:error, drive_id, reason} | _] = errors
+      Logger.error("Failed to open store for drive #{drive_id}: #{inspect(reason)}")
+      {:error, {:drive_open_failed, drive_id, reason}}
+    end
+  end
+
+  defp normalize_drive_config(drive) when is_map(drive) do
+    %{
+      id: to_string(drive[:id] || drive["id"]),
+      path: to_string(drive[:path] || drive["path"]),
+      tier: normalize_tier(drive[:tier] || drive["tier"] || :hot),
+      capacity: drive[:capacity] || drive["capacity"] || 0
+    }
+  end
+
+  defp normalize_tier(tier) when is_atom(tier), do: tier
+  defp normalize_tier(tier) when is_binary(tier), do: String.to_existing_atom(tier)
+
+  ## Private: Write
+
+  defp do_write_chunk(store, data, drive_id, tier, opts) do
     compression = Keyword.get(opts, :compression, "none")
     compression_level = Keyword.get(opts, :compression_level, 3)
 
-    metadata = %{tier: tier, data_size: byte_size(data), compression: compression}
+    metadata = %{
+      drive_id: drive_id,
+      tier: tier,
+      data_size: byte_size(data),
+      compression: compression
+    }
+
     start_time = System.monotonic_time()
 
     :telemetry.execute(
@@ -288,7 +444,7 @@ defmodule NeonFS.Core.BlobStore do
         hash = Native.compute_hash(data)
 
         case Native.store_write_chunk_compressed(
-               state.store,
+               store,
                hash,
                data,
                tier,
@@ -336,15 +492,14 @@ defmodule NeonFS.Core.BlobStore do
           {:error, Exception.message(e)}
       end
 
-    {:reply, result, state}
+    result
   end
 
-  @impl true
-  def handle_call({:read_chunk, hash, tier, read_opts}, _from, state) do
-    verify = Keyword.get(read_opts, :verify, false)
-    decompress = Keyword.get(read_opts, :decompress, false)
+  ## Private: Read
 
+  defp do_read_chunk(store, hash, drive_id, tier, verify, decompress) do
     metadata = %{
+      drive_id: drive_id,
       tier: tier,
       hash: Base.encode16(hash, case: :lower),
       verify: verify,
@@ -361,7 +516,7 @@ defmodule NeonFS.Core.BlobStore do
 
     result =
       try do
-        case Native.store_read_chunk_with_options(state.store, hash, tier, verify, decompress) do
+        case Native.store_read_chunk_with_options(store, hash, tier, verify, decompress) do
           {:ok, data} ->
             duration = System.monotonic_time() - start_time
 
@@ -397,12 +552,13 @@ defmodule NeonFS.Core.BlobStore do
           {:error, Exception.message(e)}
       end
 
-    {:reply, result, state}
+    result
   end
 
-  @impl true
-  def handle_call({:delete_chunk, hash, tier}, _from, state) do
-    metadata = %{tier: tier, hash: Base.encode16(hash, case: :lower)}
+  ## Private: Delete (searches all tiers)
+
+  defp do_delete_chunk(store, hash, drive_id) do
+    metadata = %{drive_id: drive_id, hash: Base.encode16(hash, case: :lower)}
     start_time = System.monotonic_time()
 
     :telemetry.execute(
@@ -413,7 +569,7 @@ defmodule NeonFS.Core.BlobStore do
 
     result =
       try do
-        case Native.store_delete_chunk(state.store, hash, tier) do
+        case try_delete_from_tiers(store, hash) do
           {:ok, {}} = success ->
             duration = System.monotonic_time() - start_time
 
@@ -449,12 +605,24 @@ defmodule NeonFS.Core.BlobStore do
           {:error, Exception.message(e)}
       end
 
-    {:reply, result, state}
+    result
   end
 
-  @impl true
-  def handle_call({:migrate_chunk, hash, from_tier, to_tier}, _from, state) do
+  defp try_delete_from_tiers(store, hash) do
+    # Try each tier, return success on first hit
+    Enum.reduce_while(@tiers, {:error, "chunk not found in any tier"}, fn tier, acc ->
+      case Native.store_delete_chunk(store, hash, tier) do
+        {:ok, {}} -> {:halt, {:ok, {}}}
+        {:error, _} -> {:cont, acc}
+      end
+    end)
+  end
+
+  ## Private: Migrate
+
+  defp do_migrate_chunk(store, hash, drive_id, from_tier, to_tier) do
     metadata = %{
+      drive_id: drive_id,
       hash: Base.encode16(hash, case: :lower),
       from_tier: from_tier,
       to_tier: to_tier
@@ -470,7 +638,7 @@ defmodule NeonFS.Core.BlobStore do
 
     result =
       try do
-        case Native.store_migrate_chunk(state.store, hash, from_tier, to_tier) do
+        case Native.store_migrate_chunk(store, hash, from_tier, to_tier) do
           {:ok, {}} = success ->
             duration = System.monotonic_time() - start_time
 
@@ -506,27 +674,6 @@ defmodule NeonFS.Core.BlobStore do
           {:error, Exception.message(e)}
       end
 
-    {:reply, result, state}
-  end
-
-  @impl true
-  def handle_call({:chunk_data, data, strategy}, _from, state) do
-    {strategy_str, param} =
-      case strategy do
-        :auto ->
-          Native.auto_chunk_strategy(byte_size(data))
-
-        {:single} ->
-          {"single", 0}
-
-        {:fixed, size} ->
-          {"fixed", size}
-
-        {:fastcdc, avg_size} ->
-          {"fastcdc", avg_size}
-      end
-
-    result = Native.chunk_data(data, strategy_str, param)
-    {:reply, result, state}
+    result
   end
 end

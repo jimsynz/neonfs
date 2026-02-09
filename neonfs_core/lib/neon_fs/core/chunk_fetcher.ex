@@ -18,7 +18,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   All events include metadata with operation details.
   """
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex}
+  alias NeonFS.Core.{BlobStore, ChunkAccessTracker, ChunkCache, ChunkIndex, DriveRegistry}
   require Logger
 
   @type fetch_result :: {:ok, binary(), source()} | {:error, term()}
@@ -56,13 +56,55 @@ defmodule NeonFS.Core.ChunkFetcher do
   @spec fetch_chunk(binary(), keyword()) :: fetch_result()
   def fetch_chunk(hash, opts \\ []) when is_binary(hash) do
     tier = Keyword.get(opts, :tier, "hot")
+    drive_id = Keyword.get(opts, :drive_id, "default")
     verify = Keyword.get(opts, :verify, false)
     decompress = Keyword.get(opts, :decompress, false)
+    volume_id = Keyword.get(opts, :volume_id)
 
     start_time = System.monotonic_time()
 
-    # Try local fetch first
-    case try_local_fetch(hash, tier, verify, decompress) do
+    # Try cache first (only for transformed chunks)
+    result =
+      case try_cache_fetch(volume_id, hash) do
+        {:ok, data} ->
+          {:ok, data, :local}
+
+        :miss ->
+          fetch_from_storage(hash, drive_id, tier, verify, decompress, start_time, opts)
+      end
+
+    # Record access for tiering decisions and populate cache
+    case result do
+      {:ok, data, _source} ->
+        ChunkAccessTracker.record_access(hash)
+        maybe_cache_result(volume_id, hash, data, decompress)
+
+      _ ->
+        :ok
+    end
+
+    result
+  end
+
+  defp try_cache_fetch(nil, _hash), do: :miss
+
+  defp try_cache_fetch(volume_id, hash) do
+    ChunkCache.get(volume_id, hash)
+  rescue
+    ArgumentError -> :miss
+  end
+
+  defp maybe_cache_result(nil, _hash, _data, _decompress), do: :ok
+  defp maybe_cache_result(_volume_id, _hash, _data, false), do: :ok
+
+  defp maybe_cache_result(volume_id, hash, data, true) do
+    ChunkCache.put(volume_id, hash, data)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp fetch_from_storage(hash, drive_id, tier, verify, decompress, start_time, opts) do
+    case try_local_fetch(hash, drive_id, tier, verify, decompress) do
       {:ok, data} ->
         duration = System.monotonic_time() - start_time
 
@@ -82,10 +124,10 @@ defmodule NeonFS.Core.ChunkFetcher do
 
   # Private Functions
 
-  defp try_local_fetch(hash, tier, verify, decompress) do
+  defp try_local_fetch(hash, drive_id, tier, verify, decompress) do
     read_opts = [verify: verify, decompress: decompress]
 
-    case BlobStore.read_chunk_with_options(hash, tier, read_opts) do
+    case BlobStore.read_chunk_with_options(hash, drive_id, tier, read_opts) do
       {:ok, data} -> {:ok, data}
       {:error, reason} -> {:error, reason}
     end
@@ -144,7 +186,9 @@ defmodule NeonFS.Core.ChunkFetcher do
   end
 
   defp try_fetch_from_location(location, hash, tier, verify, decompress, cache_remote) do
-    case rpc_read_chunk(location.node, hash, tier, verify, decompress) do
+    drive_id = Map.get(location, :drive_id, "default")
+
+    case rpc_read_chunk(location.node, hash, drive_id, tier, verify, decompress) do
       {:ok, data} ->
         maybe_cache_remotely_fetched_chunk(hash, data, tier, cache_remote)
         {:ok, data, {:remote, location.node}}
@@ -166,16 +210,85 @@ defmodule NeonFS.Core.ChunkFetcher do
   end
 
   defp sort_locations_by_preference(locations) do
-    # For Phase 2, simple sorting: prefer any available node
-    # In future phases, could consider:
-    # - Same rack/zone (from location metadata)
-    # - Network proximity (latency measurements)
-    # - Node load (current request count)
-    # For now, just shuffle to distribute load
-    Enum.shuffle(locations)
+    local_node = Node.self()
+
+    locations
+    |> Enum.map(&enrich_location_with_drive_info/1)
+    |> sort_locations_by_score(local_node)
   end
 
-  defp rpc_read_chunk(node, hash, tier, verify, decompress) do
+  defp enrich_location_with_drive_info(location) do
+    node = location.node
+    drive_id = Map.get(location, :drive_id, "default")
+
+    case safe_get_drive(node, drive_id) do
+      {:ok, drive} ->
+        Map.merge(location, %{tier: drive.tier, state: drive.state})
+
+      {:error, _} ->
+        Logger.warning("Drive info unavailable for #{drive_id} on #{node}, assigning worst score")
+
+        location
+    end
+  end
+
+  defp safe_get_drive(node, drive_id) do
+    DriveRegistry.get_drive(node, drive_id)
+  rescue
+    ArgumentError -> {:error, :registry_unavailable}
+  catch
+    :exit, _ -> {:error, :registry_unavailable}
+  end
+
+  @doc """
+  Sorts locations by preference score. Lower scores are preferred.
+
+  Locations with the same score are shuffled randomly to avoid hotspotting.
+  This is a pure function suitable for testing without GenServer dependencies.
+
+  ## Scoring hierarchy
+
+  | Location type          | Score |
+  |------------------------|-------|
+  | Local SSD              |   0   |
+  | Remote SSD             |  10   |
+  | Local HDD active       |  20   |
+  | Remote HDD active      |  30   |
+  | HDD standby (any)      |  50   |
+  | Unknown drive           | 100   |
+  """
+  @spec sort_locations_by_score([map()], node()) :: [map()]
+  def sort_locations_by_score(locations, local_node) do
+    locations
+    |> Enum.map(fn loc -> {score_location(loc, local_node), :rand.uniform(), loc} end)
+    |> Enum.sort_by(fn {score, rand, _loc} -> {score, rand} end)
+    |> Enum.map(fn {_score, _rand, loc} -> loc end)
+  end
+
+  @doc """
+  Computes a preference score for a chunk location.
+
+  Lower scores are preferred. The `:hot` tier is treated as SSD-class storage;
+  all other tiers (`:warm`, `:cold`) are treated as HDD-class. The gaps between
+  scores (multiples of 10) allow future fine-tuning without reshuffling the hierarchy.
+  """
+  @spec score_location(map(), node()) :: non_neg_integer()
+  def score_location(location_info, local_node) do
+    tier = Map.get(location_info, :tier)
+    state = Map.get(location_info, :state)
+    local? = Map.get(location_info, :node) == local_node
+
+    drive_score(tier, state, local?)
+  end
+
+  defp drive_score(nil, _state, _local?), do: 100
+  defp drive_score(:hot, _state, true), do: 0
+  defp drive_score(:hot, _state, false), do: 10
+  defp drive_score(_hdd, :standby, _local?), do: 50
+  defp drive_score(_hdd, _state, true), do: 20
+  defp drive_score(_hdd, _state, false), do: 30
+
+  defp rpc_read_chunk(node, hash, drive_id, tier, verify, decompress) do
     read_opts = [verify: verify, decompress: decompress]
 
     # Use :rpc to call BlobStore.read_chunk_with_options on the remote node
@@ -183,7 +296,7 @@ defmodule NeonFS.Core.ChunkFetcher do
            node,
            BlobStore,
            :read_chunk_with_options,
-           [hash, tier, read_opts],
+           [hash, drive_id, tier, read_opts],
            10_000
          ) do
       {:ok, data} ->
@@ -200,7 +313,9 @@ defmodule NeonFS.Core.ChunkFetcher do
 
   defp cache_chunk_locally(hash, data, tier) do
     # Store the chunk locally for future reads
-    case BlobStore.write_chunk(data, tier) do
+    drive_id = "default"
+
+    case BlobStore.write_chunk(data, drive_id, tier) do
       {:ok, written_hash, _info} ->
         if written_hash == hash do
           Logger.debug("Successfully cached remote chunk #{Base.encode16(hash)} locally")

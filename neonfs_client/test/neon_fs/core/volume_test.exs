@@ -11,7 +11,12 @@ defmodule NeonFS.Core.VolumeTest do
       assert is_binary(vol.id)
       assert vol.owner == nil
       assert vol.write_ack == :local
-      assert vol.initial_tier == :hot
+      assert vol.tiering == %{initial_tier: :hot, promotion_threshold: 10, demotion_delay: 86_400}
+      assert vol.caching.transformed_chunks == true
+      assert vol.caching.reconstructed_stripes == true
+      assert vol.caching.remote_chunks == true
+      assert vol.caching.max_memory == 268_435_456
+      assert vol.io_weight == 100
       assert vol.logical_size == 0
       assert vol.physical_size == 0
       assert vol.chunk_count == 0
@@ -20,12 +25,37 @@ defmodule NeonFS.Core.VolumeTest do
     end
 
     test "accepts custom options" do
-      vol = Volume.new("custom", owner: "alice", write_ack: :quorum, initial_tier: :warm)
+      vol =
+        Volume.new("custom",
+          owner: "alice",
+          write_ack: :quorum,
+          tiering: %{initial_tier: :warm, promotion_threshold: 5, demotion_delay: 3600}
+        )
 
       assert vol.name == "custom"
       assert vol.owner == "alice"
       assert vol.write_ack == :quorum
-      assert vol.initial_tier == :warm
+      assert vol.tiering.initial_tier == :warm
+      assert vol.tiering.promotion_threshold == 5
+      assert vol.tiering.demotion_delay == 3600
+    end
+
+    test "accepts custom caching and io_weight" do
+      vol =
+        Volume.new("custom",
+          caching: %{
+            transformed_chunks: false,
+            reconstructed_stripes: true,
+            remote_chunks: false,
+            max_memory: 512_000_000
+          },
+          io_weight: 200
+        )
+
+      assert vol.caching.transformed_chunks == false
+      assert vol.caching.remote_chunks == false
+      assert vol.caching.max_memory == 512_000_000
+      assert vol.io_weight == 200
     end
 
     test "generates unique IDs" do
@@ -39,6 +69,27 @@ defmodule NeonFS.Core.VolumeTest do
   describe "default_durability/0" do
     test "returns 3-way replication with min 2 copies" do
       assert Volume.default_durability() == %{type: :replicate, factor: 3, min_copies: 2}
+    end
+  end
+
+  describe "default_tiering/0" do
+    test "returns hot tier with default thresholds" do
+      assert Volume.default_tiering() == %{
+               initial_tier: :hot,
+               promotion_threshold: 10,
+               demotion_delay: 86_400
+             }
+    end
+  end
+
+  describe "default_caching/0" do
+    test "returns all-enabled with 256MB" do
+      assert Volume.default_caching() == %{
+               transformed_chunks: true,
+               reconstructed_stripes: true,
+               remote_chunks: true,
+               max_memory: 268_435_456
+             }
     end
   end
 
@@ -62,6 +113,20 @@ defmodule NeonFS.Core.VolumeTest do
       assert updated.owner == "bob"
       assert updated.write_ack == :all
       assert updated.name == "test"
+    end
+
+    test "updates tiering, caching, and io_weight" do
+      vol = Volume.new("test")
+
+      updated =
+        Volume.update(vol,
+          tiering: %{initial_tier: :cold, promotion_threshold: 20, demotion_delay: 172_800},
+          io_weight: 50
+        )
+
+      assert updated.tiering.initial_tier == :cold
+      assert updated.tiering.promotion_threshold == 20
+      assert updated.io_weight == 50
     end
 
     test "updates the updated_at timestamp" do
@@ -133,9 +198,99 @@ defmodule NeonFS.Core.VolumeTest do
       assert {:error, "write_ack must be" <> _} = Volume.validate(vol)
     end
 
-    test "rejects invalid tier" do
-      vol = %{Volume.new("x") | initial_tier: :invalid}
-      assert {:error, "initial_tier must be" <> _} = Volume.validate(vol)
+    test "rejects invalid tiering initial_tier" do
+      vol = %{
+        Volume.new("x")
+        | tiering: %{initial_tier: :invalid, promotion_threshold: 10, demotion_delay: 86_400}
+      }
+
+      assert {:error, "invalid tiering" <> _} = Volume.validate(vol)
+    end
+
+    test "rejects non-positive promotion_threshold" do
+      vol = %{
+        Volume.new("x")
+        | tiering: %{initial_tier: :hot, promotion_threshold: 0, demotion_delay: 86_400}
+      }
+
+      assert {:error, "invalid tiering" <> _} = Volume.validate(vol)
+    end
+
+    test "rejects non-positive demotion_delay" do
+      vol = %{
+        Volume.new("x")
+        | tiering: %{initial_tier: :hot, promotion_threshold: 10, demotion_delay: -1}
+      }
+
+      assert {:error, "invalid tiering" <> _} = Volume.validate(vol)
+    end
+
+    test "accepts valid tiering with all tiers" do
+      for tier <- [:hot, :warm, :cold] do
+        vol = %{
+          Volume.new("x")
+          | tiering: %{initial_tier: tier, promotion_threshold: 5, demotion_delay: 3600}
+        }
+
+        assert :ok = Volume.validate(vol)
+      end
+    end
+
+    test "rejects invalid caching" do
+      vol = %{
+        Volume.new("x")
+        | caching: %{
+            transformed_chunks: "yes",
+            reconstructed_stripes: true,
+            remote_chunks: true,
+            max_memory: 1000
+          }
+      }
+
+      assert {:error, "invalid caching" <> _} = Volume.validate(vol)
+    end
+
+    test "rejects non-positive caching max_memory" do
+      vol = %{
+        Volume.new("x")
+        | caching: %{
+            transformed_chunks: true,
+            reconstructed_stripes: true,
+            remote_chunks: true,
+            max_memory: 0
+          }
+      }
+
+      assert {:error, "invalid caching" <> _} = Volume.validate(vol)
+    end
+
+    test "accepts valid caching config" do
+      vol = %{
+        Volume.new("x")
+        | caching: %{
+            transformed_chunks: false,
+            reconstructed_stripes: false,
+            remote_chunks: false,
+            max_memory: 1
+          }
+      }
+
+      assert :ok = Volume.validate(vol)
+    end
+
+    test "rejects non-positive io_weight" do
+      vol = %{Volume.new("x") | io_weight: 0}
+      assert {:error, "io_weight must be a positive integer"} = Volume.validate(vol)
+    end
+
+    test "rejects non-integer io_weight" do
+      vol = %{Volume.new("x") | io_weight: 1.5}
+      assert {:error, "io_weight must be a positive integer"} = Volume.validate(vol)
+    end
+
+    test "accepts valid io_weight" do
+      vol = %{Volume.new("x") | io_weight: 250}
+      assert :ok = Volume.validate(vol)
     end
 
     test "rejects invalid compression algorithm" do

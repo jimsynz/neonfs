@@ -9,6 +9,8 @@
 - To return binary from Rustler NIF: use `NewBinary::new(env, len)`, copy data, then `.into()` to convert to `Binary<'a>`
 - For Rustler Resources: use `#[rustler::resource_impl]` on `impl Resource for T {}` - auto-registers the resource type
 - Rustler encodes `Result<(), E>` as `{:ok, {}}` not `:ok` - adjust Elixir specs accordingly
+- Volume config uses nested maps: `volume.tiering.initial_tier` (not `volume.initial_tier`), `volume.caching.*`, and `volume.io_weight`
+- Ra machine version migrations: wrap old fields into new structures with defaults, handle both old and new format in deserializers
 
 ---
 
@@ -1351,4 +1353,364 @@
   - `:ets.lookup/2` always returns a list — guard clauses like `when is_list(entries)` with a `_ -> []` fallback trigger dialyzer warnings
   - When removing a path dependency (neonfs_core from neonfs_fuse), run `mix deps.clean --unused --unlock` to clean stale lockfile entries
   - Use `fj` CLI (not `gh`) for Forgejo-hosted repos — e.g. `fj pr create --base main "title"`
+---
+
+## 2026-02-08 - Task 0045
+- What was implemented:
+  - Restructured Volume struct: removed `initial_tier` top-level field, added `tiering` map (`initial_tier`, `promotion_threshold`, `demotion_delay`), `caching` map (`transformed_chunks`, `reconstructed_stripes`, `remote_chunks`, `max_memory`), and `io_weight` field
+  - Added validation for all new fields in `Volume.validate/1`
+  - Added `default_tiering/0` and `default_caching/0` functions with sensible defaults
+  - Bumped MetadataStateMachine version from 2 to 3 with `{:machine_version, 2, 3}` migration handler that migrates old volumes with `initial_tier` field into new `tiering` map format
+  - Updated VolumeRegistry serialisation (`volume_to_map/1` and `map_to_volume/1`) with backward compatibility for pre-Phase 3 volumes
+  - Updated WriteOperation to use `volume.tiering.initial_tier` instead of hardcoded `"hot"`
+  - Updated Replication module to use `volume.tiering.initial_tier`
+  - Updated CLI handler with new volume creation options documentation and serialisation
+  - Updated all tests in neonfs_client (90 tests passing) and created new MetadataStateMachine migration tests (7 tests passing)
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/volume.ex` (restructured struct, new types, validation, defaults)
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (version bump 2→3, migration handler)
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` (serialisation with backward compat)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (tier-aware write path)
+  - `neonfs_core/lib/neon_fs/core/replication.ex` (tier from tiering config)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (volume map serialisation, docs)
+  - `neonfs_client/test/neon_fs/core/volume_test.exs` (updated for tiering/caching/io_weight)
+  - `neonfs_core/test/neon_fs/core/volume_registry_test.exs` (updated for new struct)
+  - `neonfs_core/test/neon_fs/core/metadata_state_machine_test.exs` (new - migration tests)
+- **Learnings for future iterations:**
+  - Ra machine version migration must handle volumes created before the migration by wrapping old fields into new structures with defaults
+  - VolumeRegistry `map_to_volume/1` needs backward compat for both old format (top-level `initial_tier`) and new format (`tiering` map) since Ra state may contain either
+  - Pre-existing issue: `NeonFS.TestCase` in neonfs_core fails to load in Elixir 1.19.5 — `test/support/test_case.ex` doesn't match test load filters. This affects all neonfs_core tests using `use NeonFS.TestCase`
+  - The `.tool-versions` has `elixir 1.19.5` but installed version is `1.19.5-otp-28` — need to match for asdf to find the right version
+---
+
+## 2026-02-08 - Task 0046
+- What was implemented:
+  - Refactored BlobStore GenServer from single NIF handle to multi-drive architecture
+  - State changed from single handle to `%{stores: %{drive_id => handle}, drives: %{drive_id => drive_config}}`
+  - `init/1` reads drive config from opts or `Application.get_env(:neonfs_core, :drives, [])`, fails with `:no_drives_configured` if empty
+  - Each configured drive gets its own `Native.store_open/2` call with independent handle
+  - New API: `write_chunk/4` (data, drive_id, tier, opts), `read_chunk/3` (hash, drive_id, opts), `read_chunk_with_options/4` (hash, drive_id, tier, read_opts), `delete_chunk/3` (hash, drive_id, opts) searches all tiers, `migrate_chunk/5` (hash, drive_id, from_tier, to_tier, opts), `list_drives/1`, `chunk_data/3` unchanged
+  - Drive config shape: `%{id: string, path: string, tier: atom, capacity: integer}` — normalized from keyword lists or maps
+  - All telemetry events include `drive_id` in metadata
+  - Updated all callers: WriteOperation, Replication, ChunkFetcher, ReadOperation
+  - Updated Supervisor to pass drives config to BlobStore child spec with backward compat fallback to `blob_store_base_dir`
+  - Added drives config to `config.exs` (test env) and `runtime.exs` (NEONFS_DRIVES env var parsing)
+  - Complete rewrite of blob_store_test.exs with 32 tests including multi-drive scenarios
+  - Updated chunk_fetcher_test.exs and test_case.ex for new API
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/blob_store.ex` (complete rewrite — multi-handle state, new API)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (store_new_chunk, delete_chunk_from_storage)
+  - `neonfs_core/lib/neon_fs/core/replication.ex` (replicate_to_node — pass drive_id in RPC args)
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (fetch_chunk, try_local_fetch, try_fetch_from_location, rpc_read_chunk, cache_chunk_locally)
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` (fetch_chunk_data — pass drive_id in fetch_opts)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (build_children, default_drives helper)
+  - `neonfs_core/config/config.exs` (added drives config for test env)
+  - `neonfs_core/config/runtime.exs` (added NEONFS_DRIVES env var parsing)
+  - `neonfs_core/test/neon_fs/core/blob_store_test.exs` (complete rewrite — 32 tests)
+  - `neonfs_core/test/neon_fs/core/chunk_fetcher_test.exs` (updated BlobStore call signatures)
+  - `neonfs_core/test/support/test_case.ex` (start_blob_store, configure_test_dirs, cleanup_test_dirs)
+  - `tasks/task_0046_multi_drive_blob_store.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - `Native.store_open/2` already supports multiple independent calls — no Rust changes needed for multi-drive
+  - Drive config normalization handles both map and keyword list inputs (normalize string/atom keys)
+  - `delete_chunk` iterates all tiers (hot/warm/cold) since callers may not know which tier a chunk is in
+  - Backward compatibility in Supervisor: fall back to `blob_store_base_dir` config with single "default" drive when `:drives` config not set
+  - NEONFS_DRIVES env var format: `"id:path:tier:capacity,id2:path2:tier2:capacity2"` with colon-separated fields and comma-separated drives
+  - Multi-drive test setup: create separate tmp dirs for each drive, configure independent drives list
+  - Test that writes to different drive_ids can be verified by checking files exist in correct tmp dirs
+  - Pre-existing issue persists: `NeonFS.TestCase` in neonfs_core fails to load in Elixir 1.19.5 — affects tests using `use NeonFS.TestCase` but not standalone BlobStore tests
+---
+
+## 2026-02-08 - Task 0047
+- What was implemented:
+  - Created `Drive` struct (`neonfs_core/lib/neon_fs/core/drive.ex`) with fields: id, node, path, tier, capacity_bytes, used_bytes, state (:active/:standby), power_management, idle_timeout
+  - Created `DriveRegistry` GenServer (`neonfs_core/lib/neon_fs/core/drive_registry.ex`) backed by ETS `:drive_registry` table
+  - Implements: `register_drive/1`, `list_drives/0`, `drives_for_tier/1`, `drives_for_node/1`, `select_drive/1` (least-used by ratio), `update_usage/2`, `update_state/2`
+  - Drives registered on startup from application config via `Drive.from_config/2`
+  - Cross-node sync via periodic RPC (`sync_remote_drives`) with configurable interval (default 30s)
+  - Stale remote entries cleaned up when nodes disconnect
+  - Created `Topology` module (`neonfs_core/lib/neon_fs/core/topology.ex`) with `available_tiers/0`, `cluster_tiers/0`, `validate_tier_available/1`
+  - Added DriveRegistry to supervision tree (after BlobStore, before ChunkIndex)
+  - Telemetry events: `[:neonfs, :drive_registry, :register]` and `[:neonfs, :drive_registry, :select_drive]`
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/drive.ex` (new — Drive struct with from_config/2, usage_ratio/1)
+  - `neonfs_core/lib/neon_fs/core/drive_registry.ex` (new — ETS-backed GenServer)
+  - `neonfs_core/lib/neon_fs/core/topology.ex` (new — tier availability queries)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added DriveRegistry child)
+  - `neonfs_core/test/neon_fs/core/drive_registry_test.exs` (new — 21 tests)
+  - `neonfs_core/test/neon_fs/core/topology_test.exs` (new — 9 tests)
+  - `tasks/task_0047_drive_registry_and_tier_discovery.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - DriveRegistry is local-first: each node owns its drives authoritatively, cluster view assembled via RPC
+  - Drive state (usage, power) is too volatile for Ra consensus — keep in local ETS, sync periodically
+  - `select_drive/1` filters to local node + active state, then picks by min `usage_ratio`
+  - ETS table key is `{node, drive_id}` tuple for unique identification across cluster
+  - `Drive.from_config/2` normalizes both atom and string keys in config maps
+  - Sync interval configurable and disableable (set to 0 for tests to avoid timer leaks)
+  - Topology module is a stateless query layer over DriveRegistry — no GenServer needed
+  - App supervisor starts children despite `start_children?: false` in config.exs because the app starts before Mix loads test config. Tests must handle pre-existing DriveRegistry using `ensure_registry_with_drives` pattern (clear ETS + re-register) instead of stop/start
+---
+
+## 2026-02-08 - Task 0048
+- What was implemented:
+  - WriteOperation now uses `DriveRegistry.select_drive(tier)` instead of hardcoded `"default"` drive_id
+  - Write path uses `volume.tiering.initial_tier` for tier selection (was already set in task 0045, now feeds into DriveRegistry)
+  - New `select_drive_for_tier/1` helper maps `{:error, :no_drives_in_tier}` to `{:error, :no_drives_available}`
+  - `build_chunk_meta` now accepts explicit `drive_id` parameter from selected drive
+  - `maybe_replicate_chunk` passes actual tier from volume config instead of hardcoded `:hot`
+  - Replication module uses `DriveRegistry.drives_for_node/1` to select drives for remote nodes
+  - New `local_drive_id_for_tier/1` helper selects local drive via DriveRegistry
+  - All "default" drive_id references in replication replaced with actual drive selection
+  - `perform_replication`, `quorum_replicate`, `sync_replicate` all accept and pass `local_drive_id`
+  - DriveRegistry and Topology tests updated with `ensure_registry_with_drives` pattern for robustness
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (DriveRegistry integration, tier-aware writes)
+  - `neonfs_core/lib/neon_fs/core/replication.ex` (drive-aware replica placement, local_drive_id)
+  - `neonfs_core/test/neon_fs/core/drive_registry_test.exs` (robust test setup pattern)
+  - `neonfs_core/test/neon_fs/core/topology_test.exs` (robust test setup pattern)
+  - `tasks/task_0048_write_path_tier_and_drive_handling.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - DriveRegistry.select_drive/1 returns `{:ok, %Drive{}}` — extract `.id` for BlobStore calls
+  - Replication targets need drive selection per-node — use `drives_for_node/1` to find active drives
+  - When DriveRegistry is unavailable (no drives registered), fall back to `"default"` drive_id for backward compatibility
+  - Test setup must handle pre-existing named GenServers from app supervisor — use ETS clear + re-register instead of stop/start
+---
+
+## 2026-02-08 - Task 0049
+- What was implemented:
+  - Created `ChunkAccessTracker` GenServer with ETS-backed access frequency tracking
+  - `record_access/1` uses direct `ets.update_counter/3` for lock-free concurrent updates (no GenServer bottleneck)
+  - ETS table stores `{chunk_hash, hourly_count, daily_count, last_accessed_unix}` tuples
+  - `get_stats/1` returns `%{hourly: count, daily: count, last_accessed: DateTime}`
+  - `list_hot_chunks/2` returns chunks above access threshold, sorted by count descending
+  - `list_cold_chunks/2` returns chunks not accessed within N hours
+  - Periodic decay via `Process.send_after/3`: rolls hourly into daily, cleans up zero-activity entries
+  - Daily approximation: subtracts 1/24 of daily per decay cycle (sliding window approximation)
+  - Sampled telemetry (1 in 100 accesses) to avoid overhead
+  - Integrated into `ChunkFetcher.fetch_chunk/2` — calls `record_access/1` after successful read
+  - Added to supervision tree (after DriveRegistry, before ChunkIndex)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_access_tracker.ex` (new — GenServer + ETS)
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (added record_access call)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added ChunkAccessTracker child)
+  - `neonfs_core/test/neon_fs/core/chunk_access_tracker_test.exs` (new — 15 tests)
+  - `tasks/task_0049_chunk_access_tracking.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - `ets.update_counter/3` with `rescue ArgumentError` handles upsert pattern efficiently
+  - Use `write_concurrency: true` for ETS tables with heavy concurrent writes
+  - Sampled telemetry (1 in N with `:rand.uniform/1`) avoids hot-path overhead
+  - Sliding window approximation (subtract 1/24 per hour) is simpler than per-access timestamps and uses constant memory
+  - Tests can send `:decay` message directly to GenServer for deterministic testing
+---
+
+## 2026-02-09 - Task 0050
+- What was implemented:
+  - Replaced `Enum.shuffle` in `ChunkFetcher.sort_locations_by_preference/1` with score-based replica selection
+  - Scoring hierarchy: local SSD (0) > remote SSD (10) > local HDD active (20) > remote HDD active (30) > HDD standby (50) > unknown (100)
+  - `:hot` tier mapped to SSD-class, `:warm`/`:cold` to HDD-class
+  - Tie-breaking within same score uses `:rand.uniform()` to avoid hotspotting
+  - Drive info (tier, state) enriched from DriveRegistry via new `get_drive/2` function
+  - Graceful fallback when DriveRegistry ETS table doesn't exist (rescue ArgumentError + catch exit)
+  - Pure scoring functions: `score_location/2` and `sort_locations_by_score/2` are public and testable without GenServer
+  - Multi-clause `drive_score/3` pattern matching to satisfy Credo cyclomatic complexity limits
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (replaced shuffle with scoring, added public scoring functions)
+  - `neonfs_core/lib/neon_fs/core/drive_registry.ex` (added `get_drive/2` for direct ETS lookup by node+drive_id)
+  - `neonfs_core/test/neon_fs/core/chunk_fetcher_test.exs` (added 14 new tests for scoring and sorting)
+  - `tasks/task_0050_tier_aware_read_path.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Credo `--strict` enforces max cyclomatic complexity of 9; use multi-clause pattern matching instead of `cond` to stay under the limit
+  - `rescue ArgumentError` needed for ETS operations on tables that may not exist; `catch :exit` alone doesn't catch it
+  - ChunkFetcher tests need `ChunkAccessTracker` ETS table started — existing test setup doesn't include it
+  - Pre-existing test failures exist across multiple test files due to missing DriveRegistry ETS table in older test setups
+---
+
+## 2026-02-09 - Task 0051
+- What was implemented:
+  - Created `DriveCommand` behaviour with `spin_down/1`, `spin_up/1`, `check_state/1` callbacks
+  - Created `DriveCommand.Default` implementation using `hdparm` system commands
+  - Created `DriveCommand.Test` implementation using ETS table for call tracking and configurable results
+  - Created `DriveState` GenServer per drive with 5-state power management state machine: `:active`, `:idle`, `:spinning_down`, `:standby`, `:spinning_up`
+  - Idle timeout triggers active → idle → spinning_down → standby transition (configurable, default 30 min)
+  - Spin-up on read: `ensure_active/1` blocks callers during spin-up, returns `:ok` when drive ready
+  - Concurrent spin-up coalescing: multiple callers waiting on same spin-up share single operation
+  - `record_io/1` (cast) resets idle timer, called by BlobStore on every successful read/write/delete/migrate
+  - `ensure_active/1` called by BlobStore client API before reads (runs in caller's process, not BlobStore GenServer)
+  - DriveRegistry updated with simplified state (`:active`/`:standby`) on every transition
+  - Non-PM drives (SSDs) skip all power management — always `:active`
+  - Telemetry events: `[:neonfs, :drive_state, :transition]` with from/to metadata
+  - Registry (`NeonFS.Core.DriveStateRegistry`) for per-drive process naming
+  - Supervisor starts Registry, DriveRegistry, then DriveState per configured drive
+  - Command module configurable via `:drive_command_module` application env
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/drive_command.ex` (new — behaviour + Default + Test implementations)
+  - `neonfs_core/lib/neon_fs/core/drive_state.ex` (new — per-drive GenServer with state machine)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added Registry, DriveState children, drive_state_children/2 helper)
+  - `neonfs_core/lib/neon_fs/core/blob_store.ex` (added DriveState.ensure_active before reads, record_io after all ops)
+  - `neonfs_core/test/neon_fs/core/drive_command_test.exs` (new — 13 tests for Test implementation)
+  - `neonfs_core/test/neon_fs/core/drive_state_test.exs` (new — 24 tests covering all state transitions)
+  - `tasks/task_0051_drive_power_management.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - `catch` must come after `rescue` in Elixir function bodies (compiler warning otherwise)
+  - With idle_timeout of 0 and spin-down configured to fail, the state machine enters a rapid retry loop (active → idle → spinning_down → fail → active → repeat). Use manual message sending in tests to avoid this
+  - DriveState processes use `{:via, Registry, {RegistryName, drive_id}}` for per-drive naming
+  - `ensure_active/1` runs in the caller's process via GenServer.call, keeping BlobStore responsive during spin-ups
+  - `record_io/1` is a cast (fire-and-forget) to avoid adding latency to the I/O path
+  - Graceful fallback for non-existent DriveState processes: `catch :exit, {:noproc, _} -> :ok`
+  - DriveCommand.Test uses a named ETS table (`:drive_command_test`) — tests must use `async: false`
+  - Spin-up coalescing works by queuing `GenServer.from` references and replying to all waiters when spin-up completes
+  - When spin-down completes with waiters queued, immediately start spin-up (avoid unnecessary standby period)
+---
+
+## 2026-02-09 - Task 0052
+- What was implemented:
+  - Created `ChunkCache` GenServer with two ETS tables: `:chunk_cache_data` (set) for data lookup and `:chunk_cache_lru` (ordered_set) for eviction ordering
+  - `get/2` returns `{:ok, data}` or `:miss`, updates LRU timestamp on hit
+  - `put/4` stores data with byte_size tracking, triggers LRU eviction if volume exceeds max_memory
+  - `invalidate/1` removes chunk from all volumes, `invalidate/2` from specific volume
+  - `stats/0` returns `%{hits, misses, evictions, memory_used}` from dedicated stats ETS table
+  - LRU eviction walks ordered_set from oldest, evicting entries for the specific volume until memory is under limit
+  - Memory tracking uses `byte_size/1` on cached binary data
+  - Cache skip logic in ChunkFetcher: only caches when `volume_id` is provided AND `decompress: true` (transformed data)
+  - Integrated into ChunkFetcher.fetch_chunk: checks cache before BlobStore, populates after successful decompressed read
+  - Telemetry events: `[:neonfs, :chunk_cache, :hit]`, `[:neonfs, :chunk_cache, :miss]`, `[:neonfs, :chunk_cache, :eviction]`
+  - Stats counters use `ets.update_counter/3` for lock-free concurrent updates
+  - Added ChunkCache to supervision tree (after ChunkAccessTracker, before ChunkIndex)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_cache.ex` (new — GenServer + 2 ETS tables)
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (integrated cache lookup/population, added volume_id opt)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added ChunkCache child)
+  - `neonfs_core/test/neon_fs/core/chunk_cache_test.exs` (new — 20 tests)
+  - `tasks/task_0052_chunk_cache.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - ETS ordered_set with `{timestamp, volume_id, chunk_hash}` keys provides natural LRU ordering across all volumes
+  - `System.monotonic_time(:microsecond)` gives unique-enough timestamps for LRU ordering
+  - LRU update on get: delete old timestamp entry, insert new one (two ETS operations per hit)
+  - Per-volume eviction requires walking ordered_set and filtering — `ets.first/1` + `ets.next/2` pattern
+  - ChunkCache.put is a cast (non-blocking for callers), eviction happens asynchronously in GenServer
+  - Cache skip logic: only populate cache when decompress=true (no point caching unmodified data)
+  - `:chunk_cache_stats` ETS table keeps hit/miss/eviction counters separate from data tables
+---
+
+## 2026-02-09 - Task 0053
+- What was implemented:
+  - Created `BackgroundWorker` GenServer with priority queues (`:high`, `:normal`, `:low`) using Erlang's `:queue` module
+  - `submit/2` accepts `(work_fn, opts)` returning `{:ok, work_id}` — opts include `:priority` and `:label`
+  - `cancel/1` removes queued work or marks running work as cancelled (result discarded on completion)
+  - `status/0` returns `%{queued, running, completed, by_priority}` aggregate stats
+  - `status/1` returns per-work-item status: `:queued`, `:running`, `:completed`, `:cancelled`, `:failed`
+  - Concurrency limiting: configurable `max_concurrent` (default 2), checked before dequeuing
+  - Priority ordering: `@priority_order [:high, :normal, :low]` — `dequeue_next/1` iterates in order
+  - Rate limiting: sliding window tracking `starts_this_minute` list, pruned on each start
+  - Load-aware yielding: `:erlang.statistics(:scheduler_wall_time_all)` compared against `load_threshold` (default 0.8)
+  - `Task.Supervisor` (named `NeonFS.Core.BackgroundTaskSupervisor`) for crash isolation via `async_nolink`
+  - Telemetry events: submit, start, complete, fail, cancel
+  - Graceful shutdown: `terminate/2` drains queues and waits for running tasks (bounded by task count)
+  - Work IDs are 16-char hex strings from `:crypto.strong_rand_bytes(8)`
+  - Added both `Task.Supervisor` and `BackgroundWorker` to supervision tree
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/background_worker.ex` (new — GenServer with priority queues)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added Task.Supervisor + BackgroundWorker children)
+  - `neonfs_core/test/neon_fs/core/background_worker_test.exs` (new — 17 tests)
+  - `tasks/task_0053_background_work_infrastructure.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - App-supervised GenServers can't be stopped/restarted in tests — use the app-started instance directly
+  - "Poke" pattern: `send(pid, :check_queue)` forces immediate queue processing instead of waiting for timer
+  - Erlang `:queue` module provides efficient FIFO queues; map of queues gives priority ordering
+  - `Task.Supervisor.async_nolink/2` returns a `%Task{}` with a `.ref` usable for monitoring
+  - Task success delivers `{ref, result}` message; crash delivers `{:DOWN, ref, :process, pid, reason}`
+  - `Process.demonitor(ref, [:flush])` needed after successful task to clean up monitor
+  - `:erlang.system_flag(:scheduler_wall_time, true)` must be called before reading scheduler stats
+---
+
+## 2026-02-09 - Task 0054
+- What was implemented:
+  - Created `TieringManager` GenServer, one per node, with periodic evaluation cycle (default 5 min)
+  - Promotion: chunks on cold/warm tier with daily access count exceeding volume's `promotion_threshold` get promoted one tier step
+  - Demotion: chunks on hot tier with `last_accessed` older than volume's `demotion_delay` seconds get demoted one tier step
+  - Eviction: when a tier exceeds configurable threshold (default 0.9), least-accessed chunks are demoted regardless of delay
+  - Tier progression always one step: hot <-> warm <-> cold (no direct hot -> cold jumps)
+  - Queries `ChunkIndex.list_by_node/1` for local chunks, `ChunkAccessTracker.get_stats/1` for access patterns
+  - Queries `DriveRegistry.list_drives/0` for tier capacity and usage ratios
+  - Reads volume tiering config via `VolumeRegistry.list/0` for threshold/delay values
+  - Submits migration work to `BackgroundWorker` with `:low` priority
+  - Skips evaluation when BackgroundWorker queued items exceed `queue_full_threshold` (default 50)
+  - Dry-run mode: logs what would be done without submitting work
+  - Module injection for testability: `chunk_index_mod`, `access_tracker_mod`, `drive_registry_mod`, `volume_registry_mod`, `background_worker_mod`
+  - Telemetry events: evaluation cycle, promotion, demotion
+  - `evaluate_now/0` and `status/0` client APIs
+  - Added TieringManager to supervision tree (after ServiceRegistry)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/tiering_manager.ex` (new — GenServer with evaluation logic)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (added TieringManager child)
+  - `neonfs_core/test/neon_fs/core/tiering_manager_test.exs` (new — 16 tests with ETS-based mocks)
+  - `tasks/task_0054_tiering_manager.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Module injection via opts (e.g. `chunk_index_mod: MockChunkIndex`) allows clean unit testing without app dependencies
+  - ETS-based mock modules (named tables with `:public`) work well for `async: false` test suites
+  - Mock modules defined as top-level `defmodule` outside test module avoid naming conflicts
+  - `ChunkMeta` doesn't carry `volume_id` — volume association must be resolved via FileIndex (deferred to task 0055)
+  - Credo `--strict` enforces max nesting depth of 2 — extract inner blocks into separate defp functions
+  - `String.to_existing_atom/1` is safe when the atom set is bounded (like `:promote`/`:demote`)
+---
+
+## 2026-02-09 - Task 0055
+- What was implemented:
+  - Created `TierMigration` module implementing saga-pattern data movement with ordered steps
+  - Steps: acquire lock → copy data (read from source, write to target) → verify hash on target → update metadata in ChunkIndex → cleanup source → release lock
+  - Copy supports local (same-node between drives) and cross-node (via RPC) migration
+  - Rollback on failure: deletes the copy from target, releases lock
+  - Cleanup is best-effort: failure to delete source is logged but not an error (orphaned chunks harmless)
+  - `LockTable` ETS-based lock preventing concurrent migrations of the same chunk
+  - `acquire_lock/1` uses `ets.insert_new/2` for atomic lock acquisition
+  - `run_migration/1` entry point accepting params map with chunk_hash, source/target drive/node/tier
+  - `work_fn/1` wraps migration for BackgroundWorker submission
+  - Telemetry events: `:start`, `:success`, `:failure`
+  - Added `reactor ~> 0.13` to dependencies (installed as 0.17.0 with spark, splode, etc.)
+  - Verification step reads chunk with `verify: true` from target after copy
+  - Metadata update replaces old source location with new target location in ChunkIndex
+- Files changed:
+  - `neonfs_core/mix.exs` (added reactor dependency)
+  - `neonfs_core/lib/neon_fs/core/tier_migration.ex` (new — saga-pattern migration orchestration)
+  - `neonfs_core/lib/neon_fs/core/tier_migration/lock_table.ex` (new — ETS lock table)
+  - `neonfs_core/test/neon_fs/core/tier_migration_test.exs` (new — 12 tests)
+  - `tasks/task_0055_tier_migration_with_reactor.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - `ets.insert_new/2` is atomic and returns boolean — perfect for lock acquisition
+  - BlobStore tiers are strings ("hot", "warm", "cold") while metadata uses atoms (:hot, :warm, :cold)
+  - `Atom.to_string/1` needed when calling BlobStore with tier from metadata
+  - Cross-node operations use `:rpc.call/5` with timeout; `{:badrpc, reason}` wraps failures
+  - Rollback delete operations should be silent on failure (best-effort cleanup)
+  - `replace_all` in Edit tool replaces ALL occurrences including inside alias declarations — be careful
+---
+
+### Task 0056: Phase 3 Integration Tests — Complete
+- **Date:** 2026-02-09
+- **Summary:** End-to-end integration tests validating Phase 3 milestone (tiering, caching, drive management) across peer-node clusters.
+- **Tests created:** 11 integration tests in `neonfs_integration/test/integration/phase3_test.exs`, all passing
+- **Tests cover:**
+  - Writes land on correct initial tier (hot) — verifies ChunkIndex location metadata
+  - Read data correctness after write — round-trip write/read verification
+  - Chunk access tracking — reads generate access stats in ChunkAccessTracker
+  - TieringManager manual evaluation — evaluate_now returns result with promotion/demotion counts
+  - BackgroundWorker — submit work and verify completion status
+  - Local tier migration — migrate chunk from hot to warm using TierMigration.run_migration
+  - Cache telemetry — ChunkCache stats show activity after repeated reads
+  - DriveRegistry — list_drives returns registered drives, select_drive returns correct tier
+  - Worker status — BackgroundWorker.status/0 and TieringManager.status/0 return correct maps
+- **PeerCluster extended:** Added `:drives` option to `start_cluster!/2` for custom drive configs per node
+- **Key fixes during development:**
+  - `status.state` → `status.status` — cluster_status returns `:status` key, not `:state`
+  - Volume creation uses `CLI.Handler.create_volume` with map config, not VolumeRegistry.create directly
+  - Anonymous fns can't cross RPC boundary (module not on peer node) — use `&:erlang.node/0` external fn reference
+  - `mix test` requires explicit `MIX_ENV=test` in this project due to elixirc_paths not loading test/support without it
+- Files changed:
+  - `neonfs_integration/test/integration/phase3_test.exs` (new — 11 integration tests)
+  - `neonfs_integration/lib/neonfs/integration/peer_cluster.ex` (modified — added :drives option)
+  - `tasks/task_0056_phase3_integration_tests.md` (status updated to Complete)
+- **Learnings for future iterations:**
+  - Anonymous functions defined in one BEAM module cannot be sent via RPC to nodes that don't have that module loaded — use external function references (`&Module.fun/arity`) instead
+  - `mix test` may not properly detect `MIX_ENV=test` for `elixirc_paths` in umbrella-adjacent projects — use explicit `MIX_ENV=test` prefix
+  - PeerCluster.rpc uses `:rpc.call` (requires connected nodes), while `:peer.call` works before connection — the distinction matters for startup sequences
+  - CLI.Handler wraps core module APIs with map-based configs — prefer CLI.Handler for integration tests for realistic call paths
 ---

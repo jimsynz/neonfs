@@ -204,11 +204,14 @@ defmodule NeonFS.Core.ReadOperation do
   end
 
   defp fetch_chunk_data(chunk_meta, should_verify) do
-    # Determine tier (use first location for Phase 1/2)
-    tier =
+    # Determine tier and drive_id (use first location for Phase 1/2)
+    {tier, drive_id} =
       case chunk_meta.locations do
-        [location | _] -> Atom.to_string(location.tier)
-        [] -> "hot"
+        [location | _] ->
+          {Atom.to_string(location.tier), Map.get(location, :drive_id, "default")}
+
+        [] ->
+          {"hot", "default"}
       end
 
     # Determine if we need to decompress
@@ -221,6 +224,7 @@ defmodule NeonFS.Core.ReadOperation do
 
     fetch_opts = [
       tier: tier,
+      drive_id: drive_id,
       verify: should_verify,
       decompress: needs_decompress
     ]

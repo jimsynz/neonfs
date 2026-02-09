@@ -104,6 +104,28 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 2, 3}, state) do
+    require Logger
+    Logger.info("Ra machine version upgrade: 2 -> 3 (volume tiering/caching/io_weight)")
+
+    # Migrate existing volumes: wrap initial_tier into tiering map, add caching and io_weight
+    volumes = Map.get(state, :volumes, %{})
+
+    migrated_volumes =
+      Map.new(volumes, fn {id, vol} ->
+        migrated =
+          vol
+          |> migrate_volume_tiering()
+          |> migrate_volume_caching()
+          |> migrate_volume_io_weight()
+
+        {id, migrated}
+      end)
+
+    new_state = %{state | volumes: migrated_volumes}
+    {new_state, :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade: #{from_version} -> #{to_version}")
@@ -425,7 +447,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 2
+  def version, do: 3
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -434,4 +456,39 @@ defmodule NeonFS.Core.MetadataStateMachine do
   """
   @impl :ra_machine
   def which_module(_version), do: __MODULE__
+
+  # Migration helpers for version 2 -> 3
+
+  defp migrate_volume_tiering(vol) do
+    case Map.get(vol, :tiering) do
+      %{initial_tier: _} ->
+        # Already has tiering map, nothing to do
+        vol
+
+      _ ->
+        # Wrap existing initial_tier into tiering map with defaults
+        initial_tier = Map.get(vol, :initial_tier, :hot)
+
+        vol
+        |> Map.put(:tiering, %{
+          initial_tier: initial_tier,
+          promotion_threshold: 10,
+          demotion_delay: 86_400
+        })
+        |> Map.delete(:initial_tier)
+    end
+  end
+
+  defp migrate_volume_caching(vol) do
+    Map.put_new(vol, :caching, %{
+      transformed_chunks: true,
+      reconstructed_stripes: true,
+      remote_chunks: true,
+      max_memory: 268_435_456
+    })
+  end
+
+  defp migrate_volume_io_weight(vol) do
+    Map.put_new(vol, :io_weight, 100)
+  end
 end

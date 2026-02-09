@@ -171,7 +171,9 @@ defmodule NeonFS.CLI.Handler do
     - `:owner` - Owner string
     - `:durability` - Durability config map
     - `:write_ack` - Write acknowledgment level (`:local`, `:quorum`, `:all`)
-    - `:initial_tier` - Initial storage tier (`:hot`, `:warm`, `:cold`)
+    - `:tiering` - Tiering config map (`:initial_tier`, `:promotion_threshold`, `:demotion_delay`)
+    - `:caching` - Caching config map (`:transformed_chunks`, `:reconstructed_stripes`, `:remote_chunks`, `:max_memory`)
+    - `:io_weight` - I/O scheduling weight (positive integer)
     - `:compression` - Compression config map
     - `:verification` - Verification config map
 
@@ -417,7 +419,9 @@ defmodule NeonFS.CLI.Handler do
       owner: volume.owner,
       durability: volume.durability,
       write_ack: volume.write_ack,
-      initial_tier: volume.initial_tier,
+      tiering: volume.tiering,
+      caching: volume.caching,
+      io_weight: volume.io_weight,
       compression: volume.compression,
       verification: volume.verification,
       logical_size: volume.logical_size,

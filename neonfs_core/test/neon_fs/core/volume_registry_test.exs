@@ -27,7 +27,16 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert volume.owner == nil
       assert volume.durability == %{type: :replicate, factor: 3, min_copies: 2}
       assert volume.write_ack == :local
-      assert volume.initial_tier == :hot
+
+      assert volume.tiering == %{
+               initial_tier: :hot,
+               promotion_threshold: 10,
+               demotion_delay: 86_400
+             }
+
+      assert volume.caching.transformed_chunks == true
+      assert volume.caching.max_memory == 268_435_456
+      assert volume.io_weight == 100
       assert volume.compression == %{algorithm: :zstd, level: 3, min_size: 4096}
       assert volume.verification == %{on_read: :never, sampling_rate: nil}
       assert volume.logical_size == 0
@@ -42,14 +51,15 @@ defmodule NeonFS.Core.VolumeRegistryTest do
         Volume.new("test-volume",
           owner: "alice",
           write_ack: :quorum,
-          initial_tier: :warm,
+          tiering: %{initial_tier: :warm, promotion_threshold: 5, demotion_delay: 3600},
           compression: %{algorithm: :none}
         )
 
       assert volume.name == "test-volume"
       assert volume.owner == "alice"
       assert volume.write_ack == :quorum
-      assert volume.initial_tier == :warm
+      assert volume.tiering.initial_tier == :warm
+      assert volume.tiering.promotion_threshold == 5
       assert volume.compression == %{algorithm: :none}
     end
 
@@ -64,13 +74,14 @@ defmodule NeonFS.Core.VolumeRegistryTest do
         Volume.update(volume,
           owner: "bob",
           write_ack: :all,
-          initial_tier: :cold,
+          tiering: %{initial_tier: :cold, promotion_threshold: 20, demotion_delay: 172_800},
           durability: %{type: :replicate, factor: 5, min_copies: 3}
         )
 
       assert updated.owner == "bob"
       assert updated.write_ack == :all
-      assert updated.initial_tier == :cold
+      assert updated.tiering.initial_tier == :cold
+      assert updated.tiering.promotion_threshold == 20
       assert updated.durability == %{type: :replicate, factor: 5, min_copies: 3}
       assert DateTime.compare(updated.updated_at, original_updated_at) == :gt
 
@@ -128,10 +139,14 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert msg =~ "write_ack"
     end
 
-    test "validate/1 rejects invalid tier" do
-      volume = %{Volume.new("test-volume") | initial_tier: :freezing}
+    test "validate/1 rejects invalid tiering" do
+      volume = %{
+        Volume.new("test-volume")
+        | tiering: %{initial_tier: :freezing, promotion_threshold: 10, demotion_delay: 86_400}
+      }
+
       assert {:error, msg} = Volume.validate(volume)
-      assert msg =~ "tier"
+      assert msg =~ "tiering"
     end
 
     test "validate/1 rejects invalid compression algorithm" do

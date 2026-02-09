@@ -67,10 +67,17 @@ defmodule NeonFS.Core.Supervisor do
   defp start_children?, do: Application.get_env(:neonfs_core, :start_children?, true)
 
   defp build_children do
-    base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs/blobs")
+    drives = Application.get_env(:neonfs_core, :drives, default_drives())
     prefix_depth = Application.get_env(:neonfs_core, :blob_store_prefix_depth, 2)
     meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
     snapshot_interval_ms = Application.get_env(:neonfs_core, :snapshot_interval_ms, 30_000)
+
+    command_module =
+      Application.get_env(
+        :neonfs_core,
+        :drive_command_module,
+        NeonFS.Core.DriveCommand.Default
+      )
 
     # Ra requires a named Erlang node (not :nonode@nohost) to function
     node_named = Node.self() != :nonode@nohost
@@ -81,32 +88,57 @@ defmodule NeonFS.Core.Supervisor do
       "Building children: node=#{inspect(Node.self())}, node_named=#{node_named}, ra_config=#{ra_config}, enable_ra=#{enable_ra}"
     )
 
-    base_children = [
-      # Persistence must start first - restores metadata from DETS
-      # Give it extra shutdown time to complete the final snapshot
-      %{
-        id: NeonFS.Core.Persistence,
-        start:
-          {NeonFS.Core.Persistence, :start_link,
-           [[meta_dir: meta_dir, snapshot_interval_ms: snapshot_interval_ms]]},
-        shutdown: 30_000
-      },
+    # Per-drive power management state machines
+    base_children =
+      [
+        # Persistence must start first - restores metadata from DETS
+        # Give it extra shutdown time to complete the final snapshot
+        %{
+          id: NeonFS.Core.Persistence,
+          start:
+            {NeonFS.Core.Persistence, :start_link,
+             [[meta_dir: meta_dir, snapshot_interval_ms: snapshot_interval_ms]]},
+          shutdown: 30_000
+        },
 
-      # BlobStore provides storage layer for all components
-      {NeonFS.Core.BlobStore, base_dir: base_dir, prefix_depth: prefix_depth},
+        # Registry for DriveState process naming (must start before BlobStore)
+        {Registry, keys: :unique, name: NeonFS.Core.DriveStateRegistry},
 
-      # ChunkIndex depends on BlobStore
-      NeonFS.Core.ChunkIndex,
+        # BlobStore provides storage layer for all components (multi-drive)
+        {NeonFS.Core.BlobStore, drives: drives, prefix_depth: prefix_depth},
 
-      # FileIndex depends on ChunkIndex
-      NeonFS.Core.FileIndex,
+        # DriveRegistry tracks all drives and their usage/state
+        {NeonFS.Core.DriveRegistry, drives: drives}
+      ] ++
+        drive_state_children(drives, command_module) ++
+        [
+          # ChunkAccessTracker records chunk access patterns for tiering decisions
+          NeonFS.Core.ChunkAccessTracker,
 
-      # VolumeRegistry depends on FileIndex
-      NeonFS.Core.VolumeRegistry,
+          # ChunkCache provides LRU caching for decompressed/decrypted chunks
+          NeonFS.Core.ChunkCache,
 
-      # ServiceRegistry depends on Ra being available
-      NeonFS.Core.ServiceRegistry
-    ]
+          # Task.Supervisor for background work crash isolation
+          {Task.Supervisor, name: NeonFS.Core.BackgroundTaskSupervisor},
+
+          # BackgroundWorker provides priority queues and rate limiting
+          NeonFS.Core.BackgroundWorker,
+
+          # ChunkIndex depends on BlobStore
+          NeonFS.Core.ChunkIndex,
+
+          # FileIndex depends on ChunkIndex
+          NeonFS.Core.FileIndex,
+
+          # VolumeRegistry depends on FileIndex
+          NeonFS.Core.VolumeRegistry,
+
+          # ServiceRegistry depends on Ra being available
+          NeonFS.Core.ServiceRegistry,
+
+          # TieringManager evaluates chunks for promotion/demotion
+          NeonFS.Core.TieringManager
+        ]
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation
     if enable_ra do
@@ -114,5 +146,34 @@ defmodule NeonFS.Core.Supervisor do
     else
       base_children
     end
+  end
+
+  defp drive_state_children(drives, command_module) do
+    Enum.map(drives, fn config ->
+      drive_id = to_string(config[:id] || config["id"])
+      drive_path = to_string(config[:path] || config["path"])
+      power_mgmt = config[:power_management] || config["power_management"] || false
+      idle_timeout = config[:idle_timeout] || config["idle_timeout"] || 1800
+
+      %{
+        id: {NeonFS.Core.DriveState, drive_id},
+        start:
+          {NeonFS.Core.DriveState, :start_link,
+           [
+             [
+               drive_id: drive_id,
+               drive_path: drive_path,
+               power_management: power_mgmt,
+               idle_timeout: idle_timeout,
+               command_module: command_module
+             ]
+           ]}
+      }
+    end)
+  end
+
+  defp default_drives do
+    base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs/blobs")
+    [%{id: "default", path: base_dir, tier: :hot, capacity: 0}]
   end
 end

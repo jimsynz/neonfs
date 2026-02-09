@@ -11,9 +11,11 @@ defmodule NeonFS.Core.BlobStoreTest do
     tmp_dir = Path.join(System.tmp_dir!(), @tmp_dir_prefix <> random_string())
     File.mkdir_p!(tmp_dir)
 
+    drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 100_000_000}]
+
     # Start a BlobStore for this test
     {:ok, pid} =
-      start_supervised({BlobStore, base_dir: tmp_dir, prefix_depth: 2, name: test_server()})
+      start_supervised({BlobStore, drives: drives, prefix_depth: 2, name: test_server()})
 
     on_exit(fn ->
       File.rm_rf!(tmp_dir)
@@ -22,24 +24,27 @@ defmodule NeonFS.Core.BlobStoreTest do
     %{store: pid, tmp_dir: tmp_dir}
   end
 
-  describe "write_chunk/3 and read_chunk/3" do
+  describe "write_chunk/4 and read_chunk/3" do
     test "basic write and read roundtrip", %{store: _store} do
       data = "hello world"
 
-      assert {:ok, hash, info} = BlobStore.write_chunk(data, "hot", server: test_server())
+      assert {:ok, hash, info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
+
       assert byte_size(hash) == 32
       assert info.original_size == byte_size(data)
       assert info.stored_size > 0
       assert info.compression == "none"
 
-      assert {:ok, ^data} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
     end
 
     test "write and read with compression", %{store: _store} do
       data = String.duplicate("hello world ", 1000)
 
       assert {:ok, hash, info} =
-               BlobStore.write_chunk(data, "hot",
+               BlobStore.write_chunk(data, "default", "hot",
                  compression: "zstd",
                  compression_level: 3,
                  server: test_server()
@@ -51,12 +56,14 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert info.compression == "zstd:3"
 
       # Read without decompression returns compressed data
-      assert {:ok, compressed} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:ok, compressed} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
+
       assert byte_size(compressed) < byte_size(data)
 
       # Read with decompression returns original data
       assert {:ok, decompressed} =
-               BlobStore.read_chunk_with_options(hash, "hot",
+               BlobStore.read_chunk_with_options(hash, "default", "hot",
                  decompress: true,
                  server: test_server()
                )
@@ -67,57 +74,99 @@ defmodule NeonFS.Core.BlobStoreTest do
     test "read with verification succeeds for valid chunk", %{store: _store} do
       data = "test data"
 
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
       assert {:ok, ^data} =
-               BlobStore.read_chunk_with_options(hash, "hot", verify: true, server: test_server())
+               BlobStore.read_chunk_with_options(hash, "default", "hot",
+                 verify: true,
+                 server: test_server()
+               )
     end
 
     test "write to different tiers", %{store: _store} do
       data = "test data"
 
       for tier <- ["hot", "warm", "cold"] do
-        {:ok, hash, _info} = BlobStore.write_chunk(data, tier, server: test_server())
-        {:ok, ^data} = BlobStore.read_chunk(hash, tier, server: test_server())
+        {:ok, hash, _info} =
+          BlobStore.write_chunk(data, "default", tier, server: test_server())
+
+        {:ok, ^data} =
+          BlobStore.read_chunk(hash, "default", tier: tier, server: test_server())
       end
     end
 
     test "reading nonexistent chunk returns error", %{store: _store} do
       fake_hash = :crypto.strong_rand_bytes(32)
 
-      assert {:error, reason} = BlobStore.read_chunk(fake_hash, "hot", server: test_server())
+      assert {:error, reason} =
+               BlobStore.read_chunk(fake_hash, "default", tier: "hot", server: test_server())
+
       assert reason =~ "not found" or reason =~ "NotFound"
     end
 
     test "empty data roundtrip", %{store: _store} do
       data = ""
 
-      assert {:ok, hash, info} = BlobStore.write_chunk(data, "hot", server: test_server())
+      assert {:ok, hash, info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
+
       assert byte_size(hash) == 32
       assert info.original_size == 0
 
-      assert {:ok, ^data} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
+    end
+
+    test "unknown drive_id returns error", %{store: _store} do
+      data = "test data"
+
+      assert {:error, reason} =
+               BlobStore.write_chunk(data, "nonexistent", "hot", server: test_server())
+
+      assert reason =~ "unknown drive_id"
     end
   end
 
-  describe "delete_chunk/3" do
+  describe "delete_chunk/2" do
     test "deletes an existing chunk", %{store: _store} do
       data = "delete me"
 
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
-      assert {:ok, ^data} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
-      assert {:ok, {}} = BlobStore.delete_chunk(hash, "hot", server: test_server())
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
+
+      assert {:ok, {}} = BlobStore.delete_chunk(hash, "default", server: test_server())
 
       # Reading after delete should fail
-      assert {:error, _reason} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:error, _reason} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
     end
 
     test "deleting nonexistent chunk returns error", %{store: _store} do
       fake_hash = :crypto.strong_rand_bytes(32)
 
-      assert {:error, reason} = BlobStore.delete_chunk(fake_hash, "hot", server: test_server())
-      assert reason =~ "not found" or reason =~ "NotFound"
+      assert {:error, reason} =
+               BlobStore.delete_chunk(fake_hash, "default", server: test_server())
+
+      assert reason =~ "not found"
+    end
+
+    test "deletes chunk regardless of tier", %{store: _store} do
+      data = "find me in any tier"
+
+      # Write to warm tier
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "warm", server: test_server())
+
+      # Delete without specifying tier - should find it
+      assert {:ok, {}} = BlobStore.delete_chunk(hash, "default", server: test_server())
+
+      # Verify it's gone
+      assert {:error, _} =
+               BlobStore.read_chunk(hash, "default", tier: "warm", server: test_server())
     end
   end
 
@@ -125,34 +174,45 @@ defmodule NeonFS.Core.BlobStoreTest do
     test "migrates chunk from hot to cold", %{store: _store} do
       data = "migrate me"
 
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
-      assert {:ok, ^data} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
-      assert {:ok, {}} = BlobStore.migrate_chunk(hash, "hot", "cold", server: test_server())
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
+
+      assert {:ok, {}} =
+               BlobStore.migrate_chunk(hash, "default", "hot", "cold", server: test_server())
 
       # Should no longer exist in hot tier
-      assert {:error, _} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:error, _} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
 
       # Should exist in cold tier
-      assert {:ok, ^data} = BlobStore.read_chunk(hash, "cold", server: test_server())
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "default", tier: "cold", server: test_server())
     end
 
     test "migrates chunk from cold to warm", %{store: _store} do
       data = "migrate me back"
 
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "cold", server: test_server())
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "cold", server: test_server())
 
-      assert {:ok, {}} = BlobStore.migrate_chunk(hash, "cold", "warm", server: test_server())
+      assert {:ok, {}} =
+               BlobStore.migrate_chunk(hash, "default", "cold", "warm", server: test_server())
 
-      assert {:error, _} = BlobStore.read_chunk(hash, "cold", server: test_server())
-      assert {:ok, ^data} = BlobStore.read_chunk(hash, "warm", server: test_server())
+      assert {:error, _} =
+               BlobStore.read_chunk(hash, "default", tier: "cold", server: test_server())
+
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "default", tier: "warm", server: test_server())
     end
 
     test "migrating nonexistent chunk returns error", %{store: _store} do
       fake_hash = :crypto.strong_rand_bytes(32)
 
       assert {:error, reason} =
-               BlobStore.migrate_chunk(fake_hash, "hot", "cold", server: test_server())
+               BlobStore.migrate_chunk(fake_hash, "default", "hot", "cold", server: test_server())
 
       assert reason =~ "not found" or reason =~ "NotFound"
     end
@@ -160,12 +220,117 @@ defmodule NeonFS.Core.BlobStoreTest do
     test "migration preserves data integrity", %{store: _store} do
       data = String.duplicate("important data ", 100)
 
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
-      assert {:ok, {}} = BlobStore.migrate_chunk(hash, "hot", "warm", server: test_server())
-      assert {:ok, {}} = BlobStore.migrate_chunk(hash, "warm", "cold", server: test_server())
-      assert {:ok, {}} = BlobStore.migrate_chunk(hash, "cold", "hot", server: test_server())
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
-      assert {:ok, ^data} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:ok, {}} =
+               BlobStore.migrate_chunk(hash, "default", "hot", "warm", server: test_server())
+
+      assert {:ok, {}} =
+               BlobStore.migrate_chunk(hash, "default", "warm", "cold", server: test_server())
+
+      assert {:ok, {}} =
+               BlobStore.migrate_chunk(hash, "default", "cold", "hot", server: test_server())
+
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
+    end
+  end
+
+  describe "list_drives/0" do
+    test "returns configured drives", %{store: _store} do
+      assert {:ok, drives} = BlobStore.list_drives(server: test_server())
+      assert is_map(drives)
+      assert Map.has_key?(drives, "default")
+      assert drives["default"].tier == :hot
+    end
+  end
+
+  describe "multi-drive scenarios" do
+    setup do
+      # Create two separate drive directories
+      drive1_dir = Path.join(System.tmp_dir!(), "multi_drive_test_1_" <> random_string())
+      drive2_dir = Path.join(System.tmp_dir!(), "multi_drive_test_2_" <> random_string())
+      File.mkdir_p!(drive1_dir)
+      File.mkdir_p!(drive2_dir)
+
+      drives = [
+        %{id: "nvme0", path: drive1_dir, tier: :hot, capacity: 500_000_000},
+        %{id: "sata0", path: drive2_dir, tier: :cold, capacity: 2_000_000_000}
+      ]
+
+      server_name = :"multi_drive_test_#{System.unique_integer([:positive, :monotonic])}"
+
+      {:ok, _pid} =
+        start_supervised(
+          {BlobStore, drives: drives, prefix_depth: 2, name: server_name},
+          id: server_name
+        )
+
+      on_exit(fn ->
+        File.rm_rf!(drive1_dir)
+        File.rm_rf!(drive2_dir)
+      end)
+
+      %{
+        server: server_name,
+        drive1_dir: drive1_dir,
+        drive2_dir: drive2_dir
+      }
+    end
+
+    test "writes to different drives end up in correct directories", ctx do
+      data1 = "hot data on nvme"
+      data2 = "cold data on sata"
+
+      assert {:ok, hash1, _info} =
+               BlobStore.write_chunk(data1, "nvme0", "hot", server: ctx.server)
+
+      assert {:ok, hash2, _info} =
+               BlobStore.write_chunk(data2, "sata0", "cold", server: ctx.server)
+
+      # Read from correct drives
+      assert {:ok, ^data1} =
+               BlobStore.read_chunk(hash1, "nvme0", tier: "hot", server: ctx.server)
+
+      assert {:ok, ^data2} =
+               BlobStore.read_chunk(hash2, "sata0", tier: "cold", server: ctx.server)
+
+      # Data should NOT be on the other drive
+      assert {:error, _} =
+               BlobStore.read_chunk(hash1, "sata0", tier: "hot", server: ctx.server)
+
+      assert {:error, _} =
+               BlobStore.read_chunk(hash2, "nvme0", tier: "cold", server: ctx.server)
+    end
+
+    test "each drive gets independent NIF handle", ctx do
+      assert {:ok, drives} = BlobStore.list_drives(server: ctx.server)
+      assert map_size(drives) == 2
+      assert Map.has_key?(drives, "nvme0")
+      assert Map.has_key?(drives, "sata0")
+      assert drives["nvme0"].tier == :hot
+      assert drives["sata0"].tier == :cold
+    end
+
+    test "operations on unknown drive return error", ctx do
+      assert {:error, reason} =
+               BlobStore.write_chunk("data", "unknown_drive", "hot", server: ctx.server)
+
+      assert reason =~ "unknown drive_id"
+    end
+
+    test "migration within a drive works", ctx do
+      data = "migrate within drive"
+
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "nvme0", "hot", server: ctx.server)
+
+      assert {:ok, {}} =
+               BlobStore.migrate_chunk(hash, "nvme0", "hot", "warm", server: ctx.server)
+
+      assert {:ok, ^data} =
+               BlobStore.read_chunk(hash, "nvme0", tier: "warm", server: ctx.server)
     end
   end
 
@@ -261,17 +426,20 @@ defmodule NeonFS.Core.BlobStoreTest do
   end
 
   describe "telemetry events" do
-    test "emits write_chunk events", %{store: _store} do
+    test "emits write_chunk events with drive_id", %{store: _store} do
       ref = telemetry_listen([:neonfs, :blob_store, :write_chunk])
 
       data = "telemetry test"
-      assert {:ok, _hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
+
+      assert {:ok, _hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :write_chunk, :start], _measurements,
                       metadata}
 
       assert metadata.tier == "hot"
       assert metadata.data_size == byte_size(data)
+      assert metadata.drive_id == "default"
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :write_chunk, :stop], measurements,
                       _metadata}
@@ -282,18 +450,22 @@ defmodule NeonFS.Core.BlobStoreTest do
       :telemetry.detach(ref)
     end
 
-    test "emits read_chunk events", %{store: _store} do
+    test "emits read_chunk events with drive_id", %{store: _store} do
       data = "read telemetry test"
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
+
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
       ref = telemetry_listen([:neonfs, :blob_store, :read_chunk])
 
-      assert {:ok, _data} = BlobStore.read_chunk(hash, "hot", server: test_server())
+      assert {:ok, _data} =
+               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :read_chunk, :start], _measurements,
                       metadata}
 
       assert metadata.tier == "hot"
+      assert metadata.drive_id == "default"
       assert metadata.verify == false
       assert metadata.decompress == false
 
@@ -306,16 +478,20 @@ defmodule NeonFS.Core.BlobStoreTest do
       :telemetry.detach(ref)
     end
 
-    test "emits delete_chunk events", %{store: _store} do
+    test "emits delete_chunk events with drive_id", %{store: _store} do
       data = "delete telemetry test"
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
+
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
       ref = telemetry_listen([:neonfs, :blob_store, :delete_chunk])
 
-      assert {:ok, {}} = BlobStore.delete_chunk(hash, "hot", server: test_server())
+      assert {:ok, {}} = BlobStore.delete_chunk(hash, "default", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :delete_chunk, :start], _measurements,
-                      _metadata}
+                      metadata}
+
+      assert metadata.drive_id == "default"
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :delete_chunk, :stop], measurements,
                       _metadata}
@@ -325,19 +501,23 @@ defmodule NeonFS.Core.BlobStoreTest do
       :telemetry.detach(ref)
     end
 
-    test "emits migrate_chunk events", %{store: _store} do
+    test "emits migrate_chunk events with drive_id", %{store: _store} do
       data = "migrate telemetry test"
-      assert {:ok, hash, _info} = BlobStore.write_chunk(data, "hot", server: test_server())
+
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
       ref = telemetry_listen([:neonfs, :blob_store, :migrate_chunk])
 
-      assert {:ok, {}} = BlobStore.migrate_chunk(hash, "hot", "cold", server: test_server())
+      assert {:ok, {}} =
+               BlobStore.migrate_chunk(hash, "default", "hot", "cold", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :migrate_chunk, :start], _measurements,
                       metadata}
 
       assert metadata.from_tier == "hot"
       assert metadata.to_tier == "cold"
+      assert metadata.drive_id == "default"
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :migrate_chunk, :stop], measurements,
                       _metadata}
@@ -351,7 +531,9 @@ defmodule NeonFS.Core.BlobStoreTest do
       ref = telemetry_listen([:neonfs, :blob_store, :read_chunk])
 
       fake_hash = :crypto.strong_rand_bytes(32)
-      assert {:error, _reason} = BlobStore.read_chunk(fake_hash, "hot", server: test_server())
+
+      assert {:error, _reason} =
+               BlobStore.read_chunk(fake_hash, "default", tier: "hot", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :read_chunk, :start], _measurements,
                       _metadata}
@@ -366,9 +548,18 @@ defmodule NeonFS.Core.BlobStoreTest do
     end
   end
 
-  describe "supervision" do
+  describe "startup" do
+    test "fails with clear error when no drives configured" do
+      result =
+        start_supervised(
+          {BlobStore, drives: [], prefix_depth: 2, name: :no_drives_test},
+          id: :no_drives_test
+        )
+
+      assert {:error, {{:error, :no_drives_configured}, _}} = result
+    end
+
     test "blob store starts and registers name" do
-      # Start a named BlobStore with truly unique name and ID
       unique_id = System.unique_integer([:positive, :monotonic])
       tmp_dir = Path.join(System.tmp_dir!(), "blob_store_sup_test_#{unique_id}")
       File.mkdir_p!(tmp_dir)
@@ -376,9 +567,11 @@ defmodule NeonFS.Core.BlobStoreTest do
 
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
+      drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 0}]
+
       {:ok, pid} =
         start_supervised(
-          {BlobStore, base_dir: tmp_dir, prefix_depth: 2, name: name},
+          {BlobStore, drives: drives, prefix_depth: 2, name: name},
           id: name,
           restart: :permanent
         )
@@ -387,7 +580,6 @@ defmodule NeonFS.Core.BlobStoreTest do
     end
 
     test "blob store restarts on crash when supervised" do
-      # Start under test supervisor with permanent restart, unique name and ID
       unique_id = System.unique_integer([:positive, :monotonic])
       tmp_dir = Path.join(System.tmp_dir!(), "blob_store_restart_test_#{unique_id}")
       File.mkdir_p!(tmp_dir)
@@ -395,9 +587,11 @@ defmodule NeonFS.Core.BlobStoreTest do
 
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
+      drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 0}]
+
       {:ok, original_pid} =
         start_supervised(
-          {BlobStore, base_dir: tmp_dir, prefix_depth: 2, name: name},
+          {BlobStore, drives: drives, prefix_depth: 2, name: name},
           id: name,
           restart: :permanent
         )

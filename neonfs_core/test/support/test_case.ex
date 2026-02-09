@@ -42,6 +42,7 @@ defmodule NeonFS.TestCase do
   """
   def start_core_subsystems do
     start_persistence()
+    start_drive_registry()
     start_blob_store()
     start_chunk_index()
     start_file_index()
@@ -68,16 +69,76 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts DriveRegistry with test configuration.
+  """
+  def start_drive_registry do
+    drives =
+      Application.get_env(:neonfs_core, :drives) ||
+        [
+          %{
+            id: "default",
+            path:
+              Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs_test/blobs"),
+            tier: :hot,
+            capacity: 0
+          }
+        ]
+
+    stop_if_running(NeonFS.Core.DriveRegistry)
+    cleanup_ets_table(:drive_registry)
+
+    start_supervised!(
+      {NeonFS.Core.DriveRegistry, drives: drives, sync_interval_ms: 0},
+      restart: :temporary
+    )
+  end
+
+  @doc """
   Starts BlobStore with test configuration.
   """
   def start_blob_store do
-    base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs_test/blobs")
+    drives =
+      Application.get_env(:neonfs_core, :drives) ||
+        [
+          %{
+            id: "default",
+            path:
+              Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs_test/blobs"),
+            tier: :hot,
+            capacity: 0
+          }
+        ]
+
     prefix_depth = Application.get_env(:neonfs_core, :blob_store_prefix_depth, 2)
 
     start_supervised!(
-      {NeonFS.Core.BlobStore, base_dir: base_dir, prefix_depth: prefix_depth},
+      {NeonFS.Core.BlobStore, drives: drives, prefix_depth: prefix_depth},
       restart: :temporary
     )
+  end
+
+  @doc """
+  Ensures ChunkAccessTracker is running and its ETS table exists.
+  """
+  def ensure_chunk_access_tracker do
+    case GenServer.whereis(NeonFS.Core.ChunkAccessTracker) do
+      nil ->
+        start_supervised!(
+          {NeonFS.Core.ChunkAccessTracker, decay_interval_ms: 0},
+          restart: :temporary
+        )
+
+      _pid ->
+        :ok
+    end
+
+    case :ets.whereis(:chunk_access_tracker) do
+      :undefined ->
+        :ets.new(:chunk_access_tracker, [:named_table, :set, :public])
+
+      _ ->
+        :ok
+    end
   end
 
   @doc """
@@ -280,8 +341,14 @@ defmodule NeonFS.TestCase do
   of the given tmp_dir, ensuring test isolation.
   """
   def configure_test_dirs(tmp_dir) do
+    blob_dir = Path.join(tmp_dir, "blobs")
     Application.put_env(:neonfs_core, :meta_dir, tmp_dir)
-    Application.put_env(:neonfs_core, :blob_store_base_dir, Path.join(tmp_dir, "blobs"))
+    Application.put_env(:neonfs_core, :blob_store_base_dir, blob_dir)
+
+    Application.put_env(:neonfs_core, :drives, [
+      %{id: "default", path: blob_dir, tier: :hot, capacity: 0}
+    ])
+
     Application.put_env(:neonfs_core, :ra_data_dir, Path.join(tmp_dir, "ra"))
     :ok
   end
@@ -292,6 +359,7 @@ defmodule NeonFS.TestCase do
   def cleanup_test_dirs do
     Application.delete_env(:neonfs_core, :meta_dir)
     Application.delete_env(:neonfs_core, :blob_store_base_dir)
+    Application.delete_env(:neonfs_core, :drives)
     Application.delete_env(:neonfs_core, :ra_data_dir)
     :ok
   end

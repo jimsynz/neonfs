@@ -58,8 +58,25 @@ Each task file follows this structure:
 
 **Milestone:** 3-node cluster, data replicated, survives single node failure
 
-### Phase 3: Policies, Tiering, and Compression (Future)
+### Phase 3: Policies, Tiering, and Compression (Tasks 0045-0056)
 **Goal:** Volume policies, tiered storage management, compression
+
+| Task | Description |
+|------|-------------|
+| 0045 | Volume policy configuration (tiering, caching, io_weight) |
+| 0046 | Multi-drive BlobStore (one NIF handle per physical drive) |
+| 0047 | Drive registry and tier discovery |
+| 0048 | Write path tier and drive handling |
+| 0049 | Chunk access tracking (sliding windows) |
+| 0050 | Tier-aware read path (score-based replica selection) |
+| 0051 | Drive power management (spin-down/spin-up state machine) |
+| 0052 | Chunk cache for transformed data (LRU) |
+| 0053 | Background work infrastructure (priority queues, rate limiting) |
+| 0054 | Tiering manager (promotion/demotion decisions) |
+| 0055 | Tier migration with Reactor (saga-based data movement) |
+| 0056 | Phase 3 integration tests |
+
+**Milestone:** Multiple volumes with different policies, compression working, intelligent drive management
 
 ### Phase 4: Erasure Coding (Future)
 **Goal:** Space-efficient durability for large files
@@ -129,6 +146,43 @@ Phase 2 Clustering:
                                                               │
                                                               ▼
                                                          0037 (integration)
+
+Phase 3 Policies, Tiering, and Compression:
+
+Parallel starting points (4 independent streams):
+
+Stream A — Multi-drive + drive infrastructure:
+0046 (multi-drive BS) ─▶ 0047 (drive registry) ─┬─▶ 0050 (tier-aware reads) ─▶ 0051 (power mgmt)
+                                                 ├─▶ 0048 (write path) ◀── 0045
+                                                 └─▶ 0054 (tiering mgr) ◀── 0049, 0053
+
+Stream B — Volume config + access tracking:
+0045 (volume config) ─┬─▶ 0049 (access tracking)
+                      └─▶ 0052 (chunk cache)
+
+Stream C — Background infrastructure:
+0053 (background worker)
+
+Convergence:
+0048 (write path)      ◀── 0045 + 0047
+0054 (tiering mgr)     ◀── 0047 + 0049 + 0053
+0055 (tier migration)  ◀── 0046 + 0047 + 0053 + 0054
+0056 (integration)     ◀── all Phase 3 tasks (0045–0055)
+
+Full dependency graph:
+
+0045 (volume config) ──┬──▶ 0048 (write path) ─────────────────────────┐
+                       ├──▶ 0049 (access tracking) ──▶ 0054 (tiering) ─┤
+                       └──▶ 0052 (chunk cache)                         │
+                                                                       │
+0046 (multi-drive BS) ─▶ 0047 (drive registry) ──┬──▶ 0048            │
+                                                  ├──▶ 0050 (read path)│
+                                                  ├──▶ 0051 (power)    │
+                                                  └──▶ 0054 ───────────┤
+                                                                       │
+0053 (background worker) ──▶ 0054 ──▶ 0055 (reactor migration) ───────┤
+                                                                       │
+0056 (integration tests) ◀────────────────────────────────────────────┘
 ```
 
 ## Task Status Values
@@ -157,6 +211,7 @@ Some task chains can be worked on in parallel:
 - **Blob store** (0001-0009) and **FUSE** (0010-0013) crates are independent
 - **Elixir metadata** (0015-0017) can start once blob store scaffolding is done
 - **CLI** (0022-0025) can be developed alongside core Elixir work
+- **Phase 3** has 4 independent starting points: 0045 (volume config), 0046 (multi-drive), 0053 (background worker) can all start in parallel; 0047 follows 0046
 
 ## Adding New Tasks
 

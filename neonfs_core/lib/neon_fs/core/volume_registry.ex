@@ -446,7 +446,9 @@ defmodule NeonFS.Core.VolumeRegistry do
       owner: volume.owner,
       durability: volume.durability,
       write_ack: volume.write_ack,
-      initial_tier: volume.initial_tier,
+      tiering: volume.tiering,
+      caching: volume.caching,
+      io_weight: volume.io_weight,
       compression: volume.compression,
       verification: volume.verification,
       logical_size: volume.logical_size,
@@ -458,14 +460,27 @@ defmodule NeonFS.Core.VolumeRegistry do
   end
 
   # Convert map from Ra storage to Volume struct
+  # Handles backward compatibility with pre-Phase 3 volumes that have
+  # initial_tier instead of tiering map
   defp map_to_volume(volume_map) when is_map(volume_map) do
+    tiering = resolve_tiering(volume_map)
+
     %Volume{
       id: volume_map.id,
       name: volume_map.name,
       owner: volume_map[:owner],
       durability: volume_map.durability,
       write_ack: volume_map.write_ack,
-      initial_tier: volume_map.initial_tier,
+      tiering: tiering,
+      caching:
+        volume_map[:caching] ||
+          %{
+            transformed_chunks: true,
+            reconstructed_stripes: true,
+            remote_chunks: true,
+            max_memory: 268_435_456
+          },
+      io_weight: volume_map[:io_weight] || 100,
       compression: volume_map.compression,
       verification: volume_map.verification,
       logical_size: volume_map[:logical_size] || 0,
@@ -474,5 +489,18 @@ defmodule NeonFS.Core.VolumeRegistry do
       created_at: volume_map.created_at,
       updated_at: volume_map.updated_at
     }
+  end
+
+  # Resolve tiering config from either new tiering map or legacy initial_tier field
+  defp resolve_tiering(volume_map) do
+    case volume_map[:tiering] do
+      %{initial_tier: _} = tiering ->
+        tiering
+
+      _ ->
+        # Legacy format: use initial_tier field with defaults
+        initial_tier = volume_map[:initial_tier] || :hot
+        %{initial_tier: initial_tier, promotion_threshold: 10, demotion_delay: 86_400}
+    end
   end
 end

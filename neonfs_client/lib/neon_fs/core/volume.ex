@@ -3,8 +3,8 @@ defmodule NeonFS.Core.Volume do
   Volume configuration structure.
 
   A volume represents a logical storage namespace with policies for durability,
-  tiering, compression, and verification. Phase 1 implements a basic subset;
-  full policy configuration comes in Phase 3.
+  tiering, compression, and verification. Phase 3 adds tiering policies,
+  caching configuration, and I/O weighting.
   """
 
   alias __MODULE__
@@ -26,6 +26,19 @@ defmodule NeonFS.Core.Volume do
           sampling_rate: float() | nil
         }
 
+  @type tiering_config :: %{
+          initial_tier: tier(),
+          promotion_threshold: pos_integer(),
+          demotion_delay: pos_integer()
+        }
+
+  @type caching_config :: %{
+          transformed_chunks: boolean(),
+          reconstructed_stripes: boolean(),
+          remote_chunks: boolean(),
+          max_memory: pos_integer()
+        }
+
   @type write_ack :: :local | :quorum | :all
 
   @type tier :: :hot | :warm | :cold
@@ -36,7 +49,9 @@ defmodule NeonFS.Core.Volume do
           owner: String.t() | nil,
           durability: durability_config(),
           write_ack: write_ack(),
-          initial_tier: tier(),
+          tiering: tiering_config(),
+          caching: caching_config(),
+          io_weight: pos_integer(),
           compression: compression_config(),
           verification: verification_config(),
           logical_size: non_neg_integer(),
@@ -52,7 +67,9 @@ defmodule NeonFS.Core.Volume do
     :owner,
     :durability,
     :write_ack,
-    :initial_tier,
+    :tiering,
+    :caching,
+    :io_weight,
     :compression,
     :verification,
     :logical_size,
@@ -86,7 +103,9 @@ defmodule NeonFS.Core.Volume do
       owner: Keyword.get(opts, :owner),
       durability: Keyword.get(opts, :durability, default_durability()),
       write_ack: Keyword.get(opts, :write_ack, :local),
-      initial_tier: Keyword.get(opts, :initial_tier, :hot),
+      tiering: Keyword.get(opts, :tiering, default_tiering()),
+      caching: Keyword.get(opts, :caching, default_caching()),
+      io_weight: Keyword.get(opts, :io_weight, 100),
       compression: Keyword.get(opts, :compression, default_compression()),
       verification: Keyword.get(opts, :verification, default_verification()),
       logical_size: 0,
@@ -105,6 +124,32 @@ defmodule NeonFS.Core.Volume do
   @spec default_durability() :: durability_config()
   def default_durability do
     %{type: :replicate, factor: 3, min_copies: 2}
+  end
+
+  @doc """
+  Returns the default tiering configuration.
+
+  Writes land on the hot tier by default, with promotion threshold of 10 accesses
+  and demotion delay of 86400 seconds (24 hours).
+  """
+  @spec default_tiering() :: tiering_config()
+  def default_tiering do
+    %{initial_tier: :hot, promotion_threshold: 10, demotion_delay: 86_400}
+  end
+
+  @doc """
+  Returns the default caching configuration.
+
+  All caching enabled with 256MB max memory.
+  """
+  @spec default_caching() :: caching_config()
+  def default_caching do
+    %{
+      transformed_chunks: true,
+      reconstructed_stripes: true,
+      remote_chunks: true,
+      max_memory: 268_435_456
+    }
   end
 
   @doc """
@@ -130,8 +175,8 @@ defmodule NeonFS.Core.Volume do
   @doc """
   Updates a volume with new configuration values.
 
-  Only allows updating specific fields: owner, durability, write_ack, initial_tier,
-  compression, verification. Updates the updated_at timestamp.
+  Only allows updating specific fields: owner, durability, write_ack, tiering,
+  caching, io_weight, compression, verification. Updates the updated_at timestamp.
 
   ## Examples
 
@@ -140,7 +185,17 @@ defmodule NeonFS.Core.Volume do
   """
   @spec update(t(), keyword()) :: t()
   def update(volume, opts) do
-    allowed_keys = [:owner, :durability, :write_ack, :initial_tier, :compression, :verification]
+    allowed_keys = [
+      :owner,
+      :durability,
+      :write_ack,
+      :tiering,
+      :caching,
+      :io_weight,
+      :compression,
+      :verification
+    ]
+
     updates = Keyword.take(opts, allowed_keys)
 
     updates
@@ -179,7 +234,11 @@ defmodule NeonFS.Core.Volume do
   - Replication factor must be >= 1
   - Minimum copies must be >= 1 and <= factor
   - Write acknowledgement must be one of: :local, :quorum, :all
-  - Initial tier must be one of: :hot, :warm, :cold
+  - Tiering initial_tier must be one of: :hot, :warm, :cold
+  - Tiering promotion_threshold must be positive integer
+  - Tiering demotion_delay must be positive integer
+  - Caching max_memory must be positive integer
+  - io_weight must be positive integer
   - Compression algorithm must be :zstd or :none
   - Compression level must be 1-22 for zstd
   - Verification on_read must be one of: :always, :never, :sampling
@@ -190,7 +249,9 @@ defmodule NeonFS.Core.Volume do
     with :ok <- validate_name(volume.name),
          :ok <- validate_durability(volume.durability),
          :ok <- validate_write_ack(volume.write_ack),
-         :ok <- validate_tier(volume.initial_tier),
+         :ok <- validate_tiering(volume.tiering),
+         :ok <- validate_caching(volume.caching),
+         :ok <- validate_io_weight(volume.io_weight),
          :ok <- validate_compression(volume.compression) do
       validate_verification(volume.verification)
     end
@@ -211,8 +272,38 @@ defmodule NeonFS.Core.Volume do
   defp validate_write_ack(ack) when ack in [:local, :quorum, :all], do: :ok
   defp validate_write_ack(_), do: {:error, "write_ack must be :local, :quorum, or :all"}
 
-  defp validate_tier(tier) when tier in [:hot, :warm, :cold], do: :ok
-  defp validate_tier(_), do: {:error, "initial_tier must be :hot, :warm, or :cold"}
+  defp validate_tiering(%{
+         initial_tier: tier,
+         promotion_threshold: pt,
+         demotion_delay: dd
+       })
+       when tier in [:hot, :warm, :cold] and is_integer(pt) and pt > 0 and is_integer(dd) and
+              dd > 0 do
+    :ok
+  end
+
+  defp validate_tiering(_),
+    do:
+      {:error,
+       "invalid tiering: initial_tier must be :hot, :warm, or :cold; promotion_threshold and demotion_delay must be positive integers"}
+
+  defp validate_caching(%{
+         transformed_chunks: tc,
+         reconstructed_stripes: rs,
+         remote_chunks: rc,
+         max_memory: mm
+       })
+       when is_boolean(tc) and is_boolean(rs) and is_boolean(rc) and is_integer(mm) and mm > 0 do
+    :ok
+  end
+
+  defp validate_caching(_),
+    do:
+      {:error,
+       "invalid caching: transformed_chunks, reconstructed_stripes, remote_chunks must be booleans; max_memory must be positive integer"}
+
+  defp validate_io_weight(w) when is_integer(w) and w > 0, do: :ok
+  defp validate_io_weight(_), do: {:error, "io_weight must be a positive integer"}
 
   defp validate_compression(%{algorithm: :none}), do: :ok
 

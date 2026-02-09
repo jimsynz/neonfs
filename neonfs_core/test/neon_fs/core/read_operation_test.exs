@@ -9,10 +9,12 @@ defmodule NeonFS.Core.ReadOperationTest do
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
     stop_ra()
+    start_drive_registry()
     start_blob_store()
     start_chunk_index()
     start_file_index()
     start_volume_registry()
+    ensure_chunk_access_tracker()
 
     # Set up telemetry test handler
     :telemetry.attach_many(

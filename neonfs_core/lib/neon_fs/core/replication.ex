@@ -11,7 +11,7 @@ defmodule NeonFS.Core.Replication do
   """
 
   alias NeonFS.Cluster.State, as: ClusterState
-  alias NeonFS.Core.{BlobStore, ChunkIndex}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveRegistry}
 
   require Logger
 
@@ -27,7 +27,7 @@ defmodule NeonFS.Core.Replication do
     * `chunk_data` - The raw chunk data to replicate
     * `volume` - The volume configuration
     * `opts` - Optional parameters:
-      * `:tier` - Target tier for replicas (default: volume.initial_tier)
+      * `:tier` - Target tier for replicas (default: volume.tiering.initial_tier)
       * `:exclude_nodes` - Nodes to exclude from selection (default: [])
 
   ## Returns
@@ -38,7 +38,7 @@ defmodule NeonFS.Core.Replication do
           replication_result()
   def replicate_chunk(chunk_hash, chunk_data, volume, opts \\ []) do
     start_time = System.monotonic_time()
-    tier = Keyword.get(opts, :tier, volume.initial_tier)
+    tier = Keyword.get(opts, :tier, volume.tiering.initial_tier)
     exclude_nodes = Keyword.get(opts, :exclude_nodes, [Node.self()])
 
     :telemetry.execute(
@@ -50,16 +50,18 @@ defmodule NeonFS.Core.Replication do
     # Determine how many replicas we need (minus the local copy already stored)
     target_count = volume.durability.factor - 1
 
+    local_drive_id = local_drive_id_for_tier(tier)
+
     result =
       case select_replication_targets(target_count, exclude_nodes) do
         {:ok, targets} ->
-          perform_replication(chunk_hash, chunk_data, tier, targets, volume)
+          perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id)
 
         {:error, :no_targets} ->
           # No replication targets available - return local location only
           # This is acceptable when running in single-node mode
           Logger.debug("No replication targets available, returning local location only")
-          {:ok, [%{node: Node.self(), drive_id: "default", tier: tier}]}
+          {:ok, [%{node: Node.self(), drive_id: local_drive_id, tier: tier}]}
       end
 
     duration = System.monotonic_time() - start_time
@@ -132,7 +134,18 @@ defmodule NeonFS.Core.Replication do
   defp filter_and_prepare_targets(members, exclude_nodes) do
     members
     |> Enum.reject(&(&1 in exclude_nodes))
-    |> Enum.map(&%{node: &1, drive_id: "default"})
+    |> Enum.map(fn node ->
+      # Try to find a drive for this node from registry; fall back to "default"
+      drive_id =
+        DriveRegistry.drives_for_node(node)
+        |> Enum.filter(&(&1.state == :active))
+        |> case do
+          [drive | _] -> drive.id
+          [] -> "default"
+        end
+
+      %{node: node, drive_id: drive_id}
+    end)
   end
 
   defp get_cluster_members do
@@ -150,21 +163,21 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp perform_replication(chunk_hash, chunk_data, tier, targets, volume) do
+  defp perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id) do
     case volume.write_ack do
       :local ->
         # Background replication - spawn async and return immediately
         spawn_background_replication(chunk_hash, chunk_data, tier, targets)
         # Return only local location for now
-        {:ok, [%{node: Node.self(), drive_id: "default", tier: tier}]}
+        {:ok, [%{node: Node.self(), drive_id: local_drive_id, tier: tier}]}
 
       :quorum ->
         # Quorum replication - wait for W of N
-        quorum_replicate(chunk_hash, chunk_data, tier, targets, volume)
+        quorum_replicate(chunk_hash, chunk_data, tier, targets, volume, local_drive_id)
 
       :all ->
         # Synchronous replication - wait for all
-        sync_replicate(chunk_hash, chunk_data, tier, targets)
+        sync_replicate(chunk_hash, chunk_data, tier, targets, local_drive_id)
     end
   end
 
@@ -193,7 +206,7 @@ defmodule NeonFS.Core.Replication do
     end)
   end
 
-  defp quorum_replicate(chunk_hash, chunk_data, tier, targets, volume) do
+  defp quorum_replicate(chunk_hash, chunk_data, tier, targets, volume, local_drive_id) do
     # Calculate quorum size (W of N)
     # For 3-replica volumes with min_copies=2, we need 1 additional success (already stored locally)
     min_copies = volume.durability.min_copies
@@ -208,7 +221,7 @@ defmodule NeonFS.Core.Replication do
 
     # Include local location
     all_locations = [
-      %{node: Node.self(), drive_id: "default", tier: tier} | successful_locations
+      %{node: Node.self(), drive_id: local_drive_id, tier: tier} | successful_locations
     ]
 
     if length(successful_locations) >= required_successes do
@@ -225,7 +238,7 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp sync_replicate(chunk_hash, chunk_data, tier, targets) do
+  defp sync_replicate(chunk_hash, chunk_data, tier, targets, local_drive_id) do
     results = replicate_to_targets(chunk_hash, chunk_data, tier, targets)
 
     # Check if all succeeded
@@ -233,7 +246,7 @@ defmodule NeonFS.Core.Replication do
       locations = Enum.map(results, fn {:ok, location} -> location end)
 
       # Include local location
-      all_locations = [%{node: Node.self(), drive_id: "default", tier: tier} | locations]
+      all_locations = [%{node: Node.self(), drive_id: local_drive_id, tier: tier} | locations]
 
       # Update metadata with all locations
       add_locations_to_chunk(chunk_hash, locations)
@@ -266,19 +279,20 @@ defmodule NeonFS.Core.Replication do
 
   defp replicate_to_node(chunk_hash, chunk_data, tier, target) do
     tier_str = Atom.to_string(tier)
+    drive_id = target.drive_id
 
     # Use :rpc to call BlobStore.write_chunk on the remote node
     case :rpc.call(
            target.node,
            BlobStore,
            :write_chunk,
-           [chunk_data, tier_str, []],
+           [chunk_data, drive_id, tier_str, []],
            10_000
          ) do
       {:ok, returned_hash, _chunk_info} ->
         # Verify hash matches
         if returned_hash == chunk_hash do
-          location = %{node: target.node, drive_id: target.drive_id, tier: tier}
+          location = %{node: target.node, drive_id: drive_id, tier: tier}
           {:ok, location}
         else
           Logger.error("Hash mismatch during replication: expected #{Base.encode16(chunk_hash)}")
@@ -294,6 +308,13 @@ defmodule NeonFS.Core.Replication do
         Logger.warning("RPC failed when replicating to #{target.node}: #{inspect(reason)}")
 
         {:error, {:rpc_failed, reason}}
+    end
+  end
+
+  defp local_drive_id_for_tier(tier) do
+    case DriveRegistry.select_drive(tier) do
+      {:ok, drive} -> drive.id
+      {:error, _} -> "default"
     end
   end
 

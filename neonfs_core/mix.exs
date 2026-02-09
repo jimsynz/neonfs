@@ -59,6 +59,7 @@ defmodule NeonFS.Core.MixProject do
     [
       {:neonfs_client, path: "../neonfs_client"},
       {:ra, "~> 2.13"},
+      {:reactor, "~> 0.13"},
       {:rustler, "~> 0.37", runtime: false},
 
       # dev/test

@@ -9,8 +9,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
     stop_ra()
+    start_drive_registry()
     start_blob_store()
     start_chunk_index()
+    ensure_chunk_access_tracker()
     on_exit(fn -> cleanup_test_dirs() end)
     :ok
   end
@@ -19,7 +21,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
     test "returns {:ok, data, :local} when chunk exists locally" do
       # Write a test chunk
       data = "hello world from local node"
-      {:ok, hash, info} = BlobStore.write_chunk(data, "hot")
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       # Create chunk metadata
       chunk_meta = %ChunkMeta{
@@ -41,7 +43,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
     test "uses correct tier when fetching locally" do
       # Write chunk to warm tier
       data = "warm tier data"
-      {:ok, hash, info} = BlobStore.write_chunk(data, "warm")
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "warm")
 
       chunk_meta = %ChunkMeta{
         hash: hash,
@@ -69,7 +71,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
     test "verifies chunk when verify option is true" do
       data = "data to verify"
-      {:ok, hash, info} = BlobStore.write_chunk(data, "hot")
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
         hash: hash,
@@ -90,7 +92,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
     test "decompresses chunk when decompress option is true" do
       # Write compressed chunk
       data = String.duplicate("compress me! ", 100)
-      {:ok, hash, info} = BlobStore.write_chunk(data, "hot", compression: "zstd")
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
 
       chunk_meta = %ChunkMeta{
         hash: hash,
@@ -138,7 +140,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
     test "filters out local node from remote fetch attempts" do
       data = "local data, not remote"
-      {:ok, hash, info} = BlobStore.write_chunk(data, "hot")
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       # Create metadata with both local and remote locations
       chunk_meta = %ChunkMeta{
@@ -161,6 +163,131 @@ defmodule NeonFS.Core.ChunkFetcherTest do
     end
   end
 
+  describe "score_location/2" do
+    @local_node :test@localhost
+
+    test "scores local SSD (hot tier) as 0" do
+      location = %{node: @local_node, drive_id: "ssd1", tier: :hot, state: :active}
+      assert ChunkFetcher.score_location(location, @local_node) == 0
+    end
+
+    test "scores remote SSD (hot tier) as 10" do
+      location = %{node: :remote@host, drive_id: "ssd1", tier: :hot, state: :active}
+      assert ChunkFetcher.score_location(location, @local_node) == 10
+    end
+
+    test "scores local active HDD (warm tier) as 20" do
+      location = %{node: @local_node, drive_id: "hdd1", tier: :warm, state: :active}
+      assert ChunkFetcher.score_location(location, @local_node) == 20
+    end
+
+    test "scores local active HDD (cold tier) as 20" do
+      location = %{node: @local_node, drive_id: "hdd1", tier: :cold, state: :active}
+      assert ChunkFetcher.score_location(location, @local_node) == 20
+    end
+
+    test "scores remote active HDD as 30" do
+      location = %{node: :remote@host, drive_id: "hdd1", tier: :warm, state: :active}
+      assert ChunkFetcher.score_location(location, @local_node) == 30
+    end
+
+    test "scores standby HDD as 50 regardless of locality" do
+      local_standby = %{node: @local_node, drive_id: "hdd1", tier: :cold, state: :standby}
+      remote_standby = %{node: :remote@host, drive_id: "hdd2", tier: :warm, state: :standby}
+
+      assert ChunkFetcher.score_location(local_standby, @local_node) == 50
+      assert ChunkFetcher.score_location(remote_standby, @local_node) == 50
+    end
+
+    test "scores unknown drive (nil tier) as 100" do
+      location = %{node: :remote@host, drive_id: "unknown", tier: nil, state: nil}
+      assert ChunkFetcher.score_location(location, @local_node) == 100
+    end
+
+    test "scores location with missing tier/state keys as 100" do
+      location = %{node: :remote@host, drive_id: "unknown"}
+      assert ChunkFetcher.score_location(location, @local_node) == 100
+    end
+
+    test "standby SSD is still scored as SSD (no spin-up penalty)" do
+      location = %{node: @local_node, drive_id: "ssd1", tier: :hot, state: :standby}
+      assert ChunkFetcher.score_location(location, @local_node) == 0
+    end
+  end
+
+  describe "sort_locations_by_score/2" do
+    @local_node :test@localhost
+
+    test "sorts by score ascending" do
+      locations = [
+        %{node: :remote@host, drive_id: "hdd1", tier: :warm, state: :active},
+        %{node: @local_node, drive_id: "ssd1", tier: :hot, state: :active},
+        %{node: :remote@host, drive_id: "hdd2", tier: :cold, state: :standby},
+        %{node: :remote@host, drive_id: "ssd2", tier: :hot, state: :active}
+      ]
+
+      sorted = ChunkFetcher.sort_locations_by_score(locations, @local_node)
+
+      # Local SSD (0), Remote SSD (10), Remote HDD active (30), HDD standby (50)
+      assert Enum.at(sorted, 0).drive_id == "ssd1"
+      assert Enum.at(sorted, 1).drive_id == "ssd2"
+      assert Enum.at(sorted, 2).drive_id == "hdd1"
+      assert Enum.at(sorted, 3).drive_id == "hdd2"
+    end
+
+    test "unknown drives sorted last" do
+      locations = [
+        %{node: :remote@host, drive_id: "unknown1"},
+        %{node: @local_node, drive_id: "ssd1", tier: :hot, state: :active}
+      ]
+
+      sorted = ChunkFetcher.sort_locations_by_score(locations, @local_node)
+
+      assert Enum.at(sorted, 0).drive_id == "ssd1"
+      assert Enum.at(sorted, 1).drive_id == "unknown1"
+    end
+
+    test "tie-breaking within same score varies across calls" do
+      # Two remote SSDs should have the same score (10) but random ordering
+      locations =
+        for i <- 1..20 do
+          %{node: :remote@host, drive_id: "ssd#{i}", tier: :hot, state: :active}
+        end
+
+      # Run multiple sorts and check that at least one produces different first element
+      first_ids =
+        for _ <- 1..10 do
+          sorted = ChunkFetcher.sort_locations_by_score(locations, @local_node)
+          Enum.at(sorted, 0).drive_id
+        end
+
+      # With 20 locations and 10 attempts, it's astronomically unlikely
+      # that the same one would be first every time if randomization works
+      unique_firsts = Enum.uniq(first_ids)
+      assert length(unique_firsts) > 1
+    end
+
+    test "empty list returns empty list" do
+      assert ChunkFetcher.sort_locations_by_score([], @local_node) == []
+    end
+
+    test "single location returns that location" do
+      locations = [%{node: @local_node, drive_id: "ssd1", tier: :hot, state: :active}]
+      sorted = ChunkFetcher.sort_locations_by_score(locations, @local_node)
+      assert length(sorted) == 1
+      assert Enum.at(sorted, 0).drive_id == "ssd1"
+    end
+
+    test "preserves all location fields" do
+      locations = [
+        %{node: @local_node, drive_id: "ssd1", tier: :hot, state: :active, extra: :data}
+      ]
+
+      [sorted_loc] = ChunkFetcher.sort_locations_by_score(locations, @local_node)
+      assert sorted_loc.extra == :data
+    end
+  end
+
   describe "telemetry events" do
     test "emits local_hit event when chunk is found locally" do
       # Attach telemetry handler
@@ -177,7 +304,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       # Write and fetch chunk
       data = "telemetry test data"
-      {:ok, hash, info} = BlobStore.write_chunk(data, "hot")
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
         hash: hash,

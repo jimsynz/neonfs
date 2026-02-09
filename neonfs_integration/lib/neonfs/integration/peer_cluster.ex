@@ -63,6 +63,8 @@ defmodule NeonFS.Integration.PeerCluster do
   - `:applications` - Applications to start on each node (default: [:neonfs_core])
   - `:base_dir` - Base directory for cluster data (default: creates temp dir)
   - `:enable_ra` - Enable Ra consensus (default: true)
+  - `:drives` - Custom drive configs per node. A function `(node_name, data_dir) -> [drive_config]`
+    that returns drive config maps. When not provided, uses a single default drive.
 
   ## Ra Notes
 
@@ -76,6 +78,7 @@ defmodule NeonFS.Integration.PeerCluster do
     applications = Keyword.get(opts, :applications, [:neonfs_core])
     # Enable Ra by default
     enable_ra = Keyword.get(opts, :enable_ra, true)
+    drives_fn = Keyword.get(opts, :drives, nil)
 
     # Ensure controller is distributed
     ensure_distributed!()
@@ -104,21 +107,25 @@ defmodule NeonFS.Integration.PeerCluster do
         # Configure neonfs_core to use the test data directories
         # IMPORTANT: Ra expects data_dir as a charlist, not a binary!
         # DETS in Erlang requires charlist file paths.
+        core_config = [
+          data_dir: data_dir,
+          meta_dir: meta_dir,
+          blob_store_base_dir: Path.join(data_dir, "blobs"),
+          ra_data_dir: to_charlist(ra_dir),
+          enable_ra: enable_ra
+        ]
+
+        core_config =
+          if drives_fn do
+            Keyword.put(core_config, :drives, drives_fn.(node_name, data_dir))
+          else
+            core_config
+          end
+
         app_config = [
-          # Suppress debug/info logs on peer nodes during tests
-          logger: [
-            level: :warning
-          ],
-          neonfs_core: [
-            data_dir: data_dir,
-            meta_dir: meta_dir,
-            blob_store_base_dir: Path.join(data_dir, "blobs"),
-            ra_data_dir: to_charlist(ra_dir),
-            enable_ra: enable_ra
-          ],
-          ra: [
-            data_dir: to_charlist(ra_dir)
-          ]
+          logger: [level: :warning],
+          neonfs_core: core_config,
+          ra: [data_dir: to_charlist(ra_dir)]
         ]
 
         start_cluster_node(node_name, peer_opts, applications, app_config, enable_ra, acc)

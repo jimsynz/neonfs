@@ -71,12 +71,29 @@ Before committing, check if any edited files have learnings worth preserving in 
 
 Only update AGENTS.md if you have **genuinely reusable knowledge** that would help future work in that directory.
 
+## Build vs Buy: Check for Existing Packages
+
+Before implementing non-trivial functionality from scratch, **check whether an existing Elixir or Rust package already solves the problem**. Search hex.pm (Elixir) and crates.io (Rust) for relevant libraries.
+
+When evaluating a package, consider:
+1. **Does it actually cover the key requirements?** Match the task's acceptance criteria against the library's features. Pay attention to the specific kind of limits, eviction strategies, data structures, etc. the task requires — not just the general category.
+2. **What's the abstraction mismatch cost?** If you'd need to reimplement most of the logic on top of the library anyway, it's not saving time.
+3. **Is it actively maintained?** Check release dates, open issues, and download counts on hex.pm / crates.io.
+4. **Does it add unnecessary complexity?** A 150-line focused module is often better than a dependency that brings features you don't need.
+
+**Use a package** when it genuinely covers the requirements and saves significant implementation effort.
+**Build it custom** when the requirements are specific enough that you'd be fighting the library's abstractions.
+
+If you find a promising package, briefly note the comparison (what it covers, what it doesn't) in your progress report so future iterations don't re-evaluate the same options.
+
 ## Quality Requirements
 
-- ALL commits must pass your project's quality checks (`mix check`, etc).
+- **Before every commit**, run `mix check --no-retry` from the **repository root**. This runs checks across **all subprojects** (neonfs_client, neonfs_core, neonfs_fuse, neonfs_integration). The build MUST pass in **every subproject** before committing — not just the one you changed. Changes to shared code (e.g. neonfs_client types, state machine versions, new supervisor children) frequently break downstream packages.
 - Do NOT commit broken code.
 - Keep changes focused and minimal.
 - Follow existing code patterns.
+- When adding new components to the supervision tree, ensure **all test files** that start related services are updated to also start the new component. Check `test/support/test_case.ex` helpers and any test setup blocks that manually start subsystems.
+- **If you are unsure how to implement something, ask me.** Do not guess or make assumptions about architecture, API design, or behaviour — check with me first.
 
 ## Phase Completion Requirements
 

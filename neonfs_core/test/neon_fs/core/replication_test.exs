@@ -9,6 +9,8 @@ defmodule NeonFS.Core.ReplicationTest do
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
     stop_ra()
+    start_drive_registry()
+    start_blob_store()
     start_chunk_index()
 
     on_exit(fn -> cleanup_test_dirs() end)

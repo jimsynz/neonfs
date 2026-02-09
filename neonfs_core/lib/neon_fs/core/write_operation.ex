@@ -10,6 +10,7 @@ defmodule NeonFS.Core.WriteOperation do
     BlobStore,
     ChunkIndex,
     ChunkMeta,
+    DriveRegistry,
     FileIndex,
     FileMeta,
     Replication,
@@ -179,10 +180,15 @@ defmodule NeonFS.Core.WriteOperation do
     {_should_compress, compression} = should_compress_chunk?(size, compression_config)
     write_opts = build_write_opts(compression)
 
-    with {:ok, _returned_hash, chunk_info} <- BlobStore.write_chunk(data, "hot", write_opts),
-         chunk_meta <- build_chunk_meta(hash, size, chunk_info, volume, write_id),
+    tier = volume.tiering.initial_tier
+    tier_str = Atom.to_string(tier)
+
+    with {:ok, drive} <- select_drive_for_tier(tier),
+         {:ok, _returned_hash, chunk_info} <-
+           BlobStore.write_chunk(data, drive.id, tier_str, write_opts),
+         chunk_meta <- build_chunk_meta(hash, size, chunk_info, drive.id, volume, write_id),
          :ok <- ChunkIndex.put(chunk_meta) do
-      maybe_replicate_chunk(hash, data, volume)
+      maybe_replicate_chunk(hash, data, volume, tier)
       build_chunk_result(hash, offset, size, chunk_info, index)
     else
       {:error, reason} when is_tuple(reason) -> {:error, reason}
@@ -190,16 +196,26 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
+  defp select_drive_for_tier(tier) do
+    case DriveRegistry.select_drive(tier) do
+      {:ok, drive} ->
+        {:ok, drive}
+
+      {:error, :no_drives_in_tier} ->
+        {:error, :no_drives_available}
+    end
+  end
+
   defp build_write_opts(:none), do: []
   defp build_write_opts({:zstd, level}), do: [compression: "zstd", compression_level: level]
 
-  defp build_chunk_meta(hash, size, chunk_info, volume, write_id) do
+  defp build_chunk_meta(hash, size, chunk_info, drive_id, volume, write_id) do
     %ChunkMeta{
       hash: hash,
       original_size: size,
       stored_size: chunk_info.stored_size,
       compression: parse_compression(chunk_info.compression),
-      locations: [%{node: node(), drive_id: "default", tier: :hot}],
+      locations: [%{node: node(), drive_id: drive_id, tier: volume.tiering.initial_tier}],
       target_replicas: volume.durability.factor,
       commit_state: :uncommitted,
       active_write_refs: MapSet.new([write_id]),
@@ -213,9 +229,9 @@ defmodule NeonFS.Core.WriteOperation do
   defp parse_compression("zstd"), do: :zstd
   defp parse_compression(_), do: :none
 
-  defp maybe_replicate_chunk(hash, data, volume) do
+  defp maybe_replicate_chunk(hash, data, volume, tier) do
     if volume.durability.factor > 1 do
-      case Replication.replicate_chunk(hash, data, volume, tier: :hot) do
+      case Replication.replicate_chunk(hash, data, volume, tier: tier) do
         {:ok, _locations} ->
           :ok
 
@@ -369,8 +385,8 @@ defmodule NeonFS.Core.WriteOperation do
   defp delete_chunk_from_storage(meta) do
     case meta.locations do
       [location | _] ->
-        tier_str = Atom.to_string(location.tier)
-        BlobStore.delete_chunk(meta.hash, tier_str)
+        drive_id = Map.get(location, :drive_id, "default")
+        BlobStore.delete_chunk(meta.hash, drive_id)
 
       [] ->
         :ok

@@ -23,10 +23,41 @@ if config_env() == :prod do
   config :ra,
     data_dir: String.to_charlist("#{data_dir}/ra")
 
+  # Drive configuration: comma-separated list of id:path:tier:capacity
+  # e.g. NEONFS_DRIVES="nvme0:/data/nvme0:hot:1000000000000,sata0:/data/sata0:cold:4000000000000"
+  # Falls back to a single default drive at {data_dir}/blobs
+  drives =
+    case System.get_env("NEONFS_DRIVES") do
+      nil ->
+        [%{id: "default", path: "#{data_dir}/blobs", tier: :hot, capacity: 0}]
+
+      drives_str ->
+        drives_str
+        |> String.split(",", trim: true)
+        |> Enum.map(fn drive_str ->
+          case String.split(drive_str, ":", parts: 4) do
+            [id, path, tier, capacity] ->
+              %{
+                id: id,
+                path: path,
+                tier: String.to_atom(tier),
+                capacity: String.to_integer(capacity)
+              }
+
+            [id, path, tier] ->
+              %{id: id, path: path, tier: String.to_atom(tier), capacity: 0}
+
+            _ ->
+              raise "Invalid drive config: #{drive_str}. Expected id:path:tier[:capacity]"
+          end
+        end)
+    end
+
   # Core configuration
   config :neonfs_core,
     blob_store_base_dir: "#{data_dir}/blobs",
     blob_store_prefix_depth: String.to_integer(System.get_env("NEONFS_PREFIX_DEPTH", "2")),
+    drives: drives,
     enable_ra: enable_ra,
     meta_dir: "#{data_dir}/meta",
     ra_data_dir: "#{data_dir}/ra",
