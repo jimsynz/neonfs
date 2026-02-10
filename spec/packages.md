@@ -28,12 +28,6 @@ NeonFS uses three technology stacks:
 
 #### Phase 1: Foundation
 
-**hlclock** - Hybrid Logical Clocks
-- **Hex**: https://hex.pm/packages/hlclock
-- **Purpose**: Timestamp-based conflict resolution for leaderless quorum metadata operations
-- **Why**: Combines physical NTP timestamps with logical counters for causality detection. Essential for the HLC conflict resolution described in `metadata.md`.
-- **Features**: Globally-unique monotonic timestamps, bounded clock drift handling (300s default)
-
 **briefly** - Temporary Files
 - **Hex**: https://hex.pm/packages/briefly
 - **Purpose**: Temporary file management with automatic cleanup
@@ -56,11 +50,6 @@ NeonFS uses three technology stacks:
 - **Purpose**: Automatic cluster formation and healing
 - **Why**: Pluggable discovery strategies (DNS, Kubernetes, EPMD). DNS strategy works well with WireGuard/Tailscale deployments.
 - **Strategies**: DNS polling for WireGuard mesh, Kubernetes for container deployments
-
-**libring** - Consistent Hashing
-- **Hex**: https://hex.pm/packages/libring
-- **Purpose**: Consistent hash ring for metadata segment assignment
-- **Why**: Fast lookup using Erlang's `:gb_tree`. Critical for distributed segment assignment as described in `metadata.md`.
 
 **broadway** - Data Pipelines
 - **Hex**: https://hex.pm/packages/broadway
@@ -87,7 +76,22 @@ NeonFS uses three technology stacks:
 - **Why**: Cluster and volume configuration files use YAML format (per `implementation.md` examples).
 - **Alternative**: `toml` for TOML format if preferred
 
-#### Phase 5: Security
+#### Phase 5: Metadata Tiering
+
+**hlclock** - Hybrid Logical Clocks
+- **Hex**: https://hex.pm/packages/hlclock
+- **Purpose**: Timestamp-based conflict resolution for leaderless quorum metadata operations
+- **Why**: Combines physical NTP timestamps with logical counters for causality detection. Essential for the HLC conflict resolution described in `metadata.md`.
+- **Features**: Globally-unique monotonic timestamps, bounded clock drift handling (300s default)
+- **Alternative**: Custom `NeonFS.Core.HLC` module (task 0080) — evaluate whether hlclock provides sufficient control or if a custom implementation is needed
+
+**libring** - Consistent Hashing
+- **Hex**: https://hex.pm/packages/libring
+- **Purpose**: Consistent hash ring for metadata segment assignment
+- **Why**: Fast lookup using Erlang's `:gb_tree`. Critical for distributed segment assignment as described in `metadata.md`.
+- **Alternative**: Custom `NeonFS.Core.MetadataRing` module (task 0081) — evaluate whether libring's API fits our needs
+
+#### Phase 6: Security
 
 **jose** - JSON Object Signing and Encryption
 - **Hex**: https://hex.pm/packages/jose
@@ -104,7 +108,7 @@ NeonFS uses three technology stacks:
 - **Purpose**: Argon2 password hashing (PHC winner)
 - **Why**: User password hashing for access control
 
-#### Phase 6: APIs and Integration
+#### Phase 7: APIs and Integration
 
 **bandit** - HTTP Server
 - **Hex**: https://hex.pm/packages/bandit
@@ -127,7 +131,7 @@ NeonFS uses three technology stacks:
 - **Why**: Efficient serialisation for chunk metadata, replication queue items. Middle ground between JSON and Protocol Buffers.
 - **Status**: Optional optimisation
 
-#### Phase 7: Operations
+#### Phase 8: Operations
 
 **telemetry_metrics_prometheus** - Prometheus Metrics
 - **Hex**: https://hex.pm/packages/telemetry_metrics_prometheus
@@ -150,12 +154,13 @@ NeonFS uses three technology stacks:
 ### Summary: Hex Package Additions by Phase
 
 ```
-Phase 1: hlclock, briefly, stream_data, mimic
-Phase 2: libcluster, libring, broadway, reactor
+Phase 1: briefly, stream_data, mimic
+Phase 2: libcluster, broadway, reactor
 Phase 3: lru_cache, yaml_elixir
-Phase 5: jose, joken, argon2_elixir
-Phase 6: bandit, plug, grpc, msgpax (optional)
-Phase 7: telemetry_metrics_prometheus, prom_ex (optional)
+Phase 5: hlclock (or custom HLC), libring (or custom ring)
+Phase 6: jose, joken, argon2_elixir
+Phase 7: bandit, plug, grpc, msgpax (optional)
+Phase 8: telemetry_metrics_prometheus, prom_ex (optional)
 ```
 
 ---
@@ -487,14 +492,14 @@ Monitor these packages for maintenance concerns:
 
 ### Phase 1 (Foundation)
 ```
-Hex: hlclock, briefly, stream_data, mimic
+Hex: briefly, stream_data, mimic
 Rust: fastcdc, sha2, zstd, fuser, clap, thiserror, anyhow
 OTP: :json (for API responses, config)
 ```
 
 ### Phase 2 (Clustering)
 ```
-Hex: libcluster, libring, broadway, reactor
+Hex: libcluster, broadway, reactor
 Rust: (no additions)
 OTP: :pg, :erpc
 ```
@@ -513,21 +518,28 @@ Rust: solana-reed-solomon-erasure
 OTP: (no additions)
 ```
 
-### Phase 5 (Security)
+### Phase 5 (Metadata Tiering)
+```
+Hex: hlclock (or custom HLC), libring (or custom ring)
+Rust: (no additions — metadata NIFs extend existing neonfs_blob)
+OTP: (no additions)
+```
+
+### Phase 6 (Security)
 ```
 Hex: jose, joken, argon2_elixir
 Rust: aes-gcm (already recommended for Phase 1)
 OTP: (no additions)
 ```
 
-### Phase 6 (APIs)
+### Phase 7 (APIs)
 ```
 Hex: bandit, plug, grpc, msgpax (optional)
 Rust: (no additions)
 OTP: (no additions)
 ```
 
-### Phase 7 (Operations)
+### Phase 8 (Operations)
 ```
 Hex: telemetry_metrics_prometheus, prom_ex (optional)
 Rust: tokio-uring (if I/O bottleneck identified)

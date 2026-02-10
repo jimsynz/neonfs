@@ -1014,6 +1014,70 @@ defmodule NeonFS.AntiEntropy do
 end
 ```
 
+## Physical Storage: BlobStore Metadata Namespace
+
+Rather than introducing a separate storage system (SQLite, RocksDB, DETS), metadata records are stored using the same BlobStore mechanism as data chunks. This gives metadata identical durability guarantees — atomic write to temp file, fsync, rename into place — and the same replication characteristics. No separate storage engine to configure, monitor, or debug.
+
+### Directory Layout
+
+Metadata is stored in a `meta/` namespace alongside the existing `blobs/` directory:
+
+```
+{base_dir}/
+├── blobs/                          # Data chunks (existing)
+│   ├── hot/{prefix}/{hash}
+│   ├── warm/{prefix}/{hash}
+│   └── cold/{prefix}/{hash}
+└── meta/                           # Metadata records (new)
+    └── {segment_id}/
+        └── {prefix_1}/{prefix_2}/
+            └── {key_hash}
+```
+
+Same prefix depth as chunks (default 2), same atomic write pattern.
+
+### Key Derivation
+
+Metadata keys are **deterministic** (derived from record type + primary key), not content-addressed:
+
+| Record Type | Key Format | Sharding |
+|-------------|-----------|----------|
+| Chunk metadata | `SHA256("chunk:" ++ chunk_hash)` | By chunk hash |
+| File metadata | `SHA256("file:" ++ file_id)` | By file_id |
+| Directory entry | `SHA256("dir:" ++ volume_id ++ ":" ++ parent_path)` | By parent_path |
+| Stripe metadata | `SHA256("stripe:" ++ stripe_id)` | By stripe_id |
+
+All lookups are by exact key — no B-trees, ordered indexes, or range scans needed. Directory listings are efficient because all children of a directory share a single DirectoryEntry record (looked up by parent path).
+
+### Record Format
+
+Each stored record includes the value and an HLC timestamp for conflict resolution:
+
+```elixir
+%StoredRecord{
+  value: term(),              # The actual metadata (FileMeta, ChunkMeta, etc.)
+  hlc_timestamp: {wall_ms, counter, node_id},
+  tombstone: false            # true for deleted records
+}
+```
+
+Records are serialised with `:erlang.term_to_binary/1` before writing to BlobStore and deserialised with `:erlang.binary_to_term/1` on read.
+
+### Tombstones
+
+Deletes write a tombstone marker rather than removing the file immediately. This is necessary because quorum deletes must propagate — a delete on one replica writes a tombstone that other replicas observe during anti-entropy. Without tombstones, a deleted record would "reappear" when a replica that missed the delete syncs its data.
+
+Tombstone cleanup happens during anti-entropy: once all replicas in a segment agree that a key is tombstoned, the physical file can be removed.
+
+### Why Not SQLite/RocksDB?
+
+- **One storage system**: Data and metadata share the same durability model, the same fsync + atomic rename pattern, and the same directory structure. No second storage engine to configure, tune, or debug.
+- **No additional dependencies**: BlobStore NIFs already exist and are well-tested.
+- **Identical replication**: Metadata replication uses the same mechanisms as chunk replication.
+- **Simplicity**: Exact-key lookups are a directory traversal, not a B-tree search. For NeonFS's access patterns (all lookups by known key), this is sufficient.
+
+The tradeoff is that range scans are not supported — but NeonFS's metadata access patterns don't require them. Directory listings use DirectoryEntry (single key lookup), not range scans over file paths.
+
 ## Metadata Configuration
 
 ```yaml
@@ -1042,6 +1106,19 @@ metadata:
   virtual_nodes_per_physical: 64
   hash_algorithm: sha256
 
+  # Storage placement
+  storage_tier: hot               # Prefer hot-tier drives for metadata
+  fallback_tier: warm             # Use warm if no hot-tier available
+
+  # Resolved lookup cache (availability during partial outages)
+  resolved_lookup_cache:
+    enabled: true
+    max_entries: 100_000
+    default_ttl: 5m               # Per-volume overridable
+
+  # Degraded reads (serve local replicas when quorum unavailable)
+  degraded_reads: true            # Return {:ok, value, :possibly_stale}
+
   # Background consistency
   anti_entropy:
     enabled: true
@@ -1049,10 +1126,71 @@ metadata:
 
   # Read repair
   read_repair: async            # sync | async | disabled
-
-  # Local storage engine
-  storage_engine: sqlite        # sqlite | rocksdb
 ```
+
+## Metadata Placement
+
+Metadata records are stored on **hot-tier drives** regardless of which tier the associated data chunks occupy. Metadata is small (hundreds of bytes per record) and latency-sensitive — every file open, directory listing, and attribute check starts with a metadata lookup. Placing metadata on the fastest available storage minimises the overhead of the quorum read path.
+
+When a node hosts multiple drives, the MetadataStore selects a hot-tier drive for the `meta/` namespace. If no hot-tier drive is available, the warmest available tier is used. Drive selection for metadata is independent of the consistent hashing ring — the ring determines *which nodes* host a segment's replicas, and each node stores its replica on its own fastest drive.
+
+This follows the same pattern as Ceph, which recommends placing its metadata pool on SSD/NVMe even when data pools span HDDs.
+
+## Availability During Partial Outages
+
+In clusters larger than 3 nodes, metadata quorum failure domains may diverge from data replication failure domains. A node may hold data chunks but not be a metadata replica for those chunks' metadata. If the metadata replicas are unreachable, the node cannot resolve chunk locations for files it physically stores.
+
+NeonFS addresses this through aggressive caching and degraded read support, rather than co-locating metadata with data:
+
+### Resolved Lookup Cache
+
+Each node maintains an ETS-backed cache of **resolved metadata lookups** — the complete file→chunk mapping needed to serve a read. Once a file has been opened and its metadata resolved, subsequent reads do not re-query the quorum:
+
+```elixir
+%ResolvedLookupCache{
+  # file_id → {chunk_list, stripe_info, cached_at, ttl}
+  entries: ETS.table(),
+  default_ttl: :timer.minutes(5),    # Configurable per-volume
+  max_entries: 100_000
+}
+```
+
+This is analogous to Ceph's *capabilities* model: once a client receives capabilities for a file, it can continue reading data directly even if the metadata server is temporarily unavailable. In NeonFS, the resolved lookup cache serves the same role — cached metadata enables continued data access during transient metadata quorum failures.
+
+### Degraded Reads from Local Replicas
+
+When the QuorumCoordinator cannot reach enough replicas for a full quorum read (R responses), it falls back to serving from whatever local MetadataStore replicas are available:
+
+```elixir
+case quorum_read(key, opts) do
+  {:ok, value} ->
+    {:ok, value}
+
+  {:error, :quorum_unavailable} ->
+    case MetadataStore.local_read(segment_id, key) do
+      {:ok, value} ->
+        # Return with staleness indicator so callers can decide
+        {:ok, value, :possibly_stale}
+
+      {:error, :not_found} ->
+        {:error, :quorum_unavailable}
+    end
+end
+```
+
+Degraded reads are flagged with `:possibly_stale` so callers (e.g., FUSE handler) can decide whether to serve stale data or return an error. For read-heavy workloads, serving stale metadata is almost always preferable to failing — the actual data chunks are immutable and content-addressed, so stale metadata may point to older (but still valid) file versions.
+
+### Cache Invalidation
+
+The resolved lookup cache is invalidated via:
+- **TTL expiry**: Entries expire after a configurable period (default 5 minutes)
+- **Write-through**: When a local write completes (file update, metadata change), the corresponding cache entry is evicted
+- **Pub/sub notification**: When quorum writes complete on other nodes, a cluster-wide notification evicts stale cache entries
+
+### What This Does Not Solve
+
+- **First access to a file**: If a file has never been accessed on this node and the metadata quorum is unreachable, the file cannot be served. This is an inherent tradeoff of not co-locating metadata with data.
+- **Directory listings**: These require the DirectoryEntry metadata, which is not cached in the resolved lookup cache. Directory listings during metadata outages will fail unless the node has a local replica of the relevant directory segment.
 
 ## Caching
 
@@ -1075,3 +1213,5 @@ Each node caches recently accessed metadata regardless of segment assignment:
 ```
 
 Cache invalidation via pub/sub when quorum writes complete. Stale cache entries are also detected and repaired during quorum reads.
+
+The MetadataCache (above) caches individual metadata records as returned by the quorum system. The ResolvedLookupCache (see Availability During Partial Outages) caches the *composed result* of a full file resolution — the complete chunk list needed to serve reads. Both caches operate independently: MetadataCache reduces quorum round-trips for repeated lookups, while ResolvedLookupCache enables continued data access when the quorum is temporarily unreachable.

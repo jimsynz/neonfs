@@ -60,20 +60,40 @@ Deliverables:
 
 **Milestone:** Volumes can use erasure coding, ~1.4x overhead with 4-fault tolerance
 
-### Phase 5: Security
+### Phase 5: Metadata Tiering
+
+**Goal:** Scalable metadata architecture
+
+Deliverables:
+- Hybrid Logical Clocks for conflict resolution
+- Consistent hashing ring for metadata segment assignment
+- MetadataStateMachine v5 (segment assignments + intents, remove chunk/file/stripe maps from Ra)
+- BlobStore metadata namespace (Rust NIFs + Elixir MetadataStore)
+- Leaderless quorum coordinator (R+W>N reads/writes)
+- Intent log for cross-segment atomicity and concurrent writer detection
+- ChunkIndex, FileIndex, StripeIndex migration from Ra to quorum store
+- DirectoryEntry type for efficient directory listings
+- Read repair and anti-entropy for background consistency
+
+**Milestone:** Metadata scales independently of cluster size, quorum-replicated with tunable consistency per volume
+
+### Phase 6: Security
 
 **Goal:** Production-ready security model
 
 Deliverables:
-- Cluster CA and certificate management
-- Node join ceremony with invite tokens
-- Volume encryption (server-side)
-- Access control enforcement
-- Audit logging
+- AES-256-GCM encryption in BlobStore NIFs (integrated into read/write pipeline)
+- MetadataStateMachine v6 (encryption keys, volume ACLs — Tier 1 in Ra)
+- Per-volume key management with wrapped keys
+- Encrypted write and read paths (single NIF boundary crossing per chunk)
+- Volume key rotation with background re-encryption
+- UID/GID-based volume and file ACLs with POSIX enforcement
+- Audit logging for security-relevant events
+- CLI security commands
 
-**Milestone:** Secure multi-user deployment
+**Milestone:** Encrypted volumes with key rotation, UID/GID-based ACLs with POSIX enforcement, operational audit logging
 
-### Phase 6: APIs and Integration
+### Phase 7: APIs and Integration
 
 **Goal:** External access methods
 
@@ -85,7 +105,7 @@ Deliverables:
 
 **Milestone:** Access from containers, S3 clients, Windows/macOS mounts
 
-### Phase 7: Operations
+### Phase 8: Operations
 
 **Goal:** Production operations support
 
@@ -93,6 +113,7 @@ Deliverables:
 - Prometheus metrics exporter
 - Decision escalation system (CLI + webhook)
 - Capacity planning tools
+- DR snapshots to system volume
 - Backup/restore procedures
 - Comprehensive documentation
 

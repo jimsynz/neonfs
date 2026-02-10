@@ -6,7 +6,7 @@ This directory contains individual task specifications for developing NeonFS. Ea
 
 Each task file follows this structure:
 - **Status**: Current state of the task (see below)
-- **Phase**: Which implementation phase (1-7) this task belongs to
+- **Phase**: Which implementation phase (1-8) this task belongs to
 - **Description**: What needs to be built
 - **Acceptance Criteria**: Checkboxes for completion verification
 - **Testing Strategy**: How to verify the implementation
@@ -96,14 +96,55 @@ Each task file follows this structure:
 
 **Milestone:** Volumes can use erasure coding, ~1.4x overhead with 4-fault tolerance
 
-### Phase 5: Security (Future)
+### Phase 5: Metadata Tiering (Tasks 0080-0091)
+**Goal:** Scalable metadata architecture — move large metadata out of Ra into leaderless quorum-replicated BlobStore
+
+| Task | Description |
+|------|-------------|
+| 0080 | Hybrid Logical Clocks (HLC for conflict resolution) |
+| 0081 | Consistent hashing ring (key → segment → replica set) |
+| 0082 | MetadataStateMachine v5 (segment assignments + intents, remove chunk/file/stripe maps) |
+| 0083 | BlobStore metadata namespace (Rust NIFs + MetadataStore Elixir module) |
+| 0084 | Quorum coordinator (leaderless R+W>N reads/writes) |
+| 0085 | Intent log (cross-segment atomicity, concurrent writer detection) |
+| 0086 | ChunkIndex migration to quorum store |
+| 0087 | FileIndex and directory entry migration |
+| 0088 | StripeIndex migration to quorum store |
+| 0089 | Read repair and write/read path adaptation |
+| 0090 | Anti-entropy (periodic Merkle tree sync) |
+| 0091 | Phase 5 integration tests and full verification |
+
+**Milestone:** Metadata scales independently of cluster size, quorum-replicated with tunable consistency, directory entries for efficient listings
+
+### Phase 6: Security (Tasks 0067-0079)
 **Goal:** Production-ready security model
 
-### Phase 6: APIs and Integration (Future)
+| Task | Description |
+|------|-------------|
+| 0067 | Encryption NIFs (AES-256-GCM in Rust) |
+| 0068 | Encryption types and Volume config extension |
+| 0069 | ACL types (UID/GID-based) |
+| 0070 | MetadataStateMachine v6 (encryption keys, volume ACLs) |
+| 0071 | Per-volume key management (KeyManager) |
+| 0072 | Encrypted write path |
+| 0073 | Encrypted read path and key version lookup |
+| 0074 | Volume key rotation worker |
+| 0075 | Volume ACLs and authorisation |
+| 0076 | File/directory ACLs and POSIX enforcement |
+| 0077 | Audit logging |
+| 0078 | CLI security commands |
+| 0079 | Phase 6 integration tests and full verification |
+
+**Milestone:** Encrypted volumes with key rotation, UID/GID-based volume and file ACLs with POSIX enforcement, operational audit logging
+
+### Phase 7: APIs and Integration (Future)
 **Goal:** S3, Docker, CIFS, CSI access methods
 
-### Phase 7: Operations (Future)
-**Goal:** Production operations support
+### Phase 8: Operations (Future)
+**Goal:** Production operations support (DR snapshots, monitoring, capacity planning)
+
+### Deferred: TLS Distribution (Future)
+**Goal:** Mutual TLS for Erlang distribution (node-to-node traffic encryption and per-node certificate identity). Deferred from Phase 6 — relies on WireGuard/VPN for transport security in the interim.
 
 ## Task Dependencies Graph
 
@@ -227,6 +268,91 @@ Full dependency graph:
                         └──▶ 0065 (CLI)
 
 0066 (integration tests) ◀── all tasks 0057–0065
+
+Phase 5 Metadata Tiering:
+
+Parallel starting points (2 independent streams):
+
+Stream A — HLC:
+0080 (Hybrid Logical Clocks)
+
+Stream B — Hashing ring:
+0081 (Consistent hashing ring)
+
+Convergence:
+0082 (MSM v5)               ◀── 0081
+0083 (BlobStore metadata)    ◀── 0080 + 0082
+0084 (Quorum coordinator)    ◀── 0080 + 0081 + 0083
+0085 (Intent log)            ◀── 0082
+
+Migration (parallel after 0084):
+0086 (ChunkIndex)            ◀── 0084
+0087 (FileIndex + DirEntry)  ◀── 0084 + 0085
+0088 (StripeIndex)           ◀── 0084
+
+Adaptation:
+0089 (ReadRepair + paths)    ◀── 0086 + 0087 + 0088
+0090 (Anti-entropy)          ◀── 0084
+0091 (integration)           ◀── all Phase 5 tasks (0080–0090)
+
+Full dependency graph:
+
+0080 (HLC) ─────────────────────────┐
+                                     │
+0081 (Ring) ──▶ 0082 (MSM v5) ──────┼──▶ 0083 (BlobStore meta) ──▶ 0084 (Quorum)
+                     │               │                                    │
+                     └──▶ 0085 (IntentLog) ──────────────────────────────┤
+                                                                         │
+                     0086 (ChunkIndex) ◀─────────────────────────────────┤
+                     0087 (FileIndex+Dir) ◀── 0084 + 0085 ──────────────┤
+                     0088 (StripeIndex) ◀────────────────────────────────┘
+                          │
+                     0089 (ReadRepair+Paths) ◀── 0086 + 0087 + 0088
+                     0090 (Anti-Entropy) ◀── 0084
+                          │
+                     0091 (Integration) ◀── all
+
+Phase 6 Security:
+
+Parallel starting points (3 independent streams):
+
+Stream A — Encryption NIF:
+0067 (AES-256-GCM NIFs)
+
+Stream B — Encryption types:
+0068 (encryption types + Volume config)
+
+Stream C — ACL types:
+0069 (UID/GID-based ACL types)
+
+Convergence:
+0070 (MSM v6)          ◀── 0068 + 0069
+0071 (key management)  ◀── 0070
+0072 (encrypted write) ◀── 0067 + 0071
+0073 (encrypted read)  ◀── 0072
+0074 (key rotation)    ◀── 0073
+
+0075 (volume ACLs)     ◀── 0069 + 0070
+0076 (file ACLs)       ◀── 0075
+
+0077 (audit logging)   ◀── 0070
+
+0078 (CLI commands)    ◀── 0071 + 0074 + 0075 + 0077
+0079 (integration)     ◀── all Phase 6 tasks (0067–0078)
+
+Full dependency graph:
+
+0067 (encrypt NIF) ────────────────────────┐
+                                            │
+0068 (encrypt types) ──┬──▶ 0070 (MSM v6) ─┼──▶ 0071 (key mgmt) ──▶ 0072 (write) ──▶ 0073 (read) ──▶ 0074 (rotation)
+                        │                   │                                                              │
+0069 (ACL types) ──────┘                   ├──▶ 0075 (vol ACLs) ──▶ 0076 (file ACLs)                     │
+                                            │                              │                               │
+                                            └──▶ 0077 (audit) ────────────┤                               │
+                                                                           │                               │
+0078 (CLI commands) ◀──────────────────────────────────────────────────────┘───────────────────────────────┘
+
+0079 (integration tests) ◀── all tasks 0067–0078
 ```
 
 ## Task Status Values
@@ -257,6 +383,8 @@ Some task chains can be worked on in parallel:
 - **CLI** (0022-0025) can be developed alongside core Elixir work
 - **Phase 3** has 4 independent starting points: 0045 (volume config), 0046 (multi-drive), 0053 (background worker) can all start in parallel; 0047 follows 0046
 - **Phase 4** has 2 independent starting points: 0057 (Rust NIF) and 0058 (Stripe struct) can start in parallel; critical path is 0058 → 0059 → 0060 → 0061 → 0064 → 0066
+- **Phase 5** has 2 independent starting points: 0080 (HLC) and 0081 (hashing ring) can start in parallel; critical path is 0081 → 0082 → 0083 → 0084 → 0086/0087/0088 → 0089 → 0091
+- **Phase 6** has 3 independent starting points: 0067 (encryption NIF), 0068 (encryption types), 0069 (ACL types) can all start in parallel; two main chains converge at CLI (0078): encryption chain (0067 → 0072 → 0073 → 0074) and ACL chain (0069 → 0075 → 0076)
 
 ## Adding New Tasks
 
