@@ -1,7 +1,7 @@
 # Task 0082: MetadataStateMachine v5 (Segment Assignments + Intents)
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering

@@ -1,36 +1,53 @@
 defmodule NeonFS.Core.FileIndex do
   @moduledoc """
-  GenServer for managing file metadata storage and lookups.
+  GenServer managing file metadata with quorum-backed distributed storage
+  and DirectoryEntry-based path lookups.
 
-  Uses ETS tables for efficient concurrent reads:
-  - `:file_index_by_id` - lookup files by ID
-  - `:file_index_by_path` - lookup files by {volume_id, path}
+  Files are stored with key `"file:<file_id>"` and sharded by `hash(file_id)`.
+  Directory entries are stored with key `"dir:<volume_id>:<parent_path>"` and
+  sharded by `hash(parent_path)`.
 
-  The GenServer serializes write operations while allowing concurrent reads
-  from any process via the public ETS tables.
+  ## Quorum Mode
 
-  ## Ra Integration
+  Writes go through `QuorumCoordinator.quorum_write/3` and cache misses fall back
+  to `QuorumCoordinator.quorum_read/2`. Requires `:quorum_opts` at startup.
 
-  When Ra is available (Phase 2+), file metadata is replicated across the cluster
-  via the Ra consensus protocol. All mutations (create, update, delete) are first
-  written to Ra, then the local ETS cache is updated. On startup, the ETS cache
-  is restored from Ra state.
+  ## Cross-Segment Operations
+
+  File creation and deletion span two segments (FileMeta + DirectoryEntry) and
+  use the IntentLog for crash-safe atomicity. File moves across directories also
+  use IntentLog to coordinate two DirectoryEntry updates.
   """
 
   use GenServer
   require Logger
 
-  alias NeonFS.Core.{FileMeta, RaServer, RaSupervisor}
+  alias NeonFS.Core.{
+    DirectoryEntry,
+    FileMeta,
+    Intent,
+    IntentLog,
+    MetadataCodec,
+    QuorumCoordinator
+  }
 
   @type file_id :: String.t()
   @type volume_id :: String.t()
   @type path :: String.t()
 
+  @file_key_prefix "file:"
+  @dir_key_prefix "dir:"
+
   ## Client API
 
   @doc """
   Starts the FileIndex GenServer.
+
+  ## Options
+
+    * `:quorum_opts` — keyword list passed to QuorumCoordinator (must include `:ring`).
   """
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -38,26 +55,19 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Creates a new file metadata entry.
 
-  Returns the created FileMeta struct.
-
-  ## Parameters
-  - `file`: A FileMeta struct to store
-
-  ## Examples
-      iex> file = FileMeta.new("vol1", "/test.txt")
-      iex> FileIndex.create(file)
-      {:ok, %FileMeta{...}}
+  Uses IntentLog for cross-segment atomicity (FileMeta + DirectoryEntry).
+  The parent directory must exist — use `mkdir/3` to create directories first,
+  or this function auto-creates the root directory for the volume.
   """
   @spec create(FileMeta.t()) :: {:ok, FileMeta.t()} | {:error, term()}
   def create(%FileMeta{} = file) do
-    GenServer.call(__MODULE__, {:create, file}, 10_000)
+    GenServer.call(__MODULE__, {:create, file}, 15_000)
   end
 
   @doc """
   Retrieves a file by its ID.
 
-  First checks local ETS cache, then falls back to Ra if not found locally.
-  Returns `{:ok, file}` if found, `{:error, :not_found}` otherwise.
+  Checks local ETS cache first, falls back to quorum read.
   """
   @spec get(file_id()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get(file_id) do
@@ -66,43 +76,35 @@ defmodule NeonFS.Core.FileIndex do
         {:ok, file}
 
       [] ->
-        # Not in local cache, try Ra
-        get_from_ra(file_id)
+        get_from_quorum(file_id)
     end
   end
 
   @doc """
   Retrieves a file by volume ID and path.
 
-  First checks local ETS cache, then falls back to Ra if not found locally.
-  Returns `{:ok, file}` if found, `{:error, :not_found}` otherwise.
+  Parses the path into parent_path + name, reads the DirectoryEntry to find
+  the file_id, then reads the FileMeta via quorum.
   """
   @spec get_by_path(volume_id(), path()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get_by_path(volume_id, path) do
-    normalized_path = FileMeta.normalize_path(path)
+    normalized = FileMeta.normalize_path(path)
+    {parent, name} = split_path(normalized)
 
-    case :ets.lookup(:file_index_by_path, {volume_id, normalized_path}) do
-      [{_, file}] ->
-        {:ok, file}
-
-      [] ->
-        # Not in local cache, try Ra
-        get_by_path_from_ra(volume_id, normalized_path)
+    with {:ok, dir_entry} <- read_dir_entry(volume_id, parent),
+         {:ok, child} <- DirectoryEntry.get_child(dir_entry, name),
+         {:ok, file} <- get(child.id) do
+      {:ok, file}
+    else
+      {:error, _} -> {:error, :not_found}
     end
   end
 
   @doc """
   Updates an existing file metadata entry.
 
-  Returns `{:ok, updated_file}` if successful, `{:error, :not_found}` if file doesn't exist.
-
-  ## Parameters
-  - `file_id`: The ID of the file to update
-  - `updates`: Keyword list of fields to update
-
-  ## Examples
-      iex> FileIndex.update("file-id", size: 2048, mode: 0o755)
-      {:ok, %FileMeta{size: 2048, mode: 0o755, version: 2}}
+  Quorum-writes the updated FileMeta. Does not modify DirectoryEntry
+  (path changes should use `rename/4` or `move/5` instead).
   """
   @spec update(file_id(), keyword()) :: {:ok, FileMeta.t()} | {:error, term()}
   def update(file_id, updates) do
@@ -112,398 +114,756 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Deletes a file metadata entry.
 
-  This performs a soft delete by setting a deleted flag or can be a hard delete
-  depending on implementation needs. For Phase 1, this performs a hard delete.
-
-  Returns `:ok` if successful, `{:error, :not_found}` if file doesn't exist.
+  Uses IntentLog for cross-segment atomicity to remove both the FileMeta
+  and the DirectoryEntry child reference.
   """
   @spec delete(file_id()) :: :ok | {:error, term()}
   def delete(file_id) do
-    GenServer.call(__MODULE__, {:delete, file_id}, 10_000)
+    GenServer.call(__MODULE__, {:delete, file_id}, 15_000)
   end
 
   @doc """
-  Lists all files in a directory.
+  Lists directory contents.
 
-  Returns a list of FileMeta structs for files whose paths start with the given directory path.
-
-  ## Parameters
-  - `volume_id`: The volume ID
-  - `dir_path`: The directory path (e.g., "/documents")
-
-  ## Examples
-      iex> FileIndex.list_dir("vol1", "/documents")
-      [%FileMeta{path: "/documents/file1.txt"}, %FileMeta{path: "/documents/file2.pdf"}]
+  Quorum reads the DirectoryEntry for the given path and returns
+  the children map: `%{name => %{type: :file | :dir, id: binary()}}`.
   """
-  @spec list_dir(volume_id(), path()) :: [FileMeta.t()]
+  @spec list_dir(volume_id(), path()) ::
+          {:ok, %{String.t() => DirectoryEntry.child_info()}} | {:error, term()}
   def list_dir(volume_id, dir_path) do
-    normalized_path = FileMeta.normalize_path(dir_path)
+    normalized = FileMeta.normalize_path(dir_path)
 
-    # Get all files in the volume
-    list_volume(volume_id)
-    |> Enum.filter(fn file ->
-      # Check if file path starts with directory path
-      if normalized_path == "/" do
-        # Root directory - include all files
-        true
-      else
-        # Subdirectory - check if path starts with dir_path/
-        String.starts_with?(file.path, normalized_path <> "/")
-      end
-    end)
+    case read_dir_entry(volume_id, normalized) do
+      {:ok, dir_entry} -> {:ok, dir_entry.children}
+      {:error, :not_found} -> {:ok, %{}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @doc """
-  Lists all files in a volume.
+  Creates a directory.
 
-  Returns a list of all FileMeta structs for the given volume.
+  Creates a DirectoryEntry for the new directory and adds a child entry
+  to the parent DirectoryEntry.
   """
-  @spec list_volume(volume_id()) :: [FileMeta.t()]
-  def list_volume(volume_id) do
-    :ets.select(:file_index_by_path, [
-      {{{volume_id, :_}, :"$1"}, [], [:"$1"]}
-    ])
+  @spec mkdir(volume_id(), path(), keyword()) :: {:ok, DirectoryEntry.t()} | {:error, term()}
+  def mkdir(volume_id, path, opts \\ []) do
+    GenServer.call(__MODULE__, {:mkdir, volume_id, path, opts}, 10_000)
   end
 
   @doc """
-  Lists all files across all volumes.
+  Renames a file or directory within the same parent directory.
 
-  Primarily useful for testing and debugging.
+  Single DirectoryEntry quorum write — no IntentLog needed since it's
+  a single-segment operation.
+  """
+  @spec rename(volume_id(), path(), String.t(), String.t()) :: :ok | {:error, term()}
+  def rename(volume_id, parent_path, old_name, new_name) do
+    GenServer.call(__MODULE__, {:rename, volume_id, parent_path, old_name, new_name}, 10_000)
+  end
+
+  @doc """
+  Moves a file or directory across directories.
+
+  Uses IntentLog for cross-segment atomicity (two DirectoryEntry writes).
+  """
+  @spec move(volume_id(), path(), path(), String.t()) :: :ok | {:error, term()}
+  def move(volume_id, source_dir, dest_dir, name) do
+    GenServer.call(__MODULE__, {:move, volume_id, source_dir, dest_dir, name}, 15_000)
+  end
+
+  @doc """
+  Ensures a root directory entry exists for the given volume.
+  """
+  @spec ensure_root_dir(volume_id()) :: :ok | {:error, term()}
+  def ensure_root_dir(volume_id) do
+    GenServer.call(__MODULE__, {:ensure_root_dir, volume_id}, 10_000)
+  end
+
+  @doc """
+  Lists all files across all volumes from the local ETS cache.
+
+  Primarily useful for garbage collection and debugging.
   """
   @spec list_all() :: [FileMeta.t()]
   def list_all do
-    :ets.select(:file_index_by_id, [{{:_, :"$1"}, [], [:"$1"]}])
+    :ets.foldl(
+      fn
+        {_id, %FileMeta{} = file}, acc -> [file | acc]
+        _, acc -> acc
+      end,
+      [],
+      :file_index_by_id
+    )
+  end
+
+  @doc """
+  Lists all files in a volume from the local ETS cache.
+  """
+  @spec list_volume(volume_id()) :: [FileMeta.t()]
+  def list_volume(volume_id) do
+    :ets.foldl(
+      fn
+        {_id, %FileMeta{volume_id: ^volume_id} = file}, acc -> [file | acc]
+        _, acc -> acc
+      end,
+      [],
+      :file_index_by_id
+    )
   end
 
   ## Server Callbacks
 
   @impl true
-  def init(_opts) do
-    # Create ETS tables for file lookups
-    :ets.new(:file_index_by_id, [
-      :named_table,
-      :set,
-      :public,
-      read_concurrency: true
-    ])
+  def init(opts) do
+    :ets.new(:file_index_by_id, [:set, :named_table, :public, read_concurrency: true])
 
-    :ets.new(:file_index_by_path, [
-      :named_table,
-      :set,
-      :public,
-      read_concurrency: true
-    ])
+    quorum_opts = Keyword.get(opts, :quorum_opts)
+    :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
 
-    Logger.info("FileIndex started with ETS tables")
+    if quorum_opts do
+      case load_from_local_store() do
+        {:ok, count} ->
+          Logger.info("FileIndex started in quorum mode, loaded #{count} files from local store")
 
-    # Try to restore state from Ra if available
-    case restore_from_ra() do
-      {:ok, count} when count > 0 ->
-        Logger.info("FileIndex restored #{count} files from Ra")
-
-      {:ok, 0} ->
-        Logger.debug("FileIndex: no files to restore from Ra")
-
-      {:error, :ra_not_available} ->
-        Logger.debug("FileIndex started but Ra not ready yet: :noproc")
-
-      {:error, reason} ->
-        Logger.warning("FileIndex failed to restore from Ra: #{inspect(reason)}")
+        {:error, reason} ->
+          Logger.debug(
+            "FileIndex started in quorum mode, local store not available: #{inspect(reason)}"
+          )
+      end
+    else
+      Logger.warning("FileIndex started without quorum_opts — writes will fail")
     end
 
-    {:ok, %{}}
+    {:ok, %{quorum_opts: quorum_opts}}
   end
 
   @impl true
   def handle_call({:create, file}, _from, state) do
-    reply = do_create_file(file)
+    reply = do_create(file, quorum_opts())
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:update, file_id, updates}, _from, state) do
-    case :ets.lookup(:file_index_by_id, file_id) do
-      [] ->
-        {:reply, {:error, :not_found}, state}
-
-      [{^file_id, old_file}] ->
-        do_update(file_id, old_file, updates, state)
-    end
+    reply = do_update(file_id, updates, quorum_opts())
+    {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:delete, file_id}, _from, state) do
-    case :ets.lookup(:file_index_by_id, file_id) do
-      [] ->
-        {:reply, {:error, :not_found}, state}
+    reply = do_delete(file_id, quorum_opts())
+    {:reply, reply, state}
+  end
 
-      [{^file_id, file}] ->
-        # Try to write through Ra if available
-        case maybe_ra_command({:delete_file, file_id}) do
-          {:ok, :ok} ->
-            # Update local ETS cache
-            :ets.delete(:file_index_by_id, file_id)
-            path_key = {file.volume_id, file.path}
-            :ets.delete(:file_index_by_path, path_key)
-            {:reply, :ok, state}
+  @impl true
+  def handle_call({:mkdir, volume_id, path, opts}, _from, state) do
+    reply = do_mkdir(volume_id, path, opts, quorum_opts())
+    {:reply, reply, state}
+  end
 
-          {:error, :ra_not_available} ->
-            # Ra not available, delete directly from ETS
-            :ets.delete(:file_index_by_id, file_id)
-            path_key = {file.volume_id, file.path}
-            :ets.delete(:file_index_by_path, path_key)
-            {:reply, :ok, state}
+  @impl true
+  def handle_call({:rename, volume_id, parent_path, old_name, new_name}, _from, state) do
+    reply = do_rename(volume_id, parent_path, old_name, new_name, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:move, volume_id, source_dir, dest_dir, name}, _from, state) do
+    reply = do_move(volume_id, source_dir, dest_dir, name, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:ensure_root_dir, volume_id}, _from, state) do
+    reply = do_ensure_root_dir(volume_id, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def terminate(_reason, _state) do
+    :persistent_term.erase({__MODULE__, :quorum_opts})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  ## Private — Create
+
+  defp do_create(_file, nil), do: {:error, :no_quorum}
+
+  defp do_create(file, quorum_opts) do
+    with :ok <- FileMeta.validate_path(file.path) do
+      {parent_path, name} = split_path(file.path)
+
+      intent =
+        Intent.new(
+          id: UUIDv7.generate(),
+          operation: :file_create,
+          conflict_key: {:create, file.volume_id, parent_path, name},
+          params: %{volume_id: file.volume_id, path: file.path, file_id: file.id}
+        )
+
+      with {:ok, intent_id} <- try_acquire_intent(intent),
+           :ok <- do_ensure_root_dir(file.volume_id, quorum_opts),
+           :ok <- ensure_parent_dirs(file.volume_id, parent_path, quorum_opts),
+           :ok <- quorum_write_file(file, quorum_opts),
+           :ok <-
+             quorum_add_dir_child(file.volume_id, parent_path, name, :file, file.id, quorum_opts) do
+        complete_intent(intent_id)
+        :ets.insert(:file_index_by_id, {file.id, file})
+        {:ok, file}
+      else
+        {:error, :conflict, _existing} ->
+          {:error, :already_exists}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  ## Private — Update
+
+  defp do_update(_file_id, _updates, nil), do: {:error, :no_quorum}
+
+  defp do_update(file_id, updates, quorum_opts) do
+    case fetch_file(file_id, quorum_opts) do
+      {:ok, old_file} ->
+        updated_file = FileMeta.update(old_file, updates)
+
+        case quorum_write_file(updated_file, quorum_opts) do
+          :ok ->
+            :ets.insert(:file_index_by_id, {file_id, updated_file})
+            {:ok, updated_file}
 
           {:error, reason} ->
-            {:reply, {:error, reason}, state}
+            {:error, reason}
         end
-    end
-  end
-
-  ## Private helpers
-
-  defp do_create_file(file) do
-    with :ok <- check_file_not_exists(file),
-         :ok <- FileMeta.validate_path(file.path),
-         :ok <- persist_file(file) do
-      {:ok, file}
-    end
-  end
-
-  defp check_file_not_exists(file) do
-    id_exists? = :ets.member(:file_index_by_id, file.id)
-    path_key = {file.volume_id, file.path}
-    path_exists? = :ets.member(:file_index_by_path, path_key)
-
-    if id_exists? or path_exists? do
-      {:error, :already_exists}
-    else
-      :ok
-    end
-  end
-
-  defp persist_file(file) do
-    path_key = {file.volume_id, file.path}
-
-    case maybe_ra_command({:put_file, struct_to_map(file)}) do
-      {:ok, :ok} ->
-        insert_file_to_ets(file, path_key)
-        :ok
-
-      {:error, :ra_not_available} ->
-        insert_file_to_ets(file, path_key)
-        :ok
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp insert_file_to_ets(file, path_key) do
-    :ets.insert(:file_index_by_id, {file.id, file})
-    :ets.insert(:file_index_by_path, {path_key, file})
-  end
+  ## Private — Delete
 
-  # Handle path updates separately to reduce nesting
-  defp do_update(file_id, old_file, updates, state) do
-    updated_file = FileMeta.update(old_file, updates)
+  defp do_delete(_file_id, nil), do: {:error, :no_quorum}
 
-    if Keyword.has_key?(updates, :path) do
-      update_with_path_change(file_id, old_file, updated_file, state)
-    else
-      update_without_path_change(file_id, updated_file, state)
-    end
-  end
+  defp do_delete(file_id, quorum_opts) do
+    case fetch_file(file_id, quorum_opts) do
+      {:ok, file} ->
+        {parent_path, name} = split_path(file.path)
 
-  defp update_with_path_change(file_id, old_file, updated_file, state) do
-    new_path = FileMeta.normalize_path(updated_file.path)
+        intent =
+          Intent.new(
+            id: UUIDv7.generate(),
+            operation: :file_delete,
+            conflict_key: {:file, file_id},
+            params: %{file_id: file_id, volume_id: file.volume_id, path: file.path}
+          )
 
-    case FileMeta.validate_path(new_path) do
-      :ok ->
-        # Build the updates map for Ra
-        updates = struct_to_map(updated_file)
-
-        # Try to write through Ra if available
-        case maybe_ra_command({:update_file, file_id, updates}) do
-          {:ok, :ok} ->
-            # Update local ETS cache
-            old_path_key = {old_file.volume_id, old_file.path}
-            :ets.delete(:file_index_by_path, old_path_key)
-            new_path_key = {updated_file.volume_id, updated_file.path}
-            :ets.insert(:file_index_by_path, {new_path_key, updated_file})
-            :ets.insert(:file_index_by_id, {file_id, updated_file})
-            {:reply, {:ok, updated_file}, state}
-
-          {:error, :ra_not_available} ->
-            # Ra not available, update directly in ETS
-            old_path_key = {old_file.volume_id, old_file.path}
-            :ets.delete(:file_index_by_path, old_path_key)
-            new_path_key = {updated_file.volume_id, updated_file.path}
-            :ets.insert(:file_index_by_path, {new_path_key, updated_file})
-            :ets.insert(:file_index_by_id, {file_id, updated_file})
-            {:reply, {:ok, updated_file}, state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
+        with {:ok, intent_id} <- try_acquire_intent(intent),
+             :ok <- quorum_delete_file(file_id, quorum_opts),
+             :ok <-
+               quorum_remove_dir_child(file.volume_id, parent_path, name, quorum_opts) do
+          complete_intent(intent_id)
+          :ets.delete(:file_index_by_id, file_id)
+          :ok
+        else
+          {:error, reason} -> {:error, reason}
         end
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason}
     end
   end
 
-  defp update_without_path_change(file_id, updated_file, state) do
-    # Build the updates map for Ra
-    updates = struct_to_map(updated_file)
+  ## Private — Mkdir
 
-    # Try to write through Ra if available
-    case maybe_ra_command({:update_file, file_id, updates}) do
-      {:ok, :ok} ->
-        # Update local ETS cache
-        path_key = {updated_file.volume_id, updated_file.path}
-        :ets.insert(:file_index_by_id, {file_id, updated_file})
-        :ets.insert(:file_index_by_path, {path_key, updated_file})
-        {:reply, {:ok, updated_file}, state}
+  defp do_mkdir(_volume_id, _path, _opts, nil), do: {:error, :quorum_required}
 
-      {:error, :ra_not_available} ->
-        # Ra not available, update directly in ETS
-        path_key = {updated_file.volume_id, updated_file.path}
-        :ets.insert(:file_index_by_id, {file_id, updated_file})
-        :ets.insert(:file_index_by_path, {path_key, updated_file})
-        {:reply, {:ok, updated_file}, state}
+  defp do_mkdir(volume_id, path, opts, quorum_opts) do
+    normalized = FileMeta.normalize_path(path)
+    {parent_path, name} = split_path(normalized)
+
+    dir_id = UUIDv7.generate()
+    new_dir = DirectoryEntry.new(volume_id, normalized, opts)
+
+    with :ok <- do_ensure_root_dir(volume_id, quorum_opts),
+         :ok <- ensure_parent_dirs(volume_id, parent_path, quorum_opts),
+         :ok <- quorum_write_dir_entry(new_dir, quorum_opts),
+         :ok <- quorum_add_dir_child(volume_id, parent_path, name, :dir, dir_id, quorum_opts) do
+      {:ok, new_dir}
+    end
+  end
+
+  ## Private — Rename (within same directory)
+
+  defp do_rename(_volume_id, _parent_path, _old_name, _new_name, nil),
+    do: {:error, :quorum_required}
+
+  defp do_rename(volume_id, parent_path, old_name, new_name, quorum_opts) do
+    normalized = FileMeta.normalize_path(parent_path)
+
+    case read_dir_entry(volume_id, normalized) do
+      {:ok, dir_entry} ->
+        case DirectoryEntry.rename_child(dir_entry, old_name, new_name) do
+          {:ok, updated_entry} ->
+            quorum_write_dir_entry(updated_entry, quorum_opts)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason}
     end
   end
 
-  # Ra integration helpers
+  ## Private — Move (across directories)
 
-  # Query Ra for a file by ID, caching the result locally if found
-  defp get_from_ra(file_id) do
-    query_fn = fn state ->
-      state
-      |> Map.get(:files, %{})
-      |> Map.get(file_id)
-    end
+  defp do_move(_volume_id, _source_dir, _dest_dir, _name, nil), do: {:error, :quorum_required}
 
-    case RaSupervisor.query(query_fn) do
-      {:ok, nil} -> {:error, :not_found}
-      {:ok, file_map} -> cache_and_return_file(file_map)
-      {:error, _} -> {:error, :not_found}
+  defp do_move(volume_id, source_dir, dest_dir, name, quorum_opts) do
+    source_normalized = FileMeta.normalize_path(source_dir)
+    dest_normalized = FileMeta.normalize_path(dest_dir)
+
+    intent =
+      Intent.new(
+        id: UUIDv7.generate(),
+        operation: :file_move,
+        conflict_key: {:dir, volume_id, source_normalized},
+        params: %{
+          volume_id: volume_id,
+          source_dir: source_normalized,
+          dest_dir: dest_normalized,
+          name: name
+        }
+      )
+
+    with {:ok, source_entry} <- read_dir_entry(volume_id, source_normalized),
+         {:ok, child} <- DirectoryEntry.get_child(source_entry, name),
+         {:ok, intent_id} <- try_acquire_intent(intent),
+         :ok <-
+           quorum_remove_dir_child(volume_id, source_normalized, name, quorum_opts),
+         :ok <-
+           quorum_add_dir_child(
+             volume_id,
+             dest_normalized,
+             name,
+             child.type,
+             child.id,
+             quorum_opts
+           ) do
+      complete_intent(intent_id)
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
     end
-  catch
-    :exit, _ -> {:error, :not_found}
   end
 
-  # Query Ra for a file by volume_id and path, caching the result locally if found
-  defp get_by_path_from_ra(volume_id, path) do
-    query_fn = fn state ->
-      state
-      |> Map.get(:files, %{})
-      |> find_file_by_path(volume_id, path)
-    end
+  ## Private — Root directory
 
-    case RaSupervisor.query(query_fn) do
-      {:ok, nil} -> {:error, :not_found}
-      {:ok, file_map} -> cache_and_return_file(file_map)
-      {:error, _} -> {:error, :not_found}
+  defp do_ensure_root_dir(_volume_id, nil), do: {:error, :no_quorum}
+
+  defp do_ensure_root_dir(volume_id, quorum_opts) do
+    dir_key = dir_key(volume_id, "/")
+
+    case QuorumCoordinator.quorum_read(dir_key, quorum_opts) do
+      {:ok, _value} ->
+        :ok
+
+      {:ok, _value, :possibly_stale} ->
+        :ok
+
+      {:error, :not_found} ->
+        root = DirectoryEntry.new(volume_id, "/")
+        quorum_write_dir_entry(root, quorum_opts)
+
+      {:error, _reason} ->
+        root = DirectoryEntry.new(volume_id, "/")
+        quorum_write_dir_entry(root, quorum_opts)
     end
-  catch
-    :exit, _ -> {:error, :not_found}
   end
 
-  defp find_file_by_path(files, volume_id, path) do
-    Enum.find_value(files, fn {_id, file_map} ->
-      if file_map[:volume_id] == volume_id and file_map[:path] == path, do: file_map
+  ## Private — Parent directory creation
+
+  defp ensure_parent_dirs(_volume_id, "/", _quorum_opts), do: :ok
+
+  defp ensure_parent_dirs(volume_id, path, quorum_opts) do
+    parts = path_parts(path)
+
+    Enum.reduce_while(parts, :ok, fn dir_path, :ok ->
+      case ensure_single_parent_dir(volume_id, dir_path, quorum_opts) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
     end)
   end
 
-  defp cache_and_return_file(file_map) do
-    file = map_to_struct(file_map)
-    path_key = {file.volume_id, file.path}
-    :ets.insert(:file_index_by_id, {file.id, file})
-    :ets.insert(:file_index_by_path, {path_key, file})
-    {:ok, file}
+  defp ensure_single_parent_dir(volume_id, dir_path, quorum_opts) do
+    dir_key = dir_key(volume_id, dir_path)
+
+    case QuorumCoordinator.quorum_read(dir_key, quorum_opts) do
+      {:ok, _} ->
+        :ok
+
+      {:ok, _, :possibly_stale} ->
+        :ok
+
+      {:error, :not_found} ->
+        create_parent_dir(volume_id, dir_path, quorum_opts)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
-  # Try to execute a Ra command, but gracefully handle Ra not being available
-  # Returns {:ok, result} | {:error, :ra_not_available} | {:error, reason}
-  #
-  # IMPORTANT: Only returns :ra_not_available when Ra has not been initialized yet
-  # (Phase 1 single-node mode). Once Ra is initialized, errors are propagated
-  # so that quorum loss is properly detected.
-  defp maybe_ra_command(cmd) do
-    case RaSupervisor.command(cmd) do
-      {:ok, result, _leader} ->
-        {:ok, result}
+  defp create_parent_dir(volume_id, dir_path, quorum_opts) do
+    dir = DirectoryEntry.new(volume_id, dir_path)
+    {parent, name} = split_path(dir_path)
 
-      {:error, :noproc} ->
-        # Ra server not running - check if it was ever initialized
-        if RaServer.initialized?() do
-          {:error, :ra_unavailable}
-        else
-          {:error, :ra_not_available}
+    with :ok <- quorum_write_dir_entry(dir, quorum_opts) do
+      quorum_add_dir_child(volume_id, parent, name, :dir, UUIDv7.generate(), quorum_opts)
+    end
+  end
+
+  ## Private — Quorum operations for files
+
+  defp quorum_write_file(file, quorum_opts) do
+    key = file_key(file.id)
+    storable = file_to_storable_map(file)
+
+    case QuorumCoordinator.quorum_write(key, storable, quorum_opts) do
+      {:ok, :written} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp quorum_delete_file(file_id, quorum_opts) do
+    key = file_key(file_id)
+
+    case QuorumCoordinator.quorum_delete(key, quorum_opts) do
+      {:ok, :written} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  ## Private — Quorum operations for directory entries
+
+  defp quorum_write_dir_entry(%DirectoryEntry{} = entry, quorum_opts) do
+    key = dir_key(entry.volume_id, entry.parent_path)
+    storable = DirectoryEntry.to_storable_map(entry)
+
+    case QuorumCoordinator.quorum_write(key, storable, quorum_opts) do
+      {:ok, :written} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp quorum_add_dir_child(volume_id, parent_path, name, type, id, quorum_opts) do
+    case read_dir_entry(volume_id, parent_path) do
+      {:ok, dir_entry} ->
+        updated = DirectoryEntry.add_child(dir_entry, name, type, id)
+        quorum_write_dir_entry(updated, quorum_opts)
+
+      {:error, :not_found} ->
+        # Parent doesn't exist yet — create it with the child
+        new_dir =
+          DirectoryEntry.new(volume_id, parent_path)
+          |> DirectoryEntry.add_child(name, type, id)
+
+        quorum_write_dir_entry(new_dir, quorum_opts)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp quorum_remove_dir_child(volume_id, parent_path, name, quorum_opts) do
+    case read_dir_entry(volume_id, parent_path) do
+      {:ok, dir_entry} ->
+        updated = DirectoryEntry.remove_child(dir_entry, name)
+        quorum_write_dir_entry(updated, quorum_opts)
+
+      {:error, :not_found} ->
+        # Parent doesn't exist — nothing to remove
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  ## Private — Read helpers
+
+  defp read_dir_entry(volume_id, path) do
+    case quorum_opts() do
+      nil -> {:error, :not_found}
+      opts -> read_dir_entry_quorum(volume_id, path, opts)
+    end
+  end
+
+  defp read_dir_entry_quorum(volume_id, path, quorum_opts) do
+    key = dir_key(volume_id, path)
+
+    case QuorumCoordinator.quorum_read(key, quorum_opts) do
+      {:ok, value} ->
+        {:ok, DirectoryEntry.from_storable_map(value)}
+
+      {:ok, value, :possibly_stale} ->
+        {:ok, DirectoryEntry.from_storable_map(value)}
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_file(file_id, quorum_opts) do
+    case :ets.lookup(:file_index_by_id, file_id) do
+      [{^file_id, file}] -> {:ok, file}
+      [] -> get_file_from_quorum(file_id, quorum_opts)
+    end
+  end
+
+  defp get_from_quorum(file_id) do
+    case quorum_opts() do
+      nil -> {:error, :not_found}
+      opts -> get_file_from_quorum(file_id, opts)
+    end
+  end
+
+  defp get_file_from_quorum(file_id, quorum_opts) do
+    key = file_key(file_id)
+
+    case QuorumCoordinator.quorum_read(key, quorum_opts) do
+      {:ok, value} ->
+        file = storable_map_to_file(value)
+        :ets.insert(:file_index_by_id, {file_id, file})
+        {:ok, file}
+
+      {:ok, value, :possibly_stale} ->
+        file = storable_map_to_file(value)
+        :ets.insert(:file_index_by_id, {file_id, file})
+        {:ok, file}
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, _reason} ->
+        {:error, :not_found}
+    end
+  rescue
+    _ -> {:error, :not_found}
+  end
+
+  ## Private — IntentLog helpers
+
+  defp try_acquire_intent(intent) do
+    case IntentLog.try_acquire(intent) do
+      {:ok, intent_id} -> {:ok, intent_id}
+      {:error, :conflict, existing} -> {:error, :conflict, existing}
+      {:error, :ra_not_available} -> {:ok, intent.id}
+      {:error, :ra_unavailable} -> {:ok, intent.id}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:ok, intent.id}
+  catch
+    :exit, _ -> {:ok, intent.id}
+  end
+
+  defp complete_intent(intent_id) do
+    case IntentLog.complete(intent_id) do
+      :ok -> :ok
+      {:error, _} -> :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  ## Private — Key format
+
+  defp file_key(file_id), do: @file_key_prefix <> file_id
+  defp dir_key(volume_id, path), do: @dir_key_prefix <> volume_id <> ":" <> path
+
+  ## Private — Serialisation
+
+  defp file_to_storable_map(%FileMeta{} = file) do
+    %{
+      id: file.id,
+      volume_id: file.volume_id,
+      path: file.path,
+      chunks: file.chunks,
+      stripes: file.stripes,
+      size: file.size,
+      mode: file.mode,
+      uid: file.uid,
+      gid: file.gid,
+      created_at: file.created_at,
+      modified_at: file.modified_at,
+      accessed_at: file.accessed_at,
+      version: file.version,
+      previous_version_id: file.previous_version_id,
+      hlc_timestamp: file.hlc_timestamp
+    }
+  end
+
+  defp storable_map_to_file(map) when is_map(map) do
+    %FileMeta{
+      id: get_field(map, :id),
+      volume_id: get_field(map, :volume_id),
+      path: get_field(map, :path),
+      chunks: get_field(map, :chunks, []),
+      stripes: get_field(map, :stripes),
+      size: get_field(map, :size, 0),
+      mode: get_field(map, :mode, 0o644),
+      uid: get_field(map, :uid, 0),
+      gid: get_field(map, :gid, 0),
+      created_at: decode_datetime(get_field(map, :created_at)),
+      modified_at: decode_datetime(get_field(map, :modified_at)),
+      accessed_at: decode_datetime(get_field(map, :accessed_at)),
+      version: get_field(map, :version, 1),
+      previous_version_id: get_field(map, :previous_version_id),
+      hlc_timestamp: get_field(map, :hlc_timestamp)
+    }
+  end
+
+  defp get_field(map, key, default \\ nil) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key)) || default
+  end
+
+  defp decode_datetime(%DateTime{} = dt), do: dt
+  defp decode_datetime(nil), do: nil
+
+  defp decode_datetime(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp decode_datetime(_), do: nil
+
+  ## Private — Local store loading
+
+  defp load_from_local_store do
+    drives = Application.get_env(:neonfs_core, :drives) || default_drives()
+
+    count =
+      Enum.reduce(drives, 0, fn drive, total ->
+        path = drive_path(drive)
+        meta_dir = Path.join(path, "meta")
+
+        case File.ls(meta_dir) do
+          {:ok, segment_dirs} ->
+            total + load_segments_from_disk(meta_dir, segment_dirs)
+
+          {:error, _} ->
+            total
         end
+      end)
 
-      {:error, reason} ->
-        {:error, reason}
+    {:ok, count}
+  rescue
+    _ -> {:error, :not_available}
+  end
 
-      {:timeout, _} ->
-        {:error, :timeout}
-    end
-  catch
-    :exit, {:noproc, _} ->
-      if RaServer.initialized?() do
-        {:error, :ra_unavailable}
-      else
-        {:error, :ra_not_available}
+  defp load_segments_from_disk(meta_dir, segment_dirs) do
+    Enum.reduce(segment_dirs, 0, fn segment_hex, count ->
+      segment_dir = Path.join(meta_dir, segment_hex)
+      file_paths = walk_metadata_files(segment_dir)
+      count + load_file_records(file_paths)
+    end)
+  end
+
+  defp load_file_records(file_paths) do
+    Enum.reduce(file_paths, 0, fn file_path, count ->
+      case load_file_record(file_path) do
+        :ok -> count + 1
+        :skip -> count
       end
-
-    :exit, reason ->
-      if RaServer.initialized?() do
-        {:error, {:ra_exit, reason}}
-      else
-        {:error, :ra_not_available}
-      end
+    end)
   end
 
-  # Restore files from Ra state into ETS
-  defp restore_from_ra do
-    case RaSupervisor.query(fn state -> Map.get(state, :files, %{}) end) do
-      {:ok, files} when is_map(files) ->
-        count =
-          Enum.reduce(files, 0, fn {_id, file_map}, acc ->
-            file_meta = map_to_struct(file_map)
-            :ets.insert(:file_index_by_id, {file_meta.id, file_meta})
-            path_key = {file_meta.volume_id, file_meta.path}
-            :ets.insert(:file_index_by_path, {path_key, file_meta})
-            acc + 1
-          end)
-
-        {:ok, count}
-
-      {:error, :noproc} ->
-        {:error, :ra_not_available}
-
-      {:error, reason} ->
-        {:error, reason}
+  defp load_file_record(file_path) do
+    with {:ok, data} <- File.read(file_path),
+         {:ok, %{tombstone: false, value: value}} <- MetadataCodec.decode_record(data),
+         true <- file_metadata?(value) do
+      file = storable_map_to_file(value)
+      :ets.insert(:file_index_by_id, {file.id, file})
+      :ok
+    else
+      _ -> :skip
     end
-  catch
-    :exit, {:noproc, _} ->
-      {:error, :ra_not_available}
-
-    :exit, reason ->
-      {:error, {:ra_exit, reason}}
   end
 
-  # Convert a FileMeta struct to a map for Ra storage
-  defp struct_to_map(%FileMeta{} = file) do
-    Map.from_struct(file)
+  defp file_metadata?(map) when is_map(map) do
+    has_field?(map, :id) and has_field?(map, :volume_id) and has_field?(map, :path)
   end
 
-  # Convert a map from Ra storage back to a FileMeta struct
-  defp map_to_struct(file_map) when is_map(file_map) do
-    struct(FileMeta, file_map)
+  defp file_metadata?(_), do: false
+
+  defp has_field?(map, key) do
+    Map.has_key?(map, key) or Map.has_key?(map, Atom.to_string(key))
+  end
+
+  defp walk_metadata_files(dir) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.flat_map(entries, &collect_metadata_entry(dir, &1))
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp collect_metadata_entry(dir, entry) do
+    path = Path.join(dir, entry)
+
+    cond do
+      File.dir?(path) -> walk_metadata_files(path)
+      String.contains?(entry, ".tmp") -> []
+      true -> [path]
+    end
+  end
+
+  defp default_drives do
+    base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs/blobs")
+    [%{id: "default", path: base_dir, tier: :hot, capacity: 0}]
+  end
+
+  defp drive_path(%{path: path}), do: path
+  defp drive_path(drive) when is_map(drive), do: Map.get(drive, :path, Map.get(drive, "path", ""))
+
+  ## Private — Path helpers
+
+  defp split_path("/"), do: {"/", ""}
+
+  defp split_path(path) do
+    parts = String.split(path, "/", trim: true)
+    name = List.last(parts)
+    parent_parts = Enum.drop(parts, -1)
+    parent = "/" <> Enum.join(parent_parts, "/")
+    parent = if parent == "/", do: "/", else: parent
+    {parent, name}
+  end
+
+  defp path_parts(path) do
+    parts = String.split(path, "/", trim: true)
+
+    parts
+    |> Enum.scan([], fn part, acc -> acc ++ [part] end)
+    |> Enum.map(fn parts -> "/" <> Enum.join(parts, "/") end)
+  end
+
+  defp quorum_opts do
+    :persistent_term.get({__MODULE__, :quorum_opts}, nil)
   end
 end

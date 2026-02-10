@@ -7,7 +7,7 @@
 use crate::compression::{compress, decompress, Compression};
 use crate::error::StoreError;
 use crate::hash::{sha256, Hash};
-use crate::path::{chunk_path, ensure_parent_dirs, Tier};
+use crate::path::{chunk_path, ensure_parent_dirs, metadata_path, Tier};
 use rand::Rng;
 use std::fs::{self, File};
 use std::io::Write;
@@ -374,6 +374,134 @@ impl BlobStore {
 
         // Only delete source after successful destination write and verification
         self.delete_chunk(hash, from_tier)?;
+
+        Ok(())
+    }
+
+    // Metadata operations
+
+    /// Computes the path for a metadata file.
+    fn metadata_path(&self, segment_id_hex: &str, key_hash: &Hash) -> PathBuf {
+        metadata_path(
+            &self.base_dir,
+            segment_id_hex,
+            key_hash,
+            self.config.prefix_depth,
+        )
+    }
+
+    /// Writes metadata to the store atomically.
+    ///
+    /// Uses the same write-then-rename pattern as chunk writes for crash safety.
+    /// No compression is applied to metadata.
+    ///
+    /// # Arguments
+    /// * `segment_id_hex` - Hex string identifying the metadata segment.
+    /// * `key_hash` - SHA-256 hash of the metadata key.
+    /// * `data` - Raw metadata bytes to write.
+    pub fn write_metadata(
+        &self,
+        segment_id_hex: &str,
+        key_hash: &Hash,
+        data: &[u8],
+    ) -> Result<(), StoreError> {
+        let final_path = self.metadata_path(segment_id_hex, key_hash);
+        let temp_path = self.temp_path(&final_path);
+
+        ensure_parent_dirs(&final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
+
+        let mut file = File::create(&temp_path).map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.write_all(data)
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.sync_all()
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+
+        fs::rename(&temp_path, &final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
+
+        Ok(())
+    }
+
+    /// Reads metadata from the store.
+    ///
+    /// # Arguments
+    /// * `segment_id_hex` - Hex string identifying the metadata segment.
+    /// * `key_hash` - SHA-256 hash of the metadata key.
+    ///
+    /// # Errors
+    /// Returns `MetadataNotFound` if the key does not exist.
+    pub fn read_metadata(
+        &self,
+        segment_id_hex: &str,
+        key_hash: &Hash,
+    ) -> Result<Vec<u8>, StoreError> {
+        let path = self.metadata_path(segment_id_hex, key_hash);
+
+        if !path.exists() {
+            return Err(StoreError::MetadataNotFound(key_hash.to_hex()));
+        }
+
+        fs::read(&path).map_err(|e| StoreError::io_error(&path, e))
+    }
+
+    /// Deletes metadata from the store.
+    ///
+    /// # Arguments
+    /// * `segment_id_hex` - Hex string identifying the metadata segment.
+    /// * `key_hash` - SHA-256 hash of the metadata key.
+    ///
+    /// # Errors
+    /// Returns `MetadataNotFound` if the key does not exist.
+    pub fn delete_metadata(&self, segment_id_hex: &str, key_hash: &Hash) -> Result<(), StoreError> {
+        let path = self.metadata_path(segment_id_hex, key_hash);
+
+        if !path.exists() {
+            return Err(StoreError::MetadataNotFound(key_hash.to_hex()));
+        }
+
+        fs::remove_file(&path).map_err(|e| StoreError::io_error(&path, e))
+    }
+
+    /// Lists all metadata keys in a segment.
+    ///
+    /// Recursively walks the segment directory and parses leaf filenames as
+    /// hex-encoded hashes. Temporary files (`.tmp` suffix) are skipped.
+    /// Returns an empty vec for nonexistent segment directories.
+    ///
+    /// # Arguments
+    /// * `segment_id_hex` - Hex string identifying the metadata segment.
+    pub fn list_metadata_segment(&self, segment_id_hex: &str) -> Result<Vec<Hash>, StoreError> {
+        let segment_dir = self.base_dir.join("meta").join(segment_id_hex);
+
+        if !segment_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut hashes = Vec::new();
+        Self::walk_metadata_dir(&segment_dir, &mut hashes)?;
+        Ok(hashes)
+    }
+
+    /// Recursively walks a directory collecting metadata key hashes from leaf files.
+    fn walk_metadata_dir(dir: &Path, hashes: &mut Vec<Hash>) -> Result<(), StoreError> {
+        let entries = fs::read_dir(dir).map_err(|e| StoreError::io_error(dir, e))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| StoreError::io_error(dir, e))?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                Self::walk_metadata_dir(&path, hashes)?;
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                // Skip temporary files
+                if name.contains(".tmp") {
+                    continue;
+                }
+                // Parse filename as hex hash
+                if let Ok(hash) = Hash::from_hex(name) {
+                    hashes.push(hash);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -985,5 +1113,147 @@ mod tests {
         // Chunk should be in cold, not hot
         assert!(!store.chunk_exists(&hash, Tier::Hot));
         assert!(store.chunk_exists(&hash, Tier::Cold));
+    }
+
+    // Metadata tests
+
+    const TEST_SEGMENT_HEX: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn test_metadata_write_read_roundtrip() {
+        let (store, _temp) = create_test_store();
+        let key_hash = sha256(b"chunk:abc123");
+        let data = b"serialised metadata record";
+
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key_hash, data)
+            .unwrap();
+        let read_data = store.read_metadata(TEST_SEGMENT_HEX, &key_hash).unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_metadata_read_nonexistent() {
+        let (store, _temp) = create_test_store();
+        let key_hash = sha256(b"nonexistent");
+
+        let result = store.read_metadata(TEST_SEGMENT_HEX, &key_hash);
+        assert!(matches!(result, Err(StoreError::MetadataNotFound(_))));
+    }
+
+    #[test]
+    fn test_metadata_delete() {
+        let (store, _temp) = create_test_store();
+        let key_hash = sha256(b"to_delete");
+        let data = b"will be deleted";
+
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key_hash, data)
+            .unwrap();
+        store.delete_metadata(TEST_SEGMENT_HEX, &key_hash).unwrap();
+
+        let result = store.read_metadata(TEST_SEGMENT_HEX, &key_hash);
+        assert!(matches!(result, Err(StoreError::MetadataNotFound(_))));
+    }
+
+    #[test]
+    fn test_metadata_delete_nonexistent() {
+        let (store, _temp) = create_test_store();
+        let key_hash = sha256(b"nonexistent");
+
+        let result = store.delete_metadata(TEST_SEGMENT_HEX, &key_hash);
+        assert!(matches!(result, Err(StoreError::MetadataNotFound(_))));
+    }
+
+    #[test]
+    fn test_metadata_list_segment() {
+        let (store, _temp) = create_test_store();
+        let key1 = sha256(b"key_one");
+        let key2 = sha256(b"key_two");
+        let key3 = sha256(b"key_three");
+
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key1, b"val1")
+            .unwrap();
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key2, b"val2")
+            .unwrap();
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key3, b"val3")
+            .unwrap();
+
+        let mut hashes = store.list_metadata_segment(TEST_SEGMENT_HEX).unwrap();
+        hashes.sort_by_key(|h| h.to_hex());
+
+        assert_eq!(hashes.len(), 3);
+        let mut expected = vec![key1, key2, key3];
+        expected.sort_by_key(|h| h.to_hex());
+        assert_eq!(hashes, expected);
+    }
+
+    #[test]
+    fn test_metadata_list_empty_segment() {
+        let (store, _temp) = create_test_store();
+
+        let hashes = store.list_metadata_segment(TEST_SEGMENT_HEX).unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_list_ignores_temp_files() {
+        let (store, temp_dir) = create_test_store();
+        let key_hash = sha256(b"real_key");
+
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key_hash, b"data")
+            .unwrap();
+
+        // Create a temp file in the segment directory
+        let meta_path = store.metadata_path(TEST_SEGMENT_HEX, &key_hash);
+        let temp_file = meta_path.with_file_name(format!(
+            "{}.tmp.0000000000000001",
+            meta_path.file_name().unwrap().to_str().unwrap()
+        ));
+        fs::write(&temp_file, b"partial write").unwrap();
+
+        let hashes = store.list_metadata_segment(TEST_SEGMENT_HEX).unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0], key_hash);
+
+        // Cleanup
+        drop(store);
+        drop(temp_dir);
+    }
+
+    #[test]
+    fn test_metadata_overwrite() {
+        let (store, _temp) = create_test_store();
+        let key_hash = sha256(b"overwrite_key");
+
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key_hash, b"version_1")
+            .unwrap();
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key_hash, b"version_2")
+            .unwrap();
+
+        let data = store.read_metadata(TEST_SEGMENT_HEX, &key_hash).unwrap();
+        assert_eq!(data, b"version_2");
+    }
+
+    #[test]
+    fn test_metadata_binary_data_with_nulls() {
+        let (store, _temp) = create_test_store();
+        let key_hash = sha256(b"binary_key");
+        let data: Vec<u8> = (0..256).map(|i| i as u8).collect();
+
+        store
+            .write_metadata(TEST_SEGMENT_HEX, &key_hash, &data)
+            .unwrap();
+        let read_data = store.read_metadata(TEST_SEGMENT_HEX, &key_hash).unwrap();
+
+        assert_eq!(read_data, data);
     }
 }

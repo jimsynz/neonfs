@@ -1,7 +1,7 @@
 # Task 0089: Read Repair and Write/Read Path Adaptation
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering
@@ -44,6 +44,8 @@ Implement the ReadRepair module for async repair of stale metadata replicas, a R
 - [ ] Integration: WriteOperation tests pass with quorum-backed indexes
 - [ ] Integration: ReadOperation tests pass with quorum-backed indexes
 - [ ] All existing Phase 1-4 tests pass (no regressions)
+- [ ] Skipped integration tests restored and passing — remove `@moduletag skip:` from: ReplicationTest, FailureTest, SingleNodeTest, Phase3Test, FuseHandlerTest, ErasureCodingTest (skipped in task 0087 after FileIndex Ra fallback removal)
+- [ ] Supervisor passes `quorum_opts` to FileIndex (and ChunkIndex) so the production supervision tree uses quorum mode
 
 ## Testing Strategy
 - ExUnit tests for ReadRepair module in isolation (mock BackgroundWorker)

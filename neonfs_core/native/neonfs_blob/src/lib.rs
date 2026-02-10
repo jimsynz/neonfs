@@ -513,4 +513,101 @@ fn erasure_decode<'a>(
     Ok(result)
 }
 
+/// Writes metadata to the blob store's metadata namespace.
+///
+/// # Arguments
+/// * `store` - Resource reference to the blob store.
+/// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
+/// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
+/// * `data` - Binary metadata to write.
+#[rustler::nif]
+fn metadata_write(
+    store: ResourceArc<BlobStoreResource>,
+    segment_id_hex: String,
+    key_hash_bytes: Binary,
+    data: Binary,
+) -> Result<(), String> {
+    let key_hash = parse_hash(&key_hash_bytes)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    store_guard
+        .write_metadata(&segment_id_hex, &key_hash, data.as_slice())
+        .map_err(|e| e.to_string())
+}
+
+/// Reads metadata from the blob store's metadata namespace.
+///
+/// # Arguments
+/// * `env` - Rustler environment.
+/// * `store` - Resource reference to the blob store.
+/// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
+/// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
+#[rustler::nif]
+fn metadata_read<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    segment_id_hex: String,
+    key_hash_bytes: Binary,
+) -> Result<Binary<'a>, String> {
+    let key_hash = parse_hash(&key_hash_bytes)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let data = store_guard
+        .read_metadata(&segment_id_hex, &key_hash)
+        .map_err(|e| e.to_string())?;
+
+    let mut output = NewBinary::new(env, data.len());
+    output.copy_from_slice(&data);
+    Ok(output.into())
+}
+
+/// Deletes metadata from the blob store's metadata namespace.
+///
+/// # Arguments
+/// * `store` - Resource reference to the blob store.
+/// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
+/// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
+#[rustler::nif]
+fn metadata_delete(
+    store: ResourceArc<BlobStoreResource>,
+    segment_id_hex: String,
+    key_hash_bytes: Binary,
+) -> Result<(), String> {
+    let key_hash = parse_hash(&key_hash_bytes)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    store_guard
+        .delete_metadata(&segment_id_hex, &key_hash)
+        .map_err(|e| e.to_string())
+}
+
+/// Lists all metadata key hashes in a segment.
+///
+/// # Arguments
+/// * `env` - Rustler environment.
+/// * `store` - Resource reference to the blob store.
+/// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
+#[rustler::nif]
+fn metadata_list_segment<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    segment_id_hex: String,
+) -> Result<Vec<Binary<'a>>, String> {
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let hashes = store_guard
+        .list_metadata_segment(&segment_id_hex)
+        .map_err(|e| e.to_string())?;
+
+    let result: Vec<Binary<'a>> = hashes
+        .into_iter()
+        .map(|hash| {
+            let mut bin = NewBinary::new(env, 32);
+            bin.copy_from_slice(hash.as_bytes());
+            bin.into()
+        })
+        .collect();
+
+    Ok(result)
+}
+
 rustler::init!("Elixir.NeonFS.Core.Blob.Native");

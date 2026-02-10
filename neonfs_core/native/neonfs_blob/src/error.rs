@@ -11,6 +11,10 @@ pub enum StoreError {
     #[error("chunk not found: {0}")]
     ChunkNotFound(String),
 
+    /// The requested metadata key does not exist in the store.
+    #[error("metadata not found: {0}")]
+    MetadataNotFound(String),
+
     /// An I/O error occurred during store operations.
     #[error("I/O error at {path}: {source}")]
     IoError {

@@ -89,6 +89,58 @@ pub fn chunk_path(base_dir: &Path, hash: &Hash, tier: Tier, prefix_depth: usize)
     path
 }
 
+/// Generates the path for a metadata file based on its segment and key hash.
+///
+/// The path follows the format:
+/// `{base_dir}/meta/{segment_id_hex}/{prefix_1}/{prefix_2}/.../{key_hash_hex}`
+///
+/// # Arguments
+/// * `base_dir` - The base directory for blob storage.
+/// * `segment_id_hex` - The 64-character hex string identifying the segment.
+/// * `key_hash` - The SHA-256 hash of the metadata key.
+/// * `prefix_depth` - Number of 2-character prefix directories (1=256 dirs, 2=65K dirs).
+///
+/// # Examples
+/// ```
+/// use neonfs_blob::path::metadata_path;
+/// use neonfs_blob::hash::Hash;
+/// use std::path::Path;
+///
+/// let key_hash = Hash::from_hex("abcd7c9e1234567890abcdef1234567890abcdef1234567890abcdef12345678").unwrap();
+/// let segment_hex = "ff".repeat(32);
+/// let path = metadata_path(Path::new("/var/lib/neonfs"), &segment_hex, &key_hash, 2);
+/// assert_eq!(
+///     path,
+///     Path::new(&format!("/var/lib/neonfs/meta/{}/ab/cd/abcd7c9e1234567890abcdef1234567890abcdef1234567890abcdef12345678", segment_hex))
+/// );
+/// ```
+pub fn metadata_path(
+    base_dir: &Path,
+    segment_id_hex: &str,
+    key_hash: &Hash,
+    prefix_depth: usize,
+) -> PathBuf {
+    let hex = key_hash.to_hex();
+    let mut path = base_dir.to_path_buf();
+
+    // Add the meta directory and segment
+    path.push("meta");
+    path.push(segment_id_hex);
+
+    // Add prefix directories based on depth
+    // Each prefix is 2 hex characters (1 byte)
+    for i in 0..prefix_depth {
+        let start = i * 2;
+        let end = start + 2;
+        path.push(&hex[start..end]);
+    }
+
+    // Add the full key hash as the filename
+    path.push(&hex);
+
+    path
+}
+
 /// Creates the parent directories for a path atomically.
 ///
 /// This function is idempotent - calling it multiple times with the same path
@@ -315,5 +367,75 @@ mod tests {
         assert!(path1.starts_with("/data"));
         assert!(path2.starts_with("/storage"));
         assert_ne!(path1, path2);
+    }
+
+    // Metadata path tests
+
+    const TEST_SEGMENT_HEX: &str =
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+    #[test]
+    fn test_metadata_path_depth_2() {
+        let key_hash = test_hash();
+        let path = metadata_path(Path::new("/var/lib/neonfs"), TEST_SEGMENT_HEX, &key_hash, 2);
+        assert_eq!(
+            path,
+            Path::new(&format!(
+                "/var/lib/neonfs/meta/{}/ab/cd/{}",
+                TEST_SEGMENT_HEX, TEST_HASH_HEX
+            ))
+        );
+    }
+
+    #[test]
+    fn test_metadata_path_depth_1() {
+        let key_hash = test_hash();
+        let path = metadata_path(Path::new("/var/lib/neonfs"), TEST_SEGMENT_HEX, &key_hash, 1);
+        assert_eq!(
+            path,
+            Path::new(&format!(
+                "/var/lib/neonfs/meta/{}/ab/{}",
+                TEST_SEGMENT_HEX, TEST_HASH_HEX
+            ))
+        );
+    }
+
+    #[test]
+    fn test_metadata_path_depth_0() {
+        let key_hash = test_hash();
+        let path = metadata_path(Path::new("/var/lib/neonfs"), TEST_SEGMENT_HEX, &key_hash, 0);
+        assert_eq!(
+            path,
+            Path::new(&format!(
+                "/var/lib/neonfs/meta/{}/{}",
+                TEST_SEGMENT_HEX, TEST_HASH_HEX
+            ))
+        );
+    }
+
+    #[test]
+    fn test_metadata_path_lowercase_hex() {
+        let key_hash =
+            Hash::from_hex("ABCD7C9E00000000000000000000000000000000000000000000000000000000")
+                .unwrap();
+        let path = metadata_path(Path::new("/base"), TEST_SEGMENT_HEX, &key_hash, 2);
+
+        let path_str = path.to_string_lossy();
+        assert!(path_str.contains("/ab/cd/"));
+        assert!(!path_str.contains("/AB/"));
+    }
+
+    #[test]
+    fn test_metadata_path_different_segments() {
+        let key_hash = test_hash();
+        let seg_a = "aa".repeat(32);
+        let seg_b = "bb".repeat(32);
+
+        let path_a = metadata_path(Path::new("/data"), &seg_a, &key_hash, 2);
+        let path_b = metadata_path(Path::new("/data"), &seg_b, &key_hash, 2);
+
+        assert_ne!(path_a, path_b);
+        assert!(path_a.to_string_lossy().contains(&seg_a));
+        assert!(path_b.to_string_lossy().contains(&seg_b));
     }
 }

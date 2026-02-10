@@ -1,7 +1,7 @@
 # Task 0080: Hybrid Logical Clocks
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering

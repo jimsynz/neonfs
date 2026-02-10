@@ -26,7 +26,7 @@ defmodule NeonFS.TestCase do
 
   use ExUnit.CaseTemplate
 
-  alias NeonFS.Core.{RaServer, RaSupervisor}
+  alias NeonFS.Core.{MetadataRing, RaServer, RaSupervisor}
 
   using do
     quote do
@@ -151,22 +151,88 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts FileIndex.
+  Starts FileIndex with mock quorum infrastructure.
+
+  Automatically builds mock quorum opts when none are provided.
+
+  ## Options
+
+    * `:quorum_opts` — explicit quorum opts to use (overrides auto-built ones).
   """
-  def start_file_index do
+  def start_file_index(opts \\ []) do
+    opts =
+      if Keyword.has_key?(opts, :quorum_opts) do
+        opts
+      else
+        {quorum_opts, _store} = build_mock_quorum_opts()
+        [quorum_opts: quorum_opts]
+      end
+
     stop_if_running(NeonFS.Core.FileIndex)
     cleanup_ets_table(:file_index_by_id)
-    cleanup_ets_table(:file_index_by_path)
-    start_supervised!(NeonFS.Core.FileIndex, restart: :temporary)
+
+    start_supervised!(
+      {NeonFS.Core.FileIndex, opts},
+      restart: :temporary
+    )
   end
 
   @doc """
-  Starts StripeIndex.
+  Builds mock quorum opts backed by a local ETS table.
+
+  Returns `{quorum_opts, store}` where `store` is the ETS table reference.
+  """
+  def build_mock_quorum_opts do
+    store = :ets.new(:test_quorum_store, [:set, :public])
+
+    ring =
+      MetadataRing.new([node()],
+        virtual_nodes_per_physical: 4,
+        replicas: 1
+      )
+
+    write_fn = fn _node, _segment, key, value ->
+      :ets.insert(store, {key, value})
+      :ok
+    end
+
+    read_fn = fn _node, _segment, key ->
+      case :ets.lookup(store, key) do
+        [{^key, value}] -> {:ok, value, {1_000_000, 0, node()}}
+        [] -> {:error, :not_found}
+      end
+    end
+
+    delete_fn = fn _node, _segment, key ->
+      :ets.delete(store, key)
+      :ok
+    end
+
+    quorum_opts = [
+      ring: ring,
+      write_fn: write_fn,
+      read_fn: read_fn,
+      delete_fn: delete_fn,
+      quarantine_checker: fn _ -> false end,
+      read_repair_fn: fn _work_fn, _opts -> {:ok, "noop"} end,
+      local_node: node()
+    ]
+
+    {quorum_opts, store}
+  end
+
+  @doc """
+  Starts StripeIndex with mock quorum infrastructure.
   """
   def start_stripe_index do
+    {quorum_opts, _store} = build_mock_quorum_opts()
     stop_if_running(NeonFS.Core.StripeIndex)
     cleanup_ets_table(:stripe_index)
-    start_supervised!(NeonFS.Core.StripeIndex, restart: :temporary)
+
+    start_supervised!(
+      {NeonFS.Core.StripeIndex, quorum_opts: quorum_opts},
+      restart: :temporary
+    )
   end
 
   @doc """
@@ -313,7 +379,6 @@ defmodule NeonFS.TestCase do
       :volumes_by_id,
       :volumes_by_name,
       :file_index_by_id,
-      :file_index_by_path,
       :chunk_index,
       :stripe_index
     ]

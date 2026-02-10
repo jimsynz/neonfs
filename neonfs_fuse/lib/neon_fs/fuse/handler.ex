@@ -178,12 +178,9 @@ defmodule NeonFS.FUSE.Handler do
 
       {"readdir_ok", %{"entries" => result_entries}}
     else
-      {:error, :not_found} ->
-        {"error", %{"errno" => errno(:enoent)}}
-
       {:error, reason} ->
         Logger.warning("Readdir failed: #{inspect(reason)}")
-        {"error", %{"errno" => errno(:eio)}}
+        {"error", %{"errno" => errno(:enoent)}}
     end
   end
 
@@ -407,23 +404,25 @@ defmodule NeonFS.FUSE.Handler do
 
   defp list_directory(volume_id, path) do
     dir_path = String.trim_trailing(path, "/")
+    result = file_index_list_dir(volume_id, dir_path)
+    {:ok, parse_dir_entries(result, dir_path)}
+  end
 
-    case file_index_get_by_path(volume_id, dir_path) do
-      {:ok, _dir} ->
-        files = file_index_list_dir(volume_id, dir_path)
+  defp parse_dir_entries(children, dir_path) when is_map(children) do
+    # New format: %{name => %{type: :file | :dir, id: id}}
+    Enum.map(children, fn {name, child_info} ->
+      child_path = Path.join(dir_path, name)
+      mode = if child_info[:type] == :dir, do: 0o40755, else: 0o100644
+      {name, child_path, mode}
+    end)
+  end
 
-        entries =
-          Enum.map(files, fn file ->
-            relative = String.trim_leading(file.path, dir_path <> "/")
-            name = Path.basename(relative)
-            {name, file.path, file.mode}
-          end)
-
-        {:ok, entries}
-
-      {:error, _} = error ->
-        error
-    end
+  defp parse_dir_entries(files, _dir_path) when is_list(files) do
+    # Legacy format: [%FileMeta{}, ...]
+    Enum.map(files, fn file ->
+      name = Path.basename(file.path)
+      {name, file.path, file.mode}
+    end)
   end
 
   # Check if file is at top level (no subdirectories)
@@ -516,8 +515,9 @@ defmodule NeonFS.FUSE.Handler do
 
   defp file_index_list_dir(volume_id, path) do
     case core_call(NeonFS.Core.FileIndex, :list_dir, [volume_id, path]) do
+      {:ok, children} when is_map(children) -> children
       files when is_list(files) -> files
-      {:error, _} -> []
+      {:error, _} -> %{}
     end
   end
 

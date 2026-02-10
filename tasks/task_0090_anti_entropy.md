@@ -1,7 +1,7 @@
 # Task 0090: Anti-Entropy
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering

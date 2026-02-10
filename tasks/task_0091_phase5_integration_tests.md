@@ -1,7 +1,7 @@
 # Task 0091: Phase 5 Integration Tests and Full Verification
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering
@@ -10,24 +10,24 @@ Not Started
 End-to-end integration tests for the tiered metadata architecture and a full verification pass ensuring all existing and new tests pass. This task validates that all Phase 5 components work together in a multi-node cluster via the PeerCluster test infrastructure. It also ensures no regressions in Phases 1-4 by running the complete check suite.
 
 ## Acceptance Criteria
-- [ ] Integration test: multi-node quorum write/read consistency (3-node PeerCluster, write to one node, read from another, verify data matches)
-- [ ] Integration test: node failure during quorum operation (kill one node, verify quorum of 2 still works for reads and writes)
-- [ ] Integration test: directory listing via DirectoryEntry (create files in a directory, list_dir, verify all children returned)
-- [ ] Integration test: cross-segment file creation atomicity (create file = FileMeta + DirectoryEntry, verify both written or neither)
-- [ ] Integration test: crash recovery — simulate crash mid-create (intent exists but operation incomplete), restart node, verify intent resolved correctly
-- [ ] Integration test: clock skew detection (manually offset a node's reported time, verify warning/quarantine behaviour)
-- [ ] Integration test: read repair (write stale data to one replica directly, read via quorum, verify stale replica repaired in background)
-- [ ] Integration test: concurrent writer detection (two nodes attempt to write same file simultaneously, verify one succeeds and one gets conflict error)
-- [ ] Integration test: full write → read → delete cycle through FUSE handler on multi-node cluster
-- [ ] Integration test: erasure-coded volume works with quorum-based metadata (write/read on erasure volume, verify stripes distributed correctly)
-- [ ] Integration test: mixed volume types — replicated and erasure-coded volumes coexist, both work correctly
-- [ ] `mix check --no-retry` passes from repository root (all subprojects: neonfs_client, neonfs_core, neonfs_fuse, neonfs_integration)
-- [ ] All existing Phase 1-4 tests pass without modification (no regressions)
-- [ ] Dialyzer passes with all new types (HLC, MetadataRing, DirectoryEntry, Intent, etc.)
-- [ ] Credo passes on all new modules
-- [ ] Rust `cargo test` passes in neonfs_blob (including new metadata NIF code)
-- [ ] Rust `cargo clippy --all-targets -- -D warnings` passes
-- [ ] tasks/README.md updated with Phase 5 metadata section and dependency graph
+- [x] Integration test: multi-node quorum write/read consistency (3-node PeerCluster, write to one node, read from another, verify data matches)
+- [x] Integration test: node failure during quorum operation (kill one node, verify quorum of 2 still works for reads and writes)
+- [x] Integration test: directory listing via DirectoryEntry (create files in a directory, list_dir, verify all children returned)
+- [x] Integration test: cross-segment file creation atomicity (create file = FileMeta + DirectoryEntry, verify both written or neither)
+- [x] Integration test: crash recovery — simulate crash mid-create (intent exists but operation incomplete), restart node, verify intent resolved correctly
+- [x] Integration test: clock skew detection (manually offset a node's reported time, verify warning/quarantine behaviour)
+- [x] Integration test: read repair (write stale data to one replica directly, read via quorum, verify stale replica repaired in background)
+- [x] Integration test: concurrent writer detection (two nodes attempt to write same file simultaneously, verify one succeeds and one gets conflict error)
+- [x] Integration test: full write → read → delete cycle through FUSE handler on multi-node cluster
+- [x] Integration test: erasure-coded volume works with quorum-based metadata (write/read on erasure volume, verify stripes distributed correctly)
+- [x] Integration test: mixed volume types — replicated and erasure-coded volumes coexist, both work correctly
+- [x] `mix check --no-retry` passes from repository root (all subprojects: neonfs_client, neonfs_core, neonfs_fuse, neonfs_integration)
+- [x] All existing Phase 1-4 tests pass without modification (no regressions)
+- [x] Dialyzer passes with all new types (HLC, MetadataRing, DirectoryEntry, Intent, etc.)
+- [x] Credo passes on all new modules
+- [x] Rust `cargo test` passes in neonfs_blob (including new metadata NIF code)
+- [x] Rust `cargo clippy --all-targets -- -D warnings` passes
+- [x] tasks/README.md updated with Phase 5 metadata section and dependency graph
 
 ## Testing Strategy
 - PeerCluster-based integration tests in neonfs_integration (follow existing Phase 2-4 test patterns)

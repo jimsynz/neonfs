@@ -108,6 +108,9 @@ defmodule NeonFS.CLI.Handler do
 
     case Join.join_cluster(token, via_node, type) do
       {:ok, state} ->
+        # Rebuild the quorum metadata ring on all nodes to include the new member
+        rebuild_quorum_ring_on_all_nodes()
+
         {:ok,
          %{
            "cluster_id" => state.cluster_id,
@@ -546,5 +549,19 @@ defmodule NeonFS.CLI.Handler do
     # If key doesn't exist as atom, use string key directly
     ArgumentError ->
       Enum.into(map, [])
+  end
+
+  defp rebuild_quorum_ring_on_all_nodes do
+    NeonFS.Core.Supervisor.rebuild_quorum_ring()
+
+    for node <- Node.list() do
+      try do
+        :erpc.call(node, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [], 5_000)
+      catch
+        _, _ -> :ok
+      end
+    end
+
+    :ok
   end
 end

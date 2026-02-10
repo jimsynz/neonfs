@@ -1,20 +1,22 @@
 defmodule NeonFS.Core.MetadataStateMachine do
   @moduledoc """
-  Ra state machine for cluster-wide metadata storage.
+  Ra state machine for cluster-wide metadata storage (v5).
 
-  This state machine manages:
-  - Node membership and health
-  - Volume definitions
-  - User and group definitions
-  - Segment assignments
-  - Active write sessions
+  Stores cluster-critical metadata with strong consistency via Raft consensus:
   - Service registry (nodes and their service types)
+  - Volume definitions
+  - Segment assignments (consistent hash ring -> replica sets)
+  - Active write intents (cross-segment atomicity and concurrent writer detection)
+  - General key-value data (volume-level metadata)
 
-  For Phase 2, this provides the foundation for distributed consensus.
-  Future phases will expand this to handle full cluster coordination.
+  Also retains chunk, file, and stripe metadata for backward compatibility.
+  These will move to quorum-based BlobStore storage (Tier 2/3) in Phase 5
+  tasks 0086-0089.
   """
 
   @behaviour :ra_machine
+
+  alias NeonFS.Core.Intent
 
   @type command ::
           {:put, key :: term(), value :: term()}
@@ -37,6 +39,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:put_stripe, stripe_data :: map()}
           | {:update_stripe, stripe_id :: binary(), updates :: map()}
           | {:delete_stripe, stripe_id :: binary()}
+          | {:assign_segment, segment_id :: term(), replica_set :: [node()]}
+          | {:bulk_update_assignments, assignments :: %{term() => [node()]}}
+          | {:try_acquire_intent, intent :: Intent.t()}
+          | {:complete_intent, intent_id :: binary()}
+          | {:fail_intent, intent_id :: binary(), reason :: term()}
+          | {:extend_intent, intent_id :: binary(), additional_seconds :: pos_integer()}
+          | :cleanup_expired_intents
+
+  @type segment_assignment :: %{
+          replica_set: [node()],
+          version: non_neg_integer()
+        }
 
   @type state :: %{
           data: %{optional(term()) => term()},
@@ -45,11 +59,55 @@ defmodule NeonFS.Core.MetadataStateMachine do
           services: %{optional(node()) => map()},
           volumes: %{optional(binary()) => map()},
           stripes: %{optional(binary()) => map()},
+          segment_assignments: %{optional(term()) => segment_assignment()},
+          intents: %{optional(binary()) => Intent.t()},
+          active_intents_by_conflict_key: %{optional(term()) => binary()},
           version: non_neg_integer()
         }
 
+  # Public query functions
+
   @doc """
-  Initialize the state machine with an empty data map.
+  Returns all segment assignments from the given state.
+  """
+  @spec get_segment_assignments(state()) :: %{term() => segment_assignment()}
+  def get_segment_assignments(state), do: state.segment_assignments
+
+  @doc """
+  Returns the intent with the given ID from the state, or nil.
+  """
+  @spec get_intent(state(), binary()) :: Intent.t() | nil
+  def get_intent(state, intent_id), do: Map.get(state.intents, intent_id)
+
+  @doc """
+  Returns all active (pending) intents from the state.
+  """
+  @spec list_active_intents(state()) :: [Intent.t()]
+  def list_active_intents(state) do
+    state.active_intents_by_conflict_key
+    |> Map.values()
+    |> Enum.map(&Map.get(state.intents, &1))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  @doc """
+  Returns all pending intents that have exceeded their TTL.
+  """
+  @spec list_expired_intents(state()) :: [Intent.t()]
+  def list_expired_intents(state) do
+    now = DateTime.utc_now()
+
+    state.intents
+    |> Map.values()
+    |> Enum.filter(fn intent ->
+      intent.state == :pending and Intent.expired_at?(intent, now)
+    end)
+  end
+
+  # Ra machine callbacks
+
+  @doc """
+  Initialise the state machine with a clean v5 state.
   """
   @impl :ra_machine
   def init(_config) do
@@ -60,23 +118,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
       services: %{},
       volumes: %{},
       stripes: %{},
+      segment_assignments: %{},
+      intents: %{},
+      active_intents_by_conflict_key: %{},
       version: 0
     }
   end
 
-  @doc """
-  Apply a command to the state machine.
-
-  Commands:
-  - `{:put, key, value}` - Store a key-value pair
-  - `{:delete, key}` - Remove a key
-  """
   @impl :ra_machine
   def apply(_meta, {:put, key, value}, state) do
     new_data = Map.put(state.data, key, value)
     new_state = %{state | data: new_data, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :put],
       %{version: new_state.version},
@@ -90,7 +143,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
     new_data = Map.delete(state.data, key)
     new_state = %{state | data: new_data, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :delete],
       %{version: new_state.version},
@@ -100,7 +152,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  # Handle Ra builtin command for machine version upgrades
+  # Machine version upgrades
+
   def apply(_meta, {:machine_version, 1, 2}, state) do
     require Logger
     Logger.info("Ra machine version upgrade: 1 -> 2 (adding services registry)")
@@ -113,7 +166,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
     require Logger
     Logger.info("Ra machine version upgrade: 2 -> 3 (volume tiering/caching/io_weight)")
 
-    # Migrate existing volumes: wrap initial_tier into tiering map, add caching and io_weight
     volumes = Map.get(state, :volumes, %{})
 
     migrated_volumes =
@@ -139,6 +191,19 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 4, 5}, state) do
+    require Logger
+    Logger.info("Ra machine version upgrade: 4 -> 5 (segment assignments + intents)")
+
+    new_state =
+      state
+      |> Map.put_new(:segment_assignments, %{})
+      |> Map.put_new(:intents, %{})
+      |> Map.put_new(:active_intents_by_conflict_key, %{})
+
+    {new_state, :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade: #{from_version} -> #{to_version}")
@@ -146,12 +211,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {state, :ok, []}
   end
 
+  # Chunk commands (legacy — will move to quorum BlobStore in tasks 0086-0089)
+
   def apply(_meta, {:put_chunk, chunk_meta}, state) do
     hash = chunk_meta.hash
     new_chunks = Map.put(state.chunks, hash, chunk_meta)
     new_state = %{state | chunks: new_chunks, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :put_chunk],
       %{version: new_state.version},
@@ -171,7 +237,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
         new_chunks = Map.put(state.chunks, hash, updated_meta)
         new_state = %{state | chunks: new_chunks, version: state.version + 1}
 
-        # Emit telemetry
         :telemetry.execute(
           [:neonfs, :ra, :command, :update_chunk_locations],
           %{version: new_state.version},
@@ -186,7 +251,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
     new_chunks = Map.delete(state.chunks, hash)
     new_state = %{state | chunks: new_chunks, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :delete_chunk],
       %{version: new_state.version},
@@ -202,7 +266,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
         {state, {:error, :not_found}, []}
 
       chunk_meta ->
-        # Check if there are active write refs
         active_write_refs = Map.get(chunk_meta, :active_write_refs, MapSet.new())
 
         if MapSet.size(active_write_refs) == 0 do
@@ -210,7 +273,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
           new_chunks = Map.put(state.chunks, hash, updated_meta)
           new_state = %{state | chunks: new_chunks, version: state.version + 1}
 
-          # Emit telemetry
           :telemetry.execute(
             [:neonfs, :ra, :command, :commit_chunk],
             %{version: new_state.version},
@@ -236,7 +298,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
         new_chunks = Map.put(state.chunks, hash, updated_meta)
         new_state = %{state | chunks: new_chunks, version: state.version + 1}
 
-        # Emit telemetry
         :telemetry.execute(
           [:neonfs, :ra, :command, :add_write_ref],
           %{version: new_state.version},
@@ -259,7 +320,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
         new_chunks = Map.put(state.chunks, hash, updated_meta)
         new_state = %{state | chunks: new_chunks, version: state.version + 1}
 
-        # Emit telemetry
         :telemetry.execute(
           [:neonfs, :ra, :command, :remove_write_ref],
           %{version: new_state.version},
@@ -270,14 +330,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  # Volume commands
+
   def apply(_meta, {:put_volume, volume_data}, state) do
-    # Ensure volumes map exists (for backwards compatibility with existing Ra state)
-    volumes = Map.get(state, :volumes, %{})
     id = volume_data.id
-    new_volumes = Map.put(volumes, id, volume_data)
+    new_volumes = Map.put(state.volumes, id, volume_data)
     new_state = %{state | volumes: new_volumes, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :put_volume],
       %{version: new_state.version},
@@ -288,12 +347,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:delete_volume, volume_id}, state) do
-    # Ensure volumes map exists (for backwards compatibility with existing Ra state)
-    volumes = Map.get(state, :volumes, %{})
-    new_volumes = Map.delete(volumes, volume_id)
+    new_volumes = Map.delete(state.volumes, volume_id)
     new_state = %{state | volumes: new_volumes, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :delete_volume],
       %{version: new_state.version},
@@ -303,16 +359,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  # File metadata commands
+  # File metadata commands (legacy — will move to quorum BlobStore in tasks 0086-0089)
 
   def apply(_meta, {:put_file, file_meta}, state) do
-    # Ensure files map exists (for backwards compatibility with existing Ra state)
-    files = Map.get(state, :files, %{})
     id = file_meta.id
-    new_files = Map.put(files, id, file_meta)
+    new_files = Map.put(state.files, id, file_meta)
     new_state = %{state | files: new_files, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :put_file],
       %{version: new_state.version},
@@ -323,18 +376,15 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:update_file, file_id, updates}, state) do
-    files = Map.get(state, :files, %{})
-
-    case Map.get(files, file_id) do
+    case Map.get(state.files, file_id) do
       nil ->
         {state, {:error, :not_found}, []}
 
       file_meta ->
         updated_meta = Map.merge(file_meta, updates)
-        new_files = Map.put(files, file_id, updated_meta)
+        new_files = Map.put(state.files, file_id, updated_meta)
         new_state = %{state | files: new_files, version: state.version + 1}
 
-        # Emit telemetry
         :telemetry.execute(
           [:neonfs, :ra, :command, :update_file],
           %{version: new_state.version},
@@ -346,11 +396,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:delete_file, file_id}, state) do
-    files = Map.get(state, :files, %{})
-    new_files = Map.delete(files, file_id)
+    new_files = Map.delete(state.files, file_id)
     new_state = %{state | files: new_files, version: state.version + 1}
 
-    # Emit telemetry
     :telemetry.execute(
       [:neonfs, :ra, :command, :delete_file],
       %{version: new_state.version},
@@ -363,9 +411,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Service registry commands
 
   def apply(_meta, {:register_service, service_info}, state) do
-    services = Map.get(state, :services, %{})
     node = service_info.node
-    new_services = Map.put(services, node, service_info)
+    new_services = Map.put(state.services, node, service_info)
     new_state = %{state | services: new_services, version: state.version + 1}
 
     :telemetry.execute(
@@ -378,8 +425,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:deregister_service, node}, state) do
-    services = Map.get(state, :services, %{})
-    new_services = Map.delete(services, node)
+    new_services = Map.delete(state.services, node)
     new_state = %{state | services: new_services, version: state.version + 1}
 
     :telemetry.execute(
@@ -392,15 +438,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:update_service_status, node, status}, state) do
-    services = Map.get(state, :services, %{})
-
-    case Map.get(services, node) do
+    case Map.get(state.services, node) do
       nil ->
         {state, {:error, :not_found}, []}
 
       service_info ->
         updated = Map.put(service_info, :status, status)
-        new_services = Map.put(services, node, updated)
+        new_services = Map.put(state.services, node, updated)
         new_state = %{state | services: new_services, version: state.version + 1}
 
         :telemetry.execute(
@@ -414,15 +458,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:update_service_metrics, node, metrics}, state) do
-    services = Map.get(state, :services, %{})
-
-    case Map.get(services, node) do
+    case Map.get(state.services, node) do
       nil ->
         {state, {:error, :not_found}, []}
 
       service_info ->
         updated = Map.put(service_info, :metrics, metrics)
-        new_services = Map.put(services, node, updated)
+        new_services = Map.put(state.services, node, updated)
         new_state = %{state | services: new_services, version: state.version + 1}
 
         :telemetry.execute(
@@ -435,12 +477,11 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
-  # Stripe commands
+  # Stripe commands (legacy — will move to quorum BlobStore in tasks 0086-0089)
 
   def apply(_meta, {:put_stripe, stripe_data}, state) do
-    stripes = Map.get(state, :stripes, %{})
     id = stripe_data.id
-    new_stripes = Map.put(stripes, id, stripe_data)
+    new_stripes = Map.put(state.stripes, id, stripe_data)
     new_state = %{state | stripes: new_stripes, version: state.version + 1}
 
     :telemetry.execute(
@@ -453,15 +494,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:update_stripe, stripe_id, updates}, state) do
-    stripes = Map.get(state, :stripes, %{})
-
-    case Map.get(stripes, stripe_id) do
+    case Map.get(state.stripes, stripe_id) do
       nil ->
         {state, {:error, :not_found}, []}
 
       stripe_data ->
         updated = Map.merge(stripe_data, updates)
-        new_stripes = Map.put(stripes, stripe_id, updated)
+        new_stripes = Map.put(state.stripes, stripe_id, updated)
         new_state = %{state | stripes: new_stripes, version: state.version + 1}
 
         :telemetry.execute(
@@ -475,8 +514,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:delete_stripe, stripe_id}, state) do
-    stripes = Map.get(state, :stripes, %{})
-    new_stripes = Map.delete(stripes, stripe_id)
+    new_stripes = Map.delete(state.stripes, stripe_id)
     new_state = %{state | stripes: new_stripes, version: state.version + 1}
 
     :telemetry.execute(
@@ -488,24 +526,233 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  # Segment assignment commands (new in v5)
+
+  def apply(_meta, {:assign_segment, segment_id, replica_set}, state) do
+    existing = Map.get(state.segment_assignments, segment_id)
+    new_version = if existing, do: existing.version + 1, else: 1
+
+    assignment = %{replica_set: replica_set, version: new_version}
+    new_assignments = Map.put(state.segment_assignments, segment_id, assignment)
+    new_state = %{state | segment_assignments: new_assignments, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :assign_segment],
+      %{version: new_state.version},
+      %{segment_id: segment_id, replica_count: length(replica_set)}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:bulk_update_assignments, assignments}, state) do
+    new_assignments =
+      Enum.reduce(assignments, state.segment_assignments, fn {segment_id, replica_set}, acc ->
+        existing = Map.get(acc, segment_id)
+        new_version = if existing, do: existing.version + 1, else: 1
+        Map.put(acc, segment_id, %{replica_set: replica_set, version: new_version})
+      end)
+
+    new_state = %{state | segment_assignments: new_assignments, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :bulk_update_assignments],
+      %{version: new_state.version},
+      %{segment_count: map_size(assignments)}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  # Intent management commands (new in v5)
+
+  def apply(_meta, {:try_acquire_intent, %Intent{} = intent}, state) do
+    now = DateTime.utc_now()
+
+    case Map.get(state.active_intents_by_conflict_key, intent.conflict_key) do
+      nil ->
+        new_state =
+          state
+          |> put_in_intents(intent.id, intent)
+          |> put_in_conflict_key(intent.conflict_key, intent.id)
+          |> increment_version()
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :try_acquire_intent],
+          %{version: new_state.version},
+          %{intent_id: intent.id, operation: intent.operation, result: :acquired}
+        )
+
+        {new_state, {:ok, :acquired}, []}
+
+      existing_id ->
+        existing = Map.get(state.intents, existing_id)
+
+        if Intent.expired_at?(existing, now) do
+          new_state =
+            state
+            |> put_in_intents(existing_id, %{existing | state: :expired})
+            |> put_in_intents(intent.id, intent)
+            |> put_in_conflict_key(intent.conflict_key, intent.id)
+            |> increment_version()
+
+          :telemetry.execute(
+            [:neonfs, :ra, :command, :try_acquire_intent],
+            %{version: new_state.version},
+            %{intent_id: intent.id, operation: intent.operation, result: :acquired_expired}
+          )
+
+          {new_state, {:ok, :acquired}, []}
+        else
+          :telemetry.execute(
+            [:neonfs, :ra, :command, :try_acquire_intent],
+            %{version: state.version},
+            %{intent_id: intent.id, operation: intent.operation, result: :conflict}
+          )
+
+          {state, {:ok, :conflict, existing}, []}
+        end
+    end
+  end
+
+  def apply(_meta, {:complete_intent, intent_id}, state) do
+    case Map.get(state.intents, intent_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      intent ->
+        completed = %{intent | state: :completed, completed_at: DateTime.utc_now()}
+
+        new_state =
+          state
+          |> put_in_intents(intent_id, completed)
+          |> remove_conflict_key(intent.conflict_key)
+          |> increment_version()
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :complete_intent],
+          %{version: new_state.version},
+          %{intent_id: intent_id}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:fail_intent, intent_id, reason}, state) do
+    case Map.get(state.intents, intent_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      intent ->
+        failed = %{intent | state: :failed, completed_at: DateTime.utc_now(), error: reason}
+
+        new_state =
+          state
+          |> put_in_intents(intent_id, failed)
+          |> remove_conflict_key(intent.conflict_key)
+          |> increment_version()
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :fail_intent],
+          %{version: new_state.version},
+          %{intent_id: intent_id, reason: reason}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:extend_intent, intent_id, additional_seconds}, state) do
+    case Map.get(state.intents, intent_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      %Intent{state: :pending} = intent ->
+        extended = %{
+          intent
+          | expires_at: DateTime.add(intent.expires_at, additional_seconds, :second)
+        }
+
+        new_state =
+          state
+          |> put_in_intents(intent_id, extended)
+          |> increment_version()
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :extend_intent],
+          %{version: new_state.version},
+          %{intent_id: intent_id, additional_seconds: additional_seconds}
+        )
+
+        {new_state, :ok, []}
+
+      _non_pending ->
+        {state, {:error, :not_pending}, []}
+    end
+  end
+
+  def apply(_meta, :cleanup_expired_intents, state) do
+    now = DateTime.utc_now()
+
+    expired_ids =
+      state.intents
+      |> Enum.filter(fn {_id, intent} ->
+        intent.state == :pending and Intent.expired_at?(intent, now)
+      end)
+      |> Enum.map(fn {id, _intent} -> id end)
+
+    new_state =
+      Enum.reduce(expired_ids, state, fn intent_id, acc ->
+        intent = Map.get(acc.intents, intent_id)
+        expired_intent = %{intent | state: :expired}
+
+        acc
+        |> put_in_intents(intent_id, expired_intent)
+        |> remove_conflict_key(intent.conflict_key)
+      end)
+
+    new_state = increment_version(new_state)
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :cleanup_expired_intents],
+      %{version: new_state.version, cleaned_count: length(expired_ids)},
+      %{}
+    )
+
+    {new_state, {:ok, length(expired_ids)}, []}
+  end
+
+  # Catch-all for truly unknown commands (prevents crashes)
+  def apply(_meta, command, state) do
+    require Logger
+
+    command_type =
+      case command do
+        {type, _} -> type
+        {type, _, _} -> type
+        {type, _, _, _} -> type
+        other -> other
+      end
+
+    Logger.debug("Ignoring unhandled Ra command: #{inspect(command_type)}")
+
+    {state, {:error, :unknown_command}, []}
+  end
+
   @doc """
   Handle state transitions. Called when the Ra server enters a new state.
   """
   @impl :ra_machine
   def state_enter(_state_name, _state) do
-    # Called when the Ra server enters a new state (follower, candidate, leader)
-    # No special handling needed for now
     []
   end
 
   @doc """
   Called when a snapshot is installed (e.g., during cluster catch-up).
-
-  Returns a list of effects to execute after snapshot installation.
   """
   @impl :ra_machine
   def snapshot_installed(_meta, _state, _old_meta, _old_state) do
-    # No effects needed after snapshot installation
     []
   end
 
@@ -513,26 +760,48 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 4
+  def version, do: 5
 
   @doc """
   Return the module to handle a specific state machine version.
-
-  All versions use this same module - we don't have multiple versions yet.
   """
   @impl :ra_machine
   def which_module(_version), do: __MODULE__
+
+  # Private helpers
+
+  defp put_in_intents(state, intent_id, intent) do
+    %{state | intents: Map.put(state.intents, intent_id, intent)}
+  end
+
+  defp put_in_conflict_key(state, conflict_key, intent_id) do
+    %{
+      state
+      | active_intents_by_conflict_key:
+          Map.put(state.active_intents_by_conflict_key, conflict_key, intent_id)
+    }
+  end
+
+  defp remove_conflict_key(state, conflict_key) do
+    %{
+      state
+      | active_intents_by_conflict_key:
+          Map.delete(state.active_intents_by_conflict_key, conflict_key)
+    }
+  end
+
+  defp increment_version(state) do
+    %{state | version: state.version + 1}
+  end
 
   # Migration helpers for version 2 -> 3
 
   defp migrate_volume_tiering(vol) do
     case Map.get(vol, :tiering) do
       %{initial_tier: _} ->
-        # Already has tiering map, nothing to do
         vol
 
       _ ->
-        # Wrap existing initial_tier into tiering map with defaults
         initial_tier = Map.get(vol, :initial_tier, :hot)
 
         vol

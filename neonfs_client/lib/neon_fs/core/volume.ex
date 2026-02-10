@@ -45,6 +45,12 @@ defmodule NeonFS.Core.Volume do
           max_memory: pos_integer()
         }
 
+  @type metadata_consistency_config :: %{
+          replicas: pos_integer(),
+          read_quorum: pos_integer(),
+          write_quorum: pos_integer()
+        }
+
   @type write_ack :: :local | :quorum | :all
 
   @type tier :: :hot | :warm | :cold
@@ -60,6 +66,7 @@ defmodule NeonFS.Core.Volume do
           io_weight: pos_integer(),
           compression: compression_config(),
           verification: verification_config(),
+          metadata_consistency: metadata_consistency_config() | nil,
           logical_size: non_neg_integer(),
           physical_size: non_neg_integer(),
           chunk_count: non_neg_integer(),
@@ -78,6 +85,7 @@ defmodule NeonFS.Core.Volume do
     :io_weight,
     :compression,
     :verification,
+    :metadata_consistency,
     :logical_size,
     :physical_size,
     :chunk_count,
@@ -114,6 +122,7 @@ defmodule NeonFS.Core.Volume do
       io_weight: Keyword.get(opts, :io_weight, 100),
       compression: Keyword.get(opts, :compression, default_compression()),
       verification: Keyword.get(opts, :verification, default_verification()),
+      metadata_consistency: Keyword.get(opts, :metadata_consistency),
       logical_size: 0,
       physical_size: 0,
       chunk_count: 0,
@@ -192,14 +201,15 @@ defmodule NeonFS.Core.Volume do
   @spec update(t(), keyword()) :: t()
   def update(volume, opts) do
     allowed_keys = [
-      :owner,
-      :durability,
-      :write_ack,
-      :tiering,
       :caching,
-      :io_weight,
       :compression,
-      :verification
+      :durability,
+      :io_weight,
+      :metadata_consistency,
+      :owner,
+      :tiering,
+      :verification,
+      :write_ack
     ]
 
     updates = Keyword.take(opts, allowed_keys)
@@ -265,8 +275,9 @@ defmodule NeonFS.Core.Volume do
          :ok <- validate_tiering(volume.tiering),
          :ok <- validate_caching(volume.caching),
          :ok <- validate_io_weight(volume.io_weight),
-         :ok <- validate_compression(volume.compression) do
-      validate_verification(volume.verification)
+         :ok <- validate_compression(volume.compression),
+         :ok <- validate_verification(volume.verification) do
+      validate_metadata_consistency(volume.metadata_consistency)
     end
   end
 
@@ -348,4 +359,26 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_verification(_),
     do: {:error, "on_read must be :always, :never, or :sampling"}
+
+  defp validate_metadata_consistency(nil), do: :ok
+
+  defp validate_metadata_consistency(%{
+         replicas: n,
+         read_quorum: r,
+         write_quorum: w
+       })
+       when is_integer(n) and n >= 1 and is_integer(r) and r >= 1 and r <= n and is_integer(w) and
+              w >= 1 and w <= n do
+    if r + w > n do
+      :ok
+    else
+      {:error,
+       "metadata_consistency requires R + W > N for strong consistency (got R=#{r}, W=#{w}, N=#{n})"}
+    end
+  end
+
+  defp validate_metadata_consistency(_),
+    do:
+      {:error,
+       "invalid metadata_consistency: requires replicas >= 1, read_quorum and write_quorum >= 1 and <= replicas"}
 end

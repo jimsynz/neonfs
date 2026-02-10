@@ -8,6 +8,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   - Critical failure (too many missing chunks)
   - Stripe repair after chunk loss
   - GC cleanup of erasure-coded files
+
   - Mixed cluster with both replicated and erasure-coded volumes
   - CLI handler volume creation with erasure durability
   """
@@ -16,7 +17,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 1
-
   describe "erasure write and read" do
     test "write file to erasure volume and read back", %{cluster: cluster} do
       :ok = init_erasure_cluster(cluster)

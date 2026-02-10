@@ -92,7 +92,10 @@ defmodule NeonFS.Integration.PeerCluster do
     # Start nodes sequentially to avoid DETS name conflicts during Ra initialization
     nodes =
       Enum.reduce(1..node_count, [], fn i, acc ->
-        node_name = :"node#{i}"
+        alias_name = :"node#{i}"
+        # Use cluster_id in the EPMD name to avoid collisions with stale nodes
+        # from previous tests whose on_exit cleanup hasn't completed yet
+        peer_name = :"node#{i}_#{cluster_id}"
         data_dir = Path.join(base_dir, "node#{i}")
         meta_dir = Path.join(data_dir, "meta")
         ra_dir = Path.join(data_dir, "ra")
@@ -102,7 +105,7 @@ defmodule NeonFS.Integration.PeerCluster do
         File.mkdir_p!(meta_dir)
         File.mkdir_p!(ra_dir)
 
-        peer_opts = build_peer_opts(node_name, cookie, data_dir)
+        peer_opts = build_peer_opts(peer_name, cookie, data_dir)
 
         # Configure neonfs_core to use the test data directories
         # IMPORTANT: Ra expects data_dir as a charlist, not a binary!
@@ -117,7 +120,7 @@ defmodule NeonFS.Integration.PeerCluster do
 
         core_config =
           if drives_fn do
-            Keyword.put(core_config, :drives, drives_fn.(node_name, data_dir))
+            Keyword.put(core_config, :drives, drives_fn.(alias_name, data_dir))
           else
             core_config
           end
@@ -128,7 +131,7 @@ defmodule NeonFS.Integration.PeerCluster do
           ra: [data_dir: to_charlist(ra_dir)]
         ]
 
-        start_cluster_node(node_name, peer_opts, applications, app_config, enable_ra, acc)
+        start_cluster_node(alias_name, peer_opts, applications, app_config, enable_ra, acc)
       end)
 
     %{
@@ -167,8 +170,9 @@ defmodule NeonFS.Integration.PeerCluster do
       end
     end
 
-    # Small delay to allow DETS cleanup to complete
-    Process.sleep(100)
+    # Wait for all peer nodes to actually deregister from EPMD,
+    # otherwise the next test might fail to start nodes with the same names
+    wait_for_peers_gone(cluster.nodes)
 
     File.rm_rf(cluster.data_dir)
     :ok
@@ -271,7 +275,9 @@ defmodule NeonFS.Integration.PeerCluster do
   end
 
   defp start_application_on_peer(peer, node, app) do
-    case :peer.call(peer, :application, :ensure_all_started, [app]) do
+    # Under heavy load (e.g. full integration suite), application startup can
+    # exceed the default 5s :peer.call timeout. Use 30s to be safe.
+    case :peer.call(peer, :application, :ensure_all_started, [app], 30_000) do
       {:ok, _} -> :ok
       {:error, reason} -> Logger.warning("Failed to start #{app} on #{node}: #{inspect(reason)}")
     end
@@ -288,7 +294,12 @@ defmodule NeonFS.Integration.PeerCluster do
     args =
       [
         ~c"-setcookie",
-        to_charlist(cookie)
+        to_charlist(cookie),
+        # Disable global's partition prevention — tests rapidly create/destroy
+        # clusters and global misinterprets this as overlapping partitions
+        ~c"-kernel",
+        ~c"prevent_overlapping_partitions",
+        ~c"false"
       ] ++
         Enum.flat_map(code_paths, fn path ->
           [~c"-pa", to_charlist(path)]
@@ -321,15 +332,47 @@ defmodule NeonFS.Integration.PeerCluster do
     # Wait for Ra system to be ready on the peer
     # Try up to 30 times with 100ms delay (3 seconds total)
     Enum.reduce_while(1..30, :not_ready, fn _i, _acc ->
-      case :peer.call(peer, :ra_system, :fetch, [:default]) do
-        {:ok, _} ->
-          {:halt, :ok}
+      try do
+        case :peer.call(peer, :ra_system, :fetch, [:default]) do
+          {:ok, _} ->
+            {:halt, :ok}
 
-        _ ->
+          _ ->
+            Process.sleep(100)
+            {:cont, :not_ready}
+        end
+      catch
+        :exit, _ ->
           Process.sleep(100)
           {:cont, :not_ready}
       end
     end)
+  end
+
+  defp wait_for_peers_gone(nodes) do
+    # Wait up to 5 seconds for all peer nodes to fully terminate.
+    # This prevents the next test from hitting EPMD name conflicts.
+    deadline = System.monotonic_time(:millisecond) + 5_000
+
+    Enum.each(nodes, fn node_info ->
+      wait_for_node_gone(node_info.node, deadline)
+    end)
+  end
+
+  defp wait_for_node_gone(node_atom, deadline) do
+    if System.monotonic_time(:millisecond) > deadline do
+      Logger.warning("Peer node #{node_atom} still registered after timeout")
+    else
+      case Node.ping(node_atom) do
+        :pang ->
+          :ok
+
+        :pong ->
+          Node.disconnect(node_atom)
+          Process.sleep(100)
+          wait_for_node_gone(node_atom, deadline)
+      end
+    end
   end
 
   defp generate_cluster_id do

@@ -14,7 +14,6 @@ defmodule NeonFS.Integration.Phase3Test do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 1
-
   describe "tiering lifecycle" do
     test "writes land on hot tier by default", %{cluster: cluster} do
       :ok = init_cluster_with_volume(cluster)

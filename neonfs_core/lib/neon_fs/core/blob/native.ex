@@ -495,4 +495,76 @@ defmodule NeonFS.Core.Blob.Native do
           {:ok, [shard()]} | {:error, String.t()}
   def erasure_decode(_shards_with_indices, _data_count, _parity_count, _shard_size),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  # Metadata namespace operations
+
+  @doc """
+  Writes metadata to the blob store's metadata namespace.
+
+  Metadata is stored under `meta/{segment_id_hex}/{prefix}/{key_hash_hex}`,
+  using the same atomic write-then-rename pattern as chunk writes.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `segment_id_hex` - Hex string identifying the metadata segment
+    - `key_hash` - 32-byte binary hash of the metadata key
+    - `data` - Binary metadata to write
+
+  ## Returns
+    - `{:ok, {}}` - On success
+    - `{:error, reason}` - If the write fails
+  """
+  @spec metadata_write(store(), String.t(), hash(), binary()) :: {:ok, {}} | {:error, String.t()}
+  def metadata_write(_store, _segment_id_hex, _key_hash, _data),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Reads metadata from the blob store's metadata namespace.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `segment_id_hex` - Hex string identifying the metadata segment
+    - `key_hash` - 32-byte binary hash of the metadata key
+
+  ## Returns
+    - `{:ok, data}` - The metadata as a binary
+    - `{:error, reason}` - If the key does not exist or read fails
+  """
+  @spec metadata_read(store(), String.t(), hash()) :: {:ok, binary()} | {:error, String.t()}
+  def metadata_read(_store, _segment_id_hex, _key_hash),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Deletes metadata from the blob store's metadata namespace.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `segment_id_hex` - Hex string identifying the metadata segment
+    - `key_hash` - 32-byte binary hash of the metadata key
+
+  ## Returns
+    - `{:ok, {}}` - On success
+    - `{:error, reason}` - If the key does not exist or delete fails
+  """
+  @spec metadata_delete(store(), String.t(), hash()) :: {:ok, {}} | {:error, String.t()}
+  def metadata_delete(_store, _segment_id_hex, _key_hash),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Lists all metadata key hashes in a segment.
+
+  Recursively walks the segment directory and returns all key hashes found.
+  Temporary files are skipped. Returns an empty list for nonexistent segments.
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `segment_id_hex` - Hex string identifying the metadata segment
+
+  ## Returns
+    - `{:ok, hashes}` - List of 32-byte binary key hashes
+    - `{:error, reason}` - If the listing fails
+  """
+  @spec metadata_list_segment(store(), String.t()) :: {:ok, [hash()]} | {:error, String.t()}
+  def metadata_list_segment(_store, _segment_id_hex),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

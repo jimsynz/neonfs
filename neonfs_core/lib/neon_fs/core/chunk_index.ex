@@ -1,22 +1,48 @@
 defmodule NeonFS.Core.ChunkIndex do
   @moduledoc """
-  GenServer managing chunk metadata with Ra-backed distributed storage.
+  GenServer managing chunk metadata with quorum-backed distributed storage.
 
   Provides fast lookups by hash and queries by location or commit state.
-  Uses Ra consensus for writes and maintains a local ETS cache for fast reads.
+  Uses QuorumCoordinator for distributed writes/reads and maintains a local
+  ETS cache for fast reads.
+
+  ## Quorum Mode
+
+  When started with `:quorum_opts`, writes go through `QuorumCoordinator.quorum_write/3`
+  and cache misses fall back to `QuorumCoordinator.quorum_read/2`. When quorum_opts
+  is nil, falls back to Ra consensus for backward compatibility with the existing
+  supervision tree (until the quorum infrastructure is wired into the application).
+
+  ## Local-Only State
+
+  `active_write_refs` are ephemeral per-node state and are never replicated.
   """
 
   use GenServer
   require Logger
 
-  alias NeonFS.Core.{ChunkMeta, RaServer, RaSupervisor}
+  alias NeonFS.Core.{
+    ChunkMeta,
+    FileIndex,
+    MetadataCodec,
+    QuorumCoordinator,
+    RaServer,
+    RaSupervisor
+  }
 
   @type location :: ChunkMeta.location()
+
+  @chunk_key_prefix "chunk:"
 
   # Client API
 
   @doc """
   Starts the ChunkIndex GenServer.
+
+  ## Options
+
+    * `:quorum_opts` — keyword list passed to QuorumCoordinator (must include `:ring`).
+      When nil, operates in local-only ETS mode.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -26,19 +52,17 @@ defmodule NeonFS.Core.ChunkIndex do
   @doc """
   Stores or updates chunk metadata.
 
-  Returns `:ok` on success, or `{:error, reason}` if the operation fails
-  (e.g., Ra cluster unavailable due to quorum loss).
+  Returns `:ok` on success, or `{:error, reason}` if the operation fails.
   """
   @spec put(ChunkMeta.t()) :: :ok | {:error, term()}
   def put(%ChunkMeta{} = chunk_meta) do
-    # Timeout must be longer than Ra timeout (5s) to allow Ra to timeout first
     GenServer.call(__MODULE__, {:put, chunk_meta}, 10_000)
   end
 
   @doc """
   Retrieves chunk metadata by hash.
 
-  First checks local ETS cache, then falls back to Ra if not found locally.
+  First checks local ETS cache, then falls back to quorum read if not found locally.
   """
   @spec get(binary()) :: {:ok, ChunkMeta.t()} | {:error, :not_found}
   def get(hash) when is_binary(hash) do
@@ -47,8 +71,7 @@ defmodule NeonFS.Core.ChunkIndex do
         {:ok, chunk_meta}
 
       [] ->
-        # Not in local cache, try Ra
-        get_from_ra(hash)
+        get_from_quorum(hash)
     end
   end
 
@@ -58,6 +81,55 @@ defmodule NeonFS.Core.ChunkIndex do
   @spec delete(binary()) :: :ok | {:error, term()}
   def delete(hash) when is_binary(hash) do
     GenServer.call(__MODULE__, {:delete, hash}, 10_000)
+  end
+
+  @doc """
+  Checks whether chunk metadata exists for the given hash.
+
+  Checks local ETS cache first, then falls back to quorum read.
+  """
+  @spec exists?(binary()) :: boolean()
+  def exists?(hash) when is_binary(hash) do
+    case :ets.lookup(:chunk_index, hash) do
+      [{^hash, _}] -> true
+      [] -> match?({:ok, _}, get_from_quorum(hash))
+    end
+  end
+
+  @doc """
+  Returns all chunk metadata stored in the local ETS cache.
+  """
+  @spec list_all() :: [ChunkMeta.t()]
+  def list_all do
+    :ets.foldl(
+      fn
+        {_hash, %ChunkMeta{} = chunk_meta}, acc -> [chunk_meta | acc]
+        _, acc -> acc
+      end,
+      [],
+      :chunk_index
+    )
+  end
+
+  @doc """
+  Returns all chunks associated with a volume.
+
+  Resolves chunks through FileIndex: gets all files for the volume, collects
+  their chunk hashes, and looks up each from the local ETS cache.
+  """
+  @spec get_chunks_for_volume(binary()) :: [ChunkMeta.t()]
+  def get_chunks_for_volume(volume_id) when is_binary(volume_id) do
+    chunk_hashes =
+      FileIndex.list_volume(volume_id)
+      |> Enum.flat_map(fn file_meta -> file_meta.chunk_hashes end)
+      |> Enum.uniq()
+
+    Enum.reduce(chunk_hashes, [], fn hash, acc ->
+      case :ets.lookup(:chunk_index, hash) do
+        [{^hash, %ChunkMeta{} = chunk_meta}] -> [chunk_meta | acc]
+        _ -> acc
+      end
+    end)
   end
 
   @doc """
@@ -74,7 +146,6 @@ defmodule NeonFS.Core.ChunkIndex do
             acc
           end
 
-        # Skip non-ChunkMeta entries (can happen with stale DETS data)
         _, acc ->
           acc
       end,
@@ -97,7 +168,6 @@ defmodule NeonFS.Core.ChunkIndex do
             acc
           end
 
-        # Skip non-ChunkMeta entries (can happen with stale DETS data)
         _, acc ->
           acc
       end,
@@ -116,7 +186,6 @@ defmodule NeonFS.Core.ChunkIndex do
         {_hash, %ChunkMeta{commit_state: :uncommitted} = chunk_meta}, acc ->
           [chunk_meta | acc]
 
-        # Skip committed chunks or non-ChunkMeta entries
         _, acc ->
           acc
       end,
@@ -127,6 +196,8 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @doc """
   Adds a write reference to a chunk.
+
+  Write references are local-only (ephemeral, single-node) and are never replicated.
   """
   @spec add_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, term()}
   def add_write_ref(hash, write_id) do
@@ -135,6 +206,8 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @doc """
   Removes a write reference from a chunk.
+
+  Write references are local-only (ephemeral, single-node) and are never replicated.
   """
   @spec remove_write_ref(binary(), ChunkMeta.write_id()) :: :ok | {:error, term()}
   def remove_write_ref(hash, write_id) do
@@ -161,41 +234,39 @@ defmodule NeonFS.Core.ChunkIndex do
   # Server Callbacks
 
   @impl true
-  def init(_opts) do
-    # Create ETS table for chunk metadata
-    # :set - one entry per hash
-    # :named_table - accessible by name :chunk_index
-    # :public - readable from any process
-    # read_concurrency: true - optimize for concurrent reads
+  def init(opts) do
     :ets.new(:chunk_index, [:set, :named_table, :public, read_concurrency: true])
 
-    # Try to restore chunks from Ra state into ETS
-    # If Ra is not ready yet (e.g., during startup), that's okay - the index
-    # will be populated as operations occur
-    case restore_from_ra() do
-      {:ok, count} ->
-        Logger.info(
-          "ChunkIndex started with ETS table :chunk_index, restored #{count} chunks from Ra"
-        )
+    quorum_opts = Keyword.get(opts, :quorum_opts)
+    :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
 
-      {:error, reason} ->
-        Logger.debug("ChunkIndex started but Ra not ready yet: #{inspect(reason)}")
+    if quorum_opts do
+      case load_from_local_store() do
+        {:ok, count} ->
+          Logger.info("ChunkIndex started, loaded #{count} chunks from local store")
+
+        {:error, reason} ->
+          Logger.debug("ChunkIndex started, local store not available: #{inspect(reason)}")
+      end
+    else
+      case restore_from_ra() do
+        {:ok, count} ->
+          Logger.info(
+            "ChunkIndex started with ETS table :chunk_index, restored #{count} chunks from Ra"
+          )
+
+        {:error, reason} ->
+          Logger.debug("ChunkIndex started but Ra not ready yet: #{inspect(reason)}")
+      end
     end
 
-    {:ok, %{}}
+    {:ok, %{quorum_opts: quorum_opts}}
   end
 
   @impl true
   def handle_call({:put, chunk_meta}, _from, state) do
-    # Try to write through Ra if available, otherwise write directly to ETS
-    case maybe_ra_command({:put_chunk, struct_to_map(chunk_meta)}) do
-      {:ok, :ok} ->
-        # Update local ETS cache
-        :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
-        {:reply, :ok, state}
-
-      {:error, :ra_not_available} ->
-        # Ra not available, write directly to ETS (Phase 1 mode)
+    case do_quorum_write(chunk_meta, quorum_opts()) do
+      :ok ->
         :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
         {:reply, :ok, state}
 
@@ -206,15 +277,8 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @impl true
   def handle_call({:delete, hash}, _from, state) do
-    # Try to write through Ra if available
-    case maybe_ra_command({:delete_chunk, hash}) do
-      {:ok, :ok} ->
-        # Update local ETS cache
-        :ets.delete(:chunk_index, hash)
-        {:reply, :ok, state}
-
-      {:error, :ra_not_available} ->
-        # Ra not available, write directly to ETS
+    case do_quorum_delete(hash, quorum_opts()) do
+      :ok ->
         :ets.delete(:chunk_index, hash)
         {:reply, :ok, state}
 
@@ -224,10 +288,9 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @impl true
-  def handle_call({:add_write_ref, hash, write_id}, _from, state) do
+  def handle_call({:add_write_ref, hash, write_id}, _from, %{quorum_opts: nil} = state) do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, chunk_meta}] ->
-        # Try to write through Ra if available
         case maybe_ra_command({:add_write_ref, hash, write_id}) do
           {:ok, :ok} ->
             updated_meta = ChunkMeta.add_write_ref(chunk_meta, write_id)
@@ -238,8 +301,48 @@ defmodule NeonFS.Core.ChunkIndex do
             {:reply, {:error, :not_found}, state}
 
           {:error, :ra_not_available} ->
-            # Ra not available, write directly to ETS
             updated_meta = ChunkMeta.add_write_ref(chunk_meta, write_id)
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      [] ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:add_write_ref, hash, write_id}, _from, state) do
+    # Quorum mode: write refs are local-only (ephemeral, not replicated)
+    case :ets.lookup(:chunk_index, hash) do
+      [{^hash, chunk_meta}] ->
+        updated_meta = ChunkMeta.add_write_ref(chunk_meta, write_id)
+        :ets.insert(:chunk_index, {hash, updated_meta})
+        {:reply, :ok, state}
+
+      [] ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:remove_write_ref, hash, write_id}, _from, %{quorum_opts: nil} = state) do
+    case :ets.lookup(:chunk_index, hash) do
+      [{^hash, chunk_meta}] ->
+        case maybe_ra_command({:remove_write_ref, hash, write_id}) do
+          {:ok, :ok} ->
+            updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:ok, {:error, :not_found}} ->
+            {:reply, {:error, :not_found}, state}
+
+          {:error, :ra_not_available} ->
+            updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
             :ets.insert(:chunk_index, {hash, updated_meta})
             {:reply, :ok, state}
 
@@ -254,27 +357,12 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @impl true
   def handle_call({:remove_write_ref, hash, write_id}, _from, state) do
+    # Quorum mode: write refs are local-only (ephemeral, not replicated)
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, chunk_meta}] ->
-        # Try to write through Ra if available
-        case maybe_ra_command({:remove_write_ref, hash, write_id}) do
-          {:ok, :ok} ->
-            updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
-            :ets.insert(:chunk_index, {hash, updated_meta})
-            {:reply, :ok, state}
-
-          {:ok, {:error, :not_found}} ->
-            {:reply, {:error, :not_found}, state}
-
-          {:error, :ra_not_available} ->
-            # Ra not available, write directly to ETS
-            updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
-            :ets.insert(:chunk_index, {hash, updated_meta})
-            {:reply, :ok, state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
+        updated_meta = ChunkMeta.remove_write_ref(chunk_meta, write_id)
+        :ets.insert(:chunk_index, {hash, updated_meta})
+        {:reply, :ok, state}
 
       [] ->
         {:reply, {:error, :not_found}, state}
@@ -283,17 +371,16 @@ defmodule NeonFS.Core.ChunkIndex do
 
   @impl true
   def handle_call({:commit, hash}, _from, state) do
-    reply = do_commit_chunk(hash)
+    reply = do_commit_chunk(hash, quorum_opts())
     {:reply, reply, state}
   end
 
   @impl true
-  def handle_call({:update_locations, hash, locations}, _from, state) do
+  def handle_call({:update_locations, hash, locations}, _from, %{quorum_opts: nil} = state) do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, chunk_meta}] ->
         updated_meta = %{chunk_meta | locations: locations}
 
-        # Try to write through Ra if available
         case maybe_ra_command({:update_chunk_locations, hash, locations}) do
           {:ok, :ok} ->
             :ets.insert(:chunk_index, {hash, updated_meta})
@@ -303,7 +390,6 @@ defmodule NeonFS.Core.ChunkIndex do
             {:reply, {:error, reason}, state}
 
           {:error, :ra_not_available} ->
-            # Ra not available, write directly to ETS
             :ets.insert(:chunk_index, {hash, updated_meta})
             {:reply, :ok, state}
 
@@ -316,12 +402,120 @@ defmodule NeonFS.Core.ChunkIndex do
     end
   end
 
-  # Private Helpers
+  @impl true
+  def handle_call({:update_locations, hash, locations}, _from, state) do
+    case :ets.lookup(:chunk_index, hash) do
+      [{^hash, chunk_meta}] ->
+        updated_meta = %{chunk_meta | locations: locations}
 
-  defp do_commit_chunk(hash) do
+        case do_quorum_write(updated_meta, quorum_opts()) do
+          :ok ->
+            :ets.insert(:chunk_index, {hash, updated_meta})
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      [] ->
+        {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def terminate(_reason, _state) do
+    :persistent_term.erase({__MODULE__, :quorum_opts})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  # Private — Current quorum opts (always read from persistent_term to get
+  # the latest ring after rebuild_quorum_ring updates it)
+
+  defp quorum_opts do
+    :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+  end
+
+  # Private — Quorum operations
+
+  defp do_quorum_write(chunk_meta, nil) do
+    case maybe_ra_command({:put_chunk, chunk_to_ra_map(chunk_meta)}) do
+      {:ok, :ok} ->
+        :ok
+
+      {:error, :ra_not_available} ->
+        :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_quorum_write(chunk_meta, quorum_opts) do
+    key = chunk_key(chunk_meta.hash)
+    storable = chunk_to_storable_map(chunk_meta)
+
+    case QuorumCoordinator.quorum_write(key, storable, quorum_opts) do
+      {:ok, :written} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_quorum_delete(hash, nil) do
+    case maybe_ra_command({:delete_chunk, hash}) do
+      {:ok, :ok} -> :ok
+      {:error, :ra_not_available} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_quorum_delete(hash, quorum_opts) do
+    key = chunk_key(hash)
+
+    case QuorumCoordinator.quorum_delete(key, quorum_opts) do
+      {:ok, :written} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp get_from_quorum(hash) do
+    case quorum_opts() do
+      nil ->
+        get_from_ra(hash)
+
+      opts ->
+        key = chunk_key(hash)
+
+        case QuorumCoordinator.quorum_read(key, opts) do
+          {:ok, value} ->
+            chunk_meta = storable_map_to_chunk(value)
+            :ets.insert(:chunk_index, {hash, chunk_meta})
+            {:ok, chunk_meta}
+
+          {:ok, value, :possibly_stale} ->
+            chunk_meta = storable_map_to_chunk(value)
+            :ets.insert(:chunk_index, {hash, chunk_meta})
+            {:ok, chunk_meta}
+
+          {:error, :not_found} ->
+            {:error, :not_found}
+
+          {:error, _reason} ->
+            {:error, :not_found}
+        end
+    end
+  rescue
+    _ -> {:error, :not_found}
+  end
+
+  # Private — Commit
+
+  defp do_commit_chunk(hash, quorum_opts) do
     with [{^hash, chunk_meta}] <- :ets.lookup(:chunk_index, hash),
          {:ok, committed_meta} <- ChunkMeta.commit(chunk_meta),
-         :ok <- persist_committed_chunk(hash, committed_meta) do
+         :ok <- persist_committed_chunk(committed_meta, quorum_opts) do
       :ok
     else
       [] -> {:error, :not_found}
@@ -329,23 +523,36 @@ defmodule NeonFS.Core.ChunkIndex do
     end
   end
 
-  defp persist_committed_chunk(hash, committed_meta) do
-    case maybe_ra_command({:commit_chunk, hash}) do
+  defp persist_committed_chunk(committed_meta, nil) do
+    case maybe_ra_command({:commit_chunk, committed_meta.hash}) do
       {:ok, :ok} ->
-        :ets.insert(:chunk_index, {hash, committed_meta})
+        :ets.insert(:chunk_index, {committed_meta.hash, committed_meta})
         :ok
 
       {:ok, {:error, reason}} ->
         {:error, reason}
 
       {:error, :ra_not_available} ->
-        :ets.insert(:chunk_index, {hash, committed_meta})
+        :ets.insert(:chunk_index, {committed_meta.hash, committed_meta})
         :ok
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  defp persist_committed_chunk(committed_meta, quorum_opts) do
+    case do_quorum_write(committed_meta, quorum_opts) do
+      :ok ->
+        :ets.insert(:chunk_index, {committed_meta.hash, committed_meta})
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Private — ETS query helpers
 
   defp has_location?(chunk_meta, node, drive_id, tier) do
     Enum.any?(chunk_meta.locations, fn location ->
@@ -359,7 +566,183 @@ defmodule NeonFS.Core.ChunkIndex do
     end)
   end
 
-  # Query Ra for chunk metadata by hash, caching the result locally if found
+  # Private — Key format
+
+  defp chunk_key(hash) when is_binary(hash) do
+    @chunk_key_prefix <> Base.encode16(hash)
+  end
+
+  # Private — Serialisation
+
+  defp chunk_to_storable_map(%ChunkMeta{} = chunk_meta) do
+    %{
+      hash: chunk_meta.hash,
+      original_size: chunk_meta.original_size,
+      stored_size: chunk_meta.stored_size,
+      compression: chunk_meta.compression,
+      locations: chunk_meta.locations,
+      target_replicas: chunk_meta.target_replicas,
+      commit_state: chunk_meta.commit_state,
+      stripe_id: chunk_meta.stripe_id,
+      stripe_index: chunk_meta.stripe_index,
+      created_at: chunk_meta.created_at,
+      last_verified: chunk_meta.last_verified
+    }
+  end
+
+  defp storable_map_to_chunk(map) when is_map(map) do
+    %ChunkMeta{
+      hash: get_field(map, :hash),
+      original_size: get_field(map, :original_size),
+      stored_size: get_field(map, :stored_size),
+      compression: to_atom(get_field(map, :compression)),
+      locations: decode_locations(get_field(map, :locations, [])),
+      target_replicas: get_field(map, :target_replicas, 1),
+      commit_state: to_atom(get_field(map, :commit_state, :uncommitted)),
+      active_write_refs: MapSet.new(),
+      stripe_id: get_field(map, :stripe_id),
+      stripe_index: get_field(map, :stripe_index),
+      created_at: decode_datetime(get_field(map, :created_at)),
+      last_verified: decode_datetime(get_field(map, :last_verified))
+    }
+  end
+
+  defp get_field(map, key, default \\ nil) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key)) || default
+  end
+
+  defp decode_locations(locations) when is_list(locations) do
+    Enum.map(locations, fn loc ->
+      %{
+        node: to_atom(get_field(loc, :node)),
+        drive_id: get_field(loc, :drive_id),
+        tier: to_atom(get_field(loc, :tier))
+      }
+    end)
+  end
+
+  defp decode_locations(_), do: []
+
+  defp to_atom(value) when is_atom(value), do: value
+  defp to_atom(value) when is_binary(value), do: String.to_existing_atom(value)
+  defp to_atom(nil), do: nil
+
+  defp decode_datetime(%DateTime{} = dt), do: dt
+  defp decode_datetime(nil), do: nil
+
+  defp decode_datetime(str) when is_binary(str) do
+    case DateTime.from_iso8601(str) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp decode_datetime(_), do: nil
+
+  # Private — Local store loading
+
+  defp load_from_local_store do
+    drives = Application.get_env(:neonfs_core, :drives) || default_drives()
+
+    count =
+      Enum.reduce(drives, 0, fn drive, total ->
+        drive_path = drive_path(drive)
+        meta_dir = Path.join(drive_path, "meta")
+
+        case File.ls(meta_dir) do
+          {:ok, segment_dirs} ->
+            total + load_segments_from_disk(meta_dir, segment_dirs)
+
+          {:error, _} ->
+            total
+        end
+      end)
+
+    {:ok, count}
+  rescue
+    _ -> {:error, :not_available}
+  end
+
+  defp load_segments_from_disk(meta_dir, segment_dirs) do
+    Enum.reduce(segment_dirs, 0, fn segment_hex, count ->
+      segment_dir = Path.join(meta_dir, segment_hex)
+      key_files = walk_metadata_files(segment_dir)
+      count + load_chunk_files(key_files)
+    end)
+  end
+
+  defp load_chunk_files(file_paths) do
+    Enum.reduce(file_paths, 0, fn file_path, count ->
+      case load_chunk_file(file_path) do
+        :ok -> count + 1
+        :skip -> count
+      end
+    end)
+  end
+
+  defp load_chunk_file(file_path) do
+    with {:ok, data} <- File.read(file_path),
+         {:ok, chunk_meta} <- decode_chunk_record(data) do
+      :ets.insert(:chunk_index, {chunk_meta.hash, chunk_meta})
+      :ok
+    else
+      _ -> :skip
+    end
+  end
+
+  defp walk_metadata_files(dir) do
+    case File.ls(dir) do
+      {:ok, entries} ->
+        Enum.flat_map(entries, &collect_metadata_entry(dir, &1))
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp collect_metadata_entry(dir, entry) do
+    path = Path.join(dir, entry)
+
+    cond do
+      File.dir?(path) -> walk_metadata_files(path)
+      String.contains?(entry, ".tmp") -> []
+      true -> [path]
+    end
+  end
+
+  defp decode_chunk_record(data) do
+    case MetadataCodec.decode_record(data) do
+      {:ok, %{tombstone: true}} ->
+        :skip
+
+      {:ok, %{value: value}} when is_map(value) ->
+        if chunk_metadata?(value) do
+          {:ok, storable_map_to_chunk(value)}
+        else
+          :skip
+        end
+
+      _ ->
+        :skip
+    end
+  end
+
+  defp chunk_metadata?(map) do
+    (Map.has_key?(map, :hash) or Map.has_key?(map, "hash")) and
+      (Map.has_key?(map, :original_size) or Map.has_key?(map, "original_size")) and
+      (Map.has_key?(map, :stored_size) or Map.has_key?(map, "stored_size"))
+  end
+
+  defp default_drives do
+    base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs/blobs")
+    [%{id: "default", path: base_dir, tier: :hot, capacity: 0}]
+  end
+
+  defp drive_path(%{path: path}), do: path
+  defp drive_path(drive) when is_map(drive), do: Map.get(drive, :path, Map.get(drive, "path", ""))
+
+  # Private — Ra fallback (nil quorum_opts mode)
+
   defp get_from_ra(hash) do
     case RaSupervisor.query(fn state ->
            chunks = Map.get(state, :chunks, %{})
@@ -369,8 +752,7 @@ defmodule NeonFS.Core.ChunkIndex do
         {:error, :not_found}
 
       {:ok, chunk_map} ->
-        chunk_meta = map_to_struct(chunk_map)
-        # Cache locally for future lookups
+        chunk_meta = ra_map_to_chunk(chunk_map)
         :ets.insert(:chunk_index, {hash, chunk_meta})
         {:ok, chunk_meta}
 
@@ -384,29 +766,19 @@ defmodule NeonFS.Core.ChunkIndex do
     :exit, _ -> {:error, :not_found}
   end
 
-  # Try to execute a Ra command, but gracefully handle Ra not being available
-  # Returns {:ok, result} | {:error, :ra_not_available} | {:error, reason}
-  #
-  # IMPORTANT: Only returns :ra_not_available when Ra has not been initialized yet
-  # (Phase 1 single-node mode). Once Ra is initialized, errors are propagated
-  # so that quorum loss is properly detected.
-  #
-  # credo:disable-for-next-line Credo.Check.Refactor.Try
   defp maybe_ra_command(cmd) do
     initialized = RaServer.initialized?()
 
     try do
       case RaSupervisor.command(cmd) do
+        {:ok, {:error, :unknown_command}, _leader} ->
+          {:error, :ra_not_available}
+
         {:ok, result, _leader} ->
           {:ok, result}
 
         {:error, :noproc} ->
-          # Ra server not running - check if it was ever initialized
-          if initialized do
-            {:error, :ra_unavailable}
-          else
-            {:error, :ra_not_available}
-          end
+          ra_noproc_error(initialized)
 
         {:error, reason} ->
           {:error, reason}
@@ -416,30 +788,26 @@ defmodule NeonFS.Core.ChunkIndex do
       end
     catch
       :exit, {:noproc, _} ->
-        if initialized do
-          {:error, :ra_unavailable}
-        else
-          {:error, :ra_not_available}
-        end
+        ra_noproc_error(initialized)
 
       kind, reason ->
         Logger.debug("Ra command error: #{inspect({kind, reason})}")
 
-        if initialized do
-          {:error, {:ra_error, {kind, reason}}}
-        else
-          {:error, :ra_not_available}
-        end
+        if initialized,
+          do: {:error, {:ra_error, {kind, reason}}},
+          else: {:error, :ra_not_available}
     end
   end
 
-  # Restore chunks from Ra state into ETS
+  defp ra_noproc_error(true), do: {:error, :ra_unavailable}
+  defp ra_noproc_error(false), do: {:error, :ra_not_available}
+
   defp restore_from_ra do
-    case RaSupervisor.query(fn state -> state.chunks end) do
+    case RaSupervisor.query(fn state -> Map.get(state, :chunks, %{}) end) do
       {:ok, chunks} when is_map(chunks) ->
         count =
           Enum.reduce(chunks, 0, fn {hash, chunk_map}, acc ->
-            chunk_meta = map_to_struct(chunk_map)
+            chunk_meta = ra_map_to_chunk(chunk_map)
             :ets.insert(:chunk_index, {hash, chunk_meta})
             acc + 1
           end)
@@ -451,8 +819,7 @@ defmodule NeonFS.Core.ChunkIndex do
     end
   end
 
-  # Convert ChunkMeta struct to map for Ra storage
-  defp struct_to_map(%ChunkMeta{} = chunk_meta) do
+  defp chunk_to_ra_map(%ChunkMeta{} = chunk_meta) do
     %{
       hash: chunk_meta.hash,
       original_size: chunk_meta.original_size,
@@ -469,8 +836,7 @@ defmodule NeonFS.Core.ChunkIndex do
     }
   end
 
-  # Convert map from Ra storage to ChunkMeta struct
-  defp map_to_struct(chunk_map) when is_map(chunk_map) do
+  defp ra_map_to_chunk(chunk_map) when is_map(chunk_map) do
     %ChunkMeta{
       hash: chunk_map.hash,
       original_size: chunk_map.original_size,

@@ -57,6 +57,7 @@ defmodule NeonFS.Core.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:msgpax, "~> 2.4"},
       {:neonfs_client, path: "../neonfs_client"},
       {:ra, "~> 2.13"},
       {:reactor, "~> 0.13"},
@@ -71,7 +72,8 @@ defmodule NeonFS.Core.MixProject do
       {:earmark, "~> 1.4", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.7", only: [:dev, :test]},
-      {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false}
+      {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
+      {:stream_data, "~> 1.0", only: [:test]}
     ]
   end
 end

@@ -1,9 +1,9 @@
 defmodule NeonFS.Integration.FailureTest do
   use NeonFS.Integration.ClusterCase, async: false
 
-  @moduletag timeout: 180_000
+  @moduletag timeout: 300_000
+  # Phase 5 quorum-replicated metadata enables multi-node failure tolerance
   @moduletag nodes: 3
-
   setup %{cluster: cluster} do
     :ok = init_cluster_with_data(cluster)
     %{cluster: cluster}
@@ -14,8 +14,9 @@ defmodule NeonFS.Integration.FailureTest do
       # Stop node3 (simulates crash)
       :ok = PeerCluster.stop_node(cluster, :node3)
 
-      # Wait for cluster to detect the failure and still be operational
-      assert_eventually timeout: 10_000 do
+      # Wait for cluster to detect the failure and still be operational.
+      # Use default 30s RPC timeout — with node3 dead, quorum reads take longer.
+      assert_eventually timeout: 60_000 do
         # Data should still be readable (quorum of 2 still available)
         case PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :read_file, [
                "test-volume",
@@ -64,25 +65,28 @@ defmodule NeonFS.Integration.FailureTest do
           "during"
         ])
 
-      # Note: Node restart not supported with simple child_spec approach.
-      # Verifying data on surviving nodes instead.
+      # Verify both files are readable from surviving nodes.
+      # Use default 30s RPC timeout — with node3 dead, each quorum read waits
+      # up to 5.5s for the dead replica timeout, and read_file chains 2-3 reads.
+      assert_eventually timeout: 60_000 do
+        case PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :read_file, [
+               "test-volume",
+               "/before-crash.txt"
+             ]) do
+          {:ok, "before"} -> true
+          _ -> false
+        end
+      end
 
-      # Verify both files are readable from surviving nodes
-      {:ok, content1} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :read_file, [
-          "test-volume",
-          "/before-crash.txt"
-        ])
-
-      assert content1 == "before"
-
-      {:ok, content2} =
-        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
-          "test-volume",
-          "/during-outage.txt"
-        ])
-
-      assert content2 == "during"
+      assert_eventually timeout: 60_000 do
+        case PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+               "test-volume",
+               "/during-outage.txt"
+             ]) do
+          {:ok, "during"} -> true
+          _ -> false
+        end
+      end
     end
   end
 
@@ -109,31 +113,7 @@ defmodule NeonFS.Integration.FailureTest do
   end
 
   defp init_cluster_with_data(cluster) do
-    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
-    {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
-
-    node1_info = PeerCluster.get_node!(cluster, :node1)
-    node1_str = Atom.to_string(node1_info.node)
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node2, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node3, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    # Wait for cluster to stabilize
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
+    init_multi_node_cluster(cluster)
 
     {:ok, _} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
@@ -148,11 +128,11 @@ defmodule NeonFS.Integration.FailureTest do
         "test data"
       ])
 
-    # Wait for initial replication to complete
+    # Wait for initial data to be readable from node2 (proves quorum replication works)
     :ok =
       wait_until(
         fn ->
-          case PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :read_file, [
+          case PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
                  "test-volume",
                  "/test.txt"
                ]) do
@@ -160,9 +140,75 @@ defmodule NeonFS.Integration.FailureTest do
             _ -> false
           end
         end,
-        timeout: 10_000
+        timeout: 60_000
       )
 
     :ok
+  end
+
+  defp init_multi_node_cluster(cluster) do
+    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+
+    {:ok, %{"token" => token}} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
+
+    node1_info = PeerCluster.get_node!(cluster, :node1)
+    node1_str = Atom.to_string(node1_info.node)
+
+    join_nodes_sequentially(cluster, token, node1_str)
+    wait_for_full_mesh(cluster)
+    rebuild_quorum_rings(cluster)
+
+    :ok
+  end
+
+  defp join_nodes_sequentially(cluster, token, node1_str) do
+    for node_name <- [:node2, :node3] do
+      {:ok, _} =
+        PeerCluster.rpc(cluster, node_name, NeonFS.CLI.Handler, :join_cluster, [
+          token,
+          node1_str
+        ])
+
+      wait_for_cluster_stable(cluster)
+    end
+  end
+
+  defp wait_for_cluster_stable(cluster) do
+    :ok =
+      wait_until(
+        fn ->
+          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
+            {:ok, _status} -> true
+            _ -> false
+          end
+        end,
+        timeout: 10_000
+      )
+  end
+
+  defp wait_for_full_mesh(cluster) do
+    peer_nodes = Enum.map([:node1, :node2, :node3], &PeerCluster.get_node!(cluster, &1).node)
+
+    assert_eventually timeout: 30_000 do
+      Enum.all?(peer_nodes, fn peer ->
+        node_list = :rpc.call(peer, Node, :list, [])
+        other_peers = Enum.filter(node_list, &(&1 in peer_nodes))
+
+        has_metadata_store =
+          case :rpc.call(peer, Process, :whereis, [NeonFS.Core.MetadataStore]) do
+            pid when is_pid(pid) -> true
+            _ -> false
+          end
+
+        length(other_peers) >= 2 and has_metadata_store
+      end)
+    end
+  end
+
+  defp rebuild_quorum_rings(cluster) do
+    for node_name <- [:node1, :node2, :node3] do
+      PeerCluster.rpc(cluster, node_name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
+    end
   end
 end

@@ -49,6 +49,9 @@ defmodule NeonFS.Integration.ClusterCase do
     # Use ExUnit's tmp_dir if available, otherwise create our own
     base_dir = Map.get(tags, :tmp_dir) || create_temp_dir()
 
+    # Ensure no stale peer nodes from previous tests (on_exit runs asynchronously)
+    ensure_clean_node_state()
+
     # Start cluster in the provided directory
     cluster =
       PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
@@ -56,10 +59,53 @@ defmodule NeonFS.Integration.ClusterCase do
     # Connect all nodes to each other
     PeerCluster.connect_nodes(cluster)
 
+    # Force the global name server to reconcile its view of the network.
+    # Without this, global may see leftover distribution state from old
+    # clusters and disconnect peer nodes to "prevent overlapping partitions".
+    :global.sync()
+
     # Register cleanup for nodes (tmp_dir is cleaned up by ExUnit automatically)
     on_exit(fn -> PeerCluster.stop_cluster(cluster) end)
 
     %{cluster: cluster}
+  end
+
+  defp ensure_clean_node_state do
+    # Wait for stale peer VMs from a previous test's async on_exit to fully
+    # terminate. We check EPMD directly — any "node*" entry is from a previous
+    # test cluster and must be gone before we start new peers to avoid resource
+    # contention (CPU/memory from zombie VMs slowing down new cluster startup).
+    wait_until(
+      fn ->
+        disconnect_stale_peers()
+        no_stale_epmd_entries?()
+      end,
+      timeout: 15_000,
+      interval: 200
+    )
+
+    # Reconcile global's network view after old peers are gone, before
+    # the new cluster connects. This reduces the chance of global acting
+    # on stale distribution state from the previous cluster.
+    :global.sync()
+  end
+
+  defp disconnect_stale_peers do
+    for node <- Node.list(),
+        String.starts_with?(Atom.to_string(node), "node"),
+        do: Node.disconnect(node)
+  end
+
+  defp no_stale_epmd_entries? do
+    case :erl_epmd.names() do
+      {:ok, names} ->
+        not Enum.any?(names, fn {name, _port} ->
+          String.starts_with?(to_string(name), "node")
+        end)
+
+      {:error, _} ->
+        true
+    end
   end
 
   defp create_temp_dir do

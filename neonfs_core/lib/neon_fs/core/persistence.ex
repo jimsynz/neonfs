@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.Persistence do
   @moduledoc """
-  Coordinates metadata persistence for all NeonFS Core metadata tables.
+  Coordinates metadata persistence for NeonFS Core configuration tables.
 
   Provides DETS-backed persistence with atomic write-then-move semantics to
   prevent corruption during shutdown. Periodically snapshots ETS tables to
@@ -8,17 +8,21 @@ defmodule NeonFS.Core.Persistence do
 
   ## Persistence Strategy
 
-  - **Startup**: Load DETS → ETS for all metadata tables
+  - **Startup**: Load DETS -> ETS for configuration tables
   - **Runtime**: Periodic snapshots every N seconds (default: 30s)
   - **Shutdown**: Immediate snapshot before termination
   - **Atomic Writes**: Write to `.tmp` file, sync, then rename
 
-  ## Metadata Tables
+  ## Persisted Tables
 
-  - ChunkIndex: `:chunk_index` → `/var/lib/neonfs/meta/chunk_index.dets`
-  - FileIndex: `:file_index_by_id`, `:file_index_by_path` → `file_index_*.dets`
-  - VolumeRegistry: `:volumes_by_id`, `:volumes_by_name` → `volume_registry_*.dets`
-  - StripeIndex: `:stripe_index` → `stripe_index.dets`
+  - VolumeRegistry: `:volumes_by_id`, `:volumes_by_name` -> `volume_registry_*.dets`
+
+  ## Metadata Tables (NOT persisted here)
+
+  ChunkIndex, FileIndex, and StripeIndex are now backed by the leaderless
+  quorum-replicated BlobStore (Phase 5). They load from local BlobStore
+  on startup via `load_from_local_store/0` — DETS snapshots are no longer
+  needed for these tables.
   """
 
   use GenServer
@@ -95,22 +99,14 @@ defmodule NeonFS.Core.Persistence do
     cleanup_temp_files(meta_dir)
 
     # Define table configurations
+    # Only VolumeRegistry tables are persisted via DETS.
+    # ChunkIndex, FileIndex, StripeIndex load from BlobStore on startup (Phase 5).
     tables = [
-      %{ets_table: :chunk_index, dets_path: Path.join(meta_dir, "chunk_index.dets")},
-      %{
-        ets_table: :file_index_by_id,
-        dets_path: Path.join(meta_dir, "file_index_by_id.dets")
-      },
-      %{
-        ets_table: :file_index_by_path,
-        dets_path: Path.join(meta_dir, "file_index_by_path.dets")
-      },
       %{ets_table: :volumes_by_id, dets_path: Path.join(meta_dir, "volume_registry_by_id.dets")},
       %{
         ets_table: :volumes_by_name,
         dets_path: Path.join(meta_dir, "volume_registry_by_name.dets")
-      },
-      %{ets_table: :stripe_index, dets_path: Path.join(meta_dir, "stripe_index.dets")}
+      }
     ]
 
     state = %{tables: tables, snapshot_interval_ms: snapshot_interval_ms}
@@ -196,7 +192,7 @@ defmodule NeonFS.Core.Persistence do
     # Wait for ETS table to be created by the owning GenServer
     wait_for_ets_table(ets_table)
 
-    # Load DETS → ETS
+    # Load DETS -> ETS
     case :dets.to_ets(dets_ref, ets_table) do
       ^ets_table ->
         count = :ets.info(ets_table, :size)

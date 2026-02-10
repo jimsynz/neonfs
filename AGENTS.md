@@ -121,6 +121,13 @@ mix test                       # All Elixir tests
 cargo test                     # Rust tests
 ```
 
+**Test suite performance:** The full check suite (`mix check --no-retry`) takes several minutes, and the integration tests (`neonfs_integration`) alone can take 6+ minutes. **Save test output to a file and grep it** rather than re-running the suite each time you need to inspect results:
+```bash
+mix check --no-retry 2>&1 | tee /tmp/neonfs_check.txt
+grep -E 'failure|FAILED|✕' /tmp/neonfs_check.txt
+```
+Run individual test files first to iterate quickly before running the full suite.
+
 ## Version Requirements
 
 From `.tool-versions`:
@@ -187,6 +194,10 @@ For GenServers that own ETS tables and need persistence on shutdown:
 2. Supervisor shuts down children in REVERSE start order
 3. Each GenServer should persist its own ETS tables in `terminate/2` while they still exist
 4. Don't rely on a central Persistence GenServer to snapshot tables owned by other processes
+
+## Phase 5 Metadata Migration
+
+Phase 5 migrates metadata indexes (ChunkIndex, FileIndex, StripeIndex) from Ra-backed storage to leaderless quorum-replicated BlobStore via QuorumCoordinator. **There is no need for backward compatibility with Ra in the migrated modules.** When migrating an index module, remove all Ra fallback code paths entirely — the module should require `quorum_opts` and use QuorumCoordinator exclusively. Do not add dual-mode (Ra + quorum) support.
 
 ## Rustler NIF Return Values
 

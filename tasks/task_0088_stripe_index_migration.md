@@ -1,7 +1,7 @@
 # Task 0088: StripeIndex Migration to Quorum Store
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering

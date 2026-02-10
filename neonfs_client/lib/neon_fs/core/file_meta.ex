@@ -23,7 +23,8 @@ defmodule NeonFS.Core.FileMeta do
           modified_at: DateTime.t(),
           accessed_at: DateTime.t(),
           version: non_neg_integer(),
-          previous_version_id: String.t() | nil
+          previous_version_id: String.t() | nil,
+          hlc_timestamp: term()
         }
 
   defstruct [
@@ -40,7 +41,8 @@ defmodule NeonFS.Core.FileMeta do
     :modified_at,
     :accessed_at,
     :version,
-    :previous_version_id
+    :previous_version_id,
+    :hlc_timestamp
   ]
 
   @doc """

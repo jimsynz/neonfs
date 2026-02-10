@@ -116,13 +116,15 @@ defmodule NeonFS.TestHelpers do
 
   @doc """
   List files in a directory within a volume.
+
+  Returns `{:ok, children_map}` where children_map is
+  `%{name => %{type: :file | :dir, id: binary()}}`.
   """
-  @spec list_dir(String.t(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  @spec list_dir(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def list_dir(volume_name, dir_path) do
     case VolumeRegistry.get_by_name(volume_name) do
       {:ok, volume} ->
-        files = FileIndex.list_dir(volume.id, dir_path)
-        {:ok, files}
+        FileIndex.list_dir(volume.id, dir_path)
 
       {:error, _} = error ->
         error

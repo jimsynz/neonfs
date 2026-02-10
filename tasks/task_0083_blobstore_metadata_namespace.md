@@ -1,7 +1,7 @@
 # Task 0083: BlobStore Metadata Namespace
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering

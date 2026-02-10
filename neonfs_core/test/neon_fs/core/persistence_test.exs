@@ -10,10 +10,8 @@ defmodule NeonFS.Core.PersistenceTest do
     configure_test_dirs(tmp_dir)
     stop_ra()
 
-    # Start persistence and the subsystems that own ETS tables
+    # Start persistence and volume registry (which owns the ETS tables we persist)
     start_persistence()
-    start_chunk_index()
-    start_file_index()
     start_volume_registry()
 
     on_exit(fn -> cleanup_test_dirs() end)
@@ -23,43 +21,47 @@ defmodule NeonFS.Core.PersistenceTest do
 
   describe "snapshot_now/0" do
     test "creates DETS files from ETS tables", %{meta_dir: meta_dir} do
-      # Insert test data into ETS tables
-      :ets.insert(:chunk_index, {:test_chunk, "chunk_data"})
-      :ets.insert(:file_index_by_id, {:test_file, "file_data"})
+      # Insert test data into volume ETS tables
       :ets.insert(:volumes_by_id, {:test_volume, "volume_data"})
+      :ets.insert(:volumes_by_name, {"test-vol", :test_volume})
 
       # Trigger snapshot
       :ok = Persistence.snapshot_now()
 
-      # Verify DETS files were created
-      assert File.exists?(Path.join(meta_dir, "chunk_index.dets"))
-      assert File.exists?(Path.join(meta_dir, "file_index_by_id.dets"))
+      # Verify DETS files were created for volume tables
       assert File.exists?(Path.join(meta_dir, "volume_registry_by_id.dets"))
+      assert File.exists?(Path.join(meta_dir, "volume_registry_by_name.dets"))
+
+      # Metadata tables (chunk_index, file_index, stripe_index) are no longer
+      # persisted via DETS — they load from BlobStore on startup (Phase 5)
+      refute File.exists?(Path.join(meta_dir, "chunk_index.dets"))
+      refute File.exists?(Path.join(meta_dir, "file_index_by_id.dets"))
+      refute File.exists?(Path.join(meta_dir, "stripe_index.dets"))
     end
 
     test "persists data that can be read back", %{meta_dir: meta_dir} do
-      # Insert test data
-      :ets.insert(:chunk_index, {:chunk_key, %{size: 1024}})
+      # Insert test data into volume table
+      :ets.insert(:volumes_by_id, {:vol_key, %{name: "test-volume"}})
 
       # Trigger snapshot
       :ok = Persistence.snapshot_now()
 
       # Read back from DETS
-      dets_path = Path.join(meta_dir, "chunk_index.dets")
+      dets_path = Path.join(meta_dir, "volume_registry_by_id.dets")
 
       {:ok, dets} =
-        :dets.open_file(:verify_chunk, type: :set, file: String.to_charlist(dets_path))
+        :dets.open_file(:verify_volume, type: :set, file: String.to_charlist(dets_path))
 
-      result = :dets.lookup(dets, :chunk_key)
+      result = :dets.lookup(dets, :vol_key)
       :dets.close(dets)
 
-      assert result == [{:chunk_key, %{size: 1024}}]
+      assert result == [{:vol_key, %{name: "test-volume"}}]
     end
   end
 
   describe "atomic writes" do
     test "does not leave .tmp files after successful snapshot", %{meta_dir: meta_dir} do
-      :ets.insert(:chunk_index, {:key, "value"})
+      :ets.insert(:volumes_by_id, {:key, "value"})
       :ok = Persistence.snapshot_now()
 
       # Check no .tmp files remain

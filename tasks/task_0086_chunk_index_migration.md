@@ -1,7 +1,7 @@
 # Task 0086: ChunkIndex Migration to Quorum Store
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering
@@ -10,22 +10,22 @@ Not Started
 Migrate ChunkIndex from Ra-backed storage to the leaderless quorum system via QuorumCoordinator. Replace all `maybe_ra_command` calls with `QuorumCoordinator.quorum_write/3` and all `get_from_ra` calls with `QuorumCoordinator.quorum_read/2`. Chunk metadata is stored in the BlobStore metadata namespace with deterministic keys. The public API of ChunkIndex remains unchanged — callers (WriteOperation, ReadOperation, GC) are unaffected.
 
 ## Acceptance Criteria
-- [ ] `ChunkIndex.put/2` uses `QuorumCoordinator.quorum_write/3` instead of Ra command
-- [ ] `ChunkIndex.get/1` uses `QuorumCoordinator.quorum_read/2` instead of Ra query
-- [ ] `ChunkIndex.delete/1` uses `QuorumCoordinator.quorum_delete/2` instead of Ra command
-- [ ] `ChunkIndex.exists?/1` uses quorum read (returns boolean)
-- [ ] Metadata key format: `"chunk:#{Base.encode16(chunk_hash)}"` — deterministic, not content-addressed
-- [ ] Local ETS cache retained for fast lookups (populated from MetadataStore on startup, updated on writes)
-- [ ] `restore_from_ra/0` replaced with `load_from_local_store/0` — loads chunk metadata from local BlobStore metadata directory walk into ETS
-- [ ] `active_write_refs` tracking stays local (ephemeral, single-node — not replicated)
-- [ ] DETS/Persistence integration for chunks removed (BlobStore handles durability)
-- [ ] All public API functions (`put`, `get`, `delete`, `exists?`, `get_chunks_for_volume`, `list_all`) maintain their existing signatures and return types
-- [ ] `get_chunks_for_volume/1` works via local ETS scan (not quorum read — would be too expensive)
-- [ ] Unit tests: put chunk via quorum, read back, verify equal
-- [ ] Unit tests: delete chunk, verify not_found on read
-- [ ] Unit tests: local ETS cache updated on write/delete
-- [ ] Unit tests: load_from_local_store populates ETS from BlobStore
-- [ ] All existing ChunkIndex tests pass (adapted to new backend)
+- [x] `ChunkIndex.put/2` uses `QuorumCoordinator.quorum_write/3` instead of Ra command
+- [x] `ChunkIndex.get/1` uses `QuorumCoordinator.quorum_read/2` instead of Ra query
+- [x] `ChunkIndex.delete/1` uses `QuorumCoordinator.quorum_delete/2` instead of Ra command
+- [x] `ChunkIndex.exists?/1` uses quorum read (returns boolean)
+- [x] Metadata key format: `"chunk:#{Base.encode16(chunk_hash)}"` — deterministic, not content-addressed
+- [x] Local ETS cache retained for fast lookups (populated from MetadataStore on startup, updated on writes)
+- [x] `restore_from_ra/0` replaced with `load_from_local_store/0` — loads chunk metadata from local BlobStore metadata directory walk into ETS
+- [x] `active_write_refs` tracking stays local (ephemeral, single-node — not replicated)
+- [x] DETS/Persistence integration for chunks removed (BlobStore handles durability)
+- [x] All public API functions (`put`, `get`, `delete`, `exists?`, `get_chunks_for_volume`, `list_all`) maintain their existing signatures and return types
+- [x] `get_chunks_for_volume/1` works via local ETS scan (not quorum read — would be too expensive)
+- [x] Unit tests: put chunk via quorum, read back, verify equal
+- [x] Unit tests: delete chunk, verify not_found on read
+- [x] Unit tests: local ETS cache updated on write/delete
+- [x] Unit tests: load_from_local_store populates ETS from BlobStore
+- [x] All existing ChunkIndex tests pass (adapted to new backend)
 
 ## Testing Strategy
 - ExUnit tests with QuorumCoordinator (can use single-node setup where quorum of 1 is sufficient)

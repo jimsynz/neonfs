@@ -1,7 +1,7 @@
 # Task 0081: Consistent Hashing Ring
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering

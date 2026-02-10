@@ -4,19 +4,72 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
   alias NeonFS.Core.ChunkIndex
   alias NeonFS.Core.ChunkMeta
+  alias NeonFS.Core.MetadataRing
 
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
-    stop_ra()
-    start_chunk_index()
-    on_exit(fn -> cleanup_test_dirs() end)
-    :ok
+
+    # Set up mock quorum infrastructure
+    store = :ets.new(:test_quorum_store, [:set, :public])
+
+    ring =
+      MetadataRing.new([node()],
+        virtual_nodes_per_physical: 4,
+        replicas: 1
+      )
+
+    write_fn = fn _node, _segment, key, value ->
+      :ets.insert(store, {key, value})
+      :ok
+    end
+
+    read_fn = fn _node, _segment, key ->
+      case :ets.lookup(store, key) do
+        [{^key, value}] -> {:ok, value, {1_000_000, 0, node()}}
+        [] -> {:error, :not_found}
+      end
+    end
+
+    delete_fn = fn _node, _segment, key ->
+      :ets.delete(store, key)
+      :ok
+    end
+
+    quorum_opts = [
+      ring: ring,
+      write_fn: write_fn,
+      read_fn: read_fn,
+      delete_fn: delete_fn,
+      quarantine_checker: fn _ -> false end,
+      read_repair_fn: fn _work_fn, _opts -> {:ok, "noop"} end,
+      local_node: node()
+    ]
+
+    stop_if_running(NeonFS.Core.ChunkIndex)
+    cleanup_ets_table(:chunk_index)
+
+    start_supervised!(
+      {NeonFS.Core.ChunkIndex, quorum_opts: quorum_opts},
+      restart: :temporary
+    )
+
+    on_exit(fn ->
+      cleanup_test_dirs()
+
+      try do
+        :ets.delete(store)
+      rescue
+        ArgumentError -> :ok
+      end
+    end)
+
+    %{store: store, quorum_opts: quorum_opts}
   end
 
   describe "put/1 and get/1" do
-    test "stores and retrieves chunk metadata" do
+    test "stores and retrieves chunk metadata via quorum" do
       hash = :crypto.strong_rand_bytes(32)
       chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
 
@@ -46,10 +99,33 @@ defmodule NeonFS.Core.ChunkIndexTest do
       assert retrieved.stored_size == 256
       assert retrieved.compression == :zstd
     end
+
+    test "quorum read populates ETS cache on miss", %{store: store} do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
+
+      # Write via put (goes to quorum + ETS)
+      assert :ok = ChunkIndex.put(chunk_meta)
+
+      # Remove from ETS cache manually
+      :ets.delete(:chunk_index, hash)
+      assert [] = :ets.lookup(:chunk_index, hash)
+
+      # Verify data is still in quorum store
+      key = "chunk:" <> Base.encode16(hash)
+      assert [{^key, _}] = :ets.lookup(store, key)
+
+      # get/1 should fall back to quorum and re-populate ETS
+      assert {:ok, retrieved} = ChunkIndex.get(hash)
+      assert retrieved.hash == hash
+
+      # ETS should be populated again
+      assert [{^hash, _}] = :ets.lookup(:chunk_index, hash)
+    end
   end
 
   describe "delete/1" do
-    test "removes chunk metadata" do
+    test "removes chunk metadata from quorum and ETS" do
       hash = :crypto.strong_rand_bytes(32)
       chunk_meta = ChunkMeta.new(hash, 1024, 512)
 
@@ -64,6 +140,59 @@ defmodule NeonFS.Core.ChunkIndexTest do
       hash = :crypto.strong_rand_bytes(32)
       assert :ok = ChunkIndex.delete(hash)
       assert :ok = ChunkIndex.delete(hash)
+    end
+  end
+
+  describe "exists?/1" do
+    test "returns true for existing chunk" do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+
+      assert :ok = ChunkIndex.put(chunk_meta)
+      assert ChunkIndex.exists?(hash)
+    end
+
+    test "returns false for non-existent chunk" do
+      hash = :crypto.strong_rand_bytes(32)
+      refute ChunkIndex.exists?(hash)
+    end
+
+    test "finds chunk via quorum when not in ETS cache", %{store: store} do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+
+      assert :ok = ChunkIndex.put(chunk_meta)
+
+      # Remove from ETS cache
+      :ets.delete(:chunk_index, hash)
+
+      # Verify data is still in quorum store
+      key = "chunk:" <> Base.encode16(hash)
+      assert [{^key, _}] = :ets.lookup(store, key)
+
+      # exists? should find it via quorum
+      assert ChunkIndex.exists?(hash)
+    end
+  end
+
+  describe "list_all/0" do
+    test "returns all chunks from ETS" do
+      hashes =
+        for _ <- 1..5 do
+          hash = :crypto.strong_rand_bytes(32)
+          chunk_meta = ChunkMeta.new(hash, 1024, 512)
+          ChunkIndex.put(chunk_meta)
+          hash
+        end
+
+      all = ChunkIndex.list_all()
+      assert length(all) == 5
+      all_hashes = Enum.map(all, & &1.hash) |> Enum.sort()
+      assert Enum.sort(hashes) == all_hashes
+    end
+
+    test "returns empty list when no chunks exist" do
+      assert [] = ChunkIndex.list_all()
     end
   end
 
@@ -185,7 +314,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
   end
 
   describe "add_write_ref/2 and remove_write_ref/2" do
-    test "adds and removes write references" do
+    test "adds and removes write references (local-only)" do
       hash = :crypto.strong_rand_bytes(32)
       chunk_meta = ChunkMeta.new(hash, 1024, 512)
 
@@ -352,6 +481,68 @@ defmodule NeonFS.Core.ChunkIndexTest do
         assert chunk.commit_state == :committed, "Chunk should be committed"
         assert MapSet.size(chunk.active_write_refs) == 0, "No active write refs should remain"
       end
+    end
+  end
+
+  describe "ETS cache behaviour" do
+    test "writes update both quorum and ETS", %{store: store} do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
+
+      assert :ok = ChunkIndex.put(chunk_meta)
+
+      # Check ETS
+      assert [{^hash, cached}] = :ets.lookup(:chunk_index, hash)
+      assert cached.hash == hash
+
+      # Check quorum store
+      key = "chunk:" <> Base.encode16(hash)
+      assert [{^key, stored}] = :ets.lookup(store, key)
+      assert stored[:hash] == hash
+    end
+
+    test "deletes remove from both quorum and ETS", %{store: store} do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+
+      assert :ok = ChunkIndex.put(chunk_meta)
+      assert :ok = ChunkIndex.delete(hash)
+
+      # ETS should be empty
+      assert [] = :ets.lookup(:chunk_index, hash)
+
+      # Quorum store should be empty
+      key = "chunk:" <> Base.encode16(hash)
+      assert [] = :ets.lookup(store, key)
+    end
+  end
+
+  describe "key format" do
+    test "uses chunk: prefix with hex-encoded hash", %{store: store} do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+
+      assert :ok = ChunkIndex.put(chunk_meta)
+
+      expected_key = "chunk:" <> Base.encode16(hash)
+      assert [{^expected_key, _}] = :ets.lookup(store, expected_key)
+    end
+  end
+
+  # Private helper to match test_case.ex pattern
+  defp stop_if_running(name) do
+    case Process.whereis(name) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal, 5000)
+    end
+
+    Process.sleep(10)
+  end
+
+  defp cleanup_ets_table(table) do
+    case :ets.whereis(table) do
+      :undefined -> :ok
+      ref -> :ets.delete(ref)
     end
   end
 end

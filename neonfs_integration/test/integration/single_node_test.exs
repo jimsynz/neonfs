@@ -15,7 +15,6 @@ defmodule NeonFS.Integration.SingleNodeTest do
 
   @moduletag timeout: 120_000
   @moduletag nodes: 1
-
   describe "file operations" do
     test "write and read file", %{cluster: cluster} do
       :ok = init_cluster_with_volume(cluster)
@@ -126,9 +125,9 @@ defmodule NeonFS.Integration.SingleNodeTest do
           "/"
         ])
 
-      root_paths = Enum.map(root_files, & &1.path)
-      assert "/file1.txt" in root_paths
-      assert "/file2.txt" in root_paths
+      root_names = Map.keys(root_files)
+      assert "file1.txt" in root_names
+      assert "file2.txt" in root_names
 
       # Verify subdirectory listing
       {:ok, docs_files} =
@@ -137,9 +136,9 @@ defmodule NeonFS.Integration.SingleNodeTest do
           "/docs"
         ])
 
-      docs_paths = Enum.map(docs_files, & &1.path)
-      assert "/docs/readme.md" in docs_paths
-      assert "/docs/guide.md" in docs_paths
+      docs_names = Map.keys(docs_files)
+      assert "readme.md" in docs_names
+      assert "guide.md" in docs_names
     end
 
     test "large file chunking and reassembly", %{cluster: cluster} do

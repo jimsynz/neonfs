@@ -14,6 +14,7 @@ defmodule NeonFS.Core.ReadOperation do
     ChunkFetcher,
     ChunkIndex,
     FileIndex,
+    ResolvedLookupCache,
     StripeIndex,
     VolumeRegistry
   }
@@ -56,14 +57,68 @@ defmodule NeonFS.Core.ReadOperation do
     )
 
     result =
-      with {:ok, volume} <- get_volume(volume_id),
-           {:ok, file_meta} <- get_file(volume_id, path) do
-        do_read(file_meta, volume, offset, length)
+      with {:ok, volume} <- get_volume(volume_id) do
+        read_with_cache(volume, volume_id, path, offset, length)
       end
 
     duration = System.monotonic_time() - start_time
     emit_read_telemetry(result, duration, volume_id, path)
     result
+  end
+
+  # ─── Cache-aware read ─────────────────────────────────────────────────
+
+  defp read_with_cache(volume, volume_id, path, offset, length) do
+    with {:ok, file_meta} <- get_file(volume_id, path) do
+      read_with_cache_lookup(file_meta, volume, offset, length)
+    end
+  end
+
+  defp read_with_cache_lookup(file_meta, volume, offset, length) do
+    case try_cache_read(file_meta, volume, offset, length) do
+      {:ok, _data} = result ->
+        result
+
+      :miss ->
+        read_and_populate_cache(file_meta, volume, offset, length)
+    end
+  end
+
+  defp read_and_populate_cache(file_meta, volume, offset, length) do
+    case do_read(file_meta, volume, offset, length) do
+      {:ok, _data} = result ->
+        populate_resolved_cache(file_meta)
+        result
+
+      error ->
+        error
+    end
+  end
+
+  defp try_cache_read(file_meta, volume, offset, length) do
+    case ResolvedLookupCache.get(file_meta.id) do
+      {:ok, _cached_metadata} ->
+        do_read(file_meta, volume, offset, length)
+
+      :miss ->
+        :miss
+    end
+  rescue
+    _ -> :miss
+  catch
+    :exit, _ -> :miss
+  end
+
+  defp populate_resolved_cache(file_meta) do
+    ResolvedLookupCache.put(file_meta.id, %{
+      file_meta: file_meta,
+      chunks: file_meta.chunks,
+      stripes: file_meta.stripes
+    })
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # ─── Routing ──────────────────────────────────────────────────────────

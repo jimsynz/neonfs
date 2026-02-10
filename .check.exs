@@ -3,7 +3,7 @@ subprojects =
   |> Path.wildcard(match_dot: true)
   |> Enum.map(&Path.dirname/1)
   |> Enum.map(&String.to_atom/1)
-  |> Enum.map(&{&1, command: "mix check --no-retry", cd: "#{&1}"})
+  |> Enum.map(&{&1, command: "mix check --no-retry", retry: "mix check --retry", cd: "#{&1}"})
 
 [
   parallel: true,

@@ -1,7 +1,7 @@
 # Task 0087: FileIndex and Directory Entry Migration
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 5 - Metadata Tiering

@@ -19,6 +19,7 @@ defmodule NeonFS.Core.WriteOperation do
     FileIndex,
     FileMeta,
     Replication,
+    ResolvedLookupCache,
     Stripe,
     StripeIndex,
     StripePlacement,
@@ -67,6 +68,12 @@ defmodule NeonFS.Core.WriteOperation do
       with {:ok, volume} <- get_volume(volume_id) do
         do_write(volume, path, data, write_id, opts)
       end
+
+    # Evict resolved lookup cache on successful write to prevent serving stale data
+    case result do
+      {:ok, file_meta} -> evict_resolved_cache(file_meta.id)
+      _ -> :ok
+    end
 
     duration = System.monotonic_time() - start_time
     emit_completion_telemetry(result, duration, volume_id, path, write_id, data)
@@ -517,8 +524,12 @@ defmodule NeonFS.Core.WriteOperation do
   defp create_erasure_file_metadata(volume_id, path, stripe_results, data, opts) do
     # Handle file overwrite
     case FileIndex.get_by_path(volume_id, path) do
-      {:ok, existing_file} -> FileIndex.delete(existing_file.id)
-      {:error, :not_found} -> :ok
+      {:ok, existing_file} ->
+        evict_resolved_cache(existing_file.id)
+        FileIndex.delete(existing_file.id)
+
+      {:error, :not_found} ->
+        :ok
     end
 
     # Build stripe references with byte ranges
@@ -724,8 +735,12 @@ defmodule NeonFS.Core.WriteOperation do
     chunk_hashes = Enum.map(sorted_chunks, & &1.hash)
 
     case FileIndex.get_by_path(volume_id, path) do
-      {:ok, existing_file} -> FileIndex.delete(existing_file.id)
-      {:error, :not_found} -> :ok
+      {:ok, existing_file} ->
+        evict_resolved_cache(existing_file.id)
+        FileIndex.delete(existing_file.id)
+
+      {:error, :not_found} ->
+        :ok
     end
 
     file_opts = [chunks: chunk_hashes, size: byte_size(data)]
@@ -846,6 +861,12 @@ defmodule NeonFS.Core.WriteOperation do
       {:error, reason} ->
         {:error, {:volume_lookup_failed, reason}}
     end
+  end
+
+  defp evict_resolved_cache(file_id) do
+    ResolvedLookupCache.evict(file_id)
+  rescue
+    _ -> :ok
   end
 
   defp emit_completion_telemetry(result, duration, volume_id, path, write_id, data) do

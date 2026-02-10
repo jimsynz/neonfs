@@ -21,9 +21,17 @@ defmodule NeonFS.Core.RaTest do
   end
 
   describe "MetadataStateMachine" do
-    test "init/1 returns empty state" do
+    test "init/1 returns empty v5 state" do
       state = MetadataStateMachine.init(%{})
       assert state.data == %{}
+      assert state.chunks == %{}
+      assert state.files == %{}
+      assert state.services == %{}
+      assert state.volumes == %{}
+      assert state.stripes == %{}
+      assert state.segment_assignments == %{}
+      assert state.intents == %{}
+      assert state.active_intents_by_conflict_key == %{}
       assert state.version == 0
     end
 
@@ -51,7 +59,7 @@ defmodule NeonFS.Core.RaTest do
     end
 
     test "version/0 returns state machine version" do
-      assert MetadataStateMachine.version() == 4
+      assert MetadataStateMachine.version() == 5
     end
 
     test "which_module/1 returns correct module" do

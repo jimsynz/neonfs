@@ -1,4 +1,12 @@
-{:ok, _} = Node.start(:neonfs_integration_test, name_domain: :shortnames)
+unless Node.alive?() do
+  {:ok, _} = Node.start(:neonfs_integration_test, name_domain: :shortnames)
+end
+
+# Disable global's partition prevention — tests rapidly create/destroy peer
+# clusters and global misinterprets this as overlapping partitions, proactively
+# disconnecting healthy nodes mid-test. Must be set at runtime since kernel is
+# already started by the time config.exs runs.
+Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
 # Build CLI (cargo skips if unchanged)
 cli_dir = Path.expand("../../neonfs-cli", __DIR__)

@@ -227,6 +227,100 @@ defmodule NeonFS.Core.BlobStore do
     GenServer.call(server, {:migrate_chunk, hash, drive_id, from_tier, to_tier})
   end
 
+  # Metadata namespace operations
+
+  @doc """
+  Writes metadata to the blob store's metadata namespace.
+
+  ## Parameters
+
+    * `segment_id` - 32-byte binary segment identifier (hex-encoded before NIF call)
+    * `key_hash` - 32-byte binary hash of the metadata key
+    * `data` - Binary metadata to write
+    * `drive_id` - Target drive identifier
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `{:ok, {}}` - On success
+    * `{:error, reason}` - On failure
+  """
+  @spec write_metadata(binary(), binary(), binary(), drive_id(), keyword()) ::
+          {:ok, {}} | {:error, String.t()}
+  def write_metadata(segment_id, key_hash, data, drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:write_metadata, segment_id, key_hash, data, drive_id})
+  end
+
+  @doc """
+  Reads metadata from the blob store's metadata namespace.
+
+  ## Parameters
+
+    * `segment_id` - 32-byte binary segment identifier
+    * `key_hash` - 32-byte binary hash of the metadata key
+    * `drive_id` - Drive identifier to read from
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `{:ok, data}` - The metadata as a binary
+    * `{:error, reason}` - On failure
+  """
+  @spec read_metadata(binary(), binary(), drive_id(), keyword()) ::
+          {:ok, binary()} | {:error, String.t()}
+  def read_metadata(segment_id, key_hash, drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:read_metadata, segment_id, key_hash, drive_id})
+  end
+
+  @doc """
+  Deletes metadata from the blob store's metadata namespace.
+
+  ## Parameters
+
+    * `segment_id` - 32-byte binary segment identifier
+    * `key_hash` - 32-byte binary hash of the metadata key
+    * `drive_id` - Drive identifier
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `{:ok, {}}` - On success
+    * `{:error, reason}` - On failure
+  """
+  @spec delete_metadata(binary(), binary(), drive_id(), keyword()) ::
+          {:ok, {}} | {:error, String.t()}
+  def delete_metadata(segment_id, key_hash, drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:delete_metadata, segment_id, key_hash, drive_id})
+  end
+
+  @doc """
+  Lists all metadata key hashes in a segment.
+
+  ## Parameters
+
+    * `segment_id` - 32-byte binary segment identifier
+    * `drive_id` - Drive identifier
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `{:ok, hashes}` - List of 32-byte binary key hashes
+    * `{:error, reason}` - On failure
+  """
+  @spec list_metadata_segment(binary(), drive_id(), keyword()) ::
+          {:ok, [binary()]} | {:error, String.t()}
+  def list_metadata_segment(segment_id, drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:list_metadata_segment, segment_id, drive_id})
+  end
+
   @doc """
   Returns configured drives and their status.
 
@@ -369,6 +463,58 @@ defmodule NeonFS.Core.BlobStore do
 
     result = Native.chunk_data(data, strategy_str, param)
     {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:write_metadata, segment_id, key_hash, data, drive_id}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        segment_hex = Base.encode16(segment_id, case: :lower)
+        result = Native.metadata_write(store, segment_hex, key_hash, data)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:read_metadata, segment_id, key_hash, drive_id}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        segment_hex = Base.encode16(segment_id, case: :lower)
+        result = Native.metadata_read(store, segment_hex, key_hash)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:delete_metadata, segment_id, key_hash, drive_id}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        segment_hex = Base.encode16(segment_id, case: :lower)
+        result = Native.metadata_delete(store, segment_hex, key_hash)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:list_metadata_segment, segment_id, drive_id}, _from, state) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        segment_hex = Base.encode16(segment_id, case: :lower)
+        result = Native.metadata_list_segment(store, segment_hex)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
   end
 
   ## Private: Store lookup
