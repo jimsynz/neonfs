@@ -137,12 +137,23 @@ Each task file follows this structure:
 
 **Milestone:** Encrypted volumes with key rotation, UID/GID-based volume and file ACLs with POSIX enforcement, operational audit logging
 
-### Phase 7: System Volume (Future)
+### Phase 7: System Volume (Tasks 0092-0097)
 **Goal:** Cluster-wide replicated storage for operational data
 
 The `_system` volume stores cluster-wide operational data (CA keys, audit logs, DR snapshots). It is auto-created at cluster init with replication factor equal to cluster size.
 
-Task specifications not yet written. See [spec/system-volume.md](../spec/system-volume.md).
+| Task | Description |
+|------|-------------|
+| 0092 | Volume struct `system` field and VolumeRegistry guards |
+| 0093 | SystemVolume access API (read, write, append, list, delete, exists?) |
+| 0094 | Cluster init creates system volume and identity file |
+| 0095 | Node join/decommission replication adjustment |
+| 0096 | System volume log retention (background pruning) |
+| 0097 | Phase 7 integration tests |
+
+**Milestone:** System volume auto-created at cluster init, replicated to all nodes, protected from deletion/rename, with retention-managed audit log directories
+
+See [spec/system-volume.md](../spec/system-volume.md).
 
 ### Phase 8: Cluster CA (Future)
 **Goal:** Self-signed certificate authority for inter-node mTLS
@@ -382,9 +393,27 @@ Full dependency graph:
 
 0079 (integration tests) ◀── all tasks 0067–0078
 
-Phase 7 → 8 → 9 → 10 (linear chain, task numbers TBD):
+Phase 7 System Volume:
 
-Phase 7 (System Volume) ──▶ Phase 8 (Cluster CA) ──▶ Phase 9 (Data Transfer)
+Single dependency chain (strictly sequential):
+
+0092 (Volume struct + guards) ──▶ 0093 (SystemVolume API) ──▶ 0094 (cluster init)
+                               └──▶ 0095 (join replication)
+                               └──▶ 0096 (log retention) ◀── 0093
+
+0097 (integration tests) ◀── all Phase 7 tasks (0092–0096)
+
+Full dependency graph:
+
+0092 (Volume struct) ──┬──▶ 0093 (SystemVolume API) ──┬──▶ 0094 (cluster init)
+                       │                               └──▶ 0096 (log retention)
+                       └──▶ 0095 (join replication)
+
+0097 (integration tests) ◀── all tasks 0092–0096
+
+Phase 8 → 9 → 10 (linear chain, task numbers TBD):
+
+Phase 8 (Cluster CA) ──▶ Phase 9 (Data Transfer)
 
 Phase 10 (Event Notification) — no hard dependency on 7-9, sequenced after for practical reasons
 ```
@@ -419,6 +448,7 @@ Some task chains can be worked on in parallel:
 - **Phase 4** has 2 independent starting points: 0057 (Rust NIF) and 0058 (Stripe struct) can start in parallel; critical path is 0058 → 0059 → 0060 → 0061 → 0064 → 0066
 - **Phase 5** has 2 independent starting points: 0080 (HLC) and 0081 (hashing ring) can start in parallel; critical path is 0081 → 0082 → 0083 → 0084 → 0086/0087/0088 → 0089 → 0091
 - **Phase 6** has 3 independent starting points: 0067 (encryption NIF), 0068 (encryption types), 0069 (ACL types) can all start in parallel; two main chains converge at CLI (0078): encryption chain (0067 → 0072 → 0073 → 0074) and ACL chain (0069 → 0075 → 0076)
+- **Phase 7** is mostly sequential: 0092 (Volume struct) must come first, then 0093 (SystemVolume API) and 0095 (join replication) can start in parallel; 0094 (cluster init) and 0096 (log retention) follow 0093; critical path is 0092 → 0093 → 0094 → 0097
 - **Phases 7 → 8 → 9** are strictly sequential: System Volume → Cluster CA → Data Transfer (each depends on the previous)
 - **Phase 10** (Event Notification) has no dependency on Phases 7-9 and could theoretically be developed in parallel, but is sequenced after them for practical reasons
 
