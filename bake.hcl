@@ -14,7 +14,7 @@ target "base" {
   dockerfile = "containers/Containerfile.base"
   platforms  = [for platform in PLATFORMS: "${platform}"]
   tags       = ["forgejo.dmz/project-neon/neonfs/base:${TAG}"]
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG}"]
+  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/base:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG},mode=max"]
 }
 
@@ -25,19 +25,8 @@ target "dev" {
   contexts = {
     "base": "target:base"
   }
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/dev:${TAG}"]
+  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/dev:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/dev:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/dev:${TAG},mode=max"]
-}
-
-target "builder" {
-  dockerfile = "containers/Containerfile.builder"
-  platforms  = [for platform in PLATFORMS: "${platform}"]
-  tags       = ["forgejo.dmz/project-neon/neonfs/builder:${TAG}"]
-  contexts = {
-    "base": "target:base"
-  }
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/builder:${TAG}"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/builder:${TAG},mode=max"]
 }
 
 target "core" {
@@ -47,9 +36,9 @@ target "core" {
   contexts = {
     "client": "./neonfs_client"
     "src": "./neonfs_core"
-    "builder": "target:builder"
+    "base": "target:base"
   }
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG}"]
+  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/core:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG},mode=max"]
 }
 
@@ -60,9 +49,9 @@ target "fuse" {
   contexts = {
     "client": "./neonfs_client"
     "src": "./neonfs_fuse"
-    "builder": "target:builder"
+    "base": "target:base"
   }
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG}"]
+  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/fuse:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG},mode=max"]
 }
 
@@ -72,8 +61,8 @@ target "cli" {
   tags       = ["forgejo.dmz/project-neon/neonfs/cli:${TAG}"]
   contexts = {
     "src": "./neonfs-cli"
-    "builder": "target:builder"
+    "base": "target:base"
   }
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG}"]
+  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/cli:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG},mode=max"]
 }

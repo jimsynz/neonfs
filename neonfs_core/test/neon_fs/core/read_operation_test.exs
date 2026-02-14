@@ -2,7 +2,16 @@ defmodule NeonFS.Core.ReadOperationTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{ChunkIndex, ReadOperation, StripeIndex, VolumeRegistry, WriteOperation}
+  alias NeonFS.Core.{
+    ChunkIndex,
+    KeyManager,
+    RaServer,
+    ReadOperation,
+    StripeIndex,
+    VolumeEncryption,
+    VolumeRegistry,
+    WriteOperation
+  }
 
   @moduletag :tmp_dir
 
@@ -545,6 +554,142 @@ defmodule NeonFS.Core.ReadOperationTest do
 
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/overwrite_ec.txt")
       assert read_data == "Version 2 longer"
+    end
+  end
+
+  describe "encrypted read path" do
+    @test_master_key :crypto.strong_rand_bytes(32) |> Base.encode64()
+
+    setup %{tmp_dir: tmp_dir} do
+      # Set up encryption infrastructure: Ra + cluster.json with master key
+      write_cluster_json(tmp_dir, @test_master_key)
+
+      start_ra()
+      :ok = RaServer.init_cluster()
+
+      # Attach decrypt telemetry handler
+      :telemetry.attach(
+        "read-decrypt-test",
+        [:neonfs, :read, :decrypt],
+        &handle_telemetry_event/4,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("read-decrypt-test") end)
+
+      # Create an encrypted volume
+      vol_name = "encrypted-read-vol-#{:rand.uniform(999_999)}"
+
+      {:ok, enc_volume} =
+        VolumeRegistry.create(vol_name,
+          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
+          compression: %{algorithm: :none}
+        )
+
+      {:ok, _version} = KeyManager.setup_volume_encryption(enc_volume.id)
+
+      {:ok, enc_volume: enc_volume}
+    end
+
+    test "full round-trip: encrypted write then read", %{enc_volume: volume} do
+      data = "Secret data for encrypted round-trip test"
+
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/secret.txt", data)
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/secret.txt")
+      assert read_data == data
+    end
+
+    test "reads large encrypted file (multiple chunks)", %{enc_volume: volume} do
+      data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
+
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/large_enc.bin", data)
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/large_enc.bin")
+      assert read_data == data
+    end
+
+    test "reads encrypted file with offset and length", %{enc_volume: volume} do
+      data = "0123456789ABCDEFGHIJ"
+
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/partial_enc.txt", data)
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/partial_enc.txt", offset: 5, length: 5)
+
+      assert read_data == "56789"
+    end
+
+    test "reads with mixed key versions after rotation", %{enc_volume: volume} do
+      # Write first file at key version 1
+      data_v1 = "Data encrypted with key version 1"
+      {:ok, _} = WriteOperation.write_file(volume.id, "/v1.txt", data_v1)
+
+      # Rotate key → version 2
+      {:ok, 2} = KeyManager.rotate_volume_key(volume.id)
+
+      # Write second file at key version 2
+      data_v2 = "Data encrypted with key version 2"
+      {:ok, _} = WriteOperation.write_file(volume.id, "/v2.txt", data_v2)
+
+      # Both files should read correctly — each chunk uses its own key version
+      assert {:ok, read_v1} = ReadOperation.read_file(volume.id, "/v1.txt")
+      assert read_v1 == data_v1
+
+      assert {:ok, read_v2} = ReadOperation.read_file(volume.id, "/v2.txt")
+      assert read_v2 == data_v2
+    end
+
+    test "tampered ciphertext returns decryption error", %{enc_volume: volume} do
+      data = "Data to be tampered with"
+      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/tamper.txt", data)
+
+      # Get chunk hash and metadata
+      [chunk_hash] = file_meta.chunks
+      {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+
+      # Modify the chunk's crypto nonce in metadata to simulate wrong decryption params.
+      # The chunk stays on disk unchanged — the NIF will attempt decryption with the
+      # wrong nonce, causing GCM authentication to fail.
+      wrong_nonce = :crypto.strong_rand_bytes(12)
+      wrong_crypto = %{chunk_meta.crypto | nonce: wrong_nonce}
+      wrong_meta = %{chunk_meta | crypto: wrong_crypto}
+      ChunkIndex.put(wrong_meta)
+
+      assert {:error, {:decryption_failed, ^chunk_hash}} =
+               ReadOperation.read_file(volume.id, "/tamper.txt")
+    end
+
+    test "unencrypted reads still work in Ra context", %{tmp_dir: _tmp_dir} do
+      vol_name = "plain-read-vol-#{:rand.uniform(999_999)}"
+      {:ok, plain_vol} = VolumeRegistry.create(vol_name, compression: %{algorithm: :none})
+
+      data = "Plaintext data in Ra context"
+      {:ok, _} = WriteOperation.write_file(plain_vol.id, "/plain.txt", data)
+
+      assert {:ok, read_data} = ReadOperation.read_file(plain_vol.id, "/plain.txt")
+      assert read_data == data
+    end
+
+    test "emits decrypt telemetry events", %{enc_volume: volume} do
+      Process.put(:telemetry_events, [])
+
+      data = "Telemetry decrypt test"
+      {:ok, _} = WriteOperation.write_file(volume.id, "/telem_dec.txt", data)
+      {:ok, _} = ReadOperation.read_file(volume.id, "/telem_dec.txt")
+
+      events = Process.get(:telemetry_events, [])
+
+      decrypt_events =
+        Enum.filter(events, &(&1.event == [:neonfs, :read, :decrypt]))
+
+      assert decrypt_events != []
+
+      for event <- decrypt_events do
+        assert event.metadata.volume_id == volume.id
+        assert event.metadata.key_version == 1
+        assert is_binary(event.metadata.chunk_hash)
+      end
     end
   end
 

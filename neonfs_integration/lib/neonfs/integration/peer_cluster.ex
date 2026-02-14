@@ -115,7 +115,10 @@ defmodule NeonFS.Integration.PeerCluster do
           meta_dir: meta_dir,
           blob_store_base_dir: Path.join(data_dir, "blobs"),
           ra_data_dir: to_charlist(ra_dir),
-          enable_ra: enable_ra
+          enable_ra: enable_ra,
+          # Increase quorum timeout for integration tests where 3 peer nodes
+          # share a single machine and BEAM schedulers are heavily contended.
+          quorum_timeout_ms: 15_000
         ]
 
         core_config =

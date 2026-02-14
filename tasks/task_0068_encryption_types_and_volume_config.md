@@ -1,7 +1,7 @@
 # Task 0068: Encryption Types and Volume Config Extension
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security

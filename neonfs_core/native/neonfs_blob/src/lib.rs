@@ -1,5 +1,6 @@
 pub mod chunking;
 pub mod compression;
+pub mod encryption;
 pub mod erasure;
 pub mod error;
 pub mod hash;
@@ -8,6 +9,7 @@ pub mod store;
 
 use crate::chunking::{auto_strategy, chunk_data, ChunkStrategy};
 use crate::compression::Compression;
+use crate::encryption::EncryptionParams;
 use crate::hash::Hash;
 use crate::path::Tier;
 use crate::store::{BlobStore, ReadOptions, StoreConfig, WriteOptions};
@@ -89,33 +91,42 @@ fn store_write_chunk(
         .map_err(|e| e.to_string())
 }
 
-/// Writes a chunk to the blob store with optional compression.
+/// Writes a chunk to the blob store with optional compression and encryption.
 ///
 /// # Arguments
+/// * `env` - Rustler environment.
 /// * `store` - Resource reference to the blob store.
 /// * `hash` - 32-byte binary hash of the original (uncompressed) chunk data.
 /// * `data` - Binary data to write.
 /// * `tier` - Storage tier ("hot", "warm", or "cold").
 /// * `compression` - Compression type: "none" or "zstd".
 /// * `compression_level` - Compression level (1-19, used for zstd only).
+/// * `key_binary` - 32-byte AES-256 key, or empty binary for no encryption.
+/// * `nonce_binary` - 12-byte nonce, or empty binary for no encryption.
 ///
 /// # Returns
-/// A map with chunk info: original_size, stored_size, compression.
+/// A tuple of (original_size, stored_size, compression, encryption_algorithm, nonce).
 #[rustler::nif]
-fn store_write_chunk_compressed(
+#[allow(clippy::too_many_arguments)]
+fn store_write_chunk_compressed<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
     data: Binary,
     tier: String,
     compression: String,
     compression_level: i32,
-) -> Result<(usize, usize, String), String> {
+    key_binary: Binary,
+    nonce_binary: Binary,
+) -> Result<(usize, usize, String, String, Binary<'a>), String> {
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
     let compression = parse_compression(&compression, compression_level)?;
+    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
 
     let options = WriteOptions {
         compression: Some(compression),
+        encryption,
     };
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
@@ -128,10 +139,20 @@ fn store_write_chunk_compressed(
         Compression::Zstd { level } => format!("zstd:{}", level),
     };
 
+    let encryption_algorithm = chunk_info.encryption_algorithm.unwrap_or_default();
+
+    let nonce_bytes = chunk_info.encryption_nonce.unwrap_or_default();
+    let mut nonce_out = NewBinary::new(env, nonce_bytes.len());
+    if !nonce_bytes.is_empty() {
+        nonce_out.copy_from_slice(&nonce_bytes);
+    }
+
     Ok((
         chunk_info.original_size,
         chunk_info.stored_size,
         compression_str,
+        encryption_algorithm,
+        nonce_out.into(),
     ))
 }
 
@@ -191,6 +212,7 @@ fn store_read_chunk_verified<'a>(
     let options = ReadOptions {
         verify,
         decompress: false,
+        encryption: None,
     };
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
@@ -203,7 +225,8 @@ fn store_read_chunk_verified<'a>(
     Ok(output.into())
 }
 
-/// Reads a chunk from the blob store with optional verification and decompression.
+/// Reads a chunk from the blob store with optional verification, decompression,
+/// and decryption.
 ///
 /// # Arguments
 /// * `env` - Rustler environment.
@@ -212,9 +235,12 @@ fn store_read_chunk_verified<'a>(
 /// * `tier` - Storage tier ("hot", "warm", or "cold").
 /// * `verify` - If true, verify the data matches the hash after reading/decompression.
 /// * `decompress` - If true, decompress the data after reading.
+/// * `key_binary` - 32-byte AES-256 key, or empty binary for no decryption.
+/// * `nonce_binary` - 12-byte nonce, or empty binary for no decryption.
 ///
 /// # Returns
 /// The chunk data as a binary, or an error tuple.
+#[allow(clippy::too_many_arguments)]
 #[rustler::nif]
 fn store_read_chunk_with_options<'a>(
     env: Env<'a>,
@@ -223,11 +249,18 @@ fn store_read_chunk_with_options<'a>(
     tier: String,
     verify: bool,
     decompress: bool,
+    key_binary: Binary,
+    nonce_binary: Binary,
 ) -> Result<Binary<'a>, String> {
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
+    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
 
-    let options = ReadOptions { verify, decompress };
+    let options = ReadOptions {
+        verify,
+        decompress,
+        encryption,
+    };
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
     let data = store_guard
@@ -315,6 +348,42 @@ fn store_migrate_chunk(
         .map_err(|e| e.to_string())
 }
 
+/// Re-encrypts a chunk in place: decrypts with old key/nonce, re-encrypts
+/// with new key/nonce, writes back atomically.
+///
+/// # Arguments
+/// * `store` - Resource reference to the blob store.
+/// * `hash` - 32-byte binary hash of the chunk.
+/// * `tier` - Storage tier ("hot", "warm", or "cold").
+/// * `old_key` - 32-byte AES-256 key used for current encryption.
+/// * `old_nonce` - 12-byte nonce used for current encryption.
+/// * `new_key` - 32-byte AES-256 key for new encryption.
+/// * `new_nonce` - 12-byte nonce for new encryption.
+///
+/// # Returns
+/// The stored size of the re-encrypted chunk, or an error tuple.
+#[rustler::nif]
+fn store_reencrypt_chunk(
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    tier: String,
+    old_key: Binary,
+    old_nonce: Binary,
+    new_key: Binary,
+    new_nonce: Binary,
+) -> Result<usize, String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let tier = parse_tier(&tier)?;
+
+    let old_params = parse_required_encryption_params(&old_key, &old_nonce)?;
+    let new_params = parse_required_encryption_params(&new_key, &new_nonce)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    store_guard
+        .reencrypt_chunk(&hash, tier, &old_params, &new_params)
+        .map_err(|e| e.to_string())
+}
+
 /// Parses a 32-byte binary into a Hash.
 fn parse_hash(hash_bytes: &Binary) -> Result<Hash, String> {
     if hash_bytes.len() != 32 {
@@ -351,6 +420,27 @@ fn parse_compression(compression: &str, level: i32) -> Result<Compression, Strin
             compression
         )),
     }
+}
+
+/// Parses optional encryption parameters from key and nonce binaries.
+/// Empty binaries mean no encryption. Returns None for no encryption.
+fn parse_encryption_params(
+    key_binary: &Binary,
+    nonce_binary: &Binary,
+) -> Result<Option<EncryptionParams>, String> {
+    if key_binary.is_empty() && nonce_binary.is_empty() {
+        return Ok(None);
+    }
+    let params = parse_required_encryption_params(key_binary, nonce_binary)?;
+    Ok(Some(params))
+}
+
+/// Parses required encryption parameters (non-empty key and nonce).
+fn parse_required_encryption_params(
+    key_binary: &Binary,
+    nonce_binary: &Binary,
+) -> Result<EncryptionParams, String> {
+    EncryptionParams::new(key_binary.as_slice(), nonce_binary.as_slice()).map_err(|e| e.to_string())
 }
 
 /// Chunk result as returned to Elixir.

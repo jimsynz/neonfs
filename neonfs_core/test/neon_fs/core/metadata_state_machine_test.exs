@@ -14,6 +14,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       segment_assignments: %{},
       intents: %{},
       active_intents_by_conflict_key: %{},
+      encryption_keys: %{},
+      volume_acls: %{},
       version: 0
     }
   end
@@ -41,21 +43,21 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 5" do
-      assert MetadataStateMachine.version() == 5
+    test "returns 6" do
+      assert MetadataStateMachine.version() == 6
     end
   end
 
   describe "which_module/1" do
     test "returns the same module for all versions" do
-      for v <- 1..5 do
+      for v <- 1..6 do
         assert MetadataStateMachine.which_module(v) == MetadataStateMachine
       end
     end
   end
 
   describe "init/1" do
-    test "initialises empty v5 state" do
+    test "initialises empty v6 state" do
       state = MetadataStateMachine.init(%{})
 
       assert state.data == %{}
@@ -67,6 +69,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert state.segment_assignments == %{}
       assert state.intents == %{}
       assert state.active_intents_by_conflict_key == %{}
+      assert state.encryption_keys == %{}
+      assert state.volume_acls == %{}
       assert state.version == 0
     end
   end
@@ -99,6 +103,63 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert new_state.segment_assignments == %{}
       assert new_state.intents == %{}
       assert new_state.active_intents_by_conflict_key == %{}
+    end
+  end
+
+  describe "machine version migration 5 -> 6" do
+    test "adds v6 fields to existing state" do
+      old_state = %{
+        data: %{some: :data},
+        chunks: %{"hash1" => %{hash: "hash1"}},
+        files: %{"file1" => %{id: "file1"}},
+        services: %{node1: %{type: :core}},
+        volumes: %{"vol1" => %{id: "vol1"}},
+        stripes: %{"s1" => %{id: "s1"}},
+        segment_assignments: %{"seg-1" => %{replica_set: [:n1], version: 1}},
+        intents: %{},
+        active_intents_by_conflict_key: %{},
+        version: 200
+      }
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:machine_version, 5, 6}, old_state)
+
+      # Existing data preserved
+      assert new_state.data == %{some: :data}
+      assert new_state.chunks == %{"hash1" => %{hash: "hash1"}}
+      assert new_state.files == %{"file1" => %{id: "file1"}}
+      assert new_state.services == %{node1: %{type: :core}}
+      assert new_state.volumes == %{"vol1" => %{id: "vol1"}}
+      assert new_state.stripes == %{"s1" => %{id: "s1"}}
+      assert new_state.segment_assignments == %{"seg-1" => %{replica_set: [:n1], version: 1}}
+      assert new_state.version == 200
+
+      # New v6 fields added
+      assert new_state.encryption_keys == %{}
+      assert new_state.volume_acls == %{}
+    end
+
+    test "does not overwrite existing v6 fields if already present" do
+      state_with_fields = %{
+        data: %{},
+        chunks: %{},
+        files: %{},
+        services: %{},
+        volumes: %{},
+        stripes: %{},
+        segment_assignments: %{},
+        intents: %{},
+        active_intents_by_conflict_key: %{},
+        encryption_keys: %{"vol1" => %{1 => %{wrapped_key: "key"}}},
+        volume_acls: %{"vol1" => %{owner_uid: 1000}},
+        version: 100
+      }
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:machine_version, 5, 6}, state_with_fields)
+
+      assert new_state.encryption_keys == %{"vol1" => %{1 => %{wrapped_key: "key"}}}
+      assert new_state.volume_acls == %{"vol1" => %{owner_uid: 1000}}
     end
   end
 
@@ -582,6 +643,263 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
+  describe "encryption key commands" do
+    defp make_wrapped_entry(overrides \\ %{}) do
+      Map.merge(
+        %{
+          wrapped_key: :crypto.strong_rand_bytes(32),
+          created_at: DateTime.utc_now(),
+          deprecated_at: nil
+        },
+        overrides
+      )
+    end
+
+    test "put_encryption_key stores a key for a volume" do
+      entry = make_wrapped_entry()
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:put_encryption_key, "vol-1", 1, entry},
+          base_state()
+        )
+
+      assert state.encryption_keys["vol-1"][1] == entry
+      assert state.version == 1
+    end
+
+    test "put_encryption_key adds multiple versions for same volume" do
+      entry_v1 = make_wrapped_entry()
+      entry_v2 = make_wrapped_entry()
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:put_encryption_key, "vol-1", 1, entry_v1},
+          base_state()
+        )
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:put_encryption_key, "vol-1", 2, entry_v2},
+          state
+        )
+
+      assert state.encryption_keys["vol-1"][1] == entry_v1
+      assert state.encryption_keys["vol-1"][2] == entry_v2
+      assert state.version == 2
+    end
+
+    test "put_encryption_key replaces existing key version" do
+      entry_v1 = make_wrapped_entry()
+      replacement = make_wrapped_entry()
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:put_encryption_key, "vol-1", 1, entry_v1},
+          base_state()
+        )
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:put_encryption_key, "vol-1", 1, replacement},
+          state
+        )
+
+      assert state.encryption_keys["vol-1"][1] == replacement
+    end
+
+    test "delete_encryption_key removes a specific key version" do
+      entry_v1 = make_wrapped_entry()
+      entry_v2 = make_wrapped_entry()
+
+      state = %{
+        base_state()
+        | encryption_keys: %{"vol-1" => %{1 => entry_v1, 2 => entry_v2}}
+      }
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:delete_encryption_key, "vol-1", 1},
+          state
+        )
+
+      refute Map.has_key?(state.encryption_keys["vol-1"], 1)
+      assert state.encryption_keys["vol-1"][2] == entry_v2
+      assert state.version == 1
+    end
+
+    test "delete_encryption_key removes volume entry when last key deleted" do
+      entry = make_wrapped_entry()
+      state = %{base_state() | encryption_keys: %{"vol-1" => %{1 => entry}}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:delete_encryption_key, "vol-1", 1},
+          state
+        )
+
+      refute Map.has_key?(state.encryption_keys, "vol-1")
+    end
+
+    test "delete_encryption_key returns error for unknown volume" do
+      {_state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:delete_encryption_key, "nonexistent", 1},
+          base_state()
+        )
+    end
+
+    test "set_current_key_version updates volume encryption config" do
+      volume = %{
+        id: "vol-1",
+        name: "test",
+        encryption: %{mode: :server_side, current_key_version: 1}
+      }
+
+      state = %{base_state() | volumes: %{"vol-1" => volume}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:set_current_key_version, "vol-1", 2},
+          state
+        )
+
+      assert state.volumes["vol-1"].encryption.current_key_version == 2
+      assert state.version == 1
+    end
+
+    test "set_current_key_version creates encryption map if not present" do
+      volume = %{id: "vol-1", name: "test"}
+      state = %{base_state() | volumes: %{"vol-1" => volume}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:set_current_key_version, "vol-1", 1},
+          state
+        )
+
+      assert state.volumes["vol-1"].encryption.current_key_version == 1
+    end
+
+    test "set_current_key_version returns error for unknown volume" do
+      {_state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:set_current_key_version, "nonexistent", 1},
+          base_state()
+        )
+    end
+  end
+
+  describe "volume ACL commands" do
+    test "put_volume_acl stores ACL data" do
+      acl = %{volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000, entries: []}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:put_volume_acl, "vol-1", acl},
+          base_state()
+        )
+
+      assert state.volume_acls["vol-1"] == acl
+      assert state.version == 1
+    end
+
+    test "put_volume_acl replaces existing ACL" do
+      old_acl = %{volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000, entries: []}
+      new_acl = %{volume_id: "vol-1", owner_uid: 2000, owner_gid: 2000, entries: []}
+
+      state = %{base_state() | volume_acls: %{"vol-1" => old_acl}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:put_volume_acl, "vol-1", new_acl},
+          state
+        )
+
+      assert state.volume_acls["vol-1"] == new_acl
+    end
+
+    test "update_volume_acl merges updates into existing ACL" do
+      acl = %{volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000, entries: []}
+      state = %{base_state() | volume_acls: %{"vol-1" => acl}}
+
+      entry = %{principal: {:uid, 2000}, permissions: MapSet.new([:read])}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:update_volume_acl, "vol-1", %{entries: [entry]}},
+          state
+        )
+
+      assert state.volume_acls["vol-1"].entries == [entry]
+      assert state.volume_acls["vol-1"].owner_uid == 1000
+      assert state.version == 1
+    end
+
+    test "update_volume_acl returns error for unknown volume" do
+      {_state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:update_volume_acl, "nonexistent", %{entries: []}},
+          base_state()
+        )
+    end
+  end
+
+  describe "volume deletion cascade" do
+    test "delete_volume removes encryption keys and ACL" do
+      volume = %{id: "vol-1", name: "test"}
+      entry = %{wrapped_key: <<1, 2, 3>>, created_at: DateTime.utc_now(), deprecated_at: nil}
+      acl = %{volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000, entries: []}
+
+      state = %{
+        base_state()
+        | volumes: %{"vol-1" => volume, "vol-2" => %{id: "vol-2", name: "other"}},
+          encryption_keys: %{"vol-1" => %{1 => entry}, "vol-2" => %{1 => entry}},
+          volume_acls: %{"vol-1" => acl, "vol-2" => %{volume_id: "vol-2"}}
+      }
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_volume, "vol-1"}, state)
+
+      # vol-1 data removed
+      refute Map.has_key?(state.volumes, "vol-1")
+      refute Map.has_key?(state.encryption_keys, "vol-1")
+      refute Map.has_key?(state.volume_acls, "vol-1")
+
+      # vol-2 data preserved
+      assert Map.has_key?(state.volumes, "vol-2")
+      assert Map.has_key?(state.encryption_keys, "vol-2")
+      assert Map.has_key?(state.volume_acls, "vol-2")
+    end
+
+    test "delete_volume works when volume has no keys or ACL" do
+      volume = %{id: "vol-1", name: "test"}
+      state = %{base_state() | volumes: %{"vol-1" => volume}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_volume, "vol-1"}, state)
+
+      assert state.volumes == %{}
+      assert state.encryption_keys == %{}
+      assert state.volume_acls == %{}
+    end
+  end
+
   describe "unknown commands" do
     test "catch-all returns :unknown_command for truly unknown commands" do
       state = base_state()
@@ -607,6 +925,22 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
       assert MetadataStateMachine.get_intent(state, "test") == intent
       assert MetadataStateMachine.get_intent(state, "missing") == nil
+    end
+
+    test "get_encryption_keys/2 returns keys for a volume or nil" do
+      keys = %{1 => %{wrapped_key: <<1>>, created_at: DateTime.utc_now(), deprecated_at: nil}}
+      state = %{base_state() | encryption_keys: %{"vol-1" => keys}}
+
+      assert MetadataStateMachine.get_encryption_keys(state, "vol-1") == keys
+      assert MetadataStateMachine.get_encryption_keys(state, "missing") == nil
+    end
+
+    test "get_volume_acl/2 returns ACL for a volume or nil" do
+      acl = %{volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000, entries: []}
+      state = %{base_state() | volume_acls: %{"vol-1" => acl}}
+
+      assert MetadataStateMachine.get_volume_acl(state, "vol-1") == acl
+      assert MetadataStateMachine.get_volume_acl(state, "missing") == nil
     end
 
     test "list_active_intents/1 returns only active intents" do

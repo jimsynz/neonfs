@@ -9,6 +9,12 @@ defmodule NeonFS.Core.FileMeta do
   Stripe references for erasure coding come in Phase 4.
   """
 
+  @type acl_entry :: %{
+          type: :user | :group | :mask | :other,
+          id: non_neg_integer() | nil,
+          permissions: MapSet.t(:r | :w | :x)
+        }
+
   @type t :: %__MODULE__{
           id: String.t(),
           volume_id: String.t(),
@@ -19,6 +25,8 @@ defmodule NeonFS.Core.FileMeta do
           mode: non_neg_integer(),
           uid: non_neg_integer(),
           gid: non_neg_integer(),
+          acl_entries: [acl_entry()],
+          default_acl: [acl_entry()] | nil,
           created_at: DateTime.t(),
           modified_at: DateTime.t(),
           accessed_at: DateTime.t(),
@@ -42,7 +50,9 @@ defmodule NeonFS.Core.FileMeta do
     :accessed_at,
     :version,
     :previous_version_id,
-    :hlc_timestamp
+    :hlc_timestamp,
+    acl_entries: [],
+    default_acl: nil
   ]
 
   @doc """
@@ -60,6 +70,8 @@ defmodule NeonFS.Core.FileMeta do
     - `:gid` - Owner group ID (default: 0)
     - `:version` - Initial version (default: 1)
     - `:previous_version_id` - Previous version ID (default: nil)
+    - `:acl_entries` - Extended ACL entries (default: [])
+    - `:default_acl` - Default ACL for directories (default: nil)
 
   ## Examples
       iex> FileMeta.new("vol1", "/test.txt")
@@ -79,6 +91,8 @@ defmodule NeonFS.Core.FileMeta do
       mode: Keyword.get(opts, :mode, 0o644),
       uid: Keyword.get(opts, :uid, 0),
       gid: Keyword.get(opts, :gid, 0),
+      acl_entries: Keyword.get(opts, :acl_entries, []),
+      default_acl: Keyword.get(opts, :default_acl),
       created_at: now,
       modified_at: now,
       accessed_at: now,

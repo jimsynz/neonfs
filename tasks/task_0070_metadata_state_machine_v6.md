@@ -1,7 +1,7 @@
 # Task 0070: MetadataStateMachine v6 (Encryption Keys, Volume ACLs)
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security
@@ -10,19 +10,19 @@ Not Started
 Bump MetadataStateMachine from v5 to v6, adding `encryption_keys` and `volume_acls` maps to the Ra-backed state. Encryption keys are per-volume, wrapped with the cluster master key. Volume ACLs store UID/GID-based permission entries. No user/group identity storage — NeonFS works with numeric UIDs/GIDs only. Follows the established migration pattern from v4→v5 (metadata tiering). These fields belong in Ra (Tier 1) because they are small, critical, and need strong consistency.
 
 ## Acceptance Criteria
-- [ ] MetadataStateMachine `version/0` returns 6
-- [ ] State includes `encryption_keys: %{volume_id => %{version => wrapped_key_entry}}`
-- [ ] State includes `volume_acls: %{volume_id => acl_data}`
-- [ ] Migration handler for `{:machine_version, 5, 6}` adds empty maps for new fields
-- [ ] Encryption key commands: `{:put_encryption_key, volume_id, version, wrapped_entry}`, `{:delete_encryption_key, volume_id, version}`, `{:set_current_key_version, volume_id, version}`
-- [ ] Volume ACL commands: `{:put_volume_acl, volume_id, acl_data}`, `{:update_volume_acl, volume_id, updates}`
-- [ ] Query functions: `get_encryption_keys/1`, `get_volume_acl/1`
-- [ ] Volume deletion cascades: deleting a volume also removes its encryption keys and ACL
-- [ ] Persistence module updated to snapshot new state fields
-- [ ] All existing v5 state and commands continue to work
-- [ ] Unit tests for each new command type
-- [ ] Unit tests for v5→v6 migration
-- [ ] Unit tests for cascade deletion
+- [x] MetadataStateMachine `version/0` returns 6
+- [x] State includes `encryption_keys: %{volume_id => %{version => wrapped_key_entry}}`
+- [x] State includes `volume_acls: %{volume_id => acl_data}`
+- [x] Migration handler for `{:machine_version, 5, 6}` adds empty maps for new fields
+- [x] Encryption key commands: `{:put_encryption_key, volume_id, version, wrapped_entry}`, `{:delete_encryption_key, volume_id, version}`, `{:set_current_key_version, volume_id, version}`
+- [x] Volume ACL commands: `{:put_volume_acl, volume_id, acl_data}`, `{:update_volume_acl, volume_id, updates}`
+- [x] Query functions: `get_encryption_keys/2`, `get_volume_acl/2`
+- [x] Volume deletion cascades: deleting a volume also removes its encryption keys and ACL
+- [x] Persistence module updated to snapshot new state fields
+- [x] All existing v5 state and commands continue to work
+- [x] Unit tests for each new command type
+- [x] Unit tests for v5→v6 migration
+- [x] Unit tests for cascade deletion
 
 ## Testing Strategy
 - ExUnit tests for each Ra command (put, delete for keys and ACLs)

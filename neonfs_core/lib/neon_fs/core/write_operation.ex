@@ -8,21 +8,30 @@ defmodule NeonFS.Core.WriteOperation do
   For replicated volumes, each chunk is stored and replicated to N nodes.
   For erasure-coded volumes, chunks are grouped into stripes, parity is computed,
   and all chunks (data + parity) are distributed across nodes.
+
+  For encrypted volumes (`encryption.mode == :server_side`), the current volume key
+  is fetched once per write and a unique 96-bit nonce is generated per chunk. The key
+  and nonce are passed to the BlobStore NIF which handles compress → encrypt → write
+  in a single call (no separate encryption NIF boundary crossing).
   """
 
   alias NeonFS.Core.{
+    Authorise,
     Blob.Native,
     BlobStore,
+    ChunkCrypto,
     ChunkIndex,
     ChunkMeta,
     DriveRegistry,
     FileIndex,
     FileMeta,
+    KeyManager,
     Replication,
     ResolvedLookupCache,
     Stripe,
     StripeIndex,
     StripePlacement,
+    Volume,
     VolumeRegistry
   }
 
@@ -36,6 +45,11 @@ defmodule NeonFS.Core.WriteOperation do
           stored_size: non_neg_integer(),
           compression: :none | :zstd
         }
+
+  # Encryption context resolved once per write_file call.
+  # nil for unencrypted volumes, map with key material for encrypted ones.
+  @type encryption_ctx ::
+          %{key: binary(), key_version: pos_integer()} | nil
 
   @doc """
   Writes file data to a volume with chunking and deduplication.
@@ -64,8 +78,12 @@ defmodule NeonFS.Core.WriteOperation do
       %{volume_id: volume_id, path: path, write_id: write_id}
     )
 
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
     result =
-      with {:ok, volume} <- get_volume(volume_id) do
+      with {:ok, volume} <- get_volume(volume_id),
+           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}) do
         do_write(volume, path, data, write_id, opts)
       end
 
@@ -91,27 +109,35 @@ defmodule NeonFS.Core.WriteOperation do
   # Private Functions
 
   defp do_write(%{durability: %{type: :erasure}} = volume, path, data, write_id, opts) do
-    case erasure_write(volume, path, data, write_id, opts) do
-      {:ok, _file_meta} = ok ->
-        ok
+    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+      write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
 
-      {:error, _reason} = error ->
-        abort_chunks(write_id)
-        abort_stripes(write_id)
-        error
+      case erasure_write(volume, path, data, write_ctx, opts) do
+        {:ok, _file_meta} = ok ->
+          ok
+
+        {:error, _reason} = error ->
+          abort_chunks(write_id)
+          abort_stripes(write_id)
+          error
+      end
     end
   end
 
   defp do_write(volume, path, data, write_id, opts) do
-    with {:ok, chunks} <- chunk_and_store(data, volume, write_id, opts),
-         {:ok, file_meta} <- create_file_metadata(volume.id, path, chunks, data, opts),
-         :ok <- commit_chunks(write_id, chunks),
-         :ok <- update_volume_stats(volume.id, data, chunks) do
-      {:ok, file_meta}
-    else
-      {:error, _reason} = error ->
-        abort_chunks(write_id)
-        error
+    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+      write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
+
+      with {:ok, chunks} <- chunk_and_store(data, volume, write_ctx, opts),
+           {:ok, file_meta} <- create_file_metadata(volume.id, path, chunks, data, opts),
+           :ok <- commit_chunks(write_id, chunks),
+           :ok <- update_volume_stats(volume.id, data, chunks) do
+        {:ok, file_meta}
+      else
+        {:error, _reason} = error ->
+          abort_chunks(write_id)
+          error
+      end
     end
   end
 
@@ -122,16 +148,59 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
+  # ─── Encryption ────────────────────────────────────────────────────────
+
+  @spec resolve_encryption(Volume.t()) :: {:ok, encryption_ctx()} | {:error, term()}
+  defp resolve_encryption(volume) do
+    if Volume.encrypted?(volume) do
+      case KeyManager.get_current_key(volume.id) do
+        {:ok, {key, key_version}} ->
+          {:ok, %{key: key, key_version: key_version}}
+
+        {:error, _reason} = error ->
+          error
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp generate_chunk_nonce, do: :crypto.strong_rand_bytes(12)
+
+  defp add_encryption_write_opts(write_opts, nil), do: write_opts
+
+  defp add_encryption_write_opts(write_opts, %{key: key}) do
+    nonce = generate_chunk_nonce()
+    write_opts ++ [key: key, nonce: nonce]
+  end
+
+  defp build_chunk_crypto(nil, _write_opts), do: nil
+
+  defp build_chunk_crypto(%{key_version: key_version}, write_opts) do
+    nonce = Keyword.fetch!(write_opts, :nonce)
+    ChunkCrypto.new(nonce: nonce, key_version: key_version)
+  end
+
+  defp emit_encrypt_telemetry(nil, _hash, _volume_id), do: :ok
+
+  defp emit_encrypt_telemetry(%{key_version: key_version}, hash, volume_id) do
+    :telemetry.execute(
+      [:neonfs, :write, :encrypt],
+      %{},
+      %{chunk_hash: hash, volume_id: volume_id, key_version: key_version}
+    )
+  end
+
   # ─── Erasure-Coded Write Path ───────────────────────────────────────────
 
-  defp erasure_write(volume, path, data, write_id, opts) do
+  defp erasure_write(volume, path, data, write_ctx, opts) do
     with {:ok, chunk_results} <- chunk_data(data, opts),
          {:ok, stripe_results} <-
-           build_and_store_stripes(chunk_results, volume, write_id, opts),
+           build_and_store_stripes(chunk_results, volume, write_ctx, opts),
          all_chunks = collect_all_stripe_chunks(stripe_results),
          {:ok, file_meta} <-
            create_erasure_file_metadata(volume.id, path, stripe_results, data, opts),
-         :ok <- commit_chunks(write_id, all_chunks),
+         :ok <- commit_chunks(write_ctx.write_id, all_chunks),
          :ok <- validate_erasure_commit(stripe_results, data),
          :ok <- update_volume_stats(volume.id, data, all_chunks) do
       {:ok, file_meta}
@@ -143,7 +212,7 @@ defmodule NeonFS.Core.WriteOperation do
     BlobStore.chunk_data(data, chunk_strategy)
   end
 
-  defp build_and_store_stripes(chunk_results, volume, write_id, opts) do
+  defp build_and_store_stripes(chunk_results, volume, write_ctx, opts) do
     data_chunks_per_stripe = volume.durability.data_chunks
     parity_count = volume.durability.parity_chunks
 
@@ -161,7 +230,7 @@ defmodule NeonFS.Core.WriteOperation do
              parity_count,
              data_chunks_per_stripe,
              volume,
-             write_id,
+             write_ctx,
              byte_offset,
              partial,
              opts
@@ -185,7 +254,7 @@ defmodule NeonFS.Core.WriteOperation do
          parity_count,
          data_chunks_per_stripe,
          volume,
-         write_id,
+         write_ctx,
          byte_offset,
          partial,
          opts
@@ -210,29 +279,28 @@ defmodule NeonFS.Core.WriteOperation do
 
     stripe_config = %{data_chunks: data_chunks_per_stripe, parity_chunks: parity_count}
 
+    store_ctx = %{
+      stripe_id: stripe_id,
+      compression_config: compression_config,
+      tier: tier,
+      tier_str: tier_str,
+      write_id: write_ctx.write_id,
+      encryption_ctx: write_ctx.enc_ctx,
+      volume_id: volume.id
+    }
+
     with {:ok, parity_shards} <- Native.erasure_encode(padded_data_list, parity_count),
          {:ok, targets} <- StripePlacement.select_targets(stripe_config, tier: tier),
          data_targets = Enum.take(targets, length(padded)),
          parity_targets = Enum.drop(targets, length(padded)),
          {:ok, stored_data_chunks} <-
-           store_data_chunks(
-             padded,
-             stripe_id,
-             compression_config,
-             tier,
-             tier_str,
-             data_targets,
-             write_id
-           ),
+           store_data_chunks(padded, data_targets, store_ctx),
          {:ok, stored_parity_chunks} <-
            store_parity_chunks(
              parity_shards,
-             stripe_id,
              data_chunks_per_stripe,
-             tier,
-             tier_str,
              parity_targets,
-             write_id
+             store_ctx
            ) do
       all_chunk_hashes =
         Enum.map(stored_data_chunks, & &1.hash) ++
@@ -249,7 +317,7 @@ defmodule NeonFS.Core.WriteOperation do
           padded_bytes
         )
 
-      store_stripe_metadata(stripe, stripe_id, write_id)
+      store_stripe_metadata(stripe, stripe_id, write_ctx.write_id)
 
       all_chunks = stored_data_chunks ++ stored_parity_chunks
 
@@ -298,23 +366,7 @@ defmodule NeonFS.Core.WriteOperation do
   defp padded_chunk_size([{data, _, _} | _]), do: byte_size(data)
   defp padded_chunk_size([]), do: 0
 
-  defp store_data_chunks(
-         data_entries,
-         stripe_id,
-         compression_config,
-         tier,
-         tier_str,
-         targets,
-         write_id
-       ) do
-    ctx = %{
-      stripe_id: stripe_id,
-      compression_config: compression_config,
-      tier: tier,
-      tier_str: tier_str,
-      write_id: write_id
-    }
-
+  defp store_data_chunks(data_entries, targets, ctx) do
     data_entries
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {{data, _hash, size}, stripe_idx}, {:ok, acc} ->
@@ -334,12 +386,16 @@ defmodule NeonFS.Core.WriteOperation do
   defp store_stripe_data_chunk(data, size, stripe_idx, target, ctx) do
     {_should, compression} = should_compress_chunk?(size, ctx.compression_config)
     write_opts = build_write_opts(compression)
+    write_opts = add_encryption_write_opts(write_opts, ctx.encryption_ctx)
     # Use padded data size as original_size so decompression detection works correctly.
     # The pre-padding `size` is only used for compression min_size threshold.
     padded_size = byte_size(data)
 
     with {:ok, hash, chunk_info} <-
            write_chunk_to_target(data, target, ctx.tier_str, write_opts) do
+      crypto = build_chunk_crypto(ctx.encryption_ctx, write_opts)
+      emit_encrypt_telemetry(ctx.encryption_ctx, hash, ctx.volume_id)
+
       meta_args = %{
         hash: hash,
         size: padded_size,
@@ -348,7 +404,8 @@ defmodule NeonFS.Core.WriteOperation do
         tier: ctx.tier,
         stripe_id: ctx.stripe_id,
         stripe_idx: stripe_idx,
-        write_id: ctx.write_id
+        write_id: ctx.write_id,
+        crypto: crypto
       }
 
       chunk_meta = build_erasure_chunk_meta(meta_args)
@@ -370,17 +427,7 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp store_parity_chunks(
-         parity_shards,
-         stripe_id,
-         data_chunk_count,
-         tier,
-         tier_str,
-         targets,
-         write_id
-       ) do
-    ctx = %{stripe_id: stripe_id, tier: tier, tier_str: tier_str, write_id: write_id}
-
+  defp store_parity_chunks(parity_shards, data_chunk_count, targets, ctx) do
     parity_shards
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {parity_data, parity_idx}, {:ok, acc} ->
@@ -400,9 +447,13 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp store_parity_chunk(parity_data, stripe_idx, target, ctx) do
     size = byte_size(parity_data)
+    write_opts = add_encryption_write_opts([], ctx.encryption_ctx)
 
     with {:ok, hash, chunk_info} <-
-           write_chunk_to_target(parity_data, target, ctx.tier_str, []) do
+           write_chunk_to_target(parity_data, target, ctx.tier_str, write_opts) do
+      crypto = build_chunk_crypto(ctx.encryption_ctx, write_opts)
+      emit_encrypt_telemetry(ctx.encryption_ctx, hash, ctx.volume_id)
+
       meta_args = %{
         hash: hash,
         size: size,
@@ -411,7 +462,8 @@ defmodule NeonFS.Core.WriteOperation do
         tier: ctx.tier,
         stripe_id: ctx.stripe_id,
         stripe_idx: stripe_idx,
-        write_id: ctx.write_id
+        write_id: ctx.write_id,
+        crypto: crypto
       }
 
       chunk_meta = build_erasure_chunk_meta(meta_args)
@@ -439,6 +491,7 @@ defmodule NeonFS.Core.WriteOperation do
       original_size: args.size,
       stored_size: args.chunk_info.stored_size,
       compression: parse_compression(args.chunk_info.compression),
+      crypto: args.crypto,
       locations: [%{node: args.target.node, drive_id: args.target.drive_id, tier: args.tier}],
       target_replicas: 1,
       commit_state: :uncommitted,
@@ -546,6 +599,9 @@ defmodule NeonFS.Core.WriteOperation do
         :error -> file_opts
       end
 
+    file_opts = apply_uid_gid_opts(file_opts, opts)
+    file_opts = maybe_inherit_default_acl(file_opts, volume_id, path)
+
     file_meta = FileMeta.new(volume_id, path, file_opts)
     file_meta = %{file_meta | stripes: stripes}
 
@@ -575,12 +631,12 @@ defmodule NeonFS.Core.WriteOperation do
 
   # ─── Replicated Write Path (existing) ──────────────────────────────────
 
-  defp chunk_and_store(data, volume, write_id, opts) do
+  defp chunk_and_store(data, volume, write_ctx, opts) do
     chunk_strategy = resolve_chunk_strategy(opts)
 
     case BlobStore.chunk_data(data, chunk_strategy) do
       {:ok, chunk_results} ->
-        process_chunks(chunk_results, volume, write_id, opts)
+        process_chunks(chunk_results, volume, write_ctx, opts)
 
       {:error, _reason} = error ->
         error
@@ -597,13 +653,13 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp process_chunks(chunk_results, volume, write_id, opts) do
+  defp process_chunks(chunk_results, volume, write_ctx, opts) do
     compression_config = Keyword.get(opts, :compression, volume.compression)
 
     chunk_results
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {{data, hash, offset, size}, index}, {:ok, acc} ->
-      case process_chunk(data, hash, offset, size, index, compression_config, volume, write_id) do
+      case process_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
         {:ok, chunk_info} ->
           {:cont, {:ok, [chunk_info | acc]}}
 
@@ -618,10 +674,10 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp process_chunk(data, hash, offset, size, index, compression_config, volume, write_id) do
+  defp process_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
     case ChunkIndex.get(hash) do
       {:ok, existing_chunk} ->
-        case ChunkIndex.add_write_ref(hash, write_id) do
+        case ChunkIndex.add_write_ref(hash, write_ctx.write_id) do
           :ok ->
             {:ok,
              %{
@@ -639,27 +695,38 @@ defmodule NeonFS.Core.WriteOperation do
         end
 
       {:error, :not_found} ->
-        store_new_chunk(data, hash, offset, size, index, compression_config, volume, write_id)
+        store_new_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx)
     end
   end
 
-  defp store_new_chunk(data, hash, offset, size, index, compression_config, volume, write_id) do
+  defp store_new_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
     {_should_compress, compression} = should_compress_chunk?(size, compression_config)
     write_opts = build_write_opts(compression)
+    write_opts = add_encryption_write_opts(write_opts, write_ctx.enc_ctx)
 
     tier = volume.tiering.initial_tier
     tier_str = Atom.to_string(tier)
 
     with {:ok, drive} <- select_drive_for_tier(tier),
          {:ok, _returned_hash, chunk_info} <-
-           BlobStore.write_chunk(data, drive.id, tier_str, write_opts),
-         chunk_meta <- build_chunk_meta(hash, size, chunk_info, drive.id, volume, write_id),
-         :ok <- ChunkIndex.put(chunk_meta) do
-      maybe_replicate_chunk(hash, data, volume, tier)
-      build_chunk_result(hash, offset, size, chunk_info, index)
+           BlobStore.write_chunk(data, drive.id, tier_str, write_opts) do
+      crypto = build_chunk_crypto(write_ctx.enc_ctx, write_opts)
+      emit_encrypt_telemetry(write_ctx.enc_ctx, hash, volume.id)
+
+      chunk_meta =
+        build_chunk_meta(hash, size, chunk_info, drive.id, volume, write_ctx.write_id, crypto)
+
+      case ChunkIndex.put(chunk_meta) do
+        :ok ->
+          maybe_replicate_chunk(hash, data, volume, tier)
+          build_chunk_result(hash, offset, size, chunk_info, index)
+
+        {:error, reason} ->
+          {:error, {:chunk_index_failed, reason}}
+      end
     else
-      {:error, reason} when is_tuple(reason) -> {:error, reason}
-      {:error, reason} -> {:error, {:chunk_index_failed, reason}}
+      {:error, :no_drives_available} = error -> error
+      {:error, reason} -> {:error, {:chunk_write_failed, reason}}
     end
   end
 
@@ -675,12 +742,13 @@ defmodule NeonFS.Core.WriteOperation do
   defp build_write_opts(:none), do: []
   defp build_write_opts({:zstd, level}), do: [compression: "zstd", compression_level: level]
 
-  defp build_chunk_meta(hash, size, chunk_info, drive_id, volume, write_id) do
+  defp build_chunk_meta(hash, size, chunk_info, drive_id, volume, write_id, crypto) do
     %ChunkMeta{
       hash: hash,
       original_size: size,
       stored_size: chunk_info.stored_size,
       compression: parse_compression(chunk_info.compression),
+      crypto: crypto,
       locations: [%{node: node(), drive_id: drive_id, tier: volume.tiering.initial_tier}],
       target_replicas: volume.durability.factor,
       commit_state: :uncommitted,
@@ -750,6 +818,9 @@ defmodule NeonFS.Core.WriteOperation do
         {:ok, mode} -> Keyword.put(file_opts, :mode, mode)
         :error -> file_opts
       end
+
+    file_opts = apply_uid_gid_opts(file_opts, opts)
+    file_opts = maybe_inherit_default_acl(file_opts, volume_id, path)
 
     file_meta = FileMeta.new(volume_id, path, file_opts)
 
@@ -867,6 +938,40 @@ defmodule NeonFS.Core.WriteOperation do
     ResolvedLookupCache.evict(file_id)
   rescue
     _ -> :ok
+  end
+
+  defp apply_uid_gid_opts(file_opts, opts) do
+    file_opts =
+      case Keyword.fetch(opts, :uid) do
+        {:ok, uid} -> Keyword.put(file_opts, :uid, uid)
+        :error -> file_opts
+      end
+
+    case Keyword.fetch(opts, :gid) do
+      {:ok, gid} -> Keyword.put(file_opts, :gid, gid)
+      :error -> file_opts
+    end
+  end
+
+  defp maybe_inherit_default_acl(file_opts, volume_id, path) do
+    parent_path = FileMeta.parent_path(path)
+
+    if parent_path do
+      case FileIndex.get_by_path(volume_id, parent_path) do
+        {:ok, parent_meta}
+        when is_list(parent_meta.default_acl) and parent_meta.default_acl != [] ->
+          Keyword.put(file_opts, :acl_entries, parent_meta.default_acl)
+
+        _ ->
+          file_opts
+      end
+    else
+      file_opts
+    end
+  rescue
+    _ -> file_opts
+  catch
+    :exit, _ -> file_opts
   end
 
   defp emit_completion_telemetry(result, duration, volume_id, path, write_id, data) do

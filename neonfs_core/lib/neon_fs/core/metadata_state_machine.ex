@@ -1,12 +1,14 @@
 defmodule NeonFS.Core.MetadataStateMachine do
   @moduledoc """
-  Ra state machine for cluster-wide metadata storage (v5).
+  Ra state machine for cluster-wide metadata storage (v6).
 
   Stores cluster-critical metadata with strong consistency via Raft consensus:
   - Service registry (nodes and their service types)
   - Volume definitions
   - Segment assignments (consistent hash ring -> replica sets)
   - Active write intents (cross-segment atomicity and concurrent writer detection)
+  - Encryption keys (per-volume, wrapped with cluster master key)
+  - Volume ACLs (UID/GID-based permission entries)
   - General key-value data (volume-level metadata)
 
   Also retains chunk, file, and stripe metadata for backward compatibility.
@@ -17,6 +19,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @behaviour :ra_machine
 
   alias NeonFS.Core.Intent
+
+  @type wrapped_key_entry :: %{
+          wrapped_key: binary(),
+          created_at: DateTime.t(),
+          deprecated_at: DateTime.t() | nil
+        }
 
   @type command ::
           {:put, key :: term(), value :: term()}
@@ -46,6 +54,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:fail_intent, intent_id :: binary(), reason :: term()}
           | {:extend_intent, intent_id :: binary(), additional_seconds :: pos_integer()}
           | :cleanup_expired_intents
+          | {:put_encryption_key, volume_id :: binary(), version :: pos_integer(),
+             wrapped_entry :: wrapped_key_entry()}
+          | {:delete_encryption_key, volume_id :: binary(), version :: pos_integer()}
+          | {:set_current_key_version, volume_id :: binary(), version :: pos_integer()}
+          | {:set_rotation_state, volume_id :: binary(), rotation :: map() | nil}
+          | {:put_volume_acl, volume_id :: binary(), acl_data :: map()}
+          | {:update_volume_acl, volume_id :: binary(), updates :: map()}
 
   @type segment_assignment :: %{
           replica_set: [node()],
@@ -62,6 +77,10 @@ defmodule NeonFS.Core.MetadataStateMachine do
           segment_assignments: %{optional(term()) => segment_assignment()},
           intents: %{optional(binary()) => Intent.t()},
           active_intents_by_conflict_key: %{optional(term()) => binary()},
+          encryption_keys: %{
+            optional(binary()) => %{optional(pos_integer()) => wrapped_key_entry()}
+          },
+          volume_acls: %{optional(binary()) => map()},
           version: non_neg_integer()
         }
 
@@ -104,10 +123,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end)
   end
 
+  @doc """
+  Returns the encryption keys for the given volume, or nil if none exist.
+  """
+  @spec get_encryption_keys(state(), binary()) :: %{pos_integer() => wrapped_key_entry()} | nil
+  def get_encryption_keys(state, volume_id), do: Map.get(state.encryption_keys, volume_id)
+
+  @doc """
+  Returns the volume ACL for the given volume, or nil if none exist.
+  """
+  @spec get_volume_acl(state(), binary()) :: map() | nil
+  def get_volume_acl(state, volume_id), do: Map.get(state.volume_acls, volume_id)
+
   # Ra machine callbacks
 
   @doc """
-  Initialise the state machine with a clean v5 state.
+  Initialise the state machine with a clean v6 state.
   """
   @impl :ra_machine
   def init(_config) do
@@ -121,6 +152,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
       segment_assignments: %{},
       intents: %{},
       active_intents_by_conflict_key: %{},
+      encryption_keys: %{},
+      volume_acls: %{},
       version: 0
     }
   end
@@ -200,6 +233,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
       |> Map.put_new(:segment_assignments, %{})
       |> Map.put_new(:intents, %{})
       |> Map.put_new(:active_intents_by_conflict_key, %{})
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 5, 6}, state) do
+    require Logger
+    Logger.info("Ra machine version upgrade: 5 -> 6 (encryption keys + volume ACLs)")
+
+    new_state =
+      state
+      |> Map.put_new(:encryption_keys, %{})
+      |> Map.put_new(:volume_acls, %{})
 
     {new_state, :ok, []}
   end
@@ -347,8 +392,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:delete_volume, volume_id}, state) do
-    new_volumes = Map.delete(state.volumes, volume_id)
-    new_state = %{state | volumes: new_volumes, version: state.version + 1}
+    new_state = %{
+      state
+      | volumes: Map.delete(state.volumes, volume_id),
+        encryption_keys: Map.delete(state.encryption_keys, volume_id),
+        volume_acls: Map.delete(state.volume_acls, volume_id),
+        version: state.version + 1
+    }
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :delete_volume],
@@ -524,6 +574,129 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {new_state, :ok, []}
+  end
+
+  # Encryption key commands (new in v6)
+
+  def apply(_meta, {:put_encryption_key, volume_id, key_version, wrapped_entry}, state) do
+    volume_keys = Map.get(state.encryption_keys, volume_id, %{})
+    updated_keys = Map.put(volume_keys, key_version, wrapped_entry)
+    new_encryption_keys = Map.put(state.encryption_keys, volume_id, updated_keys)
+    new_state = %{state | encryption_keys: new_encryption_keys, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_encryption_key],
+      %{version: new_state.version},
+      %{volume_id: volume_id, key_version: key_version}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:delete_encryption_key, volume_id, key_version}, state) do
+    case Map.get(state.encryption_keys, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      volume_keys ->
+        updated_keys = Map.delete(volume_keys, key_version)
+
+        new_encryption_keys =
+          if map_size(updated_keys) == 0 do
+            Map.delete(state.encryption_keys, volume_id)
+          else
+            Map.put(state.encryption_keys, volume_id, updated_keys)
+          end
+
+        new_state = %{state | encryption_keys: new_encryption_keys, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :delete_encryption_key],
+          %{version: new_state.version},
+          %{volume_id: volume_id, key_version: key_version}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:set_current_key_version, volume_id, key_version}, state) do
+    case Map.get(state.volumes, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      volume_data ->
+        encryption = Map.get(volume_data, :encryption, %{})
+        updated_encryption = Map.put(encryption, :current_key_version, key_version)
+        updated_volume = Map.put(volume_data, :encryption, updated_encryption)
+        new_volumes = Map.put(state.volumes, volume_id, updated_volume)
+        new_state = %{state | volumes: new_volumes, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :set_current_key_version],
+          %{version: new_state.version},
+          %{volume_id: volume_id, key_version: key_version}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:set_rotation_state, volume_id, rotation}, state) do
+    case Map.get(state.volumes, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      volume_data ->
+        encryption = Map.get(volume_data, :encryption, %{})
+        updated_encryption = Map.put(encryption, :rotation, rotation)
+        updated_volume = Map.put(volume_data, :encryption, updated_encryption)
+        new_volumes = Map.put(state.volumes, volume_id, updated_volume)
+        new_state = %{state | volumes: new_volumes, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :set_rotation_state],
+          %{version: new_state.version},
+          %{volume_id: volume_id, rotation: rotation}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  # Volume ACL commands (new in v6)
+
+  def apply(_meta, {:put_volume_acl, volume_id, acl_data}, state) do
+    new_acls = Map.put(state.volume_acls, volume_id, acl_data)
+    new_state = %{state | volume_acls: new_acls, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_volume_acl],
+      %{version: new_state.version},
+      %{volume_id: volume_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:update_volume_acl, volume_id, updates}, state) do
+    case Map.get(state.volume_acls, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      existing_acl ->
+        updated_acl = Map.merge(existing_acl, updates)
+        new_acls = Map.put(state.volume_acls, volume_id, updated_acl)
+        new_state = %{state | volume_acls: new_acls, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :update_volume_acl],
+          %{version: new_state.version},
+          %{volume_id: volume_id}
+        )
+
+        {new_state, :ok, []}
+    end
   end
 
   # Segment assignment commands (new in v5)
@@ -760,7 +933,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 5
+  def version, do: 6
 
   @doc """
   Return the module to handle a specific state machine version.

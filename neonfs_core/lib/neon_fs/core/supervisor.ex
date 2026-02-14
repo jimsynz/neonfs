@@ -179,6 +179,12 @@ defmodule NeonFS.Core.Supervisor do
           # VolumeRegistry depends on FileIndex
           NeonFS.Core.VolumeRegistry,
 
+          # ACLManager caches volume ACLs in ETS, backed by Ra
+          NeonFS.Core.ACLManager,
+
+          # AuditLog records security-relevant events in bounded ETS
+          NeonFS.Core.AuditLog,
+
           # ServiceRegistry depends on Ra being available
           NeonFS.Core.ServiceRegistry,
 
@@ -206,6 +212,7 @@ defmodule NeonFS.Core.Supervisor do
     # In a multi-node cluster, the ring is rebuilt when cluster membership changes
     # (future: dynamic ring rebuild via ServiceRegistry events).
     core_nodes = discover_core_nodes()
+    timeout = Application.get_env(:neonfs_core, :quorum_timeout_ms, 5_000)
 
     ring =
       MetadataRing.new(core_nodes,
@@ -213,7 +220,7 @@ defmodule NeonFS.Core.Supervisor do
         replicas: min(3, length(core_nodes))
       )
 
-    [ring: ring]
+    [ring: ring, timeout: timeout]
   end
 
   defp discover_core_nodes do

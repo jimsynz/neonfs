@@ -8,6 +8,7 @@ defmodule NeonFS.Core.Volume do
   """
 
   alias __MODULE__
+  alias NeonFS.Core.VolumeEncryption
 
   @type durability_config ::
           %{
@@ -66,6 +67,7 @@ defmodule NeonFS.Core.Volume do
           io_weight: pos_integer(),
           compression: compression_config(),
           verification: verification_config(),
+          encryption: VolumeEncryption.t(),
           metadata_consistency: metadata_consistency_config() | nil,
           logical_size: non_neg_integer(),
           physical_size: non_neg_integer(),
@@ -85,6 +87,7 @@ defmodule NeonFS.Core.Volume do
     :io_weight,
     :compression,
     :verification,
+    :encryption,
     :metadata_consistency,
     :logical_size,
     :physical_size,
@@ -122,6 +125,7 @@ defmodule NeonFS.Core.Volume do
       io_weight: Keyword.get(opts, :io_weight, 100),
       compression: Keyword.get(opts, :compression, default_compression()),
       verification: Keyword.get(opts, :verification, default_verification()),
+      encryption: Keyword.get(opts, :encryption, default_encryption()),
       metadata_consistency: Keyword.get(opts, :metadata_consistency),
       logical_size: 0,
       physical_size: 0,
@@ -188,6 +192,16 @@ defmodule NeonFS.Core.Volume do
   end
 
   @doc """
+  Returns the default encryption configuration.
+
+  No encryption by default.
+  """
+  @spec default_encryption() :: VolumeEncryption.t()
+  def default_encryption do
+    VolumeEncryption.new()
+  end
+
+  @doc """
   Updates a volume with new configuration values.
 
   Only allows updating specific fields: owner, durability, write_ack, tiering,
@@ -204,6 +218,7 @@ defmodule NeonFS.Core.Volume do
       :caching,
       :compression,
       :durability,
+      :encryption,
       :io_weight,
       :metadata_consistency,
       :owner,
@@ -247,6 +262,12 @@ defmodule NeonFS.Core.Volume do
   def erasure?(%Volume{}), do: false
 
   @doc """
+  Returns true if the volume has encryption enabled.
+  """
+  @spec encrypted?(t()) :: boolean()
+  def encrypted?(%Volume{encryption: encryption}), do: VolumeEncryption.active?(encryption)
+
+  @doc """
   Validates a volume configuration.
 
   Returns `:ok` if valid, or `{:error, reason}` if invalid.
@@ -276,7 +297,8 @@ defmodule NeonFS.Core.Volume do
          :ok <- validate_caching(volume.caching),
          :ok <- validate_io_weight(volume.io_weight),
          :ok <- validate_compression(volume.compression),
-         :ok <- validate_verification(volume.verification) do
+         :ok <- validate_verification(volume.verification),
+         :ok <- validate_encryption(volume.encryption) do
       validate_metadata_consistency(volume.metadata_consistency)
     end
   end
@@ -359,6 +381,9 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_verification(_),
     do: {:error, "on_read must be :always, :never, or :sampling"}
+
+  defp validate_encryption(%VolumeEncryption{} = enc), do: VolumeEncryption.validate(enc)
+  defp validate_encryption(_), do: {:error, "encryption must be a VolumeEncryption struct"}
 
   defp validate_metadata_consistency(nil), do: :ok
 

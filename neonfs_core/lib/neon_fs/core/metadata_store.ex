@@ -83,7 +83,28 @@ defmodule NeonFS.Core.MetadataStore do
   @spec write(segment_id(), key(), term(), keyword()) :: :ok | {:error, term()}
   def write(segment_id, key, value, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:write, segment_id, key, value})
+
+    case Keyword.get(opts, :caller_timestamp) do
+      nil ->
+        GenServer.call(server, {:write, segment_id, key, value})
+
+      timestamp ->
+        GenServer.call(server, {:write_with_timestamp, segment_id, key, value, timestamp})
+    end
+  end
+
+  @doc """
+  Generates a new HLC timestamp for use as a coordinator-level write timestamp.
+
+  Call this on the coordinating node BEFORE dispatching quorum writes, then pass
+  the returned timestamp via `caller_timestamp: ts` to `write/4` on all replicas.
+  This ensures all replicas record the same logical timestamp for the same write,
+  preventing late-arriving writes from overwriting later logical writes.
+  """
+  @spec generate_timestamp(keyword()) :: HLC.timestamp()
+  def generate_timestamp(opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, :generate_timestamp)
   end
 
   @doc """
@@ -213,32 +234,35 @@ defmodule NeonFS.Core.MetadataStore do
   end
 
   @impl true
+  def handle_call(:generate_timestamp, _from, state) do
+    {timestamp, new_hlc} = HLC.now(state.hlc)
+    {:reply, timestamp, %{state | hlc: new_hlc}}
+  end
+
+  @impl true
   def handle_call({:write, segment_id, key, value}, _from, state) do
     key_hash = compute_key_hash(key)
     {timestamp, new_hlc} = HLC.now(state.hlc)
+    do_write(segment_id, key_hash, value, timestamp, %{state | hlc: new_hlc})
+  end
 
-    record = %{value: value, hlc_timestamp: timestamp, tombstone: false}
+  @impl true
+  def handle_call(
+        {:write_with_timestamp, segment_id, key, value, caller_timestamp},
+        _from,
+        state
+      ) do
+    key_hash = compute_key_hash(key)
 
-    case MetadataCodec.encode_record(record) do
-      {:ok, serialised} ->
-        case BlobStore.write_metadata(segment_id, key_hash, serialised, state.drive_id,
-               server: state.blob_store_server
-             ) do
-          {:ok, {}} ->
-            # Decode the serialised record to normalise values for cache consistency
-            # (atom keys → string keys, atom values → strings)
-            {:ok, normalised} = MetadataCodec.decode_record(serialised)
-            new_state = %{state | hlc: new_hlc}
-            new_state = cache_put(new_state, segment_id, key_hash, normalised)
-            {:reply, :ok, new_state}
+    # Advance local HLC to stay monotonic with the caller's timestamp.
+    # This ensures future locally-generated timestamps are >= the caller's.
+    new_hlc =
+      case HLC.receive_timestamp(state.hlc, caller_timestamp) do
+        {:ok, _merged_ts, advanced_hlc} -> advanced_hlc
+        {:error, :clock_skew_detected, _skew} -> state.hlc
+      end
 
-          {:error, reason} ->
-            {:reply, {:error, reason}, %{state | hlc: new_hlc}}
-        end
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, %{state | hlc: new_hlc}}
-    end
+    do_write(segment_id, key_hash, value, caller_timestamp, %{state | hlc: new_hlc})
   end
 
   @impl true
@@ -348,6 +372,32 @@ defmodule NeonFS.Core.MetadataStore do
       {:ok, key_hashes} ->
         new_state = load_records_into_cache(key_hashes, segment_id, state)
         {:reply, :ok, new_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  ## Private: Write helper
+
+  defp do_write(segment_id, key_hash, value, timestamp, state) do
+    record = %{value: value, hlc_timestamp: timestamp, tombstone: false}
+
+    case MetadataCodec.encode_record(record) do
+      {:ok, serialised} ->
+        case BlobStore.write_metadata(segment_id, key_hash, serialised, state.drive_id,
+               server: state.blob_store_server
+             ) do
+          {:ok, {}} ->
+            # Decode the serialised record to normalise values for cache consistency
+            # (atom keys → string keys, atom values → strings)
+            {:ok, normalised} = MetadataCodec.decode_record(serialised)
+            new_state = cache_put(state, segment_id, key_hash, normalised)
+            {:reply, :ok, new_state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}

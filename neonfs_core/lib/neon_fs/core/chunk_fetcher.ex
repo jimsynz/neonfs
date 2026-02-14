@@ -38,6 +38,8 @@ defmodule NeonFS.Core.ChunkFetcher do
       * `:verify` - Verify data integrity (default: false)
       * `:decompress` - Decompress data (default: false)
       * `:cache_remote` - Cache remotely fetched chunks locally (default: false)
+      * `:key` - Decryption key (default: <<>>)
+      * `:nonce` - Decryption nonce (default: <<>>)
 
   ## Returns
 
@@ -55,12 +57,8 @@ defmodule NeonFS.Core.ChunkFetcher do
   """
   @spec fetch_chunk(binary(), keyword()) :: fetch_result()
   def fetch_chunk(hash, opts \\ []) when is_binary(hash) do
-    tier = Keyword.get(opts, :tier, "hot")
-    drive_id = Keyword.get(opts, :drive_id, "default")
-    verify = Keyword.get(opts, :verify, false)
-    decompress = Keyword.get(opts, :decompress, false)
     volume_id = Keyword.get(opts, :volume_id)
-
+    decompress = Keyword.get(opts, :decompress, false)
     start_time = System.monotonic_time()
 
     # Try cache first (only for transformed chunks)
@@ -70,7 +68,7 @@ defmodule NeonFS.Core.ChunkFetcher do
           {:ok, data, :local}
 
         :miss ->
-          fetch_from_storage(hash, drive_id, tier, verify, decompress, start_time, opts)
+          fetch_from_storage(hash, start_time, opts)
       end
 
     # Record access for tiering decisions and populate cache
@@ -84,160 +82,6 @@ defmodule NeonFS.Core.ChunkFetcher do
     end
 
     result
-  end
-
-  defp try_cache_fetch(nil, _hash), do: :miss
-
-  defp try_cache_fetch(volume_id, hash) do
-    ChunkCache.get(volume_id, hash)
-  rescue
-    ArgumentError -> :miss
-  end
-
-  defp maybe_cache_result(nil, _hash, _data, _decompress), do: :ok
-  defp maybe_cache_result(_volume_id, _hash, _data, false), do: :ok
-
-  defp maybe_cache_result(volume_id, hash, data, true) do
-    ChunkCache.put(volume_id, hash, data)
-  rescue
-    ArgumentError -> :ok
-  end
-
-  defp fetch_from_storage(hash, drive_id, tier, verify, decompress, start_time, opts) do
-    case try_local_fetch(hash, drive_id, tier, verify, decompress) do
-      {:ok, data} ->
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:neonfs, :chunk_fetcher, :local_hit],
-          %{duration: duration, bytes: byte_size(data)},
-          %{hash: Base.encode16(hash, case: :lower)}
-        )
-
-        {:ok, data, :local}
-
-      {:error, _reason} ->
-        # Not found locally, try remote fetch
-        try_remote_fetch(hash, tier, verify, decompress, start_time, opts)
-    end
-  end
-
-  # Private Functions
-
-  defp try_local_fetch(hash, drive_id, tier, verify, decompress) do
-    read_opts = [verify: verify, decompress: decompress]
-
-    case BlobStore.read_chunk_with_options(hash, drive_id, tier, read_opts) do
-      {:ok, data} -> {:ok, data}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp try_remote_fetch(hash, tier, verify, decompress, start_time, opts) do
-    cache_remote = Keyword.get(opts, :cache_remote, false)
-
-    :telemetry.execute(
-      [:neonfs, :chunk_fetcher, :remote_fetch, :start],
-      %{system_time: System.system_time()},
-      %{hash: Base.encode16(hash, case: :lower)}
-    )
-
-    result =
-      case ChunkIndex.get(hash) do
-        {:error, :not_found} ->
-          {:error, :chunk_not_found}
-
-        {:ok, chunk_meta} ->
-          fetch_from_remote(hash, chunk_meta.locations, tier, verify, decompress, cache_remote)
-      end
-
-    duration = System.monotonic_time() - start_time
-
-    case result do
-      {:ok, data, {:remote, node}} ->
-        :telemetry.execute(
-          [:neonfs, :chunk_fetcher, :remote_fetch, :stop],
-          %{duration: duration, bytes: byte_size(data)},
-          %{hash: Base.encode16(hash, case: :lower), node: node}
-        )
-
-      {:error, reason} ->
-        :telemetry.execute(
-          [:neonfs, :chunk_fetcher, :remote_fetch, :exception],
-          %{duration: duration},
-          %{hash: Base.encode16(hash, case: :lower), error: reason}
-        )
-    end
-
-    result
-  end
-
-  defp fetch_from_remote(hash, locations, tier, verify, decompress, cache_remote) do
-    # Filter out local node from locations
-    remote_locations =
-      locations
-      |> Enum.reject(&(&1.node == Node.self()))
-      |> sort_locations_by_preference()
-
-    # Try each location until one succeeds
-    Enum.find_value(remote_locations, {:error, :all_replicas_failed}, fn location ->
-      try_fetch_from_location(location, hash, tier, verify, decompress, cache_remote)
-    end)
-  end
-
-  defp try_fetch_from_location(location, hash, tier, verify, decompress, cache_remote) do
-    drive_id = Map.get(location, :drive_id, "default")
-
-    case rpc_read_chunk(location.node, hash, drive_id, tier, verify, decompress) do
-      {:ok, data} ->
-        maybe_cache_remotely_fetched_chunk(hash, data, tier, cache_remote)
-        {:ok, data, {:remote, location.node}}
-
-      {:error, reason} ->
-        Logger.debug(
-          "Failed to fetch chunk from #{location.node}: #{inspect(reason)}, trying next location"
-        )
-
-        # Return nil to continue to next location
-        nil
-    end
-  end
-
-  defp maybe_cache_remotely_fetched_chunk(hash, data, tier, cache_remote) do
-    if cache_remote do
-      spawn(fn -> cache_chunk_locally(hash, data, tier) end)
-    end
-  end
-
-  defp sort_locations_by_preference(locations) do
-    local_node = Node.self()
-
-    locations
-    |> Enum.map(&enrich_location_with_drive_info/1)
-    |> sort_locations_by_score(local_node)
-  end
-
-  defp enrich_location_with_drive_info(location) do
-    node = location.node
-    drive_id = Map.get(location, :drive_id, "default")
-
-    case safe_get_drive(node, drive_id) do
-      {:ok, drive} ->
-        Map.merge(location, %{tier: drive.tier, state: drive.state})
-
-      {:error, _} ->
-        Logger.warning("Drive info unavailable for #{drive_id} on #{node}, assigning worst score")
-
-        location
-    end
-  end
-
-  defp safe_get_drive(node, drive_id) do
-    DriveRegistry.get_drive(node, drive_id)
-  rescue
-    ArgumentError -> {:error, :registry_unavailable}
-  catch
-    :exit, _ -> {:error, :registry_unavailable}
   end
 
   @doc """
@@ -281,6 +125,170 @@ defmodule NeonFS.Core.ChunkFetcher do
     drive_score(tier, state, local?)
   end
 
+  # ─── Private Functions ──────────────────────────────────────────────
+
+  defp try_cache_fetch(nil, _hash), do: :miss
+
+  defp try_cache_fetch(volume_id, hash) do
+    ChunkCache.get(volume_id, hash)
+  rescue
+    ArgumentError -> :miss
+  end
+
+  defp maybe_cache_result(nil, _hash, _data, _decompress), do: :ok
+  defp maybe_cache_result(_volume_id, _hash, _data, false), do: :ok
+
+  defp maybe_cache_result(volume_id, hash, data, true) do
+    ChunkCache.put(volume_id, hash, data)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp fetch_from_storage(hash, start_time, opts) do
+    read_opts = build_read_opts(opts)
+    drive_id = Keyword.get(opts, :drive_id, "default")
+    tier = Keyword.get(opts, :tier, "hot")
+
+    case try_local_fetch(hash, drive_id, tier, read_opts) do
+      {:ok, data} ->
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:neonfs, :chunk_fetcher, :local_hit],
+          %{duration: duration, bytes: byte_size(data)},
+          %{hash: Base.encode16(hash, case: :lower)}
+        )
+
+        {:ok, data, :local}
+
+      {:error, "encryption error" <> _ = reason} ->
+        # Decryption failures mean the chunk was found locally but couldn't be
+        # authenticated. Retrying on a remote node with the same key/nonce would
+        # fail identically, so propagate immediately.
+        {:error, reason}
+
+      {:error, _reason} ->
+        # Not found locally, try remote fetch
+        try_remote_fetch(hash, start_time, opts)
+    end
+  end
+
+  defp try_local_fetch(hash, drive_id, tier, read_opts) do
+    case BlobStore.read_chunk_with_options(hash, drive_id, tier, read_opts) do
+      {:ok, data} -> {:ok, data}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp try_remote_fetch(hash, start_time, opts) do
+    read_opts = build_read_opts(opts)
+    tier = Keyword.get(opts, :tier, "hot")
+    cache_remote = Keyword.get(opts, :cache_remote, false)
+
+    :telemetry.execute(
+      [:neonfs, :chunk_fetcher, :remote_fetch, :start],
+      %{system_time: System.system_time()},
+      %{hash: Base.encode16(hash, case: :lower)}
+    )
+
+    result =
+      case ChunkIndex.get(hash) do
+        {:error, :not_found} ->
+          {:error, :chunk_not_found}
+
+        {:ok, chunk_meta} ->
+          fetch_from_remote(hash, chunk_meta.locations, tier, read_opts, cache_remote)
+      end
+
+    duration = System.monotonic_time() - start_time
+
+    case result do
+      {:ok, data, {:remote, node}} ->
+        :telemetry.execute(
+          [:neonfs, :chunk_fetcher, :remote_fetch, :stop],
+          %{duration: duration, bytes: byte_size(data)},
+          %{hash: Base.encode16(hash, case: :lower), node: node}
+        )
+
+      {:error, reason} ->
+        :telemetry.execute(
+          [:neonfs, :chunk_fetcher, :remote_fetch, :exception],
+          %{duration: duration},
+          %{hash: Base.encode16(hash, case: :lower), error: reason}
+        )
+    end
+
+    result
+  end
+
+  defp fetch_from_remote(hash, locations, tier, read_opts, cache_remote) do
+    # Filter out local node from locations
+    remote_locations =
+      locations
+      |> Enum.reject(&(&1.node == Node.self()))
+      |> sort_locations_by_preference()
+
+    # Try each location until one succeeds
+    Enum.find_value(remote_locations, {:error, :all_replicas_failed}, fn location ->
+      try_fetch_from_location(location, hash, tier, read_opts, cache_remote)
+    end)
+  end
+
+  defp try_fetch_from_location(location, hash, tier, read_opts, cache_remote) do
+    drive_id = Map.get(location, :drive_id, "default")
+
+    case rpc_read_chunk(location.node, hash, drive_id, tier, read_opts) do
+      {:ok, data} ->
+        maybe_cache_remotely_fetched_chunk(hash, data, tier, cache_remote)
+        {:ok, data, {:remote, location.node}}
+
+      {:error, reason} ->
+        Logger.debug(
+          "Failed to fetch chunk from #{location.node}: #{inspect(reason)}, trying next location"
+        )
+
+        # Return nil to continue to next location
+        nil
+    end
+  end
+
+  defp maybe_cache_remotely_fetched_chunk(hash, data, tier, cache_remote) do
+    if cache_remote do
+      spawn(fn -> cache_chunk_locally(hash, data, tier) end)
+    end
+  end
+
+  defp sort_locations_by_preference(locations) do
+    local_node = Node.self()
+
+    locations
+    |> Enum.map(&enrich_location_with_drive_info/1)
+    |> sort_locations_by_score(local_node)
+  end
+
+  defp enrich_location_with_drive_info(location) do
+    node = location.node
+    drive_id = Map.get(location, :drive_id, "default")
+
+    case safe_get_drive(node, drive_id) do
+      {:ok, drive} ->
+        Map.merge(location, %{tier: drive.tier, state: drive.state})
+
+      {:error, _} ->
+        Logger.debug("Drive info unavailable for #{drive_id} on #{node}, assigning worst score")
+
+        location
+    end
+  end
+
+  defp safe_get_drive(node, drive_id) do
+    DriveRegistry.get_drive(node, drive_id)
+  rescue
+    ArgumentError -> {:error, :registry_unavailable}
+  catch
+    :exit, _ -> {:error, :registry_unavailable}
+  end
+
   defp drive_score(nil, _state, _local?), do: 100
   defp drive_score(:hot, _state, true), do: 0
   defp drive_score(:hot, _state, false), do: 10
@@ -288,9 +296,16 @@ defmodule NeonFS.Core.ChunkFetcher do
   defp drive_score(_hdd, _state, true), do: 20
   defp drive_score(_hdd, _state, false), do: 30
 
-  defp rpc_read_chunk(node, hash, drive_id, tier, verify, decompress) do
-    read_opts = [verify: verify, decompress: decompress]
+  defp build_read_opts(opts) do
+    [
+      verify: Keyword.get(opts, :verify, false),
+      decompress: Keyword.get(opts, :decompress, false),
+      key: Keyword.get(opts, :key, <<>>),
+      nonce: Keyword.get(opts, :nonce, <<>>)
+    ]
+  end
 
+  defp rpc_read_chunk(node, hash, drive_id, tier, read_opts) do
     # Use :rpc to call BlobStore.read_chunk_with_options on the remote node
     case :rpc.call(
            node,

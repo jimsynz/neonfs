@@ -16,9 +16,11 @@ defmodule NeonFS.Integration.QuorumTest do
   @moduletag :integration
   @moduletag nodes: 3
 
-  # Short RPC timeout for use inside retry loops — allows multiple attempts
-  # within the assert_eventually window instead of blocking on a single slow call
-  @retry_rpc_timeout 10_000
+  # RPC timeout for use inside retry loops. Must be large enough for a cold-cache
+  # read_file (two quorum reads + RPC chunk fetch ≈ 21s worst case). With 30s per
+  # attempt and 60s assert_eventually, the first attempt populates ETS caches and
+  # the second (if needed) completes quickly.
+  @retry_rpc_timeout 30_000
 
   describe "multi-node quorum consistency" do
     test "write on one node, read from another", %{cluster: cluster} do
@@ -34,41 +36,42 @@ defmodule NeonFS.Integration.QuorumTest do
         ])
 
       assert file.size == byte_size(test_data)
+      file_id = file.id
 
       # Read from node2 (metadata via quorum, chunk data fetched via RPC from node1)
       assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node2,
-               NeonFS.TestHelpers,
-               :read_file,
-               [
-                 "consistency-vol",
-                 "/quorum.bin"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, ^test_data} -> true
-          _ -> false
-        end
+        result =
+          PeerCluster.rpc(
+            cluster,
+            :node2,
+            NeonFS.TestHelpers,
+            :read_file,
+            [
+              "consistency-vol",
+              "/quorum.bin"
+            ],
+            @retry_rpc_timeout
+          )
+
+        match?({:ok, ^test_data}, result)
       end
 
       # Verify file metadata accessible from node3 via quorum
       assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node3,
-               NeonFS.TestHelpers,
-               :get_file,
-               [
-                 "consistency-vol",
-                 "/quorum.bin"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, f} -> f.id == file.id
-          _ -> false
-        end
+        result =
+          PeerCluster.rpc(
+            cluster,
+            :node3,
+            NeonFS.TestHelpers,
+            :get_file,
+            [
+              "consistency-vol",
+              "/quorum.bin"
+            ],
+            @retry_rpc_timeout
+          )
+
+        match?({:ok, %{id: ^file_id}}, result)
       end
     end
 
@@ -327,73 +330,11 @@ defmodule NeonFS.Integration.QuorumTest do
   # ─── Helpers ──────────────────────────────────────────────────────────
 
   defp init_multi_node_cluster(cluster, volume_name) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["quorum-test"])
-
-    {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
-
-    node1_info = PeerCluster.get_node!(cluster, :node1)
-    node1_str = Atom.to_string(node1_info.node)
-
-    # Join nodes sequentially with waits between — Ra rejects concurrent cluster changes
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node2, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    # Wait for node2's Ra membership to be committed before joining node3
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node3, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    # Wait for cluster to stabilise with all 3 nodes
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-
-    # Wait for ALL peer nodes to see each other AND have MetadataStore running.
-    # discover_core_nodes() filters Node.list() by MetadataStore presence,
-    # so the ring will be incomplete if MetadataStore isn't ready on all peers.
-    peer_nodes = Enum.map([:node1, :node2, :node3], &PeerCluster.get_node!(cluster, &1).node)
-
-    assert_eventually timeout: 30_000 do
-      Enum.all?(peer_nodes, fn peer ->
-        # Check this node sees the other 2 peers (excluding the test runner)
-        node_list = :rpc.call(peer, Node, :list, [])
-        other_peers = Enum.filter(node_list, &(&1 in peer_nodes))
-        all_connected = length(other_peers) >= 2
-
-        # Check MetadataStore is running on this node
-        has_metadata_store =
-          case :rpc.call(peer, Process, :whereis, [NeonFS.Core.MetadataStore]) do
-            pid when is_pid(pid) -> true
-            _ -> false
-          end
-
-        all_connected and has_metadata_store
-      end)
-    end
-
-    # Rebuild quorum ring on all nodes now that full membership is confirmed
-    for node_name <- [:node1, :node2, :node3] do
-      PeerCluster.rpc(cluster, node_name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
-    end
+    token = init_cluster_and_invite(cluster)
+    join_all_nodes(cluster, token)
+    wait_for_full_connectivity(cluster)
+    rebuild_and_verify_quorum_rings(cluster)
+    sync_drive_registries(cluster)
 
     {:ok, _} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
@@ -402,5 +343,98 @@ defmodule NeonFS.Integration.QuorumTest do
       ])
 
     :ok
+  end
+
+  defp init_cluster_and_invite(cluster) do
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["quorum-test"])
+
+    {:ok, %{"token" => token}} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
+
+    token
+  end
+
+  defp join_all_nodes(cluster, token) do
+    node1_str = cluster |> PeerCluster.get_node!(:node1) |> Map.get(:node) |> Atom.to_string()
+
+    # Join nodes sequentially with waits between — Ra rejects concurrent cluster changes
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node2, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
+
+    :ok = wait_for_cluster_stable(cluster)
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node3, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
+
+    :ok = wait_for_cluster_stable(cluster)
+  end
+
+  defp wait_for_cluster_stable(cluster) do
+    wait_until(
+      fn ->
+        match?(
+          {:ok, _},
+          PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, [])
+        )
+      end,
+      timeout: 10_000
+    )
+  end
+
+  defp wait_for_full_connectivity(cluster) do
+    # Wait for ALL peer nodes to see each other AND have MetadataStore running.
+    # discover_core_nodes() filters Node.list() by MetadataStore presence,
+    # so the ring will be incomplete if MetadataStore isn't ready on all peers.
+    peer_nodes = Enum.map([:node1, :node2, :node3], &PeerCluster.get_node!(cluster, &1).node)
+
+    assert_eventually timeout: 30_000 do
+      Enum.all?(peer_nodes, &node_fully_connected?(&1, peer_nodes))
+    end
+  end
+
+  defp node_fully_connected?(peer, all_peer_nodes) do
+    node_list = :rpc.call(peer, Node, :list, [])
+    other_peers = Enum.filter(node_list, &(&1 in all_peer_nodes))
+    has_enough_peers = length(other_peers) >= 2
+    has_metadata_store = is_pid(:rpc.call(peer, Process, :whereis, [NeonFS.Core.MetadataStore]))
+    has_enough_peers and has_metadata_store
+  end
+
+  defp rebuild_and_verify_quorum_rings(cluster) do
+    for node_name <- [:node1, :node2, :node3] do
+      PeerCluster.rpc(cluster, node_name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
+    end
+
+    for node_name <- [:node1, :node2, :node3] do
+      verify_quorum_ring(cluster, node_name)
+    end
+  end
+
+  defp verify_quorum_ring(cluster, node_name) do
+    opts =
+      PeerCluster.rpc(cluster, node_name, :persistent_term, :get, [
+        {NeonFS.Core.FileIndex, :quorum_opts}
+      ])
+
+    ring = Keyword.fetch!(opts, :ring)
+    ring_size = MapSet.size(ring.node_set)
+    timeout = Keyword.fetch!(opts, :timeout)
+
+    unless ring_size == 3 do
+      raise "Ring on #{node_name} has #{ring_size} nodes, expected 3: #{inspect(ring.node_set)}"
+    end
+
+    unless timeout >= 10_000 do
+      raise "Timeout on #{node_name} is #{timeout}ms, expected >= 10_000"
+    end
+  end
+
+  defp sync_drive_registries(cluster) do
+    # Force DriveRegistry to sync remote drives immediately so ChunkFetcher
+    # has drive info for scoring (avoids 30s delay and "Drive info unavailable" warnings)
+    for node_name <- [:node1, :node2, :node3] do
+      PeerCluster.rpc(cluster, node_name, NeonFS.Core.DriveRegistry, :sync_now, [])
+    end
   end
 end

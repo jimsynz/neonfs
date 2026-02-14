@@ -115,7 +115,8 @@ defmodule NeonFS.FUSE.MountManager do
   def handle_call({:mount, volume_name, mount_point, opts}, _from, state) do
     with :ok <- validate_mount_point(mount_point),
          :ok <- check_not_mounted(mount_point, state),
-         {:ok, volume} <- get_volume(volume_name) do
+         {:ok, volume} <- get_volume(volume_name),
+         :ok <- check_mount_permission(volume, opts) do
       mount_filesystem(volume_name, volume.id, mount_point, opts, state)
     else
       {:error, reason} = error ->
@@ -222,6 +223,22 @@ defmodule NeonFS.FUSE.MountManager do
     case NeonFS.Client.core_call(NeonFS.Core.VolumeRegistry, :get_by_name, [volume_name]) do
       {:ok, volume} -> {:ok, volume}
       {:error, :not_found} -> {:error, :volume_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp check_mount_permission(volume, opts) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    case NeonFS.Client.core_call(NeonFS.Core.Authorise, :check, [
+           uid,
+           gids,
+           :mount,
+           {:volume, volume.id}
+         ]) do
+      :ok -> :ok
+      {:error, :forbidden} -> {:error, :forbidden}
       {:error, reason} -> {:error, reason}
     end
   end

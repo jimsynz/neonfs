@@ -245,6 +245,26 @@ defmodule NeonFS.TestCase do
     start_supervised!(NeonFS.Core.VolumeRegistry, restart: :temporary)
   end
 
+  @doc """
+  Starts ACLManager.
+  """
+  def start_acl_manager do
+    stop_if_running(NeonFS.Core.ACLManager)
+    cleanup_ets_table(:volume_acls)
+    start_supervised!(NeonFS.Core.ACLManager, restart: :temporary)
+  end
+
+  @doc """
+  Starts AuditLog with test configuration.
+  """
+  def start_audit_log(opts \\ []) do
+    stop_if_running(NeonFS.Core.AuditLog)
+    cleanup_ets_table(:audit_log)
+
+    opts = Keyword.merge([max_events: 1000, prune_interval_ms: 0], opts)
+    start_supervised!({NeonFS.Core.AuditLog, opts}, restart: :temporary)
+  end
+
   defp stop_if_running(name) do
     case Process.whereis(name) do
       nil -> :ok
@@ -378,6 +398,8 @@ defmodule NeonFS.TestCase do
     tables = [
       :volumes_by_id,
       :volumes_by_name,
+      :volume_acls,
+      :audit_log,
       :file_index_by_id,
       :chunk_index,
       :stripe_index
@@ -426,6 +448,24 @@ defmodule NeonFS.TestCase do
 
     Application.put_env(:neonfs_core, :ra_data_dir, Path.join(tmp_dir, "ra"))
     :ok
+  end
+
+  @doc """
+  Writes a cluster.json file with a master key for encryption tests.
+  """
+  def write_cluster_json(dir, master_key) do
+    alias NeonFS.Cluster.State, as: ClusterState
+
+    cluster_state =
+      ClusterState.new(
+        "test-cluster-#{System.unique_integer([:positive])}",
+        "test-cluster",
+        master_key,
+        %{id: "node-1", name: node(), joined_at: DateTime.utc_now()}
+      )
+
+    Application.put_env(:neonfs_core, :meta_dir, dir)
+    :ok = ClusterState.save(cluster_state)
   end
 
   @doc """

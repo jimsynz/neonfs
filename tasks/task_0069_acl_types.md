@@ -1,7 +1,7 @@
 # Task 0069: ACL Types (UID/GID-Based)
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security

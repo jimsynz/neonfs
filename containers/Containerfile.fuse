@@ -1,9 +1,10 @@
-FROM builder AS deps
+FROM base AS deps
 RUN mkdir /workdir/neonfs_client
 COPY --from=client . /workdir/neonfs_client
 RUN mkdir /workdir/neonfs_fuse
 COPY --from=src . /workdir/neonfs_fuse
 WORKDIR /workdir/neonfs_fuse
+RUN export PATH="/root/.asdf/shims:$PATH"; mix local.hex --force && mix local.rebar --force
 RUN export PATH="/root/.asdf/shims:$PATH"; mix deps.get
 
 FROM deps AS releaser

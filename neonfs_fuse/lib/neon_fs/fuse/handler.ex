@@ -65,10 +65,13 @@ defmodule NeonFS.FUSE.Handler do
   def init(opts) do
     fuse_server = Keyword.get(opts, :fuse_server)
     volume = Keyword.get(opts, :volume, @default_volume)
+    uid = Keyword.get(opts, :uid, 0)
+    gid = Keyword.get(opts, :gid, 0)
+    gids = Keyword.get(opts, :gids, [])
 
     Logger.info("FUSE Handler started (volume: #{volume})")
 
-    {:ok, %{fuse_server: fuse_server, volume: volume}}
+    {:ok, %{fuse_server: fuse_server, volume: volume, uid: uid, gid: gid, gids: gids}}
   end
 
   @impl true
@@ -131,9 +134,13 @@ defmodule NeonFS.FUSE.Handler do
     size = params["size"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         :ok <- check_file_permission(volume_id, path, :read, state),
          {:ok, data} <- read_file(volume_id, path, offset: offset, length: size) do
       {"read_ok", %{"data" => data}}
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
@@ -150,11 +157,15 @@ defmodule NeonFS.FUSE.Handler do
     data = params["data"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         :ok <- check_file_permission(volume_id, path, :write, state),
          {:ok, existing_file} <- file_index_get_by_path(volume_id, path),
          merged_data <- merge_write_data(existing_file, offset, data),
          {:ok, _file} <- write_file(volume_id, path, merged_data) do
       {"write_ok", %{"size" => byte_size(data)}}
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
@@ -191,6 +202,7 @@ defmodule NeonFS.FUSE.Handler do
     _mode = params["mode"]
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
+         :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
          {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: @default_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
@@ -199,6 +211,9 @@ defmodule NeonFS.FUSE.Handler do
 
       {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "file", "fh" => fh}}
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, reason} ->
         Logger.warning("Create failed: #{inspect(reason)}")
         {"error", %{"errno" => errno(:eio)}}
@@ -212,11 +227,15 @@ defmodule NeonFS.FUSE.Handler do
     _mode = params["mode"]
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
+         :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
          {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: @dir_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "directory", "fh" => 0}}
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, reason} ->
         Logger.warning("Mkdir failed: #{inspect(reason)}")
         {"error", %{"errno" => errno(:eio)}}
@@ -229,6 +248,7 @@ defmodule NeonFS.FUSE.Handler do
     name = params["name"]
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
+         :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
          {:ok, inode} <- InodeTable.get_inode(volume_id, child_path),
          {:ok, file} <- file_index_get_by_path(volume_id, child_path),
@@ -236,6 +256,9 @@ defmodule NeonFS.FUSE.Handler do
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
@@ -254,6 +277,7 @@ defmodule NeonFS.FUSE.Handler do
     name = params["name"]
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
+         :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
          {:ok, inode} <- InodeTable.get_inode(volume_id, child_path),
          {:ok, files} <- list_directory(volume_id, child_path),
@@ -263,6 +287,9 @@ defmodule NeonFS.FUSE.Handler do
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
@@ -300,6 +327,8 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, old_parent_path}} <- resolve_inode(old_parent, state),
          {:ok, {^volume_id, new_parent_path}} <- resolve_inode(new_parent, state),
+         :ok <- check_file_permission(volume_id, old_parent_path, :write, state),
+         :ok <- check_file_permission(volume_id, new_parent_path, :write, state),
          old_path <- build_child_path(old_parent_path, old_name),
          new_path <- build_child_path(new_parent_path, new_name),
          {:ok, file} <- file_index_get_by_path(volume_id, old_path),
@@ -309,6 +338,9 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, _new_inode} <- InodeTable.allocate_inode(volume_id, new_path) do
       {"ok", %{}}
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
@@ -326,7 +358,8 @@ defmodule NeonFS.FUSE.Handler do
     ino = params["ino"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, file} <- file_index_get_by_path(volume_id, path) do
+         {:ok, file} <- file_index_get_by_path(volume_id, path),
+         :ok <- check_setattr_permission(file, params, state) do
       updates = build_setattr_updates(params)
 
       case file_index_update(file.id, updates) do
@@ -339,6 +372,9 @@ defmodule NeonFS.FUSE.Handler do
           {"error", %{"errno" => errno(:eio)}}
       end
     else
+      {:error, :forbidden} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
@@ -495,6 +531,49 @@ defmodule NeonFS.FUSE.Handler do
   defp maybe_add_setattr_time(updates, key, {sec, nsec}) do
     dt = DateTime.from_unix!(sec * 1_000_000_000 + nsec, :nanosecond)
     [{key, dt} | updates]
+  end
+
+  # Permission checking — routes through core node's Authorise module
+  defp check_file_permission(volume_id, path, action, state) do
+    # Root (UID 0) bypasses all checks
+    if state.uid == 0 do
+      :ok
+    else
+      # For root directory, fall back to volume-level check
+      if path == "/" do
+        core_call(NeonFS.Core.Authorise, :check, [
+          state.uid,
+          state.gids,
+          action,
+          {:volume, volume_id}
+        ])
+      else
+        core_call(NeonFS.Core.Authorise, :check, [
+          state.uid,
+          state.gids,
+          action,
+          {:file, volume_id, path}
+        ])
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Only owner UID or root can chmod/chown
+  defp check_setattr_permission(_file, _params, %{uid: 0}), do: :ok
+
+  defp check_setattr_permission(file, params, state) do
+    changes_ownership = params["mode"] != nil or params["uid"] != nil or params["gid"] != nil
+    file_uid = Map.get(file, :uid, 0)
+
+    if changes_ownership and state.uid != file_uid do
+      {:error, :forbidden}
+    else
+      :ok
+    end
   end
 
   # RPC wrappers — route all core operations through the client

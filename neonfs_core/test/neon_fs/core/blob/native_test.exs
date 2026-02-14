@@ -339,8 +339,17 @@ defmodule NeonFS.Core.Blob.NativeTest do
       data = String.duplicate("hello world ", 100)
       hash = Native.compute_hash(data)
 
-      assert {:ok, {original_size, stored_size, compression}} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "none", 0)
+      assert {:ok, {original_size, stored_size, compression, _, _}} =
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "none",
+                 0,
+                 <<>>,
+                 <<>>
+               )
 
       assert original_size == byte_size(data)
       assert stored_size == original_size
@@ -352,8 +361,17 @@ defmodule NeonFS.Core.Blob.NativeTest do
       data = String.duplicate("hello world ", 1000)
       hash = Native.compute_hash(data)
 
-      assert {:ok, {original_size, stored_size, compression}} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+      assert {:ok, {original_size, stored_size, compression, _, _}} =
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "zstd",
+                 3,
+                 <<>>,
+                 <<>>
+               )
 
       assert original_size == byte_size(data)
       assert stored_size < original_size
@@ -365,10 +383,19 @@ defmodule NeonFS.Core.Blob.NativeTest do
       hash = Native.compute_hash(data)
 
       assert {:ok, _} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "zstd",
+                 3,
+                 <<>>,
+                 <<>>
+               )
 
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, true)
+               Native.store_read_chunk_with_options(store, hash, "hot", false, true, <<>>, <<>>)
 
       assert read_data == data
     end
@@ -377,11 +404,20 @@ defmodule NeonFS.Core.Blob.NativeTest do
       data = String.duplicate("hello world ", 1000)
       hash = Native.compute_hash(data)
 
-      assert {:ok, {_orig, stored_size, _comp}} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+      assert {:ok, {_orig, stored_size, _comp, _, _}} =
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "zstd",
+                 3,
+                 <<>>,
+                 <<>>
+               )
 
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, false)
+               Native.store_read_chunk_with_options(store, hash, "hot", false, false, <<>>, <<>>)
 
       # Should return compressed data
       assert byte_size(read_data) == stored_size
@@ -397,7 +433,7 @@ defmodule NeonFS.Core.Blob.NativeTest do
       # Reading with decompress=true on uncompressed data should fail
       # because zstd decoder expects a valid zstd frame
       assert {:error, _reason} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, true)
+               Native.store_read_chunk_with_options(store, hash, "hot", false, true, <<>>, <<>>)
     end
 
     test "read with verify=true and decompress=true verifies original data", %{store: store} do
@@ -405,10 +441,19 @@ defmodule NeonFS.Core.Blob.NativeTest do
       hash = Native.compute_hash(data)
 
       assert {:ok, _} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "zstd",
+                 3,
+                 <<>>,
+                 <<>>
+               )
 
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", true, true)
+               Native.store_read_chunk_with_options(store, hash, "hot", true, true, <<>>, <<>>)
 
       assert read_data == data
     end
@@ -421,7 +466,16 @@ defmodule NeonFS.Core.Blob.NativeTest do
       hash = Native.compute_hash(data)
 
       assert {:ok, _} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "zstd",
+                 3,
+                 <<>>,
+                 <<>>
+               )
 
       # Corrupt the file (but keep it as valid zstd)
       hash_hex = Base.encode16(hash, case: :lower)
@@ -439,7 +493,9 @@ defmodule NeonFS.Core.Blob.NativeTest do
           other_data,
           "warm",
           "zstd",
-          3
+          3,
+          <<>>,
+          <<>>
         )
 
       {:ok, wrong_compressed_data} =
@@ -448,14 +504,16 @@ defmodule NeonFS.Core.Blob.NativeTest do
           Native.compute_hash(other_data),
           "warm",
           false,
-          false
+          false,
+          <<>>,
+          <<>>
         )
 
       File.write!(chunk_path, wrong_compressed_data)
 
       # Verification should fail because decompressed data doesn't match expected hash
       assert {:error, reason} =
-               Native.store_read_chunk_with_options(store, hash, "hot", true, true)
+               Native.store_read_chunk_with_options(store, hash, "hot", true, true, <<>>, <<>>)
 
       assert reason =~ "corrupt chunk"
     end
@@ -467,11 +525,29 @@ defmodule NeonFS.Core.Blob.NativeTest do
       hash1 = Native.compute_hash(data <> "1")
       hash9 = Native.compute_hash(data <> "9")
 
-      assert {:ok, {_, stored_level1, _}} =
-               Native.store_write_chunk_compressed(store, hash1, data <> "1", "hot", "zstd", 1)
+      assert {:ok, {_, stored_level1, _, _, _}} =
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash1,
+                 data <> "1",
+                 "hot",
+                 "zstd",
+                 1,
+                 <<>>,
+                 <<>>
+               )
 
-      assert {:ok, {_, stored_level9, _}} =
-               Native.store_write_chunk_compressed(store, hash9, data <> "9", "warm", "zstd", 9)
+      assert {:ok, {_, stored_level9, _, _, _}} =
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash9,
+                 data <> "9",
+                 "warm",
+                 "zstd",
+                 9,
+                 <<>>,
+                 <<>>
+               )
 
       # Higher level should produce equal or smaller size
       assert stored_level9 <= stored_level1
@@ -481,8 +557,17 @@ defmodule NeonFS.Core.Blob.NativeTest do
       data = ""
       hash = Native.compute_hash(data)
 
-      assert {:ok, {original_size, stored_size, compression}} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "zstd", 3)
+      assert {:ok, {original_size, stored_size, compression, _, _}} =
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "zstd",
+                 3,
+                 <<>>,
+                 <<>>
+               )
 
       assert original_size == 0
       # zstd still creates a small frame for empty data
@@ -491,7 +576,7 @@ defmodule NeonFS.Core.Blob.NativeTest do
 
       # Should decompress back to empty
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, true)
+               Native.store_read_chunk_with_options(store, hash, "hot", false, true, <<>>, <<>>)
 
       assert read_data == data
     end
@@ -501,7 +586,16 @@ defmodule NeonFS.Core.Blob.NativeTest do
       hash = Native.compute_hash(data)
 
       assert {:error, reason} =
-               Native.store_write_chunk_compressed(store, hash, data, "hot", "invalid", 3)
+               Native.store_write_chunk_compressed(
+                 store,
+                 hash,
+                 data,
+                 "hot",
+                 "invalid",
+                 3,
+                 <<>>,
+                 <<>>
+               )
 
       assert reason =~ "invalid compression"
     end

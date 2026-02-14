@@ -2,7 +2,17 @@ defmodule NeonFS.Core.WriteOperationTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{ChunkIndex, FileIndex, StripeIndex, VolumeRegistry, WriteOperation}
+  alias NeonFS.Core.{
+    BlobStore,
+    ChunkIndex,
+    FileIndex,
+    KeyManager,
+    RaServer,
+    StripeIndex,
+    VolumeEncryption,
+    VolumeRegistry,
+    WriteOperation
+  }
 
   @moduletag :tmp_dir
 
@@ -23,7 +33,8 @@ defmodule NeonFS.Core.WriteOperationTest do
         [:neonfs, :write_operation, :start],
         [:neonfs, :write_operation, :stop],
         [:neonfs, :write_operation, :exception],
-        [:neonfs, :write_operation, :stripe_created]
+        [:neonfs, :write_operation, :stripe_created],
+        [:neonfs, :write, :encrypt]
       ],
       &handle_telemetry_event/4,
       nil
@@ -186,6 +197,17 @@ defmodule NeonFS.Core.WriteOperationTest do
       # Only the second file should be in the index at that path
       assert {:ok, retrieved_file} = FileIndex.get_by_path(volume.id, path)
       assert retrieved_file.id == file2.id
+    end
+
+    test "unencrypted volume chunks have nil crypto field", %{volume: volume} do
+      data = "Plaintext data"
+
+      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/plain.txt", data)
+
+      for chunk_hash <- file_meta.chunks do
+        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        assert chunk_meta.crypto == nil
+      end
     end
   end
 
@@ -586,6 +608,136 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert updated_volume.logical_size == byte_size(data)
       assert updated_volume.physical_size > 0
       assert updated_volume.chunk_count > 0
+    end
+  end
+
+  describe "encrypted write path" do
+    @test_master_key :crypto.strong_rand_bytes(32) |> Base.encode64()
+
+    setup %{tmp_dir: tmp_dir} do
+      # Set up encryption infrastructure: Ra + cluster.json with master key
+      write_cluster_json(tmp_dir, @test_master_key)
+
+      start_ra()
+      :ok = RaServer.init_cluster()
+
+      # Create an encrypted volume
+      vol_name = "encrypted-vol-#{:rand.uniform(999_999)}"
+
+      {:ok, enc_volume} =
+        VolumeRegistry.create(vol_name,
+          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
+          compression: %{algorithm: :none}
+        )
+
+      # Set up the encryption key in Ra
+      {:ok, _version} = KeyManager.setup_volume_encryption(enc_volume.id)
+
+      {:ok, enc_volume: enc_volume}
+    end
+
+    test "writes to encrypted volume with crypto metadata", %{enc_volume: volume} do
+      data = "Secret data for encryption test"
+
+      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/secret.txt", data)
+
+      assert file_meta.volume_id == volume.id
+      assert file_meta.size == byte_size(data)
+
+      # Verify all chunks have crypto metadata populated
+      for chunk_hash <- file_meta.chunks do
+        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        assert chunk_meta.crypto != nil
+        assert chunk_meta.crypto.algorithm == :aes_256_gcm
+        assert byte_size(chunk_meta.crypto.nonce) == 12
+        assert chunk_meta.crypto.key_version == 1
+      end
+    end
+
+    test "stored_size accounts for GCM auth tag overhead", %{enc_volume: volume} do
+      # Use a compressible repeated pattern that won't compress much with :none
+      data = :crypto.strong_rand_bytes(1024)
+
+      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/overhead.bin", data)
+
+      for chunk_hash <- file_meta.chunks do
+        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        # stored_size should be original_size + 16 (GCM auth tag)
+        assert chunk_meta.stored_size == chunk_meta.original_size + 16
+      end
+    end
+
+    test "stored bytes differ from plaintext", %{enc_volume: volume} do
+      data = String.duplicate("KNOWN_PATTERN", 100)
+
+      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/verify_enc.txt", data)
+
+      # Read raw bytes from BlobStore (without decryption) and confirm they differ from input
+      for chunk_hash <- file_meta.chunks do
+        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        [location | _] = chunk_meta.locations
+        drive_id = Map.get(location, :drive_id, "default")
+        tier_str = Atom.to_string(Map.get(location, :tier, :hot))
+
+        {:ok, raw_bytes} =
+          BlobStore.read_chunk(chunk_hash, drive_id, tier: tier_str)
+
+        # Raw bytes should NOT match the original data
+        refute raw_bytes == data
+      end
+    end
+
+    test "each chunk gets a unique nonce", %{enc_volume: volume} do
+      # Use fixed chunking to ensure multiple chunks
+      data = :crypto.strong_rand_bytes(2048)
+
+      assert {:ok, file_meta} =
+               WriteOperation.write_file(volume.id, "/multi_chunk.bin", data,
+                 chunk_strategy: {:fixed, 1024}
+               )
+
+      nonces =
+        Enum.map(file_meta.chunks, fn hash ->
+          {:ok, meta} = ChunkIndex.get(hash)
+          meta.crypto.nonce
+        end)
+
+      # All nonces should be unique
+      assert length(Enum.uniq(nonces)) == length(nonces)
+    end
+
+    test "emits encrypt telemetry events", %{enc_volume: volume} do
+      Process.put(:telemetry_events, [])
+
+      data = "Telemetry encryption test"
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/telem_enc.txt", data)
+
+      events = Process.get(:telemetry_events, [])
+
+      encrypt_events =
+        Enum.filter(events, &(&1.event == [:neonfs, :write, :encrypt]))
+
+      assert encrypt_events != []
+
+      for event <- encrypt_events do
+        assert event.metadata.volume_id == volume.id
+        assert event.metadata.key_version == 1
+        assert is_binary(event.metadata.chunk_hash)
+      end
+    end
+
+    test "unencrypted volume continues to work with no crypto field", %{tmp_dir: _tmp_dir} do
+      # Create a plain (unencrypted) volume in the same test context where Ra is running
+      vol_name = "plain-vol-#{:rand.uniform(999_999)}"
+      {:ok, plain_vol} = VolumeRegistry.create(vol_name, compression: %{algorithm: :none})
+
+      data = "Plaintext in Ra context"
+      assert {:ok, file_meta} = WriteOperation.write_file(plain_vol.id, "/plain.txt", data)
+
+      for chunk_hash <- file_meta.chunks do
+        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        assert chunk_meta.crypto == nil
+      end
     end
   end
 

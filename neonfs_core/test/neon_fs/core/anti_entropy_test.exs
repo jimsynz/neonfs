@@ -286,7 +286,7 @@ defmodule NeonFS.Core.AntiEntropyTest do
   end
 
   describe "multi-replica repair (simulated via raw writes)" do
-    setup %{segment_id: segment_id} do
+    setup do
       start_supervised!({MetadataStore, name: MetadataStore}, restart: :temporary)
 
       :ok

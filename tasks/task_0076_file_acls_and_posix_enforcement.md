@@ -1,7 +1,7 @@
 # Task 0076: File/Directory ACLs and POSIX Enforcement
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security
@@ -10,22 +10,22 @@ Not Started
 Implement file and directory-level access control with POSIX mode enforcement and extended ACL entries. The FUSE handler enforces POSIX mode bits (already stored in FileMeta as `mode`, `uid`, `gid`) using the `FileACL.check_access/4` function from task 0069. Extended ACL entries allow granting specific UIDs/GIDs access beyond what mode bits permit. ACL inheritance allows directories to define default ACLs that apply to newly created children. All checks use numeric UIDs/GIDs — no name resolution.
 
 ## Acceptance Criteria
-- [ ] `Authorise.check/3` extended to handle `{:file, volume_id, path}` resources by checking file-level ACLs
-- [ ] POSIX mode enforcement: `mode` bits checked against requesting UID/GID using `FileACL.check_access/4`
-- [ ] Extended ACL entries stored in FileMeta metadata (extend FileMeta with `acl_entries` field, default empty list)
-- [ ] `ACLManager.set_file_acl/3` sets extended ACL entries on a file or directory
-- [ ] `ACLManager.get_file_acl/2` retrieves file ACL (mode + extended entries)
-- [ ] Directory default ACLs: directories can have a `default_acl` that is applied to newly created children
-- [ ] `WriteOperation` applies directory default ACL when creating new files (inherits parent directory's default ACL as the new file's ACL)
-- [ ] FUSE handler integration: permission checks before allowing read, write, unlink, rename, mkdir, rmdir operations
-- [ ] FUSE handler: `setattr` respects ownership rules (only owner UID or root can chmod/chown)
-- [ ] Default when no explicit ACL set: volume owner UID = file owner, mode = 0644 for files, 0755 for directories
-- [ ] MetadataStateMachine handles file ACL storage (stored as part of file metadata, not separate Ra state)
-- [ ] CLI handler: `handle_set_file_acl/3`, `handle_get_file_acl/2` for managing extended ACLs
-- [ ] Unit tests for POSIX mode checking (owner, group, other)
-- [ ] Unit tests for extended ACL with mask interaction
-- [ ] Unit tests for directory ACL inheritance
-- [ ] Unit tests for FUSE handler permission enforcement
+- [x] `Authorise.check/3` extended to handle `{:file, volume_id, path}` resources by checking file-level ACLs
+- [x] POSIX mode enforcement: `mode` bits checked against requesting UID/GID using `FileACL.check_access/4`
+- [x] Extended ACL entries stored in FileMeta metadata (extend FileMeta with `acl_entries` field, default empty list)
+- [x] `ACLManager.set_file_acl/3` sets extended ACL entries on a file or directory
+- [x] `ACLManager.get_file_acl/2` retrieves file ACL (mode + extended entries)
+- [x] Directory default ACLs: directories can have a `default_acl` that is applied to newly created children
+- [x] `WriteOperation` applies directory default ACL when creating new files (inherits parent directory's default ACL as the new file's ACL)
+- [x] FUSE handler integration: permission checks before allowing read, write, unlink, rename, mkdir, rmdir operations
+- [x] FUSE handler: `setattr` respects ownership rules (only owner UID or root can chmod/chown)
+- [x] Default when no explicit ACL set: volume owner UID = file owner, mode = 0644 for files, 0755 for directories
+- [x] MetadataStateMachine handles file ACL storage (stored as part of file metadata, not separate Ra state)
+- [x] CLI handler: `handle_set_file_acl/3`, `handle_get_file_acl/2` for managing extended ACLs
+- [x] Unit tests for POSIX mode checking (owner, group, other)
+- [x] Unit tests for extended ACL with mask interaction
+- [x] Unit tests for directory ACL inheritance
+- [x] Unit tests for FUSE handler permission enforcement
 
 ## Testing Strategy
 - ExUnit tests for POSIX mode bit checking (rwx for owner, group, other)

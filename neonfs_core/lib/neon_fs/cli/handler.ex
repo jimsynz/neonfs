@@ -10,8 +10,22 @@ defmodule NeonFS.CLI.Handler do
   consists only of serializable terms (maps, lists, atoms, strings, numbers).
   """
 
+  require Logger
+
   alias NeonFS.Cluster.{Init, Invite, Join, State}
-  alias NeonFS.Core.{ServiceRegistry, Volume, VolumeRegistry}
+
+  alias NeonFS.Core.{
+    ACLManager,
+    AuditLog,
+    Authorise,
+    KeyManager,
+    KeyRotation,
+    ServiceRegistry,
+    Volume,
+    VolumeACL,
+    VolumeEncryption,
+    VolumeRegistry
+  }
 
   @doc """
   Returns cluster status information.
@@ -111,6 +125,17 @@ defmodule NeonFS.CLI.Handler do
         # Rebuild the quorum metadata ring on all nodes to include the new member
         rebuild_quorum_ring_on_all_nodes()
 
+        AuditLog.log_event(
+          event_type: :node_joined,
+          actor_uid: 0,
+          resource: Atom.to_string(Node.self()),
+          details: %{
+            cluster_id: state.cluster_id,
+            node_type: Atom.to_string(state.node_type),
+            via_node: via_node_str
+          }
+        )
+
         {:ok,
          %{
            "cluster_id" => state.cluster_id,
@@ -187,16 +212,23 @@ defmodule NeonFS.CLI.Handler do
   @spec create_volume(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def create_volume(name, config) when is_binary(name) and is_map(config) do
     opts = map_to_opts(config)
+    owner_uid = Keyword.get(opts, :owner_uid, 0)
+    owner_gid = Keyword.get(opts, :owner_gid, 0)
 
-    case parse_durability_opt(opts) do
-      {:ok, parsed_opts} ->
-        case VolumeRegistry.create(name, parsed_opts) do
-          {:ok, volume} -> {:ok, volume_to_map(volume)}
-          {:error, reason} -> {:error, reason}
-        end
+    with {:ok, parsed_opts} <- parse_durability_opt(opts),
+         {:ok, final_opts} <- parse_encryption_opt(parsed_opts),
+         {:ok, volume} <- VolumeRegistry.create(name, final_opts),
+         :ok <- setup_encryption_if_needed(volume) do
+      create_initial_acl(volume.id, owner_uid, owner_gid)
 
-      {:error, reason} ->
-        {:error, reason}
+      AuditLog.log_event(
+        event_type: :volume_created,
+        actor_uid: owner_uid,
+        resource: volume.id,
+        details: %{name: name}
+      )
+
+      {:ok, volume_to_map(volume)}
     end
   end
 
@@ -211,12 +243,32 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec delete_volume(String.t()) :: {:ok, map()} | {:error, term()}
-  def delete_volume(name) when is_binary(name) do
+  def delete_volume(name), do: delete_volume(name, [])
+
+  @spec delete_volume(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def delete_volume(name, opts) when is_binary(name) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
     case VolumeRegistry.get_by_name(name) do
       {:ok, volume} ->
-        case VolumeRegistry.delete(volume.id) do
-          :ok -> {:ok, %{}}
-          {:error, reason} -> {:error, reason}
+        with :ok <- Authorise.check(uid, gids, :admin, {:volume, volume.id}) do
+          case VolumeRegistry.delete(volume.id) do
+            :ok ->
+              cleanup_volume_acl(volume.id)
+
+              AuditLog.log_event(
+                event_type: :volume_deleted,
+                actor_uid: uid,
+                resource: volume.id,
+                details: %{name: name}
+              )
+
+              {:ok, %{}}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
         end
 
       {:error, reason} ->
@@ -301,6 +353,200 @@ defmodule NeonFS.CLI.Handler do
     with {:ok, fuse_node} <- get_fuse_node(),
          {:ok, mounts} <- rpc_list_mounts(fuse_node) do
       {:ok, Enum.map(mounts, &mount_info_to_map/1)}
+    end
+  end
+
+  @doc """
+  Starts key rotation for a volume.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+
+  ## Returns
+  - `{:ok, map}` - Rotation info with from_version, to_version, total_chunks
+  - `{:error, reason}` - Error tuple
+  """
+  @spec rotate_volume_key(String.t()) :: {:ok, map()} | {:error, term()}
+  def rotate_volume_key(volume_name) when is_binary(volume_name) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name) do
+      KeyRotation.start_rotation(volume.id)
+    end
+  end
+
+  @doc """
+  Returns the current key rotation status for a volume.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+
+  ## Returns
+  - `{:ok, map}` - Rotation state with progress
+  - `{:error, :no_rotation}` - No rotation in progress
+  - `{:error, reason}` - Error tuple
+  """
+  @spec rotation_status(String.t()) :: {:ok, map()} | {:error, term()}
+  def rotation_status(volume_name) when is_binary(volume_name) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name) do
+      KeyRotation.rotation_status(volume.id)
+    end
+  end
+
+  @doc """
+  Sets extended ACL entries on a file or directory.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+  - `path` - File path within the volume
+  - `acl_entries` - List of ACL entry maps
+
+  ## Returns
+  - `{:ok, %{}}` - Success
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_set_file_acl(String.t(), String.t(), [map()]) :: {:ok, map()} | {:error, term()}
+  def handle_set_file_acl(volume_name, path, acl_entries) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         :ok <- ACLManager.set_file_acl(volume.id, path, acl_entries) do
+      {:ok, %{}}
+    end
+  end
+
+  @doc """
+  Gets the file ACL (mode + extended entries) for a file or directory.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+  - `path` - File path within the volume
+
+  ## Returns
+  - `{:ok, map}` - ACL info with mode, uid, gid, acl_entries, default_acl
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_get_file_acl(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_get_file_acl(volume_name, path) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name) do
+      ACLManager.get_file_acl(volume.id, path)
+    end
+  end
+
+  @doc """
+  Sets the default ACL for a directory.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+  - `path` - Directory path within the volume
+  - `default_acl` - List of ACL entry maps to inherit
+
+  ## Returns
+  - `{:ok, %{}}` - Success
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_set_default_acl(String.t(), String.t(), [map()]) :: {:ok, map()} | {:error, term()}
+  def handle_set_default_acl(volume_name, path, default_acl) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         :ok <- ACLManager.set_default_acl(volume.id, path, default_acl) do
+      {:ok, %{}}
+    end
+  end
+
+  @doc """
+  Lists audit log events with optional filters.
+
+  ## Parameters
+  - `filters` - Map with optional keys:
+    - `"type"` - Event type string (e.g. "volume_created")
+    - `"actor_uid"` - Actor UID integer
+    - `"since"` - ISO 8601 datetime string
+    - `"until"` - ISO 8601 datetime string
+    - `"limit"` - Maximum number of results (default: 100)
+
+  ## Returns
+  - `{:ok, [map]}` - List of audit event maps
+  """
+  @spec handle_audit_list(map()) :: {:ok, [map()]}
+  def handle_audit_list(filters \\ %{}) do
+    query_opts =
+      filters
+      |> parse_audit_filters()
+
+    events =
+      AuditLog.query(query_opts)
+      |> Enum.map(&audit_event_to_map/1)
+
+    {:ok, events}
+  end
+
+  @doc """
+  Grants permissions to a principal on a volume.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+  - `principal_str` - Principal string, e.g. "uid:1000" or "gid:100"
+  - `permissions` - List of permission strings, e.g. ["read", "write"]
+
+  ## Returns
+  - `{:ok, %{}}` - Success
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_acl_grant(String.t(), String.t(), [String.t()]) :: {:ok, map()} | {:error, term()}
+  def handle_acl_grant(volume_name, principal_str, permissions) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, principal} <- parse_principal(principal_str),
+         {:ok, perms} <- parse_permissions(permissions),
+         :ok <- ACLManager.grant(volume.id, principal, perms) do
+      AuditLog.log_event(
+        event_type: :acl_grant,
+        actor_uid: 0,
+        resource: volume.id,
+        details: %{principal: principal_str, permissions: permissions}
+      )
+
+      {:ok, %{}}
+    end
+  end
+
+  @doc """
+  Revokes all permissions for a principal on a volume.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+  - `principal_str` - Principal string, e.g. "uid:1000" or "gid:100"
+
+  ## Returns
+  - `{:ok, %{}}` - Success
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_acl_revoke(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_acl_revoke(volume_name, principal_str) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, principal} <- parse_principal(principal_str),
+         :ok <- ACLManager.revoke(volume.id, principal) do
+      AuditLog.log_event(
+        event_type: :acl_revoke,
+        actor_uid: 0,
+        resource: volume.id,
+        details: %{principal: principal_str}
+      )
+
+      {:ok, %{}}
+    end
+  end
+
+  @doc """
+  Shows the ACL for a volume.
+
+  ## Parameters
+  - `volume_name` - Volume name (string)
+
+  ## Returns
+  - `{:ok, map}` - ACL info with owner_uid, owner_gid, entries
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_acl_show(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_acl_show(volume_name) do
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, acl} <- ACLManager.get_volume_acl(volume.id) do
+      {:ok, volume_acl_to_map(acl)}
     end
   end
 
@@ -433,6 +679,7 @@ defmodule NeonFS.CLI.Handler do
       io_weight: volume.io_weight,
       compression: volume.compression,
       verification: volume.verification,
+      encryption: encryption_to_map(volume.encryption),
       logical_size: volume.logical_size,
       physical_size: volume.physical_size,
       chunk_count: volume.chunk_count,
@@ -479,6 +726,46 @@ defmodule NeonFS.CLI.Handler do
       registered_at: DateTime.to_iso8601(info.registered_at),
       metadata: info.metadata
     }
+  end
+
+  defp parse_encryption_opt(opts) do
+    case Keyword.get(opts, :encryption) do
+      nil ->
+        {:ok, opts}
+
+      %VolumeEncryption{} ->
+        {:ok, opts}
+
+      %{mode: mode} when is_atom(mode) ->
+        enc = build_encryption_config(mode)
+        {:ok, Keyword.put(opts, :encryption, enc)}
+
+      %{"mode" => mode} when is_binary(mode) ->
+        enc = build_encryption_config(String.to_existing_atom(mode))
+        {:ok, Keyword.put(opts, :encryption, enc)}
+
+      _other ->
+        {:ok, opts}
+    end
+  rescue
+    ArgumentError -> {:error, "Invalid encryption mode"}
+  end
+
+  defp build_encryption_config(:none), do: VolumeEncryption.new(mode: :none)
+
+  defp build_encryption_config(:server_side) do
+    VolumeEncryption.new(mode: :server_side, current_key_version: 1)
+  end
+
+  defp setup_encryption_if_needed(volume) do
+    if Volume.encrypted?(volume) do
+      case KeyManager.setup_volume_encryption(volume.id) do
+        {:ok, _version} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
   end
 
   defp parse_durability_opt(opts) do
@@ -549,6 +836,134 @@ defmodule NeonFS.CLI.Handler do
     # If key doesn't exist as atom, use string key directly
     ArgumentError ->
       Enum.into(map, [])
+  end
+
+  defp cleanup_volume_acl(volume_id) do
+    ACLManager.delete_volume_acl(volume_id)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp create_initial_acl(volume_id, owner_uid, owner_gid) do
+    acl = VolumeACL.new(volume_id: volume_id, owner_uid: owner_uid, owner_gid: owner_gid)
+    ACLManager.set_volume_acl(volume_id, acl)
+  rescue
+    _ -> Logger.warning("Failed to create initial ACL for volume #{volume_id}")
+  catch
+    :exit, _ -> Logger.warning("Failed to create initial ACL for volume #{volume_id}")
+  end
+
+  defp audit_event_to_map(%NeonFS.Core.AuditEvent{} = event) do
+    %{
+      id: event.id,
+      timestamp: DateTime.to_iso8601(event.timestamp),
+      event_type: Atom.to_string(event.event_type),
+      actor_uid: event.actor_uid,
+      actor_node: Atom.to_string(event.actor_node),
+      resource: event.resource,
+      details: event.details,
+      outcome: Atom.to_string(event.outcome)
+    }
+  end
+
+  defp parse_audit_filters(filters) do
+    []
+    |> maybe_add_filter(:event_type, parse_event_type(Map.get(filters, "type")))
+    |> maybe_add_filter(:actor_uid, Map.get(filters, "actor_uid"))
+    |> maybe_add_filter(:resource, Map.get(filters, "resource"))
+    |> maybe_add_filter(:since, parse_datetime(Map.get(filters, "since")))
+    |> maybe_add_filter(:until, parse_datetime(Map.get(filters, "until")))
+    |> maybe_add_filter(:limit, Map.get(filters, "limit"))
+  end
+
+  defp maybe_add_filter(opts, _key, nil), do: opts
+  defp maybe_add_filter(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp parse_event_type(nil), do: nil
+
+  defp parse_event_type(type) when is_binary(type) do
+    String.to_existing_atom(type)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp parse_datetime(nil), do: nil
+
+  defp parse_datetime(dt_string) when is_binary(dt_string) do
+    case DateTime.from_iso8601(dt_string) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp encryption_to_map(%VolumeEncryption{} = enc) do
+    base = %{
+      mode: Atom.to_string(enc.mode),
+      current_key_version: enc.current_key_version
+    }
+
+    case enc.rotation do
+      nil ->
+        Map.put(base, :rotation, nil)
+
+      rotation ->
+        Map.put(base, :rotation, %{
+          from_version: rotation.from_version,
+          to_version: rotation.to_version,
+          started_at: DateTime.to_iso8601(rotation.started_at),
+          progress: rotation.progress
+        })
+    end
+  end
+
+  defp volume_acl_to_map(%VolumeACL{} = acl) do
+    %{
+      volume_id: acl.volume_id,
+      owner_uid: acl.owner_uid,
+      owner_gid: acl.owner_gid,
+      entries:
+        Enum.map(acl.entries, fn entry ->
+          {type, id} = entry.principal
+
+          %{
+            principal: "#{type}:#{id}",
+            permissions: entry.permissions |> MapSet.to_list() |> Enum.map(&Atom.to_string/1)
+          }
+        end)
+    }
+  end
+
+  defp parse_principal("uid:" <> uid_str) do
+    case Integer.parse(uid_str) do
+      {uid, ""} when uid >= 0 -> {:ok, {:uid, uid}}
+      _ -> {:error, "Invalid UID: #{uid_str}"}
+    end
+  end
+
+  defp parse_principal("gid:" <> gid_str) do
+    case Integer.parse(gid_str) do
+      {gid, ""} when gid >= 0 -> {:ok, {:gid, gid}}
+      _ -> {:error, "Invalid GID: #{gid_str}"}
+    end
+  end
+
+  defp parse_principal(other),
+    do: {:error, "Invalid principal format: #{other}. Use uid:N or gid:N"}
+
+  defp parse_permissions(perm_strings) when is_list(perm_strings) do
+    perms = Enum.map(perm_strings, &String.to_existing_atom/1)
+    valid = [:read, :write, :admin]
+    invalid = Enum.reject(perms, &(&1 in valid))
+
+    if invalid == [] do
+      {:ok, perms}
+    else
+      {:error, "Invalid permissions: #{inspect(invalid)}"}
+    end
+  rescue
+    ArgumentError -> {:error, "Invalid permission name. Valid: read, write, admin"}
   end
 
   defp rebuild_quorum_ring_on_all_nodes do

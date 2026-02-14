@@ -15,6 +15,201 @@
 
 ---
 
+## 2026-02-13 - Task 0077
+- What was implemented:
+  - `NeonFS.Core.AuditEvent` struct in neonfs_client (shared type) — id, timestamp, event_type, actor_uid, actor_node, resource, details, outcome
+  - `NeonFS.Core.AuditLog` GenServer with ETS-backed bounded storage (ordered_set keyed by `{timestamp_us, id}`)
+  - Async logging via `GenServer.cast/2` — never blocks callers
+  - `log/1` and `log_event/1` (convenience) for recording events
+  - `recent/1` returns N most recent events (reverse ETS fold)
+  - `query/1` with filters: event_type, actor_uid, resource (prefix match), since/until (DateTime), limit
+  - Bounded storage: configurable max_events (default 100,000), oldest pruned on insert when exceeded
+  - Time-based retention: configurable max_age_days (default 90), periodic prune timer
+  - DETS persistence via Persistence module (snapshot on terminate, periodic snapshots)
+  - Added to core supervision tree (after ACLManager)
+  - Audit events emitted from: ACLManager (set/grant/revoke/file ACL), KeyRotation (rotation started), Authorise (denied access), Handler (volume create/delete, node join)
+  - CLI handler: `handle_audit_list/1` with filter parsing (type, actor_uid, resource, since, until, limit)
+  - Telemetry: `[:neonfs, :audit, :logged]` per event
+  - 21 unit tests covering logging, querying, bounded storage, retention pruning, telemetry
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/audit_event.ex` (new — AuditEvent struct)
+  - `neonfs_core/lib/neon_fs/core/audit_log.ex` (new — GenServer with ETS)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (modified — add AuditLog to children)
+  - `neonfs_core/lib/neon_fs/core/persistence.ex` (modified — add `:audit_log` table)
+  - `neonfs_core/lib/neon_fs/core/acl_manager.ex` (modified — emit audit events)
+  - `neonfs_core/lib/neon_fs/core/key_rotation.ex` (modified — emit audit event on rotation)
+  - `neonfs_core/lib/neon_fs/core/authorise.ex` (modified — emit audit event on denied access)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — audit events on admin actions, handle_audit_list)
+  - `neonfs_core/test/support/test_case.ex` (modified — added `start_audit_log/1`, `:audit_log` in clear_ets_tables)
+  - `neonfs_core/test/neon_fs/core/audit_log_test.exs` (new — 21 tests)
+- **Learnings for future iterations:**
+  - When adding a new module to neonfs_client, run `mix dialyzer --plt --force-check` in neonfs_core to rebuild the PLT — the PLT won't pick up new dependency modules automatically
+  - ETS ordered_set with `{timestamp_us, id}` keys gives natural chronological ordering and efficient oldest-first pruning via `ets.first/1`
+  - `GenServer.cast/2` calls need `rescue`/`catch :exit` wrappers to be truly non-blocking — if the process doesn't exist, cast raises
+  - `mix check` without `--no-retry` reruns only previously failed checks — much faster for iterating on fixes
+---
+
+## 2026-02-13 - Task 0075
+- What was implemented:
+  - `NeonFS.Core.Authorise` module with `check/3` and `check/4` — UID/GID-based permission checks
+  - UID 0 (root) bypasses all checks; owner UID has implicit admin; permission inheritance (admin → write → read)
+  - Actions: `:read`, `:write`, `:admin`, `:mount` (mount maps to `:read` permission)
+  - `NeonFS.Core.ACLManager` GenServer with public ETS table (`:volume_acls`) and Ra-backed CRUD
+  - `set_volume_acl/2`, `grant/3`, `revoke/2`, `get_volume_acl/1`, `delete_volume_acl/1`
+  - ACLManager loads from Ra on startup, snapshots to DETS on shutdown (via Persistence)
+  - WriteOperation and ReadOperation call `Authorise.check/4` before proceeding (UID from `:uid` opt, default 0)
+  - MountManager calls Authorise via `NeonFS.Client.core_call/3` (runs on FUSE node, checks on core node)
+  - Handler.create_volume creates initial ACL with owner_uid/owner_gid from config (default 0)
+  - Handler.delete_volume checks `:admin` permission before deletion, cleans up ACL after
+  - ACLManager added to core supervision tree (after VolumeRegistry, before ServiceRegistry)
+  - Persistence updated to snapshot `:volume_acls` ETS table
+  - Telemetry events: `[:neonfs, :authorise, :granted]` and `[:neonfs, :authorise, :denied]`
+  - 26 new unit tests (15 Authorise + 11 ACLManager)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/authorise.ex` (new — permission checking)
+  - `neonfs_core/lib/neon_fs/core/acl_manager.ex` (new — GenServer with ETS + Ra)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (modified — add ACLManager to children)
+  - `neonfs_core/lib/neon_fs/core/persistence.ex` (modified — add `:volume_acls` table)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (modified — auth check before write)
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` (modified — auth check before read)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — create ACL on volume create, auth on delete)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_manager.ex` (modified — auth check via core_call)
+  - `neonfs_core/test/support/test_case.ex` (modified — added `start_acl_manager/0`)
+  - `neonfs_core/test/neon_fs/core/authorise_test.exs` (new — 15 tests)
+  - `neonfs_core/test/neon_fs/core/acl_manager_test.exs` (new — 11 tests)
+- **Learnings for future iterations:**
+  - Handler's `create_initial_acl` must use `rescue` + `catch :exit` — `GenServer.call` raises exit (not exception) when process doesn't exist
+  - Default UID 0 (root bypass) maintains backward compatibility — existing tests without explicit UID continue to work
+  - ACLManager follows VolumeRegistry pattern: serialised writes through GenServer, direct ETS reads for hot path
+  - Auth check in FUSE's MountManager goes via `NeonFS.Client.core_call` since neonfs_fuse has no dependency on neonfs_core
+---
+
+## 2026-02-13 - Task 0074
+- What was implemented:
+  - Volume key rotation orchestration (`NeonFS.Core.KeyRotation`) with `start_rotation/1` and `rotation_status/1`
+  - Batch re-encryption worker (`NeonFS.Core.KeyRotation.Worker`) processes chunks in configurable batches (default 1000)
+  - Worker calls `BlobStore.reencrypt_chunk/8` → `Native.store_reencrypt_chunk/7` NIF — decrypt-old → encrypt-new happens entirely in Rust
+  - New nonce generated per chunk during re-encryption, ChunkMeta crypto field updated with new nonce and key version
+  - Rotation state persisted in Ra via new `:set_rotation_state` command on MetadataStateMachine
+  - Concurrent rotation detection reads rotation state from Ra directly (not VolumeRegistry ETS cache)
+  - Progress tracking updated after each batch with `{total_chunks, migrated}` counts
+  - Rate limiting via configurable `rotation_rate_limit` (default 1000 chunks/sec) with per-chunk sleep
+  - BackgroundWorker integration at `:low` priority
+  - Telemetry events: `rotation_started`, `rotation_progress`, `rotation_completed`, `rotation_failed`
+  - CLI handler functions: `rotate_volume_key/1` and `rotation_status/1`
+  - Added `reencrypt_chunk/8` public API to BlobStore (wraps NIF through GenServer)
+  - Fixed bug in `ChunkIndex.get_chunks_for_volume/1` — was using `file_meta.chunk_hashes` but field is `file_meta.chunks`
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/key_rotation.ex` (new — rotation orchestration)
+  - `neonfs_core/lib/neon_fs/core/key_rotation/worker.ex` (new — batch re-encryption worker)
+  - `neonfs_core/lib/neon_fs/core/blob_store.ex` (modified — added `reencrypt_chunk` API and handle_call)
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (modified — added `:set_rotation_state` command)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — added rotation handler functions)
+  - `neonfs_core/lib/neon_fs/core/chunk_index.ex` (bugfix — `.chunk_hashes` → `.chunks`)
+  - `neonfs_core/test/neon_fs/core/key_rotation_test.exs` (new — 15 tests)
+- **Learnings for future iterations:**
+  - Rotation state must be read from Ra directly, not from VolumeRegistry ETS cache — `:set_rotation_state` updates Ra volume map but VolumeRegistry doesn't sync the rotation field back to its cache
+  - `ChunkIndex.get_chunks_for_volume/1` had a latent bug using `.chunk_hashes` instead of `.chunks` — never triggered before because the function wasn't called in production code
+  - BackgroundWorker's `Task.Supervisor` must be started BEFORE the BackgroundWorker GenServer — otherwise the check_queue timer fires before the supervisor exists and crashes the worker
+  - For concurrent rotation tests, set rotation state in Ra directly rather than relying on timing of async workers
+---
+
+## 2026-02-13 - Task 0073
+- What was implemented:
+  - Encrypted read path — `ReadOperation` checks each chunk's `ChunkCrypto` metadata and looks up the correct key version from `KeyManager`
+  - `resolve_decrypt_opts/2` — reads `crypto.key_version` from ChunkMeta, calls `KeyManager.get_volume_key/2`, returns `[key: ..., nonce: ...]`
+  - Key/nonce passed through ChunkFetcher → BlobStore → NIF (read → decrypt → decompress → verify in single NIF call)
+  - `needs_decompress` made encryption-aware — encrypted chunks with `stored_size != original_size` (GCM tag overhead) no longer incorrectly trigger decompression
+  - ChunkFetcher refactored to pass `opts` keyword list through instead of destructured params (fixes Credo arity > 8 warning)
+  - ChunkFetcher propagates `"encryption error"` NIF failures immediately instead of falling through to remote fetch (same key/nonce would fail identically)
+  - `translate_decrypt_error/2` converts NIF encryption error strings to `{:decryption_failed, chunk_hash}` tuples
+  - `BlobStore.read_chunk_with_options/4` now extracts `:key`/`:nonce` from read_opts and passes to NIF
+  - Telemetry events emitted at `[:neonfs, :read, :decrypt]` per chunk with volume_id and key_version
+  - Unencrypted chunks skip decryption entirely (no key/nonce to NIF)
+  - Mixed key versions within a single read handled correctly (each chunk resolved independently)
+  - `volume_id` threaded through entire read path (chunk and stripe paths) for key lookup
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` (modified — encryption support, resolve_decrypt_opts, telemetry)
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (modified — opts passthrough refactor, encryption error propagation)
+  - `neonfs_core/lib/neon_fs/core/blob_store.ex` (modified — key/nonce extraction in read path)
+  - `neonfs_core/test/neon_fs/core/read_operation_test.exs` (modified — 7 new encrypted read tests)
+- **Learnings for future iterations:**
+  - Encrypted uncompressed chunks have `stored_size != original_size` due to 16-byte GCM auth tag — decompress check must account for this
+  - NIF encryption errors are strings (`"encryption error: ..."`) — pattern match with `"encryption error" <> _` to distinguish from other string errors
+  - When local decryption fails, don't fall through to remote fetch — the key/nonce come from metadata, not the local node
+---
+
+## 2026-02-13 - Task 0072
+- What was implemented:
+  - Encrypted write path for both replicated and erasure-coded volumes
+  - `resolve_encryption/1` — checks `Volume.encrypted?/1`, fetches current key via `KeyManager.get_current_key/1`
+  - Per-chunk 96-bit random nonces via `:crypto.strong_rand_bytes(12)`
+  - Key and nonce passed through BlobStore NIF write opts (compress → encrypt → write in single NIF call)
+  - `ChunkMeta` gains `crypto` field (`ChunkCrypto.t() | nil`)
+  - `BlobStore.do_write_chunk/4` passes key/nonce from opts to `Native.store_write_chunk_compressed`
+  - Encryption context threaded through entire write pipeline via `write_ctx` map
+  - Telemetry events emitted at `[:neonfs, :write, :encrypt]` per chunk
+  - Unencrypted volumes continue to work unchanged (nil crypto, empty key/nonce to NIF)
+  - Fixed pre-existing dialyzer dead code in `VolumeRegistry.encryption_to_map/1`
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (modified — encryption support + arity refactor)
+  - `neonfs_core/lib/neon_fs/core/chunk_meta.ex` (modified — added `crypto` field)
+  - `neonfs_core/lib/neon_fs/core/blob_store.ex` (modified — key/nonce passthrough)
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` (modified — fixed dead code in encryption_to_map)
+  - `neonfs_core/test/neon_fs/core/write_operation_test.exs` (modified — 6 new encrypted write tests)
+  - `neonfs_core/test/neon_fs/core/key_manager_test.exs` (modified — removed duplicate helper)
+  - `neonfs_core/test/support/test_case.ex` (modified — added `write_cluster_json/2` helper)
+- **Learnings for future iterations:**
+  - ChunkCrypto already exists in neonfs_client — don't create duplicates in neonfs_core
+  - Dialyzer PLTs must be rebuilt (delete `.plt` AND `.plt.hash`) when cross-package types change
+  - Bundling related params into a context map (`write_ctx`) keeps function arity under credo's max of 8
+  - `encryption_to_map/1` defensive clauses were dead code — use specific struct match when callers are known
+---
+
+## 2026-02-13 - Task 0071
+- What was implemented:
+  - Created `NeonFS.Core.KeyManager` — stateless module for per-volume encryption key lifecycle
+  - `generate_volume_key/1` — generates 256-bit AES key, wraps with master key via AES-256-GCM, stores in Ra
+  - `get_volume_key/2` — reads wrapped key from Ra, unwraps with master key
+  - `get_current_key/1` — determines current key version from volume encryption config, returns unwrapped key
+  - `setup_volume_encryption/1` — generates first key (v1), sets current_key_version on volume
+  - `rotate_volume_key/1` — generates new version, deprecates old key, updates current_key_version
+  - Key wrapping format: `<<nonce::12, ciphertext::32, tag::16>>` with volume_id+version as AAD
+  - Master key loaded from cluster.json on each operation (no caching)
+  - Added `encryption` field to VolumeRegistry `volume_to_map`/`map_to_volume` for Ra serialisation
+  - 19 tests covering generation, round-trip, setup, rotation, deprecation, wrong master key, missing cluster state
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/key_manager.ex` (new — key generation, wrapping, version management)
+  - `neonfs_core/test/neon_fs/core/key_manager_test.exs` (new — 19 tests)
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` (modified — encryption field serialisation)
+- **Learnings for future iterations:**
+  - Dialyzer PLTs can get stale when cross-package module functions are referenced via aliases — using fully qualified `%NeonFS.Core.VolumeEncryption{}` structs in VolumeRegistry works around PLT resolution issues
+  - `:crypto.crypto_one_time_aead/7` is sufficient for key wrapping — no need for Rust NIFs for this simple operation
+  - Credo `--strict` enforces max nesting depth of 2 — extract Ra query helpers into separate functions when composing `case` over query results
+  - Including volume_id and key_version as AAD in the wrapped key provides domain separation, preventing key entries from being moved between volumes
+---
+
+## 2026-02-13 - Task 0070
+- What was implemented:
+  - Bumped MetadataStateMachine from v5 to v6
+  - Added `encryption_keys` and `volume_acls` maps to Ra state
+  - Added v5→v6 migration handler using `Map.put_new/3`
+  - Added encryption key commands: `put_encryption_key`, `delete_encryption_key`, `set_current_key_version`
+  - Added volume ACL commands: `put_volume_acl`, `update_volume_acl`
+  - Added query functions: `get_encryption_keys/2`, `get_volume_acl/2`
+  - Volume deletion now cascades to remove encryption keys and ACLs
+  - Updated `ra_test.exs` version assertion from 5 to 6
+  - Added 16 new tests covering all new commands, migration, cascade deletion, and queries
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (modified — v6 upgrade)
+  - `neonfs_core/test/neon_fs/core/metadata_state_machine_test.exs` (modified — new tests)
+  - `neonfs_core/test/neon_fs/core/ra_test.exs` (modified — version assertion)
+- **Learnings for future iterations:**
+  - Ra state persistence is automatic — new map fields in the state are included in Ra snapshots via Erlang term serialisation; no changes needed to Persistence module
+  - `delete_encryption_key` cleans up the volume entry entirely when the last key version is removed, preventing empty map accumulation
+  - `set_current_key_version` updates the volume's `:encryption` sub-map, creating it if absent, keeping encryption config alongside the volume
+---
+
 ## 2026-01-27 - Task 0001
 - What was implemented:
   - Created neonfs_blob Rust crate using `mix rustler.new`
@@ -2237,4 +2432,173 @@
   - Dialyzer catches unreachable guard clauses (e.g. `{wall, counter, node} || default`) — HLC timestamps are always tuples, never nil
   - Credo max nesting depth 2 — extract filter predicates (like `unanimously_tombstoned?`) into named helpers
   - Merkle tree root hash: sort key_hashes first for deterministic ordering, then SHA-256 the concatenation of per-record hashes
+---
+
+## 2026-02-12 - Task 0067
+- What was implemented:
+  - AES-256-GCM authenticated encryption integrated into the BlobStore read/write pipeline
+  - New `encryption.rs` module with `EncryptionParams`, `encrypt()`, `decrypt()` using the `aes-gcm` crate (RustCrypto)
+  - Extended `WriteOptions` and `ReadOptions` with `encryption: Option<EncryptionParams>`
+  - Extended `ChunkInfo` with `encryption_algorithm` and `encryption_nonce` fields
+  - Write pipeline: compress → encrypt → write; Read pipeline: read → decrypt → decompress → verify
+  - `store_reencrypt_chunk` NIF for key rotation (decrypt-old → encrypt-new without crossing NIF boundary)
+  - NIF interface uses empty binary (`<<>>`) for "no encryption" — full backward compatibility
+  - 149 Rust tests pass (including 8 new store encryption tests, 11 encryption module tests with proptest)
+  - 8 new Elixir NIF boundary tests (encrypted round-trip, compression+encryption, wrong key, reencrypt, invalid params)
+  - All 873 neonfs_core tests pass, all subproject checks pass including dialyzer
+- Files changed:
+  - `neonfs_core/native/neonfs_blob/Cargo.toml` (modified — added `aes-gcm = "0.10"`)
+  - `neonfs_core/native/neonfs_blob/src/encryption.rs` (new — AES-256-GCM encrypt/decrypt + tests)
+  - `neonfs_core/native/neonfs_blob/src/error.rs` (modified — added EncryptionError variant)
+  - `neonfs_core/native/neonfs_blob/src/store.rs` (modified — encryption in WriteOptions/ReadOptions/ChunkInfo, pipeline integration, reencrypt_chunk)
+  - `neonfs_core/native/neonfs_blob/src/lib.rs` (modified — extended NIF signatures with key/nonce params, added store_reencrypt_chunk NIF)
+  - `neonfs_core/lib/neon_fs/core/blob/native.ex` (modified — updated NIF bindings for new arities, added store_reencrypt_chunk/7)
+  - `neonfs_core/lib/neon_fs/core/blob_store.ex` (modified — updated callers with empty binary encryption params)
+  - `neonfs_core/test/neon_fs/core/blob/native_test.exs` (modified — updated all calls to new arity)
+  - `neonfs_core/test/neon_fs/core/blob/native_encryption_test.exs` (new — 8 Elixir encryption NIF tests)
+  - `tasks/task_0067_encryption_nifs.md` (status: Complete)
+- **Learnings for future iterations:**
+  - Task notes said `ring` was already in Cargo.toml for SHA-256 — actually uses `sha2` from RustCrypto. Used `aes-gcm` crate for consistency.
+  - Proptest with 0–1MB random data takes ~60s to run; consider reducing upper bound for faster CI feedback
+  - When extending NIF signatures with many params, clippy's `too_many_arguments` lint triggers at 8+ — use `#[allow(clippy::too_many_arguments)]`
+---
+
+## 2026-02-12 - Task 0068
+- What was implemented:
+  - `NeonFS.Core.VolumeEncryption` struct in neonfs_client with `mode`, `current_key_version`, `keys`, `rotation` fields
+  - `VolumeEncryption.new/1`, `active?/1`, `rotating?/1`, `validate/1` functions
+  - `NeonFS.Core.ChunkCrypto` struct in neonfs_client with `algorithm`, `nonce`, `key_version` fields
+  - `ChunkCrypto.new/1`, `validate/1` functions
+  - Extended `Volume` struct with `encryption` field (defaults to `%VolumeEncryption{mode: :none}`)
+  - Added `Volume.encrypted?/1` helper and `Volume.default_encryption/0`
+  - Added `:encryption` to allowed `Volume.update/2` keys and validation chain
+  - Unit tests for VolumeEncryption (creation, active?, rotating?, validation)
+  - Unit tests for ChunkCrypto (creation, validation)
+  - All 139 neonfs_client tests pass, full suite passes across all subprojects
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/volume_encryption.ex` (new — VolumeEncryption struct and helpers)
+  - `neonfs_client/lib/neon_fs/core/chunk_crypto.ex` (new — ChunkCrypto struct)
+  - `neonfs_client/lib/neon_fs/core/volume.ex` (modified — added encryption field, encrypted?/1, default_encryption/0, validation)
+  - `neonfs_client/test/neon_fs/core/volume_encryption_test.exs` (new — 11 tests)
+  - `neonfs_client/test/neon_fs/core/chunk_crypto_test.exs` (new — 9 tests)
+  - `tasks/task_0068_encryption_types_and_volume_config.md` (status: Complete)
+- **Learnings for future iterations:**
+  - Encryption types live in neonfs_client (shared across packages), not neonfs_core
+  - VolumeEncryption uses `defstruct` with defaults (`mode: :none`, `current_key_version: 0`, `keys: %{}`, `rotation: nil`) rather than all `:nil` fields
+  - Volume already has a pattern for nested config validation — delegation to the type's own `validate/1` function works well
+---
+
+## 2026-02-12 - Task 0069
+- What was implemented:
+  - `NeonFS.Core.VolumeACL` struct with `volume_id`, `owner_uid`, `owner_gid`, `entries` fields
+  - VolumeACL entry uses `{:uid, integer}` or `{:gid, integer}` principals with MapSet permissions
+  - `has_permission?/3` and `has_permission?/4` (with supplementary GIDs) for permission checks
+  - Permission inheritance: `:admin` → `:write` → `:read`; volume owner UID always has all permissions
+  - `NeonFS.Core.FileACL` struct with `mode` (POSIX bits), `uid`, `gid`, `acl_entries` fields
+  - Extended ACL entry types: `:user`, `:group`, `:mask`, `:other` with MapSet permissions (`:r`, `:w`, `:x`)
+  - `check_access/4` and `check_access/5` implementing full POSIX ACL evaluation order
+  - Mask entry correctly limits named user and named group effective permissions (not owner or other)
+  - Validation for both VolumeACL and FileACL structs
+  - 23 VolumeACL tests (permission checks, inheritance, validation)
+  - 43 FileACL tests (mode bits, extended ACLs, mask interaction, evaluation order, validation)
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/volume_acl.ex` (new — VolumeACL struct and permission helpers)
+  - `neonfs_client/lib/neon_fs/core/file_acl.ex` (new — FileACL struct and POSIX access checks)
+  - `neonfs_client/test/neon_fs/core/volume_acl_test.exs` (new — 23 tests)
+  - `neonfs_client/test/neon_fs/core/file_acl_test.exs` (new — 43 tests)
+  - `tasks/task_0069_acl_types.md` (status: Complete)
+- **Learnings for future iterations:**
+  - ACL types use numeric UIDs/GIDs (not string user/group IDs) to mirror NFS AUTH_SYS
+  - VolumeACL uses permission inheritance (admin ⊃ write ⊃ read) checked via `permission_satisfied?/2`
+  - FileACL implements full POSIX ACL evaluation order: owner → named user (masked) → owning group (masked if extended) → named group (masked) → other
+  - `stream_data`/`ExUnitProperties` not available in neonfs_client — use iteration-based property tests instead
+  - Credo strict catches redundant last `with` clauses — use direct return from last call instead of `with :ok <- ... do :ok end`
+---
+
+## 2026-02-13 - Task 0076
+- What was implemented:
+  - `Authorise.check/4` extended to handle `{:file, volume_id, path}` resources — looks up FileMeta from FileIndex, constructs FileACL, checks POSIX mode + extended ACL entries
+  - Falls back to volume-level check when file not found
+  - `ACLManager.set_file_acl/3` sets extended ACL entries on a file via FileIndex update (GenServer-serialised writes)
+  - `ACLManager.get_file_acl/2` reads file ACL (mode, uid, gid, acl_entries, default_acl) directly from FileIndex (no GenServer call)
+  - `ACLManager.set_default_acl/3` sets directory default ACL via FileIndex update
+  - FileMeta struct extended with `acl_entries` (default `[]`) and `default_acl` (default `nil`) fields
+  - WriteOperation inherits parent directory's `default_acl` as new file's `acl_entries` via `maybe_inherit_default_acl/3`
+  - FUSE handler enforces file-level permissions: read, write, create, mkdir, unlink, rmdir, rename all check `Authorise.check/4` via `core_call`
+  - FUSE handler setattr enforces ownership: only file owner UID or root can chmod/chown
+  - Handler state extended with `uid`, `gid`, `gids` fields (from init opts, default 0/0/[])
+  - CLI handler: `handle_set_file_acl/3`, `handle_get_file_acl/2`, `handle_set_default_acl/3`
+  - 19 new unit tests covering POSIX mode checking, root bypass, extended ACL entries, mask interaction, directory inheritance, volume fallback
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/file_meta.ex` (modified — added `acl_entries`, `default_acl` fields and `acl_entry` type)
+  - `neonfs_core/lib/neon_fs/core/authorise.ex` (modified — added `{:file, volume_id, path}` resource handling)
+  - `neonfs_core/lib/neon_fs/core/acl_manager.ex` (modified — added file ACL CRUD and directory default ACL)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (modified — directory default ACL inheritance)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (modified — permission enforcement in FUSE callbacks)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — file ACL handler functions)
+  - `neonfs_core/test/neon_fs/core/authorise_file_test.exs` (new — 19 tests)
+  - `tasks/task_0076_file_acls_and_posix_enforcement.md` (status: Complete)
+- **Learnings for future iterations:**
+  - Dialyzer PLT must be rebuilt when struct fields change in a dependency package (neonfs_client) — stale PLT causes false `guard_fail` errors
+  - Don't use `|| []` fallback on struct fields that already have a default value — Dialyzer knows the field type and flags the nil-check as impossible
+  - FUSE handler permission checks must go through `core_call` since neonfs_fuse has no dependency on neonfs_core; wrap in rescue/catch to prevent permission check failures from breaking operations
+  - `action_to_file_permission/1` maps volume-level actions (:read, :write, :admin, :mount) to POSIX file permissions (:r, :w, :r)
+---
+
+### Task 0078: CLI Security Commands — 2026-02-13
+- **Status:** Complete
+- **Summary:** Added security-related commands to the Rust CLI for volume encryption, key rotation, ACL management, and audit log queries. Also added missing Elixir handler functions for volume ACL grant/revoke/show and encryption config parsing.
+- **Changes:**
+  - `neonfs-cli/src/commands/acl.rs` (new — ACL subcommands: grant, revoke, show, set-file, get-file)
+  - `neonfs-cli/src/commands/audit.rs` (new — audit log list with type/uid/resource/time/limit filters)
+  - `neonfs-cli/src/commands/mod.rs` (modified — registered acl and audit modules)
+  - `neonfs-cli/src/commands/volume.rs` (modified — --encryption flag on create, rotate-key, rotation-status subcommands)
+  - `neonfs-cli/src/main.rs` (modified — Acl and Audit command variants with dispatch)
+  - `neonfs-cli/src/term/types.rs` (modified — RotationStatus, RotationInfo, AclInfo, AclEntry, FileAclInfo, AuditEntry structs; VolumeInfo encryption fields)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — handle_acl_grant/3, handle_acl_revoke/2, handle_acl_show/1; encryption_to_map/1; parse_encryption_opt/1; parse_principal/1; parse_permissions/1; volume_to_map encryption field; VolumeEncryption alias)
+  - `tasks/task_0078_cli_security_commands.md` (status: Complete)
+- **Test results:** 40 Rust CLI tests, 1003 neonfs_core tests, 43 neonfs_fuse tests, 65 integration tests — all passing
+- **Learnings:**
+  - ACLManager.grant/3 expects a list of permission atoms, not a MapSet — always check the typespec
+  - When CLI sends config maps to handler, handler must convert to proper structs before passing to VolumeRegistry/Volume.new
+  - Volume encryption config needs explicit parse step: map → VolumeEncryption.new(mode: mode)
+---
+
+### Task 0079: Phase 6 Integration Tests and Full Verification — 2026-02-13
+- **Status:** Complete
+- **Summary:** 27 new integration tests covering all Phase 6 security features (encryption, ACLs, audit logging, key rotation) across multi-node PeerCluster. Also fixed handler.ex encrypted volume creation bug (missing key setup).
+- **Files:**
+  - `neonfs_integration/test/integration/encryption_test.exs` (new — 7 tests: encrypted round-trip, raw chunk not plaintext, mixed modes, encrypted EC write/read, degraded read with decryption, CLI handler create with encryption, volume info encryption status)
+  - `neonfs_integration/test/integration/acl_test.exs` (new — 9 tests: grant read only, grant write, owner full access, root bypass, GID-based permission, file ACL mode 0600, extended ACL entry, directory default ACL on file, CLI handler grant/show/revoke)
+  - `neonfs_integration/test/integration/audit_test.exs` (new — 5 tests: ACL grant audit event, key rotation audit event, query by actor UID, query by resource, CLI handler audit list)
+  - `neonfs_integration/test/integration/key_rotation_test.exs` (new — 6 tests: write v1/rotate v2/read back, rotation status, complete rotation with chunk version check, CLI rotate_volume_key, CLI rotation_status, cannot rotate unencrypted)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — build_encryption_config/1 helper, setup_encryption_if_needed/1, KeyManager alias)
+  - `tasks/task_0079_phase6_integration_tests.md` (status: Complete)
+- **Test results:** 92 integration tests (27 new + 65 existing), 1003 neonfs_core tests, 43 neonfs_fuse tests, 149 Rust blob tests, 40 Rust CLI tests — all passing
+- **Learnings:**
+  - `alias` in Elixir is compile-time — `replace_all` on module names must not touch the alias declarations themselves
+  - Encrypted volumes need `compression: %{algorithm: :none}` in tests to avoid compression+encryption read path interaction
+  - AuditLog.log uses GenServer.cast (async) — wrap audit queries in `assert_eventually`
+  - ACLManager logs `:volume_acl_changed`, KeyRotation logs `:key_rotated` — check actual event types, not assumed ones
+  - Handler `create_volume` was missing key setup — added `setup_encryption_if_needed/1` to the `with` chain
+---
+
+## 2026-02-13 - Task 0070
+- What was implemented:
+  - Bumped MetadataStateMachine from v5 to v6
+  - Added `encryption_keys` and `volume_acls` maps to Ra state
+  - Added v5→v6 migration handler (adds empty maps for new fields)
+  - Encryption key commands: `put_encryption_key`, `delete_encryption_key`, `set_current_key_version`
+  - Volume ACL commands: `put_volume_acl`, `update_volume_acl`
+  - Query functions: `get_encryption_keys/2`, `get_volume_acl/2`
+  - Volume deletion cascade: deleting a volume removes its encryption keys and ACL
+  - Unit tests for all new commands, migration, cascade deletion, and query functions
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/metadata_state_machine.ex` (modified — v6 with new fields, commands, migration)
+  - `neonfs_core/test/neon_fs/core/metadata_state_machine_test.exs` (modified — 57 tests, all passing)
+- **Learnings for future iterations:**
+  - Ra state persistence is handled automatically by Ra's snapshot mechanism — adding new map fields to the state is sufficient, no changes to Persistence module needed
+  - `Map.put_new/3` in migration handlers is safe — won't overwrite if fields already exist
+  - `delete_encryption_key` should clean up the volume's key map entirely when the last key version is removed
+  - `set_current_key_version` operates on the volume's `:encryption` sub-map, creating it if needed
 ---

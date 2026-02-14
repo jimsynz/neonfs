@@ -242,11 +242,10 @@ defmodule NeonFS.Core.Blob.Native do
   @type chunk_info :: {non_neg_integer(), non_neg_integer(), compression()}
 
   @doc """
-  Writes a chunk to the blob store with optional compression.
+  Writes a chunk to the blob store with optional compression and encryption.
 
-  The hash is computed on the original (uncompressed) data. If compression is
-  enabled, the data is compressed before writing to disk, but the hash still
-  refers to the original data for content addressing.
+  The hash is computed on the original (uncompressed, unencrypted) data.
+  Pipeline order: compress → encrypt → write to disk.
 
   ## Parameters
     - `store` - Reference to the blob store
@@ -255,12 +254,11 @@ defmodule NeonFS.Core.Blob.Native do
     - `tier` - Storage tier ("hot", "warm", or "cold")
     - `compression` - Compression type: "none" or "zstd"
     - `compression_level` - Compression level (1-19, used for zstd only)
+    - `key` - 32-byte AES-256 key for encryption, or `<<>>` for no encryption
+    - `nonce` - 12-byte nonce for encryption, or `<<>>` for no encryption
 
   ## Returns
-    - `{:ok, {original_size, stored_size, compression}}` - On success, where:
-      - `original_size` - Size of the original uncompressed data
-      - `stored_size` - Size of the data as stored on disk (compressed or not)
-      - `compression` - The compression used ("none" or "zstd:N")
+    - `{:ok, {original_size, stored_size, compression, encryption_algorithm, nonce}}` - On success
     - `{:error, reason}` - If the write fails
 
   ## Examples
@@ -268,8 +266,8 @@ defmodule NeonFS.Core.Blob.Native do
       iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
       iex> data = String.duplicate("hello world", 1000)
       iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
-      iex> {:ok, {orig, stored, comp}} = NeonFS.Core.Blob.Native.store_write_chunk_compressed(
-      ...>   store, hash, data, "hot", "zstd", 3
+      iex> {:ok, {orig, stored, comp, _enc, _nonce}} = NeonFS.Core.Blob.Native.store_write_chunk_compressed(
+      ...>   store, hash, data, "hot", "zstd", 3, <<>>, <<>>
       ...> )
       iex> stored < orig
       true
@@ -277,22 +275,38 @@ defmodule NeonFS.Core.Blob.Native do
       "zstd:3"
 
   """
+  @type encryption_info ::
+          {non_neg_integer(), non_neg_integer(), compression(), String.t(), binary()}
+
   @spec store_write_chunk_compressed(
           store(),
           hash(),
           binary(),
           tier(),
           compression(),
-          integer()
-        ) :: {:ok, chunk_info()} | {:error, String.t()}
-  def store_write_chunk_compressed(_store, _hash, _data, _tier, _compression, _compression_level),
-    do: :erlang.nif_error(:nif_not_loaded)
+          integer(),
+          binary(),
+          binary()
+        ) :: {:ok, encryption_info()} | {:error, String.t()}
+  def store_write_chunk_compressed(
+        _store,
+        _hash,
+        _data,
+        _tier,
+        _compression,
+        _compression_level,
+        _key,
+        _nonce
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Reads a chunk from the blob store with optional verification and decompression.
+  Reads a chunk from the blob store with optional verification, decompression,
+  and decryption.
 
-  This is the most flexible read function, supporting both integrity verification
-  and transparent decompression.
+  This is the most flexible read function, supporting integrity verification,
+  transparent decompression, and decryption.
+  Pipeline order: read → decrypt → decompress → verify.
 
   ## Parameters
     - `store` - Reference to the blob store
@@ -300,17 +314,13 @@ defmodule NeonFS.Core.Blob.Native do
     - `tier` - Storage tier ("hot", "warm", or "cold")
     - `verify` - If true, verify the data matches the expected hash after decompression
     - `decompress` - If true, decompress the data after reading
+    - `key` - 32-byte AES-256 key for decryption, or `<<>>` for no decryption
+    - `nonce` - 12-byte nonce for decryption, or `<<>>` for no decryption
 
   ## Returns
-    - `{:ok, data}` - The chunk data as a binary (decompressed if requested)
-    - `{:error, reason}` - If the chunk does not exist, read fails, decompression
-      fails, or verification fails
-
-  ## Notes
-    - When both `verify` and `decompress` are true, verification happens AFTER
-      decompression since the hash is of the original uncompressed data.
-    - The Elixir metadata layer tracks which chunks are compressed and passes
-      the appropriate `decompress` flag.
+    - `{:ok, data}` - The chunk data as a binary (decrypted and/or decompressed if requested)
+    - `{:error, reason}` - If the chunk does not exist, read fails, decryption
+      fails, decompression fails, or verification fails
 
   ## Examples
 
@@ -318,18 +328,59 @@ defmodule NeonFS.Core.Blob.Native do
       iex> data = String.duplicate("hello world", 1000)
       iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
       iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk_compressed(
-      ...>   store, hash, data, "hot", "zstd", 3
+      ...>   store, hash, data, "hot", "zstd", 3, <<>>, <<>>
       ...> )
       iex> {:ok, read_data} = NeonFS.Core.Blob.Native.store_read_chunk_with_options(
-      ...>   store, hash, "hot", true, true
+      ...>   store, hash, "hot", true, true, <<>>, <<>>
       ...> )
       iex> read_data == data
       true
 
   """
-  @spec store_read_chunk_with_options(store(), hash(), tier(), boolean(), boolean()) ::
+  @spec store_read_chunk_with_options(
+          store(),
+          hash(),
+          tier(),
+          boolean(),
+          boolean(),
+          binary(),
+          binary()
+        ) ::
           {:ok, binary()} | {:error, String.t()}
-  def store_read_chunk_with_options(_store, _hash, _tier, _verify, _decompress),
+  def store_read_chunk_with_options(_store, _hash, _tier, _verify, _decompress, _key, _nonce),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Re-encrypts a chunk in place: decrypts with old key/nonce, re-encrypts with
+  new key/nonce, writes back atomically.
+
+  The entire decrypt → re-encrypt cycle happens in Rust without any data
+  crossing the NIF boundary. Compression is preserved (only the encryption
+  layer changes).
+
+  ## Parameters
+    - `store` - Reference to the blob store
+    - `hash` - 32-byte binary hash of the chunk
+    - `tier` - Storage tier ("hot", "warm", or "cold")
+    - `old_key` - 32-byte AES-256 key used for current encryption
+    - `old_nonce` - 12-byte nonce used for current encryption
+    - `new_key` - 32-byte AES-256 key for new encryption
+    - `new_nonce` - 12-byte nonce for new encryption
+
+  ## Returns
+    - `{:ok, stored_size}` - The stored size of the re-encrypted chunk
+    - `{:error, reason}` - If the chunk does not exist or re-encryption fails
+  """
+  @spec store_reencrypt_chunk(
+          store(),
+          hash(),
+          tier(),
+          binary(),
+          binary(),
+          binary(),
+          binary()
+        ) :: {:ok, non_neg_integer()} | {:error, String.t()}
+  def store_reencrypt_chunk(_store, _hash, _tier, _old_key, _old_nonce, _new_key, _new_nonce),
     do: :erlang.nif_error(:nif_not_loaded)
 
   # Chunking types

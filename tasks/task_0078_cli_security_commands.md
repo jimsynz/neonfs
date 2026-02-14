@@ -1,7 +1,7 @@
 # Task 0078: CLI Security Commands
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security

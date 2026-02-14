@@ -1,8 +1,8 @@
 FROM base
 
 RUN useradd dev
-RUN mkdir /home/dev
-RUN mkdir /workdir
+RUN mkdir -p /home/dev
+RUN mkdir -p /workdir
 RUN chown dev:dev /home/dev
 RUN chown dev:dev /workdir
 USER dev

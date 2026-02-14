@@ -8,7 +8,8 @@ mod term;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    cluster::ClusterCommand, mount::MountCommand, node::NodeCommand, volume::VolumeCommand,
+    acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, mount::MountCommand,
+    node::NodeCommand, volume::VolumeCommand,
 };
 use error::Result;
 use output::OutputFormat;
@@ -34,16 +35,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// ACL management
+    Acl {
+        #[command(subcommand)]
+        command: AclCommand,
+    },
+
+    /// Audit log
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+
     /// Cluster management
     Cluster {
         #[command(subcommand)]
         command: ClusterCommand,
-    },
-
-    /// Volume management
-    Volume {
-        #[command(subcommand)]
-        command: VolumeCommand,
     },
 
     /// Mount management
@@ -56,6 +63,12 @@ enum Commands {
     Node {
         #[command(subcommand)]
         command: NodeCommand,
+    },
+
+    /// Volume management
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommand,
     },
 }
 
@@ -75,10 +88,12 @@ fn main() -> Result<()> {
     let format = cli.output_format();
 
     match cli.command {
+        Commands::Acl { command } => command.execute(format),
+        Commands::Audit { command } => command.execute(format),
         Commands::Cluster { command } => command.execute(format),
-        Commands::Volume { command } => command.execute(format),
         Commands::Mount { command } => command.execute(format),
         Commands::Node { command } => command.execute(format),
+        Commands::Volume { command } => command.execute(format),
     }
 }
 
@@ -88,7 +103,6 @@ mod tests {
 
     #[test]
     fn test_cli_parsing() {
-        // Test that CLI parsing works
         let cli = Cli::try_parse_from(["neonfs-cli", "node", "list"]);
         assert!(cli.is_ok());
     }
@@ -109,5 +123,42 @@ mod tests {
     fn test_default_table_format() {
         let cli = Cli::parse_from(["neonfs-cli", "node", "list"]);
         assert!(matches!(cli.output_format(), OutputFormat::Table));
+    }
+
+    #[test]
+    fn test_acl_subcommand_parsing() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "acl", "show", "myvol"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_audit_subcommand_parsing() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "audit", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_volume_encryption_flag() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "volume",
+            "create",
+            "myvol",
+            "--encryption",
+            "server-side",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_volume_rotate_key() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "volume", "rotate-key", "myvol"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_volume_rotation_status() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "volume", "rotation-status", "myvol"]);
+        assert!(cli.is_ok());
     }
 }

@@ -171,7 +171,11 @@ defmodule NeonFS.Core.ServiceRegistry do
   defp do_register(info, state) do
     info_map = ServiceInfo.to_map(info)
 
-    case maybe_ra_command({:register_service, info_map}) do
+    # Service registration is best-effort in Ra — the service is always inserted
+    # into ETS regardless. Use a short timeout to avoid blocking during cluster
+    # transitions (e.g. when a new member has been added but hasn't started yet,
+    # quorum is temporarily unreachable).
+    case maybe_ra_command({:register_service, info_map}, 500) do
       {:ok, :ok} -> :ok
       {:error, :ra_not_available} -> :ok
       {:error, reason} -> Logger.warning("Ra register_service failed: #{inspect(reason)}")
@@ -192,7 +196,8 @@ defmodule NeonFS.Core.ServiceRegistry do
   end
 
   defp do_deregister(node, state) do
-    case maybe_ra_command({:deregister_service, node}) do
+    # Best-effort Ra replication — use short timeout like do_register.
+    case maybe_ra_command({:deregister_service, node}, 500) do
       {:ok, :ok} -> :ok
       {:error, :ra_not_available} -> :ok
       {:error, reason} -> Logger.warning("Ra deregister_service failed: #{inspect(reason)}")
@@ -243,8 +248,16 @@ defmodule NeonFS.Core.ServiceRegistry do
     ArgumentError -> :ok
   end
 
-  defp maybe_ra_command(cmd) do
-    case RaSupervisor.command(cmd) do
+  defp maybe_ra_command(cmd, timeout \\ 5000) do
+    if RaServer.initialized?() do
+      maybe_ra_command_impl(cmd, timeout)
+    else
+      {:error, :ra_not_available}
+    end
+  end
+
+  defp maybe_ra_command_impl(cmd, timeout) do
+    case RaSupervisor.command(cmd, timeout) do
       {:ok, result, _leader} ->
         {:ok, result}
 

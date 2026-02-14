@@ -143,7 +143,9 @@ defmodule NeonFS.Core.BlobStore do
     tier = Keyword.get(opts, :tier, "hot")
     verify = Keyword.get(opts, :verify, false)
     decompress = Keyword.get(opts, :decompress, false)
-    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress})
+    key = Keyword.get(opts, :key, <<>>)
+    nonce = Keyword.get(opts, :nonce, <<>>)
+    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce})
   end
 
   @doc """
@@ -172,7 +174,9 @@ defmodule NeonFS.Core.BlobStore do
     {server, read_opts} = Keyword.pop(read_opts, :server, __MODULE__)
     verify = Keyword.get(read_opts, :verify, false)
     decompress = Keyword.get(read_opts, :decompress, false)
-    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress})
+    key = Keyword.get(read_opts, :key, <<>>)
+    nonce = Keyword.get(read_opts, :nonce, <<>>)
+    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce})
   end
 
   @doc """
@@ -225,6 +229,49 @@ defmodule NeonFS.Core.BlobStore do
   def migrate_chunk(hash, drive_id, from_tier, to_tier, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:migrate_chunk, hash, drive_id, from_tier, to_tier})
+  end
+
+  @doc """
+  Re-encrypts a chunk in place with new encryption keys.
+
+  Decrypts with the old key/nonce and re-encrypts with the new key/nonce
+  atomically in Rust — no chunk data crosses the NIF boundary.
+
+  ## Parameters
+
+    * `hash` - SHA-256 hash of the chunk (32 bytes)
+    * `drive_id` - Drive identifier containing the chunk
+    * `tier` - Storage tier: "hot", "warm", or "cold"
+    * `old_key` - Old encryption key (32 bytes)
+    * `old_nonce` - Old nonce (12 bytes)
+    * `new_key` - New encryption key (32 bytes)
+    * `new_nonce` - New nonce (12 bytes)
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `{:ok, stored_size}` - The stored size of the re-encrypted chunk
+    * `{:error, reason}` - On failure
+
+  """
+  @spec reencrypt_chunk(
+          chunk_hash(),
+          drive_id(),
+          tier(),
+          binary(),
+          binary(),
+          binary(),
+          binary(),
+          keyword()
+        ) :: {:ok, non_neg_integer()} | {:error, String.t()}
+  def reencrypt_chunk(hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+
+    GenServer.call(
+      server,
+      {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce}
+    )
   end
 
   # Metadata namespace operations
@@ -401,10 +448,14 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @impl true
-  def handle_call({:read_chunk, hash, drive_id, tier, verify, decompress}, _from, state) do
+  def handle_call(
+        {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce},
+        _from,
+        state
+      ) do
     case get_store(state, drive_id) do
       {:ok, store} ->
-        result = do_read_chunk(store, hash, drive_id, tier, verify, decompress)
+        result = do_read_chunk(store, hash, drive_id, tier, verify, decompress, key, nonce)
         if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
         {:reply, result, state}
 
@@ -431,6 +482,25 @@ defmodule NeonFS.Core.BlobStore do
     case get_store(state, drive_id) do
       {:ok, store} ->
         result = do_migrate_chunk(store, hash, drive_id, from_tier, to_tier)
+        if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
+        {:reply, result, state}
+
+      {:error, _reason} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  @impl true
+  def handle_call(
+        {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce},
+        _from,
+        state
+      ) do
+    case get_store(state, drive_id) do
+      {:ok, store} ->
+        result =
+          Native.store_reencrypt_chunk(store, hash, tier, old_key, old_nonce, new_key, new_nonce)
+
         if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
         {:reply, result, state}
 
@@ -569,6 +639,8 @@ defmodule NeonFS.Core.BlobStore do
   defp do_write_chunk(store, data, drive_id, tier, opts) do
     compression = Keyword.get(opts, :compression, "none")
     compression_level = Keyword.get(opts, :compression_level, 3)
+    key = Keyword.get(opts, :key, <<>>)
+    nonce = Keyword.get(opts, :nonce, <<>>)
 
     metadata = %{
       drive_id: drive_id,
@@ -595,9 +667,11 @@ defmodule NeonFS.Core.BlobStore do
                data,
                tier,
                compression,
-               compression_level
+               compression_level,
+               key,
+               nonce
              ) do
-          {:ok, {original_size, stored_size, comp_type}} ->
+          {:ok, {original_size, stored_size, comp_type, _enc_algo, _enc_nonce}} ->
             duration = System.monotonic_time() - start_time
 
             :telemetry.execute(
@@ -643,7 +717,7 @@ defmodule NeonFS.Core.BlobStore do
 
   ## Private: Read
 
-  defp do_read_chunk(store, hash, drive_id, tier, verify, decompress) do
+  defp do_read_chunk(store, hash, drive_id, tier, verify, decompress, key, nonce) do
     metadata = %{
       drive_id: drive_id,
       tier: tier,
@@ -662,7 +736,15 @@ defmodule NeonFS.Core.BlobStore do
 
     result =
       try do
-        case Native.store_read_chunk_with_options(store, hash, tier, verify, decompress) do
+        case Native.store_read_chunk_with_options(
+               store,
+               hash,
+               tier,
+               verify,
+               decompress,
+               key,
+               nonce
+             ) do
           {:ok, data} ->
             duration = System.monotonic_time() - start_time
 

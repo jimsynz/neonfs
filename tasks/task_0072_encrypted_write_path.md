@@ -1,7 +1,7 @@
 # Task 0072: Encrypted Write Path
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security

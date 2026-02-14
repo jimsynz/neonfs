@@ -121,6 +121,17 @@ defmodule NeonFS.Core.DriveRegistry do
   end
 
   @doc """
+  Triggers an immediate sync of remote drive metadata.
+
+  Useful in tests or after cluster topology changes when you need
+  remote drive info available without waiting for the periodic sync.
+  """
+  @spec sync_now() :: :ok
+  def sync_now do
+    GenServer.call(__MODULE__, :sync_now)
+  end
+
+  @doc """
   Updates the used_bytes for a drive.
   """
   @spec update_usage(String.t(), non_neg_integer()) :: :ok | {:error, :not_found}
@@ -164,20 +175,33 @@ defmodule NeonFS.Core.DriveRegistry do
 
     Logger.info("DriveRegistry started with #{length(local_drives)} local drives")
 
-    # Schedule periodic cross-node sync
-    if sync_interval > 0 do
-      Process.send_after(self(), :sync_remote_drives, sync_interval)
-    end
+    state = %{
+      table: table,
+      sync_interval: sync_interval,
+      local_drive_ids: Enum.map(local_drives, & &1.id)
+    }
 
-    {:ok,
-     %{
-       table: table,
-       sync_interval: sync_interval,
-       local_drive_ids: Enum.map(local_drives, & &1.id)
-     }}
+    # Sync remote drives immediately via handle_continue, then schedule periodic syncs
+    {:ok, state, {:continue, :initial_sync}}
   end
 
   @impl true
+  def handle_continue(:initial_sync, state) do
+    sync_remote_drives(state.table, state.local_drive_ids)
+
+    if state.sync_interval > 0 do
+      Process.send_after(self(), :sync_remote_drives, state.sync_interval)
+    end
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_call(:sync_now, _from, state) do
+    sync_remote_drives(state.table, state.local_drive_ids)
+    {:reply, :ok, state}
+  end
+
   def handle_call({:register_drive, %Drive{} = drive}, _from, state) do
     key = drive_key(drive)
     :ets.insert(state.table, {key, drive})

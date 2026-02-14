@@ -82,9 +82,11 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       ])
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "test.txt"}}})
-      :timer.sleep(200)
 
-      assert {:ok, inode} = InodeTable.get_inode(volume_id, "/test.txt")
+      :ok =
+        wait_until(fn -> match?({:ok, _}, InodeTable.get_inode(volume_id, "/test.txt")) end)
+
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/test.txt")
       assert inode > 1
     end
 
@@ -114,10 +116,12 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "new.txt", "mode" => 0o644}}}
       )
 
-      :timer.sleep(200)
+      # Wait for create to complete
+      :ok =
+        wait_until(fn -> match?({:ok, _}, InodeTable.get_inode(volume_id, "/new.txt")) end)
 
       # Verify inode was allocated
-      assert {:ok, inode} = InodeTable.get_inode(volume_id, "/new.txt")
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/new.txt")
 
       # Write data to the file
       send(
@@ -141,9 +145,11 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "docs", "mode" => 0o755}}}
       )
 
-      :timer.sleep(200)
+      # Wait for mkdir to complete (inode allocated)
+      :ok =
+        wait_until(fn -> match?({:ok, _}, InodeTable.get_inode(volume_id, "/docs")) end)
 
-      assert {:ok, dir_inode} = InodeTable.get_inode(volume_id, "/docs")
+      {:ok, dir_inode} = InodeTable.get_inode(volume_id, "/docs")
 
       # Create a file inside the directory
       send(
@@ -152,7 +158,11 @@ defmodule NeonFS.Integration.FuseHandlerTest do
          {"create", %{"parent" => dir_inode, "name" => "readme.md", "mode" => 0o644}}}
       )
 
-      :timer.sleep(200)
+      # Wait for create to complete
+      :ok =
+        wait_until(fn ->
+          match?({:ok, _}, InodeTable.get_inode(volume_id, "/docs/readme.md"))
+        end)
 
       # List the directory
       send(handler, {:fuse_op, 3, {"readdir", %{"ino" => dir_inode, "offset" => 0}}})
@@ -173,7 +183,12 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         {:fuse_op, 2, {"create", %{"parent" => 1, "name" => "file2.txt", "mode" => 0o644}}}
       )
 
-      :timer.sleep(200)
+      # Wait for both creates to complete (queued sequentially in the handler)
+      :ok =
+        wait_until(fn ->
+          match?({:ok, _}, InodeTable.get_inode(volume_id, "/file1.txt")) and
+            match?({:ok, _}, InodeTable.get_inode(volume_id, "/file2.txt"))
+        end)
 
       send(handler, {:fuse_op, 3, {"readdir", %{"ino" => 1, "offset" => 0}}})
       :timer.sleep(200)
@@ -195,10 +210,12 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/delete_me.txt")
 
       send(handler, {:fuse_op, 1, {"unlink", %{"parent" => 1, "name" => "delete_me.txt"}}})
-      :timer.sleep(200)
 
-      # Verify inode was released
-      assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/delete_me.txt")
+      # Wait for inode to be released
+      :ok =
+        wait_until(fn ->
+          match?({:error, :not_found}, InodeTable.get_inode(volume_id, "/delete_me.txt"))
+        end)
     end
 
     test "deletes empty directory", %{handler: handler, volume_id: volume_id, cluster: cluster} do
@@ -213,9 +230,12 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/empty_dir")
 
       send(handler, {:fuse_op, 1, {"rmdir", %{"parent" => 1, "name" => "empty_dir"}}})
-      :timer.sleep(200)
 
-      assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/empty_dir")
+      # Wait for inode to be released
+      :ok =
+        wait_until(fn ->
+          match?({:error, :not_found}, InodeTable.get_inode(volume_id, "/empty_dir"))
+        end)
     end
   end
 
@@ -242,10 +262,12 @@ defmodule NeonFS.Integration.FuseHandlerTest do
           }}}
       )
 
-      :timer.sleep(200)
-
-      assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/old_name.txt")
-      assert {:ok, _} = InodeTable.get_inode(volume_id, "/new_name.txt")
+      # Wait for rename to complete
+      :ok =
+        wait_until(fn ->
+          match?({:error, :not_found}, InodeTable.get_inode(volume_id, "/old_name.txt")) and
+            match?({:ok, _}, InodeTable.get_inode(volume_id, "/new_name.txt"))
+        end)
     end
   end
 

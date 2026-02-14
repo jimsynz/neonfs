@@ -1,5 +1,6 @@
 //! Error types for blob store operations.
 
+use crate::encryption::EncryptionError;
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -35,6 +36,10 @@ pub enum StoreError {
     /// The base directory does not exist and could not be created.
     #[error("invalid base directory: {0}")]
     InvalidBaseDir(PathBuf),
+
+    /// An encryption or decryption error occurred.
+    #[error("encryption error: {0}")]
+    EncryptionError(String),
 }
 
 impl StoreError {
@@ -44,5 +49,11 @@ impl StoreError {
             path: path.into(),
             source,
         }
+    }
+}
+
+impl From<EncryptionError> for StoreError {
+    fn from(e: EncryptionError) -> Self {
+        Self::EncryptionError(e.to_string())
     }
 }

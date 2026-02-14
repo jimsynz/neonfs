@@ -85,6 +85,13 @@ defmodule NeonFS.Core.QuorumCoordinator do
       config = resolve_quorum_config(opts, length(replicas))
       timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
 
+      # Generate a coordinator-level timestamp BEFORE dispatching to replicas.
+      # All replicas use this same timestamp, preventing late-arriving writes
+      # from an earlier quorum_write (whose task was killed after W met) from
+      # overwriting a logically-later write with a higher per-node HLC timestamp.
+      caller_timestamp = generate_write_timestamp(opts)
+      write_opts = Keyword.put(opts, :caller_timestamp, caller_timestamp)
+
       start_time = System.monotonic_time(:millisecond)
 
       write_satisfied? = fn results, pending ->
@@ -95,7 +102,7 @@ defmodule NeonFS.Core.QuorumCoordinator do
       responses =
         dispatch_parallel(
           replicas,
-          &dispatch_write(&1, segment_id, key, value, opts),
+          &dispatch_write(&1, segment_id, key, value, write_opts),
           timeout,
           write_satisfied?
         )
@@ -292,12 +299,13 @@ defmodule NeonFS.Core.QuorumCoordinator do
 
   defp default_write(node, segment_id, key, value, opts) do
     local_node = Keyword.get(opts, :local_node, Node.self())
+    write_opts = build_write_opts(opts)
 
     if node == local_node do
-      MetadataStore.write(segment_id, key, value, metadata_store_opts(opts))
+      MetadataStore.write(segment_id, key, value, write_opts)
     else
       timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
-      :erpc.call(node, MetadataStore, :write, [segment_id, key, value, []], timeout)
+      :erpc.call(node, MetadataStore, :write, [segment_id, key, value, write_opts], timeout)
     end
   end
 
@@ -353,6 +361,22 @@ defmodule NeonFS.Core.QuorumCoordinator do
     case Keyword.get(opts, :metadata_store) do
       nil -> []
       server -> [server: server]
+    end
+  end
+
+  defp generate_write_timestamp(opts) do
+    case Keyword.get(opts, :write_fn) do
+      nil -> MetadataStore.generate_timestamp(metadata_store_opts(opts))
+      _custom_fn -> {System.system_time(:millisecond), 0, Node.self()}
+    end
+  end
+
+  defp build_write_opts(opts) do
+    base = metadata_store_opts(opts)
+
+    case Keyword.get(opts, :caller_timestamp) do
+      nil -> base
+      ts -> Keyword.put(base, :caller_timestamp, ts)
     end
   end
 

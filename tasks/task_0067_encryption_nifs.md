@@ -1,7 +1,7 @@
 # Task 0067: Encryption Support in BlobStore NIFs
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security
@@ -10,27 +10,27 @@ Not Started
 Add AES-256-GCM authenticated encryption to the `neonfs_blob` Rust crate, integrated into the existing store read/write pipeline. Rather than exposing separate encrypt/decrypt NIFs (which would require copying chunk data across the NIF boundary multiple times), encryption is added as an optional step in the existing `WriteOptions` and `ReadOptions` — the same pattern used for compression. The Rust store handles the full pipeline internally: compress → encrypt → write on the write path, and read → decrypt → decompress → verify on the read path. A dedicated `store_reencrypt_chunk` NIF is also provided for key rotation (decrypt with old key → encrypt with new key without crossing the NIF boundary).
 
 ## Acceptance Criteria
-- [ ] New `encryption.rs` module in `neonfs_blob/src/` with internal `encrypt` and `decrypt` functions (not exposed as separate NIFs)
-- [ ] `encrypt(data, key, nonce)` — takes plaintext bytes, 256-bit key, and 96-bit nonce; returns ciphertext with appended 128-bit authentication tag
-- [ ] `decrypt(ciphertext_with_tag, key, nonce)` — takes ciphertext (with appended tag), 256-bit key, and 96-bit nonce; returns plaintext or error
-- [ ] `WriteOptions` extended with `encryption: Option<EncryptionParams>` where `EncryptionParams` holds key (32 bytes) and nonce (12 bytes)
-- [ ] `ReadOptions` extended with `encryption: Option<EncryptionParams>` (same struct, key + nonce for decryption)
-- [ ] Write pipeline order in `BlobStore::write_chunk_with_options`: compress → encrypt → write to disk
-- [ ] Read pipeline order in `BlobStore::read_chunk_with_options`: read from disk → decrypt → decompress → verify hash
-- [ ] `store_write_chunk_compressed` NIF extended with optional `key_binary` and `nonce_binary` params (empty binary = no encryption)
-- [ ] `store_read_chunk_with_options` NIF extended with optional `key_binary` and `nonce_binary` params (empty binary = no decryption)
-- [ ] New `store_reencrypt_chunk` NIF: reads chunk, decrypts with old key/nonce, re-encrypts with new key/nonce, writes back atomically — returns `{:ok, {stored_size}}` or `{:error, reason}`
-- [ ] `ChunkInfo` return from write NIF extended with encryption metadata (algorithm string, nonce echo)
-- [ ] Error cases handled: wrong key size (must be 32 bytes), wrong nonce size (must be 12 bytes), authentication failure on decrypt, empty data
-- [ ] Rust unit tests for encrypt/decrypt round-trip with known test vectors
-- [ ] Rust proptest: encrypt random data with random key, decrypt recovers original
-- [ ] Rust test: decrypt with wrong key returns authentication error
-- [ ] Rust test: tampered ciphertext returns authentication error
-- [ ] Rust test: write with encryption, read with decryption, verify round-trip through store
-- [ ] Rust test: write with compression + encryption, read with decryption + decompression, verify round-trip
-- [ ] Rust test: reencrypt_chunk produces valid ciphertext under new key
-- [ ] Elixir-side test calling extended NIFs verifies round-trip through NIF boundary
-- [ ] All existing tests still pass (no encryption params = existing behaviour)
+- [x] New `encryption.rs` module in `neonfs_blob/src/` with internal `encrypt` and `decrypt` functions (not exposed as separate NIFs)
+- [x] `encrypt(data, key, nonce)` — takes plaintext bytes, 256-bit key, and 96-bit nonce; returns ciphertext with appended 128-bit authentication tag
+- [x] `decrypt(ciphertext_with_tag, key, nonce)` — takes ciphertext (with appended tag), 256-bit key, and 96-bit nonce; returns plaintext or error
+- [x] `WriteOptions` extended with `encryption: Option<EncryptionParams>` where `EncryptionParams` holds key (32 bytes) and nonce (12 bytes)
+- [x] `ReadOptions` extended with `encryption: Option<EncryptionParams>` (same struct, key + nonce for decryption)
+- [x] Write pipeline order in `BlobStore::write_chunk_with_options`: compress → encrypt → write to disk
+- [x] Read pipeline order in `BlobStore::read_chunk_with_options`: read from disk → decrypt → decompress → verify hash
+- [x] `store_write_chunk_compressed` NIF extended with optional `key_binary` and `nonce_binary` params (empty binary = no encryption)
+- [x] `store_read_chunk_with_options` NIF extended with optional `key_binary` and `nonce_binary` params (empty binary = no decryption)
+- [x] New `store_reencrypt_chunk` NIF: reads chunk, decrypts with old key/nonce, re-encrypts with new key/nonce, writes back atomically — returns `{:ok, {stored_size}}` or `{:error, reason}`
+- [x] `ChunkInfo` return from write NIF extended with encryption metadata (algorithm string, nonce echo)
+- [x] Error cases handled: wrong key size (must be 32 bytes), wrong nonce size (must be 12 bytes), authentication failure on decrypt, empty data
+- [x] Rust unit tests for encrypt/decrypt round-trip with known test vectors
+- [x] Rust proptest: encrypt random data with random key, decrypt recovers original
+- [x] Rust test: decrypt with wrong key returns authentication error
+- [x] Rust test: tampered ciphertext returns authentication error
+- [x] Rust test: write with encryption, read with decryption, verify round-trip through store
+- [x] Rust test: write with compression + encryption, read with decryption + decompression, verify round-trip
+- [x] Rust test: reencrypt_chunk produces valid ciphertext under new key
+- [x] Elixir-side test calling extended NIFs verifies round-trip through NIF boundary
+- [x] All existing tests still pass (no encryption params = existing behaviour)
 
 ## Testing Strategy
 - Rust unit tests in `encryption.rs` with NIST test vectors for AES-256-GCM

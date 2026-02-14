@@ -99,6 +99,19 @@ pub struct VolumeInfo {
     pub chunk_count: u64,
     pub durability_type: String,
     pub durability_factor: u64,
+    pub encryption_mode: String,
+    pub encryption_key_version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<RotationInfo>,
+}
+
+/// Embedded rotation info within a volume
+#[derive(Debug, Serialize)]
+pub struct RotationInfo {
+    pub from_version: u64,
+    pub to_version: u64,
+    pub total_chunks: u64,
+    pub migrated: u64,
 }
 
 impl VolumeInfo {
@@ -110,6 +123,14 @@ impl VolumeInfo {
         let durability = term_to_map(map.get("durability").ok_or_else(|| {
             CliError::TermConversionError("Missing 'durability' field".to_string())
         })?)?;
+
+        // Extract encryption config (optional for backward compatibility)
+        let (encryption_mode, encryption_key_version, rotation) =
+            if let Some(enc_term) = map.get("encryption") {
+                parse_encryption(enc_term)?
+            } else {
+                ("none".to_string(), 0, None)
+            };
 
         Ok(Self {
             id: term_to_string(
@@ -135,6 +156,9 @@ impl VolumeInfo {
             durability_factor: term_to_u64(durability.get("factor").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'factor' field in durability".to_string())
             })?)?,
+            encryption_mode,
+            encryption_key_version,
+            rotation,
         })
     }
 
@@ -161,6 +185,254 @@ impl VolumeInfo {
     /// Format durability as string (e.g., "replicate:3")
     pub fn durability_string(&self) -> String {
         format!("{}:{}", self.durability_type, self.durability_factor)
+    }
+}
+
+/// Parse encryption map from Erlang term
+fn parse_encryption(term: &Term) -> Result<(String, u64, Option<RotationInfo>)> {
+    let enc_map = term_to_map(term)?;
+
+    let mode = term_to_string(enc_map.get("mode").ok_or_else(|| {
+        CliError::TermConversionError("Missing 'mode' field in encryption".to_string())
+    })?)?;
+
+    let key_version = enc_map
+        .get("current_key_version")
+        .and_then(|t| term_to_u64(t).ok())
+        .unwrap_or(0);
+
+    let rotation = if let Some(rot_term) = enc_map.get("rotation") {
+        // rotation can be nil (atom)
+        match rot_term {
+            Term::Atom(Atom { name }) if name == "nil" => None,
+            _ => {
+                let rot_map = term_to_map(rot_term)?;
+                let progress = rot_map
+                    .get("progress")
+                    .and_then(|t| term_to_map(t).ok())
+                    .unwrap_or_default();
+
+                Some(RotationInfo {
+                    from_version: rot_map
+                        .get("from_version")
+                        .and_then(|t| term_to_u64(t).ok())
+                        .unwrap_or(0),
+                    to_version: rot_map
+                        .get("to_version")
+                        .and_then(|t| term_to_u64(t).ok())
+                        .unwrap_or(0),
+                    total_chunks: progress
+                        .get("total_chunks")
+                        .and_then(|t| term_to_u64(t).ok())
+                        .unwrap_or(0),
+                    migrated: progress
+                        .get("migrated")
+                        .and_then(|t| term_to_u64(t).ok())
+                        .unwrap_or(0),
+                })
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok((mode, key_version, rotation))
+}
+
+/// Key rotation status response
+#[derive(Debug, Serialize)]
+pub struct RotationStatus {
+    pub from_version: u64,
+    pub to_version: u64,
+    pub total_chunks: u64,
+    pub migrated: u64,
+    pub started_at: String,
+}
+
+impl RotationStatus {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        // Handle both start_rotation response and rotation_status response
+        let (total_chunks, migrated) = if let Some(progress_term) = map.get("progress") {
+            let progress = term_to_map(progress_term)?;
+            let total = progress
+                .get("total_chunks")
+                .and_then(|t| term_to_u64(t).ok())
+                .unwrap_or(0);
+            let mig = progress
+                .get("migrated")
+                .and_then(|t| term_to_u64(t).ok())
+                .unwrap_or(0);
+            (total, mig)
+        } else {
+            let total = map
+                .get("total_chunks")
+                .and_then(|t| term_to_u64(t).ok())
+                .unwrap_or(0);
+            (total, 0)
+        };
+
+        let started_at = map
+            .get("started_at")
+            .and_then(|t| term_to_string(t).ok())
+            .unwrap_or_default();
+
+        Ok(Self {
+            from_version: term_to_u64(map.get("from_version").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'from_version' field".to_string())
+            })?)?,
+            to_version: term_to_u64(map.get("to_version").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'to_version' field".to_string())
+            })?)?,
+            total_chunks,
+            migrated,
+            started_at,
+        })
+    }
+}
+
+/// Volume ACL information
+#[derive(Debug, Serialize)]
+pub struct AclInfo {
+    pub volume_id: String,
+    pub owner_uid: u64,
+    pub owner_gid: u64,
+    pub entries: Vec<AclEntry>,
+}
+
+/// Single ACL entry
+#[derive(Debug, Serialize)]
+pub struct AclEntry {
+    pub principal: String,
+    pub permissions: Vec<String>,
+}
+
+impl AclInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let entries_terms = map
+            .get("entries")
+            .and_then(|t| term_to_list(t).ok())
+            .unwrap_or_default();
+
+        let entries: Result<Vec<AclEntry>> = entries_terms
+            .into_iter()
+            .map(|t| {
+                let entry_map = term_to_map(&t)?;
+                let principal = term_to_string(entry_map.get("principal").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'principal' field".to_string())
+                })?)?;
+                let perm_terms = entry_map
+                    .get("permissions")
+                    .and_then(|t| term_to_list(t).ok())
+                    .unwrap_or_default();
+                let permissions: Result<Vec<String>> =
+                    perm_terms.iter().map(term_to_string).collect();
+                Ok(AclEntry {
+                    principal,
+                    permissions: permissions?,
+                })
+            })
+            .collect();
+
+        Ok(Self {
+            volume_id: term_to_string(map.get("volume_id").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'volume_id' field".to_string())
+            })?)?,
+            owner_uid: term_to_u64(map.get("owner_uid").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'owner_uid' field".to_string())
+            })?)?,
+            owner_gid: term_to_u64(map.get("owner_gid").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'owner_gid' field".to_string())
+            })?)?,
+            entries: entries?,
+        })
+    }
+}
+
+/// File ACL information
+#[derive(Debug, Serialize)]
+pub struct FileAclInfo {
+    pub mode: u64,
+    pub uid: u64,
+    pub gid: u64,
+    pub acl_entries: Vec<String>,
+}
+
+impl FileAclInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let acl_entries = map
+            .get("acl_entries")
+            .and_then(|t| term_to_list(t).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| term_to_string(t).ok())
+            .collect();
+
+        Ok(Self {
+            mode: term_to_u64(map.get("mode").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'mode' field".to_string())
+            })?)?,
+            uid: term_to_u64(map.get("uid").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'uid' field".to_string())
+            })?)?,
+            gid: term_to_u64(map.get("gid").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'gid' field".to_string())
+            })?)?,
+            acl_entries,
+        })
+    }
+}
+
+/// Audit log entry
+#[derive(Debug, Serialize)]
+pub struct AuditEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub event_type: String,
+    pub actor_uid: u64,
+    pub actor_node: String,
+    pub resource: String,
+    pub outcome: String,
+}
+
+impl AuditEntry {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            id: term_to_string(
+                map.get("id").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'id' field".to_string())
+                })?,
+            )?,
+            timestamp: term_to_string(map.get("timestamp").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'timestamp' field".to_string())
+            })?)?,
+            event_type: term_to_string(map.get("event_type").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'event_type' field".to_string())
+            })?)?,
+            actor_uid: term_to_u64(map.get("actor_uid").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'actor_uid' field".to_string())
+            })?)?,
+            actor_node: term_to_string(map.get("actor_node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'actor_node' field".to_string())
+            })?)?,
+            resource: term_to_string(map.get("resource").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'resource' field".to_string())
+            })?)?,
+            outcome: term_to_string(map.get("outcome").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'outcome' field".to_string())
+            })?)?,
+        })
     }
 }
 
@@ -221,5 +493,70 @@ mod tests {
             uptime_seconds: 186300, // 2d 3h 45m
         };
         assert_eq!(status.uptime_string(), "2d 3h 45m");
+    }
+
+    #[test]
+    fn test_volume_durability_string() {
+        let volume = VolumeInfo {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            logical_size: 0,
+            physical_size: 0,
+            chunk_count: 0,
+            durability_type: "replicate".to_string(),
+            durability_factor: 3,
+            encryption_mode: "none".to_string(),
+            encryption_key_version: 0,
+            rotation: None,
+        };
+        assert_eq!(volume.durability_string(), "replicate:3");
+    }
+
+    #[test]
+    fn test_rotation_status_json_serialization() {
+        let status = RotationStatus {
+            from_version: 1,
+            to_version: 2,
+            total_chunks: 100,
+            migrated: 50,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["from_version"], 1);
+        assert_eq!(json["to_version"], 2);
+        assert_eq!(json["total_chunks"], 100);
+        assert_eq!(json["migrated"], 50);
+    }
+
+    #[test]
+    fn test_acl_info_json_serialization() {
+        let acl = AclInfo {
+            volume_id: "vol-1".to_string(),
+            owner_uid: 1000,
+            owner_gid: 1000,
+            entries: vec![AclEntry {
+                principal: "uid:1001".to_string(),
+                permissions: vec!["read".to_string(), "write".to_string()],
+            }],
+        };
+        let json = serde_json::to_value(&acl).unwrap();
+        assert_eq!(json["owner_uid"], 1000);
+        assert_eq!(json["entries"][0]["principal"], "uid:1001");
+    }
+
+    #[test]
+    fn test_audit_entry_json_serialization() {
+        let entry = AuditEntry {
+            id: "evt-1".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            event_type: "volume_created".to_string(),
+            actor_uid: 0,
+            actor_node: "neonfs_core@localhost".to_string(),
+            resource: "vol-1".to_string(),
+            outcome: "success".to_string(),
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["event_type"], "volume_created");
+        assert_eq!(json["outcome"], "success");
     }
 }

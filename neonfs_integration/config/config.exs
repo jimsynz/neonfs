@@ -9,6 +9,11 @@ if Mix.env() == :test do
   # Without this, the test controller is included in the quorum ring
   # and causes 4-node rings instead of the expected 3.
   config :neonfs_core, start_children?: false
+
+  # Increase quorum timeout for integration tests where 3 peer nodes
+  # share a single machine. The default 5s is tight when BEAM schedulers
+  # are contended across 4+ nodes; 15s gives ample headroom.
+  config :neonfs_core, quorum_timeout_ms: 15_000
 end
 
 if Mix.env() in [:dev, :test] do

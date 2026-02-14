@@ -1,4 +1,4 @@
-FROM builder AS deps
+FROM base AS deps
 RUN mkdir /workdir/neonfs-cli
 COPY --from=src . /workdir/neonfs-cli
 WORKDIR /workdir/neonfs-cli

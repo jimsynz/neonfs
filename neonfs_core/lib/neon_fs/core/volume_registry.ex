@@ -451,6 +451,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       io_weight: volume.io_weight,
       compression: volume.compression,
       verification: volume.verification,
+      encryption: encryption_to_map(volume.encryption),
       logical_size: volume.logical_size,
       physical_size: volume.physical_size,
       chunk_count: volume.chunk_count,
@@ -483,11 +484,38 @@ defmodule NeonFS.Core.VolumeRegistry do
       io_weight: volume_map[:io_weight] || 100,
       compression: volume_map.compression,
       verification: volume_map.verification,
+      encryption: map_to_encryption(volume_map[:encryption]),
       logical_size: volume_map[:logical_size] || 0,
       physical_size: volume_map[:physical_size] || 0,
       chunk_count: volume_map[:chunk_count] || 0,
       created_at: volume_map.created_at,
       updated_at: volume_map.updated_at
+    }
+  end
+
+  defp encryption_to_map(%NeonFS.Core.VolumeEncryption{} = enc) do
+    %{
+      mode: enc.mode,
+      current_key_version: enc.current_key_version,
+      rotation: enc.rotation
+    }
+  end
+
+  defp map_to_encryption(nil) do
+    %NeonFS.Core.VolumeEncryption{
+      mode: :none,
+      current_key_version: 0,
+      keys: %{},
+      rotation: nil
+    }
+  end
+
+  defp map_to_encryption(enc_map) when is_map(enc_map) do
+    %NeonFS.Core.VolumeEncryption{
+      mode: enc_map[:mode] || :none,
+      current_key_version: enc_map[:current_key_version] || 0,
+      keys: enc_map[:keys] || %{},
+      rotation: enc_map[:rotation]
     }
   end
 

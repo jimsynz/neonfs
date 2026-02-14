@@ -22,6 +22,7 @@ defmodule NeonFS.Core.ChunkIndex do
   require Logger
 
   alias NeonFS.Core.{
+    ChunkCrypto,
     ChunkMeta,
     FileIndex,
     MetadataCodec,
@@ -121,7 +122,7 @@ defmodule NeonFS.Core.ChunkIndex do
   def get_chunks_for_volume(volume_id) when is_binary(volume_id) do
     chunk_hashes =
       FileIndex.list_volume(volume_id)
-      |> Enum.flat_map(fn file_meta -> file_meta.chunk_hashes end)
+      |> Enum.flat_map(fn file_meta -> file_meta.chunks end)
       |> Enum.uniq()
 
     Enum.reduce(chunk_hashes, [], fn hash, acc ->
@@ -580,6 +581,7 @@ defmodule NeonFS.Core.ChunkIndex do
       original_size: chunk_meta.original_size,
       stored_size: chunk_meta.stored_size,
       compression: chunk_meta.compression,
+      crypto: encode_crypto(chunk_meta.crypto),
       locations: chunk_meta.locations,
       target_replicas: chunk_meta.target_replicas,
       commit_state: chunk_meta.commit_state,
@@ -596,6 +598,7 @@ defmodule NeonFS.Core.ChunkIndex do
       original_size: get_field(map, :original_size),
       stored_size: get_field(map, :stored_size),
       compression: to_atom(get_field(map, :compression)),
+      crypto: decode_crypto(get_field(map, :crypto)),
       locations: decode_locations(get_field(map, :locations, [])),
       target_replicas: get_field(map, :target_replicas, 1),
       commit_state: to_atom(get_field(map, :commit_state, :uncommitted)),
@@ -638,6 +641,22 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   defp decode_datetime(_), do: nil
+
+  defp encode_crypto(nil), do: nil
+
+  defp encode_crypto(%ChunkCrypto{} = crypto) do
+    %{algorithm: crypto.algorithm, nonce: crypto.nonce, key_version: crypto.key_version}
+  end
+
+  defp decode_crypto(nil), do: nil
+
+  defp decode_crypto(map) when is_map(map) do
+    %ChunkCrypto{
+      algorithm: to_atom(get_field(map, :algorithm, :aes_256_gcm)),
+      nonce: get_field(map, :nonce),
+      key_version: get_field(map, :key_version)
+    }
+  end
 
   # Private — Local store loading
 
@@ -825,6 +844,7 @@ defmodule NeonFS.Core.ChunkIndex do
       original_size: chunk_meta.original_size,
       stored_size: chunk_meta.stored_size,
       compression: chunk_meta.compression,
+      crypto: encode_crypto(chunk_meta.crypto),
       locations: chunk_meta.locations,
       target_replicas: chunk_meta.target_replicas,
       commit_state: chunk_meta.commit_state,
@@ -842,6 +862,7 @@ defmodule NeonFS.Core.ChunkIndex do
       original_size: chunk_map.original_size,
       stored_size: chunk_map.stored_size,
       compression: chunk_map.compression,
+      crypto: decode_crypto(chunk_map[:crypto]),
       locations: chunk_map.locations,
       target_replicas: chunk_map.target_replicas,
       commit_state: chunk_map.commit_state,

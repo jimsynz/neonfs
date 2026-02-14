@@ -6,3 +6,10 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     systemd \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir /workdir
+WORKDIR /workdir
+COPY .tool-versions /workdir
+ENV ASDF_DIR=/root/.asdf
+RUN /usr/local/bin/asdf_install
+RUN export PATH="/root/.asdf/shims:$PATH"; asdf reshim

@@ -5,6 +5,7 @@
 //! to prevent partial chunks.
 
 use crate::compression::{compress, decompress, Compression};
+use crate::encryption::{self, EncryptionParams};
 use crate::error::StoreError;
 use crate::hash::{sha256, Hash};
 use crate::path::{chunk_path, ensure_parent_dirs, metadata_path, Tier};
@@ -36,6 +37,9 @@ pub struct ReadOptions {
     /// The Rust layer doesn't track compression state - the caller must know
     /// whether the chunk was compressed.
     pub decompress: bool,
+    /// If set, decrypt the data after reading (before decompression).
+    /// The read pipeline is: read → decrypt → decompress → verify.
+    pub encryption: Option<EncryptionParams>,
 }
 
 impl ReadOptions {
@@ -44,6 +48,7 @@ impl ReadOptions {
         Self {
             verify: true,
             decompress: false,
+            encryption: None,
         }
     }
 
@@ -52,6 +57,7 @@ impl ReadOptions {
         Self {
             verify: false,
             decompress: true,
+            encryption: None,
         }
     }
 
@@ -60,6 +66,7 @@ impl ReadOptions {
         Self {
             verify: true,
             decompress: true,
+            encryption: None,
         }
     }
 }
@@ -69,6 +76,9 @@ impl ReadOptions {
 pub struct WriteOptions {
     /// Compression to apply to the chunk data before writing.
     pub compression: Option<Compression>,
+    /// If set, encrypt the data after compression (before writing).
+    /// The write pipeline is: compress → encrypt → write.
+    pub encryption: Option<EncryptionParams>,
 }
 
 impl WriteOptions {
@@ -76,6 +86,7 @@ impl WriteOptions {
     pub fn with_compression(compression: Compression) -> Self {
         Self {
             compression: Some(compression),
+            encryption: None,
         }
     }
 }
@@ -87,10 +98,14 @@ pub struct ChunkInfo {
     pub hash: Hash,
     /// The size of the original data in bytes.
     pub original_size: usize,
-    /// The size of the stored data in bytes (may differ if compressed).
+    /// The size of the stored data in bytes (may differ if compressed/encrypted).
     pub stored_size: usize,
     /// The compression applied to the chunk.
     pub compression: Compression,
+    /// The encryption algorithm used, if any (e.g. "aes-256-gcm").
+    pub encryption_algorithm: Option<String>,
+    /// The nonce used for encryption, if any (echoed back for metadata storage).
+    pub encryption_nonce: Option<Vec<u8>>,
 }
 
 /// A content-addressed blob store.
@@ -190,8 +205,8 @@ impl BlobStore {
         let temp_path = self.temp_path(&final_path);
         let original_size = data.len();
 
-        // Apply compression if specified
-        let (data_to_write, compression) = if let Some(ref compression) = options.compression {
+        // Step 1: Apply compression if specified
+        let (compressed_data, compression) = if let Some(ref compression) = options.compression {
             if compression.is_none() {
                 (data.to_vec(), Compression::None)
             } else {
@@ -202,6 +217,19 @@ impl BlobStore {
         } else {
             (data.to_vec(), Compression::None)
         };
+
+        // Step 2: Apply encryption if specified (after compression)
+        let (data_to_write, encryption_algorithm, encryption_nonce) =
+            if let Some(ref enc_params) = options.encryption {
+                let encrypted = encryption::encrypt(&compressed_data, enc_params)?;
+                (
+                    encrypted,
+                    Some("aes-256-gcm".to_string()),
+                    Some(enc_params.nonce.to_vec()),
+                )
+            } else {
+                (compressed_data, None, None)
+            };
 
         let stored_size = data_to_write.len();
 
@@ -223,6 +251,8 @@ impl BlobStore {
             original_size,
             stored_size,
             compression,
+            encryption_algorithm,
+            encryption_nonce,
         })
     }
 
@@ -272,14 +302,21 @@ impl BlobStore {
 
         let raw_data = fs::read(&path).map_err(|e| StoreError::io_error(&path, e))?;
 
-        // Optionally decompress the data
-        let data = if options.decompress {
-            decompress(&raw_data).map_err(|e| StoreError::io_error(&path, e))?
+        // Step 1: Optionally decrypt the data (before decompression)
+        let decrypted_data = if let Some(ref enc_params) = options.encryption {
+            encryption::decrypt(&raw_data, enc_params)?
         } else {
             raw_data
         };
 
-        // Optionally verify the data matches the expected hash
+        // Step 2: Optionally decompress the data
+        let data = if options.decompress {
+            decompress(&decrypted_data).map_err(|e| StoreError::io_error(&path, e))?
+        } else {
+            decrypted_data
+        };
+
+        // Step 3: Optionally verify the data matches the expected hash
         // Verification is done on the decompressed data (original content)
         if options.verify {
             let actual_hash = sha256(&data);
@@ -359,6 +396,7 @@ impl BlobStore {
         let options = ReadOptions {
             verify: true,
             decompress: false, // Read raw data (may be compressed)
+            encryption: None,
         };
         let data = self.read_chunk_with_options(hash, from_tier, &options)?;
 
@@ -369,6 +407,7 @@ impl BlobStore {
         let verify_options = ReadOptions {
             verify: true,
             decompress: false,
+            encryption: None,
         };
         let _ = self.read_chunk_with_options(hash, to_tier, &verify_options)?;
 
@@ -376,6 +415,58 @@ impl BlobStore {
         self.delete_chunk(hash, from_tier)?;
 
         Ok(())
+    }
+
+    /// Re-encrypts a chunk in place: decrypts with old key/nonce, re-encrypts
+    /// with new key/nonce, writes back atomically.
+    ///
+    /// The entire decrypt-old → encrypt-new cycle happens in Rust without any
+    /// data crossing the NIF boundary. Compression is preserved (only the
+    /// encryption layer changes).
+    ///
+    /// # Arguments
+    /// * `hash` - The SHA-256 hash of the chunk.
+    /// * `tier` - The storage tier.
+    /// * `old_params` - Encryption parameters used to encrypt the current data.
+    /// * `new_params` - Encryption parameters for the new encryption.
+    ///
+    /// # Returns
+    /// The stored size of the re-encrypted chunk.
+    pub fn reencrypt_chunk(
+        &self,
+        hash: &Hash,
+        tier: Tier,
+        old_params: &EncryptionParams,
+        new_params: &EncryptionParams,
+    ) -> Result<usize, StoreError> {
+        let path = self.chunk_path(hash, tier);
+
+        if !path.exists() {
+            return Err(StoreError::ChunkNotFound(hash.to_hex()));
+        }
+
+        // Read raw encrypted data from disk
+        let raw_data = fs::read(&path).map_err(|e| StoreError::io_error(&path, e))?;
+
+        // Decrypt with old key/nonce (result is compressed data or raw data)
+        let intermediate = encryption::decrypt(&raw_data, old_params)?;
+
+        // Re-encrypt with new key/nonce
+        let new_encrypted = encryption::encrypt(&intermediate, new_params)?;
+
+        let stored_size = new_encrypted.len();
+
+        // Write back atomically
+        let temp_path = self.temp_path(&path);
+        let mut file = File::create(&temp_path).map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.write_all(&new_encrypted)
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.sync_all()
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+
+        fs::rename(&temp_path, &path).map_err(|e| StoreError::io_error(&path, e))?;
+
+        Ok(stored_size)
     }
 
     // Metadata operations
@@ -1253,6 +1344,269 @@ mod tests {
             .write_metadata(TEST_SEGMENT_HEX, &key_hash, &data)
             .unwrap();
         let read_data = store.read_metadata(TEST_SEGMENT_HEX, &key_hash).unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    // Encryption store tests
+
+    fn test_encryption_params() -> EncryptionParams {
+        EncryptionParams {
+            key: [0x42u8; 32],
+            nonce: [0x01u8; 12],
+        }
+    }
+
+    #[test]
+    fn test_write_encrypted_read_decrypted_round_trip() {
+        let (store, _temp) = create_test_store();
+        let data = b"hello encrypted world";
+        let hash = sha256(data);
+        let enc = test_encryption_params();
+
+        let write_opts = WriteOptions {
+            compression: None,
+            encryption: Some(enc.clone()),
+        };
+        let chunk_info = store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_opts)
+            .unwrap();
+
+        assert_eq!(chunk_info.original_size, data.len());
+        // Encrypted data is larger (plaintext + 16 byte tag)
+        assert_eq!(chunk_info.stored_size, data.len() + 16);
+        assert_eq!(
+            chunk_info.encryption_algorithm.as_deref(),
+            Some("aes-256-gcm")
+        );
+        assert_eq!(chunk_info.encryption_nonce.as_deref(), Some(&enc.nonce[..]));
+
+        let read_opts = ReadOptions {
+            verify: false,
+            decompress: false,
+            encryption: Some(enc),
+        };
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_opts)
+            .unwrap();
+
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_write_compressed_encrypted_read_round_trip() {
+        let (store, _temp) = create_test_store();
+        let data = b"compressed and encrypted data that is repeated ";
+        let repeated: Vec<u8> = data.iter().cycle().take(10000).copied().collect();
+        let hash = sha256(&repeated);
+        let enc = test_encryption_params();
+
+        let write_opts = WriteOptions {
+            compression: Some(Compression::zstd(3)),
+            encryption: Some(enc.clone()),
+        };
+        let chunk_info = store
+            .write_chunk_with_options(&hash, &repeated, Tier::Hot, &write_opts)
+            .unwrap();
+
+        assert_eq!(chunk_info.original_size, repeated.len());
+        // Compressed+encrypted should be smaller than original (compression helps)
+        assert!(chunk_info.stored_size < repeated.len());
+
+        let read_opts = ReadOptions {
+            verify: true,
+            decompress: true,
+            encryption: Some(enc),
+        };
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_opts)
+            .unwrap();
+
+        assert_eq!(read_data, repeated);
+    }
+
+    #[test]
+    fn test_encrypted_read_with_wrong_key_fails() {
+        let (store, _temp) = create_test_store();
+        let data = b"secret data";
+        let hash = sha256(data);
+        let enc = test_encryption_params();
+
+        let write_opts = WriteOptions {
+            compression: None,
+            encryption: Some(enc),
+        };
+        store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_opts)
+            .unwrap();
+
+        let wrong_enc = EncryptionParams {
+            key: [0xFFu8; 32],
+            nonce: [0x01u8; 12],
+        };
+        let read_opts = ReadOptions {
+            verify: false,
+            decompress: false,
+            encryption: Some(wrong_enc),
+        };
+        let result = store.read_chunk_with_options(&hash, Tier::Hot, &read_opts);
+        assert!(matches!(result, Err(StoreError::EncryptionError(_))));
+    }
+
+    #[test]
+    fn test_write_without_encryption_chunk_info_has_no_encryption() {
+        let (store, _temp) = create_test_store();
+        let data = b"no encryption";
+        let hash = sha256(data);
+
+        let write_opts = WriteOptions::default();
+        let chunk_info = store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_opts)
+            .unwrap();
+
+        assert!(chunk_info.encryption_algorithm.is_none());
+        assert!(chunk_info.encryption_nonce.is_none());
+    }
+
+    #[test]
+    fn test_reencrypt_chunk_round_trip() {
+        let (store, _temp) = create_test_store();
+        let data = b"data to reencrypt";
+        let hash = sha256(data);
+
+        let old_enc = EncryptionParams {
+            key: [0xAAu8; 32],
+            nonce: [0x01u8; 12],
+        };
+
+        // Write with old encryption
+        let write_opts = WriteOptions {
+            compression: None,
+            encryption: Some(old_enc.clone()),
+        };
+        store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_opts)
+            .unwrap();
+
+        // Re-encrypt with new key
+        let new_enc = EncryptionParams {
+            key: [0xBBu8; 32],
+            nonce: [0x02u8; 12],
+        };
+        let stored_size = store
+            .reencrypt_chunk(&hash, Tier::Hot, &old_enc, &new_enc)
+            .unwrap();
+
+        assert_eq!(stored_size, data.len() + 16);
+
+        // Old key should fail
+        let old_read = ReadOptions {
+            verify: false,
+            decompress: false,
+            encryption: Some(old_enc),
+        };
+        assert!(store
+            .read_chunk_with_options(&hash, Tier::Hot, &old_read)
+            .is_err());
+
+        // New key should work
+        let new_read = ReadOptions {
+            verify: false,
+            decompress: false,
+            encryption: Some(new_enc),
+        };
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &new_read)
+            .unwrap();
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_reencrypt_chunk_with_compression_preserves_data() {
+        let (store, _temp) = create_test_store();
+        let data: Vec<u8> = b"compressed reencrypt "
+            .iter()
+            .cycle()
+            .take(5000)
+            .copied()
+            .collect();
+        let hash = sha256(&data);
+
+        let old_enc = EncryptionParams {
+            key: [0xCCu8; 32],
+            nonce: [0x03u8; 12],
+        };
+
+        // Write compressed + encrypted
+        let write_opts = WriteOptions {
+            compression: Some(Compression::zstd(3)),
+            encryption: Some(old_enc.clone()),
+        };
+        store
+            .write_chunk_with_options(&hash, &data, Tier::Hot, &write_opts)
+            .unwrap();
+
+        // Re-encrypt
+        let new_enc = EncryptionParams {
+            key: [0xDDu8; 32],
+            nonce: [0x04u8; 12],
+        };
+        store
+            .reencrypt_chunk(&hash, Tier::Hot, &old_enc, &new_enc)
+            .unwrap();
+
+        // Read with new key + decompress and verify
+        let read_opts = ReadOptions {
+            verify: true,
+            decompress: true,
+            encryption: Some(new_enc),
+        };
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_opts)
+            .unwrap();
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_reencrypt_nonexistent_chunk_fails() {
+        let (store, _temp) = create_test_store();
+        let hash = sha256(b"nonexistent");
+        let old_enc = test_encryption_params();
+        let new_enc = EncryptionParams {
+            key: [0xFFu8; 32],
+            nonce: [0xFFu8; 12],
+        };
+
+        let result = store.reencrypt_chunk(&hash, Tier::Hot, &old_enc, &new_enc);
+        assert!(matches!(result, Err(StoreError::ChunkNotFound(_))));
+    }
+
+    #[test]
+    fn test_encrypted_empty_data() {
+        let (store, _temp) = create_test_store();
+        let data = b"";
+        let hash = sha256(data);
+        let enc = test_encryption_params();
+
+        let write_opts = WriteOptions {
+            compression: None,
+            encryption: Some(enc.clone()),
+        };
+        let chunk_info = store
+            .write_chunk_with_options(&hash, data, Tier::Hot, &write_opts)
+            .unwrap();
+
+        // Empty data + 16 byte auth tag
+        assert_eq!(chunk_info.stored_size, 16);
+
+        let read_opts = ReadOptions {
+            verify: false,
+            decompress: false,
+            encryption: Some(enc),
+        };
+        let read_data = store
+            .read_chunk_with_options(&hash, Tier::Hot, &read_opts)
+            .unwrap();
 
         assert_eq!(read_data, data);
     }

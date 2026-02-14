@@ -10,10 +10,12 @@ defmodule NeonFS.Core.ReadOperation do
   """
 
   alias NeonFS.Core.{
+    Authorise,
     Blob.Native,
     ChunkFetcher,
     ChunkIndex,
     FileIndex,
+    KeyManager,
     ResolvedLookupCache,
     StripeIndex,
     VolumeRegistry
@@ -56,8 +58,12 @@ defmodule NeonFS.Core.ReadOperation do
       %{volume_id: volume_id, path: path, length: length}
     )
 
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
     result =
-      with {:ok, volume} <- get_volume(volume_id) do
+      with {:ok, volume} <- get_volume(volume_id),
+           :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}) do
         read_with_cache(volume, volume_id, path, offset, length)
       end
 
@@ -135,7 +141,7 @@ defmodule NeonFS.Core.ReadOperation do
 
   defp read_from_chunks(file_meta, volume, offset, length) do
     with {:ok, needed_chunks} <- calculate_needed_chunks(file_meta, offset, length),
-         {:ok, chunk_data} <- fetch_chunks(needed_chunks, volume) do
+         {:ok, chunk_data} <- fetch_chunks(needed_chunks, volume, volume.id) do
       assemble_data(chunk_data)
     end
   end
@@ -177,10 +183,10 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp fetch_chunks(needed_chunks, volume) do
+  defp fetch_chunks(needed_chunks, volume, volume_id) do
     should_verify = should_verify_on_read?(volume.verification)
 
-    results = Enum.map(needed_chunks, &fetch_single_chunk(&1.hash, should_verify))
+    results = Enum.map(needed_chunks, &fetch_single_chunk(&1.hash, should_verify, volume_id))
 
     if Enum.all?(results, &match?({:ok, _}, &1)) do
       chunks = Enum.map(results, fn {:ok, data} -> data end)
@@ -216,17 +222,17 @@ defmodule NeonFS.Core.ReadOperation do
         file_meta.stripes
         |> Enum.filter(fn %{byte_range: {s, e}} -> s < end_byte and e > offset end)
 
-      read_stripe_segments(relevant, offset, end_byte, should_verify)
+      read_stripe_segments(relevant, offset, end_byte, should_verify, volume.id)
     end
   end
 
-  defp read_stripe_segments(stripes, offset, end_byte, should_verify) do
+  defp read_stripe_segments(stripes, offset, end_byte, should_verify, volume_id) do
     stripes
     |> Enum.reduce_while({:ok, []}, fn %{stripe_id: sid, byte_range: {s, _e}}, {:ok, acc} ->
       stripe_offset = max(0, offset - s)
       stripe_length = min_stripe_read_length(s, offset, end_byte)
 
-      case read_stripe(sid, stripe_offset, stripe_length, should_verify) do
+      case read_stripe(sid, stripe_offset, stripe_length, should_verify, volume_id) do
         {:ok, data} -> {:cont, {:ok, [data | acc]}}
         {:error, _} = err -> {:halt, err}
       end
@@ -242,7 +248,7 @@ defmodule NeonFS.Core.ReadOperation do
     end_byte - read_start
   end
 
-  defp read_stripe(stripe_id, offset_in_stripe, length, should_verify) do
+  defp read_stripe(stripe_id, offset_in_stripe, length, should_verify, volume_id) do
     case StripeIndex.get(stripe_id) do
       {:ok, stripe} ->
         max_readable = max(0, stripe.data_bytes - offset_in_stripe)
@@ -251,7 +257,7 @@ defmodule NeonFS.Core.ReadOperation do
         if actual_length <= 0 do
           {:ok, <<>>}
         else
-          do_read_stripe(stripe, offset_in_stripe, actual_length, should_verify)
+          do_read_stripe(stripe, offset_in_stripe, actual_length, should_verify, volume_id)
         end
 
       {:error, :not_found} ->
@@ -259,14 +265,14 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp do_read_stripe(stripe, offset, length, should_verify) do
+  defp do_read_stripe(stripe, offset, length, should_verify, volume_id) do
     case calculate_stripe_state(stripe) do
       :healthy ->
-        read_stripe_healthy(stripe, offset, length, should_verify)
+        read_stripe_healthy(stripe, offset, length, should_verify, volume_id)
 
       :degraded ->
         emit_stripe_read_telemetry(stripe, :degraded)
-        read_stripe_degraded(stripe, offset, length, should_verify)
+        read_stripe_degraded(stripe, offset, length, should_verify, volume_id)
 
       :critical ->
         emit_stripe_read_telemetry(stripe, :critical)
@@ -293,7 +299,7 @@ defmodule NeonFS.Core.ReadOperation do
     match?({:ok, _}, ChunkIndex.get(chunk_hash))
   end
 
-  defp read_stripe_healthy(stripe, offset, length, should_verify) do
+  defp read_stripe_healthy(stripe, offset, length, should_verify, volume_id) do
     chunk_size = stripe.config.chunk_size
     start_idx = div(offset, chunk_size)
     end_idx = div(offset + length - 1, chunk_size)
@@ -301,7 +307,7 @@ defmodule NeonFS.Core.ReadOperation do
     chunks_data =
       start_idx..end_idx
       |> Enum.map(fn idx -> Enum.at(stripe.chunks, idx) end)
-      |> Enum.map(&fetch_single_chunk(&1, should_verify))
+      |> Enum.map(&fetch_single_chunk(&1, should_verify, volume_id))
 
     if Enum.all?(chunks_data, &match?({:ok, _}, &1)) do
       raw =
@@ -316,7 +322,7 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp read_stripe_degraded(stripe, offset, length, should_verify) do
+  defp read_stripe_degraded(stripe, offset, length, should_verify, volume_id) do
     k = stripe.config.data_chunks
 
     available_with_idx =
@@ -328,17 +334,17 @@ defmodule NeonFS.Core.ReadOperation do
       {:error, :insufficient_chunks}
     else
       shards_to_fetch = Enum.take(available_with_idx, k)
-      fetch_and_reconstruct(shards_to_fetch, stripe, offset, length, should_verify)
+      fetch_and_reconstruct(shards_to_fetch, stripe, offset, length, should_verify, volume_id)
     end
   end
 
-  defp fetch_and_reconstruct(shards_to_fetch, stripe, offset, length, should_verify) do
+  defp fetch_and_reconstruct(shards_to_fetch, stripe, offset, length, should_verify, volume_id) do
     k = stripe.config.data_chunks
     chunk_size = stripe.config.chunk_size
 
     shard_results =
       Enum.map(shards_to_fetch, fn {hash, idx} ->
-        case fetch_single_chunk(hash, should_verify) do
+        case fetch_single_chunk(hash, should_verify, volume_id) do
           {:ok, data} -> {:ok, {idx, data}}
           error -> error
         end
@@ -398,14 +404,14 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp fetch_single_chunk(hash, should_verify) do
+  defp fetch_single_chunk(hash, should_verify, volume_id) do
     case ChunkIndex.get(hash) do
-      {:ok, chunk_meta} -> fetch_chunk_data(chunk_meta, should_verify)
+      {:ok, chunk_meta} -> fetch_chunk_data(chunk_meta, should_verify, volume_id)
       {:error, :not_found} -> {:error, :chunk_not_found}
     end
   end
 
-  defp fetch_chunk_data(chunk_meta, should_verify) do
+  defp fetch_chunk_data(chunk_meta, should_verify, volume_id) do
     {tier, drive_id} =
       case chunk_meta.locations do
         [location | _] ->
@@ -416,18 +422,26 @@ defmodule NeonFS.Core.ReadOperation do
       end
 
     needs_decompress =
-      chunk_meta.compression != :none or chunk_meta.stored_size != chunk_meta.original_size
+      chunk_meta.compression != :none or
+        (chunk_meta.crypto == nil and chunk_meta.stored_size != chunk_meta.original_size)
 
-    fetch_opts = [
-      tier: tier,
-      drive_id: drive_id,
-      verify: should_verify,
-      decompress: needs_decompress
-    ]
+    with {:ok, decrypt_opts} <- resolve_decrypt_opts(chunk_meta.crypto, volume_id) do
+      fetch_opts =
+        [
+          tier: tier,
+          drive_id: drive_id,
+          verify: should_verify,
+          decompress: needs_decompress
+        ] ++ decrypt_opts
 
-    case ChunkFetcher.fetch_chunk(chunk_meta.hash, fetch_opts) do
-      {:ok, data, _source} -> {:ok, data}
-      {:error, reason} -> {:error, reason}
+      case ChunkFetcher.fetch_chunk(chunk_meta.hash, fetch_opts) do
+        {:ok, data, _source} ->
+          emit_decrypt_telemetry(chunk_meta.crypto, chunk_meta.hash, volume_id)
+          {:ok, data}
+
+        {:error, reason} ->
+          {:error, translate_decrypt_error(reason, chunk_meta.hash)}
+      end
     end
   end
 
@@ -459,4 +473,41 @@ defmodule NeonFS.Core.ReadOperation do
       %{stripe_id: stripe.id, state: state, degraded_count: total - available}
     )
   end
+
+  # ─── Encryption Helpers ──────────────────────────────────────────────
+
+  defp resolve_decrypt_opts(nil, _volume_id), do: {:ok, []}
+
+  defp resolve_decrypt_opts(crypto, volume_id) do
+    case KeyManager.get_volume_key(volume_id, crypto.key_version) do
+      {:ok, key} ->
+        {:ok, [key: key, nonce: crypto.nonce]}
+
+      {:error, :unknown_key_version} = error ->
+        error
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp emit_decrypt_telemetry(nil, _hash, _volume_id), do: :ok
+
+  defp emit_decrypt_telemetry(crypto, hash, volume_id) do
+    :telemetry.execute(
+      [:neonfs, :read, :decrypt],
+      %{},
+      %{chunk_hash: hash, volume_id: volume_id, key_version: crypto.key_version}
+    )
+  end
+
+  defp translate_decrypt_error(reason, chunk_hash) when is_binary(reason) do
+    if String.contains?(reason, "encryption error") do
+      {:decryption_failed, chunk_hash}
+    else
+      reason
+    end
+  end
+
+  defp translate_decrypt_error(reason, _chunk_hash), do: reason
 end

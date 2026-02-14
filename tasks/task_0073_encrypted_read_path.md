@@ -1,7 +1,7 @@
 # Task 0073: Encrypted Read Path and Key Version Lookup
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 6 - Security
