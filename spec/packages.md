@@ -108,7 +108,7 @@ NeonFS uses three technology stacks:
 - **Purpose**: Argon2 password hashing (PHC winner)
 - **Why**: User password hashing for access control
 
-#### Phase 7: APIs and Integration
+#### Phase 11: APIs and Integration
 
 **bandit** - HTTP Server
 - **Hex**: https://hex.pm/packages/bandit
@@ -131,7 +131,7 @@ NeonFS uses three technology stacks:
 - **Why**: Efficient serialisation for chunk metadata, replication queue items. Middle ground between JSON and Protocol Buffers.
 - **Status**: Optional optimisation
 
-#### Phase 8: Operations
+#### Phase 12: Operations
 
 **telemetry_metrics_prometheus** - Prometheus Metrics
 - **Hex**: https://hex.pm/packages/telemetry_metrics_prometheus
@@ -159,8 +159,11 @@ Phase 2: libcluster, broadway, reactor
 Phase 3: lru_cache, yaml_elixir
 Phase 5: hlclock (or custom HLC), libring (or custom ring)
 Phase 6: jose, joken, argon2_elixir
-Phase 7: bandit, plug, grpc, msgpax (optional)
-Phase 8: telemetry_metrics_prometheus, prom_ex (optional)
+Phase 7: (no additions — uses existing volume infrastructure)
+Phase 8: x509
+Phase 9: nimble_pool
+Phase 11: bandit, plug, grpc, msgpax (optional)
+Phase 12: telemetry_metrics_prometheus, prom_ex (optional)
 ```
 
 ---
@@ -532,14 +535,42 @@ Rust: aes-gcm (already recommended for Phase 1)
 OTP: (no additions)
 ```
 
-### Phase 7 (APIs)
+### Phase 7 (System Volume)
+```
+Hex: (no additions)
+Rust: (no additions)
+OTP: (no additions)
+```
+
+### Phase 8 (Cluster CA)
+```
+Hex: x509
+Rust: (no additions)
+OTP: :public_key, :ssl
+```
+
+### Phase 9 (Data Transfer)
+```
+Hex: nimble_pool
+Rust: (no additions)
+OTP: :ssl
+```
+
+### Phase 10 (Event Notification)
+```
+Hex: (no additions)
+Rust: (no additions)
+OTP: :pg
+```
+
+### Phase 11 (APIs)
 ```
 Hex: bandit, plug, grpc, msgpax (optional)
 Rust: (no additions)
 OTP: (no additions)
 ```
 
-### Phase 8 (Operations)
+### Phase 12 (Operations)
 ```
 Hex: telemetry_metrics_prometheus, prom_ex (optional)
 Rust: tokio-uring (if I/O bottleneck identified)

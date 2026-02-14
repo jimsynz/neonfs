@@ -49,6 +49,7 @@ The full specification is organised into the following documents. Each contains 
 | [Architecture](architecture.md) | System structure: Elixir control plane, Rust data plane, NIF integration, supervision trees, on-disk blob storage format, and the FUSE data path. | Implementing core system structure, understanding NIF boundaries, working on supervision trees. |
 | [Data Model](data-model.md) | Core data structures: chunks (Rust and Elixir views), stripes, files, volumes. Includes chunking strategy and complete volume configuration examples. | Working with data structures, implementing new entity types, configuring volumes. |
 | [Metadata](metadata.md) | Distributed metadata architecture: tiered storage (Ra, quorum, ephemeral), leaderless quorum model, HLC conflict resolution, consistent hashing, anti-entropy. | Implementing metadata operations, understanding consistency model, working on distributed state. |
+| [System Volume](system-volume.md) | The `_system` volume: cluster-wide operational storage replicated to every node. Stores TLS CA, audit logs, intent archives, DR snapshots. Auto-created at cluster init, replication factor equals cluster size, not user-accessible. | Working with cluster CA, audit logging, DR snapshots, understanding system volume lifecycle. |
 
 ### Cluster Behaviour
 
@@ -58,13 +59,15 @@ The full specification is organised into the following documents. Each contains 
 | [Node Management](node-management.md) | Node lifecycle: states, state transitions, partition behaviour, clock synchronisation, escalation ladder, repair prioritisation, cost functions for read/write routing. | Node lifecycle code, failure handling, implementing read/write routing, partition recovery. |
 | [Storage Tiering](storage-tiering.md) | Tier definitions (hot/warm/cold), drive state tracking, read path optimisation, power management (spin-down), promotion/demotion logic, caching strategy. | Drive management, tier migration, implementing caching, power management features. |
 | [Replication](replication.md) | Write flows (replicated and erasure-coded), uncommitted chunk cleanup, quorum configurations, write hole mitigation, partial stripe handling, garbage collection. | Write path implementation, chunk replication, garbage collection, erasure coding. |
-| [Event Notification](pubsub.md) | Cluster-wide event notification via `:pg` process groups: event types, subscription model, broadcasting from core nodes, partition recovery (cache invalidation on reconnect), gap detection. | Implementing metadata caching on interface nodes, adding cache invalidation, working on FUSE/S3 performance. |
+| [Event Notification](pubsub.md) | Cluster-wide event notification via `:pg` process groups and node-local `Registry` dispatch: event types (content, attribute, ACL, directory, volume), subscription model, two-layer broadcasting (cross-node relay + local fan-out), partition recovery (cache invalidation on reconnect), gap detection. | Implementing metadata caching on interface nodes, adding cache invalidation, working on FUSE/S3 performance. |
+| [Data Transfer](data-transfer.md) | Out-of-band data plane: separates bulk chunk transfer (replication, retrieval) from Erlang distribution onto dedicated TLS connections using `:ssl` with `{packet, 4}` framing and `nimble_pool` connection pooling. Peer-to-peer, symmetric protocol. Cluster CA stored in system volume, mTLS between all nodes. | Implementing chunk replication, remote chunk retrieval, data plane security, connection pooling. |
 
 ### Security and Access
 
 | Document | Description | When to read |
 |----------|-------------|--------------|
 | [Security](security.md) | Network security recommendations, cluster authentication (invite tokens), key hierarchy, three encryption modes (none, server-side, envelope), deduplication/encryption interaction, identity and access control, threat model. | Auth implementation, encryption features, ACLs, security-sensitive code, threat modelling. |
+| [Cluster CA](cluster-ca.md) | Self-signed cluster certificate authority for data transfer mTLS: ECDSA P-256 keys, certificate issuance via CSR during node join, automatic renewal, CRL revocation, CA stored in system volume. Uses `x509` package (pure Elixir, zero deps). | Implementing cluster TLS, certificate lifecycle, node join/leave flows. |
 
 ### External Interfaces
 
@@ -78,7 +81,7 @@ The full specification is organised into the following documents. Each contains 
 | Document | Description | When to read |
 |----------|-------------|--------------|
 | [Operations](operations.md) | Day-to-day operations: cluster init, adding nodes, creating volumes, monitoring, decision points, audit logging, telemetry (metrics, tracing, logging), cluster upgrades, disaster recovery. | Operational tooling, observability, backup/restore, upgrade procedures. |
-| [Implementation](implementation.md) | Implementation phases (1-7), technical dependencies (Elixir and Rust crates, external services), node and volume configuration reference. | Planning work, understanding dependencies, configuration options. |
+| [Implementation](implementation.md) | Implementation phases (1-12), technical dependencies (Elixir and Rust crates, external services), node and volume configuration reference. | Planning work, understanding dependencies, configuration options. |
 | [Packages](packages.md) | External packages and dependencies: Hex packages, Rust crates, and OTP built-in modules. Organised by implementation phase with recommendations for each. | Evaluating dependencies, adding new packages, understanding what's available vs. build-from-scratch. |
 | [Appendix](appendix.md) | Open questions (unresolved design decisions) and glossary of terms. | Terminology reference, understanding areas needing design decisions. |
 

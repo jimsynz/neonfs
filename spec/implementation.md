@@ -93,19 +93,83 @@ Deliverables:
 
 **Milestone:** Encrypted volumes with key rotation, UID/GID-based ACLs with POSIX enforcement, operational audit logging
 
-### Phase 7: APIs and Integration
+### Phase 7: System Volume
+
+**Goal:** Cluster-wide replicated storage for operational data
+
+Deliverables:
+- `_system` volume: auto-created at cluster init, replication factor equals cluster size
+- VolumeRegistry guards: system volume cannot be deleted, renamed, or reconfigured by operators
+- `NeonFS.Core.SystemVolume` access API: `read/1`, `write/2`, `append/2`, `list/1`
+- Volume struct extension with `system: boolean()` field
+- Replication factor auto-adjustment on node join/decommission
+- Log retention: background pruning of append-only data (intent archives, audit logs)
+- Startup ordering: system volume available before subsystems that depend on it
+
+**Milestone:** `_system` volume created at cluster init, replicated to all nodes, accessible from any node, survives node failures, hidden from user volume listings
+
+### Phase 8: Cluster CA
+
+**Goal:** Self-signed certificate authority for inter-node mTLS
+
+Deliverables:
+- Cluster CA generation at cluster init: ECDSA P-256, stored in system volume
+- Node certificate issuance via CSR during node join
+- Certificate auto-renewal: `NeonFS.Transport.CertRenewal` GenServer (30 days before expiry)
+- Certificate revocation: CRL stored in system volume, updated on node decommission
+- Serial number allocation in system volume (`/tls/serial`)
+- Local filesystem cache of CA cert for fast TLS startup
+- CLI commands: `neonfs cluster ca info`, `ca list`, `ca revoke`, `ca rotate`
+- Uses `x509` package (pure Elixir, zero deps)
+
+**Milestone:** Every node has a valid certificate signed by the cluster CA, certificates auto-renew, revoked node certs are rejected, CA key stored durably in system volume
+
+### Phase 9: Data Transfer
+
+**Goal:** Out-of-band data plane separating bulk chunk traffic from the Erlang distribution control plane
+
+Deliverables:
+- TLS data plane: `:ssl` with `{packet, 4}` framing, mTLS using cluster CA certificates
+- Connection pooling via `nimble_pool` (configurable connections per peer)
+- Transport listener, handler, and pool manager modules in `neonfs_client`
+- ServiceRegistry extension: data transfer endpoint advertisement and discovery
+- `Router.data_call/4` for routing chunk operations over the data plane
+- Chunk replication and retrieval migrated from distribution to data plane
+- Configurable bind address and OS-assigned port with advertisement
+
+**Milestone:** Chunk data separated from control plane, cluster stable under sustained bulk transfer, Ra consensus unaffected by large file writes
+
+### Phase 10: Event Notification
+
+**Goal:** Push-based cache invalidation for interface nodes
+
+Deliverables:
+- Event notification system via OTP `:pg` process groups and node-local `Registry`
+- Event structs: file content, file attributes (chmod, chown, utimens, xattr), ACL changes, directory, and volume state changes
+- Two-layer dispatch: `:pg` relay for cross-node (one message per node), `Registry` for local fan-out
+- Subscription model: per-volume with local filtering
+- `NeonFS.Events.Broadcaster` on core nodes after successful metadata writes
+- `NeonFS.Events.Relay` for `:pg` membership management and local dispatch
+- `NeonFS.Client.EventHandler` behaviour in `neonfs_client`
+- Partition recovery: full cache invalidation on reconnect with debouncing
+- Gap detection via per-source-node sequence counters
+- FUSE metadata cache with event-driven invalidation
+
+**Milestone:** Interface nodes receive push-based metadata invalidation, reduced RPC round-trips for cached metadata, correct behaviour across partitions
+
+### Phase 11: APIs and Integration
 
 **Goal:** External access methods
 
 Deliverables:
-- S3-compatible HTTP API
+- S3-compatible HTTP API (Bandit + Plug)
 - Docker volume plugin
 - CIFS via Samba VFS module
 - CSI driver for Kubernetes
 
 **Milestone:** Access from containers, S3 clients, Windows/macOS mounts
 
-### Phase 8: Operations
+### Phase 12: Operations
 
 **Goal:** Production operations support
 
@@ -130,6 +194,8 @@ Deliverables:
 | Ra | Raft consensus for metadata |
 | Reactor | Saga orchestration for cross-segment operations |
 | Rustler | NIF integration with Rust |
+| NimblePool | Connection pooling for TLS data plane |
+| X509 | Certificate authority operations (pure Elixir, zero deps) |
 | Plug + Bandit | HTTP server for S3 API |
 | GRPC | CSI driver protocol |
 | Phoenix (optional) | Web UI for operations |
