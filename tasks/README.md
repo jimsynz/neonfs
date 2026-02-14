@@ -6,7 +6,7 @@ This directory contains individual task specifications for developing NeonFS. Ea
 
 Each task file follows this structure:
 - **Status**: Current state of the task (see below)
-- **Phase**: Which implementation phase (1-8) this task belongs to
+- **Phase**: Which implementation phase (1-12) this task belongs to
 - **Description**: What needs to be built
 - **Acceptance Criteria**: Checkboxes for completion verification
 - **Testing Strategy**: How to verify the implementation
@@ -137,14 +137,42 @@ Each task file follows this structure:
 
 **Milestone:** Encrypted volumes with key rotation, UID/GID-based volume and file ACLs with POSIX enforcement, operational audit logging
 
-### Phase 7: APIs and Integration (Future)
+### Phase 7: System Volume (Future)
+**Goal:** Cluster-wide replicated storage for operational data
+
+The `_system` volume stores cluster-wide operational data (CA keys, audit logs, DR snapshots). It is auto-created at cluster init with replication factor equal to cluster size.
+
+Task specifications not yet written. See [spec/system-volume.md](../spec/system-volume.md).
+
+### Phase 8: Cluster CA (Future)
+**Goal:** Self-signed certificate authority for inter-node mTLS
+
+ECDSA P-256 CA stored in the system volume. Nodes receive certificates via CSR during join. Auto-renewal, CRL revocation, CLI commands.
+
+Task specifications not yet written. See [spec/cluster-ca.md](../spec/cluster-ca.md).
+
+### Phase 9: Data Transfer (Future)
+**Goal:** Out-of-band data plane separating bulk chunk traffic from Erlang distribution
+
+TLS data plane using `:ssl` with `{packet, 4}` framing and `nimble_pool` connection pooling. Chunk replication and retrieval migrated from distribution to the data plane.
+
+Task specifications not yet written. See [spec/data-transfer.md](../spec/data-transfer.md).
+
+### Phase 10: Event Notification (Future)
+**Goal:** Push-based cache invalidation for interface nodes
+
+Two-layer dispatch (`:pg` cross-node relay + `Registry` local fan-out). Struct-based events for file content, attributes, ACLs, directories, and volumes. Partition recovery with debounced invalidation.
+
+Task specifications not yet written. See [spec/pubsub.md](../spec/pubsub.md).
+
+### Phase 11: APIs and Integration (Future)
 **Goal:** S3, Docker, CIFS, CSI access methods
 
-### Phase 8: Operations (Future)
+### Phase 12: Operations (Future)
 **Goal:** Production operations support (DR snapshots, monitoring, capacity planning)
 
 ### Deferred: TLS Distribution (Future)
-**Goal:** Mutual TLS for Erlang distribution (node-to-node traffic encryption and per-node certificate identity). Deferred from Phase 6 — relies on WireGuard/VPN for transport security in the interim.
+**Goal:** Mutual TLS for Erlang distribution (node-to-node control plane encryption). The cluster CA (Phase 8) provides the certificate infrastructure; the data plane (Phase 9) uses dedicated TLS connections for bulk transfer. Distribution-level TLS for the control plane remains deferred — relies on WireGuard/VPN for transport security in the interim.
 
 ## Task Dependencies Graph
 
@@ -353,6 +381,12 @@ Full dependency graph:
 0078 (CLI commands) ◀──────────────────────────────────────────────────────┘───────────────────────────────┘
 
 0079 (integration tests) ◀── all tasks 0067–0078
+
+Phase 7 → 8 → 9 → 10 (linear chain, task numbers TBD):
+
+Phase 7 (System Volume) ──▶ Phase 8 (Cluster CA) ──▶ Phase 9 (Data Transfer)
+
+Phase 10 (Event Notification) — no hard dependency on 7-9, sequenced after for practical reasons
 ```
 
 ## Task Status Values
@@ -385,6 +419,8 @@ Some task chains can be worked on in parallel:
 - **Phase 4** has 2 independent starting points: 0057 (Rust NIF) and 0058 (Stripe struct) can start in parallel; critical path is 0058 → 0059 → 0060 → 0061 → 0064 → 0066
 - **Phase 5** has 2 independent starting points: 0080 (HLC) and 0081 (hashing ring) can start in parallel; critical path is 0081 → 0082 → 0083 → 0084 → 0086/0087/0088 → 0089 → 0091
 - **Phase 6** has 3 independent starting points: 0067 (encryption NIF), 0068 (encryption types), 0069 (ACL types) can all start in parallel; two main chains converge at CLI (0078): encryption chain (0067 → 0072 → 0073 → 0074) and ACL chain (0069 → 0075 → 0076)
+- **Phases 7 → 8 → 9** are strictly sequential: System Volume → Cluster CA → Data Transfer (each depends on the previous)
+- **Phase 10** (Event Notification) has no dependency on Phases 7-9 and could theoretically be developed in parallel, but is sequenced after them for practical reasons
 
 ## Adding New Tasks
 
