@@ -59,7 +59,7 @@ defmodule NeonFS.Core.Volume do
   @type t :: %__MODULE__{
           id: binary(),
           name: String.t(),
-          owner: String.t() | nil,
+          owner: String.t() | :system | nil,
           durability: durability_config(),
           write_ack: write_ack(),
           tiering: tiering_config(),
@@ -73,7 +73,8 @@ defmodule NeonFS.Core.Volume do
           physical_size: non_neg_integer(),
           chunk_count: non_neg_integer(),
           created_at: DateTime.t(),
-          updated_at: DateTime.t()
+          updated_at: DateTime.t(),
+          system: boolean()
         }
 
   defstruct [
@@ -93,7 +94,8 @@ defmodule NeonFS.Core.Volume do
     :physical_size,
     :chunk_count,
     :created_at,
-    :updated_at
+    :updated_at,
+    system: false
   ]
 
   @doc """
@@ -268,6 +270,13 @@ defmodule NeonFS.Core.Volume do
   def encrypted?(%Volume{encryption: encryption}), do: VolumeEncryption.active?(encryption)
 
   @doc """
+  Returns true if the volume is a system volume.
+  """
+  @spec system?(t()) :: boolean()
+  def system?(%Volume{system: true}), do: true
+  def system?(%Volume{}), do: false
+
+  @doc """
   Validates a volume configuration.
 
   Returns `:ok` if valid, or `{:error, reason}` if invalid.
@@ -290,7 +299,8 @@ defmodule NeonFS.Core.Volume do
   """
   @spec validate(t()) :: :ok | {:error, String.t()}
   def validate(%Volume{} = volume) do
-    with :ok <- validate_name(volume.name),
+    with :ok <- validate_system_field(volume),
+         :ok <- validate_name(volume.name),
          :ok <- validate_durability(volume.durability),
          :ok <- validate_write_ack(volume.write_ack),
          :ok <- validate_tiering(volume.tiering),
@@ -302,6 +312,13 @@ defmodule NeonFS.Core.Volume do
       validate_metadata_consistency(volume.metadata_consistency)
     end
   end
+
+  defp validate_system_field(%Volume{system: true, name: "_system"}), do: :ok
+
+  defp validate_system_field(%Volume{system: true}),
+    do: {:error, "system: true is only allowed for the _system volume"}
+
+  defp validate_system_field(%Volume{}), do: :ok
 
   defp validate_name(name) when is_binary(name) and byte_size(name) > 0, do: :ok
   defp validate_name(_), do: {:error, "name must be a non-empty string"}

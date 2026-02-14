@@ -1,7 +1,7 @@
 # Task 0096: System Volume Log Retention
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 7 - System Volume

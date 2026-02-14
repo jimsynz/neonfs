@@ -5,6 +5,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
   alias NeonFS.Core.Volume
+  alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Core.VolumeRegistry
 
   @moduletag :tmp_dir
@@ -42,6 +43,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert volume.logical_size == 0
       assert volume.physical_size == 0
       assert volume.chunk_count == 0
+      assert volume.system == false
       assert %DateTime{} = volume.created_at
       assert %DateTime{} = volume.updated_at
     end
@@ -195,6 +197,33 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
       assert {:error, msg} = Volume.validate(volume)
       assert msg =~ "sampling_rate"
+    end
+
+    test "validate/1 rejects system: true on non-_system volumes" do
+      volume = %{Volume.new("my-volume") | system: true}
+      assert {:error, msg} = Volume.validate(volume)
+      assert msg =~ "system"
+    end
+
+    test "validate/1 accepts system: true on _system volume" do
+      volume = %{Volume.new("_system") | system: true}
+      assert Volume.validate(volume) == :ok
+    end
+
+    test "validate/1 accepts system: false on any volume" do
+      volume = Volume.new("test-volume")
+      assert volume.system == false
+      assert Volume.validate(volume) == :ok
+    end
+
+    test "system?/1 returns true for system volumes" do
+      volume = %{Volume.new("_system") | system: true}
+      assert Volume.system?(volume) == true
+    end
+
+    test "system?/1 returns false for normal volumes" do
+      volume = Volume.new("test-volume")
+      assert Volume.system?(volume) == false
     end
   end
 
@@ -356,6 +385,174 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
       # Wait for all tasks to complete
       Enum.each(tasks, &Task.await/1)
+    end
+  end
+
+  describe "reserved names" do
+    test "create/1 rejects names starting with underscore" do
+      assert {:error, :reserved_name} = VolumeRegistry.create("_system")
+    end
+
+    test "create/1 rejects any underscore-prefixed name" do
+      assert {:error, :reserved_name} = VolumeRegistry.create("_reserved")
+      assert {:error, :reserved_name} = VolumeRegistry.create("_internal")
+    end
+
+    test "create/1 allows names with underscores elsewhere" do
+      assert {:ok, volume} = VolumeRegistry.create("my_volume")
+      assert volume.name == "my_volume"
+    end
+  end
+
+  describe "system volume" do
+    setup %{tmp_dir: tmp_dir} do
+      write_cluster_json(tmp_dir, "test-master-key-for-system-volume")
+      :ok
+    end
+
+    test "create_system_volume/0 creates system volume with correct properties" do
+      assert {:ok, volume} = VolumeRegistry.create_system_volume()
+
+      assert volume.name == "_system"
+      assert volume.owner == :system
+      assert volume.system == true
+      assert volume.durability == %{type: :replicate, factor: 1, min_copies: 1}
+      assert volume.write_ack == :quorum
+      assert volume.tiering.initial_tier == :hot
+      assert volume.compression.algorithm == :zstd
+      assert volume.compression.level == 3
+      assert volume.encryption.mode == :none
+      assert volume.verification.on_read == :always
+    end
+
+    test "create_system_volume/0 uses deterministic ID" do
+      assert {:ok, vol1} = VolumeRegistry.create_system_volume()
+
+      # Compute the expected deterministic ID
+      expected_id =
+        :crypto.hash(:sha256, "neonfs:system_volume:test-cluster")
+        |> Base.encode16(case: :lower)
+        |> binary_part(0, 32)
+
+      assert vol1.id == expected_id
+    end
+
+    test "create_system_volume/0 rejects duplicate creation" do
+      assert {:ok, _} = VolumeRegistry.create_system_volume()
+      assert {:error, :already_exists} = VolumeRegistry.create_system_volume()
+    end
+
+    test "get_system_volume/0 returns the system volume" do
+      assert {:ok, created} = VolumeRegistry.create_system_volume()
+      assert {:ok, retrieved} = VolumeRegistry.get_system_volume()
+      assert retrieved.id == created.id
+      assert retrieved.name == "_system"
+    end
+
+    test "get_system_volume/0 returns not_found when no system volume" do
+      assert {:error, :not_found} = VolumeRegistry.get_system_volume()
+    end
+
+    test "delete/1 rejects deletion of system volume by ID" do
+      assert {:ok, volume} = VolumeRegistry.create_system_volume()
+      assert {:error, :system_volume} = VolumeRegistry.delete(volume.id)
+
+      # Volume should still exist
+      assert {:ok, _} = VolumeRegistry.get_system_volume()
+    end
+
+    test "update/2 rejects changes to protected fields on system volume" do
+      assert {:ok, volume} = VolumeRegistry.create_system_volume()
+
+      # Owner is protected
+      assert {:error, :system_volume_protected} =
+               VolumeRegistry.update(volume.id, owner: "alice")
+
+      # Encryption is protected
+      assert {:error, :system_volume_protected} =
+               VolumeRegistry.update(volume.id,
+                 encryption: VolumeEncryption.new(mode: :aes_256_gcm)
+               )
+
+      # Durability type is protected
+      assert {:error, :system_volume_protected} =
+               VolumeRegistry.update(volume.id,
+                 durability: %{type: :erasure, data_chunks: 4, parity_chunks: 2}
+               )
+    end
+
+    test "update/2 allows non-protected field changes on system volume" do
+      assert {:ok, volume} = VolumeRegistry.create_system_volume()
+
+      # write_ack is not protected
+      assert {:ok, updated} = VolumeRegistry.update(volume.id, write_ack: :all)
+      assert updated.write_ack == :all
+
+      # compression is not protected
+      assert {:ok, updated} =
+               VolumeRegistry.update(volume.id,
+                 compression: %{algorithm: :zstd, level: 1, min_size: 0}
+               )
+
+      assert updated.compression.level == 1
+    end
+
+    test "update/2 allows durability factor changes (same type) on system volume" do
+      assert {:ok, volume} = VolumeRegistry.create_system_volume()
+
+      # Changing factor (keeping type :replicate) is allowed
+      assert {:ok, updated} =
+               VolumeRegistry.update(volume.id,
+                 durability: %{type: :replicate, factor: 3, min_copies: 1}
+               )
+
+      assert updated.durability.factor == 3
+    end
+
+    test "adjust_system_volume_replication/1 updates replication factor" do
+      assert {:ok, _} = VolumeRegistry.create_system_volume()
+
+      assert {:ok, updated} = VolumeRegistry.adjust_system_volume_replication(3)
+      assert updated.durability.factor == 3
+      assert updated.durability.min_copies == 1
+
+      assert {:ok, updated} = VolumeRegistry.adjust_system_volume_replication(5)
+      assert updated.durability.factor == 5
+    end
+
+    test "adjust_system_volume_replication/1 can decrement" do
+      assert {:ok, _} = VolumeRegistry.create_system_volume()
+      assert {:ok, _} = VolumeRegistry.adjust_system_volume_replication(3)
+
+      assert {:ok, updated} = VolumeRegistry.adjust_system_volume_replication(2)
+      assert updated.durability.factor == 2
+    end
+
+    test "list/0 excludes system volume by default" do
+      assert {:ok, _} = VolumeRegistry.create_system_volume()
+      assert {:ok, _} = VolumeRegistry.create("user-volume")
+
+      volumes = VolumeRegistry.list()
+      names = Enum.map(volumes, & &1.name)
+
+      assert names == ["user-volume"]
+      refute "_system" in names
+    end
+
+    test "list/1 includes system volume with include_system: true" do
+      assert {:ok, _} = VolumeRegistry.create_system_volume()
+      assert {:ok, _} = VolumeRegistry.create("user-volume")
+
+      volumes = VolumeRegistry.list(include_system: true)
+      names = Enum.map(volumes, & &1.name)
+
+      assert "_system" in names
+      assert "user-volume" in names
+    end
+
+    test "list/0 returns empty when only system volume exists" do
+      assert {:ok, _} = VolumeRegistry.create_system_volume()
+      assert VolumeRegistry.list() == []
     end
   end
 end

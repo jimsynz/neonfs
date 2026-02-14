@@ -47,9 +47,21 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "cluster_init/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
       start_ra()
 
-      on_exit(fn -> cleanup_test_dirs() end)
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
       :ok
     end
 
@@ -91,10 +103,22 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "create_invite/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
       start_ra()
       Handler.cluster_init("invite-test-cluster")
 
-      on_exit(fn -> cleanup_test_dirs() end)
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
       :ok
     end
 
@@ -120,9 +144,21 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "create_invite/1 without cluster" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
       start_ra()
 
-      on_exit(fn -> cleanup_test_dirs() end)
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
       :ok
     end
 
@@ -134,10 +170,22 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "join_cluster/2" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
       start_ra()
       Handler.cluster_init("join-test-cluster")
 
-      on_exit(fn -> cleanup_test_dirs() end)
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
       :ok
     end
 

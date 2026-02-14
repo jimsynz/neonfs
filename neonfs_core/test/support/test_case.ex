@@ -236,6 +236,16 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts ServiceRegistry.
+  """
+  def start_service_registry do
+    stop_if_running(NeonFS.Core.ServiceRegistry)
+    cleanup_ets_table(:services_by_node)
+    cleanup_ets_table(:services_by_type)
+    start_supervised!(NeonFS.Core.ServiceRegistry, restart: :temporary)
+  end
+
+  @doc """
   Starts VolumeRegistry.
   """
   def start_volume_registry do

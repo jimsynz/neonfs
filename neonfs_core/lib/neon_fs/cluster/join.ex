@@ -9,7 +9,7 @@ defmodule NeonFS.Cluster.Join do
 
   alias NeonFS.Client.{ServiceInfo, ServiceType}
   alias NeonFS.Cluster.{Invite, State}
-  alias NeonFS.Core.{RaServer, ServiceRegistry}
+  alias NeonFS.Core.{RaServer, ServiceRegistry, VolumeRegistry}
 
   require Logger
 
@@ -110,6 +110,9 @@ defmodule NeonFS.Cluster.Join do
          :ok <- maybe_add_to_ra_cluster(joining_node, type) do
       # Register in ServiceRegistry for all node types
       register_service(joining_node, type)
+
+      # Adjust system volume replication for core node joins (non-fatal)
+      maybe_adjust_system_volume_replication(updated_state, type)
 
       cluster_info = %{
         cluster_id: state.cluster_id,
@@ -263,6 +266,22 @@ defmodule NeonFS.Cluster.Join do
       add_to_ra_cluster(joining_node)
     else
       :ok
+    end
+  end
+
+  defp maybe_adjust_system_volume_replication(updated_state, type) do
+    if ServiceType.core?(type) do
+      core_count = length(updated_state.ra_cluster_members)
+
+      case VolumeRegistry.adjust_system_volume_replication(core_count) do
+        {:ok, _volume} ->
+          Logger.info("System volume replication factor adjusted to #{core_count}")
+
+        {:error, reason} ->
+          Logger.warning(
+            "Failed to adjust system volume replication to #{core_count}: #{inspect(reason)}"
+          )
+      end
     end
   end
 

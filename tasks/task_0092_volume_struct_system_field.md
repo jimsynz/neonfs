@@ -1,7 +1,7 @@
 # Task 0092: Volume Struct `system` Field and VolumeRegistry Guards
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 7 - System Volume

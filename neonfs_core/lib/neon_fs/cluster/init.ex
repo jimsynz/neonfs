@@ -8,20 +8,30 @@ defmodule NeonFS.Cluster.Init do
   - Generating cryptographic master key (for future encryption)
   - Persisting cluster state to disk
   - Bootstrapping single-node Ra cluster
+  - Creating the system volume and writing cluster identity
   """
 
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.RaServer
+  alias NeonFS.Core.{RaServer, SystemVolume, VolumeRegistry}
 
   @doc """
   Initializes a new cluster with the given name.
 
   Returns `{:ok, cluster_id}` on success, or `{:error, reason}` on failure.
 
+  The init sequence is:
+  1. Generate cluster/node IDs and master key
+  2. Save cluster state to disk
+  3. Bootstrap single-node Ra cluster
+  4. Create system volume
+  5. Write cluster identity file
+
   ## Errors
   - `{:error, :already_initialised}` - cluster state already exists
   - `{:error, :node_not_named}` - Erlang node not named (required for Ra)
   - `{:error, :ra_start_failed}` - Ra cluster failed to start
+  - `{:error, :system_volume_failed}` - system volume creation failed
+  - `{:error, :identity_write_failed}` - cluster identity write failed
   """
   @spec init_cluster(String.t()) :: {:ok, String.t()} | {:error, term()}
   def init_cluster(cluster_name) do
@@ -53,14 +63,37 @@ defmodule NeonFS.Cluster.Init do
 
     state = State.new(cluster_id, cluster_name, master_key, node_info)
 
-    # Save cluster state first
     with :ok <- State.save(state),
-         # Then start Ra as a founding single-node cluster
-         :ok <- RaServer.init_cluster() do
+         :ok <- RaServer.init_cluster(),
+         {:ok, _volume} <- create_system_volume(),
+         :ok <- write_cluster_identity(cluster_name) do
       {:ok, cluster_id}
     else
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp create_system_volume do
+    case VolumeRegistry.create_system_volume() do
+      {:ok, volume} -> {:ok, volume}
+      {:error, :already_exists} -> VolumeRegistry.get_system_volume()
+      {:error, reason} -> {:error, {:system_volume_failed, reason}}
+    end
+  end
+
+  defp write_cluster_identity(cluster_name) do
+    identity = %{
+      cluster_name: cluster_name,
+      initialized_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      format_version: 1
+    }
+
+    json = identity |> :json.format() |> IO.iodata_to_binary()
+
+    case SystemVolume.write("/cluster/identity.json", json) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:identity_write_failed, reason}}
     end
   end
 

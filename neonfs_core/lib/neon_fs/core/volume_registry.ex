@@ -9,23 +9,29 @@ defmodule NeonFS.Core.VolumeRegistry do
   use GenServer
   require Logger
 
+  alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.Persistence
   alias NeonFS.Core.RaServer
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
+  alias NeonFS.Core.VolumeEncryption
 
   @type volume_id :: binary()
   @type volume_name :: String.t()
 
+  @system_volume_name "_system"
+  @system_volume_protected_fields [:encryption, :owner, :system]
+
   # Client API
 
   @doc """
-  Starts the volume registry.
+  Adjusts the system volume replication factor to match cluster size.
   """
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  @spec adjust_system_volume_replication(pos_integer()) :: {:ok, Volume.t()} | {:error, term()}
+  def adjust_system_volume_replication(new_cluster_size)
+      when is_integer(new_cluster_size) and new_cluster_size >= 1 do
+    GenServer.call(__MODULE__, {:adjust_system_volume_replication, new_cluster_size}, 10_000)
   end
 
   @doc """
@@ -33,11 +39,37 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   Returns `{:ok, volume}` if successful, or `{:error, reason}` if:
   - Name already exists
+  - Name starts with `_` (reserved namespace)
   - Configuration is invalid
   """
   @spec create(String.t(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def create(name, opts \\ []) do
     GenServer.call(__MODULE__, {:create, name, opts}, 10_000)
+  end
+
+  @doc """
+  Creates the system volume. Called once during cluster init.
+
+  The system volume uses a deterministic ID derived from the cluster name
+  and has special properties: replicated to all nodes, cannot be deleted
+  or renamed, hidden from default volume listings.
+  """
+  @spec create_system_volume() :: {:ok, Volume.t()} | {:error, term()}
+  def create_system_volume do
+    GenServer.call(__MODULE__, :create_system_volume, 10_000)
+  end
+
+  @doc """
+  Deletes a volume.
+
+  Returns `:ok` if successful, or `{:error, reason}` if:
+  - Volume not found
+  - Volume contains files (must be empty)
+  - Volume is a system volume
+  """
+  @spec delete(volume_id()) :: :ok | {:error, term()}
+  def delete(id) do
+    GenServer.call(__MODULE__, {:delete, id}, 10_000)
   end
 
   @doc """
@@ -77,12 +109,21 @@ defmodule NeonFS.Core.VolumeRegistry do
   end
 
   @doc """
-  Lists all volumes.
-
-  Returns a list of all volume structs.
+  Returns the system volume, or `{:error, :not_found}` if it doesn't exist.
   """
-  @spec list() :: [Volume.t()]
-  def list do
+  @spec get_system_volume() :: {:ok, Volume.t()} | {:error, :not_found}
+  def get_system_volume do
+    get_by_name(@system_volume_name)
+  end
+
+  @doc """
+  Lists volumes.
+
+  By default, system volumes are excluded. Pass `include_system: true` to
+  include them.
+  """
+  @spec list(keyword()) :: [Volume.t()]
+  def list(opts \\ []) do
     local_volumes =
       :ets.tab2list(:volumes_by_id)
       |> Enum.map(fn {_id, volume} -> volume end)
@@ -99,7 +140,22 @@ defmodule NeonFS.Core.VolumeRegistry do
         local_volumes
       end
 
+    volumes =
+      if Keyword.get(opts, :include_system, false) do
+        volumes
+      else
+        Enum.reject(volumes, fn v -> Map.get(v, :system, false) end)
+      end
+
     Enum.sort_by(volumes, & &1.name)
+  end
+
+  @doc """
+  Starts the volume registry.
+  """
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   @doc """
@@ -108,6 +164,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   Returns `{:ok, updated_volume}` if successful, or `{:error, reason}` if:
   - Volume not found
   - New configuration is invalid
+  - System volume protected fields are being changed
   """
   @spec update(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def update(id, opts) do
@@ -122,18 +179,6 @@ defmodule NeonFS.Core.VolumeRegistry do
   @spec update_stats(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def update_stats(id, stats) do
     GenServer.call(__MODULE__, {:update_stats, id, stats}, 10_000)
-  end
-
-  @doc """
-  Deletes a volume.
-
-  Returns `:ok` if successful, or `{:error, reason}` if:
-  - Volume not found
-  - Volume contains files (must be empty)
-  """
-  @spec delete(volume_id()) :: :ok | {:error, term()}
-  def delete(id) do
-    GenServer.call(__MODULE__, {:delete, id}, 10_000)
   end
 
   # Server callbacks
@@ -193,8 +238,26 @@ defmodule NeonFS.Core.VolumeRegistry do
   end
 
   @impl true
+  def handle_call({:adjust_system_volume_replication, new_size}, _from, state) do
+    reply = do_adjust_system_volume_replication(new_size)
+    {:reply, reply, state}
+  end
+
+  @impl true
   def handle_call({:create, name, opts}, _from, state) do
     reply = do_create_volume(name, opts)
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call(:create_system_volume, _from, state) do
+    reply = do_create_system_volume()
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:delete, id}, _from, state) do
+    reply = do_delete_volume(id)
     {:reply, reply, state}
   end
 
@@ -210,14 +273,38 @@ defmodule NeonFS.Core.VolumeRegistry do
     {:reply, reply, state}
   end
 
-  @impl true
-  def handle_call({:delete, id}, _from, state) do
-    reply = do_delete_volume(id)
-    {:reply, reply, state}
+  defp do_adjust_system_volume_replication(new_size) do
+    with {:ok, volume} <- get_by_name(@system_volume_name) do
+      current = volume.durability
+      new_min = min(new_size, current.min_copies)
+      updated_durability = %{current | factor: new_size, min_copies: new_min}
+      updated = %{volume | durability: updated_durability, updated_at: DateTime.utc_now()}
+
+      case persist_volume(updated) do
+        :ok -> {:ok, updated}
+        error -> error
+      end
+    end
+  end
+
+  defp do_create_system_volume do
+    with {:ok, cluster_name} <- load_cluster_name(),
+         {:error, :not_found} <- get_by_name(@system_volume_name) do
+      volume = build_system_volume(cluster_name)
+
+      case persist_volume(volume) do
+        :ok -> {:ok, volume}
+        error -> error
+      end
+    else
+      {:ok, _existing} -> {:error, :already_exists}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp do_create_volume(name, opts) do
-    with {:error, :not_found} <- get_by_name(name),
+    with :ok <- check_reserved_name(name),
+         {:error, :not_found} <- get_by_name(name),
          volume = Volume.new(name, opts),
          :ok <- Volume.validate(volume),
          :ok <- persist_volume(volume) do
@@ -228,12 +315,11 @@ defmodule NeonFS.Core.VolumeRegistry do
     end
   end
 
-  defp do_update_volume(id, opts) do
+  defp do_delete_volume(id) do
     with {:ok, volume} <- get(id),
-         updated = Volume.update(volume, opts),
-         :ok <- Volume.validate(updated),
-         :ok <- persist_volume(updated) do
-      {:ok, updated}
+         :ok <- check_not_system_volume(volume),
+         :ok <- check_volume_empty(volume) do
+      delete_volume_persisted(id, volume)
     end
   end
 
@@ -245,10 +331,75 @@ defmodule NeonFS.Core.VolumeRegistry do
     end
   end
 
-  defp do_delete_volume(id) do
+  defp do_update_volume(id, opts) do
     with {:ok, volume} <- get(id),
-         :ok <- check_volume_empty(volume) do
-      delete_volume_persisted(id, volume)
+         :ok <- check_system_volume_update(volume, opts),
+         updated = Volume.update(volume, opts),
+         :ok <- Volume.validate(updated),
+         :ok <- persist_volume(updated) do
+      {:ok, updated}
+    end
+  end
+
+  defp build_system_volume(cluster_name) do
+    now = DateTime.utc_now()
+
+    %Volume{
+      id: system_volume_id(cluster_name),
+      name: @system_volume_name,
+      owner: :system,
+      durability: %{type: :replicate, factor: 1, min_copies: 1},
+      write_ack: :quorum,
+      tiering: %{initial_tier: :hot, promotion_threshold: 1, demotion_delay: 1},
+      caching: %{
+        transformed_chunks: false,
+        reconstructed_stripes: false,
+        remote_chunks: false,
+        max_memory: 1
+      },
+      io_weight: 100,
+      compression: %{algorithm: :zstd, level: 3, min_size: 0},
+      verification: %{on_read: :always, sampling_rate: nil},
+      encryption: VolumeEncryption.new(),
+      metadata_consistency: nil,
+      logical_size: 0,
+      physical_size: 0,
+      chunk_count: 0,
+      created_at: now,
+      updated_at: now,
+      system: true
+    }
+  end
+
+  defp check_not_system_volume(%Volume{} = volume) do
+    if Map.get(volume, :system, false) do
+      {:error, :system_volume}
+    else
+      :ok
+    end
+  end
+
+  defp check_reserved_name("_" <> _), do: {:error, :reserved_name}
+  defp check_reserved_name(_), do: :ok
+
+  defp check_system_volume_update(%Volume{} = volume, opts) do
+    if Map.get(volume, :system, false) do
+      has_protected_field =
+        Enum.any?(@system_volume_protected_fields, &Keyword.has_key?(opts, &1))
+
+      durability_type_changed =
+        case Keyword.get(opts, :durability) do
+          %{type: type} when type != :replicate -> true
+          _ -> false
+        end
+
+      if has_protected_field or durability_type_changed do
+        {:error, :system_volume_protected}
+      else
+        :ok
+      end
+    else
+      :ok
     end
   end
 
@@ -260,6 +411,19 @@ defmodule NeonFS.Core.VolumeRegistry do
     else
       {:error, "volume contains #{length(files)} file(s), cannot delete"}
     end
+  end
+
+  defp load_cluster_name do
+    case ClusterState.load() do
+      {:ok, state} -> {:ok, state.cluster_name}
+      {:error, reason} -> {:error, {:no_cluster_state, reason}}
+    end
+  end
+
+  defp system_volume_id(cluster_name) do
+    :crypto.hash(:sha256, "neonfs:system_volume:#{cluster_name}")
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, 32)
   end
 
   defp persist_volume(volume) do
@@ -456,7 +620,8 @@ defmodule NeonFS.Core.VolumeRegistry do
       physical_size: volume.physical_size,
       chunk_count: volume.chunk_count,
       created_at: volume.created_at,
-      updated_at: volume.updated_at
+      updated_at: volume.updated_at,
+      system: volume.system
     }
   end
 
@@ -489,7 +654,8 @@ defmodule NeonFS.Core.VolumeRegistry do
       physical_size: volume_map[:physical_size] || 0,
       chunk_count: volume_map[:chunk_count] || 0,
       created_at: volume_map.created_at,
-      updated_at: volume_map.updated_at
+      updated_at: volume_map.updated_at,
+      system: volume_map[:system] || false
     }
   end
 

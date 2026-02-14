@@ -192,7 +192,10 @@ defmodule NeonFS.Core.Supervisor do
           NeonFS.Core.TieringManager,
 
           # AntiEntropy periodically syncs metadata segments via Merkle tree comparison
-          NeonFS.Core.AntiEntropy
+          NeonFS.Core.AntiEntropy,
+
+          # Retention prunes old audit log files from the system volume
+          NeonFS.Core.SystemVolume.Retention
         ]
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation

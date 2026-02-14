@@ -1,7 +1,7 @@
 # Task 0094: Cluster Init Creates System Volume
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 7 - System Volume

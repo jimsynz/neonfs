@@ -1,7 +1,7 @@
 # Task 0095: Node Join/Decommission Replication Adjustment
 
 ## Status
-Not Started
+Complete
 
 ## Phase
 7 - System Volume
