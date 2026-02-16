@@ -3,29 +3,34 @@
 use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
-use crate::term::types::{ClusterInitResult, ClusterStatus};
-use crate::term::{extract_error, unwrap_ok_tuple};
+use crate::term::types::{
+    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus,
+};
+use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Binary, FixInteger, Term};
 
 /// Cluster management subcommands
 #[derive(Debug, Subcommand)]
 pub enum ClusterCommand {
-    /// Initialize a new cluster
-    Init {
-        /// Cluster name
-        #[arg(long)]
-        name: String,
+    /// Certificate authority management
+    Ca {
+        #[command(subcommand)]
+        command: CaCommand,
     },
-
-    /// Show cluster status
-    Status,
 
     /// Create an invite token for joining nodes
     CreateInvite {
         /// Token expiration duration (e.g., "1h", "30m", "3600")
         #[arg(long, default_value = "1h")]
         expires: String,
+    },
+
+    /// Initialize a new cluster
+    Init {
+        /// Cluster name
+        #[arg(long)]
+        name: String,
     },
 
     /// Join an existing cluster
@@ -38,16 +43,39 @@ pub enum ClusterCommand {
         #[arg(long)]
         via: String,
     },
+
+    /// Show cluster status
+    Status,
+}
+
+/// Certificate authority subcommands
+#[derive(Debug, Subcommand)]
+pub enum CaCommand {
+    /// Display CA information (subject, algorithm, validity, serial counter)
+    Info,
+
+    /// List all issued node certificates
+    List,
+
+    /// Revoke a node's certificate
+    Revoke {
+        /// Node name whose certificate to revoke
+        node: String,
+    },
+
+    /// Rotate the cluster CA (reissues all node certificates)
+    Rotate,
 }
 
 impl ClusterCommand {
     /// Execute the cluster command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            ClusterCommand::Init { name } => self.init(name, format),
-            ClusterCommand::Status => self.status(format),
+            ClusterCommand::Ca { command } => command.execute(format),
             ClusterCommand::CreateInvite { expires } => self.create_invite(expires, format),
+            ClusterCommand::Init { name } => self.init(name, format),
             ClusterCommand::Join { token, via } => self.join(token, via, format),
+            ClusterCommand::Status => self.status(format),
         }
     }
 
@@ -235,6 +263,171 @@ impl ClusterCommand {
             }
         }
         Ok(())
+    }
+}
+
+impl CaCommand {
+    /// Execute the CA subcommand
+    pub fn execute(&self, format: OutputFormat) -> Result<()> {
+        match self {
+            CaCommand::Info => self.info(format),
+            CaCommand::List => self.list(format),
+            CaCommand::Revoke { node } => self.revoke(node, format),
+            CaCommand::Rotate => self.rotate(),
+        }
+    }
+
+    fn info(&self, format: OutputFormat) -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "handle_ca_info", vec![])
+                .await
+        })?;
+
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(format_ca_error(&err_msg)));
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let info = CaInfo::from_term(data)?;
+
+        match format {
+            OutputFormat::Json => {
+                println!("{}", json::format(&info)?);
+            }
+            OutputFormat::Table => {
+                let mut tbl = table::Table::new(vec!["Property".to_string(), "Value".to_string()]);
+                tbl.add_row(vec!["Subject".to_string(), info.subject.clone()]);
+                tbl.add_row(vec!["Algorithm".to_string(), info.algorithm.clone()]);
+                tbl.add_row(vec!["Valid From".to_string(), info.valid_from.clone()]);
+                tbl.add_row(vec!["Valid To".to_string(), info.valid_to.clone()]);
+                tbl.add_row(vec![
+                    "Current Serial".to_string(),
+                    info.current_serial.to_string(),
+                ]);
+                tbl.add_row(vec![
+                    "Nodes Issued".to_string(),
+                    info.nodes_issued.to_string(),
+                ]);
+                print!("{}", tbl.render()?);
+            }
+        }
+        Ok(())
+    }
+
+    fn list(&self, format: OutputFormat) -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "handle_ca_list", vec![])
+                .await
+        })?;
+
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(format_ca_error(&err_msg)));
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let entries = term_to_list(&data)?;
+
+        let certs: Vec<CertificateEntry> = entries
+            .into_iter()
+            .map(CertificateEntry::from_term)
+            .collect::<Result<Vec<_>>>()?;
+
+        match format {
+            OutputFormat::Json => {
+                println!("{}", json::format(&certs)?);
+            }
+            OutputFormat::Table => {
+                if certs.is_empty() {
+                    println!("No certificates issued yet.");
+                } else {
+                    let mut tbl = table::Table::new(vec![
+                        "Node".to_string(),
+                        "Hostname".to_string(),
+                        "Serial".to_string(),
+                        "Expires".to_string(),
+                        "Status".to_string(),
+                    ]);
+                    for cert in &certs {
+                        tbl.add_row(vec![
+                            cert.node_name.clone(),
+                            cert.hostname.clone(),
+                            cert.serial.to_string(),
+                            cert.expires.clone(),
+                            cert.status.clone(),
+                        ]);
+                    }
+                    print!("{}", tbl.render()?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn revoke(&self, node: &str, format: OutputFormat) -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            let node_binary = Binary::from(node.as_bytes().to_vec());
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_ca_revoke",
+                vec![Term::Binary(node_binary)],
+            )
+            .await
+        })?;
+
+        if let Some(err_msg) = extract_error(&result) {
+            return Err(crate::error::CliError::RpcError(format_ca_error(&err_msg)));
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let revoke_result = CaRevokeResult::from_term(data)?;
+
+        match format {
+            OutputFormat::Json => {
+                println!("{}", json::format(&revoke_result)?);
+            }
+            OutputFormat::Table => {
+                println!(
+                    "✓ Revoked certificate for '{}' (serial {})",
+                    revoke_result.node_name, revoke_result.serial
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn rotate(&self) -> Result<()> {
+        eprintln!("CA rotation is not yet implemented.");
+        eprintln!();
+        eprintln!("CA rotation is a rare, disruptive operation that reissues all node");
+        eprintln!("certificates. It requires a dual-CA transition period and rolling");
+        eprintln!("reissuance across the cluster.");
+        eprintln!();
+        eprintln!("This will be implemented in a future release.");
+        Err(crate::error::CliError::RpcError(
+            "CA rotation not yet implemented".to_string(),
+        ))
+    }
+}
+
+/// Format CA-specific error messages for display
+fn format_ca_error(err_msg: &str) -> String {
+    match err_msg {
+        "ca_not_initialized" => {
+            "CA not initialised. Run 'neonfs cluster init' to create the cluster CA.".to_string()
+        }
+        "node_not_found" => {
+            "No certificate found for the specified node. Use 'neonfs cluster ca list' to see issued certificates.".to_string()
+        }
+        other => other.to_string(),
     }
 }
 

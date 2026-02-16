@@ -47,6 +47,7 @@ defmodule NeonFS.Client.MixProject do
     [
       {:telemetry, "~> 1.2"},
       {:uuid_v7, "~> 0.6"},
+      {:x509, "~> 0.8"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

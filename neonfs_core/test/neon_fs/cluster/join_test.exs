@@ -4,6 +4,7 @@ defmodule NeonFS.Cluster.JoinTest do
 
   alias NeonFS.Cluster.{Init, Invite, Join}
   alias NeonFS.Core.VolumeRegistry
+  alias NeonFS.Transport.TLS
 
   @moduletag :tmp_dir
 
@@ -34,10 +35,51 @@ defmodule NeonFS.Cluster.JoinTest do
     :ok
   end
 
-  describe "accept_join/3 system volume replication" do
-    test "adjusts factor on core joins and skips non-core joins" do
-      # System volume starts with factor 1 (single node at init)
+  # Consolidated into a single test because Ra's :default system is a
+  # singleton — restarting it between tests is fragile.
+  describe "accept_join/4 certificate issuance and replication" do
+    test "signs CSR, increments serial, returns certs, and adjusts replication" do
+      # --- Certificate issuance for non-core join ---
+      {:ok, token1} = Invite.create_invite(3600)
+      fuse_key = TLS.generate_node_key()
+      fuse_csr = TLS.create_csr(fuse_key, "fuse_peer@localhost")
+
+      {:ok, cluster_info} = Join.accept_join(token1, :fuse_peer@localhost, :fuse, fuse_csr)
+
+      # Response includes signed cert and CA cert
+      assert is_binary(cluster_info.node_cert_pem)
+      assert is_binary(cluster_info.ca_cert_pem)
+
+      node_info = TLS.certificate_info(cluster_info.node_cert_pem)
+      ca_info = TLS.certificate_info(cluster_info.ca_cert_pem)
+
+      # Cert subject matches joining node, issuer matches CA
+      assert node_info.subject =~ "fuse_peer@localhost"
+      assert node_info.issuer == ca_info.subject
+
+      # First node cert was serial 1 (from init), this should be serial 2
+      assert node_info.serial == 2
+
+      # --- Serial increments on subsequent join ---
+      {:ok, token2} = Invite.create_invite(3600)
+      key2 = TLS.generate_node_key()
+      csr2 = TLS.create_csr(key2, "another_fuse@localhost")
+
+      {:ok, cluster_info2} = Join.accept_join(token2, :another_fuse@localhost, :fuse, csr2)
+
+      node_info2 = TLS.certificate_info(cluster_info2.node_cert_pem)
+      assert node_info2.serial == 3
+
+      # --- Backwards compatibility: accept_join without CSR still works ---
+      {:ok, token3} = Invite.create_invite(3600)
+      {:ok, cluster_info3} = Join.accept_join(token3, :legacy_peer@localhost, :fuse)
+
+      assert is_nil(cluster_info3.node_cert_pem)
+      assert is_nil(cluster_info3.ca_cert_pem)
+
+      # --- System volume replication (existing behaviour preserved) ---
       {:ok, volume} = VolumeRegistry.get_system_volume()
+      # Non-core joins don't change replication factor
       assert volume.durability.factor == 1
 
       # Verify sequential core join replication adjustments (1 → 2 → 3).
@@ -50,20 +92,19 @@ defmodule NeonFS.Cluster.JoinTest do
       {:ok, vol3} = VolumeRegistry.adjust_system_volume_replication(3)
       assert vol3.durability.factor == 3
 
-      # Non-core join via accept_join does not change replication factor
-      {:ok, token} = Invite.create_invite(3600)
-      {:ok, _cluster_info} = Join.accept_join(token, :fuse_peer@localhost, :fuse)
-
-      {:ok, vol_after_fuse} = VolumeRegistry.get_system_volume()
-      assert vol_after_fuse.durability.factor == 3
-
-      # Failure-tolerance: maybe_adjust_system_volume_replication is called outside
-      # the `with` chain in accept_join/3 and its result is discarded, so adjustment
-      # failure cannot abort a join.
-
-      # Reset to initial factor for test isolation — Ra state persists across
-      # repeat-until-failure runs within the same BEAM process.
+      # Reset for test isolation
       VolumeRegistry.adjust_system_volume_replication(1)
+    end
+  end
+
+  describe "accept_join/4 CSR validation" do
+    test "rejects invalid CSR" do
+      {:ok, token} = Invite.create_invite(3600)
+
+      # A non-nil, non-CSR value should be rejected
+      result = Join.accept_join(token, :bad_csr_peer@localhost, :fuse, :not_a_csr)
+
+      assert {:error, {:cert_signing_failed, :invalid_csr}} = result
     end
   end
 end

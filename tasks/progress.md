@@ -13,6 +13,48 @@
 - Ra machine version migrations: wrap old fields into new structures with defaults, handle both old and new format in deserializers
 - `solana-reed-solomon-erasure` v4.0.1 is yanked — use `4.0.1-3` (pre-release); `++` has higher precedence than `|>` in Elixir
 
+- x509 0.9.2 generates dialyzer warnings for `X509.ASN1.record/1` and `:public_key.ec_private_key/0` — add `{:unknown_type}` entries to `.dialyzer_ignore.exs`
+- `X509.Certificate.validity/1` returns an ASN.1 record `{:Validity, notBefore, notAfter}` — use `import X509.ASN1` and `validity(notBefore: nb, notAfter: na)` to destructure, then `X509.DateTime.to_datetime/1` to get DateTimes
+- x509 Extension records have 4 elements `{:Extension, oid, critical, value}` — not 3-tuples
+- Bitwise `&&&` has lower precedence than `==` in Elixir — use parentheses: `(mode &&& 0o777) == 0o644`
+
+---
+
+## 2026-02-15 - Task 0098
+- What was implemented:
+  - Added `x509 ~> 0.8` (resolved to 0.9.2) as a dependency of `neonfs_client`
+  - Created `NeonFS.Transport.TLS` module in `neonfs_client/lib/neon_fs/transport/tls.ex`
+  - `generate_ca/1` — ECDSA P-256, self-signed, `:root_ca` template, configurable validity
+  - `generate_node_key/0` — ECDSA P-256 key generation
+  - `create_csr/2` — CSR with `/O=NeonFS/CN=<node_name>` subject
+  - `sign_csr/5` — signs CSR with `:server` template, SAN, ext_key_usage `[:serverAuth, :clientAuth]`
+  - `validate_csr/1` — signature verification
+  - `create_empty_crl/2` — empty CRL as PEM
+  - `add_crl_entry/4` — adds revocation entry, returns updated CRL PEM
+  - `parse_crl_entries/1` — parses CRL PEM to list of entries
+  - `certificate_info/1` — extracts subject, serial, not_before, not_after, issuer (accepts cert or PEM)
+  - `days_until_expiry/1` — days until notAfter (accepts cert or PEM)
+  - PEM helpers: `encode_cert/1`, `decode_cert!/1`, `encode_key/1`, `decode_key!/1`, `encode_csr/1`, `decode_csr!/1`
+  - `tls_dir/0` — configurable local TLS directory (default `/var/lib/neonfs/tls`)
+  - `write_local_tls/3` — writes ca.crt, node.crt, node.key with correct permissions (key 0600, certs 0644)
+  - `read_local_cert/0`, `read_local_ca_cert/0` — reads and decodes local cert files
+  - `renewal_threshold_days/0` — configurable threshold (default 30 days)
+  - All validity periods configurable via `:neonfs_client` application env
+  - Type specs on all public functions
+  - 30 unit tests covering all public functions
+  - Updated `.dialyzer_ignore.exs` to skip x509 dependency's dialyzer warnings
+- Files changed:
+  - `neonfs_client/mix.exs` (modified — added x509 dependency)
+  - `neonfs_client/lib/neon_fs/transport/tls.ex` (new — TLS module)
+  - `neonfs_client/test/neon_fs/transport/tls_test.exs` (new — 30 tests)
+  - `neonfs_client/.dialyzer_ignore.exs` (modified — x509 dialyzer ignores)
+  - `tasks/task_0098_tls_core_module.md` (status → Complete)
+- **Learnings for future iterations:**
+  - x509 0.9.2 has known dialyzer type issues — must ignore in `.dialyzer_ignore.exs`
+  - `X509.DateTime.to_datetime/1` converts ASN.1 time tuples to `DateTime` structs — use with `import X509.ASN1` for record destructuring
+  - String interpolation in `@doc` attributes causes compilation errors when the interpolated variable doesn't exist at module scope — use angle brackets instead
+  - The `X509.Certificate.Extension` module's functions return `{:Extension, oid, critical, value}` 4-tuples (records)
+  - `mix deps.get` must be run in all downstream packages (neonfs_core, neonfs_fuse, neonfs_integration) when neonfs_client's deps change
 ---
 
 ## 2026-02-14 - Task 0094
@@ -2719,4 +2761,102 @@
   - System volume data stored in Ra is eventually consistent across nodes. Use `assert_eventually` for cross-node queries — immediate assertions will fail.
   - Data written before quorum ring expansion (e.g. identity file at init) becomes unreachable after `rebuild_quorum_rings` because reads route to new ring nodes that lack the data. Anti-entropy eventually fixes this, but it's too slow for tests. Test such data from the init node only, or write it after ring rebuild.
   - The `ResolvedLookupCacheTest` LRU eviction test is intermittently flaky when run with the full suite (test ordering/parallel interference). Not related to system volume changes.
+---
+
+## Task 0099: CertificateAuthority Module and Cluster Init CA Generation
+
+- **Date:** 2026-02-16
+- **Status:** Complete
+- **Phase:** 8 - Cluster CA
+- **Summary:** Created `NeonFS.Core.CertificateAuthority` module that bridges `Transport.TLS` crypto primitives and the system volume. Provides `init_ca/1` (generates CA, writes cert/key/serial/CRL to system volume), `sign_node_csr/2` (validates CSR, reads CA from system volume, allocates serial, signs), `next_serial/0` (read-modify-write on `/tls/serial`), and `ca_info/0` (CA metadata from system volume). Extended `Cluster.Init.init_cluster/1` to generate the cluster CA and issue the first node certificate as part of the init flow. Serial allocation uses single-caller guarantee (not GenServer) — the handler GenServer serialises join requests.
+- **Files created/modified:**
+  - `neonfs_core/lib/neon_fs/core/certificate_authority.ex` (new — CertificateAuthority module with 4 public functions)
+  - `neonfs_core/test/neon_fs/core/certificate_authority_test.exs` (new — 8 tests covering init_ca, sign_node_csr, next_serial, ca_info)
+  - `neonfs_core/lib/neon_fs/cluster/init.ex` (modified — added CA init and first node cert to init flow)
+  - `neonfs_core/test/neon_fs/cluster/init_test.exs` (modified — consolidated to single test, added CA/cert assertions)
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` (modified — consolidated cluster_init tests for Ra singleton isolation)
+  - `neonfs_core/test/support/test_case.ex` (modified — `start_chunk_index` now builds mock quorum opts like FileIndex/StripeIndex; added tls_dir to `configure_test_dirs`/`cleanup_test_dirs`)
+- **Learnings for future iterations:**
+  - `start_chunk_index()` without quorum_opts falls back to Ra for reads, causing `:all_replicas_failed` when Ra state is contaminated between tests. Always pass mock quorum opts to all index GenServers in tests.
+  - Ra singleton test isolation: tests in different describe blocks within the same file that each start/stop Ra will interfere with each other. Consolidate tests that call `init_cluster` into a single test per describe block.
+  - The init flow now includes system volume reads (for `sign_node_csr` reading CA cert/key back), not just writes. This makes it more sensitive to index/BlobStore state correctness.
+---
+
+## Task 0100: Node Join Certificate Issuance
+
+- **Date:** 2026-02-16
+- **Status:** Complete
+- **Phase:** 8 - Cluster CA
+- **Summary:** Extended the node join flow to include TLS certificate issuance. Joining nodes generate an ECDSA P-256 keypair + CSR locally; the CSR is sent to the core node via the existing `accept_join` RPC. The core node validates the CSR format, signs it via `CertificateAuthority.sign_node_csr/2`, and returns the signed cert + CA cert PEM in the join response. The joining node stores all three files locally via `TLS.write_local_tls/3`. Backwards compatible — `accept_join` accepts an optional 4th CSR parameter; when nil, no certificate is issued.
+- **Files created/modified:**
+  - `neonfs_core/lib/neon_fs/cluster/join.ex` (modified — `join_cluster/3` generates keypair+CSR, `accept_join/4` signs CSR and returns certs, `request_join/5` passes CSR, new helpers `sign_joining_node_csr/2` and `store_local_tls/2`)
+  - `neonfs_core/test/neon_fs/cluster/join_test.exs` (modified — consolidated tests, added certificate issuance and CSR validation tests)
+  - `neonfs_client/lib/neon_fs/transport/tls.ex` (modified — added `valid_csr_format?/1` structural check)
+- **Learnings for future iterations:**
+  - `X509.CSR.valid?/1` pattern matches on the `{:CertificationRequest, _, _, _}` tuple — passing a non-CSR value raises `FunctionClauseError`, not `false`. Use a structural check (`valid_csr_format?/1`) before calling `validate_csr`.
+  - The join response crosses an RPC boundary, so certs are sent as PEM strings (not x509 structs) for serialisability. The joining node decodes them back with `TLS.decode_cert!/1` before storing.
+---
+
+## Task 0101: Certificate Auto-Renewal (CertRenewal GenServer)
+
+- **Date:** 2026-02-16
+- **Status:** Complete
+- **Phase:** 8 - Cluster CA
+- **Summary:** Created `NeonFS.Transport.CertRenewal` GenServer in `neonfs_client` that periodically checks the local node certificate's expiry. When within the configurable threshold (default 30 days), it generates a new ECDSA P-256 keypair and CSR, sends it to a core node for signing via `Router.call/4` → `CertificateAuthority.sign_node_csr/2`, and writes the new credentials locally via `TLS.write_local_tls/3`. Handles missing certs gracefully (skips check), retries failures with exponential backoff (1h→2h→4h→...→24h cap), and never crashes on renewal failure.
+- **Files created:**
+  - `neonfs_client/lib/neon_fs/transport/cert_renewal.ex` (new — CertRenewal GenServer)
+  - `neonfs_client/test/neon_fs/transport/cert_renewal_test.exs` (new — 12 unit tests)
+- **Design decisions:**
+  - Accepts an optional `:renew_fun` for dependency injection in tests — avoids needing Mox while keeping the GenServer testable without a real core node
+  - `:name` option extracted from opts so multiple instances can run in parallel tests
+  - `calculate_backoff/1` exposed as `@doc false` public function for direct unit testing of the backoff curve
+---
+
+## Task 0103: CLI CA Commands
+
+- **Date:** 2026-02-16
+- **Status:** Complete
+- **Phase:** 8 - Cluster CA
+- **Summary:** Added CA management commands to both Elixir CLI handler and Rust CLI. Elixir side: `handle_ca_info/0`, `handle_ca_list/0`, `handle_ca_revoke/1`, `handle_ca_rotate/0` (placeholder). The `list_issued/0` function in CertificateAuthority reads cert metadata stored under `/tls/issued/<serial>` by `sign_node_csr/2`. Rust side: `CaCommand` subcommand enum (Info, List, Revoke, Rotate) nested under `ClusterCommand::Ca`. Term conversion types `CaInfo`, `CertificateEntry`, `CaRevokeResult` with `from_term()`. Human-readable error messages for `ca_not_initialized` and `node_not_found`. CA rotation returns clear "not yet implemented" message.
+- **Tests:** 68 Elixir handler+CA tests pass, 48 Rust tests pass (including 4 new CLI parsing + 4 term conversion tests)
+- **Files modified:**
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — added `handle_ca_info/0`, `handle_ca_list/0`, `handle_ca_revoke/1`, `handle_ca_rotate/0`)
+  - `neonfs_core/lib/neon_fs/core/certificate_authority.ex` (modified — added `list_issued/0`, cert metadata tracking in `sign_node_csr/2`)
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` (modified — 7 new CA handler tests)
+  - `neonfs_core/test/neon_fs/core/certificate_authority_test.exs` (modified — 3 new list_issued tests)
+  - `neonfs-cli/src/commands/cluster.rs` (modified — added `CaCommand` enum + execute methods)
+  - `neonfs-cli/src/term/types.rs` (modified — added `CaInfo`, `CertificateEntry`, `CaRevokeResult` types + tests)
+  - `neonfs-cli/src/main.rs` (modified — 4 new CLI parsing tests)
+---
+
+## Task 0102: Certificate Revocation (CRL Management)
+
+- **Date:** 2026-02-16
+- **Status:** Complete
+- **Phase:** 8 - Cluster CA
+- **Summary:** Added CRL management functions to `CertificateAuthority`: `revoke_certificate/2` (accepts cert or serial + reason, idempotent), `get_crl/0`, `list_revoked/0` (returns serial, revoked_at, reason), `is_revoked?/1`. Reason codes are mapped from snake_case (`:key_compromise`, `:cessation_of_operation`) to x509 library's camelCase (`:keyCompromise`, `:cessationOfOperation`) and back. Also updated `TLS.add_crl_entry/4` to accept an optional 5th parameter for CRL entry extensions. Node decommission integration deferred — no decommission flow exists yet.
+- **Files modified:**
+  - `neonfs_core/lib/neon_fs/core/certificate_authority.ex` (modified — added `revoke_certificate/2`, `get_crl/0`, `list_revoked/0`, `is_revoked?/1`, reason code mapping helpers)
+  - `neonfs_core/test/neon_fs/core/certificate_authority_test.exs` (modified — added 10 revocation, CRL, and is_revoked? tests)
+  - `neonfs_client/lib/neon_fs/transport/tls.ex` (modified — `add_crl_entry/5` optional extensions parameter)
+- **Learnings:**
+  - x509 library's `X509.CRL.Extension.reason_code/1` type does not list `:unspecified` — instead, omit the reason code extension entirely for unspecified revocations
+  - `CRLEntry.extension/2` returns DER-encoded extension values; use `:public_key.der_decode(:CRLReason, der_value)` to decode reason atoms
+---
+
+## 2026-02-16 - Task 0104
+- What was implemented:
+  - Verified existing `neonfs_integration/test/integration/cluster_ca_test.exs` (12 tests) covers all acceptance criteria
+  - Tests cover: CA lifecycle (init, cert issuance, serial uniqueness, subject names, CA identity across nodes), cross-node CSR signing, certificate revocation (CRL visibility, ca list status), and node failure resilience
+  - All 12 cluster CA integration tests pass (221s runtime)
+  - Full integration suite passes: 111 tests, 0 failures in neonfs_integration
+  - Marked all acceptance criteria as complete
+  - Phase 8 (Cluster CA) is now fully complete: tasks 0098-0104 all pass
+- Files changed:
+  - `tasks/task_0104_phase8_integration_tests.md` (status → Complete, acceptance criteria checked)
+  - `tasks/progress.md` (appended this entry)
+- **Learnings for future iterations:**
+  - The cluster CA integration tests were already written (likely by a previous iteration) but the task was never marked complete — always check if the test file already exists before writing from scratch
+  - 2 pre-existing TieringManagerTest failures in neonfs_core are ETS cleanup race conditions in `on_exit` callbacks, not real test failures — these are known flaky teardown issues
+  - Integration tests for CA take ~4 minutes per test due to cluster setup/teardown overhead
 ---

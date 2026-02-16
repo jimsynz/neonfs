@@ -155,12 +155,24 @@ The `_system` volume stores cluster-wide operational data (CA keys, audit logs, 
 
 See [spec/system-volume.md](../spec/system-volume.md).
 
-### Phase 8: Cluster CA (Future)
+### Phase 8: Cluster CA (Tasks 0098-0104)
 **Goal:** Self-signed certificate authority for inter-node mTLS
 
 ECDSA P-256 CA stored in the system volume. Nodes receive certificates via CSR during join. Auto-renewal, CRL revocation, CLI commands.
 
-Task specifications not yet written. See [spec/cluster-ca.md](../spec/cluster-ca.md).
+| Task | Description |
+|------|-------------|
+| 0098 | x509 dependency and NeonFS.Transport.TLS core module |
+| 0099 | CertificateAuthority module and cluster init CA generation |
+| 0100 | Node join certificate issuance |
+| 0101 | Certificate auto-renewal (CertRenewal GenServer) |
+| 0102 | Certificate revocation (CRL management) |
+| 0103 | CLI CA commands (Elixir handler + Rust CLI) |
+| 0104 | Phase 8 integration tests |
+
+**Milestone:** Every node has a valid certificate signed by the cluster CA, certificates auto-renew, revoked node certs are tracked in CRL, CA key stored durably in system volume
+
+See [spec/cluster-ca.md](../spec/cluster-ca.md).
 
 ### Phase 9: Data Transfer (Future)
 **Goal:** Out-of-band data plane separating bulk chunk traffic from Erlang distribution
@@ -411,9 +423,36 @@ Full dependency graph:
 
 0097 (integration tests) ◀── all tasks 0092–0096
 
-Phase 8 → 9 → 10 (linear chain, task numbers TBD):
+Phase 8 Cluster CA:
 
-Phase 8 (Cluster CA) ──▶ Phase 9 (Data Transfer)
+Single starting point (0098), then 3 parallel streams:
+
+Stream A — Init + Join:
+0098 (TLS module) ──▶ 0099 (CA + init) ──▶ 0100 (join certs)
+
+Stream B — Renewal:
+0098 (TLS module) ──▶ 0101 (CertRenewal)
+
+Stream C — Revocation:
+0098 (TLS module) ──▶ 0102 (CRL revocation)
+
+Convergence:
+0103 (CLI commands) ◀── 0099 + 0100 + 0102
+0104 (integration)  ◀── all Phase 8 tasks (0098–0103)
+
+Full dependency graph:
+
+0098 (TLS module) ──┬──▶ 0099 (CA + init) ──▶ 0100 (join certs) ──┐
+                    ├──▶ 0101 (CertRenewal)                        │
+                    └──▶ 0102 (CRL revocation) ────────────────────┤
+                                                                    │
+0103 (CLI commands) ◀── 0099 + 0100 + 0102 ───────────────────────┤
+                                                                    │
+0104 (integration tests) ◀────────────────────────────────────────┘
+
+Phase 9 → 10 (task numbers TBD):
+
+Phase 9 (Data Transfer) ◀── Phase 8 (Cluster CA)
 
 Phase 10 (Event Notification) — no hard dependency on 7-9, sequenced after for practical reasons
 ```
@@ -449,6 +488,7 @@ Some task chains can be worked on in parallel:
 - **Phase 5** has 2 independent starting points: 0080 (HLC) and 0081 (hashing ring) can start in parallel; critical path is 0081 → 0082 → 0083 → 0084 → 0086/0087/0088 → 0089 → 0091
 - **Phase 6** has 3 independent starting points: 0067 (encryption NIF), 0068 (encryption types), 0069 (ACL types) can all start in parallel; two main chains converge at CLI (0078): encryption chain (0067 → 0072 → 0073 → 0074) and ACL chain (0069 → 0075 → 0076)
 - **Phase 7** is mostly sequential: 0092 (Volume struct) must come first, then 0093 (SystemVolume API) and 0095 (join replication) can start in parallel; 0094 (cluster init) and 0096 (log retention) follow 0093; critical path is 0092 → 0093 → 0094 → 0097
+- **Phase 8** has 1 starting point: 0098 (TLS module) must come first, then 0099 (CA + init), 0101 (renewal), 0102 (revocation) can start in parallel; 0100 (join certs) follows 0099; 0103 (CLI) needs 0099 + 0100 + 0102; critical path is 0098 → 0099 → 0100 → 0103 → 0104
 - **Phases 7 → 8 → 9** are strictly sequential: System Volume → Cluster CA → Data Transfer (each depends on the previous)
 - **Phase 10** (Event Notification) has no dependency on Phases 7-9 and could theoretically be developed in parallel, but is sequenced after them for practical reasons
 

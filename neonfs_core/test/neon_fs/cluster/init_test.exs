@@ -2,8 +2,11 @@ defmodule NeonFS.Cluster.InitTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
+  import Bitwise
+
   alias NeonFS.Cluster.Init
   alias NeonFS.Core.{SystemVolume, VolumeRegistry}
+  alias NeonFS.Transport.TLS
 
   @moduletag :tmp_dir
 
@@ -32,11 +35,13 @@ defmodule NeonFS.Cluster.InitTest do
   end
 
   describe "init_cluster/1" do
-    test "creates system volume and writes identity file" do
+    # Consolidated into a single test because Ra's :default system is a
+    # singleton — restarting it between tests is fragile.
+    test "creates system volume, CA materials, identity file, and node cert" do
       cluster_name = "test-cluster"
       {:ok, _cluster_id} = Init.init_cluster(cluster_name)
 
-      # System volume exists with correct properties
+      # --- System volume properties ---
       assert {:ok, volume} = VolumeRegistry.get_system_volume()
       assert volume.name == "_system"
       assert volume.system == true
@@ -47,7 +52,7 @@ defmodule NeonFS.Cluster.InitTest do
       assert volume.compression.algorithm == :zstd
       assert volume.encryption.mode == :none
 
-      # Identity file is readable and contains correct data
+      # --- Identity file ---
       assert {:ok, json} = SystemVolume.read("/cluster/identity.json")
       identity = :json.decode(json)
 
@@ -55,24 +60,43 @@ defmodule NeonFS.Cluster.InitTest do
       assert identity["format_version"] == 1
       assert is_binary(identity["initialized_at"])
 
-      # Verify it's valid ISO 8601
       assert {:ok, _datetime, _offset} =
                DateTime.from_iso8601(identity["initialized_at"])
-    end
 
-    test "returns error when already initialised" do
-      {:ok, _cluster_id} = Init.init_cluster("test-cluster")
-      assert {:error, :already_initialised} = Init.init_cluster("test-cluster")
-    end
+      # --- CA materials in system volume ---
+      assert {:ok, ca_cert_pem} = SystemVolume.read("/tls/ca.crt")
+      assert {:ok, ca_key_pem} = SystemVolume.read("/tls/ca.key")
+      assert {:ok, crl_pem} = SystemVolume.read("/tls/crl.pem")
 
-    test "idempotent — system volume not duplicated on re-init attempt" do
-      {:ok, _cluster_id} = Init.init_cluster("test-cluster")
-      {:ok, volume} = VolumeRegistry.get_system_volume()
+      ca_info = TLS.certificate_info(ca_cert_pem)
+      assert ca_info.subject =~ "#{cluster_name} CA"
+      assert ca_info.subject =~ "NeonFS"
 
-      # Second init fails (State.exists? is true)
-      assert {:error, :already_initialised} = Init.init_cluster("test-cluster")
+      _key = TLS.decode_key!(ca_key_pem)
+      _entries = TLS.parse_crl_entries(crl_pem)
 
-      # System volume still exists and is unchanged
+      # Serial incremented once (first node cert issued)
+      assert {:ok, "2"} = SystemVolume.read("/tls/serial")
+
+      # --- Node certificate stored locally ---
+      assert {:ok, node_cert} = TLS.read_local_cert()
+      assert {:ok, local_ca_cert} = TLS.read_local_ca_cert()
+
+      node_info = TLS.certificate_info(node_cert)
+      local_ca_info = TLS.certificate_info(local_ca_cert)
+
+      assert node_info.issuer == local_ca_info.subject
+      assert node_info.subject =~ Atom.to_string(Node.self())
+
+      key_path = Path.join(TLS.tls_dir(), "node.key")
+      assert File.exists?(key_path)
+      {:ok, stat} = File.stat(key_path)
+      assert (stat.mode &&& 0o777) == 0o600
+
+      # --- Idempotency: second init returns already_initialised ---
+      assert {:error, :already_initialised} = Init.init_cluster(cluster_name)
+
+      # System volume unchanged after failed re-init
       assert {:ok, ^volume} = VolumeRegistry.get_system_volume()
     end
   end

@@ -9,10 +9,12 @@ defmodule NeonFS.Cluster.Init do
   - Persisting cluster state to disk
   - Bootstrapping single-node Ra cluster
   - Creating the system volume and writing cluster identity
+  - Generating the cluster CA and issuing the first node certificate
   """
 
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{RaServer, SystemVolume, VolumeRegistry}
+  alias NeonFS.Core.{CertificateAuthority, RaServer, SystemVolume, VolumeRegistry}
+  alias NeonFS.Transport.TLS
 
   @doc """
   Initializes a new cluster with the given name.
@@ -25,6 +27,8 @@ defmodule NeonFS.Cluster.Init do
   3. Bootstrap single-node Ra cluster
   4. Create system volume
   5. Write cluster identity file
+  6. Generate cluster CA
+  7. Issue first node certificate
 
   ## Errors
   - `{:error, :already_initialised}` - cluster state already exists
@@ -32,6 +36,8 @@ defmodule NeonFS.Cluster.Init do
   - `{:error, :ra_start_failed}` - Ra cluster failed to start
   - `{:error, :system_volume_failed}` - system volume creation failed
   - `{:error, :identity_write_failed}` - cluster identity write failed
+  - `{:error, {:ca_init_failed, reason}}` - CA initialisation failed
+  - `{:error, {:node_cert_failed, reason}}` - first node certificate issuance failed
   """
   @spec init_cluster(String.t()) :: {:ok, String.t()} | {:error, term()}
   def init_cluster(cluster_name) do
@@ -66,7 +72,9 @@ defmodule NeonFS.Cluster.Init do
     with :ok <- State.save(state),
          :ok <- RaServer.init_cluster(),
          {:ok, _volume} <- create_system_volume(),
-         :ok <- write_cluster_identity(cluster_name) do
+         :ok <- write_cluster_identity(cluster_name),
+         {:ok, _ca_cert, _ca_key} <- init_cluster_ca(cluster_name),
+         :ok <- issue_first_node_cert() do
       {:ok, cluster_id}
     else
       {:error, reason} ->
@@ -95,6 +103,36 @@ defmodule NeonFS.Cluster.Init do
       :ok -> :ok
       {:error, reason} -> {:error, {:identity_write_failed, reason}}
     end
+  end
+
+  defp init_cluster_ca(cluster_name) do
+    case CertificateAuthority.init_ca(cluster_name) do
+      {:ok, ca_cert, ca_key} -> {:ok, ca_cert, ca_key}
+      {:error, reason} -> {:error, {:ca_init_failed, reason}}
+    end
+  end
+
+  defp issue_first_node_cert do
+    node_name = Atom.to_string(Node.self())
+    hostname = node_hostname()
+    node_key = TLS.generate_node_key()
+    csr = TLS.create_csr(node_key, node_name)
+
+    case CertificateAuthority.sign_node_csr(csr, hostname) do
+      {:ok, node_cert, ca_cert} ->
+        TLS.write_local_tls(ca_cert, node_cert, node_key)
+        :ok
+
+      {:error, reason} ->
+        {:error, {:node_cert_failed, reason}}
+    end
+  end
+
+  defp node_hostname do
+    Node.self()
+    |> Atom.to_string()
+    |> String.split("@")
+    |> List.last()
   end
 
   @doc """

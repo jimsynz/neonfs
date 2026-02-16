@@ -10,7 +10,7 @@ defmodule NeonFS.Core.MetadataRingTest do
     test "builds ring from node list with default options" do
       ring = MetadataRing.new(@nodes)
 
-      assert MetadataRing.segment_count(ring) == 3 * 64
+      assert MetadataRing.segment_count(ring) == 256
       assert length(MetadataRing.nodes(ring)) == 3
     end
 
@@ -25,7 +25,8 @@ defmodule NeonFS.Core.MetadataRingTest do
     test "accepts custom virtual_nodes_per_physical" do
       ring = MetadataRing.new(@nodes, virtual_nodes_per_physical: 10)
 
-      assert MetadataRing.segment_count(ring) == 3 * 10
+      # Segment count is always 256 (fixed), regardless of virtual nodes per physical
+      assert MetadataRing.segment_count(ring) == 256
     end
 
     test "accepts custom replicas" do
@@ -111,7 +112,7 @@ defmodule NeonFS.Core.MetadataRingTest do
       {new_ring, affected} = MetadataRing.add_node(ring, :core@node11)
 
       assert :core@node11 in MetadataRing.nodes(new_ring)
-      assert MetadataRing.segment_count(new_ring) == 11 * 64
+      assert MetadataRing.segment_count(new_ring) == 256
 
       # With replicas=3, approximately replicas/N segments are affected
       # For 11 nodes: ~3/11 ≈ 27%, allow generous bounds
@@ -133,7 +134,7 @@ defmodule NeonFS.Core.MetadataRingTest do
       ring = MetadataRing.new(@nodes)
       {new_ring, affected} = MetadataRing.add_node(ring, :core@node4)
 
-      all_segment_ids = new_ring.sorted_ring |> Enum.map(&elem(&1, 0))
+      all_segment_ids = MetadataRing.segments(new_ring) |> Enum.map(&elem(&1, 0))
 
       Enum.each(affected, fn seg_id ->
         assert seg_id in all_segment_ids
@@ -148,7 +149,7 @@ defmodule NeonFS.Core.MetadataRingTest do
       {new_ring, affected} = MetadataRing.remove_node(ring, :core@node5)
 
       refute :core@node5 in MetadataRing.nodes(new_ring)
-      assert MetadataRing.segment_count(new_ring) == 4 * 64
+      assert MetadataRing.segment_count(new_ring) == 256
       assert affected != []
     end
 
@@ -165,7 +166,7 @@ defmodule NeonFS.Core.MetadataRingTest do
       ring = MetadataRing.new(nodes)
       {new_ring, affected} = MetadataRing.remove_node(ring, :core@node4)
 
-      all_segment_ids = new_ring.sorted_ring |> Enum.map(&elem(&1, 0))
+      all_segment_ids = MetadataRing.segments(new_ring) |> Enum.map(&elem(&1, 0))
 
       Enum.each(affected, fn seg_id ->
         assert seg_id in all_segment_ids
@@ -174,11 +175,11 @@ defmodule NeonFS.Core.MetadataRingTest do
   end
 
   describe "segments/1" do
-    test "returns all segments with replica sets" do
+    test "returns all 256 fixed segments with replica sets" do
       ring = MetadataRing.new(@nodes)
       segments = MetadataRing.segments(ring)
 
-      assert length(segments) == 3 * 64
+      assert length(segments) == 256
 
       Enum.each(segments, fn {segment_id, replica_set} ->
         assert byte_size(segment_id) == 32
@@ -196,6 +197,38 @@ defmodule NeonFS.Core.MetadataRingTest do
 
       assert length(nodes) == 3
       assert nodes == Enum.sort(nodes)
+    end
+  end
+
+  describe "segment_id stability" do
+    test "same key produces same segment_id across 1/3/5-node rings" do
+      ring1 = MetadataRing.new([:core@node1])
+      ring3 = MetadataRing.new([:core@node1, :core@node2, :core@node3])
+
+      ring5 =
+        MetadataRing.new([:core@node1, :core@node2, :core@node3, :core@node4, :core@node5])
+
+      for key <- ["ca_cert", "ca_key", "crl", "test_key_#{:rand.uniform(1000)}"] do
+        {seg1, _replicas1} = MetadataRing.locate(ring1, key)
+        {seg3, _replicas3} = MetadataRing.locate(ring3, key)
+        {seg5, _replicas5} = MetadataRing.locate(ring5, key)
+
+        assert seg1 == seg3, "segment_id changed for #{key} between 1-node and 3-node ring"
+        assert seg3 == seg5, "segment_id changed for #{key} between 3-node and 5-node ring"
+      end
+    end
+
+    test "segment_id is derived from key hash first byte" do
+      ring = MetadataRing.new(@nodes)
+
+      key = "test_key"
+      key_hash = :crypto.hash(:sha256, key)
+      <<first_byte, _rest::binary>> = key_hash
+      expected_segment_id = <<first_byte, 0::size(248)>>
+
+      {segment_id, _replicas} = MetadataRing.locate(ring, key)
+
+      assert segment_id == expected_segment_id
     end
   end
 
@@ -255,7 +288,7 @@ defmodule NeonFS.Core.MetadataRingTest do
 
       assert byte_size(segment_id) == 32
       assert replicas == [:core@node1]
-      assert MetadataRing.segment_count(ring) == 64
+      assert MetadataRing.segment_count(ring) == 256
     end
 
     test "works with 3 nodes" do

@@ -26,6 +26,7 @@ defmodule NeonFS.MixProject do
 
     defp in_all(argv, task) do
       task = to_string(task)
+      env = if Mix.env() != :dev, do: [{"MIX_ENV", "#{Mix.env()}"}], else: []
 
       "*/mix.exs"
       |> Path.wildcard()
@@ -35,7 +36,7 @@ defmodule NeonFS.MixProject do
 
         {_, exitcode} =
           System.cmd("mix", [task | argv],
-            env: [{"MIX_ENV", "#{Mix.env()}"}],
+            env: env,
             cd: project,
             use_stdio: false
           )

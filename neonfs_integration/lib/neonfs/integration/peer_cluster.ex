@@ -128,8 +128,13 @@ defmodule NeonFS.Integration.PeerCluster do
             core_config
           end
 
+        client_config = [
+          tls_dir: Path.join(data_dir, "tls")
+        ]
+
         app_config = [
           logger: [level: :warning],
+          neonfs_client: client_config,
           neonfs_core: core_config,
           ra: [data_dir: to_charlist(ra_dir)]
         ]

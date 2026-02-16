@@ -18,6 +18,7 @@ defmodule NeonFS.CLI.Handler do
     ACLManager,
     AuditLog,
     Authorise,
+    CertificateAuthority,
     KeyManager,
     KeyRotation,
     ServiceRegistry,
@@ -79,6 +80,95 @@ defmodule NeonFS.CLI.Handler do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  Returns cluster CA information.
+
+  ## Returns
+  - `{:ok, map}` - CA info with subject, algorithm, validity dates, serial counter
+  - `{:error, :ca_not_initialized}` - CA hasn't been created yet
+  """
+  @spec handle_ca_info() :: {:ok, map()} | {:error, term()}
+  def handle_ca_info do
+    case CertificateAuthority.ca_info() do
+      {:ok, info} ->
+        {:ok,
+         %{
+           subject: info.subject,
+           algorithm: info.algorithm,
+           valid_from: DateTime.to_iso8601(info.valid_from),
+           valid_to: DateTime.to_iso8601(info.valid_to),
+           current_serial: info.current_serial,
+           nodes_issued: info.nodes_issued
+         }}
+
+      {:error, _} ->
+        {:error, :ca_not_initialized}
+    end
+  end
+
+  @doc """
+  Lists all issued node certificates with their status.
+
+  ## Returns
+  - `{:ok, [map]}` - List of certificate info maps
+  - `{:error, :ca_not_initialized}` - CA hasn't been created yet
+  """
+  @spec handle_ca_list() :: {:ok, [map()]} | {:error, term()}
+  def handle_ca_list do
+    case CertificateAuthority.list_issued() do
+      {:ok, certs} ->
+        {:ok,
+         Enum.map(certs, fn cert ->
+           %{
+             node_name: cert.node_name,
+             hostname: cert.hostname,
+             serial: cert.serial,
+             expires: DateTime.to_iso8601(cert.not_after),
+             status: if(cert.revoked, do: "revoked", else: "valid")
+           }
+         end)}
+
+      {:error, _} ->
+        {:error, :ca_not_initialized}
+    end
+  end
+
+  @doc """
+  Revokes a node's certificate by node name.
+
+  Looks up the node in the issued certificates list and revokes its certificate.
+
+  ## Parameters
+  - `node_name` - The node name (as it appears in the certificate subject CN)
+
+  ## Returns
+  - `{:ok, map}` - Revocation result with serial number
+  - `{:error, :node_not_found}` - No certificate found for the given node
+  - `{:error, :ca_not_initialized}` - CA hasn't been created yet
+  """
+  @spec handle_ca_revoke(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_ca_revoke(node_name) when is_binary(node_name) do
+    with {:ok, certs} <- map_ca_error(CertificateAuthority.list_issued()),
+         {:ok, cert} <- find_cert_by_node(certs, node_name),
+         :ok <- CertificateAuthority.revoke_certificate(cert.serial, :cessation_of_operation) do
+      {:ok, %{serial: cert.serial, node_name: cert.node_name, status: "revoked"}}
+    end
+  end
+
+  @doc """
+  Rotates the cluster CA.
+
+  CA rotation is a rare, disruptive operation that reissues all node
+  certificates. It requires a dual-CA transition period and rolling
+  reissuance across the cluster.
+
+  Not yet implemented — returns `{:error, :not_implemented}`.
+  """
+  @spec handle_ca_rotate() :: {:error, :not_implemented}
+  def handle_ca_rotate do
+    {:error, :not_implemented}
   end
 
   @doc """
@@ -965,6 +1055,23 @@ defmodule NeonFS.CLI.Handler do
   rescue
     ArgumentError -> {:error, "Invalid permission name. Valid: read, write, admin"}
   end
+
+  # Find a cert entry matching the given node name.
+  # The node_name in cert metadata is the full X.500 subject (e.g. "/O=NeonFS/CN=node@host").
+  # Match against the CN portion or the full subject.
+  defp find_cert_by_node(certs, name) do
+    case Enum.find(certs, fn cert ->
+           cert.node_name == name or
+             String.ends_with?(cert.node_name, "/CN=#{name}") or
+             cert.hostname == name
+         end) do
+      nil -> {:error, :node_not_found}
+      cert -> {:ok, cert}
+    end
+  end
+
+  defp map_ca_error({:ok, _} = ok), do: ok
+  defp map_ca_error({:error, _}), do: {:error, :ca_not_initialized}
 
   defp rebuild_quorum_ring_on_all_nodes do
     NeonFS.Core.Supervisor.rebuild_quorum_ring()

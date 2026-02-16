@@ -161,4 +161,28 @@ mod tests {
         let cli = Cli::try_parse_from(["neonfs-cli", "volume", "rotation-status", "myvol"]);
         assert!(cli.is_ok());
     }
+
+    #[test]
+    fn test_cluster_ca_info() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "info"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_list() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_revoke() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "revoke", "node-1"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_rotate() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "rotate"]);
+        assert!(cli.is_ok());
+    }
 }

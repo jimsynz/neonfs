@@ -27,7 +27,7 @@ defmodule NeonFS.Core.Supervisor do
 
   require Logger
 
-  alias NeonFS.Core.MetadataRing
+  alias NeonFS.Core.{AntiEntropy, MetadataRing}
 
   def start_link(init_arg) do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
@@ -78,6 +78,7 @@ defmodule NeonFS.Core.Supervisor do
   """
   @spec rebuild_quorum_ring() :: :ok
   def rebuild_quorum_ring do
+    old_quorum_opts = :persistent_term.get({NeonFS.Core.ChunkIndex, :quorum_opts}, nil)
     quorum_opts = build_quorum_opts()
 
     for module <- [NeonFS.Core.ChunkIndex, NeonFS.Core.FileIndex, NeonFS.Core.StripeIndex] do
@@ -86,12 +87,34 @@ defmodule NeonFS.Core.Supervisor do
 
     ring = Keyword.fetch!(quorum_opts, :ring)
     Logger.info("Rebuilt quorum ring with #{MapSet.size(ring.node_set)} nodes")
+
+    sync_after_ring_change(old_quorum_opts, ring)
+
     :ok
   end
 
   # Private functions
 
   defp start_children?, do: Application.get_env(:neonfs_core, :start_children?, true)
+
+  defp sync_after_ring_change(nil, _new_ring), do: :ok
+
+  defp sync_after_ring_change(old_quorum_opts, new_ring) do
+    old_ring = Keyword.fetch!(old_quorum_opts, :ring)
+
+    if old_ring.node_set != new_ring.node_set do
+      local_segments =
+        new_ring
+        |> MetadataRing.segments()
+        |> Enum.filter(fn {_seg_id, replicas} -> Node.self() in replicas end)
+
+      Logger.info("Ring membership changed, syncing #{length(local_segments)} segments")
+
+      Enum.each(local_segments, fn {segment_id, _replicas} ->
+        AntiEntropy.sync_segment(segment_id, ring: new_ring)
+      end)
+    end
+  end
 
   defp build_children do
     drives = Application.get_env(:neonfs_core, :drives, default_drives())
@@ -231,10 +254,19 @@ defmodule NeonFS.Core.Supervisor do
       Node.list()
       |> Enum.filter(fn node ->
         try do
-          case :erpc.call(node, Process, :whereis, [NeonFS.Core.MetadataStore], 2_000) do
-            pid when is_pid(pid) -> true
-            _ -> false
-          end
+          has_metadata_store =
+            case :erpc.call(node, Process, :whereis, [NeonFS.Core.MetadataStore], 2_000) do
+              pid when is_pid(pid) -> true
+              _ -> false
+            end
+
+          # Only include nodes that have actually joined the cluster.
+          # Unjoined nodes may have MetadataStore running (from app start)
+          # but lack cluster data, which would cause quorum read failures.
+          is_cluster_member =
+            :erpc.call(node, NeonFS.Cluster.State, :exists?, [], 2_000)
+
+          has_metadata_store and is_cluster_member
         catch
           _, _ -> false
         end

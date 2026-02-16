@@ -9,7 +9,8 @@ defmodule NeonFS.Cluster.Join do
 
   alias NeonFS.Client.{ServiceInfo, ServiceType}
   alias NeonFS.Cluster.{Invite, State}
-  alias NeonFS.Core.{RaServer, ServiceRegistry, VolumeRegistry}
+  alias NeonFS.Core.{CertificateAuthority, RaServer, ServiceRegistry, VolumeRegistry}
+  alias NeonFS.Transport.TLS
 
   require Logger
 
@@ -50,11 +51,15 @@ defmodule NeonFS.Cluster.Join do
   def join_cluster(token, via_node, type \\ :core)
       when is_binary(token) and is_atom(via_node) and is_service_type(type) do
     this_node = Node.self()
+    node_name = Atom.to_string(this_node)
+    node_key = TLS.generate_node_key()
+    csr = TLS.create_csr(node_key, node_name)
 
     with :ok <- validate_not_in_cluster(),
-         {:ok, cluster_info} <- request_join(via_node, token, this_node, type),
+         {:ok, cluster_info} <- request_join(via_node, token, this_node, type, csr),
          {:ok, state} <- build_cluster_state(cluster_info, type),
-         :ok <- State.save(state) do
+         :ok <- State.save(state),
+         :ok <- store_local_tls(cluster_info, node_key) do
       # Only core nodes join the Ra cluster
       if ServiceType.core?(type) do
         schedule_ra_join_async(state)
@@ -95,16 +100,21 @@ defmodule NeonFS.Cluster.Join do
   - `joining_node` - The node name of the joining node
   - `type` - Service type of the joining node (default: `:core`). Non-core
     types are registered in ServiceRegistry but not added to Ra cluster.
+  - `csr` - The node's CSR for certificate issuance
 
   ## Returns
-  - `{:ok, cluster_info}` containing cluster details for the joining node
+  - `{:ok, cluster_info}` containing cluster details and TLS certs for the joining node
   - `{:error, reason}` on failure
   """
-  @spec accept_join(String.t(), atom(), ServiceType.t()) :: {:ok, map()} | {:error, term()}
-  def accept_join(token, joining_node, type \\ :core)
+  @spec accept_join(String.t(), atom(), ServiceType.t(), TLS.csr() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def accept_join(token, joining_node, type \\ :core, csr \\ nil)
       when is_binary(token) and is_atom(joining_node) and is_service_type(type) do
+    hostname = joining_node |> Atom.to_string() |> String.split("@") |> List.last()
+
     with :ok <- Invite.validate_invite(token),
          {:ok, state} <- State.load(),
+         {:ok, node_cert_pem, ca_cert_pem} <- sign_joining_node_csr(csr, hostname),
          {:ok, updated_state} <- add_peer_to_state(state, joining_node, type),
          :ok <- State.save(updated_state),
          :ok <- maybe_add_to_ra_cluster(joining_node, type) do
@@ -129,7 +139,9 @@ defmodule NeonFS.Cluster.Join do
               last_seen: DateTime.to_iso8601(peer.last_seen)
             }
           end),
-        ra_cluster_members: Enum.map(updated_state.ra_cluster_members, &Atom.to_string/1)
+        ra_cluster_members: Enum.map(updated_state.ra_cluster_members, &Atom.to_string/1),
+        node_cert_pem: node_cert_pem,
+        ca_cert_pem: ca_cert_pem
       }
 
       Logger.info("Accepted #{type} join request from #{inspect(joining_node)}")
@@ -139,6 +151,34 @@ defmodule NeonFS.Cluster.Join do
 
   # Private functions
 
+  defp sign_joining_node_csr(nil, _hostname), do: {:ok, nil, nil}
+
+  defp sign_joining_node_csr(csr, hostname) do
+    if TLS.valid_csr_format?(csr) and TLS.validate_csr(csr) do
+      case CertificateAuthority.sign_node_csr(csr, hostname) do
+        {:ok, node_cert, ca_cert} ->
+          {:ok, TLS.encode_cert(node_cert), TLS.encode_cert(ca_cert)}
+
+        {:error, reason} ->
+          {:error, {:cert_signing_failed, reason}}
+      end
+    else
+      {:error, {:cert_signing_failed, :invalid_csr}}
+    end
+  end
+
+  defp store_local_tls(%{node_cert_pem: nil}, _node_key), do: :ok
+  defp store_local_tls(%{ca_cert_pem: nil}, _node_key), do: :ok
+
+  defp store_local_tls(%{node_cert_pem: node_cert_pem, ca_cert_pem: ca_cert_pem}, node_key) do
+    ca_cert = TLS.decode_cert!(ca_cert_pem)
+    node_cert = TLS.decode_cert!(node_cert_pem)
+    TLS.write_local_tls(ca_cert, node_cert, node_key)
+    :ok
+  end
+
+  defp store_local_tls(_cluster_info, _node_key), do: :ok
+
   defp validate_not_in_cluster do
     if State.exists?() do
       {:error, :already_in_cluster}
@@ -147,8 +187,8 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp request_join(via_node, token, this_node, type) do
-    case :rpc.call(via_node, __MODULE__, :accept_join, [token, this_node, type]) do
+  defp request_join(via_node, token, this_node, type, csr) do
+    case :rpc.call(via_node, __MODULE__, :accept_join, [token, this_node, type, csr]) do
       {:ok, cluster_info} ->
         {:ok, cluster_info}
 

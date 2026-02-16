@@ -11,21 +11,22 @@ defmodule NeonFS.Core.MetadataRing do
 
   ## Segments
 
-  Each virtual node on the ring defines a segment — the arc of key space from
-  the previous virtual node's position (exclusive) to this virtual node's
-  position (inclusive). The segment ID is the SHA-256 hash that determines the
-  virtual node's ring position. The total number of segments equals
-  `node_count * virtual_nodes_per_physical`.
+  Segment IDs are derived from the key hash, not from ring topology. The
+  first byte of a key's SHA-256 hash determines its segment, giving 256
+  fixed segments that remain stable as nodes join and leave the cluster.
+  This ensures data stored under a segment ID on disk remains addressable
+  regardless of ring changes.
 
   ## Replica Sets
 
-  For a given key, `locate/2` walks clockwise from the key's ring position
-  and collects the first N distinct physical nodes. This ensures replicas are
-  spread across different machines.
+  For a given key, `locate/2` walks clockwise from the key's SHA-256 ring
+  position and collects the first N distinct physical nodes. Replicas may
+  change as nodes join/leave, but the segment ID (disk path) stays the same.
   """
 
   @default_virtual_nodes_per_physical 64
   @default_replicas 3
+  @segment_count 256
 
   @type segment_id :: binary()
   @type replica_set :: [node()]
@@ -79,16 +80,18 @@ defmodule NeonFS.Core.MetadataRing do
   Hashes the key with SHA-256, walks clockwise from the resulting ring
   position, and collects up to `replicas` distinct physical nodes.
 
-  Returns `{segment_id, replica_set}` where `segment_id` is the ring position
-  of the first virtual node found clockwise, and `replica_set` is an ordered
-  list of distinct physical nodes.
+  Returns `{segment_id, replica_set}` where `segment_id` is derived from
+  the first byte of the key's SHA-256 hash (stable across ring changes),
+  and `replica_set` is an ordered list of distinct physical nodes.
   """
   @spec locate(t(), binary()) :: {segment_id(), replica_set()}
   def locate(%__MODULE__{sorted_ring: []}, _key), do: {<<>>, []}
 
   def locate(%__MODULE__{} = ring, key) when is_binary(key) do
-    position = :crypto.hash(:sha256, key)
-    locate_by_position(ring, position)
+    key_hash = :crypto.hash(:sha256, key)
+    segment_id = derive_segment_id(key_hash)
+    {_vnode_segment, replicas} = locate_by_position(ring, key_hash)
+    {segment_id, replicas}
   end
 
   @doc """
@@ -139,22 +142,17 @@ defmodule NeonFS.Core.MetadataRing do
   end
 
   @doc """
-  Returns all segment IDs and their replica sets.
+  Returns all 256 fixed segment IDs and their replica sets.
   """
   @spec segments(t()) :: [{segment_id(), replica_set()}]
   def segments(%__MODULE__{sorted_ring: []}), do: []
 
   def segments(%__MODULE__{} = ring) do
-    effective = effective_replicas(ring)
-    ring_tuple = List.to_tuple(ring.sorted_ring)
-    ring_size = tuple_size(ring_tuple)
-
-    ring.sorted_ring
-    |> Enum.with_index()
-    |> Enum.map(fn {{position, _node}, idx} ->
-      {_seg_id, replicas} = collect_replicas(ring_tuple, idx, ring_size, effective)
-      {position, replicas}
-    end)
+    for i <- 0..(@segment_count - 1) do
+      segment_id = <<i, 0::size(248)>>
+      {_vnode_segment, replicas} = locate_by_position(ring, segment_id)
+      {segment_id, replicas}
+    end
   end
 
   @doc """
@@ -166,12 +164,11 @@ defmodule NeonFS.Core.MetadataRing do
   end
 
   @doc """
-  Returns the total number of segments (one per virtual node).
+  Returns the total number of segments (256 fixed segments, or 0 for empty ring).
   """
   @spec segment_count(t()) :: non_neg_integer()
-  def segment_count(%__MODULE__{sorted_ring: sorted_ring}) do
-    length(sorted_ring)
-  end
+  def segment_count(%__MODULE__{sorted_ring: []}), do: 0
+  def segment_count(%__MODULE__{}), do: @segment_count
 
   # --- Private Functions ---
 
@@ -234,12 +231,16 @@ defmodule NeonFS.Core.MetadataRing do
   end
 
   defp compute_affected_segments(old_ring, new_ring) do
-    new_ring.sorted_ring
-    |> Enum.filter(fn {position, _node} ->
-      {_new_seg, new_replicas} = locate_by_position(new_ring, position)
-      {_old_seg, old_replicas} = locate_by_position(old_ring, position)
-      new_replicas != old_replicas
-    end)
-    |> Enum.map(&elem(&1, 0))
+    for i <- 0..(@segment_count - 1),
+        segment_id = <<i, 0::size(248)>>,
+        {_new_seg, new_replicas} = locate_by_position(new_ring, segment_id),
+        {_old_seg, old_replicas} = locate_by_position(old_ring, segment_id),
+        new_replicas != old_replicas do
+      segment_id
+    end
+  end
+
+  defp derive_segment_id(<<first_byte, _rest::binary>>) do
+    <<first_byte, 0::size(248)>>
   end
 end

@@ -89,6 +89,107 @@ impl ClusterStatus {
     }
 }
 
+/// CA information response
+#[derive(Debug, Serialize)]
+pub struct CaInfo {
+    pub subject: String,
+    pub algorithm: String,
+    pub valid_from: String,
+    pub valid_to: String,
+    pub current_serial: u64,
+    pub nodes_issued: u64,
+}
+
+impl CaInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            subject: term_to_string(map.get("subject").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'subject' field".to_string())
+            })?)?,
+            algorithm: term_to_string(map.get("algorithm").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'algorithm' field".to_string())
+            })?)?,
+            valid_from: term_to_string(map.get("valid_from").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'valid_from' field".to_string())
+            })?)?,
+            valid_to: term_to_string(map.get("valid_to").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'valid_to' field".to_string())
+            })?)?,
+            current_serial: term_to_u64(map.get("current_serial").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'current_serial' field".to_string())
+            })?)?,
+            nodes_issued: term_to_u64(map.get("nodes_issued").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'nodes_issued' field".to_string())
+            })?)?,
+        })
+    }
+}
+
+/// Certificate entry in CA list output
+#[derive(Debug, Serialize)]
+pub struct CertificateEntry {
+    pub node_name: String,
+    pub hostname: String,
+    pub serial: u64,
+    pub expires: String,
+    pub status: String,
+}
+
+impl CertificateEntry {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            node_name: term_to_string(map.get("node_name").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node_name' field".to_string())
+            })?)?,
+            hostname: term_to_string(map.get("hostname").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'hostname' field".to_string())
+            })?)?,
+            serial: term_to_u64(map.get("serial").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'serial' field".to_string())
+            })?)?,
+            expires: term_to_string(map.get("expires").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'expires' field".to_string())
+            })?)?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+        })
+    }
+}
+
+/// CA revocation response
+#[derive(Debug, Serialize)]
+pub struct CaRevokeResult {
+    pub serial: u64,
+    pub node_name: String,
+    pub status: String,
+}
+
+impl CaRevokeResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            serial: term_to_u64(map.get("serial").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'serial' field".to_string())
+            })?)?,
+            node_name: term_to_string(map.get("node_name").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node_name' field".to_string())
+            })?)?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+        })
+    }
+}
+
 /// Volume information response
 #[derive(Debug, Serialize)]
 pub struct VolumeInfo {
@@ -558,5 +659,160 @@ mod tests {
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["event_type"], "volume_created");
         assert_eq!(json["outcome"], "success");
+    }
+
+    #[test]
+    fn test_ca_info_json_serialization() {
+        let info = CaInfo {
+            subject: "/O=NeonFS/CN=test-cluster CA".to_string(),
+            algorithm: "ECDSA P-256".to_string(),
+            valid_from: "2026-02-16T00:00:00Z".to_string(),
+            valid_to: "2036-02-16T00:00:00Z".to_string(),
+            current_serial: 3,
+            nodes_issued: 3,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["algorithm"], "ECDSA P-256");
+        assert_eq!(json["current_serial"], 3);
+        assert_eq!(json["nodes_issued"], 3);
+    }
+
+    #[test]
+    fn test_ca_info_from_term() {
+        let term = Term::Map(eetf::Map {
+            entries: vec![
+                (
+                    Term::Binary(Binary {
+                        bytes: b"subject".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"/O=NeonFS/CN=test CA".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"algorithm".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"ECDSA P-256".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"valid_from".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"2026-02-16T00:00:00Z".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"valid_to".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"2036-02-16T00:00:00Z".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"current_serial".to_vec(),
+                    }),
+                    Term::FixInteger(FixInteger::from(5)),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"nodes_issued".to_vec(),
+                    }),
+                    Term::FixInteger(FixInteger::from(5)),
+                ),
+            ],
+        });
+        let info = CaInfo::from_term(term).unwrap();
+        assert_eq!(info.subject, "/O=NeonFS/CN=test CA");
+        assert_eq!(info.current_serial, 5);
+    }
+
+    #[test]
+    fn test_certificate_entry_from_term() {
+        let term = Term::Map(eetf::Map {
+            entries: vec![
+                (
+                    Term::Binary(Binary {
+                        bytes: b"node_name".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"/O=NeonFS/CN=node-1".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"hostname".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"node-1.example.com".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"serial".to_vec(),
+                    }),
+                    Term::FixInteger(FixInteger::from(1)),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"expires".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"2027-02-16T00:00:00Z".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"status".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"valid".to_vec(),
+                    }),
+                ),
+            ],
+        });
+        let entry = CertificateEntry::from_term(term).unwrap();
+        assert_eq!(entry.hostname, "node-1.example.com");
+        assert_eq!(entry.serial, 1);
+        assert_eq!(entry.status, "valid");
+    }
+
+    #[test]
+    fn test_ca_revoke_result_from_term() {
+        let term = Term::Map(eetf::Map {
+            entries: vec![
+                (
+                    Term::Binary(Binary {
+                        bytes: b"serial".to_vec(),
+                    }),
+                    Term::FixInteger(FixInteger::from(2)),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"node_name".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"/O=NeonFS/CN=node-2".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"status".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"revoked".to_vec(),
+                    }),
+                ),
+            ],
+        });
+        let result = CaRevokeResult::from_term(term).unwrap();
+        assert_eq!(result.serial, 2);
+        assert_eq!(result.node_name, "/O=NeonFS/CN=node-2");
+        assert_eq!(result.status, "revoked");
     }
 }

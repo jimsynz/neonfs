@@ -204,25 +204,43 @@ defmodule NeonFS.Integration.QuorumTest do
           ])
       end
 
-      # Write v2 to node1 only (newer HLC timestamp)
-      :ok =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.MetadataStore, :write, [
-          segment_id,
-          test_key,
-          %{"version" => "v2", "data" => "updated"}
-        ])
+      # Ensure wall clock advances past all v1 timestamps before generating
+      # the coordinator timestamp. Without this, v1 writes and the coordinator
+      # timestamp can land in the same millisecond, and the HLC node_id
+      # tiebreaker makes node3's v1 appear "newer" than the coord timestamp
+      # (because node3's name sorts higher than node1's).
+      Process.sleep(5)
 
-      # Now: node1 has v2@t2, node2/node3 have v1@t1
-      # Quorum read from node2 should return v2 (latest) and trigger repair
-      result =
-        PeerCluster.rpc(cluster, :node2, NeonFS.Core.QuorumCoordinator, :quorum_read, [
-          test_key,
-          quorum_opts
-        ])
+      # Generate a coordinator timestamp from node1. Since node1 already had
+      # a v1 write AND the wall clock has advanced, this timestamp is guaranteed
+      # newer than any v1 timestamp on any node.
+      coord_ts =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.MetadataStore, :generate_timestamp, [])
 
-      assert {:ok, %{"version" => "v2", "data" => "updated"}} = result
+      # Write v2 to node1 and node2 with the coordinator timestamp
+      for node_name <- [:node1, :node2] do
+        :ok =
+          PeerCluster.rpc(cluster, node_name, NeonFS.Core.MetadataStore, :write, [
+            segment_id,
+            test_key,
+            %{"version" => "v2", "data" => "updated"},
+            [caller_timestamp: coord_ts]
+          ])
+      end
 
-      # Wait for read repair to update the stale replicas
+      # Now: node1 has v2@coord_ts, node2 has v2@coord_ts, node3 has v1@t1
+      # Quorum read should return v2 (latest) and trigger repair on node3
+      assert_eventually timeout: 10_000 do
+        result =
+          PeerCluster.rpc(cluster, :node2, NeonFS.Core.QuorumCoordinator, :quorum_read, [
+            test_key,
+            quorum_opts
+          ])
+
+        match?({:ok, %{"version" => "v2", "data" => "updated"}}, result)
+      end
+
+      # Wait for read repair to update the stale replica (node3)
       assert_eventually timeout: 30_000 do
         case PeerCluster.rpc(cluster, :node3, NeonFS.Core.MetadataStore, :read, [
                segment_id,

@@ -142,12 +142,30 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts ChunkIndex.
+  Starts ChunkIndex with mock quorum infrastructure.
+
+  Automatically builds mock quorum opts when none are provided.
+
+  ## Options
+
+    * `:quorum_opts` — explicit quorum opts to use (overrides auto-built ones).
   """
-  def start_chunk_index do
+  def start_chunk_index(opts \\ []) do
+    opts =
+      if Keyword.has_key?(opts, :quorum_opts) do
+        opts
+      else
+        {quorum_opts, _store} = build_mock_quorum_opts()
+        [quorum_opts: quorum_opts]
+      end
+
     stop_if_running(NeonFS.Core.ChunkIndex)
     cleanup_ets_table(:chunk_index)
-    start_supervised!(NeonFS.Core.ChunkIndex, restart: :temporary)
+
+    start_supervised!(
+      {NeonFS.Core.ChunkIndex, opts},
+      restart: :temporary
+    )
   end
 
   @doc """
@@ -457,6 +475,10 @@ defmodule NeonFS.TestCase do
     ])
 
     Application.put_env(:neonfs_core, :ra_data_dir, Path.join(tmp_dir, "ra"))
+
+    # TLS dir for cluster CA / node cert operations (Phase 8+)
+    Application.put_env(:neonfs_client, :tls_dir, Path.join(tmp_dir, "tls"))
+
     :ok
   end
 
@@ -486,6 +508,7 @@ defmodule NeonFS.TestCase do
     Application.delete_env(:neonfs_core, :blob_store_base_dir)
     Application.delete_env(:neonfs_core, :drives)
     Application.delete_env(:neonfs_core, :ra_data_dir)
+    Application.delete_env(:neonfs_client, :tls_dir)
     :ok
   end
 end

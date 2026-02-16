@@ -4,7 +4,8 @@ defmodule NeonFS.CLI.HandlerTest do
 
   alias NeonFS.CLI.Handler
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.RaServer
+  alias NeonFS.Core.{CertificateAuthority, RaServer, VolumeRegistry}
+  alias NeonFS.Transport.TLS
 
   @moduletag :tmp_dir
 
@@ -44,6 +45,8 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  # Consolidated into a single test because Ra's :default system is a
+  # singleton — restarting it between tests is fragile.
   describe "cluster_init/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
@@ -65,9 +68,10 @@ defmodule NeonFS.CLI.HandlerTest do
       :ok
     end
 
-    test "initializes cluster successfully" do
+    test "initializes cluster, persists state, returns serializable data, and rejects re-init" do
       assert {:ok, result} = Handler.cluster_init("test-cluster")
 
+      # --- Init result properties ---
       assert is_binary(result.cluster_id)
       assert String.starts_with?(result.cluster_id, "clust_")
       assert result.cluster_name == "test-cluster"
@@ -75,28 +79,21 @@ defmodule NeonFS.CLI.HandlerTest do
       assert String.starts_with?(result.node_id, "node_")
       assert is_binary(result.node_name)
       assert is_binary(result.created_at)
-    end
 
-    test "creates cluster state file" do
-      assert {:ok, _result} = Handler.cluster_init("my-cluster")
-
+      # --- Cluster state persisted ---
       assert State.exists?()
       assert {:ok, state} = State.load()
-      assert state.cluster_name == "my-cluster"
-    end
+      assert state.cluster_name == "test-cluster"
 
-    test "returns error if already initialized" do
-      assert {:ok, _result} = Handler.cluster_init("first-cluster")
-      assert {:error, :already_initialised} = Handler.cluster_init("second-cluster")
-    end
-
-    test "returns serializable data" do
-      assert {:ok, result} = Handler.cluster_init("test-cluster")
+      # --- Result is serializable ---
       assert is_map(result)
 
       for {_key, value} <- result do
         assert is_binary(value) or is_atom(value) or is_number(value)
       end
+
+      # --- Idempotency: second init returns already_initialised ---
+      assert {:error, :already_initialised} = Handler.cluster_init("second-cluster")
     end
   end
 
@@ -555,6 +552,123 @@ defmodule NeonFS.CLI.HandlerTest do
     test "returns list or error depending on FUSE availability" do
       result = Handler.list_mounts()
       assert match?({:ok, _}, result) or match?({:error, _}, result)
+    end
+  end
+
+  describe "handle_ca_info/0" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+
+      {:ok, _volume} = VolumeRegistry.create_system_volume()
+      {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_ca("handler-test")
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns CA info after cluster init" do
+      assert {:ok, info} = Handler.handle_ca_info()
+      assert info.subject =~ "handler-test CA"
+      assert info.algorithm == "ECDSA P-256"
+      assert is_binary(info.valid_from)
+      assert is_binary(info.valid_to)
+      assert info.current_serial == 0
+      assert info.nodes_issued == 0
+    end
+  end
+
+  describe "handle_ca_info/0 without CA" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns error before CA init" do
+      assert {:error, :ca_not_initialized} = Handler.handle_ca_info()
+    end
+  end
+
+  describe "handle_ca_list/0 and handle_ca_revoke/1" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+
+      {:ok, _volume} = VolumeRegistry.create_system_volume()
+      {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_ca("ca-list-test")
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns initial node after signing a cert" do
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "list-node")
+      {:ok, _cert, _ca} = CertificateAuthority.sign_node_csr(csr, "list-node.test")
+
+      assert {:ok, certs} = Handler.handle_ca_list()
+      assert length(certs) == 1
+
+      [cert] = certs
+      assert cert.node_name =~ "list-node"
+      assert cert.hostname == "list-node.test"
+      assert cert.serial == 1
+      assert cert.status == "valid"
+      assert is_binary(cert.expires)
+    end
+
+    test "returns multiple nodes" do
+      for n <- 1..3 do
+        key = TLS.generate_node_key()
+        csr = TLS.create_csr(key, "node-#{n}")
+        {:ok, _cert, _ca} = CertificateAuthority.sign_node_csr(csr, "node-#{n}.test")
+      end
+
+      assert {:ok, certs} = Handler.handle_ca_list()
+      assert length(certs) == 3
+    end
+
+    test "revoke marks cert as revoked in list" do
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "revoke-target")
+
+      {:ok, _cert, _ca} =
+        CertificateAuthority.sign_node_csr(csr, "revoke-target.test")
+
+      assert {:ok, %{serial: 1, status: "revoked"}} = Handler.handle_ca_revoke("revoke-target")
+
+      assert {:ok, [cert]} = Handler.handle_ca_list()
+      assert cert.status == "revoked"
+    end
+
+    test "revoke returns error for unknown node" do
+      assert {:error, :node_not_found} = Handler.handle_ca_revoke("nonexistent-node")
     end
   end
 end
