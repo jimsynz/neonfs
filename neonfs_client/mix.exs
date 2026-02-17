@@ -33,7 +33,7 @@ defmodule NeonFS.Client.MixProject do
   # No OTP application module — pure library
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :ssl]
     ]
   end
 
@@ -45,6 +45,7 @@ defmodule NeonFS.Client.MixProject do
 
   defp deps do
     [
+      {:nimble_pool, "~> 1.1"},
       {:telemetry, "~> 1.2"},
       {:uuid_v7, "~> 0.6"},
       {:x509, "~> 0.8"},

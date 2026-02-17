@@ -10,6 +10,7 @@ defmodule NeonFS.Core.Replication do
   Phase 2 implements simple replication. Erasure coding comes in Phase 4.
   """
 
+  alias NeonFS.Client.Router
   alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.{BlobStore, ChunkIndex, DriveRegistry}
 
@@ -281,7 +282,32 @@ defmodule NeonFS.Core.Replication do
     tier_str = Atom.to_string(tier)
     drive_id = target.drive_id
 
-    # Use :rpc to call BlobStore.write_chunk on the remote node
+    case Router.data_call(target.node, :put_chunk,
+           hash: chunk_hash,
+           volume_id: drive_id,
+           write_id: nil,
+           tier: tier_str,
+           data: chunk_data
+         ) do
+      :ok ->
+        {:ok, %{node: target.node, drive_id: drive_id, tier: tier}}
+
+      {:error, :already_exists} ->
+        {:ok, %{node: target.node, drive_id: drive_id, tier: tier}}
+
+      {:error, :no_data_endpoint} ->
+        Logger.info("No data endpoint for #{target.node}, falling back to distribution RPC")
+        replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target)
+
+      {:error, reason} ->
+        Logger.warning("Failed to replicate chunk to #{target.node}: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target) do
+    drive_id = target.drive_id
+
     case :rpc.call(
            target.node,
            BlobStore,
@@ -290,10 +316,8 @@ defmodule NeonFS.Core.Replication do
            10_000
          ) do
       {:ok, returned_hash, _chunk_info} ->
-        # Verify hash matches
         if returned_hash == chunk_hash do
-          location = %{node: target.node, drive_id: drive_id, tier: tier}
-          {:ok, location}
+          {:ok, %{node: target.node, drive_id: drive_id, tier: String.to_existing_atom(tier_str)}}
         else
           Logger.error("Hash mismatch during replication: expected #{Base.encode16(chunk_hash)}")
           {:error, :hash_mismatch}
@@ -301,12 +325,10 @@ defmodule NeonFS.Core.Replication do
 
       {:error, reason} ->
         Logger.warning("Failed to replicate chunk to #{target.node}: #{inspect(reason)}")
-
         {:error, reason}
 
       {:badrpc, reason} ->
         Logger.warning("RPC failed when replicating to #{target.node}: #{inspect(reason)}")
-
         {:error, {:rpc_failed, reason}}
     end
   end

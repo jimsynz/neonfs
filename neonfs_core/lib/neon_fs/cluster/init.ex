@@ -12,9 +12,20 @@ defmodule NeonFS.Cluster.Init do
   - Generating the cluster CA and issuing the first node certificate
   """
 
+  alias NeonFS.Client.ServiceInfo
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{CertificateAuthority, RaServer, SystemVolume, VolumeRegistry}
-  alias NeonFS.Transport.TLS
+
+  alias NeonFS.Core.{
+    CertificateAuthority,
+    RaServer,
+    ServiceRegistry,
+    SystemVolume,
+    VolumeRegistry
+  }
+
+  alias NeonFS.Transport.{Listener, PoolManager, TLS}
+
+  require Logger
 
   @doc """
   Initializes a new cluster with the given name.
@@ -75,11 +86,77 @@ defmodule NeonFS.Cluster.Init do
          :ok <- write_cluster_identity(cluster_name),
          {:ok, _ca_cert, _ca_key} <- init_cluster_ca(cluster_name),
          :ok <- issue_first_node_cert() do
+      activate_data_plane()
       {:ok, cluster_id}
     else
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp activate_data_plane do
+    case Listener.rebind() do
+      :ok ->
+        ServiceRegistry.refresh_self()
+        broadcast_data_endpoint()
+        create_peer_pools()
+
+      {:error, reason} ->
+        Logger.warning("Failed to activate data plane: #{inspect(reason)}")
+    end
+  catch
+    _, _ -> :ok
+  end
+
+  defp broadcast_data_endpoint do
+    port = Listener.get_port()
+
+    if port > 0 do
+      endpoint = PoolManager.advertise_endpoint(port)
+      this_node = Node.self()
+
+      info =
+        ServiceInfo.new(this_node, :core, metadata: %{data_endpoint: endpoint})
+
+      for node <- Node.list() do
+        try do
+          :erpc.call(node, ServiceRegistry, :register, [info], 5_000)
+
+          # Only create a pool if the remote node has its data plane active
+          remote_port = :erpc.call(node, Listener, :get_port, [], 5_000)
+
+          if remote_port > 0 do
+            :erpc.call(node, PoolManager, :ensure_pool, [this_node, endpoint], 5_000)
+          end
+        catch
+          _, _ -> :ok
+        end
+      end
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp create_peer_pools do
+    for peer <- Node.list() do
+      try do
+        case :erpc.call(peer, ServiceRegistry, :get, [peer], 5_000) do
+          {:ok, info} ->
+            endpoint = Map.get(info.metadata || %{}, :data_endpoint)
+
+            if endpoint do
+              PoolManager.ensure_pool(peer, endpoint)
+            end
+
+          _ ->
+            :ok
+        end
+      catch
+        _, _ -> :ok
+      end
+    end
+  rescue
+    _ -> :ok
   end
 
   defp create_system_volume do

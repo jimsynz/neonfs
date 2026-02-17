@@ -15,6 +15,8 @@ defmodule NeonFS.Core.WriteOperation do
   in a single call (no separate encryption NIF boundary crossing).
   """
 
+  alias NeonFS.Client.Router
+
   alias NeonFS.Core.{
     Authorise,
     Blob.Native,
@@ -507,17 +509,50 @@ defmodule NeonFS.Core.WriteOperation do
     if target.node == node() do
       BlobStore.write_chunk(data, target.drive_id, tier_str, write_opts)
     else
-      case :rpc.call(
-             target.node,
-             BlobStore,
-             :write_chunk,
-             [data, target.drive_id, tier_str, write_opts],
-             10_000
-           ) do
-        {:ok, hash, chunk_info} -> {:ok, hash, chunk_info}
-        {:error, reason} -> {:error, {:remote_write_failed, target.node, reason}}
-        {:badrpc, reason} -> {:error, {:rpc_failed, target.node, reason}}
-      end
+      write_chunk_to_remote(data, target, tier_str, write_opts)
+    end
+  end
+
+  defp write_chunk_to_remote(data, target, tier_str, write_opts) do
+    hash = Native.compute_hash(data)
+
+    case Router.data_call(target.node, :put_chunk,
+           hash: hash,
+           volume_id: target.drive_id,
+           write_id: nil,
+           tier: tier_str,
+           data: data
+         ) do
+      result when result in [:ok, {:error, :already_exists}] ->
+        chunk_info = %{
+          original_size: byte_size(data),
+          stored_size: byte_size(data),
+          compression: "none"
+        }
+
+        {:ok, hash, chunk_info}
+
+      {:error, :no_data_endpoint} ->
+        Logger.info("No data endpoint for #{target.node}, falling back to distribution RPC")
+
+        write_chunk_to_remote_rpc(data, target, tier_str, write_opts)
+
+      {:error, reason} ->
+        {:error, {:remote_write_failed, target.node, reason}}
+    end
+  end
+
+  defp write_chunk_to_remote_rpc(data, target, tier_str, write_opts) do
+    case :rpc.call(
+           target.node,
+           BlobStore,
+           :write_chunk,
+           [data, target.drive_id, tier_str, write_opts],
+           10_000
+         ) do
+      {:ok, hash, chunk_info} -> {:ok, hash, chunk_info}
+      {:error, reason} -> {:error, {:remote_write_failed, target.node, reason}}
+      {:badrpc, reason} -> {:error, {:rpc_failed, target.node, reason}}
     end
   end
 

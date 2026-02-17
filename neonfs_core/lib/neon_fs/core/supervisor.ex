@@ -27,7 +27,7 @@ defmodule NeonFS.Core.Supervisor do
 
   require Logger
 
-  alias NeonFS.Core.{AntiEntropy, MetadataRing}
+  alias NeonFS.Core.{AntiEntropy, MetadataRing, ServiceRegistry}
 
   def start_link(init_arg) do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
@@ -208,8 +208,21 @@ defmodule NeonFS.Core.Supervisor do
           # AuditLog records security-relevant events in bounded ETS
           NeonFS.Core.AuditLog,
 
+          # Transport: HandlerSupervisor + Listener + PoolSupervisor + PoolManager for data transfer (Phase 9)
+          NeonFS.Transport.HandlerSupervisor,
+          NeonFS.Transport.Listener,
+          NeonFS.Transport.PoolSupervisor,
+          {NeonFS.Transport.PoolManager,
+           service_list_fn: fn ->
+             try do
+               ServiceRegistry.list()
+             rescue
+               _ -> []
+             end
+           end},
+
           # ServiceRegistry depends on Ra being available
-          NeonFS.Core.ServiceRegistry,
+          ServiceRegistry,
 
           # TieringManager evaluates chunks for promotion/demotion
           NeonFS.Core.TieringManager,

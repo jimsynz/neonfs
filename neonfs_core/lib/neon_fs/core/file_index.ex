@@ -721,7 +721,7 @@ defmodule NeonFS.Core.FileIndex do
       volume_id: get_field(map, :volume_id),
       path: get_field(map, :path),
       chunks: get_field(map, :chunks, []),
-      stripes: get_field(map, :stripes),
+      stripes: decode_stripes(get_field(map, :stripes)),
       size: get_field(map, :size, 0),
       mode: get_field(map, :mode, 0o644),
       uid: get_field(map, :uid, 0),
@@ -738,6 +738,27 @@ defmodule NeonFS.Core.FileIndex do
   defp get_field(map, key, default \\ nil) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key)) || default
   end
+
+  defp decode_stripes(nil), do: nil
+
+  defp decode_stripes(stripes) when is_list(stripes) do
+    Enum.map(stripes, &decode_stripe_entry/1)
+  end
+
+  defp decode_stripes(_), do: nil
+
+  defp decode_stripe_entry(%{stripe_id: _, byte_range: _} = entry), do: entry
+
+  defp decode_stripe_entry(entry) when is_map(entry) do
+    %{
+      stripe_id: get_field(entry, :stripe_id),
+      byte_range: decode_byte_range(get_field(entry, :byte_range))
+    }
+  end
+
+  defp decode_byte_range({s, e}), do: {s, e}
+  defp decode_byte_range([s, e]) when is_integer(s) and is_integer(e), do: {s, e}
+  defp decode_byte_range(other), do: other
 
   defp decode_datetime(%DateTime{} = dt), do: dt
   defp decode_datetime(nil), do: nil

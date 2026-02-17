@@ -25,6 +25,9 @@ defmodule NeonFS.FUSE.Supervisor do
       {NeonFS.Client.Connection, bootstrap_nodes: bootstrap_nodes()},
       NeonFS.Client.Discovery,
       NeonFS.Client.CostFunction,
+      # Transport: PoolSupervisor + PoolManager for data transfer (Phase 9)
+      NeonFS.Transport.PoolSupervisor,
+      NeonFS.Transport.PoolManager,
       # Inode table must start before handlers
       NeonFS.FUSE.InodeTable,
       # DynamicSupervisor for mount handlers

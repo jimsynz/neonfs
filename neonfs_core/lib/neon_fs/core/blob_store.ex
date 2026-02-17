@@ -204,6 +204,23 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @doc """
+  Checks if a chunk exists on any drive and tier, returning its tier and stored size.
+
+  Iterates all drives and tiers to locate the chunk. Returns the first match.
+
+  ## Returns
+
+    * `{:ok, tier, size}` — chunk found with its tier and stored byte size
+    * `{:error, :not_found}` — chunk not present on any drive/tier
+  """
+  @spec chunk_info(chunk_hash(), keyword()) ::
+          {:ok, tier(), non_neg_integer()} | {:error, :not_found}
+  def chunk_info(hash, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:chunk_info, hash})
+  end
+
+  @doc """
   Migrates a chunk between tiers within a single drive.
 
   The operation is atomic: the chunk is copied to the destination tier,
@@ -475,6 +492,12 @@ defmodule NeonFS.Core.BlobStore do
       {:error, _reason} = error ->
         {:reply, error, state}
     end
+  end
+
+  @impl true
+  def handle_call({:chunk_info, hash}, _from, state) do
+    result = do_chunk_info(state.stores, hash)
+    {:reply, result, state}
   end
 
   @impl true
@@ -784,6 +807,26 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   ## Private: Delete (searches all tiers)
+
+  defp do_chunk_info(stores, hash) do
+    Enum.reduce_while(stores, {:error, :not_found}, fn {_drive_id, store}, acc ->
+      case find_chunk_on_store(store, hash) do
+        {:ok, _tier, _size} = found -> {:halt, found}
+        {:error, :not_found} -> {:cont, acc}
+      end
+    end)
+  end
+
+  defp find_chunk_on_store(store, hash) do
+    Enum.reduce_while(@tiers, {:error, :not_found}, fn tier, acc ->
+      with {:ok, true} <- Native.store_chunk_exists(store, hash, tier),
+           {:ok, data} <- Native.store_read_chunk(store, hash, tier) do
+        {:halt, {:ok, tier, byte_size(data)}}
+      else
+        _ -> {:cont, acc}
+      end
+    end)
+  end
 
   defp do_delete_chunk(store, hash, drive_id) do
     metadata = %{drive_id: drive_id, hash: Base.encode16(hash, case: :lower)}

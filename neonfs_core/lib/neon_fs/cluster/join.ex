@@ -10,7 +10,7 @@ defmodule NeonFS.Cluster.Join do
   alias NeonFS.Client.{ServiceInfo, ServiceType}
   alias NeonFS.Cluster.{Invite, State}
   alias NeonFS.Core.{CertificateAuthority, RaServer, ServiceRegistry, VolumeRegistry}
-  alias NeonFS.Transport.TLS
+  alias NeonFS.Transport.{Listener, PoolManager, TLS}
 
   require Logger
 
@@ -55,11 +55,16 @@ defmodule NeonFS.Cluster.Join do
     node_key = TLS.generate_node_key()
     csr = TLS.create_csr(node_key, node_name)
 
+    data_endpoint = local_data_endpoint()
+
     with :ok <- validate_not_in_cluster(),
-         {:ok, cluster_info} <- request_join(via_node, token, this_node, type, csr),
+         {:ok, cluster_info} <-
+           request_join(via_node, token, this_node, type, csr, data_endpoint),
          {:ok, state} <- build_cluster_state(cluster_info, type),
          :ok <- State.save(state),
          :ok <- store_local_tls(cluster_info, node_key) do
+      activate_data_plane()
+
       # Only core nodes join the Ra cluster
       if ServiceType.core?(type) do
         schedule_ra_join_async(state)
@@ -106,9 +111,9 @@ defmodule NeonFS.Cluster.Join do
   - `{:ok, cluster_info}` containing cluster details and TLS certs for the joining node
   - `{:error, reason}` on failure
   """
-  @spec accept_join(String.t(), atom(), ServiceType.t(), TLS.csr() | nil) ::
+  @spec accept_join(String.t(), atom(), ServiceType.t(), TLS.csr() | nil, term()) ::
           {:ok, map()} | {:error, term()}
-  def accept_join(token, joining_node, type \\ :core, csr \\ nil)
+  def accept_join(token, joining_node, type \\ :core, csr \\ nil, data_endpoint \\ nil)
       when is_binary(token) and is_atom(joining_node) and is_service_type(type) do
     hostname = joining_node |> Atom.to_string() |> String.split("@") |> List.last()
 
@@ -119,7 +124,7 @@ defmodule NeonFS.Cluster.Join do
          :ok <- State.save(updated_state),
          :ok <- maybe_add_to_ra_cluster(joining_node, type) do
       # Register in ServiceRegistry for all node types
-      register_service(joining_node, type)
+      register_service(joining_node, type, data_endpoint)
 
       # Adjust system volume replication for core node joins (non-fatal)
       maybe_adjust_system_volume_replication(updated_state, type)
@@ -150,6 +155,72 @@ defmodule NeonFS.Cluster.Join do
   end
 
   # Private functions
+
+  defp activate_data_plane do
+    case Listener.rebind() do
+      :ok ->
+        ServiceRegistry.refresh_self()
+        broadcast_data_endpoint()
+        create_peer_pools()
+
+      {:error, reason} ->
+        Logger.warning("Failed to activate data plane: #{inspect(reason)}")
+    end
+  catch
+    _, _ -> :ok
+  end
+
+  defp broadcast_data_endpoint do
+    port = Listener.get_port()
+
+    if port > 0 do
+      endpoint = PoolManager.advertise_endpoint(port)
+      this_node = Node.self()
+
+      info =
+        ServiceInfo.new(this_node, :core, metadata: %{data_endpoint: endpoint})
+
+      for node <- Node.list() do
+        try do
+          :erpc.call(node, ServiceRegistry, :register, [info], 5_000)
+
+          # Only create a pool if the remote node has its data plane active
+          # (port > 0 means it has TLS certs and can make outbound connections)
+          remote_port = :erpc.call(node, Listener, :get_port, [], 5_000)
+
+          if remote_port > 0 do
+            :erpc.call(node, PoolManager, :ensure_pool, [this_node, endpoint], 5_000)
+          end
+        catch
+          _, _ -> :ok
+        end
+      end
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp create_peer_pools do
+    for peer <- Node.list() do
+      try do
+        case :erpc.call(peer, ServiceRegistry, :get, [peer], 5_000) do
+          {:ok, info} ->
+            endpoint = Map.get(info.metadata || %{}, :data_endpoint)
+
+            if endpoint do
+              PoolManager.ensure_pool(peer, endpoint)
+            end
+
+          _ ->
+            :ok
+        end
+      catch
+        _, _ -> :ok
+      end
+    end
+  rescue
+    _ -> :ok
+  end
 
   defp sign_joining_node_csr(nil, _hostname), do: {:ok, nil, nil}
 
@@ -187,8 +258,14 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp request_join(via_node, token, this_node, type, csr) do
-    case :rpc.call(via_node, __MODULE__, :accept_join, [token, this_node, type, csr]) do
+  defp request_join(via_node, token, this_node, type, csr, data_endpoint) do
+    case :rpc.call(via_node, __MODULE__, :accept_join, [
+           token,
+           this_node,
+           type,
+           csr,
+           data_endpoint
+         ]) do
       {:ok, cluster_info} ->
         {:ok, cluster_info}
 
@@ -325,8 +402,15 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp register_service(joining_node, type) do
-    info = ServiceInfo.new(joining_node, type)
+  defp register_service(joining_node, type, data_endpoint) do
+    metadata =
+      if data_endpoint do
+        %{data_endpoint: data_endpoint}
+      else
+        %{}
+      end
+
+    info = ServiceInfo.new(joining_node, type, metadata: metadata)
 
     case ServiceRegistry.register(info) do
       :ok ->
@@ -442,5 +526,18 @@ defmodule NeonFS.Cluster.Join do
         Logger.error("Failed to join Ra cluster: #{inspect(reason)}")
         {:error, {:ra_join_failed, reason}}
     end
+  end
+
+  defp local_data_endpoint do
+    case Process.whereis(Listener) do
+      nil ->
+        nil
+
+      _pid ->
+        port = Listener.get_port()
+        if port > 0, do: PoolManager.advertise_endpoint(port)
+    end
+  rescue
+    _ -> nil
   end
 end

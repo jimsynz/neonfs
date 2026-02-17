@@ -2860,3 +2860,140 @@
   - 2 pre-existing TieringManagerTest failures in neonfs_core are ETS cleanup race conditions in `on_exit` callbacks, not real test failures — these are known flaky teardown issues
   - Integration tests for CA take ~4 minutes per test due to cluster setup/teardown overhead
 ---
+
+## 2026-02-17 - Task 0105: nimble_pool Dependency and Transport.ConnPool
+
+- **Date:** 2026-02-17
+- **Status:** Complete
+- **Phase:** 9 - Data Transfer
+- **Summary:** Added `nimble_pool ~> 1.1` dependency to `neonfs_client` and created `NeonFS.Transport.ConnPool` module implementing the `NimblePool` behaviour. The pool manages persistent TLS connections to a single peer node with async connection establishment, checkout/checkin, health checks via `:ssl.connection_information/1`, and automatic replacement of dead connections. The `execute/3` function implements the checkout-send-recv-checkin pattern using `{packet, 4}` framing and `:erlang.term_to_binary/binary_to_term` serialisation. 13 unit tests cover pool creation, echo send/recv, concurrent requests, recv timeout, checkout timeout on pool exhaustion, dead connection recovery, ping survival, and SSL option defaults.
+- **Files modified:**
+  - `neonfs_client/mix.exs` (modified — added `{:nimble_pool, "~> 1.1"}` dep, `:ssl` to `extra_applications`)
+  - `neonfs_client/lib/neon_fs/transport/conn_pool.ex` (new — NimblePool behaviour with `start_link/1`, `execute/3`, all callbacks)
+  - `neonfs_client/test/neon_fs/transport/conn_pool_test.exs` (new — 13 tests with TLS echo server)
+  - `tasks/task_0105_nimble_pool_and_conn_pool.md` (status → Complete, acceptance criteria checked)
+- **Learnings:**
+  - NimblePool 1.1.0 `checkout!/4` expects arity-2 function `(command, client_state)` and only supports `{result, client_state}` return — no `{:remove, reason, result}` tuple
+  - SSL sockets close when their controlling process exits — async `init_worker` runs in a one-off Task, so must transfer controlling_process to pool_pid before Task returns
+  - `:fail_if_no_peer_cert` is a server-only SSL option; using it in `:ssl.connect` returns `{:error, {:option, :server_only, :fail_if_no_peer_cert}}`
+  - For error handling in NimblePool checkout functions, use pattern match assertions (`:ok = :ssl.send(...)`) which raise `MatchError` — NimblePool's catch block removes the worker automatically
+  - NimblePool exits (not raises) on checkout timeout — use `catch_exit` not `assert_raise`
+---
+
+## 2026-02-17 - Task 0106: Transport.Listener and Transport.Handler
+
+- **Date:** 2026-02-17
+- **Status:** Complete
+- **Phase:** 9 - Data Transfer
+- **Summary:** Created `NeonFS.Transport.Listener` (GenServer), `NeonFS.Transport.Handler` (GenServer, `restart: :temporary`), and `NeonFS.Transport.HandlerSupervisor` (DynamicSupervisor) in `neonfs_client`. The Listener opens a TLS listening socket with mutual TLS, spawns configurable acceptor tasks, and hands accepted connections to Handler processes. The Handler uses `{active, 10}` for backpressure, deserialises inbound messages, and dispatches `put_chunk`, `get_chunk`, and `has_chunk` operations to a configurable dispatch module (defaulting to `NeonFS.Core.BlobStore`). Both components added to `neonfs_core`'s supervision tree after AuditLog and before ServiceRegistry. The Listener gracefully handles missing TLS certificates (starts inactive) to avoid breaking existing integration tests. 16 unit tests (7 handler, 9 listener) including dispatch, connection lifecycle, ssl_passive re-arming, failed handshake resilience, and concurrent connections.
+- **Files modified:**
+  - `neonfs_client/lib/neon_fs/transport/handler_supervisor.ex` (new — DynamicSupervisor for Handler processes)
+  - `neonfs_client/lib/neon_fs/transport/handler.ex` (new — GenServer handling inbound TLS chunk operations)
+  - `neonfs_client/lib/neon_fs/transport/listener.ex` (new — GenServer TLS listener with acceptor tasks)
+  - `neonfs_client/test/support/stub_blob_store.ex` (new — Agent-backed test stub for dispatch_module)
+  - `neonfs_client/test/neon_fs/transport/handler_test.exs` (new — 7 tests)
+  - `neonfs_client/test/neon_fs/transport/listener_test.exs` (new — 9 tests)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (modified — added HandlerSupervisor + Listener to child list)
+  - `tasks/task_0106_transport_listener_and_handler.md` (status → Complete, acceptance criteria checked)
+- **Learnings:**
+  - SSL sockets close when their controlling process exits — client sockets created inside `Task.async` must transfer `controlling_process` to the parent before the Task exits
+  - Handler activation must be deferred: acceptor starts Handler (init stores socket passively), transfers `controlling_process`, then sends `:activate` message — `{active, N}` cannot be set in init because the Handler isn't the controlling process yet
+  - The Listener must handle missing TLS certs gracefully (return inactive state from init) since it's in the supervision tree and existing integration tests don't set up TLS files
+  - `has_chunk` requires a `chunk_info/1` function on the dispatch module that doesn't yet exist in BlobStore — deferred to integration tasks (0109/0110)
+---
+
+## 2026-02-17 - Task 0107: Transport.PoolManager and Endpoint Advertisement
+
+- **Date:** 2026-02-17
+- **Status:** Complete
+- **Phase:** 9 - Data Transfer
+- **Summary:** Created `NeonFS.Transport.PoolManager` (GenServer) and `NeonFS.Transport.PoolSupervisor` (DynamicSupervisor) in `neonfs_client`. PoolManager manages per-peer ConnPool instances, storing pool references in an ETS table (`:neonfs_transport_pools`) for fast concurrent lookups without serialising through the GenServer. Monitors nodes via `:net_kernel.monitor_nodes/1` to remove pools on `:nodedown`, and periodically refreshes peer endpoints from `NeonFS.Client.Discovery` to create/remove pools for appearing/departing peers. `advertise_endpoint/1` constructs `{host, port}` tuples from configured advertise address or auto-detected first non-loopback IPv4 via `:inet.getifaddrs/0`. Both components added to neonfs_core and neonfs_fuse supervision trees. 14 unit tests covering pool lifecycle, crash recovery, nodedown handling, discovery refresh, and endpoint advertisement.
+- **Files modified:**
+  - `neonfs_client/lib/neon_fs/transport/pool_supervisor.ex` (new — DynamicSupervisor for ConnPool instances with explicit child spec)
+  - `neonfs_client/lib/neon_fs/transport/pool_manager.ex` (new — GenServer managing per-peer pools via ETS + monitors)
+  - `neonfs_client/test/neon_fs/transport/pool_manager_test.exs` (new — 14 tests with TLS echo server)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (modified — added PoolSupervisor + PoolManager to child list)
+  - `neonfs_fuse/lib/neon_fs/fuse/supervisor.ex` (modified — added PoolSupervisor + PoolManager to child list)
+  - `tasks/task_0107_transport_pool_manager.md` (status → Complete, acceptance criteria checked)
+- **Learnings:**
+  - ConnPool uses `@behaviour NimblePool` (not `use GenServer`), so it doesn't auto-generate `child_spec/1` — PoolSupervisor must pass an explicit child spec map to `DynamicSupervisor.start_child/2`
+  - `stop_pool` must accept the supervisor as a parameter (not hardcode `PoolSupervisor`) to support test-injected supervisor names
+  - Discovery ETS table name is `:neonfs_client_services` with keys like `{:by_type, type}` — tests can set up mock discovery data by inserting directly into this table
+---
+
+## 2026-02-17 - Task 0108: Router.data_call/4
+
+- **Date:** 2026-02-17
+- **Status:** Complete
+- **Phase:** 9 - Data Transfer
+- **Summary:** Extended `NeonFS.Client.Router` with `data_call/4` for routing chunk data operations over the TLS data plane. Unlike `call/4` which load-balances via CostFunction, `data_call/4` targets an explicit node — chunk placement is determined by the metadata layer. Builds protocol message tuples (`{:put_chunk, ref, ...}`, `{:get_chunk, ref, ...}`, `{:has_chunk, ref, ...}`) with `make_ref()`, sends via `ConnPool.execute/3`, and normalises responses by stripping refs and validating ref matches. Also updated ServiceRegistry self-registration (`handle_continue(:register_self)`) to include `data_endpoint` in metadata when Listener is available, and updated `Cluster.Join` to exchange `data_endpoint` during join flow.
+- **Files modified:**
+  - `neonfs_client/lib/neon_fs/client/router.ex` (modified — added `data_call/4`, `build_data_message/3`, `normalise_data_response/2`)
+  - `neonfs_client/test/neon_fs/client/router_data_call_test.exs` (new — 6 tests with real TLS echo server)
+  - `neonfs_core/lib/neon_fs/core/service_registry.ex` (modified — `build_self_metadata/0` includes data_endpoint from Listener)
+  - `neonfs_core/lib/neon_fs/cluster/join.ex` (modified — `accept_join/5` accepts data_endpoint, `join_cluster/3` sends local data_endpoint)
+  - `tasks/task_0108_router_data_call.md` (status → Complete, acceptance criteria checked)
+- **Learnings:**
+  - Supervisor child ordering matters for data_endpoint: Listener must start before ServiceRegistry so `build_self_metadata()` finds Listener's port during `handle_continue(:register_self)`
+  - Stale Dialyzer PLT requires `--force-check` flag to rebuild after adding new modules — deleting the PLT file alone is not sufficient
+  - `rescue _ -> %{}` pattern is useful for gracefully handling cases where Listener/PoolManager aren't started yet (e.g. test environment)
+---
+
+## 2026-02-17 - Task 0109: Write Path Data Plane Migration
+
+- **Date:** 2026-02-17
+- **Status:** Complete
+- **Phase:** 9 - Data Transfer
+- **Summary:** Migrated chunk replication and erasure-coded stripe distribution from Erlang distribution RPCs to the TLS data plane. `Replication.replicate_to_node/4` now tries `Router.data_call(node, :put_chunk, ...)` first, falling back to `:rpc.call` when no data endpoint is available (returns `{:error, :no_data_endpoint}`). `WriteOperation.write_chunk_to_target/4` similarly tries data_call for remote writes, computing the content hash locally via `Native.compute_hash/1` and building approximate chunk_info since the data plane protocol only returns `:ok`. Local writes remain unchanged (direct BlobStore NIF). Metadata operations (commit, abort, intent log) stay on Erlang distribution. Both `:ok` and `{:error, :already_exists}` responses are treated as success for idempotent writes.
+- **Files modified:**
+  - `neonfs_core/lib/neon_fs/core/replication.ex` (modified — `replicate_to_node` uses data_call with RPC fallback)
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` (modified — `write_chunk_to_target` split into local/remote paths, remote uses data_call with RPC fallback)
+  - `neonfs_core/test/neon_fs/core/replication_data_plane_test.exs` (new — 4 tests: RPC fallback, background replication, data plane put, idempotent writes)
+  - `neonfs_core/test/neon_fs/core/write_operation_data_plane_test.exs` (new — 6 tests: local bypass, erasure single-node, hash consistency, TLS data plane put, configurable timeout)
+  - `tasks/task_0109_write_path_data_plane.md` (status → Complete, acceptance criteria checked)
+- **Learnings:**
+  - The data plane protocol returns `:ok` for put_chunk (not hash/chunk_info), so remote writes must compute the hash locally via `Native.compute_hash/1` and estimate stored_size as `byte_size(data)` with `compression: "none"`
+  - The Handler currently passes `[]` write_opts (no compression/encryption on receive side), so stored_size approximation is reasonable — compression/encryption should happen on the sender before transfer
+  - `result when result in [:ok, {:error, :already_exists}]` guard clause handles both success and idempotent re-write in a single pattern
+---
+
+## 2026-02-17 - Task 0110: Read Path Data Plane Migration
+
+- **Date:** 2026-02-17
+- **Status:** Complete
+- **Phase:** 9 - Data Transfer
+- **Summary:** Migrated remote chunk retrieval from Erlang distribution RPCs to the TLS data plane. `ChunkFetcher` now uses a smart routing approach: uncompressed/unencrypted chunks are fetched via `Router.data_call(node, :get_chunk, ...)` over TLS, while chunks needing decompression or decryption continue to use `:rpc.call` (the data plane returns raw stored bytes without transformation). Falls back to RPC when `data_call` returns `{:error, :no_data_endpoint}` (rolling upgrade compatibility). Extended the Handler's `get_chunk` protocol to accept an optional tier parameter (5-element tuple `{:get_chunk, ref, hash, volume_id, tier}`) for tier-aware reads, with backward-compatible 4-element support. Local reads, cache integration, and location scoring remain unchanged.
+- **Files modified:**
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (modified — `rpc_read_chunk` replaced with `read_remote_chunk` using data_call + RPC fallback, `needs_remote_processing?` check for decompress/decrypt)
+  - `neonfs_client/lib/neon_fs/transport/handler.ex` (modified — added 5-element `get_chunk` dispatch with tier parameter)
+  - `neonfs_client/lib/neon_fs/client/router.ex` (modified — `build_data_message(:get_chunk)` now includes tier in message)
+  - `neonfs_core/test/neon_fs/core/chunk_fetcher_data_plane_test.exs` (new — 11 tests: RPC fallback, compressed chunk RPC path, TLS data plane reads, not_found handling, tier-aware reads, local bypass, location scoring)
+  - `neonfs_client/test/neon_fs/transport/handler_test.exs` (modified — added 5-element get_chunk test)
+  - `neonfs_client/test/neon_fs/client/router_data_call_test.exs` (modified — added 5-element get_chunk handlers)
+  - `neonfs_core/test/neon_fs/core/replication_data_plane_test.exs` (modified — added 5-element get_chunk handler to echo server)
+  - `neonfs_core/test/neon_fs/core/write_operation_data_plane_test.exs` (modified — added 5-element get_chunk handler to echo server)
+  - `tasks/task_0110_read_path_data_plane.md` (status → Complete, acceptance criteria checked)
+- **Learnings:**
+  - The data plane returns raw stored bytes — no decompression or decryption. Chunks needing processing must use RPC (remote-side processing) until a standalone transform NIF is available
+  - The Handler's original `get_chunk` protocol lacked a tier parameter, defaulting to "hot". Extended to 5-element tuple with backward compatibility for non-hot tier reads
+  - Echo servers in all data plane tests must handle both 4-element and 5-element get_chunk tuples after the protocol extension
+---
+
+## 2026-02-18 - Task 0111: Phase 9 Integration Tests
+
+- **Date:** 2026-02-18
+- **Status:** Complete
+- **Phase:** 9 - Data Transfer
+- **Summary:** Created integration tests for the data transfer plane across a 3-node PeerCluster. Nine tests verify endpoint advertisement, pool creation, point-to-point chunk transfer (put/get/has/not_found), replicated volume writes, remote reads, and node failure resilience. Fixed a critical bootstrapping issue: `Listener` starts in the supervisor tree before TLS certs exist (created during cluster_init/join_cluster), causing it to degrade to port=0. Added `Listener.rebind/0` to re-bind with fresh certs, `ServiceRegistry.refresh_self/0` to re-register the data endpoint, and `broadcast_data_endpoint/0` to propagate endpoints to all connected peers. Both `cluster_init` and `join_cluster` now call `activate_data_plane()` after writing TLS certs.
+- **Files modified:**
+  - `neonfs_integration/test/integration/data_transfer_test.exs` (new — 9 integration tests)
+  - `neonfs_client/lib/neon_fs/transport/listener.ex` (modified — added `rebind/0`, stored config in state for rebind, added `close_listener/1`)
+  - `neonfs_core/lib/neon_fs/core/service_registry.ex` (modified — added `refresh_self/0` and `handle_cast(:refresh_self)`)
+  - `neonfs_core/lib/neon_fs/cluster/init.ex` (modified — added `activate_data_plane/0` and `broadcast_data_endpoint/0`)
+  - `neonfs_core/lib/neon_fs/cluster/join.ex` (modified — added `activate_data_plane/0` and `broadcast_data_endpoint/0`)
+- **Learnings:**
+  - Listener starts before TLS certs exist — needs a rebind mechanism after certs are written by cluster_init/join_cluster
+  - ServiceRegistry.refresh_self only updates local ETS + Ra (which may timeout during joins). Must also broadcast the updated endpoint directly to connected peers via RPC
+  - Discovery refreshes every 5s, PoolManager every 30s — after endpoint propagation, pools appear within ~35s (test timeout 60s is sufficient)
+  - Integration test sync_data_endpoints helper ensures all nodes know about each other's endpoints before waiting for pools
+---

@@ -18,6 +18,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   All events include metadata with operation details.
   """
 
+  alias NeonFS.Client.Router
   alias NeonFS.Core.{BlobStore, ChunkAccessTracker, ChunkCache, ChunkIndex, DriveRegistry}
   require Logger
 
@@ -237,7 +238,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   defp try_fetch_from_location(location, hash, tier, read_opts, cache_remote) do
     drive_id = Map.get(location, :drive_id, "default")
 
-    case rpc_read_chunk(location.node, hash, drive_id, tier, read_opts) do
+    case read_remote_chunk(location.node, hash, drive_id, tier, read_opts) do
       {:ok, data} ->
         maybe_cache_remotely_fetched_chunk(hash, data, tier, cache_remote)
         {:ok, data, {:remote, location.node}}
@@ -305,8 +306,41 @@ defmodule NeonFS.Core.ChunkFetcher do
     ]
   end
 
+  defp read_remote_chunk(node, hash, drive_id, tier, read_opts) do
+    if needs_remote_processing?(read_opts) do
+      # Chunks needing decompression or decryption must use RPC because
+      # the data plane returns raw stored bytes without transformation
+      rpc_read_chunk(node, hash, drive_id, tier, read_opts)
+    else
+      data_call_read_chunk(node, hash, drive_id, tier, read_opts)
+    end
+  end
+
+  defp needs_remote_processing?(read_opts) do
+    Keyword.get(read_opts, :decompress, false) or
+      Keyword.get(read_opts, :key, <<>>) != <<>>
+  end
+
+  defp data_call_read_chunk(node, hash, drive_id, tier, read_opts) do
+    case Router.data_call(node, :get_chunk, [hash: hash, volume_id: drive_id, tier: tier],
+           timeout: 10_000
+         ) do
+      {:ok, data} ->
+        {:ok, data}
+
+      {:error, :no_data_endpoint} ->
+        Logger.info("No data endpoint for #{node}, falling back to distribution RPC for read")
+        rpc_read_chunk(node, hash, drive_id, tier, read_opts)
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp rpc_read_chunk(node, hash, drive_id, tier, read_opts) do
-    # Use :rpc to call BlobStore.read_chunk_with_options on the remote node
     case :rpc.call(
            node,
            BlobStore,

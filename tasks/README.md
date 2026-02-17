@@ -174,12 +174,24 @@ ECDSA P-256 CA stored in the system volume. Nodes receive certificates via CSR d
 
 See [spec/cluster-ca.md](../spec/cluster-ca.md).
 
-### Phase 9: Data Transfer (Future)
+### Phase 9: Data Transfer (Tasks 0105-0111)
 **Goal:** Out-of-band data plane separating bulk chunk traffic from Erlang distribution
 
 TLS data plane using `:ssl` with `{packet, 4}` framing and `nimble_pool` connection pooling. Chunk replication and retrieval migrated from distribution to the data plane.
 
-Task specifications not yet written. See [spec/data-transfer.md](../spec/data-transfer.md).
+| Task | Description |
+|------|-------------|
+| 0105 | nimble_pool dependency and Transport.ConnPool (NimblePool behaviour) |
+| 0106 | Transport.Listener and Transport.Handler (inbound connection handling) |
+| 0107 | Transport.PoolManager and endpoint advertisement (per-peer pool lifecycle) |
+| 0108 | Router.data_call/4 (data plane routing + ServiceRegistry integration) |
+| 0109 | Write path data plane migration (replication + stripe distribution) |
+| 0110 | Read path data plane migration (remote chunk retrieval) |
+| 0111 | Phase 9 integration tests |
+
+**Milestone:** Chunk data separated from control plane, cluster stable under sustained bulk transfer, Ra consensus unaffected by large file writes
+
+See [spec/data-transfer.md](../spec/data-transfer.md).
 
 ### Phase 10: Event Notification (Future)
 **Goal:** Push-based cache invalidation for interface nodes
@@ -450,9 +462,35 @@ Full dependency graph:
                                                                     │
 0104 (integration tests) ◀────────────────────────────────────────┘
 
-Phase 9 → 10 (task numbers TBD):
+Phase 9 Data Transfer:
 
-Phase 9 (Data Transfer) ◀── Phase 8 (Cluster CA)
+Parallel starting points (2 independent streams):
+
+Stream A — Outbound connection pool:
+0105 (ConnPool)
+
+Stream B — Inbound connection handling:
+0106 (Listener + Handler)
+
+Convergence:
+0107 (PoolManager)         ◀── 0105
+0108 (Router.data_call)    ◀── 0107
+
+Migration (parallel after 0108):
+0109 (write path)          ◀── 0108
+0110 (read path)           ◀── 0108
+
+0111 (integration tests)   ◀── all Phase 9 tasks (0105–0110)
+
+Full dependency graph:
+
+0105 (ConnPool) ──▶ 0107 (PoolManager) ──▶ 0108 (data_call) ──┬──▶ 0109 (write path)
+                                                                │
+0106 (Listener + Handler)                                       └──▶ 0110 (read path)
+
+0111 (integration tests) ◀── all tasks 0105–0110
+
+Phase 9 → 10:
 
 Phase 10 (Event Notification) — no hard dependency on 7-9, sequenced after for practical reasons
 ```
@@ -489,6 +527,7 @@ Some task chains can be worked on in parallel:
 - **Phase 6** has 3 independent starting points: 0067 (encryption NIF), 0068 (encryption types), 0069 (ACL types) can all start in parallel; two main chains converge at CLI (0078): encryption chain (0067 → 0072 → 0073 → 0074) and ACL chain (0069 → 0075 → 0076)
 - **Phase 7** is mostly sequential: 0092 (Volume struct) must come first, then 0093 (SystemVolume API) and 0095 (join replication) can start in parallel; 0094 (cluster init) and 0096 (log retention) follow 0093; critical path is 0092 → 0093 → 0094 → 0097
 - **Phase 8** has 1 starting point: 0098 (TLS module) must come first, then 0099 (CA + init), 0101 (renewal), 0102 (revocation) can start in parallel; 0100 (join certs) follows 0099; 0103 (CLI) needs 0099 + 0100 + 0102; critical path is 0098 → 0099 → 0100 → 0103 → 0104
+- **Phase 9** has 2 independent starting points: 0105 (ConnPool) and 0106 (Listener + Handler) can start in parallel; 0107 (PoolManager) follows 0105; 0108 (data_call) follows 0107; then 0109 (write path) and 0110 (read path) can be done in parallel; critical path is 0105 → 0107 → 0108 → 0109 → 0111
 - **Phases 7 → 8 → 9** are strictly sequential: System Volume → Cluster CA → Data Transfer (each depends on the previous)
 - **Phase 10** (Event Notification) has no dependency on Phases 7-9 and could theoretically be developed in parallel, but is sequenced after them for practical reasons
 

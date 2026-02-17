@@ -4,13 +4,21 @@ defmodule NeonFS.Client.Router do
 
   Uses `CostFunction` for node selection and includes retry + failover
   to the next-best node on `:badrpc`.
+
+  Also provides `data_call/4` for routing chunk data operations over
+  the TLS data plane (Phase 9), using per-peer connection pools managed
+  by `NeonFS.Transport.PoolManager`.
   """
 
   require Logger
 
   alias NeonFS.Client.{CostFunction, Discovery}
+  alias NeonFS.Transport.{ConnPool, PoolManager}
 
   @max_retries 2
+  @default_data_timeout 30_000
+
+  @type data_operation :: :put_chunk | :get_chunk | :has_chunk
 
   @doc """
   Routes a call to the cheapest available core node.
@@ -24,6 +32,52 @@ defmodule NeonFS.Client.Router do
   end
 
   @doc """
+  Routes a chunk data operation to a specific node over the TLS data plane.
+
+  Unlike `call/4` which uses CostFunction to select the best node,
+  `data_call/4` targets an explicit node — chunk placement is determined
+  by the metadata layer.
+
+  ## Operations
+
+    * `:put_chunk` — `args`: `[hash: h, volume_id: v, write_id: w, tier: t, data: d]`
+    * `:get_chunk` — `args`: `[hash: h, volume_id: v]`
+    * `:has_chunk` — `args`: `[hash: h]`
+
+  ## Options
+
+    * `:timeout` — checkout/recv timeout in ms (default: 30_000)
+
+  ## Returns
+
+    * `:ok` — put_chunk success
+    * `{:ok, chunk_bytes}` — get_chunk success
+    * `{:ok, %{tier: tier, size: size}}` — has_chunk found
+    * `{:error, :no_data_endpoint}` — no pool exists for target node
+    * `{:error, :ref_mismatch}` — response ref doesn't match request
+    * `{:error, reason}` — remote error
+  """
+  @spec data_call(node(), data_operation(), keyword(), keyword()) ::
+          :ok | {:ok, term()} | {:error, term()}
+  def data_call(node, operation, args, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, @default_data_timeout)
+
+    case PoolManager.get_pool(node) do
+      {:ok, pool} ->
+        ref = make_ref()
+        message = build_data_message(operation, ref, args)
+        execute_opts = [timeout: timeout, recv_timeout: timeout]
+
+        pool
+        |> ConnPool.execute(message, execute_opts)
+        |> normalise_data_response(ref)
+
+      {:error, :no_pool} ->
+        {:error, :no_data_endpoint}
+    end
+  end
+
+  @doc """
   Routes a metadata call, preferring the Ra leader when possible.
   """
   @spec metadata_call(module(), atom(), [term()]) :: term()
@@ -31,7 +85,41 @@ defmodule NeonFS.Client.Router do
     do_call(module, function, args, 10_000, @max_retries, prefer_leader: true)
   end
 
-  ## Private helpers
+  ## Private helpers — data_call
+
+  defp build_data_message(:put_chunk, ref, args) do
+    {:put_chunk, ref, args[:hash], args[:volume_id], args[:write_id], args[:tier], args[:data]}
+  end
+
+  defp build_data_message(:get_chunk, ref, args) do
+    {:get_chunk, ref, args[:hash], args[:volume_id], Keyword.get(args, :tier, "hot")}
+  end
+
+  defp build_data_message(:has_chunk, ref, args) do
+    {:has_chunk, ref, args[:hash]}
+  end
+
+  defp normalise_data_response({:ok, ref}, expected_ref) when ref == expected_ref, do: :ok
+
+  defp normalise_data_response({:ok, ref, data}, expected_ref) when ref == expected_ref,
+    do: {:ok, data}
+
+  defp normalise_data_response({:ok, ref, tier, size}, expected_ref) when ref == expected_ref,
+    do: {:ok, %{tier: tier, size: size}}
+
+  defp normalise_data_response({:error, ref, reason}, expected_ref) when ref == expected_ref,
+    do: {:error, reason}
+
+  defp normalise_data_response({:ok, _wrong_ref}, _expected_ref), do: {:error, :ref_mismatch}
+  defp normalise_data_response({:ok, _wrong_ref, _}, _expected_ref), do: {:error, :ref_mismatch}
+
+  defp normalise_data_response({:ok, _wrong_ref, _, _}, _expected_ref),
+    do: {:error, :ref_mismatch}
+
+  defp normalise_data_response({:error, _wrong_ref, _}, _expected_ref),
+    do: {:error, :ref_mismatch}
+
+  ## Private helpers — call/metadata_call
 
   defp do_call(_module, _function, _args, _timeout, 0, _opts) do
     {:error, :all_nodes_unreachable}

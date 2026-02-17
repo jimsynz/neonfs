@@ -13,6 +13,7 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   alias NeonFS.Client.{ServiceInfo, ServiceType}
   alias NeonFS.Core.{RaServer, RaSupervisor}
+  alias NeonFS.Transport.{Listener, PoolManager}
 
   ## Client API
 
@@ -30,6 +31,17 @@ defmodule NeonFS.Core.ServiceRegistry do
   @spec deregister(node()) :: :ok | {:error, term()}
   def deregister(node) do
     GenServer.call(__MODULE__, {:deregister, node}, 10_000)
+  end
+
+  @doc """
+  Re-registers this node's service info with updated metadata.
+
+  Call this after TLS certificates are written and `Listener.rebind/0`
+  succeeds, so the new data transfer endpoint is advertised.
+  """
+  @spec refresh_self() :: :ok
+  def refresh_self do
+    GenServer.cast(__MODULE__, :refresh_self)
   end
 
   @doc """
@@ -122,7 +134,8 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @impl true
   def handle_continue(:register_self, state) do
-    info = ServiceInfo.new(Node.self(), :core)
+    metadata = build_self_metadata()
+    info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
     new_state = do_register(info, state)
     {:noreply, new_state}
   end
@@ -132,6 +145,14 @@ defmodule NeonFS.Core.ServiceRegistry do
     Logger.info("ServiceRegistry shutting down, deregistering self")
     remove_from_ets(Node.self())
     :ok
+  end
+
+  @impl true
+  def handle_cast(:refresh_self, state) do
+    metadata = build_self_metadata()
+    info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
+    new_state = do_register(info, state)
+    {:noreply, new_state}
   end
 
   @impl true
@@ -167,6 +188,25 @@ defmodule NeonFS.Core.ServiceRegistry do
   end
 
   ## Private helpers
+
+  defp build_self_metadata do
+    case Process.whereis(Listener) do
+      nil ->
+        %{}
+
+      _pid ->
+        port = Listener.get_port()
+
+        if port > 0 do
+          endpoint = PoolManager.advertise_endpoint(port)
+          %{data_endpoint: endpoint}
+        else
+          %{}
+        end
+    end
+  rescue
+    _ -> %{}
+  end
 
   defp do_register(info, state) do
     info_map = ServiceInfo.to_map(info)
