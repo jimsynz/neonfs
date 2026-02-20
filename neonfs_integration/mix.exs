@@ -2,7 +2,7 @@ defmodule NeonFS.Integration.MixProject do
   use Mix.Project
 
   @moduledoc """
-  TODO: Write a description!
+  Multi-node integration test suite for NeonFS.
   """
   @version "0.1.0"
 

@@ -2,7 +2,7 @@ defmodule NeonFS.FUSE.MixProject do
   use Mix.Project
 
   @moduledoc """
-  TODO: Write a description!
+  FUSE filesystem interface for NeonFS.
   """
   @version "0.1.0"
 

@@ -2,7 +2,7 @@ defmodule NeonFS.Core.MixProject do
   use Mix.Project
 
   @moduledoc """
-  TODO: Write a description!
+  Storage engine, metadata management, and cluster coordination for NeonFS.
   """
   @version "0.1.0"
 
