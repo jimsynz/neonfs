@@ -1,11 +1,11 @@
 defmodule NeonFS.Core.TopologyTest do
   use ExUnit.Case, async: false
+  use NeonFS.TestCase
 
   alias NeonFS.Core.{Drive, DriveRegistry, Topology}
 
   setup do
-    # Ensure a DriveRegistry is running with our test drives.
-    ensure_registry_with_drives([
+    start_drive_registry_with_drives([
       %{id: "nvme0", path: "/tmp/test_nvme0", tier: :hot, capacity: 1_000_000_000},
       %{id: "sata0", path: "/tmp/test_sata0", tier: :cold, capacity: 4_000_000_000}
     ])
@@ -13,18 +13,23 @@ defmodule NeonFS.Core.TopologyTest do
     :ok
   end
 
-  defp ensure_registry_with_drives(drives_config) do
-    case GenServer.whereis(DriveRegistry) do
-      nil ->
-        {:ok, _pid} = DriveRegistry.start_link(drives: drives_config, sync_interval_ms: 0)
-
-      _pid ->
-        :ets.delete_all_objects(:drive_registry)
-
-        drives_config
-        |> Enum.map(&Drive.from_config(&1, Node.self()))
-        |> Enum.each(&DriveRegistry.register_drive/1)
+  defp start_drive_registry_with_drives(drives_config) do
+    case Process.whereis(DriveRegistry) do
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal, 5000)
     end
+
+    Process.sleep(10)
+
+    case :ets.whereis(:drive_registry) do
+      :undefined -> :ok
+      ref -> :ets.delete(ref)
+    end
+
+    start_supervised!(
+      {DriveRegistry, drives: drives_config, sync_interval_ms: 0},
+      restart: :temporary
+    )
   end
 
   describe "available_tiers/0" do

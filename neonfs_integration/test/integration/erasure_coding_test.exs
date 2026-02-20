@@ -17,10 +17,28 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
+
+  setup_all %{cluster: cluster} do
+    :ok = init_single_node_cluster(cluster, name: "ec-test")
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        "ec-volume",
+        %{"durability" => "erasure:2:1"}
+      ])
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        "rep-volume",
+        %{"durability" => "replicate:1"}
+      ])
+
+    %{}
+  end
+
   describe "erasure write and read" do
     test "write file to erasure volume and read back", %{cluster: cluster} do
-      :ok = init_erasure_cluster(cluster)
-
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
@@ -43,8 +61,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
     end
 
     test "small file on erasure volume (single partial stripe)", %{cluster: cluster} do
-      :ok = init_erasure_cluster(cluster)
-
       # Small file — only one partial stripe with 2+1 config
       test_data = :crypto.strong_rand_bytes(512)
 
@@ -66,8 +82,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
     end
 
     test "large file spanning multiple stripes", %{cluster: cluster} do
-      :ok = init_erasure_cluster(cluster)
-
       # Large file: will span multiple stripes
       test_data = :crypto.strong_rand_bytes(100 * 1024)
 
@@ -104,8 +118,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
   describe "degraded read" do
     test "read succeeds with one chunk missing (within parity tolerance)", %{cluster: cluster} do
-      :ok = init_erasure_cluster(cluster)
-
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
@@ -135,8 +147,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
     end
 
     test "read fails when too many chunks missing", %{cluster: cluster} do
-      :ok = init_erasure_cluster(cluster)
-
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
@@ -170,8 +180,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
   describe "stripe repair" do
     test "repair restores degraded stripe", %{cluster: cluster} do
-      :ok = init_erasure_cluster(cluster)
-
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
@@ -205,14 +213,26 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   end
 
   describe "garbage collection" do
-    test "GC cleans up erasure-coded file chunks and stripes", %{cluster: cluster} do
-      :ok = init_erasure_cluster(cluster)
+    @describetag cluster_mode: :per_test
 
+    setup %{cluster: cluster} do
+      :ok = init_single_node_cluster(cluster, name: "gc-ec-test")
+
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+          "gc-ec-volume",
+          %{"durability" => "erasure:2:1"}
+        ])
+
+      %{}
+    end
+
+    test "GC cleans up erasure-coded file chunks and stripes", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "ec-volume",
+          "gc-ec-volume",
           "/gc-test.bin",
           test_data
         ])
@@ -226,7 +246,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
       # Delete the file
       PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :delete_file, [
-        "ec-volume",
+        "gc-ec-volume",
         "/gc-test.bin"
       ])
 
@@ -251,8 +271,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
   describe "mixed cluster" do
     test "replicated and erasure volumes coexist", %{cluster: cluster} do
-      :ok = init_mixed_cluster(cluster)
-
       rep_data = :crypto.strong_rand_bytes(2048)
       ec_data = :crypto.strong_rand_bytes(2048)
 
@@ -291,8 +309,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
   describe "CLI handler" do
     test "create volume with erasure durability string", %{cluster: cluster} do
-      init_cluster_base(cluster)
-
       {:ok, volume} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
           "cli-ec-vol",
@@ -302,53 +318,5 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       assert volume.durability == %{type: :erasure, data_chunks: 4, parity_chunks: 2}
       assert volume.durability_display == "erasure:4+2 (1.50x overhead)"
     end
-  end
-
-  # ─── Helpers ──────────────────────────────────────────────────────────
-
-  defp init_cluster_base(cluster) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["ec-test"])
-
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-  end
-
-  defp init_erasure_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
-        "ec-volume",
-        %{"durability" => "erasure:2:1"}
-      ])
-
-    :ok
-  end
-
-  defp init_mixed_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
-        "rep-volume",
-        %{"durability" => "replicate:1"}
-      ])
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
-        "ec-volume",
-        %{"durability" => "erasure:2:1"}
-      ])
-
-    :ok
   end
 end

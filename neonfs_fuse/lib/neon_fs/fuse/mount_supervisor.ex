@@ -36,6 +36,17 @@ defmodule NeonFS.FUSE.MountSupervisor do
   end
 
   @doc """
+  Start a MetadataCache process for a mount under supervision.
+
+  Returns `{:ok, pid}` on success, `{:error, reason}` on failure.
+  """
+  @spec start_cache(keyword()) :: DynamicSupervisor.on_start_child()
+  def start_cache(cache_opts) do
+    child_spec = {NeonFS.FUSE.MetadataCache, cache_opts}
+    DynamicSupervisor.start_child(__MODULE__, child_spec)
+  end
+
+  @doc """
   Stop a handler process.
 
   Returns `:ok` on success, `{:error, :not_found}` if not found.
@@ -43,6 +54,16 @@ defmodule NeonFS.FUSE.MountSupervisor do
   @spec stop_handler(pid()) :: :ok | {:error, :not_found}
   def stop_handler(handler_pid) when is_pid(handler_pid) do
     DynamicSupervisor.terminate_child(__MODULE__, handler_pid)
+  end
+
+  @doc """
+  Stop a cache process.
+
+  Returns `:ok` on success, `{:error, :not_found}` if not found.
+  """
+  @spec stop_cache(pid()) :: :ok | {:error, :not_found}
+  def stop_cache(cache_pid) when is_pid(cache_pid) do
+    DynamicSupervisor.terminate_child(__MODULE__, cache_pid)
   end
 
   @impl true

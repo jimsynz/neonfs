@@ -340,29 +340,19 @@ defmodule NeonFS.CLI.Handler do
     uid = Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :gids, [])
 
-    case VolumeRegistry.get_by_name(name) do
-      {:ok, volume} ->
-        with :ok <- Authorise.check(uid, gids, :admin, {:volume, volume.id}) do
-          case VolumeRegistry.delete(volume.id) do
-            :ok ->
-              cleanup_volume_acl(volume.id)
+    with {:ok, volume} <- VolumeRegistry.get_by_name(name),
+         :ok <- Authorise.check(uid, gids, :admin, {:volume, volume.id}),
+         :ok <- VolumeRegistry.delete(volume.id) do
+      cleanup_volume_acl(volume.id)
 
-              AuditLog.log_event(
-                event_type: :volume_deleted,
-                actor_uid: uid,
-                resource: volume.id,
-                details: %{name: name}
-              )
+      AuditLog.log_event(
+        event_type: :volume_deleted,
+        actor_uid: uid,
+        resource: volume.id,
+        details: %{name: name}
+      )
 
-              {:ok, %{}}
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, %{}}
     end
   end
 

@@ -50,8 +50,7 @@ defmodule NeonFS.Core.ReplicationDataPlaneTest do
         Replication.replicate_chunk(chunk_hash, chunk_data, volume_no_exclude, exclude_nodes: [])
 
       # Should succeed: data_call fails (no pool), falls back to RPC to self
-      assert {:ok, locations} = result
-      assert locations != []
+      assert {:ok, [_ | _] = locations} = result
       assert Enum.any?(locations, &(&1.node == Node.self()))
     end
 
@@ -66,8 +65,9 @@ defmodule NeonFS.Core.ReplicationDataPlaneTest do
       chunk_hash = :crypto.hash(:sha256, chunk_data)
 
       # Should return immediately with local location
-      assert {:ok, locations} = Replication.replicate_chunk(chunk_hash, chunk_data, volume)
-      assert locations != []
+      assert {:ok, [_ | _] = locations} =
+               Replication.replicate_chunk(chunk_hash, chunk_data, volume)
+
       assert Enum.any?(locations, &(&1.node == Node.self()))
     end
   end

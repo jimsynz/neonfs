@@ -255,24 +255,31 @@ defmodule NeonFS.Core.QuorumCoordinator do
     remaining_ms = deadline - System.monotonic_time(:millisecond)
 
     if remaining_ms <= 0 do
-      for task <- remaining_tasks, do: Task.shutdown(task, :brutal_kill)
-      results ++ List.duplicate({:error, :timeout}, length(remaining_tasks))
+      shutdown_remaining(remaining_tasks, results)
     else
-      poll_ms = min(100, remaining_ms)
-      batch = Task.yield_many(remaining_tasks, timeout: poll_ms)
-
-      {yielded, still_pending} = Enum.split_with(batch, fn {_t, r} -> r != nil end)
-      new_results = Enum.map(yielded, &extract_yield_result/1)
-      all_results = results ++ new_results
-      pending_tasks = Enum.map(still_pending, fn {task, nil} -> task end)
-
-      if satisfied?.(all_results, length(pending_tasks)) or pending_tasks == [] do
-        for task <- pending_tasks, do: Task.shutdown(task, :brutal_kill)
-        all_results ++ List.duplicate({:error, :timeout}, length(pending_tasks))
-      else
-        collect_until_satisfied(pending_tasks, satisfied?, all_results, deadline)
-      end
+      poll_and_collect(remaining_tasks, satisfied?, results, deadline, remaining_ms)
     end
+  end
+
+  defp poll_and_collect(remaining_tasks, satisfied?, results, deadline, remaining_ms) do
+    poll_ms = min(100, remaining_ms)
+    batch = Task.yield_many(remaining_tasks, timeout: poll_ms)
+
+    {yielded, still_pending} = Enum.split_with(batch, fn {_t, r} -> r != nil end)
+    new_results = Enum.map(yielded, &extract_yield_result/1)
+    all_results = results ++ new_results
+    pending_tasks = Enum.map(still_pending, fn {task, nil} -> task end)
+
+    if satisfied?.(all_results, length(pending_tasks)) or pending_tasks == [] do
+      shutdown_remaining(pending_tasks, all_results)
+    else
+      collect_until_satisfied(pending_tasks, satisfied?, all_results, deadline)
+    end
+  end
+
+  defp shutdown_remaining(tasks, results) do
+    Enum.each(tasks, &Task.shutdown(&1, :brutal_kill))
+    results ++ List.duplicate({:error, :timeout}, length(tasks))
   end
 
   defp extract_yield_result({_task, {:ok, result}}), do: result

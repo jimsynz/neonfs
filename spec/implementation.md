@@ -139,7 +139,7 @@ Deliverables:
 
 **Milestone:** Chunk data separated from control plane, cluster stable under sustained bulk transfer, Ra consensus unaffected by large file writes
 
-### Phase 10: Event Notification
+### Phase 10: Event Notification (Tasks 0112-0118)
 
 **Goal:** Push-based cache invalidation for interface nodes
 

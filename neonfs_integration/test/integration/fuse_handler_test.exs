@@ -9,21 +9,14 @@ defmodule NeonFS.Integration.FuseHandlerTest do
 
   @moduletag timeout: 120_000
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.FUSE.{Handler, InodeTable}
 
-  setup %{cluster: cluster} do
-    # Initialise the cluster and create a test volume
+  setup_all %{cluster: cluster} do
     {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
-    :ok =
-      wait_until(fn ->
-        case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-          {:ok, _status} -> true
-          _ -> false
-        end
-      end)
+    :ok = wait_for_cluster_stable(cluster)
 
     {:ok, volume_map} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
@@ -31,8 +24,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         %{}
       ])
 
-    volume_id = volume_map[:id]
+    %{volume_id: volume_map[:id]}
+  end
 
+  setup %{cluster: cluster, volume_id: volume_id} do
     # Start client infrastructure on the test runner, pointing at the core peer
     core_node = PeerCluster.get_node!(cluster, :node1).node
 
@@ -62,14 +57,14 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         timeout: 10_000
       )
 
-    # Start a handler for testing
-    {:ok, handler} = Handler.start_link(volume: volume_id)
+    # Start a handler for testing with test_notify so we can assert_receive
+    {:ok, handler} = Handler.start_link(volume: volume_id, test_notify: self())
 
     on_exit(fn ->
       if Process.alive?(handler), do: GenServer.stop(handler)
     end)
 
-    {:ok, handler: handler, volume_id: volume_id, cluster: cluster}
+    {:ok, handler: handler}
   end
 
   describe "lookup operation" do
@@ -82,9 +77,7 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       ])
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "test.txt"}}})
-
-      :ok =
-        wait_until(fn -> match?({:ok, _}, InodeTable.get_inode(volume_id, "/test.txt")) end)
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
 
       {:ok, inode} = InodeTable.get_inode(volume_id, "/test.txt")
       assert inode > 1
@@ -92,7 +85,7 @@ defmodule NeonFS.Integration.FuseHandlerTest do
 
     test "returns error for nonexistent file", %{handler: handler, volume_id: volume_id} do
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "missing.txt"}}})
-      :timer.sleep(200)
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 2}}}, 5_000
 
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/missing.txt")
     end
@@ -101,7 +94,7 @@ defmodule NeonFS.Integration.FuseHandlerTest do
   describe "getattr operation" do
     test "gets attributes for root directory", %{handler: handler} do
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => 1}}})
-      :timer.sleep(200)
+      assert_receive {:fuse_op_complete, 1, {"attr_ok", _}}, 5_000
 
       # Root should always exist
       assert {:ok, {nil, "/"}} = InodeTable.get_path(1)
@@ -116,9 +109,7 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "new.txt", "mode" => 0o644}}}
       )
 
-      # Wait for create to complete
-      :ok =
-        wait_until(fn -> match?({:ok, _}, InodeTable.get_inode(volume_id, "/new.txt")) end)
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
 
       # Verify inode was allocated
       {:ok, inode} = InodeTable.get_inode(volume_id, "/new.txt")
@@ -129,11 +120,11 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         {:fuse_op, 2, {"write", %{"ino" => inode, "offset" => 0, "data" => "hello world"}}}
       )
 
-      :timer.sleep(200)
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
 
       # Read the data back
       send(handler, {:fuse_op, 3, {"read", %{"ino" => inode, "offset" => 0, "size" => 100}}})
-      :timer.sleep(200)
+      assert_receive {:fuse_op_complete, 3, {"read_ok", _}}, 5_000
     end
   end
 
@@ -145,9 +136,7 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "docs", "mode" => 0o755}}}
       )
 
-      # Wait for mkdir to complete (inode allocated)
-      :ok =
-        wait_until(fn -> match?({:ok, _}, InodeTable.get_inode(volume_id, "/docs")) end)
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
 
       {:ok, dir_inode} = InodeTable.get_inode(volume_id, "/docs")
 
@@ -158,15 +147,11 @@ defmodule NeonFS.Integration.FuseHandlerTest do
          {"create", %{"parent" => dir_inode, "name" => "readme.md", "mode" => 0o644}}}
       )
 
-      # Wait for create to complete
-      :ok =
-        wait_until(fn ->
-          match?({:ok, _}, InodeTable.get_inode(volume_id, "/docs/readme.md"))
-        end)
+      assert_receive {:fuse_op_complete, 2, {"entry_ok", _}}, 5_000
 
       # List the directory
       send(handler, {:fuse_op, 3, {"readdir", %{"ino" => dir_inode, "offset" => 0}}})
-      :timer.sleep(200)
+      assert_receive {:fuse_op_complete, 3, {"readdir_ok", _}}, 5_000
 
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/docs/readme.md")
     end
@@ -178,20 +163,17 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "file1.txt", "mode" => 0o644}}}
       )
 
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+
       send(
         handler,
         {:fuse_op, 2, {"create", %{"parent" => 1, "name" => "file2.txt", "mode" => 0o644}}}
       )
 
-      # Wait for both creates to complete (queued sequentially in the handler)
-      :ok =
-        wait_until(fn ->
-          match?({:ok, _}, InodeTable.get_inode(volume_id, "/file1.txt")) and
-            match?({:ok, _}, InodeTable.get_inode(volume_id, "/file2.txt"))
-        end)
+      assert_receive {:fuse_op_complete, 2, {"entry_ok", _}}, 5_000
 
       send(handler, {:fuse_op, 3, {"readdir", %{"ino" => 1, "offset" => 0}}})
-      :timer.sleep(200)
+      assert_receive {:fuse_op_complete, 3, {"readdir_ok", _}}, 5_000
 
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/file1.txt")
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/file2.txt")
@@ -210,12 +192,9 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/delete_me.txt")
 
       send(handler, {:fuse_op, 1, {"unlink", %{"parent" => 1, "name" => "delete_me.txt"}}})
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
 
-      # Wait for inode to be released
-      :ok =
-        wait_until(fn ->
-          match?({:error, :not_found}, InodeTable.get_inode(volume_id, "/delete_me.txt"))
-        end)
+      assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/delete_me.txt")
     end
 
     test "deletes empty directory", %{handler: handler, volume_id: volume_id, cluster: cluster} do
@@ -230,12 +209,9 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/empty_dir")
 
       send(handler, {:fuse_op, 1, {"rmdir", %{"parent" => 1, "name" => "empty_dir"}}})
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
 
-      # Wait for inode to be released
-      :ok =
-        wait_until(fn ->
-          match?({:error, :not_found}, InodeTable.get_inode(volume_id, "/empty_dir"))
-        end)
+      assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/empty_dir")
     end
   end
 
@@ -262,19 +238,17 @@ defmodule NeonFS.Integration.FuseHandlerTest do
           }}}
       )
 
-      # Wait for rename to complete
-      :ok =
-        wait_until(fn ->
-          match?({:error, :not_found}, InodeTable.get_inode(volume_id, "/old_name.txt")) and
-            match?({:ok, _}, InodeTable.get_inode(volume_id, "/new_name.txt"))
-        end)
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/old_name.txt")
+      assert {:ok, _} = InodeTable.get_inode(volume_id, "/new_name.txt")
     end
   end
 
   describe "error handling" do
     test "handles unknown operations gracefully", %{handler: handler} do
       send(handler, {:fuse_op, 1, {"unknown_op", %{}}})
-      :timer.sleep(100)
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 38}}}, 5_000
 
       # Should log warning and return ENOSYS — handler stays alive
       assert Process.alive?(handler)

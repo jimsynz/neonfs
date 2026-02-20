@@ -7,12 +7,12 @@ variable "TAG" {
 }
 
 variable "PLATFORMS" {
-  default = ["linux/amd64", "linux/arm64"]
+  default = "linux/amd64,linux/arm64"
 }
 
 target "base" {
   dockerfile = "containers/Containerfile.base"
-  platforms  = [for platform in PLATFORMS: "${platform}"]
+  platforms  = split(",", PLATFORMS)
   tags       = ["forgejo.dmz/project-neon/neonfs/base:${TAG}"]
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/base:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG},mode=max"]
@@ -20,7 +20,7 @@ target "base" {
 
 target "dev" {
   dockerfile = "containers/Containerfile.dev"
-  platforms  = [for platform in PLATFORMS: "${platform}"]
+  platforms  = split(",", PLATFORMS)
   tags       = ["forgejo.dmz/project-neon/neonfs/dev:${TAG}"]
   contexts = {
     "base": "target:base"
@@ -31,7 +31,7 @@ target "dev" {
 
 target "core" {
   dockerfile = "containers/Containerfile.core"
-  platforms  = [for platform in PLATFORMS: "${platform}"]
+  platforms  = split(",", PLATFORMS)
   tags       = ["forgejo.dmz/project-neon/neonfs/core:${TAG}"]
   contexts = {
     "client": "./neonfs_client"
@@ -44,7 +44,7 @@ target "core" {
 
 target "fuse" {
   dockerfile = "containers/Containerfile.fuse"
-  platforms  = [for platform in PLATFORMS: "${platform}"]
+  platforms  = split(",", PLATFORMS)
   tags       = ["forgejo.dmz/project-neon/neonfs/fuse:${TAG}"]
   contexts = {
     "client": "./neonfs_client"
@@ -57,7 +57,7 @@ target "fuse" {
 
 target "cli" {
   dockerfile = "containers/Containerfile.cli"
-  platforms  = [for platform in PLATFORMS: "${platform}"]
+  platforms  = split(",", PLATFORMS)
   tags       = ["forgejo.dmz/project-neon/neonfs/cli:${TAG}"]
   contexts = {
     "src": "./neonfs-cli"

@@ -193,12 +193,24 @@ TLS data plane using `:ssl` with `{packet, 4}` framing and `nimble_pool` connect
 
 See [spec/data-transfer.md](../spec/data-transfer.md).
 
-### Phase 10: Event Notification (Future)
+### Phase 10: Event Notification (Tasks 0112-0118)
 **Goal:** Push-based cache invalidation for interface nodes
 
-Two-layer dispatch (`:pg` cross-node relay + `Registry` local fan-out). Struct-based events for file content, attributes, ACLs, directories, and volumes. Partition recovery with debounced invalidation.
+Two-layer dispatch (`:pg` cross-node relay + `Registry` local fan-out). Struct-based events for file content, attributes, ACLs, directories, and volumes. Partition recovery with debounced invalidation. No new dependencies — uses OTP built-in `:pg` and `Registry`.
 
-Task specifications not yet written. See [spec/pubsub.md](../spec/pubsub.md).
+| Task | Description |
+|------|-------------|
+| 0112 | Event structs and Envelope (14 event types + wrapper) |
+| 0113 | Subscription API, Relay, and Registry (subscribe/unsubscribe + two-layer dispatch) |
+| 0114 | Broadcaster and sequence counters (event emission + per-volume atomics counters) |
+| 0115 | Core metadata event emission (instrument FileIndex, VolumeRegistry, ACLManager) |
+| 0116 | Partition recovery (cache invalidation on reconnect with debouncing) |
+| 0117 | FUSE metadata cache with event-driven invalidation |
+| 0118 | Phase 10 integration tests |
+
+**Milestone:** Interface nodes receive push-based metadata invalidation, reduced RPC round-trips for cached metadata, correct behaviour across partitions
+
+See [spec/pubsub.md](../spec/pubsub.md).
 
 ### Phase 11: APIs and Integration (Future)
 **Goal:** S3, Docker, CIFS, CSI access methods
@@ -493,6 +505,33 @@ Full dependency graph:
 Phase 9 → 10:
 
 Phase 10 (Event Notification) — no hard dependency on 7-9, sequenced after for practical reasons
+
+Phase 10 Event Notification:
+
+Parallel starting points (2 independent streams after 0112):
+
+Stream A — Subscription (receiving side):
+0112 (event structs) ──▶ 0113 (subscription + Relay)
+
+Stream B — Broadcasting (sending side):
+0112 (event structs) ──▶ 0114 (Broadcaster)
+
+Convergence:
+0115 (event emission)    ◀── 0114
+0116 (partition recovery) ◀── 0113
+0117 (FUSE cache)        ◀── 0113 + 0115
+
+0118 (integration tests) ◀── all Phase 10 tasks (0112–0117)
+
+Full dependency graph:
+
+0112 (event structs) ──┬──▶ 0113 (subscription + Relay) ──┬──▶ 0116 (partition recovery)
+                       │                                    │
+                       └──▶ 0114 (Broadcaster) ──▶ 0115 (event emission)
+                                                           │
+                                         0117 (FUSE cache) ◀── 0113 + 0115
+                                                           │
+                                         0118 (integration) ◀── all tasks 0112–0117
 ```
 
 ## Task Status Values
@@ -529,7 +568,7 @@ Some task chains can be worked on in parallel:
 - **Phase 8** has 1 starting point: 0098 (TLS module) must come first, then 0099 (CA + init), 0101 (renewal), 0102 (revocation) can start in parallel; 0100 (join certs) follows 0099; 0103 (CLI) needs 0099 + 0100 + 0102; critical path is 0098 → 0099 → 0100 → 0103 → 0104
 - **Phase 9** has 2 independent starting points: 0105 (ConnPool) and 0106 (Listener + Handler) can start in parallel; 0107 (PoolManager) follows 0105; 0108 (data_call) follows 0107; then 0109 (write path) and 0110 (read path) can be done in parallel; critical path is 0105 → 0107 → 0108 → 0109 → 0111
 - **Phases 7 → 8 → 9** are strictly sequential: System Volume → Cluster CA → Data Transfer (each depends on the previous)
-- **Phase 10** (Event Notification) has no dependency on Phases 7-9 and could theoretically be developed in parallel, but is sequenced after them for practical reasons
+- **Phase 10** has 1 starting point: 0112 (event structs) must come first, then 0113 (subscription + Relay) and 0114 (Broadcaster) can start in parallel; 0115 (event emission) follows 0114; 0116 (partition recovery) follows 0113; 0117 (FUSE cache) needs 0113 + 0115; critical path is 0112 → 0114 → 0115 → 0117 → 0118. Phase 10 has no hard dependency on Phases 7-9 but is sequenced after them for practical reasons
 
 ## Adding New Tasks
 

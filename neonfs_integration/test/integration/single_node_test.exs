@@ -15,10 +15,15 @@ defmodule NeonFS.Integration.SingleNodeTest do
 
   @moduletag timeout: 120_000
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
+
+  setup_all %{cluster: cluster} do
+    init_cluster_with_volume(cluster)
+    %{}
+  end
+
   describe "file operations" do
     test "write and read file", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       # Write test data
       test_data = :crypto.strong_rand_bytes(100 * 1024)
 
@@ -43,8 +48,6 @@ defmodule NeonFS.Integration.SingleNodeTest do
     end
 
     test "partial file reads work correctly", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       # Write test data
       test_data = :crypto.strong_rand_bytes(1024)
 
@@ -99,8 +102,6 @@ defmodule NeonFS.Integration.SingleNodeTest do
     end
 
     test "multiple files in directory structure", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       # Write multiple files including subdirectories
       files = [
         {"/file1.txt", "Hello World"},
@@ -142,8 +143,6 @@ defmodule NeonFS.Integration.SingleNodeTest do
     end
 
     test "large file chunking and reassembly", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       # Write large file (> 1MB to trigger chunking)
       test_data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
 
@@ -171,15 +170,13 @@ defmodule NeonFS.Integration.SingleNodeTest do
 
   describe "volume statistics" do
     test "volume statistics are tracked correctly", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
-      # Check initial volume stats
+      # Capture volume stats before writing
       {:ok, volume_before} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :get_volume, ["test-volume"])
 
-      assert volume_before[:logical_size] == 0
-      assert volume_before[:physical_size] == 0
-      assert volume_before[:chunk_count] == 0
+      assert is_integer(volume_before[:logical_size])
+      assert is_integer(volume_before[:physical_size])
+      assert is_integer(volume_before[:chunk_count])
 
       # Write some data
       test_data = :crypto.strong_rand_bytes(10 * 1024)
@@ -199,16 +196,21 @@ defmodule NeonFS.Integration.SingleNodeTest do
       assert is_integer(volume_after[:physical_size])
       assert is_integer(volume_after[:chunk_count])
 
-      # Stats should have increased
-      assert volume_after[:logical_size] > 0
-      assert volume_after[:chunk_count] > 0
+      # Stats should have increased after write
+      assert volume_after[:logical_size] > volume_before[:logical_size]
+      assert volume_after[:chunk_count] > volume_before[:chunk_count]
     end
   end
 
   describe "persistence" do
-    test "data persists across application restart", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
+    @describetag cluster_mode: :per_test
 
+    setup %{cluster: cluster} do
+      init_cluster_with_volume(cluster)
+      %{}
+    end
+
+    test "data persists across application restart", %{cluster: cluster} do
       # Write test data
       test_data = :crypto.strong_rand_bytes(50 * 1024)
 

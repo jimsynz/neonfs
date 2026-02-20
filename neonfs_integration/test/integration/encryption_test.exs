@@ -18,11 +18,56 @@ defmodule NeonFS.Integration.EncryptionTest do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
+
+  setup_all %{cluster: cluster} do
+    :ok = init_single_node_cluster(cluster, name: "enc-test")
+
+    # Encrypted volume (no compression — avoids compression+encryption interaction)
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [
+        "enc-volume",
+        [
+          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
+          compression: %{algorithm: :none}
+        ]
+      ])
+
+    {:ok, enc_vol} =
+      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, ["enc-volume"])
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, KeyManager, :setup_volume_encryption, [enc_vol.id])
+
+    # Plain volume for mixed-mode test
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        "plain-volume",
+        %{}
+      ])
+
+    # Encrypted + erasure-coded volume
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [
+        "enc-ec-volume",
+        [
+          durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1},
+          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
+          compression: %{algorithm: :none}
+        ]
+      ])
+
+    {:ok, enc_ec_vol} =
+      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, ["enc-ec-volume"])
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, KeyManager, :setup_volume_encryption, [enc_ec_vol.id])
+
+    %{}
+  end
 
   describe "encrypted volume round-trip" do
     test "create encrypted volume, write file, read back", %{cluster: cluster} do
-      :ok = init_encrypted_cluster(cluster)
-
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
@@ -45,8 +90,6 @@ defmodule NeonFS.Integration.EncryptionTest do
     end
 
     test "raw encrypted chunk is not plaintext", %{cluster: cluster} do
-      :ok = init_encrypted_cluster(cluster)
-
       # Use recognisable pattern data so we can detect if it's stored in plaintext
       test_data = String.duplicate("PLAINTEXT_MARKER_DATA_", 200)
 
@@ -76,8 +119,6 @@ defmodule NeonFS.Integration.EncryptionTest do
 
   describe "mixed encryption modes" do
     test "unencrypted and encrypted volumes coexist", %{cluster: cluster} do
-      :ok = init_mixed_encryption_cluster(cluster)
-
       plain_data = :crypto.strong_rand_bytes(2048)
       secret_data = :crypto.strong_rand_bytes(2048)
 
@@ -116,8 +157,6 @@ defmodule NeonFS.Integration.EncryptionTest do
 
   describe "encrypted erasure-coded volume" do
     test "write and read with encryption + erasure coding", %{cluster: cluster} do
-      :ok = init_encrypted_erasure_cluster(cluster)
-
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
@@ -140,8 +179,6 @@ defmodule NeonFS.Integration.EncryptionTest do
     end
 
     test "degraded read with decryption succeeds", %{cluster: cluster} do
-      :ok = init_encrypted_erasure_cluster(cluster)
-
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
@@ -173,8 +210,6 @@ defmodule NeonFS.Integration.EncryptionTest do
 
   describe "CLI handler" do
     test "create volume with --encryption server-side via handler", %{cluster: cluster} do
-      init_cluster_base(cluster)
-
       {:ok, volume} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
           "cli-enc-vol",
@@ -185,115 +220,11 @@ defmodule NeonFS.Integration.EncryptionTest do
     end
 
     test "volume info shows encryption status", %{cluster: cluster} do
-      :ok = init_encrypted_cluster(cluster)
-
       {:ok, volume_info} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :get_volume, ["enc-volume"])
 
       assert volume_info[:encryption][:mode] in [:server_side, "server_side"]
       assert is_integer(volume_info[:encryption][:current_key_version])
     end
-  end
-
-  # ─── Helpers ──────────────────────────────────────────────────────────
-
-  defp init_cluster_base(cluster) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["enc-test"])
-
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-  end
-
-  defp init_encrypted_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    # Create encrypted volume directly via VolumeRegistry to set compression: none
-    # This avoids compression+encryption interaction issues in round-trip tests
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [
-        "enc-volume",
-        [
-          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
-          compression: %{algorithm: :none}
-        ]
-      ])
-
-    {:ok, volume} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, [
-        "enc-volume"
-      ])
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, KeyManager, :setup_volume_encryption, [
-        volume.id
-      ])
-
-    :ok
-  end
-
-  defp init_mixed_encryption_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
-        "plain-volume",
-        %{}
-      ])
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [
-        "enc-volume",
-        [
-          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
-          compression: %{algorithm: :none}
-        ]
-      ])
-
-    {:ok, volume} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, [
-        "enc-volume"
-      ])
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, KeyManager, :setup_volume_encryption, [
-        volume.id
-      ])
-
-    :ok
-  end
-
-  defp init_encrypted_erasure_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [
-        "enc-ec-volume",
-        [
-          durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1},
-          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
-          compression: %{algorithm: :none}
-        ]
-      ])
-
-    {:ok, volume} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, [
-        "enc-ec-volume"
-      ])
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, KeyManager, :setup_volume_encryption, [
-        volume.id
-      ])
-
-    :ok
   end
 end

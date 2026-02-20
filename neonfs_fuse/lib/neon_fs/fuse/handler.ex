@@ -28,7 +28,7 @@ defmodule NeonFS.FUSE.Handler do
   import Bitwise
   require Logger
 
-  alias NeonFS.FUSE.{InodeTable, Native}
+  alias NeonFS.FUSE.{InodeTable, MetadataCache, Native}
 
   @default_volume "default"
 
@@ -50,6 +50,8 @@ defmodule NeonFS.FUSE.Handler do
   - `:volume` - Volume ID to use for this mount (default: "default")
   - `:mount_id` - Mount ID for logging purposes
   - `:name` - Optional name for registration (default: no registration)
+  - `:cache_table` - ETS table reference for MetadataCache (default: nil)
+  - `:test_notify` - Pid to notify when operations complete (test only)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -68,10 +70,20 @@ defmodule NeonFS.FUSE.Handler do
     uid = Keyword.get(opts, :uid, 0)
     gid = Keyword.get(opts, :gid, 0)
     gids = Keyword.get(opts, :gids, [])
+    cache_table = Keyword.get(opts, :cache_table)
 
     Logger.info("FUSE Handler started (volume: #{volume})")
 
-    {:ok, %{fuse_server: fuse_server, volume: volume, uid: uid, gid: gid, gids: gids}}
+    {:ok,
+     %{
+       fuse_server: fuse_server,
+       volume: volume,
+       uid: uid,
+       gid: gid,
+       gids: gids,
+       cache_table: cache_table,
+       test_notify: Keyword.get(opts, :test_notify)
+     }}
   end
 
   @impl true
@@ -82,6 +94,10 @@ defmodule NeonFS.FUSE.Handler do
 
     if state.fuse_server do
       Native.reply_fuse_operation(state.fuse_server, request_id, reply)
+    end
+
+    if state.test_notify do
+      send(state.test_notify, {:fuse_op_complete, request_id, reply})
     end
 
     {:noreply, state}
@@ -96,7 +112,7 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, file} <- file_index_get_by_path(volume_id, child_path) do
+         {:ok, file} <- cached_lookup(state.cache_table, volume_id, parent_path, name, child_path) do
       {:ok, inode} = InodeTable.allocate_inode(volume_id, file.path)
 
       {"lookup_ok", %{"ino" => inode, "size" => file.size, "kind" => file_kind(file.mode)}}
@@ -115,7 +131,7 @@ defmodule NeonFS.FUSE.Handler do
     ino = params["ino"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, file} <- fetch_file_or_root(volume_id, path) do
+         {:ok, file} <- cached_getattr(state.cache_table, volume_id, path) do
       {"attr_ok", %{"ino" => ino, "size" => file.size, "kind" => file_kind(file.mode)}}
     else
       {:error, :not_found} ->
@@ -180,7 +196,7 @@ defmodule NeonFS.FUSE.Handler do
     ino = params["ino"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
-         {:ok, entries} <- list_directory(volume_id, path) do
+         {:ok, entries} <- cached_readdir(state.cache_table, volume_id, path) do
       result_entries =
         Enum.map(entries, fn {name, child_path, mode} ->
           {:ok, child_inode} = InodeTable.allocate_inode(volume_id, child_path)
@@ -388,6 +404,68 @@ defmodule NeonFS.FUSE.Handler do
   defp handle_operation({operation, _params}, _state) do
     Logger.warning("Unknown FUSE operation: #{operation}")
     {"error", %{"errno" => errno(:enosys)}}
+  end
+
+  # Cache-aware lookup: check cache first, fall through to RPC on miss
+  defp cached_lookup(nil, volume_id, _parent_path, _name, child_path) do
+    file_index_get_by_path(volume_id, child_path)
+  end
+
+  defp cached_lookup(cache_table, volume_id, parent_path, name, child_path) do
+    case MetadataCache.get_lookup(cache_table, volume_id, parent_path, name) do
+      {:ok, file} ->
+        {:ok, file}
+
+      :miss ->
+        case file_index_get_by_path(volume_id, child_path) do
+          {:ok, file} = result ->
+            MetadataCache.put_lookup(cache_table, volume_id, parent_path, name, file)
+            MetadataCache.put_attrs(cache_table, volume_id, file.path, file)
+            result
+
+          error ->
+            error
+        end
+    end
+  end
+
+  # Cache-aware getattr: check cache first, fall through to RPC on miss
+  defp cached_getattr(nil, volume_id, path) do
+    fetch_file_or_root(volume_id, path)
+  end
+
+  defp cached_getattr(cache_table, volume_id, path) do
+    case MetadataCache.get_attrs(cache_table, volume_id, path) do
+      {:ok, file} ->
+        {:ok, file}
+
+      :miss ->
+        case fetch_file_or_root(volume_id, path) do
+          {:ok, file} = result ->
+            MetadataCache.put_attrs(cache_table, volume_id, path, file)
+            result
+
+          error ->
+            error
+        end
+    end
+  end
+
+  # Cache-aware readdir: check cache first, fall through to RPC on miss
+  defp cached_readdir(nil, volume_id, path) do
+    list_directory(volume_id, path)
+  end
+
+  defp cached_readdir(cache_table, volume_id, path) do
+    case MetadataCache.get_dir_listing(cache_table, volume_id, path) do
+      {:ok, entries} ->
+        {:ok, entries}
+
+      :miss ->
+        {:ok, entries} = list_directory(volume_id, path)
+        MetadataCache.put_dir_listing(cache_table, volume_id, path, entries)
+        {:ok, entries}
+    end
   end
 
   # Resolve inode to {volume_id, path}

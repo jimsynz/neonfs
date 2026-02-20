@@ -15,6 +15,7 @@ defmodule NeonFS.Integration.QuorumTest do
   @moduletag timeout: 300_000
   @moduletag :integration
   @moduletag nodes: 3
+  @moduletag cluster_mode: :shared
 
   # RPC timeout for use inside retry loops. Must be large enough for a cold-cache
   # read_file (two quorum reads + RPC chunk fetch ≈ 21s worst case). With 30s per
@@ -22,61 +23,66 @@ defmodule NeonFS.Integration.QuorumTest do
   # the second (if needed) completes quickly.
   @retry_rpc_timeout 30_000
 
+  setup_all %{cluster: cluster} do
+    :ok = init_multi_node_cluster(cluster, name: "quorum-test")
+    verify_all_quorum_rings(cluster)
+    sync_drive_registries(cluster)
+    %{}
+  end
+
   describe "multi-node quorum consistency" do
     test "write on one node, read from another", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "consistency-vol")
+      :ok = init_quorum_cluster(cluster, "consistency-vol")
+
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "consistency-vol"
+        ])
 
       test_data = :crypto.strong_rand_bytes(4096)
 
+      # Subscribe on node2, write on node1, wait for event to prove replication
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "consistency-vol",
-          "/quorum.bin",
-          test_data
-        ])
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "consistency-vol",
+              "/quorum.bin",
+              test_data
+            ])
+          end,
+          timeout: 15_000
+        )
 
       assert file.size == byte_size(test_data)
-      file_id = file.id
 
-      # Read from node2 (metadata via quorum, chunk data fetched via RPC from node1)
-      assert_eventually timeout: 60_000 do
-        result =
-          PeerCluster.rpc(
-            cluster,
-            :node2,
-            NeonFS.TestHelpers,
-            :read_file,
-            [
-              "consistency-vol",
-              "/quorum.bin"
-            ],
-            @retry_rpc_timeout
-          )
+      # Event proved replication — read from node2
+      {:ok, read_data} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+          "consistency-vol",
+          "/quorum.bin"
+        ])
 
-        match?({:ok, ^test_data}, result)
-      end
+      assert read_data == test_data
 
-      # Verify file metadata accessible from node3 via quorum
-      assert_eventually timeout: 60_000 do
-        result =
-          PeerCluster.rpc(
-            cluster,
-            :node3,
-            NeonFS.TestHelpers,
-            :get_file,
-            [
-              "consistency-vol",
-              "/quorum.bin"
-            ],
-            @retry_rpc_timeout
-          )
+      # File metadata accessible from node3 via quorum
+      {:ok, file_from_node3} =
+        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :get_file, [
+          "consistency-vol",
+          "/quorum.bin"
+        ])
 
-        match?({:ok, %{id: ^file_id}}, result)
-      end
+      assert file_from_node3.id == file.id
     end
 
     test "multiple files readable from all nodes", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "multi-vol")
+      :ok = init_quorum_cluster(cluster, "multi-vol")
+
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, ["multi-vol"])
 
       files = [
         {"/file1.txt", "content one"},
@@ -84,67 +90,72 @@ defmodule NeonFS.Integration.QuorumTest do
         {"/docs/readme.md", "# README"}
       ]
 
+      # Write each file and wait for replication event on node2
       for {path, content} <- files do
         {:ok, _} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-            "multi-vol",
-            path,
-            content
-          ])
+          subscribe_then_act(
+            cluster,
+            :node2,
+            volume.id,
+            fn ->
+              PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+                "multi-vol",
+                path,
+                content
+              ])
+            end,
+            timeout: 15_000
+          )
       end
 
-      # Verify all files readable from node2
+      # Events proved replication — all files readable from node2
       for {path, expected} <- files do
-        assert_eventually timeout: 60_000 do
-          case PeerCluster.rpc(
-                 cluster,
-                 :node2,
-                 NeonFS.TestHelpers,
-                 :read_file,
-                 [
-                   "multi-vol",
-                   path
-                 ],
-                 @retry_rpc_timeout
-               ) do
-            {:ok, ^expected} -> true
-            _ -> false
-          end
-        end
+        {:ok, data} =
+          PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+            "multi-vol",
+            path
+          ])
+
+        assert data == expected
       end
     end
   end
 
   describe "node failure during quorum operation" do
+    @describetag cluster_mode: :per_test
+
+    setup %{cluster: cluster} do
+      :ok = init_multi_node_cluster(cluster, name: "quorum-test")
+      verify_all_quorum_rings(cluster)
+      sync_drive_registries(cluster)
+      %{}
+    end
+
     test "quorum of 2 still works when one node fails", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "failure-vol")
+      :ok = init_quorum_cluster(cluster, "failure-vol")
+
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "failure-vol"
+        ])
 
       test_data = "data before failure"
 
+      # Subscribe on node2, write on node1, wait for replication event
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "failure-vol",
-          "/before.txt",
-          test_data
-        ])
-
-      # Wait for data to be readable from node2 before killing node3
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node2,
-               NeonFS.TestHelpers,
-               :read_file,
-               [
-                 "failure-vol",
-                 "/before.txt"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, ^test_data} -> true
-          _ -> false
-        end
-      end
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "failure-vol",
+              "/before.txt",
+              test_data
+            ])
+          end,
+          timeout: 15_000
+        )
 
       # Stop node3
       :ok = PeerCluster.stop_node(cluster, :node3)
@@ -182,7 +193,7 @@ defmodule NeonFS.Integration.QuorumTest do
 
   describe "read repair" do
     test "stale replica repaired after quorum read", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "repair-vol")
+      :ok = init_quorum_cluster(cluster, "repair-vol")
 
       # Get the quorum ring to find segment and replicas for a test key
       quorum_opts =
@@ -255,55 +266,50 @@ defmodule NeonFS.Integration.QuorumTest do
 
   describe "full write/read/delete cycle on multi-node cluster" do
     test "complete file lifecycle across nodes", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "lifecycle-vol")
+      :ok = init_quorum_cluster(cluster, "lifecycle-vol")
+
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "lifecycle-vol"
+        ])
 
       test_data = :crypto.strong_rand_bytes(8192)
 
-      # Write from node1
+      # Subscribe on node2, write on node1, wait for replication event
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "lifecycle-vol",
-          "/lifecycle.bin",
-          test_data
-        ])
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "lifecycle-vol",
+              "/lifecycle.bin",
+              test_data
+            ])
+          end,
+          timeout: 15_000
+        )
 
       assert file.size == byte_size(test_data)
 
-      # Read from node2
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node2,
-               NeonFS.TestHelpers,
-               :read_file,
-               [
-                 "lifecycle-vol",
-                 "/lifecycle.bin"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, ^test_data} -> true
-          _ -> false
-        end
-      end
+      # Event proved replication — read from node2
+      {:ok, data_node2} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+          "lifecycle-vol",
+          "/lifecycle.bin"
+        ])
 
-      # Read from node3 as well
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node3,
-               NeonFS.TestHelpers,
-               :read_file,
-               [
-                 "lifecycle-vol",
-                 "/lifecycle.bin"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, ^test_data} -> true
-          _ -> false
-        end
-      end
+      assert data_node2 == test_data
+
+      # Read from node3 via quorum
+      {:ok, data_node3} =
+        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :read_file, [
+          "lifecycle-vol",
+          "/lifecycle.bin"
+        ])
+
+      assert data_node3 == test_data
 
       # Delete from node2
       assert_eventually timeout: 30_000 do
@@ -347,13 +353,7 @@ defmodule NeonFS.Integration.QuorumTest do
 
   # ─── Helpers ──────────────────────────────────────────────────────────
 
-  defp init_multi_node_cluster(cluster, volume_name) do
-    token = init_cluster_and_invite(cluster)
-    join_all_nodes(cluster, token)
-    wait_for_full_connectivity(cluster)
-    rebuild_and_verify_quorum_rings(cluster)
-    sync_drive_registries(cluster)
-
+  defp init_quorum_cluster(cluster, volume_name) do
     {:ok, _} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         volume_name,
@@ -363,69 +363,9 @@ defmodule NeonFS.Integration.QuorumTest do
     :ok
   end
 
-  defp init_cluster_and_invite(cluster) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["quorum-test"])
-
-    {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
-
-    token
-  end
-
-  defp join_all_nodes(cluster, token) do
-    node1_str = cluster |> PeerCluster.get_node!(:node1) |> Map.get(:node) |> Atom.to_string()
-
-    # Join nodes sequentially with waits between — Ra rejects concurrent cluster changes
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node2, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    :ok = wait_for_cluster_stable(cluster)
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node3, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    :ok = wait_for_cluster_stable(cluster)
-  end
-
-  defp wait_for_cluster_stable(cluster) do
-    wait_until(
-      fn ->
-        match?(
-          {:ok, _},
-          PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, [])
-        )
-      end,
-      timeout: 10_000
-    )
-  end
-
-  defp wait_for_full_connectivity(cluster) do
-    # Wait for ALL peer nodes to see each other AND have MetadataStore running.
-    # discover_core_nodes() filters Node.list() by MetadataStore presence,
-    # so the ring will be incomplete if MetadataStore isn't ready on all peers.
-    peer_nodes = Enum.map([:node1, :node2, :node3], &PeerCluster.get_node!(cluster, &1).node)
-
-    assert_eventually timeout: 30_000 do
-      Enum.all?(peer_nodes, &node_fully_connected?(&1, peer_nodes))
-    end
-  end
-
-  defp node_fully_connected?(peer, all_peer_nodes) do
-    node_list = :rpc.call(peer, Node, :list, [])
-    other_peers = Enum.filter(node_list, &(&1 in all_peer_nodes))
-    has_enough_peers = length(other_peers) >= 2
-    has_metadata_store = is_pid(:rpc.call(peer, Process, :whereis, [NeonFS.Core.MetadataStore]))
-    has_enough_peers and has_metadata_store
-  end
-
-  defp rebuild_and_verify_quorum_rings(cluster) do
-    for node_name <- [:node1, :node2, :node3] do
-      PeerCluster.rpc(cluster, node_name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
-    end
-
-    for node_name <- [:node1, :node2, :node3] do
-      verify_quorum_ring(cluster, node_name)
+  defp verify_all_quorum_rings(cluster) do
+    for node_info <- cluster.nodes do
+      verify_quorum_ring(cluster, node_info.name)
     end
   end
 

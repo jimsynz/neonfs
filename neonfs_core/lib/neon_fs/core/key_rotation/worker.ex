@@ -43,32 +43,19 @@ defmodule NeonFS.Core.KeyRotation.Worker do
           "#{total} chunks, v#{old_version} → v#{new_version}"
       )
 
+      rotation_ctx = %{
+        volume_id: volume_id,
+        old_key: old_key,
+        new_key: new_key,
+        new_version: new_version,
+        delay_per_chunk: delay_per_chunk,
+        total: total
+      }
+
       result =
         chunks
         |> Enum.chunk_every(batch_size)
-        |> Enum.reduce_while({0, :ok}, fn batch, {migrated, :ok} ->
-          case process_batch(batch, volume_id, old_key, new_key, new_version, delay_per_chunk) do
-            {:ok, batch_count} ->
-              new_migrated = migrated + batch_count
-              update_progress(volume_id, total, new_migrated)
-
-              :telemetry.execute(
-                [:neonfs, :rotation, :progress],
-                %{migrated: new_migrated, total: total},
-                %{volume_id: volume_id}
-              )
-
-              {:cont, {new_migrated, :ok}}
-
-            {:error, reason} ->
-              Logger.error(
-                "Key rotation failed for volume #{volume_id} " <>
-                  "at chunk #{migrated}: #{inspect(reason)}"
-              )
-
-              {:halt, {migrated, {:error, reason}}}
-          end
-        end)
+        |> Enum.reduce_while({0, :ok}, &rotate_batch(&1, &2, rotation_ctx))
 
       case result do
         {_migrated, :ok} ->
@@ -87,6 +74,37 @@ defmodule NeonFS.Core.KeyRotation.Worker do
   end
 
   # Private
+
+  defp rotate_batch(batch, {migrated, :ok}, ctx) do
+    case process_batch(
+           batch,
+           ctx.volume_id,
+           ctx.old_key,
+           ctx.new_key,
+           ctx.new_version,
+           ctx.delay_per_chunk
+         ) do
+      {:ok, batch_count} ->
+        new_migrated = migrated + batch_count
+        update_progress(ctx.volume_id, ctx.total, new_migrated)
+
+        :telemetry.execute(
+          [:neonfs, :rotation, :progress],
+          %{migrated: new_migrated, total: ctx.total},
+          %{volume_id: ctx.volume_id}
+        )
+
+        {:cont, {new_migrated, :ok}}
+
+      {:error, reason} ->
+        Logger.error(
+          "Key rotation failed for volume #{ctx.volume_id} " <>
+            "at chunk #{migrated}: #{inspect(reason)}"
+        )
+
+        {:halt, {migrated, {:error, reason}}}
+    end
+  end
 
   defp chunks_needing_rotation(volume_id, old_version) do
     ChunkIndex.get_chunks_for_volume(volume_id)

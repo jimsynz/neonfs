@@ -14,10 +14,15 @@ defmodule NeonFS.Integration.Phase3Test do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
+
+  setup_all %{cluster: cluster} do
+    init_cluster_with_volume(cluster)
+    %{}
+  end
+
   describe "tiering lifecycle" do
     test "writes land on hot tier by default", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       # Write test data
       test_data = :crypto.strong_rand_bytes(1024)
 
@@ -43,8 +48,6 @@ defmodule NeonFS.Integration.Phase3Test do
     end
 
     test "read data is correct after write", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       test_data = :crypto.strong_rand_bytes(10 * 1024)
 
       {:ok, _file} =
@@ -64,8 +67,6 @@ defmodule NeonFS.Integration.Phase3Test do
     end
 
     test "chunk access tracking records accesses", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, file} =
@@ -94,8 +95,6 @@ defmodule NeonFS.Integration.Phase3Test do
     end
 
     test "tiering manager evaluation completes without error", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       # Trigger manual evaluation
       result =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.TieringManager, :evaluate_now, [])
@@ -107,8 +106,6 @@ defmodule NeonFS.Integration.Phase3Test do
     end
 
     test "background worker accepts and completes work", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       # Submit work via BackgroundWorker
       # Use an external function reference since anonymous fns can't cross RPC
       # (the defining module doesn't exist on the peer node)
@@ -133,8 +130,6 @@ defmodule NeonFS.Integration.Phase3Test do
     end
 
     test "local tier migration moves chunk between tiers", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, file} =
@@ -175,8 +170,6 @@ defmodule NeonFS.Integration.Phase3Test do
     end
 
     test "cache hit telemetry on repeated reads", %{cluster: cluster} do
-      :ok = init_cluster_with_volume(cluster)
-
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, _file} =
@@ -260,29 +253,6 @@ defmodule NeonFS.Integration.Phase3Test do
   # Helpers
 
   defp init_cluster_with_volume(cluster) do
-    # Initialize cluster (Ra)
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
-    # Wait for cluster to be ready
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-
-    # Create test volume via CLI handler (accepts map config)
-    {:ok, _volume} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
-        "test-volume",
-        %{}
-      ])
-
-    :ok
+    init_single_node_cluster(cluster, volumes: [{"test-volume", %{}}])
   end
 end

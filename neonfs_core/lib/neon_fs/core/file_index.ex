@@ -31,6 +31,17 @@ defmodule NeonFS.Core.FileIndex do
     QuorumCoordinator
   }
 
+  alias NeonFS.Events.Broadcaster
+
+  alias NeonFS.Events.{
+    DirCreated,
+    DirRenamed,
+    FileContentUpdated,
+    FileCreated,
+    FileDeleted,
+    FileRenamed
+  }
+
   @type file_id :: String.t()
   @type volume_id :: String.t()
   @type path :: String.t()
@@ -312,6 +323,13 @@ defmodule NeonFS.Core.FileIndex do
              quorum_add_dir_child(file.volume_id, parent_path, name, :file, file.id, quorum_opts) do
         complete_intent(intent_id)
         :ets.insert(:file_index_by_id, {file.id, file})
+
+        safe_broadcast(file.volume_id, %FileCreated{
+          volume_id: file.volume_id,
+          file_id: file.id,
+          path: file.path
+        })
+
         {:ok, file}
       else
         {:error, :conflict, _existing} ->
@@ -335,6 +353,13 @@ defmodule NeonFS.Core.FileIndex do
         case quorum_write_file(updated_file, quorum_opts) do
           :ok ->
             :ets.insert(:file_index_by_id, {file_id, updated_file})
+
+            safe_broadcast(updated_file.volume_id, %FileContentUpdated{
+              volume_id: updated_file.volume_id,
+              file_id: file_id,
+              path: updated_file.path
+            })
+
             {:ok, updated_file}
 
           {:error, reason} ->
@@ -369,6 +394,13 @@ defmodule NeonFS.Core.FileIndex do
                quorum_remove_dir_child(file.volume_id, parent_path, name, quorum_opts) do
           complete_intent(intent_id)
           :ets.delete(:file_index_by_id, file_id)
+
+          safe_broadcast(file.volume_id, %FileDeleted{
+            volume_id: file.volume_id,
+            file_id: file_id,
+            path: file.path
+          })
+
           :ok
         else
           {:error, reason} -> {:error, reason}
@@ -394,6 +426,7 @@ defmodule NeonFS.Core.FileIndex do
          :ok <- ensure_parent_dirs(volume_id, parent_path, quorum_opts),
          :ok <- quorum_write_dir_entry(new_dir, quorum_opts),
          :ok <- quorum_add_dir_child(volume_id, parent_path, name, :dir, dir_id, quorum_opts) do
+      safe_broadcast(volume_id, %DirCreated{volume_id: volume_id, path: normalized})
       {:ok, new_dir}
     end
   end
@@ -406,18 +439,12 @@ defmodule NeonFS.Core.FileIndex do
   defp do_rename(volume_id, parent_path, old_name, new_name, quorum_opts) do
     normalized = FileMeta.normalize_path(parent_path)
 
-    case read_dir_entry(volume_id, normalized) do
-      {:ok, dir_entry} ->
-        case DirectoryEntry.rename_child(dir_entry, old_name, new_name) do
-          {:ok, updated_entry} ->
-            quorum_write_dir_entry(updated_entry, quorum_opts)
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, dir_entry} <- read_dir_entry(volume_id, normalized),
+         child_result = DirectoryEntry.get_child(dir_entry, old_name),
+         {:ok, updated_entry} <- DirectoryEntry.rename_child(dir_entry, old_name, new_name),
+         :ok <- quorum_write_dir_entry(updated_entry, quorum_opts) do
+      broadcast_rename_event(volume_id, child_result, normalized, old_name, new_name)
+      :ok
     end
   end
 
@@ -457,6 +484,9 @@ defmodule NeonFS.Core.FileIndex do
              quorum_opts
            ) do
       complete_intent(intent_id)
+
+      broadcast_move_event(volume_id, child, source_normalized, dest_normalized, name)
+
       :ok
     else
       {:error, reason} -> {:error, reason}
@@ -687,6 +717,69 @@ defmodule NeonFS.Core.FileIndex do
   catch
     :exit, _ -> :ok
   end
+
+  ## Private — Event broadcasting
+
+  defp safe_broadcast(volume_id, event) do
+    Broadcaster.broadcast(volume_id, event)
+  rescue
+    _ ->
+      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      :ok
+  catch
+    :exit, _ ->
+      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      :ok
+  end
+
+  defp broadcast_rename_event(volume_id, {:ok, child}, parent_path, old_name, new_name) do
+    old_path = join_path(parent_path, old_name)
+    new_path = join_path(parent_path, new_name)
+
+    case child.type do
+      :file ->
+        safe_broadcast(volume_id, %FileRenamed{
+          volume_id: volume_id,
+          file_id: child.id,
+          old_path: old_path,
+          new_path: new_path
+        })
+
+      :dir ->
+        safe_broadcast(volume_id, %DirRenamed{
+          volume_id: volume_id,
+          old_path: old_path,
+          new_path: new_path
+        })
+    end
+  end
+
+  defp broadcast_rename_event(_volume_id, {:error, _}, _parent, _old, _new), do: :ok
+
+  defp broadcast_move_event(volume_id, child, source_dir, dest_dir, name) do
+    old_path = join_path(source_dir, name)
+    new_path = join_path(dest_dir, name)
+
+    case child.type do
+      :file ->
+        safe_broadcast(volume_id, %FileRenamed{
+          volume_id: volume_id,
+          file_id: child.id,
+          old_path: old_path,
+          new_path: new_path
+        })
+
+      :dir ->
+        safe_broadcast(volume_id, %DirRenamed{
+          volume_id: volume_id,
+          old_path: old_path,
+          new_path: new_path
+        })
+    end
+  end
+
+  defp join_path("/", name), do: "/" <> name
+  defp join_path(parent, name), do: parent <> "/" <> name
 
   ## Private — Key format
 

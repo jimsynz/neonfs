@@ -13,13 +13,11 @@ defmodule NeonFS.Integration.DataTransferTest do
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3
+  @moduletag cluster_mode: :shared
 
-  setup context do
-    unless context[:skip_full_setup] do
-      init_multi_node_cluster(context.cluster)
-    end
-
-    %{cluster: context.cluster}
+  setup_all %{cluster: cluster} do
+    init_data_transfer_cluster(cluster)
+    %{}
   end
 
   describe "endpoint advertisement" do
@@ -184,24 +182,35 @@ defmodule NeonFS.Integration.DataTransferTest do
         end
       end
 
-      # Write a file (triggers chunk replication via data plane)
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "data-plane-vol",
-          "/test.txt",
-          "data plane replication test content"
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "data-plane-vol"
         ])
 
-      # The file should be readable from node2 (proving chunks were replicated)
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
-               "data-plane-vol",
-               "/test.txt"
-             ]) do
-          {:ok, "data plane replication test content"} -> true
-          _ -> false
-        end
-      end
+      # Subscribe on node2, write on node1, wait for event to prove replication
+      {:ok, _} =
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "data-plane-vol",
+              "/test.txt",
+              "data plane replication test content"
+            ])
+          end,
+          timeout: 15_000
+        )
+
+      # Event proved replication — file readable from node2
+      {:ok, data} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+          "data-plane-vol",
+          "/test.txt"
+        ])
+
+      assert data == "data plane replication test content"
     end
   end
 
@@ -223,41 +232,57 @@ defmodule NeonFS.Integration.DataTransferTest do
         end
       end
 
-      content = "remote read test: data should traverse the data plane"
-
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "remote-read-vol",
-          "/remote-read.txt",
-          content
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "remote-read-vol"
         ])
 
-      # Read from node2 — chunks may not be local on node2, so it fetches
-      # remotely. With the data plane active, unprocessed reads use TLS.
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
-               "remote-read-vol",
-               "/remote-read.txt"
-             ]) do
-          {:ok, ^content} -> true
-          _ -> false
-        end
-      end
+      content = "remote read test: data should traverse the data plane"
 
-      # Also verify from node3
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :read_file, [
-               "remote-read-vol",
-               "/remote-read.txt"
-             ]) do
-          {:ok, ^content} -> true
-          _ -> false
-        end
-      end
+      # Subscribe on node2, write on node1, wait for event to prove replication
+      {:ok, _} =
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "remote-read-vol",
+              "/remote-read.txt",
+              content
+            ])
+          end,
+          timeout: 15_000
+        )
+
+      # Event proved replication — read from node2 via data plane
+      {:ok, data_node2} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+          "remote-read-vol",
+          "/remote-read.txt"
+        ])
+
+      assert data_node2 == content
+
+      # Also verify from node3 via quorum read
+      {:ok, data_node3} =
+        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :read_file, [
+          "remote-read-vol",
+          "/remote-read.txt"
+        ])
+
+      assert data_node3 == content
     end
   end
 
   describe "node failure during transfer" do
+    @describetag cluster_mode: :per_test
+
+    setup %{cluster: cluster} do
+      init_data_transfer_cluster(cluster)
+      %{}
+    end
+
     test "surviving nodes continue operating after node failure", %{cluster: cluster} do
       # Create volume and initial data
       {:ok, _} =
@@ -275,23 +300,26 @@ defmodule NeonFS.Integration.DataTransferTest do
         end
       end
 
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "failure-vol",
-          "/before.txt",
-          "before node failure"
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "failure-vol"
         ])
 
-      # Ensure data is readable from node2 before killing node3
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
-               "failure-vol",
-               "/before.txt"
-             ]) do
-          {:ok, "before node failure"} -> true
-          _ -> false
-        end
-      end
+      # Subscribe on node2, write on node1, wait for replication before failure test
+      {:ok, _} =
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "failure-vol",
+              "/before.txt",
+              "before node failure"
+            ])
+          end,
+          timeout: 15_000
+        )
 
       # Stop node3
       :ok = PeerCluster.stop_node(cluster, :node3)
@@ -346,30 +374,42 @@ defmodule NeonFS.Integration.DataTransferTest do
         end
       end
 
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "ec-data-plane-vol"
+        ])
+
       # Write a file — erasure coding produces stripe chunks sent via data plane
       content = :crypto.strong_rand_bytes(4096)
 
+      # Subscribe on node2, write on node1, wait for event to prove replication
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "ec-data-plane-vol",
-          "/ec-test.bin",
-          content
-        ])
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "ec-data-plane-vol",
+              "/ec-test.bin",
+              content
+            ])
+          end,
+          timeout: 15_000
+        )
 
       # Verify the file has stripes (proves erasure coding was used)
       assert is_list(file.stripes)
       assert file.stripes != []
 
-      # Read the file back from a different node
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
-               "ec-data-plane-vol",
-               "/ec-test.bin"
-             ]) do
-          {:ok, ^content} -> true
-          _ -> false
-        end
-      end
+      # Event proved replication — read from node2
+      {:ok, read_data} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+          "ec-data-plane-vol",
+          "/ec-test.bin"
+        ])
+
+      assert read_data == content
     end
   end
 
@@ -421,7 +461,7 @@ defmodule NeonFS.Integration.DataTransferTest do
   end
 
   describe "new node joins and becomes reachable" do
-    @describetag skip_full_setup: true
+    @describetag cluster_mode: :per_test
 
     test "joining node's data plane is discovered by existing nodes", %{cluster: cluster} do
       # Initialize a 2-node cluster first
@@ -494,71 +534,10 @@ defmodule NeonFS.Integration.DataTransferTest do
 
   ## Private helpers
 
-  defp init_multi_node_cluster(cluster) do
-    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
-    {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
-
-    node1_info = PeerCluster.get_node!(cluster, :node1)
-    node1_str = Atom.to_string(node1_info.node)
-
-    join_nodes_sequentially(cluster, token, node1_str)
-    wait_for_full_mesh(cluster)
-    rebuild_quorum_rings(cluster)
+  defp init_data_transfer_cluster(cluster) do
+    :ok = init_multi_node_cluster(cluster)
     wait_for_data_plane(cluster)
-
     :ok
-  end
-
-  defp join_nodes_sequentially(cluster, token, node1_str) do
-    for node_name <- [:node2, :node3] do
-      {:ok, _} =
-        PeerCluster.rpc(cluster, node_name, NeonFS.CLI.Handler, :join_cluster, [
-          token,
-          node1_str
-        ])
-
-      wait_for_cluster_stable(cluster)
-    end
-  end
-
-  defp wait_for_cluster_stable(cluster) do
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-  end
-
-  defp wait_for_full_mesh(cluster) do
-    peer_nodes = Enum.map([:node1, :node2, :node3], &PeerCluster.get_node!(cluster, &1).node)
-
-    assert_eventually timeout: 30_000 do
-      Enum.all?(peer_nodes, fn peer ->
-        node_list = :rpc.call(peer, Node, :list, [])
-        other_peers = Enum.filter(node_list, &(&1 in peer_nodes))
-
-        has_metadata_store =
-          case :rpc.call(peer, Process, :whereis, [NeonFS.Core.MetadataStore]) do
-            pid when is_pid(pid) -> true
-            _ -> false
-          end
-
-        length(other_peers) >= 2 and has_metadata_store
-      end)
-    end
-  end
-
-  defp rebuild_quorum_rings(cluster) do
-    for node_name <- [:node1, :node2, :node3] do
-      PeerCluster.rpc(cluster, node_name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
-    end
   end
 
   defp wait_for_data_plane(cluster) do

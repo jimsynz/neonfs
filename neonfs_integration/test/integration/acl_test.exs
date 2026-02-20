@@ -17,15 +17,26 @@ defmodule NeonFS.Integration.ACLTest do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
+
+  setup_all %{cluster: cluster} do
+    :ok = init_single_node_cluster(cluster, name: "acl-test")
+
+    {:ok, volume} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        "acl-volume",
+        %{}
+      ])
+
+    %{volume_id: volume.id}
+  end
 
   describe "volume ACL — UID-based" do
-    test "grant read only — read succeeds, write denied", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "grant read only — read succeeds, write denied", %{cluster: cluster, volume_id: vid} do
       # Grant UID 1000 read-only permission
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:uid, 1000},
           [:read]
         ])
@@ -33,7 +44,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Write as UID 1000 should be denied
       result =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
-          volume_id(cluster),
+          vid,
           "/denied.bin",
           "test",
           [uid: 1000]
@@ -52,7 +63,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Read as UID 1000 should succeed
       {:ok, data} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ReadOperation, :read_file, [
-          volume_id(cluster),
+          vid,
           "/readable.bin",
           [uid: 1000]
         ])
@@ -60,13 +71,11 @@ defmodule NeonFS.Integration.ACLTest do
       assert data == "test data"
     end
 
-    test "grant write — both read and write succeed", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "grant write — both read and write succeed", %{cluster: cluster, volume_id: vid} do
       # Grant UID 1000 write permission (implies read)
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:uid, 1000},
           [:write]
         ])
@@ -74,7 +83,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Write as UID 1000 should succeed
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
-          volume_id(cluster),
+          vid,
           "/writable.bin",
           "written by 1000",
           [uid: 1000]
@@ -83,7 +92,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Read as UID 1000 should also succeed
       {:ok, data} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ReadOperation, :read_file, [
-          volume_id(cluster),
+          vid,
           "/writable.bin",
           [uid: 1000]
         ])
@@ -91,25 +100,26 @@ defmodule NeonFS.Integration.ACLTest do
       assert data == "written by 1000"
     end
 
-    test "volume owner has full access without explicit grant", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "volume owner has full access without explicit grant", %{
+      cluster: cluster,
+      volume_id: vid
+    } do
       # Set volume ACL with owner_uid = 500
       acl =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeACL, :new, [
-          [volume_id: volume_id(cluster), owner_uid: 500, owner_gid: 500]
+          [volume_id: vid, owner_uid: 500, owner_gid: 500]
         ])
 
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :set_volume_acl, [
-          volume_id(cluster),
+          vid,
           acl
         ])
 
       # Owner UID 500 can write without explicit grant
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
-          volume_id(cluster),
+          vid,
           "/owner.bin",
           "owner data",
           [uid: 500]
@@ -118,7 +128,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Owner UID 500 can read
       {:ok, data} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ReadOperation, :read_file, [
-          volume_id(cluster),
+          vid,
           "/owner.bin",
           [uid: 500]
         ])
@@ -126,15 +136,13 @@ defmodule NeonFS.Integration.ACLTest do
       assert data == "owner data"
     end
 
-    test "UID 0 (root) bypasses all ACL checks", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "UID 0 (root) bypasses all ACL checks", %{cluster: cluster, volume_id: vid} do
       # Don't grant any permissions — root should still work
 
       # Root can write
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
-          volume_id(cluster),
+          vid,
           "/root.bin",
           "root data",
           [uid: 0]
@@ -143,7 +151,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Root can read
       {:ok, data} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ReadOperation, :read_file, [
-          volume_id(cluster),
+          vid,
           "/root.bin",
           [uid: 0]
         ])
@@ -153,13 +161,11 @@ defmodule NeonFS.Integration.ACLTest do
   end
 
   describe "volume ACL — GID-based" do
-    test "GID-based permission grants access to matching UID", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "GID-based permission grants access to matching UID", %{cluster: cluster, volume_id: vid} do
       # Grant GID 100 read permission
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:gid, 100},
           [:read]
         ])
@@ -175,7 +181,7 @@ defmodule NeonFS.Integration.ACLTest do
       # UID 2000 with GID 100 in supplementary groups can read
       {:ok, data} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ReadOperation, :read_file, [
-          volume_id(cluster),
+          vid,
           "/gid-test.bin",
           [uid: 2000, gids: [100]]
         ])
@@ -185,13 +191,11 @@ defmodule NeonFS.Integration.ACLTest do
   end
 
   describe "file ACL — POSIX mode" do
-    test "mode 0600 — owner can read/write, others cannot", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "mode 0600 — owner can read/write, others cannot", %{cluster: cluster, volume_id: vid} do
       # Grant UID 1000 write to the volume so it can create files
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:uid, 1000},
           [:write]
         ])
@@ -199,7 +203,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Also grant UID 2000 write to the volume
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:uid, 2000},
           [:write]
         ])
@@ -207,7 +211,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Write file as UID 1000 with mode 0600
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
-          volume_id(cluster),
+          vid,
           "/private.bin",
           "private data",
           [uid: 1000, mode: 0o600]
@@ -216,7 +220,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Set file ACL with owner UID 1000
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :set_file_acl, [
-          volume_id(cluster),
+          vid,
           "/private.bin",
           [%{type: :user, id: nil, permissions: MapSet.new([:r, :w])}]
         ])
@@ -226,7 +230,7 @@ defmodule NeonFS.Integration.ACLTest do
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.Authorise, :check, [
           1000,
           :read,
-          {:file, volume_id(cluster), "/private.bin"}
+          {:file, vid, "/private.bin"}
         ])
 
       assert result == :ok
@@ -236,7 +240,7 @@ defmodule NeonFS.Integration.ACLTest do
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.Authorise, :check, [
           2000,
           :read,
-          {:file, volume_id(cluster), "/private.bin"}
+          {:file, vid, "/private.bin"}
         ])
 
       assert {:error, :forbidden} = result
@@ -244,20 +248,18 @@ defmodule NeonFS.Integration.ACLTest do
   end
 
   describe "file ACL — extended ACL" do
-    test "extended ACL entry grants specific UID access", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "extended ACL entry grants specific UID access", %{cluster: cluster, volume_id: vid} do
       # Grant UIDs volume access
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:uid, 1000},
           [:write]
         ])
 
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:uid, 2000},
           [:read]
         ])
@@ -265,7 +267,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Write file as UID 1000
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
-          volume_id(cluster),
+          vid,
           "/extended.bin",
           "extended acl data",
           [uid: 1000, mode: 0o600]
@@ -274,7 +276,7 @@ defmodule NeonFS.Integration.ACLTest do
       # Add extended ACL entry granting UID 2000 read access
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :set_file_acl, [
-          volume_id(cluster),
+          vid,
           "/extended.bin",
           [
             %{type: :user, id: nil, permissions: MapSet.new([:r, :w])},
@@ -287,7 +289,7 @@ defmodule NeonFS.Integration.ACLTest do
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.Authorise, :check, [
           2000,
           :read,
-          {:file, volume_id(cluster), "/extended.bin"}
+          {:file, vid, "/extended.bin"}
         ])
 
       assert result == :ok
@@ -295,9 +297,7 @@ defmodule NeonFS.Integration.ACLTest do
   end
 
   describe "directory default ACL" do
-    test "default ACL inheritance via parent file", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "default ACL inheritance via parent file", %{cluster: cluster, volume_id: vid} do
       # Write a parent file that will hold default_acl
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
@@ -314,7 +314,7 @@ defmodule NeonFS.Integration.ACLTest do
 
       {:ok, parent_file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
-          volume_id(cluster),
+          vid,
           "/parent.bin"
         ])
 
@@ -341,9 +341,7 @@ defmodule NeonFS.Integration.ACLTest do
   end
 
   describe "CLI handler ACL commands" do
-    test "grant, show, and revoke via handler", %{cluster: cluster} do
-      :ok = init_acl_cluster(cluster)
-
+    test "grant, show, and revoke via handler", %{cluster: cluster, volume_id: _vid} do
       # Grant via handler
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :handle_acl_grant, [
@@ -380,54 +378,6 @@ defmodule NeonFS.Integration.ACLTest do
         end)
 
       assert uid_1000 == nil, "UID 1000 should be revoked"
-    end
-  end
-
-  # ─── Helpers ──────────────────────────────────────────────────────────
-
-  defp init_cluster_base(cluster) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["acl-test"])
-
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-  end
-
-  defp init_acl_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    {:ok, volume} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
-        "acl-volume",
-        %{}
-      ])
-
-    # Store the volume ID for later use
-    Process.put(:test_volume_id, volume.id)
-
-    :ok
-  end
-
-  defp volume_id(cluster) do
-    case Process.get(:test_volume_id) do
-      nil ->
-        {:ok, volume} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
-            "acl-volume"
-          ])
-
-        volume.id
-
-      id ->
-        id
     end
   end
 end

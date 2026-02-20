@@ -17,15 +17,41 @@ defmodule NeonFS.Integration.AuditTest do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
+
+  setup_all %{cluster: cluster} do
+    :ok = init_single_node_cluster(cluster, name: "audit-test")
+
+    {:ok, volume} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        "audit-volume",
+        %{}
+      ])
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [
+        "enc-audit-volume",
+        [
+          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
+          compression: %{algorithm: :none}
+        ]
+      ])
+
+    {:ok, enc_volume} =
+      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, ["enc-audit-volume"])
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, KeyManager, :setup_volume_encryption, [enc_volume.id])
+
+    %{audit_volume_id: volume.id, enc_audit_volume_id: enc_volume.id}
+  end
 
   describe "audit log records security operations" do
-    test "ACL grant produces audit event", %{cluster: cluster} do
-      :ok = init_audit_cluster(cluster)
-
+    test "ACL grant produces audit event", %{cluster: cluster, audit_volume_id: vid} do
       # Grant ACL
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.ACLManager, :grant, [
-          volume_id(cluster),
+          vid,
           {:uid, 1000},
           [:read]
         ])
@@ -49,13 +75,11 @@ defmodule NeonFS.Integration.AuditTest do
       assert acl_event.event_type == :volume_acl_changed
     end
 
-    test "key rotation produces audit event", %{cluster: cluster} do
-      :ok = init_encrypted_audit_cluster(cluster)
-
+    test "key rotation produces audit event", %{cluster: cluster, enc_audit_volume_id: enc_vid} do
       # Start key rotation
       {:ok, _rotation} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.KeyRotation, :start_rotation, [
-          volume_id(cluster)
+          enc_vid
         ])
 
       # AuditLog.log uses cast (async), so wait for it to be processed
@@ -77,16 +101,14 @@ defmodule NeonFS.Integration.AuditTest do
       assert rotation_event.event_type == :key_rotated
     end
 
-    test "audit events are queryable by actor UID", %{cluster: cluster} do
-      :ok = init_audit_cluster(cluster)
-
+    test "audit events are queryable by actor UID", %{cluster: cluster, audit_volume_id: vid} do
       # Log a custom audit event with specific UID
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.AuditLog, :log_event, [
           [
             event_type: :acl_grant,
             actor_uid: 42,
-            resource: "volume:#{volume_id(cluster)}",
+            resource: "volume:#{vid}",
             details: %{principal: "uid:1000", permissions: [:read]},
             outcome: :success
           ]
@@ -113,10 +135,8 @@ defmodule NeonFS.Integration.AuditTest do
       assert Enum.all?(events, &(&1.actor_uid == 42))
     end
 
-    test "audit events are queryable by resource", %{cluster: cluster} do
-      :ok = init_audit_cluster(cluster)
-
-      resource = "volume:#{volume_id(cluster)}"
+    test "audit events are queryable by resource", %{cluster: cluster, audit_volume_id: vid} do
+      resource = "volume:#{vid}"
 
       # Log a custom audit event with specific resource
       :ok =
@@ -154,8 +174,6 @@ defmodule NeonFS.Integration.AuditTest do
 
   describe "CLI handler audit commands" do
     test "handle_audit_list returns events with filters", %{cluster: cluster} do
-      :ok = init_audit_cluster(cluster)
-
       # Generate some audit events
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.AuditLog, :log_event, [
@@ -193,66 +211,5 @@ defmodule NeonFS.Integration.AuditTest do
       assert Map.has_key?(event, :event_type)
       assert Map.has_key?(event, :timestamp)
     end
-  end
-
-  # ─── Helpers ──────────────────────────────────────────────────────────
-
-  defp init_cluster_base(cluster) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["audit-test"])
-
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-  end
-
-  defp init_audit_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    {:ok, volume} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
-        "audit-volume",
-        %{}
-      ])
-
-    Process.put(:test_volume_id, volume.id)
-    :ok
-  end
-
-  defp init_encrypted_audit_cluster(cluster) do
-    init_cluster_base(cluster)
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [
-        "enc-audit-volume",
-        [
-          encryption: VolumeEncryption.new(mode: :server_side, current_key_version: 1),
-          compression: %{algorithm: :none}
-        ]
-      ])
-
-    {:ok, volume} =
-      PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, [
-        "enc-audit-volume"
-      ])
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, KeyManager, :setup_volume_encryption, [
-        volume.id
-      ])
-
-    Process.put(:test_volume_id, volume.id)
-    :ok
-  end
-
-  defp volume_id(_cluster) do
-    Process.get(:test_volume_id)
   end
 end

@@ -168,9 +168,9 @@ defmodule NeonFS.Core.ChunkFetcher do
         # fail identically, so propagate immediately.
         {:error, reason}
 
-      {:error, _reason} ->
+      {:error, local_reason} ->
         # Not found locally, try remote fetch
-        try_remote_fetch(hash, start_time, opts)
+        try_remote_fetch(hash, start_time, opts, local_reason)
     end
   end
 
@@ -181,7 +181,7 @@ defmodule NeonFS.Core.ChunkFetcher do
     end
   end
 
-  defp try_remote_fetch(hash, start_time, opts) do
+  defp try_remote_fetch(hash, start_time, opts, local_reason) do
     read_opts = build_read_opts(opts)
     tier = Keyword.get(opts, :tier, "hot")
     cache_remote = Keyword.get(opts, :cache_remote, false)
@@ -198,7 +198,14 @@ defmodule NeonFS.Core.ChunkFetcher do
           {:error, :chunk_not_found}
 
         {:ok, chunk_meta} ->
-          fetch_from_remote(hash, chunk_meta.locations, tier, read_opts, cache_remote)
+          fetch_from_remote(
+            hash,
+            chunk_meta.locations,
+            tier,
+            read_opts,
+            cache_remote,
+            local_reason
+          )
       end
 
     duration = System.monotonic_time() - start_time
@@ -222,15 +229,24 @@ defmodule NeonFS.Core.ChunkFetcher do
     result
   end
 
-  defp fetch_from_remote(hash, locations, tier, read_opts, cache_remote) do
+  defp fetch_from_remote(hash, locations, tier, read_opts, cache_remote, local_reason) do
     # Filter out local node from locations
     remote_locations =
       locations
       |> Enum.reject(&(&1.node == Node.self()))
       |> sort_locations_by_preference()
 
+    # When no remote locations exist (single-node), surface the local error
+    # instead of the misleading :all_replicas_failed
+    default_error =
+      if remote_locations == [] do
+        {:error, {:local_read_failed, local_reason}}
+      else
+        {:error, :all_replicas_failed}
+      end
+
     # Try each location until one succeeds
-    Enum.find_value(remote_locations, {:error, :all_replicas_failed}, fn location ->
+    Enum.find_value(remote_locations, default_error, fn location ->
       try_fetch_from_location(location, hash, tier, read_opts, cache_remote)
     end)
   end

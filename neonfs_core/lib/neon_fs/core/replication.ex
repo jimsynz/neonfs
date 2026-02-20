@@ -108,29 +108,33 @@ defmodule NeonFS.Core.Replication do
     if count == 0 do
       {:ok, []}
     else
-      with {:ok, members} <- get_cluster_members(),
-           available <- filter_and_prepare_targets(members, exclude_nodes),
-           selected <- Enum.take(available, count) do
-        # Warn if we couldn't get enough targets
-        if length(selected) < count and not Enum.empty?(selected) do
-          Logger.warning(
-            "Requested #{count} replicas but only #{length(selected)} nodes available. " <>
-              "Some redundancy is better than none."
-          )
-        end
+      case get_cluster_members() do
+        {:ok, members} ->
+          members
+          |> filter_and_prepare_targets(exclude_nodes)
+          |> Enum.take(count)
+          |> validate_selected_targets(count)
 
-        # Return error if no targets, otherwise return selected
-        case selected do
-          [] -> {:error, :no_targets}
-          targets -> {:ok, targets}
-        end
-      else
-        {:error, _reason} -> {:error, :no_targets}
+        {:error, _reason} ->
+          {:error, :no_targets}
       end
     end
   end
 
   # Private Functions
+
+  defp validate_selected_targets([], _count), do: {:error, :no_targets}
+
+  defp validate_selected_targets(selected, count) do
+    if length(selected) < count do
+      Logger.warning(
+        "Requested #{count} replicas but only #{length(selected)} nodes available. " <>
+          "Some redundancy is better than none."
+      )
+    end
+
+    {:ok, selected}
+  end
 
   defp filter_and_prepare_targets(members, exclude_nodes) do
     members

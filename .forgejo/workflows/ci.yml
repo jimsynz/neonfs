@@ -352,12 +352,12 @@ jobs:
           mix check
 
   # =========================================================================
-  # containers - Docker buildx multi-platform builds
-  # Only runs on push (not PRs), after integration tests pass
-  # Uses the runner's own Docker daemon (configured with insecure registry)
+  # containers - Docker buildx multi-platform builds (QEMU cross-compilation)
+  # Only runs on push (not PRs), after integration tests pass.
+  # Pinned to amd64 runner; arm64 images are cross-built via QEMU.
   # =========================================================================
   containers:
-    runs-on: docker
+    runs-on: amd64
     needs: [neonfs_client, neonfs_core, neonfs_fuse, neonfs_integration]
     if: forgejo.event_name == 'push'
     container:

@@ -12,7 +12,12 @@ defmodule NeonFS.Core.TieringManagerTest do
     {:ok, pid} = start_test_manager()
 
     on_exit(fn ->
-      if Process.alive?(pid), do: GenServer.stop(pid)
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _ -> :ok
+      end
+
       MockChunkIndex.cleanup()
       MockAccessTracker.cleanup()
       MockDriveRegistry.cleanup()

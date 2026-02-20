@@ -28,6 +28,12 @@ defmodule NeonFS.FUSE.Supervisor do
       # Transport: PoolSupervisor + PoolManager for data transfer (Phase 9)
       NeonFS.Transport.PoolSupervisor,
       NeonFS.Transport.PoolManager,
+      # Event notification infrastructure (Phase 10)
+      # :pg scope for cross-node event relay, Registry for node-local fan-out
+      %{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}},
+      {Registry, keys: :duplicate, name: NeonFS.Events.Registry},
+      NeonFS.Events.Relay,
+      NeonFS.Client.PartitionRecovery,
       # Inode table must start before handlers
       NeonFS.FUSE.InodeTable,
       # DynamicSupervisor for mount handlers

@@ -5,10 +5,11 @@ defmodule NeonFS.Integration.ClusterCATest do
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3
+  @moduletag cluster_mode: :shared
 
-  setup %{cluster: cluster} do
-    init_multi_node_cluster(cluster)
-    %{cluster: cluster}
+  setup_all %{cluster: cluster} do
+    :ok = init_multi_node_cluster(cluster)
+    %{}
   end
 
   describe "CA lifecycle" do
@@ -250,6 +251,13 @@ defmodule NeonFS.Integration.ClusterCATest do
   end
 
   describe "node failure resilience" do
+    @describetag cluster_mode: :per_test
+
+    setup %{cluster: cluster} do
+      :ok = init_multi_node_cluster(cluster)
+      %{}
+    end
+
     test "CA operations survive single node failure", %{cluster: cluster} do
       # Stop node3
       :ok = PeerCluster.stop_node(cluster, :node3)
@@ -291,74 +299,6 @@ defmodule NeonFS.Integration.ClusterCATest do
           _ -> false
         end
       end
-    end
-  end
-
-  ## Private helpers
-
-  defp init_multi_node_cluster(cluster) do
-    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
-    {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
-
-    node1_info = PeerCluster.get_node!(cluster, :node1)
-    node1_str = Atom.to_string(node1_info.node)
-
-    join_nodes_sequentially(cluster, token, node1_str)
-    wait_for_full_mesh(cluster)
-    rebuild_quorum_rings(cluster)
-
-    :ok
-  end
-
-  defp join_nodes_sequentially(cluster, token, node1_str) do
-    for node_name <- [:node2, :node3] do
-      {:ok, _} =
-        PeerCluster.rpc(cluster, node_name, NeonFS.CLI.Handler, :join_cluster, [
-          token,
-          node1_str
-        ])
-
-      wait_for_cluster_stable(cluster)
-    end
-  end
-
-  defp wait_for_cluster_stable(cluster) do
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-  end
-
-  defp wait_for_full_mesh(cluster) do
-    peer_nodes = Enum.map([:node1, :node2, :node3], &PeerCluster.get_node!(cluster, &1).node)
-
-    assert_eventually timeout: 30_000 do
-      Enum.all?(peer_nodes, fn peer ->
-        node_list = :rpc.call(peer, Node, :list, [])
-        other_peers = Enum.filter(node_list, &(&1 in peer_nodes))
-
-        has_metadata_store =
-          case :rpc.call(peer, Process, :whereis, [NeonFS.Core.MetadataStore]) do
-            pid when is_pid(pid) -> true
-            _ -> false
-          end
-
-        length(other_peers) >= 2 and has_metadata_store
-      end)
-    end
-  end
-
-  defp rebuild_quorum_rings(cluster) do
-    for node_name <- [:node1, :node2, :node3] do
-      PeerCluster.rpc(cluster, node_name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
     end
   end
 end

@@ -1,5 +1,9 @@
 defmodule NeonFS.Core.ResolvedLookupCacheTest do
-  use ExUnit.Case, async: true
+  # async: false because the cache uses a global ETS table (:resolved_lookup_cache)
+  # and a singleton GenServer. Concurrent async modules doing ReadOperation.read_file
+  # trigger populate_resolved_cache, adding entries through this test's GenServer and
+  # causing unexpected LRU evictions when max_entries is small.
+  use ExUnit.Case, async: false
 
   alias NeonFS.Core.ResolvedLookupCache
 

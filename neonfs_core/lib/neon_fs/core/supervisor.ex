@@ -169,6 +169,13 @@ defmodule NeonFS.Core.Supervisor do
           # Must start before ChunkIndex/FileIndex/StripeIndex (they need it for loading)
           NeonFS.Core.MetadataStore,
 
+          # Event notification infrastructure (Phase 10)
+          # :pg scope for cross-node event relay, Registry for node-local fan-out
+          %{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}},
+          {Registry, keys: :duplicate, name: NeonFS.Events.Registry},
+          NeonFS.Events.Relay,
+          NeonFS.Client.PartitionRecovery,
+
           # ClockMonitor detects clock skew and quarantines nodes
           NeonFS.Core.ClockMonitor,
 
@@ -231,7 +238,13 @@ defmodule NeonFS.Core.Supervisor do
           NeonFS.Core.AntiEntropy,
 
           # Retention prunes old audit log files from the system volume
-          NeonFS.Core.SystemVolume.Retention
+          NeonFS.Core.SystemVolume.Retention,
+
+          # ReadySignal MUST be the last child — it joins :pg group {:node, :ready}
+          # to signal that all preceding children have started successfully.
+          # Integration tests use :pg.monitor/2 on this group for event-driven
+          # readiness detection instead of polling.
+          NeonFS.Core.ReadySignal
         ]
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation

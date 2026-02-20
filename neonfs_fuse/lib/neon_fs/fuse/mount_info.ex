@@ -12,7 +12,8 @@ defmodule NeonFS.FUSE.MountInfo do
     :mount_point,
     :started_at,
     :mount_session,
-    :handler_pid
+    :handler_pid,
+    :cache_pid
   ]
 
   @type t :: %__MODULE__{
@@ -21,7 +22,8 @@ defmodule NeonFS.FUSE.MountInfo do
           mount_point: String.t(),
           started_at: DateTime.t(),
           mount_session: reference(),
-          handler_pid: pid()
+          handler_pid: pid(),
+          cache_pid: pid() | nil
         }
 
   @doc """

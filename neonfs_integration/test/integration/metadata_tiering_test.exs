@@ -13,14 +13,16 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 3
+  @moduletag cluster_mode: :shared
 
-  # Short RPC timeout for use inside retry loops — allows multiple attempts
-  # within the assert_eventually window instead of blocking on a single slow call
-  @retry_rpc_timeout 10_000
+  setup_all %{cluster: cluster} do
+    :ok = init_multi_node_cluster(cluster, name: "tiering-test")
+    %{}
+  end
 
   describe "directory listing via DirectoryEntry" do
     test "list_dir returns all children", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "dir-vol")
+      :ok = init_tiering_cluster(cluster, "dir-vol")
 
       # Create files in root and a subdirectory
       files = [
@@ -78,14 +80,26 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
   describe "cross-segment file creation atomicity" do
     test "file creation writes both FileMeta and DirectoryEntry", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "atomic-vol")
+      :ok = init_tiering_cluster(cluster, "atomic-vol")
 
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, ["atomic-vol"])
+
+      # Subscribe on node2, write on node1, wait for event to prove replication
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "atomic-vol",
-          "/atomic-test.txt",
-          "atomic content"
-        ])
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "atomic-vol",
+              "/atomic-test.txt",
+              "atomic content"
+            ])
+          end,
+          timeout: 15_000
+        )
 
       # Verify FileMeta exists (via get_file)
       {:ok, retrieved} =
@@ -105,24 +119,14 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
       assert Map.has_key?(root_children, "atomic-test.txt")
 
-      # Verify from a different node — both FileMeta and DirectoryEntry
-      # should be accessible via quorum
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node2,
-               NeonFS.TestHelpers,
-               :get_file,
-               [
-                 "atomic-vol",
-                 "/atomic-test.txt"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, f} -> f.id == file.id
-          _ -> false
-        end
-      end
+      # Cross-node read — event proved replication, so data is available
+      {:ok, f} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :get_file, [
+          "atomic-vol",
+          "/atomic-test.txt"
+        ])
+
+      assert f.id == file.id
 
       {:ok, root_from_node2} =
         PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :list_dir, [
@@ -136,7 +140,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
   describe "crash recovery" do
     test "expired intent allows new creation for same path", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "crash-vol")
+      :ok = init_tiering_cluster(cluster, "crash-vol")
 
       # Get the volume ID for intent conflict key
       {:ok, volume_info} =
@@ -199,7 +203,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
   describe "clock skew detection" do
     test "quarantines node with excessive skew", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "clock-vol")
+      :ok = init_tiering_cluster(cluster, "clock-vol")
 
       node2_atom = PeerCluster.get_node!(cluster, :node2).node
       node2_str = Atom.to_string(node2_atom)
@@ -256,7 +260,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
   describe "concurrent writer detection" do
     test "second writer for same path gets conflict error", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "conflict-vol")
+      :ok = init_tiering_cluster(cluster, "conflict-vol")
 
       {:ok, volume_info} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :get_volume, ["conflict-vol"])
@@ -304,16 +308,30 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
   describe "erasure-coded volume with quorum metadata" do
     test "write and read on erasure volume in multi-node cluster", %{cluster: cluster} do
-      :ok = init_multi_node_cluster(cluster, "ec-quorum-vol", durability: "erasure:2:1")
+      :ok = init_tiering_cluster(cluster, "ec-quorum-vol", durability: "erasure:2:1")
+
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "ec-quorum-vol"
+        ])
 
       test_data = :crypto.strong_rand_bytes(4096)
 
+      # Subscribe on node2, write on node1, wait for event to prove replication
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "ec-quorum-vol",
-          "/erasure.bin",
-          test_data
-        ])
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "ec-quorum-vol",
+              "/erasure.bin",
+              test_data
+            ])
+          end,
+          timeout: 15_000
+        )
 
       assert is_list(file.stripes)
       assert file.stripes != []
@@ -327,22 +345,13 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
       assert read_data == test_data
 
-      # Verify stripe metadata is accessible from node2 via quorum
+      # Event proved replication — stripe metadata is now accessible from node2
       [%{stripe_id: sid} | _] = file.stripes
 
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node2,
-               NeonFS.Core.StripeIndex,
-               :get,
-               [sid],
-               @retry_rpc_timeout
-             ) do
-          {:ok, stripe} -> stripe.id == sid
-          _ -> false
-        end
-      end
+      {:ok, stripe} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.Core.StripeIndex, :get, [sid])
+
+      assert stripe.id == sid
     end
   end
 
@@ -350,8 +359,6 @@ defmodule NeonFS.Integration.MetadataTieringTest do
     test "replicated and erasure-coded volumes coexist on multi-node cluster", %{
       cluster: cluster
     } do
-      :ok = init_multi_node_cluster_base(cluster)
-
       # Create both volume types
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
@@ -365,23 +372,46 @@ defmodule NeonFS.Integration.MetadataTieringTest do
           %{"durability" => "erasure:2:1"}
         ])
 
+      {:ok, rep_volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, ["rep-vol"])
+
+      {:ok, ec_volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, ["ec-vol"])
+
       rep_data = :crypto.strong_rand_bytes(2048)
       ec_data = :crypto.strong_rand_bytes(2048)
 
-      # Write to both volumes
+      # Write to replicated volume and wait for replication event on node2
       {:ok, rep_file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "rep-vol",
-          "/rep.bin",
-          rep_data
-        ])
+        subscribe_then_act(
+          cluster,
+          :node2,
+          rep_volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "rep-vol",
+              "/rep.bin",
+              rep_data
+            ])
+          end,
+          timeout: 15_000
+        )
 
+      # Write to erasure volume and wait for replication event on node2
       {:ok, ec_file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
-          "ec-vol",
-          "/ec.bin",
-          ec_data
-        ])
+        subscribe_then_act(
+          cluster,
+          :node2,
+          ec_volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "ec-vol",
+              "/ec.bin",
+              ec_data
+            ])
+          end,
+          timeout: 15_000
+        )
 
       # Verify replicated file has chunks but no stripes
       assert rep_file.chunks != []
@@ -390,117 +420,29 @@ defmodule NeonFS.Integration.MetadataTieringTest do
       assert is_list(ec_file.stripes)
       assert ec_file.stripes != []
 
-      # Read replicated file from node2 (full data read)
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node2,
-               NeonFS.TestHelpers,
-               :read_file,
-               [
-                 "rep-vol",
-                 "/rep.bin"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, ^rep_data} -> true
-          _ -> false
-        end
-      end
+      # Events proved replication — read replicated file from node2
+      {:ok, read_rep} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :read_file, [
+          "rep-vol",
+          "/rep.bin"
+        ])
 
-      # Verify EC file metadata is accessible from node2 via quorum
-      assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node2,
-               NeonFS.TestHelpers,
-               :get_file,
-               [
-                 "ec-vol",
-                 "/ec.bin"
-               ],
-               @retry_rpc_timeout
-             ) do
-          {:ok, file} -> file.id == ec_file.id
-          _ -> false
-        end
-      end
+      assert read_rep == rep_data
+
+      # EC file metadata accessible from node2 via quorum
+      {:ok, ec_from_node2} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.TestHelpers, :get_file, [
+          "ec-vol",
+          "/ec.bin"
+        ])
+
+      assert ec_from_node2.id == ec_file.id
     end
   end
 
   # ─── Helpers ──────────────────────────────────────────────────────────
 
-  defp init_multi_node_cluster_base(cluster) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["tiering-test"])
-
-    {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
-
-    node1_info = PeerCluster.get_node!(cluster, :node1)
-    node1_str = Atom.to_string(node1_info.node)
-
-    # Join nodes sequentially with waits between — Ra rejects concurrent cluster changes
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node2, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node3, NeonFS.CLI.Handler, :join_cluster, [token, node1_str])
-
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _status} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-
-    # Wait for ALL peer nodes to see each other AND have MetadataStore running.
-    # discover_core_nodes() filters Node.list() by MetadataStore presence,
-    # so the ring will be incomplete if MetadataStore isn't ready on all peers.
-    peer_nodes = Enum.map([:node1, :node2, :node3], &PeerCluster.get_node!(cluster, &1).node)
-
-    assert_eventually timeout: 30_000 do
-      Enum.all?(peer_nodes, fn peer ->
-        node_list = :rpc.call(peer, Node, :list, [])
-        other_peers = Enum.filter(node_list, &(&1 in peer_nodes))
-        all_connected = length(other_peers) >= 2
-
-        has_metadata_store =
-          case :rpc.call(peer, Process, :whereis, [NeonFS.Core.MetadataStore]) do
-            pid when is_pid(pid) -> true
-            _ -> false
-          end
-
-        all_connected and has_metadata_store
-      end)
-    end
-
-    # Rebuild quorum ring on all nodes now that full membership is confirmed
-    for node_name <- [:node1, :node2, :node3] do
-      PeerCluster.rpc(cluster, node_name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
-    end
-
-    :ok
-  end
-
-  defp init_multi_node_cluster(cluster, volume_name, opts \\ []) do
-    :ok = init_multi_node_cluster_base(cluster)
-
+  defp init_tiering_cluster(cluster, volume_name, opts \\ []) do
     durability = Keyword.get(opts, :durability, "replicate:1")
 
     volume_opts =

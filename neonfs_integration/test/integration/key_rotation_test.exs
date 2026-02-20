@@ -213,7 +213,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
 
   describe "rotation edge cases" do
     test "cannot rotate unencrypted volume", %{cluster: cluster} do
-      init_cluster_base(cluster)
+      :ok = init_single_node_cluster(cluster, name: "rotation-test")
 
       {:ok, volume} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
@@ -232,24 +232,8 @@ defmodule NeonFS.Integration.KeyRotationTest do
 
   # ─── Helpers ──────────────────────────────────────────────────────────
 
-  defp init_cluster_base(cluster) do
-    {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["rotation-test"])
-
-    :ok =
-      wait_until(
-        fn ->
-          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-            {:ok, _} -> true
-            _ -> false
-          end
-        end,
-        timeout: 10_000
-      )
-  end
-
   defp init_rotation_cluster(cluster) do
-    init_cluster_base(cluster)
+    :ok = init_single_node_cluster(cluster, name: "rotation-test")
 
     {:ok, _} =
       PeerCluster.rpc(cluster, :node1, VolumeRegistry, :create, [

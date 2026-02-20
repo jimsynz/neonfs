@@ -17,7 +17,68 @@
 - `X509.Certificate.validity/1` returns an ASN.1 record `{:Validity, notBefore, notAfter}` — use `import X509.ASN1` and `validity(notBefore: nb, notAfter: na)` to destructure, then `X509.DateTime.to_datetime/1` to get DateTimes
 - x509 Extension records have 4 elements `{:Extension, oid, critical, value}` — not 3-tuples
 - Bitwise `&&&` has lower precedence than `==` in Elixir — use parentheses: `(mode &&& 0o777) == 0o644`
+- `:pg` is an Erlang module without `child_spec/1` — use explicit child spec maps: `%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}}`
 
+---
+
+## 2026-02-18 - Task 0115
+- What was implemented:
+  - Instrumented `FileIndex`, `VolumeRegistry`, and `ACLManager` to emit events via `Broadcaster.broadcast/2` after successful metadata writes
+  - FileIndex events: `FileCreated` (create), `FileContentUpdated` (update), `FileDeleted` (delete), `DirCreated` (mkdir), `FileRenamed`/`DirRenamed` (rename and move, type-aware)
+  - VolumeRegistry events: `VolumeCreated` (create), `VolumeDeleted` (delete), `VolumeUpdated` (update) — `update_stats`, `create_system_volume`, and `adjust_system_volume_replication` deliberately excluded
+  - ACLManager events: `VolumeAclChanged` (set_volume_acl, grant, revoke, delete_volume_acl), `FileAclChanged` (set_file_acl)
+  - Each module has a `safe_broadcast/2` private function wrapping `Broadcaster.broadcast/2` in try/rescue/catch for defence in depth
+  - Refactored `do_rename` from nested `case` to `with` chain for cleaner broadcast integration
+  - Added `broadcast_rename_event/5` and `broadcast_move_event/5` helpers for type-aware rename/move events
+  - 21 unit tests covering all event emission paths, negative cases (failed writes, stats updates, system volume), and envelope correctness
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/file_index.ex` (modified — added Broadcaster calls in do_create, do_update, do_delete, do_mkdir, do_rename, do_move)
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` (modified — added Broadcaster calls in do_create_volume, do_delete_volume, do_update_volume)
+  - `neonfs_core/lib/neon_fs/core/acl_manager.ex` (modified — added Broadcaster calls in set_volume_acl, grant, revoke, delete_volume_acl, set_file_acl)
+  - `neonfs_core/test/neon_fs/events/emission_test.exs` (new — 21 tests)
+  - `tasks/task_0115_core_metadata_event_emission.md` (status → Complete)
+- **Learnings for future iterations:**
+  - `FileIndex.update/2` is called for both content and attribute changes; broadcasts `FileContentUpdated` uniformly since events are hints not data
+  - When ACLManager calls `FileIndex.update/2`, both `FileContentUpdated` and `FileAclChanged` are emitted — this is correct since they target different cache layers
+  - `do_rename` needs child type info before the rename operation occurs (the old name is gone from the dir entry after rename), so `DirectoryEntry.get_child` must be called first
+  - TieringManagerTest has pre-existing flakiness in `on_exit` cleanup — unrelated to event emission changes
+---
+
+## 2026-02-18 - Task 0112
+- What was implemented:
+  - 14 event struct modules in `neonfs_client/lib/neon_fs/events/` — pure data types with `@enforce_keys` and `@type t()`
+  - File content events: `FileCreated`, `FileContentUpdated`, `FileTruncated`, `FileDeleted` (volume_id, file_id, path)
+  - File attribute events: `FileAttrsChanged` (volume_id, file_id, path), `FileRenamed` (volume_id, file_id, old_path, new_path)
+  - ACL events: `VolumeAclChanged` (volume_id), `FileAclChanged` (volume_id, path)
+  - Directory events: `DirCreated` (volume_id, path), `DirDeleted` (volume_id, path), `DirRenamed` (volume_id, old_path, new_path)
+  - Volume events: `VolumeCreated`, `VolumeUpdated`, `VolumeDeleted` (volume_id)
+  - `NeonFS.Events.Envelope` struct with `@enforce_keys [:event, :source_node, :sequence, :hlc_timestamp]`
+  - `NeonFS.Events` module with combined `@type event()` union type across all 14 event structs
+  - 35 unit tests covering struct construction, required key enforcement, envelope wrapping, and type consistency
+  - All checks pass in all subprojects (neonfs_client 332 tests, neonfs_core, neonfs_fuse, neonfs_integration 123 tests)
+- Files changed:
+  - `neonfs_client/lib/neon_fs/events.ex` (new — combined event type)
+  - `neonfs_client/lib/neon_fs/events/envelope.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/file_created.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/file_content_updated.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/file_truncated.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/file_deleted.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/file_attrs_changed.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/file_renamed.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/volume_acl_changed.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/file_acl_changed.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/dir_created.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/dir_deleted.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/dir_renamed.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/volume_created.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/volume_updated.ex` (new)
+  - `neonfs_client/lib/neon_fs/events/volume_deleted.ex` (new)
+  - `neonfs_client/test/neon_fs/events_test.exs` (new — 35 tests)
+  - `tasks/task_0112_event_structs_and_envelope.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Event structs are deliberately minimal — pure data types in neonfs_client with no runtime dependencies
+  - Envelope `hlc_timestamp` is typed structurally as `{non_neg_integer(), non_neg_integer(), node()}` since neonfs_client has no compile-time dep on neonfs_core's HLC module
+  - Each event type gets its own module for precise Dialyzer type narrowing in pattern matches
 ---
 
 ## 2026-02-15 - Task 0098
@@ -2996,4 +3057,130 @@
   - ServiceRegistry.refresh_self only updates local ETS + Ra (which may timeout during joins). Must also broadcast the updated endpoint directly to connected peers via RPC
   - Discovery refreshes every 5s, PoolManager every 30s — after endpoint propagation, pools appear within ~35s (test timeout 60s is sufficient)
   - Integration test sync_data_endpoints helper ensures all nodes know about each other's endpoints before waiting for pools
+---
+
+## 2026-02-18 - Task 0113
+- What was implemented:
+  - `NeonFS.Events.Relay` GenServer in `neonfs_client` — manages `:pg` group membership with per-volume reference counting and subscriber process monitoring
+  - Extended `NeonFS.Events` module with `subscribe/1`, `unsubscribe/1`, `subscribe_volumes/0`, `unsubscribe_volumes/0` functions
+  - `NeonFS.Client.EventHandler` behaviour with `handle_event/1` callback
+  - Supervision tree updates: added `:pg` scope (`:neonfs_events`), `NeonFS.Events.Registry` (duplicate keys), and `NeonFS.Events.Relay` to both `NeonFS.Core.Supervisor` and `NeonFS.FUSE.Supervisor`
+  - Relay joins `{:volumes}` `:pg` group on init; joins/leaves `{:volume, volume_id}` groups based on subscriber count
+  - Relay monitors subscriber processes and cleans up ref counts on `:DOWN`
+  - Relay dispatches `{:neonfs_event, %Envelope{}}` messages via `Registry.dispatch/3` to the appropriate group key
+  - 21 unit tests for Relay and subscription API covering: pg group joins/leaves, event dispatch routing, multi-subscriber fan-out, process exit cleanup
+  - All checks pass across all subprojects (neonfs_client 353 tests, neonfs_core 1101 tests, neonfs_fuse 43 tests, neonfs_integration 123 tests)
+- Files changed:
+  - `neonfs_client/lib/neon_fs/events.ex` (modified — added subscribe/unsubscribe API + Relay alias)
+  - `neonfs_client/lib/neon_fs/events/relay.ex` (new — Relay GenServer)
+  - `neonfs_client/lib/neon_fs/client/event_handler.ex` (new — EventHandler behaviour)
+  - `neonfs_client/test/neon_fs/events/relay_test.exs` (new — 10 tests)
+  - `neonfs_client/test/neon_fs/events/subscription_test.exs` (new — 11 tests)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (modified — added :pg, Registry, Relay children)
+  - `neonfs_fuse/lib/neon_fs/fuse/supervisor.ex` (modified — added :pg, Registry, Relay children)
+  - `tasks/task_0113_subscription_api_relay_and_registry.md` (status → Complete)
+- **Learnings for future iterations:**
+  - `:pg` is an Erlang module without `child_spec/1` — use explicit child spec maps `%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}}` in supervisors and tests (not `{:pg, :neonfs_events}`)
+  - `start_supervised!` in ExUnit needs the same explicit map format for Erlang modules
+  - Relay reference counting + process monitoring ensures pg group cleanup even when subscribers crash
+  - Credo's nested-module warning triggers for `NeonFS.Events.Relay` used inside `NeonFS.Events` — alias it at the top
+---
+
+## 2026-02-18 - Task 0114
+- What was implemented:
+  - `NeonFS.Events.Broadcaster` module in `neonfs_core/lib/neon_fs/events/broadcaster.ex`
+  - `broadcast/2` — wraps event in Envelope (source node, sequence, HLC timestamp), sends to `:pg` group `{:volume, volume_id}`; volume events also sent to `{:volumes}` group
+  - Per-volume `:atomics` sequence counters stored in `:persistent_term` under `{Broadcaster, :counter, volume_id}` — lock-free, concurrent-safe
+  - `get_or_create_counter/1` — idempotent counter creation with race-condition handling
+  - `next_sequence/1` — atomic increment via `:atomics.add_get/3`, first event gets sequence 1
+  - HLC timestamps via per-process state in process dictionary — each calling process maintains its own `NeonFS.Core.HLC` instance, avoiding global bottleneck
+  - Fire-and-forget broadcasting via `send/2`, returns `:ok` regardless of subscribers
+  - 14 unit tests covering broadcast delivery, volume vs non-volume event routing, sequence monotonicity, per-volume counter independence, counter idempotency, envelope correctness
+  - All checks pass in all subprojects (neonfs_client 353 tests, neonfs_core 1115 tests, neonfs_fuse 42 tests, neonfs_integration 123 tests)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/events/broadcaster.ex` (new — Broadcaster module)
+  - `neonfs_core/test/neon_fs/events/broadcaster_test.exs` (new — 14 tests)
+  - `tasks/task_0114_broadcaster_and_sequence_counters.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Dialyzer PLTs for downstream packages may cache stale type info from dependencies — if a new type is added to `neonfs_client` and Dialyzer in `neonfs_core` reports "Unknown type", delete `_build/dev/dialyxir_*.plt` and rebuild
+  - `:persistent_term.put/2` does not raise on concurrent writes (both succeed), but `:persistent_term.get/1` raises `ArgumentError` when key not found — wrap in rescue
+  - Per-process HLC (process dictionary) is the recommended approach for Broadcaster: avoids GenServer bottleneck, each index GenServer gets its own monotonic HLC state
+  - `:atomics.add_get/3` is the idiomatic BEAM approach for lock-free sequence counters — no GenServer serialisation needed
+---
+
+## 2026-02-18 - Task 0116
+- What was implemented:
+  - `NeonFS.Client.PartitionRecovery` GenServer in `neonfs_client` — monitors core node connections via `:net_kernel.monitor_nodes(true)` and triggers full cache invalidation on reconnect
+  - Tracks `known_core_nodes` (MapSet) and `pending_invalidations` (MapSet) in state
+  - `{:nodedown, node}` — removes core node from known set and clears pending invalidation (preventing stale debounce fire)
+  - `{:nodeup, node}` — schedules debounced invalidation via `Process.send_after/3`, adds to both known and pending sets
+  - `{:do_invalidate, node}` — if node still in pending set, collects all unique PIDs from `NeonFS.Events.Registry` via `Registry.select/2` and sends each `:neonfs_invalidate_all`; skips if node went down before debounce expired
+  - Deduplication: `Registry.select` + `Enum.uniq` ensures each subscriber receives exactly one invalidation message regardless of how many volumes they're subscribed to
+  - Configurable debounce period via app env `:neonfs_client, :partition_recovery_debounce_ms` (default 5_000ms)
+  - Configurable `core_node?` predicate via init opts for testability; default uses `:erpc.call` to check for `NeonFS.Core.ServiceRegistry` on the remote node
+  - Added to both `NeonFS.Core.Supervisor` and `NeonFS.FUSE.Supervisor` after `NeonFS.Events.Relay`
+  - 11 unit tests covering: init, nodedown/nodeup for core and non-core nodes, debounced invalidation delivery, skip on node-down-before-debounce, deduplication across multi-volume subscribers, rapid flapping, configurable debounce timing
+  - All checks pass in all subprojects (neonfs_client 364 tests, neonfs_core 1115 tests, neonfs_fuse 43 tests, neonfs_integration 123 tests)
+- Files changed:
+  - `neonfs_client/lib/neon_fs/client/partition_recovery.ex` (new — PartitionRecovery GenServer)
+  - `neonfs_client/test/neon_fs/client/partition_recovery_test.exs` (new — 11 tests)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` (modified — added PartitionRecovery after Relay)
+  - `neonfs_fuse/lib/neon_fs/fuse/supervisor.ex` (modified — added PartitionRecovery after Relay)
+  - `tasks/task_0116_partition_recovery.md` (status → Complete)
+- **Learnings for future iterations:**
+  - `Registry.select/2` with match spec `[{{:_, :"$1", :_}, [], [:"$1"]}]` efficiently collects all registered PIDs across all keys — useful for broadcast-to-all without knowing the key set
+  - Elixir formatter prefers `:core@test` over `:"core@test"` when the atom is a valid identifier (no special characters beyond `@`)
+  - Credo's implicit-try rule: use `defp foo do ... catch` instead of `defp foo do try do ... catch` when the entire function body is a try block
+  - PartitionRecovery is visible in integration test logs ("Partition recovery: invalidated 0 subscriber(s)") when peer nodes reconnect — confirms it's correctly detecting nodeup events in the supervision tree
+---
+
+### Task 0117: FUSE Metadata Cache with Event-Driven Invalidation
+- **Date:** 2026-02-18
+- **Status:** Complete
+- **What was done:**
+  - Implemented `NeonFS.FUSE.MetadataCache` GenServer in neonfs_fuse — ETS-backed local cache for file/directory metadata, reducing RPC round-trips to core nodes
+  - Single ETS table per cache instance with tagged keys: `{:attrs, volume_id, path}`, `{:dir, volume_id, path}`, `{:lookup, volume_id, parent_path, name}`
+  - Table is `:public` with `read_concurrency: true` so Handler process can read directly without GenServer bottleneck
+  - Implements `NeonFS.Client.EventHandler` behaviour — subscribes to volume events via `NeonFS.Events.subscribe/1`, dispatches 14 event types to specific invalidation logic
+  - Gap detection: tracks per-source-node sequence numbers, clears all caches when a sequence gap is detected (dropped messages)
+  - Handles `:neonfs_invalidate_all` message from PartitionRecovery for full cache clear on cluster reconnection
+  - Integrated cache into FUSE Handler with cache-aware `cached_lookup/5`, `cached_getattr/3`, and `cached_readdir/3` helpers — check cache first, fall through to RPC on miss, populate cache on success
+  - Handler uses `nil` guard clauses for backward compatibility when no cache table is provided
+  - Updated MountSupervisor with `start_cache/1` and `stop_cache/1` for DynamicSupervisor management
+  - Updated MountInfo struct with `cache_pid` field for lifecycle tracking
+  - Updated MountManager to start MetadataCache before Handler, pass `cache_table` to Handler opts, clean up cache on unmount and handler crash
+  - 22 new tests covering: cache API roundtrips, cache miss behaviour, invalidate_all, all 14 event types, gap detection (sequence gap vs contiguous), and partition recovery
+  - All checks pass in all subprojects (neonfs_client 364 tests, neonfs_core 1115 tests, neonfs_fuse 65 tests, neonfs_integration 123 tests)
+- Files changed:
+  - `neonfs_fuse/lib/neon_fs/fuse/metadata_cache.ex` (new — MetadataCache GenServer)
+  - `neonfs_fuse/test/neon_fs/fuse/metadata_cache_test.exs` (new — 22 tests)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (modified — cache-aware lookup/getattr/readdir)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_manager.ex` (modified — start/stop cache alongside handler)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_supervisor.ex` (modified — start_cache/stop_cache)
+  - `neonfs_fuse/lib/neon_fs/fuse/mount_info.ex` (modified — added cache_pid field)
+  - `tasks/task_0117_fuse_metadata_cache.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Dialyzer PLT can become stale when new modules are added to dependencies — `rm -rf _build/dev/dialyxir*` forces rebuild
+  - `list_directory/2` in Handler always returns `{:ok, entries}` — dialyzer correctly flags unreachable error branches in wrapper functions
+  - Process dictionary is a pragmatic approach for storing state needed by behaviour callbacks that don't accept extra arguments (EventHandler.handle_event/1 only takes envelope)
+---
+
+### Task 0118: Phase 10 Integration Tests
+- **Date:** 2026-02-18
+- **Status:** Complete
+- **What was done:**
+  - Created `neonfs_integration/test/integration/event_notification_test.exs` — 13 integration tests verifying cross-node event notification
+  - Created `neonfs_integration/test/support/event_collector.ex` — test helper GenServer that subscribes to events and collects them for inspection
+  - Tests cover: FileCreated cross-node delivery, FileDeleted, DirCreated (explicit mkdir), VolumeAclChanged, VolumeCreated lifecycle events, envelope field correctness (source_node, sequence, hlc_timestamp), monotonic sequence ordering, multi-subscriber fan-out, cross-node delivery from multiple source nodes, volume isolation (no cross-volume leakage), unsubscribe lifecycle, partition recovery (disconnect/reconnect triggers `:neonfs_invalidate_all`), and FUSE MetadataCache invalidation via cross-node events
+  - All checks pass in all subprojects (neonfs_client 364 tests, neonfs_core 1136 tests, neonfs_fuse 65 tests, neonfs_integration 136 tests)
+- Files changed:
+  - `neonfs_integration/test/integration/event_notification_test.exs` (new — 13 integration tests)
+  - `neonfs_integration/test/support/event_collector.ex` (new — test helper GenServer)
+  - `tasks/task_0118_phase10_integration_tests.md` (status → Complete)
+- **Learnings for future iterations:**
+  - GenServer processes started via RPC must use `GenServer.start` (not `start_link`) — the RPC handler process exits after the call, killing any linked processes
+  - `FileIndex.ensure_parent_dirs` does NOT emit `DirCreated` events — only explicit `FileIndex.mkdir/3` emits `DirCreated`
+  - `:net_kernel.disconnect/1` returns `true` (not `:ok`) — match accordingly in tests
+  - `VolumeCreated` struct only has `volume_id` field (no `:name`) — the struct is minimal by design
+  - Partition recovery test needs generous timeouts — default debounce is 5s, plus node reconnection time
 ---

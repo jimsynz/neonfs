@@ -16,6 +16,8 @@ defmodule NeonFS.Core.VolumeRegistry do
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeEncryption
+  alias NeonFS.Events.Broadcaster
+  alias NeonFS.Events.{VolumeCreated, VolumeDeleted, VolumeUpdated}
 
   @type volume_id :: binary()
   @type volume_name :: String.t()
@@ -308,6 +310,7 @@ defmodule NeonFS.Core.VolumeRegistry do
          volume = Volume.new(name, opts),
          :ok <- Volume.validate(volume),
          :ok <- persist_volume(volume) do
+      safe_broadcast(volume.id, %VolumeCreated{volume_id: volume.id})
       {:ok, volume}
     else
       {:ok, _} -> {:error, "volume with name '#{name}' already exists"}
@@ -318,8 +321,10 @@ defmodule NeonFS.Core.VolumeRegistry do
   defp do_delete_volume(id) do
     with {:ok, volume} <- get(id),
          :ok <- check_not_system_volume(volume),
-         :ok <- check_volume_empty(volume) do
-      delete_volume_persisted(id, volume)
+         :ok <- check_volume_empty(volume),
+         :ok <- delete_volume_persisted(id, volume) do
+      safe_broadcast(id, %VolumeDeleted{volume_id: id})
+      :ok
     end
   end
 
@@ -337,6 +342,7 @@ defmodule NeonFS.Core.VolumeRegistry do
          updated = Volume.update(volume, opts),
          :ok <- Volume.validate(updated),
          :ok <- persist_volume(updated) do
+      safe_broadcast(id, %VolumeUpdated{volume_id: id})
       {:ok, updated}
     end
   end
@@ -454,6 +460,20 @@ defmodule NeonFS.Core.VolumeRegistry do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Event broadcasting
+
+  defp safe_broadcast(volume_id, event) do
+    Broadcaster.broadcast(volume_id, event)
+  rescue
+    _ ->
+      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      :ok
+  catch
+    :exit, _ ->
+      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      :ok
   end
 
   # Private helpers

@@ -3,8 +3,15 @@ defmodule NeonFS.Integration.CLITest do
 
   @moduletag timeout: 60_000
   @moduletag nodes: 1
+  @moduletag cluster_mode: :shared
 
   @cli_path Path.expand("../../../neonfs-cli/target/release/neonfs-cli", __DIR__)
+
+  setup_all %{cluster: cluster} do
+    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+    :ok = wait_for_cluster_stable(cluster)
+    %{}
+  end
 
   describe "CLI communication with peer nodes" do
     test "CLI can query cluster status", %{cluster: cluster} do
@@ -13,17 +20,6 @@ defmodule NeonFS.Integration.CLITest do
         flunk(
           "CLI binary not found at #{@cli_path}. Build it with: cd neonfs-cli && cargo build --release"
         )
-      end
-
-      # Initialize the cluster
-      {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
-      # Wait for initialization
-      assert_eventually do
-        case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-          {:ok, _} -> true
-          _ -> false
-        end
       end
 
       # Get cluster info for CLI
@@ -44,8 +40,6 @@ defmodule NeonFS.Integration.CLITest do
         )
       end
 
-      {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
       node_info = PeerCluster.get_node!(cluster, :node1)
 
       # Create volume via CLI
@@ -64,8 +58,6 @@ defmodule NeonFS.Integration.CLITest do
 
   describe "cluster operations without CLI binary" do
     test "cluster status can be queried via RPC", %{cluster: cluster} do
-      {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
       {:ok, status} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, [])
 
       assert is_map(status)
@@ -74,8 +66,6 @@ defmodule NeonFS.Integration.CLITest do
     end
 
     test "volumes can be created and listed via RPC", %{cluster: cluster} do
-      {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
       # Create volume
       {:ok, volume} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
@@ -92,8 +82,6 @@ defmodule NeonFS.Integration.CLITest do
     end
 
     test "volumes can be deleted via RPC", %{cluster: cluster} do
-      {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
-
       # Create volume
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, ["delete-me", %{}])

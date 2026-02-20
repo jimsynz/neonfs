@@ -8,24 +8,36 @@ defmodule NeonFS.Integration.ClusterCase do
   - **Supervised lifecycle**: Each peer node supervised via `start_supervised!/2`
   - **Telemetry integration**: Subscribe to events for completion notification
 
+  ## Cluster Lifecycle Modes
+
+  Control the cluster lifecycle with the `@moduletag cluster_mode:` tag:
+
+  - **`:per_test`** (default) — fresh cluster per test via `setup`
+  - **`:shared`** — one cluster for the whole module via `setup_all`;
+    tests share it and must use unique volume names to avoid collisions
+
   ## Usage
 
+      # Per-test cluster (default)
       defmodule MyTest do
         use NeonFS.Integration.ClusterCase, async: false
 
-        @moduletag nodes: 3  # Optional, defaults to 3
+        @moduletag nodes: 3
 
         test "my cluster test", %{cluster: cluster} do
-          # Use wait_for_event or wait_until, never Process.sleep
           PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+        end
+      end
 
-          # Wait for cluster to be ready via event or condition
-          :ok = wait_until(fn ->
-            case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
-              {:ok, status} -> status.state == :ready
-              _ -> false
-            end
-          end)
+      # Shared cluster (one per module)
+      defmodule FastTest do
+        use NeonFS.Integration.ClusterCase, async: false
+
+        @moduletag cluster_mode: :shared
+        @moduletag nodes: 3
+
+        test "test A", %{cluster: cluster} do
+          # cluster is created once and shared across all tests
         end
       end
   """
@@ -42,32 +54,65 @@ defmodule NeonFS.Integration.ClusterCase do
     end
   end
 
+  setup_all tags do
+    if Map.get(tags, :cluster_mode) == :shared do
+      node_count = Map.get(tags, :nodes, 3)
+      applications = Map.get(tags, :applications, [:neonfs_core])
+      base_dir = create_temp_dir()
+
+      ensure_clean_node_state()
+
+      cluster =
+        PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
+
+      PeerCluster.connect_nodes(cluster)
+      :global.sync()
+
+      on_exit(fn -> PeerCluster.stop_cluster(cluster) end)
+
+      %{cluster: cluster}
+    else
+      %{}
+    end
+  end
+
   setup tags do
-    node_count = Map.get(tags, :nodes, 3)
-    applications = Map.get(tags, :applications, [:neonfs_core])
+    if Map.get(tags, :cluster_mode) == :shared do
+      # Cluster already created in setup_all — pass through
+      %{}
+    else
+      # Default: per-test cluster creation
+      node_count = Map.get(tags, :nodes, 3)
+      applications = Map.get(tags, :applications, [:neonfs_core])
+      base_dir = Map.get(tags, :tmp_dir) || create_temp_dir()
 
-    # Use ExUnit's tmp_dir if available, otherwise create our own
-    base_dir = Map.get(tags, :tmp_dir) || create_temp_dir()
+      # When a shared cluster exists (from setup_all), skip cleanup that would
+      # disconnect it. The per-test cluster uses unique node names so there
+      # are no EPMD collisions.
+      shared_cluster = tags[:cluster]
+      unless shared_cluster, do: ensure_clean_node_state()
 
-    # Ensure no stale peer nodes from previous tests (on_exit runs asynchronously)
-    ensure_clean_node_state()
+      cluster =
+        PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
 
-    # Start cluster in the provided directory
-    cluster =
-      PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
+      PeerCluster.connect_nodes(cluster)
+      :global.sync()
 
-    # Connect all nodes to each other
-    PeerCluster.connect_nodes(cluster)
+      on_exit(fn ->
+        PeerCluster.stop_cluster(cluster)
 
-    # Force the global name server to reconcile its view of the network.
-    # Without this, global may see leftover distribution state from old
-    # clusters and disconnect peer nodes to "prevent overlapping partitions".
-    :global.sync()
+        # Restore the shared cluster's cookie and reconnect after per-test
+        # cleanup. start_cluster! calls :erlang.set_cookie/1, which changes
+        # the test runner's cookie and breaks connectivity to shared nodes.
+        if shared_cluster do
+          :erlang.set_cookie(shared_cluster.cookie)
+          PeerCluster.connect_nodes(shared_cluster)
+          :global.sync()
+        end
+      end)
 
-    # Register cleanup for nodes (tmp_dir is cleaned up by ExUnit automatically)
-    on_exit(fn -> PeerCluster.stop_cluster(cluster) end)
-
-    %{cluster: cluster}
+      %{cluster: cluster}
+    end
   end
 
   defp ensure_clean_node_state do
@@ -230,6 +275,265 @@ defmodule NeonFS.Integration.ClusterCase do
             "Condition not met within #{unquote(timeout)}ms: #{unquote(Macro.to_string(block))}"
           )
       end
+    end
+  end
+
+  # ─── Shared cluster init helpers ──────────────────────────────────
+
+  @doc """
+  Initialise a multi-node (3-node) cluster with sequential joins, full mesh
+  wait, and quorum ring rebuild. Optionally creates volumes.
+
+  ## Options
+  - `:name` - Cluster name (default: "test")
+  - `:volumes` - List of `{name, opts}` tuples to create (default: [])
+
+  ## Example
+
+      :ok = init_multi_node_cluster(cluster, name: "my-test", volumes: [{"vol", %{}}])
+  """
+  @spec init_multi_node_cluster(map(), keyword()) :: :ok
+  def init_multi_node_cluster(cluster, opts \\ []) do
+    cluster_name = Keyword.get(opts, :name, "test")
+    volumes = Keyword.get(opts, :volumes, [])
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
+
+    {:ok, %{"token" => token}} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
+
+    node1_str = cluster |> PeerCluster.get_node!(:node1) |> Map.get(:node) |> Atom.to_string()
+    node_names = cluster.nodes |> Enum.map(& &1.name) |> Enum.reject(&(&1 == :node1))
+
+    for node_name <- node_names do
+      {:ok, _} =
+        PeerCluster.rpc(cluster, node_name, NeonFS.CLI.Handler, :join_cluster, [
+          token,
+          node1_str
+        ])
+
+      :ok = wait_for_cluster_stable(cluster)
+    end
+
+    wait_for_full_mesh(cluster)
+    rebuild_quorum_rings(cluster)
+
+    for {name, vol_opts} <- volumes do
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [name, vol_opts])
+    end
+
+    :ok
+  end
+
+  @doc """
+  Initialise a single-node cluster and optionally create volumes.
+
+  ## Options
+  - `:name` - Cluster name (default: "test")
+  - `:volumes` - List of `{name, opts}` tuples to create (default: [])
+  """
+  @spec init_single_node_cluster(map(), keyword()) :: :ok
+  def init_single_node_cluster(cluster, opts \\ []) do
+    cluster_name = Keyword.get(opts, :name, "test")
+    volumes = Keyword.get(opts, :volumes, [])
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
+
+    :ok = wait_for_cluster_stable(cluster)
+
+    for {name, vol_opts} <- volumes do
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [name, vol_opts])
+    end
+
+    :ok
+  end
+
+  @doc """
+  Wait for cluster_status to return {:ok, _} on node1, indicating Ra is stable.
+  """
+  @spec wait_for_cluster_stable(map()) :: :ok
+  def wait_for_cluster_stable(cluster) do
+    :ok =
+      wait_until(
+        fn ->
+          case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_status, []) do
+            {:ok, _status} -> true
+            _ -> false
+          end
+        end,
+        timeout: 10_000
+      )
+  end
+
+  @doc """
+  Wait for all peer nodes to have fully started (ReadySignal joined `:pg`).
+
+  Uses `:pg.monitor/2` for event-driven detection instead of polling.
+  `NeonFS.Core.ReadySignal` is the last child in the supervisor, so its
+  presence in the `{:node, :ready}` group guarantees all preceding children
+  (including MetadataStore) have started.
+  """
+  @spec wait_for_full_mesh(map()) :: :ok
+  def wait_for_full_mesh(cluster) do
+    peer_nodes =
+      MapSet.new(cluster.nodes, fn ni -> PeerCluster.get_node!(cluster, ni.name).node end)
+
+    ensure_pg_scope()
+
+    {ref, current_members} = :pg.monitor(:neonfs_events, {:node, :ready})
+
+    ready_nodes =
+      current_members
+      |> Enum.map(&node/1)
+      |> MapSet.new()
+      |> MapSet.intersection(peer_nodes)
+
+    unless MapSet.equal?(ready_nodes, peer_nodes) do
+      deadline = System.monotonic_time(:millisecond) + 30_000
+      await_pg_ready(ref, peer_nodes, ready_nodes, deadline)
+    end
+
+    :pg.demonitor(:neonfs_events, ref)
+    :ok
+  end
+
+  @doc """
+  Rebuild quorum rings on all nodes in the cluster.
+  """
+  @spec rebuild_quorum_rings(map()) :: :ok
+  def rebuild_quorum_rings(cluster) do
+    for node_info <- cluster.nodes do
+      PeerCluster.rpc(cluster, node_info.name, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [])
+    end
+
+    :ok
+  end
+
+  # ─── :pg readiness helpers ─────────────────────────────────────────
+
+  defp ensure_pg_scope do
+    case :pg.start(:neonfs_events) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+    end
+  end
+
+  defp await_pg_ready(ref, expected, ready, deadline) do
+    missing = MapSet.difference(expected, ready)
+
+    if MapSet.size(missing) == 0 do
+      :ok
+    else
+      remaining_ms = deadline - System.monotonic_time(:millisecond)
+
+      if remaining_ms <= 0 do
+        import ExUnit.Assertions
+        flunk("Nodes not ready within timeout: #{inspect(MapSet.to_list(missing))}")
+      else
+        receive do
+          {^ref, :join, {:node, :ready}, pids} ->
+            new_ready =
+              pids
+              |> Enum.map(&node/1)
+              |> MapSet.new()
+              |> MapSet.intersection(expected)
+
+            await_pg_ready(ref, expected, MapSet.union(ready, new_ready), deadline)
+        after
+          remaining_ms ->
+            import ExUnit.Assertions
+            flunk("Nodes not ready within timeout: #{inspect(MapSet.to_list(missing))}")
+        end
+      end
+    end
+  end
+
+  # ─── Event-driven wait helpers ────────────────────────────────────
+
+  @doc """
+  Subscribe to events on a peer node, then run an action, then wait for an
+  event to arrive. Returns the action's result.
+
+  Useful for replacing `assert_eventually timeout: 60_000` polling loops on
+  cross-node reads: subscribe first, write, wait for the event, then assert.
+
+  ## Options
+  - `:timeout` - How long to wait for the event (default: 10_000)
+  - `:match` - Predicate on the envelope (default: always true)
+  """
+  @spec subscribe_then_act(map(), atom(), binary(), (-> any()), keyword()) :: any()
+  def subscribe_then_act(cluster, subscriber_node, volume_id, action_fn, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 10_000)
+    match_fn = Keyword.get(opts, :match, fn _envelope -> true end)
+
+    {:ok, collector} =
+      PeerCluster.rpc(
+        cluster,
+        subscriber_node,
+        NeonFS.Integration.EventCollector,
+        :start_with_notify,
+        [volume_id, self()]
+      )
+
+    result = action_fn.()
+
+    do_receive_event(match_fn, timeout)
+
+    PeerCluster.rpc(cluster, subscriber_node, GenServer, :stop, [collector])
+    result
+  end
+
+  @doc """
+  Subscribe on a peer node and block until an event matching the predicate arrives.
+
+  ## Options
+  - `:timeout` - How long to wait (default: 10_000)
+  - `:match` - Predicate on the envelope (default: always true)
+  """
+  @spec wait_for_event_on_node(map(), atom(), binary(), keyword()) :: :ok
+  def wait_for_event_on_node(cluster, node_name, volume_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 10_000)
+    match_fn = Keyword.get(opts, :match, fn _envelope -> true end)
+
+    {:ok, collector} =
+      PeerCluster.rpc(
+        cluster,
+        node_name,
+        NeonFS.Integration.EventCollector,
+        :start_with_notify,
+        [volume_id, self()]
+      )
+
+    do_receive_event(match_fn, timeout)
+
+    PeerCluster.rpc(cluster, node_name, GenServer, :stop, [collector])
+    :ok
+  end
+
+  defp do_receive_event(match_fn, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    do_receive_event_loop(match_fn, deadline)
+  end
+
+  defp do_receive_event_loop(match_fn, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:neonfs_test_event, envelope} ->
+        if match_fn.(envelope) do
+          :ok
+        else
+          do_receive_event_loop(match_fn, deadline)
+        end
+    after
+      remaining ->
+        import ExUnit.Assertions
+        flunk("No matching event received within timeout")
     end
   end
 end

@@ -21,7 +21,8 @@ defmodule NeonFS.Integration.MixProject do
 
   defp dialyzer do
     [
-      ignore_warnings: ".dialyzer_ignore.exs"
+      ignore_warnings: ".dialyzer_ignore.exs",
+      plt_add_apps: [:neonfs_client, :neonfs_core, :neonfs_fuse]
     ]
   end
 

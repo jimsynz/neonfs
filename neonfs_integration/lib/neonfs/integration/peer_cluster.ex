@@ -129,7 +129,8 @@ defmodule NeonFS.Integration.PeerCluster do
           end
 
         client_config = [
-          tls_dir: Path.join(data_dir, "tls")
+          tls_dir: Path.join(data_dir, "tls"),
+          partition_recovery_debounce_ms: 200
         ]
 
         app_config = [

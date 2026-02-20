@@ -14,6 +14,8 @@ defmodule NeonFS.Core.ACLManager do
   require Logger
 
   alias NeonFS.Core.{AuditLog, FileIndex, Persistence, RaSupervisor, VolumeACL}
+  alias NeonFS.Events.Broadcaster
+  alias NeonFS.Events.{FileAclChanged, VolumeAclChanged}
 
   @ets_table :volume_acls
 
@@ -158,6 +160,8 @@ defmodule NeonFS.Core.ACLManager do
         resource: volume_id,
         details: %{action: :set, owner_uid: acl.owner_uid, owner_gid: acl.owner_gid}
       )
+
+      safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
     end
 
     {:reply, reply, state}
@@ -179,6 +183,8 @@ defmodule NeonFS.Core.ACLManager do
             resource: volume_id,
             details: %{action: :grant, principal: principal, permissions: permissions}
           )
+
+          safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
         end
 
         {:reply, reply, state}
@@ -203,6 +209,8 @@ defmodule NeonFS.Core.ACLManager do
             resource: volume_id,
             details: %{action: :revoke, principal: principal}
           )
+
+          safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
         end
 
         {:reply, reply, state}
@@ -215,6 +223,7 @@ defmodule NeonFS.Core.ACLManager do
   @impl true
   def handle_call({:delete_volume_acl, volume_id}, _from, state) do
     :ets.delete(@ets_table, volume_id)
+    safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
     {:reply, :ok, state}
   end
 
@@ -232,6 +241,7 @@ defmodule NeonFS.Core.ACLManager do
                 details: %{path: path, entries_count: length(acl_entries)}
               )
 
+              safe_broadcast(volume_id, %FileAclChanged{volume_id: volume_id, path: path})
               :ok
 
             {:error, reason} ->
@@ -271,6 +281,20 @@ defmodule NeonFS.Core.ACLManager do
     :ok
   rescue
     _ -> :ok
+  end
+
+  # Event broadcasting
+
+  defp safe_broadcast(volume_id, event) do
+    Broadcaster.broadcast(volume_id, event)
+  rescue
+    _ ->
+      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      :ok
+  catch
+    :exit, _ ->
+      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      :ok
   end
 
   # Private
