@@ -4,7 +4,7 @@ use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::DriveInfo;
-use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
+use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Atom, Binary, Map, Term};
 
@@ -42,6 +42,20 @@ pub enum DriveCommand {
 
     /// List all drives on this node
     List,
+
+    /// Evacuate all data from a drive (graceful removal)
+    Evacuate {
+        /// Drive identifier
+        drive_id: String,
+
+        /// Node where the drive is located (default: local node)
+        #[arg(long)]
+        node: Option<String>,
+
+        /// Allow migration to any tier (default: same tier only)
+        #[arg(long)]
+        any_tier: bool,
+    },
 }
 
 impl DriveCommand {
@@ -56,6 +70,11 @@ impl DriveCommand {
             } => self.add(path, tier, capacity, id.as_deref(), format),
             DriveCommand::Remove { drive_id, force } => self.remove(drive_id, *force, format),
             DriveCommand::List => self.list(format),
+            DriveCommand::Evacuate {
+                drive_id,
+                node,
+                any_tier,
+            } => self.evacuate(drive_id, node.as_deref(), *any_tier, format),
         }
     }
 
@@ -173,8 +192,8 @@ impl DriveCommand {
         if let Some(err_msg) = extract_error(&result) {
             if err_msg == "drive_has_data" {
                 eprintln!(
-                    "Error: Drive '{}' contains data. Evacuate data first or use --force to remove anyway.",
-                    drive_id
+                    "Error: Drive '{}' contains data. Use `drive evacuate {}` first, or --force to remove anyway.",
+                    drive_id, drive_id
                 );
                 return Err(crate::error::CliError::RpcError(
                     "Drive contains data".to_string(),
@@ -250,6 +269,130 @@ impl DriveCommand {
         }
         Ok(())
     }
+
+    fn evacuate(
+        &self,
+        drive_id: &str,
+        node: Option<&str>,
+        any_tier: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        // Get the local node name from the daemon if no node specified
+        let node_name = match node {
+            Some(n) => n.to_string(),
+            None => {
+                let status = runtime.block_on(async {
+                    let mut conn = DaemonConnection::connect().await?;
+                    conn.call("Elixir.NeonFS.CLI.Handler", "cluster_status", vec![])
+                        .await
+                })?;
+                let status_data = unwrap_ok_tuple(status)?;
+                let status_map = term_to_map(&status_data)?;
+                match status_map.get("node") {
+                    Some(term) => term_to_string(term)?,
+                    None => {
+                        return Err(crate::error::CliError::RpcError(
+                            "Could not determine local node name".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        let node_term = Term::Binary(Binary {
+            bytes: node_name.as_bytes().to_vec(),
+        });
+        let drive_id_term = Term::Binary(Binary {
+            bytes: drive_id.as_bytes().to_vec(),
+        });
+
+        let mut opts_entries = vec![];
+        if any_tier {
+            opts_entries.push((
+                Term::Binary(Binary {
+                    bytes: b"any_tier".to_vec(),
+                }),
+                Term::Atom(Atom::from("true")),
+            ));
+        }
+        let opts_term = Term::Map(Map {
+            entries: opts_entries,
+        });
+
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_evacuate_drive",
+                vec![node_term, drive_id_term, opts_term],
+            )
+            .await
+        })?;
+
+        if let Some(err_msg) = extract_error(&result) {
+            match err_msg.as_str() {
+                "already_draining" => {
+                    eprintln!("Error: Drive '{}' is already being evacuated.", drive_id);
+                }
+                "insufficient_capacity" => {
+                    eprintln!(
+                        "Error: Not enough capacity on other drives to evacuate '{}'.",
+                        drive_id
+                    );
+                }
+                _ => {}
+            }
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let job_map = term_to_map(&data)?;
+
+        let job_id = job_map
+            .get("id")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+        let total = job_map
+            .get("progress_total")
+            .and_then(extract_integer)
+            .unwrap_or(0);
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "status": "started",
+                    "job_id": job_id,
+                    "drive_id": drive_id,
+                    "node": node_name,
+                    "total_chunks": total,
+                    "any_tier": any_tier
+                });
+                println!("{}", json::format(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Evacuation started for drive '{}'", drive_id);
+                println!("  Node: {}", node_name);
+                println!("  Job ID: {}", job_id);
+                println!("  Chunks to evacuate: {}", total);
+                if any_tier {
+                    println!("  Mode: any tier (cross-tier migration allowed)");
+                } else {
+                    println!("  Mode: same tier only");
+                }
+                println!("\nTrack progress with: neonfs job show {}", job_id);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn extract_integer(term: &Term) -> Option<i64> {
+    match term {
+        Term::FixInteger(n) => Some(n.value as i64),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -291,5 +434,57 @@ mod tests {
 
         let cli = TestCli::try_parse_from(["test", "remove", "nvme0", "--force"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_evacuate_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: DriveCommand,
+        }
+
+        let cli = TestCli::try_parse_from(["test", "evacuate", "nvme0"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            match parsed.command {
+                DriveCommand::Evacuate {
+                    drive_id,
+                    node,
+                    any_tier,
+                } => {
+                    assert_eq!(drive_id, "nvme0");
+                    assert!(node.is_none());
+                    assert!(!any_tier);
+                }
+                _ => panic!("Expected Evacuate variant"),
+            }
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "evacuate",
+            "sata0",
+            "--node",
+            "neonfs-core@host1",
+            "--any-tier",
+        ]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            match parsed.command {
+                DriveCommand::Evacuate {
+                    drive_id,
+                    node,
+                    any_tier,
+                } => {
+                    assert_eq!(drive_id, "sata0");
+                    assert_eq!(node.as_deref(), Some("neonfs-core@host1"));
+                    assert!(any_tier);
+                }
+                _ => panic!("Expected Evacuate variant"),
+            }
+        }
     }
 }

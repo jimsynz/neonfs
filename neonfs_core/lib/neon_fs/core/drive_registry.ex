@@ -109,9 +109,14 @@ defmodule NeonFS.Core.DriveRegistry do
   """
   @spec select_drive(atom()) :: {:ok, Drive.t()} | {:error, :no_drives_in_tier}
   def select_drive(tier) do
-    candidates =
+    local_tier_drives =
       drives_for_tier(tier)
-      |> Enum.filter(&(&1.node == Node.self() and &1.state == :active))
+      |> Enum.filter(&(&1.node == Node.self() and &1.state != :draining))
+
+    active = Enum.filter(local_tier_drives, &(&1.state == :active))
+
+    candidates =
+      if active != [], do: active, else: Enum.filter(local_tier_drives, &(&1.state == :standby))
 
     :telemetry.execute(
       [:neonfs, :drive_registry, :select_drive],
@@ -152,7 +157,7 @@ defmodule NeonFS.Core.DriveRegistry do
   Updates the state of a drive (:active or :standby).
   """
   @spec update_state(String.t(), Drive.state()) :: :ok | {:error, :not_found}
-  def update_state(drive_id, state) when state in [:active, :standby] do
+  def update_state(drive_id, state) when state in [:active, :standby, :draining] do
     GenServer.call(__MODULE__, {:update_state, drive_id, state})
   end
 

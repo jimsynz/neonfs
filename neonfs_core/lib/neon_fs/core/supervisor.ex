@@ -210,6 +210,9 @@ defmodule NeonFS.Core.Supervisor do
           # StripeIndex for erasure-coded stripe metadata (quorum-backed)
           {NeonFS.Core.StripeIndex, quorum_opts: quorum_opts},
 
+          # StorageMetrics tracks per-drive usage via telemetry
+          NeonFS.Core.StorageMetrics,
+
           # VolumeRegistry depends on FileIndex
           NeonFS.Core.VolumeRegistry,
 

@@ -273,6 +273,49 @@ defmodule NeonFS.Core.ChunkIndexTest do
     end
   end
 
+  describe "list_by_drive/2" do
+    test "finds chunks on a specific node and drive" do
+      hash1 = :crypto.strong_rand_bytes(32)
+      hash2 = :crypto.strong_rand_bytes(32)
+      hash3 = :crypto.strong_rand_bytes(32)
+
+      location1 = %{node: :node1, drive_id: "drive1", tier: :hot}
+      location2 = %{node: :node1, drive_id: "drive2", tier: :hot}
+      location3 = %{node: :node2, drive_id: "drive1", tier: :cold}
+
+      chunk1 = ChunkMeta.new(hash1, 1024, 512) |> ChunkMeta.add_location(location1)
+      chunk2 = ChunkMeta.new(hash2, 2048, 1024) |> ChunkMeta.add_location(location2)
+
+      chunk3 =
+        ChunkMeta.new(hash3, 4096, 2048)
+        |> ChunkMeta.add_location(location1)
+        |> ChunkMeta.add_location(location3)
+
+      ChunkIndex.put(chunk1)
+      ChunkIndex.put(chunk2)
+      ChunkIndex.put(chunk3)
+
+      # Query node1/drive1 - should return chunk1 and chunk3
+      chunks = ChunkIndex.list_by_drive(:node1, "drive1")
+      hashes = Enum.map(chunks, & &1.hash) |> Enum.sort()
+      assert Enum.sort([hash1, hash3]) == hashes
+
+      # Query node1/drive2 - should return only chunk2
+      chunks = ChunkIndex.list_by_drive(:node1, "drive2")
+      assert length(chunks) == 1
+      assert hd(chunks).hash == hash2
+
+      # Query node2/drive1 - should return only chunk3
+      chunks = ChunkIndex.list_by_drive(:node2, "drive1")
+      assert length(chunks) == 1
+      assert hd(chunks).hash == hash3
+
+      # Query non-existent combination
+      chunks = ChunkIndex.list_by_drive(:node1, "drive999")
+      assert chunks == []
+    end
+  end
+
   describe "list_uncommitted/0" do
     test "finds all uncommitted chunks" do
       hash1 = :crypto.strong_rand_bytes(32)

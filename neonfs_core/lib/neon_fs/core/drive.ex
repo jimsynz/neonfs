@@ -3,11 +3,12 @@ defmodule NeonFS.Core.Drive do
   Represents a physical storage drive in the NeonFS cluster.
 
   Each drive has a unique ID, belongs to a node, is assigned to a storage tier,
-  and tracks capacity and usage. Drives can be in `:active` or `:standby` state
-  for power management purposes.
+  and tracks capacity and usage. Drives can be in `:active`, `:standby`, or
+  `:draining` state. The `:draining` state indicates an evacuation is in progress
+  and no new writes should be directed to this drive.
   """
 
-  @type state :: :active | :standby
+  @type state :: :active | :standby | :draining
 
   @type t :: %__MODULE__{
           id: String.t(),

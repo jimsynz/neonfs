@@ -24,6 +24,7 @@ defmodule NeonFS.CLI.Handler do
     KeyManager,
     KeyRotation,
     ServiceRegistry,
+    StorageMetrics,
     Volume,
     VolumeACL,
     VolumeEncryption,
@@ -683,6 +684,97 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
+  Starts evacuation of all data from a drive.
+
+  ## Parameters
+  - `node_name` - Node name string (e.g. "neonfs-core@host")
+  - `drive_id` - Drive identifier
+  - `opts` - Options map with optional keys:
+    - `"any_tier"` - Allow migration to any tier (default: false)
+
+  ## Returns
+  - `{:ok, map}` - Job info map
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_evacuate_drive(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def handle_evacuate_drive(node_name, drive_id, opts \\ %{})
+      when is_binary(node_name) and is_binary(drive_id) do
+    node = String.to_atom(node_name)
+    any_tier = Map.get(opts, "any_tier", false)
+
+    case NeonFS.Core.DriveEvacuation.start_evacuation(node, drive_id, any_tier: any_tier) do
+      {:ok, job} -> {:ok, job_to_map(job)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns the evacuation status for a drive.
+
+  ## Parameters
+  - `drive_id` - Drive identifier
+
+  ## Returns
+  - `{:ok, map}` - Status map
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_evacuation_status(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_evacuation_status(drive_id) when is_binary(drive_id) do
+    case NeonFS.Core.DriveEvacuation.evacuation_status(drive_id) do
+      {:ok, status} ->
+        {:ok,
+         %{
+           job_id: status.job_id,
+           status: Atom.to_string(status.status),
+           progress_total: status.progress.total,
+           progress_completed: status.progress.completed,
+           progress_description: status.progress.description,
+           drive_id: status.drive_id,
+           node: if(status.node, do: Atom.to_string(status.node)),
+           any_tier: status.any_tier
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns cluster-wide storage capacity information.
+
+  ## Returns
+  - `{:ok, map}` - Capacity info with per-drive breakdown
+  """
+  @spec handle_storage_stats() :: {:ok, map()}
+  def handle_storage_stats do
+    stats = StorageMetrics.cluster_capacity()
+
+    drives =
+      Enum.map(stats.drives, fn d ->
+        %{
+          node: Atom.to_string(d.node),
+          drive_id: d.drive_id,
+          tier: Atom.to_string(d.tier),
+          capacity_bytes: serialise_capacity(d.capacity_bytes),
+          used_bytes: d.used_bytes,
+          available_bytes: serialise_capacity(d.available_bytes),
+          state: Atom.to_string(d.state)
+        }
+      end)
+
+    {:ok,
+     %{
+       drives: drives,
+       total_capacity: serialise_capacity(stats.total_capacity),
+       total_used: stats.total_used,
+       total_available: serialise_capacity(stats.total_available)
+     }}
+  end
+
+  defp serialise_capacity(:unlimited), do: "unlimited"
+  defp serialise_capacity(n) when is_integer(n), do: n
+
+  @doc """
   Lists background jobs with optional filters.
 
   ## Parameters
@@ -814,7 +906,10 @@ defmodule NeonFS.CLI.Handler do
   defp parse_job_type_filter(opts, type_label) when is_binary(type_label) do
     # Find runner module by label
     # We search known runners; extensible as new runners are added
-    known_runners = [NeonFS.Core.Job.Runners.KeyRotation]
+    known_runners = [
+      NeonFS.Core.Job.Runners.KeyRotation,
+      NeonFS.Core.Job.Runners.DriveEvacuation
+    ]
 
     case Enum.find(known_runners, fn mod -> mod.label() == type_label end) do
       nil -> opts

@@ -48,4 +48,10 @@ defmodule NeonFS.Core.Job.Runner do
   Returns a human-readable label for CLI display (e.g. `"key-rotation"`).
   """
   @callback label() :: String.t()
+
+  @doc """
+  Called when a job is cancelled. Optional cleanup hook.
+  """
+  @callback on_cancel(job :: Job.t()) :: :ok
+  @optional_callbacks [on_cancel: 1]
 end

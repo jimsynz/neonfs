@@ -163,24 +163,23 @@ defmodule NeonFS.Core.JobTracker do
 
   def handle_call({:cancel, job_id}, _from, state) do
     case :ets.lookup(@ets_table, job_id) do
+      [{^job_id, job}] when job.status in [:completed, :failed, :cancelled] ->
+        {:reply, {:error, :already_terminal}, state}
+
       [{^job_id, job}] ->
-        if Job.terminal?(job) do
-          {:reply, {:error, :already_terminal}, state}
-        else
-          cancelled = %{
-            job
-            | status: :cancelled,
-              updated_at: DateTime.utc_now(),
-              completed_at: DateTime.utc_now()
-          }
+        cancelled = %{
+          job
+          | status: :cancelled,
+            updated_at: DateTime.utc_now(),
+            completed_at: DateTime.utc_now()
+        }
 
-          persist_job(cancelled)
-          emit_telemetry(:cancelled, cancelled)
+        persist_job(cancelled)
+        emit_telemetry(:cancelled, cancelled)
+        invoke_on_cancel(cancelled, job_id)
 
-          # If there's a running task, shut it down
-          state = cancel_running_task(state, job_id)
-          {:reply, :ok, state}
-        end
+        state = cancel_running_task(state, job_id)
+        {:reply, :ok, state}
 
       [] ->
         {:reply, {:error, :not_found}, state}
@@ -216,6 +215,18 @@ defmodule NeonFS.Core.JobTracker do
     Logger.info("JobTracker shutting down, snapshotting jobs...")
     Persistence.snapshot_table(@ets_table, state.dets_path)
     :ok
+  end
+
+  # Private — Cancellation hooks
+
+  defp invoke_on_cancel(job, job_id) do
+    if function_exported?(job.type, :on_cancel, 1) do
+      try do
+        job.type.on_cancel(job)
+      rescue
+        error -> Logger.warning("on_cancel hook failed for #{job_id}: #{inspect(error)}")
+      end
+    end
   end
 
   # Private — Job execution

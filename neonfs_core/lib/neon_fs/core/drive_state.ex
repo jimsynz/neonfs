@@ -263,8 +263,15 @@ defmodule NeonFS.Core.DriveState do
   end
 
   defp update_registry_state(drive_id, power_state) do
-    registry_state = if power_state in [:active, :idle], do: :active, else: :standby
-    DriveRegistry.update_state(drive_id, registry_state)
+    # Don't let power management transitions overwrite :draining state
+    case DriveRegistry.get_drive(Node.self(), drive_id) do
+      {:ok, %{state: :draining}} ->
+        :ok
+
+      _ ->
+        registry_state = if power_state in [:active, :idle], do: :active, else: :standby
+        DriveRegistry.update_state(drive_id, registry_state)
+    end
   rescue
     _ -> :ok
   catch

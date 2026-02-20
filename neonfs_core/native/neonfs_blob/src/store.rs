@@ -340,14 +340,20 @@ impl BlobStore {
     /// # Errors
     /// Returns `ChunkNotFound` if the chunk does not exist.
     /// Returns `IoError` if the delete fails.
-    pub fn delete_chunk(&self, hash: &Hash, tier: Tier) -> Result<(), StoreError> {
+    pub fn delete_chunk(&self, hash: &Hash, tier: Tier) -> Result<u64, StoreError> {
         let path = self.chunk_path(hash, tier);
 
         if !path.exists() {
             return Err(StoreError::ChunkNotFound(hash.to_hex()));
         }
 
-        fs::remove_file(&path).map_err(|e| StoreError::io_error(&path, e))
+        let file_size = fs::metadata(&path)
+            .map_err(|e| StoreError::io_error(&path, e))?
+            .len();
+
+        fs::remove_file(&path).map_err(|e| StoreError::io_error(&path, e))?;
+
+        Ok(file_size)
     }
 
     /// Checks if a chunk exists in the store.

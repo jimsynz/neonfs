@@ -178,6 +178,28 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @doc """
+  Lists all chunks with a location on a given node and drive (any tier).
+  """
+  @spec list_by_drive(node(), String.t()) :: [ChunkMeta.t()]
+  def list_by_drive(node, drive_id) when is_atom(node) and is_binary(drive_id) do
+    :ets.foldl(
+      fn
+        {_hash, %ChunkMeta{} = chunk_meta}, acc ->
+          if has_drive?(chunk_meta, node, drive_id) do
+            [chunk_meta | acc]
+          else
+            acc
+          end
+
+        _, acc ->
+          acc
+      end,
+      [],
+      :chunk_index
+    )
+  end
+
+  @doc """
   Lists all uncommitted chunks.
   """
   @spec list_uncommitted() :: [ChunkMeta.t()]
@@ -564,6 +586,12 @@ defmodule NeonFS.Core.ChunkIndex do
   defp has_node?(chunk_meta, node) do
     Enum.any?(chunk_meta.locations, fn location ->
       location.node == node
+    end)
+  end
+
+  defp has_drive?(chunk_meta, node, drive_id) do
+    Enum.any?(chunk_meta.locations, fn location ->
+      location.node == node and location.drive_id == drive_id
     end)
   end
 

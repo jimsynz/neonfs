@@ -176,10 +176,11 @@ defmodule NeonFS.Core.Blob.Native do
       iex> data = "hello world"
       iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
       iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
-      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_delete_chunk(store, hash, "hot")
+      iex> {:ok, _bytes_freed} = NeonFS.Core.Blob.Native.store_delete_chunk(store, hash, "hot")
 
   """
-  @spec store_delete_chunk(store(), hash(), tier()) :: {:ok, {}} | {:error, String.t()}
+  @spec store_delete_chunk(store(), hash(), tier()) ::
+          {:ok, non_neg_integer()} | {:error, String.t()}
   def store_delete_chunk(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """

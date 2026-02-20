@@ -177,10 +177,12 @@ defmodule NeonFS.Core.DriveRegistryTest do
       assert selected.id == "nvme1"
     end
 
-    test "skips standby drives" do
+    test "falls back to standby drives when no active drives" do
       DriveRegistry.update_state("nvme0", :standby)
 
-      assert {:error, :no_drives_in_tier} = DriveRegistry.select_drive(:hot)
+      assert {:ok, selected} = DriveRegistry.select_drive(:hot)
+      assert selected.id == "nvme0"
+      assert selected.state == :standby
     end
 
     test "emits telemetry on selection" do

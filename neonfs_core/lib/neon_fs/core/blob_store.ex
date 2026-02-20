@@ -113,6 +113,7 @@ defmodule NeonFS.Core.BlobStore do
   @spec write_chunk(binary(), drive_id(), tier(), keyword()) ::
           {:ok, chunk_hash(), chunk_info()} | {:error, String.t()}
   def write_chunk(data, drive_id, tier, opts \\ []) do
+    DriveState.ensure_active(drive_id)
     {server, opts} = Keyword.pop(opts, :server, __MODULE__)
     GenServer.call(server, {:write_chunk, data, drive_id, tier, opts})
   end
@@ -193,11 +194,12 @@ defmodule NeonFS.Core.BlobStore do
 
   ## Returns
 
-    * `{:ok, {}}` - On success
+    * `{:ok, bytes_freed}` - Number of bytes freed on success
     * `{:error, reason}` - On failure
 
   """
-  @spec delete_chunk(chunk_hash(), drive_id(), keyword()) :: {:ok, {}} | {:error, String.t()}
+  @spec delete_chunk(chunk_hash(), drive_id(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, String.t()}
   def delete_chunk(hash, drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:delete_chunk, hash, drive_id})
@@ -953,16 +955,16 @@ defmodule NeonFS.Core.BlobStore do
     result =
       try do
         case try_delete_from_tiers(store, hash) do
-          {:ok, {}} = success ->
+          {:ok, bytes_freed} ->
             duration = System.monotonic_time() - start_time
 
             :telemetry.execute(
               [:neonfs, :blob_store, :delete_chunk, :stop],
-              %{duration: duration},
+              %{duration: duration, bytes_freed: bytes_freed},
               metadata
             )
 
-            success
+            {:ok, bytes_freed}
 
           {:error, reason} = error ->
             duration = System.monotonic_time() - start_time
@@ -995,7 +997,7 @@ defmodule NeonFS.Core.BlobStore do
     # Try each tier, return success on first hit
     Enum.reduce_while(@tiers, {:error, "chunk not found in any tier"}, fn tier, acc ->
       case Native.store_delete_chunk(store, hash, tier) do
-        {:ok, {}} -> {:halt, {:ok, {}}}
+        {:ok, bytes_freed} -> {:halt, {:ok, bytes_freed}}
         {:error, _} -> {:cont, acc}
       end
     end)

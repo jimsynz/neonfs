@@ -138,7 +138,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert {:ok, ^data} =
                BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
 
-      assert {:ok, {}} = BlobStore.delete_chunk(hash, "default", server: test_server())
+      assert {:ok, _bytes_freed} = BlobStore.delete_chunk(hash, "default", server: test_server())
 
       # Reading after delete should fail
       assert {:error, _reason} =
@@ -162,7 +162,7 @@ defmodule NeonFS.Core.BlobStoreTest do
                BlobStore.write_chunk(data, "default", "warm", server: test_server())
 
       # Delete without specifying tier - should find it
-      assert {:ok, {}} = BlobStore.delete_chunk(hash, "default", server: test_server())
+      assert {:ok, _bytes_freed} = BlobStore.delete_chunk(hash, "default", server: test_server())
 
       # Verify it's gone
       assert {:error, _} =
@@ -486,7 +486,7 @@ defmodule NeonFS.Core.BlobStoreTest do
 
       ref = telemetry_listen([:neonfs, :blob_store, :delete_chunk])
 
-      assert {:ok, {}} = BlobStore.delete_chunk(hash, "default", server: test_server())
+      assert {:ok, _bytes_freed} = BlobStore.delete_chunk(hash, "default", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :delete_chunk, :start], _measurements,
                       metadata}

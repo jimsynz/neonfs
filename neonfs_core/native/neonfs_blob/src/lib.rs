@@ -280,13 +280,13 @@ fn store_read_chunk_with_options<'a>(
 /// * `tier` - Storage tier ("hot", "warm", or "cold").
 ///
 /// # Returns
-/// `:ok` on success, or an error tuple.
+/// `{:ok, bytes_freed}` on success, or an error tuple.
 #[rustler::nif]
 fn store_delete_chunk(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
     tier: String,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
 
