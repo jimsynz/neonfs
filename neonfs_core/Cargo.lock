@@ -304,6 +304,7 @@ dependencies = [
  "aes-gcm",
  "fastcdc",
  "hex",
+ "libc",
  "proptest",
  "rand",
  "rustler",

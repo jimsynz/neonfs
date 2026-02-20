@@ -547,6 +547,24 @@ defmodule NeonFS.Core.Blob.Native do
   def erasure_decode(_shards_with_indices, _data_count, _parity_count, _shard_size),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  # Filesystem info
+
+  @doc """
+  Returns filesystem capacity information for the given path.
+
+  Uses `statvfs()` to query the filesystem containing `path`.
+
+  ## Parameters
+    - `path` - Absolute path to query (can be any file or directory on the filesystem)
+
+  ## Returns
+    - `{:ok, {total_bytes, available_bytes, used_bytes}}` - Filesystem capacity info
+    - `{:error, reason}` - If the path doesn't exist or statvfs fails
+  """
+  @spec filesystem_info(String.t()) ::
+          {:ok, {non_neg_integer(), non_neg_integer(), non_neg_integer()}} | {:error, String.t()}
+  def filesystem_info(_path), do: :erlang.nif_error(:nif_not_loaded)
+
   # Metadata namespace operations
 
   @doc """

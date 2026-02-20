@@ -700,4 +700,36 @@ fn metadata_list_segment<'a>(
     Ok(result)
 }
 
+/// Returns filesystem capacity information for the given path.
+///
+/// Uses `statvfs()` to query the filesystem containing `path`.
+///
+/// # Returns
+/// A tuple of `(total_bytes, available_bytes, used_bytes)`.
+#[rustler::nif]
+fn filesystem_info(path: String) -> Result<(u64, u64, u64), String> {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+
+    let c_path = CString::new(path.as_bytes()).map_err(|e| e.to_string())?;
+
+    let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+
+    if result != 0 {
+        let errno = std::io::Error::last_os_error();
+        return Err(format!("statvfs failed for '{}': {}", path, errno));
+    }
+
+    let stat = unsafe { stat.assume_init() };
+
+    let block_size = stat.f_frsize;
+    let total_bytes = stat.f_blocks * block_size;
+    let available_bytes = stat.f_bavail * block_size;
+    let used_bytes = total_bytes.saturating_sub(stat.f_bfree * block_size);
+
+    Ok((total_bytes, available_bytes, used_bytes))
+}
+
 rustler::init!("Elixir.NeonFS.Core.Blob.Native");

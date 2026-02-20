@@ -352,7 +352,7 @@ The FUSE node's service discovery layer (`NeonFS.Client.Discovery`) will automat
 Configure storage drives via the `NEONFS_DRIVES` environment variable on core nodes. Each drive is specified as `id:path:tier[:capacity]`, with multiple drives separated by commas:
 
 ```
-NEONFS_DRIVES="nvme0:/data/nvme0:hot:1000000000000,sata0:/data/sata0:cold:4000000000000"
+NEONFS_DRIVES="nvme0:/data/nvme0:hot:1T,sata0:/data/sata0:cold:4T"
 ```
 
 | Field | Description |
@@ -360,7 +360,9 @@ NEONFS_DRIVES="nvme0:/data/nvme0:hot:1000000000000,sata0:/data/sata0:cold:400000
 | `id` | Unique identifier for the drive |
 | `path` | Absolute path to the storage directory |
 | `tier` | Storage tier: `hot`, `warm`, or `cold` |
-| `capacity` | Optional capacity in bytes (0 = unlimited) |
+| `capacity` | Optional capacity limit (0 = unlimited). Accepts raw bytes or human-readable suffixes: `M` (MiB, 1024^2), `G` (GiB, 1024^3), `T` (TiB, 1024^4). Suffixes are case-insensitive. Examples: `500G`, `1T`, `1.5T`, `100M`. |
+
+At startup, NeonFS checks each drive's configured capacity against the actual partition size and logs a warning if the configured value exceeds the partition total.
 
 When `NEONFS_DRIVES` is not set, a single default drive is created at `{NEONFS_DATA_DIR}/blobs` with tier `hot`.
 
@@ -389,7 +391,7 @@ services:
       - /data/nvme0:/data/nvme0                   # Hot tier drive
       - /data/sata0:/data/sata0                   # Cold tier drive
     environment:
-      NEONFS_DRIVES: "nvme0:/data/nvme0:hot:1000000000000,sata0:/data/sata0:cold:4000000000000"
+      NEONFS_DRIVES: "nvme0:/data/nvme0:hot:1T,sata0:/data/sata0:cold:4T"
 ```
 
 ## Operations

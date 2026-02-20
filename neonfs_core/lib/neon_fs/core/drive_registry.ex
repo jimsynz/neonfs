@@ -19,6 +19,7 @@ defmodule NeonFS.Core.DriveRegistry do
   require Logger
 
   alias NeonFS.Core.Drive
+  alias NeonFS.Core.DriveConfig
 
   @ets_table :drive_registry
   @sync_interval_ms 30_000
@@ -172,6 +173,8 @@ defmodule NeonFS.Core.DriveRegistry do
         %{drive_id: drive.id, node: drive.node, tier: drive.tier}
       )
     end)
+
+    DriveConfig.validate_drives(local_drives)
 
     Logger.info("DriveRegistry started with #{length(local_drives)} local drives")
 
