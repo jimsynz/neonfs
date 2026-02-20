@@ -740,6 +740,60 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
+  Starts a cluster-wide rebalance operation.
+
+  ## Parameters
+  - `opts` - Options map with optional keys:
+    - `"tier"` - Specific tier to rebalance (e.g. "hot", "warm", "cold")
+    - `"threshold"` - Balance tolerance as string float (default: "0.10")
+    - `"batch_size"` - Chunks per migration batch as string integer (default: "50")
+
+  ## Returns
+  - `{:ok, map}` - Job info map
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_rebalance(map()) :: {:ok, map()} | {:error, term()}
+  def handle_rebalance(opts \\ %{}) do
+    rebalance_opts =
+      []
+      |> parse_tier_opt(Map.get(opts, "tier"))
+      |> parse_float_opt(:threshold, Map.get(opts, "threshold"))
+      |> parse_int_opt(:batch_size, Map.get(opts, "batch_size"))
+
+    case NeonFS.Core.ClusterRebalance.start_rebalance(rebalance_opts) do
+      {:ok, job} -> {:ok, job_to_map(job)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Returns the status of an active or recent rebalance operation.
+
+  ## Returns
+  - `{:ok, map}` - Status map with progress info
+  - `{:error, :no_rebalance}` - No rebalance in progress
+  """
+  @spec handle_rebalance_status() :: {:ok, map()} | {:error, term()}
+  def handle_rebalance_status do
+    case NeonFS.Core.ClusterRebalance.rebalance_status() do
+      {:ok, status} ->
+        {:ok,
+         %{
+           job_id: status.job_id,
+           status: Atom.to_string(status.status),
+           progress_total: status.progress.total,
+           progress_completed: status.progress.completed,
+           progress_description: status.progress.description,
+           tiers: Enum.map(status.tiers, &Atom.to_string/1),
+           threshold: status.threshold
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
   Returns cluster-wide storage capacity information.
 
   ## Returns
@@ -870,6 +924,44 @@ defmodule NeonFS.CLI.Handler do
   defp serialise_param_value(v) when is_number(v), do: v
   defp serialise_param_value(v), do: inspect(v)
 
+  defp parse_tier_opt(opts, nil), do: opts
+
+  defp parse_tier_opt(opts, tier) when is_binary(tier) do
+    Keyword.put(opts, :tier, String.to_existing_atom(tier))
+  rescue
+    ArgumentError -> opts
+  end
+
+  defp parse_float_opt(opts, _key, nil), do: opts
+
+  defp parse_float_opt(opts, key, value) when is_binary(value) do
+    case Float.parse(value) do
+      {f, ""} -> Keyword.put(opts, key, f)
+      _ -> opts
+    end
+  end
+
+  defp parse_float_opt(opts, key, value) when is_float(value) do
+    Keyword.put(opts, key, value)
+  end
+
+  defp parse_float_opt(opts, _key, _value), do: opts
+
+  defp parse_int_opt(opts, _key, nil), do: opts
+
+  defp parse_int_opt(opts, key, value) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, ""} when n > 0 -> Keyword.put(opts, key, n)
+      _ -> opts
+    end
+  end
+
+  defp parse_int_opt(opts, key, value) when is_integer(value) and value > 0 do
+    Keyword.put(opts, key, value)
+  end
+
+  defp parse_int_opt(opts, _key, _value), do: opts
+
   defp parse_job_filters(filters) do
     []
     |> parse_job_status_filter(Map.get(filters, "status"))
@@ -907,8 +999,9 @@ defmodule NeonFS.CLI.Handler do
     # Find runner module by label
     # We search known runners; extensible as new runners are added
     known_runners = [
-      NeonFS.Core.Job.Runners.KeyRotation,
-      NeonFS.Core.Job.Runners.DriveEvacuation
+      NeonFS.Core.Job.Runners.ClusterRebalance,
+      NeonFS.Core.Job.Runners.DriveEvacuation,
+      NeonFS.Core.Job.Runners.KeyRotation
     ]
 
     case Enum.find(known_runners, fn mod -> mod.label() == type_label end) do

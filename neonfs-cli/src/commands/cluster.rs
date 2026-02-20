@@ -6,9 +6,9 @@ use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
     CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus,
 };
-use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
+use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
-use eetf::{Binary, FixInteger, Term};
+use eetf::{Binary, FixInteger, Map, Term};
 
 /// Cluster management subcommands
 #[derive(Debug, Subcommand)]
@@ -44,6 +44,24 @@ pub enum ClusterCommand {
         via: String,
     },
 
+    /// Rebalance storage across drives within each tier
+    Rebalance {
+        /// Only rebalance a specific tier (hot, warm, cold)
+        #[arg(long)]
+        tier: Option<String>,
+
+        /// Balance tolerance (0.0-1.0, default: 0.10)
+        #[arg(long, default_value = "0.10")]
+        threshold: String,
+
+        /// Chunks per migration batch
+        #[arg(long, default_value = "50")]
+        batch_size: String,
+    },
+
+    /// Show status of an active rebalance operation
+    RebalanceStatus,
+
     /// Show cluster status
     Status,
 }
@@ -75,6 +93,12 @@ impl ClusterCommand {
             ClusterCommand::CreateInvite { expires } => self.create_invite(expires, format),
             ClusterCommand::Init { name } => self.init(name, format),
             ClusterCommand::Join { token, via } => self.join(token, via, format),
+            ClusterCommand::Rebalance {
+                tier,
+                threshold,
+                batch_size,
+            } => self.rebalance(tier.as_deref(), threshold, batch_size, format),
+            ClusterCommand::RebalanceStatus => self.rebalance_status(format),
             ClusterCommand::Status => self.status(format),
         }
     }
@@ -260,6 +284,198 @@ impl ClusterCommand {
                 println!("  Node ID:     {}", join_result.node_id);
                 println!("  Node Name:   {}", join_result.node_name);
                 println!();
+            }
+        }
+        Ok(())
+    }
+
+    fn rebalance(
+        &self,
+        tier: Option<&str>,
+        threshold: &str,
+        batch_size: &str,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let mut opts_entries = vec![
+            (
+                Term::Binary(Binary {
+                    bytes: b"threshold".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: threshold.as_bytes().to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"batch_size".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: batch_size.as_bytes().to_vec(),
+                }),
+            ),
+        ];
+
+        if let Some(tier_str) = tier {
+            if !["hot", "warm", "cold"].contains(&tier_str) {
+                return Err(crate::error::CliError::InvalidArgument(format!(
+                    "Invalid tier '{}'. Valid: hot, warm, cold",
+                    tier_str
+                )));
+            }
+            opts_entries.push((
+                Term::Binary(Binary {
+                    bytes: b"tier".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: tier_str.as_bytes().to_vec(),
+                }),
+            ));
+        }
+
+        let opts_term = Term::Map(Map {
+            entries: opts_entries,
+        });
+
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_rebalance",
+                vec![opts_term],
+            )
+            .await
+        })?;
+
+        if let Some(err_msg) = extract_error(&result) {
+            match err_msg.as_str() {
+                "already_balanced" => {
+                    eprintln!("Cluster is already balanced within the configured threshold.");
+                }
+                "rebalance_already_running" => {
+                    eprintln!("A rebalance operation is already in progress.");
+                    eprintln!("Use 'neonfs cluster rebalance-status' to check progress.");
+                }
+                "insufficient_drives" => {
+                    eprintln!(
+                        "Not enough eligible drives to rebalance (need at least 2 per tier)."
+                    );
+                }
+                "no_drives" => {
+                    eprintln!("No drives configured in the cluster.");
+                }
+                _ => {}
+            }
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let job_map = term_to_map(&data)?;
+
+        let job_id = job_map
+            .get("id")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+        let total = job_map
+            .get("progress_total")
+            .and_then(extract_integer)
+            .unwrap_or(0);
+        let description = job_map
+            .get("progress_description")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "status": "started",
+                    "job_id": job_id,
+                    "threshold": threshold,
+                    "batch_size": batch_size,
+                    "estimated_chunks": total
+                });
+                println!("{}", json::format(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Rebalance started");
+                println!("  Job ID: {}", job_id);
+                println!("  {}", description);
+                println!("  Threshold: {}", threshold);
+                println!("  Batch size: {}", batch_size);
+                println!("  Estimated chunks: {}", total);
+                println!("\nTrack progress with: neonfs job show {}", job_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn rebalance_status(&self, format: OutputFormat) -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_rebalance_status",
+                vec![],
+            )
+            .await
+        })?;
+
+        if let Some(err_msg) = extract_error(&result) {
+            if err_msg == "no_rebalance" {
+                eprintln!("No rebalance operation found.");
+                return Err(crate::error::CliError::RpcError(err_msg));
+            }
+            return Err(crate::error::CliError::RpcError(err_msg));
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let status_map = term_to_map(&data)?;
+
+        let job_id = status_map
+            .get("job_id")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+        let status = status_map
+            .get("status")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+        let total = status_map
+            .get("progress_total")
+            .and_then(extract_integer)
+            .unwrap_or(0);
+        let completed = status_map
+            .get("progress_completed")
+            .and_then(extract_integer)
+            .unwrap_or(0);
+        let description = status_map
+            .get("progress_description")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "job_id": job_id,
+                    "status": status,
+                    "progress_total": total,
+                    "progress_completed": completed,
+                    "progress_description": description
+                });
+                println!("{}", json::format(&response)?);
+            }
+            OutputFormat::Table => {
+                let mut tbl = table::Table::new(vec!["Property".to_string(), "Value".to_string()]);
+                tbl.add_row(vec!["Job ID".to_string(), job_id]);
+                tbl.add_row(vec!["Status".to_string(), status]);
+                tbl.add_row(vec![
+                    "Progress".to_string(),
+                    format!("{}/{}", completed, total),
+                ]);
+                tbl.add_row(vec!["Description".to_string(), description]);
+                print!("{}", tbl.render()?);
             }
         }
         Ok(())
@@ -490,5 +706,99 @@ fn extract_token(term: &Term) -> Result<String> {
     }
 }
 
-// Tests for cluster commands would require a running daemon (integration tests)
-// Unit tests for output formatting are in the output module
+fn extract_integer(term: &Term) -> Option<i64> {
+    match term {
+        Term::FixInteger(n) => Some(n.value as i64),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rebalance_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: ClusterCommand,
+        }
+
+        // Default flags
+        let cli = TestCli::try_parse_from(["test", "rebalance"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            match parsed.command {
+                ClusterCommand::Rebalance {
+                    tier,
+                    threshold,
+                    batch_size,
+                } => {
+                    assert!(tier.is_none());
+                    assert_eq!(threshold, "0.10");
+                    assert_eq!(batch_size, "50");
+                }
+                _ => panic!("Expected Rebalance variant"),
+            }
+        }
+
+        // With tier
+        let cli = TestCli::try_parse_from(["test", "rebalance", "--tier", "hot"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            match parsed.command {
+                ClusterCommand::Rebalance { tier, .. } => {
+                    assert_eq!(tier.as_deref(), Some("hot"));
+                }
+                _ => panic!("Expected Rebalance variant"),
+            }
+        }
+
+        // All flags
+        let cli = TestCli::try_parse_from([
+            "test",
+            "rebalance",
+            "--tier",
+            "warm",
+            "--threshold",
+            "0.05",
+            "--batch-size",
+            "100",
+        ]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            match parsed.command {
+                ClusterCommand::Rebalance {
+                    tier,
+                    threshold,
+                    batch_size,
+                } => {
+                    assert_eq!(tier.as_deref(), Some("warm"));
+                    assert_eq!(threshold, "0.05");
+                    assert_eq!(batch_size, "100");
+                }
+                _ => panic!("Expected Rebalance variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_rebalance_status_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: ClusterCommand,
+        }
+
+        let cli = TestCli::try_parse_from(["test", "rebalance-status"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            assert!(matches!(parsed.command, ClusterCommand::RebalanceStatus));
+        }
+    }
+}
