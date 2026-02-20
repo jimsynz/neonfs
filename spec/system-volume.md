@@ -77,7 +77,7 @@ _system/
 │       ├── 2026-02-14.jsonl    # Security audit events
 │       └── ...
 ├── snapshots/
-│   └── ...                     # DR snapshots (Phase 12)
+│   └── ...                     # DR snapshots (Phase 15)
 └── cluster/
     └── identity.json           # Cluster name, init timestamp, version
 ```
@@ -343,7 +343,7 @@ end
 
 - **System volume as a FUSE mount**: The system volume is not mounted via FUSE. It is accessed programmatically through `NeonFS.Core.SystemVolume` functions.
 - **Operator write access**: Operators cannot write directly to the system volume. All writes go through NeonFS internal APIs.
-- **Backup of system volume**: DR snapshot and backup procedures are a Phase 12 concern. The system volume itself may be part of the data that gets backed up.
+- **Backup of system volume**: DR snapshot and backup procedures are a Phase 15 concern. The system volume itself may be part of the data that gets backed up.
 - **Quota or size limits**: The system volume has no size quota. In practice, its contents (certificates, logs, snapshots) are small relative to user data.
 
 ## Implementation Phase

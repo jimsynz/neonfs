@@ -212,11 +212,23 @@ Two-layer dispatch (`:pg` cross-node relay + `Registry` local fan-out). Struct-b
 
 See [spec/pubsub.md](../spec/pubsub.md).
 
-### Phase 11: APIs and Integration (Future)
-**Goal:** S3, Docker, CIFS, CSI access methods
+### Phase 11: S3-Compatible API (Future)
+**Goal:** S3-compatible HTTP access to NeonFS volumes (Bandit + Plug, S3 Signature v4)
 
-### Phase 12: Operations (Future)
+### Phase 12: Docker/Podman Volume Plugin (Future)
+**Goal:** Container volume integration for Docker and Podman
+
+### Phase 13: CIFS/SMB (Future)
+**Goal:** Windows and macOS network share access via Samba VFS module
+
+### Phase 14: CSI Driver (Future)
+**Goal:** Kubernetes-native persistent volume support via gRPC CSI
+
+### Phase 15: Operations (Future)
 **Goal:** Production operations support (DR snapshots, monitoring, capacity planning)
+
+### Phase 16: Documentation (Future)
+**Goal:** Comprehensive documentation for operators, users, and developers
 
 ### Deferred: TLS Distribution (Future)
 **Goal:** Mutual TLS for Erlang distribution (node-to-node control plane encryption). The cluster CA (Phase 8) provides the certificate infrastructure; the data plane (Phase 9) uses dedicated TLS connections for bulk transfer. Distribution-level TLS for the control plane remains deferred — relies on WireGuard/VPN for transport security in the interim.

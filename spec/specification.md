@@ -81,7 +81,7 @@ The full specification is organised into the following documents. Each contains 
 | Document | Description | When to read |
 |----------|-------------|--------------|
 | [Operations](operations.md) | Day-to-day operations: cluster init, adding nodes, creating volumes, monitoring, decision points, audit logging, telemetry (metrics, tracing, logging), cluster upgrades, disaster recovery. | Operational tooling, observability, backup/restore, upgrade procedures. |
-| [Implementation](implementation.md) | Implementation phases (1-12), technical dependencies (Elixir and Rust crates, external services), node and volume configuration reference. | Planning work, understanding dependencies, configuration options. |
+| [Implementation](implementation.md) | Implementation phases (1-16), technical dependencies (Elixir and Rust crates, external services), node and volume configuration reference. | Planning work, understanding dependencies, configuration options. |
 | [Packages](packages.md) | External packages and dependencies: Hex packages, Rust crates, and OTP built-in modules. Organised by implementation phase with recommendations for each. | Evaluating dependencies, adding new packages, understanding what's available vs. build-from-scratch. |
 | [Appendix](appendix.md) | Open questions (unresolved design decisions) and glossary of terms. | Terminology reference, understanding areas needing design decisions. |
 

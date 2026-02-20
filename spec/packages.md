@@ -108,22 +108,17 @@ NeonFS uses three technology stacks:
 - **Purpose**: Argon2 password hashing (PHC winner)
 - **Why**: User password hashing for access control
 
-#### Phase 11: APIs and Integration
+#### Phase 11: S3-Compatible API
 
 **bandit** - HTTP Server
 - **Hex**: https://hex.pm/packages/bandit
 - **Purpose**: Pure Elixir HTTP server for Plug applications
-- **Why**: S3-compatible API server, health check endpoints, Prometheus metrics. Up to 4x faster than Cowboy for HTTP/1.x. Default for Phoenix since 1.7.11.
+- **Why**: S3-compatible API server, health check endpoints. Up to 4x faster than Cowboy for HTTP/1.x. Default for Phoenix since 1.7.11.
 
 **plug** - HTTP Middleware
 - **Hex**: https://hex.pm/packages/plug
 - **Purpose**: Adapter interface and middleware toolkit
 - **Why**: Essential for building HTTP endpoints. Required by Bandit.
-
-**grpc** - gRPC Implementation
-- **Hex**: https://hex.pm/packages/grpc
-- **Purpose**: Full Elixir gRPC with HTTP transcoding
-- **Why**: CSI driver protocol for Kubernetes integration. Depends on `protobuf` for serialisation.
 
 **msgpax** - MessagePack
 - **Hex**: https://hex.pm/packages/msgpax
@@ -131,7 +126,14 @@ NeonFS uses three technology stacks:
 - **Why**: Efficient serialisation for chunk metadata, replication queue items. Middle ground between JSON and Protocol Buffers.
 - **Status**: Optional optimisation
 
-#### Phase 12: Operations
+#### Phase 14: CSI Driver
+
+**grpc** - gRPC Implementation
+- **Hex**: https://hex.pm/packages/grpc
+- **Purpose**: Full Elixir gRPC with HTTP transcoding
+- **Why**: CSI driver protocol for Kubernetes integration. Depends on `protobuf` for serialisation.
+
+#### Phase 15: Operations
 
 **telemetry_metrics_prometheus** - Prometheus Metrics
 - **Hex**: https://hex.pm/packages/telemetry_metrics_prometheus
@@ -162,8 +164,12 @@ Phase 6: jose, joken, argon2_elixir
 Phase 7: (no additions — uses existing volume infrastructure)
 Phase 8: x509
 Phase 9: nimble_pool
-Phase 11: bandit, plug, grpc, msgpax (optional)
-Phase 12: telemetry_metrics_prometheus, prom_ex (optional)
+Phase 11: bandit, plug, msgpax (optional)
+Phase 12: (no additions — uses FUSE infrastructure)
+Phase 13: (no additions — Samba VFS is a C module)
+Phase 14: grpc
+Phase 15: telemetry_metrics_prometheus, prom_ex (optional)
+Phase 16: (no additions)
 ```
 
 ---
@@ -563,16 +569,44 @@ Rust: (no additions)
 OTP: :pg
 ```
 
-### Phase 11 (APIs)
+### Phase 11 (S3-Compatible API)
 ```
-Hex: bandit, plug, grpc, msgpax (optional)
+Hex: bandit, plug, msgpax (optional)
 Rust: (no additions)
 OTP: (no additions)
 ```
 
-### Phase 12 (Operations)
+### Phase 12 (Docker/Podman Volume Plugin)
+```
+Hex: (no additions — uses FUSE infrastructure)
+Rust: (no additions)
+OTP: (no additions)
+```
+
+### Phase 13 (CIFS/SMB)
+```
+Hex: (no additions — Samba VFS is a C module)
+Rust: (no additions)
+OTP: (no additions)
+```
+
+### Phase 14 (CSI Driver)
+```
+Hex: grpc
+Rust: (no additions)
+OTP: (no additions)
+```
+
+### Phase 15 (Operations)
 ```
 Hex: telemetry_metrics_prometheus, prom_ex (optional)
 Rust: tokio-uring (if I/O bottleneck identified)
+OTP: (no additions)
+```
+
+### Phase 16 (Documentation)
+```
+Hex: (no additions)
+Rust: (no additions)
 OTP: (no additions)
 ```

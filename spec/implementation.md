@@ -157,19 +157,53 @@ Deliverables:
 
 **Milestone:** Interface nodes receive push-based metadata invalidation, reduced RPC round-trips for cached metadata, correct behaviour across partitions
 
-### Phase 11: APIs and Integration
+### Phase 11: S3-Compatible API
 
-**Goal:** External access methods
+**Goal:** S3-compatible HTTP access to NeonFS volumes
 
 Deliverables:
 - S3-compatible HTTP API (Bandit + Plug)
-- Docker volume plugin
-- CIFS via Samba VFS module
-- CSI driver for Kubernetes
+- S3 Signature v4 authentication mapped to NeonFS users
+- Bucket-to-volume mapping
+- Degraded mode handling (503 for writes, health endpoint for load balancers)
 
-**Milestone:** Access from containers, S3 clients, Windows/macOS mounts
+**Milestone:** S3 clients (aws-cli, s3cmd, SDKs) can read/write NeonFS volumes
 
-### Phase 12: Operations
+### Phase 12: Docker/Podman Volume Plugin
+
+**Goal:** Container volume integration for Docker and Podman
+
+Deliverables:
+- HTTP-based volume plugin (VolumeDriver.Create, Mount, Unmount, Remove)
+- FUSE-backed mounts at container paths
+- Health check endpoint for container orchestrators
+
+**Milestone:** `docker volume create -d neonfs` works, containers can mount NeonFS volumes
+
+### Phase 13: CIFS/SMB
+
+**Goal:** Windows and macOS network share access
+
+Deliverables:
+- Samba VFS module translating SMB operations to NeonFS API calls
+- Windows client access
+- macOS Finder integration
+
+**Milestone:** Windows and macOS clients can mount NeonFS volumes as network shares
+
+### Phase 14: CSI Driver
+
+**Goal:** Kubernetes-native persistent volume support
+
+Deliverables:
+- gRPC CSI driver (Controller and Node services)
+- CreateVolume/DeleteVolume, Publish/Unpublish
+- Stage/Unstage, NodePublish/NodeUnpublish
+- Volume health reporting for pod scheduling
+
+**Milestone:** Kubernetes pods can use NeonFS persistent volumes via CSI
+
+### Phase 15: Operations
 
 **Goal:** Production operations support
 
@@ -179,9 +213,21 @@ Deliverables:
 - Capacity planning tools
 - DR snapshots to system volume
 - Backup/restore procedures
-- Comprehensive documentation
 
 **Milestone:** Operable production system with monitoring and alerting
+
+### Phase 16: Documentation
+
+**Goal:** Comprehensive documentation for operators, users, and developers
+
+Deliverables:
+- Operator guide (installation, configuration, upgrades, troubleshooting)
+- User guide (CLI usage, volume management, access methods)
+- Developer guide (architecture, contributing, extending)
+- API reference (S3, CSI, Docker plugin, CIFS)
+- Runbooks for common operational scenarios
+
+**Milestone:** Complete documentation covering deployment, operation, and development
 
 ---
 
