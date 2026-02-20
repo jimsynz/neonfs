@@ -400,6 +400,73 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @doc """
+  Opens a new blob store for a drive at runtime.
+
+  Creates the NIF handle and adds it to the BlobStore state.
+
+  ## Parameters
+
+    * `drive_config` - Drive configuration map with `:id`, `:path`, `:tier`, `:capacity`
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `{:ok, drive_id}` - On success
+    * `{:error, reason}` - On failure
+  """
+  @spec open_store(drive_config(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def open_store(drive_config, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:open_store, drive_config})
+  end
+
+  @doc """
+  Closes a blob store for a drive at runtime.
+
+  Removes the NIF handle from state. The Rust ResourceArc is GC'd once dereferenced.
+
+  ## Parameters
+
+    * `drive_id` - Drive identifier to close
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `:ok` - On success
+    * `{:error, :unknown_drive}` - Drive not found
+  """
+  @spec close_store(String.t(), keyword()) :: :ok | {:error, :unknown_drive}
+  def close_store(drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:close_store, drive_id})
+  end
+
+  @doc """
+  Checks if a drive contains any data by inspecting tier subdirectories.
+
+  Walks the drive's tier subdirectories (`hot/`, `warm/`, `cold/`) and checks
+  for the presence of any prefix subdirectories containing files.
+
+  ## Parameters
+
+    * `drive_id` - Drive identifier
+    * `opts` - Optional keyword list:
+      * `:server` - GenServer name, defaults to `__MODULE__`
+
+  ## Returns
+
+    * `{:ok, boolean()}` - Whether the drive contains data
+    * `{:error, :unknown_drive}` - Drive not found
+  """
+  @spec drive_has_data?(String.t(), keyword()) :: {:ok, boolean()} | {:error, :unknown_drive}
+  def drive_has_data?(drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:drive_has_data, drive_id})
+  end
+
+  @doc """
   Splits data into chunks using the specified strategy.
 
   ## Parameters
@@ -438,8 +505,11 @@ defmodule NeonFS.Core.BlobStore do
     prefix_depth = Keyword.get(opts, :prefix_depth, 2)
 
     if drives_config == [] do
-      Logger.error("No drives configured for BlobStore — at least one drive is required")
-      {:stop, {:error, :no_drives_configured}}
+      Logger.info(
+        "BlobStore starting with no drives — use DriveManager.add_drive/1 to add drives"
+      )
+
+      {:ok, %{stores: %{}, drives: %{}, prefix_depth: prefix_depth}}
     else
       case open_all_stores(drives_config, prefix_depth) do
         {:ok, stores, drives} ->
@@ -535,6 +605,48 @@ defmodule NeonFS.Core.BlobStore do
   @impl true
   def handle_call(:list_drives, _from, state) do
     {:reply, {:ok, state.drives}, state}
+  end
+
+  @impl true
+  def handle_call({:open_store, drive_config}, _from, state) do
+    drive = normalize_drive_config(drive_config)
+
+    if Map.has_key?(state.stores, drive.id) do
+      {:reply, {:error, {:already_open, drive.id}}, state}
+    else
+      case Native.store_open(drive.path, state.prefix_depth) do
+        {:ok, handle} ->
+          new_stores = Map.put(state.stores, drive.id, handle)
+          new_drives = Map.put(state.drives, drive.id, drive)
+          {:reply, {:ok, drive.id}, %{state | stores: new_stores, drives: new_drives}}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, state}
+      end
+    end
+  end
+
+  @impl true
+  def handle_call({:close_store, drive_id}, _from, state) do
+    if Map.has_key?(state.stores, drive_id) do
+      new_stores = Map.delete(state.stores, drive_id)
+      new_drives = Map.delete(state.drives, drive_id)
+      {:reply, :ok, %{state | stores: new_stores, drives: new_drives}}
+    else
+      {:reply, {:error, :unknown_drive}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:drive_has_data, drive_id}, _from, state) do
+    case Map.fetch(state.drives, drive_id) do
+      {:ok, drive} ->
+        has_data = check_drive_has_data(drive.path)
+        {:reply, {:ok, has_data}, state}
+
+      :error ->
+        {:reply, {:error, :unknown_drive}, state}
+    end
   end
 
   @impl true
@@ -887,6 +999,38 @@ defmodule NeonFS.Core.BlobStore do
         {:error, _} -> {:cont, acc}
       end
     end)
+  end
+
+  ## Private: Drive data check
+
+  defp check_drive_has_data(drive_path) do
+    # The NIF stores data under {drive_path}/blobs/{tier}/{prefix}/{hash}
+    blobs_path = Path.join(drive_path, "blobs")
+
+    Enum.any?(@tiers, fn tier ->
+      tier_path = Path.join(blobs_path, tier)
+
+      case File.ls(tier_path) do
+        {:ok, entries} -> Enum.any?(entries, &prefix_dir_has_files?(tier_path, &1))
+        {:error, _} -> false
+      end
+    end)
+  end
+
+  defp prefix_dir_has_files?(parent, entry) do
+    path = Path.join(parent, entry)
+
+    case File.stat(path) do
+      {:ok, %{type: :directory}} ->
+        case File.ls(path) do
+          {:ok, [_ | _]} -> true
+          _ -> false
+        end
+
+      _ ->
+        # A file directly in the tier dir also counts as data
+        true
+    end
   end
 
   ## Private: Migrate

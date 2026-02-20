@@ -20,10 +20,18 @@ defmodule NeonFS.Cluster.State do
           last_seen: DateTime.t()
         }
 
+  @type drive_config :: %{
+          id: String.t(),
+          path: String.t(),
+          tier: String.t(),
+          capacity: String.t()
+        }
+
   @type t :: %__MODULE__{
           cluster_id: String.t(),
           cluster_name: String.t(),
           created_at: DateTime.t(),
+          drives: [drive_config()],
           master_key: String.t(),
           this_node: node_info(),
           known_peers: [peer_info()],
@@ -38,6 +46,7 @@ defmodule NeonFS.Cluster.State do
     :created_at,
     :master_key,
     :this_node,
+    drives: [],
     known_peers: [],
     ra_cluster_members: [],
     node_type: :core
@@ -94,6 +103,15 @@ defmodule NeonFS.Cluster.State do
       "cluster_id" => state.cluster_id,
       "cluster_name" => state.cluster_name,
       "created_at" => DateTime.to_iso8601(state.created_at),
+      "drives" =>
+        Enum.map(state.drives, fn drive ->
+          %{
+            "id" => to_string(drive[:id] || drive["id"]),
+            "path" => to_string(drive[:path] || drive["path"]),
+            "tier" => to_string(drive[:tier] || drive["tier"]),
+            "capacity" => to_string(drive[:capacity] || drive["capacity"] || "0")
+          }
+        end),
       "master_key" => state.master_key,
       "this_node" => %{
         "id" => state.this_node.id,
@@ -143,6 +161,22 @@ defmodule NeonFS.Cluster.State do
     end
   end
 
+  @doc """
+  Updates the drives list in the persisted cluster state.
+
+  Loads the current state, replaces the drives field, and saves.
+  """
+  @spec update_drives([drive_config()]) :: :ok | {:error, term()}
+  def update_drives(drives) when is_list(drives) do
+    case load() do
+      {:ok, state} ->
+        save(%{state | drives: drives})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # Private helpers
 
   defp sync_file(path) do
@@ -169,6 +203,15 @@ defmodule NeonFS.Cluster.State do
       cluster_id: data["cluster_id"],
       cluster_name: data["cluster_name"],
       created_at: parse_datetime!(data["created_at"]),
+      drives:
+        Enum.map(data["drives"] || [], fn drive ->
+          %{
+            "id" => drive["id"],
+            "path" => drive["path"],
+            "tier" => drive["tier"],
+            "capacity" => drive["capacity"] || "0"
+          }
+        end),
       master_key: data["master_key"],
       this_node: %{
         id: data["this_node"]["id"],

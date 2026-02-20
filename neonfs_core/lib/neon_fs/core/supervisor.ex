@@ -122,13 +122,6 @@ defmodule NeonFS.Core.Supervisor do
     meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs/meta")
     snapshot_interval_ms = Application.get_env(:neonfs_core, :snapshot_interval_ms, 30_000)
 
-    command_module =
-      Application.get_env(
-        :neonfs_core,
-        :drive_command_module,
-        NeonFS.Core.DriveCommand.Default
-      )
-
     # Ra requires a named Erlang node (not :nonode@nohost) to function
     node_named = Node.self() != :nonode@nohost
     ra_config = Application.get_env(:neonfs_core, :enable_ra, false)
@@ -161,9 +154,14 @@ defmodule NeonFS.Core.Supervisor do
         {NeonFS.Core.BlobStore, drives: drives, prefix_depth: prefix_depth},
 
         # DriveRegistry tracks all drives and their usage/state
-        {NeonFS.Core.DriveRegistry, drives: drives}
+        {NeonFS.Core.DriveRegistry, drives: drives},
+
+        # DynamicSupervisor for DriveState processes (managed by DriveManager)
+        {DynamicSupervisor, name: NeonFS.Core.DriveStateSupervisor, strategy: :one_for_one},
+
+        # DriveManager orchestrates runtime drive add/remove
+        NeonFS.Core.DriveManager
       ] ++
-        drive_state_children(drives, command_module) ++
         [
           # MetadataStore wraps BlobStore metadata namespace with ETS caching and HLC timestamps
           # Must start before ChunkIndex/FileIndex/StripeIndex (they need it for loading)
@@ -299,30 +297,6 @@ defmodule NeonFS.Core.Supervisor do
       end)
 
     [Node.self() | other_core]
-  end
-
-  defp drive_state_children(drives, command_module) do
-    Enum.map(drives, fn config ->
-      drive_id = to_string(config[:id] || config["id"])
-      drive_path = to_string(config[:path] || config["path"])
-      power_mgmt = config[:power_management] || config["power_management"] || false
-      idle_timeout = config[:idle_timeout] || config["idle_timeout"] || 1800
-
-      %{
-        id: {NeonFS.Core.DriveState, drive_id},
-        start:
-          {NeonFS.Core.DriveState, :start_link,
-           [
-             [
-               drive_id: drive_id,
-               drive_path: drive_path,
-               power_management: power_mgmt,
-               idle_timeout: idle_timeout,
-               command_module: command_module
-             ]
-           ]}
-      }
-    end)
   end
 
   defp default_drives do

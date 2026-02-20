@@ -219,6 +219,90 @@ defmodule NeonFS.Cluster.StateTest do
     end
   end
 
+  describe "drives serialisation" do
+    test "saves and loads state with drives" do
+      state = %State{
+        create_test_state()
+        | drives: [
+            %{"id" => "nvme0", "path" => "/data/nvme0", "tier" => "hot", "capacity" => "1T"},
+            %{"id" => "sata0", "path" => "/data/sata0", "tier" => "cold", "capacity" => "4T"}
+          ]
+      }
+
+      :ok = State.save(state)
+      assert {:ok, loaded} = State.load()
+
+      assert length(loaded.drives) == 2
+      [nvme, sata] = loaded.drives
+      assert nvme["id"] == "nvme0"
+      assert nvme["path"] == "/data/nvme0"
+      assert nvme["tier"] == "hot"
+      assert nvme["capacity"] == "1T"
+      assert sata["id"] == "sata0"
+      assert sata["tier"] == "cold"
+    end
+
+    test "loads state without drives key (backward compat)" do
+      # Write JSON manually without a "drives" key
+      json =
+        :json.format(%{
+          "cluster_id" => "clust_abc123",
+          "cluster_name" => "test-cluster",
+          "created_at" => "2024-01-15T10:30:00Z",
+          "master_key" => "master_key_base64",
+          "this_node" => %{
+            "id" => "node_test123",
+            "name" => "neonfs@localhost",
+            "joined_at" => "2024-01-15T10:30:00Z"
+          },
+          "known_peers" => [],
+          "ra_cluster_members" => ["neonfs@localhost"],
+          "node_type" => "core"
+        })
+
+      File.write!(State.state_file_path(), json)
+      assert {:ok, loaded} = State.load()
+      assert loaded.drives == []
+    end
+
+    test "saves drives with atom keys" do
+      state = %State{
+        create_test_state()
+        | drives: [
+            %{id: "nvme0", path: "/data/nvme0", tier: :hot, capacity: 1_099_511_627_776}
+          ]
+      }
+
+      :ok = State.save(state)
+      assert {:ok, loaded} = State.load()
+
+      [drive] = loaded.drives
+      assert drive["id"] == "nvme0"
+      assert drive["tier"] == "hot"
+      assert drive["capacity"] == "1099511627776"
+    end
+  end
+
+  describe "update_drives/1" do
+    test "updates drives in persisted state" do
+      state = create_test_state()
+      :ok = State.save(state)
+
+      drives = [
+        %{"id" => "new_drive", "path" => "/data/new", "tier" => "warm", "capacity" => "500G"}
+      ]
+
+      assert :ok = State.update_drives(drives)
+      assert {:ok, loaded} = State.load()
+      assert length(loaded.drives) == 1
+      assert hd(loaded.drives)["id"] == "new_drive"
+    end
+
+    test "returns error when cluster.json doesn't exist" do
+      assert {:error, :not_found} = State.update_drives([])
+    end
+  end
+
   # Helper functions
 
   defp create_test_state do

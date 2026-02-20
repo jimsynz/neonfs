@@ -178,6 +178,10 @@ Deliverables:
 - FUSE-backed mounts at container paths
 - Health check endpoint for container orchestrators
 
+References:
+- https://docs.docker.com/engine/extend/plugin_api/
+- https://docs.docker.com/engine/extend/plugins_volume/
+
 **Milestone:** `docker volume create -d neonfs` works, containers can mount NeonFS volumes
 
 ### Phase 13: CIFS/SMB

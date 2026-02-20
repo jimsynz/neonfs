@@ -549,14 +549,18 @@ defmodule NeonFS.Core.BlobStoreTest do
   end
 
   describe "startup" do
-    test "fails with clear error when no drives configured" do
-      result =
+    test "starts with empty drives for later runtime addition" do
+      {:ok, pid} =
         start_supervised(
           {BlobStore, drives: [], prefix_depth: 2, name: :no_drives_test},
           id: :no_drives_test
         )
 
-      assert {:error, {{:error, :no_drives_configured}, _}} = result
+      assert is_pid(pid)
+
+      # Operations fail gracefully when no drives are present
+      assert {:ok, drives} = BlobStore.list_drives(server: :no_drives_test)
+      assert drives == %{}
     end
 
     test "blob store starts and registers name" do

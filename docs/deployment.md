@@ -154,7 +154,6 @@ chmod 600 cookie
 | `RELEASE_DISTRIBUTION` | `sname` | Distribution mode (`sname` or `name`) |
 | `NEONFS_DATA_DIR` | `/var/lib/neonfs/data` | Base directory for data, metadata, and Ra state |
 | `NEONFS_FUSE_NODE` | `neonfs_fuse@localhost` | FUSE node name (for RPC calls to FUSE) |
-| `NEONFS_DRIVES` | Single default drive at `{data_dir}/blobs` | Comma-separated drive specs (see [Storage Configuration](#storage-configuration)) |
 | `NEONFS_ENABLE_RA` | `true` | Enable Ra consensus (set `false` only for debugging) |
 | `NEONFS_PREFIX_DEPTH` | `2` | Blob store directory prefix depth |
 | `NEONFS_SNAPSHOT_INTERVAL_MS` | `30000` | Ra snapshot interval in milliseconds |
@@ -347,24 +346,73 @@ The FUSE node's service discovery layer (`NeonFS.Client.Discovery`) will automat
 
 ## Storage Configuration
 
-### Drive tiers
+### Drive management
 
-Configure storage drives via the `NEONFS_DRIVES` environment variable on core nodes. Each drive is specified as `id:path:tier[:capacity]`, with multiple drives separated by commas:
+Drives are managed at runtime via the CLI and persisted to `cluster.json`. A fresh node starts with a single default drive at `{NEONFS_DATA_DIR}/blobs`; use `drive add` to configure production storage.
 
+#### Adding a drive
+
+```bash
+neonfs-cli drive add --path /data/nvme0 --tier hot --capacity 1T --id nvme0
 ```
-NEONFS_DRIVES="nvme0:/data/nvme0:hot:1T,sata0:/data/sata0:cold:4T"
-```
 
-| Field | Description |
-|-------|-------------|
-| `id` | Unique identifier for the drive |
-| `path` | Absolute path to the storage directory |
-| `tier` | Storage tier: `hot`, `warm`, or `cold` |
-| `capacity` | Optional capacity limit (0 = unlimited). Accepts raw bytes or human-readable suffixes: `M` (MiB, 1024^2), `G` (GiB, 1024^3), `T` (TiB, 1024^4). Suffixes are case-insensitive. Examples: `500G`, `1T`, `1.5T`, `100M`. |
+| Flag | Description |
+|------|-------------|
+| `--path` | Absolute path to the storage directory (required, must exist) |
+| `--tier` | Storage tier: `hot`, `warm`, or `cold` (default: `hot`) |
+| `--capacity` | Capacity limit. Accepts raw bytes or human-readable suffixes: `M` (MiB), `G` (GiB), `T` (TiB). `0` means unlimited. (default: `0`) |
+| `--id` | Unique drive identifier (auto-generated from path if omitted) |
 
 At startup, NeonFS checks each drive's configured capacity against the actual partition size and logs a warning if the configured value exceeds the partition total.
 
-When `NEONFS_DRIVES` is not set, a single default drive is created at `{NEONFS_DATA_DIR}/blobs` with tier `hot`.
+#### Removing a drive
+
+```bash
+neonfs-cli drive remove nvme0
+```
+
+If the drive contains data, removal is refused. Use `--force` to override:
+
+```bash
+neonfs-cli drive remove nvme0 --force
+```
+
+**Important:** Forcing removal of a drive that contains data will make those chunks unavailable. Ensure data is replicated elsewhere or evacuated before removing.
+
+#### Listing drives
+
+```bash
+neonfs-cli drive list
+```
+
+Displays all drives on the local node with their path, tier, capacity, usage, and state.
+
+### cluster.json drives format
+
+Drive configuration is stored per-node in `cluster.json` (under `NEONFS_DATA_DIR/meta/`). The `"drives"` key is an array of drive objects:
+
+```json
+{
+  "cluster_id": "clust_abc123",
+  "cluster_name": "my-cluster",
+  "drives": [
+    {"id": "nvme0", "path": "/data/nvme0", "tier": "hot", "capacity": "1T"},
+    {"id": "sata0", "path": "/data/sata0", "tier": "cold", "capacity": "4T"}
+  ]
+}
+```
+
+Capacity values are stored as strings with human-readable suffixes and parsed on load.
+
+### Manual recovery
+
+If drive configuration becomes corrupted or needs manual adjustment:
+
+1. Stop the node
+2. Edit `cluster.json` directly — add, remove, or fix drive entries in the `"drives"` array
+3. Restart the node — drives are loaded from `cluster.json` at startup
+
+This is the recovery path when the CLI or runtime management isn't available.
 
 ### Data directory layout
 
@@ -372,12 +420,12 @@ The core node's data directory (`NEONFS_DATA_DIR`, default `/var/lib/neonfs/data
 
 ```
 /var/lib/neonfs/data/
-  blobs/      # Default blob storage (when NEONFS_DRIVES is not set)
-  meta/       # File and chunk metadata
+  blobs/      # Default blob storage (before drives are configured)
+  meta/       # File and chunk metadata, including cluster.json
   ra/         # Ra consensus log and snapshots
 ```
 
-When using custom drives, blob data is stored at the paths specified in `NEONFS_DRIVES` rather than under the data directory.
+When custom drives are added, blob data is stored at the paths specified in each drive's configuration rather than under the data directory.
 
 ### Volume mounts in compose
 
@@ -390,8 +438,6 @@ services:
       - /var/lib/neonfs:/var/lib/neonfs          # Data dir (metadata, Ra state)
       - /data/nvme0:/data/nvme0                   # Hot tier drive
       - /data/sata0:/data/sata0                   # Cold tier drive
-    environment:
-      NEONFS_DRIVES: "nvme0:/data/nvme0:hot:1T,sata0:/data/sata0:cold:4T"
 ```
 
 ## Operations

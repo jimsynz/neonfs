@@ -3,6 +3,73 @@
 use super::*;
 use serde::Serialize;
 
+/// Drive information response
+#[derive(Debug, Serialize)]
+pub struct DriveInfo {
+    pub id: String,
+    pub node: String,
+    pub path: String,
+    pub tier: String,
+    pub capacity_bytes: u64,
+    pub used_bytes: u64,
+    pub state: String,
+}
+
+impl DriveInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            id: term_to_string(
+                map.get("id").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'id' field".to_string())
+                })?,
+            )?,
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            path: term_to_string(map.get("path").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'path' field".to_string())
+            })?)?,
+            tier: term_to_string(map.get("tier").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'tier' field".to_string())
+            })?)?,
+            capacity_bytes: term_to_u64(map.get("capacity_bytes").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'capacity_bytes' field".to_string())
+            })?)?,
+            used_bytes: term_to_u64(map.get("used_bytes").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'used_bytes' field".to_string())
+            })?)?,
+            state: term_to_string(map.get("state").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'state' field".to_string())
+            })?)?,
+        })
+    }
+
+    /// Format capacity in human-readable format
+    pub fn format_capacity(bytes: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+        const GB: u64 = MB * 1024;
+        const TB: u64 = GB * 1024;
+
+        if bytes == 0 {
+            "unlimited".to_string()
+        } else if bytes >= TB {
+            format!("{:.1} TiB", bytes as f64 / TB as f64)
+        } else if bytes >= GB {
+            format!("{:.1} GiB", bytes as f64 / GB as f64)
+        } else if bytes >= MB {
+            format!("{:.1} MiB", bytes as f64 / MB as f64)
+        } else if bytes >= KB {
+            format!("{:.1} KiB", bytes as f64 / KB as f64)
+        } else {
+            format!("{} B", bytes)
+        }
+    }
+}
+
 /// Cluster status response
 #[derive(Debug, Serialize)]
 pub struct ClusterStatus {
@@ -575,6 +642,78 @@ impl MountInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_drive_info_format_capacity() {
+        assert_eq!(DriveInfo::format_capacity(0), "unlimited");
+        assert_eq!(DriveInfo::format_capacity(1_099_511_627_776), "1.0 TiB");
+        assert_eq!(DriveInfo::format_capacity(1_073_741_824), "1.0 GiB");
+        assert_eq!(DriveInfo::format_capacity(104_857_600), "100.0 MiB");
+    }
+
+    #[test]
+    fn test_drive_info_from_term() {
+        let term = Term::Map(eetf::Map {
+            entries: vec![
+                (
+                    Term::Binary(Binary {
+                        bytes: b"id".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"nvme0".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"node".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"neonfs_core@localhost".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"path".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"/data/nvme0".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"tier".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"hot".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"capacity_bytes".to_vec(),
+                    }),
+                    Term::FixInteger(FixInteger::from(0)),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"used_bytes".to_vec(),
+                    }),
+                    Term::FixInteger(FixInteger::from(0)),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"state".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"active".to_vec(),
+                    }),
+                ),
+            ],
+        });
+        let info = DriveInfo::from_term(term).unwrap();
+        assert_eq!(info.id, "nvme0");
+        assert_eq!(info.path, "/data/nvme0");
+        assert_eq!(info.tier, "hot");
+    }
 
     #[test]
     fn test_volume_format_size() {

@@ -23,36 +23,11 @@ if config_env() == :prod do
   config :ra,
     data_dir: String.to_charlist("#{data_dir}/ra")
 
-  # Drive configuration: comma-separated list of id:path:tier:capacity
-  # e.g. NEONFS_DRIVES="nvme0:/data/nvme0:hot:1T,sata0:/data/sata0:cold:4T"
-  # Capacity accepts raw bytes or suffixes: M (MiB), G (GiB), T (TiB)
-  # Falls back to a single default drive at {data_dir}/blobs
-  drives =
-    case System.get_env("NEONFS_DRIVES") do
-      nil ->
-        [%{id: "default", path: "#{data_dir}/blobs", tier: :hot, capacity: 0}]
-
-      drives_str ->
-        drives_str
-        |> String.split(",", trim: true)
-        |> Enum.map(fn drive_str ->
-          case String.split(drive_str, ":", parts: 4) do
-            [id, path, tier, capacity] ->
-              %{
-                id: id,
-                path: path,
-                tier: String.to_atom(tier),
-                capacity: NeonFS.Core.DriveConfig.parse_capacity!(capacity)
-              }
-
-            [id, path, tier] ->
-              %{id: id, path: path, tier: String.to_atom(tier), capacity: 0}
-
-            _ ->
-              raise "Invalid drive config: #{drive_str}. Expected id:path:tier[:capacity]"
-          end
-        end)
-    end
+  # Default drive configuration — used when cluster.json has no drives
+  # (fresh install, before `neonfs-cli drive add`).
+  # At startup, Application.start/2 loads drives from cluster.json and
+  # overrides this default via Application.put_env/3.
+  drives = [%{id: "default", path: "#{data_dir}/blobs", tier: :hot, capacity: 0}]
 
   # Core configuration
   config :neonfs_core,

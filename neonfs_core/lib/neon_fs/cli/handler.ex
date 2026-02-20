@@ -19,6 +19,7 @@ defmodule NeonFS.CLI.Handler do
     AuditLog,
     Authorise,
     CertificateAuthority,
+    DriveManager,
     KeyManager,
     KeyRotation,
     ServiceRegistry,
@@ -628,6 +629,54 @@ defmodule NeonFS.CLI.Handler do
          {:ok, acl} <- ACLManager.get_volume_acl(volume.id) do
       {:ok, volume_acl_to_map(acl)}
     end
+  end
+
+  @doc """
+  Adds a drive to the local node.
+
+  ## Parameters
+  - `config` - Drive config map with keys: "path", "tier", "capacity", optional "id"
+
+  ## Returns
+  - `{:ok, map}` - Drive info as map
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_add_drive(map()) :: {:ok, map()} | {:error, term()}
+  def handle_add_drive(config) when is_map(config) do
+    case DriveManager.add_drive(config) do
+      {:ok, drive_map} -> {:ok, drive_map}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Removes a drive from the local node.
+
+  ## Parameters
+  - `drive_id` - Drive identifier (string)
+  - `force` - Whether to force removal even if drive has data (boolean)
+
+  ## Returns
+  - `{:ok, %{}}` - Success
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_remove_drive(String.t(), boolean()) :: {:ok, map()} | {:error, term()}
+  def handle_remove_drive(drive_id, force \\ false) when is_binary(drive_id) do
+    case DriveManager.remove_drive(drive_id, force: force) do
+      :ok -> {:ok, %{}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Lists all drives on the local node.
+
+  ## Returns
+  - `{:ok, [map]}` - List of drive info maps
+  """
+  @spec handle_list_drives() :: {:ok, [map()]}
+  def handle_list_drives do
+    {:ok, DriveManager.list_drives()}
   end
 
   # Private helper functions

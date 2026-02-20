@@ -50,6 +50,14 @@ defmodule NeonFS.Core.DriveRegistry do
   end
 
   @doc """
+  Deregisters a drive from the registry.
+  """
+  @spec deregister_drive(String.t()) :: :ok | {:error, :not_found}
+  def deregister_drive(drive_id) do
+    GenServer.call(__MODULE__, {:deregister_drive, drive_id})
+  end
+
+  @doc """
   Looks up a specific drive by node and drive ID.
   """
   @spec get_drive(node(), String.t()) :: {:ok, Drive.t()} | {:error, :not_found}
@@ -215,7 +223,34 @@ defmodule NeonFS.Core.DriveRegistry do
       %{drive_id: drive.id, node: drive.node, tier: drive.tier}
     )
 
+    state =
+      if drive.node == Node.self() and drive.id not in state.local_drive_ids do
+        %{state | local_drive_ids: [drive.id | state.local_drive_ids]}
+      else
+        state
+      end
+
     {:reply, :ok, state}
+  end
+
+  def handle_call({:deregister_drive, drive_id}, _from, state) do
+    case find_drive(state.table, drive_id) do
+      {:ok, key, _drive} ->
+        :ets.delete(state.table, key)
+
+        new_local_ids = List.delete(state.local_drive_ids, drive_id)
+
+        :telemetry.execute(
+          [:neonfs, :drive_registry, :deregister],
+          %{},
+          %{drive_id: drive_id, node: Node.self()}
+        )
+
+        {:reply, :ok, %{state | local_drive_ids: new_local_ids}}
+
+      :not_found ->
+        {:reply, {:error, :not_found}, state}
+    end
   end
 
   def handle_call({:update_usage, drive_id, used_bytes}, _from, state) do

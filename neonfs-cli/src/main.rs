@@ -8,8 +8,8 @@ mod term;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, mount::MountCommand,
-    node::NodeCommand, volume::VolumeCommand,
+    acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, drive::DriveCommand,
+    mount::MountCommand, node::NodeCommand, volume::VolumeCommand,
 };
 use error::Result;
 use output::OutputFormat;
@@ -53,6 +53,12 @@ enum Commands {
         command: ClusterCommand,
     },
 
+    /// Drive management
+    Drive {
+        #[command(subcommand)]
+        command: DriveCommand,
+    },
+
     /// Mount management
     Mount {
         #[command(subcommand)]
@@ -91,6 +97,7 @@ fn main() -> Result<()> {
         Commands::Acl { command } => command.execute(format),
         Commands::Audit { command } => command.execute(format),
         Commands::Cluster { command } => command.execute(format),
+        Commands::Drive { command } => command.execute(format),
         Commands::Mount { command } => command.execute(format),
         Commands::Node { command } => command.execute(format),
         Commands::Volume { command } => command.execute(format),
@@ -159,6 +166,48 @@ mod tests {
     #[test]
     fn test_volume_rotation_status() {
         let cli = Cli::try_parse_from(["neonfs-cli", "volume", "rotation-status", "myvol"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_drive_list() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "drive", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_drive_add() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "drive", "add", "--path", "/data/nvme0"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_drive_add_full() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "drive",
+            "add",
+            "--path",
+            "/data/nvme0",
+            "--tier",
+            "hot",
+            "--capacity",
+            "1T",
+            "--id",
+            "nvme0",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_drive_remove() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "drive", "remove", "nvme0"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_drive_remove_force() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "drive", "remove", "nvme0", "--force"]);
         assert!(cli.is_ok());
     }
 
