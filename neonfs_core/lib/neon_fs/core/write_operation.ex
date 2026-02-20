@@ -796,6 +796,7 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp parse_compression("zstd"), do: :zstd
+  defp parse_compression("zstd:" <> _level), do: :zstd
   defp parse_compression(_), do: :none
 
   defp maybe_replicate_chunk(hash, data, volume, tier) do
