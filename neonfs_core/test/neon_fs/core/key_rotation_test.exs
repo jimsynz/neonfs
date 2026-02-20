@@ -5,10 +5,10 @@ defmodule NeonFS.Core.KeyRotationTest do
   alias NeonFS.Core.{
     BlobStore,
     ChunkIndex,
+    JobTracker,
     KeyManager,
     KeyRotation,
     RaServer,
-    RaSupervisor,
     VolumeRegistry,
     WriteOperation
   }
@@ -31,6 +31,7 @@ defmodule NeonFS.Core.KeyRotationTest do
     start_file_index()
     start_volume_registry()
     start_background_worker()
+    start_job_tracker(tmp_dir)
 
     start_ra()
     :ok = RaServer.init_cluster()
@@ -53,7 +54,7 @@ defmodule NeonFS.Core.KeyRotationTest do
       assert info.from_version == 1
       assert info.to_version == 2
       assert info.total_chunks >= 1
-      assert is_binary(info.work_id)
+      assert is_binary(info.job_id)
     end
 
     test "rejects rotation for unencrypted volume" do
@@ -64,19 +65,12 @@ defmodule NeonFS.Core.KeyRotationTest do
 
     test "rejects concurrent rotation" do
       volume_id = create_encrypted_volume("concurrent-rot")
+      write_test_file(volume_id, "/test.txt", "Test data for rotation")
 
-      # Set rotation state directly in Ra to simulate an in-progress rotation
-      rotation_state = %{
-        from_version: 1,
-        to_version: 2,
-        started_at: DateTime.utc_now(),
-        progress: %{total_chunks: 100, migrated: 50}
-      }
+      # Start a real rotation
+      {:ok, _info} = KeyRotation.start_rotation(volume_id)
 
-      {:ok, :ok, _leader} =
-        RaSupervisor.command({:set_rotation_state, volume_id, rotation_state})
-
-      # Attempt to start another rotation — should be rejected
+      # Before it completes, a second rotation should be rejected
       assert {:error, :rotation_in_progress} = KeyRotation.start_rotation(volume_id)
     end
 
@@ -289,9 +283,23 @@ defmodule NeonFS.Core.KeyRotationTest do
     )
 
     start_supervised!(
-      {NeonFS.Core.BackgroundWorker,
-       max_concurrent: 2, max_per_minute: 100, check_interval_ms: 50},
+      {NeonFS.Core.BackgroundWorker, max_concurrent: 4, max_per_minute: 100},
       restart: :temporary
+    )
+  end
+
+  defp start_job_tracker(_tmp_dir) do
+    meta_dir = Path.join(System.tmp_dir!(), "neonfs_kr_jobs_#{:rand.uniform(1_000_000)}")
+    File.mkdir_p!(meta_dir)
+
+    start_supervised!(
+      {Task.Supervisor, name: NeonFS.Core.JobTaskSupervisor},
+      restart: :temporary
+    )
+
+    start_supervised!(
+      {JobTracker,
+       name: JobTracker, meta_dir: meta_dir, task_supervisor: NeonFS.Core.JobTaskSupervisor}
     )
   end
 

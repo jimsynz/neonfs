@@ -26,17 +26,15 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
   defp ensure_background_worker do
     case GenServer.whereis(NeonFS.Core.BackgroundWorker) do
       nil ->
-        start_supervised!(NeonFS.Core.BackgroundWorker, restart: :temporary)
+        # Use max_concurrent: 2 for predictable concurrency tests
+        start_supervised!(
+          {NeonFS.Core.BackgroundWorker, max_concurrent: 2, max_per_minute: 50},
+          restart: :temporary
+        )
 
       _pid ->
         :ok
     end
-  end
-
-  defp poke_worker do
-    pid = GenServer.whereis(BackgroundWorker)
-    if pid, do: send(pid, :check_queue)
-    Process.sleep(50)
   end
 
   describe "submit/2" do
@@ -60,7 +58,25 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
       {:ok, _id} =
         BackgroundWorker.submit(fn -> :ok end, priority: :low, label: "test_low")
 
-      poke_worker()
+      Process.sleep(100)
+    end
+
+    test "submits with resource declarations" do
+      {:ok, _id} =
+        BackgroundWorker.submit(fn -> :ok end,
+          priority: :normal,
+          resources: [{:drive, "nvme0"}]
+        )
+
+      Process.sleep(100)
+    end
+
+    test "starts work immediately on submit (demand-driven)" do
+      {:ok, id} = BackgroundWorker.submit(fn -> Process.sleep(200) end)
+
+      # Work should be running immediately, not waiting for a timer
+      Process.sleep(50)
+      assert BackgroundWorker.status(id) == :running
     end
   end
 
@@ -80,8 +96,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
   describe "status/1" do
     test "returns :completed for finished work" do
       {:ok, id} = BackgroundWorker.submit(fn -> :done end)
-      poke_worker()
-      Process.sleep(100)
+      Process.sleep(200)
 
       assert BackgroundWorker.status(id) == :completed
     end
@@ -92,7 +107,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
 
     test "returns :running for in-progress work" do
       {:ok, id} = BackgroundWorker.submit(fn -> Process.sleep(5000) end)
-      poke_worker()
+      Process.sleep(50)
 
       assert BackgroundWorker.status(id) == :running
     end
@@ -103,7 +118,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
       # Fill concurrency slots
       {:ok, _} = BackgroundWorker.submit(fn -> Process.sleep(5000) end)
       {:ok, _} = BackgroundWorker.submit(fn -> Process.sleep(5000) end)
-      poke_worker()
+      Process.sleep(50)
 
       # This should be queued since slots are full
       {:ok, id} = BackgroundWorker.submit(fn -> :ok end)
@@ -114,7 +129,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
 
     test "marks running work as cancelled" do
       {:ok, id} = BackgroundWorker.submit(fn -> Process.sleep(5000) end)
-      poke_worker()
+      Process.sleep(50)
 
       assert :ok = BackgroundWorker.cancel(id)
       assert BackgroundWorker.status(id) == :cancelled
@@ -144,16 +159,69 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
         end)
       end
 
-      # Poke multiple times to process queue
-      for _i <- 1..10 do
-        poke_worker()
-        Process.sleep(100)
+      # Wait for all to complete
+      Process.sleep(1500)
+
+      # max_concurrent is 2 in test setup
+      assert :counters.get(max_seen, 1) <= 2
+    end
+  end
+
+  describe "per-resource concurrency" do
+    test "limits concurrent work on the same resource" do
+      counter = :counters.new(1, [])
+      max_seen = :counters.new(1, [])
+
+      # Submit 3 items all targeting the same drive
+      for _i <- 1..3 do
+        BackgroundWorker.submit(
+          fn ->
+            :counters.add(counter, 1, 1)
+            current = :counters.get(counter, 1)
+
+            if current > :counters.get(max_seen, 1) do
+              :counters.put(max_seen, 1, current)
+            end
+
+            Process.sleep(200)
+            :counters.sub(counter, 1, 1)
+          end,
+          resources: [{:drive, "nvme0"}]
+        )
       end
 
-      Process.sleep(500)
+      Process.sleep(1000)
 
-      # max_concurrent is 2 (app supervisor default)
-      assert :counters.get(max_seen, 1) <= 2
+      # default_resource_limit is 1, so only 1 at a time on the same drive
+      assert :counters.get(max_seen, 1) <= 1
+    end
+
+    test "allows concurrent work on different resources" do
+      counter = :counters.new(1, [])
+      max_seen = :counters.new(1, [])
+
+      # Submit items targeting different drives
+      for drive <- ["nvme0", "nvme1"] do
+        BackgroundWorker.submit(
+          fn ->
+            :counters.add(counter, 1, 1)
+            current = :counters.get(counter, 1)
+
+            if current > :counters.get(max_seen, 1) do
+              :counters.put(max_seen, 1, current)
+            end
+
+            Process.sleep(300)
+            :counters.sub(counter, 1, 1)
+          end,
+          resources: [{:drive, drive}]
+        )
+      end
+
+      Process.sleep(200)
+
+      # Different resources can run concurrently
+      assert :counters.get(max_seen, 1) >= 2
     end
   end
 
@@ -162,7 +230,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
       # Fill slots with blocking work
       {:ok, _} = BackgroundWorker.submit(fn -> Process.sleep(1000) end)
       {:ok, _} = BackgroundWorker.submit(fn -> Process.sleep(1000) end)
-      poke_worker()
+      Process.sleep(50)
 
       parent = self()
 
@@ -182,10 +250,6 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
       # Wait for blocking work to finish and queued work to execute
       Process.sleep(1500)
 
-      for _i <- 1..5, do: poke_worker()
-
-      Process.sleep(500)
-
       # Collect execution order
       results = collect_messages()
 
@@ -200,8 +264,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
       {:ok, crash_id} =
         BackgroundWorker.submit(fn -> raise "intentional crash" end, label: "crasher")
 
-      poke_worker()
-      Process.sleep(100)
+      Process.sleep(200)
 
       # Worker should still be running
       assert Process.alive?(GenServer.whereis(BackgroundWorker))
@@ -211,8 +274,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
 
       # Can still submit new work
       {:ok, new_id} = BackgroundWorker.submit(fn -> :ok end)
-      poke_worker()
-      Process.sleep(100)
+      Process.sleep(200)
 
       assert BackgroundWorker.status(new_id) == :completed
     end
@@ -238,8 +300,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
         ])
 
       {:ok, work_id} = BackgroundWorker.submit(fn -> :ok end, label: "completer")
-      poke_worker()
-      Process.sleep(100)
+      Process.sleep(200)
 
       assert_receive {[:neonfs, :background_worker, :complete], ^ref, %{},
                       %{work_id: ^work_id, label: "completer"}}
@@ -252,8 +313,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
         ])
 
       {:ok, work_id} = BackgroundWorker.submit(fn -> raise "boom" end, label: "boomer")
-      poke_worker()
-      Process.sleep(200)
+      Process.sleep(300)
 
       assert_receive {[:neonfs, :background_worker, :fail], ^ref, %{},
                       %{work_id: ^work_id, label: "boomer", reason: _}}
@@ -268,7 +328,7 @@ defmodule NeonFS.Core.BackgroundWorkerTest do
       # Fill slots
       {:ok, _} = BackgroundWorker.submit(fn -> Process.sleep(5000) end)
       {:ok, _} = BackgroundWorker.submit(fn -> Process.sleep(5000) end)
-      poke_worker()
+      Process.sleep(50)
 
       {:ok, work_id} = BackgroundWorker.submit(fn -> :ok end)
       BackgroundWorker.cancel(work_id)

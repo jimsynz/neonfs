@@ -2,36 +2,30 @@ defmodule NeonFS.Core.KeyRotation do
   @moduledoc """
   Volume key rotation orchestration.
 
-  Coordinates the lifecycle of a key rotation: generates a new key version,
-  sets rotation state on the volume, and submits a background worker to
-  re-encrypt all chunks from the old key to the new key.
+  Coordinates the lifecycle of a key rotation: generates a new key version
+  and creates a background job to re-encrypt all chunks from the old key
+  to the new key.
 
-  Rotation state is persisted in Ra (via `:set_rotation_state` command) so
-  it survives node restarts. The `KeyRotation.Worker` module handles the
-  actual batch re-encryption.
-
-  Rotation state is read directly from Ra (not VolumeRegistry ETS cache)
-  because the `:set_rotation_state` command updates the Ra volume map
-  but VolumeRegistry does not sync the rotation field back to its cache.
+  Rotation progress is tracked via the JobTracker system, which persists
+  state to ETS+DETS and survives node restarts.
   """
 
   alias NeonFS.Core.{
     AuditLog,
-    BackgroundWorker,
     ChunkIndex,
+    JobTracker,
     KeyManager,
-    RaSupervisor,
     VolumeRegistry
   }
 
-  alias NeonFS.Core.KeyRotation.Worker
+  alias NeonFS.Core.Job.Runners.KeyRotation, as: KeyRotationRunner
   alias NeonFS.Core.VolumeEncryption
 
   @doc """
   Starts key rotation for a volume.
 
-  Generates a new key version, sets the rotation state on the volume, and
-  submits a background worker to re-encrypt all chunks.
+  Generates a new key version and creates a background job to re-encrypt
+  all chunks.
 
   Returns `{:ok, rotation_info}` on success, or `{:error, reason}` if the
   volume is not encrypted or a rotation is already in progress.
@@ -46,10 +40,13 @@ defmodule NeonFS.Core.KeyRotation do
          chunks = ChunkIndex.get_chunks_for_volume(volume_id),
          encrypted_chunks = Enum.filter(chunks, &(&1.crypto != nil)),
          total_chunks = length(encrypted_chunks),
-         rotation_state = build_rotation_state(old_version, new_version, total_chunks),
-         {:ok, :ok, _leader} <-
-           RaSupervisor.command({:set_rotation_state, volume_id, rotation_state}),
-         {:ok, work_id} <- submit_worker(volume_id, old_version, new_version) do
+         {:ok, job} <-
+           JobTracker.create(KeyRotationRunner, %{
+             volume_id: volume_id,
+             from_version: old_version,
+             to_version: new_version,
+             total_chunks: total_chunks
+           }) do
       :telemetry.execute(
         [:neonfs, :rotation, :started],
         %{total_chunks: total_chunks},
@@ -73,7 +70,7 @@ defmodule NeonFS.Core.KeyRotation do
          from_version: old_version,
          to_version: new_version,
          total_chunks: total_chunks,
-         work_id: work_id
+         job_id: job.id
        }}
     end
   end
@@ -81,16 +78,22 @@ defmodule NeonFS.Core.KeyRotation do
   @doc """
   Returns the current rotation status for a volume.
 
-  Reads rotation state directly from Ra for consistency.
-  Returns the rotation state map, or `{:error, :no_rotation}` if no rotation
+  Queries JobTracker for running key-rotation jobs on this volume.
+  Returns the job's progress, or `{:error, :no_rotation}` if no rotation
   is in progress.
   """
   @spec rotation_status(binary()) :: {:ok, map()} | {:error, term()}
   def rotation_status(volume_id) do
-    case query_rotation_state(volume_id) do
-      {:ok, nil} -> {:error, :no_rotation}
-      {:ok, rotation} -> {:ok, rotation}
-      {:error, _} = error -> error
+    with {:ok, _volume} <- VolumeRegistry.get(volume_id) do
+      JobTracker.list(type: KeyRotationRunner, status: [:pending, :running])
+      |> Enum.find(fn job -> job.params.volume_id == volume_id end)
+      |> case do
+        nil ->
+          {:error, :no_rotation}
+
+        job ->
+          {:ok, format_rotation_status(job)}
+      end
     end
   end
 
@@ -105,43 +108,21 @@ defmodule NeonFS.Core.KeyRotation do
   end
 
   defp validate_not_rotating(volume_id) do
-    case query_rotation_state(volume_id) do
-      {:ok, nil} -> :ok
-      {:ok, _rotation} -> {:error, :rotation_in_progress}
-      {:error, _} = error -> error
+    case rotation_status(volume_id) do
+      {:error, :no_rotation} -> :ok
+      {:ok, _} -> {:error, :rotation_in_progress}
     end
   end
 
-  defp query_rotation_state(volume_id) do
-    RaSupervisor.query(fn state ->
-      state.volumes
-      |> Map.get(volume_id)
-      |> case do
-        nil -> :volume_not_found
-        vol_data -> get_in(vol_data, [:encryption, :rotation])
-      end
-    end)
-    |> translate_rotation_result()
-  end
-
-  defp translate_rotation_result({:ok, :volume_not_found}), do: {:error, :not_found}
-  defp translate_rotation_result({:ok, rotation}), do: {:ok, rotation}
-  defp translate_rotation_result({:error, _} = error), do: error
-
-  defp build_rotation_state(from_version, to_version, total_chunks) do
+  defp format_rotation_status(job) do
     %{
-      from_version: from_version,
-      to_version: to_version,
-      started_at: DateTime.utc_now(),
-      progress: %{total_chunks: total_chunks, migrated: 0}
+      from_version: job.params.from_version,
+      to_version: job.params.to_version,
+      started_at: job.started_at,
+      progress: %{
+        total_chunks: job.progress.total,
+        migrated: job.progress.completed
+      }
     }
-  end
-
-  defp submit_worker(volume_id, old_version, new_version) do
-    BackgroundWorker.submit(
-      fn -> Worker.run(volume_id, old_version, new_version) end,
-      priority: :low,
-      label: "key_rotation:#{volume_id}"
-    )
   end
 end

@@ -9,7 +9,7 @@ mod term;
 use clap::{Parser, Subcommand};
 use commands::{
     acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, drive::DriveCommand,
-    mount::MountCommand, node::NodeCommand, volume::VolumeCommand,
+    job::JobCommand, mount::MountCommand, node::NodeCommand, volume::VolumeCommand,
 };
 use error::Result;
 use output::OutputFormat;
@@ -59,6 +59,12 @@ enum Commands {
         command: DriveCommand,
     },
 
+    /// Background job management
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
+    },
+
     /// Mount management
     Mount {
         #[command(subcommand)]
@@ -98,6 +104,7 @@ fn main() -> Result<()> {
         Commands::Audit { command } => command.execute(format),
         Commands::Cluster { command } => command.execute(format),
         Commands::Drive { command } => command.execute(format),
+        Commands::Job { command } => command.execute(format),
         Commands::Mount { command } => command.execute(format),
         Commands::Node { command } => command.execute(format),
         Commands::Volume { command } => command.execute(format),
@@ -166,6 +173,36 @@ mod tests {
     #[test]
     fn test_volume_rotation_status() {
         let cli = Cli::try_parse_from(["neonfs-cli", "volume", "rotation-status", "myvol"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_job_list() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "job", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_job_list_with_status() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "job", "list", "--status", "running"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_job_list_node_only() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "job", "list", "--node-only"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_job_show() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "job", "show", "abc123"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_job_cancel() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "job", "cancel", "abc123"]);
         assert!(cli.is_ok());
     }
 

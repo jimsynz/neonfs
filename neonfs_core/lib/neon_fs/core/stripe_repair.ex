@@ -351,14 +351,41 @@ defmodule NeonFS.Core.StripeRepair do
   defp submit_repair(stripe_id, priority) do
     if Code.ensure_loaded?(BackgroundWorker) and
          Process.whereis(BackgroundWorker) != nil do
+      resources = drive_resources_for_stripe(stripe_id)
+
       BackgroundWorker.submit(
         fn -> repair_stripe(stripe_id) end,
         priority: priority,
-        label: "stripe_repair:#{stripe_id}"
+        label: "stripe_repair:#{stripe_id}",
+        resources: resources
       )
     else
       # BackgroundWorker not available, run directly
       repair_stripe(stripe_id)
+    end
+  end
+
+  defp drive_resources_for_stripe(stripe_id) do
+    case StripeIndex.get(stripe_id) do
+      {:ok, stripe} ->
+        stripe.chunks
+        |> Enum.flat_map(&local_drive_resources_for_chunk/1)
+        |> Enum.uniq()
+
+      _ ->
+        []
+    end
+  end
+
+  defp local_drive_resources_for_chunk(hash) do
+    case ChunkIndex.get(hash) do
+      {:ok, chunk} ->
+        chunk.locations
+        |> Enum.filter(&(&1.node == Node.self()))
+        |> Enum.map(&{:drive, Map.get(&1, :drive_id, "default")})
+
+      _ ->
+        []
     end
   end
 

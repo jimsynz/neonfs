@@ -20,6 +20,7 @@ defmodule NeonFS.CLI.Handler do
     Authorise,
     CertificateAuthority,
     DriveManager,
+    JobTracker,
     KeyManager,
     KeyRotation,
     ServiceRegistry,
@@ -28,6 +29,8 @@ defmodule NeonFS.CLI.Handler do
     VolumeEncryption,
     VolumeRegistry
   }
+
+  alias NeonFS.Core.Job
 
   @doc """
   Returns cluster status information.
@@ -679,7 +682,147 @@ defmodule NeonFS.CLI.Handler do
     {:ok, DriveManager.list_drives()}
   end
 
+  @doc """
+  Lists background jobs with optional filters.
+
+  ## Parameters
+  - `filters` - Map with optional keys:
+    - `"cluster"` - Whether to query all nodes (default: true)
+    - `"status"` - Status string or list (e.g. "running")
+    - `"type"` - Job type label (e.g. "key-rotation")
+
+  ## Returns
+  - `{:ok, [map]}` - List of job maps
+  """
+  @spec handle_list_jobs(map()) :: {:ok, [map()]}
+  def handle_list_jobs(filters \\ %{}) do
+    cluster_wide = Map.get(filters, "cluster", true)
+    parsed_filters = parse_job_filters(filters)
+
+    jobs =
+      if cluster_wide do
+        JobTracker.list_cluster(parsed_filters)
+      else
+        JobTracker.list(parsed_filters)
+      end
+
+    {:ok, Enum.map(jobs, &job_to_map/1)}
+  end
+
+  @doc """
+  Gets a job by ID.
+
+  ## Parameters
+  - `job_id` - Job identifier (string)
+
+  ## Returns
+  - `{:ok, map}` - Job details as map
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_get_job(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_get_job(job_id) when is_binary(job_id) do
+    case JobTracker.get(job_id) do
+      {:ok, job} -> {:ok, job_to_map(job)}
+      {:error, :not_found} -> {:error, "Job not found: #{job_id}"}
+    end
+  end
+
+  @doc """
+  Cancels a running or pending job.
+
+  ## Parameters
+  - `job_id` - Job identifier (string)
+
+  ## Returns
+  - `{:ok, %{}}` - Success
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_cancel_job(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_cancel_job(job_id) when is_binary(job_id) do
+    case JobTracker.cancel(job_id) do
+      :ok -> {:ok, %{}}
+      {:error, :not_found} -> {:error, "Job not found: #{job_id}"}
+      {:error, :already_terminal} -> {:error, "Job already finished: #{job_id}"}
+    end
+  end
+
   # Private helper functions
+
+  defp job_to_map(%Job{} = job) do
+    %{
+      id: job.id,
+      type: job.type.label(),
+      node: Atom.to_string(job.node),
+      status: Atom.to_string(job.status),
+      progress_total: job.progress.total,
+      progress_completed: job.progress.completed,
+      progress_description: job.progress.description,
+      params: serialise_params(job.params),
+      error: if(job.error, do: inspect(job.error)),
+      created_at: DateTime.to_iso8601(job.created_at),
+      started_at: if(job.started_at, do: DateTime.to_iso8601(job.started_at)),
+      updated_at: DateTime.to_iso8601(job.updated_at),
+      completed_at: if(job.completed_at, do: DateTime.to_iso8601(job.completed_at))
+    }
+  end
+
+  defp serialise_params(params) when is_map(params) do
+    Map.new(params, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), serialise_param_value(v)}
+      {k, v} -> {to_string(k), serialise_param_value(v)}
+    end)
+  end
+
+  defp serialise_param_value(v) when is_atom(v), do: Atom.to_string(v)
+  defp serialise_param_value(v) when is_binary(v), do: v
+  defp serialise_param_value(v) when is_number(v), do: v
+  defp serialise_param_value(v), do: inspect(v)
+
+  defp parse_job_filters(filters) do
+    []
+    |> parse_job_status_filter(Map.get(filters, "status"))
+    |> parse_job_type_filter(Map.get(filters, "type"))
+  end
+
+  defp parse_job_status_filter(opts, nil), do: opts
+
+  defp parse_job_status_filter(opts, status) when is_binary(status) do
+    Keyword.put(opts, :status, String.to_existing_atom(status))
+  rescue
+    ArgumentError -> opts
+  end
+
+  defp parse_job_status_filter(opts, statuses) when is_list(statuses) do
+    atoms =
+      statuses
+      |> Enum.map(fn s ->
+        try do
+          String.to_existing_atom(s)
+        rescue
+          ArgumentError -> nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+
+    if atoms != [], do: Keyword.put(opts, :status, atoms), else: opts
+  end
+
+  defp parse_job_status_filter(opts, _), do: opts
+
+  defp parse_job_type_filter(opts, nil), do: opts
+
+  defp parse_job_type_filter(opts, type_label) when is_binary(type_label) do
+    # Find runner module by label
+    # We search known runners; extensible as new runners are added
+    known_runners = [NeonFS.Core.Job.Runners.KeyRotation]
+
+    case Enum.find(known_runners, fn mod -> mod.label() == type_label end) do
+      nil -> opts
+      mod -> Keyword.put(opts, :type, mod)
+    end
+  end
+
+  defp parse_job_type_filter(opts, _), do: opts
 
   # Get the FUSE node and verify it's reachable
   # Checks in order: ServiceRegistry, local node, connected nodes, configured fallback

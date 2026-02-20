@@ -189,6 +189,12 @@ defmodule NeonFS.Core.Supervisor do
           # BackgroundWorker provides priority queues and rate limiting
           NeonFS.Core.BackgroundWorker,
 
+          # Task.Supervisor for job runner processes (separate from BackgroundTaskSupervisor)
+          {Task.Supervisor, name: NeonFS.Core.JobTaskSupervisor},
+
+          # JobTracker manages persistent, resumable background jobs
+          NeonFS.Core.JobTracker,
+
           # ReadRepair submits async repair jobs for stale metadata replicas
           NeonFS.Core.ReadRepair,
 

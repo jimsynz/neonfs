@@ -43,14 +43,14 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 6" do
-      assert MetadataStateMachine.version() == 6
+    test "returns 7" do
+      assert MetadataStateMachine.version() == 7
     end
   end
 
   describe "which_module/1" do
     test "returns the same module for all versions" do
-      for v <- 1..6 do
+      for v <- 1..7 do
         assert MetadataStateMachine.which_module(v) == MetadataStateMachine
       end
     end

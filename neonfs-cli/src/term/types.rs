@@ -639,6 +639,132 @@ impl MountInfo {
     }
 }
 
+/// Job information response
+#[derive(Debug, Serialize)]
+pub struct JobInfo {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub job_type: String,
+    pub node: String,
+    pub status: String,
+    pub progress_total: u64,
+    pub progress_completed: u64,
+    pub progress_description: String,
+    pub params: std::collections::HashMap<String, String>,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+impl JobInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let params = match map.get("params") {
+            Some(params_term) => match term_to_map(params_term) {
+                Ok(m) => m
+                    .into_iter()
+                    .filter_map(|(k, v)| term_to_string(&v).ok().map(|vs| (k, vs)))
+                    .collect(),
+                Err(_) => std::collections::HashMap::new(),
+            },
+            None => std::collections::HashMap::new(),
+        };
+
+        Ok(Self {
+            id: term_to_string(
+                map.get("id").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'id' field".to_string())
+                })?,
+            )?,
+            job_type: term_to_string(map.get("type").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'type' field".to_string())
+            })?)?,
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+            progress_total: term_to_u64(map.get("progress_total").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'progress_total' field".to_string())
+            })?)?,
+            progress_completed: term_to_u64(map.get("progress_completed").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'progress_completed' field".to_string())
+            })?)?,
+            progress_description: term_to_string(map.get("progress_description").ok_or_else(
+                || {
+                    CliError::TermConversionError(
+                        "Missing 'progress_description' field".to_string(),
+                    )
+                },
+            )?)?,
+            params,
+            error: map
+                .get("error")
+                .and_then(|t| term_to_string(t).ok())
+                .filter(|s| s != "nil"),
+            created_at: term_to_string(map.get("created_at").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'created_at' field".to_string())
+            })?)?,
+            started_at: map
+                .get("started_at")
+                .and_then(|t| term_to_string(t).ok())
+                .filter(|s| s != "nil"),
+            updated_at: term_to_string(map.get("updated_at").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'updated_at' field".to_string())
+            })?)?,
+            completed_at: map
+                .get("completed_at")
+                .and_then(|t| term_to_string(t).ok())
+                .filter(|s| s != "nil"),
+        })
+    }
+
+    /// Returns a truncated ID for table display
+    pub fn id_short(&self) -> String {
+        if self.id.len() > 12 {
+            self.id[..12].to_string()
+        } else {
+            self.id.clone()
+        }
+    }
+
+    /// Returns a shortened node name
+    pub fn node_short(&self) -> String {
+        if let Some(at_pos) = self.node.find('@') {
+            self.node[..at_pos].to_string()
+        } else {
+            self.node.clone()
+        }
+    }
+
+    /// Returns progress as "completed/total (percent%)"
+    pub fn progress_string(&self) -> String {
+        if self.progress_total == 0 {
+            return "—".to_string();
+        }
+        let percent = (self.progress_completed * 100) / self.progress_total;
+        format!(
+            "{}/{} ({}%)",
+            self.progress_completed, self.progress_total, percent
+        )
+    }
+
+    /// Returns detailed progress with description
+    pub fn progress_detail(&self) -> String {
+        let base = self.progress_string();
+        if self.progress_description.is_empty() {
+            base
+        } else {
+            format!("{} — {}", base, self.progress_description)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,6 +1045,56 @@ mod tests {
         assert_eq!(entry.hostname, "node-1.example.com");
         assert_eq!(entry.serial, 1);
         assert_eq!(entry.status, "valid");
+    }
+
+    #[test]
+    fn test_job_info_progress_string() {
+        let job = JobInfo {
+            id: "abc123def456abcd".to_string(),
+            job_type: "key-rotation".to_string(),
+            node: "neonfs_core@localhost".to_string(),
+            status: "running".to_string(),
+            progress_total: 1000,
+            progress_completed: 450,
+            progress_description: "Re-encrypting chunks".to_string(),
+            params: std::collections::HashMap::new(),
+            error: None,
+            created_at: "2026-02-20T08:15:00Z".to_string(),
+            started_at: Some("2026-02-20T08:15:01Z".to_string()),
+            updated_at: "2026-02-20T08:20:00Z".to_string(),
+            completed_at: None,
+        };
+        assert_eq!(job.progress_string(), "450/1000 (45%)");
+        assert_eq!(
+            job.progress_detail(),
+            "450/1000 (45%) — Re-encrypting chunks"
+        );
+        assert_eq!(job.id_short(), "abc123def456");
+        assert_eq!(job.node_short(), "neonfs_core");
+    }
+
+    #[test]
+    fn test_job_info_json_serialization() {
+        let job = JobInfo {
+            id: "abc123".to_string(),
+            job_type: "key-rotation".to_string(),
+            node: "node1@localhost".to_string(),
+            status: "completed".to_string(),
+            progress_total: 100,
+            progress_completed: 100,
+            progress_description: "Complete".to_string(),
+            params: std::collections::HashMap::new(),
+            error: None,
+            created_at: "2026-02-20T08:15:00Z".to_string(),
+            started_at: Some("2026-02-20T08:15:01Z".to_string()),
+            updated_at: "2026-02-20T08:20:00Z".to_string(),
+            completed_at: Some("2026-02-20T08:20:00Z".to_string()),
+        };
+        let json = serde_json::to_value(&job).unwrap();
+        assert_eq!(json["type"], "key-rotation");
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["progress_total"], 100);
+        assert_eq!(json["progress_completed"], 100);
     }
 
     #[test]

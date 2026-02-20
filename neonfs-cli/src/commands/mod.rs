@@ -4,6 +4,7 @@ pub mod acl;
 pub mod audit;
 pub mod cluster;
 pub mod drive;
+pub mod job;
 pub mod mount;
 pub mod node;
 pub mod volume;

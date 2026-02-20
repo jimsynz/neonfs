@@ -58,7 +58,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
              wrapped_entry :: wrapped_key_entry()}
           | {:delete_encryption_key, volume_id :: binary(), version :: pos_integer()}
           | {:set_current_key_version, volume_id :: binary(), version :: pos_integer()}
-          | {:set_rotation_state, volume_id :: binary(), rotation :: map() | nil}
           | {:put_volume_acl, volume_id :: binary(), acl_data :: map()}
           | {:update_volume_acl, volume_id :: binary(), updates :: map()}
 
@@ -246,6 +245,21 @@ defmodule NeonFS.Core.MetadataStateMachine do
       |> Map.put_new(:encryption_keys, %{})
       |> Map.put_new(:volume_acls, %{})
 
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 6, 7}, state) do
+    require Logger
+    Logger.info("Ra machine version upgrade: 6 -> 7 (remove rotation state from volumes)")
+
+    volumes =
+      Map.new(state.volumes, fn {id, vol} ->
+        encryption = Map.get(vol, :encryption, %{})
+        cleaned_encryption = Map.delete(encryption, :rotation)
+        {id, Map.put(vol, :encryption, cleaned_encryption)}
+      end)
+
+    new_state = %{state | volumes: volumes}
     {new_state, :ok, []}
   end
 
@@ -642,28 +656,6 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
-  def apply(_meta, {:set_rotation_state, volume_id, rotation}, state) do
-    case Map.get(state.volumes, volume_id) do
-      nil ->
-        {state, {:error, :not_found}, []}
-
-      volume_data ->
-        encryption = Map.get(volume_data, :encryption, %{})
-        updated_encryption = Map.put(encryption, :rotation, rotation)
-        updated_volume = Map.put(volume_data, :encryption, updated_encryption)
-        new_volumes = Map.put(state.volumes, volume_id, updated_volume)
-        new_state = %{state | volumes: new_volumes, version: state.version + 1}
-
-        :telemetry.execute(
-          [:neonfs, :ra, :command, :set_rotation_state],
-          %{version: new_state.version},
-          %{volume_id: volume_id, rotation: rotation}
-        )
-
-        {new_state, :ok, []}
-    end
-  end
-
   # Volume ACL commands (new in v6)
 
   def apply(_meta, {:put_volume_acl, volume_id, acl_data}, state) do
@@ -933,7 +925,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 6
+  def version, do: 7
 
   @doc """
   Return the module to handle a specific state machine version.

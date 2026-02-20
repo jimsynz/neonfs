@@ -80,17 +80,21 @@ defmodule NeonFS.Integration.KeyRotationTest do
           volume.id
         ])
 
-      # Check rotation status
-      {:ok, status} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.KeyRotation, :rotation_status, [
-          volume.id
-        ])
+      # Check rotation status — rotation may complete before we query
+      case PeerCluster.rpc(cluster, :node1, NeonFS.Core.KeyRotation, :rotation_status, [
+             volume.id
+           ]) do
+        {:ok, status} ->
+          assert is_map(status)
+          assert Map.has_key?(status, :from_version)
+          assert Map.has_key?(status, :to_version)
+          assert status.from_version == 1
+          assert status.to_version == 2
 
-      assert is_map(status)
-      assert Map.has_key?(status, :from_version)
-      assert Map.has_key?(status, :to_version)
-      assert status.from_version == 1
-      assert status.to_version == 2
+        {:error, :no_rotation} ->
+          # Rotation completed before we could query — valid outcome
+          :ok
+      end
     end
 
     test "complete rotation — data still readable after rotation finishes", %{cluster: cluster} do
@@ -199,15 +203,19 @@ defmodule NeonFS.Integration.KeyRotationTest do
           "rotation-volume"
         ])
 
-      # Query status via handler
-      {:ok, status} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :rotation_status, [
-          "rotation-volume"
-        ])
+      # Query status via handler — rotation may complete before we query
+      case PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :rotation_status, [
+             "rotation-volume"
+           ]) do
+        {:ok, status} ->
+          assert is_map(status)
+          assert Map.has_key?(status, :from_version)
+          assert Map.has_key?(status, :to_version)
 
-      assert is_map(status)
-      assert Map.has_key?(status, :from_version)
-      assert Map.has_key?(status, :to_version)
+        {:error, :no_rotation} ->
+          # Rotation completed before we could query — valid outcome
+          :ok
+      end
     end
   end
 

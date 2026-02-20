@@ -166,10 +166,10 @@ defmodule NeonFS.Core.TieringManager do
     eviction_demotions = check_eviction_pressure(chunks, tier_usage, state)
 
     # Deduplicate: eviction demotions take priority
-    eviction_hashes = MapSet.new(eviction_demotions, fn {hash, _, _} -> hash end)
+    eviction_hashes = MapSet.new(eviction_demotions, fn {hash, _, _, _} -> hash end)
 
     demotions =
-      Enum.reject(demotions, fn {hash, _, _} -> MapSet.member?(eviction_hashes, hash) end)
+      Enum.reject(demotions, fn {hash, _, _, _} -> MapSet.member?(eviction_hashes, hash) end)
 
     all_demotions = eviction_demotions ++ demotions
 
@@ -208,33 +208,34 @@ defmodule NeonFS.Core.TieringManager do
 
       location ->
         current_tier = location.tier
+        drive_id = Map.get(location, :drive_id, "default")
         stats = state.access_tracker_mod.get_stats(chunk.hash)
         config = Map.get(volume_configs, chunk_volume_id(chunk))
 
-        promos = maybe_promote(chunk.hash, current_tier, stats, config, promos)
-        demos = maybe_demote(chunk.hash, current_tier, stats, config, demos)
+        promos = maybe_promote(chunk.hash, current_tier, drive_id, stats, config, promos)
+        demos = maybe_demote(chunk.hash, current_tier, drive_id, stats, config, demos)
 
         {promos, demos}
     end
   end
 
-  defp maybe_promote(hash, current_tier, stats, config, promos) do
+  defp maybe_promote(hash, current_tier, drive_id, stats, config, promos) do
     promotion_threshold = get_promotion_threshold(config)
     target = promote_tier(current_tier)
 
     if target != nil and stats.daily >= promotion_threshold do
-      [{hash, current_tier, target} | promos]
+      [{hash, current_tier, target, drive_id} | promos]
     else
       promos
     end
   end
 
-  defp maybe_demote(hash, current_tier, stats, config, demos) do
+  defp maybe_demote(hash, current_tier, drive_id, stats, config, demos) do
     demotion_delay = get_demotion_delay(config)
     target = demote_tier(current_tier)
 
     if target != nil and should_demote?(stats, demotion_delay) do
-      [{hash, current_tier, target} | demos]
+      [{hash, current_tier, target, drive_id} | demos]
     else
       demos
     end
@@ -273,12 +274,14 @@ defmodule NeonFS.Core.TieringManager do
       loc != nil and loc.tier == tier
     end)
     |> Enum.map(fn chunk ->
+      loc = find_local_location(chunk)
+      drive_id = Map.get(loc, :drive_id, "default")
       stats = state.access_tracker_mod.get_stats(chunk.hash)
-      {chunk.hash, stats}
+      {chunk.hash, drive_id, stats}
     end)
-    |> Enum.sort_by(fn {_hash, stats} -> stats.daily end, :asc)
+    |> Enum.sort_by(fn {_hash, _drive_id, stats} -> stats.daily end, :asc)
     |> Enum.take(div(state.max_chunks_per_cycle, 10))
-    |> Enum.map(fn {hash, _stats} -> {hash, tier, target} end)
+    |> Enum.map(fn {hash, drive_id, _stats} -> {hash, tier, target, drive_id} end)
   end
 
   ## Private — Tier helpers
@@ -363,7 +366,7 @@ defmodule NeonFS.Core.TieringManager do
     Enum.each(demotions, fn move -> submit_move(move, :demotion, state) end)
   end
 
-  defp submit_move({hash, from_tier, to_tier}, direction, state) do
+  defp submit_move({hash, from_tier, to_tier, drive_id}, direction, state) do
     action = if direction == :promotion, do: "promote", else: "demote"
     label = "#{action}:#{hash_prefix(hash)}:#{from_tier}->#{to_tier}"
 
@@ -371,7 +374,8 @@ defmodule NeonFS.Core.TieringManager do
       state.background_worker_mod.submit(
         fn -> {String.to_existing_atom(action), hash, from_tier, to_tier} end,
         priority: :low,
-        label: label
+        label: label,
+        resources: [{:drive, drive_id}]
       )
     end
 

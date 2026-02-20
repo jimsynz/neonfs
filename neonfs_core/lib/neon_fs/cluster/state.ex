@@ -36,7 +36,8 @@ defmodule NeonFS.Cluster.State do
           this_node: node_info(),
           known_peers: [peer_info()],
           ra_cluster_members: [atom()],
-          node_type: atom()
+          node_type: atom(),
+          worker: map()
         }
 
   @enforce_keys [:cluster_id, :cluster_name, :created_at, :master_key, :this_node]
@@ -49,7 +50,8 @@ defmodule NeonFS.Cluster.State do
     drives: [],
     known_peers: [],
     ra_cluster_members: [],
-    node_type: :core
+    node_type: :core,
+    worker: %{}
   ]
 
   @doc """
@@ -127,7 +129,8 @@ defmodule NeonFS.Cluster.State do
           }
         end),
       "ra_cluster_members" => Enum.map(state.ra_cluster_members, &Atom.to_string/1),
-      "node_type" => Atom.to_string(state.node_type)
+      "node_type" => Atom.to_string(state.node_type),
+      "worker" => serialise_worker_config(state.worker)
     }
 
     json = :json.format(data)
@@ -227,7 +230,8 @@ defmodule NeonFS.Cluster.State do
           }
         end),
       ra_cluster_members: Enum.map(data["ra_cluster_members"] || [], &String.to_atom/1),
-      node_type: parse_node_type(data["node_type"])
+      node_type: parse_node_type(data["node_type"]),
+      worker: data["worker"] || %{}
     }
 
     {:ok, state}
@@ -244,5 +248,13 @@ defmodule NeonFS.Cluster.State do
       {:ok, datetime, _offset} -> datetime
       _ -> raise "Invalid datetime"
     end
+  end
+
+  defp serialise_worker_config(worker) when worker == %{}, do: %{}
+
+  defp serialise_worker_config(worker) when is_map(worker) do
+    worker
+    |> Enum.map(fn {k, v} -> {to_string(k), v} end)
+    |> Map.new()
   end
 end

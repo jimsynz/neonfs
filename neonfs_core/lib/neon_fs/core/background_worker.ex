@@ -1,19 +1,30 @@
 defmodule NeonFS.Core.BackgroundWorker do
   @moduledoc """
-  Node-local background task runner with priority queues, rate limiting,
-  and load-aware yielding.
+  Node-local background task runner with priority queues, per-resource
+  concurrency, rate limiting, and BEAM-native load management.
 
   Provides centralised scheduling for maintenance operations like tier
   migrations, scrubbing, and rebalancing. Uses `Task.Supervisor` for crash
   isolation so failed tasks don't bring down the worker.
 
+  Spawned tasks run at `:low` BEAM process priority, which means the
+  scheduler naturally yields to normal-priority application traffic
+  without any polling overhead.
+
   ## Configuration
 
-    * `:max_concurrent` — maximum tasks running at once (default: 2)
-    * `:max_per_minute` — rate limit on task starts (default: 10)
-    * `:load_threshold` — scheduler utilisation above which new work pauses (default: 0.8)
-    * `:check_interval_ms` — how often to poll the queue (default: 500)
+    * `:max_concurrent` — maximum tasks running at once (default from app env, fallback: 4)
+    * `:max_per_minute` — rate limit on task starts (default from app env, fallback: 50)
+    * `:default_resource_limit` — max concurrent ops per resource key (default from app env, fallback: 1)
     * `:task_supervisor` — name of the `Task.Supervisor` (default: `NeonFS.Core.BackgroundTaskSupervisor`)
+
+  ## Resource-Aware Scheduling
+
+  Work items can declare resource requirements via the `:resources` option.
+  For example, `resources: [{:drive, "nvme0"}]` declares that this work
+  uses drive nvme0. At most `default_resource_limit` tasks can use the
+  same resource concurrently. Work items with no resources are limited
+  only by `max_concurrent`.
 
   ## Telemetry Events
 
@@ -51,6 +62,7 @@ defmodule NeonFS.Core.BackgroundWorker do
 
     * `:priority` — `:high`, `:normal` (default), or `:low`
     * `:label` — human-readable label for logging
+    * `:resources` — list of resource keys, e.g. `[{:drive, "nvme0"}]`
 
   ## Returns
 
@@ -104,27 +116,42 @@ defmodule NeonFS.Core.BackgroundWorker do
   def init(opts) do
     Process.flag(:trap_exit, true)
 
-    # Enable scheduler wall time statistics
-    :erlang.system_flag(:scheduler_wall_time, true)
-
     task_supervisor =
       Keyword.get(opts, :task_supervisor, NeonFS.Core.BackgroundTaskSupervisor)
+
+    max_concurrent =
+      Keyword.get(
+        opts,
+        :max_concurrent,
+        Application.get_env(:neonfs_core, :worker_max_concurrent, 4)
+      )
+
+    max_per_minute =
+      Keyword.get(
+        opts,
+        :max_per_minute,
+        Application.get_env(:neonfs_core, :worker_max_per_minute, 50)
+      )
+
+    default_resource_limit =
+      Keyword.get(
+        opts,
+        :default_resource_limit,
+        Application.get_env(:neonfs_core, :worker_drive_concurrency, 1)
+      )
 
     state = %{
       queues: %{high: :queue.new(), normal: :queue.new(), low: :queue.new()},
       running: %{},
       work_registry: %{},
-      max_concurrent: Keyword.get(opts, :max_concurrent, 2),
-      max_per_minute: Keyword.get(opts, :max_per_minute, 10),
-      load_threshold: Keyword.get(opts, :load_threshold, 0.8),
-      check_interval_ms: Keyword.get(opts, :check_interval_ms, 500),
+      max_concurrent: max_concurrent,
+      max_per_minute: max_per_minute,
+      default_resource_limit: default_resource_limit,
       task_supervisor: task_supervisor,
       completed_count: 0,
       starts_this_minute: [],
-      last_wall_time: nil
+      resource_usage: %{}
     }
-
-    schedule_check(state)
 
     Logger.info("BackgroundWorker started (max_concurrent=#{state.max_concurrent})")
     {:ok, state}
@@ -134,6 +161,7 @@ defmodule NeonFS.Core.BackgroundWorker do
   def handle_call({:submit, work_fn, opts}, _from, state) do
     priority = Keyword.get(opts, :priority, :normal)
     label = Keyword.get(opts, :label, "background_work")
+    resources = Keyword.get(opts, :resources, [])
     work_id = generate_work_id()
 
     work = %{
@@ -141,6 +169,7 @@ defmodule NeonFS.Core.BackgroundWorker do
       fn: work_fn,
       priority: priority,
       label: label,
+      resources: resources,
       submitted_at: System.monotonic_time(:millisecond)
     }
 
@@ -152,6 +181,9 @@ defmodule NeonFS.Core.BackgroundWorker do
       %{},
       %{work_id: work_id, priority: priority, label: label}
     )
+
+    # Demand-driven: try to start work immediately on submit
+    state = maybe_start_work(state)
 
     {:reply, {:ok, work_id}, state}
   end
@@ -217,12 +249,6 @@ defmodule NeonFS.Core.BackgroundWorker do
   end
 
   @impl true
-  def handle_info(:check_queue, state) do
-    state = maybe_start_work(state)
-    schedule_check(state)
-    {:noreply, state}
-  end
-
   def handle_info({ref, result}, state) when is_reference(ref) do
     # Task completed successfully
     Process.demonitor(ref, [:flush])
@@ -268,16 +294,36 @@ defmodule NeonFS.Core.BackgroundWorker do
 
   defp dequeue_next(state) do
     Enum.find_value(@priority_order, fn priority ->
-      queue = state.queues[priority]
-
-      case :queue.out(queue) do
-        {{:value, work}, new_queue} ->
-          {work, put_in(state.queues[priority], new_queue)}
-
-        {:empty, _} ->
-          nil
-      end
+      dequeue_first_available(state, priority)
     end)
+  end
+
+  defp dequeue_first_available(state, priority) do
+    queue = state.queues[priority]
+    scan_queue_for_available(state, priority, queue, :queue.new())
+  end
+
+  defp scan_queue_for_available(state, priority, queue, skipped) do
+    case :queue.out(queue) do
+      {{:value, work}, remaining} ->
+        if resources_available?(work, state) do
+          # Found available work — reconstruct queue with skipped items prepended
+          new_queue = :queue.join(skipped, remaining)
+          {work, put_in(state.queues[priority], new_queue)}
+        else
+          # This item's resources are busy, skip it
+          scan_queue_for_available(state, priority, remaining, :queue.in(work, skipped))
+        end
+
+      {:empty, _} ->
+        # No available work in this priority — restore skipped items
+        if :queue.is_empty(skipped) do
+          nil
+        else
+          # Put skipped items back and return nil
+          nil
+        end
+    end
   end
 
   defp remove_from_queues(state, work_id) do
@@ -304,6 +350,30 @@ defmodule NeonFS.Core.BackgroundWorker do
     end
   end
 
+  ## Private — Resource management
+
+  defp resources_available?(work, state) do
+    limit = state.default_resource_limit
+
+    Enum.all?(work.resources, fn resource ->
+      Map.get(state.resource_usage, resource, 0) < limit
+    end)
+  end
+
+  defp acquire_resources(state, work) do
+    Enum.reduce(work.resources, state, fn resource, acc ->
+      current = Map.get(acc.resource_usage, resource, 0)
+      %{acc | resource_usage: Map.put(acc.resource_usage, resource, current + 1)}
+    end)
+  end
+
+  defp release_resources(state, work) do
+    Enum.reduce(work.resources, state, fn resource, acc ->
+      current = Map.get(acc.resource_usage, resource, 0)
+      %{acc | resource_usage: Map.put(acc.resource_usage, resource, max(current - 1, 0))}
+    end)
+  end
+
   ## Private — Work execution
 
   defp maybe_start_work(state) do
@@ -312,9 +382,6 @@ defmodule NeonFS.Core.BackgroundWorker do
         state
 
       rate_limited?(state) ->
-        state
-
-      load_too_high?(state) ->
         state
 
       true ->
@@ -343,11 +410,13 @@ defmodule NeonFS.Core.BackgroundWorker do
   defp do_start_work(state, work) do
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        Process.flag(:priority, :low)
         work.fn.()
       end)
 
     state = put_in(state.running[task.ref], work)
     state = put_in(state.work_registry[work.id], :running)
+    state = acquire_resources(state, work)
     state = record_start(state)
 
     :telemetry.execute(
@@ -367,7 +436,11 @@ defmodule NeonFS.Core.BackgroundWorker do
 
       {work, running} ->
         state = %{state | running: running}
-        handle_work_completion(state, work, result)
+        state = release_resources(state, work)
+        state = handle_work_completion(state, work, result)
+
+        # Demand-driven: try to start next work on completion
+        maybe_start_work(state)
     end
   end
 
@@ -423,47 +496,7 @@ defmodule NeonFS.Core.BackgroundWorker do
     %{state | starts_this_minute: starts}
   end
 
-  ## Private — Load awareness
-
-  defp load_too_high?(state) do
-    utilisation = scheduler_utilisation(state)
-    utilisation > state.load_threshold
-  end
-
-  defp scheduler_utilisation(state) do
-    current = :erlang.statistics(:scheduler_wall_time_all)
-
-    case state.last_wall_time do
-      nil ->
-        0.0
-
-      prev ->
-        calculate_utilisation(prev, current)
-    end
-  rescue
-    _ -> 0.0
-  end
-
-  defp calculate_utilisation(prev, current) do
-    pairs = Enum.zip(Enum.sort(prev), Enum.sort(current))
-
-    {total_active, total_total} =
-      Enum.reduce(pairs, {0, 0}, fn {{_id, a1, t1}, {_id2, a2, t2}}, {acc_a, acc_t} ->
-        {acc_a + (a2 - a1), acc_t + (t2 - t1)}
-      end)
-
-    if total_total > 0 do
-      total_active / total_total
-    else
-      0.0
-    end
-  end
-
   ## Private — Helpers
-
-  defp schedule_check(state) do
-    Process.send_after(self(), :check_queue, state.check_interval_ms)
-  end
 
   defp generate_work_id do
     :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
