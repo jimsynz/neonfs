@@ -44,17 +44,19 @@ defmodule NeonFS.Core.DriveRegistry do
   @doc """
   Registers a drive in the registry.
   """
-  @spec register_drive(Drive.t()) :: :ok
-  def register_drive(%Drive{} = drive) do
-    GenServer.call(__MODULE__, {:register_drive, drive})
+  @spec register_drive(Drive.t(), keyword()) :: :ok
+  def register_drive(%Drive{} = drive, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(__MODULE__, {:register_drive, drive}, timeout)
   end
 
   @doc """
   Deregisters a drive from the registry.
   """
-  @spec deregister_drive(String.t()) :: :ok | {:error, :not_found}
-  def deregister_drive(drive_id) do
-    GenServer.call(__MODULE__, {:deregister_drive, drive_id})
+  @spec deregister_drive(String.t(), keyword()) :: :ok | {:error, :not_found}
+  def deregister_drive(drive_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(__MODULE__, {:deregister_drive, drive_id}, timeout)
   end
 
   @doc """

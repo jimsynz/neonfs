@@ -67,9 +67,10 @@ defmodule NeonFS.FUSE.MetadataCache do
   @doc """
   Return the ETS table reference for direct reads from the Handler.
   """
-  @spec table(GenServer.server()) :: :ets.table()
-  def table(server) do
-    GenServer.call(server, :table)
+  @spec table(GenServer.server(), keyword()) :: :ets.table()
+  def table(server, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, :table, timeout)
   end
 
   @doc """

@@ -264,7 +264,7 @@ defmodule NeonFS.FUSE.MountManager do
     cache_opts = [volume_id: volume_id]
 
     with {:ok, cache_pid} <- MountSupervisor.start_cache(cache_opts),
-         cache_table <- MetadataCache.table(cache_pid) do
+         cache_table <- MetadataCache.table(cache_pid, timeout: :infinity) do
       # Start the handler process for this mount under the DynamicSupervisor
       handler_opts = [
         volume: volume_id,

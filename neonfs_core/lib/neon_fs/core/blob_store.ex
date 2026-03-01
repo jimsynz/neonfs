@@ -387,7 +387,8 @@ defmodule NeonFS.Core.BlobStore do
           {:ok, [binary()]} | {:error, String.t()}
   def list_metadata_segment(segment_id, drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:list_metadata_segment, segment_id, drive_id})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:list_metadata_segment, segment_id, drive_id}, timeout)
   end
 
   @doc """
@@ -423,7 +424,8 @@ defmodule NeonFS.Core.BlobStore do
   @spec open_store(drive_config(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def open_store(drive_config, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:open_store, drive_config})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:open_store, drive_config}, timeout)
   end
 
   @doc """
@@ -445,7 +447,8 @@ defmodule NeonFS.Core.BlobStore do
   @spec close_store(String.t(), keyword()) :: :ok | {:error, :unknown_drive}
   def close_store(drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:close_store, drive_id})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:close_store, drive_id}, timeout)
   end
 
   @doc """
@@ -468,7 +471,8 @@ defmodule NeonFS.Core.BlobStore do
   @spec drive_has_data?(String.t(), keyword()) :: {:ok, boolean()} | {:error, :unknown_drive}
   def drive_has_data?(drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:drive_has_data, drive_id})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:drive_has_data, drive_id}, timeout)
   end
 
   @doc """

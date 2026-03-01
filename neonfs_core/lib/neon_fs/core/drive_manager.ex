@@ -154,9 +154,9 @@ defmodule NeonFS.Core.DriveManager do
     with {:ok, parsed} <- validate_drive_config(config),
          :ok <- check_path_exists(parsed.path),
          :ok <- check_id_unique(parsed.id),
-         {:ok, _drive_id} <- BlobStore.open_store(parsed),
+         {:ok, _drive_id} <- BlobStore.open_store(parsed, timeout: :infinity),
          drive = Drive.from_config(parsed, Node.self()),
-         :ok <- DriveRegistry.register_drive(drive),
+         :ok <- DriveRegistry.register_drive(drive, timeout: :infinity),
          :ok <- start_single_drive_state(parsed, command_module),
          :ok <- validate_capacity(drive),
          :ok <- save_drives_to_cluster_state() do
@@ -227,8 +227,8 @@ defmodule NeonFS.Core.DriveManager do
 
     with {:ok, _drive} <- get_local_drive(drive_id),
          :ok <- check_drive_data(drive_id, force),
-         :ok <- BlobStore.close_store(drive_id),
-         :ok <- DriveRegistry.deregister_drive(drive_id),
+         :ok <- BlobStore.close_store(drive_id, timeout: :infinity),
+         :ok <- DriveRegistry.deregister_drive(drive_id, timeout: :infinity),
          :ok <- stop_drive_state(drive_id) do
       save_drives_to_cluster_state()
     end
@@ -244,7 +244,7 @@ defmodule NeonFS.Core.DriveManager do
   defp check_drive_data(_drive_id, true = _force), do: :ok
 
   defp check_drive_data(drive_id, _force) do
-    case BlobStore.drive_has_data?(drive_id) do
+    case BlobStore.drive_has_data?(drive_id, timeout: :infinity) do
       {:ok, false} -> :ok
       {:ok, true} -> {:error, :drive_has_data}
       {:error, reason} -> {:error, reason}

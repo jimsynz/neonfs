@@ -121,7 +121,7 @@ defmodule NeonFS.Core.BackgroundWorker do
           by_priority: %{priority() => non_neg_integer()}
         }
   def status do
-    GenServer.call(__MODULE__, :status)
+    GenServer.call(__MODULE__, :status, :infinity)
   end
 
   @doc """
@@ -129,7 +129,7 @@ defmodule NeonFS.Core.BackgroundWorker do
   """
   @spec status(work_id()) :: work_status() | {:error, :not_found}
   def status(work_id) do
-    GenServer.call(__MODULE__, {:status, work_id})
+    GenServer.call(__MODULE__, {:status, work_id}, :infinity)
   end
 
   ## Server Callbacks

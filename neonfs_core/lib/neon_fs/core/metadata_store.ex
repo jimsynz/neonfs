@@ -310,7 +310,8 @@ defmodule NeonFS.Core.MetadataStore do
   @impl true
   def handle_call({:list_segment, segment_id}, _from, state) do
     case BlobStore.list_metadata_segment(segment_id, state.drive_id,
-           server: state.blob_store_server
+           server: state.blob_store_server,
+           timeout: :infinity
          ) do
       {:ok, key_hashes} ->
         entries = collect_live_entries(key_hashes, segment_id, state)
@@ -324,7 +325,8 @@ defmodule NeonFS.Core.MetadataStore do
   @impl true
   def handle_call({:list_segment_all, segment_id}, _from, state) do
     case BlobStore.list_metadata_segment(segment_id, state.drive_id,
-           server: state.blob_store_server
+           server: state.blob_store_server,
+           timeout: :infinity
          ) do
       {:ok, key_hashes} ->
         entries = collect_all_entries(key_hashes, segment_id, state)
@@ -338,7 +340,8 @@ defmodule NeonFS.Core.MetadataStore do
   @impl true
   def handle_call({:merkle_tree, segment_id}, _from, state) do
     case BlobStore.list_metadata_segment(segment_id, state.drive_id,
-           server: state.blob_store_server
+           server: state.blob_store_server,
+           timeout: :infinity
          ) do
       {:ok, key_hashes} ->
         {root_hash, count} = compute_merkle_tree(key_hashes, segment_id, state)
@@ -369,7 +372,8 @@ defmodule NeonFS.Core.MetadataStore do
   @impl true
   def handle_call({:load_segment, segment_id}, _from, state) do
     case BlobStore.list_metadata_segment(segment_id, state.drive_id,
-           server: state.blob_store_server
+           server: state.blob_store_server,
+           timeout: :infinity
          ) do
       {:ok, key_hashes} ->
         new_state = load_records_into_cache(key_hashes, segment_id, state)
