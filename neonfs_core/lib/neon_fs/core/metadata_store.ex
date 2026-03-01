@@ -289,7 +289,8 @@ defmodule NeonFS.Core.MetadataStore do
     case MetadataCodec.encode_record(record) do
       {:ok, serialised} ->
         case BlobStore.write_metadata(segment_id, key_hash, serialised, state.drive_id,
-               server: state.blob_store_server
+               server: state.blob_store_server,
+               timeout: :infinity
              ) do
           {:ok, {}} ->
             {:ok, normalised} = MetadataCodec.decode_record(serialised)
@@ -353,7 +354,8 @@ defmodule NeonFS.Core.MetadataStore do
     key_hash = compute_key_hash(key)
 
     case BlobStore.delete_metadata(segment_id, key_hash, state.drive_id,
-           server: state.blob_store_server
+           server: state.blob_store_server,
+           timeout: :infinity
          ) do
       result when result in [:ok, {:ok, {}}] ->
         cache_remove(state, segment_id, key_hash)
@@ -386,7 +388,8 @@ defmodule NeonFS.Core.MetadataStore do
     case MetadataCodec.encode_record(record) do
       {:ok, serialised} ->
         case BlobStore.write_metadata(segment_id, key_hash, serialised, state.drive_id,
-               server: state.blob_store_server
+               server: state.blob_store_server,
+               timeout: :infinity
              ) do
           {:ok, {}} ->
             # Decode the serialised record to normalise values for cache consistency
@@ -411,7 +414,8 @@ defmodule NeonFS.Core.MetadataStore do
 
   defp read_from_blob_store(state, segment_id, key_hash) do
     case BlobStore.read_metadata(segment_id, key_hash, state.drive_id,
-           server: state.blob_store_server
+           server: state.blob_store_server,
+           timeout: :infinity
          ) do
       {:ok, data} ->
         record = deserialise_record(data)
@@ -448,7 +452,8 @@ defmodule NeonFS.Core.MetadataStore do
 
   defp read_record_from_blob_store(segment_id, key_hash, state) do
     case BlobStore.read_metadata(segment_id, key_hash, state.drive_id,
-           server: state.blob_store_server
+           server: state.blob_store_server,
+           timeout: :infinity
          ) do
       {:ok, data} -> deserialise_record(data)
       {:error, _} -> nil

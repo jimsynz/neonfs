@@ -316,7 +316,8 @@ defmodule NeonFS.Core.BlobStore do
           {:ok, {}} | {:error, String.t()}
   def write_metadata(segment_id, key_hash, data, drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:write_metadata, segment_id, key_hash, data, drive_id})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:write_metadata, segment_id, key_hash, data, drive_id}, timeout)
   end
 
   @doc """
@@ -339,7 +340,8 @@ defmodule NeonFS.Core.BlobStore do
           {:ok, binary()} | {:error, String.t()}
   def read_metadata(segment_id, key_hash, drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:read_metadata, segment_id, key_hash, drive_id})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:read_metadata, segment_id, key_hash, drive_id}, timeout)
   end
 
   @doc """
@@ -362,7 +364,8 @@ defmodule NeonFS.Core.BlobStore do
           {:ok, {}} | {:error, String.t()}
   def delete_metadata(segment_id, key_hash, drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:delete_metadata, segment_id, key_hash, drive_id})
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:delete_metadata, segment_id, key_hash, drive_id}, timeout)
   end
 
   @doc """
