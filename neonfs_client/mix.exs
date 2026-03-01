@@ -46,11 +46,13 @@ defmodule NeonFS.Client.MixProject do
   defp deps do
     [
       {:nimble_pool, "~> 1.1"},
+      {:splode, "~> 0.3"},
       {:telemetry, "~> 1.2"},
       {:uuid_v7, "~> 0.6"},
       {:x509, "~> 0.8"},
 
       # dev/test
+      {:stream_data, "~> 1.0", only: [:test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},

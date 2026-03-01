@@ -3,6 +3,8 @@ defmodule NeonFS.Core.Blob.NativeTest do
 
   alias NeonFS.Core.Blob.Native
 
+  @moduletag :tmp_dir
+
   describe "add/2" do
     test "adds two positive integers" do
       assert Native.add(1, 2) == 3
@@ -89,11 +91,12 @@ defmodule NeonFS.Core.Blob.NativeTest do
   end
 
   describe "store_open/2" do
-    setup do
+    setup %{tmp_dir: tmp_dir} do
       # Create a temporary directory for each test
-      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_test_#{:rand.uniform(1_000_000)}")
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
-      {:ok, tmp_dir: tmp_dir}
+      store_dir = Path.join(tmp_dir, "store_open")
+      File.rm_rf!(store_dir)
+      on_exit(fn -> File.rm_rf!(store_dir) end)
+      {:ok, tmp_dir: store_dir}
     end
 
     test "opens a store at new directory", %{tmp_dir: tmp_dir} do
@@ -115,11 +118,11 @@ defmodule NeonFS.Core.Blob.NativeTest do
   end
 
   describe "store operations" do
-    setup do
-      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_store_test_#{:rand.uniform(1_000_000)}")
-      {:ok, store} = Native.store_open(tmp_dir, 2)
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
-      {:ok, store: store, tmp_dir: tmp_dir}
+    setup %{tmp_dir: tmp_dir} do
+      store_dir = Path.join(tmp_dir, "store_ops")
+      {:ok, store} = Native.store_open(store_dir, 2)
+      on_exit(fn -> File.rm_rf!(store_dir) end)
+      {:ok, store: store, tmp_dir: store_dir}
     end
 
     test "write then read returns same data", %{store: store} do
@@ -245,11 +248,11 @@ defmodule NeonFS.Core.Blob.NativeTest do
   end
 
   describe "chunk verification" do
-    setup do
-      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_verify_test_#{:rand.uniform(1_000_000)}")
-      {:ok, store} = Native.store_open(tmp_dir, 2)
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
-      {:ok, store: store, tmp_dir: tmp_dir}
+    setup %{tmp_dir: tmp_dir} do
+      store_dir = Path.join(tmp_dir, "verify")
+      {:ok, store} = Native.store_open(store_dir, 2)
+      on_exit(fn -> File.rm_rf!(store_dir) end)
+      {:ok, store: store, tmp_dir: store_dir}
     end
 
     test "read with verify=true on valid chunk succeeds", %{store: store} do
@@ -313,26 +316,27 @@ defmodule NeonFS.Core.Blob.NativeTest do
   end
 
   describe "resource cleanup" do
-    test "store can be garbage collected" do
-      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_gc_test_#{:rand.uniform(1_000_000)}")
+    @tag :tmp_dir
+    test "store can be garbage collected", %{tmp_dir: tmp_dir} do
+      store_dir = Path.join(tmp_dir, "gc")
 
       # Open store in a function so it goes out of scope
-      {:ok, _store} = Native.store_open(tmp_dir, 2)
+      {:ok, _store} = Native.store_open(store_dir, 2)
 
       # Force garbage collection
       :erlang.garbage_collect()
 
       # If we got here without crash, cleanup is working
-      File.rm_rf!(tmp_dir)
+      File.rm_rf!(store_dir)
     end
   end
 
   describe "chunk compression" do
-    setup do
-      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_compress_test_#{:rand.uniform(1_000_000)}")
-      {:ok, store} = Native.store_open(tmp_dir, 2)
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
-      {:ok, store: store, tmp_dir: tmp_dir}
+    setup %{tmp_dir: tmp_dir} do
+      store_dir = Path.join(tmp_dir, "compress")
+      {:ok, store} = Native.store_open(store_dir, 2)
+      on_exit(fn -> File.rm_rf!(store_dir) end)
+      {:ok, store: store, tmp_dir: store_dir}
     end
 
     test "write with compression=none returns same size", %{store: store} do
@@ -766,10 +770,10 @@ defmodule NeonFS.Core.Blob.NativeTest do
   end
 
   describe "chunk tier migration" do
-    setup do
-      tmp_dir = Path.join(System.tmp_dir!(), "neonfs_migrate_test_#{:rand.uniform(1_000_000)}")
-      {:ok, store} = Native.store_open(tmp_dir, 2)
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    setup %{tmp_dir: tmp_dir} do
+      store_dir = Path.join(tmp_dir, "migrate")
+      {:ok, store} = Native.store_open(store_dir, 2)
+      on_exit(fn -> File.rm_rf!(store_dir) end)
       {:ok, store: store}
     end
 

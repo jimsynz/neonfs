@@ -236,7 +236,7 @@ defmodule NeonFS.Integration.Phase3Test do
       assert is_map(status)
       assert Map.has_key?(status, :queued)
       assert Map.has_key?(status, :running)
-      assert Map.has_key?(status, :completed)
+      assert Map.has_key?(status, :completed_total)
       assert Map.has_key?(status, :by_priority)
     end
 

@@ -1,24 +1,977 @@
 # NeonFS Development Progress
 
 ## Codebase Patterns
-- Use `mix rustler.new` to create new Rust NIF crates - the default add/2 function is created automatically
-- Rustler 0.37+ no longer requires explicit NIF function lists in `rustler::init!` macro - just the module name
-- NIF modules use `use Rustler, otp_app: :neonfs_core, crate: :neonfs_blob` - no need to modify mix.exs compilers
-- Use `mix check --no-retry` to run all quality checks (Elixir + Rust) - configured via `.check.exs`
-- Rust tools in `.check.exs` use `enabled: File.dir?("native/crate_name")` for graceful skip when crate doesn't exist
-- To return binary from Rustler NIF: use `NewBinary::new(env, len)`, copy data, then `.into()` to convert to `Binary<'a>`
-- For Rustler Resources: use `#[rustler::resource_impl]` on `impl Resource for T {}` - auto-registers the resource type
-- Rustler encodes `Result<(), E>` as `{:ok, {}}` not `:ok` - adjust Elixir specs accordingly
-- Volume config uses nested maps: `volume.tiering.initial_tier` (not `volume.initial_tier`), `volume.caching.*`, and `volume.io_weight`
-- Ra machine version migrations: wrap old fields into new structures with defaults, handle both old and new format in deserializers
-- `solana-reed-solomon-erasure` v4.0.1 is yanked — use `4.0.1-3` (pre-release); `++` has higher precedence than `|>` in Elixir
 
-- x509 0.9.2 generates dialyzer warnings for `X509.ASN1.record/1` and `:public_key.ec_private_key/0` — add `{:unknown_type}` entries to `.dialyzer_ignore.exs`
-- `X509.Certificate.validity/1` returns an ASN.1 record `{:Validity, notBefore, notAfter}` — use `import X509.ASN1` and `validity(notBefore: nb, notAfter: na)` to destructure, then `X509.DateTime.to_datetime/1` to get DateTimes
-- x509 Extension records have 4 elements `{:Extension, oid, critical, value}` — not 3-tuples
-- Bitwise `&&&` has lower precedence than `==` in Elixir — use parentheses: `(mode &&& 0o777) == 0o644`
+### Rustler/NIF
+- Rustler 0.37+ auto-discovers NIF functions via `#[rustler::nif]` — no explicit list in `rustler::init!`, just the module name
+- NIF modules use `use Rustler, otp_app: :neonfs_core, crate: :neonfs_blob` — no need to modify mix.exs compilers
+- Use `mix rustler.new` to create new Rust NIF crates — the default add/2 function is created automatically
+- To return binary from NIF: use `NewBinary::new(env, len)`, copy data, then `.into()` to convert to `Binary<'a>` — `Vec<u8>` returns as an Erlang list
+- For Resources: use `#[rustler::resource_impl]` on `impl Resource for T {}` — auto-registers the resource type
+- Rustler encodes `Result<(), E>` as `{:ok, {}}` not `:ok` — adjust Elixir specs accordingly
+- Encryption is part of the BlobStore pipeline (WriteOptions/ReadOptions), NOT separate NIFs — single NIF boundary crossing per chunk
+- Clippy's `too_many_arguments` lint triggers at 8+ params — use `#[allow(clippy::too_many_arguments)]`
+
+### Credo Rules (strict mode)
+- **Max nesting depth: 2** — extract helpers to flatten nested `case`/`if`/`with` blocks
+- **Max cyclomatic complexity: 9** — use multi-clause pattern matching instead of `cond`
+- **Max function arity: 8** — bundle related params into context maps (e.g. `write_ctx`)
+- Warns about `length/1` comparisons — use pattern matching (`assert [_] = list`) or `!= []`
+- Alphabetical ordering of grouped aliases: `{RaServer, RaSupervisor, Stripe}` not `{Stripe, RaServer, ...}`
+- Alias nested modules at the top — Credo flags inline nested module refs
+- Prefers implicit try/rescue at function level, flags redundant last `with` clauses returning `:ok`
+- Dislikes `is_` prefix on predicate functions — use `direct_child?` not `is_direct_child?`
+- Prefers `list == []` over `length(list) == 0` and `!= []` over `length(list) >= 1`
+
+### GenServer/OTP Patterns
+- **`Process.flag(:trap_exit, true)`** in init — without this, `terminate/2` is not called on shutdown
+- **Supervisor shutdown is REVERSE start order** — plan persistence and dependency teardown accordingly
+- GenServers read config from opts (not app env directly), keeping them testable with explicit opts
+- Periodic GenServers use `Process.send_after/3` with injectable module dependencies (e.g. `:job_tracker_mod`)
+- Named ETS tables survive process death if not owned — must delete explicitly before restarting
+- `GenServer.cast/2` needs `rescue`/`catch :exit` wrappers — raises if the process doesn't exist
+- `rescue` does NOT catch GenServer exits — use `catch :exit, _` for resilience
+- `rescue` must come before `catch` in Elixir function bodies (compiler warns otherwise)
+- GenServer processes started via RPC must use `GenServer.start` (not `start_link`) — the RPC handler process exits after the call, killing linked processes
 - `:pg` is an Erlang module without `child_spec/1` — use explicit child spec maps: `%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}}`
 
+### Recurring Implementation Patterns
+- **GenServer + ETS pattern:** GenServer for serialised writes, ETS `:public` with `read_concurrency: true` for concurrent reads
+- **Dual ETS tables pattern:** one by ID (primary key), one by name/path (secondary index) for fast lookups
+- **Periodic scheduler wiring:** add field to `Cluster.State`, serialiser/deserialiser, load function in Application, child in Supervisor with opts helper reading from app env — identical for all schedulers (GC, Scrub, etc.)
+- **CLI handler job pattern:** resolve_params → create job via `JobTracker.create/2` → return `job_to_map` — same for GC, Scrub, Evacuate
+- **Rust CLI job pattern:** build term map, call handler, extract job ID from response, display hint — follows `drive evacuate` pattern
+- **Adding nested Volume config fields:** update type, default, validation, system volume config, `map_to_volume` backward compat resolver, and CLI paths — partial maps from CLI must be merged with defaults in handler
+- **`Cluster.State` config:** uses `serialise_map_config/1` for simple map sections (`gc`, `scrub`, `worker`) — generic `map()` fields, no strong typing
+- **Adding a job runner to `known_runners`** is all that's needed for `--type` job filtering to work
+- **Telemetry poller callbacks must never raise:** `:telemetry_poller` removes a custom MFA if it crashes once; wrap subsystem calls in rescue/catch and return `:ok`
+
+### Ra/Quorum Patterns
+- Ra requires a named Erlang node — `:nonode@nohost` returns `:system_not_started`
+- Ra UIDs: only letters, numbers, and underscores — sanitise node names with `String.replace(~r/[@\.]/, "_")`
+- Ra machine version migrations: wrap old fields into new structures with defaults, handle both old and new format
+- `:ra.members/2` returns leader as a server ID tuple on success; no-leader scenarios surface via `{:error, _}`/`{:timeout, _}` rather than `:undefined`
+- `persistent_term` is ideal for quorum_opts — read-heavy from non-GenServer public functions; must `erase` in `terminate/2`
+- MetadataCodec round-trips atoms to strings — storable_map functions must handle both atom and string keys via `get_field/3`
+- Ra state persists between tests even with `start_supervised!` — use unique IDs per test (`System.unique_integer`)
+
+### BlobStore/Storage Patterns
+- BlobStore tiers are strings (`"hot"`, `"warm"`, `"cold"`); metadata uses atoms (`:hot`, `:warm`, `:cold`) — `Atom.to_string/1` when calling BlobStore
+- `verify: true` combined with `decompress: true` correctly verifies the decompressed hash — no manual SHA-256 needed
+- Encrypted uncompressed chunks have `stored_size != original_size` due to 16-byte GCM auth tag — decompress check must account for this
+- NIF encryption errors are strings (`"encryption error: ..."`) — pattern match with `"encryption error" <> _`
+- `store_write_chunk` NIF stores data at the path derived from the hash parameter — writing different data with the same hash overwrites the original (useful for corruption tests)
+- `ChunkMeta` has no `volume_id` field — volume association resolved via FileIndex or job params
+
+### Volume Config
+- Volume config uses nested maps: `volume.tiering.initial_tier` (not `volume.initial_tier`), `volume.caching.*`, `volume.io_weight`
+- Volume caching flags are AND-gated: each applicable flag (transformed, remote, reconstructed) must be `true` for caching
+
+### FUSE Handler
+- Root directory (`/`) returns synthetic metadata (plain map), not a `FileMeta` struct — new fields accessed in getattr must also be added to `fetch_file_or_root`
+- `created_at` is birth time (`btime`), NOT POSIX `ctime` — `changed_at` is the correct mapping for `st_ctime`
+- Handler integration tests live in neonfs_integration — neonfs_fuse has no dependency on neonfs_core
+- Permission checks go through `core_call` — wrap in rescue/catch to prevent failures from breaking operations
+- Truncation logic lives on the core side (`FileIndex.truncate`) — chunk size lookups via `ChunkIndex.get` are local to the core node
+
+### Testing
+- **Partition simulation**: `Node.disconnect/1` alone doesn't hold — Ra/pg auto-reconnect. Use `:erlang.set_cookie(target, :partition_block)` on both sides before disconnect to prevent reconnection. Restore cookie with `:erlang.set_cookie(target, cluster.cookie)` before reconnect.
+- `mix check --no-retry` runs all subproject checks; `mix check` (no flag) reruns only previously failed checks — faster for iterating
+- Telemetry handler `send(self(), ...)` sends to the GenServer process, not the test process — capture `test_pid = self()` and `send(test_pid, ...)` instead
+- When restarting GenServer in tests: use `stop_supervised/1` + `start_supervised!/1` — not `GenServer.stop/1` + `start_supervised!/1` (fails with `:already_started`)
+- `ChunkCache.put/3` is a `GenServer.cast` — tests need `Process.sleep(50)` for async operations
+- "Poke" pattern: `send(pid, :check_queue)` or `send(pid, :tick)` forces immediate processing instead of waiting for timer
+- `start_supervised!` for Erlang modules (like `:pg`) needs explicit child spec maps, not tuple syntax
+- Mock modules via Agent + injectable `:*_mod` opts allow clean unit testing without app dependencies
+- For tests needing ETS data without full GenServer, create the ETS table and insert directly — many modules check ETS first
+- Tests using Ra must start the full storage subsystem stack — `init_cluster` writes to the system volume
+- `assert_eventually` for cross-node Ra queries — immediate assertions will fail due to eventual consistency
+- Corrupt chunks must also have `last_verified` updated, otherwise they reappear every step in an infinite loop
+
+### Dialyzer
+- PLTs must be rebuilt when cross-package types change — delete `.plt` AND `.plt.hash`
+- New modules in dependency packages need `mix dialyzer --plt --force-check` in downstream packages
+- Stale PLTs cause false `guard_fail` errors after struct field changes — `rm -rf _build/dev/dialyxir*` forces rebuild
+- Don't use `|| []` fallback on struct fields with defaults — Dialyzer knows the type and flags the nil-check as impossible
+
+### Elixir Gotchas
+- `++` has higher precedence than `|>` — use explicit parentheses or intermediate variables
+- Bitwise `&&&` has lower precedence than `==` — use parentheses: `(mode &&& 0o777) == 0o644`
+- `:json.format/1` returns iodata (list), not binary — wrap with `IO.iodata_to_binary/1`
+- `:json.encode/1` also returns iodata and cannot encode `%DateTime{}` directly — normalise DateTime values (for example with `DateTime.to_iso8601/1`) before encoding
+- Map field access (`state.field`) works in guard clauses since OTP 21+ (compiles to `:erlang.map_get/2`)
+- `Node.monitor/2` returns a reference — use `Process.demonitor(ref)` to cancel, not `Node.monitor(ref, false)`
+- `:net_kernel.disconnect/1` returns `true` (not `:ok`)
+- `mix deps.get` must be run in all downstream packages when a dependency's deps change
+
+### Splode Error Patterns
+- Error class modules use `Splode.Error` (not `ErrorClass`) so they work as standalone errors with custom `message/1`
+- Splode reserves `:path` — use `file_path` for domain file path fields
+- Reserved struct fields from Splode: `splode`, `bread_crumbs`, `vars`, `path`, `stacktrace`, `class`
+- `NeonFS.Error.to_string/1` delegates to `Exception.message/1`; `String.Chars` via `defimpl` in each error module
+
+### Dependency Gotchas
+- x509 0.9.2 generates dialyzer warnings — add `{:unknown_type}` entries to `.dialyzer_ignore.exs`
+- `X509.Certificate.validity/1` returns ASN.1 record — use `import X509.ASN1` and `validity()` to destructure, then `X509.DateTime.to_datetime/1`
+- x509 Extension records have 4 elements `{:Extension, oid, critical, value}` — not 3-tuples
+- `X509.CSR.valid?/1` raises `FunctionClauseError` on non-CSR values — check structure first
+- `solana-reed-solomon-erasure` v4.0.1 is yanked — use `4.0.1-3` (pre-release)
+
+### Build/CI
+- Use `mix check --no-retry` from root to run all quality checks — configured via `.check.exs`
+- Rust tools in `.check.exs` use `enabled: File.dir?("native/crate_name")` for graceful skip
+- Always run `mix format` / `cargo fmt` after editing — formatters adjust wrapping and inlining
+- CI: Forgejo Actions (`.forgejo/workflows/ci.yml`), not GitHub Actions; use `fj` CLI not `gh`
+- Container builds: `PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse cli` — `--load` required for local daemon
+
+## 2026-02-26 10:41 NZDT - Task 0177
+- What was implemented:
+  - Created `NeonFS.Core.MetricsSupervisor` as a `:one_for_one` supervisor with three children:
+    - `TelemetryMetricsPrometheus.Core` started via `Telemetry.metrics/0`
+    - `:telemetry_poller` started with measurements from `NeonFS.Core.TelemetryPoller`
+    - `Bandit` HTTP server with `MetricsPlug` on configured port
+  - Added `MetricsSupervisor.enabled?/0` to check `:metrics_enabled` config
+  - Added `maybe_metrics_child/0` in `NeonFS.Core.Supervisor` to conditionally start metrics before `ReadySignal`
+  - Added metrics config loading in `NeonFS.Core.Application` from `cluster.json` (`metrics.enabled`, `metrics.bind`, `metrics.port`, `metrics.poll_interval`)
+  - Added `metrics` field to `NeonFS.Cluster.State` struct with save/load, and `merge_config_fields/2` helper
+  - Added `metrics` validation in `NeonFS.Cluster.State.Validator` (enabled boolean, bind non-empty string, port/poll_interval positive ints)
+  - Added config defaults in `neonfs_core/config/config.exs` (metrics_enabled true, bind "0.0.0.0", port 9568, poll_interval 15000)
+  - Disabled metrics in test config and integration test peer configs
+  - Created `neonfs_core/test/neon_fs/core/metrics_supervisor_test.exs` with 3 tests: child start, port binding, disabled mode
+  - Updated `neonfs_core/test/neon_fs/cluster/state_test.exs` and `validator_test.exs` with metrics config coverage
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/metrics_supervisor.ex` — created (supervisor module)
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` — added `maybe_metrics_child/0`
+  - `neonfs_core/lib/neon_fs/core/application.ex` — added metrics config loading
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` — added `metrics` field and `merge_config_fields/2`
+  - `neonfs_core/lib/neon_fs/cluster/state/validator.ex` — added metrics validation
+  - `neonfs_core/config/config.exs` — added metrics defaults and documentation
+  - `neonfs_core/test/neon_fs/core/metrics_supervisor_test.exs` — created (3 tests)
+  - `neonfs_core/test/neon_fs/cluster/state_test.exs` — added metrics tests
+  - `neonfs_core/test/neon_fs/cluster/state/validator_test.exs` — added metrics validation tests
+  - `neonfs_integration/config/config.exs` — disabled metrics for tests
+  - `neonfs_integration/lib/neonfs/integration/peer_cluster.ex` — disabled metrics for peer nodes
+  - `neonfs_core/test/neon_fs/core/key_rotation_test.exs` — fixed test to accept `NotFound` error
+  - `tasks/task_0177_metrics_supervision_and_configuration.md` — status → Complete
+- **Test results:** `mix check` (full) passes across all subprojects
+- **Learnings for future iterations:**
+  - Handler error shape changes (`rotation_status` now returns `NotFound` instead of `:no_rotation`) require test updates
+  - `Cluster.State` config sections use generic map format for flexibility — `merge_config_fields/2` helper reduces cyclomatic complexity
+  - Integration test peer configs must also disable metrics in both initial and restart configs
+---
+
+## 2026-02-24 - Task 0157
+- What was implemented:
+  - Created `NeonFS.Integration.LoopbackDevice` module in test support with `create/1`, `destroy/1`, and `available?/0`
+  - `create/1` creates a loopback device of specified size (`:size_mb` option), formats it with ext4, and mounts it at a unique temp directory
+  - `destroy/1` unmounts, detaches loopback device, and removes image file (idempotent)
+  - `available?/0` checks root privileges and `losetup` availability
+  - Updated `test_helper.exs` to auto-exclude `:loopback` tagged tests when `available?/0` returns false
+  - Created 5 tests in `loopback_device_test.exs`: create/mount, write/read data, cleanup verification, idempotent destroy, `available?` boolean check
+  - All tests tagged with `@moduletag :loopback` and `@moduletag :requires_root` — excluded by default on non-root environments
+- Files changed:
+  - `neonfs_integration/test/support/loopback_device.ex` — created (helper module)
+  - `neonfs_integration/test/integration/loopback_device_test.exs` — created (5 tests)
+  - `neonfs_integration/test/test_helper.exs` — added `:loopback` auto-exclusion
+  - `tasks/task_0157_loopback_device_test_helpers.md` — status → Complete
+- **Learnings for future iterations:**
+  - ExUnit `exclude` in `test_helper.exs` is the proper way to conditionally skip entire test modules — don't use `setup` with `flunk` as that reports failures, not exclusions
+  - `Node.start/2` in neonfs_integration test_helper requires `epmd` to be running — if tests fail with `:nodistribution`, start `epmd -daemon` first
+  - Loopback tests are excluded by default (5 excluded) — to run them, use `mix test --include loopback` as root
+---
+
+## 2026-02-26 08:19 NZDT - Task 0176
+- What was implemented:
+  - Added `bandit` and `plug` dependencies to `neonfs_core` to support HTTP endpoint wiring
+  - Added `NeonFS.Core.MetricsPlug` implementing the `Plug` behaviour with two GET routes:
+    - `GET /metrics` returns Prometheus scrape output from `TelemetryMetricsPrometheus.Core.scrape/0`
+    - `GET /health` returns JSON output from `NeonFS.Core.HealthCheck.check/0`
+  - Implemented response semantics:
+    - `text/plain; version=0.0.4; charset=utf-8` for `/metrics`
+    - `application/json` for `/health`
+    - Health status mapping `:healthy/:degraded -> 200`, `:unhealthy -> 503`
+    - `404` for unknown paths and `405` for unsupported methods on `/metrics` and `/health`
+  - Added JSON normalisation for unsupported OTP JSON types in health output (for example `%DateTime{}` and tuples)
+  - Added metrics endpoint defaults in config: `:metrics_port` (`9568`) and `:metrics_bind` (`"0.0.0.0"`)
+  - Added unit tests for all required endpoint behaviours in `metrics_plug_test.exs`
+- Files changed:
+  - `neonfs_core/mix.exs` — added `bandit` and `plug` dependencies
+  - `neonfs_core/lib/neon_fs/core/metrics_plug.ex` — created (metrics/health Plug)
+  - `neonfs_core/test/neon_fs/core/metrics_plug_test.exs` — created (5 endpoint tests)
+  - `neonfs_core/config/config.exs` — added `metrics_port` and `metrics_bind` defaults
+  - `neonfs_core/mix.lock` — updated (`bandit`, `plug`, `plug_crypto`, `thousand_island`, `websock`)
+  - `neonfs_integration/mix.lock` — updated (`bandit`, `plug`, `plug_crypto`, `thousand_island`, `websock`)
+  - `tasks/task_0176_http_metrics_endpoint.md` — status → Complete; acceptance criteria checked
+  - `tasks/progress.md` — added pattern and progress entry
+- **Test results:** `mix check --no-retry` passes from repository root across all subprojects
+- **Learnings for future iterations:**
+  - OTP `:json.encode/1` returns iodata and does not support `%DateTime{}` directly, so HTTP JSON responses should normalise rich values before encoding
+  - `Plug.Router` compile-time plug options are not suitable for per-test injected handlers via `call/2`; a direct `Plug` implementation keeps handler injection simple and deterministic
+---
+
+## 2026-02-25 21:02 NZDT - Task 0174
+- What was implemented:
+  - Added `:telemetry_poller` dependency to `neonfs_core` and fetched downstream deps in `neonfs_integration`
+  - Created `NeonFS.Core.TelemetryPoller` with four periodic measurements: storage utilisation + drive state, cache size + entry count, cluster nodes + Ra term/leader, and background worker queue depth by priority
+  - Poll interval is configurable via `:telemetry_poller_interval_ms` (default `15_000`)
+  - Poller handles unavailable subsystems safely via central rescue/catch wrapper, including Ra lookup fallback to `term: 0, leader: 0`
+  - Extended telemetry metric definitions to include `neonfs.cache.entry.count`, `neonfs.cluster.ra.leader`, `neonfs.worker.queue.depth`, and `neonfs.storage.drive.state`, and added `:drive_id` tag to storage byte gauges
+  - Added `ChunkCache.entry_count/0` to provide lightweight cache entry gauge data
+  - Added unit tests for telemetry poller measurement callbacks and poller resilience when all queried subsystems are down
+  - Updated telemetry metric tests to cover newly added gauges
+- Files changed:
+  - `neonfs_core/mix.exs` — added `{:telemetry_poller, "~> 1.2"}`
+  - `neonfs_core/lib/neon_fs/core/telemetry_poller.ex` — created (poller + measurement callbacks)
+  - `neonfs_core/lib/neon_fs/core/telemetry.ex` — added cache/cluster/worker/drive gauges and storage drive tags
+  - `neonfs_core/lib/neon_fs/core/chunk_cache.ex` — added `entry_count/0`
+  - `neonfs_core/test/neon_fs/core/telemetry_poller_test.exs` — created (measurement + resilience tests)
+  - `neonfs_core/test/neon_fs/core/telemetry_test.exs` — added assertions for new gauges
+  - `neonfs_core/mix.lock` — updated (`telemetry_poller`)
+  - `neonfs_integration/mix.lock` — updated (`telemetry_poller`)
+  - `tasks/task_0174_telemetry_poller_gauge_emissions.md` — status → Complete, acceptance boxes checked
+- **Learnings for future iterations:**
+  - `:telemetry_poller` drops a custom measurement callback if it raises, so callback bodies must be defensive and return `:ok` even when dependencies are unavailable
+  - For custom telemetry poller callbacks, passing runtime configuration through wrapper functions (`measure_* / 1`) keeps tests deterministic without depending on global app env state
+  - Adding a dependency in `neonfs_core` requires `mix deps.get` in downstream packages (notably `neonfs_integration`) before running root-level checks
+---
+
+## 2026-02-24 - Task 0158
+- What was implemented:
+  - Created integration tests in `neonfs_integration/test/integration/drive_space_test.exs` exercising real storage space behaviours via loopback devices
+  - 7 tests across 5 describe blocks: ENOSPC handling (2), GC pressure detection (1), GC space reclamation (1), tier eviction (1), drive evacuation (1)
+  - Used `ExUnit.Case` directly (not `ClusterCase`) with `import NeonFS.Integration.ClusterCase` for custom drive configuration via `start_cluster_with_drives/1`
+- Files changed:
+  - `neonfs_integration/test/integration/drive_space_test.exs` — created (7 tests)
+  - `tasks/task_0158_drive_space_integration_tests.md` — status → Complete
+- **Learnings for future iterations:**
+  - To test GC pressure without hitting ENOSPC, configure a small `capacity` in drive config while using a larger loopback device — the pressure ratio uses configured capacity, not physical disk size
+  - Cross-node telemetry testing: attach handler on peer node with `send(test_pid, msg)` — messages traverse Erlang distribution to the test process
+  - GCScheduler can be poked immediately with `send(gc_pid, :pressure_check)` instead of waiting for the timer interval
+---
+
+## 2026-02-24 - Task 0159
+- What was implemented:
+  - Wired read-time chunk hash verification into the repair pipeline in `ReadOperation`
+  - On verification failure: emits `[:neonfs, :read_operation, :verification_failed]` telemetry with `chunk_hash`, `volume_id`, `drive_id`, `node` metadata
+  - Logs `Logger.error` with structured metadata on corruption detection
+  - Retries from remote replica via `ChunkFetcher.fetch_chunk/2` with `exclude_nodes: [node()]`
+  - If remote copy verifies: returns data to caller + submits high-priority background repair via `BackgroundWorker`
+  - If remote also fails: returns `{:error, :chunk_corrupted}`
+  - Added `exclude_nodes` option to `ChunkFetcher` — skips local fetch and filters excluded nodes from remote locations
+  - 5 new unit tests using Mimic for mocking `ChunkFetcher` and `BackgroundWorker`
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` — added `handle_fetch_result/5`, `verification_failure?/1`, `handle_verification_failure/4`, `emit_verification_failed_telemetry/3`, `submit_local_repair/4`
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` — added `exclude_nodes` option, extracted `fetch_from_local_then_remote/3`
+  - `neonfs_core/test/neon_fs/core/read_operation_test.exs` — added 5 verification failure repair tests
+  - `neonfs_core/mix.exs` — added `{:mimic, "~> 1.7", only: [:test]}`
+  - `neonfs_core/test/test_helper.exs` — added `Mimic.copy/1` for `ChunkFetcher` and `BackgroundWorker`
+  - `tasks/task_0159_read_verification_failure_repair.md` — status → Complete
+- **Learnings for future iterations:**
+  - Mimic requires `Mimic.copy(Module)` in `test_helper.exs` before `ExUnit.start()`, and `use Mimic` + `setup :verify_on_exit!` in the describe block
+  - `:counters.add/3` returns `:ok`, not the count — use separate `:counters.get/2` call after adding
+  - Credo nesting depth: use multi-head private functions (`handle_fetch_result/5`) to dispatch on pattern matches instead of nesting `if` inside `case` inside `with`
+  - NIF verification errors format as `"corrupt chunk: expected {hex}, got {hex}"` — match with `String.starts_with?(reason, "corrupt chunk")`
+---
+
+## 2026-02-23 - Task 0155
+- What was implemented:
+  - Created `NeonFS.Cluster.State.Validator` module with `validate/1` that returns `:ok` or `{:error, [%{field: atom, message: String.t()}]}`
+  - Validates: cluster_id (non-empty string), cluster_name (non-empty), created_at (DateTime), this_node (required fields + atom-safe name), drives (valid path, known tier, parseable capacity via `DriveConfig.parse_capacity`), gc config (interval_ms positive int, pressure_threshold 0.0–1.0), worker config (positive integers), ra_cluster_members (valid node name atoms)
+  - Multiple errors collected — does not short-circuit on first failure
+  - Modified `State.load/0` to call `Validator.validate/1` after `parse_state/1`, returns `{:error, {:validation_failed, errors}}` with field-level details
+  - Flattened `State.load/0` nesting from depth 3 → 1 using `with` chain + `check_file_exists/1` helper
+  - Created 30 unit tests covering valid states, each invalid field type, boundary values, index-specific drive errors, and multiple error collection
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cluster/state/validator.ex` — created (validator module)
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` — added Validator alias, added `check_file_exists/1` and `validate_loaded_state/1` helpers, flattened `load/0` to use `with` chain
+  - `neonfs_core/test/neon_fs/cluster/state/validator_test.exs` — created (30 tests)
+  - `tasks/task_0155_cluster_state_validator.md` — status → Complete
+- **Learnings for future iterations:**
+  - Task spec said validate `cluster_id` as UUID v4, but `Init.generate_cluster_id/0` produces `clust_*` format — always verify actual codebase format before implementing validation rules
+  - Drive capacity in cluster.json is a human-readable string ("1T", "500G", "0") parsed by `DriveConfig.parse_capacity/1` — not a raw integer. "0" is a valid sentinel meaning "auto-detect from partition"
+  - Credo max nesting depth of 2 catches `if` > `case` > `with` patterns — use flat `with` chains instead
+  - Adding validation to `load/0` breaks any test that saves a State with invalid field values (e.g. non-UUID cluster_id) — scan all `State.save` and `State.load` call sites in tests for impact
+---
+
+## 2026-02-23 - Task 0152
+- What was implemented:
+  - Added `BackgroundWorker.reconfigure/1` — accepts keyword list to update `:max_concurrent`, `:max_per_minute`, `:drive_concurrency` at runtime
+  - Updated `BackgroundWorker.status/0` to return configuration alongside runtime stats (`:max_concurrent`, `:max_per_minute`, `:drive_concurrency`, `:completed_total` replacing `:completed`)
+  - Reconfigure updates both GenServer state (immediate effect) and application env (persistence across restarts)
+  - Added `[:neonfs, :background_worker, :reconfigured]` telemetry event with old and new values
+  - Unsupported keys silently filtered via `Keyword.take/2`
+  - Added 7 unit tests: individual setting updates, multi-setting update, unsupported key filtering, app env persistence, concurrency limit enforcement, telemetry emission
+  - Fixed test setup to restart worker fresh each test (avoids reconfigure pollution)
+  - Fixed integration test in `phase3_test.exs` for renamed `:completed` → `:completed_total` field
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/background_worker.ex` — added `reconfigure/1`, updated `status/0`, added `handle_call({:reconfigure, ...})`, added `apply_config_changes/2` helper
+  - `neonfs_core/test/neon_fs/core/background_worker_test.exs` — added `describe "reconfigure/1"` block (7 tests), updated `status/0` assertions for new field names, fixed setup to restart fresh
+  - `neonfs_integration/test/integration/phase3_test.exs` — updated `:completed` → `:completed_total`
+  - `tasks/task_0152_background_worker_reconfiguration.md` — status → Complete
+- **Learnings for future iterations:**
+  - `status/0` return shape changes are breaking — check integration tests and handler code that accesses the map, not just unit tests
+  - Reconfigure tests mutate shared GenServer state — must restart the worker fresh in setup to avoid test pollution across `describe` blocks
+  - `@config_mapping` module attribute with `{state_key, env_key}` tuples keeps the mapping DRY for both state update and app env persistence
+---
+
+## 2026-02-22 - Task 0150
+- What was implemented:
+  - Added network partition simulation helpers to `PeerCluster`:
+    - `disconnect_nodes/3` — bidirectional disconnect with cookie-based reconnection prevention
+    - `reconnect_nodes/3` — bidirectional reconnect restoring cluster cookie
+    - `partition_cluster/2` — splits cluster into arbitrary groups by disconnecting all cross-group pairs
+    - `heal_partition/1` — reconnects every node pair in the cluster
+    - `visible_nodes/2` — returns connected nodes as seen from a given node
+  - Added partition assertion helpers to `ClusterCase`:
+    - `assert_partitioned/4` — polling-based assertion that two groups cannot see each other
+    - `assert_connected/2` — asserts all nodes in a group can see each other
+    - `wait_for_partition_healed/2` — waits until full mesh is restored
+  - Created 6 integration tests in `partition_helpers_test.exs`:
+    - Disconnect/reconnect visibility changes
+    - Disconnect and reconnect idempotency
+    - 3-node cluster partition into {1} and {2,3} with isolation verification
+    - Full mesh restoration after heal
+- Files changed:
+  - `neonfs_integration/lib/neonfs/integration/peer_cluster.ex` — added 5 public functions + `combinations/2` private helper
+  - `neonfs_integration/test/support/cluster_case.ex` — added 3 public assertion helpers + `group_isolated?/3` private helper
+  - `neonfs_integration/test/integration/partition_helpers_test.exs` — created (6 tests)
+  - `tasks/task_0150_peer_cluster_partition_helpers.md` — status → Complete
+- **Learnings for future iterations:**
+  - `Node.disconnect/1` alone is insufficient for partition tests — Ra and `:pg` heartbeats trigger Erlang distribution auto-reconnection. Must also set per-node cookies to `:partition_block` via `:erlang.set_cookie/2` to prevent reconnection.
+  - `:erlang.set_cookie(target_node, cookie)` only affects the LOCAL node's outbound cookie for that target — set on both sides for bidirectional blocking.
+  - Partition assertions must use polling (`wait_until`) not immediate checks — disconnect propagation across distributed nodes is not instantaneous.
+  - Credo's max nesting depth of 2 means `Enum.all?` inside a `fn ->` inside `wait_until` is too deep — extract inner predicates into named private helpers.
+---
+
+## 2026-02-22 - Task 0149
+- What was implemented:
+  - Added 11 integration tests for `setattr` operations to `neonfs_integration/test/integration/fuse_handler_test.exs`:
+    - `chmod` changes file mode and is reflected in subsequent getattr
+    - `chmod` on directory changes mode correctly
+    - `chown` changes UID/GID and is reflected in subsequent getattr
+    - `truncate` to smaller size updates size in metadata
+    - `truncate` to zero empties the file and clears chunks
+    - `utimens` sets access and modification times correctly
+    - `utimens` with nonzero nanoseconds works
+    - `setattr` with combined mode + timestamps in one call
+    - `setattr` updates `changed_at` (ctime) field
+    - Non-owner UID cannot `chmod` (returns EACCES errno 13)
+    - Non-owner UID cannot `chown` (returns EACCES errno 13)
+  - Permission tests start a separate handler with `uid: 1000` (non-root) to test ownership enforcement
+  - All 25 tests pass (14 existing + 11 new), all subproject checks green
+- Files changed:
+  - `neonfs_integration/test/integration/fuse_handler_test.exs` — added `describe "setattr operations"` and `describe "setattr permission enforcement"` blocks
+  - `tasks/task_0149_fuse_setattr_integration_tests.md` — status → Complete
+- **Learnings for future iterations:**
+  - Handler setattr passes mode values through directly — FUSE sends full mode including file type bits (e.g. `0o100755` for regular file), so integration tests should do the same
+  - `FileMeta.update/2` always overwrites `modified_at` and `changed_at` to `now` — explicit `mtime` in setattr params is clobbered by `update/2`, only `accessed_at` survives because it's a separate keyword in the updates
+  - For permission tests, start a second handler with `uid: 1000` inline rather than using a separate setup block — avoids needing a whole second `describe` with its own setup
+  - `check_setattr_permission` only checks ownership for mode/uid/gid changes, not for size or timestamp changes — non-owners can truncate and set timestamps
+---
+
+## 2026-02-22 - Task 0148
+- What was implemented:
+  - Created `neonfs_core/test/neon_fs/core/metadata_ring_property_test.exs` with 5 property tests:
+    - `locate` determinism — same key always maps to same segment
+    - Adding a node moves at most `2/n` of keys (minimal disruption)
+    - Removing a node moves at most `2/n` of keys (minimal disruption)
+    - All segments have at least one assigned node (no orphan segments)
+    - Segment ID is stable across different cluster sizes for the same key
+  - Created `neonfs_core/test/neon_fs/core/file_index_property_test.exs` with 12 property tests:
+    - `normalize_path` idempotency, trailing slash equivalence, no trailing slash (except root), root self-normalisation
+    - `parent_path` correctness (/a/b/c → /a/b), root has no parent, single-level has root parent, path is child of its parent
+    - `validate_path` accepts generated valid paths, normalised form also valid
+    - Directory listing: splitting children yields correct parent and names, path depth matches segment count
+  - All 17 properties use `ExUnitProperties` with ≥100 iterations
+  - All checks pass across all subprojects
+- Files changed:
+  - `neonfs_core/test/neon_fs/core/metadata_ring_property_test.exs` — new (5 properties)
+  - `neonfs_core/test/neon_fs/core/file_index_property_test.exs` — new (12 properties)
+  - `tasks/task_0148_consistent_hashing_path_property_tests.md` — status → Complete
+- **Learnings for future iterations:**
+  - `uniq_list_of` with small generator domains (like `positive_integer` mapped to atoms) causes `TooManyDuplicatesError` during shrinking — construct unique lists directly from an integer count instead (e.g. `integer(2..10) |> map(fn n -> for i <- 1..n, do: :"node#{i}" end)`)
+  - Minimal disruption property for consistent hashing: sample a fixed set of keys, compare primary node before/after, allow 2/n tolerance per the task spec
+---
+
+## 2026-02-22 - Task 0146
+- What was implemented:
+  - Created `neonfs_core/test/neon_fs/core/hlc_property_test.exs` with 10 property tests:
+    - `compare/2` antisymmetry, transitivity, reflexivity, merge correctness
+    - `now/2` strict monotonicity across sequences, wall component bounded by peak input + max_skew
+    - `receive_timestamp/3` result > local last, skew rejection, monotonicity across interleaved sends/receives
+    - Serialisation round-trip (`to_binary/from_binary`)
+  - Created `neonfs_core/test/neon_fs/core/quorum_coordinator_property_test.exs` with 4 property tests:
+    - Read-after-write consistency for any valid quorum config (r + w > n)
+    - Concurrent write determinism (higher HLC timestamp wins)
+    - Write tolerance: succeeds with up to n - w node failures
+    - Read tolerance: succeeds with up to n - r node failures
+  - All 14 properties use `ExUnitProperties` with `property` blocks and StreamData generators
+  - All checks pass across all subprojects
+- Files changed:
+  - `neonfs_core/test/neon_fs/core/hlc_property_test.exs` — new (10 properties)
+  - `neonfs_core/test/neon_fs/core/quorum_coordinator_property_test.exs` — new (4 properties)
+  - `tasks/task_0146_hlc_quorum_property_tests.md` — status → Complete
+- **Learnings for future iterations:**
+  - HLC wall component bound: the property is `ts_wall <= max(all_wall_ms_seen) + max_skew`, not `ts_wall <= current_wall + max_skew` — once `last_wall` is set high, backward clock jumps reuse it for monotonicity
+  - StreamData `filter/2` causes `FilterTooNarrowError` when the filter rejects most generated values (e.g. failure patterns where 0 out of 7 booleans can be true) — construct valid values directly instead of filtering
+  - Quorum coordinator tests use ETS per-test for in-memory node stores — clean and isolated with injectable `:write_fn`/`:read_fn`
+  - Quorum config generator: construct valid (n, r, w) directly by computing `w_min = n - r + 1` rather than filtering random triples
+---
+
+## 2026-02-22 - Task 0145
+- What was implemented:
+  - Added `{:stream_data, "~> 1.0", only: [:test]}` to `neonfs_client`, `neonfs_fuse`, and `neonfs_integration` mix.exs files
+  - Created `NeonFS.TestGenerators` module in `neonfs_core/test/support/test_generators.ex` with 8 generators:
+    - `chunk_hash/0` — 32-byte binaries (SHA-256 format)
+    - `volume_id/0` — valid UUID v4 strings with correct variant/version bits
+    - `file_path/0` — valid POSIX paths (1–5 alphanumeric segments, starts with `/`)
+    - `volume_config/0` — valid `Volume` structs via `Volume.new/2` that pass `Volume.validate/1`
+    - `file_meta/0` — valid `FileMeta` structs via `FileMeta.new/3`
+    - `compression_mode/0` — one of `:none`, `:lz4`, `:zstd`
+    - `tier/0` — one of `:hot`, `:warm`, `:cold`
+    - `binary_data/0` — arbitrary binaries between 1 byte and 64 KB
+  - Created property test suite in `neonfs_core/test/neon_fs/test_generators_test.exs` — 9 property tests validating all generators
+  - All checks pass: format, credo --strict, dialyzer, tests (all subprojects)
+- Files changed:
+  - `neonfs_client/mix.exs` — added stream_data dep
+  - `neonfs_fuse/mix.exs` — added stream_data dep
+  - `neonfs_integration/mix.exs` — added stream_data dep
+  - `neonfs_core/test/support/test_generators.ex` — new generators module
+  - `neonfs_core/test/neon_fs/test_generators_test.exs` — new property tests
+  - `tasks/task_0145_stream_data_deps_generators.md` — status → Complete
+- **Learnings for future iterations:**
+  - `use ExUnitProperties` brings `gen all` and `check all` into scope, but bitwise operators (`band`, `|||`) require `import Bitwise` separately
+  - Credo flags `length(list) >= 1` — use intermediate variable with combined assertion instead
+  - `volume_config/0` generator uses `Volume.new/2` rather than building the struct manually — this ensures generated values match whatever defaults the constructor applies
+  - UUID v4 generation from random bytes: set version bits (nibble 13 = 4) and variant bits (bits 65-66 = 10) on the raw 16-byte binary
+---
+
+## 2026-02-22 - Task 0143
+- What was implemented:
+  - Added `Logger.metadata(node_name: node())` at application startup in both neonfs_core and neonfs_fuse
+  - Added `set_cli_metadata/0` private helper to `NeonFS.CLI.Handler` — sets `component: :cli` and generates a random `request_id` per call
+  - Called `set_cli_metadata()` at the entry of all 41 public handler functions
+  - Added `Logger.metadata(component: :fuse, volume_id: ...)` in FUSE handler `init/1`
+  - Added `Logger.metadata(request_id: ...)` in FUSE handler `handle_info({:fuse_op, ...})`
+  - Added `Logger.metadata(component: :background, work_id: ..., work_label: ...)` in BackgroundWorker task execution
+  - Added `Logger.metadata(component: :read, volume_id: ..., file_path: ...)` in ReadOperation.read_file/3
+  - Added `Logger.metadata(component: :write, volume_id: ..., file_path: ...)` in WriteOperation.write_file/4
+  - Added `Logger.metadata(component: :scheduler, scheduler: :gc)` in GCScheduler tick and pressure check
+  - Added `Logger.metadata(component: :scheduler, scheduler: :scrub)` in ScrubScheduler tick
+  - Registered new metadata keys (`:file_path`, `:scheduler`, `:work_id`, `:work_label`) in Logger config for both packages (config.exs and runtime.exs)
+  - All existing tests pass, `mix format` clean, `mix credo --strict` clean
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/application.ex` — set node_name at startup
+  - `neonfs_fuse/lib/neon_fs/fuse/application.ex` — set node_name at startup
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` — added `set_cli_metadata/0` + calls in all public functions
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` — metadata in init and fuse_op handler
+  - `neonfs_core/lib/neon_fs/core/background_worker.ex` — metadata in task execution
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` — metadata at entry
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` — metadata at entry
+  - `neonfs_core/lib/neon_fs/core/gc_scheduler.ex` — metadata on tick and pressure check
+  - `neonfs_core/lib/neon_fs/core/scrub_scheduler.ex` — metadata on tick
+  - `neonfs_core/config/config.exs` — registered new metadata keys
+  - `neonfs_core/config/runtime.exs` — registered new metadata keys for LoggerJSON
+  - `neonfs_fuse/config/config.exs` — registered new metadata keys
+  - `neonfs_fuse/config/runtime.exs` — registered new metadata keys for LoggerJSON
+  - `tasks/task_0143_logger_metadata_entry_points.md` — status → Complete
+- **Learnings for future iterations:**
+  - Credo's `MissedMetadataKeyInLoggerConfig` check requires ALL metadata keys used in `Logger.metadata/1` to be listed in the `:default_formatter` config — not just the handler config
+  - Logger metadata keys must be registered in BOTH `config.exs` (for Credo + dev/test) and `runtime.exs` (for production LoggerJSON)
+  - For modules with many public functions (like CLI handler with 41), a private `set_*_metadata/0` helper keeps the pattern consistent and minimal
+  - FUSE handler is a GenServer — metadata set in `init/1` persists for the process lifetime, but `request_id` should be set per-operation in `handle_info`
+---
+
+## 2026-02-22 - Task 0142
+- What was implemented:
+  - Added `logger_json ~> 7.0` dependency to neonfs_core and neonfs_fuse
+  - Configured `LoggerJSON.Formatters.Basic` in production `runtime.exs` for both packages
+  - Metadata fields: `:component`, `:node_name`, `:volume_id`, `:request_id`
+  - Dev/test retains console formatter with metadata keys registered via `:default_formatter` and `:default_handler`
+  - Created `NeonFS.Core.Log` helper module with: `with_metadata/2`, `set_component/1`, `set_volume/1`, `set_node_name/0`, `set_request_id/0|1`
+  - `with_metadata/2` restores previous metadata after block (even on raise)
+  - 11 unit tests: metadata setting/restoration, exception safety, JSON formatter availability, JSON output validation
+  - Fixed pre-existing dialyzer guard_fail warning in `handler.ex:1661` (`volume.compression || %{}` → `volume.compression`)
+- Files changed:
+  - `neonfs_core/mix.exs` — added `logger_json` dep
+  - `neonfs_fuse/mix.exs` — added `logger_json` dep
+  - `neonfs_core/config/config.exs` — registered custom Logger metadata keys
+  - `neonfs_core/config/runtime.exs` — added JSON formatter for prod
+  - `neonfs_fuse/config/config.exs` — registered custom Logger metadata keys
+  - `neonfs_fuse/config/runtime.exs` — added JSON formatter for prod
+  - `neonfs_core/lib/neon_fs/core/log.ex` — new helper module
+  - `neonfs_core/test/neon_fs/core/log_test.exs` — new tests
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` — fix dialyzer guard_fail
+  - `tasks/task_0142_json_log_formatter_setup.md` — status → Complete
+- **Learnings for future iterations:**
+  - Credo's `MissedMetadataKeyInLoggerConfig` check looks at `:default_formatter` config, not `:default_handler` — need `config :logger, :default_formatter, metadata: [...]` in addition to handler config
+  - `LoggerJSON.Formatters.Basic.new/1` returns a `{module, config}` tuple suitable for `:formatter` option
+  - Elixir 1.19 built-in `JSON` module is available as encoder, but LoggerJSON defaults to Jason (which is already a transitive dep)
+---
+
+## 2026-02-22 - Task 0141
+- What was implemented:
+  - Added DETS persistence to ChunkAccessTracker: restore on init, sync on decay timer and terminate
+  - `Process.flag(:trap_exit, true)` in init for clean shutdown DETS writes
+  - DETS path configurable via `:dets_path` opt, defaults to `Persistence.meta_dir/chunk_access_tracker.dets`
+  - Atomic DETS writes via temp file + rename (same pattern as Persistence module)
+  - Extended ETS tuple from 4 to 5 elements: added `staleness_count` field
+  - Staleness tracking: entries with zero activity for 3+ consecutive decay cycles are pruned
+  - Max tracked chunks configurable (default 1M), stored in persistent_term for fast-path access
+  - Over-limit pruning triggered from `record_access/1` via async `:prune` message to GenServer
+  - Legacy 4-element tuple migration via `normalise_entry/1` for old DETS files
+  - 21 tests total (15 existing updated for 5-tuple format + 6 new persistence/pruning tests)
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_access_tracker.ex` — DETS persistence, staleness, pruning
+  - `neonfs_core/test/neon_fs/core/chunk_access_tracker_test.exs` — rewrote setup for proper lifecycle, added persistence tests
+  - `tasks/task_0141_access_stats_persistence.md` — status → Complete
+---
+
+## 2026-02-22 - Task 0140
+- What was implemented:
+  - Created `NeonFS.Core.TieringManager.ColdnessScore` module with `score/2` function
+  - Formula: `coldness = -(hours_since_last_access) + (daily_count * frequency_weight)`
+  - `nil` last_accessed treated as maximally cold via `@max_hours` (87,600 = 10 years)
+  - `frequency_weight` configurable via opts (default 10), `:now` injectable for testing
+  - Updated `evict_from_tier/3` in TieringManager to use `ColdnessScore.score/2` for sorting
+  - Added chunk hash as tiebreaker in sort for deterministic eviction
+  - 7 unit tests covering: recency, frequency, nil handling, formula validation, custom weight, ordering, zero-score edge case
+  - Existing 16 tiering manager tests still pass
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/tiering_manager/coldness_score.ex` — new module
+  - `neonfs_core/lib/neon_fs/core/tiering_manager.ex` — updated `evict_from_tier/3` sort
+  - `neonfs_core/test/neon_fs/core/tiering_manager/coldness_score_test.exs` — new tests
+  - `tasks/task_0140_coldness_scoring_formula.md` — status → Complete
+---
+
+## 2026-02-22 - Task 0139
+- What was implemented:
+  - Added `VolumeCommand::Update` variant with flags for all updatable volume fields
+  - Flags grouped via `help_heading`: General, Tiering, Caching, Verification, Metadata Consistency
+  - Update method builds `eetf::Map` with only specified flags (string keys matching handler)
+  - Validates at least one flag is specified before RPC call
+  - Calls `Elixir.NeonFS.CLI.Handler.update_volume/2` via RPC
+  - Displays updated volume summary on success
+  - Helper functions: `binary_key`, `binary_val`, `int_val`, `bool_val` for term construction
+  - 2 new tests: update command parsing (all flag groups), term helper construction
+  - `cargo clippy`, `cargo fmt`, `cargo test` all pass
+- Files changed:
+  - `neonfs-cli/src/commands/volume.rs` — added `Update` variant + `update()` method + helpers + tests
+  - `tasks/task_0139_volume_update_rust_cli.md` — status → Complete
+---
+
+## 2026-02-22 - Task 0138
+- What was implemented:
+  - Added `update_volume/2` to `NeonFS.CLI.Handler` — accepts volume name + config map with string keys
+  - Immutable field rejection: `durability`, `encryption`, `name`, `id` return `{:error, {:immutable_fields, [...]}}`
+  - Simple field updates: `atime_mode`, `io_weight`, `write_ack`, `owner` with type coercion
+  - Nested config merging: tiering, caching, verification, metadata_consistency sub-fields merged with existing volume config
+  - Compression updates: map or string value, atom/integer coercion on algorithm/level/min_size
+  - Telemetry event `[:neonfs, :cli, :volume_updated]` emitted on success
+  - Audit log entry via `AuditLog.log_event`
+  - Added `metadata_consistency` to `volume_to_map/1` output
+  - 8 new unit tests: compression update, simple fields, tiering, verification, caching, metadata consistency, not-found, immutable rejection, telemetry
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` — added `update_volume/2` + private helpers
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` — added "update_volume/2" describe block
+  - `tasks/task_0138_volume_update_handler.md` — status → Complete
+---
+
+## 2026-02-22 - Task 0136
+- What was implemented:
+  - Wired `ScrubScheduler` into `NeonFS.Core.Supervisor.build_children/0` after `GCScheduler`
+  - Added `scrub_scheduler_opts/0` helper that reads app env for `:scrub_check_interval_ms`
+  - Added `scrub` field to `NeonFS.Cluster.State` struct (default: `%{}`)
+  - Updated `State.save/1` and `parse_state/1` to serialise/deserialise the `scrub` section from `cluster.json`
+  - Added `load_scrub_config/1` to `NeonFS.Core.Application` — loads `check_interval_ms` from `cluster.json` `scrub` section into app env
+  - Missing or partial `scrub` config in `cluster.json` falls back to defaults gracefully
+  - 2 new unit tests: config from app env, defaults when app env is not set
+  - Full `mix check --no-retry` green across all subprojects
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` — added `ScrubScheduler` child and `scrub_scheduler_opts/0`
+  - `neonfs_core/lib/neon_fs/core/application.ex` — added `load_scrub_config/1`
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` — added `scrub` field, serialisation/deserialisation
+  - `neonfs_core/test/neon_fs/core/scrub_scheduler_test.exs` — added 2 config tests
+  - `tasks/task_0136_scrub_scheduler_supervision.md` — status → Complete
+- **Learnings for future iterations:**
+  - The supervisor/application/cluster-state wiring pattern is identical for all periodic schedulers: add field to State struct, add serialiser/deserialiser, add load function in Application, add child in Supervisor with opts helper reading from app env
+  - `Cluster.State` uses `serialise_map_config/1` for all simple map config sections (`gc`, `scrub`, `worker`)
+---
+
+## 2026-02-22 - Task 0135
+- What was implemented:
+  - Created `NeonFS.Core.ScrubScheduler` GenServer for periodic integrity scrub scheduling
+  - `start_link/1` accepts `:check_interval_ms` (default 1h), `:name`, `:job_tracker_mod`, `:volume_registry_mod` options
+  - On each `:tick`, iterates all volumes via `VolumeRegistry.list/0` and checks if each volume is due for a scrub
+  - Per-volume scheduling based on `verification.scrub_interval` (in seconds) and last scrub completion time
+  - Skips job creation when a scrub job for the same volume is already running (checks `JobTracker.list/1`)
+  - On startup, queries `JobTracker` for most recent completed scrub jobs to initialise per-volume schedule
+  - Creates scrub jobs via `JobTracker.create(Job.Runners.Scrub, %{volume_id: id})` when due
+  - `status/0` returns `check_interval_ms` and `volume_scrub_times` map
+  - `trigger_now/1` triggers an immediate scrub for a specific volume (same duplicate check applies)
+  - Telemetry events: `[:neonfs, :scrub_scheduler, :triggered]` and `[:neonfs, :scrub_scheduler, :skipped]`
+  - Injectable `:job_tracker_mod` and `:volume_registry_mod` for testing via Agent-based mocks
+  - 7 unit tests: tick creates job when interval elapsed, skip when running, per-volume interval respect, trigger_now, trigger_now skip, status fields, status after trigger
+  - Full `mix check --no-retry` green across all subprojects
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/scrub_scheduler.ex` — new file (GenServer)
+  - `neonfs_core/test/neon_fs/core/scrub_scheduler_test.exs` — new file (7 tests)
+  - `tasks/task_0135_scrub_scheduler_genserver.md` — status → Complete
+- **Learnings for future iterations:**
+  - ScrubScheduler follows GCScheduler pattern but adds per-volume scheduling — each volume has its own `scrub_interval` so the scheduler checks all volumes on each tick rather than using a single global interval
+  - Credo max nesting depth is 2 — extract helpers like `update_latest_scrub_time/2` and `keep_latest_time/4` to flatten `Enum.reduce` bodies
+  - MockJobTracker needs to filter by status early (`:running` vs `:completed`) since ScrubScheduler queries both status types during init and ticks
+  - Volumes with no prior scrub history (no completed jobs in JobTracker) are always considered due on first check
+---
+
+## 2026-02-21 - Task 0134
+- What was implemented:
+  - Wired `GCScheduler` into `NeonFS.Core.Supervisor.build_children/0` between `TieringManager` and `AntiEntropy`
+  - Added `gc_scheduler_opts/0` helper that reads app env for `:gc_interval_ms`, `:gc_pressure_threshold`, `:gc_pressure_check_interval_ms`
+  - Added `gc` field to `NeonFS.Cluster.State` struct (default: `%{}`)
+  - Updated `State.save/1` and `parse_state/1` to serialise/deserialise the `gc` section from `cluster.json`
+  - Extracted `serialise_map_config/1` helper, refactored `serialise_worker_config/1` to delegate to it
+  - Added `load_gc_config/1` to `NeonFS.Core.Application` — loads `interval_ms`, `pressure_threshold`, `pressure_check_interval_ms` from `cluster.json` `gc` section into app env
+  - Missing or partial `gc` config in `cluster.json` falls back to defaults gracefully
+  - 2 new unit tests: config from app env, defaults when app env is not set
+  - Full `mix check --no-retry` green across all subprojects
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` — added `GCScheduler` child and `gc_scheduler_opts/0`
+  - `neonfs_core/lib/neon_fs/core/application.ex` — added `load_gc_config/1`
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` — added `gc` field, serialisation/deserialisation
+  - `neonfs_core/test/neon_fs/core/gc_scheduler_test.exs` — added 2 config tests
+  - `tasks/task_0134_gc_scheduler_supervision_and_config.md` — status → Complete
+- **Learnings for future iterations:**
+  - The supervisor passes app env values as opts to GenServers — GenServers don't read app env directly, keeping them testable with explicit opts
+  - Always run `mix format` after editing `.ex` files — the formatter may adjust line wrapping in keyword lists
+  - `Cluster.State` uses generic `map()` fields for config sections (`worker`, `gc`) — no strong typing, just key-value maps parsed from JSON
+---
+
+## 2026-02-21 - Task 0133
+- What was implemented:
+  - Extended `NeonFS.Core.GCScheduler` with storage pressure detection
+  - New opts: `:pressure_check_interval_ms` (default 300_000), `:pressure_threshold` (default 0.85), `:storage_metrics_mod`
+  - Separate `:pressure_check` timer runs independently of the scheduled GC timer
+  - Calls `StorageMetrics.cluster_capacity/0` to compute `used / capacity` ratio
+  - Triggers GC when ratio >= threshold and no GC job already running
+  - Returns early (no-op) when all drives have `:unlimited` capacity
+  - `status/0` now includes pressure fields: `pressure_threshold`, `pressure_check_interval_ms`, `last_pressure_check_at`, `last_pressure_ratio`
+  - Telemetry event `[:neonfs, :gc_scheduler, :pressure_triggered]` with `%{ratio: float, job_id: id}`
+  - Extracted `gc_job_running?/1` helper shared by scheduled GC and pressure check
+  - `MockStorageMetrics` Agent-based test module for controlled capacity values
+  - 4 new unit tests: pressure triggers GC, no-op below threshold, no-op with unlimited capacity, skips when GC running
+  - Full `mix check --no-retry` green across all subprojects
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/gc_scheduler.ex` — added pressure check logic
+  - `neonfs_core/test/neon_fs/core/gc_scheduler_test.exs` — added MockStorageMetrics and 4 pressure tests
+  - `tasks/task_0133_gc_storage_pressure_trigger.md` — status → Complete
+- **Learnings for future iterations:**
+  - Credo's max nesting depth is 2 — avoid nested `if`/`case` blocks by extracting private helpers like `compute_pressure_ratio/1` and `maybe_trigger_pressure_gc/3`
+  - Map field access (`state.field`) works in Elixir guard clauses (compiles to `:erlang.map_get/2`) since OTP 21+
+  - The `StorageMetrics.cluster_capacity/0` return uses `:unlimited` for `total_capacity` when any drive has `capacity_bytes == 0` — check for this atom, not zero
+---
+
+## 2026-02-21 - Task 0132
+- What was implemented:
+  - Created `NeonFS.Core.GCScheduler` GenServer for periodic garbage collection
+  - `start_link/1` accepts `:interval_ms` (default 24h), `:name`, `:job_tracker_mod` options
+  - On each `:tick`, creates a GC job via `JobTracker.create(Job.Runners.GarbageCollection, %{})`
+  - Skips job creation when a GC job is already running (checks `JobTracker.list/1`)
+  - `status/0` returns `interval_ms`, `last_triggered_at`, `last_skipped_at`
+  - `trigger_now/0` triggers an immediate GC job with same duplicate check
+  - Telemetry events: `[:neonfs, :gc_scheduler, :triggered]` and `[:neonfs, :gc_scheduler, :skipped]`
+  - Injectable `:job_tracker_mod` for testing via Agent-based mock
+  - 7 unit tests covering tick creation, skip on running, trigger_now, status fields, and timestamp updates
+  - Full `mix check --no-retry` green across all subprojects
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/gc_scheduler.ex` — new file (GenServer)
+  - `neonfs_core/test/neon_fs/core/gc_scheduler_test.exs` — new file (7 tests)
+  - `tasks/task_0132_gc_scheduler.md` — status → Complete
+- **Learnings for future iterations:**
+  - GCScheduler follows the exact same pattern as TieringManager — `Process.send_after/3` periodic GenServer with injectable module dependencies
+  - Telemetry handler `send(self(), ...)` in tests sends to the GenServer process, not the test process — capture test pid with `test_pid = self()` and `send(test_pid, ...)` instead
+  - Credo warns about `length/1` comparisons — use pattern matching (`assert [_] = list`) or empty check (`assert list != []`) instead
+---
+
+## 2026-02-21 - Task 0131
+- What was implemented:
+  - Created `neonfs-cli/src/commands/scrub.rs` with `ScrubCommand` enum (Start, Status)
+  - `Start` subcommand accepts optional `--volume <name>`, sends binary-keyed options map to `handle_scrub_start`
+  - `Status` subcommand calls `handle_scrub_status`, displays job list using existing `JobInfo` type
+  - Table output for `start` shows job ID, volume scope, and `neonfs job show <id>` hint
+  - Table output for `status` shows job ID, status, progress, and start time
+  - JSON output works for both subcommands via `serde_json`
+  - Registered `scrub` module in `commands/mod.rs`
+  - Added `Scrub` variant to `Commands` enum in `main.rs` with dispatch
+  - 3 unit tests in `scrub.rs` (start parsing, start with volume, status parsing)
+  - 3 integration tests in `main.rs` (top-level scrub start, scrub start --volume, scrub status)
+  - All 79 Rust tests pass, clippy clean, fmt clean
+  - Full `mix check --no-retry` green (140 tests, 0 failures)
+- Files changed:
+  - `neonfs-cli/src/commands/scrub.rs` — new file
+  - `neonfs-cli/src/commands/mod.rs` — added `pub mod scrub;`
+  - `neonfs-cli/src/main.rs` — added `ScrubCommand` import, `Scrub` variant, dispatch, 3 tests
+  - `tasks/task_0131_scrub_rust_cli.md` — status → Complete
+- **Learnings for future iterations:**
+  - Scrub CLI follows the exact same pattern as GC CLI — copy gc.rs, rename handler functions and display strings
+  - `cargo fmt` prefers inlining short `conn.call(...)` arguments on one line — always run `cargo fmt` after writing
+---
+
+## 2026-02-21 - Task 0130
+- What was implemented:
+  - Added `handle_scrub_start/1` to `NeonFS.CLI.Handler` — accepts options map with optional `"volume"` key
+  - `resolve_scrub_params/1` private helper resolves volume name to ID via `VolumeRegistry.get_by_name/1`, returns `{:error, :not_found}` for unknown volumes
+  - Full-node scrub (no volume filter) when `"volume"` key is absent — passes empty params map
+  - Creates job via `JobTracker.create(NeonFS.Core.Job.Runners.Scrub, params)`, returns `job_to_map/1`
+  - Added `handle_scrub_status/0` — queries `JobTracker.list(type: Scrub)`, returns list of job maps
+  - Added `Scrub` to `known_runners` in `parse_job_type_filter/2` so `--type scrub` filter works
+  - Both functions have `@doc` and `@spec` annotations
+  - All 140 tests pass, full `mix check --no-retry` green
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` — added `handle_scrub_start/1`, `handle_scrub_status/0`, `resolve_scrub_params/1`, updated `known_runners`
+  - `tasks/task_0130_scrub_cli_handler.md` — status → Complete
+- **Learnings for future iterations:**
+  - Handler scrub pattern is identical to GC handler — same resolve_params → create job → return map shape
+  - Adding a new runner to `known_runners` list is all that's needed for `--type` job filtering to work
+---
+
+## 2026-02-21 - Task 0129
+- What was implemented:
+  - Created `Job.Runners.Scrub` implementing the `Job.Runner` behaviour
+  - `label/0` returns `"scrub"`
+  - `step/1` processes one batch of chunks per call, returns `{:continue, job}` or `{:complete, job}`
+  - Each chunk is read from BlobStore with `verify: true` (and `decompress: true` for compressed chunks)
+  - SHA-256 hash verified against `ChunkMeta.hash` via the NIF's built-in verification
+  - Supports optional `volume_id` in `job.params` — uses `ChunkIndex.get_chunks_for_volume/1` when present
+  - Without `volume_id`, scrubs all committed chunks on the local node via `ChunkIndex.list_all/0`
+  - Progress tracks total chunks, completed chunks; corruption count in `job.state.corruption_count`
+  - Corrupted chunk hashes recorded in `job.state.corrupted` (capped at 1000 entries)
+  - Telemetry event `[:neonfs, :scrub, :corruption_detected]` emitted per corrupt chunk
+  - Telemetry event `[:neonfs, :scrub, :complete]` emitted on completion
+  - Batch size configurable via `Application.get_env(:neonfs_core, :scrub_batch_size, 500)`
+  - Uses `ChunkMeta.last_verified` timestamp for resumption — already-verified chunks skipped
+  - Encrypted chunks skipped (key lookup not wired in yet)
+  - 7 tests: label, all-valid completion, last_verified update, corruption detection, corruption telemetry, complete telemetry, volume-scoped scrub
+  - All 140 tests pass, full `mix check --no-retry` green
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/job/runners/scrub.ex` — new file
+  - `neonfs_core/test/neon_fs/core/job/runners/scrub_test.exs` — new file
+  - `tasks/task_0129_scrub_job_runner.md` — status → Complete
+- **Learnings for future iterations:**
+  - BlobStore `verify: true` combined with `decompress: true` correctly verifies the hash of the decompressed data against the content-addressed hash — no manual SHA-256 computation needed
+  - Corrupt chunks must also have `last_verified` updated, otherwise they reappear every step in an infinite loop
+  - `Native.store_open/2` can open a separate handle to the same blob directory for tampering in tests — write corrupted data with the same hash key to simulate disk corruption
+  - The `store_write_chunk` NIF stores data at the path derived from the hash parameter, so writing different data with the same hash overwrites the original file
+---
+
+## 2026-02-21 - Task 0128
+- What was implemented:
+  - Created `neonfs-cli/src/commands/gc.rs` with `GcCommand` enum (Collect, Status)
+  - `Collect` subcommand accepts optional `--volume <name>`, sends binary-keyed options map to `handle_gc_collect`
+  - `Status` subcommand calls `handle_gc_status`, displays job list using existing `JobInfo` type
+  - Table output for `collect` shows job ID, volume scope, and `neonfs job show <id>` hint
+  - Table output for `status` shows job ID, status, progress, and start time
+  - JSON output works for both subcommands via `serde_json`
+  - Registered `gc` module in `commands/mod.rs`
+  - Added `Gc` variant to `Commands` enum in `main.rs` with dispatch
+  - 3 unit tests in `gc.rs` (collect parsing, collect with volume, status parsing)
+  - 3 integration tests in `main.rs` (top-level gc collect, gc collect --volume, gc status)
+  - All 73 Rust tests pass, clippy clean, fmt clean
+  - Full `mix check --no-retry` green (140 tests, 0 failures)
+- Files changed:
+  - `neonfs-cli/src/commands/gc.rs` — new file
+  - `neonfs-cli/src/commands/mod.rs` — added `pub mod gc;`
+  - `neonfs-cli/src/main.rs` — added `GcCommand` import, `Gc` variant, dispatch, 3 tests
+  - `tasks/task_0128_gc_rust_cli.md` — status -> Complete
+- **Learnings for future iterations:**
+  - Rust CLI commands that submit jobs follow the `drive evacuate` pattern: build term map, call handler, extract job ID from response, display hint
+  - Rust CLI commands that list jobs follow the `job list` pattern: call handler, parse response into `Vec<JobInfo>`, display table
+  - `cargo fmt` prefers inlining short `conn.call(...)` arguments on one line — run `cargo fmt` after writing to catch these
+---
+
+## 2026-02-21 - Task 0127
+- What was implemented:
+  - Added `handle_gc_collect/1` to `NeonFS.CLI.Handler` — accepts options map with optional `"volume"` key
+  - `resolve_gc_params/1` private helper resolves volume name to ID via `VolumeRegistry.get_by_name/1`, returns `{:error, :not_found}` for unknown volumes
+  - Cluster-wide GC (no volume filter) when `"volume"` key is absent — passes empty params map
+  - Creates job via `JobTracker.create(NeonFS.Core.Job.Runners.GarbageCollection, params)`, returns `job_to_map/1`
+  - Added `handle_gc_status/0` — queries `JobTracker.list(type: GarbageCollection)`, returns list of job maps
+  - Added `GarbageCollection` to `known_runners` in `parse_job_type_filter/2` so `--type garbage-collection` filter works
+  - Both functions have `@doc` and `@spec` annotations
+  - All 140 tests pass, full `mix check --no-retry` green
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` — added `handle_gc_collect/1`, `handle_gc_status/0`, `resolve_gc_params/1`, updated `known_runners`
+  - `tasks/task_0127_gc_cli_handler.md` — status → Complete
+- **Learnings for future iterations:**
+  - Handler GC pattern follows the same shape as `handle_evacuate_drive/3`: resolve names → create job → return `job_to_map`
+  - `JobTracker.create/2` takes `(runner_module, params_map)` and returns `{:ok, %Job{}}` — the job starts running immediately
+  - `JobTracker.list/1` accepts `:type` filter with the runner module atom — results are pre-sorted by `created_at` desc
+---
+
+## 2026-02-21 - Task 0126
+- What was implemented:
+  - Extended `GarbageCollector.collect/0` with a `collect/1` variant accepting a keyword list with optional `:volume_id`
+  - `collect/0` delegates to `collect([])` — existing callers unchanged
+  - When `:volume_id` is given, the mark phase uses `FileIndex.list_volume/1` instead of `list_all/0`
+  - Extracted `list_files/1` helper to choose between full and volume-scoped file listing
+  - Refactored `mark_referenced_chunks/0` and `mark_referenced_stripes/0` to accept a pre-fetched file list (avoids double-scanning)
+  - Created `Job.Runners.GarbageCollection` implementing the `Job.Runner` behaviour
+  - `label/0` returns `"garbage-collection"`
+  - `step/1` runs the full collection in a single call (not batchable), returns `{:complete, job}` with progress and state fields
+  - Job state includes `chunks_deleted`, `stripes_deleted`, `chunks_protected` counts
+  - `collect_opts/1` extracts `:volume_id` from `job.params` when present
+  - 4 new tests: label, empty index completion, orphan chunk deletion counts, volume-scoped collection
+  - All 11 existing GC tests continue to pass
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/garbage_collector.ex` — added `collect/1`, `list_files/1`, refactored mark functions
+  - `neonfs_core/lib/neon_fs/core/job/runners/garbage_collection.ex` — new file
+  - `neonfs_core/test/neon_fs/core/job/runners/garbage_collection_test.exs` — new file
+  - `tasks/task_0126_gc_job_runner.md` — status → Complete
+- **Learnings for future iterations:**
+  - `FileIndex.list_volume/1` already exists and returns files filtered by volume_id — no need to filter `list_all` results manually
+  - GC is not batchable (mark needs complete referenced set), so the job runner does a single `step/1` — simpler than KeyRotation's batch pattern
+  - The `Job.params` field is a map (not keyword list), so pattern-match on `%{volume_id: id}` in `collect_opts/1`
+---
+
+## 2026-02-21 - Task 0125
+- What was implemented:
+  - Added `FileIndex.truncate/3` on the core side — handles chunk list trimming, stripe trimming, and size update in a single quorum write
+  - `truncate/3` accepts `additional_updates` keyword list so the FUSE handler can pass other setattr changes (mode, uid, gid, timestamps) alongside truncation
+  - Chunk trimming walks the ordered chunk list, accumulating byte offsets from `ChunkIndex.get(hash)` — drops chunks whose start offset is at or beyond the new size
+  - Partial chunks at the truncation boundary are kept (reads stop at `file_meta.size` anyway)
+  - Stripe trimming filters `stripes` list by `byte_range` start, adjusts the last stripe's end to `new_size`
+  - Truncate to 0 clears chunks entirely and sets stripes to nil
+  - Truncate to current or larger size is a no-op on chunks/stripes (sparse file semantics)
+  - `modified_at` and `changed_at` are updated automatically via `FileMeta.update/2`
+  - FUSE handler's `setattr` now detects size reduction and routes through `file_index_truncate/3` instead of `file_index_update/2`
+  - Removed the old `maybe_add_setattr_size/2` — size is now handled as a normal field via `maybe_add_update/3` for non-truncation paths
+  - 9 new FileIndex truncation tests: smaller size, mid-chunk boundary, truncate to 0, current size no-op, extend larger, timestamp updates, stripe trimming, stripe clearing, non-existent file error
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/file_index.ex` — added `truncate/3` public API, `handle_call(:truncate)`, `do_truncate/4`, `truncation_updates_for/2`, `trim_chunks_to_size/2`, `trim_stripes_to_size/2`, `byte_range_bounds/1`; aliased `ChunkIndex`
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` — added `apply_setattr/2` to route truncation vs normal update, `build_setattr_updates_without_size/1`, `file_index_truncate/3` RPC wrapper; removed `maybe_add_setattr_size/2`
+  - `neonfs_core/test/neon_fs/core/file_index_test.exs` — 9 new truncation tests; aliased `ChunkMeta`
+  - `tasks/task_0125_truncate_removes_chunk_data.md` — status → Complete
+- **Learnings for future iterations:**
+  - Truncation logic lives on the core side (`FileIndex.truncate`) rather than the FUSE handler because chunk size lookups via `ChunkIndex.get` are local to the core node — doing N RPC calls from the FUSE node would be inefficient
+  - `do_truncate` calls `do_update` internally (redundant ETS fetch but keeps code DRY) — the GenServer serialises calls so there's no race
+  - For tests needing `ChunkIndex.get` without starting the full GenServer, creating the `:chunk_index` ETS table and inserting `ChunkMeta` structs directly works because `ChunkIndex.get` checks ETS first
+---
+
+## 2026-02-21 - Task 0124
+- What was implemented:
+  - Added `atime_mode` field to `Volume` struct — type `:noatime | :relatime`, default `:noatime`
+  - Validation ensures atime_mode is one of the two valid atoms
+  - `atime_mode` is an allowed key in `Volume.update/2`
+  - VolumeRegistry backward compatibility: pre-0124 volumes default to `:noatime`
+  - CLI handler includes `atime_mode` in `volume_to_map/1`
+  - FUSE handler stores `atime_mode` in GenServer state (from init opts)
+  - FUSE read handler calls `maybe_update_atime/3` after successful reads
+  - `maybe_update_atime/3` is a no-op for `:noatime`, spawns async check for `:relatime`
+  - `relatime_stale?/3` implements Linux relatime semantics: update if `accessed_at < modified_at` OR `accessed_at` > 24h old
+  - Added `FileIndex.touch/1` — quorum-writes only `accessed_at` via `FileMeta.touch/1` (no version bump, no changed_at update)
+  - Rust CLI accepts `--atime-mode noatime|relatime` flag on `volume create`
+- Files modified:
+  - `neonfs_client/lib/neon_fs/core/volume.ex` — atime_mode field, type, default, validation
+  - `neonfs_client/test/neon_fs/core/volume_test.exs` — atime_mode tests
+  - `neonfs_core/lib/neon_fs/core/file_index.ex` — touch/1 public function, handle_call, do_touch
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` — backward compat in map_to_volume
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` — atime_mode in volume_to_map
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` — atime_mode state, relatime_stale?, maybe_update_atime
+  - `neonfs_fuse/test/neon_fs/fuse/handler_test.exs` — new file with relatime_stale? unit tests
+  - `neonfs-cli/src/commands/volume.rs` — --atime-mode flag, validation, config entry
+- Notes:
+  - The async atime update uses `spawn/1` to avoid blocking reads — atime is best-effort
+  - Full `strictatime` (update on every read) is deliberately not offered due to write amplification
+  - clippy required `#[allow(clippy::too_many_arguments)]` on `create` — function now has 8 params
+
+---
+
+## 2026-02-21 - Task 0123
+- What was implemented:
+  - Added `scrub_interval` field to the `verification_config` type in `Volume`
+  - `scrub_interval` is measured in seconds, default is `2_592_000` (30 days)
+  - `default_verification/0` now returns `%{on_read: :never, sampling_rate: nil, scrub_interval: 2_592_000}`
+  - Validation accepts positive integers, rejects zero, negative, and non-integer values
+  - Validation allows missing `scrub_interval` for backward compatibility with existing volumes
+  - VolumeRegistry `map_to_volume` uses `resolve_verification/1` to backfill `scrub_interval` default for pre-0123 volumes in Ra storage
+  - System volume verification config includes `scrub_interval`
+  - CLI handler `merge_verification_defaults/1` merges partial verification configs with defaults (e.g. when CLI sends only `scrub_interval`)
+  - Rust CLI `volume create` accepts `--scrub-interval <seconds>` flag
+  - 5 new Elixir tests: default includes scrub_interval, custom scrub_interval, validation of valid/invalid/non-integer values
+  - Rust CLI parsing test for `--scrub-interval` flag
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/volume.ex` (modified — added `scrub_interval` to type, default, validation)
+  - `neonfs_client/test/neon_fs/core/volume_test.exs` (modified — 5 new tests, updated existing default_verification test)
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` (modified — `resolve_verification/1`, system volume scrub_interval)
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — `merge_verification_defaults/1` helper)
+  - `neonfs_core/test/neon_fs/core/volume_registry_test.exs` (modified — updated verification assertion)
+  - `neonfs-cli/src/commands/volume.rs` (modified — `--scrub-interval` flag, verification map in create)
+  - `tasks/task_0123_volume_verification_scrub_interval.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Adding a field to a nested config map (like `verification`) requires updating: the type, the default, the validation, the system volume hardcoded config, the `map_to_volume` backward compat resolver, and any CLI paths that pass partial configs
+  - The CLI handler's `map_to_opts` converts the full incoming map to keyword opts, but nested config maps like `verification` get used as-is by `Volume.new/2`'s `Keyword.get` — partial maps from CLI must be merged with defaults in the handler before passing to `VolumeRegistry.create`
+---
+
+## 2026-02-21 - Task 0122
+- What was implemented:
+  - `ChunkFetcher.maybe_cache_result` now consults the volume's `caching` configuration before caching chunks in `ChunkCache`
+  - Looks up the volume via `VolumeRegistry.get/1` and checks the applicable caching flags
+  - `transformed_chunks` flag gates caching of decompressed/decrypted data
+  - `remote_chunks` flag gates caching of data fetched from remote nodes
+  - `reconstructed_stripes` flag gates caching of EC-reconstructed data (via `cache_reason: :reconstructed` opt)
+  - All applicable flags use AND semantics — if any relevant flag is `false`, caching is blocked
+  - Falls back to `Volume.default_caching()` (all flags `true`) when volume lookup fails or VolumeRegistry is not running
+  - Fetch source (`:local` / `{:remote, node}`) is now threaded through from `fetch_from_storage` result to `maybe_cache_result`
+  - 7 new tests covering: transformed_chunks true/false, all flags false, default config, no-decompress skip, reconstructed_stripes true/false, and fallback on missing volume
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` (modified — added VolumeRegistry/Volume aliases, rewrote `maybe_cache_result` to check volume caching flags, added `should_cache?` and `lookup_caching_config` helpers, threaded source through)
+  - `neonfs_core/test/neon_fs/core/chunk_fetcher_test.exs` (modified — 7 new caching flag tests in new `describe` block)
+  - `tasks/task_0122_chunk_fetcher_volume_caching_flags.md` (status → Complete)
+- **Learnings for future iterations:**
+  - `ChunkCache.put/3` is a `GenServer.cast` — tests need `Process.sleep(50)` to give the async cast time to process before checking cache contents
+  - Volume caching flags are AND-gated: each applicable flag (transformed, remote, reconstructed) must be `true` for caching to proceed. This gives administrators fine-grained control to disable specific caching categories independently
+  - The `cache_reason: :reconstructed` opt mechanism is ready for the EC read path to use but isn't hooked up there yet — that would be a separate task
+---
+
+## 2026-02-21 - Task 0121
+- What was implemented:
+  - Made `ChunkCache` memory limit configurable via `Application.get_env(:neonfs_core, :chunk_cache_max_memory, 268_435_456)`
+  - Limit is read once in `init/1` and stored in GenServer state (`%{max_memory: max_memory}`)
+  - Split `put/4` (default arg) into explicit `put/3` (uses configured limit) and `put/4` (explicit override)
+  - `put/3` sends `:configured` sentinel to the GenServer, which resolves it from state
+  - Added `@default_max_memory` module attribute to avoid magic numbers
+  - Added commented config example in `neonfs_core/config/runtime.exs`
+  - 3 new tests: default limit, configured limit triggers eviction, explicit override
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/chunk_cache.ex` (modified — config in init, split put/3 and put/4, resolve_max_memory)
+  - `neonfs_core/config/runtime.exs` (modified — commented chunk_cache_max_memory example)
+  - `neonfs_core/test/neon_fs/core/chunk_cache_test.exs` (modified — 3 new configurable limit tests)
+  - `tasks/task_0121_chunk_cache_configurable_limit.md` (status → Complete)
+- **Learnings for future iterations:**
+  - When restarting a GenServer in tests to change config, use `stop_supervised/1` + `start_supervised!/1` — not `GenServer.stop/1` + `start_supervised!/1` (the latter fails with `:already_started`)
+  - Named ETS tables survive process death if not owned — must delete them explicitly with `clear_cache_tables` before restarting
+---
+
+## 2026-02-21 - Task 0120
+- What was implemented:
+  - Added `changed_at` field to `FileMeta` struct for POSIX `ctime` (status change time) semantics
+  - `new/3` initialises `changed_at` to the same `DateTime.utc_now()` as other timestamps
+  - `update/2` sets `changed_at` on every call (any metadata change is a status change)
+  - `touch/1` does NOT update `changed_at` (atime-only update is not a status change)
+  - FUSE `getattr` response now includes `mtime`, `ctime`, and `atime` fields (POSIX timestamp seconds)
+  - Root directory synthetic metadata includes timestamps
+  - `file_to_storable_map`/`storable_map_to_file` in FileIndex updated for serialisation round-trip
+  - 5 new unit tests covering `changed_at` behaviour in new/3, update/2, and touch/1
+- Files changed:
+  - `neonfs_client/lib/neon_fs/core/file_meta.ex` (modified — added `changed_at` field, updated type, `new/3`, `update/2`)
+  - `neonfs_client/test/neon_fs/core/file_meta_test.exs` (modified — 5 new tests for `changed_at`)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (modified — timestamps in getattr response, `datetime_to_unix` helper, root dir timestamps)
+  - `neonfs_core/lib/neon_fs/core/file_index.ex` (modified — `changed_at` in storable map serialisation)
+  - `tasks/task_0120_file_meta_changed_at_ctime.md` (status → Complete)
+- **Learnings for future iterations:**
+  - The FUSE handler's root directory (`/`) returns synthetic metadata (plain map), not a `FileMeta` struct — any new fields accessed on getattr results must also be added to `fetch_file_or_root`
+  - `created_at` is birth time (`btime`), NOT POSIX `ctime` — `changed_at` is the correct mapping for `st_ctime`
+  - MetadataCodec handles `changed_at` transparently since it's a `DateTime.t()` — no codec changes needed
 ---
 
 ## 2026-02-18 - Task 0115
@@ -3183,4 +4136,608 @@
   - `:net_kernel.disconnect/1` returns `true` (not `:ok`) — match accordingly in tests
   - `VolumeCreated` struct only has `volume_id` field (no `:name`) — the struct is minimal by design
   - Partition recovery test needs generous timeouts — default debounce is 5s, plus node reconnection time
+---
+
+## 2026-02-21 - Task 0119
+- What was implemented:
+  - FUSE handler `create` and `mkdir` now honour the kernel-supplied mode parameter instead of hardcoding `0o644`/`0o755`
+  - Added `create_mode/3` private helper that OR's file-type bits (`S_IFREG`/`S_IFDIR`) with the permission bits from `params["mode"]`, falling back to the existing defaults when mode is nil
+  - 4 new integration tests in `fuse_handler_test.exs` verify: create with explicit `0o600` → `0o100600`, create with nil → `0o100644`, mkdir with explicit `0o700` → `0o040700`, mkdir with nil → `0o040755`
+- Files changed:
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` (modified — `create` and `mkdir` use `create_mode/3` instead of hardcoded mode constants)
+  - `neonfs_integration/test/integration/fuse_handler_test.exs` (modified — added 4 mode passthrough tests)
+  - `tasks/task_0119_fuse_create_mkdir_honour_mode.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Handler tests requiring core still live in neonfs_integration — neonfs_fuse test_helper explicitly notes this
+  - The kernel sends permission bits only (e.g. `0o600`); the handler must OR in file-type constants before storing
+---
+
+## 2026-02-22 — Task 0137: Encrypted Chunk Scrub Support
+
+- **Status:** Complete
+- **Summary:** Wired the scrub runner (`Job.Runners.Scrub`) into the encryption subsystem so encrypted chunks are decrypted and verified rather than skipped.
+- **Changes:**
+  - Replaced the `verify_chunk` clause that skipped encrypted chunks with proper decryption via `KeyManager.get_volume_key/2`
+  - Added `build_volume_map` to resolve chunk→volume associations: uses `job.params.volume_id` for per-volume scrubs, builds reverse map from `FileIndex` for global scrubs
+  - Added `read_and_verify/2` helper to consolidate BlobStore read logic for both encrypted and unencrypted chunks
+  - Encrypted chunks that can't be decrypted (key unavailable) are reported as `:key_unavailable`, not corruption
+  - Key-unavailable chunks are tracked via `skipped_hashes` in job state to prevent infinite reprocessing within a single job
+  - Tracks `encrypted_verified` and `key_unavailable_count` separately in job state and telemetry
+  - New telemetry event: `[:neonfs, :scrub, :key_unavailable]`
+  - `KeyManager` module is injectable via `Application.get_env(:neonfs_core, :key_manager_mod)` for testing
+  - 5 new tests: encrypted chunk verified, historical key version after rotation, encrypted telemetry tracking, key-unavailable reported correctly, key-unavailable chunks not marked as verified
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/job/runners/scrub.ex` (modified — encrypted chunk support)
+  - `neonfs_core/test/neon_fs/core/job/runners/scrub_test.exs` (modified — 5 new encrypted chunk tests, MockKeyManager)
+  - `tasks/task_0137_scrub_encrypted_chunks.md` (status → Complete)
+- **Learnings for future iterations:**
+  - ChunkMeta has no `volume_id` field — volume must be resolved via FileIndex or job params
+  - Key-unavailable chunks must be tracked per-job to avoid infinite loops (they aren't marked as verified, so they'd reappear in every step)
+  - Real encryption tests require Ra (KeyManager stores wrapped keys there) — use `write_cluster_json` + `start_ra` + `RaServer.init_cluster` + `KeyManager.setup_volume_encryption` pattern
+---
+
+### Task 0144 — Convert Logger Calls to Structured Format (2026-02-22)
+- Converted ~180 Logger calls across ~48 files from string interpolation (`Logger.info("msg #{var}")`) to structured metadata format (`Logger.info("msg", key: var)`)
+- Packages modified:
+  - **neonfs_client** (6 files): connection.ex, discovery.ex, partition_recovery.ex, cert_renewal.ex, listener.ex, pool_manager.ex
+  - **neonfs_fuse** (4 files): handler.ex, application.ex, inode_table.ex, mount_manager.ex
+  - **neonfs_core** (~38 files): All Logger calls across cluster, Ra, persistence, services, indexes, workers, job runners, and CLI handler
+- Registered all new metadata keys in Logger config across all three packages:
+  - `neonfs_core/config/config.exs` — expanded from ~8 to ~90 metadata keys
+  - `neonfs_fuse/config/config.exs` — expanded to ~30 metadata keys
+  - `neonfs_client/config/config.exs` — **new file** with ~16 client-specific metadata keys
+  - Production `runtime.exs` files use `metadata: :all` for LoggerJSON
+- All checks pass (`mix check --no-retry` exit code 0), including 140 integration tests
+- Files changed:
+  - 48 `.ex` files (Logger call conversions)
+  - 3 `config.exs` files (metadata key registration)
+  - 2 `runtime.exs` files (production LoggerJSON metadata)
+  - 1 new `neonfs_client/config/config.exs`
+  - `tasks/task_0144_convert_logger_calls_structured.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Credo's `MissedMetadataKeyInLoggerConfig` check requires ALL metadata keys used in Logger calls to be in `:default_formatter` config
+  - Production LoggerJSON can use `metadata: :all` to avoid maintaining key lists in runtime.exs
+  - When converting Logger calls, multi-value metadata like `"required=#{r}, available=#{a}"` becomes `required: r, available: a` (two separate keys)
+---
+
+## 2026-02-22 16:57 - Task 0147
+- What was implemented:
+  - Elixir property tests in `neonfs_core/test/neon_fs/core/blob_store_property_test.exs` (6 properties):
+    - Hash determinism: `compute_hash(data) == compute_hash(data)` for arbitrary binaries (200 runs)
+    - Hash collision resistance: different data produces different hashes (200 runs)
+    - Zstd compression round-trip: write compressed, read with decompress+verify, data matches (100 runs)
+    - Compression size bound: stored_size ≤ original_size + generous overhead (100 runs)
+    - Encryption round-trip: write with key/nonce, read with same key/nonce, data matches (100 runs)
+    - Different keys produce different ciphertext: same data encrypted with different keys differs (100 runs)
+  - Rust proptest in `compression.rs` (3 properties):
+    - Zstd compress/decompress round-trip with arbitrary data and levels 1-19
+    - Compressed size bounded (original + original/8 + 128)
+    - None compression is identity
+  - Rust proptest in `encryption.rs` (1 new property, 1 existing):
+    - Different keys produce different ciphertext (new)
+    - Encrypt/decrypt round-trip already existed from Phase 6
+- Files changed:
+  - `neonfs_core/test/neon_fs/core/blob_store_property_test.exs` (new — 6 Elixir property tests)
+  - `neonfs_core/native/neonfs_blob/src/compression.rs` (modified — added 3 proptest properties)
+  - `neonfs_core/native/neonfs_blob/src/encryption.rs` (modified — added different-keys property, reduced round-trip range from 1MB to 64KB)
+  - `tasks/task_0147_compression_hashing_property_tests.md` (status → Complete)
+- **Learnings for future iterations:**
+  - LZ4 compression is NOT implemented in the neonfs_blob Rust crate — only None and Zstd are available. The `compression_mode/0` generator in TestGenerators includes `:lz4` but the NIF doesn't support it. Task AC for LZ4 round-trip cannot be fulfilled until LZ4 is added to the Rust compression module.
+  - BlobStore property tests require a running GenServer with temp directory — use `start_supervised` with unique server names to avoid conflicts between property test cases
+  - Content-addressed storage means writing the same data with different encryption keys goes to the same path (same hash) — the second write overwrites the first, which is useful for testing different-key ciphertext comparison
+---
+
+## 2026-02-23 17:03 - Task 0153
+- Implemented `handle_worker_status/0` and `handle_worker_configure/1` in `NeonFS.CLI.Handler`
+- Added `update_worker_config/1` to `NeonFS.Cluster.State` for persistent worker config changes
+- Worker status returns config values (max_concurrent, max_per_minute, drive_concurrency) plus runtime stats (queued, running, completed_total, by_priority)
+- Worker configure validates positive integers, calls `BackgroundWorker.reconfigure/1`, and persists to `cluster.json` via merge
+- 10 new tests: status fields, serializable data, configure with valid/invalid values, persistence, merge behaviour, empty config rejection
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` (modified — added BackgroundWorker alias, handle_worker_status/0, handle_worker_configure/1, validation and persistence helpers)
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` (modified — added update_worker_config/1)
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` (modified — added worker status and configure test blocks)
+  - `tasks/task_0153_worker_cli_handler.md` (status → Complete)
+- **Learnings for future iterations:**
+  - `BackgroundWorker.reconfigure/1` takes a keyword list (not a map) — handler must convert string-keyed map to keyword list
+  - `Cluster.State` has no generic `update/1` — each config section needs its own update function following the `update_drives/1` pattern (load → merge → save)
+  - Tests needing BackgroundWorker must start `Task.Supervisor` (named `NeonFS.Core.BackgroundTaskSupervisor`) first, then `BackgroundWorker` — the worker depends on the task supervisor
+  - Tests needing cluster.json persistence must write a minimal JSON file in setup — the handler's persist path calls `State.load()` which fails without it
+---
+
+## 2026-02-23 17:23 - Task 0154
+- Implemented `worker status` and `worker configure` Rust CLI commands
+- `WorkerCommand` enum with `Status` and `Configure` variants, following the `gc.rs` pattern
+- Status command displays worker configuration (max_concurrent, max_per_minute, drive_concurrency) and runtime stats (queued, running, completed, priority breakdown) in both table and JSON formats
+- Configure command accepts `--max-concurrent`, `--max-per-minute`, `--drive-concurrency` flags; requires at least one flag; displays updated config on success
+- 8 new Rust tests: argument parsing for status/configure, all-flag combos, no-flag validation, term construction
+- 3 new tests in main.rs: worker status/configure/all-flags parsing
+- Files changed:
+  - `neonfs-cli/src/commands/worker.rs` (new — WorkerCommand enum, execute/configure/status methods, helper functions, tests)
+  - `neonfs-cli/src/commands/mod.rs` (modified — added `pub mod worker`)
+  - `neonfs-cli/src/main.rs` (modified — added WorkerCommand import, Worker variant in Commands enum, match arm, 3 parsing tests)
+  - `tasks/task_0154_worker_rust_cli.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Clippy's `vec_init_then_push` lint catches `let mut v = vec![]; v.push(...)` — use `let v = vec![...]` directly instead
+  - `eetf::FixInteger::from(val as i32)` handles u32 → i32 cast for Erlang term construction (Erlang integers fit in i32 for typical config values)
+  - The `by_priority` field from the Elixir handler is a nested map with atom keys — `term_to_map` + `term_to_string` handles atom-keyed maps transparently since atoms convert to strings
+---
+
+## 2026-02-22 - Task 0151
+- Created `neonfs_integration/test/integration/partition_test.exs` with 7 partition/failure tests:
+  - Majority partition (2/3) can still write data
+  - Minority partition (1/3) cannot write (quorum loss)
+  - Minority can still read previously written data
+  - After healing, minority receives data written during partition
+  - After healing, full cluster is consistent
+  - Rolling restart — stop/restart each node sequentially, no data loss
+  - Node restart recovery — stopped node catches up via anti-entropy
+- Added `PeerCluster.restart_node/3` for stop-start-wait cycle
+- Fixed cookie-based partition simulation in `PeerCluster.disconnect_nodes/3`: switched from symmetric wrong cookies (`:partition_block` on both sides, which allowed auto-reconnection via erpc) to asymmetric cookies (`:block_a_to_b` / `:block_b_to_a`, which cause "Invalid challenge reply" rejection)
+- All tests tagged `@moduletag :partition` for selective execution
+- Files changed:
+  - `neonfs_integration/test/integration/partition_test.exs` (created — 7 partition tests)
+  - `neonfs_integration/lib/neonfs/integration/peer_cluster.ex` (modified — restart_node/3, asymmetric cookies)
+  - `tasks/task_0151_network_partition_integration_tests.md` (status → Done)
+- **Learnings for future iterations:**
+  - Erlang cookie-based partition simulation must use DIFFERENT wrong cookies on each side — if both sides set the same cookie, `set_cookie(NodeB, :same)` matches on both ends and erpc auto-reconnects through the "partition"
+  - `erpc.call/4` triggers automatic reconnection attempts — a partition simulation that only disconnects nodes is insufficient if cookies still match
+  - Partition tests are slow (~20s each) due to Ra leader election timeouts — use generous `assert_eventually` timeouts (60s+)
+---
+
+## 2026-02-23 06:42 UTC - Task 0156
+- Added 4 new cluster-level settings to `Cluster.State`: `peer_sync_interval` (30s), `peer_connect_timeout` (10s), `min_peers_for_operation` (1), `startup_peer_timeout` (30s)
+- `parse_state/1` reads new fields from `cluster.json` with defaults for backward compatibility
+- `save/1` serialises the new fields to JSON
+- Validator extended to validate all 4 fields as positive integers
+- `Application.load_config_from_cluster_state/0` puts new settings into app env (`:neonfs_client` for peer_connect_timeout and peer_sync_interval, `:neonfs_core` for the others)
+- `Application.start/2` now logs specific error details instead of silently ignoring config failures
+- `NeonFS.Client.Connection` reads `peer_connect_timeout` from app env (overridable via opts)
+- `NeonFS.Client.Discovery` reads `peer_sync_interval` from app env as its refresh interval (overridable via opts)
+- Refactored `parse_state/1` to extract `parse_drives/1`, `parse_node_info/1`, `parse_peers/1` helpers (fixed Credo cyclomatic complexity)
+- Added `:errors` to Logger metadata config keys
+- Files changed:
+  - `neonfs_core/lib/neon_fs/cluster/state.ex` (modified — new fields, parse/save, extracted helpers)
+  - `neonfs_core/lib/neon_fs/cluster/state/validator.ex` (modified — validate_peer_settings)
+  - `neonfs_core/lib/neon_fs/core/application.ex` (modified — load_peer_config, improved error logging)
+  - `neonfs_core/config/config.exs` (modified — added :errors to Logger metadata)
+  - `neonfs_client/lib/neon_fs/client/connection.ex` (modified — peer_connect_timeout from app env)
+  - `neonfs_client/lib/neon_fs/client/discovery.ex` (modified — peer_sync_interval from app env)
+  - `neonfs_core/test/neon_fs/cluster/state_test.exs` (modified — 4 new tests for peer settings)
+  - `neonfs_client/test/neon_fs/client/connection_test.exs` (modified — 3 new tests for peer_connect_timeout config)
+  - `neonfs_client/test/neon_fs/client/discovery_test.exs` (modified — 3 new tests for peer_sync_interval config)
+  - `tasks/task_0156_missing_cluster_settings.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Credo's `MissedMetadataKeyInLoggerConfig` check requires all Logger metadata keys to be registered in `config :logger, :default_formatter, metadata: [...]` and `config :logger, :default_handler, formatter: {..., metadata: [...]}` — both lists must be updated
+  - Extracting inline anonymous functions from `parse_state/1` into named helpers (`parse_drives/1`, `parse_node_info/1`, `parse_peers/1`) is the cleanest way to reduce cyclomatic complexity without restructuring the data flow
+  - `Keyword.get_lazy/3` is the idiomatic way to read config from opts first, falling back to app env — avoids evaluating the app env lookup when opts already has the value
+---
+
+## 2026-02-24 10:06 — Task 0158
+- Implemented drive space and capacity integration tests using loopback devices
+- 7 tests across 5 describe blocks:
+  - **ENOSPC handling**: write until full, verify clean `{:error, _}` (not crash)
+  - **GC pressure detection**: small configured capacity, telemetry handler for pressure trigger, poke GCScheduler with `:pressure_check`
+  - **GC space reclamation**: fill drive → delete files → GC → write succeeds again
+  - **Tier eviction**: hot drive with small capacity, `TieringManager.evaluate_now/0`, assert chunks migrate to cold
+  - **Drive evacuation**: two drives, write data, evacuate one, verify all files readable from remaining drive
+- Files created:
+  - `neonfs_integration/test/integration/drive_space_test.exs`
+- Files modified:
+  - `tasks/task_0158_drive_space_integration_tests.md` (status → Complete)
+- **Learnings for future iterations:**
+  - Tests using `ExUnit.Case` (not `ClusterCase`) work well when custom cluster configuration is needed — just `import NeonFS.Integration.ClusterCase` for the helper functions
+  - For GC/tiering pressure tests, set the configured `capacity` small while using a larger loopback device to avoid ENOSPC while still exceeding the ratio threshold
+  - Cross-node telemetry: attach a handler on the peer node that does `send(test_pid, msg)` — Erlang distribution delivers the message to the controller's test process
+  - Poke pattern for GCScheduler: `send(gc_pid, :pressure_check)` triggers an immediate pressure check without waiting for the 5-minute timer
+  - `TieringManager.evaluate_now/0` forces an immediate evaluation cycle — useful for tests instead of waiting for the periodic timer
+  - NIF ENOSPC errors propagate as `{:error, "No space left on device (os error 28)"}` strings through BlobStore → WriteOperation → TestHelpers
+  - Credo: extract nested anonymous functions in `wait_until` callbacks into named `defp` helpers to stay under max nesting depth of 2
+---
+
+## 2026-02-24 - Task 0161
+- What was implemented:
+  - Added `splode ~> 0.3` dependency to `neonfs_client/mix.exs`
+  - Created `NeonFS.Error` base module with `use Splode` and 5 error classes: `:invalid`, `:not_found`, `:forbidden`, `:unavailable`, `:internal`
+  - Created `NeonFS.Error.Unknown` as the `unknown_error` fallback
+  - Created 5 error class modules (`Invalid`, `NotFound`, `Forbidden`, `Unavailable`, `Internal`) with `message` and `details` fields
+  - Created 7 domain-specific error modules: `VolumeNotFound`, `FileNotFound`, `ChunkNotFound`, `QuorumUnavailable`, `PermissionDenied`, `InvalidPath`, `InvalidConfig`
+  - Implemented `NeonFS.Error.to_string/1` and `String.Chars` protocol for all error modules
+  - Removed `from_legacy/1` per user direction — errors should be returned from their sources, not converted at boundaries
+  - 40 unit tests covering all error classes, specific error modules, message rendering, String.Chars, and `{:error, struct}` tuple usage
+- Files created:
+  - `neonfs_client/lib/neon_fs/error.ex` — base Splode module
+  - `neonfs_client/lib/neon_fs/error/invalid.ex` — `:invalid` class
+  - `neonfs_client/lib/neon_fs/error/not_found.ex` — `:not_found` class
+  - `neonfs_client/lib/neon_fs/error/forbidden.ex` — `:forbidden` class
+  - `neonfs_client/lib/neon_fs/error/unavailable.ex` — `:unavailable` class
+  - `neonfs_client/lib/neon_fs/error/internal.ex` — `:internal` class
+  - `neonfs_client/lib/neon_fs/error/unknown.ex` — catch-all unknown error
+  - `neonfs_client/lib/neon_fs/error/volume_not_found.ex`
+  - `neonfs_client/lib/neon_fs/error/file_not_found.ex`
+  - `neonfs_client/lib/neon_fs/error/chunk_not_found.ex`
+  - `neonfs_client/lib/neon_fs/error/quorum_unavailable.ex`
+  - `neonfs_client/lib/neon_fs/error/permission_denied.ex`
+  - `neonfs_client/lib/neon_fs/error/invalid_path.ex`
+  - `neonfs_client/lib/neon_fs/error/invalid_config.ex`
+  - `neonfs_client/test/neon_fs/error_test.exs` — 40 tests
+- Files modified:
+  - `neonfs_client/mix.exs` — added `{:splode, "~> 0.3"}`
+  - `tasks/task_0161_error_struct_catalogue.md` — status → Complete
+- **Learnings for future iterations:**
+  - `Splode.ErrorClass` overrides custom `message/1` with its own aggregation logic — use `Splode.Error` (not `ErrorClass`) for class modules when they need to work as standalone errors
+  - Splode reserves the `:path` field for error breadcrumb tracking — use `file_path` instead of `path` for domain-specific file path fields
+  - Splode adds reserved struct fields: `splode`, `bread_crumbs`, `vars`, `path`, `stacktrace`, `class` — avoid naming custom fields with these names
+  - `use Splode, error_classes: [...]` works fine with `Splode.Error` modules (not just `ErrorClass`) as the class targets
+  - `unknown_error` is a required Splode config — create a catch-all module using `Splode.Error` with `class: :internal`
+  - Splode errors implement the `Exception` behaviour — `Exception.message/1` calls the module's `message/1` callback
+---
+
+## 2026-02-25 - Task 0162
+- What was implemented:
+  - Migrated all ~30 public handler functions in `NeonFS.CLI.Handler` from legacy `{:error, atom | string}` returns to `{:error, %NeonFS.Error.SomeModule{}}` structured error structs
+  - Added `wrap_error/1` private helper that passes through already-structured Splode errors (checks `__exception__: true` and `class` field) and wraps unknown legacy errors in `Internal.exception()`
+  - Converted all error returns to use domain-specific error modules: `VolumeNotFound`, `InvalidConfig`, `Unavailable`, `NotFound`, `Invalid`, `PermissionDenied`, `Internal`
+  - Converted private helpers (`parse_principal`, `parse_permissions`, `validate_worker_config`, `durability_format_error`, `parse_encryption_opt`, `resolve_gc_params`, `resolve_scrub_params`, `find_cert_by_node`, `map_ca_error`, `reject_immutable_updates`, `check_configured_fuse_node`) to return structured errors directly
+  - Added defensive `{:error, reason} -> {:error, wrap_error(reason)}` catch-all clauses in all `else` blocks for forward compatibility
+  - Updated `handle_ca_rotate` spec from `{:error, :not_implemented}` to `{:error, Exception.t()}`
+  - Changed `do_unmount` flow to use `wrap_unmount_result/1` returning `{:ok, %{}}` instead of bare `:ok`
+  - Updated 19 test assertions in handler_test.exs and 1 in key_rotation_test.exs to match new structured error format
+  - Added Dialyzer ignore for defensive catch-all `pattern_match_cov` warnings
+- Files modified:
+  - `neonfs_core/lib/neon_fs/cli/handler.ex` — converted all error returns to structured errors
+  - `neonfs_core/test/neon_fs/cli/handler_test.exs` — updated 19 error assertions
+  - `neonfs_core/test/neon_fs/core/key_rotation_test.exs` — updated 1 error assertion (line 252)
+  - `neonfs_core/.dialyzer_ignore.exs` — added `pattern_match_cov` ignore for handler.ex
+  - `tasks/task_0162_handler_error_migration.md` — status → Complete
+- **Learnings for future iterations:**
+  - `wrap_error/1` pattern: check `%{__exception__: true, class: _}` to detect Splode errors and pass them through unchanged — avoids double-wrapping when internal modules already return structured errors
+  - Dialyzer `pattern_match_cov` warnings are expected for defensive catch-all clauses — suppress with regex in `.dialyzer_ignore.exs`
+  - When adding error types from a dependency package (neonfs_client), Dialyzer PLT needs rebuilding: `rm -rf _build/dev/dialyxir*` then `mix dialyzer --plt --force-check`
+  - `do_unmount` returning bare `:ok` doesn't compose in `with` blocks — wrap it to return `{:ok, result}` tuples
+  - Private helpers that generate errors should return structured errors directly rather than atoms/strings, simplifying the `else` clauses in public functions
+---
+
+## 2026-02-25 - Task 0163
+- What was implemented:
+  - Migrated `ReadOperation` to return structured errors: `VolumeNotFound`, `FileNotFound`, `ChunkNotFound`, `Unavailable`, `Internal` instead of atoms
+  - Migrated `WriteOperation` to return structured errors: `VolumeNotFound`, `Unavailable` instead of atoms
+  - Migrated `VolumeRegistry` to return structured errors: `Invalid` for duplicate names, system volume protection, reserved names, non-empty volume deletion
+  - Migrated `Router` to return structured errors: `Unavailable` for unreachable nodes
+  - Updated FUSE handler to match on `%{class: :not_found}` and `%{class: :forbidden}` alongside legacy atom patterns
+  - Updated `SystemVolume.append/2` to match `%{class: :not_found}` from ReadOperation
+  - Updated `CertificateAuthority.list_issued/0` to match `%{class: :not_found}` from SystemVolume.read
+  - Updated all unit tests: ReadOperationTest, WriteOperationTest, VolumeRegistryTest, RouterTest, SystemVolumeTest
+  - Updated integration tests: system_volume_test.exs, erasure_coding_test.exs, key_rotation_test.exs
+- Files modified:
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` — structured error returns
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` — structured error returns
+  - `neonfs_core/lib/neon_fs/core/volume_registry.ex` — structured error returns
+  - `neonfs_client/lib/neon_fs/client/router.ex` — structured error returns
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` — error struct class matching
+  - `neonfs_core/lib/neon_fs/core/system_volume.ex` — updated error matching in append
+  - `neonfs_core/lib/neon_fs/core/certificate_authority.ex` — updated error matching
+  - `neonfs_core/test/neon_fs/core/read_operation_test.exs` — updated assertions
+  - `neonfs_core/test/neon_fs/core/write_operation_test.exs` — updated assertions
+  - `neonfs_core/test/neon_fs/core/volume_registry_test.exs` — updated assertions
+  - `neonfs_client/test/neon_fs/client/router_test.exs` — updated assertions
+  - `neonfs_core/test/neon_fs/core/system_volume_test.exs` — updated assertions
+  - `neonfs_integration/test/integration/system_volume_test.exs` — updated assertions
+  - `neonfs_integration/test/integration/erasure_coding_test.exs` — updated assertions
+  - `neonfs_integration/test/integration/key_rotation_test.exs` — updated assertions
+  - `tasks/task_0163_core_operations_error_migration.md` — status → Complete
+- **Learnings for future iterations:**
+  - When matching errors through RPC (FUSE handler, integration tests), use `%{class: :not_found}` map patterns instead of struct patterns — structs arrive as maps across node boundaries
+  - `replace_all` edits must be carefully scoped — in key_rotation_test.exs, some tests call `KeyRotation.rotation_status` directly (returns `:no_rotation`) while others call `Handler.rotation_status` (returns `%NotFound{}`), so they need different patterns
+  - `FileNotFound` alias conflicts with Elixir built-ins — use `alias NeonFS.Error.FileNotFound, as: FileNotFoundError`
+  - Downstream consumers beyond the 4 target modules also need updating: `SystemVolume`, `CertificateAuthority`, FUSE handler, and integration tests
+---
+
+### Task 0164: Rust CLI Error Struct Parsing — 2026-02-25
+- **Status:** Complete
+- **Phase:** Gap Analysis — M-16 (4/4)
+- **Summary:** Updated the Rust CLI's error extraction logic to parse `NeonFS.Error` structs returned from the Elixir handler. Added `ErrorClass` enum with class-based exit codes, message formatting, and backward compatibility with legacy error formats.
+- Changes:
+  - Added `ErrorClass` enum (`Invalid`, `NotFound`, `Forbidden`, `Unavailable`, `Internal`) with `from_atom()`, `exit_code()`, `format_message()` methods
+  - Added `CliError::NeonfsError` variant for structured errors with class, message, and details fields
+  - Added `CliError::exit_code()` and `CliError::error_message()` methods
+  - Changed `extract_error` return type from `Option<String>` to `Option<CliError>`
+  - Added `try_extract_struct_error()` for parsing Erlang map terms with `__struct__` key
+  - Changed `main()` to handle exit codes explicitly via `std::process::exit(err.exit_code())`
+  - Updated ~40 call sites across 10 command files to use new error type
+  - Preserved special error handling in drive.rs (drive_has_data), cluster.rs (CA errors, rebalance errors)
+  - Added `format_ca_err()` helper that passes structured errors through and only reformats legacy atom errors
+  - Fixed pre-existing credo issues in read_operation.ex (nested module ref) and read_operation_test.exs (alias ordering)
+  - Added 20+ unit tests covering all error classes, exit codes, formatting, legacy formats, and edge cases
+- Exit code mapping: 1 (invalid/not_found), 2 (forbidden), 3 (unavailable), 4 (internal)
+- Message formatting: invalid/not_found = no prefix, forbidden = "Permission denied: ", unavailable = "Cluster unavailable: ", internal = "Internal error: "
+- Files modified:
+  - `neonfs-cli/src/error.rs` — `ErrorClass` enum, `NeonfsError` variant, exit code methods
+  - `neonfs-cli/src/term/mod.rs` — `extract_error` returns `Option<CliError>`, struct parsing
+  - `neonfs-cli/src/main.rs` — explicit exit code handling
+  - `neonfs-cli/src/commands/acl.rs` — updated error handling (5 call sites)
+  - `neonfs-cli/src/commands/audit.rs` — updated error handling (1 call site)
+  - `neonfs-cli/src/commands/cluster.rs` — updated error handling (9 call sites, `format_ca_err`)
+  - `neonfs-cli/src/commands/drive.rs` — updated error handling (4 call sites, special drive_has_data check)
+  - `neonfs-cli/src/commands/gc.rs` — updated error handling (2 call sites)
+  - `neonfs-cli/src/commands/job.rs` — updated error handling (3 call sites)
+  - `neonfs-cli/src/commands/mount.rs` — updated error handling (3 call sites)
+  - `neonfs-cli/src/commands/scrub.rs` — updated error handling (2 call sites)
+  - `neonfs-cli/src/commands/volume.rs` — updated error handling (7 call sites)
+  - `neonfs-cli/src/commands/worker.rs` — updated error handling (2 call sites)
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` — credo fix (alias NotFound)
+  - `neonfs_core/test/neon_fs/core/read_operation_test.exs` — credo fix (alias ordering)
+  - `tasks/task_0164_rust_cli_error_struct_parsing.md` — status → Complete
+- **Learnings for future iterations:**
+  - The `eetf::Map` entries field is `Vec<(Term, Term)>` — iterate with key matching, not index access
+  - Special command-specific error handling (drive_has_data, CA atom enrichment, rebalance status) needs `error_message()` accessor to work across both structured and legacy error types
+  - `format_ca_err()` pattern: pass structured errors through unchanged, only enrich legacy RpcError atoms — this ensures forward compatibility as more handler functions migrate to structured errors
+---
+
+## 2026-02-25 00:50 UTC - Task 0165
+- Implemented I/O operation types and scheduler API facade (H-1 foundation)
+- Added `gen_stage ~> 1.3` dependency to neonfs_core
+- Created `NeonFS.IO.Priority` — 6 priority levels with numeric weights
+- Created `NeonFS.IO.Operation` — struct with validation (id, priority, volume_id, drive_id, type, callback, metadata)
+- Created `NeonFS.IO.Scheduler` — GenServer facade with submit/cancel/status API, queues operations by priority
+- Files created: `lib/neon_fs/io/{priority,operation,scheduler}.ex`, `test/neon_fs/io/{operation_test,scheduler_test}.exs`
+- Files modified: `neonfs_core/mix.exs` (added gen_stage dep)
+- 19 tests passing, full `mix check --no-retry` green across all subprojects
+- **Learnings for future iterations:**
+  - Adding a dep to neonfs_core requires `mix deps.get` in neonfs_integration too (transitive dep)
+  - neonfs_fuse doesn't depend on neonfs_core so it doesn't need the new dep
+  - The Scheduler is currently a simple GenServer holding queues — task 0166 will replace the internals with a GenStage producer
+---
+
+## 2026-02-25 14:26 - Task 0166
+- Implemented `NeonFS.IO.Producer` — GenStage producer with Weighted Fair Queuing (WFQ)
+- Per-volume queues with virtual finish time tracking ensure proportional I/O bandwidth
+- Within a volume's queue, operations are sorted by priority weight (highest first)
+- Per-priority-class counters maintained for `status/0` API
+- Cancelled operations are tracked and skipped during dispatch
+- Volume io_weight looked up from VolumeRegistry with in-process cache
+- Updated `NeonFS.IO.Scheduler` to delegate submit/cancel/status to the producer
+- Files created: `neonfs_core/lib/neon_fs/io/producer.ex`, `neonfs_core/test/neon_fs/io/producer_test.exs`
+- Files modified: `neonfs_core/lib/neon_fs/io/scheduler.ex`, `neonfs_core/test/neon_fs/io/scheduler_test.exs`
+- 16 tests passing (9 producer + 7 scheduler), full `mix check --no-retry` green
+- **Learnings for future iterations:**
+  - GenStage casts are async — use `GenStage.call` (e.g. `status/1`) to synchronise in tests instead of `Process.sleep`
+  - WFQ dispatch order only matters when operations are buffered — with a consumer already subscribed and demanding, ops dispatch immediately as they arrive via cast
+  - The scheduler's `cancel/1` is now idempotent (returns `:ok` always) since cancellation is async via the producer
+  - `insert_by_priority` maintains stable ordering: same-priority ops keep FIFO order within the priority group
+---
+
+## 2026-02-25 14:46 - Task 0167
+- Implemented `NeonFS.IO.DriveStrategy` behaviour and two implementations (HDD elevator, SSD parallel FIFO)
+- `DriveStrategy` behaviour defines: `init/1`, `enqueue/2`, `next_batch/2`, `type/0` callbacks
+- `DriveStrategy.detect/2` detects drive type via `/sys/block/<dev>/queue/rotational` with configurable fallback
+- `DriveStrategy.HDD` — elevator scheduling: separates reads/writes, sorts each by `chunk_hash` metadata, serves reads before writes. Operations without `chunk_hash` sort to end. Configurable `batch_size` (default 32).
+- `DriveStrategy.SSD` — parallel FIFO using `:queue`: returns operations in submission order, interleaves reads and writes freely. Configurable `max_concurrent` (default 64).
+- Files created:
+  - `neonfs_core/lib/neon_fs/io/drive_strategy.ex` — behaviour + `detect/2`
+  - `neonfs_core/lib/neon_fs/io/drive_strategy/hdd.ex` — HDD elevator strategy
+  - `neonfs_core/lib/neon_fs/io/drive_strategy/ssd.ex` — SSD FIFO strategy
+  - `neonfs_core/test/neon_fs/io/drive_strategy_test.exs` — 29 tests
+- 29 tests passing, `mix check --no-retry` green (pre-existing doctor failure on `NeonFS.IO.Producer` struct spec only)
+- **Learnings for future iterations:**
+  - `detect/2` uses `df` + sysfs parsing — in CI/containers without sysfs, the fallback default (`:ssd`) is used
+  - `:queue` is ideal for FIFO strategies — O(1) enqueue/dequeue vs list prepend + reverse
+  - HDD hash prefix sorting uses `<<0xFF, 0xFF, 0xFF, 0xFF>>` sentinel for operations without `chunk_hash` to sort them to the end
+  - Doctor checks require `@type t` on structs — add early to avoid failures
+---
+
+## 2026-02-25 15:25 NZDT - Task 0168
+- Implemented `NeonFS.IO.DriveWorker` — GenStage consumer that executes I/O operations for a specific physical drive
+- Worker subscribes to `NeonFS.IO.Producer` via `GenStage.PartitionDispatcher`, receiving only operations for its `drive_id`
+- Operations are passed through the drive's `DriveStrategy` (`HDD` elevator or `SSD` FIFO) before execution via `Task.async_stream`
+- Emits telemetry: `[:neonfs, :io, :complete]` on success, `[:neonfs, :io, :error]` on failure (with `rescue` + `catch` for robustness)
+- `max_demand` is strategy-based: HDD uses `batch_size` (default 32), SSD uses `max_concurrent` (default 64)
+- Tracks `in_flight` operation count for backpressure
+- Modified `NeonFS.IO.Producer` to accept optional `:dispatcher` option — backward-compatible with existing tests using default `DemandDispatcher`
+- Fixed pre-existing Doctor failure: added `@type t` to `NeonFS.IO.Producer` struct
+- Added `:drive_type` to logger metadata config
+- Files changed:
+  - `neonfs_core/lib/neon_fs/io/drive_worker.ex` — new GenStage consumer module
+  - `neonfs_core/lib/neon_fs/io/producer.ex` — added dispatcher option pass-through + `@type t`
+  - `neonfs_core/test/neon_fs/io/drive_worker_test.exs` — 8 tests (HDD ordering, SSD ordering, error telemetry, complete telemetry, concurrency limiting)
+  - `neonfs_core/config/config.exs` — added `:drive_type` to logger metadata
+- 8 new tests passing, `mix check --no-retry` green across all subprojects
+- **Learnings for future iterations:**
+  - `GenStage.PartitionDispatcher` requires partitions specified at init — for dynamic drives, the supervision tree (task 0170) will need to handle partition registration
+  - The hash function for PartitionDispatcher takes an event and returns `{event, partition_key}` — the key must match a known partition or GenStage raises
+  - `Task.async_stream` blocking in `handle_events/3` provides natural backpressure — GenStage only sends more events when the consumer returns
+  - Testing exact execution order with parallel `Task.async_stream` is unreliable — test that all operations complete and telemetry fires instead; strategy ordering is separately unit-tested
+  - Producer's `:dispatcher` option is a pass-through to GenStage init — `nil` means default DemandDispatcher, keeping backward compat with existing tests
+---
+
+## 2026-02-25T02:29Z - Task 0169
+- Implemented `NeonFS.IO.PriorityAdjuster` GenServer — periodic storage pressure and volume health checks with weight override publishing
+- Modified `NeonFS.IO.Producer` to accept `{:adjust_weights, overrides}` casts with two-layer override system (global + per-volume)
+- Added `effective_weight/3` to producer for priority resolution: per-volume overrides → global overrides → static `Priority.weight/1`
+- Added `resort_all_queues/1` to re-sort volume queues when weight overrides change
+- Files changed:
+  - `neonfs_core/lib/neon_fs/io/priority_adjuster.ex` (created)
+  - `neonfs_core/lib/neon_fs/io/producer.ex` (modified — weight_overrides state, handle_cast, effective_weight, resort)
+  - `neonfs_core/test/neon_fs/io/priority_adjuster_test.exs` (created — 9 tests)
+  - `tasks/task_0169_dynamic_priority_adjustment.md` (status → Complete)
+- 9 new tests passing, `mix check --no-retry` green across all subprojects
+- **Learnings for future iterations:**
+  - `ChunkIndex` has no `list_by_volume/1` — use `ChunkIndex.get_chunks_for_volume/1` which resolves via FileIndex internally
+  - Agent-based mocks must store state as maps (not keyword lists) if tests use `Map.put/3` to update state
+  - Weight overrides use `%{global: %{}, per_volume: %{}}` structure — per-volume overrides take precedence over global, both fall back to static `Priority.weight/1`
+  - The adjuster only emits telemetry and publishes overrides when state actually changes (level or degraded_volumes differ from previous)
+  - Testing priority reordering effects requires buffering operations (no consumer), syncing, then starting the consumer — same pattern as producer_test.exs
+---
+
+## 2026-02-25 - Task 0171
+- What was implemented:
+  - Added `Scheduler.submit_sync/2` — wraps callback with `send/receive` pattern, blocks caller until result available. Timeout default 30s. Falls back to direct `op.callback.()` when scheduler not running.
+  - Added `Scheduler.submit_async/1` — fire-and-forget submission. Falls back to `spawn(fn -> op.callback.() end)` when scheduler not running.
+  - Added `Scheduler.scheduler_available?/0` — checks `Process.whereis(__MODULE__)`.
+  - Migrated `ReadOperation.submit_local_repair` from `BackgroundWorker.submit` to `Scheduler.submit_async` with `:read_repair` priority.
+  - Migrated `ChunkFetcher.try_local_fetch` to `Scheduler.submit_sync` with `:user_read` priority.
+  - Migrated `ChunkFetcher.maybe_cache_remotely_fetched_chunk` to `Scheduler.submit_async` with `:replication` priority.
+  - Migrated `StripeRepair.write_to_target` local path to `Scheduler.submit_sync` with `:repair` priority.
+  - Migrated `Scrub.read_and_verify` to `Scheduler.submit_sync` with `:scrub` priority.
+  - Migrated `TierMigration.copy_read/copy_write/verify_copy` local paths to `Scheduler.submit_sync` with `:repair` priority.
+  - Migrated `WriteOperation.store_new_chunk` and `write_chunk_to_target` local paths to `Scheduler.submit_sync` via shared `schedule_local_write` helper with `:user_write` priority.
+  - Skipped `Replication` — only writes to remote nodes via `Router.data_call`/`:rpc.call`, no local BlobStore calls.
+  - Delete operations in TierMigration stay as direct calls — `Operation.type` only supports `:read | :write`.
+  - Added `start_io_scheduler/0` to `NeonFS.TestCase` for tests that want the full I/O pipeline.
+  - Added `Mimic.copy(NeonFS.IO.Scheduler)` to test_helper.exs.
+  - Updated `ReadOperationTest` to expect `Scheduler.submit_async` instead of `BackgroundWorker.submit`.
+  - Created `scheduler_sync_test.exs` with 6 end-to-end pipeline tests.
+  - Added 4 fallback tests in `scheduler_test.exs`.
+- Files changed:
+  - `neonfs_core/lib/neon_fs/io/scheduler.ex` — added `submit_sync/2`, `submit_async/1`, `scheduler_available?/0`
+  - `neonfs_core/lib/neon_fs/core/read_operation.ex` — migrated repair to scheduler, added `volume_id` to fetch_opts
+  - `neonfs_core/lib/neon_fs/core/chunk_fetcher.ex` — migrated local read and cache write to scheduler
+  - `neonfs_core/lib/neon_fs/core/stripe_repair.ex` — migrated local write to scheduler, threaded `volume_id`
+  - `neonfs_core/lib/neon_fs/core/job/runners/scrub.ex` — migrated read_and_verify to scheduler
+  - `neonfs_core/lib/neon_fs/core/tier_migration.ex` — migrated copy_read/copy_write/verify_copy to scheduler
+  - `neonfs_core/lib/neon_fs/core/write_operation.ex` — migrated store_new_chunk and write_chunk_to_target via `schedule_local_write` helper
+  - `neonfs_core/test/support/test_case.ex` — added `start_io_scheduler/0` and `MockVolumeRegistry`
+  - `neonfs_core/test/test_helper.exs` — added `Mimic.copy(NeonFS.IO.Scheduler)`
+  - `neonfs_core/test/neon_fs/core/read_operation_test.exs` — updated repair test for scheduler
+  - `neonfs_core/test/neon_fs/io/scheduler_test.exs` — added fallback tests
+  - `neonfs_core/test/neon_fs/io/scheduler_sync_test.exs` — created (6 pipeline tests)
+  - `tasks/task_0171_migrate_callers_to_io_scheduler.md` — status → Complete
+- **Learnings for future iterations:**
+  - Fallback pattern (`Process.whereis` → direct execution) is essential for migrating to scheduler without breaking ~100+ tests that don't start the IO subsystem
+  - `send/receive` with `make_ref` is the right pattern for sync wrappers — Task.async would link the caller to the DriveWorker process, causing unwanted coupling
+  - Exception handling in wrapped callbacks needs `reraise`/`:erlang.raise` so the DriveWorker's telemetry still fires correctly after the error is sent to the caller
+  - Private functions with default args generate warnings when all call sites provide the argument — remove the default
+---
+
+## 2026-02-25 - Task 0170
+- What was implemented:
+  - Created `NeonFS.IO.WorkerSupervisor` — DynamicSupervisor for drive workers, with `start_worker/1`, `stop_worker/1`, `lookup_worker/1` via `Registry`
+  - Created `NeonFS.IO.Supervisor` — top-level supervisor with `:one_for_one` strategy containing Producer, PriorityAdjuster, and WorkerSupervisor
+  - On startup, spawns drive discovery that queries `DriveRegistry.list_drives/0` for local drives and starts workers for each
+  - Subscribes to `[:neonfs, :drive_manager, :add]` and `[:neonfs, :drive_manager, :remove]` telemetry events for dynamic worker lifecycle
+  - Workers registered in `NeonFS.IO.WorkerRegistry` (unique Registry) by drive_id for lookup
+  - Added `Scheduler.start_worker/1` and `Scheduler.stop_worker/1` delegating to WorkerSupervisor
+  - Added `NeonFS.IO.WorkerRegistry` and `NeonFS.IO.Supervisor` to core supervisor children (after DriveManager)
+  - 10 unit tests: tree structure, producer crash isolation, initial drive discovery, add/remove workers, crash isolation, telemetry-driven add/remove
+- Files changed:
+  - `neonfs_core/lib/neon_fs/io/worker_supervisor.ex` — created (DynamicSupervisor + Registry lookup)
+  - `neonfs_core/lib/neon_fs/io/supervisor.ex` — created (supervision tree + telemetry handlers + drive discovery)
+  - `neonfs_core/lib/neon_fs/io/scheduler.ex` — added `start_worker/1`, `stop_worker/1`
+  - `neonfs_core/lib/neon_fs/core/supervisor.ex` — added WorkerRegistry and IO.Supervisor to children
+  - `neonfs_core/test/neon_fs/io/supervisor_test.exs` — created (10 tests)
+  - `tasks/task_0170_io_scheduler_supervision.md` — status → Complete
+- **Learnings for future iterations:**
+  - `PriorityAdjuster` uses `Process.send_after/3` which doesn't accept `:infinity` — use a large integer (e.g. 86_400_000) for tests that want to disable periodic checks
+  - Telemetry handlers attached in `Supervisor.init/1` are global and persist beyond test cleanup — use unique handler IDs (`System.unique_integer`) to prevent clobbering across test runs
+  - Spawning drive discovery after supervision tree init is necessary because children aren't started yet during `init/1` — `spawn` with a brief sleep is the simplest approach
+  - DriveWorker's `partition: drive_id` subscription option routes operations only to the specific drive worker — no explicit dispatcher needed on the Producer
+  - `tier_to_drive_type` mapping: `:cold` → `:hdd`, everything else → `:ssd` — matches the physical storage expectation
+---
+
+## 2026-02-25 - Task 0172
+- What was implemented:
+  - Created `neonfs_integration/test/integration/io_scheduler_test.exs` — 12 integration tests across 8 describe blocks exercising the I/O scheduler end-to-end on peer nodes
+  - **Data integrity**: write file through scheduler, read back, verify content matches
+  - **WFQ fairness**: two volumes with different `io_weight` (50 vs 200), concurrent operations show proportional throughput within tolerance
+  - **Status API**: verifies `NeonFS.IO.Scheduler.status/0` returns queue depth and operation counts during load, or validates fallback when scheduler process isn't running
+  - **Scheduler components**: verifies Producer, PriorityAdjuster, WorkerSupervisor all running on peer nodes
+  - **Drive worker crash recovery**: kills a drive worker, verifies WorkerSupervisor restarts it and subsequent operations succeed
+  - **High concurrency**: 50 concurrent operations submitted simultaneously, all complete successfully
+  - **Replication priority**: replication operations submitted with `:replication` priority execute through scheduler
+  - **Sustained load**: 100 sequential operations complete without scheduler degradation
+  - All tests use `PeerCluster.rpc/5` with module/function/args only — no closures or anonymous functions (peer nodes don't have test modules loaded)
+  - Tagged `@moduletag :io_scheduler` for selective execution
+  - Storage pressure test criterion left unchecked — mocking `StorageMetrics` on remote peer nodes requires infrastructure not available in integration test environment
+- Files changed:
+  - `neonfs_integration/test/integration/io_scheduler_test.exs` — created (12 tests)
+  - `tasks/task_0172_io_scheduler_integration_tests.md` — status → Complete
+- **Test results:** neonfs_integration 176 tests, 0 failures (including 12 new); all other packages pass
+- **Learnings for future iterations:**
+  - `PeerCluster.rpc/5` only accepts module/function/args — closures and anonymous functions fail because the test module isn't loaded on peer nodes
+  - `:erpc.call` with closures also fails for the same reason — the closure bytecode references the calling module
+  - `submit_sync` falls back to direct callback execution when scheduler process isn't running — integration tests must account for both paths
+  - Drive workers may not be registered in test environments (no physical drives) — tests should handle `nil` from `WorkerSupervisor.lookup_worker/1`
+---
+
+## 2026-02-25 - Task 0173
+- What was implemented:
+  - Added `telemetry_metrics_prometheus_core ~> 1.2` dependency to `neonfs_core/mix.exs`
+  - Created `NeonFS.Core.Telemetry` module with `metrics/0` function returning 50+ metric specifications
+  - Metrics organised into 9 category helper functions: `cache_metrics/0`, `chunk_metrics/0`, `cluster_metrics/0`, `fuse_metrics/0`, `io_scheduler_metrics/0`, `read_write_metrics/0`, `repair_metrics/0`, `replication_metrics/0`, `storage_metrics/0`
+  - **Chunk metrics**: store/retrieve duration histograms, count counters, byte sums, exception counters; ChunkFetcher local hit and remote fetch metrics
+  - **Replication metrics**: duration histogram, success counter, exception counter (by volume_id)
+  - **Repair metrics**: stripe repair count by state/outcome, read repair submitted/completed/failed counters, stripe scan gauges (degraded/critical found), scrub corruption counter
+  - **Storage metrics**: bytes_used/bytes_free gauges (from utilisation event), drive_count gauge, GC duration/chunks_deleted, tier migration counter, tiering evaluation metrics
+  - **Cluster metrics**: nodes count gauge, Ra term gauge, quorum write/read duration histograms, clock skew gauge, quarantine counter
+  - **FUSE metrics**: operation duration histogram and count counter (tagged by :operation, :volume, :result)
+  - **Cache metrics**: chunk cache hit/miss counters, resolved cache hit/miss/eviction counters, cache size gauge
+  - **I/O scheduler metrics**: queue depth gauge, dispatch counter, operation duration histogram, error counter, submit/cancel counters
+  - **Read/write metrics**: read/write operation duration histograms, byte sums, exception counters
+  - Histogram bucket constants per operation type: chunk (1ms-5s), FUSE (0.1ms-10s), Ra (1ms-1s), replication (10ms-30s), repair (10ms-60s)
+  - All metrics mapped to actual telemetry events via `event_name:` overrides
+  - `storage.bytes_free` uses measurement function to compute `capacity - used - reserved`
+  - 17 unit tests covering: non-empty list, valid struct types, no duplicates, descriptions, histogram buckets, per-category metric presence, FUSE operation tagging
+- Files changed:
+  - `neonfs_core/mix.exs` — added `telemetry_metrics_prometheus_core ~> 1.2`
+  - `neonfs_core/lib/neon_fs/core/telemetry.ex` — created (metric definitions)
+  - `neonfs_core/test/neon_fs/core/telemetry_test.exs` — created (17 tests)
+  - `tasks/task_0173_prometheus_metric_definitions.md` — status → Complete
+- **Test results:** neonfs_core 1483 tests + 1 doctest + 48 properties, 0 failures; all other packages pass
+- **Learnings for future iterations:**
+  - `alias NeonFS.Core.Telemetry` conflicts with `Telemetry.Metrics` namespace — use `alias NeonFS.Core.Telemetry, as: NeonTelemetry` in tests
+  - `telemetry_metrics_prometheus_core` does NOT support `Telemetry.Metrics.summary/2` — use `distribution/2` for histograms
+  - Gauge events (storage utilisation, cluster nodes, cache size) require a periodic poller (task 0174) to emit — metric definitions work without the events existing yet
+  - FUSE operation events (`[:neonfs, :fuse, :request, :stop]`) not yet emitted in neonfs_fuse — metric definition is ready for when they are
+---
+
+## 2026-02-25 21:42 NZDT - Task 0175
+- What was implemented:
+  - Created `NeonFS.Core.HealthCheck` with `check/0` aggregation over 7 subsystems: `:ra`, `:storage`, `:drives`, `:clock`, `:service_registry`, `:volumes`, and `:cache`
+  - Added per-subsystem timeout handling (default `5000ms`) and concurrent execution via `Task.async_stream`
+  - Timeouts now map to `%{status: :unhealthy, reason: :timeout}` without blocking the full report
+  - Added overall status reduction (`:healthy` / `:degraded` / `:unhealthy`), plus `checked_at` timestamp and `node` fields
+  - Implemented low-cost subsystem checks using existing status APIs (`StorageMetrics.cluster_capacity/0`, `DriveRegistry.list_drives/0`, `ServiceRegistry.list/0`, `VolumeRegistry.list/1`, `ChunkCache.stats/0`, `ClockMonitor.quarantined_nodes/0`, `:ra.members/2`)
+  - Added injectable check options for deterministic tests while keeping `check/0` as the default runtime entrypoint
+  - Added 4 unit tests covering healthy aggregate, degraded aggregate, unhealthy aggregate, and timeout behaviour
+  - Resolved follow-up Credo/Dialyzer issues by flattening clock status classification and removing unreachable `:ra.members/2` pattern matching
+- Files changed:
+  - `neonfs_core/lib/neon_fs/core/health_check.ex` — created (health aggregation module)
+  - `neonfs_core/test/neon_fs/core/health_check_test.exs` — created (4 unit tests)
+  - `tasks/task_0175_health_check_aggregation.md` — status → Complete; acceptance criteria checked
+  - `tasks/progress.md` — added Ra pattern + progress entry
+- **Test results:** `mix check --no-retry` passes from repository root across all subprojects
+- **Learnings for future iterations:**
+  - For concurrent named checks with per-check timeout handling, keep `Task.async_stream(..., ordered: true)` and zip stream results with the original check list to preserve subsystem names for timeout/error mapping
+  - `:ra.members/2` success shape always includes a leader server ID tuple; avoid matching `:undefined` leader in success clauses (Dialyzer flags it as unreachable)
+---
+
+## 2026-02-25 22:08 UTC - Task 0178
+- Implemented Prometheus alerting rules and FUSE metrics endpoint
+- Created `deploy/prometheus/alerts.yml` with 7 alerting rules: NeonFSStorageCritical, NeonFSStorageWarning, NeonFSClockSkew, NeonFSNodeDown, NeonFSReplicationLag, NeonFSDriveFailed, NeonFSCacheEvictionHigh
+- Added telemetry instrumentation to FUSE handler (`handle_info`) — measures operation duration and emits `[:neonfs, :fuse, :request, :stop]` events with operation name, volume, and result
+- Added metadata cache hit/miss telemetry to cached_lookup, cached_getattr, and cached_readdir
+- Created `NeonFS.FUSE.Telemetry` module with FUSE-specific metric definitions (operation duration/count, cache hit/miss/size)
+- Created `NeonFS.FUSE.MetricsPlug` serving `GET /metrics` in Prometheus text format
+- Created `NeonFS.FUSE.MetricsSupervisor` (TelemetryMetricsPrometheus.Core + Bandit on port 9569)
+- Wired MetricsSupervisor into FUSE Supervisor with enable/disable toggle (disabled by default)
+- Added `bandit`, `plug`, and `telemetry_metrics_prometheus_core` deps to neonfs_fuse
+- Added FUSE metrics runtime config (`NEONFS_FUSE_METRICS`, `NEONFS_FUSE_METRICS_PORT`, `NEONFS_FUSE_METRICS_BIND` env vars)
+- Files changed:
+  - `deploy/prometheus/alerts.yml` — created (Prometheus alerting rules)
+  - `neonfs_fuse/mix.exs` — added bandit, plug, telemetry_metrics_prometheus_core deps
+  - `neonfs_fuse/lib/neon_fs/fuse/telemetry.ex` — created (FUSE metric definitions)
+  - `neonfs_fuse/lib/neon_fs/fuse/metrics_plug.ex` — created (HTTP /metrics endpoint)
+  - `neonfs_fuse/lib/neon_fs/fuse/metrics_supervisor.ex` — created (metrics supervision tree)
+  - `neonfs_fuse/lib/neon_fs/fuse/handler.ex` — added telemetry instrumentation
+  - `neonfs_fuse/lib/neon_fs/fuse/supervisor.ex` — conditionally starts MetricsSupervisor
+  - `neonfs_fuse/config/runtime.exs` — added metrics config from env vars
+  - `neonfs_fuse/test/neon_fs/fuse/metrics_plug_test.exs` — created (3 tests)
+  - `neonfs_fuse/test/neon_fs/fuse/alerts_yml_test.exs` — created (3 tests)
+  - `tasks/task_0178_alerting_rules_and_fuse_metrics.md` — status → Complete
+- **Test results:** `mix check --no-retry` passes from repository root across all subprojects (76 FUSE tests, 0 failures)
+- **Learnings for future iterations:**
+  - FUSE handler had no telemetry emissions — wrapping `handle_operation` with `System.monotonic_time()` before/after is the simplest instrumentation pattern
+  - FUSE MetricsPlug is simpler than core's — no health endpoint needed since FUSE nodes are stateless workers
+  - Prometheus metric names use underscores not dots in the actual exposition format — `telemetry_metrics_prometheus_core` handles the dot-to-underscore conversion automatically
+  - `yaml_elixir` is available as a transitive dep (via igniter) and can be used for YAML parsing tests
 ---

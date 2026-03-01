@@ -22,8 +22,8 @@ defmodule NeonFS.Core.StorageMetricsTest do
       restart: :temporary
     )
 
-    # Allow init to complete
-    Process.sleep(50)
+    # Sync with init/handle_continue
+    :sys.get_state(NeonFS.Core.StorageMetrics)
 
     :ok
   end
@@ -84,7 +84,7 @@ defmodule NeonFS.Core.StorageMetricsTest do
         restart: :temporary
       )
 
-      Process.sleep(50)
+      :sys.get_state(NeonFS.Core.StorageMetrics)
 
       # Check that DriveRegistry was updated
       {:ok, drive} = DriveRegistry.get_drive(node(), "default")
@@ -119,8 +119,6 @@ defmodule NeonFS.Core.StorageMetricsTest do
       nil -> :ok
       pid -> GenServer.stop(pid, :normal, 5000)
     end
-
-    Process.sleep(10)
   end
 
   describe "telemetry-driven updates" do
@@ -135,7 +133,7 @@ defmodule NeonFS.Core.StorageMetricsTest do
         %{drive_id: "default", tier: "hot", data_size: 5000, compression: "none"}
       )
 
-      Process.sleep(10)
+      :sys.get_state(NeonFS.Core.StorageMetrics)
 
       {:ok, drive_after} = DriveRegistry.get_drive(node(), "default")
       assert drive_after.used_bytes == used_before + 5000
@@ -151,7 +149,7 @@ defmodule NeonFS.Core.StorageMetricsTest do
         %{drive_id: "default", hash: "abc123"}
       )
 
-      Process.sleep(10)
+      :sys.get_state(NeonFS.Core.StorageMetrics)
 
       {:ok, drive} = DriveRegistry.get_drive(node(), "default")
       assert drive.used_bytes == 7000
@@ -166,7 +164,7 @@ defmodule NeonFS.Core.StorageMetricsTest do
         %{drive_id: "default", hash: "abc123"}
       )
 
-      Process.sleep(10)
+      :sys.get_state(NeonFS.Core.StorageMetrics)
 
       {:ok, drive} = DriveRegistry.get_drive(node(), "default")
       assert drive.used_bytes == 0

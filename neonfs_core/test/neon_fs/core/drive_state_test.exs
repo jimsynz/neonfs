@@ -9,7 +9,13 @@ defmodule NeonFS.Core.DriveStateTest do
     DriveCommand.Test.setup()
     ensure_registry()
     ensure_drive_registry()
-    :ok
+
+    ref =
+      :telemetry_test.attach_event_handlers(self(), [
+        [:neonfs, :drive_state, :transition]
+      ])
+
+    {:ok, telemetry_ref: ref}
   end
 
   defp ensure_registry do
@@ -62,27 +68,31 @@ defmodule NeonFS.Core.DriveStateTest do
     )
   end
 
-  defp wait_for_state(drive_id, expected, timeout_ms \\ 2000) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    do_wait_for_state(drive_id, expected, deadline)
+  defp wait_for_transition(drive_id, expected, timeout_ms \\ 2000) do
+    # Check if already in the desired state
+    if DriveState.get_state(drive_id) == expected do
+      :ok
+    else
+      do_wait_for_transition(drive_id, expected, timeout_ms)
+    end
   end
 
-  defp do_wait_for_state(drive_id, expected, deadline) do
-    current = DriveState.get_state(drive_id)
-
-    cond do
-      current == expected ->
+  defp do_wait_for_transition(drive_id, expected, timeout_ms) do
+    receive do
+      {[:neonfs, :drive_state, :transition], _ref, %{}, %{drive_id: ^drive_id, to: ^expected}} ->
         :ok
 
-      System.monotonic_time(:millisecond) > deadline ->
+      {[:neonfs, :drive_state, :transition], _ref, %{}, %{drive_id: ^drive_id}} ->
+        # Not the target state yet — keep waiting
+        do_wait_for_transition(drive_id, expected, timeout_ms)
+    after
+      timeout_ms ->
+        current = DriveState.get_state(drive_id)
+
         flunk(
           "Timed out waiting for drive #{drive_id} to reach #{expected}, " <>
             "current state: #{current}"
         )
-
-      true ->
-        Process.sleep(10)
-        do_wait_for_state(drive_id, expected, deadline)
     end
   end
 
@@ -114,7 +124,7 @@ defmodule NeonFS.Core.DriveStateTest do
       start_drive(idle_timeout: 0)
 
       # Wait for idle → spinning_down → standby cycle
-      wait_for_state("test_hdd", :standby)
+      wait_for_transition("test_hdd", :standby)
 
       # Now spin up via ensure_active
       assert :ok = DriveState.ensure_active("test_hdd")
@@ -133,11 +143,11 @@ defmodule NeonFS.Core.DriveStateTest do
     end
 
     test "resets idle timer (drive stays active)" do
-      start_drive(idle_timeout: 1)
+      pid = start_drive(idle_timeout: 1)
 
-      # Record I/O to reset the timer
+      # Record I/O to reset the timer, then sync with the GenServer
       DriveState.record_io("test_hdd")
-      Process.sleep(50)
+      :sys.get_state(pid)
 
       # Should still be active because record_io reset the timer
       # (the timer would have fired at 1 second, but record_io resets it)
@@ -148,12 +158,11 @@ defmodule NeonFS.Core.DriveStateTest do
       # This test manually sends the idle_timeout message
       pid = start_drive(idle_timeout: 3600)
 
-      # Force idle transition by sending idle_timeout
+      # Force idle transition by sending idle_timeout, then sync with GenServer
       send(pid, :idle_timeout)
-      # Give GenServer time to process
-      Process.sleep(20)
+      :sys.get_state(pid)
 
-      # Drive should now be spinning_down (idle → spinning_down happens together)
+      # Drive should now be spinning_down (idle -> spinning_down happens together)
       state = DriveState.get_state("test_hdd")
       assert state in [:spinning_down, :standby]
     end
@@ -184,7 +193,7 @@ defmodule NeonFS.Core.DriveStateTest do
       start_drive(idle_timeout: 0)
 
       # Should transition through: active → idle → spinning_down → standby
-      wait_for_state("test_hdd", :standby)
+      wait_for_transition("test_hdd", :standby)
 
       # Verify spin_down was called
       calls = DriveCommand.Test.get_calls()
@@ -205,7 +214,7 @@ defmodule NeonFS.Core.DriveStateTest do
       start_drive(idle_timeout: 0)
 
       # With 0-second timeout, should quickly transition to standby
-      wait_for_state("test_hdd", :standby)
+      wait_for_transition("test_hdd", :standby)
     end
   end
 
@@ -215,7 +224,7 @@ defmodule NeonFS.Core.DriveStateTest do
       DriveCommand.Test.configure(:spin_up_delay, 100)
 
       start_drive(idle_timeout: 0)
-      wait_for_state("test_hdd", :standby)
+      wait_for_transition("test_hdd", :standby)
       DriveCommand.Test.reset()
 
       # Spawn multiple concurrent callers
@@ -245,7 +254,7 @@ defmodule NeonFS.Core.DriveStateTest do
       DriveCommand.Test.configure(:spin_up_delay, 50)
 
       start_drive(idle_timeout: 0)
-      wait_for_state("test_hdd", :standby)
+      wait_for_transition("test_hdd", :standby)
 
       # Spawn concurrent callers
       tasks =
@@ -272,9 +281,10 @@ defmodule NeonFS.Core.DriveStateTest do
 
       # Manually trigger idle timeout
       send(pid, :idle_timeout)
+      :sys.get_state(pid)
 
-      # Give time for the failed spin-down to complete
-      Process.sleep(100)
+      # Wait for the failed spin-down to transition back to active
+      wait_for_transition("test_hdd", :active)
 
       # Should be back to active after spin-down failure
       assert :active = DriveState.get_state("test_hdd")
@@ -283,13 +293,13 @@ defmodule NeonFS.Core.DriveStateTest do
 
   describe "non-PM drives (SSDs)" do
     test "stay permanently active regardless of I/O" do
-      start_drive(drive_id: "ssd0", power_management: false)
+      pid = start_drive(drive_id: "ssd0", power_management: false)
 
       assert :active = DriveState.get_state("ssd0")
 
-      # Record some I/O
+      # Record some I/O, then sync with the GenServer
       DriveState.record_io("ssd0")
-      Process.sleep(50)
+      :sys.get_state(pid)
 
       # Still active
       assert :active = DriveState.get_state("ssd0")
@@ -308,26 +318,21 @@ defmodule NeonFS.Core.DriveStateTest do
   end
 
   describe "telemetry" do
-    test "emits transition events" do
-      ref =
-        :telemetry_test.attach_event_handlers(self(), [
-          [:neonfs, :drive_state, :transition]
-        ])
-
+    test "emits transition events", %{telemetry_ref: ref} do
       start_drive(idle_timeout: 0)
 
-      # Wait for transitions to happen
-      wait_for_state("test_hdd", :standby)
-
-      # Should have received transition events: active→idle, idle→spinning_down, spinning_down→standby
+      # Assert each transition event in order (these also serve as synchronisation)
       assert_receive {[:neonfs, :drive_state, :transition], ^ref, %{},
-                      %{drive_id: "test_hdd", from: :active, to: :idle}}
+                      %{drive_id: "test_hdd", from: :active, to: :idle}},
+                     2000
 
       assert_receive {[:neonfs, :drive_state, :transition], ^ref, %{},
-                      %{drive_id: "test_hdd", from: :idle, to: :spinning_down}}
+                      %{drive_id: "test_hdd", from: :idle, to: :spinning_down}},
+                     2000
 
       assert_receive {[:neonfs, :drive_state, :transition], ^ref, %{},
-                      %{drive_id: "test_hdd", from: :spinning_down, to: :standby}}
+                      %{drive_id: "test_hdd", from: :spinning_down, to: :standby}},
+                     2000
     end
   end
 
@@ -336,7 +341,7 @@ defmodule NeonFS.Core.DriveStateTest do
       start_drive(idle_timeout: 0)
 
       # Wait for standby
-      wait_for_state("test_hdd", :standby)
+      wait_for_transition("test_hdd", :standby)
 
       # DriveRegistry should show :standby
       drives = DriveRegistry.list_drives()
@@ -367,7 +372,7 @@ defmodule NeonFS.Core.DriveStateTest do
       start_drive(idle_timeout: 0)
 
       # Wait for spinning_down state
-      wait_for_state("test_hdd", :spinning_down)
+      wait_for_transition("test_hdd", :spinning_down)
 
       # Call ensure_active during spinning_down — should queue and wait
       task =

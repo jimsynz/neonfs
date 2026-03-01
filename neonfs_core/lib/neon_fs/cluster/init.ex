@@ -102,7 +102,7 @@ defmodule NeonFS.Cluster.Init do
         create_peer_pools()
 
       {:error, reason} ->
-        Logger.warning("Failed to activate data plane: #{inspect(reason)}")
+        Logger.warning("Failed to activate data plane", reason: inspect(reason))
     end
   catch
     _, _ -> :ok

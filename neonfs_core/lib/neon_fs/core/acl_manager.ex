@@ -289,11 +289,11 @@ defmodule NeonFS.Core.ACLManager do
     Broadcaster.broadcast(volume_id, event)
   rescue
     _ ->
-      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      Logger.warning("Event broadcast failed", event_type: inspect(event.__struct__))
       :ok
   catch
     :exit, _ ->
-      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      Logger.warning("Event broadcast failed", event_type: inspect(event.__struct__))
       :ok
   end
 
@@ -334,15 +334,15 @@ defmodule NeonFS.Core.ACLManager do
         end)
 
         count = map_size(acl_map)
-        if count > 0, do: Logger.info("Loaded #{count} volume ACL(s) from Ra")
+        if count > 0, do: Logger.info("Loaded volume ACLs from Ra", count: count)
 
       {:error, reason} ->
-        Logger.debug("Could not load ACLs from Ra: #{inspect(reason)}")
+        Logger.debug("Could not load ACLs from Ra", reason: reason)
     end
   rescue
-    e -> Logger.debug("Could not load ACLs from Ra: #{inspect(e)}")
+    e -> Logger.debug("Could not load ACLs from Ra", reason: e)
   catch
-    :exit, reason -> Logger.debug("Could not load ACLs from Ra (exit): #{inspect(reason)}")
+    :exit, reason -> Logger.debug("Could not load ACLs from Ra (exit)", reason: reason)
   end
 
   defp acl_to_map(%VolumeACL{} = acl) do

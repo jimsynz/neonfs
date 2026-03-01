@@ -123,10 +123,10 @@ defmodule NeonFS.Core.ServiceRegistry do
 
     case restore_from_ra() do
       {:ok, count} ->
-        Logger.info("ServiceRegistry started, restored #{count} services from Ra")
+        Logger.info("ServiceRegistry started, restored services from Ra", count: count)
 
       {:error, reason} ->
-        Logger.debug("ServiceRegistry started but Ra not ready yet: #{inspect(reason)}")
+        Logger.debug("ServiceRegistry started but Ra not ready yet", reason: reason)
     end
 
     {:ok, %{monitors: %{}}, {:continue, :register_self}}
@@ -175,14 +175,14 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @impl true
   def handle_info({:nodedown, node, _info}, state) do
-    Logger.warning("Service node down: #{node}, deregistering")
+    Logger.warning("Service node down, deregistering", node: node)
     {_, new_state} = do_deregister(node, state)
     {:noreply, new_state}
   end
 
   @impl true
   def handle_info({:nodedown, node}, state) do
-    Logger.warning("Service node down: #{node}, deregistering")
+    Logger.warning("Service node down, deregistering", node: node)
     {_, new_state} = do_deregister(node, state)
     {:noreply, new_state}
   end
@@ -218,7 +218,7 @@ defmodule NeonFS.Core.ServiceRegistry do
     case maybe_ra_command({:register_service, info_map}, 500) do
       {:ok, :ok} -> :ok
       {:error, :ra_not_available} -> :ok
-      {:error, reason} -> Logger.warning("Ra register_service failed: #{inspect(reason)}")
+      {:error, reason} -> Logger.warning("Ra register_service failed", reason: reason)
     end
 
     insert_service(info)
@@ -240,7 +240,7 @@ defmodule NeonFS.Core.ServiceRegistry do
     case maybe_ra_command({:deregister_service, node}, 500) do
       {:ok, :ok} -> :ok
       {:error, :ra_not_available} -> :ok
-      {:error, reason} -> Logger.warning("Ra deregister_service failed: #{inspect(reason)}")
+      {:error, reason} -> Logger.warning("Ra deregister_service failed", reason: reason)
     end
 
     remove_from_ets(node)
@@ -323,7 +323,7 @@ defmodule NeonFS.Core.ServiceRegistry do
       end
 
     kind, reason ->
-      Logger.debug("Ra command error: #{inspect({kind, reason})}")
+      Logger.debug("Ra command error", kind: kind, reason: reason)
 
       if RaServer.initialized?() do
         {:error, {:ra_error, {kind, reason}}}

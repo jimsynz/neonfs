@@ -62,6 +62,10 @@ defmodule NeonFS.Core.AuditLog do
     :exit, _ -> :ok
   end
 
+  @doc false
+  @spec flush() :: :ok
+  def flush, do: GenServer.call(__MODULE__, :flush)
+
   @doc """
   Convenience function to create and log an event in one call.
   """
@@ -148,6 +152,9 @@ defmodule NeonFS.Core.AuditLog do
   end
 
   @impl true
+  def handle_call(:flush, _from, state), do: {:reply, :ok, state}
+
+  @impl true
   def handle_cast({:log, %AuditEvent{} = event}, state) do
     key = event_key(event)
     :ets.insert(@ets_table, {key, event})
@@ -172,6 +179,7 @@ defmodule NeonFS.Core.AuditLog do
   def handle_info(:prune, state) do
     prune_expired(state.max_age_days)
     prune_by_count(state.max_events)
+    :telemetry.execute([:neonfs, :audit, :pruned], %{}, %{})
     schedule_prune(state.prune_interval_ms)
     {:noreply, state}
   end

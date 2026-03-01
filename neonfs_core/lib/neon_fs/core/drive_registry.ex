@@ -189,7 +189,7 @@ defmodule NeonFS.Core.DriveRegistry do
 
     DriveConfig.validate_drives(local_drives)
 
-    Logger.info("DriveRegistry started with #{length(local_drives)} local drives")
+    Logger.info("DriveRegistry started", drive_count: length(local_drives))
 
     state = %{
       table: table,
@@ -350,7 +350,7 @@ defmodule NeonFS.Core.DriveRegistry do
         end)
 
       {:badrpc, reason} ->
-        Logger.debug("Failed to sync drives from #{node}: #{inspect(reason)}")
+        Logger.debug("Failed to sync drives from node", node: node, reason: inspect(reason))
     end
   end
 end

@@ -97,7 +97,7 @@ defmodule NeonFS.Integration.SystemVolumeTest do
       result =
         PeerCluster.rpc(cluster, :node2, NeonFS.Core.VolumeRegistry, :delete, [volume.id])
 
-      assert {:error, :system_volume} = result
+      assert {:error, %{class: :invalid}} = result
     end
   end
 

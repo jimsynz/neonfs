@@ -3,15 +3,22 @@ defmodule NeonFS.Core.DriveRegistryTest do
 
   alias NeonFS.Core.{Drive, DriveRegistry}
 
-  setup do
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    nvme_path = Path.join(tmp_dir, "nvme0")
+    sata_path = Path.join(tmp_dir, "sata0")
+    File.mkdir_p!(nvme_path)
+    File.mkdir_p!(sata_path)
+
     # Ensure a DriveRegistry is running with our test drives.
     # The app supervisor may have already started one, so handle both cases.
     ensure_registry_with_drives([
-      %{id: "nvme0", path: "/tmp/test_nvme0", tier: :hot, capacity: 1_000_000_000},
-      %{id: "sata0", path: "/tmp/test_sata0", tier: :cold, capacity: 4_000_000_000}
+      %{id: "nvme0", path: nvme_path, tier: :hot, capacity: 1_000_000_000},
+      %{id: "sata0", path: sata_path, tier: :cold, capacity: 4_000_000_000}
     ])
 
-    :ok
+    {:ok, tmp_dir: tmp_dir, nvme_path: nvme_path, sata_path: sata_path}
   end
 
   defp ensure_registry_with_drives(drives_config) do
@@ -41,12 +48,12 @@ defmodule NeonFS.Core.DriveRegistryTest do
       assert "sata0" in ids
     end
 
-    test "drives have correct fields from config" do
+    test "drives have correct fields from config", %{nvme_path: nvme_path} do
       drives = DriveRegistry.list_drives()
       nvme = Enum.find(drives, &(&1.id == "nvme0"))
 
       assert nvme.node == Node.self()
-      assert nvme.path == "/tmp/test_nvme0"
+      assert nvme.path == nvme_path
       assert nvme.tier == :hot
       assert nvme.capacity_bytes == 1_000_000_000
       assert nvme.used_bytes == 0
@@ -55,11 +62,11 @@ defmodule NeonFS.Core.DriveRegistryTest do
   end
 
   describe "register_drive/1" do
-    test "registers a new drive" do
+    test "registers a new drive", %{tmp_dir: tmp_dir} do
       drive = %Drive{
         id: "sata1",
         node: Node.self(),
-        path: "/tmp/test_sata1",
+        path: Path.join(tmp_dir, "sata1"),
         tier: :warm,
         capacity_bytes: 2_000_000_000
       }
@@ -71,11 +78,11 @@ defmodule NeonFS.Core.DriveRegistryTest do
       assert Enum.any?(drives, &(&1.id == "sata1"))
     end
 
-    test "overwrites existing drive with same node+id" do
+    test "overwrites existing drive with same node+id", %{tmp_dir: tmp_dir} do
       drive = %Drive{
         id: "nvme0",
         node: Node.self(),
-        path: "/tmp/test_nvme0_updated",
+        path: Path.join(tmp_dir, "nvme0_updated"),
         tier: :hot,
         capacity_bytes: 2_000_000_000
       }
@@ -87,7 +94,7 @@ defmodule NeonFS.Core.DriveRegistryTest do
       assert nvme.capacity_bytes == 2_000_000_000
     end
 
-    test "emits telemetry on registration" do
+    test "emits telemetry on registration", %{tmp_dir: tmp_dir} do
       ref =
         :telemetry_test.attach_event_handlers(self(), [
           [:neonfs, :drive_registry, :register]
@@ -96,7 +103,7 @@ defmodule NeonFS.Core.DriveRegistryTest do
       drive = %Drive{
         id: "sata2",
         node: Node.self(),
-        path: "/tmp/test_sata2",
+        path: Path.join(tmp_dir, "sata2"),
         tier: :warm,
         capacity_bytes: 500_000_000
       }
@@ -119,11 +126,11 @@ defmodule NeonFS.Core.DriveRegistryTest do
       assert DriveRegistry.drives_for_tier(:warm) == []
     end
 
-    test "returns all drives in a tier" do
+    test "returns all drives in a tier", %{tmp_dir: tmp_dir} do
       drive = %Drive{
         id: "nvme1",
         node: Node.self(),
-        path: "/tmp/test_nvme1",
+        path: Path.join(tmp_dir, "nvme1"),
         tier: :hot,
         capacity_bytes: 1_000_000_000
       }
@@ -157,12 +164,12 @@ defmodule NeonFS.Core.DriveRegistryTest do
       assert {:error, :no_drives_in_tier} = DriveRegistry.select_drive(:warm)
     end
 
-    test "selects least-used drive" do
+    test "selects least-used drive", %{tmp_dir: tmp_dir} do
       # Add a second hot drive with lower usage ratio
       drive = %Drive{
         id: "nvme1",
         node: Node.self(),
-        path: "/tmp/test_nvme1",
+        path: Path.join(tmp_dir, "nvme1"),
         tier: :hot,
         capacity_bytes: 1_000_000_000,
         used_bytes: 0

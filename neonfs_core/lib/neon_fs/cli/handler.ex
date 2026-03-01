@@ -18,6 +18,7 @@ defmodule NeonFS.CLI.Handler do
     ACLManager,
     AuditLog,
     Authorise,
+    BackgroundWorker,
     CertificateAuthority,
     DriveManager,
     JobTracker,
@@ -33,6 +34,16 @@ defmodule NeonFS.CLI.Handler do
 
   alias NeonFS.Core.Job
 
+  alias NeonFS.Error.{
+    Internal,
+    Invalid,
+    InvalidConfig,
+    NotFound,
+    PermissionDenied,
+    Unavailable,
+    VolumeNotFound
+  }
+
   @doc """
   Returns cluster status information.
 
@@ -41,6 +52,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec cluster_status() :: {:ok, map()}
   def cluster_status do
+    set_cli_metadata()
+
     {:ok,
      %{
        name: get_cluster_name(),
@@ -63,6 +76,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec cluster_init(String.t()) :: {:ok, map()} | {:error, term()}
   def cluster_init(cluster_name) when is_binary(cluster_name) do
+    set_cli_metadata()
+
     case Init.init_cluster(cluster_name) do
       {:ok, cluster_id} ->
         # Load the state to get full details
@@ -82,8 +97,11 @@ defmodule NeonFS.CLI.Handler do
             {:ok, %{cluster_id: cluster_id}}
         end
 
+      {:error, :already_initialised} ->
+        {:error, Invalid.exception(message: "Cluster already initialised")}
+
       {:error, reason} ->
-        {:error, reason}
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -96,6 +114,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_ca_info() :: {:ok, map()} | {:error, term()}
   def handle_ca_info do
+    set_cli_metadata()
+
     case CertificateAuthority.ca_info() do
       {:ok, info} ->
         {:ok,
@@ -109,7 +129,7 @@ defmodule NeonFS.CLI.Handler do
          }}
 
       {:error, _} ->
-        {:error, :ca_not_initialized}
+        {:error, Unavailable.exception(message: "Certificate authority not initialised")}
     end
   end
 
@@ -122,6 +142,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_ca_list() :: {:ok, [map()]} | {:error, term()}
   def handle_ca_list do
+    set_cli_metadata()
+
     case CertificateAuthority.list_issued() do
       {:ok, certs} ->
         {:ok,
@@ -136,7 +158,7 @@ defmodule NeonFS.CLI.Handler do
          end)}
 
       {:error, _} ->
-        {:error, :ca_not_initialized}
+        {:error, Unavailable.exception(message: "Certificate authority not initialised")}
     end
   end
 
@@ -155,10 +177,15 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_ca_revoke(String.t()) :: {:ok, map()} | {:error, term()}
   def handle_ca_revoke(node_name) when is_binary(node_name) do
+    set_cli_metadata()
+
     with {:ok, certs} <- map_ca_error(CertificateAuthority.list_issued()),
          {:ok, cert} <- find_cert_by_node(certs, node_name),
          :ok <- CertificateAuthority.revoke_certificate(cert.serial, :cessation_of_operation) do
       {:ok, %{serial: cert.serial, node_name: cert.node_name, status: "revoked"}}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -169,11 +196,12 @@ defmodule NeonFS.CLI.Handler do
   certificates. It requires a dual-CA transition period and rolling
   reissuance across the cluster.
 
-  Not yet implemented — returns `{:error, :not_implemented}`.
+  Not yet implemented — returns a structured error.
   """
-  @spec handle_ca_rotate() :: {:error, :not_implemented}
+  @spec handle_ca_rotate() :: {:error, Exception.t()}
   def handle_ca_rotate do
-    {:error, :not_implemented}
+    set_cli_metadata()
+    {:error, Unavailable.exception(message: "CA rotation not yet implemented")}
   end
 
   @doc """
@@ -188,12 +216,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec create_invite(pos_integer()) :: {:ok, map()} | {:error, term()}
   def create_invite(expires_in) when is_integer(expires_in) and expires_in > 0 do
+    set_cli_metadata()
+
     case Invite.create_invite(expires_in) do
       {:ok, token} ->
         {:ok, %{"token" => token}}
 
+      {:error, :cluster_not_initialized} ->
+        {:error, Unavailable.exception(message: "Cluster not initialised")}
+
       {:error, reason} ->
-        {:error, reason}
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -212,6 +245,7 @@ defmodule NeonFS.CLI.Handler do
   @spec join_cluster(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def join_cluster(token, via_node_str, type_str \\ "core")
       when is_binary(token) and is_binary(via_node_str) and is_binary(type_str) do
+    set_cli_metadata()
     via_node = String.to_atom(via_node_str)
     type = String.to_existing_atom(type_str)
 
@@ -251,7 +285,7 @@ defmodule NeonFS.CLI.Handler do
          }}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -263,6 +297,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec list_services() :: {:ok, [map()]}
   def list_services do
+    set_cli_metadata()
+
     services =
       ServiceRegistry.list()
       |> Enum.map(&service_info_to_map/1)
@@ -278,6 +314,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec list_volumes() :: {:ok, [map()]}
   def list_volumes do
+    set_cli_metadata()
+
     volumes =
       VolumeRegistry.list()
       |> Enum.map(&volume_to_map/1)
@@ -295,7 +333,7 @@ defmodule NeonFS.CLI.Handler do
     - `:durability` - Durability config map
     - `:write_ack` - Write acknowledgment level (`:local`, `:quorum`, `:all`)
     - `:tiering` - Tiering config map (`:initial_tier`, `:promotion_threshold`, `:demotion_delay`)
-    - `:caching` - Caching config map (`:transformed_chunks`, `:reconstructed_stripes`, `:remote_chunks`, `:max_memory`)
+    - `:caching` - Caching config map (`:transformed_chunks`, `:reconstructed_stripes`, `:remote_chunks`)
     - `:io_weight` - I/O scheduling weight (positive integer)
     - `:compression` - Compression config map
     - `:verification` - Verification config map
@@ -306,12 +344,14 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec create_volume(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def create_volume(name, config) when is_binary(name) and is_map(config) do
+    set_cli_metadata()
     opts = map_to_opts(config)
     owner_uid = Keyword.get(opts, :owner_uid, 0)
     owner_gid = Keyword.get(opts, :owner_gid, 0)
 
     with {:ok, parsed_opts} <- parse_durability_opt(opts),
-         {:ok, final_opts} <- parse_encryption_opt(parsed_opts),
+         {:ok, enc_opts} <- parse_encryption_opt(parsed_opts),
+         final_opts = merge_verification_defaults(enc_opts),
          {:ok, volume} <- VolumeRegistry.create(name, final_opts),
          :ok <- setup_encryption_if_needed(volume) do
       create_initial_acl(volume.id, owner_uid, owner_gid)
@@ -324,6 +364,65 @@ defmodule NeonFS.CLI.Handler do
       )
 
       {:ok, volume_to_map(volume)}
+    else
+      {:error, :already_exists} ->
+        {:error, Invalid.exception(message: "Volume '#{name}' already exists")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Updates an existing volume's configuration.
+
+  ## Parameters
+  - `name` - Volume name (string)
+  - `config` - Configuration map with string keys. Supported fields:
+    - `"atime_mode"` - POSIX atime mode (`"noatime"` or `"relatime"`)
+    - `"compression"` - Compression config map (e.g. `%{"algorithm" => "none"}`)
+    - `"io_weight"` - I/O scheduling weight (positive integer)
+    - `"write_ack"` - Write acknowledgement level (`"local"`, `"quorum"`, `"all"`)
+    - `"initial_tier"` / `"promotion_threshold"` / `"demotion_delay"` - Tiering sub-fields
+    - `"transformed_chunks"` / `"reconstructed_stripes"` / `"remote_chunks"` - Caching sub-fields
+    - `"on_read"` / `"sampling_rate"` / `"scrub_interval"` - Verification sub-fields
+    - `"metadata_replicas"` / `"read_quorum"` / `"write_quorum"` - Metadata consistency sub-fields
+
+  Immutable fields (`durability`, `encryption`, `name`, `id`) are rejected.
+  Nested sub-fields are merged with the volume's current configuration.
+
+  ## Returns
+  - `{:ok, map}` - Updated volume as map
+  - `{:error, reason}` - Error tuple
+  """
+  @spec update_volume(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def update_volume(name, config) when is_binary(name) and is_map(config) do
+    set_cli_metadata()
+
+    with {:ok, volume} <- VolumeRegistry.get_by_name(name),
+         :ok <- reject_immutable_updates(config),
+         opts = build_update_opts(config, volume),
+         {:ok, updated} <- VolumeRegistry.update(volume.id, opts) do
+      :telemetry.execute(
+        [:neonfs, :cli, :volume_updated],
+        %{},
+        %{volume_id: volume.id, name: name, fields: Map.keys(config)}
+      )
+
+      AuditLog.log_event(
+        event_type: :volume_updated,
+        actor_uid: 0,
+        resource: volume.id,
+        details: %{name: name, fields: Map.keys(config)}
+      )
+
+      {:ok, volume_to_map(updated)}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -342,6 +441,7 @@ defmodule NeonFS.CLI.Handler do
 
   @spec delete_volume(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def delete_volume(name, opts) when is_binary(name) do
+    set_cli_metadata()
     uid = Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :gids, [])
 
@@ -358,6 +458,15 @@ defmodule NeonFS.CLI.Handler do
       )
 
       {:ok, %{}}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: name)}
+
+      {:error, :permission_denied} ->
+        {:error, PermissionDenied.exception(operation: :admin)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -373,9 +482,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec get_volume(String.t()) :: {:ok, map()} | {:error, term()}
   def get_volume(name) when is_binary(name) do
+    set_cli_metadata()
+
     case VolumeRegistry.get_by_name(name) do
-      {:ok, volume} -> {:ok, volume_to_map(volume)}
-      {:error, reason} -> {:error, reason}
+      {:ok, volume} ->
+        {:ok, volume_to_map(volume)}
+
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -396,11 +513,19 @@ defmodule NeonFS.CLI.Handler do
   @spec mount(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def mount(volume_name, mount_point, options)
       when is_binary(volume_name) and is_binary(mount_point) and is_map(options) do
+    set_cli_metadata()
+
     with {:ok, fuse_node} <- get_fuse_node(),
          opts = map_to_opts(options),
          {:ok, mount_id} <- rpc_mount(fuse_node, volume_name, mount_point, opts),
          {:ok, mount_info} <- rpc_get_mount(fuse_node, mount_id) do
       {:ok, mount_info_to_map(mount_info)}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -418,10 +543,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec unmount(String.t()) :: {:ok, map()} | {:error, term()}
   def unmount(mount_id_or_path) when is_binary(mount_id_or_path) do
-    with {:ok, fuse_node} <- get_fuse_node() do
-      mount_id_or_path
-      |> do_unmount(fuse_node)
-      |> format_unmount_result()
+    set_cli_metadata()
+
+    with {:ok, fuse_node} <- get_fuse_node(),
+         {:ok, _} <- do_unmount(mount_id_or_path, fuse_node) do
+      {:ok, %{}}
+    else
+      {:error, :mount_not_found} ->
+        {:error, NotFound.exception(message: "Mount not found: #{mount_id_or_path}")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -435,9 +567,14 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec list_mounts() :: {:ok, [map()]}
   def list_mounts do
+    set_cli_metadata()
+
     with {:ok, fuse_node} <- get_fuse_node(),
          {:ok, mounts} <- rpc_list_mounts(fuse_node) do
       {:ok, Enum.map(mounts, &mount_info_to_map/1)}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -453,8 +590,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec rotate_volume_key(String.t()) :: {:ok, map()} | {:error, term()}
   def rotate_volume_key(volume_name) when is_binary(volume_name) do
-    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name) do
-      KeyRotation.start_rotation(volume.id)
+    set_cli_metadata()
+
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, result} <- KeyRotation.start_rotation(volume.id) do
+      {:ok, result}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -471,8 +617,20 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec rotation_status(String.t()) :: {:ok, map()} | {:error, term()}
   def rotation_status(volume_name) when is_binary(volume_name) do
-    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name) do
-      KeyRotation.rotation_status(volume.id)
+    set_cli_metadata()
+
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, result} <- KeyRotation.rotation_status(volume.id) do
+      {:ok, result}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, :no_rotation} ->
+        {:error, NotFound.exception(message: "No key rotation in progress for '#{volume_name}'")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -490,9 +648,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_set_file_acl(String.t(), String.t(), [map()]) :: {:ok, map()} | {:error, term()}
   def handle_set_file_acl(volume_name, path, acl_entries) do
+    set_cli_metadata()
+
     with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
          :ok <- ACLManager.set_file_acl(volume.id, path, acl_entries) do
       {:ok, %{}}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -509,8 +675,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_get_file_acl(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def handle_get_file_acl(volume_name, path) do
-    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name) do
-      ACLManager.get_file_acl(volume.id, path)
+    set_cli_metadata()
+
+    with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, result} <- ACLManager.get_file_acl(volume.id, path) do
+      {:ok, result}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -528,9 +703,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_set_default_acl(String.t(), String.t(), [map()]) :: {:ok, map()} | {:error, term()}
   def handle_set_default_acl(volume_name, path, default_acl) do
+    set_cli_metadata()
+
     with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
          :ok <- ACLManager.set_default_acl(volume.id, path, default_acl) do
       {:ok, %{}}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -550,6 +733,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_audit_list(map()) :: {:ok, [map()]}
   def handle_audit_list(filters \\ %{}) do
+    set_cli_metadata()
+
     query_opts =
       filters
       |> parse_audit_filters()
@@ -575,6 +760,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_acl_grant(String.t(), String.t(), [String.t()]) :: {:ok, map()} | {:error, term()}
   def handle_acl_grant(volume_name, principal_str, permissions) do
+    set_cli_metadata()
+
     with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
          {:ok, principal} <- parse_principal(principal_str),
          {:ok, perms} <- parse_permissions(permissions),
@@ -587,6 +774,12 @@ defmodule NeonFS.CLI.Handler do
       )
 
       {:ok, %{}}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -603,6 +796,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_acl_revoke(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def handle_acl_revoke(volume_name, principal_str) do
+    set_cli_metadata()
+
     with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
          {:ok, principal} <- parse_principal(principal_str),
          :ok <- ACLManager.revoke(volume.id, principal) do
@@ -614,6 +809,12 @@ defmodule NeonFS.CLI.Handler do
       )
 
       {:ok, %{}}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -629,9 +830,17 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_acl_show(String.t()) :: {:ok, map()} | {:error, term()}
   def handle_acl_show(volume_name) do
+    set_cli_metadata()
+
     with {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
          {:ok, acl} <- ACLManager.get_volume_acl(volume.id) do
       {:ok, volume_acl_to_map(acl)}
+    else
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -647,9 +856,11 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_add_drive(map()) :: {:ok, map()} | {:error, term()}
   def handle_add_drive(config) when is_map(config) do
+    set_cli_metadata()
+
     case DriveManager.add_drive(config) do
       {:ok, drive_map} -> {:ok, drive_map}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, wrap_error(reason)}
     end
   end
 
@@ -666,9 +877,11 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_remove_drive(String.t(), boolean()) :: {:ok, map()} | {:error, term()}
   def handle_remove_drive(drive_id, force \\ false) when is_binary(drive_id) do
+    set_cli_metadata()
+
     case DriveManager.remove_drive(drive_id, force: force) do
       :ok -> {:ok, %{}}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, wrap_error(reason)}
     end
   end
 
@@ -680,6 +893,7 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_list_drives() :: {:ok, [map()]}
   def handle_list_drives do
+    set_cli_metadata()
     {:ok, DriveManager.list_drives()}
   end
 
@@ -699,12 +913,13 @@ defmodule NeonFS.CLI.Handler do
   @spec handle_evacuate_drive(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def handle_evacuate_drive(node_name, drive_id, opts \\ %{})
       when is_binary(node_name) and is_binary(drive_id) do
+    set_cli_metadata()
     node = String.to_atom(node_name)
     any_tier = Map.get(opts, "any_tier", false)
 
     case NeonFS.Core.DriveEvacuation.start_evacuation(node, drive_id, any_tier: any_tier) do
       {:ok, job} -> {:ok, job_to_map(job)}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, wrap_error(reason)}
     end
   end
 
@@ -720,6 +935,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_evacuation_status(String.t()) :: {:ok, map()} | {:error, term()}
   def handle_evacuation_status(drive_id) when is_binary(drive_id) do
+    set_cli_metadata()
+
     case NeonFS.Core.DriveEvacuation.evacuation_status(drive_id) do
       {:ok, status} ->
         {:ok,
@@ -735,7 +952,7 @@ defmodule NeonFS.CLI.Handler do
          }}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -754,6 +971,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_rebalance(map()) :: {:ok, map()} | {:error, term()}
   def handle_rebalance(opts \\ %{}) do
+    set_cli_metadata()
+
     rebalance_opts =
       []
       |> parse_tier_opt(Map.get(opts, "tier"))
@@ -762,7 +981,7 @@ defmodule NeonFS.CLI.Handler do
 
     case NeonFS.Core.ClusterRebalance.start_rebalance(rebalance_opts) do
       {:ok, job} -> {:ok, job_to_map(job)}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, wrap_error(reason)}
     end
   end
 
@@ -775,6 +994,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_rebalance_status() :: {:ok, map()} | {:error, term()}
   def handle_rebalance_status do
+    set_cli_metadata()
+
     case NeonFS.Core.ClusterRebalance.rebalance_status() do
       {:ok, status} ->
         {:ok,
@@ -788,8 +1009,11 @@ defmodule NeonFS.CLI.Handler do
            threshold: status.threshold
          }}
 
+      {:error, :no_rebalance} ->
+        {:error, NotFound.exception(message: "No rebalance in progress")}
+
       {:error, reason} ->
-        {:error, reason}
+        {:error, wrap_error(reason)}
     end
   end
 
@@ -801,6 +1025,7 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_storage_stats() :: {:ok, map()}
   def handle_storage_stats do
+    set_cli_metadata()
     stats = StorageMetrics.cluster_capacity()
 
     drives =
@@ -829,6 +1054,80 @@ defmodule NeonFS.CLI.Handler do
   defp serialise_capacity(n) when is_integer(n), do: n
 
   @doc """
+  Starts a garbage collection job.
+
+  ## Parameters
+  - `opts` - Options map with optional keys:
+    - `"volume"` - Volume name to scope collection to
+
+  ## Returns
+  - `{:ok, map}` - Job info map
+  - `{:error, :not_found}` - Volume name doesn't exist
+  """
+  @spec handle_gc_collect(map()) :: {:ok, map()} | {:error, term()}
+  def handle_gc_collect(opts \\ %{}) do
+    set_cli_metadata()
+
+    with {:ok, params} <- resolve_gc_params(opts),
+         {:ok, job} <- JobTracker.create(NeonFS.Core.Job.Runners.GarbageCollection, params) do
+      {:ok, job_to_map(job)}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Returns recent garbage collection jobs.
+
+  ## Returns
+  - `{:ok, [map]}` - List of GC job maps, most recent first
+  """
+  @spec handle_gc_status() :: {:ok, [map()]}
+  def handle_gc_status do
+    set_cli_metadata()
+    jobs = JobTracker.list(type: NeonFS.Core.Job.Runners.GarbageCollection)
+    {:ok, Enum.map(jobs, &job_to_map/1)}
+  end
+
+  @doc """
+  Starts an integrity scrub job.
+
+  ## Parameters
+  - `opts` - Options map with optional keys:
+    - `"volume"` - Volume name to scope scrubbing to
+
+  ## Returns
+  - `{:ok, map}` - Job info map
+  - `{:error, :not_found}` - Volume name doesn't exist
+  """
+  @spec handle_scrub_start(map()) :: {:ok, map()} | {:error, term()}
+  def handle_scrub_start(opts \\ %{}) do
+    set_cli_metadata()
+
+    with {:ok, params} <- resolve_scrub_params(opts),
+         {:ok, job} <- JobTracker.create(NeonFS.Core.Job.Runners.Scrub, params) do
+      {:ok, job_to_map(job)}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Returns recent scrub jobs.
+
+  ## Returns
+  - `{:ok, [map]}` - List of scrub job maps, most recent first
+  """
+  @spec handle_scrub_status() :: {:ok, [map()]}
+  def handle_scrub_status do
+    set_cli_metadata()
+    jobs = JobTracker.list(type: NeonFS.Core.Job.Runners.Scrub)
+    {:ok, Enum.map(jobs, &job_to_map/1)}
+  end
+
+  @doc """
   Lists background jobs with optional filters.
 
   ## Parameters
@@ -842,6 +1141,7 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_list_jobs(map()) :: {:ok, [map()]}
   def handle_list_jobs(filters \\ %{}) do
+    set_cli_metadata()
     cluster_wide = Map.get(filters, "cluster", true)
     parsed_filters = parse_job_filters(filters)
 
@@ -867,9 +1167,11 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_get_job(String.t()) :: {:ok, map()} | {:error, term()}
   def handle_get_job(job_id) when is_binary(job_id) do
+    set_cli_metadata()
+
     case JobTracker.get(job_id) do
       {:ok, job} -> {:ok, job_to_map(job)}
-      {:error, :not_found} -> {:error, "Job not found: #{job_id}"}
+      {:error, :not_found} -> {:error, NotFound.exception(message: "Job not found: #{job_id}")}
     end
   end
 
@@ -885,14 +1187,157 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_cancel_job(String.t()) :: {:ok, map()} | {:error, term()}
   def handle_cancel_job(job_id) when is_binary(job_id) do
+    set_cli_metadata()
+
     case JobTracker.cancel(job_id) do
-      :ok -> {:ok, %{}}
-      {:error, :not_found} -> {:error, "Job not found: #{job_id}"}
-      {:error, :already_terminal} -> {:error, "Job already finished: #{job_id}"}
+      :ok ->
+        {:ok, %{}}
+
+      {:error, :not_found} ->
+        {:error, NotFound.exception(message: "Job not found: #{job_id}")}
+
+      {:error, :already_terminal} ->
+        {:error, Invalid.exception(message: "Job already finished: #{job_id}")}
+    end
+  end
+
+  @doc """
+  Returns the current background worker status.
+
+  ## Returns
+  - `{:ok, map}` - Worker status map with config and runtime stats
+  """
+  @spec handle_worker_status() :: {:ok, map()}
+  def handle_worker_status do
+    set_cli_metadata()
+    status = BackgroundWorker.status()
+
+    {:ok,
+     %{
+       max_concurrent: status.max_concurrent,
+       max_per_minute: status.max_per_minute,
+       drive_concurrency: status.drive_concurrency,
+       queued: status.queued,
+       running: status.running,
+       completed_total: status.completed_total,
+       by_priority: %{
+         high: status.by_priority[:high] || 0,
+         normal: status.by_priority[:normal] || 0,
+         low: status.by_priority[:low] || 0
+       }
+     }}
+  end
+
+  @doc """
+  Reconfigures the background worker with new settings.
+
+  Accepts a map with string keys matching `cluster.json` field names.
+  Validates that values are positive integers before applying.
+  Persists changes to `cluster.json` so they survive restarts.
+
+  ## Parameters
+  - `config` - Map with optional keys: `"max_concurrent"`, `"max_per_minute"`, `"drive_concurrency"`
+
+  ## Returns
+  - `{:ok, map}` - New worker config after applying changes
+  - `{:error, reason}` - Validation or persistence error
+  """
+  @spec handle_worker_configure(map()) :: {:ok, map()} | {:error, term()}
+  def handle_worker_configure(config) when is_map(config) do
+    set_cli_metadata()
+
+    with {:ok, changes} <- validate_worker_config(config),
+         :ok <- BackgroundWorker.reconfigure(changes),
+         :ok <- persist_worker_config(config) do
+      {:ok, status} = handle_worker_status()
+      {:ok, Map.take(status, [:max_concurrent, :max_per_minute, :drive_concurrency])}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
   # Private helper functions
+
+  defp set_cli_metadata do
+    Logger.metadata(
+      component: :cli,
+      request_id: :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
+    )
+  end
+
+  # Wraps a legacy error reason into a structured NeonFS.Error.
+  # Already-structured errors (Splode exceptions with a class field) pass through unchanged.
+  defp wrap_error(%{__exception__: true, class: _} = error), do: error
+
+  defp wrap_error(reason) when is_binary(reason),
+    do: Internal.exception(message: reason)
+
+  defp wrap_error(reason) when is_atom(reason),
+    do: Internal.exception(message: Atom.to_string(reason))
+
+  defp wrap_error(reason),
+    do: Internal.exception(message: inspect(reason))
+
+  @worker_config_keys %{
+    "max_concurrent" => :max_concurrent,
+    "max_per_minute" => :max_per_minute,
+    "drive_concurrency" => :drive_concurrency
+  }
+
+  defp validate_worker_config(config) do
+    changes =
+      config
+      |> Map.take(Map.keys(@worker_config_keys))
+      |> Enum.reduce_while([], fn {key, value}, acc ->
+        case validate_positive_integer(key, value) do
+          {:ok, int_value} ->
+            {:cont, [{@worker_config_keys[key], int_value} | acc]}
+
+          {:error, _} = err ->
+            {:halt, err}
+        end
+      end)
+
+    case changes do
+      {:error, _} = err ->
+        err
+
+      list when is_list(list) and list == [] ->
+        {:error, InvalidConfig.exception(reason: "no valid settings provided")}
+
+      list when is_list(list) ->
+        {:ok, list}
+    end
+  end
+
+  defp validate_positive_integer(_key, value) when is_integer(value) and value > 0 do
+    {:ok, value}
+  end
+
+  defp validate_positive_integer(key, value) when is_integer(value) do
+    {:error,
+     InvalidConfig.exception(
+       field: String.to_atom(key),
+       reason: "must be a positive integer, got: #{value}"
+     )}
+  end
+
+  defp validate_positive_integer(key, value) do
+    {:error,
+     InvalidConfig.exception(
+       field: String.to_atom(key),
+       reason: "must be a positive integer, got: #{inspect(value)}"
+     )}
+  end
+
+  defp persist_worker_config(config) do
+    json_config =
+      config
+      |> Map.take(Map.keys(@worker_config_keys))
+
+    State.update_worker_config(json_config)
+  end
 
   defp job_to_map(%Job{} = job) do
     %{
@@ -1001,7 +1446,9 @@ defmodule NeonFS.CLI.Handler do
     known_runners = [
       NeonFS.Core.Job.Runners.ClusterRebalance,
       NeonFS.Core.Job.Runners.DriveEvacuation,
-      NeonFS.Core.Job.Runners.KeyRotation
+      NeonFS.Core.Job.Runners.GarbageCollection,
+      NeonFS.Core.Job.Runners.KeyRotation,
+      NeonFS.Core.Job.Runners.Scrub
     ]
 
     case Enum.find(known_runners, fn mod -> mod.label() == type_label end) do
@@ -1011,6 +1458,30 @@ defmodule NeonFS.CLI.Handler do
   end
 
   defp parse_job_type_filter(opts, _), do: opts
+
+  defp resolve_gc_params(%{"volume" => volume_name}) when is_binary(volume_name) do
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} ->
+        {:ok, %{volume_id: volume.id}}
+
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+    end
+  end
+
+  defp resolve_gc_params(_), do: {:ok, %{}}
+
+  defp resolve_scrub_params(%{"volume" => volume_name}) when is_binary(volume_name) do
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} ->
+        {:ok, %{volume_id: volume.id}}
+
+      {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+    end
+  end
+
+  defp resolve_scrub_params(_), do: {:ok, %{}}
 
   # Get the FUSE node and verify it's reachable
   # Checks in order: ServiceRegistry, local node, connected nodes, configured fallback
@@ -1063,45 +1534,65 @@ defmodule NeonFS.CLI.Handler do
     fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
 
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
-      {:badrpc, _} -> {:error, :fuse_not_available}
-      NeonFS.FUSE.MountManager -> {:ok, fuse_node}
+      {:badrpc, _} ->
+        {:error, Unavailable.exception(message: "FUSE service not available")}
+
+      NeonFS.FUSE.MountManager ->
+        {:ok, fuse_node}
     end
   end
 
   # RPC wrappers for MountManager operations
   defp rpc_mount(fuse_node, volume_name, mount_point, opts) do
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :mount, [volume_name, mount_point, opts]) do
-      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
-      result -> result
+      {:badrpc, reason} ->
+        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
+
+      result ->
+        result
     end
   end
 
   defp rpc_unmount(fuse_node, mount_id) do
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :unmount, [mount_id]) do
-      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
-      result -> result
+      {:badrpc, reason} ->
+        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
+
+      result ->
+        result
     end
   end
 
   defp rpc_list_mounts(fuse_node) do
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :list_mounts, []) do
-      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
-      mounts when is_list(mounts) -> {:ok, mounts}
-      result -> result
+      {:badrpc, reason} ->
+        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
+
+      mounts when is_list(mounts) ->
+        {:ok, mounts}
+
+      result ->
+        result
     end
   end
 
   defp rpc_get_mount(fuse_node, mount_id) do
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount, [mount_id]) do
-      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
-      result -> result
+      {:badrpc, reason} ->
+        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
+
+      result ->
+        result
     end
   end
 
   defp rpc_get_mount_by_path(fuse_node, path) do
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_path, [path]) do
-      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
-      result -> result
+      {:badrpc, reason} ->
+        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
+
+      result ->
+        result
     end
   end
 
@@ -1131,6 +1622,7 @@ defmodule NeonFS.CLI.Handler do
       id: volume.id,
       name: volume.name,
       owner: volume.owner,
+      atime_mode: volume.atime_mode,
       durability: volume.durability,
       durability_display: format_durability(volume.durability),
       write_ack: volume.write_ack,
@@ -1139,6 +1631,7 @@ defmodule NeonFS.CLI.Handler do
       io_weight: volume.io_weight,
       compression: volume.compression,
       verification: volume.verification,
+      metadata_consistency: volume.metadata_consistency,
       encryption: encryption_to_map(volume.encryption),
       logical_size: volume.logical_size,
       physical_size: volume.physical_size,
@@ -1152,12 +1645,12 @@ defmodule NeonFS.CLI.Handler do
     # Try mount_id first, then try path
     case rpc_get_mount(fuse_node, mount_id_or_path) do
       {:ok, _mount} ->
-        rpc_unmount(fuse_node, mount_id_or_path)
+        wrap_unmount_result(rpc_unmount(fuse_node, mount_id_or_path))
 
       {:error, :not_found} ->
         case rpc_get_mount_by_path(fuse_node, mount_id_or_path) do
           {:ok, mount} ->
-            rpc_unmount(fuse_node, mount.id)
+            wrap_unmount_result(rpc_unmount(fuse_node, mount.id))
 
           {:error, :not_found} ->
             {:error, :mount_not_found}
@@ -1165,8 +1658,8 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
-  defp format_unmount_result(:ok), do: {:ok, %{}}
-  defp format_unmount_result({:error, reason}), do: {:error, reason}
+  defp wrap_unmount_result(:ok), do: {:ok, %{}}
+  defp wrap_unmount_result({:error, _} = err), do: err
 
   defp mount_info_to_map(mount_info) do
     # Convert mount info to map, excluding PIDs and references
@@ -1208,7 +1701,8 @@ defmodule NeonFS.CLI.Handler do
         {:ok, opts}
     end
   rescue
-    ArgumentError -> {:error, "Invalid encryption mode"}
+    ArgumentError ->
+      {:error, InvalidConfig.exception(field: :encryption, reason: "invalid encryption mode")}
   end
 
   defp build_encryption_config(:none), do: VolumeEncryption.new(mode: :none)
@@ -1225,6 +1719,16 @@ defmodule NeonFS.CLI.Handler do
       end
     else
       :ok
+    end
+  end
+
+  defp merge_verification_defaults(opts) do
+    case Keyword.get(opts, :verification) do
+      nil ->
+        opts
+
+      config when is_map(config) ->
+        Keyword.put(opts, :verification, Map.merge(Volume.default_verification(), config))
     end
   end
 
@@ -1273,7 +1777,10 @@ defmodule NeonFS.CLI.Handler do
   defp parse_erasure_parts(_), do: {:error, durability_format_error()}
 
   defp durability_format_error do
-    "Invalid durability format. Use 'replicate:N' or 'erasure:D:P'"
+    InvalidConfig.exception(
+      field: :durability,
+      reason: "invalid format, use 'replicate:N' or 'erasure:D:P'"
+    )
   end
 
   defp format_durability(%{type: :replicate, factor: factor}) do
@@ -1310,9 +1817,9 @@ defmodule NeonFS.CLI.Handler do
     acl = VolumeACL.new(volume_id: volume_id, owner_uid: owner_uid, owner_gid: owner_gid)
     ACLManager.set_volume_acl(volume_id, acl)
   rescue
-    _ -> Logger.warning("Failed to create initial ACL for volume #{volume_id}")
+    _ -> Logger.warning("Failed to create initial ACL for volume", volume_id: volume_id)
   catch
-    :exit, _ -> Logger.warning("Failed to create initial ACL for volume #{volume_id}")
+    :exit, _ -> Logger.warning("Failed to create initial ACL for volume", volume_id: volume_id)
   end
 
   defp audit_event_to_map(%NeonFS.Core.AuditEvent{} = event) do
@@ -1398,19 +1905,20 @@ defmodule NeonFS.CLI.Handler do
   defp parse_principal("uid:" <> uid_str) do
     case Integer.parse(uid_str) do
       {uid, ""} when uid >= 0 -> {:ok, {:uid, uid}}
-      _ -> {:error, "Invalid UID: #{uid_str}"}
+      _ -> {:error, Invalid.exception(message: "Invalid UID: #{uid_str}")}
     end
   end
 
   defp parse_principal("gid:" <> gid_str) do
     case Integer.parse(gid_str) do
       {gid, ""} when gid >= 0 -> {:ok, {:gid, gid}}
-      _ -> {:error, "Invalid GID: #{gid_str}"}
+      _ -> {:error, Invalid.exception(message: "Invalid GID: #{gid_str}")}
     end
   end
 
-  defp parse_principal(other),
-    do: {:error, "Invalid principal format: #{other}. Use uid:N or gid:N"}
+  defp parse_principal(other) do
+    {:error, Invalid.exception(message: "Invalid principal format: #{other}. Use uid:N or gid:N")}
+  end
 
   defp parse_permissions(perm_strings) when is_list(perm_strings) do
     perms = Enum.map(perm_strings, &String.to_existing_atom/1)
@@ -1420,10 +1928,11 @@ defmodule NeonFS.CLI.Handler do
     if invalid == [] do
       {:ok, perms}
     else
-      {:error, "Invalid permissions: #{inspect(invalid)}"}
+      {:error, Invalid.exception(message: "Invalid permissions: #{inspect(invalid)}")}
     end
   rescue
-    ArgumentError -> {:error, "Invalid permission name. Valid: read, write, admin"}
+    ArgumentError ->
+      {:error, Invalid.exception(message: "Invalid permission name. Valid: read, write, admin")}
   end
 
   # Find a cert entry matching the given node name.
@@ -1435,13 +1944,167 @@ defmodule NeonFS.CLI.Handler do
              String.ends_with?(cert.node_name, "/CN=#{name}") or
              cert.hostname == name
          end) do
-      nil -> {:error, :node_not_found}
-      cert -> {:ok, cert}
+      nil ->
+        {:error, NotFound.exception(message: "No certificate found for node '#{name}'")}
+
+      cert ->
+        {:ok, cert}
     end
   end
 
   defp map_ca_error({:ok, _} = ok), do: ok
-  defp map_ca_error({:error, _}), do: {:error, :ca_not_initialized}
+
+  defp map_ca_error({:error, _}),
+    do: {:error, Unavailable.exception(message: "Certificate authority not initialised")}
+
+  @immutable_update_fields ~w(durability encryption name id)
+
+  defp reject_immutable_updates(config) do
+    found =
+      config
+      |> Map.keys()
+      |> Enum.filter(&(&1 in @immutable_update_fields))
+
+    if found == [] do
+      :ok
+    else
+      {:error,
+       InvalidConfig.exception(
+         field: :immutable,
+         reason: "cannot update immutable fields: #{Enum.join(found, ", ")}"
+       )}
+    end
+  end
+
+  @tiering_fields ~w(initial_tier promotion_threshold demotion_delay)
+  @caching_fields ~w(transformed_chunks reconstructed_stripes remote_chunks)
+  @verification_fields ~w(on_read sampling_rate scrub_interval)
+  @metadata_consistency_fields ~w(metadata_replicas read_quorum write_quorum)
+
+  defp build_update_opts(config, volume) do
+    []
+    |> maybe_put_simple(config, "atime_mode", :atime_mode, &coerce_atom/1)
+    |> maybe_put_simple(config, "io_weight", :io_weight, &coerce_integer/1)
+    |> maybe_put_simple(config, "write_ack", :write_ack, &coerce_atom/1)
+    |> maybe_put_simple(config, "owner", :owner, &Function.identity/1)
+    |> maybe_put_nested(config, @tiering_fields, :tiering, volume.tiering, &coerce_tiering/2)
+    |> maybe_put_nested(config, @caching_fields, :caching, volume.caching, &coerce_caching/2)
+    |> maybe_put_nested(
+      config,
+      @verification_fields,
+      :verification,
+      volume.verification,
+      &coerce_verification/2
+    )
+    |> maybe_put_nested(
+      config,
+      @metadata_consistency_fields,
+      :metadata_consistency,
+      volume.metadata_consistency,
+      &coerce_metadata_consistency/2
+    )
+    |> maybe_put_compression(config, volume)
+  end
+
+  defp maybe_put_simple(opts, config, string_key, opt_key, coerce_fn) do
+    case Map.fetch(config, string_key) do
+      {:ok, value} -> Keyword.put(opts, opt_key, coerce_fn.(value))
+      :error -> opts
+    end
+  end
+
+  defp maybe_put_nested(opts, config, field_names, opt_key, current, coerce_fn) do
+    sub_config = Map.take(config, field_names)
+
+    if map_size(sub_config) == 0 do
+      opts
+    else
+      merged =
+        Enum.reduce(sub_config, current || %{}, fn {k, v}, acc ->
+          coerce_fn.(acc, {k, v})
+        end)
+
+      Keyword.put(opts, opt_key, merged)
+    end
+  end
+
+  defp maybe_put_compression(opts, config, volume) do
+    case Map.fetch(config, "compression") do
+      {:ok, comp} when is_map(comp) ->
+        coerced = coerce_compression_map(comp)
+        merged = Map.merge(volume.compression, coerced)
+        Keyword.put(opts, :compression, merged)
+
+      {:ok, comp} ->
+        Keyword.put(opts, :compression, %{algorithm: coerce_atom(comp)})
+
+      :error ->
+        opts
+    end
+  end
+
+  defp coerce_compression_map(map) do
+    map
+    |> atomise_map()
+    |> Map.new(fn
+      {:algorithm, v} -> {:algorithm, coerce_atom(v)}
+      {:level, v} -> {:level, coerce_integer(v)}
+      {:min_size, v} -> {:min_size, coerce_integer(v)}
+      other -> other
+    end)
+  end
+
+  defp coerce_tiering(acc, {"initial_tier", v}), do: Map.put(acc, :initial_tier, coerce_atom(v))
+
+  defp coerce_tiering(acc, {"promotion_threshold", v}),
+    do: Map.put(acc, :promotion_threshold, coerce_integer(v))
+
+  defp coerce_tiering(acc, {"demotion_delay", v}),
+    do: Map.put(acc, :demotion_delay, coerce_integer(v))
+
+  defp coerce_caching(acc, {"transformed_chunks", v}),
+    do: Map.put(acc, :transformed_chunks, coerce_boolean(v))
+
+  defp coerce_caching(acc, {"reconstructed_stripes", v}),
+    do: Map.put(acc, :reconstructed_stripes, coerce_boolean(v))
+
+  defp coerce_caching(acc, {"remote_chunks", v}),
+    do: Map.put(acc, :remote_chunks, coerce_boolean(v))
+
+  defp coerce_verification(acc, {"on_read", v}), do: Map.put(acc, :on_read, coerce_atom(v))
+
+  defp coerce_verification(acc, {"sampling_rate", v}),
+    do: Map.put(acc, :sampling_rate, coerce_float(v))
+
+  defp coerce_verification(acc, {"scrub_interval", v}),
+    do: Map.put(acc, :scrub_interval, coerce_integer(v))
+
+  defp coerce_metadata_consistency(acc, {"metadata_replicas", v}),
+    do: Map.put(acc, :replicas, coerce_integer(v))
+
+  defp coerce_metadata_consistency(acc, {"read_quorum", v}),
+    do: Map.put(acc, :read_quorum, coerce_integer(v))
+
+  defp coerce_metadata_consistency(acc, {"write_quorum", v}),
+    do: Map.put(acc, :write_quorum, coerce_integer(v))
+
+  defp coerce_atom(v) when is_atom(v), do: v
+  defp coerce_atom(v) when is_binary(v), do: String.to_existing_atom(v)
+
+  defp coerce_integer(v) when is_integer(v), do: v
+  defp coerce_integer(v) when is_binary(v), do: String.to_integer(v)
+
+  defp coerce_float(v) when is_float(v), do: v
+  defp coerce_float(v) when is_integer(v), do: v / 1
+  defp coerce_float(v) when is_binary(v), do: String.to_float(v)
+
+  defp coerce_boolean(v) when is_boolean(v), do: v
+  defp coerce_boolean("true"), do: true
+  defp coerce_boolean("false"), do: false
+
+  defp atomise_map(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {coerce_atom(k), v} end)
+  end
 
   defp rebuild_quorum_ring_on_all_nodes do
     NeonFS.Core.Supervisor.rebuild_quorum_ring()

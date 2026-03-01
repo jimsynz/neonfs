@@ -224,7 +224,11 @@ defmodule NeonFS.Core.JobTracker do
       try do
         job.type.on_cancel(job)
       rescue
-        error -> Logger.warning("on_cancel hook failed for #{job_id}: #{inspect(error)}")
+        error ->
+          Logger.warning("on_cancel hook failed",
+            job_id: job_id,
+            error: inspect(error)
+          )
       end
     end
   end
@@ -321,7 +325,7 @@ defmodule NeonFS.Core.JobTracker do
 
             persist_job(failed)
             emit_telemetry(:failed, failed)
-            Logger.warning("Job #{job_id} task crashed: #{inspect(reason)}")
+            Logger.warning("Job task crashed", job_id: job_id, reason: inspect(reason))
 
           _ ->
             :ok
@@ -365,10 +369,10 @@ defmodule NeonFS.Core.JobTracker do
           :dets.to_ets(dets_ref, @ets_table)
           count = :ets.info(@ets_table, :size)
           :dets.close(dets_ref)
-          Logger.info("JobTracker restored #{count} job(s) from DETS")
+          Logger.info("JobTracker restored jobs from DETS", count: count)
 
         {:error, reason} ->
-          Logger.error("JobTracker failed to restore from DETS: #{inspect(reason)}")
+          Logger.error("JobTracker failed to restore from DETS", reason: inspect(reason))
       end
     end
 
@@ -380,7 +384,7 @@ defmodule NeonFS.Core.JobTracker do
     |> :ets.tab2list()
     |> Enum.filter(fn {_id, job} -> job.status in [:running, :pending] end)
     |> Enum.reduce(state, fn {_id, job}, acc ->
-      Logger.info("Resuming job #{job.id} (#{job.type.label()})")
+      Logger.info("Resuming job", job_id: job.id, job_label: job.type.label())
       spawn_step_loop(acc, job)
     end)
   end

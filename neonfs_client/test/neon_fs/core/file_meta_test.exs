@@ -21,6 +21,13 @@ defmodule NeonFS.Core.FileMetaTest do
       assert %DateTime{} = meta.created_at
       assert %DateTime{} = meta.modified_at
       assert %DateTime{} = meta.accessed_at
+      assert %DateTime{} = meta.changed_at
+    end
+
+    test "sets changed_at equal to created_at" do
+      meta = FileMeta.new("vol1", "/test.txt")
+
+      assert DateTime.compare(meta.changed_at, meta.created_at) == :eq
     end
 
     test "accepts custom options" do
@@ -77,10 +84,30 @@ defmodule NeonFS.Core.FileMetaTest do
 
     test "updates modified_at timestamp" do
       meta = FileMeta.new("vol1", "/test.txt")
-      Process.sleep(1)
       updated = FileMeta.update(meta, size: 100)
 
       assert DateTime.compare(updated.modified_at, meta.modified_at) in [:gt, :eq]
+    end
+
+    test "updates changed_at on mode change" do
+      meta = FileMeta.new("vol1", "/test.txt")
+      updated = FileMeta.update(meta, mode: 0o755)
+
+      assert DateTime.compare(updated.changed_at, meta.changed_at) in [:gt, :eq]
+    end
+
+    test "updates changed_at on uid/gid change" do
+      meta = FileMeta.new("vol1", "/test.txt")
+      updated = FileMeta.update(meta, uid: 1000, gid: 1000)
+
+      assert DateTime.compare(updated.changed_at, meta.changed_at) in [:gt, :eq]
+    end
+
+    test "changed_at is always >= created_at after update" do
+      meta = FileMeta.new("vol1", "/test.txt")
+      updated = FileMeta.update(meta, size: 100)
+
+      assert DateTime.compare(updated.changed_at, updated.created_at) in [:gt, :eq]
     end
 
     test "preserves unchanged fields" do
@@ -96,7 +123,6 @@ defmodule NeonFS.Core.FileMetaTest do
   describe "touch/1" do
     test "updates accessed_at timestamp" do
       meta = FileMeta.new("vol1", "/test.txt")
-      Process.sleep(1)
       touched = FileMeta.touch(meta)
 
       assert DateTime.compare(touched.accessed_at, meta.accessed_at) in [:gt, :eq]
@@ -107,6 +133,13 @@ defmodule NeonFS.Core.FileMetaTest do
       touched = FileMeta.touch(meta)
 
       assert touched.version == meta.version
+    end
+
+    test "does not update changed_at" do
+      meta = FileMeta.new("vol1", "/test.txt")
+      touched = FileMeta.touch(meta)
+
+      assert DateTime.compare(touched.changed_at, meta.changed_at) == :eq
     end
   end
 

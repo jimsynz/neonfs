@@ -105,6 +105,11 @@ defmodule NeonFS.Transport.ConnPoolTest do
     test "initialises all connections eagerly", ctx do
       pool_size = 3
 
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       {:ok, pool} =
         ConnPool.start_link(
           peer: {~c"localhost", ctx.port},
@@ -112,8 +117,10 @@ defmodule NeonFS.Transport.ConnPoolTest do
           pool_size: pool_size
         )
 
-      # Give time for async connection establishment
-      Process.sleep(500)
+      # Wait for all async TLS connections to establish
+      for _ <- 1..pool_size do
+        assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
+      end
 
       # Verify by successfully executing pool_size concurrent checkouts
       tasks =
@@ -204,6 +211,11 @@ defmodule NeonFS.Transport.ConnPoolTest do
       spawn_link(fn -> silent_accept_loop(slow_listen) end)
       on_exit(fn -> :ssl.close(slow_listen) end)
 
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       {:ok, pool} =
         ConnPool.start_link(
           peer: {~c"localhost", slow_port},
@@ -211,8 +223,8 @@ defmodule NeonFS.Transport.ConnPoolTest do
           pool_size: 1
         )
 
-      # Give time for async connection establishment
-      Process.sleep(200)
+      # Wait for async TLS connection to establish
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       # Short recv timeout — server never responds, so recv should timeout
       assert_raise MatchError, fn ->
@@ -229,6 +241,11 @@ defmodule NeonFS.Transport.ConnPoolTest do
       spawn_link(fn -> silent_accept_loop(slow_listen) end)
       on_exit(fn -> :ssl.close(slow_listen) end)
 
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       {:ok, pool} =
         ConnPool.start_link(
           peer: {~c"localhost", slow_port},
@@ -236,8 +253,8 @@ defmodule NeonFS.Transport.ConnPoolTest do
           pool_size: 1
         )
 
-      # Give time for connection establishment
-      Process.sleep(200)
+      # Wait for async TLS connection to establish
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       # Hold the only connection with a long-running execute (server never responds)
       slow_task =
@@ -278,22 +295,25 @@ defmodule NeonFS.Transport.ConnPoolTest do
       # The connection was closed server-side after the response was sent.
       # The next checkout will get the dead socket. The send/recv will fail,
       # NimblePool removes the worker and starts a replacement.
-      # We need to retry until the replacement is ready.
+      # Wait for the replacement connection to be established.
+      reconnect_ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
+      # Trigger the dead connection detection by attempting a request
+      try do
+        ConnPool.execute(pool, {:trigger_reconnect, 0})
+      rescue
+        MatchError -> :expected
+      end
+
+      # Wait for pool to reconnect
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^reconnect_ref, _, _},
+                     5_000
+
       message2 = {:request, 2}
-
-      result =
-        Enum.reduce_while(1..10, nil, fn _attempt, _acc ->
-          Process.sleep(200)
-
-          try do
-            response = ConnPool.execute(pool, message2)
-            {:halt, {:ok, response}}
-          rescue
-            MatchError -> {:cont, :retry}
-          end
-        end)
-
-      assert {:ok, ^message2} = result
+      assert ConnPool.execute(pool, message2) == message2
     end
   end
 

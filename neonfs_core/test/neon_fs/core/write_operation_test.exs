@@ -14,6 +14,8 @@ defmodule NeonFS.Core.WriteOperationTest do
     WriteOperation
   }
 
+  alias NeonFS.Error.VolumeNotFound
+
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
@@ -157,7 +159,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = "Test data"
       fake_volume_id = UUIDv7.generate()
 
-      assert {:error, :volume_not_found} =
+      assert {:error, %VolumeNotFound{volume_id: ^fake_volume_id}} =
                WriteOperation.write_file(fake_volume_id, "/test.txt", data)
     end
 
@@ -254,7 +256,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       fake_volume_id = UUIDv7.generate()
       data = "Test data"
 
-      {:error, :volume_not_found} =
+      {:error, %VolumeNotFound{}} =
         WriteOperation.write_file(fake_volume_id, "/fail.txt", data)
 
       events = Process.get(:telemetry_events, []) |> Enum.reverse()
@@ -266,7 +268,7 @@ defmodule NeonFS.Core.WriteOperationTest do
         Enum.find(events, &(&1.event == [:neonfs, :write_operation, :exception]))
 
       assert exception_event
-      assert exception_event.metadata.error == :volume_not_found
+      assert %VolumeNotFound{} = exception_event.metadata.error
       assert is_integer(exception_event.measurements.duration)
     end
   end

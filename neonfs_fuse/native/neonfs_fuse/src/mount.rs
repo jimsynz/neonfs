@@ -57,23 +57,40 @@ impl MountSession {
         let server_arc = Arc::new(Mutex::new(server));
 
         // Convert mount options to fuser format
-        let mut fuser_options = vec![
+        // AllowOther/AllowRoot are now handled via SessionACL in Config
+        let mut mount_options = vec![
             fuser::MountOption::FSName("neonfs".to_string()),
             fuser::MountOption::RO, // Read-only for now (write ops in task 0013)
         ];
 
+        let mut acl = fuser::SessionACL::Owner;
+
+        let mut auto_unmount = false;
+
         for opt in options {
             match opt.as_str() {
-                "auto_unmount" => fuser_options.push(fuser::MountOption::AutoUnmount),
-                "allow_other" => fuser_options.push(fuser::MountOption::AllowOther),
-                "allow_root" => fuser_options.push(fuser::MountOption::AllowRoot),
-                "ro" => fuser_options.push(fuser::MountOption::RO),
+                "auto_unmount" => {
+                    mount_options.push(fuser::MountOption::AutoUnmount);
+                    auto_unmount = true;
+                }
+                "allow_other" => acl = fuser::SessionACL::All,
+                "allow_root" => acl = fuser::SessionACL::RootAndOwner,
+                "ro" => mount_options.push(fuser::MountOption::RO),
                 "rw" => {} // Skip RW for now, handled in task 0013
                 _ => {
                     log::warn!("Ignoring unknown mount option: {}", opt);
                 }
             }
         }
+
+        // fuser 0.17 requires acl != Owner when auto_unmount is enabled
+        if auto_unmount && matches!(acl, fuser::SessionACL::Owner) {
+            acl = fuser::SessionACL::RootAndOwner;
+        }
+
+        let mut config = fuser::Config::default();
+        config.mount_options = mount_options;
+        config.acl = acl;
 
         // Create a new FuseServer for the filesystem
         // This is a design trade-off: each mount needs its own communication channel
@@ -85,16 +102,15 @@ impl MountSession {
         // Use spawn_mount2 which handles threading internally
         // This is more reliable in container environments than manual thread spawning
         log::warn!(
-            "Calling fuser::spawn_mount2 for {:?} with options: {:?}",
+            "Calling fuser::spawn_mount2 for {:?} with config: {:?}",
             mount_point,
-            fuser_options
+            config
         );
 
-        let background_session =
-            fuser::spawn_mount2(fs, &mount_point, &fuser_options).map_err(|e| {
-                log::error!("fuser::spawn_mount2 FAILED for {:?}: {}", mount_point, e);
-                FuseError::Io(e)
-            })?;
+        let background_session = fuser::spawn_mount2(fs, &mount_point, &config).map_err(|e| {
+            log::error!("fuser::spawn_mount2 FAILED for {:?}: {}", mount_point, e);
+            FuseError::Io(e)
+        })?;
 
         log::warn!("FUSE mount successful for {:?}", mount_point);
 

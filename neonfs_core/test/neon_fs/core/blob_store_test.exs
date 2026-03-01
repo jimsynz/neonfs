@@ -4,11 +4,10 @@ defmodule NeonFS.Core.BlobStoreTest do
   alias NeonFS.Core.Blob.Native
   alias NeonFS.Core.BlobStore
 
-  @tmp_dir_prefix "blob_store_test_"
+  @moduletag :tmp_dir
 
-  setup do
+  setup %{tmp_dir: tmp_dir} do
     # Create a unique temporary directory for each test
-    tmp_dir = Path.join(System.tmp_dir!(), @tmp_dir_prefix <> random_string())
     File.mkdir_p!(tmp_dir)
 
     drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 100_000_000}]
@@ -247,10 +246,10 @@ defmodule NeonFS.Core.BlobStoreTest do
   end
 
   describe "multi-drive scenarios" do
-    setup do
+    setup %{tmp_dir: tmp_dir} do
       # Create two separate drive directories
-      drive1_dir = Path.join(System.tmp_dir!(), "multi_drive_test_1_" <> random_string())
-      drive2_dir = Path.join(System.tmp_dir!(), "multi_drive_test_2_" <> random_string())
+      drive1_dir = Path.join(tmp_dir, "multi_drive_test_1")
+      drive2_dir = Path.join(tmp_dir, "multi_drive_test_2")
       File.mkdir_p!(drive1_dir)
       File.mkdir_p!(drive2_dir)
 
@@ -563,15 +562,13 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert drives == %{}
     end
 
-    test "blob store starts and registers name" do
+    test "blob store starts and registers name", %{tmp_dir: tmp_dir} do
       unique_id = System.unique_integer([:positive, :monotonic])
-      tmp_dir = Path.join(System.tmp_dir!(), "blob_store_sup_test_#{unique_id}")
-      File.mkdir_p!(tmp_dir)
+      store_dir = Path.join(tmp_dir, "blob_store_sup_test_#{unique_id}")
+      File.mkdir_p!(store_dir)
       name = :"test_blob_store_#{unique_id}"
 
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
-
-      drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 0}]
+      drives = [%{id: "default", path: store_dir, tier: :hot, capacity: 0}]
 
       {:ok, pid} =
         start_supervised(
@@ -583,15 +580,13 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert Process.whereis(name) == pid
     end
 
-    test "blob store restarts on crash when supervised" do
+    test "blob store restarts on crash when supervised", %{tmp_dir: tmp_dir} do
       unique_id = System.unique_integer([:positive, :monotonic])
-      tmp_dir = Path.join(System.tmp_dir!(), "blob_store_restart_test_#{unique_id}")
-      File.mkdir_p!(tmp_dir)
+      store_dir = Path.join(tmp_dir, "blob_store_restart_test_#{unique_id}")
+      File.mkdir_p!(store_dir)
       name = :"restart_test_blob_store_#{unique_id}"
 
-      on_exit(fn -> File.rm_rf!(tmp_dir) end)
-
-      drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 0}]
+      drives = [%{id: "default", path: store_dir, tier: :hot, capacity: 0}]
 
       {:ok, original_pid} =
         start_supervised(
@@ -602,27 +597,42 @@ defmodule NeonFS.Core.BlobStoreTest do
 
       assert original_pid != nil
 
-      # Kill the process
+      # Monitor and kill the process
+      ref = Process.monitor(original_pid)
       Process.exit(original_pid, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^original_pid, :killed}, 1_000
 
-      # Wait a bit for supervisor to restart it
-      Process.sleep(100)
-
-      # Should have a new PID
-      new_pid = Process.whereis(name)
-      assert new_pid != nil
+      # Wait for supervisor to restart it with a new PID
+      new_pid = wait_for_registered(name, 1_000)
       assert new_pid != original_pid
     end
   end
 
   ## Helper Functions
 
-  defp random_string do
-    :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
-  end
-
   defp test_server do
     :"blob_store_#{inspect(self())}"
+  end
+
+  defp wait_for_registered(name, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    wait_for_registered_loop(name, deadline)
+  end
+
+  defp wait_for_registered_loop(name, deadline) do
+    case Process.whereis(name) do
+      nil ->
+        if System.monotonic_time(:millisecond) > deadline do
+          flunk("Timed out waiting for #{inspect(name)} to be registered")
+        end
+
+        Process.sleep(1)
+        wait_for_registered_loop(name, deadline)
+
+      pid ->
+        pid
+    end
   end
 
   defp telemetry_listen(event_prefix) do

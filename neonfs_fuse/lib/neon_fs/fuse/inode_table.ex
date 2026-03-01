@@ -150,7 +150,7 @@ defmodule NeonFS.FUSE.InodeTable do
     # Track next available inode (start at 2, since 1 is root)
     :ets.insert(:inode_to_path, {@next_inode_key, @root_inode + 1})
 
-    Logger.info("InodeTable started with root inode #{@root_inode}")
+    Logger.info("InodeTable started", root_inode: @root_inode)
 
     {:ok, %{}}
   end

@@ -132,15 +132,22 @@ defmodule NeonFS.Core.DriveConfig do
     case Native.filesystem_info(path) do
       {:ok, {total_bytes, _available, _used}} when capacity > total_bytes ->
         Logger.warning(
-          "Drive #{id}: configured capacity (#{format_bytes(capacity)}) exceeds " <>
-            "partition total (#{format_bytes(total_bytes)}) at #{path}"
+          "Drive configured capacity exceeds partition total",
+          drive_id: id,
+          configured_capacity: format_bytes(capacity),
+          partition_total: format_bytes(total_bytes),
+          path: path
         )
 
       {:ok, _info} ->
         :ok
 
       {:error, reason} ->
-        Logger.debug("Drive #{id}: could not query filesystem at #{path}: #{reason}")
+        Logger.debug("Could not query filesystem for drive",
+          drive_id: id,
+          path: path,
+          reason: reason
+        )
     end
   end
 

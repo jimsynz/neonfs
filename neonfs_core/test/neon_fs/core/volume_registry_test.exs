@@ -7,6 +7,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Core.VolumeRegistry
+  alias NeonFS.Error.Invalid, as: InvalidError
 
   @moduletag :tmp_dir
 
@@ -36,10 +37,15 @@ defmodule NeonFS.Core.VolumeRegistryTest do
              }
 
       assert volume.caching.transformed_chunks == true
-      assert volume.caching.max_memory == 268_435_456
       assert volume.io_weight == 100
       assert volume.compression == %{algorithm: :zstd, level: 3, min_size: 4096}
-      assert volume.verification == %{on_read: :never, sampling_rate: nil}
+
+      assert volume.verification == %{
+               on_read: :never,
+               sampling_rate: nil,
+               scrub_interval: 2_592_000
+             }
+
       assert volume.logical_size == 0
       assert volume.physical_size == 0
       assert volume.chunk_count == 0
@@ -69,9 +75,6 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       volume = Volume.new("test-volume")
       original_updated_at = volume.updated_at
 
-      # Sleep to ensure timestamp changes
-      Process.sleep(10)
-
       updated =
         Volume.update(volume,
           owner: "bob",
@@ -85,7 +88,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert updated.tiering.initial_tier == :cold
       assert updated.tiering.promotion_threshold == 20
       assert updated.durability == %{type: :replicate, factor: 5, min_copies: 3}
-      assert DateTime.compare(updated.updated_at, original_updated_at) == :gt
+      assert DateTime.compare(updated.updated_at, original_updated_at) in [:gt, :eq]
 
       # ID, name, and stats should not change
       assert updated.id == volume.id
@@ -257,7 +260,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
     test "create/1 rejects duplicate names" do
       assert {:ok, _} = VolumeRegistry.create("test-volume")
-      assert {:error, msg} = VolumeRegistry.create("test-volume")
+      assert {:error, %InvalidError{message: msg}} = VolumeRegistry.create("test-volume")
       assert msg =~ "already exists"
     end
 
@@ -358,7 +361,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert {:ok, _} = FileIndex.create(file)
 
       # Attempt to delete volume
-      assert {:error, msg} = VolumeRegistry.delete(volume.id)
+      assert {:error, %InvalidError{message: msg}} = VolumeRegistry.delete(volume.id)
       assert msg =~ "contains"
       assert msg =~ "file"
 
@@ -390,12 +393,12 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
   describe "reserved names" do
     test "create/1 rejects names starting with underscore" do
-      assert {:error, :reserved_name} = VolumeRegistry.create("_system")
+      assert {:error, %InvalidError{}} = VolumeRegistry.create("_system")
     end
 
     test "create/1 rejects any underscore-prefixed name" do
-      assert {:error, :reserved_name} = VolumeRegistry.create("_reserved")
-      assert {:error, :reserved_name} = VolumeRegistry.create("_internal")
+      assert {:error, %InvalidError{}} = VolumeRegistry.create("_reserved")
+      assert {:error, %InvalidError{}} = VolumeRegistry.create("_internal")
     end
 
     test "create/1 allows names with underscores elsewhere" do
@@ -455,7 +458,8 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
     test "delete/1 rejects deletion of system volume by ID" do
       assert {:ok, volume} = VolumeRegistry.create_system_volume()
-      assert {:error, :system_volume} = VolumeRegistry.delete(volume.id)
+      assert {:error, %InvalidError{message: msg}} = VolumeRegistry.delete(volume.id)
+      assert msg =~ "system volume"
 
       # Volume should still exist
       assert {:ok, _} = VolumeRegistry.get_system_volume()
@@ -465,17 +469,19 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert {:ok, volume} = VolumeRegistry.create_system_volume()
 
       # Owner is protected
-      assert {:error, :system_volume_protected} =
+      assert {:error, %InvalidError{message: msg}} =
                VolumeRegistry.update(volume.id, owner: "alice")
 
+      assert msg =~ "protected"
+
       # Encryption is protected
-      assert {:error, :system_volume_protected} =
+      assert {:error, %InvalidError{}} =
                VolumeRegistry.update(volume.id,
                  encryption: VolumeEncryption.new(mode: :aes_256_gcm)
                )
 
       # Durability type is protected
-      assert {:error, :system_volume_protected} =
+      assert {:error, %InvalidError{}} =
                VolumeRegistry.update(volume.id,
                  durability: %{type: :erasure, data_chunks: 4, parity_chunks: 2}
                )

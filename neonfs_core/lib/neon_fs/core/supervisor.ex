@@ -27,7 +27,8 @@ defmodule NeonFS.Core.Supervisor do
 
   require Logger
 
-  alias NeonFS.Core.{AntiEntropy, MetadataRing, ServiceRegistry}
+  alias NeonFS.Cluster.{Formation, State}
+  alias NeonFS.Core.{AntiEntropy, MetadataRing, MetricsSupervisor, ServiceRegistry}
 
   def start_link(init_arg) do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
@@ -86,7 +87,7 @@ defmodule NeonFS.Core.Supervisor do
     end
 
     ring = Keyword.fetch!(quorum_opts, :ring)
-    Logger.info("Rebuilt quorum ring with #{MapSet.size(ring.node_set)} nodes")
+    Logger.info("Rebuilt quorum ring", node_count: MapSet.size(ring.node_set))
 
     sync_after_ring_change(old_quorum_opts, ring)
 
@@ -108,7 +109,9 @@ defmodule NeonFS.Core.Supervisor do
         |> MetadataRing.segments()
         |> Enum.filter(fn {_seg_id, replicas} -> Node.self() in replicas end)
 
-      Logger.info("Ring membership changed, syncing #{length(local_segments)} segments")
+      Logger.info("Ring membership changed, syncing segments",
+        segment_count: length(local_segments)
+      )
 
       Enum.each(local_segments, fn {segment_id, _replicas} ->
         AntiEntropy.sync_segment(segment_id, ring: new_ring)
@@ -127,11 +130,21 @@ defmodule NeonFS.Core.Supervisor do
     ra_config = Application.get_env(:neonfs_core, :enable_ra, false)
     enable_ra = node_named and ra_config
 
-    # Build quorum opts for metadata indexes
+    # Build quorum opts for metadata indexes and set persistent_term BEFORE
+    # children start. Children read from persistent_term at runtime; the opts
+    # are NOT baked into child specs, so crash-restart won't revert the ring
+    # to a stale value from supervisor boot time.
     quorum_opts = build_quorum_opts()
 
-    Logger.info(
-      "Building children: node=#{inspect(Node.self())}, node_named=#{node_named}, ra_config=#{ra_config}, enable_ra=#{enable_ra}"
+    for module <- [NeonFS.Core.ChunkIndex, NeonFS.Core.FileIndex, NeonFS.Core.StripeIndex] do
+      :persistent_term.put({module, :quorum_opts}, quorum_opts)
+    end
+
+    Logger.info("Building children",
+      node: Node.self(),
+      node_named: node_named,
+      ra_config: ra_config,
+      enable_ra: enable_ra
     )
 
     # Per-drive power management state machines
@@ -160,7 +173,14 @@ defmodule NeonFS.Core.Supervisor do
         {DynamicSupervisor, name: NeonFS.Core.DriveStateSupervisor, strategy: :one_for_one},
 
         # DriveManager orchestrates runtime drive add/remove
-        NeonFS.Core.DriveManager
+        NeonFS.Core.DriveManager,
+
+        # Registry for I/O drive worker process naming (must start before IO.Supervisor)
+        {Registry, keys: :unique, name: NeonFS.IO.WorkerRegistry},
+
+        # I/O scheduler supervision tree — producer, priority adjuster, drive workers
+        # Must start after DriveRegistry so it can query drives on init
+        NeonFS.IO.Supervisor
       ] ++
         [
           # MetadataStore wraps BlobStore metadata namespace with ETS caching and HLC timestamps
@@ -202,13 +222,13 @@ defmodule NeonFS.Core.Supervisor do
           NeonFS.Core.ResolvedLookupCache,
 
           # ChunkIndex depends on MetadataStore (quorum-backed)
-          {NeonFS.Core.ChunkIndex, quorum_opts: quorum_opts},
+          NeonFS.Core.ChunkIndex,
 
           # FileIndex depends on ChunkIndex (quorum-backed)
-          {NeonFS.Core.FileIndex, quorum_opts: quorum_opts},
+          NeonFS.Core.FileIndex,
 
           # StripeIndex for erasure-coded stripe metadata (quorum-backed)
-          {NeonFS.Core.StripeIndex, quorum_opts: quorum_opts},
+          NeonFS.Core.StripeIndex,
 
           # StorageMetrics tracks per-drive usage via telemetry
           NeonFS.Core.StorageMetrics,
@@ -241,18 +261,27 @@ defmodule NeonFS.Core.Supervisor do
           # TieringManager evaluates chunks for promotion/demotion
           NeonFS.Core.TieringManager,
 
+          # GCScheduler creates periodic GC jobs and triggers on storage pressure
+          {NeonFS.Core.GCScheduler, gc_scheduler_opts()},
+
+          # ScrubScheduler creates periodic scrub jobs per volume
+          {NeonFS.Core.ScrubScheduler, scrub_scheduler_opts()},
+
           # AntiEntropy periodically syncs metadata segments via Merkle tree comparison
           NeonFS.Core.AntiEntropy,
 
           # Retention prunes old audit log files from the system volume
-          NeonFS.Core.SystemVolume.Retention,
-
-          # ReadySignal MUST be the last child — it joins :pg group {:node, :ready}
+          NeonFS.Core.SystemVolume.Retention
+        ] ++
+        maybe_metrics_child() ++
+        [
+          # ReadySignal MUST be the last regular child — it joins :pg group {:node, :ready}
           # to signal that all preceding children have started successfully.
           # Integration tests use :pg.monitor/2 on this group for event-driven
           # readiness detection instead of polling.
           NeonFS.Core.ReadySignal
-        ]
+        ] ++
+        maybe_formation_child()
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation
     if enable_ra do
@@ -297,7 +326,7 @@ defmodule NeonFS.Core.Supervisor do
           # Unjoined nodes may have MetadataStore running (from app start)
           # but lack cluster data, which would cause quorum read failures.
           is_cluster_member =
-            :erpc.call(node, NeonFS.Cluster.State, :exists?, [], 2_000)
+            :erpc.call(node, State, :exists?, [], 2_000)
 
           has_metadata_store and is_cluster_member
         catch
@@ -306,6 +335,54 @@ defmodule NeonFS.Core.Supervisor do
       end)
 
     [Node.self() | other_core]
+  end
+
+  defp gc_scheduler_opts do
+    [
+      interval_ms: Application.get_env(:neonfs_core, :gc_interval_ms, 86_400_000),
+      pressure_threshold: Application.get_env(:neonfs_core, :gc_pressure_threshold, 0.85),
+      pressure_check_interval_ms:
+        Application.get_env(:neonfs_core, :gc_pressure_check_interval_ms, 300_000)
+    ]
+  end
+
+  defp scrub_scheduler_opts do
+    [
+      check_interval_ms: Application.get_env(:neonfs_core, :scrub_check_interval_ms, 3_600_000)
+    ]
+  end
+
+  defp maybe_formation_child do
+    if Application.get_env(:neonfs_core, :auto_bootstrap, false) and
+         not State.exists?() do
+      [
+        %{
+          id: Formation,
+          start:
+            {Formation, :start_link,
+             [
+               [
+                 cluster_name: Application.fetch_env!(:neonfs_core, :cluster_name),
+                 bootstrap_expect: Application.fetch_env!(:neonfs_core, :bootstrap_expect),
+                 bootstrap_peers: Application.fetch_env!(:neonfs_core, :bootstrap_peers),
+                 bootstrap_timeout: Application.get_env(:neonfs_core, :bootstrap_timeout, 300_000)
+               ]
+             ]},
+          restart: :temporary,
+          shutdown: 30_000
+        }
+      ]
+    else
+      []
+    end
+  end
+
+  defp maybe_metrics_child do
+    if MetricsSupervisor.enabled?() do
+      [MetricsSupervisor]
+    else
+      []
+    end
   end
 
   defp default_drives do

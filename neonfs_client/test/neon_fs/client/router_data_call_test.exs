@@ -97,9 +97,15 @@ defmodule NeonFS.Client.RouterDataCallTest do
 
   describe "data_call/4 with :put_chunk" do
     test "builds correct message and returns :ok on success", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(:put_peer@host, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       assert :ok =
                Router.data_call(:put_peer@host, :put_chunk,
@@ -114,9 +120,15 @@ defmodule NeonFS.Client.RouterDataCallTest do
 
   describe "data_call/4 with :get_chunk" do
     test "returns {:ok, chunk_bytes} on success", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(:get_peer@host, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       assert {:ok, "chunk_data_here"} =
                Router.data_call(:get_peer@host, :get_chunk,
@@ -128,9 +140,15 @@ defmodule NeonFS.Client.RouterDataCallTest do
 
   describe "data_call/4 with :has_chunk" do
     test "returns {:ok, %{tier: tier, size: size}} on success", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(:has_peer@host, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       assert {:ok, %{tier: :hot, size: 1024}} =
                Router.data_call(:has_peer@host, :has_chunk, hash: "sha256:ghi")
@@ -139,9 +157,15 @@ defmodule NeonFS.Client.RouterDataCallTest do
 
   describe "data_call/4 error responses" do
     test "returns {:error, reason} when remote returns error", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(:err_peer@host, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       # get_chunk with hash starting with "notfound:" triggers :not_found in our echo server
       assert {:error, :not_found} =
@@ -152,9 +176,15 @@ defmodule NeonFS.Client.RouterDataCallTest do
     end
 
     test "returns {:error, :ref_mismatch} when response ref doesn't match", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(:mismatch_peer@host, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       # get_chunk with hash starting with "badref:" triggers a wrong ref response
       assert {:error, :ref_mismatch} =

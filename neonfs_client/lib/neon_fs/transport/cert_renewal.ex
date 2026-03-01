@@ -8,6 +8,20 @@ defmodule NeonFS.Transport.CertRenewal do
   `NeonFS.Client.Router.call/4`, and writes the new credentials locally.
 
   On failure, retries with exponential backoff (1h, 2h, 4h, max 24h).
+
+  ## Telemetry Events
+
+    * `[:neonfs, :cert_renewal, :check]` — expiry check performed
+      - Measurements: `%{days_remaining: integer()}`
+      - Metadata: `%{action: :not_due | :renewal_triggered | :no_cert}`
+
+    * `[:neonfs, :cert_renewal, :success]` — certificate renewed and written
+      - Measurements: `%{}`
+      - Metadata: `%{old_serial: integer(), new_serial: integer()}`
+
+    * `[:neonfs, :cert_renewal, :failure]` — renewal attempt failed
+      - Measurements: `%{}`
+      - Metadata: `%{reason: term(), attempt: integer()}`
   """
 
   use GenServer
@@ -75,9 +89,10 @@ defmodule NeonFS.Transport.CertRenewal do
         failures = state.consecutive_failures + 1
         backoff = calculate_backoff(failures)
 
-        Logger.warning(
-          "Certificate renewal failed (attempt #{failures}): #{inspect(reason)}. " <>
-            "Retrying in #{div(backoff, 60_000)} minutes"
+        Logger.warning("Certificate renewal failed",
+          attempt: failures,
+          reason: inspect(reason),
+          retry_minutes: div(backoff, 60_000)
         )
 
         schedule_check(backoff)
@@ -103,6 +118,13 @@ defmodule NeonFS.Transport.CertRenewal do
     case TLS.read_local_cert() do
       {:error, :not_found} ->
         Logger.debug("No local certificate found, skipping renewal check")
+
+        :telemetry.execute(
+          [:neonfs, :cert_renewal, :check],
+          %{days_remaining: -1},
+          %{action: :no_cert}
+        )
+
         :no_cert
 
       {:ok, cert} ->
@@ -110,14 +132,26 @@ defmodule NeonFS.Transport.CertRenewal do
         threshold = TLS.renewal_threshold_days()
 
         if days_remaining <= threshold do
-          Logger.info(
-            "Certificate expires in #{days_remaining} days " <>
-              "(threshold: #{threshold}), initiating renewal"
+          Logger.info("Certificate expiring, initiating renewal",
+            days_remaining: days_remaining,
+            threshold: threshold
+          )
+
+          :telemetry.execute(
+            [:neonfs, :cert_renewal, :check],
+            %{days_remaining: days_remaining},
+            %{action: :renewal_triggered}
           )
 
           do_renew(cert, state)
         else
-          Logger.debug("Certificate expires in #{days_remaining} days, no renewal needed")
+          Logger.debug("Certificate not due for renewal", days_remaining: days_remaining)
+
+          :telemetry.execute(
+            [:neonfs, :cert_renewal, :check],
+            %{days_remaining: days_remaining},
+            %{action: :not_due}
+          )
 
           :not_due
         end
@@ -137,14 +171,26 @@ defmodule NeonFS.Transport.CertRenewal do
         old_info = TLS.certificate_info(old_cert)
         new_info = TLS.certificate_info(node_cert)
 
-        Logger.info(
-          "Certificate renewed successfully. " <>
-            "Old expiry: #{old_info.not_after}, new expiry: #{new_info.not_after}"
+        Logger.info("Certificate renewed successfully",
+          old_expiry: old_info.not_after,
+          new_expiry: new_info.not_after
+        )
+
+        :telemetry.execute(
+          [:neonfs, :cert_renewal, :success],
+          %{},
+          %{old_serial: old_info.serial, new_serial: new_info.serial}
         )
 
         :ok
 
       {:error, reason} ->
+        :telemetry.execute(
+          [:neonfs, :cert_renewal, :failure],
+          %{},
+          %{reason: reason, attempt: state.consecutive_failures + 1}
+        )
+
         {:error, reason}
     end
   end

@@ -177,4 +177,45 @@ mod tests {
         let parsed: Compression = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, zstd);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn zstd_compress_decompress_round_trip(
+                data in proptest::collection::vec(any::<u8>(), 0..65536),
+                level in 1..=19i32,
+            ) {
+                let compression = Compression::zstd(level);
+                let compressed = compress(&data, &compression).unwrap();
+                let decompressed = decompress(&compressed).unwrap();
+                prop_assert_eq!(decompressed, data);
+            }
+
+            #[test]
+            fn compressed_size_bounded(
+                data in proptest::collection::vec(any::<u8>(), 0..65536),
+            ) {
+                let compression = Compression::zstd(3);
+                let compressed = compress(&data, &compression).unwrap();
+                // Zstd worst-case: original + original/128 + frame overhead (~128 bytes)
+                let max_size = data.len() + data.len() / 8 + 128;
+                prop_assert!(
+                    compressed.len() <= max_size,
+                    "compressed {} bytes to {} bytes, exceeds bound {}",
+                    data.len(), compressed.len(), max_size
+                );
+            }
+
+            #[test]
+            fn none_compression_is_identity(
+                data in proptest::collection::vec(any::<u8>(), 0..65536),
+            ) {
+                let compressed = compress(&data, &Compression::None).unwrap();
+                prop_assert_eq!(compressed, data);
+            }
+        }
+    }
 }

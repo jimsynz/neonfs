@@ -28,4 +28,12 @@ end
 # cannot work from within the BEAM VM (Erlang's SIGCHLD handling breaks
 # fusermount's fork/waitpid). See neonfs_fuse/native/neonfs_fuse/tests/mount_integration.rs
 
-ExUnit.start(capture_log: true)
+# Exclude loopback device tests unless running as root with losetup available
+excludes =
+  if NeonFS.Integration.LoopbackDevice.available?() do
+    []
+  else
+    [:loopback]
+  end
+
+ExUnit.start(capture_log: true, exclude: excludes)

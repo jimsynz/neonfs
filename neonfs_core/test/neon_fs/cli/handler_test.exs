@@ -92,8 +92,9 @@ defmodule NeonFS.CLI.HandlerTest do
         assert is_binary(value) or is_atom(value) or is_number(value)
       end
 
-      # --- Idempotency: second init returns already_initialised ---
-      assert {:error, :already_initialised} = Handler.cluster_init("second-cluster")
+      # --- Idempotency: second init returns structured error ---
+      assert {:error, %NeonFS.Error.Invalid{message: "Cluster already initialised"}} =
+               Handler.cluster_init("second-cluster")
     end
   end
 
@@ -160,7 +161,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns error if cluster not initialized" do
-      assert {:error, :cluster_not_initialized} = Handler.create_invite(3600)
+      assert {:error, %NeonFS.Error.Unavailable{}} = Handler.create_invite(3600)
     end
   end
 
@@ -311,7 +312,8 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns error for non-existent volume" do
-      assert {:error, :not_found} = Handler.get_volume("no-such-vol")
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.get_volume("no-such-vol")
     end
 
     test "returns serializable data", %{volume: vol} do
@@ -335,11 +337,12 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "deletes existing volume", %{volume: vol} do
       assert {:ok, _} = Handler.delete_volume(vol.name)
-      assert {:error, :not_found} = Handler.get_volume(vol.name)
+      assert {:error, %NeonFS.Error.VolumeNotFound{}} = Handler.get_volume(vol.name)
     end
 
     test "returns error for non-existent volume" do
-      assert {:error, :not_found} = Handler.delete_volume("no-such-vol")
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.delete_volume("no-such-vol")
     end
 
     test "returns empty map on success", %{volume: vol} do
@@ -401,43 +404,49 @@ defmodule NeonFS.CLI.HandlerTest do
     test "rejects erasure:0:4 (data_chunks < 1)" do
       vol_name = "bad-vol-#{:rand.uniform(999_999)}"
       config = %{"durability" => "erasure:0:4"}
-      assert {:error, msg} = Handler.create_volume(vol_name, config)
-      assert msg =~ "Invalid durability format"
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :durability}} =
+               Handler.create_volume(vol_name, config)
     end
 
     test "rejects erasure:4:0 (parity_chunks < 1)" do
       vol_name = "bad2-vol-#{:rand.uniform(999_999)}"
       config = %{"durability" => "erasure:4:0"}
-      assert {:error, msg} = Handler.create_volume(vol_name, config)
-      assert msg =~ "Invalid durability format"
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :durability}} =
+               Handler.create_volume(vol_name, config)
     end
 
     test "rejects erasure:abc (malformed)" do
       vol_name = "bad3-vol-#{:rand.uniform(999_999)}"
       config = %{"durability" => "erasure:abc"}
-      assert {:error, msg} = Handler.create_volume(vol_name, config)
-      assert msg =~ "Invalid durability format"
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :durability}} =
+               Handler.create_volume(vol_name, config)
     end
 
     test "rejects replicate:0 (factor < 1)" do
       vol_name = "bad4-vol-#{:rand.uniform(999_999)}"
       config = %{"durability" => "replicate:0"}
-      assert {:error, msg} = Handler.create_volume(vol_name, config)
-      assert msg =~ "Invalid durability format"
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :durability}} =
+               Handler.create_volume(vol_name, config)
     end
 
     test "rejects replicate:abc (non-integer)" do
       vol_name = "bad5-vol-#{:rand.uniform(999_999)}"
       config = %{"durability" => "replicate:abc"}
-      assert {:error, msg} = Handler.create_volume(vol_name, config)
-      assert msg =~ "Invalid durability format"
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :durability}} =
+               Handler.create_volume(vol_name, config)
     end
 
     test "rejects unknown durability format" do
       vol_name = "bad6-vol-#{:rand.uniform(999_999)}"
       config = %{"durability" => "mirror:3"}
-      assert {:error, msg} = Handler.create_volume(vol_name, config)
-      assert msg =~ "Invalid durability format"
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :durability}} =
+               Handler.create_volume(vol_name, config)
     end
 
     test "default durability when no durability specified" do
@@ -555,6 +564,100 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "update_volume/2" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_volume_registry()
+      vol_name = "update-test-vol-#{:rand.uniform(999_999)}"
+      {:ok, vol} = Handler.create_volume(vol_name, %{})
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      {:ok, volume: vol, vol_name: vol_name}
+    end
+
+    test "updates compression on existing volume", %{vol_name: vol_name} do
+      config = %{"compression" => %{"algorithm" => "zstd"}}
+      assert {:ok, updated} = Handler.update_volume(vol_name, config)
+      assert updated.compression.algorithm == :zstd
+    end
+
+    test "updates simple fields", %{vol_name: vol_name} do
+      config = %{"io_weight" => 5, "write_ack" => "all", "atime_mode" => "noatime"}
+      assert {:ok, updated} = Handler.update_volume(vol_name, config)
+      assert updated.io_weight == 5
+      assert updated.write_ack == :all
+      assert updated.atime_mode == :noatime
+    end
+
+    test "updates tiering config", %{vol_name: vol_name} do
+      config = %{"initial_tier" => "warm", "promotion_threshold" => 10}
+      assert {:ok, updated} = Handler.update_volume(vol_name, config)
+      assert updated.tiering.initial_tier == :warm
+      assert updated.tiering.promotion_threshold == 10
+      # Existing demotion_delay should be preserved
+      assert is_integer(updated.tiering.demotion_delay)
+    end
+
+    test "updates verification config", %{vol_name: vol_name} do
+      config = %{"on_read" => "always", "scrub_interval" => 86_400}
+      assert {:ok, updated} = Handler.update_volume(vol_name, config)
+      assert updated.verification.on_read == :always
+      assert updated.verification.scrub_interval == 86_400
+    end
+
+    test "updates caching config", %{vol_name: vol_name} do
+      config = %{"transformed_chunks" => "false", "remote_chunks" => "true"}
+      assert {:ok, updated} = Handler.update_volume(vol_name, config)
+      assert updated.caching.transformed_chunks == false
+      assert updated.caching.remote_chunks == true
+      # Existing reconstructed_stripes should be preserved
+      assert is_boolean(updated.caching.reconstructed_stripes)
+    end
+
+    test "updates metadata consistency config", %{vol_name: vol_name} do
+      config = %{"metadata_replicas" => 5, "read_quorum" => 3, "write_quorum" => 3}
+      assert {:ok, updated} = Handler.update_volume(vol_name, config)
+      assert updated.metadata_consistency.replicas == 5
+      assert updated.metadata_consistency.read_quorum == 3
+      assert updated.metadata_consistency.write_quorum == 3
+    end
+
+    test "rejects update for non-existent volume" do
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.update_volume("no-such-vol", %{"io_weight" => 5})
+    end
+
+    test "rejects attempt to change immutable fields", %{vol_name: vol_name} do
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :immutable} = error} =
+               Handler.update_volume(vol_name, %{"durability" => "replicate:1"})
+
+      assert Exception.message(error) =~ "durability"
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :immutable}} =
+               Handler.update_volume(vol_name, %{"encryption" => "on"})
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :immutable}} =
+               Handler.update_volume(vol_name, %{"name" => "new-name"})
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :immutable}} =
+               Handler.update_volume(vol_name, %{"id" => "new-id"})
+    end
+
+    test "emits telemetry event on success", %{vol_name: vol_name} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cli, :volume_updated]
+        ])
+
+      Handler.update_volume(vol_name, %{"io_weight" => 3})
+
+      assert_received {[:neonfs, :cli, :volume_updated], ^ref, %{}, meta}
+      assert meta.name == vol_name
+      assert "io_weight" in meta.fields
+    end
+  end
+
   describe "handle_ca_info/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
@@ -600,7 +703,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns error before CA init" do
-      assert {:error, :ca_not_initialized} = Handler.handle_ca_info()
+      assert {:error, %NeonFS.Error.Unavailable{}} = Handler.handle_ca_info()
     end
   end
 
@@ -668,7 +771,150 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "revoke returns error for unknown node" do
-      assert {:error, :node_not_found} = Handler.handle_ca_revoke("nonexistent-node")
+      assert {:error, %NeonFS.Error.NotFound{}} = Handler.handle_ca_revoke("nonexistent-node")
+    end
+  end
+
+  describe "handle_worker_status/0" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+
+      start_supervised!({Task.Supervisor, name: NeonFS.Core.BackgroundTaskSupervisor})
+      start_supervised!(NeonFS.Core.BackgroundWorker)
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns worker status map with expected fields" do
+      assert {:ok, status} = Handler.handle_worker_status()
+      assert is_integer(status.max_concurrent)
+      assert is_integer(status.max_per_minute)
+      assert is_integer(status.drive_concurrency)
+      assert is_integer(status.queued)
+      assert is_integer(status.running)
+      assert is_integer(status.completed_total)
+      assert is_map(status.by_priority)
+      assert is_integer(status.by_priority.high)
+      assert is_integer(status.by_priority.normal)
+      assert is_integer(status.by_priority.low)
+    end
+
+    test "returns serializable data" do
+      assert {:ok, status} = Handler.handle_worker_status()
+      assert is_map(status)
+
+      for {_key, value} <- status do
+        assert is_integer(value) or is_map(value)
+      end
+    end
+  end
+
+  describe "handle_worker_configure/1" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+
+      # Write a minimal cluster.json so persistence works
+      meta_dir = Application.get_env(:neonfs_core, :meta_dir)
+      File.mkdir_p!(meta_dir)
+
+      state = %{
+        "cluster_id" => "clust_test",
+        "cluster_name" => "test-cluster",
+        "created_at" => DateTime.to_iso8601(DateTime.utc_now()),
+        "drives" => [],
+        "master_key" => Base.encode64(:crypto.strong_rand_bytes(32)),
+        "this_node" => %{
+          "id" => "node_test",
+          "name" => Atom.to_string(Node.self()),
+          "joined_at" => DateTime.to_iso8601(DateTime.utc_now())
+        },
+        "known_peers" => [],
+        "ra_cluster_members" => [Atom.to_string(Node.self())],
+        "node_type" => "core",
+        "gc" => %{},
+        "scrub" => %{},
+        "worker" => %{}
+      }
+
+      json = :json.format(state) |> IO.iodata_to_binary()
+      File.write!(State.state_file_path(), json)
+
+      start_supervised!({Task.Supervisor, name: NeonFS.Core.BackgroundTaskSupervisor})
+      start_supervised!(NeonFS.Core.BackgroundWorker)
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "updates worker settings" do
+      config = %{"max_concurrent" => 10, "max_per_minute" => 200}
+      assert {:ok, result} = Handler.handle_worker_configure(config)
+      assert result.max_concurrent == 10
+      assert result.max_per_minute == 200
+    end
+
+    test "persists changes to cluster.json" do
+      config = %{"max_concurrent" => 12}
+      assert {:ok, _} = Handler.handle_worker_configure(config)
+
+      assert {:ok, state} = State.load()
+      assert state.worker["max_concurrent"] == 12
+    end
+
+    test "merges with existing worker config" do
+      # Set one field first
+      config1 = %{"max_concurrent" => 8}
+      assert {:ok, _} = Handler.handle_worker_configure(config1)
+
+      # Set a different field
+      config2 = %{"drive_concurrency" => 4}
+      assert {:ok, _} = Handler.handle_worker_configure(config2)
+
+      # Both should be persisted
+      assert {:ok, state} = State.load()
+      assert state.worker["max_concurrent"] == 8
+      assert state.worker["drive_concurrency"] == 4
+    end
+
+    test "rejects negative values" do
+      config = %{"max_concurrent" => -1}
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :max_concurrent} = error} =
+               Handler.handle_worker_configure(config)
+
+      assert Exception.message(error) =~ "positive integer"
+    end
+
+    test "rejects zero values" do
+      config = %{"max_per_minute" => 0}
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :max_per_minute} = error} =
+               Handler.handle_worker_configure(config)
+
+      assert Exception.message(error) =~ "positive integer"
+    end
+
+    test "rejects non-integer values" do
+      config = %{"max_concurrent" => "fast"}
+
+      assert {:error, %NeonFS.Error.InvalidConfig{field: :max_concurrent} = error} =
+               Handler.handle_worker_configure(config)
+
+      assert Exception.message(error) =~ "positive integer"
+    end
+
+    test "rejects empty config" do
+      assert {:error, %NeonFS.Error.InvalidConfig{reason: "no valid settings provided"}} =
+               Handler.handle_worker_configure(%{})
+    end
+
+    test "returns config map with current values" do
+      config = %{"max_concurrent" => 5, "max_per_minute" => 100, "drive_concurrency" => 3}
+      assert {:ok, result} = Handler.handle_worker_configure(config)
+      assert result.max_concurrent == 5
+      assert result.max_per_minute == 100
+      assert result.drive_concurrency == 3
     end
   end
 end

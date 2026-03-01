@@ -61,18 +61,35 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  @doc """
+  Checks whether `accessed_at` is stale under `relatime` rules.
+
+  Returns `true` if:
+  - `accessed_at` is older than `modified_at`, OR
+  - `accessed_at` is more than 24 hours old
+
+  The optional `now` parameter is for testing.
+  """
+  @spec relatime_stale?(DateTime.t(), DateTime.t(), DateTime.t()) :: boolean()
+  def relatime_stale?(accessed_at, modified_at, now \\ DateTime.utc_now()) do
+    DateTime.compare(accessed_at, modified_at) == :lt or
+      DateTime.diff(now, accessed_at, :second) > 86_400
+  end
+
   ## GenServer Callbacks
 
   @impl true
   def init(opts) do
-    fuse_server = Keyword.get(opts, :fuse_server)
     volume = Keyword.get(opts, :volume, @default_volume)
+    Logger.metadata(component: :fuse, volume_id: volume)
+    fuse_server = Keyword.get(opts, :fuse_server)
     uid = Keyword.get(opts, :uid, 0)
     gid = Keyword.get(opts, :gid, 0)
     gids = Keyword.get(opts, :gids, [])
     cache_table = Keyword.get(opts, :cache_table)
+    atime_mode = Keyword.get(opts, :atime_mode, :noatime)
 
-    Logger.info("FUSE Handler started (volume: #{volume})")
+    Logger.info("FUSE Handler started", volume: volume, atime_mode: atime_mode)
 
     {:ok,
      %{
@@ -82,15 +99,20 @@ defmodule NeonFS.FUSE.Handler do
        gid: gid,
        gids: gids,
        cache_table: cache_table,
+       atime_mode: atime_mode,
        test_notify: Keyword.get(opts, :test_notify)
      }}
   end
 
   @impl true
   def handle_info({:fuse_op, request_id, operation}, state) do
-    Logger.debug("Received FUSE operation: #{inspect(operation)}")
+    Logger.metadata(request_id: :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
 
-    reply = handle_operation(operation, state)
+    Logger.debug("Received FUSE operation", operation: inspect(operation))
+
+    {reply, duration} = timed_handle_operation(operation, state)
+
+    emit_fuse_telemetry(operation, reply, duration, state.volume)
 
     if state.fuse_server do
       Native.reply_fuse_operation(state.fuse_server, request_id, reply)
@@ -104,6 +126,31 @@ defmodule NeonFS.FUSE.Handler do
   end
 
   ## Private Helpers
+
+  defp timed_handle_operation(operation, state) do
+    start_time = System.monotonic_time()
+    reply = handle_operation(operation, state)
+    duration = System.monotonic_time() - start_time
+    {reply, duration}
+  end
+
+  defp emit_fuse_telemetry({op_name, _params}, reply, duration, volume) do
+    result = if match?({"error", _}, reply), do: :error, else: :ok
+
+    :telemetry.execute(
+      [:neonfs, :fuse, :request, :stop],
+      %{duration: duration},
+      %{operation: op_name, volume: volume, result: result}
+    )
+  end
+
+  defp emit_cache_telemetry(hit_or_miss, type, volume) do
+    :telemetry.execute(
+      [:neonfs, :fuse, :metadata_cache, hit_or_miss],
+      %{count: 1},
+      %{volume: volume, type: type}
+    )
+  end
 
   # Handle lookup operation: resolve name in parent directory
   defp handle_operation({"lookup", params}, state) do
@@ -120,8 +167,11 @@ defmodule NeonFS.FUSE.Handler do
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
       {:error, reason} ->
-        Logger.warning("Lookup failed: #{inspect(reason)}")
+        Logger.warning("Lookup failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -132,13 +182,24 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          {:ok, file} <- cached_getattr(state.cache_table, volume_id, path) do
-      {"attr_ok", %{"ino" => ino, "size" => file.size, "kind" => file_kind(file.mode)}}
+      {"attr_ok",
+       %{
+         "ino" => ino,
+         "size" => file.size,
+         "kind" => file_kind(file.mode),
+         "mtime" => datetime_to_unix(file.modified_at),
+         "ctime" => datetime_to_unix(file.changed_at),
+         "atime" => datetime_to_unix(file.accessed_at)
+       }}
     else
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
       {:error, reason} ->
-        Logger.warning("Getattr failed: #{inspect(reason)}")
+        Logger.warning("Getattr failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -152,16 +213,23 @@ defmodule NeonFS.FUSE.Handler do
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          :ok <- check_file_permission(volume_id, path, :read, state),
          {:ok, data} <- read_file(volume_id, path, offset: offset, length: size) do
+      maybe_update_atime(volume_id, path, state.atime_mode)
       {"read_ok", %{"data" => data}}
     else
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
       {:error, reason} ->
-        Logger.warning("Read failed: #{inspect(reason)}")
+        Logger.warning("Read failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -182,11 +250,17 @@ defmodule NeonFS.FUSE.Handler do
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
       {:error, reason} ->
-        Logger.warning("Write failed: #{inspect(reason)}")
+        Logger.warning("Write failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -206,7 +280,7 @@ defmodule NeonFS.FUSE.Handler do
       {"readdir_ok", %{"entries" => result_entries}}
     else
       {:error, reason} ->
-        Logger.warning("Readdir failed: #{inspect(reason)}")
+        Logger.warning("Readdir failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:enoent)}}
     end
   end
@@ -215,12 +289,12 @@ defmodule NeonFS.FUSE.Handler do
   defp handle_operation({"create", params}, state) do
     parent = params["parent"]
     name = params["name"]
-    _mode = params["mode"]
+    file_mode = create_mode(params["mode"], @s_ifreg, @default_mode)
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: @default_mode),
+         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: file_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       # Allocate file handle (for now, just use inode as handle)
       fh = inode
@@ -230,8 +304,11 @@ defmodule NeonFS.FUSE.Handler do
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, reason} ->
-        Logger.warning("Create failed: #{inspect(reason)}")
+        Logger.warning("Create failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -240,20 +317,23 @@ defmodule NeonFS.FUSE.Handler do
   defp handle_operation({"mkdir", params}, state) do
     parent = params["parent"]
     name = params["name"]
-    _mode = params["mode"]
+    dir_mode = create_mode(params["mode"], @s_ifdir, @dir_mode)
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: @dir_mode),
+         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: dir_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "directory", "fh" => 0}}
     else
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, reason} ->
-        Logger.warning("Mkdir failed: #{inspect(reason)}")
+        Logger.warning("Mkdir failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -275,14 +355,20 @@ defmodule NeonFS.FUSE.Handler do
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, %{class: :not_found}} ->
         {"error", %{"errno" => errno(:enoent)}}
 
       {:error, :cannot_release_root} ->
         {"error", %{"errno" => errno(:eacces)}}
 
       {:error, reason} ->
-        Logger.warning("Unlink failed: #{inspect(reason)}")
+        Logger.warning("Unlink failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -306,7 +392,13 @@ defmodule NeonFS.FUSE.Handler do
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, %{class: :not_found}} ->
         {"error", %{"errno" => errno(:enoent)}}
 
       {:error, :directory_not_empty} ->
@@ -316,7 +408,7 @@ defmodule NeonFS.FUSE.Handler do
         {"error", %{"errno" => errno(:eacces)}}
 
       {:error, reason} ->
-        Logger.warning("Rmdir failed: #{inspect(reason)}")
+        Logger.warning("Rmdir failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -357,14 +449,20 @@ defmodule NeonFS.FUSE.Handler do
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, %{class: :not_found}} ->
         {"error", %{"errno" => errno(:enoent)}}
 
       {:error, :cannot_release_root} ->
         {"error", %{"errno" => errno(:eacces)}}
 
       {:error, reason} ->
-        Logger.warning("Rename failed: #{inspect(reason)}")
+        Logger.warning("Rename failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
@@ -376,33 +474,39 @@ defmodule NeonFS.FUSE.Handler do
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          {:ok, file} <- file_index_get_by_path(volume_id, path),
          :ok <- check_setattr_permission(file, params, state) do
-      updates = build_setattr_updates(params)
+      result = apply_setattr(file, params)
 
-      case file_index_update(file.id, updates) do
+      case result do
         {:ok, updated_file} ->
           {"attr_ok",
            %{"ino" => ino, "size" => updated_file.size, "kind" => file_kind(updated_file.mode)}}
 
         {:error, reason} ->
-          Logger.warning("Setattr failed: #{inspect(reason)}")
+          Logger.warning("Setattr failed", reason: inspect(reason))
           {"error", %{"errno" => errno(:eio)}}
       end
     else
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
+      {:error, %{class: :forbidden}} ->
+        {"error", %{"errno" => errno(:eacces)}}
+
       {:error, :not_found} ->
         {"error", %{"errno" => errno(:enoent)}}
 
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
       {:error, reason} ->
-        Logger.warning("Setattr failed: #{inspect(reason)}")
+        Logger.warning("Setattr failed", reason: inspect(reason))
         {"error", %{"errno" => errno(:eio)}}
     end
   end
 
   # Handle unknown operations
   defp handle_operation({operation, _params}, _state) do
-    Logger.warning("Unknown FUSE operation: #{operation}")
+    Logger.warning("Unknown FUSE operation", operation: operation)
     {"error", %{"errno" => errno(:enosys)}}
   end
 
@@ -414,9 +518,12 @@ defmodule NeonFS.FUSE.Handler do
   defp cached_lookup(cache_table, volume_id, parent_path, name, child_path) do
     case MetadataCache.get_lookup(cache_table, volume_id, parent_path, name) do
       {:ok, file} ->
+        emit_cache_telemetry(:hit, :lookup, volume_id)
         {:ok, file}
 
       :miss ->
+        emit_cache_telemetry(:miss, :lookup, volume_id)
+
         case file_index_get_by_path(volume_id, child_path) do
           {:ok, file} = result ->
             MetadataCache.put_lookup(cache_table, volume_id, parent_path, name, file)
@@ -437,9 +544,12 @@ defmodule NeonFS.FUSE.Handler do
   defp cached_getattr(cache_table, volume_id, path) do
     case MetadataCache.get_attrs(cache_table, volume_id, path) do
       {:ok, file} ->
+        emit_cache_telemetry(:hit, :attrs, volume_id)
         {:ok, file}
 
       :miss ->
+        emit_cache_telemetry(:miss, :attrs, volume_id)
+
         case fetch_file_or_root(volume_id, path) do
           {:ok, file} = result ->
             MetadataCache.put_attrs(cache_table, volume_id, path, file)
@@ -459,9 +569,11 @@ defmodule NeonFS.FUSE.Handler do
   defp cached_readdir(cache_table, volume_id, path) do
     case MetadataCache.get_dir_listing(cache_table, volume_id, path) do
       {:ok, entries} ->
+        emit_cache_telemetry(:hit, :readdir, volume_id)
         {:ok, entries}
 
       :miss ->
+        emit_cache_telemetry(:miss, :readdir, volume_id)
         {:ok, entries} = list_directory(volume_id, path)
         MetadataCache.put_dir_listing(cache_table, volume_id, path, entries)
         {:ok, entries}
@@ -487,13 +599,18 @@ defmodule NeonFS.FUSE.Handler do
   defp fetch_file_or_root(_volume_id, "/") do
     # Root directory doesn't exist in FileIndex, return synthetic metadata
     # Use @dir_mode which includes S_IFDIR bit
+    now = DateTime.utc_now()
+
     {:ok,
      %{
        path: "/",
        size: 0,
        mode: @dir_mode,
        uid: 0,
-       gid: 0
+       gid: 0,
+       modified_at: now,
+       accessed_at: now,
+       changed_at: now
      }}
   end
 
@@ -553,6 +670,12 @@ defmodule NeonFS.FUSE.Handler do
   # Get the file kind ("directory" or "file") based on mode bits
   defp file_kind(mode), do: if(directory?(mode), do: "directory", else: "file")
 
+  # Build a mode value from the kernel-supplied permission bits.
+  # OR's in the file-type constant (S_IFREG or S_IFDIR). Falls back to the
+  # default mode when the kernel supplies nil.
+  defp create_mode(nil, _type_bits, default), do: default
+  defp create_mode(perm_bits, type_bits, _default), do: type_bits ||| perm_bits
+
   # Build child path from parent path and name
   defp build_child_path(parent, name), do: Path.join(parent, name)
 
@@ -582,27 +705,43 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # Apply setattr, routing to truncate when size is being reduced
+  defp apply_setattr(file, params) do
+    new_size = params["size"]
+
+    if new_size != nil and new_size < file.size do
+      # Size reduction: delegate to FileIndex.truncate which trims chunks/stripes
+      other_updates = build_setattr_updates_without_size(params)
+      file_index_truncate(file.id, new_size, other_updates)
+    else
+      updates = build_setattr_updates(params)
+      file_index_update(file.id, updates)
+    end
+  end
+
   # Build updates list for setattr
   defp build_setattr_updates(params) do
     []
     |> maybe_add_update(:mode, params["mode"])
     |> maybe_add_update(:uid, params["uid"])
     |> maybe_add_update(:gid, params["gid"])
-    |> maybe_add_setattr_size(params["size"])
+    |> maybe_add_update(:size, params["size"])
+    |> maybe_add_setattr_time(:accessed_at, params["atime"])
+    |> maybe_add_setattr_time(:modified_at, params["mtime"])
+  end
+
+  # Build updates list without size (used when routing through truncate)
+  defp build_setattr_updates_without_size(params) do
+    []
+    |> maybe_add_update(:mode, params["mode"])
+    |> maybe_add_update(:uid, params["uid"])
+    |> maybe_add_update(:gid, params["gid"])
     |> maybe_add_setattr_time(:accessed_at, params["atime"])
     |> maybe_add_setattr_time(:modified_at, params["mtime"])
   end
 
   defp maybe_add_update(updates, _key, nil), do: updates
   defp maybe_add_update(updates, key, value), do: [{key, value} | updates]
-
-  defp maybe_add_setattr_size(updates, nil), do: updates
-
-  defp maybe_add_setattr_size(updates, size) do
-    # Size changes require truncation/extension, which is a write operation
-    # For now, we just track it in metadata
-    [{:size, size} | updates]
-  end
 
   defp maybe_add_setattr_time(updates, _key, nil), do: updates
 
@@ -654,6 +793,22 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # Asynchronous atime update for relatime mode.
+  # Fires off a background process so reads are never blocked by atime writes.
+  defp maybe_update_atime(_volume_id, _path, :noatime), do: :ok
+
+  defp maybe_update_atime(volume_id, path, :relatime) do
+    spawn(fn ->
+      with {:ok, file} <-
+             NeonFS.Client.core_call(NeonFS.Core.FileIndex, :get_by_path, [volume_id, path]),
+           true <- relatime_stale?(file.accessed_at, file.modified_at) do
+        NeonFS.Client.core_call(NeonFS.Core.FileIndex, :touch, [file.id])
+      end
+    end)
+
+    :ok
+  end
+
   # RPC wrappers — route all core operations through the client
   defp core_call(module, function, args) do
     NeonFS.Client.core_call(module, function, args)
@@ -686,6 +841,10 @@ defmodule NeonFS.FUSE.Handler do
     core_call(NeonFS.Core.FileIndex, :update, [file_id, updates])
   end
 
+  defp file_index_truncate(file_id, new_size, additional_updates) do
+    core_call(NeonFS.Core.FileIndex, :truncate, [file_id, new_size, additional_updates])
+  end
+
   defp read_file(volume_id, path, opts \\ []) do
     core_call(NeonFS.Core.ReadOperation, :read_file, [volume_id, path, opts])
   end
@@ -693,6 +852,10 @@ defmodule NeonFS.FUSE.Handler do
   defp write_file(volume_id, path, data, opts \\ []) do
     core_call(NeonFS.Core.WriteOperation, :write_file, [volume_id, path, data, opts])
   end
+
+  # Convert a DateTime to a POSIX timestamp (seconds since epoch)
+  defp datetime_to_unix(%DateTime{} = dt), do: DateTime.to_unix(dt)
+  defp datetime_to_unix(_), do: 0
 
   # Convert error reason to errno code
   @dialyzer {:nowarn_function, errno: 1}

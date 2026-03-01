@@ -154,11 +154,17 @@ defmodule NeonFS.Core.ReplicationDataPlaneTest do
     end
 
     test "sends chunk via data plane when pool exists", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       # Register a pool for a fake remote node
       fake_node = :repl_peer@host
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       chunk_data = "data plane chunk"
       chunk_hash = :crypto.hash(:sha256, chunk_data)
@@ -179,10 +185,16 @@ defmodule NeonFS.Core.ReplicationDataPlaneTest do
       # :already_exists from the echo server. Instead we verify the code handles it
       # by testing the normalised response path.
       # The important thing is that the replication code treats :already_exists as {:ok, location}.
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       fake_node = :exists_peer@host
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       chunk_data = "idempotent chunk"
       chunk_hash = :crypto.hash(:sha256, chunk_data)

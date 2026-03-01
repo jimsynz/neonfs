@@ -4,9 +4,15 @@ defmodule NeonFS.Core.AuthoriseFileTest do
 
   alias NeonFS.Core.{ACLManager, Authorise, FileIndex, FileMeta, VolumeACL}
 
-  setup do
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
     start_core_subsystems()
     start_acl_manager()
+
+    on_exit(fn -> cleanup_test_dirs() end)
+
     :ok
   end
 

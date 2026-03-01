@@ -575,11 +575,19 @@ defmodule NeonFS.Core.ChunkIndexTest do
   # Private helper to match test_case.ex pattern
   defp stop_if_running(name) do
     case Process.whereis(name) do
-      nil -> :ok
-      pid -> GenServer.stop(pid, :normal, 5000)
-    end
+      nil ->
+        :ok
 
-    Process.sleep(10)
+      pid ->
+        ref = Process.monitor(pid)
+        GenServer.stop(pid, :normal, 5000)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _} -> :ok
+        after
+          1_000 -> :ok
+        end
+    end
   end
 
   defp cleanup_ets_table(table) do

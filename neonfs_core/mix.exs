@@ -57,11 +57,17 @@ defmodule NeonFS.Core.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:bandit, "~> 1.5"},
+      {:gen_stage, "~> 1.3"},
+      {:logger_json, "~> 7.0"},
       {:msgpax, "~> 2.4"},
       {:neonfs_client, path: "../neonfs_client"},
+      {:plug, "~> 1.15"},
       {:ra, "~> 2.13"},
       {:reactor, "~> 1.0"},
       {:rustler, "~> 0.37", runtime: false},
+      {:telemetry_metrics_prometheus_core, "~> 1.2"},
+      {:telemetry_poller, "~> 1.2"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
@@ -73,6 +79,7 @@ defmodule NeonFS.Core.MixProject do
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.7", only: [:dev, :test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
+      {:mimic, "~> 1.7", only: [:test]},
       {:stream_data, "~> 1.0", only: [:test]}
     ]
   end

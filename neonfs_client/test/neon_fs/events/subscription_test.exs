@@ -161,24 +161,34 @@ defmodule NeonFS.Events.SubscriptionTest do
 
   describe "automatic cleanup on process exit" do
     test "Registry auto-unregisters when subscribing process exits" do
-      {pid, ref} =
+      tref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :events, :relay, :subscriber_down]
+        ])
+
+      parent = self()
+
+      {pid, mref} =
         spawn_monitor(fn ->
           Events.subscribe(@volume_id)
+          send(parent, :child_ready)
 
           receive do
             :stop -> :ok
           end
         end)
 
-      Process.sleep(50)
+      assert_receive :child_ready, 1_000
 
       entries = Registry.lookup(NeonFS.Events.Registry, {:volume, @volume_id})
       assert Enum.any?(entries, fn {p, _} -> p == pid end)
 
       send(pid, :stop)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:DOWN, ^mref, :process, ^pid, :normal}, 1_000
 
-      Process.sleep(100)
+      assert_receive {[:neonfs, :events, :relay, :subscriber_down], ^tref, %{},
+                      %{pid: ^pid, volumes_left: _}},
+                     1_000
 
       entries = Registry.lookup(NeonFS.Events.Registry, {:volume, @volume_id})
       refute Enum.any?(entries, fn {p, _} -> p == pid end)

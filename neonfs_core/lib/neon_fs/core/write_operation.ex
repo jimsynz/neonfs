@@ -37,6 +37,10 @@ defmodule NeonFS.Core.WriteOperation do
     VolumeRegistry
   }
 
+  alias NeonFS.IO.{Operation, Scheduler}
+
+  alias NeonFS.Error.{Unavailable, VolumeNotFound}
+
   require Logger
 
   @type write_id :: binary()
@@ -71,6 +75,8 @@ defmodule NeonFS.Core.WriteOperation do
   @spec write_file(binary(), String.t(), binary(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
   def write_file(volume_id, path, data, opts \\ []) do
+    Logger.metadata(component: :write, volume_id: volume_id, file_path: path)
+
     write_id = generate_write_id()
     start_time = System.monotonic_time()
 
@@ -146,7 +152,7 @@ defmodule NeonFS.Core.WriteOperation do
   defp get_volume(volume_id) do
     case VolumeRegistry.get(volume_id) do
       {:ok, volume} -> {:ok, volume}
-      {:error, :not_found} -> {:error, :volume_not_found}
+      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
     end
   end
 
@@ -394,7 +400,7 @@ defmodule NeonFS.Core.WriteOperation do
     padded_size = byte_size(data)
 
     with {:ok, hash, chunk_info} <-
-           write_chunk_to_target(data, target, ctx.tier_str, write_opts) do
+           write_chunk_to_target(data, target, ctx.tier_str, write_opts, ctx.volume_id) do
       crypto = build_chunk_crypto(ctx.encryption_ctx, write_opts)
       emit_encrypt_telemetry(ctx.encryption_ctx, hash, ctx.volume_id)
 
@@ -452,7 +458,7 @@ defmodule NeonFS.Core.WriteOperation do
     write_opts = add_encryption_write_opts([], ctx.encryption_ctx)
 
     with {:ok, hash, chunk_info} <-
-           write_chunk_to_target(parity_data, target, ctx.tier_str, write_opts) do
+           write_chunk_to_target(parity_data, target, ctx.tier_str, write_opts, ctx.volume_id) do
       crypto = build_chunk_crypto(ctx.encryption_ctx, write_opts)
       emit_encrypt_telemetry(ctx.encryption_ctx, hash, ctx.volume_id)
 
@@ -505,9 +511,9 @@ defmodule NeonFS.Core.WriteOperation do
     }
   end
 
-  defp write_chunk_to_target(data, target, tier_str, write_opts) do
+  defp write_chunk_to_target(data, target, tier_str, write_opts, volume_id) do
     if target.node == node() do
-      BlobStore.write_chunk(data, target.drive_id, tier_str, write_opts)
+      schedule_local_write(data, target.drive_id, tier_str, write_opts, volume_id)
     else
       write_chunk_to_remote(data, target, tier_str, write_opts)
     end
@@ -533,7 +539,7 @@ defmodule NeonFS.Core.WriteOperation do
         {:ok, hash, chunk_info}
 
       {:error, :no_data_endpoint} ->
-        Logger.info("No data endpoint for #{target.node}, falling back to distribution RPC")
+        Logger.info("No data endpoint, falling back to distribution RPC", node: target.node)
 
         write_chunk_to_remote_rpc(data, target, tier_str, write_opts)
 
@@ -554,6 +560,19 @@ defmodule NeonFS.Core.WriteOperation do
       {:error, reason} -> {:error, {:remote_write_failed, target.node, reason}}
       {:badrpc, reason} -> {:error, {:rpc_failed, target.node, reason}}
     end
+  end
+
+  defp schedule_local_write(data, drive_id, tier_str, write_opts, volume_id) do
+    op =
+      Operation.new(
+        priority: :user_write,
+        volume_id: volume_id,
+        drive_id: drive_id,
+        type: :write,
+        callback: fn -> BlobStore.write_chunk(data, drive_id, tier_str, write_opts) end
+      )
+
+    Scheduler.submit_sync(op)
   end
 
   defp default_target do
@@ -587,7 +606,7 @@ defmodule NeonFS.Core.WriteOperation do
   defp store_stripe_metadata(stripe, _stripe_id, _write_id) do
     case StripeIndex.put(stripe) do
       {:ok, _id} -> :ok
-      {:error, reason} -> Logger.warning("Failed to store stripe metadata: #{inspect(reason)}")
+      {:error, reason} -> Logger.warning("Failed to store stripe metadata", reason: reason)
     end
   end
 
@@ -699,7 +718,7 @@ defmodule NeonFS.Core.WriteOperation do
           {:cont, {:ok, [chunk_info | acc]}}
 
         {:error, reason} ->
-          Logger.debug("process_chunks: chunk processing failed with #{inspect(reason)}")
+          Logger.debug("Chunk processing failed", reason: reason)
           {:halt, {:error, reason}}
       end
     end)
@@ -744,7 +763,7 @@ defmodule NeonFS.Core.WriteOperation do
 
     with {:ok, drive} <- select_drive_for_tier(tier),
          {:ok, _returned_hash, chunk_info} <-
-           BlobStore.write_chunk(data, drive.id, tier_str, write_opts) do
+           schedule_local_write(data, drive.id, tier_str, write_opts, volume.id) do
       crypto = build_chunk_crypto(write_ctx.enc_ctx, write_opts)
       emit_encrypt_telemetry(write_ctx.enc_ctx, hash, volume.id)
 
@@ -760,7 +779,7 @@ defmodule NeonFS.Core.WriteOperation do
           {:error, {:chunk_index_failed, reason}}
       end
     else
-      {:error, :no_drives_available} = error -> error
+      {:error, %{class: :unavailable}} = error -> error
       {:error, reason} -> {:error, {:chunk_write_failed, reason}}
     end
   end
@@ -769,8 +788,15 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp select_drive_for_tier(tier) do
     case DriveRegistry.select_drive(tier) do
-      {:ok, drive} -> {:ok, drive}
-      {:error, :no_drives_in_tier} -> {:error, :no_drives_available}
+      {:ok, drive} ->
+        {:ok, drive}
+
+      {:error, :no_drives_in_tier} ->
+        {:error,
+         Unavailable.exception(
+           message: "No drives available in tier #{tier}",
+           details: %{tier: tier}
+         )}
     end
   end
 
@@ -803,7 +829,7 @@ defmodule NeonFS.Core.WriteOperation do
     if volume.durability.factor > 1 do
       case Replication.replicate_chunk(hash, data, volume, tier: tier) do
         {:ok, _locations} -> :ok
-        {:error, reason} -> Logger.warning("Chunk replication failed: #{inspect(reason)}")
+        {:error, reason} -> Logger.warning("Chunk replication failed", reason: reason)
       end
     end
   end

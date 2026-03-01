@@ -30,6 +30,7 @@ defmodule NeonFS.Core.TierMigration do
   require Logger
 
   alias NeonFS.Core.TierMigration.LockTable
+  alias NeonFS.IO.{Operation, Scheduler}
 
   @type migration_params :: %{
           chunk_hash: binary(),
@@ -85,6 +86,7 @@ defmodule NeonFS.Core.TierMigration do
 
   defp execute_migration(params) do
     local? = params.source_node == params.target_node
+    chunk_index = NeonFS.Core.ChunkIndex
 
     :telemetry.execute(
       [:neonfs, :tier_migration, :start],
@@ -97,16 +99,27 @@ defmodule NeonFS.Core.TierMigration do
       }
     )
 
-    with {:ok, data} <- copy_read(params),
-         {:ok, _hash, _info} <- copy_write(params, data),
-         :ok <- verify_copy(params),
+    # Look up chunk metadata to determine compression.
+    # The BlobStore NIF doesn't auto-detect compression, so we must
+    # decompress on read and re-compress on write to preserve the format.
+    chunk_compression =
+      case chunk_index.get(params.chunk_hash) do
+        {:ok, meta} -> meta.compression
+        _ -> :none
+      end
+
+    with {:ok, data} <- copy_read(params, chunk_compression != :none),
+         {:ok, _hash, _info} <- copy_write(params, data, chunk_compression),
+         :ok <- verify_copy(params, chunk_compression != :none),
          :ok <- update_metadata(params),
          _ <- cleanup_source(params) do
       {:ok, :migrated}
     else
       {:error, reason} ->
         Logger.warning(
-          "Migration failed for #{inspect(params.chunk_hash)}: #{inspect(reason)}, rolling back"
+          "Migration failed (#{inspect(reason)}), rolling back",
+          chunk_hash: inspect(params.chunk_hash),
+          reason: inspect(reason)
         )
 
         rollback_copy(params)
@@ -114,65 +127,114 @@ defmodule NeonFS.Core.TierMigration do
     end
   end
 
-  defp copy_read(params) do
+  defp copy_read(params, decompress?) do
     blob_store = NeonFS.Core.BlobStore
     tier_str = Atom.to_string(params.source_tier)
+    volume_id = Map.get(params, :volume_id, "_migration")
 
     if params.source_node == Node.self() do
-      blob_store.read_chunk_with_options(
-        params.chunk_hash,
-        params.source_drive,
-        tier_str,
-        verify: true
-      )
+      op =
+        Operation.new(
+          priority: :repair,
+          volume_id: volume_id,
+          drive_id: params.source_drive,
+          type: :read,
+          callback: fn ->
+            blob_store.read_chunk_with_options(
+              params.chunk_hash,
+              params.source_drive,
+              tier_str,
+              verify: true,
+              decompress: decompress?
+            )
+          end
+        )
+
+      Scheduler.submit_sync(op)
     else
       :rpc.call(
         params.source_node,
         blob_store,
         :read_chunk_with_options,
-        [params.chunk_hash, params.source_drive, tier_str, [verify: true]],
+        [
+          params.chunk_hash,
+          params.source_drive,
+          tier_str,
+          [verify: true, decompress: decompress?]
+        ],
         10_000
       )
       |> handle_rpc_result()
     end
   end
 
-  defp copy_write(params, data) do
+  defp copy_write(params, data, compression) do
     blob_store = NeonFS.Core.BlobStore
     tier_str = Atom.to_string(params.target_tier)
+    volume_id = Map.get(params, :volume_id, "_migration")
+    write_opts = compression_write_opts(compression)
 
     if params.target_node == Node.self() do
-      blob_store.write_chunk(data, params.target_drive, tier_str)
+      op =
+        Operation.new(
+          priority: :repair,
+          volume_id: volume_id,
+          drive_id: params.target_drive,
+          type: :write,
+          callback: fn ->
+            blob_store.write_chunk(data, params.target_drive, tier_str, write_opts)
+          end
+        )
+
+      Scheduler.submit_sync(op)
     else
       :rpc.call(
         params.target_node,
         blob_store,
         :write_chunk,
-        [data, params.target_drive, tier_str],
+        [data, params.target_drive, tier_str, write_opts],
         10_000
       )
       |> handle_rpc_result()
     end
   end
 
-  defp verify_copy(params) do
+  defp verify_copy(params, decompress?) do
     blob_store = NeonFS.Core.BlobStore
     tier_str = Atom.to_string(params.target_tier)
+    volume_id = Map.get(params, :volume_id, "_migration")
 
     result =
       if params.target_node == Node.self() do
-        blob_store.read_chunk_with_options(
-          params.chunk_hash,
-          params.target_drive,
-          tier_str,
-          verify: true
-        )
+        op =
+          Operation.new(
+            priority: :repair,
+            volume_id: volume_id,
+            drive_id: params.target_drive,
+            type: :read,
+            callback: fn ->
+              blob_store.read_chunk_with_options(
+                params.chunk_hash,
+                params.target_drive,
+                tier_str,
+                verify: true,
+                decompress: decompress?
+              )
+            end
+          )
+
+        Scheduler.submit_sync(op)
       else
         :rpc.call(
           params.target_node,
           blob_store,
           :read_chunk_with_options,
-          [params.chunk_hash, params.target_drive, tier_str, [verify: true]],
+          [
+            params.chunk_hash,
+            params.target_drive,
+            tier_str,
+            [verify: true, decompress: decompress?]
+          ],
           10_000
         )
         |> handle_rpc_result()
@@ -239,7 +301,7 @@ defmodule NeonFS.Core.TierMigration do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Cleanup of source chunk failed (orphaned): #{inspect(reason)}")
+        Logger.warning("Cleanup of source chunk failed (orphaned)", reason: inspect(reason))
 
         :ok
     end
@@ -267,6 +329,9 @@ defmodule NeonFS.Core.TierMigration do
       {:error, _} -> :ok
     end
   end
+
+  defp compression_write_opts(:none), do: []
+  defp compression_write_opts(:zstd), do: [compression: "zstd", compression_level: 3]
 
   defp handle_rpc_result({:badrpc, reason}), do: {:error, {:rpc_error, reason}}
   defp handle_rpc_result(result), do: result

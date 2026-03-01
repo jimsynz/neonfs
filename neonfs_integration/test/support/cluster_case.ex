@@ -66,7 +66,6 @@ defmodule NeonFS.Integration.ClusterCase do
         PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
 
       PeerCluster.connect_nodes(cluster)
-      :global.sync()
 
       on_exit(fn -> PeerCluster.stop_cluster(cluster) end)
 
@@ -96,7 +95,6 @@ defmodule NeonFS.Integration.ClusterCase do
         PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
 
       PeerCluster.connect_nodes(cluster)
-      :global.sync()
 
       on_exit(fn ->
         PeerCluster.stop_cluster(cluster)
@@ -278,6 +276,85 @@ defmodule NeonFS.Integration.ClusterCase do
     end
   end
 
+  # ─── Partition assertion helpers ─────────────────────────────────
+
+  @doc """
+  Assert that two groups of nodes are partitioned from each other.
+
+  Each group is a list of node names. Waits (with polling) until no node
+  in one group can see any node in the other group.
+
+  ## Options
+  - `:timeout` - Maximum time to wait in milliseconds (default: 10_000)
+  """
+  @spec assert_partitioned(map(), [atom()], [atom()], keyword()) :: :ok
+  def assert_partitioned(cluster, group_a, group_b, opts \\ []) do
+    import ExUnit.Assertions
+    timeout = Keyword.get(opts, :timeout, 10_000)
+
+    node_atoms_a = Enum.map(group_a, &PeerCluster.get_node!(cluster, &1).node)
+    node_atoms_b = Enum.map(group_b, &PeerCluster.get_node!(cluster, &1).node)
+
+    case wait_until(
+           fn ->
+             group_isolated?(cluster, group_a, node_atoms_b) and
+               group_isolated?(cluster, group_b, node_atoms_a)
+           end,
+           timeout: timeout
+         ) do
+      :ok ->
+        :ok
+
+      {:error, :timeout} ->
+        flunk("Partition not effective within #{timeout}ms — cross-group nodes still visible")
+    end
+  end
+
+  @doc """
+  Assert that all nodes in a group can see each other.
+  """
+  @spec assert_connected(map(), [atom()]) :: :ok
+  def assert_connected(cluster, node_names) do
+    import ExUnit.Assertions
+
+    for name <- node_names do
+      visible = PeerCluster.visible_nodes(cluster, name)
+      others = Enum.reject(node_names, &(&1 == name))
+      other_atoms = Enum.map(others, &PeerCluster.get_node!(cluster, &1).node)
+
+      for other_atom <- other_atoms do
+        assert other_atom in visible,
+               "#{name} cannot see #{inspect(other_atom)} — expected connected"
+      end
+    end
+
+    :ok
+  end
+
+  @doc """
+  Wait until all nodes in the cluster are connected to each other (full mesh).
+
+  ## Options
+  - `:timeout` - Maximum time to wait in milliseconds (default: 10_000)
+  """
+  @spec wait_for_partition_healed(map(), keyword()) :: :ok
+  def wait_for_partition_healed(cluster, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 10_000)
+    all_names = Enum.map(cluster.nodes, & &1.name)
+    expected_count = length(all_names) - 1
+
+    :ok =
+      wait_until(
+        fn ->
+          Enum.all?(all_names, fn name ->
+            visible = PeerCluster.visible_nodes(cluster, name)
+            length(visible) >= expected_count
+          end)
+        end,
+        timeout: timeout
+      )
+  end
+
   # ─── Shared cluster init helpers ──────────────────────────────────
 
   @doc """
@@ -411,6 +488,15 @@ defmodule NeonFS.Integration.ClusterCase do
     end
 
     :ok
+  end
+
+  # ─── Partition helpers ────────────────────────────────────────────
+
+  defp group_isolated?(cluster, group_names, forbidden_atoms) do
+    Enum.all?(group_names, fn name ->
+      visible = PeerCluster.visible_nodes(cluster, name)
+      Enum.all?(forbidden_atoms, &(&1 not in visible))
+    end)
   end
 
   # ─── :pg readiness helpers ─────────────────────────────────────────

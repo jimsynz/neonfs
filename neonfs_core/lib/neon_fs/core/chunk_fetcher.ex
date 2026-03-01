@@ -20,6 +20,7 @@ defmodule NeonFS.Core.ChunkFetcher do
 
   alias NeonFS.Client.Router
   alias NeonFS.Core.{BlobStore, ChunkAccessTracker, ChunkCache, ChunkIndex, DriveRegistry}
+  alias NeonFS.IO.{Operation, Scheduler}
   require Logger
 
   @type fetch_result :: {:ok, binary(), source()} | {:error, term()}
@@ -41,6 +42,7 @@ defmodule NeonFS.Core.ChunkFetcher do
       * `:cache_remote` - Cache remotely fetched chunks locally (default: false)
       * `:key` - Decryption key (default: <<>>)
       * `:nonce` - Decryption nonce (default: <<>>)
+      * `:cache_reason` - Why this chunk should be cached (e.g. `:reconstructed` for EC-reconstructed data)
 
   ## Returns
 
@@ -59,7 +61,6 @@ defmodule NeonFS.Core.ChunkFetcher do
   @spec fetch_chunk(binary(), keyword()) :: fetch_result()
   def fetch_chunk(hash, opts \\ []) when is_binary(hash) do
     volume_id = Keyword.get(opts, :volume_id)
-    decompress = Keyword.get(opts, :decompress, false)
     start_time = System.monotonic_time()
 
     # Try cache first (only for transformed chunks)
@@ -74,9 +75,9 @@ defmodule NeonFS.Core.ChunkFetcher do
 
     # Record access for tiering decisions and populate cache
     case result do
-      {:ok, data, _source} ->
+      {:ok, data, source} ->
         ChunkAccessTracker.record_access(hash)
-        maybe_cache_result(volume_id, hash, data, decompress)
+        maybe_cache_result(volume_id, hash, data, source, opts)
 
       _ ->
         :ok
@@ -136,21 +137,56 @@ defmodule NeonFS.Core.ChunkFetcher do
     ArgumentError -> :miss
   end
 
-  defp maybe_cache_result(nil, _hash, _data, _decompress), do: :ok
-  defp maybe_cache_result(_volume_id, _hash, _data, false), do: :ok
+  defp maybe_cache_result(nil, _hash, _data, _source, _opts), do: :ok
 
-  defp maybe_cache_result(volume_id, hash, data, true) do
-    ChunkCache.put(volume_id, hash, data)
+  defp maybe_cache_result(volume_id, hash, data, source, opts) do
+    chunk_types = cache_chunk_types(source, opts)
+
+    if chunk_types != [] do
+      ChunkCache.put(volume_id, hash, data, chunk_type: chunk_types)
+    end
+
+    :ok
   rescue
     ArgumentError -> :ok
   end
 
+  defp cache_chunk_types(source, opts) do
+    decompress = Keyword.get(opts, :decompress, false)
+    reconstructed = Keyword.get(opts, :cache_reason) == :reconstructed
+    remote = match?({:remote, _}, source)
+
+    []
+    |> maybe_add_type(:transformed, decompress)
+    |> maybe_add_type(:reconstructed, reconstructed)
+    |> maybe_add_remote_type(remote)
+  end
+
+  defp maybe_add_type(types, _type, false), do: types
+  defp maybe_add_type(types, type, true), do: [type | types]
+
+  defp maybe_add_remote_type(types, false), do: types
+  defp maybe_add_remote_type([], true), do: []
+  defp maybe_add_remote_type(types, true), do: [:remote | types]
+
   defp fetch_from_storage(hash, start_time, opts) do
+    exclude_nodes = Keyword.get(opts, :exclude_nodes, [])
+
+    if node() in exclude_nodes do
+      # Skip local fetch entirely — go straight to remote
+      try_remote_fetch(hash, start_time, opts, :excluded)
+    else
+      fetch_from_local_then_remote(hash, start_time, opts)
+    end
+  end
+
+  defp fetch_from_local_then_remote(hash, start_time, opts) do
     read_opts = build_read_opts(opts)
     drive_id = Keyword.get(opts, :drive_id, "default")
     tier = Keyword.get(opts, :tier, "hot")
+    volume_id = Keyword.get(opts, :volume_id, "_system")
 
-    case try_local_fetch(hash, drive_id, tier, read_opts) do
+    case try_local_fetch(hash, drive_id, tier, read_opts, volume_id) do
       {:ok, data} ->
         duration = System.monotonic_time() - start_time
 
@@ -174,11 +210,17 @@ defmodule NeonFS.Core.ChunkFetcher do
     end
   end
 
-  defp try_local_fetch(hash, drive_id, tier, read_opts) do
-    case BlobStore.read_chunk_with_options(hash, drive_id, tier, read_opts) do
-      {:ok, data} -> {:ok, data}
-      {:error, reason} -> {:error, reason}
-    end
+  defp try_local_fetch(hash, drive_id, tier, read_opts, volume_id) do
+    op =
+      Operation.new(
+        priority: :user_read,
+        volume_id: volume_id,
+        drive_id: drive_id,
+        type: :read,
+        callback: fn -> BlobStore.read_chunk_with_options(hash, drive_id, tier, read_opts) end
+      )
+
+    Scheduler.submit_sync(op)
   end
 
   defp try_remote_fetch(hash, start_time, opts, local_reason) do
@@ -192,6 +234,8 @@ defmodule NeonFS.Core.ChunkFetcher do
       %{hash: Base.encode16(hash, case: :lower)}
     )
 
+    exclude_nodes = Keyword.get(opts, :exclude_nodes, [])
+
     result =
       case ChunkIndex.get(hash) do
         {:error, :not_found} ->
@@ -204,7 +248,8 @@ defmodule NeonFS.Core.ChunkFetcher do
             tier,
             read_opts,
             cache_remote,
-            local_reason
+            local_reason,
+            exclude_nodes
           )
       end
 
@@ -229,11 +274,21 @@ defmodule NeonFS.Core.ChunkFetcher do
     result
   end
 
-  defp fetch_from_remote(hash, locations, tier, read_opts, cache_remote, local_reason) do
-    # Filter out local node from locations
+  defp fetch_from_remote(
+         hash,
+         locations,
+         tier,
+         read_opts,
+         cache_remote,
+         local_reason,
+         exclude_nodes
+       ) do
+    # Filter out local node and any explicitly excluded nodes from locations
+    excluded = [Node.self() | exclude_nodes] |> Enum.uniq()
+
     remote_locations =
       locations
-      |> Enum.reject(&(&1.node == Node.self()))
+      |> Enum.reject(&(&1.node in excluded))
       |> sort_locations_by_preference()
 
     # When no remote locations exist (single-node), surface the local error
@@ -260,8 +315,9 @@ defmodule NeonFS.Core.ChunkFetcher do
         {:ok, data, {:remote, location.node}}
 
       {:error, reason} ->
-        Logger.debug(
-          "Failed to fetch chunk from #{location.node}: #{inspect(reason)}, trying next location"
+        Logger.debug("Failed to fetch chunk from node, trying next location",
+          node: location.node,
+          reason: inspect(reason)
         )
 
         # Return nil to continue to next location
@@ -271,7 +327,16 @@ defmodule NeonFS.Core.ChunkFetcher do
 
   defp maybe_cache_remotely_fetched_chunk(hash, data, tier, cache_remote) do
     if cache_remote do
-      spawn(fn -> cache_chunk_locally(hash, data, tier) end)
+      op =
+        Operation.new(
+          priority: :replication,
+          volume_id: "_cache",
+          drive_id: "default",
+          type: :write,
+          callback: fn -> cache_chunk_locally(hash, data, tier) end
+        )
+
+      Scheduler.submit_async(op)
     end
   end
 
@@ -292,7 +357,10 @@ defmodule NeonFS.Core.ChunkFetcher do
         Map.merge(location, %{tier: drive.tier, state: drive.state})
 
       {:error, _} ->
-        Logger.debug("Drive info unavailable for #{drive_id} on #{node}, assigning worst score")
+        Logger.debug("Drive info unavailable, assigning worst score",
+          drive_id: drive_id,
+          node: node
+        )
 
         location
     end
@@ -345,7 +413,7 @@ defmodule NeonFS.Core.ChunkFetcher do
         {:ok, data}
 
       {:error, :no_data_endpoint} ->
-        Logger.info("No data endpoint for #{node}, falling back to distribution RPC for read")
+        Logger.info("No data endpoint, falling back to distribution RPC for read", node: node)
         rpc_read_chunk(node, hash, drive_id, tier, read_opts)
 
       {:error, :not_found} ->
@@ -371,7 +439,11 @@ defmodule NeonFS.Core.ChunkFetcher do
         {:error, reason}
 
       {:badrpc, reason} ->
-        Logger.warning("RPC failed when reading chunk from #{node}: #{inspect(reason)}")
+        Logger.warning("RPC failed when reading chunk from node",
+          node: node,
+          reason: inspect(reason)
+        )
+
         {:error, {:rpc_failed, reason}}
     end
   end
@@ -383,7 +455,10 @@ defmodule NeonFS.Core.ChunkFetcher do
     case BlobStore.write_chunk(data, drive_id, tier) do
       {:ok, written_hash, _info} ->
         if written_hash == hash do
-          Logger.debug("Successfully cached remote chunk #{Base.encode16(hash)} locally")
+          Logger.debug("Successfully cached remote chunk locally",
+            chunk_hash: Base.encode16(hash)
+          )
+
           :ok
         else
           Logger.error("Hash mismatch when caching chunk locally")
@@ -391,7 +466,7 @@ defmodule NeonFS.Core.ChunkFetcher do
         end
 
       {:error, reason} ->
-        Logger.warning("Failed to cache remote chunk locally: #{inspect(reason)}")
+        Logger.warning("Failed to cache remote chunk locally", reason: inspect(reason))
         {:error, reason}
     end
   end

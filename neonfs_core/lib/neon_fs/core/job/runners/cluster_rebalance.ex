@@ -36,7 +36,7 @@ defmodule NeonFS.Core.Job.Runners.ClusterRebalance do
   @impl NeonFS.Core.Job.Runner
   def on_cancel(job) do
     tiers = job.params.tiers
-    Logger.info("Rebalance cancelled (tiers: #{inspect(tiers)})")
+    Logger.info("Rebalance cancelled", tiers: tiers)
     :ok
   end
 
@@ -106,7 +106,10 @@ defmodule NeonFS.Core.Job.Runners.ClusterRebalance do
     total = max(job.progress.total, completed)
 
     if failures > 0 do
-      Logger.warning("Rebalance #{tier}: #{failures} chunk(s) failed in batch, will retry")
+      Logger.warning("Rebalance batch had failures, will retry",
+        tier: tier,
+        failure_count: failures
+      )
     end
 
     updated = %{
@@ -194,9 +197,10 @@ defmodule NeonFS.Core.Job.Runners.ClusterRebalance do
       }
     )
 
-    Logger.info(
-      "Rebalance completed: #{state.chunks_migrated} chunks moved " <>
-        "(#{format_bytes(state.bytes_moved)}), tiers: #{inspect(state.tiers_completed)}"
+    Logger.info("Rebalance completed",
+      chunks_migrated: state.chunks_migrated,
+      bytes_moved: format_bytes(state.bytes_moved),
+      tiers: state.tiers_completed
     )
 
     updated = %{

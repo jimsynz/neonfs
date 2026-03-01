@@ -31,7 +31,7 @@ defmodule NeonFS.Transport.PoolManager do
   require Logger
 
   alias NeonFS.Client.Discovery
-  alias NeonFS.Transport.PoolSupervisor
+  alias NeonFS.Transport.{PoolSupervisor, TLS}
 
   @ets_table :neonfs_transport_pools
   @default_pool_size 4
@@ -167,7 +167,7 @@ defmodule NeonFS.Transport.PoolManager do
   end
 
   def handle_info({:nodedown, node, _info}, state) do
-    Logger.debug("PoolManager: node down #{inspect(node)}, removing pool")
+    Logger.debug("PoolManager node down, removing pool", node: node)
     state = do_remove_pool(node, state)
     {:noreply, state}
   end
@@ -179,7 +179,7 @@ defmodule NeonFS.Transport.PoolManager do
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     case Enum.find(state.monitors, fn {_node, mref} -> mref == ref end) do
       {node, _ref} ->
-        Logger.debug("PoolManager: pool for #{inspect(node)} crashed, cleaning up")
+        Logger.debug("PoolManager pool crashed, cleaning up", node: node)
         :ets.delete(@ets_table, node)
         {:noreply, %{state | monitors: Map.delete(state.monitors, node)}}
 
@@ -191,6 +191,23 @@ defmodule NeonFS.Transport.PoolManager do
   # Private functions
 
   defp create_pool(node, {host, port} = endpoint, state) do
+    # Don't attempt pool creation if TLS certificates aren't available yet.
+    # This prevents crash storms during cluster formation when data plane
+    # activation happens before all nodes have received their certificates.
+    if state.ssl_opts || tls_ready?() do
+      do_create_pool(node, {host, port}, endpoint, state)
+    else
+      Logger.debug("PoolManager deferring pool creation: TLS not ready", node: node)
+      {{:error, :tls_not_ready}, state}
+    end
+  end
+
+  defp tls_ready? do
+    ca_path = Path.join(TLS.tls_dir(), "ca.crt")
+    File.exists?(ca_path)
+  end
+
+  defp do_create_pool(node, {host, port}, endpoint, state) do
     pool_opts = [
       peer: {host, port},
       pool_size: state.pool_size,
@@ -223,8 +240,9 @@ defmodule NeonFS.Transport.PoolManager do
         {{:ok, pid}, %{state | monitors: Map.put(state.monitors, node, mref)}}
 
       {:error, reason} = error ->
-        Logger.warning(
-          "PoolManager: failed to create pool for #{inspect(node)}: #{inspect(reason)}"
+        Logger.warning("PoolManager failed to create pool",
+          node: node,
+          reason: inspect(reason)
         )
 
         {error, state}
@@ -280,9 +298,15 @@ defmodule NeonFS.Transport.PoolManager do
     departed = MapSet.difference(existing_nodes, peer_nodes)
 
     for node <- departed do
-      Logger.debug("PoolManager: peer #{inspect(node)} no longer in discovery, removing pool")
+      Logger.debug("PoolManager peer departed, removing pool", node: node)
       do_remove_pool(node, state)
     end
+
+    :telemetry.execute(
+      [:neonfs, :transport, :pool_manager, :discovery_refresh],
+      %{peers_discovered: length(peers)},
+      %{}
+    )
 
     :ok
   rescue

@@ -35,12 +35,41 @@ defmodule NeonFS.Client.ConnectionTest do
     end
   end
 
+  describe "peer_connect_timeout configuration" do
+    test "uses default when not configured" do
+      pid = start_supervised!({Connection, bootstrap_nodes: []})
+      state = :sys.get_state(pid)
+
+      assert state.peer_connect_timeout == 10_000
+    end
+
+    test "reads from opts" do
+      pid = start_supervised!({Connection, bootstrap_nodes: [], peer_connect_timeout: 20_000})
+      state = :sys.get_state(pid)
+
+      assert state.peer_connect_timeout == 20_000
+    end
+
+    test "reads from app env when not in opts" do
+      Application.put_env(:neonfs_client, :peer_connect_timeout, 15_000)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_client, :peer_connect_timeout)
+      end)
+
+      pid = start_supervised!({Connection, bootstrap_nodes: []})
+      state = :sys.get_state(pid)
+
+      assert state.peer_connect_timeout == 15_000
+    end
+  end
+
   describe "nodedown handling" do
     test "handles nodedown for untracked node without crashing" do
       pid = start_supervised!({Connection, bootstrap_nodes: []})
 
       send(pid, {:nodedown, :unknown@host, []})
-      Process.sleep(50)
+      :sys.get_state(pid)
 
       assert Process.alive?(pid)
     end

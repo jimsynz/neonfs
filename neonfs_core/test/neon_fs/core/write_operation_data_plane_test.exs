@@ -192,10 +192,16 @@ defmodule NeonFS.Core.WriteOperationDataPlaneTest do
     end
 
     test "put_chunk via data plane returns success for remote write", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       fake_node = :wo_peer@host
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       chunk_data = "stripe chunk data"
       chunk_hash = Native.compute_hash(chunk_data)
@@ -214,10 +220,16 @@ defmodule NeonFS.Core.WriteOperationDataPlaneTest do
     end
 
     test "timeout is configurable for data plane writes", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       fake_node = :timeout_peer@host
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       chunk_data = "timeout test"
       chunk_hash = Native.compute_hash(chunk_data)

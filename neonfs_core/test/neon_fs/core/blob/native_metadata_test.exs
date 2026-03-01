@@ -5,8 +5,9 @@ defmodule NeonFS.Core.Blob.NativeMetadataTest do
 
   @segment_hex String.duplicate("aa", 32)
 
-  setup do
-    tmp_dir = Path.join(System.tmp_dir!(), "neonfs_meta_nif_test_#{:rand.uniform(1_000_000)}")
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
     {:ok, store} = Native.store_open(tmp_dir, 2)
     on_exit(fn -> File.rm_rf!(tmp_dir) end)
     {:ok, store: store, tmp_dir: tmp_dir}

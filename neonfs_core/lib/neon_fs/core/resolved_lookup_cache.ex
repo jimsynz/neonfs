@@ -49,6 +49,7 @@ defmodule NeonFS.Core.ResolvedLookupCache do
     * `:ttl_ms` — time-to-live for cached entries in milliseconds (default: #{@default_ttl_ms})
     * `:max_entries` — maximum number of cached entries (default: #{@default_max_entries})
     * `:cleanup_interval_ms` — how often to sweep expired entries (default: #{@default_cleanup_interval_ms})
+    * `:now_fn` — zero-arity function returning current time in milliseconds (default: `System.monotonic_time(:millisecond)`)
     * `:name` — GenServer name (default: `__MODULE__`)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -83,7 +84,8 @@ defmodule NeonFS.Core.ResolvedLookupCache do
   """
   @spec get(file_id()) :: {:ok, resolved_metadata()} | :miss
   def get(file_id) do
-    now = System.monotonic_time(:millisecond)
+    now_fn = :persistent_term.get({__MODULE__, :now_fn}, &default_now/0)
+    now = now_fn.()
 
     case :ets.lookup(@ets_table, file_id) do
       [{^file_id, metadata, expires_at, _inserted_at}] when expires_at > now ->
@@ -152,6 +154,9 @@ defmodule NeonFS.Core.ResolvedLookupCache do
     ttl_ms = Keyword.get(opts, :ttl_ms, @default_ttl_ms)
     max_entries = Keyword.get(opts, :max_entries, @default_max_entries)
     cleanup_interval_ms = Keyword.get(opts, :cleanup_interval_ms, @default_cleanup_interval_ms)
+    now_fn = Keyword.get(opts, :now_fn, &default_now/0)
+
+    :persistent_term.put({__MODULE__, :now_fn}, now_fn)
 
     if cleanup_interval_ms > 0 do
       Process.send_after(self(), :cleanup_expired, cleanup_interval_ms)
@@ -161,13 +166,14 @@ defmodule NeonFS.Core.ResolvedLookupCache do
      %{
        ttl_ms: ttl_ms,
        max_entries: max_entries,
-       cleanup_interval_ms: cleanup_interval_ms
+       cleanup_interval_ms: cleanup_interval_ms,
+       now_fn: now_fn
      }}
   end
 
   @impl true
   def handle_call({:put, file_id, resolved_metadata, opts}, _from, state) do
-    now = System.monotonic_time(:millisecond)
+    now = state.now_fn.()
     ttl_ms = Keyword.get(opts, :ttl_ms, state.ttl_ms)
     expires_at = now + ttl_ms
 
@@ -179,7 +185,7 @@ defmodule NeonFS.Core.ResolvedLookupCache do
 
   @impl true
   def handle_info(:cleanup_expired, state) do
-    now = System.monotonic_time(:millisecond)
+    now = state.now_fn.()
 
     expired =
       :ets.select(@ets_table, [
@@ -217,12 +223,14 @@ defmodule NeonFS.Core.ResolvedLookupCache do
   end
 
   defp delete_lru_entry do
+    now_fn = :persistent_term.get({__MODULE__, :now_fn}, &default_now/0)
+
     {oldest_key, _oldest_time} =
       :ets.foldl(
         fn {key, _meta, _exp, accessed_at}, {_ok, oldest_t} = acc ->
           if accessed_at < oldest_t, do: {key, accessed_at}, else: acc
         end,
-        {nil, System.monotonic_time(:millisecond)},
+        {nil, now_fn.()},
         @ets_table
       )
 
@@ -230,4 +238,6 @@ defmodule NeonFS.Core.ResolvedLookupCache do
       :ets.delete(@ets_table, oldest_key)
     end
   end
+
+  defp default_now, do: System.monotonic_time(:millisecond)
 end

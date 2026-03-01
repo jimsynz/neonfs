@@ -143,7 +143,7 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
       %{volume_id: volume_id}
     )
 
-    Logger.info("Key rotation completed for volume #{volume_id}")
+    Logger.info("Key rotation completed", volume_id: volume_id)
   end
 
   defp batch_size do

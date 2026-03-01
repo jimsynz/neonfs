@@ -212,7 +212,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
           assert Map.has_key?(status, :from_version)
           assert Map.has_key?(status, :to_version)
 
-        {:error, :no_rotation} ->
+        {:error, %{class: :not_found}} ->
           # Rotation completed before we could query — valid outcome
           :ok
       end

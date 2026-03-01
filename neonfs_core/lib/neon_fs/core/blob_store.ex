@@ -754,7 +754,7 @@ defmodule NeonFS.Core.BlobStore do
       {:ok, stores, drives}
     else
       [{:error, drive_id, reason} | _] = errors
-      Logger.error("Failed to open store for drive #{drive_id}: #{inspect(reason)}")
+      Logger.error("Failed to open store for drive", drive_id: drive_id, reason: inspect(reason))
       {:error, {:drive_open_failed, drive_id, reason}}
     end
   end

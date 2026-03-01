@@ -55,10 +55,15 @@ defmodule NeonFS.FUSE.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:rustler, "~> 0.37", runtime: false},
+      {:bandit, "~> 1.5"},
+      {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
+      {:plug, "~> 1.15"},
+      {:rustler, "~> 0.37", runtime: false},
+      {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test
+      {:stream_data, "~> 1.0", only: [:test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},

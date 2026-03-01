@@ -120,8 +120,8 @@ impl ClusterCommand {
         })?;
 
         // Check for error response
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         // Unwrap {:ok, value} tuple
@@ -161,8 +161,8 @@ impl ClusterCommand {
         })?;
 
         // Check for error response
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         // Unwrap {:ok, value} tuple
@@ -210,8 +210,8 @@ impl ClusterCommand {
         })?;
 
         // Check for error response
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         // Unwrap {:ok, value} tuple
@@ -259,8 +259,8 @@ impl ClusterCommand {
         })?;
 
         // Check for error response
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         // Unwrap {:ok, value} tuple
@@ -348,8 +348,8 @@ impl ClusterCommand {
             .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            match err_msg.as_str() {
+        if let Some(err) = extract_error(&result) {
+            match err.error_message().as_str() {
                 "already_balanced" => {
                     eprintln!("Cluster is already balanced within the configured threshold.");
                 }
@@ -367,7 +367,7 @@ impl ClusterCommand {
                 }
                 _ => {}
             }
-            return Err(crate::error::CliError::RpcError(err_msg));
+            return Err(err);
         }
 
         let data = unwrap_ok_tuple(result)?;
@@ -423,12 +423,11 @@ impl ClusterCommand {
             .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            if err_msg == "no_rebalance" {
+        if let Some(err) = extract_error(&result) {
+            if err.error_message() == "no_rebalance" {
                 eprintln!("No rebalance operation found.");
-                return Err(crate::error::CliError::RpcError(err_msg));
             }
-            return Err(crate::error::CliError::RpcError(err_msg));
+            return Err(err);
         }
 
         let data = unwrap_ok_tuple(result)?;
@@ -502,8 +501,8 @@ impl CaCommand {
                 .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(format_ca_error(&err_msg)));
+        if let Some(err) = extract_error(&result) {
+            return Err(format_ca_err(err));
         }
 
         let data = unwrap_ok_tuple(result)?;
@@ -542,8 +541,8 @@ impl CaCommand {
                 .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(format_ca_error(&err_msg)));
+        if let Some(err) = extract_error(&result) {
+            return Err(format_ca_err(err));
         }
 
         let data = unwrap_ok_tuple(result)?;
@@ -599,8 +598,8 @@ impl CaCommand {
             .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(format_ca_error(&err_msg)));
+        if let Some(err) = extract_error(&result) {
+            return Err(format_ca_err(err));
         }
 
         let data = unwrap_ok_tuple(result)?;
@@ -634,16 +633,24 @@ impl CaCommand {
     }
 }
 
-/// Format CA-specific error messages for display
-fn format_ca_error(err_msg: &str) -> String {
-    match err_msg {
-        "ca_not_initialized" => {
-            "CA not initialised. Run 'neonfs cluster init' to create the cluster CA.".to_string()
+/// Enrich CA-specific errors with more helpful messages.
+///
+/// Structured errors (NeonfsError) pass through unchanged — the handler
+/// already provides descriptive messages. Legacy atom-based errors get
+/// rewritten to user-friendly text.
+fn format_ca_err(err: crate::error::CliError) -> crate::error::CliError {
+    use crate::error::CliError;
+    match err {
+        CliError::NeonfsError { .. } => err,
+        CliError::RpcError(ref msg) => {
+            let enriched = match msg.as_str() {
+                "ca_not_initialized" => "CA not initialised. Run 'neonfs cluster init' to create the cluster CA.".to_string(),
+                "node_not_found" => "No certificate found for the specified node. Use 'neonfs cluster ca list' to see issued certificates.".to_string(),
+                _ => return err,
+            };
+            CliError::RpcError(enriched)
         }
-        "node_not_found" => {
-            "No certificate found for the specified node. Use 'neonfs cluster ca list' to see issued certificates.".to_string()
-        }
-        other => other.to_string(),
+        other => other,
     }
 }
 

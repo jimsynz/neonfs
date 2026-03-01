@@ -13,7 +13,7 @@ defmodule NeonFS.Core.AuditLogTest do
     test "stores an event" do
       event = AuditEvent.new(event_type: :volume_created, actor_uid: 1000, resource: "vol-1")
       AuditLog.log(event)
-      Process.sleep(50)
+      AuditLog.flush()
 
       assert AuditLog.count() == 1
     end
@@ -25,7 +25,7 @@ defmodule NeonFS.Core.AuditLogTest do
         )
       end
 
-      Process.sleep(50)
+      AuditLog.flush()
       assert AuditLog.count() == 5
     end
 
@@ -38,7 +38,6 @@ defmodule NeonFS.Core.AuditLogTest do
     test "does not raise if AuditLog process is not running" do
       # Stop the audit log
       GenServer.stop(AuditLog)
-      Process.sleep(10)
 
       # Should not raise
       event = AuditEvent.new(event_type: :volume_created, actor_uid: 0)
@@ -49,7 +48,7 @@ defmodule NeonFS.Core.AuditLogTest do
   describe "log_event/1" do
     test "creates and logs an event from keyword attributes" do
       AuditLog.log_event(event_type: :volume_deleted, actor_uid: 42, resource: "vol-x")
-      Process.sleep(50)
+      AuditLog.flush()
 
       [event] = AuditLog.recent(1)
       assert event.event_type == :volume_deleted
@@ -70,7 +69,7 @@ defmodule NeonFS.Core.AuditLogTest do
         )
       end
 
-      Process.sleep(50)
+      AuditLog.flush()
 
       events = AuditLog.recent(10)
       assert length(events) == 5
@@ -83,7 +82,7 @@ defmodule NeonFS.Core.AuditLogTest do
         AuditLog.log(AuditEvent.new(event_type: :admin_action, actor_uid: i))
       end
 
-      Process.sleep(50)
+      AuditLog.flush()
 
       events = AuditLog.recent(3)
       assert length(events) == 3
@@ -129,7 +128,7 @@ defmodule NeonFS.Core.AuditLogTest do
         AuditLog.log(event)
       end
 
-      Process.sleep(50)
+      AuditLog.flush()
       :ok
     end
 
@@ -194,7 +193,6 @@ defmodule NeonFS.Core.AuditLogTest do
     test "prunes oldest events when max_events exceeded" do
       # Reconfigure with a small limit
       GenServer.stop(AuditLog)
-      Process.sleep(10)
       cleanup_ets_table(:audit_log)
       start_audit_log(max_events: 5, prune_interval_ms: 0)
 
@@ -202,7 +200,7 @@ defmodule NeonFS.Core.AuditLogTest do
         AuditLog.log(AuditEvent.new(event_type: :admin_action, actor_uid: i, resource: "r-#{i}"))
       end
 
-      Process.sleep(100)
+      AuditLog.flush()
 
       assert AuditLog.count() <= 5
       # Most recent events should be retained
@@ -226,13 +224,13 @@ defmodule NeonFS.Core.AuditLogTest do
 
       # Insert a recent event
       AuditLog.log(AuditEvent.new(event_type: :volume_created, actor_uid: 2))
-      Process.sleep(50)
+      AuditLog.flush()
 
       assert AuditLog.count() == 2
 
       # Trigger prune by sending the message directly
       send(Process.whereis(AuditLog), :prune)
-      Process.sleep(50)
+      :sys.get_state(AuditLog)
 
       assert AuditLog.count() == 1
       [remaining] = AuditLog.recent(10)
@@ -250,7 +248,7 @@ defmodule NeonFS.Core.AuditLogTest do
         AuditLog.log(AuditEvent.new(event_type: :admin_action, actor_uid: 0))
       end
 
-      Process.sleep(50)
+      AuditLog.flush()
       assert AuditLog.count() == 3
     end
   end
@@ -263,7 +261,7 @@ defmodule NeonFS.Core.AuditLogTest do
         ])
 
       AuditLog.log(AuditEvent.new(event_type: :volume_created, actor_uid: 0))
-      Process.sleep(50)
+      AuditLog.flush()
 
       assert_received {[:neonfs, :audit, :logged], ^ref, %{count: 1},
                        %{event_type: :volume_created}}

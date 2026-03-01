@@ -121,7 +121,7 @@ defmodule NeonFS.Client.PartitionRecovery do
       send(pid, :neonfs_invalidate_all)
     end
 
-    Logger.warning("Partition recovery: invalidated #{length(pids)} subscriber(s)")
+    Logger.warning("Partition recovery invalidated subscribers", count: length(pids))
   end
 
   defp default_core_node?(node) do

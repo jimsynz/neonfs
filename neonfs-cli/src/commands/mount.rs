@@ -65,8 +65,8 @@ impl MountCommand {
         })?;
 
         // Check for error response
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         // Unwrap {:ok, mount_info} tuple
@@ -109,8 +109,8 @@ impl MountCommand {
         })?;
 
         // Check for error response
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         // Format output
@@ -142,8 +142,8 @@ impl MountCommand {
         })?;
 
         // Check for error response
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         // Unwrap {:ok, value} tuple

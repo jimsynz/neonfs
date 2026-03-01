@@ -35,25 +35,25 @@ impl From<String> for FuseError {
 }
 
 impl FuseError {
-    /// Convert to POSIX errno code
+    /// Convert to fuser::Errno for FUSE reply errors
     #[allow(dead_code)] // Used when fuse feature is enabled
-    pub fn to_errno(&self) -> i32 {
+    pub fn to_errno(&self) -> fuser::Errno {
         match self {
             FuseError::Io(e) => {
                 use std::io::ErrorKind;
                 match e.kind() {
-                    ErrorKind::NotFound => libc::ENOENT,
-                    ErrorKind::PermissionDenied => libc::EACCES,
-                    ErrorKind::AlreadyExists => libc::EEXIST,
-                    ErrorKind::InvalidInput => libc::EINVAL,
-                    ErrorKind::TimedOut => libc::ETIMEDOUT,
-                    _ => libc::EIO,
+                    ErrorKind::NotFound => fuser::Errno::ENOENT,
+                    ErrorKind::PermissionDenied => fuser::Errno::EACCES,
+                    ErrorKind::AlreadyExists => fuser::Errno::EEXIST,
+                    ErrorKind::InvalidInput => fuser::Errno::EINVAL,
+                    ErrorKind::TimedOut => fuser::Errno::ETIMEDOUT,
+                    _ => fuser::Errno::EIO,
                 }
             }
-            FuseError::ChannelSend(_) | FuseError::InvalidReply => libc::EIO,
-            FuseError::Timeout => libc::ETIMEDOUT,
-            FuseError::Shutdown => libc::ESHUTDOWN,
-            FuseError::Errno(code) => *code,
+            FuseError::ChannelSend(_) | FuseError::InvalidReply => fuser::Errno::EIO,
+            FuseError::Timeout => fuser::Errno::ETIMEDOUT,
+            FuseError::Shutdown => fuser::Errno::ESHUTDOWN,
+            FuseError::Errno(code) => fuser::Errno::from_i32(*code),
         }
     }
 
@@ -64,7 +64,7 @@ impl FuseError {
     }
 }
 
-/// Convert Elixir error atom to errno code
+/// Convert Elixir error atom to fuser::Errno
 ///
 /// Common mappings:
 /// - :enoent -> ENOENT (2)
@@ -73,21 +73,21 @@ impl FuseError {
 /// - :einval -> EINVAL (22)
 /// - :eio -> EIO (5)
 #[allow(dead_code)] // Used when fuse feature is enabled
-pub fn atom_to_errno(atom: &str) -> i32 {
+pub fn atom_to_errno(atom: &str) -> fuser::Errno {
     match atom {
-        "enoent" => libc::ENOENT,
-        "eacces" => libc::EACCES,
-        "eexist" => libc::EEXIST,
-        "einval" => libc::EINVAL,
-        "eio" => libc::EIO,
-        "eisdir" => libc::EISDIR,
-        "enotdir" => libc::ENOTDIR,
-        "enotempty" => libc::ENOTEMPTY,
-        "enametoolong" => libc::ENAMETOOLONG,
-        "enospc" => libc::ENOSPC,
-        "erofs" => libc::EROFS,
-        "etimedout" => libc::ETIMEDOUT,
-        _ => libc::EIO, // Default to generic I/O error
+        "enoent" => fuser::Errno::ENOENT,
+        "eacces" => fuser::Errno::EACCES,
+        "eexist" => fuser::Errno::EEXIST,
+        "einval" => fuser::Errno::EINVAL,
+        "eio" => fuser::Errno::EIO,
+        "eisdir" => fuser::Errno::EISDIR,
+        "enotdir" => fuser::Errno::ENOTDIR,
+        "enotempty" => fuser::Errno::ENOTEMPTY,
+        "enametoolong" => fuser::Errno::ENAMETOOLONG,
+        "enospc" => fuser::Errno::ENOSPC,
+        "erofs" => fuser::Errno::EROFS,
+        "etimedout" => fuser::Errno::ETIMEDOUT,
+        _ => fuser::Errno::EIO, // Default to generic I/O error
     }
 }
 
@@ -121,36 +121,36 @@ mod tests {
 
     #[test]
     fn test_atom_to_errno() {
-        assert_eq!(atom_to_errno("enoent"), libc::ENOENT);
-        assert_eq!(atom_to_errno("eacces"), libc::EACCES);
-        assert_eq!(atom_to_errno("eexist"), libc::EEXIST);
-        assert_eq!(atom_to_errno("einval"), libc::EINVAL);
-        assert_eq!(atom_to_errno("eio"), libc::EIO);
+        assert_eq!(atom_to_errno("enoent").code(), fuser::Errno::ENOENT.code());
+        assert_eq!(atom_to_errno("eacces").code(), fuser::Errno::EACCES.code());
+        assert_eq!(atom_to_errno("eexist").code(), fuser::Errno::EEXIST.code());
+        assert_eq!(atom_to_errno("einval").code(), fuser::Errno::EINVAL.code());
+        assert_eq!(atom_to_errno("eio").code(), fuser::Errno::EIO.code());
 
         // Unknown atoms default to EIO
-        assert_eq!(atom_to_errno("unknown"), libc::EIO);
+        assert_eq!(atom_to_errno("unknown").code(), fuser::Errno::EIO.code());
     }
 
     #[test]
     fn test_fuse_error_to_errno() {
         let err = FuseError::Errno(libc::ENOENT);
-        assert_eq!(err.to_errno(), libc::ENOENT);
+        assert_eq!(err.to_errno().code(), fuser::Errno::ENOENT.code());
 
         let err = FuseError::Timeout;
-        assert_eq!(err.to_errno(), libc::ETIMEDOUT);
+        assert_eq!(err.to_errno().code(), fuser::Errno::ETIMEDOUT.code());
 
         let err = FuseError::Shutdown;
-        assert_eq!(err.to_errno(), libc::ESHUTDOWN);
+        assert_eq!(err.to_errno().code(), fuser::Errno::ESHUTDOWN.code());
     }
 
     #[test]
     fn test_io_error_mapping() {
         let io_err = std::io::Error::from(std::io::ErrorKind::NotFound);
         let fuse_err = FuseError::from(io_err);
-        assert_eq!(fuse_err.to_errno(), libc::ENOENT);
+        assert_eq!(fuse_err.to_errno().code(), fuser::Errno::ENOENT.code());
 
         let io_err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         let fuse_err = FuseError::from(io_err);
-        assert_eq!(fuse_err.to_errno(), libc::EACCES);
+        assert_eq!(fuse_err.to_errno().code(), fuser::Errno::EACCES.code());
     }
 }

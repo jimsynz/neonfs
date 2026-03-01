@@ -197,10 +197,16 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
     end
 
     test "reads chunk via data plane when pool exists", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       fake_node = :read_peer@host
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       # Verify direct data_call works for get_chunk
       assert {:ok, data} =
@@ -214,10 +220,16 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
     end
 
     test "returns :not_found for missing chunk via data plane", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       fake_node = :missing_peer@host
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       missing_hash = :crypto.hash(:sha256, "nonexistent chunk")
 
@@ -230,10 +242,16 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
     end
 
     test "data plane read includes tier in request", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       fake_node = :tier_peer@host
       endpoint = {~c"localhost", ctx.port}
       {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
-      Process.sleep(500)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
 
       # The echo server stores data under the hash key regardless of tier,
       # but this verifies the message is well-formed with tier included

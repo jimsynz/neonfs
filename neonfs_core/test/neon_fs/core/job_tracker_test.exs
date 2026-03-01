@@ -3,6 +3,8 @@ defmodule NeonFS.Core.JobTrackerTest do
 
   alias NeonFS.Core.{Job, JobTracker}
 
+  @moduletag :tmp_dir
+
   defmodule TestRunner do
     @behaviour NeonFS.Core.Job.Runner
 
@@ -48,7 +50,15 @@ defmodule NeonFS.Core.JobTrackerTest do
 
     @impl true
     def step(job) do
-      Process.sleep(500)
+      # Signal that step is running, then wait for release
+      case Map.get(job.params, :notify_pid) do
+        pid when is_pid(pid) ->
+          send(pid, {:slow_runner_step, self()})
+          receive do: (:continue -> :ok)
+
+        _ ->
+          :ok
+      end
 
       total = Map.get(job.params, :total, job.progress.total)
 
@@ -72,8 +82,8 @@ defmodule NeonFS.Core.JobTrackerTest do
     def label, do: "slow-runner"
   end
 
-  setup do
-    meta_dir = Path.join(System.tmp_dir!(), "neonfs_test_jobs_#{:rand.uniform(1_000_000)}")
+  setup %{tmp_dir: tmp_dir} do
+    meta_dir = Path.join(tmp_dir, "job_tracker")
     File.mkdir_p!(meta_dir)
 
     ensure_task_supervisor()
@@ -119,10 +129,15 @@ defmodule NeonFS.Core.JobTrackerTest do
     end
 
     test "job completes after steps" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :job, :completed]
+        ])
+
       {:ok, job} = JobTracker.create(TestRunner, %{total: 3})
 
-      # Wait for completion — TestRunner initialises progress from params
-      Process.sleep(500)
+      assert_receive {[:neonfs, :job, :completed], ^ref, %{}, %{job_id: job_id}}, 2_000
+      assert job_id == job.id
 
       {:ok, completed} = JobTracker.get(job.id)
       assert completed.status == :completed
@@ -151,8 +166,15 @@ defmodule NeonFS.Core.JobTrackerTest do
     end
 
     test "filters by status" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :job, :failed]
+        ])
+
       {:ok, job} = JobTracker.create(FailingRunner, %{})
-      Process.sleep(200)
+
+      assert_receive {[:neonfs, :job, :failed], ^ref, %{}, %{job_id: job_id}}, 2_000
+      assert job_id == job.id
 
       failed = JobTracker.list(status: :failed)
       assert Enum.any?(failed, &(&1.id == job.id))
@@ -162,9 +184,16 @@ defmodule NeonFS.Core.JobTrackerTest do
     end
 
     test "filters by type" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :job, :failed]
+        ])
+
       {:ok, _} = JobTracker.create(TestRunner, %{total: 100})
       {:ok, _} = JobTracker.create(FailingRunner, %{})
-      Process.sleep(100)
+
+      # Wait for FailingRunner to reach terminal state before asserting on filters
+      assert_receive {[:neonfs, :job, :failed], ^ref, %{}, %{}}, 2_000
 
       test_jobs = JobTracker.list(type: TestRunner)
       assert Enum.all?(test_jobs, &(&1.type == TestRunner))
@@ -173,10 +202,20 @@ defmodule NeonFS.Core.JobTrackerTest do
 
   describe "cancel/1" do
     test "cancels a running job" do
-      {:ok, job} = JobTracker.create(SlowRunner, %{total: 100})
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :job, :started]
+        ])
 
-      # SlowRunner initialises progress from params and sleeps 500ms per step
-      Process.sleep(100)
+      {:ok, job} = JobTracker.create(SlowRunner, %{total: 100, notify_pid: self()})
+
+      # Wait for the job to be started before cancelling
+      assert_receive {[:neonfs, :job, :started], ^ref, %{}, %{job_id: job_id}}, 2_000
+      assert job_id == job.id
+
+      # Wait for step to begin, then cancel before releasing it
+      assert_receive {:slow_runner_step, _pid}, 2_000
+
       assert :ok = JobTracker.cancel(job.id)
 
       {:ok, cancelled} = JobTracker.get(job.id)
@@ -188,8 +227,15 @@ defmodule NeonFS.Core.JobTrackerTest do
     end
 
     test "returns error for already terminal job" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :job, :failed]
+        ])
+
       {:ok, job} = JobTracker.create(FailingRunner, %{})
-      Process.sleep(300)
+
+      assert_receive {[:neonfs, :job, :failed], ^ref, %{}, %{job_id: job_id}}, 2_000
+      assert job_id == job.id
 
       {:ok, failed_job} = JobTracker.get(job.id)
       assert failed_job.status == :failed
@@ -253,9 +299,6 @@ defmodule NeonFS.Core.JobTrackerTest do
         ])
 
       {:ok, job} = JobTracker.create(TestRunner, %{total: 1})
-
-      # TestRunner initialises progress from params and completes in 1 step
-      Process.sleep(500)
 
       assert_receive {[:neonfs, :job, :completed], ^ref, %{}, %{job_id: job_id}}, 2_000
       assert job_id == job.id

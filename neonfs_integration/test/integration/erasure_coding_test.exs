@@ -174,7 +174,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
           "/critical.bin"
         ])
 
-      assert {:error, :insufficient_chunks} = result
+      assert {:error, %{class: :unavailable}} = result
     end
   end
 

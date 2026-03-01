@@ -45,7 +45,7 @@ defmodule NeonFS.Core.SystemVolume do
       existing =
         case ReadOperation.read_file(volume.id, path) do
           {:ok, data} -> data
-          {:error, :file_not_found} -> <<>>
+          {:error, %{class: :not_found}} -> <<>>
         end
 
       case WriteOperation.write_file(volume.id, path, existing <> content) do

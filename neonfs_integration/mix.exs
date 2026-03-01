@@ -44,6 +44,7 @@ defmodule NeonFS.Integration.MixProject do
       {:neonfs_fuse, path: "../neonfs_fuse", runtime: false},
 
       # dev/test
+      {:stream_data, "~> 1.0", only: [:test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_check, "~> 0.16", only: [:dev, :test], runtime: false},

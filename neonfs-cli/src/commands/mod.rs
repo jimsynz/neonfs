@@ -4,10 +4,13 @@ pub mod acl;
 pub mod audit;
 pub mod cluster;
 pub mod drive;
+pub mod gc;
 pub mod job;
 pub mod mount;
 pub mod node;
+pub mod scrub;
 pub mod volume;
+pub mod worker;
 
 use crate::error::Result;
 use crate::output::OutputFormat;

@@ -147,7 +147,7 @@ defmodule NeonFS.Core.ReadRepair do
   end
 
   defp emit_repair_result_telemetry({:error, reason}, key, node) do
-    Logger.debug("Read repair failed for #{inspect(node)}: #{inspect(reason)}")
+    Logger.debug("Read repair failed", node: node, reason: inspect(reason))
 
     :telemetry.execute([:neonfs, :read_repair, :failed], %{}, %{
       key: key,

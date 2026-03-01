@@ -3,7 +3,11 @@ defmodule NeonFS.Core.TieringManagerTest do
 
   alias NeonFS.Core.TieringManager
 
-  setup do
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    Application.put_env(:neonfs_core, :mock_drive_dir, tmp_dir)
+
     MockChunkIndex.init()
     MockAccessTracker.init()
     MockDriveRegistry.init()
@@ -22,6 +26,7 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockAccessTracker.cleanup()
       MockDriveRegistry.cleanup()
       MockBackgroundWorker.cleanup()
+      Application.delete_env(:neonfs_core, :mock_drive_dir)
     end)
 
     %{manager: pid}
@@ -440,6 +445,8 @@ defmodule MockDriveRegistry do
   end
 
   def list_drives do
+    base_dir = Application.get_env(:neonfs_core, :mock_drive_dir, "/tmp/mock")
+
     :ets.tab2list(@table)
     |> Enum.filter(fn
       {{:tier_usage, _}, _} -> true
@@ -452,7 +459,7 @@ defmodule MockDriveRegistry do
       %NeonFS.Core.Drive{
         id: "mock_#{tier}",
         node: Node.self(),
-        path: "/tmp/mock/#{tier}",
+        path: Path.join(base_dir, "#{tier}"),
         tier: tier,
         capacity_bytes: capacity,
         used_bytes: used,

@@ -86,6 +86,7 @@ defmodule NeonFS.Core.SystemVolume.Retention do
   @impl true
   def handle_info(:prune, state) do
     prune()
+    :telemetry.execute([:neonfs, :system_volume, :retention, :pruned], %{}, %{})
     schedule_prune(state)
     {:noreply, state}
   end
@@ -115,7 +116,11 @@ defmodule NeonFS.Core.SystemVolume.Retention do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Failed to list #{path} for retention pruning: #{inspect(reason)}")
+        Logger.warning("Failed to list directory for retention pruning",
+          path: path,
+          reason: inspect(reason)
+        )
+
         :ok
     end
   end
@@ -126,7 +131,9 @@ defmodule NeonFS.Core.SystemVolume.Retention do
       delete_expired_file(Path.join(dir, filename))
     else
       :error ->
-        Logger.warning("Retention: skipping #{Path.join(dir, filename)} — unparseable date")
+        Logger.warning("Retention skipping file with unparseable date",
+          path: Path.join(dir, filename)
+        )
 
       false ->
         :ok
@@ -136,10 +143,13 @@ defmodule NeonFS.Core.SystemVolume.Retention do
   defp delete_expired_file(path) do
     case SystemVolume.delete(path) do
       :ok ->
-        Logger.info("Retention: deleted #{path}")
+        Logger.info("Retention deleted file", path: path)
 
       {:error, reason} ->
-        Logger.warning("Retention: failed to delete #{path}: #{inspect(reason)}")
+        Logger.warning("Retention failed to delete file",
+          path: path,
+          reason: inspect(reason)
+        )
     end
   end
 

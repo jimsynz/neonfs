@@ -114,15 +114,22 @@ defmodule NeonFS.Core.StripeIndex do
   def init(opts) do
     :ets.new(:stripe_index, [:set, :named_table, :public, read_concurrency: true])
 
-    quorum_opts = Keyword.get(opts, :quorum_opts)
+    # Use explicit opts first (unit tests pass quorum_opts directly).
+    # Fall back to persistent_term (set by Supervisor or rebuild_quorum_ring).
+    # On crash restart, child_spec has no quorum_opts, so persistent_term
+    # (preserved by crash-safe terminate) provides the authoritative ring.
+    quorum_opts =
+      Keyword.get(opts, :quorum_opts) ||
+        :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+
     :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
 
     case load_from_local_store() do
       {:ok, count} ->
-        Logger.info("StripeIndex started, loaded #{count} stripes from local store")
+        Logger.info("StripeIndex started, loaded stripes from local store", count: count)
 
       {:error, reason} ->
-        Logger.debug("StripeIndex started, local store not available: #{inspect(reason)}")
+        Logger.debug("StripeIndex started, local store not available", reason: reason)
     end
 
     {:ok, %{quorum_opts: quorum_opts}}
@@ -157,8 +164,21 @@ defmodule NeonFS.Core.StripeIndex do
     end
   end
 
+  # Only erase persistent_term on clean shutdown, not on crash. On crash
+  # restart, the surviving persistent_term value (set by rebuild_quorum_ring)
+  # prevents the child from overwriting it with a stale child_spec ring.
   @impl true
-  def terminate(_reason, _state) do
+  def terminate(reason, _state) when reason in [:normal, :shutdown] do
+    safe_erase_quorum_opts()
+  end
+
+  def terminate({:shutdown, _}, _state) do
+    safe_erase_quorum_opts()
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp safe_erase_quorum_opts do
     :persistent_term.erase({__MODULE__, :quorum_opts})
     :ok
   rescue

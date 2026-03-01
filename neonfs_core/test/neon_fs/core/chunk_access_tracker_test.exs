@@ -3,24 +3,46 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
 
   alias NeonFS.Core.ChunkAccessTracker
 
-  setup do
-    # Ensure tracker is running
-    ensure_tracker()
+  @moduletag :tmp_dir
 
-    # Clear ETS table for clean test state
-    :ets.delete_all_objects(:chunk_access_tracker)
-
-    :ok
-  end
-
-  defp ensure_tracker do
+  setup %{tmp_dir: tmp_dir} do
+    # Stop any existing tracker
     case GenServer.whereis(ChunkAccessTracker) do
-      nil ->
-        {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0)
-
-      _pid ->
-        :ok
+      nil -> :ok
+      pid -> GenServer.stop(pid, :normal, 5_000)
     end
+
+    # Clean up persistent_term from previous runs
+    try do
+      :persistent_term.erase({ChunkAccessTracker, :max_chunks})
+    rescue
+      ArgumentError -> :ok
+    end
+
+    dets_path = Path.join(tmp_dir, "chunk_access_tracker.dets")
+    {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0, dets_path: dets_path)
+
+    on_exit(fn ->
+      case GenServer.whereis(ChunkAccessTracker) do
+        nil ->
+          :ok
+
+        pid ->
+          try do
+            GenServer.stop(pid, :normal, 5_000)
+          catch
+            :exit, _ -> :ok
+          end
+      end
+
+      try do
+        :persistent_term.erase({ChunkAccessTracker, :max_chunks})
+      rescue
+        ArgumentError -> :ok
+      end
+    end)
+
+    {:ok, dets_path: dets_path, tmp_dir: tmp_dir}
   end
 
   defp make_hash(n) do
@@ -168,7 +190,7 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
 
       # Insert with a very old timestamp (48 hours ago)
       old_ts = System.system_time(:second) - 48 * 3600
-      :ets.insert(:chunk_access_tracker, {hash, 0, 5, old_ts})
+      :ets.insert(:chunk_access_tracker, {hash, 0, 5, old_ts, 0})
 
       cold_chunks = ChunkAccessTracker.list_cold_chunks(24)
       assert hash in cold_chunks
@@ -187,7 +209,7 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
 
       for i <- 1..5 do
         hash = make_hash("cold_limit_#{i}")
-        :ets.insert(:chunk_access_tracker, {hash, 0, 1, old_ts})
+        :ets.insert(:chunk_access_tracker, {hash, 0, 1, old_ts, 0})
       end
 
       cold_chunks = ChunkAccessTracker.list_cold_chunks(24, 3)
@@ -207,7 +229,7 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
 
       # Trigger decay manually
       send(GenServer.whereis(ChunkAccessTracker), :decay)
-      Process.sleep(50)
+      :sys.get_state(ChunkAccessTracker)
 
       stats = ChunkAccessTracker.get_stats(hash)
       assert stats.hourly == 0
@@ -215,19 +237,143 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
       assert stats.daily > 0
     end
 
-    test "cleans up entries with no activity" do
+    test "cleans up entries with no activity after staleness threshold" do
       hash = make_hash(:cleanup)
 
-      # Insert an entry with zero counts
-      :ets.insert(:chunk_access_tracker, {hash, 0, 0, System.system_time(:second)})
+      # Insert an entry with zero counts at staleness 2 (one more cycle = pruned)
+      :ets.insert(:chunk_access_tracker, {hash, 0, 0, System.system_time(:second), 2})
+
+      # Trigger decay — staleness reaches 3, entry should be pruned
+      send(GenServer.whereis(ChunkAccessTracker), :decay)
+      :sys.get_state(ChunkAccessTracker)
+
+      assert ChunkAccessTracker.get_stats(hash).hourly == 0
+      assert ChunkAccessTracker.get_stats(hash).daily == 0
+      assert :ets.lookup(:chunk_access_tracker, hash) == []
+    end
+
+    test "increments staleness for zero-activity entries below threshold" do
+      hash = make_hash(:stale_increment)
+
+      # Insert with zero activity and staleness 0
+      :ets.insert(:chunk_access_tracker, {hash, 0, 0, System.system_time(:second), 0})
 
       # Trigger decay
       send(GenServer.whereis(ChunkAccessTracker), :decay)
-      Process.sleep(50)
+      :sys.get_state(ChunkAccessTracker)
 
-      # Entry should be cleaned up
-      assert ChunkAccessTracker.get_stats(hash).hourly == 0
-      assert ChunkAccessTracker.get_stats(hash).daily == 0
+      # Entry should still exist with incremented staleness
+      [{^hash, 0, 0, _ts, staleness}] = :ets.lookup(:chunk_access_tracker, hash)
+      assert staleness == 1
+    end
+
+    test "resets staleness when entry has activity" do
+      hash = make_hash(:stale_reset)
+
+      # Insert with some staleness
+      :ets.insert(:chunk_access_tracker, {hash, 5, 10, System.system_time(:second), 2})
+
+      # Trigger decay — entry has activity (hourly=5), staleness should reset
+      send(GenServer.whereis(ChunkAccessTracker), :decay)
+      :sys.get_state(ChunkAccessTracker)
+
+      [{^hash, 0, new_daily, _ts, staleness}] = :ets.lookup(:chunk_access_tracker, hash)
+      assert new_daily > 0
+      assert staleness == 0
+    end
+  end
+
+  describe "DETS persistence" do
+    test "stats survive a process restart", %{dets_path: dets_path} do
+      hash = make_hash(:persist)
+
+      for _ <- 1..7 do
+        ChunkAccessTracker.record_access(hash)
+      end
+
+      assert ChunkAccessTracker.get_stats(hash).hourly == 7
+
+      # Stop the tracker (triggers terminate → DETS sync)
+      GenServer.stop(GenServer.whereis(ChunkAccessTracker), :normal, 5_000)
+
+      # Verify DETS file was written
+      assert File.exists?(dets_path)
+
+      # Restart with same DETS path
+      {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0, dets_path: dets_path)
+
+      # Stats should be restored
+      stats = ChunkAccessTracker.get_stats(hash)
+      assert stats.hourly == 7
+      assert stats.daily == 7
+    end
+
+    test "DETS sync occurs on decay timer", %{dets_path: dets_path} do
+      hash = make_hash(:decay_sync)
+      ChunkAccessTracker.record_access(hash)
+
+      # Trigger decay (which also syncs to DETS)
+      send(GenServer.whereis(ChunkAccessTracker), :decay)
+      :sys.get_state(ChunkAccessTracker)
+
+      assert File.exists?(dets_path)
+
+      # Verify DETS contains the entry
+      {:ok, dets_ref} =
+        :dets.open_file(:test_verify_dets, type: :set, file: String.to_charlist(dets_path))
+
+      entries = :dets.match_object(dets_ref, :_)
+      :dets.close(dets_ref)
+
+      assert entries != []
+      assert Enum.any?(entries, fn {h, _hourly, _daily, _ts, _stale} -> h == hash end)
+    end
+  end
+
+  describe "table size management" do
+    test "inserting beyond max triggers pruning", %{tmp_dir: tmp_dir} do
+      # Stop current tracker
+      GenServer.stop(GenServer.whereis(ChunkAccessTracker), :normal, 5_000)
+
+      # Start with a very small max
+      dets_path = Path.join(tmp_dir, "prune_test.dets")
+
+      {:ok, _pid} =
+        ChunkAccessTracker.start_link(
+          decay_interval_ms: 0,
+          dets_path: dets_path,
+          max_chunks: 10
+        )
+
+      # Insert 10 stale entries (zero activity, high staleness)
+      for i <- 1..10 do
+        hash = make_hash("stale_#{i}")
+        :ets.insert(:chunk_access_tracker, {hash, 0, 0, System.system_time(:second) - 1000, 2})
+      end
+
+      assert :ets.info(:chunk_access_tracker, :size) == 10
+
+      # This record_access pushes us over the limit, triggering async prune
+      ChunkAccessTracker.record_access(make_hash(:trigger))
+      :sys.get_state(ChunkAccessTracker)
+
+      # Table should be pruned back to at most max_chunks
+      assert :ets.info(:chunk_access_tracker, :size) <= 10
+    end
+
+    test "stale entries are pruned after consecutive zero-activity cycles" do
+      hash = make_hash(:multi_stale)
+
+      # Insert with zero activity
+      :ets.insert(:chunk_access_tracker, {hash, 0, 0, System.system_time(:second), 0})
+
+      # Run 3 decay cycles — entry should be pruned after the 3rd
+      for _ <- 1..3 do
+        send(GenServer.whereis(ChunkAccessTracker), :decay)
+        :sys.get_state(ChunkAccessTracker)
+      end
+
+      assert :ets.lookup(:chunk_access_tracker, hash) == []
     end
   end
 end

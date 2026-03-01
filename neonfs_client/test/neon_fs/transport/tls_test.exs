@@ -290,11 +290,14 @@ defmodule NeonFS.Transport.TLSTest do
       assert (key_stat.mode &&& 0o777) == 0o600
     end
 
-    test "read_local_cert returns error when file missing" do
+    @tag :tmp_dir
+    test "read_local_cert returns error when file missing", %{tmp_dir: tmp_dir} do
+      missing_dir = Path.join(tmp_dir, "missing")
+
       Application.put_env(
         :neonfs_client,
         :tls_dir,
-        "/tmp/neonfs_nonexistent_#{:rand.uniform(100_000)}"
+        missing_dir
       )
 
       on_exit(fn ->
@@ -304,11 +307,14 @@ defmodule NeonFS.Transport.TLSTest do
       assert {:error, :not_found} = TLS.read_local_cert()
     end
 
-    test "read_local_ca_cert returns error when file missing" do
+    @tag :tmp_dir
+    test "read_local_ca_cert returns error when file missing", %{tmp_dir: tmp_dir} do
+      missing_dir = Path.join(tmp_dir, "missing")
+
       Application.put_env(
         :neonfs_client,
         :tls_dir,
-        "/tmp/neonfs_nonexistent_#{:rand.uniform(100_000)}"
+        missing_dir
       )
 
       on_exit(fn ->

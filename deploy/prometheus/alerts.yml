@@ -1,0 +1,106 @@
+# NeonFS Prometheus alerting rules.
+#
+# Copy this file to your Prometheus rules directory and include it via
+# `rule_files` in prometheus.yml.  For example:
+#
+#   rule_files:
+#     - /etc/prometheus/rules/neonfs_alerts.yml
+#
+# All metric names correspond to the telemetry events defined in
+# NeonFS.Core.Telemetry (core node) and NeonFS.FUSE.Telemetry (fuse node).
+
+groups:
+  - name: neonfs_storage
+    rules:
+      - alert: NeonFSStorageCritical
+        expr: >
+          (neonfs_storage_bytes_used / (neonfs_storage_bytes_used + neonfs_storage_bytes_free)) > 0.95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NeonFS storage critically full on {{ $labels.node }}"
+          description: >
+            Node {{ $labels.node }} drive {{ $labels.drive_id }} ({{ $labels.tier }})
+            is above 95% utilisation for more than 5 minutes. Immediate action
+            required — trigger GC or add capacity.
+
+      - alert: NeonFSStorageWarning
+        expr: >
+          (neonfs_storage_bytes_used / (neonfs_storage_bytes_used + neonfs_storage_bytes_free)) > 0.85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeonFS storage warning on {{ $labels.node }}"
+          description: >
+            Node {{ $labels.node }} drive {{ $labels.drive_id }} ({{ $labels.tier }})
+            is above 85% utilisation for more than 15 minutes. Consider running
+            garbage collection or provisioning additional storage.
+
+  - name: neonfs_cluster
+    rules:
+      - alert: NeonFSClockSkew
+        expr: neonfs_clock_skew_milliseconds > 500
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NeonFS clock skew exceeds 500ms with {{ $labels.node }}"
+          description: >
+            Clock skew between the local node and {{ $labels.node }} has exceeded
+            500ms for more than 1 minute. HLC ordering guarantees are at risk.
+            Verify NTP synchronisation on both nodes.
+
+      - alert: NeonFSNodeDown
+        expr: up{job=~"neonfs.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NeonFS node unreachable: {{ $labels.instance }}"
+          description: >
+            The health endpoint for {{ $labels.instance }} has been unreachable
+            for more than 2 minutes. Check whether the node process is running
+            and the network path is clear.
+
+      - alert: NeonFSReplicationLag
+        expr: neonfs_worker_queue_depth{priority="normal"} > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeonFS replication queue depth exceeds 1000"
+          description: >
+            The background worker queue depth for normal-priority tasks
+            (including replication) has exceeded 1000 items for more than
+            5 minutes. This may indicate network issues between nodes or
+            insufficient worker capacity.
+
+  - name: neonfs_drives
+    rules:
+      - alert: NeonFSDriveFailed
+        expr: neonfs_storage_drive_state == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NeonFS drive failed on {{ $labels.node }}"
+          description: >
+            Drive {{ $labels.drive_id }} ({{ $labels.tier }}) on
+            {{ $labels.node }} reports a non-active state. Investigate
+            drive health and consider evacuating data.
+
+  - name: neonfs_cache
+    rules:
+      - alert: NeonFSCacheEvictionHigh
+        expr: rate(neonfs_cache_resolved_eviction_count[5m]) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NeonFS cache eviction rate exceeds 100/s"
+          description: >
+            The resolved lookup cache is evicting entries at more than 100
+            per second sustained for 10 minutes. Consider increasing the
+            node-level cache memory budget.

@@ -7,8 +7,9 @@ defmodule NeonFS.Core.MetadataStoreTest do
 
   @segment_id :crypto.hash(:sha256, "test_segment")
 
-  setup do
-    tmp_dir = Path.join(System.tmp_dir!(), "metadata_store_test_#{random_string()}")
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
     File.mkdir_p!(tmp_dir)
 
     drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 100_000_000}]

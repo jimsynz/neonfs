@@ -33,6 +33,7 @@ defmodule NeonFS.Core.BackgroundWorker do
     * `[:neonfs, :background_worker, :complete]` — work completed
     * `[:neonfs, :background_worker, :fail]` — work failed
     * `[:neonfs, :background_worker, :cancel]` — work cancelled
+    * `[:neonfs, :background_worker, :reconfigured]` — settings changed
   """
 
   use GenServer
@@ -74,6 +75,24 @@ defmodule NeonFS.Core.BackgroundWorker do
   end
 
   @doc """
+  Updates worker settings at runtime without restarting.
+
+  Accepts a keyword list with any of:
+    * `:max_concurrent` — maximum concurrent tasks
+    * `:max_per_minute` — rate limit on task starts
+    * `:drive_concurrency` — max concurrent ops per resource key
+
+  Unsupported keys are silently ignored. Changes take effect immediately
+  for new work items; in-flight work continues with old settings.
+
+  Also updates application env so values persist across process restarts.
+  """
+  @spec reconfigure(keyword()) :: :ok
+  def reconfigure(changes) when is_list(changes) do
+    GenServer.call(__MODULE__, {:reconfigure, changes})
+  end
+
+  @doc """
   Cancels a queued or running work item.
 
   Queued items are removed from the queue. Running items are left to
@@ -90,12 +109,15 @@ defmodule NeonFS.Core.BackgroundWorker do
   end
 
   @doc """
-  Returns overall worker status.
+  Returns overall worker status including configuration and runtime stats.
   """
   @spec status() :: %{
+          max_concurrent: pos_integer(),
+          max_per_minute: pos_integer(),
+          drive_concurrency: pos_integer(),
           queued: non_neg_integer(),
           running: non_neg_integer(),
-          completed: non_neg_integer(),
+          completed_total: non_neg_integer(),
           by_priority: %{priority() => non_neg_integer()}
         }
   def status do
@@ -153,7 +175,7 @@ defmodule NeonFS.Core.BackgroundWorker do
       resource_usage: %{}
     }
 
-    Logger.info("BackgroundWorker started (max_concurrent=#{state.max_concurrent})")
+    Logger.info("BackgroundWorker started", max_concurrent: state.max_concurrent)
     {:ok, state}
   end
 
@@ -222,6 +244,25 @@ defmodule NeonFS.Core.BackgroundWorker do
     end
   end
 
+  def handle_call({:reconfigure, changes}, _from, state) do
+    allowed = [:max_concurrent, :max_per_minute, :drive_concurrency]
+    filtered = Keyword.take(changes, allowed)
+
+    {old_values, state} = apply_config_changes(state, filtered)
+
+    unless old_values == %{} do
+      new_values = Map.new(filtered)
+
+      :telemetry.execute(
+        [:neonfs, :background_worker, :reconfigured],
+        %{},
+        %{old: old_values, new: new_values}
+      )
+    end
+
+    {:reply, :ok, state}
+  end
+
   def handle_call(:status, _from, state) do
     queued = count_queued(state)
     running = map_size(state.running)
@@ -232,9 +273,12 @@ defmodule NeonFS.Core.BackgroundWorker do
       end)
 
     result = %{
+      max_concurrent: state.max_concurrent,
+      max_per_minute: state.max_per_minute,
+      drive_concurrency: state.default_resource_limit,
       queued: queued,
       running: running,
-      completed: state.completed_count,
+      completed_total: state.completed_count,
       by_priority: by_priority
     }
 
@@ -273,13 +317,23 @@ defmodule NeonFS.Core.BackgroundWorker do
       drain_queue(state.queues[priority])
     end)
 
-    # Wait briefly for running tasks
-    if map_size(state.running) > 0 do
-      Logger.info(
-        "BackgroundWorker shutting down, waiting for #{map_size(state.running)} running tasks"
+    # Wait for running tasks to complete with timeout
+    running_count = map_size(state.running)
+
+    if running_count > 0 do
+      timeout_ms = min(running_count * 1000, 5000)
+
+      Logger.info("BackgroundWorker shutting down, waiting for running tasks",
+        running_count: running_count
       )
 
-      Process.sleep(min(map_size(state.running) * 1000, 5000))
+      drained = drain_running_tasks(running_count, timeout_ms)
+
+      :telemetry.execute(
+        [:neonfs, :background_worker, :shutdown_drain],
+        %{drained: drained, remaining: running_count - drained},
+        %{}
+      )
     end
 
     :ok
@@ -411,6 +465,13 @@ defmodule NeonFS.Core.BackgroundWorker do
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         Process.flag(:priority, :low)
+
+        Logger.metadata(
+          component: :background,
+          work_id: work.id,
+          work_label: work.label
+        )
+
         work.fn.()
       end)
 
@@ -467,7 +528,11 @@ defmodule NeonFS.Core.BackgroundWorker do
       {_, {:error, reason}} ->
         state = put_in(state.work_registry[work.id], :failed)
 
-        Logger.warning("Background work #{work.id} (#{work.label}) failed: #{inspect(reason)}")
+        Logger.warning("Background work failed",
+          work_id: work.id,
+          work_label: work.label,
+          reason: inspect(reason)
+        )
 
         :telemetry.execute(
           [:neonfs, :background_worker, :fail],
@@ -494,6 +559,58 @@ defmodule NeonFS.Core.BackgroundWorker do
     # Prune old entries and add new
     starts = [now | Enum.filter(state.starts_this_minute, &(&1 > one_minute_ago))]
     %{state | starts_this_minute: starts}
+  end
+
+  ## Private — Configuration
+
+  @config_mapping %{
+    max_concurrent: {:max_concurrent, :worker_max_concurrent},
+    max_per_minute: {:max_per_minute, :worker_max_per_minute},
+    drive_concurrency: {:default_resource_limit, :worker_drive_concurrency}
+  }
+
+  defp apply_config_changes(state, changes) do
+    Enum.reduce(changes, {%{}, state}, fn {key, value}, {old_acc, state_acc} ->
+      case Map.get(@config_mapping, key) do
+        {state_key, env_key} ->
+          old_value = Map.get(state_acc, state_key)
+          state_acc = Map.put(state_acc, state_key, value)
+          Application.put_env(:neonfs_core, env_key, value)
+          {Map.put(old_acc, key, old_value), state_acc}
+
+        nil ->
+          {old_acc, state_acc}
+      end
+    end)
+  end
+
+  ## Private — Shutdown drain
+
+  defp drain_running_tasks(remaining, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_drain_running(0, remaining, deadline)
+  end
+
+  defp do_drain_running(drained, 0, _deadline), do: drained
+
+  defp do_drain_running(drained, remaining, deadline) do
+    wait_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {ref, _result} when is_reference(ref) ->
+        Process.demonitor(ref, [:flush])
+        do_drain_running(drained + 1, remaining - 1, deadline)
+
+      {:DOWN, _ref, :process, _pid, _reason} ->
+        do_drain_running(drained + 1, remaining - 1, deadline)
+    after
+      wait_ms ->
+        Logger.warning("BackgroundWorker shutdown timeout",
+          remaining: remaining
+        )
+
+        drained
+    end
   end
 
   ## Private — Helpers

@@ -37,7 +37,7 @@ defmodule NeonFS.Core.SystemVolumeTest do
     end
 
     test "returns error for non-existent file" do
-      assert {:error, :file_not_found} = SystemVolume.read("/no/such/file.txt")
+      assert {:error, %{class: :not_found}} = SystemVolume.read("/no/such/file.txt")
     end
   end
 

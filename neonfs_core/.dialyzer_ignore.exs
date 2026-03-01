@@ -38,5 +38,12 @@
   # Test support module uses ExUnit macros that inject functions at compile time.
   # Under MIX_ENV=test (used in CI), test/support is compiled via elixirc_paths
   # but ExUnit internals aren't in the PLT. Unnecessary skip under MIX_ENV=dev.
-  ~r"test/support/test_case\.ex"
+  ~r"test/support/test_case\.ex",
+
+  # Handler defensive catch-all clauses: each `with` block ends with
+  # `{:error, reason} -> {:error, wrap_error(reason)}` for forward compatibility.
+  # Dialyzer proves the clause is unreachable given current upstream return types,
+  # but we keep them so new error atoms from internal modules are wrapped rather
+  # than leaking raw atoms to the CLI.
+  ~r"lib/neon_fs/cli/handler\.ex:\d+:\d+:pattern_match_cov"
 ]

@@ -23,6 +23,7 @@ defmodule NeonFS.Core.FileIndex do
   require Logger
 
   alias NeonFS.Core.{
+    ChunkIndex,
     DirectoryEntry,
     FileMeta,
     Intent,
@@ -120,6 +121,37 @@ defmodule NeonFS.Core.FileIndex do
   @spec update(file_id(), keyword()) :: {:ok, FileMeta.t()} | {:error, term()}
   def update(file_id, updates) do
     GenServer.call(__MODULE__, {:update, file_id, updates}, 10_000)
+  end
+
+  @doc """
+  Truncates a file to the given size, trimming chunks and stripes as needed.
+
+  When `new_size` is smaller than the current file size, walks the chunk list
+  to determine which chunks to keep based on accumulated byte offsets from
+  `ChunkIndex`. Chunks that start at or beyond the new size are dropped.
+  Stripe references are similarly trimmed for erasure-coded files.
+
+  When `new_size` is equal to or larger than the current size, only the `size`
+  field is updated (sparse file semantics — no zero-filled chunks allocated).
+
+  Any additional setattr updates (mode, uid, gid, timestamps) can be passed
+  via `additional_updates` and will be applied in the same quorum write.
+  """
+  @spec truncate(file_id(), non_neg_integer(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def truncate(file_id, new_size, additional_updates \\ []) do
+    GenServer.call(__MODULE__, {:truncate, file_id, new_size, additional_updates}, 10_000)
+  end
+
+  @doc """
+  Updates only the `accessed_at` timestamp on a file (atime touch).
+
+  Uses `FileMeta.touch/1` — no version bump, no `changed_at` or `modified_at` update.
+  Intended for `relatime`-style atime updates on read.
+  """
+  @spec touch(file_id()) :: {:ok, FileMeta.t()} | {:error, term()}
+  def touch(file_id) do
+    GenServer.call(__MODULE__, {:touch, file_id}, 10_000)
   end
 
   @doc """
@@ -229,17 +261,26 @@ defmodule NeonFS.Core.FileIndex do
   def init(opts) do
     :ets.new(:file_index_by_id, [:set, :named_table, :public, read_concurrency: true])
 
-    quorum_opts = Keyword.get(opts, :quorum_opts)
+    # Use explicit opts first (unit tests pass quorum_opts directly).
+    # Fall back to persistent_term (set by Supervisor or rebuild_quorum_ring).
+    # On crash restart, child_spec has no quorum_opts, so persistent_term
+    # (preserved by crash-safe terminate) provides the authoritative ring.
+    quorum_opts =
+      Keyword.get(opts, :quorum_opts) ||
+        :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+
     :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
 
     if quorum_opts do
       case load_from_local_store() do
         {:ok, count} ->
-          Logger.info("FileIndex started in quorum mode, loaded #{count} files from local store")
+          Logger.info("FileIndex started in quorum mode, loaded files from local store",
+            count: count
+          )
 
         {:error, reason} ->
-          Logger.debug(
-            "FileIndex started in quorum mode, local store not available: #{inspect(reason)}"
+          Logger.debug("FileIndex started in quorum mode, local store not available",
+            reason: reason
           )
       end
     else
@@ -258,6 +299,18 @@ defmodule NeonFS.Core.FileIndex do
   @impl true
   def handle_call({:update, file_id, updates}, _from, state) do
     reply = do_update(file_id, updates, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:truncate, file_id, new_size, additional_updates}, _from, state) do
+    reply = do_truncate(file_id, new_size, additional_updates, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:touch, file_id}, _from, state) do
+    reply = do_touch(file_id, quorum_opts())
     {:reply, reply, state}
   end
 
@@ -291,8 +344,21 @@ defmodule NeonFS.Core.FileIndex do
     {:reply, reply, state}
   end
 
+  # Only erase persistent_term on clean shutdown, not on crash. On crash
+  # restart, the surviving persistent_term value (set by rebuild_quorum_ring)
+  # prevents the child from overwriting it with a stale child_spec ring.
   @impl true
-  def terminate(_reason, _state) do
+  def terminate(reason, _state) when reason in [:normal, :shutdown] do
+    safe_erase_quorum_opts()
+  end
+
+  def terminate({:shutdown, _}, _state) do
+    safe_erase_quorum_opts()
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp safe_erase_quorum_opts do
     :persistent_term.erase({__MODULE__, :quorum_opts})
     :ok
   rescue
@@ -361,6 +427,110 @@ defmodule NeonFS.Core.FileIndex do
             })
 
             {:ok, updated_file}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  ## Private — Truncate
+
+  defp do_truncate(_file_id, _new_size, _additional_updates, nil), do: {:error, :no_quorum}
+
+  defp do_truncate(file_id, new_size, additional_updates, quorum_opts) do
+    case fetch_file(file_id, quorum_opts) do
+      {:ok, file} ->
+        truncation_updates = truncation_updates_for(file, new_size)
+        all_updates = Keyword.merge(additional_updates, truncation_updates)
+        do_update(file_id, all_updates, quorum_opts)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp truncation_updates_for(_file, 0) do
+    [size: 0, chunks: [], stripes: nil]
+  end
+
+  defp truncation_updates_for(file, new_size) when new_size >= file.size do
+    [size: new_size]
+  end
+
+  defp truncation_updates_for(file, new_size) do
+    trimmed_chunks = trim_chunks_to_size(file.chunks, new_size)
+    trimmed_stripes = trim_stripes_to_size(file.stripes, new_size)
+    [size: new_size, chunks: trimmed_chunks, stripes: trimmed_stripes]
+  end
+
+  defp trim_chunks_to_size(chunks, target_size) do
+    do_trim_chunks(chunks, target_size, 0, [])
+  end
+
+  defp do_trim_chunks([], _target, _offset, acc), do: Enum.reverse(acc)
+
+  defp do_trim_chunks([hash | rest], target, offset, acc) do
+    case ChunkIndex.get(hash) do
+      {:ok, chunk_meta} ->
+        if offset >= target do
+          # This chunk starts at or beyond the target — drop it and all remaining
+          Enum.reverse(acc)
+        else
+          # This chunk covers bytes before the target — keep it
+          do_trim_chunks(rest, target, offset + chunk_meta.original_size, [hash | acc])
+        end
+
+      {:error, :not_found} ->
+        # Can't determine size — keep the chunk to be safe
+        Logger.warning("Chunk size unknown during truncation, keeping chunk")
+        do_trim_chunks(rest, target, offset, [hash | acc])
+    end
+  end
+
+  defp trim_stripes_to_size(nil, _target), do: nil
+  defp trim_stripes_to_size([], _target), do: nil
+
+  defp trim_stripes_to_size(stripes, target_size) do
+    stripes
+    |> Enum.filter(fn stripe_ref ->
+      {start, _end_byte} = byte_range_bounds(stripe_ref.byte_range)
+      start < target_size
+    end)
+    |> Enum.map(fn stripe_ref ->
+      {start, end_byte} = byte_range_bounds(stripe_ref.byte_range)
+
+      if end_byte > target_size do
+        %{stripe_ref | byte_range: {start, target_size}}
+      else
+        stripe_ref
+      end
+    end)
+    |> case do
+      [] -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp byte_range_bounds({s, e}), do: {s, e}
+  defp byte_range_bounds(s..e//_), do: {s, e}
+
+  ## Private — Touch (atime-only update, no version bump)
+
+  defp do_touch(_file_id, nil), do: {:error, :no_quorum}
+
+  defp do_touch(file_id, quorum_opts) do
+    case fetch_file(file_id, quorum_opts) do
+      {:ok, old_file} ->
+        touched_file = FileMeta.touch(old_file)
+
+        case quorum_write_file(touched_file, quorum_opts) do
+          :ok ->
+            :ets.insert(:file_index_by_id, {file_id, touched_file})
+            {:ok, touched_file}
 
           {:error, reason} ->
             {:error, reason}
@@ -724,11 +894,11 @@ defmodule NeonFS.Core.FileIndex do
     Broadcaster.broadcast(volume_id, event)
   rescue
     _ ->
-      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      Logger.warning("Event broadcast failed", event_type: inspect(event.__struct__))
       :ok
   catch
     :exit, _ ->
-      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      Logger.warning("Event broadcast failed", event_type: inspect(event.__struct__))
       :ok
   end
 
@@ -802,6 +972,7 @@ defmodule NeonFS.Core.FileIndex do
       created_at: file.created_at,
       modified_at: file.modified_at,
       accessed_at: file.accessed_at,
+      changed_at: file.changed_at,
       version: file.version,
       previous_version_id: file.previous_version_id,
       hlc_timestamp: file.hlc_timestamp
@@ -822,6 +993,7 @@ defmodule NeonFS.Core.FileIndex do
       created_at: decode_datetime(get_field(map, :created_at)),
       modified_at: decode_datetime(get_field(map, :modified_at)),
       accessed_at: decode_datetime(get_field(map, :accessed_at)),
+      changed_at: decode_datetime(get_field(map, :changed_at)),
       version: get_field(map, :version, 1),
       previous_version_id: get_field(map, :previous_version_id),
       hlc_timestamp: get_field(map, :hlc_timestamp)

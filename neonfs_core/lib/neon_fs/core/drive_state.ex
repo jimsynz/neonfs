@@ -217,7 +217,7 @@ defmodule NeonFS.Core.DriveState do
   end
 
   def handle_info({:spin_down_complete, {:error, reason}}, %{power_state: :spinning_down} = state) do
-    Logger.warning("Drive #{state.drive_id} spin-down failed: #{inspect(reason)}")
+    Logger.warning("Drive spin-down failed", drive_id: state.drive_id, reason: reason)
     state = transition_to(:active, state)
     state = schedule_idle_timeout(state)
     notify_waiters(state, :ok)
@@ -234,7 +234,7 @@ defmodule NeonFS.Core.DriveState do
   end
 
   def handle_info({:spin_up_complete, {:error, reason}}, %{power_state: :spinning_up} = state) do
-    Logger.warning("Drive #{state.drive_id} spin-up failed: #{inspect(reason)}")
+    Logger.warning("Drive spin-up failed", drive_id: state.drive_id, reason: reason)
     state = transition_to(:standby, state)
     notify_waiters(state, {:error, :spin_up_failed})
     {:noreply, %{state | spin_up_waiters: []}}

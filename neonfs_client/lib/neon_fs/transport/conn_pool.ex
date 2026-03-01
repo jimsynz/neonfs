@@ -107,21 +107,48 @@ defmodule NeonFS.Transport.ConnPool do
     {:async,
      fn ->
        host_charlist = if is_binary(host), do: String.to_charlist(host), else: host
-       {:ok, socket} = :ssl.connect(host_charlist, port, ssl_opts)
-       # Transfer controlling process to the pool before this Task exits,
-       # otherwise the socket is closed when the Task terminates.
-       :ok = :ssl.controlling_process(socket, pool_pid)
-       socket
+       monotonic_start = System.monotonic_time()
+
+       case :ssl.connect(host_charlist, port, ssl_opts) do
+         {:ok, socket} ->
+           # Transfer controlling process to the pool before this Task exits,
+           # otherwise the socket is closed when the Task terminates.
+           :ok = :ssl.controlling_process(socket, pool_pid)
+           elapsed = System.monotonic_time() - monotonic_start
+
+           :telemetry.execute(
+             [:neonfs, :transport, :conn_pool, :worker_connected],
+             %{connect_time: elapsed},
+             %{host: host, port: port}
+           )
+
+           socket
+
+         {:error, reason} ->
+           exit({:ssl_connect_failed, host, port, reason})
+       end
      end, pool_state}
   end
 
   @impl NimblePool
   def handle_checkout(:checkout, _from, socket, pool_state) do
+    :telemetry.execute(
+      [:neonfs, :transport, :conn_pool, :checkout],
+      %{},
+      %{peer: pool_state.peer}
+    )
+
     {:ok, socket, socket, pool_state}
   end
 
   @impl NimblePool
   def handle_checkin(socket, _from, _old_socket, pool_state) do
+    :telemetry.execute(
+      [:neonfs, :transport, :conn_pool, :checkin],
+      %{},
+      %{peer: pool_state.peer}
+    )
+
     {:ok, socket, pool_state}
   end
 
@@ -143,7 +170,13 @@ defmodule NeonFS.Transport.ConnPool do
   end
 
   @impl NimblePool
-  def terminate_worker(_reason, socket, pool_state) do
+  def terminate_worker(reason, socket, pool_state) do
+    :telemetry.execute(
+      [:neonfs, :transport, :conn_pool, :worker_disconnected],
+      %{},
+      %{peer: pool_state.peer, reason: reason}
+    )
+
     :ssl.close(socket)
     {:ok, pool_state}
   end

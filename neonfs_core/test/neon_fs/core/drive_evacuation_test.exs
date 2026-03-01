@@ -8,8 +8,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     ChunkMeta,
     DriveEvacuation,
     DriveRegistry,
-    Job,
-    StorageMetrics
+    Job
   }
 
   alias NeonFS.Core.Job.Runners.DriveEvacuation, as: EvacuationRunner
@@ -52,7 +51,8 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       restart: :temporary
     )
 
-    Process.sleep(50)
+    # Wait for StorageMetrics to finish computing initial usage
+    :sys.get_state(NeonFS.Core.StorageMetrics)
 
     {:ok, drives: drives, drive1_path: drive1_path, drive2_path: drive2_path}
   end

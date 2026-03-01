@@ -188,7 +188,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(_meta, {:machine_version, 1, 2}, state) do
     require Logger
-    Logger.info("Ra machine version upgrade: 1 -> 2 (adding services registry)")
+    Logger.info("Ra machine version upgrade", from: 1, to: 2, change: "adding services registry")
 
     new_state = Map.put_new(state, :services, %{})
     {new_state, :ok, []}
@@ -196,7 +196,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(_meta, {:machine_version, 2, 3}, state) do
     require Logger
-    Logger.info("Ra machine version upgrade: 2 -> 3 (volume tiering/caching/io_weight)")
+
+    Logger.info("Ra machine version upgrade",
+      from: 2,
+      to: 3,
+      change: "volume tiering/caching/io_weight"
+    )
 
     volumes = Map.get(state, :volumes, %{})
 
@@ -217,7 +222,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(_meta, {:machine_version, 3, 4}, state) do
     require Logger
-    Logger.info("Ra machine version upgrade: 3 -> 4 (adding stripes registry)")
+    Logger.info("Ra machine version upgrade", from: 3, to: 4, change: "adding stripes registry")
 
     new_state = Map.put_new(state, :stripes, %{})
     {new_state, :ok, []}
@@ -225,7 +230,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(_meta, {:machine_version, 4, 5}, state) do
     require Logger
-    Logger.info("Ra machine version upgrade: 4 -> 5 (segment assignments + intents)")
+
+    Logger.info("Ra machine version upgrade",
+      from: 4,
+      to: 5,
+      change: "segment assignments + intents"
+    )
 
     new_state =
       state
@@ -238,7 +248,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(_meta, {:machine_version, 5, 6}, state) do
     require Logger
-    Logger.info("Ra machine version upgrade: 5 -> 6 (encryption keys + volume ACLs)")
+
+    Logger.info("Ra machine version upgrade",
+      from: 5,
+      to: 6,
+      change: "encryption keys + volume ACLs"
+    )
 
     new_state =
       state
@@ -250,7 +265,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(_meta, {:machine_version, 6, 7}, state) do
     require Logger
-    Logger.info("Ra machine version upgrade: 6 -> 7 (remove rotation state from volumes)")
+
+    Logger.info("Ra machine version upgrade",
+      from: 6,
+      to: 7,
+      change: "remove rotation state from volumes"
+    )
 
     volumes =
       Map.new(state.volumes, fn {id, vol} ->
@@ -265,7 +285,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
-    Logger.info("Ra machine version upgrade: #{from_version} -> #{to_version}")
+    Logger.info("Ra machine version upgrade", from: from_version, to: to_version)
 
     {state, :ok, []}
   end
@@ -900,7 +920,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
         other -> other
       end
 
-    Logger.debug("Ignoring unhandled Ra command: #{inspect(command_type)}")
+    Logger.debug("Ignoring unhandled Ra command", command_type: inspect(command_type))
 
     {state, {:error, :unknown_command}, []}
   end
@@ -983,8 +1003,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Map.put_new(vol, :caching, %{
       transformed_chunks: true,
       reconstructed_stripes: true,
-      remote_chunks: true,
-      max_memory: 268_435_456
+      remote_chunks: true
     })
   end
 

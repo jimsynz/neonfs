@@ -19,12 +19,14 @@ defmodule NeonFS.Client.Connection do
   use GenServer
   require Logger
 
-  @reconnect_interval_ms 5_000
+  @default_reconnect_interval_ms 5_000
+  @default_peer_connect_timeout_ms 10_000
 
   @type state :: %{
           bootstrap_nodes: [node()],
           connected_nodes: MapSet.t(node()),
-          monitors: %{optional(reference()) => node()}
+          monitors: %{optional(reference()) => node()},
+          peer_connect_timeout: pos_integer()
         }
 
   ## Client API
@@ -62,10 +64,20 @@ defmodule NeonFS.Client.Connection do
         Application.get_env(:neonfs_client, :bootstrap_nodes, [])
       end)
 
+    peer_connect_timeout =
+      Keyword.get_lazy(opts, :peer_connect_timeout, fn ->
+        Application.get_env(
+          :neonfs_client,
+          :peer_connect_timeout,
+          @default_peer_connect_timeout_ms
+        )
+      end)
+
     state = %{
       bootstrap_nodes: bootstrap,
       connected_nodes: MapSet.new(),
-      monitors: %{}
+      monitors: %{},
+      peer_connect_timeout: peer_connect_timeout
     }
 
     {:ok, state, {:continue, :connect}}
@@ -91,7 +103,7 @@ defmodule NeonFS.Client.Connection do
 
   @impl true
   def handle_info({:nodedown, node, _info}, state) do
-    Logger.warning("Lost connection to bootstrap node: #{node}")
+    Logger.warning("Lost connection to bootstrap node", node: node)
 
     new_connected = MapSet.delete(state.connected_nodes, node)
 
@@ -104,7 +116,7 @@ defmodule NeonFS.Client.Connection do
     new_state = %{state | connected_nodes: new_connected, monitors: new_monitors}
 
     # Schedule reconnection attempt
-    Process.send_after(self(), :reconnect, @reconnect_interval_ms)
+    Process.send_after(self(), :reconnect, @default_reconnect_interval_ms)
 
     {:noreply, new_state}
   end
@@ -144,7 +156,7 @@ defmodule NeonFS.Client.Connection do
         }
 
       false ->
-        Logger.debug("Failed to connect to bootstrap node: #{node}")
+        Logger.debug("Failed to connect to bootstrap node", node: node)
         state
 
       :ignored ->

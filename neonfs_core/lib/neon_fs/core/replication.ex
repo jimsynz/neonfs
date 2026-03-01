@@ -128,8 +128,9 @@ defmodule NeonFS.Core.Replication do
   defp validate_selected_targets(selected, count) do
     if length(selected) < count do
       Logger.warning(
-        "Requested #{count} replicas but only #{length(selected)} nodes available. " <>
-          "Some redundancy is better than none."
+        "Requested more replicas than nodes available, some redundancy is better than none",
+        requested: count,
+        available: length(selected)
       )
     end
 
@@ -188,7 +189,7 @@ defmodule NeonFS.Core.Replication do
 
   defp spawn_background_replication(chunk_hash, chunk_data, tier, targets) do
     Task.start(fn ->
-      Logger.debug("Starting background replication for #{Base.encode16(chunk_hash)}")
+      Logger.debug("Starting background replication", chunk_hash: Base.encode16(chunk_hash))
 
       results = replicate_to_targets(chunk_hash, chunk_data, tier, targets)
 
@@ -206,7 +207,7 @@ defmodule NeonFS.Core.Replication do
       failures = Enum.filter(results, &match?({:error, _}, &1))
 
       unless Enum.empty?(failures) do
-        Logger.warning("Background replication had #{length(failures)} failures")
+        Logger.warning("Background replication had failures", failure_count: length(failures))
       end
     end)
   end
@@ -235,8 +236,9 @@ defmodule NeonFS.Core.Replication do
       {:ok, all_locations}
     else
       # Quorum failed
-      Logger.error(
-        "Quorum replication failed: #{length(successful_locations)}/#{required_successes} succeeded"
+      Logger.error("Quorum replication failed",
+        succeeded: length(successful_locations),
+        required: required_successes
       )
 
       {:error, :quorum_not_met}
@@ -260,7 +262,7 @@ defmodule NeonFS.Core.Replication do
       # At least one failed
       failures = Enum.filter(results, &match?({:error, _}, &1))
 
-      Logger.error("Synchronous replication failed: #{length(failures)} targets failed")
+      Logger.error("Synchronous replication failed", failure_count: length(failures))
 
       {:error, :replication_failed}
     end
@@ -300,11 +302,15 @@ defmodule NeonFS.Core.Replication do
         {:ok, %{node: target.node, drive_id: drive_id, tier: tier}}
 
       {:error, :no_data_endpoint} ->
-        Logger.info("No data endpoint for #{target.node}, falling back to distribution RPC")
+        Logger.info("No data endpoint, falling back to distribution RPC", node: target.node)
         replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target)
 
       {:error, reason} ->
-        Logger.warning("Failed to replicate chunk to #{target.node}: #{inspect(reason)}")
+        Logger.warning("Failed to replicate chunk to node",
+          node: target.node,
+          reason: inspect(reason)
+        )
+
         {:error, reason}
     end
   end
@@ -323,16 +329,27 @@ defmodule NeonFS.Core.Replication do
         if returned_hash == chunk_hash do
           {:ok, %{node: target.node, drive_id: drive_id, tier: String.to_existing_atom(tier_str)}}
         else
-          Logger.error("Hash mismatch during replication: expected #{Base.encode16(chunk_hash)}")
+          Logger.error("Hash mismatch during replication",
+            expected_hash: Base.encode16(chunk_hash)
+          )
+
           {:error, :hash_mismatch}
         end
 
       {:error, reason} ->
-        Logger.warning("Failed to replicate chunk to #{target.node}: #{inspect(reason)}")
+        Logger.warning("Failed to replicate chunk to node",
+          node: target.node,
+          reason: inspect(reason)
+        )
+
         {:error, reason}
 
       {:badrpc, reason} ->
-        Logger.warning("RPC failed when replicating to #{target.node}: #{inspect(reason)}")
+        Logger.warning("RPC failed when replicating to node",
+          node: target.node,
+          reason: inspect(reason)
+        )
+
         {:error, {:rpc_failed, reason}}
     end
   end
@@ -352,8 +369,8 @@ defmodule NeonFS.Core.Replication do
         ChunkIndex.update_locations(chunk_hash, updated_locations)
 
       {:error, :not_found} ->
-        Logger.warning(
-          "Cannot add locations to chunk #{Base.encode16(chunk_hash)}: chunk not found"
+        Logger.warning("Cannot add locations to chunk, chunk not found",
+          chunk_hash: Base.encode16(chunk_hash)
         )
 
         :ok

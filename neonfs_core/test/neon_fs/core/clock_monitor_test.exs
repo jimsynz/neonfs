@@ -106,7 +106,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
       )
 
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       assert_receive {:skew, %{skew_ms: skew}, %{node: :peer@host}}
       assert skew < 200
@@ -137,7 +137,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
       )
 
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       assert_receive {:skew, %{skew_ms: skew}, %{node: :peer@host}}
       assert skew >= 100
@@ -168,7 +168,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
       )
 
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       assert ClockMonitor.quarantined?(:bad_node@host)
       assert_receive {:quarantined, %{skew_ms: _skew}, %{node: :bad_node@host}}
@@ -203,7 +203,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
 
       # Trigger check — should unquarantine since skew is now low
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       refute ClockMonitor.quarantined?(:recovering@host)
       assert_receive {:unquarantined, %{node: :recovering@host}}
@@ -217,7 +217,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
 
       # Should not crash
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       assert Process.alive?(GenServer.whereis(ClockMonitor))
     end
@@ -246,12 +246,12 @@ defmodule NeonFS.Core.ClockMonitorTest do
 
       # First check — should quarantine and emit event
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
       assert_receive {:quarantined, %{node: :bad@host}}
 
       # Second check — already quarantined, should NOT emit again
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
       refute_receive {:quarantined, _}
     end
 
@@ -278,7 +278,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
       )
 
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       assert_receive {:skew, _measurements, %{node: :node_a@host}}
       assert_receive {:skew, _measurements, %{node: :node_b@host}}
@@ -309,7 +309,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
       )
 
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       assert_receive {:skew, skew, :n@h}
       assert skew < 200
@@ -338,7 +338,7 @@ defmodule NeonFS.Core.ClockMonitorTest do
       )
 
       send(GenServer.whereis(ClockMonitor), :check_clocks)
-      Process.sleep(50)
+      :sys.get_state(ClockMonitor)
 
       assert_receive {:skew, skew, :n@h}
       # Should be at critical level (>=500, <1000) — not quarantined

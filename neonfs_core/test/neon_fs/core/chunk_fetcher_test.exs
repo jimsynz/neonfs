@@ -2,7 +2,8 @@ defmodule NeonFS.Core.ChunkFetcherTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{BlobStore, ChunkFetcher, ChunkIndex, ChunkMeta}
+  alias NeonFS.Core.{BlobStore, ChunkCache, ChunkFetcher, ChunkIndex, ChunkMeta, VolumeRegistry}
+  alias NeonFS.Core.Volume
 
   @moduletag :tmp_dir
 
@@ -373,6 +374,194 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       assert metadata.error == :all_replicas_failed
 
       :telemetry.detach("test-remote-exception")
+    end
+  end
+
+  describe "fetch_chunk/2 - volume caching flags" do
+    setup do
+      start_volume_registry()
+      start_chunk_cache()
+      :ok
+    end
+
+    defp start_chunk_cache do
+      case GenServer.whereis(ChunkCache) do
+        nil -> start_supervised!(ChunkCache)
+        _pid -> :ok
+      end
+
+      clear_cache_tables()
+    end
+
+    defp clear_cache_tables do
+      for table <- [:chunk_cache_data, :chunk_cache_lru] do
+        case :ets.whereis(table) do
+          :undefined -> :ok
+          ref -> :ets.delete_all_objects(ref)
+        end
+      end
+    end
+
+    defp create_volume_with_caching(caching_overrides) do
+      caching = Map.merge(Volume.default_caching(), caching_overrides)
+
+      {:ok, volume} =
+        VolumeRegistry.create("test-vol-#{:rand.uniform(999_999)}", caching: caching)
+
+      volume
+    end
+
+    defp write_compressed_chunk do
+      data = String.duplicate("cache test data! ", 100)
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
+
+      chunk_meta = %ChunkMeta{
+        hash: hash,
+        original_size: info.original_size,
+        stored_size: info.stored_size,
+        compression: String.to_atom(info.compression),
+        locations: [%{node: Node.self(), drive_id: "default", tier: :hot}],
+        target_replicas: 1,
+        commit_state: :committed
+      }
+
+      ChunkIndex.put(chunk_meta)
+
+      {data, hash}
+    end
+
+    test "caches decompressed chunk when transformed_chunks is true" do
+      volume = create_volume_with_caching(%{transformed_chunks: true})
+      {_data, hash} = write_compressed_chunk()
+
+      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      assert {:ok, _cached} = ChunkCache.get(volume.id, hash)
+    end
+
+    test "does not cache decompressed chunk when transformed_chunks is false" do
+      volume = create_volume_with_caching(%{transformed_chunks: false})
+      {_data, hash} = write_compressed_chunk()
+
+      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      assert :miss = ChunkCache.get(volume.id, hash)
+    end
+
+    test "does not cache when all caching flags are false" do
+      volume =
+        create_volume_with_caching(%{
+          transformed_chunks: false,
+          reconstructed_stripes: false,
+          remote_chunks: false
+        })
+
+      {_data, hash} = write_compressed_chunk()
+
+      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      assert :miss = ChunkCache.get(volume.id, hash)
+    end
+
+    test "default volume config (all flags true) still caches as before" do
+      {:ok, volume} = VolumeRegistry.create("default-caching-vol")
+      {_data, hash} = write_compressed_chunk()
+
+      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      assert {:ok, _cached} = ChunkCache.get(volume.id, hash)
+    end
+
+    test "does not cache when decompress is false regardless of flags" do
+      volume = create_volume_with_caching(%{transformed_chunks: true})
+      data = "uncompressed data"
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
+
+      chunk_meta = %ChunkMeta{
+        hash: hash,
+        original_size: info.original_size,
+        stored_size: info.stored_size,
+        compression: :none,
+        locations: [%{node: Node.self(), drive_id: "default", tier: :hot}],
+        target_replicas: 1,
+        commit_state: :committed
+      }
+
+      ChunkIndex.put(chunk_meta)
+
+      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: false)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      assert :miss = ChunkCache.get(volume.id, hash)
+    end
+
+    test "respects reconstructed_stripes flag via cache_reason opt" do
+      volume = create_volume_with_caching(%{reconstructed_stripes: true})
+      data = "reconstructed data"
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
+
+      chunk_meta = %ChunkMeta{
+        hash: hash,
+        original_size: info.original_size,
+        stored_size: info.stored_size,
+        compression: :none,
+        locations: [%{node: Node.self(), drive_id: "default", tier: :hot}],
+        target_replicas: 1,
+        commit_state: :committed
+      }
+
+      ChunkIndex.put(chunk_meta)
+
+      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, cache_reason: :reconstructed)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      assert {:ok, _cached} = ChunkCache.get(volume.id, hash)
+    end
+
+    test "blocks caching when reconstructed_stripes is false" do
+      volume = create_volume_with_caching(%{reconstructed_stripes: false})
+      data = "reconstructed data blocked"
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
+
+      chunk_meta = %ChunkMeta{
+        hash: hash,
+        original_size: info.original_size,
+        stored_size: info.stored_size,
+        compression: :none,
+        locations: [%{node: Node.self(), drive_id: "default", tier: :hot}],
+        target_replicas: 1,
+        commit_state: :committed
+      }
+
+      ChunkIndex.put(chunk_meta)
+
+      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, cache_reason: :reconstructed)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      assert :miss = ChunkCache.get(volume.id, hash)
+    end
+
+    test "falls back to default behaviour when volume not found" do
+      {_data, hash} = write_compressed_chunk()
+
+      # Use a non-existent volume ID
+      ChunkFetcher.fetch_chunk(hash, volume_id: "nonexistent-volume", decompress: true)
+
+      # Drain ChunkCache mailbox so the async cast is processed
+      :sys.get_state(ChunkCache)
+      # Should cache because default caching has transformed_chunks: true
+      assert {:ok, _cached} = ChunkCache.get("nonexistent-volume", hash)
     end
   end
 end

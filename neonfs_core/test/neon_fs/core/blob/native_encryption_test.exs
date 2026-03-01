@@ -3,12 +3,13 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
 
   alias NeonFS.Core.Blob.Native
 
+  @moduletag :tmp_dir
+
   @test_key :crypto.strong_rand_bytes(32)
   @test_nonce :crypto.strong_rand_bytes(12)
 
-  setup do
-    tmp_dir = System.tmp_dir!()
-    store_dir = Path.join([tmp_dir, "neonfs_enc_test_#{System.unique_integer([:positive])}"])
+  setup %{tmp_dir: tmp_dir} do
+    store_dir = Path.join(tmp_dir, "enc_test")
     {:ok, store} = Native.store_open(store_dir, 2)
     on_exit(fn -> File.rm_rf!(store_dir) end)
     {:ok, store: store}

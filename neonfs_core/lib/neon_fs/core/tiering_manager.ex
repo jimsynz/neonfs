@@ -37,6 +37,8 @@ defmodule NeonFS.Core.TieringManager do
   alias NeonFS.Core.ChunkAccessTracker
   alias NeonFS.Core.ChunkIndex
   alias NeonFS.Core.DriveRegistry
+  alias NeonFS.Core.TieringManager.ColdnessScore
+  alias NeonFS.Core.TierMigration
   alias NeonFS.Core.VolumeRegistry
 
   @tier_order [:hot, :warm, :cold]
@@ -91,8 +93,9 @@ defmodule NeonFS.Core.TieringManager do
 
     schedule_evaluation(state)
 
-    Logger.info(
-      "TieringManager started (interval=#{state.eval_interval_ms}ms, dry_run=#{state.dry_run})"
+    Logger.info("TieringManager started",
+      interval_ms: state.eval_interval_ms,
+      dry_run: state.dry_run
     )
 
     {:ok, state}
@@ -136,8 +139,8 @@ defmodule NeonFS.Core.TieringManager do
     worker_status = state.background_worker_mod.status()
 
     if worker_status.queued > state.queue_full_threshold do
-      Logger.debug(
-        "TieringManager skipping evaluation: BackgroundWorker queue full (#{worker_status.queued})"
+      Logger.debug("TieringManager skipping evaluation, BackgroundWorker queue full",
+        queued: worker_status.queued
       )
 
       %{skipped: true, reason: :queue_full, promotions: 0, demotions: 0}
@@ -279,7 +282,7 @@ defmodule NeonFS.Core.TieringManager do
       stats = state.access_tracker_mod.get_stats(chunk.hash)
       {chunk.hash, drive_id, stats}
     end)
-    |> Enum.sort_by(fn {_hash, _drive_id, stats} -> stats.daily end, :asc)
+    |> Enum.sort_by(fn {hash, _drive_id, stats} -> {ColdnessScore.score(stats), hash} end, :asc)
     |> Enum.take(div(state.max_chunks_per_cycle, 10))
     |> Enum.map(fn {hash, drive_id, _stats} -> {hash, tier, target, drive_id} end)
   end
@@ -371,8 +374,10 @@ defmodule NeonFS.Core.TieringManager do
     label = "#{action}:#{hash_prefix(hash)}:#{from_tier}->#{to_tier}"
 
     unless state.dry_run do
+      local_node = Node.self()
+
       state.background_worker_mod.submit(
-        fn -> {String.to_existing_atom(action), hash, from_tier, to_tier} end,
+        fn -> execute_tier_move(hash, drive_id, local_node, from_tier, to_tier, state) end,
         priority: :low,
         label: label,
         resources: [{:drive, drive_id}]
@@ -380,7 +385,7 @@ defmodule NeonFS.Core.TieringManager do
     end
 
     if state.dry_run do
-      Logger.info("TieringManager [dry-run] would #{action} #{label}")
+      Logger.info("TieringManager dry-run scheduled", action: action, label: label)
     end
 
     :telemetry.execute(
@@ -388,6 +393,34 @@ defmodule NeonFS.Core.TieringManager do
       %{},
       %{hash: hash, from_tier: from_tier, to_tier: to_tier, dry_run: state.dry_run}
     )
+  end
+
+  defp execute_tier_move(hash, drive_id, local_node, from_tier, to_tier, state) do
+    with {:ok, target} <- find_target_drive(to_tier, local_node, drive_id, state) do
+      TierMigration.run_migration(%{
+        chunk_hash: hash,
+        source_drive: drive_id,
+        source_node: local_node,
+        source_tier: from_tier,
+        target_drive: target.id,
+        target_node: local_node,
+        target_tier: to_tier
+      })
+    end
+  end
+
+  defp find_target_drive(tier, local_node, source_drive_id, state) do
+    drives = state.drive_registry_mod.drives_for_tier(tier)
+
+    candidates =
+      Enum.filter(drives, fn d ->
+        d.node == local_node and d.id != source_drive_id and d.state != :draining
+      end)
+
+    case candidates do
+      [] -> {:error, :no_target_drive}
+      [_ | _] -> {:ok, Enum.min_by(candidates, &Map.get(&1, :used_bytes, 0))}
+    end
   end
 
   defp hash_prefix(hash) when is_binary(hash) and byte_size(hash) >= 4 do

@@ -65,13 +65,32 @@ defmodule NeonFS.Core.KeyRotationTest do
 
     test "rejects concurrent rotation" do
       volume_id = create_encrypted_volume("concurrent-rot")
-      write_test_file(volume_id, "/test.txt", "Test data for rotation")
 
-      # Start a real rotation
-      {:ok, _info} = KeyRotation.start_rotation(volume_id)
+      # Insert a fake running rotation job directly into the JobTracker ETS
+      # table. A real rotation completes too quickly (single chunk) to
+      # reliably test the concurrency guard.
+      alias NeonFS.Core.Job
+      alias NeonFS.Core.Job.Runners.KeyRotation, as: KRRunner
 
-      # Before it completes, a second rotation should be rejected
+      now = DateTime.utc_now()
+
+      fake_job = %Job{
+        id: "fake-rotation-job",
+        type: KRRunner,
+        node: Node.self(),
+        status: :running,
+        progress: %{total: 100, completed: 0, description: "Re-encrypting chunks"},
+        params: %{volume_id: volume_id, from_version: 1, to_version: 2, total_chunks: 100},
+        created_at: now,
+        started_at: now,
+        updated_at: now
+      }
+
+      :ets.insert(:neonfs_jobs, {fake_job.id, fake_job})
+
       assert {:error, :rotation_in_progress} = KeyRotation.start_rotation(volume_id)
+    after
+      :ets.delete(:neonfs_jobs, "fake-rotation-job")
     end
 
     test "tracks correct total chunk count" do
@@ -132,8 +151,9 @@ defmodule NeonFS.Core.KeyRotationTest do
       assert Enum.all?(chunks_before, &(&1.crypto != nil and &1.crypto.key_version == 1))
 
       # Start rotation and wait for completion
+      ref = attach_job_telemetry()
       {:ok, _info} = KeyRotation.start_rotation(volume_id)
-      wait_for_rotation_complete(volume_id)
+      wait_for_rotation_complete(ref)
 
       # All chunks should now be at version 2
       chunks_after = ChunkIndex.get_chunks_for_volume(volume_id)
@@ -151,8 +171,9 @@ defmodule NeonFS.Core.KeyRotationTest do
       # Get chunk hashes before rotation
       chunks_before = ChunkIndex.get_chunks_for_volume(volume_id)
 
+      ref = attach_job_telemetry()
       {:ok, _info} = KeyRotation.start_rotation(volume_id)
-      wait_for_rotation_complete(volume_id)
+      wait_for_rotation_complete(ref)
 
       # Verify each chunk is readable with the new key
       {:ok, new_key} = KeyManager.get_volume_key(volume_id, 2)
@@ -177,8 +198,9 @@ defmodule NeonFS.Core.KeyRotationTest do
       volume_id = create_encrypted_volume("clear-state")
       write_test_file(volume_id, "/test.txt", "Test data")
 
+      ref = attach_job_telemetry()
       {:ok, _info} = KeyRotation.start_rotation(volume_id)
-      wait_for_rotation_complete(volume_id)
+      wait_for_rotation_complete(ref)
 
       assert {:error, :no_rotation} = KeyRotation.rotation_status(volume_id)
     end
@@ -192,10 +214,11 @@ defmodule NeonFS.Core.KeyRotationTest do
       encrypted_count = Enum.count(chunks_before, &(&1.crypto != nil))
       assert encrypted_count >= 2
 
+      ref = attach_job_telemetry()
       {:ok, info} = KeyRotation.start_rotation(volume_id)
       assert info.total_chunks == encrypted_count
 
-      wait_for_rotation_complete(volume_id)
+      wait_for_rotation_complete(ref)
 
       # After completion, all chunks should be at the new version
       chunks_after = ChunkIndex.get_chunks_for_volume(volume_id)
@@ -212,8 +235,9 @@ defmodule NeonFS.Core.KeyRotationTest do
       chunks_before = ChunkIndex.get_chunks_for_volume(volume_id)
       old_nonces = MapSet.new(chunks_before, & &1.crypto.nonce)
 
+      ref = attach_job_telemetry()
       {:ok, _info} = KeyRotation.start_rotation(volume_id)
-      wait_for_rotation_complete(volume_id)
+      wait_for_rotation_complete(ref)
 
       chunks_after = ChunkIndex.get_chunks_for_volume(volume_id)
       new_nonces = MapSet.new(chunks_after, & &1.crypto.nonce)
@@ -243,14 +267,15 @@ defmodule NeonFS.Core.KeyRotationTest do
         {:ok, status} ->
           assert is_map(status.progress)
 
-        {:error, :no_rotation} ->
+        {:error, %NeonFS.Error.NotFound{}} ->
           # Completed quickly
           :ok
       end
     end
 
     test "rotation_status returns error for unknown volume" do
-      assert {:error, :not_found} = Handler.rotation_status("nonexistent-vol")
+      assert {:error, %NeonFS.Error.VolumeNotFound{}} =
+               Handler.rotation_status("nonexistent-vol")
     end
   end
 
@@ -288,8 +313,8 @@ defmodule NeonFS.Core.KeyRotationTest do
     )
   end
 
-  defp start_job_tracker(_tmp_dir) do
-    meta_dir = Path.join(System.tmp_dir!(), "neonfs_kr_jobs_#{:rand.uniform(1_000_000)}")
+  defp start_job_tracker(tmp_dir) do
+    meta_dir = Path.join(tmp_dir, "job_tracker")
     File.mkdir_p!(meta_dir)
 
     start_supervised!(
@@ -303,24 +328,23 @@ defmodule NeonFS.Core.KeyRotationTest do
     )
   end
 
-  defp wait_for_rotation_complete(volume_id, timeout \\ 10_000) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-
-    wait_loop(volume_id, deadline)
+  defp attach_job_telemetry do
+    :telemetry_test.attach_event_handlers(self(), [
+      [:neonfs, :job, :completed],
+      [:neonfs, :job, :failed]
+    ])
   end
 
-  defp wait_loop(volume_id, deadline) do
-    if System.monotonic_time(:millisecond) > deadline do
-      raise "Timed out waiting for rotation to complete"
-    end
-
-    case KeyRotation.rotation_status(volume_id) do
-      {:error, :no_rotation} ->
+  defp wait_for_rotation_complete(ref, timeout \\ 10_000) do
+    receive do
+      {[:neonfs, :job, :completed], ^ref, %{}, %{}} ->
         :ok
 
-      {:ok, _status} ->
-        Process.sleep(100)
-        wait_loop(volume_id, deadline)
+      {[:neonfs, :job, :failed], ^ref, %{}, %{}} ->
+        raise "Key rotation job failed"
+    after
+      timeout ->
+        raise "Timed out waiting for rotation to complete"
     end
   end
 end

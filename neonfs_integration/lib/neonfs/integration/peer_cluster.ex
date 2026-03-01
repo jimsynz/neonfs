@@ -79,6 +79,7 @@ defmodule NeonFS.Integration.PeerCluster do
     # Enable Ra by default
     enable_ra = Keyword.get(opts, :enable_ra, true)
     drives_fn = Keyword.get(opts, :drives, nil)
+    formation_config = Keyword.get(opts, :formation, nil)
 
     # Ensure controller is distributed
     ensure_distributed!()
@@ -88,6 +89,15 @@ defmodule NeonFS.Integration.PeerCluster do
 
     # Use provided base_dir or create a new one
     base_dir = Keyword.get_lazy(opts, :base_dir, fn -> create_cluster_dir(cluster_id) end)
+
+    # Pre-compute all peer node names for formation config (bootstrap_peers
+    # needs the full list before any node starts)
+    all_peer_names =
+      if formation_config do
+        Enum.map(1..node_count, fn i -> :"node#{i}_#{cluster_id}@localhost" end)
+      else
+        []
+      end
 
     # Start nodes sequentially to avoid DETS name conflicts during Ra initialization
     nodes =
@@ -114,6 +124,7 @@ defmodule NeonFS.Integration.PeerCluster do
           data_dir: data_dir,
           meta_dir: meta_dir,
           blob_store_base_dir: Path.join(data_dir, "blobs"),
+          metrics_enabled: false,
           ra_data_dir: to_charlist(ra_dir),
           enable_ra: enable_ra,
           # Increase quorum timeout for integration tests where 3 peer nodes
@@ -124,6 +135,20 @@ defmodule NeonFS.Integration.PeerCluster do
         core_config =
           if drives_fn do
             Keyword.put(core_config, :drives, drives_fn.(alias_name, data_dir))
+          else
+            core_config
+          end
+
+        core_config =
+          if formation_config do
+            core_config ++
+              [
+                auto_bootstrap: true,
+                cluster_name: Keyword.get(formation_config, :cluster_name, cluster_id),
+                bootstrap_expect: Keyword.get(formation_config, :bootstrap_expect, node_count),
+                bootstrap_peers: all_peer_names,
+                bootstrap_timeout: Keyword.get(formation_config, :bootstrap_timeout, 120_000)
+              ]
           else
             core_config
           end
@@ -227,6 +252,147 @@ defmodule NeonFS.Integration.PeerCluster do
   end
 
   @doc """
+  Restart a stopped (or running) peer node with the same configuration.
+
+  Stops the old peer if still running, waits for it to leave EPMD, then
+  starts a fresh peer with the same EPMD name, cookie, and data directory.
+  The new peer's persisted Ra state and DETS tables are preserved on disk.
+
+  Returns `{:ok, updated_cluster}` with the new peer PID in the nodes list.
+  The caller must connect the node to the mesh and rebuild quorum rings
+  (e.g. via `wait_for_full_mesh/1` and `rebuild_quorum_rings/1`).
+
+  ## Options
+  - `:applications` - Applications to start (default: `[:neonfs_core]`)
+  """
+  @spec restart_node(cluster(), atom(), keyword()) :: {:ok, cluster()}
+  def restart_node(cluster, node_name, opts \\ []) do
+    applications = Keyword.get(opts, :applications, [:neonfs_core])
+    node_info = get_node!(cluster, node_name)
+
+    stop_peer_gracefully(node_info)
+
+    deadline = System.monotonic_time(:millisecond) + 10_000
+    wait_for_node_gone(node_info.node, deadline)
+
+    {peer_opts, app_config} = build_restart_config(cluster, node_name)
+
+    {:ok, peer, node} = start_peer(peer_opts, applications, app_config)
+    wait_for_ra_ready(peer)
+
+    new_cluster = replace_node_info(cluster, node_name, peer, node)
+    connect_restarted_node(new_cluster, node_name)
+
+    {:ok, new_cluster}
+  end
+
+  @doc """
+  Disconnect two nodes bidirectionally (simulates network partition between a pair).
+
+  Sets an invalid per-node cookie on each side to prevent Erlang distribution
+  from auto-reconnecting (e.g. when Ra sends heartbeats), then disconnects.
+  Idempotent — does nothing if the nodes are already disconnected.
+  """
+  @spec disconnect_nodes(cluster(), atom(), atom()) :: :ok
+  def disconnect_nodes(cluster, node_a_name, node_b_name) do
+    info_a = get_node!(cluster, node_a_name)
+    info_b = get_node!(cluster, node_b_name)
+
+    # Use :peer.call to bypass distribution — the peer control channel is
+    # independent of cookies and unaffected by global's partition prevention.
+
+    # Set DIFFERENT wrong per-node cookies on each side so auto-reconnection
+    # fails. Both sides must disagree on the cookie: if both use the same
+    # wrong cookie, Erlang distribution will happily reconnect them.
+    :peer.call(info_a.peer, :erlang, :set_cookie, [info_b.node, :block_a_to_b])
+    :peer.call(info_b.peer, :erlang, :set_cookie, [info_a.node, :block_b_to_a])
+
+    :peer.call(info_a.peer, Node, :disconnect, [info_b.node])
+    :peer.call(info_b.peer, Node, :disconnect, [info_a.node])
+    :ok
+  end
+
+  @doc """
+  Reconnect two nodes bidirectionally.
+
+  Restores the cluster cookie on each side, then reconnects.
+  Idempotent — does nothing if the nodes are already connected.
+  """
+  @spec reconnect_nodes(cluster(), atom(), atom()) :: :ok
+  def reconnect_nodes(cluster, node_a_name, node_b_name) do
+    info_a = get_node!(cluster, node_a_name)
+    info_b = get_node!(cluster, node_b_name)
+
+    # Use :peer.call to bypass distribution — the peer control channel is
+    # independent of cookies and unaffected by global's partition prevention.
+
+    # Restore the correct per-node cookies before reconnecting
+    :peer.call(info_a.peer, :erlang, :set_cookie, [info_b.node, cluster.cookie])
+    :peer.call(info_b.peer, :erlang, :set_cookie, [info_a.node, cluster.cookie])
+
+    :peer.call(info_a.peer, Node, :connect, [info_b.node])
+    :peer.call(info_b.peer, Node, :connect, [info_a.node])
+    :ok
+  end
+
+  @doc """
+  Partition a cluster into two groups by disconnecting all cross-group node pairs.
+
+  Each group is a list of node names (atoms like `:node1`, `:node2`).
+  Nodes within the same group remain connected.
+
+  ## Example
+
+      partition_cluster(cluster, [[:node1], [:node2, :node3]])
+  """
+  @spec partition_cluster(cluster(), [[atom()]]) :: :ok
+  def partition_cluster(cluster, groups) when is_list(groups) do
+    for group_a <- groups,
+        group_b <- groups,
+        group_a != group_b,
+        name_a <- group_a,
+        name_b <- group_b do
+      {name_a, name_b}
+    end
+    |> Enum.uniq_by(fn {a, b} -> Enum.sort([a, b]) end)
+    |> Enum.each(fn {name_a, name_b} ->
+      disconnect_nodes(cluster, name_a, name_b)
+    end)
+
+    :ok
+  end
+
+  @doc """
+  Heal all partitions by reconnecting every node pair in the cluster.
+  """
+  @spec heal_partition(cluster()) :: :ok
+  def heal_partition(cluster) do
+    names = Enum.map(cluster.nodes, & &1.name)
+
+    for [name_a, name_b] <- combinations(names, 2) do
+      reconnect_nodes(cluster, name_a, name_b)
+    end
+
+    # Nudge global on each peer to reconcile after cookie restoration
+    for node_info <- cluster.nodes do
+      :peer.call(node_info.peer, :global, :sync, [])
+    end
+
+    :ok
+  end
+
+  @doc """
+  Return the list of connected nodes as seen from the given node.
+
+  Returns Erlang node atoms (not alias names).
+  """
+  @spec visible_nodes(cluster(), atom()) :: [node()]
+  def visible_nodes(cluster, node_name) do
+    node_info = get_node!(cluster, node_name)
+    :rpc.call(node_info.node, Node, :list, [])
+  end
+
+  @doc """
   Connect all peer nodes to each other for Erlang distribution.
 
   This must be called after starting nodes with `connection: 0` to enable
@@ -327,7 +493,9 @@ defmodule NeonFS.Integration.PeerCluster do
       env: env,
       # Use 0 (no auto-connection) to avoid DETS table name conflicts during startup
       # We'll connect nodes manually after Ra has initialized
-      connection: 0
+      connection: 0,
+      # Default wait_boot is 15s which is too short on slow CI runners
+      wait_boot: 60_000
     }
   end
 
@@ -415,5 +583,79 @@ defmodule NeonFS.Integration.PeerCluster do
     dir = Path.join(System.tmp_dir!(), "neonfs_test_#{cluster_id}")
     File.mkdir_p!(dir)
     dir
+  end
+
+  defp combinations(_, 0), do: [[]]
+  defp combinations([], _), do: []
+
+  defp combinations([head | tail], k) do
+    Enum.map(combinations(tail, k - 1), &[head | &1]) ++ combinations(tail, k)
+  end
+
+  # ─── restart_node helpers ──────────────────────────────────────────
+
+  defp stop_peer_gracefully(node_info) do
+    try do
+      :peer.call(node_info.peer, :ra_system, :stop, [:default])
+    catch
+      _, _ -> :ok
+    end
+
+    try do
+      :peer.stop(node_info.peer)
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
+  defp build_restart_config(cluster, node_name) do
+    peer_name = :"#{node_name}_#{cluster.id}"
+    data_dir = Path.join(cluster.data_dir, Atom.to_string(node_name))
+    meta_dir = Path.join(data_dir, "meta")
+    ra_dir = Path.join(data_dir, "ra")
+
+    peer_opts = build_peer_opts(peer_name, cluster.cookie, data_dir)
+
+    app_config = [
+      logger: [level: :warning],
+      neonfs_client: [
+        tls_dir: Path.join(data_dir, "tls"),
+        partition_recovery_debounce_ms: 200
+      ],
+      neonfs_core: [
+        data_dir: data_dir,
+        meta_dir: meta_dir,
+        blob_store_base_dir: Path.join(data_dir, "blobs"),
+        metrics_enabled: false,
+        ra_data_dir: to_charlist(ra_dir),
+        enable_ra: true,
+        quorum_timeout_ms: 15_000
+      ],
+      ra: [data_dir: to_charlist(ra_dir)]
+    ]
+
+    {peer_opts, app_config}
+  end
+
+  defp replace_node_info(cluster, node_name, peer, node) do
+    new_nodes =
+      Enum.map(cluster.nodes, fn
+        %{name: ^node_name} -> %{name: node_name, peer: peer, node: node}
+        other -> other
+      end)
+
+    %{cluster | nodes: new_nodes}
+  end
+
+  defp connect_restarted_node(cluster, restarted_name) do
+    restarted = get_node!(cluster, restarted_name)
+    Node.connect(restarted.node)
+
+    for node_info <- cluster.nodes, node_info.name != restarted_name do
+      :rpc.call(restarted.node, Node, :connect, [node_info.node])
+      :rpc.call(node_info.node, Node, :connect, [restarted.node])
+    end
+
+    :ok
   end
 end

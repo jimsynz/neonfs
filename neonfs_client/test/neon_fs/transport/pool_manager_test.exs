@@ -100,13 +100,18 @@ defmodule NeonFS.Transport.PoolManagerTest do
     end
 
     test "pool is functional after creation", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
       start_pool_manager(ctx)
       endpoint = {~c"localhost", ctx.port}
 
       {:ok, pool} = PoolManager.ensure_pool(:peer@host1, endpoint)
 
-      # Give time for async connection establishment
-      Process.sleep(500)
+      # Wait for at least one async TLS connection to complete
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, %{}, _}, 2_000
 
       message = {:test, make_ref()}
       assert ConnPool.execute(pool, message) == message
@@ -142,8 +147,7 @@ defmodule NeonFS.Transport.PoolManagerTest do
 
       assert :ok = PoolManager.remove_pool(:peer@host1)
 
-      # Pool should eventually stop (terminated by DynamicSupervisor)
-      Process.sleep(100)
+      # DynamicSupervisor.terminate_child/2 is synchronous — pool is already stopped
       refute Process.alive?(pid)
       assert {:error, :no_pool} = PoolManager.get_pool(:peer@host1)
     end
@@ -164,9 +168,7 @@ defmodule NeonFS.Transport.PoolManagerTest do
 
       # Simulate :nodedown
       send(pm, {:nodedown, :departed@host1, []})
-
-      # Give GenServer time to process
-      Process.sleep(100)
+      :sys.get_state(pm)
 
       assert {:error, :no_pool} = PoolManager.get_pool(:departed@host1)
     end
@@ -179,11 +181,9 @@ defmodule NeonFS.Transport.PoolManagerTest do
 
       {:ok, pid} = PoolManager.ensure_pool(:crash_peer@host, endpoint)
 
-      # Kill the pool process
+      # Kill the pool process and wait for the monitor DOWN to be processed
       Process.exit(pid, :kill)
-
-      # Give monitor time to fire
-      Process.sleep(200)
+      :sys.get_state(pm)
 
       # ETS entry should be cleaned up
       assert {:error, :no_pool} = PoolManager.get_pool(:crash_peer@host)
@@ -214,6 +214,11 @@ defmodule NeonFS.Transport.PoolManagerTest do
 
   describe "discovery refresh" do
     test "creates pools for discovered peers with data_endpoint metadata", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :pool_manager, :discovery_refresh]
+        ])
+
       # Start PoolManager with a short refresh interval
       pm = start_pool_manager(ctx, discovery_refresh_interval: 100)
 
@@ -224,7 +229,7 @@ defmodule NeonFS.Transport.PoolManagerTest do
       ])
 
       # Wait for discovery refresh to fire
-      Process.sleep(300)
+      assert_receive {[:neonfs, :transport, :pool_manager, :discovery_refresh], ^ref, _, _}, 1_000
 
       assert {:ok, _} = PoolManager.get_pool(:peer_a@host1)
       assert {:ok, _} = PoolManager.get_pool(:peer_b@host2)

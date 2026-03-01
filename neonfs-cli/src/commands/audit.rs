@@ -152,8 +152,8 @@ impl AuditCommand {
             .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         let data = unwrap_ok_tuple(result)?;

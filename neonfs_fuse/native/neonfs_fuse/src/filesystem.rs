@@ -7,7 +7,9 @@ use crate::error::FuseError;
 use crate::operation::{FileKind, FuseOperation, FuseReply};
 use crate::server::FuseServer;
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, Request,
+    BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
+    INodeNo, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
+    Request, WriteFlags,
 };
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
@@ -82,7 +84,7 @@ impl NeonFilesystem {
     fn make_file_attr(ino: u64, size: u64, kind: FileKind) -> FileAttr {
         let now = SystemTime::now();
         FileAttr {
-            ino,
+            ino: INodeNo(ino),
             size,
             blocks: size.div_ceil(512), // Round up to 512-byte blocks
             atime: now,
@@ -107,21 +109,21 @@ impl NeonFilesystem {
 
 impl Filesystem for NeonFilesystem {
     /// Look up a directory entry by name
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let name_str = name.to_string_lossy().to_string();
 
         let operation = FuseOperation::Lookup {
-            parent,
+            parent: parent.0,
             name: name_str,
         };
 
         match self.call_elixir(operation) {
             Ok(FuseReply::LookupOk { ino, size, kind }) => {
                 let attr = Self::make_file_attr(ino, size, kind);
-                reply.entry(&TTL, &attr, 0);
+                reply.entry(&TTL, &attr, Generation(0));
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Lookup error: {}", e);
@@ -129,14 +131,14 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for lookup operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Get file attributes
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let operation = FuseOperation::GetAttr { ino };
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let operation = FuseOperation::GetAttr { ino: ino.0 };
 
         match self.call_elixir(operation) {
             Ok(FuseReply::AttrOk { ino, size, kind }) => {
@@ -144,7 +146,7 @@ impl Filesystem for NeonFilesystem {
                 reply.attr(&TTL, &attr);
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Getattr error: {}", e);
@@ -152,26 +154,26 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for getattr operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Read data from a file
     fn read(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
         let operation = FuseOperation::Read {
-            ino,
-            offset: offset as u64,
+            ino: ino.0,
+            offset,
             size,
         };
 
@@ -180,7 +182,7 @@ impl Filesystem for NeonFilesystem {
                 reply.data(&data);
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Read error: {}", e);
@@ -188,27 +190,30 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for read operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Read directory entries
     fn readdir(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let operation = FuseOperation::ReadDir { ino, offset };
+        let operation = FuseOperation::ReadDir {
+            ino: ino.0,
+            offset: offset as i64,
+        };
 
         match self.call_elixir(operation) {
             Ok(FuseReply::ReadDirOk { entries }) => {
                 for (idx, entry) in entries.iter().enumerate().skip(offset as usize) {
                     let kind = Self::file_kind_to_type(entry.kind);
-                    let full = reply.add(entry.ino, (idx + 1) as i64, kind, &entry.name);
+                    let full = reply.add(INodeNo(entry.ino), (idx + 1) as u64, kind, &entry.name);
                     if full {
                         break;
                     }
@@ -216,7 +221,7 @@ impl Filesystem for NeonFilesystem {
                 reply.ok();
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Readdir error: {}", e);
@@ -224,27 +229,27 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for readdir operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Write data to a file
     fn write(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _write_flags: WriteFlags,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: fuser::ReplyWrite,
     ) {
         let operation = FuseOperation::Write {
-            ino,
-            offset: offset as u64,
+            ino: ino.0,
+            offset,
             data: data.to_vec(),
         };
 
@@ -253,7 +258,7 @@ impl Filesystem for NeonFilesystem {
                 reply.written(size);
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Write error: {}", e);
@@ -261,21 +266,24 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for write operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Open a file
-    fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
-        let operation = FuseOperation::Open { ino, flags };
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: fuser::ReplyOpen) {
+        let operation = FuseOperation::Open {
+            ino: ino.0,
+            flags: flags.0,
+        };
 
         match self.call_elixir(operation) {
             Ok(FuseReply::OpenOk { fh }) => {
-                reply.opened(fh, 0);
+                reply.opened(FileHandle(fh), FopenFlags::empty());
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Open error: {}", e);
@@ -283,30 +291,34 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for open operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Release (close) a file
     fn release(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        fh: u64,
-        flags: i32,
-        _lock_owner: Option<u64>,
+        ino: INodeNo,
+        fh: FileHandle,
+        flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        let operation = FuseOperation::Release { ino, fh, flags };
+        let operation = FuseOperation::Release {
+            ino: ino.0,
+            fh: fh.0,
+            flags: flags.0,
+        };
 
         match self.call_elixir(operation) {
             Ok(FuseReply::Ok) => {
                 reply.ok();
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Release error: {}", e);
@@ -314,16 +326,16 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for release operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Create a file
     fn create(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &OsStr,
         mode: u32,
         _umask: u32,
@@ -333,7 +345,7 @@ impl Filesystem for NeonFilesystem {
         let name_str = name.to_string_lossy().to_string();
 
         let operation = FuseOperation::Create {
-            parent,
+            parent: parent.0,
             name: name_str,
             mode,
         };
@@ -346,10 +358,16 @@ impl Filesystem for NeonFilesystem {
                 fh,
             }) => {
                 let attr = Self::make_file_attr(ino, size, kind);
-                reply.created(&TTL, &attr, 0, fh, 0);
+                reply.created(
+                    &TTL,
+                    &attr,
+                    Generation(0),
+                    FileHandle(fh),
+                    FopenFlags::empty(),
+                );
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Create error: {}", e);
@@ -357,16 +375,16 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for create operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Create a directory
     fn mkdir(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &OsStr,
         mode: u32,
         _umask: u32,
@@ -375,7 +393,7 @@ impl Filesystem for NeonFilesystem {
         let name_str = name.to_string_lossy().to_string();
 
         let operation = FuseOperation::MkDir {
-            parent,
+            parent: parent.0,
             name: name_str,
             mode,
         };
@@ -383,10 +401,10 @@ impl Filesystem for NeonFilesystem {
         match self.call_elixir(operation) {
             Ok(FuseReply::LookupOk { ino, size, kind }) => {
                 let attr = Self::make_file_attr(ino, size, kind);
-                reply.entry(&TTL, &attr, 0);
+                reply.entry(&TTL, &attr, Generation(0));
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Mkdir error: {}", e);
@@ -394,17 +412,17 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for mkdir operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Remove a file
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
         let name_str = name.to_string_lossy().to_string();
 
         let operation = FuseOperation::Unlink {
-            parent,
+            parent: parent.0,
             name: name_str,
         };
 
@@ -413,7 +431,7 @@ impl Filesystem for NeonFilesystem {
                 reply.ok();
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Unlink error: {}", e);
@@ -421,17 +439,17 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for unlink operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Remove a directory
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
         let name_str = name.to_string_lossy().to_string();
 
         let operation = FuseOperation::RmDir {
-            parent,
+            parent: parent.0,
             name: name_str,
         };
 
@@ -440,7 +458,7 @@ impl Filesystem for NeonFilesystem {
                 reply.ok();
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Rmdir error: {}", e);
@@ -448,29 +466,29 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for rmdir operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Rename a file or directory
     fn rename(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &OsStr,
-        newparent: u64,
+        newparent: INodeNo,
         newname: &OsStr,
-        _flags: u32,
+        _flags: RenameFlags,
         reply: fuser::ReplyEmpty,
     ) {
         let old_name = name.to_string_lossy().to_string();
         let new_name = newname.to_string_lossy().to_string();
 
         let operation = FuseOperation::Rename {
-            old_parent: parent,
+            old_parent: parent.0,
             old_name,
-            new_parent: newparent,
+            new_parent: newparent.0,
             new_name,
         };
 
@@ -479,7 +497,7 @@ impl Filesystem for NeonFilesystem {
                 reply.ok();
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Rename error: {}", e);
@@ -487,16 +505,16 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for rename operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
 
     /// Set file attributes
     fn setattr(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
+        ino: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
         gid: Option<u32>,
@@ -504,11 +522,11 @@ impl Filesystem for NeonFilesystem {
         atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
+        _fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
+        _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
         // Convert TimeOrNow to Option<(i64, u32)>
@@ -539,7 +557,7 @@ impl Filesystem for NeonFilesystem {
         });
 
         let operation = FuseOperation::SetAttr {
-            ino,
+            ino: ino.0,
             mode,
             uid,
             gid,
@@ -554,7 +572,7 @@ impl Filesystem for NeonFilesystem {
                 reply.attr(&TTL, &attr);
             }
             Ok(FuseReply::Error { errno }) => {
-                reply.error(errno);
+                reply.error(Errno::from_i32(errno));
             }
             Err(e) => {
                 log::error!("Setattr error: {}", e);
@@ -562,7 +580,7 @@ impl Filesystem for NeonFilesystem {
             }
             _ => {
                 log::error!("Invalid reply for setattr operation");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
             }
         }
     }
@@ -591,13 +609,13 @@ mod tests {
     #[test]
     fn test_make_file_attr() {
         let attr = NeonFilesystem::make_file_attr(42, 1024, FileKind::File);
-        assert_eq!(attr.ino, 42);
+        assert_eq!(attr.ino, INodeNo(42));
         assert_eq!(attr.size, 1024);
         assert_eq!(attr.kind, FileType::RegularFile);
         assert_eq!(attr.blocks, 2); // 1024 bytes = 2 blocks of 512
 
         let attr = NeonFilesystem::make_file_attr(1, 0, FileKind::Directory);
-        assert_eq!(attr.ino, 1);
+        assert_eq!(attr.ino, INodeNo(1));
         assert_eq!(attr.size, 0);
         assert_eq!(attr.kind, FileType::Directory);
         assert_eq!(attr.perm, 0o755);

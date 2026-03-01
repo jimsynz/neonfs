@@ -3,18 +3,13 @@ defmodule NeonFS.Cluster.StateTest do
 
   alias NeonFS.Cluster.State
 
-  @tmp_dir "/tmp/neonfs_cluster_state_test"
+  @moduletag :tmp_dir
 
-  setup do
-    # Clean up any existing test directory
-    File.rm_rf!(@tmp_dir)
-    File.mkdir_p!(@tmp_dir)
-
-    # Configure test meta_dir
-    Application.put_env(:neonfs_core, :meta_dir, @tmp_dir)
+  setup %{tmp_dir: tmp_dir} do
+    Application.put_env(:neonfs_core, :meta_dir, tmp_dir)
 
     on_exit(fn ->
-      File.rm_rf!(@tmp_dir)
+      File.rm_rf!(tmp_dir)
       Application.delete_env(:neonfs_core, :meta_dir)
     end)
 
@@ -59,7 +54,7 @@ defmodule NeonFS.Cluster.StateTest do
   describe "state_file_path/0" do
     test "returns configured path" do
       path = State.state_file_path()
-      assert path == Path.join(@tmp_dir, "cluster.json")
+      assert path == Path.join(Application.get_env(:neonfs_core, :meta_dir), "cluster.json")
     end
   end
 
@@ -111,7 +106,7 @@ defmodule NeonFS.Cluster.StateTest do
 
     test "creates directory if it doesn't exist" do
       # Use a nested path
-      nested_dir = Path.join(@tmp_dir, "nested/path")
+      nested_dir = Path.join(Application.get_env(:neonfs_core, :meta_dir), "nested/path")
       Application.put_env(:neonfs_core, :meta_dir, nested_dir)
 
       state = create_test_state()
@@ -300,6 +295,111 @@ defmodule NeonFS.Cluster.StateTest do
 
     test "returns error when cluster.json doesn't exist" do
       assert {:error, :not_found} = State.update_drives([])
+    end
+  end
+
+  describe "peer settings" do
+    test "new fields have defaults in struct" do
+      state = create_test_state()
+
+      assert state.peer_sync_interval == 30_000
+      assert state.peer_connect_timeout == 10_000
+      assert state.min_peers_for_operation == 1
+      assert state.startup_peer_timeout == 30_000
+    end
+
+    test "saves and loads peer settings" do
+      state = %State{
+        create_test_state()
+        | peer_sync_interval: 60_000,
+          peer_connect_timeout: 15_000,
+          min_peers_for_operation: 2,
+          startup_peer_timeout: 45_000
+      }
+
+      :ok = State.save(state)
+      assert {:ok, loaded} = State.load()
+
+      assert loaded.peer_sync_interval == 60_000
+      assert loaded.peer_connect_timeout == 15_000
+      assert loaded.min_peers_for_operation == 2
+      assert loaded.startup_peer_timeout == 45_000
+    end
+
+    test "uses defaults when fields are missing in cluster.json (backward compat)" do
+      json =
+        :json.format(%{
+          "cluster_id" => "clust_abc123",
+          "cluster_name" => "test-cluster",
+          "created_at" => "2024-01-15T10:30:00Z",
+          "master_key" => "master_key_base64",
+          "this_node" => %{
+            "id" => "node_test123",
+            "name" => "neonfs@localhost",
+            "joined_at" => "2024-01-15T10:30:00Z"
+          },
+          "known_peers" => [],
+          "ra_cluster_members" => ["neonfs@localhost"],
+          "node_type" => "core"
+        })
+
+      File.write!(State.state_file_path(), json)
+      assert {:ok, loaded} = State.load()
+
+      assert loaded.peer_sync_interval == 30_000
+      assert loaded.peer_connect_timeout == 10_000
+      assert loaded.min_peers_for_operation == 1
+      assert loaded.startup_peer_timeout == 30_000
+    end
+
+    test "validates peer settings are positive integers" do
+      state = %State{
+        create_test_state()
+        | peer_sync_interval: -1
+      }
+
+      assert {:error, {:validation_failed, errors}} =
+               state |> State.save() |> then(fn :ok -> State.load() end)
+
+      assert Enum.any?(errors, &(&1.field == :peer_sync_interval))
+    end
+  end
+
+  describe "metrics config" do
+    test "saves and loads metrics settings" do
+      state = %State{
+        create_test_state()
+        | metrics: %{"enabled" => false, "bind" => "127.0.0.1", "port" => 9768}
+      }
+
+      :ok = State.save(state)
+      assert {:ok, loaded} = State.load()
+
+      assert loaded.metrics["enabled"] == false
+      assert loaded.metrics["bind"] == "127.0.0.1"
+      assert loaded.metrics["port"] == 9768
+    end
+
+    test "uses default empty metrics map when field is missing" do
+      json =
+        :json.format(%{
+          "cluster_id" => "clust_abc123",
+          "cluster_name" => "test-cluster",
+          "created_at" => "2024-01-15T10:30:00Z",
+          "master_key" => "master_key_base64",
+          "this_node" => %{
+            "id" => "node_test123",
+            "name" => "neonfs@localhost",
+            "joined_at" => "2024-01-15T10:30:00Z"
+          },
+          "known_peers" => [],
+          "ra_cluster_members" => ["neonfs@localhost"],
+          "node_type" => "core"
+        })
+
+      File.write!(State.state_file_path(), json)
+      assert {:ok, loaded} = State.load()
+      assert loaded.metrics == %{}
     end
   end
 

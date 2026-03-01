@@ -31,7 +31,12 @@ defmodule NeonFS.TestHelpers do
           error
       end
 
-    Logger.info("TestHelpers.write_file(#{volume_name}, #{path}) returned: #{inspect(result)}")
+    Logger.info("TestHelpers.write_file returned",
+      volume_name: volume_name,
+      path: path,
+      result: inspect(result)
+    )
+
     result
   end
 

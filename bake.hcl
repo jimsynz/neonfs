@@ -37,6 +37,7 @@ target "core" {
     "client": "./neonfs_client"
     "src": "./neonfs_core"
     "base": "target:base"
+    "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/core:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG},mode=max"]
@@ -50,6 +51,7 @@ target "fuse" {
     "client": "./neonfs_client"
     "src": "./neonfs_fuse"
     "base": "target:base"
+    "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/fuse:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG},mode=max"]

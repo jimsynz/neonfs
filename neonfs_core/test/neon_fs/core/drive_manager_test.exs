@@ -4,15 +4,10 @@ defmodule NeonFS.Core.DriveManagerTest do
   alias NeonFS.Cluster.State
   alias NeonFS.Core.{BlobStore, DriveManager, DriveRegistry}
 
-  @tmp_prefix "/tmp/neonfs_drive_manager_test_"
-  @meta_dir "/tmp/neonfs_drive_manager_test_meta"
+  @moduletag :tmp_dir
 
-  setup do
-    test_id = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
-    tmp_dir = @tmp_prefix <> test_id
-    meta_dir = @meta_dir <> test_id
-
-    File.mkdir_p!(tmp_dir)
+  setup %{tmp_dir: tmp_dir} do
+    meta_dir = Path.join(tmp_dir, "meta")
     File.mkdir_p!(meta_dir)
 
     # Set up meta_dir for cluster.json persistence
@@ -56,8 +51,8 @@ defmodule NeonFS.Core.DriveManagerTest do
 
     on_exit(fn ->
       File.rm_rf!(tmp_dir)
-      File.rm_rf!(meta_dir)
       Application.delete_env(:neonfs_core, :meta_dir)
+      Application.delete_env(:neonfs_core, :drives)
     end)
 
     %{tmp_dir: tmp_dir, meta_dir: meta_dir}

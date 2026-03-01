@@ -12,6 +12,8 @@ defmodule NeonFS.FUSE.Application do
 
   @impl true
   def start(_type, _args) do
+    Logger.metadata(node_name: node())
+
     # In test mode, don't start the supervisor - tests use start_supervised
     # for the specific components they need
     result =
@@ -33,19 +35,23 @@ defmodule NeonFS.FUSE.Application do
   end
 
   defp register_with_cluster do
-    # Async registration — don't block startup if core is unreachable
-    spawn(fn ->
-      Process.sleep(500)
+    # Async registration — don't block startup if core is unreachable.
+    # Delay gives Connection time to establish bootstrap connections.
+    Task.start(fn ->
+      Process.send_after(self(), :register, 500)
 
-      case NeonFS.Client.register(:fuse, %{
-             capabilities: [:mount, :unmount],
-             version: to_string(Application.spec(:neonfs_fuse, :vsn) || "0.0.0")
-           }) do
-        :ok ->
-          Logger.info("Registered as FUSE service with cluster")
+      receive do
+        :register ->
+          case NeonFS.Client.register(:fuse, %{
+                 capabilities: [:mount, :unmount],
+                 version: to_string(Application.spec(:neonfs_fuse, :vsn) || "0.0.0")
+               }) do
+            :ok ->
+              Logger.info("Registered as FUSE service with cluster")
 
-        {:error, reason} ->
-          Logger.warning("Failed to register with cluster: #{inspect(reason)}")
+            {:error, reason} ->
+              Logger.warning("Failed to register with cluster", reason: inspect(reason))
+          end
       end
     end)
   end
@@ -69,20 +75,26 @@ defmodule NeonFS.FUSE.Application do
         :ok
 
       _ ->
-        Logger.info("Unmounting #{length(mounts)} filesystem(s) before shutdown...")
+        Logger.info("Unmounting filesystems before shutdown", count: length(mounts))
         Enum.each(mounts, &unmount_one/1)
     end
   end
 
   defp unmount_one(mount) do
-    Logger.debug("Unmounting #{mount.volume_name} from #{mount.mount_point}")
+    Logger.debug("Unmounting filesystem",
+      volume_name: mount.volume_name,
+      mount_point: mount.mount_point
+    )
 
     case MountManager.unmount(mount.id) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("Failed to unmount #{mount.mount_point}: #{inspect(reason)}")
+        Logger.warning("Failed to unmount",
+          mount_point: mount.mount_point,
+          reason: inspect(reason)
+        )
     end
   end
 end

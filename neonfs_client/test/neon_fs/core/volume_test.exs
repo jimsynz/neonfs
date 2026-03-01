@@ -15,7 +15,7 @@ defmodule NeonFS.Core.VolumeTest do
       assert vol.caching.transformed_chunks == true
       assert vol.caching.reconstructed_stripes == true
       assert vol.caching.remote_chunks == true
-      assert vol.caching.max_memory == 268_435_456
+      refute Map.has_key?(vol.caching, :max_memory)
       assert vol.io_weight == 100
       assert vol.logical_size == 0
       assert vol.physical_size == 0
@@ -46,16 +46,41 @@ defmodule NeonFS.Core.VolumeTest do
           caching: %{
             transformed_chunks: false,
             reconstructed_stripes: true,
-            remote_chunks: false,
-            max_memory: 512_000_000
+            remote_chunks: false
           },
           io_weight: 200
         )
 
       assert vol.caching.transformed_chunks == false
       assert vol.caching.remote_chunks == false
-      assert vol.caching.max_memory == 512_000_000
       assert vol.io_weight == 200
+    end
+
+    test "creates volume with default atime_mode" do
+      vol = Volume.new("test-vol")
+
+      assert vol.atime_mode == :noatime
+    end
+
+    test "creates volume with custom atime_mode" do
+      vol = Volume.new("test-vol", atime_mode: :relatime)
+
+      assert vol.atime_mode == :relatime
+    end
+
+    test "creates volume with default scrub_interval" do
+      vol = Volume.new("test-vol")
+
+      assert vol.verification.scrub_interval == 2_592_000
+    end
+
+    test "creates volume with custom scrub_interval" do
+      vol =
+        Volume.new("test-vol",
+          verification: %{on_read: :always, sampling_rate: nil, scrub_interval: 86_400}
+        )
+
+      assert vol.verification.scrub_interval == 86_400
     end
 
     test "generates unique IDs" do
@@ -83,12 +108,11 @@ defmodule NeonFS.Core.VolumeTest do
   end
 
   describe "default_caching/0" do
-    test "returns all-enabled with 256MB" do
+    test "returns all-enabled caching config" do
       assert Volume.default_caching() == %{
                transformed_chunks: true,
                reconstructed_stripes: true,
-               remote_chunks: true,
-               max_memory: 268_435_456
+               remote_chunks: true
              }
     end
   end
@@ -100,8 +124,12 @@ defmodule NeonFS.Core.VolumeTest do
   end
 
   describe "default_verification/0" do
-    test "returns never-verify config" do
-      assert Volume.default_verification() == %{on_read: :never, sampling_rate: nil}
+    test "returns never-verify config with 30-day scrub interval" do
+      assert Volume.default_verification() == %{
+               on_read: :never,
+               sampling_rate: nil,
+               scrub_interval: 2_592_000
+             }
     end
   end
 
@@ -131,7 +159,6 @@ defmodule NeonFS.Core.VolumeTest do
 
     test "updates the updated_at timestamp" do
       vol = Volume.new("test")
-      Process.sleep(1)
       updated = Volume.update(vol, owner: "bob")
 
       assert DateTime.compare(updated.updated_at, vol.updated_at) in [:gt, :eq]
@@ -242,22 +269,7 @@ defmodule NeonFS.Core.VolumeTest do
         | caching: %{
             transformed_chunks: "yes",
             reconstructed_stripes: true,
-            remote_chunks: true,
-            max_memory: 1000
-          }
-      }
-
-      assert {:error, "invalid caching" <> _} = Volume.validate(vol)
-    end
-
-    test "rejects non-positive caching max_memory" do
-      vol = %{
-        Volume.new("x")
-        | caching: %{
-            transformed_chunks: true,
-            reconstructed_stripes: true,
-            remote_chunks: true,
-            max_memory: 0
+            remote_chunks: true
           }
       }
 
@@ -270,8 +282,7 @@ defmodule NeonFS.Core.VolumeTest do
         | caching: %{
             transformed_chunks: false,
             reconstructed_stripes: false,
-            remote_chunks: false,
-            max_memory: 1
+            remote_chunks: false
           }
       }
 
@@ -314,13 +325,60 @@ defmodule NeonFS.Core.VolumeTest do
     end
 
     test "rejects sampling without rate" do
-      vol = %{Volume.new("x") | verification: %{on_read: :sampling, sampling_rate: nil}}
+      vol = %{
+        Volume.new("x")
+        | verification: %{on_read: :sampling, sampling_rate: nil, scrub_interval: 2_592_000}
+      }
+
       assert {:error, "sampling verification" <> _} = Volume.validate(vol)
     end
 
     test "accepts sampling with valid rate" do
-      vol = %{Volume.new("x") | verification: %{on_read: :sampling, sampling_rate: 0.5}}
+      vol = %{
+        Volume.new("x")
+        | verification: %{on_read: :sampling, sampling_rate: 0.5, scrub_interval: 2_592_000}
+      }
+
       assert :ok = Volume.validate(vol)
+    end
+
+    test "accepts custom scrub_interval" do
+      vol = %{
+        Volume.new("x")
+        | verification: %{on_read: :never, sampling_rate: nil, scrub_interval: 86_400}
+      }
+
+      assert :ok = Volume.validate(vol)
+    end
+
+    test "rejects non-positive scrub_interval" do
+      vol = %{
+        Volume.new("x")
+        | verification: %{on_read: :never, sampling_rate: nil, scrub_interval: 0}
+      }
+
+      assert {:error, "scrub_interval must be a positive integer"} = Volume.validate(vol)
+    end
+
+    test "rejects non-integer scrub_interval" do
+      vol = %{
+        Volume.new("x")
+        | verification: %{on_read: :never, sampling_rate: nil, scrub_interval: 1.5}
+      }
+
+      assert {:error, "scrub_interval must be a positive integer"} = Volume.validate(vol)
+    end
+
+    test "accepts valid atime_mode values" do
+      for mode <- [:noatime, :relatime] do
+        vol = %{Volume.new("x") | atime_mode: mode}
+        assert :ok = Volume.validate(vol)
+      end
+    end
+
+    test "rejects invalid atime_mode" do
+      vol = %{Volume.new("x") | atime_mode: :strictatime}
+      assert {:error, "atime_mode must be" <> _} = Volume.validate(vol)
     end
 
     test "accepts erasure durability config" do

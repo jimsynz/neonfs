@@ -8,13 +8,22 @@ defmodule NeonFS.Core.ResolvedLookupCacheTest do
   alias NeonFS.Core.ResolvedLookupCache
 
   setup do
+    # Controllable clock: starts at 1000, advanced by tests
+    time_ref = :atomics.new(1, [])
+    :atomics.put(time_ref, 1, 1000)
+    now_fn = fn -> :atomics.get(time_ref, 1) end
+
     # Use a short TTL and small max for testing
     start_supervised!(
       {ResolvedLookupCache,
-       ttl_ms: 200, max_entries: 5, cleanup_interval_ms: 0, name: ResolvedLookupCache}
+       ttl_ms: 200,
+       max_entries: 5,
+       cleanup_interval_ms: 0,
+       now_fn: now_fn,
+       name: ResolvedLookupCache}
     )
 
-    :ok
+    %{time_ref: time_ref}
   end
 
   describe "put/3 and get/1" do
@@ -30,27 +39,30 @@ defmodule NeonFS.Core.ResolvedLookupCacheTest do
   end
 
   describe "TTL expiry" do
-    test "entry expires after TTL" do
+    test "entry expires after TTL", %{time_ref: time_ref} do
       metadata = %{file_meta: %{id: "f2"}, chunks: ["c1"]}
       ResolvedLookupCache.put("file-2", metadata)
 
       # Entry should be available immediately
       assert {:ok, _} = ResolvedLookupCache.get("file-2")
 
-      # Wait for TTL to expire (200ms)
-      Process.sleep(250)
+      # Advance clock past TTL (200ms)
+      :atomics.add(time_ref, 1, 250)
 
       # Entry should now be expired
       assert :miss = ResolvedLookupCache.get("file-2")
     end
 
-    test "per-entry TTL override" do
+    test "per-entry TTL override", %{time_ref: time_ref} do
       metadata = %{file_meta: %{id: "f3"}, chunks: []}
       # Override with very short TTL
       ResolvedLookupCache.put("file-3", metadata, ttl_ms: 50)
 
       assert {:ok, _} = ResolvedLookupCache.get("file-3")
-      Process.sleep(100)
+
+      # Advance clock past the per-entry TTL
+      :atomics.add(time_ref, 1, 100)
+
       assert :miss = ResolvedLookupCache.get("file-3")
     end
   end
@@ -73,21 +85,22 @@ defmodule NeonFS.Core.ResolvedLookupCacheTest do
   end
 
   describe "LRU eviction" do
-    test "evicts oldest entry when max entries exceeded" do
+    test "evicts oldest entry when max entries exceeded", %{time_ref: time_ref} do
       # max_entries is 5 in our test config
       for i <- 1..5 do
         ResolvedLookupCache.put("lru-#{i}", %{id: i})
-        # Small delay so timestamps differ
-        Process.sleep(5)
+        # Advance clock so timestamps differ
+        :atomics.add(time_ref, 1, 5)
       end
 
       # All 5 should be cached
       for i <- 1..5 do
         assert {:ok, _} = ResolvedLookupCache.get("lru-#{i}")
+        :atomics.add(time_ref, 1, 1)
       end
 
       # Adding a 6th entry should evict the oldest (lru-1)
-      Process.sleep(5)
+      :atomics.add(time_ref, 1, 5)
       ResolvedLookupCache.put("lru-6", %{id: 6})
 
       # lru-1 should have been evicted (it was accessed least recently)

@@ -7,8 +7,9 @@
 //! Tests require /dev/fuse to be available and will fail if FUSE is not supported.
 
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request,
+    BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
+    Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr, ReplyData,
+    ReplyDirectory, ReplyEntry, Request, WriteFlags,
 };
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -138,7 +139,7 @@ impl TestFilesystem {
     fn make_attr(&self, entry: &TestEntry) -> FileAttr {
         let now = SystemTime::now();
         FileAttr {
-            ino: entry.ino,
+            ino: INodeNo(entry.ino),
             size: entry.data.len() as u64,
             blocks: (entry.data.len() as u64).div_ceil(512),
             atime: now,
@@ -176,40 +177,40 @@ impl TestFilesystem {
 }
 
 impl Filesystem for TestFilesystem {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let name_str = name.to_string_lossy();
 
-        if let Some(entry) = self.find_child(parent, &name_str) {
+        if let Some(entry) = self.find_child(parent.0, &name_str) {
             let attr = self.make_attr(&entry);
-            reply.entry(&TTL, &attr, 0);
+            reply.entry(&TTL, &attr, Generation(0));
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let entries = self.entries.lock().unwrap();
-        if let Some(entry) = entries.get(&ino) {
+        if let Some(entry) = entries.get(&ino.0) {
             let attr = self.make_attr(entry);
             reply.attr(&TTL, &attr);
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 
     fn read(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
         let entries = self.entries.lock().unwrap();
-        if let Some(entry) = entries.get(&ino) {
+        if let Some(entry) = entries.get(&ino.0) {
             let offset = offset as usize;
             let size = size as usize;
 
@@ -220,29 +221,29 @@ impl Filesystem for TestFilesystem {
                 reply.data(&entry.data[offset..end]);
             }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 
     fn readdir(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
         let entries = self.entries.lock().unwrap();
 
-        if let Some(dir) = entries.get(&ino) {
+        if let Some(dir) = entries.get(&ino.0) {
             if dir.kind != FileType::Directory {
-                reply.error(libc::ENOTDIR);
+                reply.error(Errno::ENOTDIR);
                 return;
             }
 
             let mut all_entries = vec![
-                (ino, FileType::Directory, "."),
-                (ino, FileType::Directory, ".."),
+                (ino.0, FileType::Directory, "."),
+                (ino.0, FileType::Directory, ".."),
             ];
 
             for &child_ino in &dir.children {
@@ -254,33 +255,33 @@ impl Filesystem for TestFilesystem {
             for (idx, (entry_ino, kind, name)) in
                 all_entries.iter().enumerate().skip(offset as usize)
             {
-                let full = reply.add(*entry_ino, (idx + 1) as i64, *kind, name);
+                let full = reply.add(INodeNo(*entry_ino), (idx + 1) as u64, *kind, name);
                 if full {
                     break;
                 }
             }
             reply.ok();
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 
-    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: fuser::ReplyOpen) {
         let entries = self.entries.lock().unwrap();
-        if entries.contains_key(&ino) {
-            reply.opened(0, 0);
+        if entries.contains_key(&ino.0) {
+            reply.opened(FileHandle(0), FopenFlags::empty());
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 
     fn release(
-        &mut self,
+        &self,
         _req: &Request,
-        _ino: u64,
-        _fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
@@ -288,9 +289,9 @@ impl Filesystem for TestFilesystem {
     }
 
     fn create(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &OsStr,
         _mode: u32,
         _umask: u32,
@@ -303,22 +304,22 @@ impl Filesystem for TestFilesystem {
         let mut next_ino = self.next_ino.lock().unwrap();
 
         // Check parent exists and is a directory
-        if let Some(parent_entry) = entries.get(&parent) {
+        if let Some(parent_entry) = entries.get(&parent.0) {
             if parent_entry.kind != FileType::Directory {
-                reply.error(libc::ENOTDIR);
+                reply.error(Errno::ENOTDIR);
                 return;
             }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         }
 
         // Check file doesn't already exist
-        let parent_children = &entries.get(&parent).unwrap().children;
+        let parent_children = &entries.get(&parent.0).unwrap().children;
         for &child_ino in parent_children {
             if let Some(child) = entries.get(&child_ino) {
                 if child.name == name_str {
-                    reply.error(libc::EEXIST);
+                    reply.error(Errno::EEXIST);
                     return;
                 }
             }
@@ -338,28 +339,34 @@ impl Filesystem for TestFilesystem {
 
         let attr = self.make_attr(&entry);
         entries.insert(ino, entry);
-        entries.get_mut(&parent).unwrap().children.push(ino);
+        entries.get_mut(&parent.0).unwrap().children.push(ino);
 
-        reply.created(&TTL, &attr, 0, 0, 0);
+        reply.created(
+            &TTL,
+            &attr,
+            Generation(0),
+            FileHandle(0),
+            FopenFlags::empty(),
+        );
     }
 
     fn write(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         data: &[u8],
-        _write_flags: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _write_flags: WriteFlags,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: fuser::ReplyWrite,
     ) {
         let mut entries = self.entries.lock().unwrap();
 
-        if let Some(entry) = entries.get_mut(&ino) {
+        if let Some(entry) = entries.get_mut(&ino.0) {
             if entry.kind != FileType::RegularFile {
-                reply.error(libc::EISDIR);
+                reply.error(Errno::EISDIR);
                 return;
             }
 
@@ -374,21 +381,21 @@ impl Filesystem for TestFilesystem {
             entry.data[offset..offset + data.len()].copy_from_slice(data);
             reply.written(data.len() as u32);
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 
-    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
         let name_str = name.to_string_lossy().to_string();
 
         let mut entries = self.entries.lock().unwrap();
 
         // Find the file
         let file_ino = {
-            let parent_entry = match entries.get(&parent) {
+            let parent_entry = match entries.get(&parent.0) {
                 Some(e) => e,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -398,7 +405,7 @@ impl Filesystem for TestFilesystem {
                 if let Some(child) = entries.get(&child_ino) {
                     if child.name == name_str {
                         if child.kind == FileType::Directory {
-                            reply.error(libc::EISDIR);
+                            reply.error(Errno::EISDIR);
                             return;
                         }
                         found_ino = Some(child_ino);
@@ -409,14 +416,14 @@ impl Filesystem for TestFilesystem {
             match found_ino {
                 Some(ino) => ino,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             }
         };
 
         // Remove from parent's children
-        if let Some(parent_entry) = entries.get_mut(&parent) {
+        if let Some(parent_entry) = entries.get_mut(&parent.0) {
             parent_entry.children.retain(|&ino| ino != file_ino);
         }
 
@@ -426,9 +433,9 @@ impl Filesystem for TestFilesystem {
     }
 
     fn mkdir(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &OsStr,
         _mode: u32,
         _umask: u32,
@@ -440,9 +447,9 @@ impl Filesystem for TestFilesystem {
         let mut next_ino = self.next_ino.lock().unwrap();
 
         // Check parent exists and is a directory
-        if let Some(parent_entry) = entries.get(&parent) {
+        if let Some(parent_entry) = entries.get(&parent.0) {
             if parent_entry.kind != FileType::Directory {
-                reply.error(libc::ENOTDIR);
+                reply.error(Errno::ENOTDIR);
                 return;
             }
 
@@ -450,13 +457,13 @@ impl Filesystem for TestFilesystem {
             for &child_ino in &parent_entry.children {
                 if let Some(child) = entries.get(&child_ino) {
                     if child.name == name_str {
-                        reply.error(libc::EEXIST);
+                        reply.error(Errno::EEXIST);
                         return;
                     }
                 }
             }
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         }
 
@@ -474,22 +481,22 @@ impl Filesystem for TestFilesystem {
 
         let attr = self.make_attr(&entry);
         entries.insert(ino, entry);
-        entries.get_mut(&parent).unwrap().children.push(ino);
+        entries.get_mut(&parent.0).unwrap().children.push(ino);
 
-        reply.entry(&TTL, &attr, 0);
+        reply.entry(&TTL, &attr, Generation(0));
     }
 
-    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: fuser::ReplyEmpty) {
         let name_str = name.to_string_lossy().to_string();
 
         let mut entries = self.entries.lock().unwrap();
 
         // Find the directory
         let dir_ino = {
-            let parent_entry = match entries.get(&parent) {
+            let parent_entry = match entries.get(&parent.0) {
                 Some(e) => e,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -499,11 +506,11 @@ impl Filesystem for TestFilesystem {
                 if let Some(child) = entries.get(&child_ino) {
                     if child.name == name_str {
                         if child.kind != FileType::Directory {
-                            reply.error(libc::ENOTDIR);
+                            reply.error(Errno::ENOTDIR);
                             return;
                         }
                         if !child.children.is_empty() {
-                            reply.error(libc::ENOTEMPTY);
+                            reply.error(Errno::ENOTEMPTY);
                             return;
                         }
                         found_ino = Some(child_ino);
@@ -514,14 +521,14 @@ impl Filesystem for TestFilesystem {
             match found_ino {
                 Some(ino) => ino,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             }
         };
 
         // Remove from parent's children
-        if let Some(parent_entry) = entries.get_mut(&parent) {
+        if let Some(parent_entry) = entries.get_mut(&parent.0) {
             parent_entry.children.retain(|&ino| ino != dir_ino);
         }
 
@@ -531,13 +538,13 @@ impl Filesystem for TestFilesystem {
     }
 
     fn rename(
-        &mut self,
+        &self,
         _req: &Request,
-        parent: u64,
+        parent: INodeNo,
         name: &OsStr,
-        newparent: u64,
+        newparent: INodeNo,
         newname: &OsStr,
-        _flags: u32,
+        _flags: RenameFlags,
         reply: fuser::ReplyEmpty,
     ) {
         let old_name = name.to_string_lossy().to_string();
@@ -547,10 +554,10 @@ impl Filesystem for TestFilesystem {
 
         // Find the source entry
         let entry_ino = {
-            let parent_entry = match entries.get(&parent) {
+            let parent_entry = match entries.get(&parent.0) {
                 Some(e) => e,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -567,20 +574,20 @@ impl Filesystem for TestFilesystem {
             match found_ino {
                 Some(ino) => ino,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             }
         };
 
         // Check new parent exists
-        if !entries.contains_key(&newparent) {
-            reply.error(libc::ENOENT);
+        if !entries.contains_key(&newparent.0) {
+            reply.error(Errno::ENOENT);
             return;
         }
 
         // Remove from old parent
-        if let Some(parent_entry) = entries.get_mut(&parent) {
+        if let Some(parent_entry) = entries.get_mut(&parent.0) {
             parent_entry.children.retain(|&ino| ino != entry_ino);
         }
 
@@ -589,7 +596,7 @@ impl Filesystem for TestFilesystem {
             entry.name = new_name;
         }
 
-        if let Some(new_parent_entry) = entries.get_mut(&newparent) {
+        if let Some(new_parent_entry) = entries.get_mut(&newparent.0) {
             new_parent_entry.children.push(entry_ino);
         }
 
@@ -597,9 +604,9 @@ impl Filesystem for TestFilesystem {
     }
 
     fn setattr(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
+        ino: INodeNo,
         _mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
@@ -607,16 +614,16 @@ impl Filesystem for TestFilesystem {
         _atime: Option<fuser::TimeOrNow>,
         _mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<u64>,
+        _fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
-        _flags: Option<u32>,
+        _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
         let mut entries = self.entries.lock().unwrap();
 
-        if let Some(entry) = entries.get_mut(&ino) {
+        if let Some(entry) = entries.get_mut(&ino.0) {
             // Handle truncation
             if let Some(new_size) = size {
                 entry.data.resize(new_size as usize, 0);
@@ -625,7 +632,7 @@ impl Filesystem for TestFilesystem {
             let attr = self.make_attr(entry);
             reply.attr(&TTL, &attr);
         } else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 }
@@ -665,23 +672,46 @@ fn cleanup_mount_point(path: &std::path::Path) {
 
 /// Mount a filesystem and return the session handle
 fn mount_filesystem(
-    fs: impl Filesystem + Send + 'static,
+    fs: impl Filesystem + 'static,
     mount_point: &std::path::Path,
     read_only: bool,
 ) -> Option<fuser::BackgroundSession> {
-    let mut options = vec![
+    let mut mount_options = vec![
         MountOption::FSName("neonfs_test".to_string()),
         MountOption::AutoUnmount,
     ];
 
     if read_only {
-        options.push(MountOption::RO);
+        mount_options.push(MountOption::RO);
     }
 
-    match fuser::spawn_mount2(fs, mount_point, &options) {
+    let mut config = Config::default();
+    config.mount_options = mount_options;
+    // fuser 0.17 requires acl != Owner when AutoUnmount is enabled
+    config.acl = fuser::SessionACL::RootAndOwner;
+
+    // Record the mount point's inode before mounting so we can detect when
+    // the FUSE mount has taken over (its root inode will differ).
+    let pre_mount_ino = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(mount_point).map(|m| m.ino()).ok()
+    };
+
+    match fuser::spawn_mount2(fs, mount_point, &config) {
         Ok(session) => {
-            // Give mount time to establish
-            std::thread::sleep(Duration::from_millis(200));
+            // Poll until the mount point's inode changes, indicating the
+            // FUSE daemon has completed init and is serving requests.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                use std::os::unix::fs::MetadataExt;
+                if let Ok(metadata) = fs::metadata(mount_point) {
+                    if Some(metadata.ino()) != pre_mount_ino {
+                        return Some(session);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            eprintln!("Warning: mount may not be fully established after 5s");
             Some(session)
         }
         Err(e) => {
@@ -728,9 +758,9 @@ fn test_mount_point_must_exist() {
     let nonexistent = PathBuf::from("/nonexistent/path/that/does/not/exist");
 
     let fs = TestFilesystem::new();
-    let options = vec![MountOption::FSName("test".to_string())];
+    let config = Config::default();
 
-    let result = fuser::spawn_mount2(fs, &nonexistent, &options);
+    let result = fuser::spawn_mount2(fs, &nonexistent, &config);
     assert!(result.is_err(), "Mount to non-existent path should fail");
 }
 
@@ -740,14 +770,17 @@ fn test_mount_options() {
     let mount_point = create_mount_point();
     let fs = TestFilesystem::new();
 
-    let options = vec![
+    let mut config = Config::default();
+    config.mount_options = vec![
         MountOption::FSName("neonfs_options_test".to_string()),
         MountOption::AutoUnmount,
         MountOption::RO,
         MountOption::DefaultPermissions,
     ];
+    // fuser 0.17 requires acl != Owner when AutoUnmount is enabled
+    config.acl = fuser::SessionACL::RootAndOwner;
 
-    let result = fuser::spawn_mount2(fs, &mount_point, &options);
+    let result = fuser::spawn_mount2(fs, &mount_point, &config);
     assert!(result.is_ok(), "Mount with multiple options should succeed");
 
     // Verify it's mounted

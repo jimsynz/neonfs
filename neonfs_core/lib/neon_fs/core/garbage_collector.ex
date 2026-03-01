@@ -27,20 +27,35 @@ defmodule NeonFS.Core.GarbageCollector do
         }
 
   @doc """
-  Runs a full garbage collection pass.
+  Runs a full garbage collection pass across all volumes.
+
+  Equivalent to `collect([])`.
+  """
+  @spec collect() :: {:ok, gc_result()}
+  def collect, do: collect([])
+
+  @doc """
+  Runs a garbage collection pass with options.
 
   1. Mark phase: builds the set of all chunk hashes referenced by files
   2. Sweep phase: deletes committed chunks not in the referenced set
   3. Stripe cleanup: deletes orphaned stripe metadata
 
+  ## Options
+
+  - `:volume_id` — when given, only files belonging to that volume are scanned
+    during the mark phase. Chunks not referenced by those files are treated as
+    unreferenced.
+
   Returns a summary map with counts of deleted chunks and stripes.
   """
-  @spec collect() :: {:ok, gc_result()}
-  def collect do
+  @spec collect(keyword()) :: {:ok, gc_result()}
+  def collect(opts) when is_list(opts) do
     start_time = System.monotonic_time()
 
-    referenced_chunks = mark_referenced_chunks()
-    referenced_stripes = mark_referenced_stripes()
+    files = list_files(opts)
+    referenced_chunks = mark_referenced_chunks(files)
+    referenced_stripes = mark_referenced_stripes(files)
 
     {chunks_deleted, chunks_protected} = sweep_chunks(referenced_chunks)
     stripes_deleted = sweep_stripes(referenced_stripes)
@@ -58,11 +73,19 @@ defmodule NeonFS.Core.GarbageCollector do
     {:ok, result}
   end
 
+  # ─── File Listing ──────────────────────────────────────────────────────
+
+  defp list_files(opts) do
+    case Keyword.get(opts, :volume_id) do
+      nil -> FileIndex.list_all()
+      volume_id -> FileIndex.list_volume(volume_id)
+    end
+  end
+
   # ─── Mark Phase ────────────────────────────────────────────────────────
 
-  defp mark_referenced_chunks do
-    FileIndex.list_all()
-    |> Enum.reduce(MapSet.new(), &collect_file_chunks/2)
+  defp mark_referenced_chunks(files) do
+    Enum.reduce(files, MapSet.new(), &collect_file_chunks/2)
   end
 
   defp collect_file_chunks(file_meta, acc) do
@@ -93,9 +116,8 @@ defmodule NeonFS.Core.GarbageCollector do
 
   defp collect_stripe_chunks(acc, _), do: acc
 
-  defp mark_referenced_stripes do
-    FileIndex.list_all()
-    |> Enum.reduce(MapSet.new(), &collect_file_stripe_ids/2)
+  defp mark_referenced_stripes(files) do
+    Enum.reduce(files, MapSet.new(), &collect_file_stripe_ids/2)
   end
 
   defp collect_file_stripe_ids(%{stripes: stripes}, acc) when is_list(stripes) do

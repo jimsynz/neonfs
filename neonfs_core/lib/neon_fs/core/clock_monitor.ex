@@ -116,7 +116,7 @@ defmodule NeonFS.Core.ClockMonitor do
       Process.send_after(self(), :check_clocks, check_interval)
     end
 
-    Logger.info("ClockMonitor started (interval: #{check_interval}ms)")
+    Logger.info("ClockMonitor started", interval_ms: check_interval)
 
     {:ok, state}
   end
@@ -159,7 +159,7 @@ defmodule NeonFS.Core.ClockMonitor do
 
         {:warning, skew} ->
           maybe_unquarantine(node)
-          Logger.warning("Clock skew detected: #{inspect(node)} is #{skew}ms off")
+          Logger.warning("Clock skew detected", node: node, skew_ms: skew)
 
           :telemetry.execute(
             [:neonfs, :clock, :skew],
@@ -169,7 +169,7 @@ defmodule NeonFS.Core.ClockMonitor do
 
         {:critical, skew} ->
           maybe_unquarantine(node)
-          Logger.error("Critical clock skew: #{inspect(node)} is #{skew}ms off")
+          Logger.error("Critical clock skew", node: node, skew_ms: skew)
 
           :telemetry.execute(
             [:neonfs, :clock, :skew],
@@ -187,9 +187,15 @@ defmodule NeonFS.Core.ClockMonitor do
           )
 
         {:error, reason} ->
-          Logger.warning("Failed to probe clock on #{inspect(node)}: #{inspect(reason)}")
+          Logger.warning("Failed to probe clock on node", node: node, reason: inspect(reason))
       end
     end)
+
+    :telemetry.execute(
+      [:neonfs, :clock, :check_complete],
+      %{},
+      %{nodes_checked: length(nodes)}
+    )
   end
 
   defp check_node_clock(node, state) do
@@ -221,7 +227,10 @@ defmodule NeonFS.Core.ClockMonitor do
     :ets.insert(@ets_table, {node, skew})
 
     unless was_quarantined do
-      Logger.error("Quarantining #{inspect(node)}: clock skew #{skew}ms exceeds threshold")
+      Logger.error("Quarantining node, clock skew exceeds threshold",
+        node: node,
+        skew_ms: skew
+      )
 
       :telemetry.execute(
         [:neonfs, :clock, :quarantine],
@@ -234,7 +243,7 @@ defmodule NeonFS.Core.ClockMonitor do
   defp maybe_unquarantine(node) do
     if quarantined?(node) do
       :ets.delete(@ets_table, node)
-      Logger.info("Unquarantining #{inspect(node)}: clock skew within bounds")
+      Logger.info("Unquarantining node, clock skew within bounds", node: node)
 
       :telemetry.execute(
         [:neonfs, :clock, :unquarantine],

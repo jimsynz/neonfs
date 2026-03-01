@@ -340,6 +340,14 @@ jobs:
           mix compile
           if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
+      - name: Enable loopback devices
+        run: |
+          modprobe loop max_loop=64 || true
+          [ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237
+          for i in $(seq 0 63); do
+            [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
+          done
+
       - name: Check
         working-directory: neonfs_integration
         run: |

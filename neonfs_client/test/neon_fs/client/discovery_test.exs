@@ -27,9 +27,50 @@ defmodule NeonFS.Client.DiscoveryTest do
   describe "refresh/0" do
     test "does not crash when no core connection exists" do
       Discovery.refresh()
-      Process.sleep(50)
+      :sys.get_state(Discovery)
 
       assert Process.whereis(Discovery) != nil
+    end
+  end
+
+  describe "peer_sync_interval configuration" do
+    test "uses default refresh interval when not configured" do
+      pid = Process.whereis(Discovery)
+      state = :sys.get_state(pid)
+
+      assert state.refresh_ms == 5_000
+    end
+
+    test "reads peer_sync_interval from app env" do
+      stop_supervised!(Discovery)
+
+      Application.put_env(:neonfs_client, :peer_sync_interval, 60_000)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_client, :peer_sync_interval)
+      end)
+
+      start_supervised!(Discovery)
+      pid = Process.whereis(Discovery)
+      state = :sys.get_state(pid)
+
+      assert state.refresh_ms == 60_000
+    end
+
+    test "opts override app env" do
+      stop_supervised!(Discovery)
+
+      Application.put_env(:neonfs_client, :peer_sync_interval, 60_000)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_client, :peer_sync_interval)
+      end)
+
+      start_supervised!({Discovery, refresh_ms: 15_000})
+      pid = Process.whereis(Discovery)
+      state = :sys.get_state(pid)
+
+      assert state.refresh_ms == 15_000
     end
   end
 
@@ -37,7 +78,7 @@ defmodule NeonFS.Client.DiscoveryTest do
     test "handles nodedown without crashing" do
       pid = Process.whereis(Discovery)
       send(pid, {:nodedown, :unknown@host, []})
-      Process.sleep(50)
+      :sys.get_state(pid)
 
       assert Process.alive?(pid)
     end
@@ -45,7 +86,7 @@ defmodule NeonFS.Client.DiscoveryTest do
     test "handles nodeup without crashing" do
       pid = Process.whereis(Discovery)
       send(pid, {:nodeup, :unknown@host, []})
-      Process.sleep(50)
+      :sys.get_state(pid)
 
       assert Process.alive?(pid)
     end

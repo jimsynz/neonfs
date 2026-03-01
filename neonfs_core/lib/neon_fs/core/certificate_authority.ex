@@ -117,7 +117,7 @@ defmodule NeonFS.Core.CertificateAuthority do
       {:ok, certs}
     else
       # /tls/issued/ doesn't exist yet (no certs issued)
-      {:error, :file_not_found} -> {:ok, []}
+      {:error, %{class: :not_found}} -> {:ok, []}
       {:error, _} = error -> error
     end
   end

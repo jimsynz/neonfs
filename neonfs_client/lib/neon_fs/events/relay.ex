@@ -153,6 +153,7 @@ defmodule NeonFS.Events.Relay do
   defp handle_subscriber_down(state, pid, ref) do
     Process.demonitor(ref, [:flush])
     monitors = Map.delete(state.monitors, pid)
+    previous_volumes = Map.keys(state.volume_refs)
 
     # Find all volumes this pid was subscribed to by checking which volume
     # ref counts need decrementing. We look at Registry to see which keys
@@ -176,6 +177,14 @@ defmodule NeonFS.Events.Relay do
           Map.put(acc, volume_id, registered)
         end
       end)
+
+    volumes_left = previous_volumes -- Map.keys(volume_refs)
+
+    :telemetry.execute(
+      [:neonfs, :events, :relay, :subscriber_down],
+      %{},
+      %{pid: pid, volumes_left: volumes_left}
+    )
 
     %{state | volume_refs: volume_refs, monitors: monitors}
   end

@@ -162,13 +162,18 @@ defmodule NeonFS.Core.SystemVolume.RetentionTest do
     end
 
     test "schedules periodic pruning via handle_info" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :system_volume, :retention, :pruned]
+        ])
+
       pid = start_supervised!({Retention, prune_interval_ms: 50}, restart: :temporary)
 
       # The GenServer should be alive and scheduling prune cycles
       assert Process.alive?(pid)
 
-      # Wait long enough for at least one scheduled prune to fire
-      Process.sleep(100)
+      # Wait for at least one scheduled prune to fire
+      assert_receive {[:neonfs, :system_volume, :retention, :pruned], ^ref, %{}, %{}}, 1_000
 
       # Still alive after prune cycle (didn't crash on missing system volume)
       assert Process.alive?(pid)

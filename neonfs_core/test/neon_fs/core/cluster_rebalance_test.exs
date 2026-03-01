@@ -52,7 +52,8 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
       restart: :temporary
     )
 
-    Process.sleep(50)
+    # Wait for StorageMetrics to finish computing initial usage
+    :sys.get_state(NeonFS.Core.StorageMetrics)
 
     {:ok,
      drives: drives, drive1_path: drive1_path, drive2_path: drive2_path, drive3_path: drive3_path}

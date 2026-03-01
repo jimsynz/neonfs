@@ -13,6 +13,7 @@ defmodule NeonFS.Client.Router do
   require Logger
 
   alias NeonFS.Client.{CostFunction, Discovery}
+  alias NeonFS.Error.Unavailable
   alias NeonFS.Transport.{ConnPool, PoolManager}
 
   @max_retries 2
@@ -122,7 +123,7 @@ defmodule NeonFS.Client.Router do
   ## Private helpers — call/metadata_call
 
   defp do_call(_module, _function, _args, _timeout, 0, _opts) do
-    {:error, :all_nodes_unreachable}
+    {:error, Unavailable.exception(message: "All core nodes unreachable")}
   end
 
   defp do_call(module, function, args, timeout, retries_left, opts) do
@@ -148,14 +149,21 @@ defmodule NeonFS.Client.Router do
   defp fallback_call(module, function, args, timeout) do
     case discover_any_core_node() do
       {:ok, node} -> fallback_rpc(node, module, function, args, timeout)
-      :error -> {:error, :all_nodes_unreachable}
+      :error -> {:error, Unavailable.exception(message: "All core nodes unreachable")}
     end
   end
 
   defp fallback_rpc(node, module, function, args, timeout) do
     case :rpc.call(node, module, function, args, timeout) do
-      {:badrpc, _} -> {:error, :all_nodes_unreachable}
-      result -> result
+      {:badrpc, reason} ->
+        {:error,
+         Unavailable.exception(
+           message: "RPC to #{node} failed: #{inspect(reason)}",
+           details: %{node: node, reason: reason}
+         )}
+
+      result ->
+        result
     end
   end
 

@@ -287,7 +287,7 @@ defmodule NeonFS.Core.DriveManager do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Failed to persist drives to cluster.json: #{inspect(reason)}")
+        Logger.warning("Failed to persist drives to cluster.json", reason: reason)
         :ok
     end
   end

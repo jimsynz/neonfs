@@ -4,6 +4,9 @@ import Config
 # Evaluated at runtime when the release starts
 
 if config_env() == :prod do
+  # Structured JSON logging for production — human-readable console in dev/test
+  config :logger, :default_handler, formatter: LoggerJSON.Formatters.Basic.new(metadata: :all)
+
   # Data directory for blob storage
   data_dir = System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs/data")
 
@@ -29,6 +32,9 @@ if config_env() == :prod do
   # overrides this default via Application.put_env/3.
   drives = [%{id: "default", path: "#{data_dir}/blobs", tier: :hot, capacity: 0}]
 
+  # ChunkCache memory limit (bytes) — default 256 MiB
+  # config :neonfs_core, chunk_cache_max_memory: 536_870_912  # 512 MiB
+
   # Core configuration
   config :neonfs_core,
     blob_store_base_dir: "#{data_dir}/blobs",
@@ -41,6 +47,33 @@ if config_env() == :prod do
       String.to_integer(System.get_env("NEONFS_SNAPSHOT_INTERVAL_MS", "30000")),
     node_name: node_name,
     fuse_node: fuse_node
+
+  # Auto-bootstrap: autonomous cluster formation (Consul/Nomad bootstrap_expect pattern)
+  auto_bootstrap = System.get_env("NEONFS_AUTO_BOOTSTRAP", "false") == "true"
+
+  if auto_bootstrap do
+    cluster_name =
+      System.get_env("NEONFS_CLUSTER_NAME") ||
+        raise "NEONFS_CLUSTER_NAME required when NEONFS_AUTO_BOOTSTRAP=true"
+
+    bootstrap_expect =
+      System.get_env("NEONFS_BOOTSTRAP_EXPECT") ||
+        raise "NEONFS_BOOTSTRAP_EXPECT required when NEONFS_AUTO_BOOTSTRAP=true"
+
+    bootstrap_peers =
+      System.get_env("NEONFS_BOOTSTRAP_PEERS") ||
+        raise "NEONFS_BOOTSTRAP_PEERS required when NEONFS_AUTO_BOOTSTRAP=true"
+
+    config :neonfs_core,
+      auto_bootstrap: true,
+      cluster_name: cluster_name,
+      bootstrap_expect: String.to_integer(bootstrap_expect),
+      bootstrap_peers:
+        bootstrap_peers
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.to_atom(String.trim(&1))),
+      bootstrap_timeout: String.to_integer(System.get_env("NEONFS_BOOTSTRAP_TIMEOUT", "300000"))
+  end
 
   # BEAM VM will use RELEASE_NODE environment variable for actual node name
   # This is set via rel/env.sh.eex or systemd environment

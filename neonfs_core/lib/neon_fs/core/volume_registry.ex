@@ -16,6 +16,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeEncryption
+  alias NeonFS.Error.Invalid, as: InvalidError
   alias NeonFS.Events.Broadcaster
   alias NeonFS.Events.{VolumeCreated, VolumeDeleted, VolumeUpdated}
 
@@ -210,10 +211,10 @@ defmodule NeonFS.Core.VolumeRegistry do
     # will be populated as operations occur or when Ra becomes available
     case restore_from_ra() do
       {:ok, count} ->
-        Logger.info("VolumeRegistry started, restored #{count} volumes from Ra")
+        Logger.info("VolumeRegistry started, restored volumes from Ra", count: count)
 
       {:error, reason} ->
-        Logger.debug("VolumeRegistry started but Ra not ready yet: #{inspect(reason)}")
+        Logger.debug("VolumeRegistry started but Ra not ready yet", reason: reason)
     end
 
     {:ok, %{}}
@@ -313,8 +314,15 @@ defmodule NeonFS.Core.VolumeRegistry do
       safe_broadcast(volume.id, %VolumeCreated{volume_id: volume.id})
       {:ok, volume}
     else
-      {:ok, _} -> {:error, "volume with name '#{name}' already exists"}
-      {:error, reason} -> {:error, reason}
+      {:ok, _} ->
+        {:error,
+         InvalidError.exception(
+           message: "Volume with name '#{name}' already exists",
+           details: %{volume_name: name}
+         )}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -360,12 +368,11 @@ defmodule NeonFS.Core.VolumeRegistry do
       caching: %{
         transformed_chunks: false,
         reconstructed_stripes: false,
-        remote_chunks: false,
-        max_memory: 1
+        remote_chunks: false
       },
       io_weight: 100,
       compression: %{algorithm: :zstd, level: 3, min_size: 0},
-      verification: %{on_read: :always, sampling_rate: nil},
+      verification: %{on_read: :always, sampling_rate: nil, scrub_interval: 2_592_000},
       encryption: VolumeEncryption.new(),
       metadata_consistency: nil,
       logical_size: 0,
@@ -379,13 +386,24 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   defp check_not_system_volume(%Volume{} = volume) do
     if Map.get(volume, :system, false) do
-      {:error, :system_volume}
+      {:error,
+       InvalidError.exception(
+         message: "Cannot delete system volume",
+         details: %{volume_id: volume.id, volume_name: volume.name}
+       )}
     else
       :ok
     end
   end
 
-  defp check_reserved_name("_" <> _), do: {:error, :reserved_name}
+  defp check_reserved_name("_" <> _ = name) do
+    {:error,
+     InvalidError.exception(
+       message: "Volume names starting with '_' are reserved",
+       details: %{volume_name: name}
+     )}
+  end
+
   defp check_reserved_name(_), do: :ok
 
   defp check_system_volume_update(%Volume{} = volume, opts) do
@@ -400,7 +418,11 @@ defmodule NeonFS.Core.VolumeRegistry do
         end
 
       if has_protected_field or durability_type_changed do
-        {:error, :system_volume_protected}
+        {:error,
+         InvalidError.exception(
+           message: "Cannot modify protected fields on system volume",
+           details: %{volume_id: volume.id}
+         )}
       else
         :ok
       end
@@ -415,7 +437,11 @@ defmodule NeonFS.Core.VolumeRegistry do
     if Enum.empty?(files) do
       :ok
     else
-      {:error, "volume contains #{length(files)} file(s), cannot delete"}
+      {:error,
+       InvalidError.exception(
+         message: "Volume contains #{length(files)} file(s), cannot delete",
+         details: %{volume_id: volume.id, file_count: length(files)}
+       )}
     end
   end
 
@@ -468,11 +494,11 @@ defmodule NeonFS.Core.VolumeRegistry do
     Broadcaster.broadcast(volume_id, event)
   rescue
     _ ->
-      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      Logger.warning("Event broadcast failed", event_type: inspect(event.__struct__))
       :ok
   catch
     :exit, _ ->
-      Logger.warning("Event broadcast failed for #{inspect(event.__struct__)}")
+      Logger.warning("Event broadcast failed", event_type: inspect(event.__struct__))
       :ok
   end
 
@@ -568,7 +594,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       end
 
     kind, reason ->
-      Logger.debug("Ra command error: #{inspect({kind, reason})}")
+      Logger.debug("Ra command error", kind: kind, reason: reason)
 
       if RaServer.initialized?() do
         {:error, {:ra_error, {kind, reason}}}
@@ -650,25 +676,20 @@ defmodule NeonFS.Core.VolumeRegistry do
   # initial_tier instead of tiering map
   defp map_to_volume(volume_map) when is_map(volume_map) do
     tiering = resolve_tiering(volume_map)
+    caching = resolve_caching(volume_map)
 
     %Volume{
       id: volume_map.id,
       name: volume_map.name,
       owner: volume_map[:owner],
+      atime_mode: volume_map[:atime_mode] || :noatime,
       durability: volume_map.durability,
       write_ack: volume_map.write_ack,
       tiering: tiering,
-      caching:
-        volume_map[:caching] ||
-          %{
-            transformed_chunks: true,
-            reconstructed_stripes: true,
-            remote_chunks: true,
-            max_memory: 268_435_456
-          },
+      caching: caching,
       io_weight: volume_map[:io_weight] || 100,
       compression: volume_map.compression,
-      verification: volume_map.verification,
+      verification: resolve_verification(volume_map.verification),
       encryption: map_to_encryption(volume_map[:encryption]),
       logical_size: volume_map[:logical_size] || 0,
       physical_size: volume_map[:physical_size] || 0,
@@ -677,6 +698,16 @@ defmodule NeonFS.Core.VolumeRegistry do
       updated_at: volume_map.updated_at,
       system: volume_map[:system] || false
     }
+  end
+
+  defp resolve_caching(volume_map) do
+    volume_map
+    |> Map.get(:caching, %{
+      transformed_chunks: true,
+      reconstructed_stripes: true,
+      remote_chunks: true
+    })
+    |> Map.drop([:max_memory, "max_memory"])
   end
 
   defp encryption_to_map(%NeonFS.Core.VolumeEncryption{} = enc) do
@@ -706,6 +737,13 @@ defmodule NeonFS.Core.VolumeRegistry do
   end
 
   # Resolve tiering config from either new tiering map or legacy initial_tier field
+  # Ensure verification map includes scrub_interval (backward compat with pre-0123 volumes)
+  defp resolve_verification(%{scrub_interval: _} = verification), do: verification
+
+  defp resolve_verification(verification) when is_map(verification) do
+    Map.put(verification, :scrub_interval, 2_592_000)
+  end
+
   defp resolve_tiering(volume_map) do
     case volume_map[:tiering] do
       %{initial_tier: _} = tiering ->

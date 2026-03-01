@@ -27,6 +27,8 @@ defmodule NeonFS.Core.StripeRepair do
     StripePlacement
   }
 
+  alias NeonFS.IO.{Operation, Scheduler}
+
   alias NeonFS.Core.StripeRepair.LockTable
 
   @default_scan_interval_ms 300_000
@@ -216,7 +218,7 @@ defmodule NeonFS.Core.StripeRepair do
   end
 
   defp write_repaired_chunk(data, target, tier_str, stripe, stripe_idx) do
-    case write_to_target(data, target, tier_str) do
+    case write_to_target(data, target, tier_str, stripe.volume_id) do
       {:ok, hash, chunk_info} ->
         chunk_meta = %ChunkMeta{
           hash: hash,
@@ -237,14 +239,23 @@ defmodule NeonFS.Core.StripeRepair do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Failed to store repaired chunk: #{inspect(reason)}")
+        Logger.warning("Failed to store repaired chunk", reason: inspect(reason))
         {:error, reason}
     end
   end
 
-  defp write_to_target(data, target, tier_str) do
+  defp write_to_target(data, target, tier_str, volume_id) do
     if target.node == node() do
-      BlobStore.write_chunk(data, target.drive_id, tier_str, [])
+      op =
+        Operation.new(
+          priority: :repair,
+          volume_id: volume_id,
+          drive_id: target.drive_id,
+          type: :write,
+          callback: fn -> BlobStore.write_chunk(data, target.drive_id, tier_str, []) end
+        )
+
+      Scheduler.submit_sync(op)
     else
       case :rpc.call(
              target.node,

@@ -2,8 +2,8 @@ defmodule NeonFS.Core.ChunkCache do
   @moduledoc """
   LRU cache for decompressed/decrypted chunks backed by ETS.
 
-  Avoids redundant decompression on repeated reads. Per-volume memory limits
-  are enforced using `volume.caching.max_memory`. Uses two ETS tables:
+  Avoids redundant decompression on repeated reads. A global memory limit is
+  enforced using `:chunk_cache_max_memory`. Uses two ETS tables:
 
     * `:chunk_cache_data` — `{{volume_id, chunk_hash}, data, byte_size, timestamp}`
     * `:chunk_cache_lru` — `{{timestamp, volume_id, chunk_hash}}` (ordered_set for eviction)
@@ -21,8 +21,13 @@ defmodule NeonFS.Core.ChunkCache do
   use GenServer
   require Logger
 
+  alias NeonFS.Core.{Volume, VolumeRegistry}
+
   @data_table :chunk_cache_data
   @lru_table :chunk_cache_lru
+  @default_max_memory 268_435_456
+
+  @type chunk_type :: :local | :transformed | :reconstructed | :remote
 
   ## Client API
 
@@ -72,14 +77,30 @@ defmodule NeonFS.Core.ChunkCache do
   end
 
   @doc """
-  Stores a chunk in the cache.
+  Stores a chunk in the cache using the configured memory limit.
 
-  Evicts oldest entries if the volume exceeds `max_memory` bytes.
+  Evicts oldest entries if the cache exceeds the configured `max_memory` bytes.
   """
-  @spec put(String.t(), binary(), binary(), non_neg_integer()) :: :ok
-  def put(volume_id, chunk_hash, data, max_memory \\ 268_435_456) do
-    GenServer.cast(__MODULE__, {:put, volume_id, chunk_hash, data, max_memory})
+  @spec put(String.t(), binary(), binary()) :: :ok
+  def put(volume_id, chunk_hash, data) do
+    GenServer.cast(__MODULE__, {:put, volume_id, chunk_hash, data, []})
   end
+
+  @doc """
+  Stores a chunk in the cache with additional options.
+
+  ## Options
+
+    * `:chunk_type` - `:local`, `:transformed`, `:reconstructed`, or `:remote`
+  """
+  @spec put(String.t(), binary(), binary(), keyword()) :: :ok
+  def put(volume_id, chunk_hash, data, opts) when is_list(opts) do
+    GenServer.cast(__MODULE__, {:put, volume_id, chunk_hash, data, opts})
+  end
+
+  @doc false
+  @spec flush() :: :ok
+  def flush, do: GenServer.call(__MODULE__, :flush)
 
   @doc """
   Removes a chunk from all volumes in the cache.
@@ -116,6 +137,17 @@ defmodule NeonFS.Core.ChunkCache do
     ArgumentError -> %{hits: 0, misses: 0, evictions: 0, memory_used: 0}
   end
 
+  @doc "Returns current cache entry count."
+  @spec entry_count() :: non_neg_integer()
+  def entry_count do
+    case :ets.info(@data_table, :size) do
+      :undefined -> 0
+      count when is_integer(count) and count >= 0 -> count
+    end
+  rescue
+    ArgumentError -> 0
+  end
+
   ## Server Callbacks
 
   @impl true
@@ -125,25 +157,35 @@ defmodule NeonFS.Core.ChunkCache do
     :ets.new(:chunk_cache_stats, [:named_table, :set, :public])
     :ets.insert(:chunk_cache_stats, [{:hits, 0}, {:misses, 0}, {:evictions, 0}])
 
-    Logger.info("ChunkCache started")
-    {:ok, %{}}
+    max_memory =
+      Application.get_env(:neonfs_core, :chunk_cache_max_memory, @default_max_memory)
+
+    Logger.info("ChunkCache started", max_memory_bytes: max_memory)
+    {:ok, %{max_memory: max_memory}}
   end
 
   @impl true
-  def handle_cast({:put, volume_id, chunk_hash, data, max_memory}, state) do
-    key = {volume_id, chunk_hash}
-    size = byte_size(data)
-    ts = now_us()
+  def handle_call(:flush, _from, state), do: {:reply, :ok, state}
 
-    # Remove existing entry if present (to update)
-    remove_entry(key)
+  @impl true
+  def handle_cast({:put, volume_id, chunk_hash, data, opts}, state) do
+    chunk_types = normalise_chunk_types(opts)
 
-    # Insert new entry
-    :ets.insert(@data_table, {key, data, size, ts})
-    :ets.insert(@lru_table, {{ts, volume_id, chunk_hash}})
+    if cache_allowed?(volume_id, chunk_types) do
+      key = {volume_id, chunk_hash}
+      size = byte_size(data)
+      ts = now_us()
 
-    # Evict if over memory limit for this volume
-    evict_if_needed(volume_id, max_memory)
+      # Remove existing entry if present (to update)
+      remove_entry(key)
+
+      # Insert new entry
+      :ets.insert(@data_table, {key, data, size, ts})
+      :ets.insert(@lru_table, {{ts, volume_id, chunk_hash}})
+
+      # Evict if over global memory limit
+      evict_if_needed(state.max_memory)
+    end
 
     {:noreply, state}
   end
@@ -186,23 +228,22 @@ defmodule NeonFS.Core.ChunkCache do
     :ets.insert(@lru_table, {{new_ts, volume_id, chunk_hash}})
   end
 
-  defp evict_if_needed(volume_id, max_memory) do
-    used = volume_memory_used(volume_id)
+  defp evict_if_needed(max_memory) do
+    used = calculate_memory_used()
 
     if used > max_memory do
-      evict_oldest(volume_id, used - max_memory)
+      evict_oldest(used - max_memory)
     end
   end
 
-  defp evict_oldest(_volume_id, bytes_to_free) when bytes_to_free <= 0, do: :ok
+  defp evict_oldest(bytes_to_free) when bytes_to_free <= 0, do: :ok
 
-  defp evict_oldest(volume_id, bytes_to_free) do
-    # Walk the LRU table from oldest to newest, evicting entries for this volume
-    case find_oldest_for_volume(volume_id) do
+  defp evict_oldest(bytes_to_free) do
+    case find_oldest_entry() do
       nil ->
         :ok
 
-      {ts, chunk_hash, size} ->
+      {ts, volume_id, chunk_hash, size} ->
         :ets.delete(@data_table, {volume_id, chunk_hash})
         :ets.delete(@lru_table, {ts, volume_id, chunk_hash})
         bump_stat(:evictions)
@@ -213,39 +254,68 @@ defmodule NeonFS.Core.ChunkCache do
           %{volume_id: volume_id}
         )
 
-        evict_oldest(volume_id, bytes_to_free - size)
+        evict_oldest(bytes_to_free - size)
     end
   end
 
-  defp find_oldest_for_volume(volume_id) do
-    # Walk ordered_set from the beginning looking for entries matching this volume
-    do_find_oldest(:ets.first(@lru_table), volume_id)
+  defp find_oldest_entry do
+    do_find_oldest(:ets.first(@lru_table))
   end
 
-  defp do_find_oldest(:"$end_of_table", _volume_id), do: nil
+  defp do_find_oldest(:"$end_of_table"), do: nil
 
-  defp do_find_oldest({_ts, vol_id, _hash} = key, volume_id) when vol_id == volume_id do
-    {ts, _vol, chunk_hash} = key
-
+  defp do_find_oldest({ts, volume_id, chunk_hash} = key) do
     case :ets.lookup(@data_table, {volume_id, chunk_hash}) do
-      [{_key, _data, size, _ts}] -> {ts, chunk_hash, size}
-      [] -> do_find_oldest(:ets.next(@lru_table, key), volume_id)
+      [{_key, _data, size, _ts}] ->
+        {ts, volume_id, chunk_hash, size}
+
+      [] ->
+        :ets.delete(@lru_table, key)
+        do_find_oldest(:ets.next(@lru_table, key))
     end
-  end
-
-  defp do_find_oldest(key, volume_id) do
-    do_find_oldest(:ets.next(@lru_table, key), volume_id)
-  end
-
-  defp volume_memory_used(volume_id) do
-    :ets.tab2list(@data_table)
-    |> Enum.filter(fn {{vol, _hash}, _data, _size, _ts} -> vol == volume_id end)
-    |> Enum.reduce(0, fn {_key, _data, size, _ts}, acc -> acc + size end)
   end
 
   defp calculate_memory_used do
     :ets.tab2list(@data_table)
     |> Enum.reduce(0, fn {_key, _data, size, _ts}, acc -> acc + size end)
+  end
+
+  defp normalise_chunk_types(opts) do
+    chunk_type = Keyword.get(opts, :chunk_type, :local)
+
+    chunk_type
+    |> List.wrap()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> then(fn
+      [] -> [:local]
+      types -> types
+    end)
+  end
+
+  defp cache_allowed?(_volume_id, [:local]), do: true
+
+  defp cache_allowed?(volume_id, chunk_types) do
+    caching = lookup_caching_config(volume_id)
+
+    Enum.all?(chunk_types, fn
+      :local -> true
+      :transformed -> caching.transformed_chunks
+      :reconstructed -> caching.reconstructed_stripes
+      :remote -> caching.remote_chunks
+      _ -> false
+    end)
+  end
+
+  defp lookup_caching_config(volume_id) do
+    case VolumeRegistry.get(volume_id) do
+      {:ok, volume} -> volume.caching
+      _ -> Volume.default_caching()
+    end
+  rescue
+    _ -> Volume.default_caching()
+  catch
+    :exit, _ -> Volume.default_caching()
   end
 
   defp bump_stat(key) do

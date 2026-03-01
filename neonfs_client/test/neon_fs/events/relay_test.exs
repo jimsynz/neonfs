@@ -135,29 +135,38 @@ defmodule NeonFS.Events.RelayTest do
 
   describe "subscriber process exit" do
     test "cleans up volume ref count when subscriber exits" do
+      tref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :events, :relay, :subscriber_down]
+        ])
+
+      parent = self()
+
       # Spawn a process that subscribes and then exits
-      {pid, ref} =
+      {pid, mref} =
         spawn_monitor(fn ->
           Registry.register(NeonFS.Events.Registry, {:volume, @volume_id}, [])
           Relay.ensure_volume_group(@volume_id)
+          send(parent, :child_ready)
 
           receive do
             :stop -> :ok
           end
         end)
 
-      # Wait for the process to register
-      Process.sleep(50)
+      assert_receive :child_ready, 1_000
 
       relay_pid = Process.whereis(Relay)
       assert relay_pid in :pg.get_members(@pg_scope, {:volume, @volume_id})
 
       # Kill the subscriber
       send(pid, :stop)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+      assert_receive {:DOWN, ^mref, :process, ^pid, :normal}, 1_000
 
-      # Give the Relay time to process the DOWN message
-      Process.sleep(100)
+      # Wait for Relay to process the DOWN message via telemetry
+      assert_receive {[:neonfs, :events, :relay, :subscriber_down], ^tref, %{},
+                      %{pid: ^pid, volumes_left: _}},
+                     1_000
 
       assert :pg.get_members(@pg_scope, {:volume, @volume_id}) == []
     end

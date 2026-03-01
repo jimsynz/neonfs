@@ -9,7 +9,7 @@ use crate::encryption::{self, EncryptionParams};
 use crate::error::StoreError;
 use crate::hash::{sha256, Hash};
 use crate::path::{chunk_path, ensure_parent_dirs, metadata_path, Tier};
-use rand::Rng;
+use rand::RngExt;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};

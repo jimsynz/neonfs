@@ -172,7 +172,7 @@ defmodule NeonFS.Core.IntentLog do
         ra_noproc_error(initialized)
 
       kind, reason ->
-        Logger.debug("IntentLog Ra command error: #{inspect({kind, reason})}")
+        Logger.debug("IntentLog Ra command error", kind: kind, reason: inspect(reason))
 
         if initialized,
           do: {:error, {:ra_error, {kind, reason}}},

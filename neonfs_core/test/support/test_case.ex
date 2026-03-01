@@ -27,6 +27,13 @@ defmodule NeonFS.TestCase do
   use ExUnit.CaseTemplate
 
   alias NeonFS.Core.{MetadataRing, RaServer, RaSupervisor}
+  alias NeonFS.IO.{Producer, Scheduler, WorkerSupervisor}
+
+  # Mock volume registry for I/O scheduler tests — returns default io_weight
+  defmodule MockVolumeRegistry do
+    @moduledoc false
+    def get(_volume_id), do: {:ok, %{io_weight: 100}}
+  end
 
   using do
     quote do
@@ -274,6 +281,48 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts a minimal I/O scheduler pipeline for tests.
+
+  Starts: WorkerRegistry, Producer, Scheduler, WorkerSupervisor,
+  and a single "default" SSD DriveWorker. Uses mock volume registry
+  so no real VolumeRegistry is needed.
+  """
+  def start_io_scheduler do
+    # Worker registry (used by WorkerSupervisor for process naming)
+    case Registry.start_link(keys: :unique, name: NeonFS.IO.WorkerRegistry) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    suffix = System.unique_integer([:positive])
+    producer_name = :"test_io_producer_#{suffix}"
+
+    start_supervised!(
+      {Producer, name: producer_name, volume_registry_mod: MockVolumeRegistry},
+      id: producer_name
+    )
+
+    start_supervised!(
+      {Scheduler, name: Scheduler, producer: producer_name},
+      id: Scheduler
+    )
+
+    start_supervised!(
+      {WorkerSupervisor, name: WorkerSupervisor},
+      id: WorkerSupervisor
+    )
+
+    # Start a default SSD drive worker
+    WorkerSupervisor.start_worker(
+      drive_id: "default",
+      drive_type: :ssd,
+      producer: producer_name
+    )
+
+    :ok
+  end
+
+  @doc """
   Starts ACLManager.
   """
   def start_acl_manager do
@@ -295,11 +344,27 @@ defmodule NeonFS.TestCase do
 
   defp stop_if_running(name) do
     case Process.whereis(name) do
-      nil -> :ok
-      pid -> GenServer.stop(pid, :normal, 5000)
-    end
+      nil ->
+        :ok
 
-    Process.sleep(10)
+      pid ->
+        ref = Process.monitor(pid)
+        GenServer.stop(pid, :normal, 5000)
+        receive do: ({:DOWN, ^ref, :process, ^pid, _} -> :ok), after: (5000 -> :ok)
+    end
+  end
+
+  defp monitor_if_running(name) do
+    case Process.whereis(name) do
+      nil -> nil
+      pid -> {Process.monitor(pid), pid}
+    end
+  end
+
+  defp await_down(nil), do: :ok
+
+  defp await_down({ref, pid}) do
+    receive do: ({:DOWN, ^ref, :process, ^pid, _} -> :ok), after: (5000 -> :ok)
   end
 
   defp cleanup_ets_table(table) do
@@ -342,10 +407,11 @@ defmodule NeonFS.TestCase do
   """
   def stop_ra do
     reset_ra_server_if_running()
+    supervisor_ref = monitor_if_running(RaSupervisor)
     stop_ra_supervisor_if_running()
+    await_down(supervisor_ref)
     cleanup_ra_from_default_system()
     cleanup_ra_directories()
-    Process.sleep(50)
     :ok
   end
 

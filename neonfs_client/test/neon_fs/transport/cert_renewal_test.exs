@@ -3,11 +3,12 @@ defmodule NeonFS.Transport.CertRenewalTest do
 
   alias NeonFS.Transport.{CertRenewal, TLS}
 
+  @moduletag :tmp_dir
+
   # Short interval for tests (50ms)
   @test_check_interval 50
 
-  setup do
-    tmp_dir = Path.join(System.tmp_dir!(), "neonfs_cert_renewal_#{:rand.uniform(1_000_000)}")
+  setup %{tmp_dir: tmp_dir} do
     File.mkdir_p!(tmp_dir)
     Application.put_env(:neonfs_client, :tls_dir, tmp_dir)
 
@@ -44,6 +45,11 @@ defmodule NeonFS.Transport.CertRenewalTest do
 
   describe "starts without crashing" do
     test "when no local certificate exists" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :check]
+        ])
+
       pid =
         start_supervised!(
           {CertRenewal,
@@ -53,8 +59,8 @@ defmodule NeonFS.Transport.CertRenewalTest do
 
       assert Process.alive?(pid)
 
-      # Let at least one check cycle complete without crash
-      Process.sleep(@test_check_interval * 3)
+      # Wait for at least one check cycle to complete without crash
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, _}, 2_000
       assert Process.alive?(pid)
     end
   end
@@ -65,22 +71,21 @@ defmodule NeonFS.Transport.CertRenewalTest do
       # 5-day cert, default threshold is 30 — so renewal should trigger
       write_cert_with_validity(tmp_dir, ca_cert, ca_key, 5)
 
-      test_pid = self()
-
-      renew_fun = fn csr, hostname ->
-        send(test_pid, {:renew_called, csr, hostname})
-        node_cert = TLS.sign_csr(csr, hostname, ca_cert, ca_key, 200)
-        {:ok, node_cert, ca_cert}
-      end
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :check]
+        ])
 
       start_supervised!(
         {CertRenewal,
          name: :"renewal_near_#{:rand.uniform(100_000)}",
          check_interval_ms: @test_check_interval,
-         renew_fun: renew_fun}
+         renew_fun: make_renew_fun(ca_cert, ca_key, 200)}
       )
 
-      assert_receive {:renew_called, _csr, _hostname}, 500
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, %{days_remaining: _},
+                      %{action: :renewal_triggered}},
+                     2_000
     end
 
     test "writes new cert to local filesystem after renewal", %{tmp_dir: tmp_dir} do
@@ -88,19 +93,24 @@ defmodule NeonFS.Transport.CertRenewalTest do
       {old_cert, _old_key} = write_cert_with_validity(tmp_dir, ca_cert, ca_key, 5)
       old_info = TLS.certificate_info(old_cert)
 
-      renew_fun = make_renew_fun(ca_cert, ca_key, 999)
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :success]
+        ])
 
       start_supervised!(
         {CertRenewal,
          name: :"renewal_write_#{:rand.uniform(100_000)}",
          check_interval_ms: @test_check_interval,
-         renew_fun: renew_fun}
+         renew_fun: make_renew_fun(ca_cert, ca_key, 999)}
       )
 
-      # Wait for renewal to complete
-      Process.sleep(@test_check_interval * 3)
+      # Wait for the success telemetry event (emitted after write_local_tls)
+      assert_receive {[:neonfs, :cert_renewal, :success], ^ref, %{},
+                      %{old_serial: _, new_serial: 999}},
+                     2_000
 
-      # New cert should have a different serial
+      # Verify the cert on disk matches
       {:ok, new_cert} = TLS.read_local_cert()
       new_info = TLS.certificate_info(new_cert)
       assert new_info.serial == 999
@@ -114,24 +124,22 @@ defmodule NeonFS.Transport.CertRenewalTest do
       # 365-day cert, threshold default 30 — no renewal needed
       write_cert_with_validity(tmp_dir, ca_cert, ca_key, 365)
 
-      test_pid = self()
-
-      renew_fun = fn csr, hostname ->
-        send(test_pid, :renew_called)
-        node_cert = TLS.sign_csr(csr, hostname, ca_cert, ca_key, 200)
-        {:ok, node_cert, ca_cert}
-      end
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :check],
+          [:neonfs, :cert_renewal, :success]
+        ])
 
       start_supervised!(
         {CertRenewal,
          name: :"renewal_far_#{:rand.uniform(100_000)}",
          check_interval_ms: @test_check_interval,
-         renew_fun: renew_fun}
+         renew_fun: make_renew_fun(ca_cert, ca_key, 200)}
       )
 
-      # Let several check cycles pass
-      Process.sleep(@test_check_interval * 5)
-      refute_received :renew_called
+      # Should get a :not_due check event, never a :success
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :not_due}}, 2_000
+      refute_received {[:neonfs, :cert_renewal, :success], ^ref, _, _}
     end
   end
 
@@ -140,13 +148,12 @@ defmodule NeonFS.Transport.CertRenewalTest do
       {ca_cert, ca_key} = generate_ca()
       write_cert_with_validity(tmp_dir, ca_cert, ca_key, 5)
 
-      call_count = :counters.new(1, [:atomics])
-      test_pid = self()
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :failure]
+        ])
 
       renew_fun = fn _csr, _hostname ->
-        :counters.add(call_count, 1, 1)
-        count = :counters.get(call_count, 1)
-        send(test_pid, {:attempt, count})
         {:error, :test_failure}
       end
 
@@ -158,13 +165,15 @@ defmodule NeonFS.Transport.CertRenewalTest do
            renew_fun: renew_fun}
         )
 
-      # First attempt
-      assert_receive {:attempt, 1}, 500
+      # First attempt should emit a failure event
+      assert_receive {[:neonfs, :cert_renewal, :failure], ^ref, %{},
+                      %{reason: :test_failure, attempt: 1}},
+                     2_000
+
       assert Process.alive?(pid)
 
       # Since backoff is 1h in real config, we won't see a second attempt
       # in a short test. The key assertion is that it didn't crash.
-      Process.sleep(@test_check_interval * 2)
       assert Process.alive?(pid)
     end
   end
@@ -196,13 +205,10 @@ defmodule NeonFS.Transport.CertRenewalTest do
       {ca_cert, ca_key} = generate_ca()
       write_cert_with_validity(tmp_dir, ca_cert, ca_key, 5)
 
-      test_pid = self()
-
-      renew_fun = fn csr, hostname ->
-        send(test_pid, {:renewed, System.monotonic_time(:millisecond)})
-        node_cert = TLS.sign_csr(csr, hostname, ca_cert, ca_key, 300)
-        {:ok, node_cert, ca_cert}
-      end
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :success]
+        ])
 
       custom_interval = 100
 
@@ -210,11 +216,11 @@ defmodule NeonFS.Transport.CertRenewalTest do
         {CertRenewal,
          name: :"renewal_interval_#{:rand.uniform(100_000)}",
          check_interval_ms: custom_interval,
-         renew_fun: renew_fun}
+         renew_fun: make_renew_fun(ca_cert, ca_key, 300)}
       )
 
-      # Should receive the first renewal within 200ms (interval + some slack)
-      assert_receive {:renewed, _t1}, 500
+      # Should receive the success event within a reasonable time
+      assert_receive {[:neonfs, :cert_renewal, :success], ^ref, %{}, _}, 2_000
     end
 
     test "respects renewal_threshold_days from application env", %{tmp_dir: tmp_dir} do
@@ -225,44 +231,41 @@ defmodule NeonFS.Transport.CertRenewalTest do
       # Set threshold to 90 days — so 60-day cert should trigger renewal
       Application.put_env(:neonfs_client, :renewal_threshold_days, 90)
 
-      test_pid = self()
-
-      renew_fun = fn csr, hostname ->
-        send(test_pid, :threshold_renewal)
-        node_cert = TLS.sign_csr(csr, hostname, ca_cert, ca_key, 400)
-        {:ok, node_cert, ca_cert}
-      end
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :check]
+        ])
 
       start_supervised!(
         {CertRenewal,
          name: :"renewal_thresh_#{:rand.uniform(100_000)}",
          check_interval_ms: @test_check_interval,
-         renew_fun: renew_fun}
+         renew_fun: make_renew_fun(ca_cert, ca_key, 400)}
       )
 
-      assert_receive :threshold_renewal, 500
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :renewal_triggered}},
+                     2_000
     end
 
     test "does not renew 60-day cert with default 30-day threshold", %{tmp_dir: tmp_dir} do
       {ca_cert, ca_key} = generate_ca()
       write_cert_with_validity(tmp_dir, ca_cert, ca_key, 60)
 
-      test_pid = self()
-
-      renew_fun = fn _csr, _hostname ->
-        send(test_pid, :should_not_renew)
-        {:error, :unexpected}
-      end
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :cert_renewal, :check],
+          [:neonfs, :cert_renewal, :success]
+        ])
 
       start_supervised!(
         {CertRenewal,
          name: :"renewal_no_thresh_#{:rand.uniform(100_000)}",
          check_interval_ms: @test_check_interval,
-         renew_fun: renew_fun}
+         renew_fun: make_renew_fun(ca_cert, ca_key, 500)}
       )
 
-      Process.sleep(@test_check_interval * 5)
-      refute_received :should_not_renew
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :not_due}}, 2_000
+      refute_received {[:neonfs, :cert_renewal, :success], ^ref, _, _}
     end
   end
 end

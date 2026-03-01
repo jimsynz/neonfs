@@ -82,7 +82,7 @@ defmodule NeonFS.Transport.Listener do
         start_accepting(listen_socket, config)
 
       {:error, reason} ->
-        Logger.info("Transport listener not started: #{inspect(reason)}")
+        Logger.info("Transport listener not started", reason: inspect(reason))
         {:ok, %{listen_socket: nil, port: 0, acceptors: [], config: config}}
     end
   end
@@ -105,7 +105,7 @@ defmodule NeonFS.Transport.Listener do
         {:reply, :ok, new_state}
 
       {:error, reason} ->
-        Logger.warning("Transport listener rebind failed: #{inspect(reason)}")
+        Logger.warning("Transport listener rebind failed", reason: inspect(reason))
         {:reply, {:error, reason}, %{state | listen_socket: nil, port: 0, acceptors: []}}
     end
   end
@@ -122,7 +122,7 @@ defmodule NeonFS.Transport.Listener do
   defp rebind_with_socket(listen_socket, config) do
     {:ok, {_addr, actual_port}} = :ssl.sockname(listen_socket)
     acceptors = spawn_acceptors(listen_socket, config)
-    Logger.info("Transport listener rebound on port #{actual_port}")
+    Logger.info("Transport listener rebound", port: actual_port)
     %{listen_socket: listen_socket, port: actual_port, acceptors: acceptors, config: config}
   end
 
@@ -130,8 +130,9 @@ defmodule NeonFS.Transport.Listener do
     {:ok, {_addr, actual_port}} = :ssl.sockname(listen_socket)
     acceptors = spawn_acceptors(listen_socket, config)
 
-    Logger.info(
-      "Transport listener started on port #{actual_port} with #{config.num_acceptors} acceptors"
+    Logger.info("Transport listener started",
+      port: actual_port,
+      num_acceptors: config.num_acceptors
     )
 
     {:ok,
@@ -167,7 +168,7 @@ defmodule NeonFS.Transport.Listener do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Transport accept failed: #{inspect(reason)}")
+        Logger.warning("Transport accept failed", reason: inspect(reason))
         :ok
     end
   end
@@ -182,13 +183,25 @@ defmodule NeonFS.Transport.Listener do
             :ssl.controlling_process(socket, pid)
             send(pid, :activate)
 
+            :telemetry.execute(
+              [:neonfs, :transport, :listener, :connection_accepted],
+              %{},
+              %{}
+            )
+
           {:error, reason} ->
-            Logger.warning("Failed to start handler: #{inspect(reason)}")
+            Logger.warning("Failed to start handler", reason: inspect(reason))
             :ssl.close(socket)
         end
 
       {:error, reason} ->
-        Logger.warning("TLS handshake failed: #{inspect(reason)}")
+        :telemetry.execute(
+          [:neonfs, :transport, :listener, :connection_error],
+          %{},
+          %{reason: reason}
+        )
+
+        Logger.warning("TLS handshake failed", reason: inspect(reason))
     end
   end
 

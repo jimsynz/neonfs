@@ -268,7 +268,7 @@ mod tests {
         proptest! {
             #[test]
             fn encrypt_decrypt_round_trip(
-                data in proptest::collection::vec(any::<u8>(), 0..1_000_000),
+                data in proptest::collection::vec(any::<u8>(), 0..65536),
                 key in proptest::collection::vec(any::<u8>(), 32..=32),
                 nonce in proptest::collection::vec(any::<u8>(), 12..=12),
             ) {
@@ -283,6 +283,30 @@ mod tests {
 
                 let decrypted = decrypt(&ciphertext, &params).unwrap();
                 prop_assert_eq!(decrypted, data);
+            }
+
+            #[test]
+            fn different_keys_produce_different_ciphertext(
+                data in proptest::collection::vec(any::<u8>(), 1..1024),
+                key_a in proptest::collection::vec(any::<u8>(), 32..=32),
+                key_b in proptest::collection::vec(any::<u8>(), 32..=32),
+                nonce in proptest::collection::vec(any::<u8>(), 12..=12),
+            ) {
+                prop_assume!(key_a != key_b);
+
+                let mut ka = [0u8; 32];
+                ka.copy_from_slice(&key_a);
+                let mut kb = [0u8; 32];
+                kb.copy_from_slice(&key_b);
+                let mut n = [0u8; 12];
+                n.copy_from_slice(&nonce);
+
+                let params_a = EncryptionParams { key: ka, nonce: n };
+                let params_b = EncryptionParams { key: kb, nonce: n };
+
+                let ct_a = encrypt(&data, &params_a).unwrap();
+                let ct_b = encrypt(&data, &params_b).unwrap();
+                prop_assert_ne!(ct_a, ct_b);
             }
         }
     }

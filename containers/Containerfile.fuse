@@ -42,6 +42,8 @@ ENV MIX_ENV="prod"
 # Only copy the final release from the build stage
 COPY --from=releaser --chown=nobody:root /workdir/neonfs_fuse/_build/${MIX_ENV}/rel/neonfs_fuse ./
 
+COPY --from=cli --chown=nobody:root /bin/neonfs /app/bin
+
 USER nobody
 
 CMD ["/app/bin/neonfs_fuse", "start"]

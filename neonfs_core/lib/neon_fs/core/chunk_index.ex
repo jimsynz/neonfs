@@ -260,26 +260,31 @@ defmodule NeonFS.Core.ChunkIndex do
   def init(opts) do
     :ets.new(:chunk_index, [:set, :named_table, :public, read_concurrency: true])
 
-    quorum_opts = Keyword.get(opts, :quorum_opts)
+    # Use explicit opts first (unit tests pass quorum_opts directly).
+    # Fall back to persistent_term (set by Supervisor or rebuild_quorum_ring).
+    # On crash restart, child_spec has no quorum_opts, so persistent_term
+    # (preserved by crash-safe terminate) provides the authoritative ring.
+    quorum_opts =
+      Keyword.get(opts, :quorum_opts) ||
+        :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+
     :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
 
     if quorum_opts do
       case load_from_local_store() do
         {:ok, count} ->
-          Logger.info("ChunkIndex started, loaded #{count} chunks from local store")
+          Logger.info("ChunkIndex started, loaded chunks from local store", count: count)
 
         {:error, reason} ->
-          Logger.debug("ChunkIndex started, local store not available: #{inspect(reason)}")
+          Logger.debug("ChunkIndex started, local store not available", reason: reason)
       end
     else
       case restore_from_ra() do
         {:ok, count} ->
-          Logger.info(
-            "ChunkIndex started with ETS table :chunk_index, restored #{count} chunks from Ra"
-          )
+          Logger.info("ChunkIndex started, restored chunks from Ra", count: count)
 
         {:error, reason} ->
-          Logger.debug("ChunkIndex started but Ra not ready yet: #{inspect(reason)}")
+          Logger.debug("ChunkIndex started but Ra not ready yet", reason: reason)
       end
     end
 
@@ -445,8 +450,21 @@ defmodule NeonFS.Core.ChunkIndex do
     end
   end
 
+  # Only erase persistent_term on clean shutdown, not on crash. On crash
+  # restart, the surviving persistent_term value (set by rebuild_quorum_ring)
+  # prevents the child from overwriting it with a stale child_spec ring.
   @impl true
-  def terminate(_reason, _state) do
+  def terminate(reason, _state) when reason in [:normal, :shutdown] do
+    safe_erase_quorum_opts()
+  end
+
+  def terminate({:shutdown, _}, _state) do
+    safe_erase_quorum_opts()
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp safe_erase_quorum_opts do
     :persistent_term.erase({__MODULE__, :quorum_opts})
     :ok
   rescue
@@ -838,7 +856,7 @@ defmodule NeonFS.Core.ChunkIndex do
         ra_noproc_error(initialized)
 
       kind, reason ->
-        Logger.debug("Ra command error: #{inspect({kind, reason})}")
+        Logger.debug("Ra command error", kind: kind, reason: reason)
 
         if initialized,
           do: {:error, {:ra_error, {kind, reason}}},

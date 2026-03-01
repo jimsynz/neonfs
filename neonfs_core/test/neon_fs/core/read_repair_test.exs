@@ -66,8 +66,8 @@ defmodule NeonFS.Core.ReadRepairTest do
       ReadRepair.submit("test:coalesce_key", repair_context, [:fake_node@host])
       ReadRepair.submit("test:coalesce_key", repair_context, [:fake_node@host])
 
-      # Wait a bit for the casts to process
-      Process.sleep(100)
+      # Sync with GenServer to ensure all casts are processed
+      :sys.get_state(ReadRepair)
 
       # Only one should have been submitted (the first one)
       assert :counters.get(submitted_count, 1) == 1
@@ -76,6 +76,10 @@ defmodule NeonFS.Core.ReadRepairTest do
     end
 
     test "allows repairs after coalescing window expires" do
+      # Restart ReadRepair with coalesce_window_ms: 0 so the window expires instantly
+      stop_supervised!(ReadRepair)
+      start_supervised!({ReadRepair, coalesce_window_ms: 0})
+
       test_pid = self()
       submitted_count = :counters.new(1, [])
 
@@ -98,8 +102,8 @@ defmodule NeonFS.Core.ReadRepairTest do
       ReadRepair.submit("test:expiry_key", repair_context, [:fake_node@host])
       assert_receive :submitted, 1_000
 
-      # Wait for coalescing window to expire (200ms configured)
-      Process.sleep(250)
+      # Sync with GenServer to ensure the first repair is processed
+      :sys.get_state(ReadRepair)
 
       ReadRepair.submit("test:expiry_key", repair_context, [:fake_node@host])
       assert_receive :submitted, 1_000

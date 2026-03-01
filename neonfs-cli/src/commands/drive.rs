@@ -146,8 +146,8 @@ impl DriveCommand {
             .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         let data = unwrap_ok_tuple(result)?;
@@ -189,8 +189,8 @@ impl DriveCommand {
             .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            if err_msg == "drive_has_data" {
+        if let Some(err) = extract_error(&result) {
+            if err.error_message() == "drive_has_data" {
                 eprintln!(
                     "Error: Drive '{}' contains data. Use `drive evacuate {}` first, or --force to remove anyway.",
                     drive_id, drive_id
@@ -199,7 +199,7 @@ impl DriveCommand {
                     "Drive contains data".to_string(),
                 ));
             }
-            return Err(crate::error::CliError::RpcError(err_msg));
+            return Err(err);
         }
 
         match format {
@@ -227,8 +227,8 @@ impl DriveCommand {
                 .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            return Err(crate::error::CliError::RpcError(err_msg));
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
         }
 
         let data = unwrap_ok_tuple(result)?;
@@ -331,8 +331,8 @@ impl DriveCommand {
             .await
         })?;
 
-        if let Some(err_msg) = extract_error(&result) {
-            match err_msg.as_str() {
+        if let Some(err) = extract_error(&result) {
+            match err.error_message().as_str() {
                 "already_draining" => {
                     eprintln!("Error: Drive '{}' is already being evacuated.", drive_id);
                 }
@@ -344,7 +344,7 @@ impl DriveCommand {
                 }
                 _ => {}
             }
-            return Err(crate::error::CliError::RpcError(err_msg));
+            return Err(err);
         }
 
         let data = unwrap_ok_tuple(result)?;

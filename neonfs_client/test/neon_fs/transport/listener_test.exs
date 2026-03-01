@@ -119,6 +119,11 @@ defmodule NeonFS.Transport.ListenerTest do
     end
 
     test "failed TLS handshake does not crash acceptor", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :listener, :connection_error]
+        ])
+
       port = start_listener(ctx)
 
       wrong_client_opts = [
@@ -133,8 +138,10 @@ defmodule NeonFS.Transport.ListenerTest do
 
       assert {:error, _} = :ssl.connect(~c"localhost", port, wrong_client_opts, 5_000)
 
-      # Wait for the failed handshake to process
-      Process.sleep(200)
+      # Wait for the failed handshake telemetry
+      assert_receive {[:neonfs, :transport, :listener, :connection_error], ^ref, %{},
+                      %{reason: _}},
+                     2_000
 
       # Listener should still be alive
       assert Process.alive?(GenServer.whereis(ctx.listener_name))
@@ -147,10 +154,17 @@ defmodule NeonFS.Transport.ListenerTest do
 
   describe "message dispatch" do
     test "dispatches put_chunk and returns response", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :listener, :connection_accepted]
+        ])
+
       port = start_listener(ctx)
 
       {:ok, client} = :ssl.connect(~c"localhost", port, ctx.client_ssl_opts)
-      Process.sleep(100)
+
+      assert_receive {[:neonfs, :transport, :listener, :connection_accepted], ^ref, %{}, %{}},
+                     2_000
 
       ref = make_ref()
       message = {:put_chunk, ref, <<0::256>>, "vol-1", "w-1", :hot, "hello"}
@@ -168,10 +182,17 @@ defmodule NeonFS.Transport.ListenerTest do
       hash = :crypto.hash(:sha256, data)
       StubBlobStore.seed(hash, data)
 
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :listener, :connection_accepted]
+        ])
+
       port = start_listener(ctx)
 
       {:ok, client} = :ssl.connect(~c"localhost", port, ctx.client_ssl_opts)
-      Process.sleep(100)
+
+      assert_receive {[:neonfs, :transport, :listener, :connection_accepted], ^ref, %{}, %{}},
+                     2_000
 
       ref = make_ref()
       message = {:get_chunk, ref, hash, "vol-1"}
@@ -189,10 +210,17 @@ defmodule NeonFS.Transport.ListenerTest do
       hash = :crypto.hash(:sha256, data)
       StubBlobStore.seed(hash, data, :hot)
 
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :listener, :connection_accepted]
+        ])
+
       port = start_listener(ctx)
 
       {:ok, client} = :ssl.connect(~c"localhost", port, ctx.client_ssl_opts)
-      Process.sleep(100)
+
+      assert_receive {[:neonfs, :transport, :listener, :connection_accepted], ^ref, %{}, %{}},
+                     2_000
 
       ref = make_ref()
       message = {:has_chunk, ref, hash}

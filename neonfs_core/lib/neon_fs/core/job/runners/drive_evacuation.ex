@@ -54,7 +54,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     drive_id = job.params.drive_id
     DriveEvacuation.restore_active(node, drive_id)
 
-    Logger.info("Evacuation cancelled for drive #{drive_id}, restored to :active")
+    Logger.info("Evacuation cancelled, restored to active", drive_id: drive_id)
   end
 
   ## Private — Batch processing
@@ -75,8 +75,9 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     total = max(job.progress.total, completed + length(remaining) - successes)
 
     if failures > 0 do
-      Logger.warning(
-        "Evacuation #{job.params.drive_id}: #{failures} chunk(s) failed in batch, will retry"
+      Logger.warning("Evacuation batch had failures, will retry",
+        drive_id: job.params.drive_id,
+        failure_count: failures
       )
     end
 
@@ -121,9 +122,9 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     end
   rescue
     error ->
-      Logger.warning(
-        "Evacuation: error processing chunk #{Base.encode16(chunk.hash, case: :lower)}: " <>
-          "#{inspect(error)}"
+      Logger.warning("Evacuation error processing chunk",
+        chunk_hash: Base.encode16(chunk.hash, case: :lower),
+        error: inspect(error)
       )
 
       {:error, error}
@@ -155,7 +156,11 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Failed to delete chunk copy on #{drive_id}: #{inspect(reason)}")
+        Logger.warning("Failed to delete chunk copy",
+          drive_id: drive_id,
+          reason: inspect(reason)
+        )
+
         :ok
     end
   end
@@ -280,21 +285,27 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
           %{drive_id: drive_id, node: node}
         )
 
-        Logger.info("Evacuation completed for drive #{drive_id} on #{node}, drive deregistered")
+        Logger.info("Evacuation completed, drive deregistered",
+          drive_id: drive_id,
+          node: node
+        )
 
         {:complete,
          %{job | progress: %{job.progress | description: "Complete — drive deregistered"}}}
 
       {:ok, true} ->
-        Logger.warning(
-          "Evacuation finished but drive #{drive_id} still has data, leaving as :draining"
+        Logger.warning("Evacuation finished but drive still has data, leaving as draining",
+          drive_id: drive_id
         )
 
         {:complete, %{job | progress: %{job.progress | description: "Complete — data remains"}}}
 
       _ ->
         # Treat unexpected results defensively
-        Logger.warning("Could not verify drive #{drive_id} is empty, leaving as :draining")
+        Logger.warning("Could not verify drive is empty, leaving as draining",
+          drive_id: drive_id
+        )
+
         {:complete, %{job | progress: %{job.progress | description: "Complete — unverified"}}}
     end
   end
@@ -307,7 +318,10 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     end
   rescue
     error ->
-      Logger.warning("Failed to deregister drive #{drive_id}: #{inspect(error)}")
+      Logger.warning("Failed to deregister drive",
+        drive_id: drive_id,
+        error: inspect(error)
+      )
   end
 
   ## Private — Helpers
@@ -321,7 +335,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
           result
 
         {:badrpc, reason} ->
-          Logger.warning("Failed to list chunks on #{node}: #{inspect(reason)}")
+          Logger.warning("Failed to list chunks on node", node: node, reason: inspect(reason))
           []
       end
     end

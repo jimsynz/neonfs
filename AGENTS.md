@@ -195,6 +195,43 @@ For GenServers that own ETS tables and need persistence on shutdown:
 3. Each GenServer should persist its own ETS tables in `terminate/2` while they still exist
 4. Don't rely on a central Persistence GenServer to snapshot tables owned by other processes
 
+## Test Synchronisation
+
+**Never use `Process.sleep` for test synchronisation.** Sleeps are timing-dependent, cause flakiness, and slow down the suite. Use event-driven synchronisation instead:
+
+**Telemetry events + `:telemetry_test`** — for waiting on async operations (GenServer cycles, background tasks):
+```elixir
+# In source code — emit telemetry at the point of interest:
+:telemetry.execute([:neonfs, :component, :action], %{}, %{key: value})
+
+# In tests — subscribe and assert_receive:
+ref = :telemetry_test.attach_event_handlers(self(), [
+  [:neonfs, :component, :action]
+])
+# ... trigger the action ...
+assert_receive {[:neonfs, :component, :action], ^ref, %{}, %{key: _}}, 1_000
+```
+
+**`:sys.get_state/1`** — for synchronising with a GenServer's mailbox after sending it a message:
+```elixir
+send(genserver, :some_message)
+:sys.get_state(genserver)  # blocks until handle_info returns
+# now safe to assert on side effects
+```
+
+**Ready signals** — for waiting on spawned processes to complete setup:
+```elixir
+parent = self()
+spawn(fn ->
+  do_setup()
+  send(parent, :child_ready)
+  # ...
+end)
+assert_receive :child_ready, 1_000
+```
+
+Telemetry events serve double duty: they enable deterministic tests AND provide operational observability (metrics, alerting, dashboards). When adding new async behaviour, always consider adding telemetry — it's useful beyond just testing.
+
 ## Phase 5 Metadata Migration
 
 Phase 5 migrates metadata indexes (ChunkIndex, FileIndex, StripeIndex) from Ra-backed storage to leaderless quorum-replicated BlobStore via QuorumCoordinator. **There is no need for backward compatibility with Ra in the migrated modules.** When migrating an index module, remove all Ra fallback code paths entirely — the module should require `quorum_opts` and use QuorumCoordinator exclusively. Do not add dual-mode (Ra + quorum) support.

@@ -120,7 +120,12 @@ defmodule NeonFS.FUSE.MountManager do
       mount_filesystem(volume_name, volume.id, mount_point, opts, state)
     else
       {:error, reason} = error ->
-        Logger.error("Failed to mount #{volume_name} at #{mount_point}: #{inspect(reason)}")
+        Logger.error("Failed to mount volume",
+          volume_name: volume_name,
+          mount_point: mount_point,
+          reason: inspect(reason)
+        )
+
         {:reply, error, state}
     end
   end
@@ -176,8 +181,10 @@ defmodule NeonFS.FUSE.MountManager do
     # Handler process crashed, clean up the mount
     case find_mount_by_handler(state, pid) do
       {:ok, mount_id, mount_info} ->
-        Logger.warning(
-          "Handler for mount #{mount_id} (#{mount_info.volume_name}) crashed: #{inspect(reason)}"
+        Logger.warning("Handler for mount crashed",
+          mount_id: mount_id,
+          volume_name: mount_info.volume_name,
+          reason: inspect(reason)
         )
 
         # Try to unmount the filesystem (ignore result since handler already crashed)

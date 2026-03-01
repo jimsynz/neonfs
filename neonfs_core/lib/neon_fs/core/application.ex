@@ -17,6 +17,7 @@ defmodule NeonFS.Core.Application do
 
   @impl true
   def start(_type, _args) do
+    Logger.metadata(node_name: node())
     load_config_from_cluster_state()
 
     # Start the core supervision tree
@@ -29,14 +30,14 @@ defmodule NeonFS.Core.Application do
     # This must happen here because ETS tables are destroyed when their
     # owning GenServers terminate, and the supervisor shuts down children
     # in reverse order (Persistence last, but ETS tables are already gone).
-    Logger.info("Application stopping, triggering final snapshot...")
+    Logger.info("Application stopping, triggering final snapshot")
 
     case Persistence.snapshot_now() do
       :ok ->
         Logger.info("Final snapshot completed successfully")
 
       {:error, reason} ->
-        Logger.error("Final snapshot failed: #{inspect(reason)}")
+        Logger.error("Final snapshot failed", reason: inspect(reason))
     end
 
     :ok
@@ -46,20 +47,94 @@ defmodule NeonFS.Core.Application do
     case State.load() do
       {:ok, state} ->
         load_drives_config(state.drives)
+        load_gc_config(state.gc)
+        load_metrics_config(state.metrics)
+        load_peer_config(state)
+        load_scrub_config(state.scrub)
         load_worker_config(state.worker)
 
-      _ ->
-        :ok
+      {:error, :not_found} ->
+        Logger.info("No cluster.json found, using default configuration")
+
+      {:error, :invalid_json} ->
+        Logger.warning("cluster.json contains invalid JSON, using default configuration")
+
+      {:error, {:validation_failed, errors}} ->
+        messages = Enum.map_join(errors, "; ", &"#{&1.field}: #{&1.message}")
+
+        Logger.warning("cluster.json validation failed, using default configuration",
+          errors: messages
+        )
+
+      {:error, reason} ->
+        Logger.warning("Failed to load cluster.json, using default configuration",
+          reason: inspect(reason)
+        )
     end
   end
 
   defp load_drives_config([_ | _] = drives) do
     parsed = Enum.map(drives, &parse_drive_from_json/1)
-    Logger.info("Loaded #{length(parsed)} drive(s) from cluster.json")
+    Logger.info("Loaded drives from cluster.json", count: length(parsed))
     Application.put_env(:neonfs_core, :drives, parsed)
   end
 
   defp load_drives_config(_), do: :ok
+
+  defp load_gc_config(gc_config) when is_map(gc_config) and gc_config != %{} do
+    if interval = gc_config["interval_ms"],
+      do: Application.put_env(:neonfs_core, :gc_interval_ms, interval)
+
+    if threshold = gc_config["pressure_threshold"],
+      do: Application.put_env(:neonfs_core, :gc_pressure_threshold, threshold)
+
+    if pressure_interval = gc_config["pressure_check_interval_ms"],
+      do: Application.put_env(:neonfs_core, :gc_pressure_check_interval_ms, pressure_interval)
+
+    Logger.info("Loaded GC config from cluster.json")
+  end
+
+  defp load_gc_config(_), do: :ok
+
+  defp load_peer_config(state) do
+    Application.put_env(:neonfs_client, :peer_connect_timeout, state.peer_connect_timeout)
+    Application.put_env(:neonfs_client, :peer_sync_interval, state.peer_sync_interval)
+    Application.put_env(:neonfs_core, :min_peers_for_operation, state.min_peers_for_operation)
+    Application.put_env(:neonfs_core, :startup_peer_timeout, state.startup_peer_timeout)
+  end
+
+  defp load_metrics_config(metrics_config)
+       when is_map(metrics_config) and metrics_config != %{} do
+    if is_boolean(metrics_config["enabled"]),
+      do: Application.put_env(:neonfs_core, :metrics_enabled, metrics_config["enabled"])
+
+    if is_integer(metrics_config["port"]) and metrics_config["port"] > 0,
+      do: Application.put_env(:neonfs_core, :metrics_port, metrics_config["port"])
+
+    if is_binary(metrics_config["bind"]) and metrics_config["bind"] != "",
+      do: Application.put_env(:neonfs_core, :metrics_bind, metrics_config["bind"])
+
+    if is_integer(metrics_config["poll_interval_ms"]) and metrics_config["poll_interval_ms"] > 0,
+      do:
+        Application.put_env(
+          :neonfs_core,
+          :telemetry_poller_interval_ms,
+          metrics_config["poll_interval_ms"]
+        )
+
+    Logger.info("Loaded metrics config from cluster.json")
+  end
+
+  defp load_metrics_config(_), do: :ok
+
+  defp load_scrub_config(scrub_config) when is_map(scrub_config) and scrub_config != %{} do
+    if interval = scrub_config["check_interval_ms"],
+      do: Application.put_env(:neonfs_core, :scrub_check_interval_ms, interval)
+
+    Logger.info("Loaded scrub config from cluster.json")
+  end
+
+  defp load_scrub_config(_), do: :ok
 
   defp load_worker_config(worker_config) when is_map(worker_config) and worker_config != %{} do
     if max_c = worker_config["max_concurrent"],

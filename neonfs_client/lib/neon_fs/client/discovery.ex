@@ -60,7 +60,10 @@ defmodule NeonFS.Client.Discovery do
 
   @impl true
   def init(opts) do
-    refresh_ms = Keyword.get(opts, :refresh_ms, @default_refresh_ms)
+    refresh_ms =
+      Keyword.get_lazy(opts, :refresh_ms, fn ->
+        Application.get_env(:neonfs_client, :peer_sync_interval, @default_refresh_ms)
+      end)
 
     @ets_table =
       :ets.new(@ets_table, [
@@ -106,7 +109,7 @@ defmodule NeonFS.Client.Discovery do
 
   @impl true
   def handle_info({:nodedown, node, _info}, state) do
-    Logger.debug("Node down, invalidating cache for: #{node}")
+    Logger.debug("Node down, invalidating cache", node: node)
     invalidate_node(node)
     {:noreply, state}
   end
@@ -149,7 +152,10 @@ defmodule NeonFS.Client.Discovery do
         )
 
       {:badrpc, reason} ->
-        Logger.debug("Failed to fetch services from #{core_node}: #{inspect(reason)}")
+        Logger.debug("Failed to fetch services from core node",
+          core_node: core_node,
+          reason: inspect(reason)
+        )
     end
   end
 

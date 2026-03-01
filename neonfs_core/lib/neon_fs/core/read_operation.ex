@@ -12,6 +12,7 @@ defmodule NeonFS.Core.ReadOperation do
   alias NeonFS.Core.{
     Authorise,
     Blob.Native,
+    BlobStore,
     ChunkFetcher,
     ChunkIndex,
     FileIndex,
@@ -20,6 +21,11 @@ defmodule NeonFS.Core.ReadOperation do
     StripeIndex,
     VolumeRegistry
   }
+
+  alias NeonFS.IO.{Operation, Scheduler}
+
+  alias NeonFS.Error.{ChunkNotFound, Internal, NotFound, Unavailable, VolumeNotFound}
+  alias NeonFS.Error.FileNotFound, as: FileNotFoundError
 
   require Logger
 
@@ -47,6 +53,8 @@ defmodule NeonFS.Core.ReadOperation do
   """
   @spec read_file(binary(), String.t(), keyword()) :: read_result()
   def read_file(volume_id, path, opts \\ []) do
+    Logger.metadata(component: :read, volume_id: volume_id, file_path: path)
+
     offset = Keyword.get(opts, :offset, 0)
     length = Keyword.get(opts, :length, :all)
 
@@ -178,7 +186,7 @@ defmodule NeonFS.Core.ReadOperation do
         build_chunk_info_list(rest, chunk_end, [{hash, current_offset, chunk_end} | acc])
 
       {:error, :not_found} ->
-        Logger.error("Chunk metadata not found for hash: #{Base.encode16(hash)}")
+        Logger.error("Chunk metadata not found", chunk_hash: Base.encode16(hash))
         build_chunk_info_list(rest, current_offset, acc)
     end
   end
@@ -261,7 +269,11 @@ defmodule NeonFS.Core.ReadOperation do
         end
 
       {:error, :not_found} ->
-        {:error, :stripe_not_found}
+        {:error,
+         NotFound.exception(
+           message: "Stripe not found: #{stripe_id}",
+           details: %{stripe_id: stripe_id}
+         )}
     end
   end
 
@@ -276,7 +288,7 @@ defmodule NeonFS.Core.ReadOperation do
 
       :critical ->
         emit_stripe_read_telemetry(stripe, :critical)
-        {:error, :insufficient_chunks}
+        {:error, Unavailable.exception(message: "Insufficient chunks for stripe reconstruction")}
     end
   end
 
@@ -331,7 +343,7 @@ defmodule NeonFS.Core.ReadOperation do
       |> Enum.filter(fn {hash, _idx} -> chunk_available?(hash) end)
 
     if Kernel.length(available_with_idx) < k do
-      {:error, :insufficient_chunks}
+      {:error, Unavailable.exception(message: "Insufficient chunks for stripe reconstruction")}
     else
       shards_to_fetch = Enum.take(available_with_idx, k)
       fetch_and_reconstruct(shards_to_fetch, stripe, offset, length, should_verify, volume_id)
@@ -371,19 +383,113 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
+  defp handle_fetch_result({:ok, data, _source}, chunk_meta, _fetch_opts, _drive_id, volume_id) do
+    emit_decrypt_telemetry(chunk_meta.crypto, chunk_meta.hash, volume_id)
+    {:ok, data}
+  end
+
+  defp handle_fetch_result({:error, reason}, chunk_meta, fetch_opts, drive_id, volume_id)
+       when is_binary(reason) do
+    if verification_failure?(reason) do
+      handle_verification_failure(chunk_meta, fetch_opts, drive_id, volume_id)
+    else
+      {:error, translate_decrypt_error(reason, chunk_meta.hash)}
+    end
+  end
+
+  defp handle_fetch_result({:error, reason}, chunk_meta, _fetch_opts, _drive_id, _volume_id) do
+    {:error, translate_decrypt_error(reason, chunk_meta.hash)}
+  end
+
+  # ─── Verification Failure Repair ─────────────────────────────────────
+
+  defp verification_failure?(reason) when is_binary(reason) do
+    String.starts_with?(reason, "corrupt chunk")
+  end
+
+  defp handle_verification_failure(chunk_meta, fetch_opts, drive_id, volume_id) do
+    chunk_hash = chunk_meta.hash
+
+    emit_verification_failed_telemetry(chunk_hash, volume_id, drive_id)
+
+    Logger.error("Chunk verification failed, attempting remote recovery",
+      chunk_hash: Base.encode16(chunk_hash, case: :lower),
+      volume_id: volume_id,
+      drive_id: drive_id,
+      node: node()
+    )
+
+    remote_opts = Keyword.put(fetch_opts, :exclude_nodes, [node()])
+
+    case ChunkFetcher.fetch_chunk(chunk_hash, remote_opts) do
+      {:ok, data, _source} ->
+        submit_local_repair(chunk_hash, data, drive_id, fetch_opts)
+        {:ok, data}
+
+      {:error, _reason} ->
+        {:error,
+         Internal.exception(
+           message: "Chunk corrupted and no remote replica available",
+           details: %{chunk_hash: Base.encode16(chunk_hash, case: :lower), volume_id: volume_id}
+         )}
+    end
+  end
+
+  defp emit_verification_failed_telemetry(chunk_hash, volume_id, drive_id) do
+    :telemetry.execute(
+      [:neonfs, :read_operation, :verification_failed],
+      %{count: 1},
+      %{
+        chunk_hash: chunk_hash,
+        volume_id: volume_id,
+        drive_id: drive_id,
+        node: node()
+      }
+    )
+  end
+
+  defp submit_local_repair(chunk_hash, verified_data, drive_id, fetch_opts) do
+    tier = Keyword.get(fetch_opts, :tier, "hot")
+    volume_id = Keyword.get(fetch_opts, :volume_id, "_repair")
+
+    op =
+      Operation.new(
+        priority: :read_repair,
+        volume_id: volume_id,
+        drive_id: drive_id,
+        type: :write,
+        callback: fn ->
+          BlobStore.write_chunk(verified_data, drive_id, tier)
+
+          Logger.info("Repaired corrupt local chunk",
+            chunk_hash: Base.encode16(chunk_hash, case: :lower),
+            drive_id: drive_id,
+            tier: tier
+          )
+
+          :ok
+        end
+      )
+
+    Scheduler.submit_async(op)
+  end
+
   # ─── Shared Helpers ───────────────────────────────────────────────────
 
   defp get_volume(volume_id) do
     case VolumeRegistry.get(volume_id) do
       {:ok, volume} -> {:ok, volume}
-      {:error, :not_found} -> {:error, :volume_not_found}
+      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
     end
   end
 
   defp get_file(volume_id, path) do
     case FileIndex.get_by_path(volume_id, path) do
-      {:ok, file_meta} -> {:ok, file_meta}
-      {:error, :not_found} -> {:error, :file_not_found}
+      {:ok, file_meta} ->
+        {:ok, file_meta}
+
+      {:error, :not_found} ->
+        {:error, FileNotFoundError.exception(file_path: path, volume_id: volume_id)}
     end
   end
 
@@ -406,8 +512,15 @@ defmodule NeonFS.Core.ReadOperation do
 
   defp fetch_single_chunk(hash, should_verify, volume_id) do
     case ChunkIndex.get(hash) do
-      {:ok, chunk_meta} -> fetch_chunk_data(chunk_meta, should_verify, volume_id)
-      {:error, :not_found} -> {:error, :chunk_not_found}
+      {:ok, chunk_meta} ->
+        fetch_chunk_data(chunk_meta, should_verify, volume_id)
+
+      {:error, :not_found} ->
+        {:error,
+         ChunkNotFound.exception(
+           chunk_hash: Base.encode16(hash, case: :lower),
+           volume_id: volume_id
+         )}
     end
   end
 
@@ -431,17 +544,13 @@ defmodule NeonFS.Core.ReadOperation do
           tier: tier,
           drive_id: drive_id,
           verify: should_verify,
-          decompress: needs_decompress
+          decompress: needs_decompress,
+          volume_id: volume_id
         ] ++ decrypt_opts
 
-      case ChunkFetcher.fetch_chunk(chunk_meta.hash, fetch_opts) do
-        {:ok, data, _source} ->
-          emit_decrypt_telemetry(chunk_meta.crypto, chunk_meta.hash, volume_id)
-          {:ok, data}
-
-        {:error, reason} ->
-          {:error, translate_decrypt_error(reason, chunk_meta.hash)}
-      end
+      chunk_meta.hash
+      |> ChunkFetcher.fetch_chunk(fetch_opts)
+      |> handle_fetch_result(chunk_meta, fetch_opts, drive_id, volume_id)
     end
   end
 
@@ -503,11 +612,16 @@ defmodule NeonFS.Core.ReadOperation do
 
   defp translate_decrypt_error(reason, chunk_hash) when is_binary(reason) do
     if String.contains?(reason, "encryption error") do
-      {:decryption_failed, chunk_hash}
+      Internal.exception(
+        message: "Decryption failed for chunk #{Base.encode16(chunk_hash, case: :lower)}",
+        details: %{chunk_hash: chunk_hash, reason: reason}
+      )
     else
-      reason
+      Internal.exception(message: reason, details: %{chunk_hash: chunk_hash})
     end
   end
 
-  defp translate_decrypt_error(reason, _chunk_hash), do: reason
+  defp translate_decrypt_error(reason, chunk_hash) do
+    Internal.exception(message: inspect(reason), details: %{chunk_hash: chunk_hash})
+  end
 end

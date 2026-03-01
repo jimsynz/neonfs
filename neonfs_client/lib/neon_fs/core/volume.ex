@@ -30,7 +30,8 @@ defmodule NeonFS.Core.Volume do
 
   @type verification_config :: %{
           on_read: :always | :never | :sampling,
-          sampling_rate: float() | nil
+          sampling_rate: float() | nil,
+          scrub_interval: pos_integer()
         }
 
   @type tiering_config :: %{
@@ -42,8 +43,7 @@ defmodule NeonFS.Core.Volume do
   @type caching_config :: %{
           transformed_chunks: boolean(),
           reconstructed_stripes: boolean(),
-          remote_chunks: boolean(),
-          max_memory: pos_integer()
+          remote_chunks: boolean()
         }
 
   @type metadata_consistency_config :: %{
@@ -56,10 +56,13 @@ defmodule NeonFS.Core.Volume do
 
   @type tier :: :hot | :warm | :cold
 
+  @type atime_mode :: :noatime | :relatime
+
   @type t :: %__MODULE__{
           id: binary(),
           name: String.t(),
           owner: String.t() | :system | nil,
+          atime_mode: atime_mode(),
           durability: durability_config(),
           write_ack: write_ack(),
           tiering: tiering_config(),
@@ -95,6 +98,7 @@ defmodule NeonFS.Core.Volume do
     :chunk_count,
     :created_at,
     :updated_at,
+    atime_mode: :noatime,
     system: false
   ]
 
@@ -120,6 +124,7 @@ defmodule NeonFS.Core.Volume do
       id: id,
       name: name,
       owner: Keyword.get(opts, :owner),
+      atime_mode: Keyword.get(opts, :atime_mode, :noatime),
       durability: Keyword.get(opts, :durability, default_durability()),
       write_ack: Keyword.get(opts, :write_ack, :local),
       tiering: Keyword.get(opts, :tiering, default_tiering()),
@@ -161,15 +166,14 @@ defmodule NeonFS.Core.Volume do
   @doc """
   Returns the default caching configuration.
 
-  All caching enabled with 256MB max memory.
+  All caching enabled.
   """
   @spec default_caching() :: caching_config()
   def default_caching do
     %{
       transformed_chunks: true,
       reconstructed_stripes: true,
-      remote_chunks: true,
-      max_memory: 268_435_456
+      remote_chunks: true
     }
   end
 
@@ -190,7 +194,7 @@ defmodule NeonFS.Core.Volume do
   """
   @spec default_verification() :: verification_config()
   def default_verification do
-    %{on_read: :never, sampling_rate: nil}
+    %{on_read: :never, sampling_rate: nil, scrub_interval: 2_592_000}
   end
 
   @doc """
@@ -217,6 +221,7 @@ defmodule NeonFS.Core.Volume do
   @spec update(t(), keyword()) :: t()
   def update(volume, opts) do
     allowed_keys = [
+      :atime_mode,
       :caching,
       :compression,
       :durability,
@@ -229,7 +234,10 @@ defmodule NeonFS.Core.Volume do
       :write_ack
     ]
 
-    updates = Keyword.take(opts, allowed_keys)
+    updates =
+      opts
+      |> Keyword.take(allowed_keys)
+      |> normalise_caching_opts()
 
     updates
     |> Map.new()
@@ -290,7 +298,6 @@ defmodule NeonFS.Core.Volume do
   - Tiering initial_tier must be one of: :hot, :warm, :cold
   - Tiering promotion_threshold must be positive integer
   - Tiering demotion_delay must be positive integer
-  - Caching max_memory must be positive integer
   - io_weight must be positive integer
   - Compression algorithm must be :zstd or :none
   - Compression level must be 1-22 for zstd
@@ -301,6 +308,7 @@ defmodule NeonFS.Core.Volume do
   def validate(%Volume{} = volume) do
     with :ok <- validate_system_field(volume),
          :ok <- validate_name(volume.name),
+         :ok <- validate_atime_mode(volume.atime_mode),
          :ok <- validate_durability(volume.durability),
          :ok <- validate_write_ack(volume.write_ack),
          :ok <- validate_tiering(volume.tiering),
@@ -322,6 +330,9 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_name(name) when is_binary(name) and byte_size(name) > 0, do: :ok
   defp validate_name(_), do: {:error, "name must be a non-empty string"}
+
+  defp validate_atime_mode(mode) when mode in [:noatime, :relatime], do: :ok
+  defp validate_atime_mode(_), do: {:error, "atime_mode must be :noatime or :relatime"}
 
   defp validate_durability(%{type: :replicate, factor: factor, min_copies: min_copies})
        when is_integer(factor) and factor >= 1 and is_integer(min_copies) and min_copies >= 1 and
@@ -360,17 +371,30 @@ defmodule NeonFS.Core.Volume do
   defp validate_caching(%{
          transformed_chunks: tc,
          reconstructed_stripes: rs,
-         remote_chunks: rc,
-         max_memory: mm
+         remote_chunks: rc
        })
-       when is_boolean(tc) and is_boolean(rs) and is_boolean(rc) and is_integer(mm) and mm > 0 do
+       when is_boolean(tc) and is_boolean(rs) and is_boolean(rc) do
     :ok
   end
 
   defp validate_caching(_),
     do:
       {:error,
-       "invalid caching: transformed_chunks, reconstructed_stripes, remote_chunks must be booleans; max_memory must be positive integer"}
+       "invalid caching: transformed_chunks, reconstructed_stripes, remote_chunks must be booleans"}
+
+  defp normalise_caching_opts(opts) do
+    case Keyword.fetch(opts, :caching) do
+      {:ok, caching} ->
+        Keyword.put(opts, :caching, normalise_caching(caching))
+
+      :error ->
+        opts
+    end
+  end
+
+  defp normalise_caching(%{} = caching) do
+    Map.drop(caching, [:max_memory, "max_memory"])
+  end
 
   defp validate_io_weight(w) when is_integer(w) and w > 0, do: :ok
   defp validate_io_weight(_), do: {:error, "io_weight must be a positive integer"}
@@ -385,12 +409,13 @@ defmodule NeonFS.Core.Volume do
   defp validate_compression(_),
     do: {:error, "compression algorithm must be :none or :zstd with level 1-22"}
 
-  defp validate_verification(%{on_read: :always}), do: :ok
-  defp validate_verification(%{on_read: :never}), do: :ok
+  defp validate_verification(%{on_read: on_read} = config) when on_read in [:always, :never] do
+    validate_scrub_interval(config)
+  end
 
-  defp validate_verification(%{on_read: :sampling, sampling_rate: rate})
+  defp validate_verification(%{on_read: :sampling, sampling_rate: rate} = config)
        when is_float(rate) and rate >= 0.0 and rate <= 1.0 do
-    :ok
+    validate_scrub_interval(config)
   end
 
   defp validate_verification(%{on_read: :sampling}),
@@ -398,6 +423,13 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_verification(_),
     do: {:error, "on_read must be :always, :never, or :sampling"}
+
+  defp validate_scrub_interval(%{scrub_interval: si}) when is_integer(si) and si > 0, do: :ok
+
+  defp validate_scrub_interval(%{scrub_interval: _}),
+    do: {:error, "scrub_interval must be a positive integer"}
+
+  defp validate_scrub_interval(_), do: :ok
 
   defp validate_encryption(%VolumeEncryption{} = enc), do: VolumeEncryption.validate(enc)
   defp validate_encryption(_), do: {:error, "encryption must be a VolumeEncryption struct"}

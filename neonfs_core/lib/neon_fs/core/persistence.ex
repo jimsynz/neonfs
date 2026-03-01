@@ -143,7 +143,7 @@ defmodule NeonFS.Core.Persistence do
         Logger.debug("Periodic snapshot completed successfully")
 
       {:error, reason} ->
-        Logger.error("Periodic snapshot failed: #{inspect(reason)}")
+        Logger.error("Periodic snapshot failed", reason: inspect(reason))
     end
 
     # Schedule next snapshot
@@ -153,14 +153,14 @@ defmodule NeonFS.Core.Persistence do
 
   @impl true
   def terminate(_reason, state) do
-    Logger.info("Persistence shutting down, snapshotting all tables...")
+    Logger.info("Persistence shutting down, snapshotting all tables")
 
     case snapshot_all_tables(state.tables) do
       :ok ->
         Logger.info("Graceful shutdown snapshot completed")
 
       {:error, reason} ->
-        Logger.error("Shutdown snapshot failed: #{inspect(reason)}")
+        Logger.error("Shutdown snapshot failed", reason: inspect(reason))
     end
 
     :ok
@@ -173,7 +173,7 @@ defmodule NeonFS.Core.Persistence do
     if File.exists?(dets_path) do
       do_restore_from_dets(ets_table, dets_path)
     else
-      Logger.debug("No DETS file found at #{dets_path}, starting fresh")
+      Logger.debug("No DETS file found, starting fresh", dets_path: dets_path)
       :ok
     end
   end
@@ -185,7 +185,7 @@ defmodule NeonFS.Core.Persistence do
         restore_from_open_dets(dets_ref, ets_table, dets_path)
 
       {:error, reason} ->
-        Logger.error("Failed to open DETS file #{dets_path}: #{inspect(reason)}")
+        Logger.error("Failed to open DETS file", dets_path: dets_path, reason: inspect(reason))
         :ok
     end
   end
@@ -199,10 +199,18 @@ defmodule NeonFS.Core.Persistence do
     case :dets.to_ets(dets_ref, ets_table) do
       ^ets_table ->
         count = :ets.info(ets_table, :size)
-        Logger.info("Restored #{count} entries to #{ets_table} from #{dets_path}")
+
+        Logger.info("Restored entries from DETS",
+          count: count,
+          ets_table: ets_table,
+          dets_path: dets_path
+        )
 
       {:error, reason} ->
-        Logger.error("Failed to restore #{ets_table}: #{inspect(reason)}")
+        Logger.error("Failed to restore ETS table from DETS",
+          ets_table: ets_table,
+          reason: inspect(reason)
+        )
     end
 
     :dets.close(dets_ref)
@@ -214,10 +222,17 @@ defmodule NeonFS.Core.Persistence do
     case :ets.whereis(table_name) do
       :undefined ->
         if max_retries > 0 do
-          Process.sleep(100)
+          receive do
+          after
+            100 -> :ok
+          end
+
           wait_for_ets_table(table_name, max_retries - 1)
         else
-          Logger.warning("ETS table #{table_name} not found after waiting, skipping restore")
+          Logger.warning("ETS table not found after waiting, skipping restore",
+            table_name: table_name
+          )
+
           :ok
         end
 
@@ -243,7 +258,7 @@ defmodule NeonFS.Core.Persistence do
   defp atomic_snapshot(ets_table, dets_path) do
     case :ets.whereis(ets_table) do
       :undefined ->
-        Logger.debug("ETS table #{ets_table} not found, skipping snapshot")
+        Logger.debug("ETS table not found, skipping snapshot", ets_table: ets_table)
         :ok
 
       _ref ->
@@ -267,7 +282,11 @@ defmodule NeonFS.Core.Persistence do
         copy_and_rename(ets_table, dets_ref, temp_path, dets_path)
 
       {:error, reason} ->
-        Logger.error("Failed to open DETS file #{temp_path}: #{inspect(reason)}")
+        Logger.error("Failed to open DETS temp file",
+          dets_path: temp_path,
+          reason: inspect(reason)
+        )
+
         {:error, {:open_failed, reason}}
     end
   end
@@ -281,7 +300,12 @@ defmodule NeonFS.Core.Persistence do
       {:error, reason} ->
         :dets.close(dets_ref)
         File.rm(temp_path)
-        Logger.error("Failed to copy #{ets_table} to DETS: #{inspect(reason)}")
+
+        Logger.error("Failed to copy ETS table to DETS",
+          ets_table: ets_table,
+          reason: inspect(reason)
+        )
+
         {:error, {:to_dets_failed, reason}}
     end
   end
@@ -296,7 +320,12 @@ defmodule NeonFS.Core.Persistence do
         :ok
 
       {:error, reason} ->
-        Logger.error("Failed to rename #{temp_path} to #{dets_path}: #{inspect(reason)}")
+        Logger.error("Failed to rename temp file to DETS",
+          temp_path: temp_path,
+          dets_path: dets_path,
+          reason: inspect(reason)
+        )
+
         # Clean up the temp file since rename failed
         File.rm(temp_path)
         {:error, {:rename_failed, reason}}
@@ -318,7 +347,7 @@ defmodule NeonFS.Core.Persistence do
         |> Enum.each(fn tmp_file ->
           tmp_path = Path.join(meta_dir, tmp_file)
           File.rm(tmp_path)
-          Logger.info("Cleaned up leftover temp file: #{tmp_path}")
+          Logger.info("Cleaned up leftover temp file", path: tmp_path)
         end)
 
       {:error, :enoent} ->
@@ -326,7 +355,11 @@ defmodule NeonFS.Core.Persistence do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Failed to list directory #{meta_dir} for cleanup: #{inspect(reason)}")
+        Logger.warning("Failed to list directory for cleanup",
+          meta_dir: meta_dir,
+          reason: inspect(reason)
+        )
+
         :ok
     end
   end

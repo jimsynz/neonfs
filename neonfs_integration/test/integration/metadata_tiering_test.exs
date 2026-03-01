@@ -157,7 +157,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
             id: intent_id,
             operation: :file_create,
             conflict_key: {:create, volume_id, "/", "crash_test.txt"},
-            ttl_seconds: 2
+            ttl_seconds: 1
           ]
         ])
 
@@ -170,8 +170,10 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
       assert active_intent.state == :pending
 
-      # Wait for TTL to expire
-      Process.sleep(3_000)
+      # Wait for the 1-second TTL to expire. Intent expiry is checked lazily
+      # via DateTime comparison (Intent.expired?/1), not by a background process,
+      # so there is no event to synchronise on — real wall time must elapse.
+      Process.sleep(1_100)
 
       # Verify the intent is now expired
       {:ok, expired_intent} =

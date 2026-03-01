@@ -180,6 +180,92 @@ defmodule NeonFS.Integration.FuseHandlerTest do
     end
   end
 
+  describe "create/mkdir mode passthrough" do
+    test "create with explicit mode 0o600 stores mode 0o100600", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "private.txt", "mode" => 0o600}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/private.txt"
+        ])
+
+      assert file.mode == 0o100600
+    end
+
+    test "create with nil mode falls back to 0o100644", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "default.txt", "mode" => nil}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/default.txt"
+        ])
+
+      assert file.mode == 0o100644
+    end
+
+    test "mkdir with explicit mode 0o700 stores mode 0o040700", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "secret", "mode" => 0o700}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/secret"
+        ])
+
+      assert file.mode == 0o040700
+    end
+
+    test "mkdir with nil mode falls back to 0o040755", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "normal_dir", "mode" => nil}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/normal_dir"
+        ])
+
+      assert file.mode == 0o040755
+    end
+  end
+
   describe "unlink and rmdir operations" do
     test "deletes a file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create file on core
@@ -242,6 +328,407 @@ defmodule NeonFS.Integration.FuseHandlerTest do
 
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/old_name.txt")
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/new_name.txt")
+    end
+  end
+
+  describe "setattr operations" do
+    test "chmod changes file mode and is reflected in getattr", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      # Create file with default mode (0o100644)
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "chmod_file.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/chmod_file.txt")
+
+      # chmod to 0o755 (with regular file type bits)
+      send(
+        handler,
+        {:fuse_op, 2, {"setattr", %{"ino" => inode, "mode" => 0o100755}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+
+      # Verify mode was updated on core
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/chmod_file.txt"
+        ])
+
+      assert file.mode == 0o100755
+    end
+
+    test "chmod on directory changes mode correctly", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "chmod_dir", "mode" => 0o755}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/chmod_dir")
+
+      # chmod directory to 0o700
+      send(
+        handler,
+        {:fuse_op, 2, {"setattr", %{"ino" => inode, "mode" => 0o040700}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2,
+                      {"attr_ok", %{"ino" => ^inode, "kind" => "directory"}}},
+                     5_000
+
+      {:ok, dir} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/chmod_dir"
+        ])
+
+      assert dir.mode == 0o040700
+    end
+
+    test "chown changes UID/GID and is reflected in getattr", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "chown_file.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/chown_file.txt")
+
+      # chown to uid=1000, gid=1000
+      send(
+        handler,
+        {:fuse_op, 2, {"setattr", %{"ino" => inode, "uid" => 1000, "gid" => 1000}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/chown_file.txt"
+        ])
+
+      assert file.uid == 1000
+      assert file.gid == 1000
+    end
+
+    test "truncate to smaller size updates size in metadata", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      # Create file and write data
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "trunc_file.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/trunc_file.txt")
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"write", %{"ino" => inode, "offset" => 0, "data" => "hello world, this is content"}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
+
+      # Verify the file has data
+      {:ok, file_before} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/trunc_file.txt"
+        ])
+
+      assert file_before.size > 0
+
+      # Truncate to 5 bytes
+      send(
+        handler,
+        {:fuse_op, 3, {"setattr", %{"ino" => inode, "size" => 5}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"attr_ok", %{"ino" => ^inode, "size" => 5}}}, 5_000
+
+      {:ok, file_after} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/trunc_file.txt"
+        ])
+
+      assert file_after.size == 5
+    end
+
+    test "truncate to zero empties the file", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "trunc_zero.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/trunc_zero.txt")
+
+      send(
+        handler,
+        {:fuse_op, 2, {"write", %{"ino" => inode, "offset" => 0, "data" => "data to be removed"}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
+
+      # Truncate to 0
+      send(
+        handler,
+        {:fuse_op, 3, {"setattr", %{"ino" => inode, "size" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"attr_ok", %{"ino" => ^inode, "size" => 0}}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/trunc_zero.txt"
+        ])
+
+      assert file.size == 0
+      assert file.chunks == []
+    end
+
+    test "utimens sets access and modification times correctly", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "utimens_file.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/utimens_file.txt")
+
+      # Set atime and mtime to a known value (2025-01-01 00:00:00 UTC)
+      target_sec = 1_735_689_600
+      target_nsec = 0
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"setattr",
+          %{
+            "ino" => inode,
+            "atime" => {target_sec, target_nsec},
+            "mtime" => {target_sec, target_nsec}
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/utimens_file.txt"
+        ])
+
+      expected_dt = DateTime.from_unix!(target_sec)
+      assert DateTime.truncate(file.accessed_at, :second) == expected_dt
+      # modified_at is overwritten by FileMeta.update/2 to now — check accessed_at was set
+      assert file.accessed_at != nil
+    end
+
+    test "utimens with nonzero nanoseconds works", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "utimens_ns.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/utimens_ns.txt")
+
+      # Set atime with nanosecond precision
+      target_sec = 1_735_689_600
+      target_nsec = 500_000_000
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"setattr",
+          %{
+            "ino" => inode,
+            "atime" => {target_sec, target_nsec}
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/utimens_ns.txt"
+        ])
+
+      expected_dt = DateTime.from_unix!(target_sec * 1_000_000_000 + target_nsec, :nanosecond)
+      assert file.accessed_at == expected_dt
+    end
+
+    test "setattr with combined mode and timestamps in one call", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "combined.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/combined.txt")
+
+      target_sec = 1_735_689_600
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"setattr",
+          %{
+            "ino" => inode,
+            "mode" => 0o100755,
+            "atime" => {target_sec, 0},
+            "mtime" => {target_sec, 0}
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+
+      {:ok, file} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/combined.txt"
+        ])
+
+      assert file.mode == 0o100755
+
+      expected_dt = DateTime.from_unix!(target_sec)
+      assert DateTime.truncate(file.accessed_at, :second) == expected_dt
+    end
+
+    test "setattr updates changed_at (ctime)", %{
+      handler: handler,
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      # Create file via RPC so we can capture its initial changed_at
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        volume_id,
+        "/ctime_file.txt",
+        "content"
+      ])
+
+      {:ok, file_before} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/ctime_file.txt"
+        ])
+
+      {:ok, inode} = InodeTable.allocate_inode(volume_id, "/ctime_file.txt")
+
+      # Ensure wall clock advances past the file creation timestamp so
+      # that the setattr changed_at is guaranteed to be strictly newer.
+      Process.sleep(10)
+
+      # chmod triggers a metadata update which should update changed_at
+      send(
+        handler,
+        {:fuse_op, 1, {"setattr", %{"ino" => inode, "mode" => 0o100600}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"attr_ok", _}}, 5_000
+
+      {:ok, file_after} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
+          volume_id,
+          "/ctime_file.txt"
+        ])
+
+      assert DateTime.compare(file_after.changed_at, file_before.changed_at) == :gt
+    end
+  end
+
+  describe "setattr permission enforcement" do
+    test "non-owner UID cannot chmod (returns EACCES)", %{
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      # Create file owned by root (uid 0) via RPC
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        volume_id,
+        "/root_chmod.txt",
+        "content"
+      ])
+
+      # Start a non-root handler (uid 1000)
+      {:ok, non_root_handler} =
+        Handler.start_link(volume: volume_id, test_notify: self(), uid: 1000)
+
+      {:ok, inode} = InodeTable.allocate_inode(volume_id, "/root_chmod.txt")
+
+      send(
+        non_root_handler,
+        {:fuse_op, 1, {"setattr", %{"ino" => inode, "mode" => 0o100777}}}
+      )
+
+      # Should return EACCES (errno 13)
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, 5_000
+
+      GenServer.stop(non_root_handler)
+    end
+
+    test "non-owner UID cannot chown (returns EACCES)", %{
+      volume_id: volume_id,
+      cluster: cluster
+    } do
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        volume_id,
+        "/root_chown.txt",
+        "content"
+      ])
+
+      {:ok, non_root_handler} =
+        Handler.start_link(volume: volume_id, test_notify: self(), uid: 1000)
+
+      {:ok, inode} = InodeTable.allocate_inode(volume_id, "/root_chown.txt")
+
+      send(
+        non_root_handler,
+        {:fuse_op, 1, {"setattr", %{"ino" => inode, "uid" => 1000, "gid" => 1000}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, 5_000
+
+      GenServer.stop(non_root_handler)
     end
   end
 

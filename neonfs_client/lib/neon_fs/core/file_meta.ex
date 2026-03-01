@@ -30,6 +30,7 @@ defmodule NeonFS.Core.FileMeta do
           created_at: DateTime.t(),
           modified_at: DateTime.t(),
           accessed_at: DateTime.t(),
+          changed_at: DateTime.t(),
           version: non_neg_integer(),
           previous_version_id: String.t() | nil,
           hlc_timestamp: term()
@@ -48,6 +49,7 @@ defmodule NeonFS.Core.FileMeta do
     :created_at,
     :modified_at,
     :accessed_at,
+    :changed_at,
     :version,
     :previous_version_id,
     :hlc_timestamp,
@@ -96,6 +98,7 @@ defmodule NeonFS.Core.FileMeta do
       created_at: now,
       modified_at: now,
       accessed_at: now,
+      changed_at: now,
       version: Keyword.get(opts, :version, 1),
       previous_version_id: Keyword.get(opts, :previous_version_id)
     }
@@ -128,6 +131,7 @@ defmodule NeonFS.Core.FileMeta do
       updates
       |> Keyword.put(:version, updated_version)
       |> Keyword.put(:modified_at, now)
+      |> Keyword.put(:changed_at, now)
 
     struct(file, updates_with_meta)
   end

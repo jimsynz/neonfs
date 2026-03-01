@@ -13,6 +13,9 @@ defmodule NeonFS.Core.ReadOperationTest do
     WriteOperation
   }
 
+  alias NeonFS.Error.FileNotFound, as: FileNotFoundError
+  alias NeonFS.Error.{Internal, VolumeNotFound}
+
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
@@ -105,14 +108,14 @@ defmodule NeonFS.Core.ReadOperationTest do
     end
 
     test "returns error for non-existent file", %{volume: volume} do
-      assert {:error, :file_not_found} =
+      assert {:error, %FileNotFoundError{file_path: "/does-not-exist.txt"}} =
                ReadOperation.read_file(volume.id, "/does-not-exist.txt")
     end
 
     test "returns error for non-existent volume" do
       fake_volume_id = UUIDv7.generate()
 
-      assert {:error, :volume_not_found} =
+      assert {:error, %VolumeNotFound{volume_id: ^fake_volume_id}} =
                ReadOperation.read_file(fake_volume_id, "/test.txt")
     end
   end
@@ -306,7 +309,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       Process.put(:telemetry_events, [])
 
       # Try to read non-existent file
-      {:error, :file_not_found} = ReadOperation.read_file(volume.id, "/not-found.txt")
+      {:error, %FileNotFoundError{}} = ReadOperation.read_file(volume.id, "/not-found.txt")
 
       events = Process.get(:telemetry_events, []) |> Enum.reverse()
 
@@ -315,7 +318,7 @@ defmodule NeonFS.Core.ReadOperationTest do
         Enum.find(events, &(&1.event == [:neonfs, :read_operation, :exception]))
 
       assert exception_event
-      assert exception_event.metadata.error == :file_not_found
+      assert %FileNotFoundError{} = exception_event.metadata.error
       assert is_integer(exception_event.measurements.duration)
     end
   end
@@ -524,7 +527,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       ChunkIndex.delete(Enum.at(stripe.chunks, 0))
       ChunkIndex.delete(Enum.at(stripe.chunks, 1))
 
-      assert {:error, :insufficient_chunks} =
+      assert {:error, %NeonFS.Error.Unavailable{}} =
                ReadOperation.read_file(volume.id, "/critical_ec.bin")
     end
 
@@ -656,7 +659,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       wrong_meta = %{chunk_meta | crypto: wrong_crypto}
       ChunkIndex.put(wrong_meta)
 
-      assert {:error, {:decryption_failed, ^chunk_hash}} =
+      assert {:error, %Internal{}} =
                ReadOperation.read_file(volume.id, "/tamper.txt")
     end
 
@@ -690,6 +693,167 @@ defmodule NeonFS.Core.ReadOperationTest do
         assert event.metadata.key_version == 1
         assert is_binary(event.metadata.chunk_hash)
       end
+    end
+  end
+
+  describe "verification failure repair" do
+    use Mimic
+
+    setup :verify_on_exit!
+
+    setup %{volume: volume} do
+      # Enable verification on reads
+      {:ok, volume} =
+        VolumeRegistry.update(volume.id,
+          verification: %{on_read: :always, sampling_rate: nil}
+        )
+
+      # Attach verification failure telemetry handler
+      test_pid = self()
+
+      :telemetry.attach(
+        "verification-failure-test",
+        [:neonfs, :read_operation, :verification_failed],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:verification_failed, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("verification-failure-test") end)
+
+      {:ok, volume: volume}
+    end
+
+    test "local verification failure triggers remote fetch and returns data", %{volume: volume} do
+      data = "data for verification failure test"
+      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/verify_fail.txt", data)
+      [chunk_hash] = file_meta.chunks
+
+      call_count = :counters.new(1, [:atomics])
+
+      # First call: simulate local verification failure
+      # Second call (with exclude_nodes): return valid data from "remote"
+      Mimic.stub(NeonFS.Core.ChunkFetcher, :fetch_chunk, fn hash, opts ->
+        assert hash == chunk_hash
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:error, "corrupt chunk: expected abc123, got def456"}
+        else
+          assert node() in Keyword.get(opts, :exclude_nodes, [])
+          {:ok, data, {:remote, :fake_remote@host}}
+        end
+      end)
+
+      Mimic.stub(NeonFS.Core.BackgroundWorker, :submit, fn _work_fn, opts ->
+        assert Keyword.get(opts, :priority) == :high
+        assert Keyword.get(opts, :label) =~ "repair_corrupt_chunk"
+        {:ok, "mock_work_id"}
+      end)
+
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/verify_fail.txt")
+      assert read_data == data
+    end
+
+    test "successful remote fetch returns data to caller", %{volume: volume} do
+      data = "remote recovery data"
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/remote_ok.txt", data)
+
+      call_count = :counters.new(1, [:atomics])
+
+      Mimic.stub(NeonFS.Core.ChunkFetcher, :fetch_chunk, fn _hash, _opts ->
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:error, "corrupt chunk: expected abc, got def"}
+        else
+          {:ok, data, {:remote, :other_node@host}}
+        end
+      end)
+
+      Mimic.stub(NeonFS.Core.BackgroundWorker, :submit, fn _work_fn, _opts ->
+        {:ok, "mock_work_id"}
+      end)
+
+      assert {:ok, ^data} = ReadOperation.read_file(volume.id, "/remote_ok.txt")
+    end
+
+    test "background repair is submitted after successful remote recovery", %{volume: volume} do
+      data = "repair test data"
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/repair.txt", data)
+
+      test_pid = self()
+      call_count = :counters.new(1, [:atomics])
+
+      Mimic.stub(NeonFS.Core.ChunkFetcher, :fetch_chunk, fn _hash, _opts ->
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:error, "corrupt chunk: expected aaa, got bbb"}
+        else
+          {:ok, data, {:remote, :repair_node@host}}
+        end
+      end)
+
+      Mimic.expect(NeonFS.IO.Scheduler, :submit_async, fn op ->
+        assert is_function(op.callback, 0)
+        assert op.priority == :read_repair
+        assert op.type == :write
+        send(test_pid, :repair_submitted)
+        :ok
+      end)
+
+      assert {:ok, _} = ReadOperation.read_file(volume.id, "/repair.txt")
+      assert_receive :repair_submitted
+    end
+
+    test "both local and remote failure returns :chunk_corrupted", %{volume: volume} do
+      data = "double failure data"
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/double_fail.txt", data)
+
+      Mimic.stub(NeonFS.Core.ChunkFetcher, :fetch_chunk, fn _hash, _opts ->
+        {:error, "corrupt chunk: expected xxx, got yyy"}
+      end)
+
+      assert {:error, %Internal{}} =
+               ReadOperation.read_file(volume.id, "/double_fail.txt")
+    end
+
+    test "telemetry event emitted on verification failure", %{volume: volume} do
+      data = "telemetry verification test"
+      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/telem_verify.txt", data)
+      [chunk_hash] = file_meta.chunks
+
+      call_count = :counters.new(1, [:atomics])
+
+      Mimic.stub(NeonFS.Core.ChunkFetcher, :fetch_chunk, fn _hash, _opts ->
+        :counters.add(call_count, 1, 1)
+        count = :counters.get(call_count, 1)
+
+        if count == 1 do
+          {:error, "corrupt chunk: expected 0000, got ffff"}
+        else
+          {:ok, data, {:remote, :telem_node@host}}
+        end
+      end)
+
+      Mimic.stub(NeonFS.Core.BackgroundWorker, :submit, fn _work_fn, _opts ->
+        {:ok, "mock_id"}
+      end)
+
+      assert {:ok, _} = ReadOperation.read_file(volume.id, "/telem_verify.txt")
+
+      assert_receive {:verification_failed, event, measurements, metadata}
+      assert event == [:neonfs, :read_operation, :verification_failed]
+      assert measurements.count == 1
+      assert metadata.chunk_hash == chunk_hash
+      assert metadata.volume_id == volume.id
+      assert is_binary(metadata.drive_id)
+      assert metadata.node == node()
     end
   end
 

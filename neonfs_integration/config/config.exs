@@ -10,6 +10,9 @@ if Mix.env() == :test do
   # and causes 4-node rings instead of the expected 3.
   config :neonfs_core, start_children?: false
 
+  # Disable metrics in integration tests to avoid port conflicts.
+  config :neonfs_core, metrics_enabled: false
+
   # Increase quorum timeout for integration tests where 3 peer nodes
   # share a single machine. The default 5s is tight when BEAM schedulers
   # are contended across 4+ nodes; 15s gives ample headroom.

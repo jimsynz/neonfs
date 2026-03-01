@@ -2,7 +2,7 @@ defmodule NeonFS.Core.FileIndexTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{DirectoryEntry, FileIndex, FileMeta, MetadataRing}
+  alias NeonFS.Core.{ChunkMeta, DirectoryEntry, FileIndex, FileMeta, MetadataRing}
 
   @moduletag :tmp_dir
 
@@ -513,15 +513,173 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
+  describe "truncate/2" do
+    setup do
+      # Ensure chunk_index ETS table exists for ChunkIndex.get lookups
+      case :ets.whereis(:chunk_index) do
+        :undefined ->
+          :ets.new(:chunk_index, [:set, :named_table, :public, read_concurrency: true])
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
+
+    test "truncate to smaller size trims chunks list" do
+      # Create 4 chunks of 256 bytes each (1024 bytes total)
+      chunk_hashes = for i <- 1..4, do: :crypto.hash(:sha256, "chunk#{i}")
+
+      Enum.each(chunk_hashes, fn hash ->
+        :ets.insert(:chunk_index, {hash, ChunkMeta.new(hash, 256, 256)})
+      end)
+
+      file = FileMeta.new("vol1", "/test.txt", chunks: chunk_hashes, size: 1024)
+      {:ok, created} = FileIndex.create(file)
+
+      # Truncate to 512 bytes — should keep first 2 chunks
+      assert {:ok, truncated} = FileIndex.truncate(created.id, 512)
+      assert truncated.size == 512
+      assert length(truncated.chunks) == 2
+      assert truncated.chunks == Enum.take(chunk_hashes, 2)
+      assert truncated.version == 2
+    end
+
+    test "truncate to mid-chunk boundary keeps partial chunk" do
+      chunk_hashes = for i <- 1..4, do: :crypto.hash(:sha256, "chunk#{i}")
+
+      Enum.each(chunk_hashes, fn hash ->
+        :ets.insert(:chunk_index, {hash, ChunkMeta.new(hash, 256, 256)})
+      end)
+
+      file = FileMeta.new("vol1", "/mid.txt", chunks: chunk_hashes, size: 1024)
+      {:ok, created} = FileIndex.create(file)
+
+      # Truncate to 300 bytes — falls mid-way in chunk 2 (bytes 256-512)
+      # Chunk 2 starts at offset 256, which is < 300, so it's kept
+      assert {:ok, truncated} = FileIndex.truncate(created.id, 300)
+      assert truncated.size == 300
+      assert length(truncated.chunks) == 2
+      assert truncated.chunks == Enum.take(chunk_hashes, 2)
+    end
+
+    test "truncate to 0 clears all chunks" do
+      chunk_hashes = for i <- 1..3, do: :crypto.hash(:sha256, "chunk#{i}")
+
+      Enum.each(chunk_hashes, fn hash ->
+        :ets.insert(:chunk_index, {hash, ChunkMeta.new(hash, 256, 256)})
+      end)
+
+      file = FileMeta.new("vol1", "/empty.txt", chunks: chunk_hashes, size: 768)
+      {:ok, created} = FileIndex.create(file)
+
+      assert {:ok, truncated} = FileIndex.truncate(created.id, 0)
+      assert truncated.size == 0
+      assert truncated.chunks == []
+      assert truncated.stripes == nil
+    end
+
+    test "truncate to current size is a no-op on chunks" do
+      chunk_hashes = for i <- 1..2, do: :crypto.hash(:sha256, "chunk#{i}")
+
+      Enum.each(chunk_hashes, fn hash ->
+        :ets.insert(:chunk_index, {hash, ChunkMeta.new(hash, 512, 512)})
+      end)
+
+      file = FileMeta.new("vol1", "/same.txt", chunks: chunk_hashes, size: 1024)
+      {:ok, created} = FileIndex.create(file)
+
+      assert {:ok, same} = FileIndex.truncate(created.id, 1024)
+      assert same.size == 1024
+      assert same.chunks == chunk_hashes
+    end
+
+    test "truncate to larger size extends without adding chunks" do
+      chunk_hash = :crypto.hash(:sha256, "only-chunk")
+      :ets.insert(:chunk_index, {chunk_hash, ChunkMeta.new(chunk_hash, 512, 512)})
+
+      file = FileMeta.new("vol1", "/grow.txt", chunks: [chunk_hash], size: 512)
+      {:ok, created} = FileIndex.create(file)
+
+      assert {:ok, extended} = FileIndex.truncate(created.id, 2048)
+      assert extended.size == 2048
+      assert extended.chunks == [chunk_hash]
+    end
+
+    test "truncate updates modified_at and changed_at" do
+      chunk_hash = :crypto.hash(:sha256, "data")
+      :ets.insert(:chunk_index, {chunk_hash, ChunkMeta.new(chunk_hash, 1024, 1024)})
+
+      file = FileMeta.new("vol1", "/timestamps.txt", chunks: [chunk_hash], size: 1024)
+      {:ok, created} = FileIndex.create(file)
+
+      assert {:ok, truncated} = FileIndex.truncate(created.id, 100)
+      assert DateTime.compare(truncated.modified_at, created.modified_at) in [:gt, :eq]
+      assert DateTime.compare(truncated.changed_at, created.changed_at) in [:gt, :eq]
+    end
+
+    test "truncate trims stripes for erasure-coded files" do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 262_144}},
+        %{stripe_id: "s2", byte_range: {262_144, 524_288}},
+        %{stripe_id: "s3", byte_range: {524_288, 786_432}}
+      ]
+
+      file =
+        FileMeta.new("vol1", "/ec.txt", size: 786_432)
+        |> Map.put(:stripes, stripes)
+        |> Map.put(:chunks, [])
+
+      {:ok, created} = FileIndex.create(file)
+
+      # Truncate to 300_000 — keeps stripe 1 (0..262144) fully and trims stripe 2
+      assert {:ok, truncated} = FileIndex.truncate(created.id, 300_000)
+      assert truncated.size == 300_000
+      assert length(truncated.stripes) == 2
+
+      [s1, s2] = truncated.stripes
+      assert s1.byte_range == {0, 262_144}
+      assert s2.byte_range == {262_144, 300_000}
+    end
+
+    test "truncate to 0 clears stripes" do
+      stripes = [%{stripe_id: "s1", byte_range: {0, 262_144}}]
+
+      file =
+        FileMeta.new("vol1", "/ec-empty.txt", size: 262_144)
+        |> Map.put(:stripes, stripes)
+        |> Map.put(:chunks, [])
+
+      {:ok, created} = FileIndex.create(file)
+
+      assert {:ok, truncated} = FileIndex.truncate(created.id, 0)
+      assert truncated.stripes == nil
+      assert truncated.chunks == []
+    end
+
+    test "truncate returns error for non-existent file" do
+      assert {:error, :not_found} = FileIndex.truncate("nonexistent-id", 100)
+    end
+  end
+
   # Private helpers
 
   defp stop_if_running(name) do
     case Process.whereis(name) do
-      nil -> :ok
-      pid -> GenServer.stop(pid, :normal, 5000)
-    end
+      nil ->
+        :ok
 
-    Process.sleep(10)
+      pid ->
+        ref = Process.monitor(pid)
+        GenServer.stop(pid, :normal, 5000)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _} -> :ok
+        after
+          1_000 -> :ok
+        end
+    end
   end
 
   defp cleanup_ets_table(table) do
