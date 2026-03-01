@@ -79,7 +79,7 @@ defmodule NeonFS.Core.MixProject do
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.7", only: [:dev, :test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
-      {:mimic, "~> 1.7", only: [:test]},
+      {:mimic, "~> 2.0", only: [:test]},
       {:stream_data, "~> 1.0", only: [:test]}
     ]
   end
