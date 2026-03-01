@@ -72,7 +72,19 @@ defmodule NeonFS.Cluster.Formation do
   """
   @spec orphaned_data_detected?() :: boolean()
   def orphaned_data_detected? do
-    has_ra_data?() or has_dets_files?() or has_blob_data?()
+    ra = has_ra_data?()
+    dets = has_dets_files?()
+    blob = has_blob_data?()
+
+    if ra or dets or blob do
+      Logger.warning("Orphan detection triggered",
+        has_ra_data: ra,
+        has_dets_files: dets,
+        has_blob_data: blob
+      )
+    end
+
+    ra or dets or blob
   end
 
   # ── GenServer callbacks ─────────────────────────────────────────
@@ -93,12 +105,22 @@ defmodule NeonFS.Cluster.Formation do
 
   @impl true
   def handle_continue(:check_preconditions, state) do
+    # Prefer the result cached by Application.start/2 (run before supervisor
+    # children started, avoiding false positives from sibling artifacts).
+    # Fall back to a live check when Formation is started directly (e.g. in
+    # integration tests or manual GenServer.start).
+    orphaned =
+      case Application.fetch_env(:neonfs_core, :orphaned_data_at_startup) do
+        {:ok, value} -> value
+        :error -> orphaned_data_detected?()
+      end
+
     cond do
       State.exists?() ->
         Logger.info("Cluster state already exists, skipping formation")
         {:stop, :normal, state}
 
-      orphaned_data_detected?() ->
+      orphaned ->
         Logger.error(
           "Orphaned data detected without cluster.json — " <>
             "clean data directories or restore cluster.json before retrying"
@@ -569,8 +591,6 @@ defmodule NeonFS.Cluster.Formation do
 
     with true <- File.exists?(meta_dir),
          {:ok, files} <- File.ls(meta_dir) do
-      # Only count DETS files with non-trivial content (> 1KB).
-      # Fresh Persistence startup creates small empty DETS tables.
       Enum.any?(files, &populated_dets_file?(meta_dir, &1))
     else
       _ -> false
@@ -583,9 +603,26 @@ defmodule NeonFS.Cluster.Formation do
   end
 
   defp dets_file_has_data?(path) do
-    case File.stat(path) do
-      {:ok, %{size: size}} -> size > 1024
-      _ -> false
+    # Open the DETS file read-only and check for actual records rather than
+    # relying on a file size threshold (empty DETS tables have ~5KB of header
+    # overhead which varies by OTP version, making size checks unreliable).
+    #
+    # This is safe because orphan detection now runs in Application.start/2
+    # before the supervisor starts, so no other process has these files open.
+    tab = :"orphan_check_#{:erlang.unique_integer([:positive])}"
+
+    case :dets.open_file(tab, file: String.to_charlist(path), access: :read) do
+      {:ok, ref} ->
+        count = :dets.info(ref, :size)
+        :dets.close(ref)
+        is_integer(count) and count > 0
+
+      {:error, _} ->
+        # File locked or corrupt — fall back to generous size threshold
+        case File.stat(path) do
+          {:ok, %{size: size}} -> size > 8192
+          _ -> false
+        end
     end
   end
 

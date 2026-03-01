@@ -12,13 +12,18 @@ defmodule NeonFS.Core.Application do
   use Application
   require Logger
 
-  alias NeonFS.Cluster.State
+  alias NeonFS.Cluster.{Formation, State}
   alias NeonFS.Core.{DriveConfig, Persistence}
 
   @impl true
   def start(_type, _args) do
     Logger.metadata(node_name: node())
     load_config_from_cluster_state()
+
+    # Run orphan detection BEFORE the supervisor starts children.
+    # After supervisor init, sibling processes (Persistence, Ra, BlobStore)
+    # create files that would trigger false positives in orphan detection.
+    cache_orphan_detection_result()
 
     # Start the core supervision tree
     NeonFS.Core.Supervisor.start_link([])
@@ -41,6 +46,13 @@ defmodule NeonFS.Core.Application do
     end
 
     :ok
+  end
+
+  defp cache_orphan_detection_result do
+    if Application.get_env(:neonfs_core, :auto_bootstrap, false) and not State.exists?() do
+      result = Formation.orphaned_data_detected?()
+      Application.put_env(:neonfs_core, :orphaned_data_at_startup, result)
+    end
   end
 
   defp load_config_from_cluster_state do

@@ -23,6 +23,7 @@ defmodule NeonFS.Cluster.FormationTest do
         Application.delete_env(:ra, :data_dir)
       end
 
+      Application.delete_env(:neonfs_core, :orphaned_data_at_startup)
       cleanup_test_dirs()
     end)
 
@@ -47,9 +48,12 @@ defmodule NeonFS.Cluster.FormationTest do
       refute Formation.orphaned_data_detected?()
     end
 
-    test "returns false for fresh DETS files (small/empty)", %{tmp_dir: tmp_dir} do
-      # Persistence creates small empty DETS tables on startup
-      File.write!(Path.join(tmp_dir, "persistence.dets"), "")
+    test "returns false for empty DETS tables", %{tmp_dir: tmp_dir} do
+      # An empty DETS table (no records) should not trigger orphan detection,
+      # even though the file itself has header overhead (~5KB).
+      dets_path = Path.join(tmp_dir, "empty.dets")
+      {:ok, tab} = :dets.open_file(:orphan_test_empty, file: String.to_charlist(dets_path))
+      :dets.close(tab)
       refute Formation.orphaned_data_detected?()
     end
 
@@ -63,10 +67,12 @@ defmodule NeonFS.Cluster.FormationTest do
       assert Formation.orphaned_data_detected?()
     end
 
-    test "detects orphaned DETS files with data", %{tmp_dir: tmp_dir} do
-      # DETS files > 1KB indicate prior cluster activity
-      large_content = :crypto.strong_rand_bytes(2048)
-      File.write!(Path.join(tmp_dir, "persistence.dets"), large_content)
+    test "detects orphaned DETS files with records", %{tmp_dir: tmp_dir} do
+      # A DETS file with actual records indicates prior cluster activity
+      dets_path = Path.join(tmp_dir, "volumes.dets")
+      {:ok, tab} = :dets.open_file(:orphan_test_data, file: String.to_charlist(dets_path))
+      :dets.insert(tab, {"vol-1", %{name: "test-volume"}})
+      :dets.close(tab)
       assert Formation.orphaned_data_detected?()
     end
 
@@ -98,14 +104,15 @@ defmodule NeonFS.Cluster.FormationTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
     end
 
-    test "exits with :orphaned_data_detected when data exists without cluster.json", %{
-      tmp_dir: tmp_dir
+    test "exits with :orphaned_data_detected when cached orphan result is true", %{
+      tmp_dir: _tmp_dir
     } do
-      # Create orphaned blob data (actual files, not just directories)
-      blob_dir = Path.join(tmp_dir, "blobs")
-      prefix_dir = Path.join(blob_dir, "ab")
-      File.mkdir_p!(prefix_dir)
-      File.write!(Path.join(prefix_dir, "abcdef1234567890"), "chunk data")
+      # Simulate Application.start/2 caching a positive orphan detection result
+      Application.put_env(:neonfs_core, :orphaned_data_at_startup, true)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_core, :orphaned_data_at_startup)
+      end)
 
       # Trap exits so the linked GenServer's shutdown doesn't crash the test
       Process.flag(:trap_exit, true)
