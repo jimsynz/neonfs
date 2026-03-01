@@ -429,19 +429,19 @@ defmodule NeonFS.Core.BlobStoreTest do
       ref = telemetry_listen([:neonfs, :blob_store, :write_chunk])
 
       data = "telemetry test"
+      expected_size = byte_size(data)
 
       assert {:ok, _hash, _info} =
                BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :write_chunk, :start], _measurements,
-                      metadata}
+                      %{data_size: ^expected_size} = metadata}
 
       assert metadata.tier == "hot"
-      assert metadata.data_size == byte_size(data)
       assert metadata.drive_id == "default"
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :write_chunk, :stop], measurements,
-                      _metadata}
+                      %{data_size: ^expected_size}}
 
       assert measurements.duration > 0
       assert measurements.bytes_written > 0
