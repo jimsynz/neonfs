@@ -786,8 +786,9 @@ defmodule NeonFS.CLI.HandlerTest do
       :ok
     end
 
-    test "returns worker status map with expected fields" do
-      assert {:ok, status} = Handler.handle_worker_status()
+    test "returns list of per-node worker status maps" do
+      assert {:ok, [status | _]} = Handler.handle_worker_status()
+      assert is_binary(status.node)
       assert is_integer(status.max_concurrent)
       assert is_integer(status.max_per_minute)
       assert is_integer(status.drive_concurrency)
@@ -801,11 +802,16 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns serializable data" do
-      assert {:ok, status} = Handler.handle_worker_status()
-      assert is_map(status)
+      assert {:ok, statuses} = Handler.handle_worker_status()
+      assert is_list(statuses)
 
-      for {_key, value} <- status do
-        assert is_integer(value) or is_map(value)
+      for status <- statuses do
+        assert is_map(status)
+        assert is_binary(status.node)
+
+        for {key, value} <- status, key != :node do
+          assert is_integer(value) or is_map(value)
+        end
       end
     end
   end

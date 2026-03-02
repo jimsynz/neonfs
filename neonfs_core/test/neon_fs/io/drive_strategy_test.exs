@@ -313,15 +313,23 @@ defmodule NeonFS.IO.DriveStrategyTest do
     end
 
     test "falls back when file is missing" do
-      tmp_dir = System.tmp_dir!() |> Path.join("sysfs_test_#{System.unique_integer([:positive])}")
+      tmp_dir = make_sysfs_path()
+      # Ensure no leftover from a previous test run
+      File.rm_rf!(tmp_dir)
+      refute File.exists?(Path.join([tmp_dir, "sda", "queue", "rotational"]))
       assert read_rotational(tmp_dir, "sda") == :ssd
     end
   end
 
   ## Helpers
 
+  defp make_sysfs_path do
+    System.tmp_dir!()
+    |> Path.join("sysfs_test_#{System.unique_integer([:positive, :monotonic])}")
+  end
+
   defp create_sysfs_tree(rotational_content) do
-    tmp_dir = System.tmp_dir!() |> Path.join("sysfs_test_#{System.unique_integer([:positive])}")
+    tmp_dir = make_sysfs_path()
     queue_dir = Path.join([tmp_dir, "sda", "queue"])
     File.mkdir_p!(queue_dir)
     File.write!(Path.join(queue_dir, "rotational"), rotational_content)

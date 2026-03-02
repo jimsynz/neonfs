@@ -172,6 +172,7 @@ impl AuditCommand {
                 } else {
                     let mut tbl = table::Table::new(vec![
                         "TIMESTAMP".to_string(),
+                        "NODE".to_string(),
                         "EVENT".to_string(),
                         "ACTOR".to_string(),
                         "RESOURCE".to_string(),
@@ -180,6 +181,7 @@ impl AuditCommand {
                     for event in &events {
                         tbl.add_row(vec![
                             event.timestamp.clone(),
+                            event.node_short(),
                             event.event_type.clone(),
                             format!("uid:{}", event.actor_uid),
                             event.resource.clone(),

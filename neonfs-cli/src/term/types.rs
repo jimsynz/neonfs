@@ -618,6 +618,15 @@ impl AuditEntry {
             })?)?,
         })
     }
+
+    /// Returns a shortened actor node name (part before `@`)
+    pub fn node_short(&self) -> String {
+        if let Some(at_pos) = self.actor_node.find('@') {
+            self.actor_node[..at_pos].to_string()
+        } else {
+            self.actor_node.clone()
+        }
+    }
 }
 
 /// Mount information response
@@ -625,6 +634,7 @@ impl AuditEntry {
 pub struct MountInfo {
     #[serde(rename = "mount_id")]
     pub id: String,
+    pub node: String,
     pub volume_name: String,
     pub mount_point: String,
     #[serde(rename = "mounted_at")]
@@ -642,6 +652,9 @@ impl MountInfo {
                     CliError::TermConversionError("Missing 'id' field".to_string())
                 })?,
             )?,
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
             volume_name: term_to_string(map.get("volume_name").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'volume_name' field".to_string())
             })?)?,
@@ -652,6 +665,15 @@ impl MountInfo {
                 CliError::TermConversionError("Missing 'started_at' field".to_string())
             })?)?,
         })
+    }
+
+    /// Returns a shortened node name (part before `@`)
+    pub fn node_short(&self) -> String {
+        if let Some(at_pos) = self.node.find('@') {
+            self.node[..at_pos].to_string()
+        } else {
+            self.node.clone()
+        }
     }
 }
 

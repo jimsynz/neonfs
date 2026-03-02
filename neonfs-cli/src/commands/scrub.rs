@@ -122,6 +122,7 @@ impl ScrubCommand {
                         "ID".to_string(),
                         "STATUS".to_string(),
                         "PROGRESS".to_string(),
+                        "NODE".to_string(),
                         "STARTED".to_string(),
                     ]);
                     for job in &jobs {
@@ -129,6 +130,7 @@ impl ScrubCommand {
                             job.id_short(),
                             job.status.clone(),
                             job.progress_string(),
+                            job.node_short(),
                             job.started_at.clone().unwrap_or_default(),
                         ]);
                     }

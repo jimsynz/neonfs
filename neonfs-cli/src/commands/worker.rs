@@ -2,8 +2,10 @@
 
 use crate::daemon::DaemonConnection;
 use crate::error::Result;
-use crate::output::{json, OutputFormat};
-use crate::term::{extract_error, term_to_map, term_to_u64, unwrap_ok_tuple};
+use crate::output::{json, table, OutputFormat};
+use crate::term::{
+    extract_error, term_to_list, term_to_map, term_to_string, term_to_u64, unwrap_ok_tuple,
+};
 use clap::Subcommand;
 use eetf::{Binary, FixInteger, Map, Term};
 
@@ -144,49 +146,63 @@ impl WorkerCommand {
         }
 
         let data = unwrap_ok_tuple(result)?;
-        let status = term_to_map(&data)?;
+        let status_terms = term_to_list(&data)?;
 
-        let max_c = extract_u64(&status, "max_concurrent");
-        let max_m = extract_u64(&status, "max_per_minute");
-        let drive_c = extract_u64(&status, "drive_concurrency");
-        let queued = extract_u64(&status, "queued");
-        let running = extract_u64(&status, "running");
-        let completed = extract_u64(&status, "completed_total");
-
-        let (high, normal, low) = extract_priority_counts(&status);
+        let statuses: Vec<_> = status_terms
+            .iter()
+            .filter_map(|t| term_to_map(t).ok())
+            .collect();
 
         match format {
             OutputFormat::Json => {
-                let response = serde_json::json!({
-                    "max_concurrent": max_c,
-                    "max_per_minute": max_m,
-                    "drive_concurrency": drive_c,
-                    "queued": queued,
-                    "running": running,
-                    "completed_total": completed,
-                    "by_priority": {
-                        "high": high,
-                        "normal": normal,
-                        "low": low,
-                    },
-                });
-                println!("{}", json::format(&response)?);
+                let json_statuses: Vec<_> = statuses
+                    .iter()
+                    .map(|s| {
+                        let (high, normal, low) = extract_priority_counts(s);
+                        serde_json::json!({
+                            "node": extract_string(s, "node"),
+                            "max_concurrent": extract_u64(s, "max_concurrent"),
+                            "max_per_minute": extract_u64(s, "max_per_minute"),
+                            "drive_concurrency": extract_u64(s, "drive_concurrency"),
+                            "queued": extract_u64(s, "queued"),
+                            "running": extract_u64(s, "running"),
+                            "completed_total": extract_u64(s, "completed_total"),
+                            "by_priority": {
+                                "high": high,
+                                "normal": normal,
+                                "low": low,
+                            },
+                        })
+                    })
+                    .collect();
+                println!("{}", json::format(&json_statuses)?);
             }
             OutputFormat::Table => {
-                println!("Worker Configuration:");
-                println!("  Max concurrent:    {}", max_c);
-                println!("  Max per minute:    {}", max_m);
-                println!("  Drive concurrency: {}", drive_c);
-                println!();
-                println!("Runtime Status:");
-                println!("  Queued:    {}", queued);
-                println!("  Running:   {}", running);
-                println!("  Completed: {}", completed);
-                println!();
-                println!("Queue by Priority:");
-                println!("  High:   {}", high);
-                println!("  Normal: {}", normal);
-                println!("  Low:    {}", low);
+                if statuses.is_empty() {
+                    println!("No worker status available");
+                } else {
+                    let mut tbl = table::Table::new(vec![
+                        "NODE".to_string(),
+                        "CONCURRENT".to_string(),
+                        "PER MIN".to_string(),
+                        "DRIVE CONC".to_string(),
+                        "QUEUED".to_string(),
+                        "RUNNING".to_string(),
+                        "COMPLETED".to_string(),
+                    ]);
+                    for s in &statuses {
+                        tbl.add_row(vec![
+                            node_short_from_map(s),
+                            extract_u64(s, "max_concurrent").to_string(),
+                            extract_u64(s, "max_per_minute").to_string(),
+                            extract_u64(s, "drive_concurrency").to_string(),
+                            extract_u64(s, "queued").to_string(),
+                            extract_u64(s, "running").to_string(),
+                            extract_u64(s, "completed_total").to_string(),
+                        ]);
+                    }
+                    print!("{}", tbl.render()?);
+                }
             }
         }
         Ok(())
@@ -195,6 +211,21 @@ impl WorkerCommand {
 
 fn extract_u64(map: &std::collections::HashMap<String, Term>, key: &str) -> u64 {
     map.get(key).and_then(|t| term_to_u64(t).ok()).unwrap_or(0)
+}
+
+fn extract_string(map: &std::collections::HashMap<String, Term>, key: &str) -> String {
+    map.get(key)
+        .and_then(|t| term_to_string(t).ok())
+        .unwrap_or_default()
+}
+
+fn node_short_from_map(map: &std::collections::HashMap<String, Term>) -> String {
+    let node = extract_string(map, "node");
+    if let Some(at_pos) = node.find('@') {
+        node[..at_pos].to_string()
+    } else {
+        node
+    }
 }
 
 fn extract_priority_counts(status: &std::collections::HashMap<String, Term>) -> (u64, u64, u64) {

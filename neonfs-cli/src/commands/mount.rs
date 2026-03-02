@@ -165,12 +165,18 @@ impl MountCommand {
                     println!("No active mounts");
                 } else {
                     let mut tbl = table::Table::new(vec![
+                        "NODE".to_string(),
                         "VOLUME".to_string(),
                         "MOUNTPOINT".to_string(),
                         "MOUNTED AT".to_string(),
                     ]);
-                    for mount in mounts {
-                        tbl.add_row(vec![mount.volume_name, mount.mount_point, mount.started_at]);
+                    for mount in &mounts {
+                        tbl.add_row(vec![
+                            mount.node_short(),
+                            mount.volume_name.clone(),
+                            mount.mount_point.clone(),
+                            mount.started_at.clone(),
+                        ]);
                     }
                     print!("{}", tbl.render()?);
                 }

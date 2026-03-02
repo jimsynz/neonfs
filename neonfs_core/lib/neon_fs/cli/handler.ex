@@ -519,7 +519,7 @@ defmodule NeonFS.CLI.Handler do
          opts = map_to_opts(options),
          {:ok, mount_id} <- rpc_mount(fuse_node, volume_name, mount_point, opts),
          {:ok, mount_info} <- rpc_get_mount(fuse_node, mount_id) do
-      {:ok, mount_info_to_map(mount_info)}
+      {:ok, mount_info_to_map(mount_info, fuse_node)}
     else
       {:error, :not_found} ->
         {:error, VolumeNotFound.exception(volume_name: volume_name)}
@@ -558,23 +558,28 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
-  Lists all active mounts.
+  Lists all active mounts across the cluster.
 
-  Requires the neonfs_fuse application to be running on the local node.
+  Queries all discovered FUSE nodes and aggregates their mounts.
 
   ## Returns
-  - `{:ok, [map]}` - List of mount info maps
+  - `{:ok, [map]}` - List of mount info maps with node field
   """
   @spec list_mounts() :: {:ok, [map()]}
   def list_mounts do
     set_cli_metadata()
 
-    with {:ok, fuse_node} <- get_fuse_node(),
-         {:ok, mounts} <- rpc_list_mounts(fuse_node) do
-      {:ok, Enum.map(mounts, &mount_info_to_map/1)}
+    fuse_nodes = get_all_fuse_nodes()
+
+    if Enum.empty?(fuse_nodes) do
+      {:error, wrap_error(Unavailable.exception(message: "FUSE service not available"))}
     else
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
+      mounts =
+        fuse_nodes
+        |> Enum.flat_map(&collect_node_mounts/1)
+        |> Enum.sort_by(& &1.node)
+
+      {:ok, mounts}
     end
   end
 
@@ -739,8 +744,21 @@ defmodule NeonFS.CLI.Handler do
       filters
       |> parse_audit_filters()
 
+    local_events = AuditLog.query(query_opts)
+
+    remote_events =
+      for node <- Node.list(), reduce: [] do
+        acc ->
+          case safe_remote_audit_query(node, query_opts) do
+            events when is_list(events) -> events ++ acc
+            _ -> acc
+          end
+      end
+
     events =
-      AuditLog.query(query_opts)
+      (local_events ++ remote_events)
+      |> Enum.sort_by(& &1.timestamp, {:desc, DateTime})
+      |> maybe_limit_events(query_opts)
       |> Enum.map(&audit_event_to_map/1)
 
     {:ok, events}
@@ -1089,7 +1107,7 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
-  Returns recent garbage collection jobs.
+  Returns recent garbage collection jobs across the cluster.
 
   ## Returns
   - `{:ok, [map]}` - List of GC job maps, most recent first
@@ -1097,7 +1115,7 @@ defmodule NeonFS.CLI.Handler do
   @spec handle_gc_status() :: {:ok, [map()]}
   def handle_gc_status do
     set_cli_metadata()
-    jobs = JobTracker.list(type: NeonFS.Core.Job.Runners.GarbageCollection)
+    jobs = JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.GarbageCollection)
     {:ok, Enum.map(jobs, &job_to_map/1)}
   end
 
@@ -1126,7 +1144,7 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
-  Returns recent scrub jobs.
+  Returns recent scrub jobs across the cluster.
 
   ## Returns
   - `{:ok, [map]}` - List of scrub job maps, most recent first
@@ -1134,7 +1152,7 @@ defmodule NeonFS.CLI.Handler do
   @spec handle_scrub_status() :: {:ok, [map()]}
   def handle_scrub_status do
     set_cli_metadata()
-    jobs = JobTracker.list(type: NeonFS.Core.Job.Runners.Scrub)
+    jobs = JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.Scrub)
     {:ok, Enum.map(jobs, &job_to_map/1)}
   end
 
@@ -1213,30 +1231,31 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
-  Returns the current background worker status.
+  Returns background worker status across the cluster.
 
   ## Returns
-  - `{:ok, map}` - Worker status map with config and runtime stats
+  - `{:ok, [map]}` - List of per-node worker status maps
   """
-  @spec handle_worker_status() :: {:ok, map()}
+  @spec handle_worker_status() :: {:ok, [map()]}
   def handle_worker_status do
     set_cli_metadata()
-    status = BackgroundWorker.status()
 
-    {:ok,
-     %{
-       max_concurrent: status.max_concurrent,
-       max_per_minute: status.max_per_minute,
-       drive_concurrency: status.drive_concurrency,
-       queued: status.queued,
-       running: status.running,
-       completed_total: status.completed_total,
-       by_priority: %{
-         high: status.by_priority[:high] || 0,
-         normal: status.by_priority[:normal] || 0,
-         low: status.by_priority[:low] || 0
-       }
-     }}
+    local_status = worker_status_map(Node.self(), BackgroundWorker.status())
+
+    remote_statuses =
+      for node <- Node.list(), reduce: [] do
+        acc ->
+          case safe_remote_worker_status(node) do
+            {:ok, status} -> [worker_status_map(node, status) | acc]
+            _ -> acc
+          end
+      end
+
+    statuses =
+      [local_status | remote_statuses]
+      |> Enum.sort_by(& &1.node)
+
+    {:ok, statuses}
   end
 
   @doc """
@@ -1260,8 +1279,14 @@ defmodule NeonFS.CLI.Handler do
     with {:ok, changes} <- validate_worker_config(config),
          :ok <- BackgroundWorker.reconfigure(changes),
          :ok <- persist_worker_config(config) do
-      {:ok, status} = handle_worker_status()
-      {:ok, Map.take(status, [:max_concurrent, :max_per_minute, :drive_concurrency])}
+      status = BackgroundWorker.status()
+
+      {:ok,
+       %{
+         max_concurrent: status.max_concurrent,
+         max_per_minute: status.max_per_minute,
+         drive_concurrency: status.drive_concurrency
+       }}
     else
       {:error, reason} ->
         {:error, wrap_error(reason)}
@@ -1494,6 +1519,30 @@ defmodule NeonFS.CLI.Handler do
 
   defp resolve_scrub_params(_), do: {:ok, %{}}
 
+  # Get all reachable FUSE nodes in the cluster
+  defp get_all_fuse_nodes do
+    registry_nodes =
+      try do
+        ServiceRegistry.list_by_type(:fuse)
+        |> Enum.map(& &1.node)
+      rescue
+        ArgumentError -> []
+      end
+
+    local_node =
+      case check_local_fuse() do
+        :available -> [Node.self()]
+        :not_available -> []
+      end
+
+    connected_fuse_nodes =
+      Node.list()
+      |> Enum.filter(&fuse_node?/1)
+
+    (registry_nodes ++ local_node ++ connected_fuse_nodes)
+    |> Enum.uniq()
+  end
+
   # Get the FUSE node and verify it's reachable
   # Checks in order: ServiceRegistry, local node, connected nodes, configured fallback
   defp get_fuse_node do
@@ -1672,10 +1721,21 @@ defmodule NeonFS.CLI.Handler do
   defp wrap_unmount_result(:ok), do: {:ok, %{}}
   defp wrap_unmount_result({:error, _} = err), do: err
 
-  defp mount_info_to_map(mount_info) do
+  defp collect_node_mounts(fuse_node) do
+    case rpc_list_mounts(fuse_node) do
+      {:ok, node_mounts} ->
+        Enum.map(node_mounts, &mount_info_to_map(&1, fuse_node))
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp mount_info_to_map(mount_info, fuse_node) do
     # Convert mount info to map, excluding PIDs and references
     %{
       id: mount_info.id,
+      node: Atom.to_string(fuse_node),
       volume_name: mount_info.volume_name,
       mount_point: mount_info.mount_point,
       started_at: DateTime.to_iso8601(mount_info.started_at)
@@ -1874,6 +1934,43 @@ defmodule NeonFS.CLI.Handler do
       {:ok, dt, _offset} -> dt
       _ -> nil
     end
+  end
+
+  defp safe_remote_audit_query(node, query_opts) do
+    :erpc.call(node, AuditLog, :query, [query_opts], 5_000)
+  catch
+    :exit, _ -> []
+  end
+
+  defp maybe_limit_events(events, query_opts) do
+    limit = Keyword.get(query_opts, :limit, 100)
+    Enum.take(events, limit)
+  end
+
+  defp worker_status_map(node, status) do
+    %{
+      node: Atom.to_string(node),
+      max_concurrent: status.max_concurrent,
+      max_per_minute: status.max_per_minute,
+      drive_concurrency: status.drive_concurrency,
+      queued: status.queued,
+      running: status.running,
+      completed_total: status.completed_total,
+      by_priority: %{
+        high: status.by_priority[:high] || 0,
+        normal: status.by_priority[:normal] || 0,
+        low: status.by_priority[:low] || 0
+      }
+    }
+  end
+
+  defp safe_remote_worker_status(node) do
+    case :erpc.call(node, BackgroundWorker, :status, [], 5_000) do
+      status when is_map(status) -> {:ok, status}
+      other -> {:error, other}
+    end
+  catch
+    :exit, _ -> {:error, :unreachable}
   end
 
   defp encryption_to_map(%VolumeEncryption{} = enc) do
