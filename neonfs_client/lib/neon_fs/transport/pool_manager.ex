@@ -285,37 +285,7 @@ defmodule NeonFS.Transport.PoolManager do
     peer_nodes = MapSet.new(peers, fn {node, _endpoint} -> node end)
 
     # Create or replace pools — detect endpoint changes from container redeploys
-    for {node, endpoint} <- peers do
-      case :ets.lookup(@ets_table, node) do
-        [{^node, pid, ^endpoint}] when is_pid(pid) ->
-          # Same endpoint — keep existing pool if alive
-          unless Process.alive?(pid), do: create_pool(node, endpoint, state)
-
-        [{^node, pid, stale_endpoint}] when is_pid(pid) ->
-          # Endpoint changed — replace pool
-          if Process.alive?(pid) do
-            Logger.info("Peer endpoint changed, replacing pool",
-              node: node,
-              old_endpoint: inspect(stale_endpoint),
-              new_endpoint: inspect(endpoint)
-            )
-
-            :telemetry.execute(
-              [:neonfs, :transport, :pool_manager, :endpoint_changed],
-              %{},
-              %{node: node, old_endpoint: stale_endpoint, new_endpoint: endpoint}
-            )
-
-            do_remove_pool(node, state)
-          end
-
-          create_pool(node, endpoint, state)
-
-        _ ->
-          # No pool yet — create
-          create_pool(node, endpoint, state)
-      end
-    end
+    Enum.each(peers, fn {node, endpoint} -> sync_peer_pool(node, endpoint, state) end)
 
     # Remove pools for departed peers
     existing_nodes =
@@ -339,6 +309,38 @@ defmodule NeonFS.Transport.PoolManager do
     :ok
   rescue
     ArgumentError -> :ok
+  end
+
+  defp sync_peer_pool(node, endpoint, state) do
+    case :ets.lookup(@ets_table, node) do
+      [{^node, pid, ^endpoint}] when is_pid(pid) ->
+        unless Process.alive?(pid), do: create_pool(node, endpoint, state)
+
+      [{^node, pid, stale_endpoint}] when is_pid(pid) ->
+        replace_stale_pool(node, pid, stale_endpoint, endpoint, state)
+
+      _ ->
+        create_pool(node, endpoint, state)
+    end
+  end
+
+  defp replace_stale_pool(node, pid, stale_endpoint, endpoint, state) do
+    if Process.alive?(pid) do
+      Logger.info(
+        "Peer endpoint changed, replacing pool: #{inspect(stale_endpoint)} -> #{inspect(endpoint)}",
+        node: node
+      )
+
+      :telemetry.execute(
+        [:neonfs, :transport, :pool_manager, :endpoint_changed],
+        %{},
+        %{node: node, old_endpoint: stale_endpoint, new_endpoint: endpoint}
+      )
+
+      do_remove_pool(node, state)
+    end
+
+    create_pool(node, endpoint, state)
   end
 
   defp discover_peer_endpoints(service_list_fn) do
