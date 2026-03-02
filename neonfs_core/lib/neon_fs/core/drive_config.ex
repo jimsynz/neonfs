@@ -90,6 +90,41 @@ defmodule NeonFS.Core.DriveConfig do
     Enum.each(drives, &validate_drive_capacity/1)
   end
 
+  @doc """
+  Detects the filesystem capacity for a drive with `capacity_bytes: 0`.
+
+  Queries the filesystem via the `filesystem_info` NIF and sets `capacity_bytes`
+  to the partition's total size. No-op when capacity is already non-zero.
+  Returns the drive unchanged on filesystem error (with a warning log).
+
+  ## Parameters
+    - `drive` — a `NeonFS.Core.Drive.t()` struct
+  """
+  @spec detect_capacity(NeonFS.Core.Drive.t()) :: NeonFS.Core.Drive.t()
+  def detect_capacity(%{capacity_bytes: capacity} = drive) when capacity > 0, do: drive
+
+  def detect_capacity(%{path: path, id: id} = drive) do
+    case Native.filesystem_info(path) do
+      {:ok, {total_bytes, _available, _used}} ->
+        Logger.info("Auto-detected drive capacity from filesystem",
+          drive_id: id,
+          detected_capacity: format_bytes(total_bytes),
+          path: path
+        )
+
+        %{drive | capacity_bytes: total_bytes}
+
+      {:error, reason} ->
+        Logger.warning("Could not detect drive capacity from filesystem",
+          drive_id: id,
+          path: path,
+          reason: reason
+        )
+
+        drive
+    end
+  end
+
   ## Private
 
   defp parse_capacity_parts(string) do

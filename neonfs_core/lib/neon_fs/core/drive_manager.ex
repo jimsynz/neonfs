@@ -86,6 +86,22 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   @doc """
+  Lists all drives across the cluster as serialisable maps.
+
+  ## Options
+
+    * `:node` - Filter to drives on a specific node (atom). If omitted, returns all nodes.
+
+  ## Returns
+
+    * List of drive info maps sorted by `{node, id}`
+  """
+  @spec list_all_drives(keyword()) :: [map()]
+  def list_all_drives(opts \\ []) do
+    GenServer.call(__MODULE__, {:list_all_drives, opts})
+  end
+
+  @doc """
   Lists all local drives as serialisable maps.
   """
   @spec list_drives() :: [map()]
@@ -140,6 +156,18 @@ defmodule NeonFS.Core.DriveManager do
     end
   end
 
+  def handle_call({:list_all_drives, opts}, _from, state) do
+    drives =
+      case Keyword.get(opts, :node) do
+        nil -> DriveRegistry.list_drives()
+        node -> DriveRegistry.drives_for_node(node)
+      end
+      |> Enum.sort_by(&{&1.node, &1.id})
+      |> Enum.map(&drive_to_map/1)
+
+    {:reply, drives, state}
+  end
+
   def handle_call(:list_drives, _from, state) do
     drives =
       DriveRegistry.drives_for_node(Node.self())
@@ -155,7 +183,7 @@ defmodule NeonFS.Core.DriveManager do
          :ok <- check_path_exists(parsed.path),
          :ok <- check_id_unique(parsed.id),
          {:ok, _drive_id} <- BlobStore.open_store(parsed, timeout: :infinity),
-         drive = Drive.from_config(parsed, Node.self()),
+         drive = parsed |> Drive.from_config(Node.self()) |> DriveConfig.detect_capacity(),
          :ok <- DriveRegistry.register_drive(drive, timeout: :infinity),
          :ok <- start_single_drive_state(parsed, command_module),
          :ok <- validate_capacity(drive),

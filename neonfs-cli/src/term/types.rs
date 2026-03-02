@@ -47,16 +47,32 @@ impl DriveInfo {
         })
     }
 
-    /// Format capacity in human-readable format
+    /// Returns a shortened node name (part before `@`)
+    pub fn node_short(&self) -> String {
+        if let Some(at_pos) = self.node.find('@') {
+            self.node[..at_pos].to_string()
+        } else {
+            self.node.clone()
+        }
+    }
+
+    /// Format capacity in human-readable format (0 = "unlimited")
     pub fn format_capacity(bytes: u64) -> String {
+        if bytes == 0 {
+            "unlimited".to_string()
+        } else {
+            Self::format_bytes(bytes)
+        }
+    }
+
+    /// Format bytes in human-readable format (0 = "0 B")
+    pub fn format_bytes(bytes: u64) -> String {
         const KB: u64 = 1024;
         const MB: u64 = KB * 1024;
         const GB: u64 = MB * 1024;
         const TB: u64 = GB * 1024;
 
-        if bytes == 0 {
-            "unlimited".to_string()
-        } else if bytes >= TB {
+        if bytes >= TB {
             format!("{:.1} TiB", bytes as f64 / TB as f64)
         } else if bytes >= GB {
             format!("{:.1} GiB", bytes as f64 / GB as f64)
@@ -775,6 +791,35 @@ mod tests {
         assert_eq!(DriveInfo::format_capacity(1_099_511_627_776), "1.0 TiB");
         assert_eq!(DriveInfo::format_capacity(1_073_741_824), "1.0 GiB");
         assert_eq!(DriveInfo::format_capacity(104_857_600), "100.0 MiB");
+    }
+
+    #[test]
+    fn test_drive_info_node_short() {
+        let drive = DriveInfo {
+            id: "nvme0".to_string(),
+            node: "neonfs_core@localhost".to_string(),
+            path: "/data/nvme0".to_string(),
+            tier: "hot".to_string(),
+            capacity_bytes: 0,
+            used_bytes: 0,
+            state: "active".to_string(),
+        };
+        assert_eq!(drive.node_short(), "neonfs_core");
+
+        let drive_no_at = DriveInfo {
+            node: "nohost".to_string(),
+            ..drive
+        };
+        assert_eq!(drive_no_at.node_short(), "nohost");
+    }
+
+    #[test]
+    fn test_drive_info_format_bytes() {
+        assert_eq!(DriveInfo::format_bytes(0), "0 B");
+        assert_eq!(DriveInfo::format_bytes(512), "512 B");
+        assert_eq!(DriveInfo::format_bytes(1_099_511_627_776), "1.0 TiB");
+        assert_eq!(DriveInfo::format_bytes(1_073_741_824), "1.0 GiB");
+        assert_eq!(DriveInfo::format_bytes(104_857_600), "100.0 MiB");
     }
 
     #[test]

@@ -40,8 +40,12 @@ pub enum DriveCommand {
         force: bool,
     },
 
-    /// List all drives on this node
-    List,
+    /// List all drives across the cluster
+    List {
+        /// Filter to drives on a specific node
+        #[arg(long)]
+        node: Option<String>,
+    },
 
     /// Evacuate all data from a drive (graceful removal)
     Evacuate {
@@ -69,7 +73,7 @@ impl DriveCommand {
                 id,
             } => self.add(path, tier, capacity, id.as_deref(), format),
             DriveCommand::Remove { drive_id, force } => self.remove(drive_id, *force, format),
-            DriveCommand::List => self.list(format),
+            DriveCommand::List { node } => self.list(node.as_deref(), format),
             DriveCommand::Evacuate {
                 drive_id,
                 node,
@@ -218,13 +222,34 @@ impl DriveCommand {
         Ok(())
     }
 
-    fn list(&self, format: OutputFormat) -> Result<()> {
+    fn list(&self, node: Option<&str>, format: OutputFormat) -> Result<()> {
         let runtime = tokio::runtime::Runtime::new()?;
+
+        let mut filter_entries = vec![];
+
+        if let Some(n) = node {
+            filter_entries.push((
+                Term::Binary(Binary {
+                    bytes: b"node".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: n.as_bytes().to_vec(),
+                }),
+            ));
+        }
+
+        let filters_term = Term::Map(Map {
+            entries: filter_entries,
+        });
 
         let result = runtime.block_on(async {
             let mut conn = DaemonConnection::connect().await?;
-            conn.call("Elixir.NeonFS.CLI.Handler", "handle_list_drives", vec![])
-                .await
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_list_drives",
+                vec![filters_term],
+            )
+            .await
         })?;
 
         if let Some(err) = extract_error(&result) {
@@ -246,6 +271,7 @@ impl DriveCommand {
                     println!("No drives configured");
                 } else {
                     let mut tbl = table::Table::new(vec![
+                        "NODE".to_string(),
                         "ID".to_string(),
                         "PATH".to_string(),
                         "TIER".to_string(),
@@ -255,11 +281,12 @@ impl DriveCommand {
                     ]);
                     for drive in &drives {
                         tbl.add_row(vec![
+                            drive.node_short(),
                             drive.id.clone(),
                             drive.path.clone(),
                             drive.tier.clone(),
                             DriveInfo::format_capacity(drive.capacity_bytes),
-                            DriveInfo::format_capacity(drive.used_bytes),
+                            DriveInfo::format_bytes(drive.used_bytes),
                             drive.state.clone(),
                         ]);
                     }
@@ -411,6 +438,23 @@ mod tests {
 
         let cli = TestCli::try_parse_from(["test", "list"]);
         assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            match parsed.command {
+                DriveCommand::List { node } => assert!(node.is_none()),
+                _ => panic!("Expected List variant"),
+            }
+        }
+
+        let cli = TestCli::try_parse_from(["test", "list", "--node", "neonfs_core@host1"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            match parsed.command {
+                DriveCommand::List { node } => {
+                    assert_eq!(node.as_deref(), Some("neonfs_core@host1"));
+                }
+                _ => panic!("Expected List variant"),
+            }
+        }
 
         let cli = TestCli::try_parse_from(["test", "add", "--path", "/data/nvme0"]);
         assert!(cli.is_ok());

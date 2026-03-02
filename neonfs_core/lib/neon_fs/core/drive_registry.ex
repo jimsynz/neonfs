@@ -175,7 +175,9 @@ defmodule NeonFS.Core.DriveRegistry do
 
     local_drives =
       Enum.map(drives_config, fn config ->
-        Drive.from_config(config, Node.self())
+        config
+        |> Drive.from_config(Node.self())
+        |> DriveConfig.detect_capacity()
       end)
 
     Enum.each(local_drives, fn drive ->

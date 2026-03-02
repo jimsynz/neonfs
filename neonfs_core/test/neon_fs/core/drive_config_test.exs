@@ -65,6 +65,45 @@ defmodule NeonFS.Core.DriveConfigTest do
     end
   end
 
+  describe "detect_capacity/1" do
+    test "no-op when capacity is already set" do
+      drive = %NeonFS.Core.Drive{
+        id: "test",
+        node: Node.self(),
+        path: "/tmp",
+        tier: :hot,
+        capacity_bytes: 1_000_000
+      }
+
+      assert DriveConfig.detect_capacity(drive).capacity_bytes == 1_000_000
+    end
+
+    test "fills capacity from filesystem when capacity is zero" do
+      drive = %NeonFS.Core.Drive{
+        id: "test",
+        node: Node.self(),
+        path: "/tmp",
+        tier: :hot,
+        capacity_bytes: 0
+      }
+
+      result = DriveConfig.detect_capacity(drive)
+      assert result.capacity_bytes > 0
+    end
+
+    test "returns drive unchanged on nonexistent path" do
+      drive = %NeonFS.Core.Drive{
+        id: "test",
+        node: Node.self(),
+        path: "/nonexistent/path/that/does/not/exist",
+        tier: :hot,
+        capacity_bytes: 0
+      }
+
+      assert DriveConfig.detect_capacity(drive).capacity_bytes == 0
+    end
+  end
+
   describe "validate_drives/1" do
     test "skips drives with zero capacity" do
       drive = %NeonFS.Core.Drive{

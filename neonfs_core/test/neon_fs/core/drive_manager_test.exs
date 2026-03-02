@@ -66,6 +66,38 @@ defmodule NeonFS.Core.DriveManagerTest do
     end
   end
 
+  describe "list_all_drives/1" do
+    test "returns all drives with no filter" do
+      drives = DriveManager.list_all_drives()
+      assert length(drives) == 1
+      assert hd(drives).id == "default"
+      assert hd(drives).node == Atom.to_string(Node.self())
+    end
+
+    test "filters by node" do
+      drives = DriveManager.list_all_drives(node: Node.self())
+      assert length(drives) == 1
+      assert hd(drives).id == "default"
+    end
+
+    test "returns empty list for unknown node" do
+      drives = DriveManager.list_all_drives(node: :unknown@nowhere)
+      assert drives == []
+    end
+
+    test "includes drives added at runtime", %{tmp_dir: tmp_dir} do
+      new_path = Path.join(tmp_dir, "extra_drive")
+      File.mkdir_p!(new_path)
+      {:ok, _} = DriveManager.add_drive(%{id: "extra", path: new_path, tier: "warm"})
+
+      drives = DriveManager.list_all_drives()
+      assert length(drives) == 2
+      ids = Enum.map(drives, & &1.id)
+      assert "default" in ids
+      assert "extra" in ids
+    end
+  end
+
   describe "add_drive/1" do
     test "adds a new drive", %{tmp_dir: tmp_dir} do
       new_path = Path.join(tmp_dir, "new_drive")

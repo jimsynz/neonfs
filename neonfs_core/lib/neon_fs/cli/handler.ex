@@ -886,15 +886,26 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
-  Lists all drives on the local node.
+  Lists drives across the cluster.
+
+  ## Parameters
+  - `filters` - Optional filter map:
+    - `"node"` - Node name string to filter by (e.g. "neonfs_core@host1")
 
   ## Returns
   - `{:ok, [map]}` - List of drive info maps
   """
-  @spec handle_list_drives() :: {:ok, [map()]}
-  def handle_list_drives do
+  @spec handle_list_drives(map()) :: {:ok, [map()]}
+  def handle_list_drives(filters \\ %{}) do
     set_cli_metadata()
-    {:ok, DriveManager.list_drives()}
+
+    opts =
+      case Map.get(filters, "node") do
+        nil -> []
+        node_name -> [node: String.to_atom(node_name)]
+      end
+
+    {:ok, DriveManager.list_all_drives(opts)}
   end
 
   @doc """
