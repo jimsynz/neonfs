@@ -162,6 +162,14 @@ fn term_to_json(term: &Term) -> serde_json::Value {
             serde_json::Value::String(String::from_utf8_lossy(bytes).to_string())
         }
         Term::FixInteger(FixInteger { value }) => serde_json::json!(*value),
+        Term::BigInteger(big) => {
+            use num_traits::ToPrimitive;
+            if let Some(n) = big.to_i64() {
+                serde_json::json!(n)
+            } else {
+                serde_json::Value::String(big.to_string())
+            }
+        }
         Term::Float(f) => serde_json::json!(f.value),
         Term::Map(Map { entries }) => {
             let mut map = serde_json::Map::new();

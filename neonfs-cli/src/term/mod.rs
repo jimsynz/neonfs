@@ -4,6 +4,7 @@ pub mod types;
 
 use crate::error::{CliError, ErrorClass, Result};
 use eetf::{Atom, Binary, FixInteger, List, Map, Term, Tuple};
+use num_traits::ToPrimitive;
 use std::collections::HashMap;
 
 /// Convert Erlang term to string
@@ -24,9 +25,9 @@ pub fn term_to_string(term: &Term) -> Result<String> {
 pub fn term_to_i64(term: &Term) -> Result<i64> {
     match term {
         Term::FixInteger(FixInteger { value }) => Ok(*value as i64),
-        Term::BigInteger(_) => Err(CliError::TermConversionError(
-            "BigInteger conversion not supported (value too large)".to_string(),
-        )),
+        Term::BigInteger(big) => big.to_i64().ok_or_else(|| {
+            CliError::TermConversionError("BigInteger value overflows i64".to_string())
+        }),
         _ => Err(CliError::TermConversionError(format!(
             "Cannot convert {:?} to integer",
             term
@@ -46,9 +47,11 @@ pub fn term_to_u64(term: &Term) -> Result<u64> {
                 ))
             }
         }
-        Term::BigInteger(_) => Err(CliError::TermConversionError(
-            "BigInteger conversion not supported (value too large)".to_string(),
-        )),
+        Term::BigInteger(big) => big.to_u64().ok_or_else(|| {
+            CliError::TermConversionError(
+                "BigInteger value overflows u64 or is negative".to_string(),
+            )
+        }),
         _ => Err(CliError::TermConversionError(format!(
             "Cannot convert {:?} to u64",
             term

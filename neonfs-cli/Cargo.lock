@@ -691,6 +691,7 @@ dependencies = [
  "eetf",
  "erl_rpc",
  "hex",
+ "num-traits",
  "rand 0.10.0",
  "serde",
  "serde_json",

@@ -716,6 +716,10 @@ fn extract_token(term: &Term) -> Result<String> {
 fn extract_integer(term: &Term) -> Option<i64> {
     match term {
         Term::FixInteger(n) => Some(n.value as i64),
+        Term::BigInteger(big) => {
+            use num_traits::ToPrimitive;
+            big.to_i64()
+        }
         _ => None,
     }
 }

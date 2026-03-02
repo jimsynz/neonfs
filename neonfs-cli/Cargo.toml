@@ -24,6 +24,7 @@ erl_rpc = "0.3"    # High-level Erlang RPC client
 # in the dependency graph, breaking type compatibility at NIF boundaries.
 # Unpin when erl_rpc releases a version that depends on erl_dist >=0.7.
 eetf = "=0.8.0"
+num-traits = "0.2"  # For BigInteger → u64/i64 via ToPrimitive
 hex = "0.4"        # For cookie encoding
 rand = "0.10"       # For generating node names
 
