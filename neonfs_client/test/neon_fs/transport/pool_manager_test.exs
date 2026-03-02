@@ -6,6 +6,10 @@ defmodule NeonFS.Transport.PoolManagerTest do
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
+    # Clear the OTP PEM cache so stale entries from a previous iteration
+    # (same tmp_dir paths, different cert content) don't cause Unknown CA errors.
+    :ssl.clear_pem_cache()
+
     # Generate CA + server + client certs
     {ca_cert, ca_key} = TLS.generate_ca("pool-manager-test")
 
@@ -235,6 +239,87 @@ defmodule NeonFS.Transport.PoolManagerTest do
       assert {:ok, _} = PoolManager.get_pool(:peer_b@host2)
 
       # Verify the manager is still alive
+      assert Process.alive?(pm)
+    end
+
+    test "replaces pool when endpoint changes", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :pool_manager, :discovery_refresh],
+          [:neonfs, :transport, :pool_manager, :endpoint_changed]
+        ])
+
+      # Start with peer_a at port ctx.port
+      setup_discovery_ets([
+        {:peer_a@host1, :core, %{data_endpoint: {~c"localhost", ctx.port}}}
+      ])
+
+      pm = start_pool_manager(ctx, discovery_refresh_interval: 100)
+
+      # Wait for first refresh to create the pool
+      assert_receive {[:neonfs, :transport, :pool_manager, :discovery_refresh], ^ref, _, _}, 1_000
+      assert {:ok, original_pid} = PoolManager.get_pool(:peer_a@host1)
+
+      # Change the endpoint to a different port
+      new_port = ctx.port + 1
+
+      setup_discovery_ets([
+        {:peer_a@host1, :core, %{data_endpoint: {~c"localhost", new_port}}}
+      ])
+
+      # Wait for endpoint_changed telemetry
+      assert_receive {[:neonfs, :transport, :pool_manager, :endpoint_changed], ^ref, %{},
+                      %{
+                        node: :peer_a@host1,
+                        old_endpoint: _,
+                        new_endpoint: {~c"localhost", ^new_port}
+                      }},
+                     1_000
+
+      # Ensure the GenServer has finished processing the refresh (do_remove_pool runs
+      # after the telemetry event is emitted, so we need to sync)
+      :sys.get_state(pm)
+
+      # Pool should have been replaced (different PID or no pool if new endpoint unreachable)
+      # The old pool must not be alive
+      refute Process.alive?(original_pid)
+
+      # ETS entry should reflect the new endpoint regardless of whether the new pool connected
+      case :ets.lookup(:neonfs_transport_pools, :peer_a@host1) do
+        [{:peer_a@host1, _pid, endpoint}] ->
+          assert endpoint == {~c"localhost", new_port}
+
+        [] ->
+          # Pool creation may have failed (no server on new_port) — that's fine,
+          # the important thing is the stale pool was removed
+          :ok
+      end
+
+      assert Process.alive?(pm)
+    end
+
+    test "keeps pool when endpoint unchanged", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :pool_manager, :discovery_refresh]
+        ])
+
+      setup_discovery_ets([
+        {:peer_a@host1, :core, %{data_endpoint: {~c"localhost", ctx.port}}}
+      ])
+
+      pm = start_pool_manager(ctx, discovery_refresh_interval: 100)
+
+      # Wait for first refresh
+      assert_receive {[:neonfs, :transport, :pool_manager, :discovery_refresh], ^ref, _, _}, 1_000
+      assert {:ok, original_pid} = PoolManager.get_pool(:peer_a@host1)
+
+      # Wait for second refresh with same endpoint
+      assert_receive {[:neonfs, :transport, :pool_manager, :discovery_refresh], ^ref, _, _}, 1_000
+
+      # Pool should be the same PID — no replacement
+      assert {:ok, ^original_pid} = PoolManager.get_pool(:peer_a@host1)
+      assert Process.alive?(original_pid)
       assert Process.alive?(pm)
     end
   end
