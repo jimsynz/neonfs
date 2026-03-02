@@ -801,6 +801,54 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "handle_node_status/0" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns ok tuple with expected keys" do
+      assert {:ok, report} = Handler.handle_node_status()
+      assert Map.has_key?(report, :node)
+      assert Map.has_key?(report, :status)
+      assert Map.has_key?(report, :checked_at)
+      assert Map.has_key?(report, :checks)
+    end
+
+    test "status is a string" do
+      assert {:ok, report} = Handler.handle_node_status()
+      assert report.status in ["healthy", "degraded", "unhealthy"]
+    end
+
+    test "checked_at is an ISO8601 string" do
+      assert {:ok, report} = Handler.handle_node_status()
+      assert is_binary(report.checked_at)
+      assert {:ok, _dt, _offset} = DateTime.from_iso8601(report.checked_at)
+    end
+
+    test "checks is a map with subsystem keys" do
+      assert {:ok, report} = Handler.handle_node_status()
+      assert is_map(report.checks)
+
+      for {name, check} <- report.checks do
+        assert is_binary(name), "subsystem name should be a string"
+        assert is_map(check), "subsystem check should be a map"
+        assert Map.has_key?(check, "status"), "subsystem check should have a status key"
+      end
+    end
+
+    test "node is a string" do
+      assert {:ok, report} = Handler.handle_node_status()
+      assert is_binary(report.node)
+      assert report.node == Atom.to_string(Node.self())
+    end
+  end
+
   describe "handle_worker_status/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)

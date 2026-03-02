@@ -21,6 +21,7 @@ defmodule NeonFS.CLI.Handler do
     BackgroundWorker,
     CertificateAuthority,
     DriveManager,
+    HealthCheck,
     JobTracker,
     KeyManager,
     KeyRotation,
@@ -1303,7 +1304,52 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
+  @doc """
+  Returns node health status from the HealthCheck subsystem.
+
+  ## Returns
+  - `{:ok, map}` - Health report with node, status, checked_at, and per-subsystem checks
+  """
+  @spec handle_node_status() :: {:ok, map()}
+  def handle_node_status do
+    set_cli_metadata()
+    report = HealthCheck.check()
+    {:ok, serialise_health_report(report)}
+  end
+
   # Private helper functions
+
+  defp serialise_health_report(report) do
+    %{
+      node: normalise_for_json(report.node),
+      status: normalise_for_json(report.status),
+      checked_at: normalise_for_json(report.checked_at),
+      checks:
+        Map.new(report.checks, fn {name, check} ->
+          {normalise_for_json(name), normalise_for_json(check)}
+        end)
+    }
+  end
+
+  defp normalise_for_json(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+
+  defp normalise_for_json(%_{} = struct) do
+    struct
+    |> Map.from_struct()
+    |> normalise_for_json()
+  end
+
+  defp normalise_for_json(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {normalise_for_json(key), normalise_for_json(value)} end)
+  end
+
+  defp normalise_for_json(list) when is_list(list), do: Enum.map(list, &normalise_for_json/1)
+
+  defp normalise_for_json(atom) when is_atom(atom) and atom not in [nil, true, false],
+    do: Atom.to_string(atom)
+
+  defp normalise_for_json(tuple) when is_tuple(tuple), do: inspect(tuple)
+  defp normalise_for_json(value), do: value
 
   defp set_cli_metadata do
     Logger.metadata(

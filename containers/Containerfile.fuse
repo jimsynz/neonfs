@@ -46,4 +46,7 @@ COPY --from=cli --chown=nobody:root /bin/neonfs /app/bin
 
 USER nobody
 
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD /app/bin/neonfs_fuse pid > /dev/null 2>&1
+
 CMD ["/app/bin/neonfs_fuse", "start"]

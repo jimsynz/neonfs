@@ -92,6 +92,10 @@ pub enum CliError {
     #[error("Term conversion error: {0}")]
     TermConversionError(String),
 
+    /// Node health check reported unhealthy status
+    #[error("node is unhealthy")]
+    HealthCheckFailed,
+
     /// Invalid argument
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
@@ -114,6 +118,7 @@ impl CliError {
     pub fn exit_code(&self) -> i32 {
         match self {
             CliError::NeonfsError { class, .. } => class.exit_code(),
+            CliError::HealthCheckFailed => 2,
             _ => 1,
         }
     }
@@ -202,6 +207,13 @@ mod tests {
 
         let rpc_err = CliError::RpcError("failed".to_string());
         assert_eq!(rpc_err.exit_code(), 1);
+    }
+
+    #[test]
+    fn test_health_check_failed_exit_code() {
+        let err = CliError::HealthCheckFailed;
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(format!("{err}"), "node is unhealthy");
     }
 
     #[test]
