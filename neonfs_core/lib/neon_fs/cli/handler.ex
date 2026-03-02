@@ -307,17 +307,27 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
-  Lists all volumes in the cluster.
+  Lists volumes in the cluster.
+
+  ## Parameters
+  - `filters` - Optional filter map:
+    - `"all"` - When `true`, includes system volumes (default: excluded)
 
   ## Returns
   - `{:ok, [map]}` - List of volume maps
   """
-  @spec list_volumes() :: {:ok, [map()]}
-  def list_volumes do
+  @spec list_volumes(map()) :: {:ok, [map()]}
+  def list_volumes(filters \\ %{}) do
     set_cli_metadata()
 
+    opts =
+      case Map.get(filters, "all") do
+        true -> [include_system: true]
+        _ -> []
+      end
+
     volumes =
-      VolumeRegistry.list()
+      VolumeRegistry.list(opts)
       |> Enum.map(&volume_to_map/1)
 
     {:ok, volumes}

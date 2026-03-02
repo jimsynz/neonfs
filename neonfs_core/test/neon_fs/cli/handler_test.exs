@@ -203,7 +203,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "list_volumes/0" do
+  describe "list_volumes/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
 
@@ -253,6 +253,32 @@ defmodule NeonFS.CLI.HandlerTest do
       for vol <- volumes do
         assert is_map(vol)
       end
+    end
+
+    test "excludes system volumes by default", %{tmp_dir: tmp_dir} do
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      vol_name = "user-vol-#{:rand.uniform(999_999)}"
+      Handler.create_volume(vol_name, %{})
+      VolumeRegistry.create_system_volume()
+
+      assert {:ok, volumes} = Handler.list_volumes()
+      refute Enum.any?(volumes, fn v -> v.name == "_system" end)
+      assert Enum.any?(volumes, fn v -> v.name == vol_name end)
+    end
+
+    test "includes system volumes when all filter is true", %{tmp_dir: tmp_dir} do
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      vol_name = "user-vol-#{:rand.uniform(999_999)}"
+      Handler.create_volume(vol_name, %{})
+      VolumeRegistry.create_system_volume()
+
+      assert {:ok, volumes} = Handler.list_volumes(%{"all" => true})
+      assert Enum.any?(volumes, fn v -> v.name == "_system" end)
+      assert Enum.any?(volumes, fn v -> v.name == vol_name end)
     end
   end
 

@@ -48,7 +48,11 @@ pub enum VolumeCommand {
     },
 
     /// List all volumes
-    List,
+    List {
+        /// Include system volumes (e.g. _system)
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Start key rotation for an encrypted volume
     RotateKey {
@@ -165,7 +169,7 @@ impl VolumeCommand {
                 format,
             ),
             VolumeCommand::Delete { name, force } => self.delete(name, *force, format),
-            VolumeCommand::List => self.list(format),
+            VolumeCommand::List { all } => self.list(*all, format),
             VolumeCommand::RotateKey { name } => self.rotate_key(name, format),
             VolumeCommand::RotationStatus { name } => self.rotation_status(name, format),
             VolumeCommand::Show { name } => self.show(name, format),
@@ -210,13 +214,32 @@ impl VolumeCommand {
         }
     }
 
-    fn list(&self, format: OutputFormat) -> Result<()> {
+    fn list(&self, all: bool, format: OutputFormat) -> Result<()> {
         let runtime = tokio::runtime::Runtime::new()?;
+
+        let mut filter_entries = vec![];
+
+        if all {
+            filter_entries.push((
+                Term::Binary(Binary {
+                    bytes: b"all".to_vec(),
+                }),
+                Term::Atom(Atom::from("true")),
+            ));
+        }
+
+        let filters_term = Term::Map(Map {
+            entries: filter_entries,
+        });
 
         let result = runtime.block_on(async {
             let mut conn = DaemonConnection::connect().await?;
-            conn.call("Elixir.NeonFS.CLI.Handler", "list_volumes", vec![])
-                .await
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "list_volumes",
+                vec![filters_term],
+            )
+            .await
         })?;
 
         if let Some(err) = extract_error(&result) {
@@ -757,6 +780,15 @@ mod tests {
 
         let cli = TestCli::try_parse_from(["test", "list"]);
         assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(parsed.command, VolumeCommand::List { all: false }));
+        }
+
+        let cli = TestCli::try_parse_from(["test", "list", "--all"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(parsed.command, VolumeCommand::List { all: true }));
+        }
 
         let cli = TestCli::try_parse_from(["test", "create", "myvol"]);
         assert!(cli.is_ok());
