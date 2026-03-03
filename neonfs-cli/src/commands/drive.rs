@@ -281,7 +281,7 @@ impl DriveCommand {
                     ]);
                     for drive in &drives {
                         tbl.add_row(vec![
-                            drive.node_short(),
+                            drive.node.clone(),
                             drive.id.clone(),
                             drive.path.clone(),
                             drive.tier.clone(),

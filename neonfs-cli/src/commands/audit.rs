@@ -181,7 +181,7 @@ impl AuditCommand {
                     for event in &events {
                         tbl.add_row(vec![
                             event.timestamp.clone(),
-                            event.node_short(),
+                            event.actor_node.clone(),
                             event.event_type.clone(),
                             format!("uid:{}", event.actor_uid),
                             event.resource.clone(),

@@ -192,7 +192,7 @@ impl WorkerCommand {
                     ]);
                     for s in &statuses {
                         tbl.add_row(vec![
-                            node_short_from_map(s),
+                            extract_string(s, "node"),
                             extract_u64(s, "max_concurrent").to_string(),
                             extract_u64(s, "max_per_minute").to_string(),
                             extract_u64(s, "drive_concurrency").to_string(),
@@ -217,15 +217,6 @@ fn extract_string(map: &std::collections::HashMap<String, Term>, key: &str) -> S
     map.get(key)
         .and_then(|t| term_to_string(t).ok())
         .unwrap_or_default()
-}
-
-fn node_short_from_map(map: &std::collections::HashMap<String, Term>) -> String {
-    let node = extract_string(map, "node");
-    if let Some(at_pos) = node.find('@') {
-        node[..at_pos].to_string()
-    } else {
-        node
-    }
 }
 
 fn extract_priority_counts(status: &std::collections::HashMap<String, Term>) -> (u64, u64, u64) {

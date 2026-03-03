@@ -140,7 +140,7 @@ impl JobCommand {
                             job.job_type.clone(),
                             job.status.clone(),
                             job.progress_string(),
-                            job.node_short(),
+                            job.node.clone(),
                             job.started_at.clone().unwrap_or_default(),
                         ]);
                     }

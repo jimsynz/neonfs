@@ -47,15 +47,6 @@ impl DriveInfo {
         })
     }
 
-    /// Returns a shortened node name (part before `@`)
-    pub fn node_short(&self) -> String {
-        if let Some(at_pos) = self.node.find('@') {
-            self.node[..at_pos].to_string()
-        } else {
-            self.node.clone()
-        }
-    }
-
     /// Format capacity in human-readable format (0 = "unlimited")
     pub fn format_capacity(bytes: u64) -> String {
         if bytes == 0 {
@@ -618,15 +609,6 @@ impl AuditEntry {
             })?)?,
         })
     }
-
-    /// Returns a shortened actor node name (part before `@`)
-    pub fn node_short(&self) -> String {
-        if let Some(at_pos) = self.actor_node.find('@') {
-            self.actor_node[..at_pos].to_string()
-        } else {
-            self.actor_node.clone()
-        }
-    }
 }
 
 /// Mount information response
@@ -665,15 +647,6 @@ impl MountInfo {
                 CliError::TermConversionError("Missing 'started_at' field".to_string())
             })?)?,
         })
-    }
-
-    /// Returns a shortened node name (part before `@`)
-    pub fn node_short(&self) -> String {
-        if let Some(at_pos) = self.node.find('@') {
-            self.node[..at_pos].to_string()
-        } else {
-            self.node.clone()
-        }
     }
 }
 
@@ -771,15 +744,6 @@ impl JobInfo {
         }
     }
 
-    /// Returns a shortened node name
-    pub fn node_short(&self) -> String {
-        if let Some(at_pos) = self.node.find('@') {
-            self.node[..at_pos].to_string()
-        } else {
-            self.node.clone()
-        }
-    }
-
     /// Returns progress as "completed/total (percent%)"
     pub fn progress_string(&self) -> String {
         if self.progress_total == 0 {
@@ -813,26 +777,6 @@ mod tests {
         assert_eq!(DriveInfo::format_capacity(1_099_511_627_776), "1.0 TiB");
         assert_eq!(DriveInfo::format_capacity(1_073_741_824), "1.0 GiB");
         assert_eq!(DriveInfo::format_capacity(104_857_600), "100.0 MiB");
-    }
-
-    #[test]
-    fn test_drive_info_node_short() {
-        let drive = DriveInfo {
-            id: "nvme0".to_string(),
-            node: "neonfs_core@localhost".to_string(),
-            path: "/data/nvme0".to_string(),
-            tier: "hot".to_string(),
-            capacity_bytes: 0,
-            used_bytes: 0,
-            state: "active".to_string(),
-        };
-        assert_eq!(drive.node_short(), "neonfs_core");
-
-        let drive_no_at = DriveInfo {
-            node: "nohost".to_string(),
-            ..drive
-        };
-        assert_eq!(drive_no_at.node_short(), "nohost");
     }
 
     #[test]
@@ -1137,7 +1081,6 @@ mod tests {
             "450/1000 (45%) — Re-encrypting chunks"
         );
         assert_eq!(job.id_short(), "abc123def456");
-        assert_eq!(job.node_short(), "neonfs_core");
     }
 
     #[test]

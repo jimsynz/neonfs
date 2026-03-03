@@ -130,7 +130,7 @@ impl ScrubCommand {
                             job.id_short(),
                             job.status.clone(),
                             job.progress_string(),
-                            job.node_short(),
+                            job.node.clone(),
                             job.started_at.clone().unwrap_or_default(),
                         ]);
                     }

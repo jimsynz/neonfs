@@ -172,7 +172,7 @@ impl MountCommand {
                     ]);
                     for mount in &mounts {
                         tbl.add_row(vec![
-                            mount.node_short(),
+                            mount.node.clone(),
                             mount.volume_name.clone(),
                             mount.mount_point.clone(),
                             mount.started_at.clone(),
