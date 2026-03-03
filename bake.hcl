@@ -32,7 +32,10 @@ target "dev" {
 target "core" {
   dockerfile = "containers/Containerfile.core"
   platforms  = split(",", PLATFORMS)
-  tags       = ["forgejo.dmz/project-neon/neonfs/core:${TAG}"]
+  tags       = [
+    "forgejo.dmz/project-neon/neonfs/core:${TAG}",
+    "ghcr.io/jimsynz/neonfs/core:${TAG}"
+  ]
   contexts = {
     "client": "./neonfs_client"
     "src": "./neonfs_core"
@@ -46,7 +49,10 @@ target "core" {
 target "fuse" {
   dockerfile = "containers/Containerfile.fuse"
   platforms  = split(",", PLATFORMS)
-  tags       = ["forgejo.dmz/project-neon/neonfs/fuse:${TAG}"]
+  tags       = [
+    "forgejo.dmz/project-neon/neonfs/fuse:${TAG}",
+    "ghcr.io/jimsynz/neonfs/fuse:${TAG}"
+  ]
   contexts = {
     "client": "./neonfs_client"
     "src": "./neonfs_fuse"
@@ -60,7 +66,10 @@ target "fuse" {
 target "cli" {
   dockerfile = "containers/Containerfile.cli"
   platforms  = split(",", PLATFORMS)
-  tags       = ["forgejo.dmz/project-neon/neonfs/cli:${TAG}"]
+  tags       = [
+    "forgejo.dmz/project-neon/neonfs/cli:${TAG}",
+    "ghcr.io/jimsynz/neonfs/cli:${TAG}"
+  ]
   contexts = {
     "src": "./neonfs-cli"
     "base": "target:base"

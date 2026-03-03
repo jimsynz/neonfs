@@ -383,8 +383,11 @@ jobs:
       - name: Set up QEMU
         run: docker run --privileged --rm tonistiigi/binfmt --install all
 
-      - name: Login to Registry
+      - name: Login to Forgejo Registry
         run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
+
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
 
       - name: Set up Docker Buildx
         run: |
