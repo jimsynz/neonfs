@@ -3,10 +3,10 @@
 use crate::daemon::DaemonConnection;
 use crate::error::{CliError, Result};
 use crate::output::{json, table, OutputFormat};
-use crate::term::{extract_error, term_to_map, term_to_string, unwrap_ok_tuple};
+use crate::term::types::NodeInfo;
+use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Atom, Binary, FixInteger, List, Map, Term};
-use serde::Serialize;
 
 /// Node management subcommands
 #[derive(Debug, Subcommand)]
@@ -20,14 +20,6 @@ pub enum NodeCommand {
 
     /// List all nodes in the cluster
     List,
-}
-
-#[derive(Debug, Serialize)]
-struct NodeListEntry {
-    name: String,
-    role: String,
-    state: String,
-    uptime: String,
 }
 
 impl NodeCommand {
@@ -111,38 +103,50 @@ impl NodeCommand {
     }
 
     fn list(&self, format: OutputFormat) -> Result<()> {
-        // Placeholder implementation
-        let nodes = vec![
-            NodeListEntry {
-                name: "node1".to_string(),
-                role: "leader".to_string(),
-                state: "running".to_string(),
-                uptime: "3h 42m".to_string(),
-            },
-            NodeListEntry {
-                name: "node2".to_string(),
-                role: "follower".to_string(),
-                state: "running".to_string(),
-                uptime: "2h 15m".to_string(),
-            },
-        ];
+        let runtime = tokio::runtime::Runtime::new()?;
+
+        let result = runtime.block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "handle_node_list", vec![])
+                .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let node_terms = term_to_list(&data)?;
+        let nodes: Result<Vec<NodeInfo>> =
+            node_terms.into_iter().map(NodeInfo::from_term).collect();
+        let nodes = nodes?;
 
         match format {
             OutputFormat::Json => {
                 println!("{}", json::format(&nodes)?);
             }
             OutputFormat::Table => {
-                let mut tbl = table::Table::new(vec![
-                    "Name".to_string(),
-                    "Role".to_string(),
-                    "State".to_string(),
-                    "Uptime".to_string(),
-                ]);
-                for node in nodes {
-                    tbl.add_row(vec![node.name, node.role, node.state, node.uptime]);
+                if nodes.is_empty() {
+                    println!("No nodes found");
+                } else {
+                    let mut tbl = table::Table::new(vec![
+                        "NODE".to_string(),
+                        "TYPE".to_string(),
+                        "ROLE".to_string(),
+                        "STATUS".to_string(),
+                        "UPTIME".to_string(),
+                    ]);
+                    for node in &nodes {
+                        tbl.add_row(vec![
+                            node.node.clone(),
+                            node.node_type.clone(),
+                            node.role.clone(),
+                            node.status.clone(),
+                            node.format_uptime(),
+                        ]);
+                    }
+                    print!("{}", tbl.render()?);
                 }
-                print!("{}", tbl.render()?);
-                println!("(Placeholder data - not yet implemented)");
             }
         }
         Ok(())
@@ -196,13 +200,6 @@ fn term_to_json(term: &Term) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_node_list_placeholder() {
-        let cmd = NodeCommand::List;
-        let result = cmd.execute(OutputFormat::Table);
-        assert!(result.is_ok());
-    }
 
     #[test]
     fn test_node_command_parsing() {

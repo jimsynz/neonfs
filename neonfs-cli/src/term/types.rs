@@ -163,6 +163,58 @@ impl ClusterStatus {
     }
 }
 
+/// Node information response
+#[derive(Debug, Serialize)]
+pub struct NodeInfo {
+    pub node: String,
+    #[serde(rename = "type")]
+    pub node_type: String,
+    pub role: String,
+    pub status: String,
+    pub uptime_seconds: u64,
+}
+
+impl NodeInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            node_type: term_to_string(map.get("type").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'type' field".to_string())
+            })?)?,
+            role: term_to_string(map.get("role").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'role' field".to_string())
+            })?)?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+            uptime_seconds: term_to_u64(map.get("uptime_seconds").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'uptime_seconds' field".to_string())
+            })?)?,
+        })
+    }
+
+    /// Format uptime as human-readable string
+    pub fn format_uptime(&self) -> String {
+        let seconds = self.uptime_seconds;
+        let days = seconds / 86400;
+        let hours = (seconds % 86400) / 3600;
+        let minutes = (seconds % 3600) / 60;
+
+        if days > 0 {
+            format!("{}d {}h {}m", days, hours, minutes)
+        } else if hours > 0 {
+            format!("{}h {}m", hours, minutes)
+        } else {
+            format!("{}m", minutes)
+        }
+    }
+}
+
 /// CA information response
 #[derive(Debug, Serialize)]
 pub struct CaInfo {
@@ -1139,5 +1191,73 @@ mod tests {
         assert_eq!(result.serial, 2);
         assert_eq!(result.node_name, "/O=NeonFS/CN=node-2");
         assert_eq!(result.status, "revoked");
+    }
+
+    #[test]
+    fn test_node_info_from_term() {
+        let term = Term::Map(eetf::Map {
+            entries: vec![
+                (
+                    Term::Binary(Binary {
+                        bytes: b"node".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"neonfs_core@host1".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"type".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"core".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"role".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"leader".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"status".to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: b"online".to_vec(),
+                    }),
+                ),
+                (
+                    Term::Binary(Binary {
+                        bytes: b"uptime_seconds".to_vec(),
+                    }),
+                    Term::FixInteger(FixInteger::from(186300)),
+                ),
+            ],
+        });
+        let info = NodeInfo::from_term(term).unwrap();
+        assert_eq!(info.node, "neonfs_core@host1");
+        assert_eq!(info.node_type, "core");
+        assert_eq!(info.role, "leader");
+        assert_eq!(info.status, "online");
+        assert_eq!(info.uptime_seconds, 186300);
+    }
+
+    #[test]
+    fn test_node_info_format_uptime() {
+        let make_node = |secs: u64| NodeInfo {
+            node: "test@host".to_string(),
+            node_type: "core".to_string(),
+            role: "leader".to_string(),
+            status: "online".to_string(),
+            uptime_seconds: secs,
+        };
+
+        assert_eq!(make_node(186300).format_uptime(), "2d 3h 45m"); // 2d 3h 45m
+        assert_eq!(make_node(3660).format_uptime(), "1h 1m"); // 1h 1m
+        assert_eq!(make_node(300).format_uptime(), "5m"); // 5m
+        assert_eq!(make_node(0).format_uptime(), "0m"); // 0m
     }
 }

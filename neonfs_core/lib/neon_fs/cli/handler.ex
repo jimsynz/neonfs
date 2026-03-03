@@ -25,6 +25,7 @@ defmodule NeonFS.CLI.Handler do
     JobTracker,
     KeyManager,
     KeyRotation,
+    RaSupervisor,
     ServiceRegistry,
     StorageMetrics,
     Volume,
@@ -1317,6 +1318,49 @@ defmodule NeonFS.CLI.Handler do
     {:ok, serialise_health_report(report)}
   end
 
+  @doc """
+  Returns a list of all nodes in the cluster with their roles and uptimes.
+
+  Combines ServiceRegistry entries with Ra membership to determine leader/follower
+  roles for core nodes. Non-core nodes use their service type as their role.
+
+  ## Returns
+  - `{:ok, [map]}` - List of node info maps sorted by node name
+  """
+  @spec handle_node_list() :: {:ok, [map()]}
+  def handle_node_list do
+    set_cli_metadata()
+
+    {ra_members, leader} = get_ra_membership()
+    services = ServiceRegistry.list()
+
+    nodes =
+      services
+      |> Enum.map(fn service ->
+        server_id = {RaSupervisor.cluster_name(), service.node}
+        is_leader = server_id == leader
+
+        role =
+          cond do
+            service.type != :core -> Atom.to_string(service.type)
+            is_leader -> "leader"
+            server_id in ra_members -> "follower"
+            true -> Atom.to_string(service.type)
+          end
+
+        %{
+          node: Atom.to_string(service.node),
+          type: Atom.to_string(service.type),
+          role: role,
+          status: Atom.to_string(service.status),
+          uptime_seconds: get_remote_uptime(service.node)
+        }
+      end)
+      |> Enum.sort_by(& &1.node)
+
+    {:ok, nodes}
+  end
+
   # Private helper functions
 
   defp serialise_health_report(report) do
@@ -1731,6 +1775,24 @@ defmodule NeonFS.CLI.Handler do
     # Return uptime in seconds
     {uptime_ms, _} = :erlang.statistics(:wall_clock)
     div(uptime_ms, 1000)
+  end
+
+  defp get_ra_membership do
+    case :ra.members(RaSupervisor.server_id(), 1_000) do
+      {:ok, members, leader} -> {members, leader}
+      _ -> {[], nil}
+    end
+  end
+
+  defp get_remote_uptime(node) when node == node() do
+    get_uptime()
+  end
+
+  defp get_remote_uptime(node) do
+    case :rpc.call(node, :erlang, :statistics, [:wall_clock], 2_000) do
+      {uptime_ms, _} -> div(uptime_ms, 1000)
+      _ -> 0
+    end
   end
 
   defp volume_to_map(%Volume{} = volume) do
