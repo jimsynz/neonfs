@@ -194,6 +194,7 @@ This means a volume with `replication: 3` across 5 nodes has 5 independent Volum
 - Handles replication scheduling
 
 **API Surfaces**
+- NFSv3 via Rust NIF (nfs3_server crate)
 - S3-compatible HTTP API
 - CIFS/SMB via Samba VFS integration
 - gRPC for CSI (Kubernetes integration)
@@ -790,6 +791,7 @@ Services connect to each other via Erlang distribution. A `neonfs_s3` gateway on
 |-------------|-----------|---------|-----------|
 | `neonfs_core` | `NeonFS.Core` | Storage engine, metadata, coordination | `neonfs_blob` |
 | `neonfs_fuse` | `NeonFS.FUSE` | FUSE filesystem mounting | `neonfs_fuse` |
+| `neonfs_nfs` | `NeonFS.NFS` | NFSv3 server | `neonfs_nfs` (`nfs3_server`, `nfs3_client`) |
 | `neonfs_s3` | `NeonFS.S3` | S3-compatible HTTP API | — |
 | `neonfs_docker` | `NeonFS.Docker` | Docker/Podman volume plugin | — |
 | `neonfs_csi` | `NeonFS.CSI` | Kubernetes CSI driver | — |
@@ -815,6 +817,17 @@ FUSE filesystem service. Provides local filesystem access by:
 - Connecting to `neonfs_core` nodes for data access
 
 Can run on the same nodes as `neonfs_core` (co-located) or on separate client machines.
+
+**neonfs_nfs** (`:neonfs_nfs`)
+
+NFSv3 network filesystem server:
+- Serves volumes as NFSv3 exports via TCP (using `nfs3_server` Rust crate via Rustler NIF)
+- Translates NFS operations (read, write, lookup, mkdir, etc.) to core RPC calls
+- Virtual root directory lists available volumes as top-level directories
+- ETS-backed metadata cache with event-driven invalidation
+- Connects to `neonfs_core` nodes via `neonfs_client` Router/Discovery
+
+Can run on the same nodes as `neonfs_core` or on dedicated gateway machines.
 
 **neonfs_s3** (`:neonfs_s3`)
 
@@ -870,6 +883,18 @@ neonfs_fuse/
         ├── Cargo.toml
         └── src/
             └── lib.rs
+
+neonfs_nfs/
+├── lib/
+│   └── neon_fs/nfs/
+│       └── native.ex           # NIF module
+└── native/
+    └── neonfs_nfs/             # Rust crate (nfs3_server + nfs3_client)
+        ├── Cargo.toml
+        └── src/
+            ├── lib.rs
+            ├── filesystem.rs   # NfsFileSystem trait implementation
+            └── channel.rs      # Elixir ↔ Rust message passing
 ```
 
 The Rust crates are not separately deployable — they're compiled into the Elixir releases that contain them.
@@ -957,6 +982,7 @@ Each application uses a distinct top-level namespace:
 |-------------|-----------|-----------|
 | `neonfs_core` | `NeonFS.Core.*` | `lib/neon_fs/core/*.ex` |
 | `neonfs_fuse` | `NeonFS.FUSE.*` | `lib/neon_fs/fuse/*.ex` |
+| `neonfs_nfs` | `NeonFS.NFS.*` | `lib/neon_fs/nfs/*.ex` |
 | `neonfs_s3` | `NeonFS.S3.*` | `lib/neon_fs/s3/*.ex` |
 | `neonfs_docker` | `NeonFS.Docker.*` | `lib/neon_fs/docker/*.ex` |
 | `neonfs_csi` | `NeonFS.CSI.*` | `lib/neon_fs/csi/*.ex` |
