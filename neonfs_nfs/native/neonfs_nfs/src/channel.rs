@@ -33,8 +33,8 @@ pub enum NfsReplyData {
     Empty,
     /// File attributes
     Attrs(FileAttrs),
-    /// Lookup result: file attributes + file ID
-    Lookup(u64, FileAttrs),
+    /// Lookup result: file ID + attributes + optional volume ID override
+    Lookup(u64, FileAttrs, Option<Vec<u8>>),
     /// Read result: data bytes + EOF flag
     Read(Vec<u8>, bool),
     /// Directory entries for readdirplus
@@ -80,6 +80,8 @@ pub struct DirEntryInfo {
     pub file_id: u64,
     pub name: String,
     pub attrs: FileAttrs,
+    /// Optional volume ID override (used for virtual root entries)
+    pub volume_id: Option<Vec<u8>>,
 }
 
 impl ReplyManager {

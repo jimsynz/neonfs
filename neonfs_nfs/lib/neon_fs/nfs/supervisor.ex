@@ -34,6 +34,8 @@ defmodule NeonFS.NFS.Supervisor do
       NeonFS.Client.PartitionRecovery,
       # Inode table must start before handlers
       NeonFS.NFS.InodeTable,
+      # Metadata cache for reducing RPC round-trips
+      NeonFS.NFS.MetadataCache,
       # DynamicSupervisor for handler processes
       NeonFS.NFS.ExportSupervisor,
       # ExportManager starts NFS server and manages volume exports

@@ -28,7 +28,7 @@ defmodule NeonFS.NFS.Handler do
   import Bitwise
   require Logger
 
-  alias NeonFS.NFS.{InodeTable, Native}
+  alias NeonFS.NFS.{InodeTable, MetadataCache, Native}
 
   @null_volume_id <<0::128>>
 
@@ -47,6 +47,7 @@ defmodule NeonFS.NFS.Handler do
   - `:nfs_server` - Server resource for replying to NFS operations
   - `:name` - Optional name for registration
   - `:test_notify` - PID to notify when operations complete (test only)
+  - `:core_call_fn` - Optional `fn module, function, args -> result` override for testing
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -56,21 +57,56 @@ defmodule NeonFS.NFS.Handler do
     end
   end
 
+  @doc """
+  Set the NFS server resource on a running handler.
+
+  Called by ExportManager after the NIF server is started, since the handler
+  must exist before the NIF (which needs the handler PID), but the handler
+  needs the server resource to send replies.
+  """
+  @spec set_nfs_server(GenServer.server(), reference()) :: :ok
+  def set_nfs_server(handler, nfs_server) do
+    GenServer.call(handler, {:set_nfs_server, nfs_server})
+  end
+
   ## GenServer Callbacks
 
   @impl true
   def init(opts) do
     Logger.metadata(component: :nfs)
 
+    cache_table =
+      case Keyword.get(opts, :cache_table) do
+        nil -> safe_get_cache_table()
+        table -> table
+      end
+
+    if core_call_fn = Keyword.get(opts, :core_call_fn) do
+      Process.put(:core_call_fn, core_call_fn)
+    end
+
     Logger.info("NFS Handler started")
 
     {:ok,
      %{
        nfs_server: Keyword.get(opts, :nfs_server),
+       cache_table: cache_table,
        volume_ids: %{},
        volume_hashes: %{},
        test_notify: Keyword.get(opts, :test_notify)
      }}
+  end
+
+  defp safe_get_cache_table do
+    MetadataCache.table()
+  catch
+    :exit, _ -> nil
+  end
+
+  @impl true
+  def handle_call({:set_nfs_server, nfs_server}, _from, state) do
+    Logger.info("NFS server resource set on handler")
+    {:reply, :ok, %{state | nfs_server: nfs_server}}
   end
 
   @impl true
@@ -78,12 +114,35 @@ defmodule NeonFS.NFS.Handler do
     Logger.metadata(request_id: :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
     Logger.debug("Received NFS operation", operation: op_name)
 
-    {reply, duration, state} = timed_dispatch(op_name, params, state)
+    {reply, duration, state} =
+      try do
+        timed_dispatch(op_name, params, state)
+      rescue
+        e ->
+          Logger.error(
+            "Dispatch crashed: #{op_name}: #{Exception.message(e)}\n#{Exception.format_stacktrace(__STACKTRACE__)}"
+          )
+
+          {{:error, errno(:eio)}, 0, state}
+      end
 
     emit_telemetry(op_name, reply, duration)
 
     if state.nfs_server do
-      Native.reply_nfs_operation(state.nfs_server, request_id, reply)
+      case Native.reply_nfs_operation(state.nfs_server, request_id, reply) do
+        {:ok, {}} ->
+          Logger.debug("Reply sent", request_id: request_id)
+
+        {:error, reason} ->
+          Logger.error("Reply failed",
+            request_id: request_id,
+            operation: op_name,
+            reason: inspect(reason),
+            reply: inspect(reply, limit: 200)
+          )
+      end
+    else
+      Logger.warning("No NFS server resource — cannot reply", request_id: request_id)
     end
 
     if state.test_notify do
@@ -102,13 +161,21 @@ defmodule NeonFS.NFS.Handler do
     {reply, duration, state}
   end
 
-  defp emit_telemetry(op_name, reply, duration) do
+  defp emit_telemetry(op_name, reply, duration, volume \\ nil) do
     result = if match?({:error, _}, reply), do: :error, else: :ok
 
     :telemetry.execute(
       [:neonfs, :nfs, :request, :stop],
       %{duration: duration},
-      %{operation: op_name, result: result}
+      %{operation: op_name, result: result, volume: volume || "unknown"}
+    )
+  end
+
+  defp emit_cache_telemetry(hit_or_miss, type, volume) do
+    :telemetry.execute(
+      [:neonfs, :nfs, :metadata_cache, hit_or_miss],
+      %{count: 1},
+      %{volume: volume, type: type}
     )
   end
 
@@ -125,11 +192,8 @@ defmodule NeonFS.NFS.Handler do
     else
       result =
         with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
-             {:ok, parent_path} <- inode_path(parent_inode),
-             child_path <- Path.join(parent_path, name),
-             {:ok, file} <- file_index_get_by_path(volume, child_path),
-             {:ok, inode} <- InodeTable.allocate_inode(volume, child_path) do
-          {:ok, build_reply("lookup", inode, file)}
+             {:ok, parent_path} <- inode_path(parent_inode) do
+          cached_lookup(state.cache_table, volume, parent_path, name)
         end
 
       {result_to_reply(result), state}
@@ -145,16 +209,7 @@ defmodule NeonFS.NFS.Handler do
       if virtual_root?(volume_id_bytes, inode) do
         {:ok, build_reply("attrs", 1, synthetic_dir_attrs())}
       else
-        with {:ok, _volume} <- resolve_volume(volume_id_bytes, state),
-             {:ok, {volume, path}} <- InodeTable.get_path(inode) do
-          if path == "/" do
-            {:ok, build_reply("attrs", inode, synthetic_dir_attrs())}
-          else
-            with {:ok, file} <- file_index_get_by_path(volume, path) do
-              {:ok, build_reply("attrs", inode, file)}
-            end
-          end
-        end
+        getattr_resolve(volume_id_bytes, inode, state)
       end
 
     {result_to_reply(result), state}
@@ -205,15 +260,8 @@ defmodule NeonFS.NFS.Handler do
     else
       result =
         with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
-             {:ok, path} <- inode_path(inode),
-             {:ok, entries} <- list_directory(volume, path) do
-          dir_entries =
-            Enum.map(entries, fn {name, child_path, file_attrs} ->
-              {:ok, child_inode} = InodeTable.allocate_inode(volume, child_path)
-              build_dir_entry(child_inode, name, file_attrs)
-            end)
-
-          {:ok, {:ok, %{"type" => "dir_entries", "entries" => dir_entries}}}
+             {:ok, path} <- inode_path(inode) do
+          cached_readdir(state.cache_table, volume, path)
         end
 
       {result_to_reply(result), state}
@@ -409,6 +457,93 @@ defmodule NeonFS.NFS.Handler do
     {{:error, errno(:enosys)}, state}
   end
 
+  ## Cache-Aware Operations
+
+  defp getattr_resolve(volume_id_bytes, inode, state) do
+    with {:ok, _volume} <- resolve_volume(volume_id_bytes, state),
+         {:ok, {volume, path}} <- InodeTable.get_path(inode) do
+      if path == "/" do
+        {:ok, build_reply("attrs", inode, synthetic_dir_attrs())}
+      else
+        cached_getattr(state.cache_table, volume, path, inode)
+      end
+    end
+  end
+
+  defp cached_lookup(cache_table, volume, parent_path, name) do
+    case cache_table && MetadataCache.get_lookup(cache_table, volume, parent_path, name) do
+      {:ok, result} ->
+        emit_cache_telemetry(:hit, :lookup, volume)
+        {:ok, result}
+
+      _ ->
+        if cache_table, do: emit_cache_telemetry(:miss, :lookup, volume)
+        uncached_lookup(cache_table, volume, parent_path, name)
+    end
+  end
+
+  defp uncached_lookup(cache_table, volume, parent_path, name) do
+    child_path = Path.join(parent_path, name)
+
+    with {:ok, file} <- file_index_get_by_path(volume, child_path),
+         {:ok, inode} <- InodeTable.allocate_inode(volume, child_path) do
+      reply = build_reply("lookup", inode, file)
+      maybe_cache_lookup(cache_table, volume, parent_path, name, child_path, file, reply)
+      {:ok, reply}
+    end
+  end
+
+  defp maybe_cache_lookup(nil, _vol, _parent, _name, _child, _file, _reply), do: :ok
+
+  defp maybe_cache_lookup(cache_table, volume, parent_path, name, child_path, file, reply) do
+    MetadataCache.put_lookup(cache_table, volume, parent_path, name, reply)
+    MetadataCache.put_attrs(cache_table, volume, child_path, file)
+  end
+
+  defp cached_getattr(cache_table, volume, path, inode) do
+    case cache_table && MetadataCache.get_attrs(cache_table, volume, path) do
+      {:ok, attrs} ->
+        emit_cache_telemetry(:hit, :attrs, volume)
+        {:ok, build_reply("attrs", inode, attrs)}
+
+      _ ->
+        if cache_table, do: emit_cache_telemetry(:miss, :attrs, volume)
+        uncached_getattr(cache_table, volume, path, inode)
+    end
+  end
+
+  defp uncached_getattr(cache_table, volume, path, inode) do
+    with {:ok, file} <- file_index_get_by_path(volume, path) do
+      if cache_table, do: MetadataCache.put_attrs(cache_table, volume, path, file)
+      {:ok, build_reply("attrs", inode, file)}
+    end
+  end
+
+  defp cached_readdir(cache_table, volume, path) do
+    case cache_table && MetadataCache.get_dir_listing(cache_table, volume, path) do
+      {:ok, entries} ->
+        emit_cache_telemetry(:hit, :dir, volume)
+        {:ok, {:ok, %{"type" => "dir_entries", "entries" => entries}}}
+
+      _ ->
+        if cache_table, do: emit_cache_telemetry(:miss, :dir, volume)
+        uncached_readdir(cache_table, volume, path)
+    end
+  end
+
+  defp uncached_readdir(cache_table, volume, path) do
+    with {:ok, entries} <- list_directory(volume, path) do
+      dir_entries =
+        Enum.map(entries, fn {name, child_path, file_attrs} ->
+          {:ok, child_inode} = InodeTable.allocate_inode(volume, child_path)
+          build_dir_entry(child_inode, name, file_attrs)
+        end)
+
+      if cache_table, do: MetadataCache.put_dir_listing(cache_table, volume, path, dir_entries)
+      {:ok, {:ok, %{"type" => "dir_entries", "entries" => dir_entries}}}
+    end
+  end
+
   ## Volume Management
 
   defp virtual_root?(volume_id_bytes, inode) do
@@ -437,12 +572,16 @@ defmodule NeonFS.NFS.Handler do
   end
 
   defp lookup_volume(name, state) do
-    case core_call(NeonFS.Core.VolumeRegistry, :get_volume, [name]) do
+    case core_call(NeonFS.Core.VolumeRegistry, :get_by_name, [name]) do
       {:ok, _volume} ->
         new_state = register_volume(name, state)
         {:ok, _} = InodeTable.allocate_inode(name, "/")
         {:ok, root_inode} = InodeTable.get_inode(name, "/")
-        reply = build_reply("lookup", root_inode, synthetic_dir_attrs())
+
+        reply =
+          build_reply("lookup", root_inode, synthetic_dir_attrs())
+          |> put_volume_id(name)
+
         {reply, new_state}
 
       {:error, :not_found} ->
@@ -455,7 +594,7 @@ defmodule NeonFS.NFS.Handler do
   end
 
   defp list_virtual_root(state) do
-    case core_call(NeonFS.Core.VolumeRegistry, :list_volumes, []) do
+    case core_call(NeonFS.Core.VolumeRegistry, :list, []) do
       volumes when is_list(volumes) ->
         new_state =
           Enum.reduce(volumes, state, fn vol, acc ->
@@ -468,7 +607,9 @@ defmodule NeonFS.NFS.Handler do
             name = volume_name(vol)
             {:ok, _} = InodeTable.allocate_inode(name, "/")
             {:ok, inode} = InodeTable.get_inode(name, "/")
+
             build_dir_entry(inode, name, synthetic_dir_attrs())
+            |> Map.put("volume_id", volume_id_hash(name))
           end)
 
         reply = {:ok, %{"type" => "dir_entries", "entries" => entries}}
@@ -481,12 +622,16 @@ defmodule NeonFS.NFS.Handler do
   end
 
   defp volume_name(vol) when is_binary(vol), do: vol
-  defp volume_name(vol) when is_map(vol), do: Map.get(vol, :name, to_string(vol))
+  defp volume_name(%{name: name}) when is_binary(name), do: name
 
   ## Reply Building
 
   defp build_reply(type, inode, file_or_attrs) do
     {:ok, file_to_nfs_attrs(type, inode, file_or_attrs)}
+  end
+
+  defp put_volume_id({:ok, map}, volume_name) do
+    {:ok, Map.put(map, "volume_id", volume_id_hash(volume_name))}
   end
 
   defp build_write_reply(count, inode, file) do
@@ -671,25 +816,21 @@ defmodule NeonFS.NFS.Handler do
 
     case file_index_list_dir(volume, dir_path) do
       children when is_map(children) ->
-        entries =
-          Enum.map(children, fn {name, child_info} ->
-            child_path = Path.join(dir_path, name)
-            mode = if child_info[:type] == :dir, do: @s_ifdir ||| 0o755, else: @s_ifreg ||| 0o644
-            {name, child_path, %{size: 0, mode: mode, uid: 0, gid: 0}}
-          end)
-
-        {:ok, entries}
+        {:ok, Enum.map(children, &child_info_to_entry(dir_path, &1))}
 
       files when is_list(files) ->
-        entries =
-          Enum.map(files, fn file ->
-            name = Path.basename(file.path)
-            {name, file.path, file}
-          end)
-
-        {:ok, entries}
+        {:ok, Enum.map(files, fn file -> {Path.basename(file.path), file.path, file} end)}
     end
   end
+
+  defp child_info_to_entry(dir_path, {name, child_info}) do
+    child_path = Path.join(dir_path, name)
+    mode = child_info_mode(child_info[:type])
+    {name, child_path, %{size: 0, mode: mode, uid: 0, gid: 0}}
+  end
+
+  defp child_info_mode(:dir), do: @s_ifdir ||| 0o755
+  defp child_info_mode(_), do: @s_ifreg ||| 0o644
 
   defp top_level_file?(file) do
     case String.split(file.path, "/", trim: true) do
@@ -701,7 +842,13 @@ defmodule NeonFS.NFS.Handler do
   ## RPC Wrappers
 
   defp core_call(module, function, args) do
-    NeonFS.Client.core_call(module, function, args)
+    case Process.get(:core_call_fn) do
+      fun when is_function(fun, 3) ->
+        fun.(module, function, args)
+
+      _ ->
+        NeonFS.Client.core_call(module, function, args)
+    end
   catch
     :exit, reason ->
       Logger.warning("Core call failed",

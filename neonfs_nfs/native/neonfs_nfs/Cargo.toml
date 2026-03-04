@@ -1,8 +1,9 @@
 [package]
 name = "neonfs_nfs"
 version = "0.1.0"
-authors = []
+authors = ["James Harton <james@harton.dev>"]
 edition = "2021"
+license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib"]
@@ -10,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 rustler = "0.37.2"
 nfs3_server = "0.10"
+nfs3_client = { version = "0.8", features = ["tokio"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "time", "net", "macros"] }
-log = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "2.0"

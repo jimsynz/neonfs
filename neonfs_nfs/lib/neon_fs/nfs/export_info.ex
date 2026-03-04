@@ -16,6 +16,9 @@ defmodule NeonFS.NFS.ExportInfo do
           exported_at: DateTime.t()
         }
 
+  @doc """
+  Create a new ExportInfo from the given keyword attributes.
+  """
   @spec new(keyword()) :: t()
   def new(attrs) do
     struct!(__MODULE__, attrs)

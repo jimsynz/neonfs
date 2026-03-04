@@ -186,7 +186,8 @@ defmodule NeonFS.NFS.ExportManager do
 
     with {:ok, handler_pid} <- ExportSupervisor.start_handler([]),
          _ <- Process.monitor(handler_pid),
-         {:ok, nfs_server} <- start_native_server(bind_address, handler_pid) do
+         {:ok, nfs_server} <- start_native_server(bind_address, handler_pid),
+         :ok <- NeonFS.NFS.Handler.set_nfs_server(handler_pid, nfs_server) do
       Logger.info("NFS server started", bind_address: bind_address)
 
       {:ok, %{state | nfs_server: nfs_server, handler_pid: handler_pid}}
@@ -214,6 +215,11 @@ defmodule NeonFS.NFS.ExportManager do
     case ExportSupervisor.start_handler([]) do
       {:ok, handler_pid} ->
         Process.monitor(handler_pid)
+
+        if state.nfs_server do
+          NeonFS.NFS.Handler.set_nfs_server(handler_pid, state.nfs_server)
+        end
+
         {:ok, %{state | handler_pid: handler_pid}}
 
       {:error, reason} ->

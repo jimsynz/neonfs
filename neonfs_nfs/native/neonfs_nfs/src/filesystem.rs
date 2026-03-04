@@ -15,7 +15,7 @@ use nfs3_server::nfs3_types::nfs3::{
 use nfs3_server::vfs::{
     DirEntryPlus, NextResult, NfsFileSystem, NfsReadFileSystem, ReadDirPlusIterator,
 };
-use rustler::{Encoder, LocalPid, OwnedEnv};
+use rustler::{Encoder, LocalPid, NewBinary, OwnedEnv};
 use tokio::time::{timeout, Duration};
 
 /// Timeout for Elixir handler responses (10 seconds).
@@ -69,14 +69,16 @@ impl NeonFilesystem {
         match timeout(HANDLER_TIMEOUT, rx).await {
             Ok(Ok(reply)) => reply,
             Ok(Err(_)) => {
-                log::error!("Reply channel closed for request {}", request_id);
+                eprintln!(
+                    "[neonfs_nfs] Reply channel closed for request {}",
+                    request_id
+                );
                 NfsReply::Error(nfsstat3::NFS3ERR_IO)
             }
             Err(_) => {
-                log::warn!(
-                    "Handler timeout for request {} (op: {})",
-                    request_id,
-                    op_name
+                eprintln!(
+                    "[neonfs_nfs] Handler timeout for request {} (op: {})",
+                    request_id, op_name
                 );
                 NfsReply::Error(nfsstat3::NFS3ERR_JUKEBOX)
             }
@@ -107,7 +109,12 @@ impl ElixirValue {
             ElixirValue::U64(v) => v.encode(env),
             ElixirValue::U32(v) => v.encode(env),
             ElixirValue::String(v) => v.as_str().encode(env),
-            ElixirValue::Binary(v) => v.as_slice().encode(env),
+            ElixirValue::Binary(v) => {
+                let mut binary = NewBinary::new(env, v.len());
+                binary.as_mut_slice().copy_from_slice(v);
+                let bin: rustler::Binary = binary.into();
+                bin.encode(env)
+            }
             ElixirValue::OptionalU32(Some(v)) => v.encode(env),
             ElixirValue::OptionalU32(None) => nil_atom(),
             ElixirValue::OptionalU64(Some(v)) => v.encode(env),
@@ -209,8 +216,16 @@ impl NfsReadFileSystem for NeonFilesystem {
             .await;
 
         match reply {
-            NfsReply::Ok(NfsReplyData::Lookup(file_id, _attrs)) => {
-                Ok(NeonFileHandle::new(file_id, dirid.volume_id()))
+            NfsReply::Ok(NfsReplyData::Lookup(file_id, _attrs, volume_id_override)) => {
+                let volume_id = match &volume_id_override {
+                    Some(vid) if vid.len() == 16 => {
+                        let mut arr = [0u8; 16];
+                        arr.copy_from_slice(vid);
+                        arr
+                    }
+                    _ => dirid.volume_id(),
+                };
+                Ok(NeonFileHandle::new(file_id, volume_id))
             }
             NfsReply::Error(stat) => Err(stat),
             _ => Err(nfsstat3::NFS3ERR_IO),
@@ -304,7 +319,15 @@ impl NfsReadFileSystem for NeonFilesystem {
                     .into_iter()
                     .enumerate()
                     .map(|(i, entry)| {
-                        let handle = NeonFileHandle::new(entry.file_id, parent_volume_id);
+                        let volume_id = match &entry.volume_id {
+                            Some(vid) if vid.len() == 16 => {
+                                let mut arr = [0u8; 16];
+                                arr.copy_from_slice(vid);
+                                arr
+                            }
+                            _ => parent_volume_id,
+                        };
+                        let handle = NeonFileHandle::new(entry.file_id, volume_id);
                         DirEntryPlus {
                             fileid: entry.file_id,
                             name: entry.name.into_bytes().into(),

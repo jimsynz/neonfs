@@ -10,6 +10,9 @@ config :logger, :default_formatter,
     :core_node,
     :count,
     :export_id,
+    :function,
+    :module,
+    :name,
     :node,
     :node_name,
     :num_acceptors,
@@ -27,27 +30,31 @@ config :logger, :default_formatter,
 
 config :logger, :default_handler,
   formatter:
-    {Logger.Formatter,
-     metadata: [
-       :bind_address,
-       :component,
-       :core_node,
-       :count,
-       :export_id,
-       :node,
-       :node_name,
-       :num_acceptors,
-       :operation,
-       :port,
-       :reason,
-       :request_id,
-       :root_inode,
-       :volume,
-       :volume_id,
-       :volume_name,
-       :work_id,
-       :work_label
-     ]}
+    Logger.Formatter.new(
+      metadata: [
+        :bind_address,
+        :component,
+        :core_node,
+        :count,
+        :export_id,
+        :function,
+        :module,
+        :name,
+        :node,
+        :node_name,
+        :num_acceptors,
+        :operation,
+        :port,
+        :reason,
+        :request_id,
+        :root_inode,
+        :volume,
+        :volume_id,
+        :volume_name,
+        :work_id,
+        :work_label
+      ]
+    )
 
 if Mix.env() in [:dev, :test] do
   config :git_ops,
