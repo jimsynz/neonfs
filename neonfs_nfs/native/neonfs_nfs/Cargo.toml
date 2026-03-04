@@ -1,0 +1,15 @@
+[package]
+name = "neonfs_nfs"
+version = "0.1.0"
+authors = []
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37.2"
+nfs3_server = "0.10"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "time", "net", "macros"] }
+log = "0.4"
+thiserror = "2.0"
