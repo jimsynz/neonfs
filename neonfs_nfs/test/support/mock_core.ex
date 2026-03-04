@@ -92,18 +92,7 @@ defmodule NeonFS.NFS.MockCore do
       :ets.foldl(
         fn
           {{:file, ^volume, path}, file}, acc when is_binary(path) ->
-            if String.starts_with?(path, prefix) do
-              rest = String.replace_prefix(path, prefix, "")
-
-              if not String.contains?(rest, "/") do
-                type = if directory?(file.mode), do: :dir, else: :file
-                Map.put(acc, rest, %{type: type})
-              else
-                acc
-              end
-            else
-              acc
-            end
+            maybe_add_child(acc, path, prefix, file)
 
           _, acc ->
             acc
@@ -264,4 +253,22 @@ defmodule NeonFS.NFS.MockCore do
   end
 
   defp directory?(mode), do: (mode &&& 0o170000) == @s_ifdir
+
+  defp maybe_add_child(acc, path, prefix, file) do
+    if String.starts_with?(path, prefix) do
+      rest = String.replace_prefix(path, prefix, "")
+      add_direct_child(acc, rest, file)
+    else
+      acc
+    end
+  end
+
+  defp add_direct_child(acc, rest, file) when not is_nil(rest) do
+    if String.contains?(rest, "/") do
+      acc
+    else
+      type = if directory?(file.mode), do: :dir, else: :file
+      Map.put(acc, rest, %{type: type})
+    end
+  end
 end

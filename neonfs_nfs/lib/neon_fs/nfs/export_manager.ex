@@ -26,7 +26,7 @@ defmodule NeonFS.NFS.ExportManager do
   use GenServer
   require Logger
 
-  alias NeonFS.NFS.{ExportInfo, ExportSupervisor, Native}
+  alias NeonFS.NFS.{ExportInfo, ExportSupervisor, Handler, Native}
 
   defmodule State do
     @moduledoc false
@@ -187,7 +187,7 @@ defmodule NeonFS.NFS.ExportManager do
     with {:ok, handler_pid} <- ExportSupervisor.start_handler([]),
          _ <- Process.monitor(handler_pid),
          {:ok, nfs_server} <- start_native_server(bind_address, handler_pid),
-         :ok <- NeonFS.NFS.Handler.set_nfs_server(handler_pid, nfs_server) do
+         :ok <- Handler.set_nfs_server(handler_pid, nfs_server) do
       Logger.info("NFS server started", bind_address: bind_address)
 
       {:ok, %{state | nfs_server: nfs_server, handler_pid: handler_pid}}
@@ -217,7 +217,7 @@ defmodule NeonFS.NFS.ExportManager do
         Process.monitor(handler_pid)
 
         if state.nfs_server do
-          NeonFS.NFS.Handler.set_nfs_server(handler_pid, state.nfs_server)
+          Handler.set_nfs_server(handler_pid, state.nfs_server)
         end
 
         {:ok, %{state | handler_pid: handler_pid}}
