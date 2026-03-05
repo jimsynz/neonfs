@@ -1,0 +1,52 @@
+FROM base AS deps
+RUN mkdir /workdir/neonfs_client
+COPY --from=client . /workdir/neonfs_client
+RUN mkdir /workdir/neonfs_nfs
+COPY --from=src . /workdir/neonfs_nfs
+WORKDIR /workdir/neonfs_nfs
+RUN export PATH="/root/.asdf/shims:$PATH"; mix local.hex --force && mix local.rebar --force
+RUN export PATH="/root/.asdf/shims:$PATH"; mix deps.get
+
+FROM deps AS releaser
+ENV MIX_ENV=prod
+RUN export PATH="/root/.asdf/shims:$PATH"; mix compile
+RUN export PATH="/root/.asdf/shims:$PATH"; mix release --overwrite
+
+FROM debian:trixie
+
+RUN apt-get update -y && \
+  apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates \
+  && apt-get clean && rm -f /var/lib/apt/lists/*_*
+
+# Set the locale
+RUN sed -i '/en_NZ.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
+
+ENV LANG=en_NZ.UTF-8
+ENV LANGUAGE=en_NZ:en
+ENV LC_ALL=en_NZ.UTF-8
+
+WORKDIR "/app"
+RUN chown nobody /app
+
+# Create data directory with correct ownership
+RUN mkdir -p /var/lib/neonfs && chown -R nobody:nogroup /var/lib/neonfs
+
+VOLUME ["/var/lib/neonfs"]
+
+# Expose NFSv3 port
+EXPOSE 2049/tcp
+
+# set runner ENV
+ENV MIX_ENV="prod"
+
+# Only copy the final release from the build stage
+COPY --from=releaser --chown=nobody:root /workdir/neonfs_nfs/_build/${MIX_ENV}/rel/neonfs_nfs ./
+
+COPY --from=cli --chown=nobody:root /bin/neonfs /app/bin
+
+USER nobody
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD /app/bin/neonfs_nfs pid > /dev/null 2>&1
+
+CMD ["/app/bin/neonfs_nfs", "start"]

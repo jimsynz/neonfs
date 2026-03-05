@@ -260,6 +260,15 @@ Deliverables:
 | tokio | Async runtime, channels to Elixir |
 | rustler | NIF bindings |
 
+**neonfs_nfs crate**
+
+| Dependency | Purpose |
+|------------|---------|
+| nfs3_server | NFSv3 server implementation |
+| nfs3_client | NFSv3 client (testing) |
+| tokio | Async runtime |
+| rustler | NIF bindings |
+
 **neonfs_blob crate**
 
 | Dependency | Purpose |

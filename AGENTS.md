@@ -58,6 +58,15 @@ neonfs_fuse/          # FUSE filesystem package (depends on neonfs_client only)
 ├── native/
 └── test/
 
+neonfs_nfs/           # NFSv3 server package (depends on neonfs_client only)
+├── lib/neon_fs/nfs/
+│   ├── handler.ex       # NFS operation → core RPC translation
+│   ├── export_manager.ex # Volume export lifecycle
+│   └── metadata_cache.ex # ETS-backed metadata cache
+├── native/
+│   └── neonfs_nfs/      # Rust NIF (nfs3_server + nfs3_client)
+└── test/
+
 neonfs_integration/   # Peer-based integration tests
 ├── lib/neonfs/integration/
 │   └── peer_cluster.ex   # Spawns real peer nodes for testing
@@ -79,11 +88,12 @@ tasks/                # Implementation task specifications
 ```
 neonfs_client  ← neonfs_core  (shared types, service registry)
 neonfs_client  ← neonfs_fuse  (service discovery, RPC routing)
+neonfs_client  ← neonfs_nfs   (service discovery, RPC routing)
 neonfs_core    ← neonfs_integration (all packages for integration tests)
 neonfs_fuse    ← neonfs_integration
 ```
 
-neonfs_fuse has **no dependency** on neonfs_core. All communication between FUSE and core nodes happens via Erlang distribution, routed through the `NeonFS.Client.Router` module.
+neonfs_fuse and neonfs_nfs have **no dependency** on neonfs_core. All communication with core nodes happens via Erlang distribution, routed through the `NeonFS.Client.Router` module.
 
 ### Key Design Principles
 - All data flows through Elixir for single code path and consistency
@@ -147,7 +157,7 @@ Always consult these before implementing:
 
 ## Module Naming
 
-- Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, and `NeonFS.Integration.*`
+- Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, `NeonFS.NFS.*`, and `NeonFS.Integration.*`
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
 
@@ -164,22 +174,23 @@ fj issue list                           # List issues
 
 Build containers for local testing (single-arch, loaded locally):
 ```bash
-PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse cli
+PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse nfs cli
 ```
 
 The `--load` flag is required to load images into the local Docker daemon. Without it, images are only pushed to the registry. Multi-platform builds don't support `--load`, so override PLATFORMS for local testing.
 
 ## Multi-Node Architecture
 
-neonfs_core and neonfs_fuse run as separate Erlang nodes communicating via distribution:
+neonfs_core, neonfs_fuse, and neonfs_nfs run as separate Erlang nodes communicating via distribution:
 - Core node: `neonfs_core@neonfs-core` (storage, metadata, CLI handler, service registry)
 - FUSE node: `neonfs_fuse@neonfs-fuse` (FUSE mount operations, routes to core via neonfs_client)
+- NFS node: `neonfs_nfs@neonfs-nfs` (NFSv3 server, routes to core via neonfs_client)
 - CLI connects to core node, core makes RPC calls to FUSE node for mount operations
 - Ensure matching `RELEASE_COOKIE` across all nodes
 
 ### Service Discovery
 
-Non-core nodes (FUSE, S3, Docker, etc.) use `neonfs_client` to discover and communicate with core nodes:
+Non-core nodes (FUSE, NFS, S3, Docker, etc.) use `neonfs_client` to discover and communicate with core nodes:
 - `NeonFS.Client.Connection` — connects to bootstrap nodes via `Node.connect/1`
 - `NeonFS.Client.Discovery` — queries `NeonFS.Core.ServiceRegistry` on core nodes, caches in local ETS
 - `NeonFS.Client.CostFunction` — measures latency and load to select optimal core node

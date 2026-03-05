@@ -1,6 +1,62 @@
 # API Surfaces
 
-This document describes the external interfaces for accessing NeonFS: S3, FUSE, Docker/Podman, CSI, and CIFS.
+This document describes the external interfaces for accessing NeonFS: NFS, S3, FUSE, Docker/Podman, CSI, and CIFS.
+
+## NFSv3
+
+Network filesystem access via NFSv3 over TCP, implemented using the `nfs3_server` Rust crate (via Rustler NIF). A single TCP listener serves all exported volumes through a virtual root directory.
+
+### Virtual Root Structure
+
+```
+/                        # synthetic read-only root (lists volumes)
+/default/                # volume "default"
+/photos/                 # volume "photos"
+/photos/2024/img.jpg     # file in "photos" volume
+```
+
+### Supported Operations
+
+| NFSv3 Operation | NeonFS Mapping |
+|-----------------|----------------|
+| LOOKUP | File/directory path resolution |
+| GETATTR | File metadata (size, mode, timestamps) |
+| SETATTR | Update mode, uid, gid, truncate |
+| READ | Read file data |
+| WRITE | Write file data (with offset support) |
+| CREATE | Create new file |
+| CREATE (exclusive) | Create file only if it doesn't exist |
+| MKDIR | Create directory |
+| REMOVE / RMDIR | Delete file or directory |
+| RENAME | Move/rename file |
+| SYMLINK | Create symbolic link |
+| READLINK | Read symbolic link target |
+| READDIRPLUS | Directory listing with attributes |
+
+### Client Usage
+
+Mount a volume:
+
+```bash
+mount -t nfs -o vers=3,nolock,tcp server:/volume_name /mnt/neonfs
+```
+
+Mount the virtual root to browse available volumes:
+
+```bash
+mount -t nfs -o vers=3,nolock,tcp server:/ /mnt/neonfs
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEONFS_NFS_BIND` | `0.0.0.0` | NFS listener bind address |
+| `NEONFS_NFS_PORT` | `2049` | NFS listener port |
+
+### Degraded Mode
+
+Write operations return `NFS3ERR_ROFS` (read-only filesystem). Reads continue serving from cached/local data. Recovery is automatic when quorum is restored.
 
 ## S3-Compatible API
 
@@ -80,6 +136,10 @@ Samba VFS module translates SMB operations to NeonFS API calls. Enables Windows 
 ## Degraded Mode Behaviour
 
 When a node is in a minority partition (or otherwise unable to reach quorum for writes), it enters a degraded read-only mode. Each access protocol handles this differently:
+
+### NFS
+
+Write operations return `NFS3ERR_ROFS`. Reads continue serving from local/cached data. NFS clients see standard read-only filesystem errors and can retry writes when the cluster recovers.
 
 ### FUSE
 
@@ -195,6 +255,7 @@ end
 
 | Protocol | Error | Details |
 |----------|-------|---------|
+| NFS | `NFS3ERR_IO` | I/O error; NFS client sees read failure |
 | FUSE | `EIO` | I/O error; application sees read failure |
 | S3 | `503 Service Unavailable` | With `Retry-After` header and `X-NeonFS-Status: data-unavailable` |
 | CIFS/SMB | `STATUS_IO_DEVICE_ERROR` | Windows shows "The device is not ready" or similar |

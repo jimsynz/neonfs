@@ -2,7 +2,7 @@
 
 This document catalogues external packages, crates, and OTP modules that provide pre-tested functionality useful for NeonFS. The goal is to identify opportunities to leverage existing, well-maintained solutions rather than building from scratch.
 
-*Last updated: 2026-02-02*
+*Last updated: 2026-03-05*
 
 ## Overview
 
@@ -286,6 +286,29 @@ Phase 16: (no additions)
 - **Alternatives**:
   - `polyfuse`: Designed specifically for async/await syntax
   - `fuse3`: Async version, doesn't require libfuse for privileged mode
+
+### neonfs_nfs Crate (NFSv3 Server)
+
+| Crate | Purpose | Status |
+|-------|---------|--------|
+| `nfs3_server` | NFSv3 server implementation | Required |
+| `nfs3_client` | NFSv3 client (for testing) | Required (test) |
+| `nfs3_types` | NFSv3 protocol type definitions | Required (via nfs3_server) |
+| `tokio` | Async runtime | Required |
+| `rustler` | NIF bindings | Required |
+| `tracing` | Structured logging | Recommended |
+| `tracing-subscriber` | Log formatting | Recommended |
+
+**nfs3_server**
+- **Source**: https://github.com/Vaiz/nfs3 (crates/nfs3_server)
+- **Purpose**: NFSv3 server framework providing `NfsFileSystem` and `NfsReadFileSystem` traits
+- **Why**: Handles NFSv3 protocol parsing, TCP transport, and RPC framing. NeonFS implements the filesystem traits to serve volumes.
+- **Features**: TCP listener, connection handling, mount protocol support
+
+**nfs3_client**
+- **Source**: https://github.com/Vaiz/nfs3 (crates/nfs3_client)
+- **Purpose**: NFSv3 client for protocol-level testing
+- **Why**: Enables real NFS protocol tests without requiring a kernel NFS client or mount privileges. Used by the test client NIF.
 
 ### neonfs-cli Crate (CLI Tool)
 
