@@ -14,6 +14,12 @@ RUN export PATH="/root/.asdf/shims:$PATH"; mix release --overwrite
 
 FROM debian:trixie
 
+LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="neonfs-core" \
+      org.opencontainers.image.description="NeonFS core service container"
+
 RUN apt-get update -y && \
   apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates \
   && apt-get clean && rm -f /var/lib/apt/lists/*_*

@@ -7,6 +7,13 @@ FROM deps AS releaser
 RUN export PATH="/root/.asdf/shims:$PATH"; cargo build --release
 
 FROM debian:trixie
+
+LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="neonfs-cli" \
+      org.opencontainers.image.description="NeonFS CLI container"
+
 COPY --from=releaser /workdir/neonfs-cli/target/release/neonfs-cli /bin/neonfs
 
 ENTRYPOINT ["/bin/neonfs"]

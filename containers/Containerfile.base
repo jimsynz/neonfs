@@ -1,5 +1,11 @@
 FROM harton.dev/james/asdf_container:latest
 
+LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="neonfs-base" \
+      org.opencontainers.image.description="Base build image for NeonFS containers"
+
 RUN apt-get update && apt-get install -y \
     libfuse3-dev \
     fuse3 \

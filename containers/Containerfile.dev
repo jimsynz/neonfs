@@ -1,5 +1,11 @@
 FROM base
 
+LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="neonfs-dev" \
+      org.opencontainers.image.description="Development image for NeonFS"
+
 RUN useradd dev
 RUN mkdir -p /home/dev
 RUN mkdir -p /workdir
@@ -14,4 +20,3 @@ COPY .tool-versions /workdir
 RUN /usr/local/bin/asdf_install
 RUN export PATH="/home/dev/.asdf/shims:$PATH"; mix local.hex --force && mix local.rebar --force
 RUN curl -fsSL https://claude.ai/install.sh | bash
-
