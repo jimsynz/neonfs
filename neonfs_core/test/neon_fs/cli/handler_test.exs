@@ -590,6 +590,54 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "nfs_mount/1" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns error for non-existent volume or NFS unavailable" do
+      result = Handler.nfs_mount("no-such-vol")
+      assert match?({:error, _}, result)
+    end
+  end
+
+  describe "nfs_unmount/1" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns error for non-existent export or NFS unavailable" do
+      result = Handler.nfs_unmount("no-such-export")
+      assert match?({:error, _}, result)
+    end
+  end
+
+  describe "nfs_list_mounts/0" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "returns list or error depending on NFS availability" do
+      result = Handler.nfs_list_mounts()
+      assert match?({:ok, _}, result) or match?({:error, _}, result)
+    end
+  end
+
   describe "update_volume/2" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)

@@ -1,4 +1,4 @@
-//! Mount management commands
+//! FUSE mount management commands
 
 use crate::daemon::DaemonConnection;
 use crate::error::Result;
@@ -8,9 +8,9 @@ use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Binary, Map, Term};
 
-/// Mount management subcommands
+/// FUSE mount management subcommands
 #[derive(Debug, Subcommand)]
-pub enum MountCommand {
+pub enum FuseCommand {
     /// Mount a volume
     Mount {
         /// Volume name
@@ -30,18 +30,17 @@ pub enum MountCommand {
     List,
 }
 
-impl MountCommand {
-    /// Execute the mount command
+impl FuseCommand {
+    /// Execute the FUSE command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            MountCommand::Mount { volume, mountpoint } => self.mount(volume, mountpoint, format),
-            MountCommand::Unmount { mountpoint } => self.unmount(mountpoint, format),
-            MountCommand::List => self.list(format),
+            FuseCommand::Mount { volume, mountpoint } => self.mount(volume, mountpoint, format),
+            FuseCommand::Unmount { mountpoint } => self.unmount(mountpoint, format),
+            FuseCommand::List => self.list(format),
         }
     }
 
     fn mount(&self, volume: &str, mountpoint: &str, format: OutputFormat) -> Result<()> {
-        // Create tokio runtime for async calls
         let runtime = tokio::runtime::Runtime::new()?;
 
         let volume_term = Term::Binary(Binary {
@@ -50,10 +49,8 @@ impl MountCommand {
         let mountpoint_term = Term::Binary(Binary {
             bytes: mountpoint.as_bytes().to_vec(),
         });
-        // Empty options map
         let options_term = Term::Map(Map { entries: vec![] });
 
-        // Connect to daemon and mount volume
         let result = runtime.block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
@@ -64,16 +61,13 @@ impl MountCommand {
             .await
         })?;
 
-        // Check for error response
         if let Some(err) = extract_error(&result) {
             return Err(err);
         }
 
-        // Unwrap {:ok, mount_info} tuple
         let data = unwrap_ok_tuple(result)?;
         let mount = MountInfo::from_term(data)?;
 
-        // Format output
         match format {
             OutputFormat::Json => {
                 println!("{}", json::format(&mount)?);
@@ -90,14 +84,12 @@ impl MountCommand {
     }
 
     fn unmount(&self, mountpoint: &str, format: OutputFormat) -> Result<()> {
-        // Create tokio runtime for async calls
         let runtime = tokio::runtime::Runtime::new()?;
 
         let mountpoint_term = Term::Binary(Binary {
             bytes: mountpoint.as_bytes().to_vec(),
         });
 
-        // Connect to daemon and unmount
         let result = runtime.block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
@@ -108,12 +100,10 @@ impl MountCommand {
             .await
         })?;
 
-        // Check for error response
         if let Some(err) = extract_error(&result) {
             return Err(err);
         }
 
-        // Format output
         match format {
             OutputFormat::Json => {
                 let response = serde_json::json!({
@@ -131,31 +121,25 @@ impl MountCommand {
     }
 
     fn list(&self, format: OutputFormat) -> Result<()> {
-        // Create tokio runtime for async calls
         let runtime = tokio::runtime::Runtime::new()?;
 
-        // Connect to daemon and list mounts
         let result = runtime.block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "list_mounts", vec![])
                 .await
         })?;
 
-        // Check for error response
         if let Some(err) = extract_error(&result) {
             return Err(err);
         }
 
-        // Unwrap {:ok, value} tuple
         let data = unwrap_ok_tuple(result)?;
 
-        // Parse list of mounts
         let mount_terms = term_to_list(&data)?;
         let mounts: Result<Vec<MountInfo>> =
             mount_terms.into_iter().map(MountInfo::from_term).collect();
         let mounts = mounts?;
 
-        // Format output
         match format {
             OutputFormat::Json => {
                 println!("{}", json::format(&mounts)?);
@@ -185,6 +169,3 @@ impl MountCommand {
         Ok(())
     }
 }
-
-// Tests for mount commands would require a running daemon (integration tests)
-// Unit tests for output formatting are in the output module

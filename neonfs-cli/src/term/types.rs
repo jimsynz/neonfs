@@ -702,6 +702,40 @@ impl MountInfo {
     }
 }
 
+/// NFS export information response
+#[derive(Debug, Serialize)]
+pub struct NfsExportInfo {
+    #[serde(rename = "export_id")]
+    pub id: String,
+    pub node: String,
+    pub volume_name: String,
+    pub exported_at: String,
+}
+
+impl NfsExportInfo {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            id: term_to_string(
+                map.get("id").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'id' field".to_string())
+                })?,
+            )?,
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            volume_name: term_to_string(map.get("volume_name").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'volume_name' field".to_string())
+            })?)?,
+            exported_at: term_to_string(map.get("exported_at").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'exported_at' field".to_string())
+            })?)?,
+        })
+    }
+}
+
 /// Job information response
 #[derive(Debug, Serialize)]
 pub struct JobInfo {

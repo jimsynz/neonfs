@@ -9,8 +9,8 @@ mod term;
 use clap::{Parser, Subcommand};
 use commands::{
     acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, drive::DriveCommand,
-    gc::GcCommand, job::JobCommand, mount::MountCommand, node::NodeCommand, scrub::ScrubCommand,
-    volume::VolumeCommand, worker::WorkerCommand,
+    fuse::FuseCommand, gc::GcCommand, job::JobCommand, nfs::NfsCommand, node::NodeCommand,
+    scrub::ScrubCommand, volume::VolumeCommand, worker::WorkerCommand,
 };
 use output::OutputFormat;
 
@@ -71,10 +71,16 @@ enum Commands {
         command: JobCommand,
     },
 
-    /// Mount management
-    Mount {
+    /// FUSE mount management
+    Fuse {
         #[command(subcommand)]
-        command: MountCommand,
+        command: FuseCommand,
+    },
+
+    /// NFS export management
+    Nfs {
+        #[command(subcommand)]
+        command: NfsCommand,
     },
 
     /// Node management
@@ -124,7 +130,8 @@ fn main() {
         Commands::Drive { command } => command.execute(format),
         Commands::Gc { command } => command.execute(format),
         Commands::Job { command } => command.execute(format),
-        Commands::Mount { command } => command.execute(format),
+        Commands::Fuse { command } => command.execute(format),
+        Commands::Nfs { command } => command.execute(format),
         Commands::Node { command } => command.execute(format),
         Commands::Scrub { command } => command.execute(format),
         Commands::Volume { command } => command.execute(format),
@@ -163,6 +170,18 @@ mod tests {
     fn test_default_table_format() {
         let cli = Cli::parse_from(["neonfs-cli", "node", "list"]);
         assert!(matches!(cli.output_format(), OutputFormat::Table));
+    }
+
+    #[test]
+    fn test_fuse_subcommand_parsing() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "fuse", "mount", "myvol", "/mnt/myvol"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_nfs_subcommand_parsing() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "nfs", "mount", "myvol"]);
+        assert!(cli.is_ok());
     }
 
     #[test]

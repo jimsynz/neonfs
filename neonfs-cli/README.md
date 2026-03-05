@@ -9,7 +9,8 @@ perform administrative operations.
 
 - **Cluster** — initialise, join (via invite token), node status
 - **Volume** — create, list, delete, configure durability/tiering/encryption
-- **Mount** — mount and unmount volumes via FUSE nodes
+- **Fuse** — mount and unmount volumes via FUSE nodes
+- **Nfs** — export and unexport volumes via NFS nodes
 
 ## Building
 
@@ -32,7 +33,8 @@ The CLI escript connects to the core node specified by `--node` (or the
 ```bash
 ./neonfs_cli --node neonfs_core@hostname cluster status
 ./neonfs_cli volume create my_volume --replication-factor 3
-./neonfs_cli mount my_volume /mnt/neonfs
+./neonfs_cli fuse mount my_volume /mnt/neonfs
+./neonfs_cli nfs mount my_volume
 ```
 
 ## Licence
