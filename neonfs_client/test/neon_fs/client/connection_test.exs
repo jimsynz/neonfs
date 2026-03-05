@@ -65,7 +65,16 @@ defmodule NeonFS.Client.ConnectionTest do
   end
 
   describe "nodedown handling" do
-    test "handles nodedown for untracked node without crashing" do
+    test "handles 2-tuple nodedown for untracked node without crashing" do
+      pid = start_supervised!({Connection, bootstrap_nodes: []})
+
+      send(pid, {:nodedown, :unknown@host})
+      :sys.get_state(pid)
+
+      assert Process.alive?(pid)
+    end
+
+    test "handles 3-tuple nodedown for untracked node without crashing" do
       pid = start_supervised!({Connection, bootstrap_nodes: []})
 
       send(pid, {:nodedown, :unknown@host, []})

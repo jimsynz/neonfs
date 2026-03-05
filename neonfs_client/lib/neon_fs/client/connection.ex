@@ -102,7 +102,23 @@ defmodule NeonFS.Client.Connection do
   end
 
   @impl true
+  def handle_info({:nodedown, node}, state) do
+    {:noreply, handle_nodedown(node, state)}
+  end
+
+  @impl true
   def handle_info({:nodedown, node, _info}, state) do
+    {:noreply, handle_nodedown(node, state)}
+  end
+
+  @impl true
+  def handle_info(:reconnect, state) do
+    {:noreply, connect_to_bootstrap(state)}
+  end
+
+  ## Private helpers
+
+  defp handle_nodedown(node, state) do
     Logger.warning("Lost connection to bootstrap node", node: node)
 
     new_connected = MapSet.delete(state.connected_nodes, node)
@@ -117,16 +133,8 @@ defmodule NeonFS.Client.Connection do
 
     # Schedule reconnection attempt
     Process.send_after(self(), :reconnect, @default_reconnect_interval_ms)
-
-    {:noreply, new_state}
+    new_state
   end
-
-  @impl true
-  def handle_info(:reconnect, state) do
-    {:noreply, connect_to_bootstrap(state)}
-  end
-
-  ## Private helpers
 
   defp connect_to_bootstrap(state) do
     Enum.reduce(state.bootstrap_nodes, state, fn node, acc ->
