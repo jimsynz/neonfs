@@ -51,7 +51,7 @@ defmodule NeonFS.Integration.MixProject do
       {:ex_doc, "~> 0.30", only: [:dev, :test], runtime: false},
       {:earmark, "~> 1.4", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
-      {:igniter, "~> 0.6", only: [:dev, :test]},
+      {:igniter, "~> 0.7", only: [:dev, :test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false}
     ]
   end
