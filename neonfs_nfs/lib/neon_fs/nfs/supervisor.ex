@@ -24,6 +24,7 @@ defmodule NeonFS.NFS.Supervisor do
       {NeonFS.Client.Connection, bootstrap_nodes: bootstrap_nodes()},
       NeonFS.Client.Discovery,
       NeonFS.Client.CostFunction,
+      {NeonFS.Client.Registrar, metadata: registration_metadata(), type: :nfs},
       # Transport: PoolSupervisor + PoolManager for data transfer (Phase 9)
       NeonFS.Transport.PoolSupervisor,
       NeonFS.Transport.PoolManager,
@@ -50,5 +51,12 @@ defmodule NeonFS.NFS.Supervisor do
       nil -> Application.get_env(:neonfs_client, :bootstrap_nodes, [])
       core_node -> [core_node]
     end
+  end
+
+  defp registration_metadata do
+    %{
+      capabilities: [:export, :read, :write],
+      version: to_string(Application.spec(:neonfs_nfs, :vsn) || "0.0.0")
+    }
   end
 end

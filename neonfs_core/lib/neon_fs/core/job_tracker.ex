@@ -23,7 +23,7 @@ defmodule NeonFS.Core.JobTracker do
   use GenServer
   require Logger
 
-  alias NeonFS.Core.{Job, Persistence}
+  alias NeonFS.Core.{Job, Persistence, ServiceRegistry}
 
   @ets_table :neonfs_jobs
   @prune_interval_ms :timer.hours(1)
@@ -99,7 +99,7 @@ defmodule NeonFS.Core.JobTracker do
     local = list(filters)
 
     remote =
-      for node <- Node.list(), reduce: [] do
+      for node <- ServiceRegistry.connected_nodes_by_type(:core), reduce: [] do
         acc ->
           case safe_remote_list(node, filters) do
             jobs when is_list(jobs) -> jobs ++ acc

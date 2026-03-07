@@ -265,6 +265,7 @@ defmodule NeonFS.TestCase do
   """
   def start_service_registry do
     stop_if_running(NeonFS.Core.ServiceRegistry)
+    cleanup_ets_table(:services_by_key)
     cleanup_ets_table(:services_by_node)
     cleanup_ets_table(:services_by_type)
     start_supervised!(NeonFS.Core.ServiceRegistry, restart: :temporary)

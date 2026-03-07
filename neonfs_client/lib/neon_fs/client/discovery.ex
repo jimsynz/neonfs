@@ -129,21 +129,10 @@ defmodule NeonFS.Client.Discovery do
   defp fetch_and_cache_services(core_node) do
     case :rpc.call(core_node, NeonFS.Core.ServiceRegistry, :list, []) do
       services when is_list(services) ->
-        # Group by type and cache
-        by_type =
-          services
-          |> Enum.map(&ServiceInfo.from_map/1)
-          |> Enum.group_by(& &1.type)
+        infos = Enum.map(services, &ServiceInfo.from_map/1)
 
-        for {type, type_services} <- by_type do
-          :ets.insert(@ets_table, {{:by_type, type}, type_services})
-        end
-
-        # Cache individual nodes
-        for service <- services do
-          info = ServiceInfo.from_map(service)
-          :ets.insert(@ets_table, {{:by_node, info.node}, info})
-        end
+        cache_services(infos)
+        Connection.sync_services(infos)
 
         :telemetry.execute(
           [:neonfs, :client, :discovery, :refresh],
@@ -160,11 +149,34 @@ defmodule NeonFS.Client.Discovery do
   end
 
   defp invalidate_node(node) do
-    :ets.delete(@ets_table, {:by_node, node})
-    # Rebuild type indexes by removing the downed node
+    :ets.match_delete(@ets_table, {{:by_node, {node, :_}}, :_})
     rebuild_type_indexes(node)
+    Connection.sync_services(cached_services())
   rescue
     ArgumentError -> :ok
+  end
+
+  defp cache_services(services) do
+    :ets.match_delete(@ets_table, {{:by_node, :_}, :_})
+    :ets.match_delete(@ets_table, {{:by_type, :_}, :_})
+
+    services
+    |> Enum.group_by(& &1.type)
+    |> Enum.each(fn {type, type_services} ->
+      :ets.insert(@ets_table, {{:by_type, type}, type_services})
+    end)
+
+    Enum.each(services, fn service ->
+      :ets.insert(@ets_table, {{:by_node, ServiceInfo.key(service)}, service})
+    end)
+  end
+
+  defp cached_services do
+    :ets.match_object(@ets_table, {{:by_node, :_}, :_})
+    |> Enum.map(fn {{:by_node, _service_key}, info} -> info end)
+    |> Enum.sort_by(&{&1.node, &1.type})
+  rescue
+    ArgumentError -> []
   end
 
   defp rebuild_type_indexes(removed_node) do

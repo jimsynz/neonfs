@@ -3,7 +3,7 @@ defmodule NeonFS.Client.Connection do
   Manages Erlang distribution connections to bootstrap nodes.
 
   On init, connects to configured bootstrap nodes via `Node.connect/1`.
-  Monitors connections and attempts reconnection on `:nodedown`.
+  Monitors connections and reconciles toward the desired cluster mesh.
 
   ## Configuration
 
@@ -19,14 +19,19 @@ defmodule NeonFS.Client.Connection do
   use GenServer
   require Logger
 
+  alias NeonFS.Client.ServiceInfo
+
   @default_reconnect_interval_ms 5_000
   @default_peer_connect_timeout_ms 10_000
 
   @type state :: %{
           bootstrap_nodes: [node()],
           connected_nodes: MapSet.t(node()),
+          core_nodes: MapSet.t(node()),
+          desired_nodes: MapSet.t(node()),
           monitors: %{optional(reference()) => node()},
-          peer_connect_timeout: pos_integer()
+          peer_connect_timeout: pos_integer(),
+          reconnect_interval: pos_integer()
         }
 
   ## Client API
@@ -55,6 +60,14 @@ defmodule NeonFS.Client.Connection do
     GenServer.call(__MODULE__, :bootstrap_nodes)
   end
 
+  @doc """
+  Syncs the desired cluster nodes from discovered services.
+  """
+  @spec sync_services([ServiceInfo.t()]) :: :ok
+  def sync_services(services) do
+    GenServer.cast(__MODULE__, {:sync_services, services})
+  end
+
   ## Server callbacks
 
   @impl true
@@ -73,11 +86,19 @@ defmodule NeonFS.Client.Connection do
         )
       end)
 
+    reconnect_interval =
+      Keyword.get(opts, :reconnect_interval, @default_reconnect_interval_ms)
+
+    bootstrap_set = MapSet.new(bootstrap)
+
     state = %{
       bootstrap_nodes: bootstrap,
       connected_nodes: MapSet.new(),
+      core_nodes: bootstrap_set,
+      desired_nodes: bootstrap_set,
       monitors: %{},
-      peer_connect_timeout: peer_connect_timeout
+      peer_connect_timeout: peer_connect_timeout,
+      reconnect_interval: reconnect_interval
     }
 
     {:ok, state, {:continue, :connect}}
@@ -85,12 +106,14 @@ defmodule NeonFS.Client.Connection do
 
   @impl true
   def handle_continue(:connect, state) do
-    {:noreply, connect_to_bootstrap(state)}
+    state = reconcile_connections(state)
+    schedule_reconcile(state.reconnect_interval)
+    {:noreply, state}
   end
 
   @impl true
   def handle_call(:connected_core_node, _from, state) do
-    case MapSet.to_list(state.connected_nodes) do
+    case connected_core_nodes(state) do
       [node | _] -> {:reply, {:ok, node}, state}
       [] -> {:reply, {:error, :no_connection}, state}
     end
@@ -99,6 +122,16 @@ defmodule NeonFS.Client.Connection do
   @impl true
   def handle_call(:bootstrap_nodes, _from, state) do
     {:reply, state.bootstrap_nodes, state}
+  end
+
+  @impl true
+  def handle_cast({:sync_services, services}, state) do
+    state =
+      state
+      |> sync_discovered_services(services)
+      |> reconcile_connections()
+
+    {:noreply, state}
   end
 
   @impl true
@@ -112,14 +145,26 @@ defmodule NeonFS.Client.Connection do
   end
 
   @impl true
-  def handle_info(:reconnect, state) do
-    {:noreply, connect_to_bootstrap(state)}
+  def handle_info(:reconcile, state) do
+    state = reconcile_connections(state)
+    schedule_reconcile(state.reconnect_interval)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:nodeup, _node}, state) do
+    {:noreply, reconcile_connections(state)}
+  end
+
+  @impl true
+  def handle_info({:nodeup, _node, _info}, state) do
+    {:noreply, reconcile_connections(state)}
   end
 
   ## Private helpers
 
   defp handle_nodedown(node, state) do
-    Logger.warning("Lost connection to bootstrap node", node: node)
+    Logger.warning("Lost connection to cluster node", node: node)
 
     new_connected = MapSet.delete(state.connected_nodes, node)
 
@@ -129,21 +174,53 @@ defmodule NeonFS.Client.Connection do
       |> Enum.reject(fn {_ref, n} -> n == node end)
       |> Map.new()
 
-    new_state = %{state | connected_nodes: new_connected, monitors: new_monitors}
-
-    # Schedule reconnection attempt
-    Process.send_after(self(), :reconnect, @default_reconnect_interval_ms)
-    new_state
+    %{state | connected_nodes: new_connected, monitors: new_monitors}
   end
 
-  defp connect_to_bootstrap(state) do
-    Enum.reduce(state.bootstrap_nodes, state, fn node, acc ->
+  defp connected_core_nodes(state) do
+    state.connected_nodes
+    |> MapSet.intersection(state.core_nodes)
+    |> MapSet.to_list()
+    |> Enum.sort()
+  end
+
+  defp reconcile_connections(state) do
+    state.desired_nodes
+    |> MapSet.to_list()
+    |> Enum.sort()
+    |> Enum.reduce(state, fn node, acc ->
       if MapSet.member?(acc.connected_nodes, node) do
         acc
       else
         try_connect(node, acc)
       end
     end)
+  end
+
+  defp schedule_reconcile(ms) do
+    Process.send_after(self(), :reconcile, ms)
+  end
+
+  defp sync_discovered_services(state, services) do
+    discovered_nodes =
+      services
+      |> Enum.reject(&(&1.node == Node.self()))
+      |> Enum.map(& &1.node)
+      |> MapSet.new()
+
+    discovered_core_nodes =
+      services
+      |> Enum.filter(&(&1.type == :core and &1.node != Node.self()))
+      |> Enum.map(& &1.node)
+      |> MapSet.new()
+
+    bootstrap_nodes = MapSet.new(state.bootstrap_nodes)
+
+    %{
+      state
+      | core_nodes: MapSet.union(bootstrap_nodes, discovered_core_nodes),
+        desired_nodes: MapSet.union(bootstrap_nodes, discovered_nodes)
+    }
   end
 
   defp try_connect(node, state) do

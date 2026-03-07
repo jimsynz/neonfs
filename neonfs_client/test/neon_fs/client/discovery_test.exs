@@ -1,7 +1,7 @@
 defmodule NeonFS.Client.DiscoveryTest do
   use ExUnit.Case, async: false
 
-  alias NeonFS.Client.{Connection, Discovery}
+  alias NeonFS.Client.{Connection, Discovery, ServiceInfo}
 
   setup do
     # Discovery depends on Connection for refresh
@@ -81,6 +81,28 @@ defmodule NeonFS.Client.DiscoveryTest do
       :sys.get_state(pid)
 
       assert Process.alive?(pid)
+    end
+
+    test "syncs connection targets after invalidating a cached node" do
+      core = ServiceInfo.new(:neonfs_core@localhost, :core)
+      nfs = ServiceInfo.new(:neonfs_nfs@localhost, :nfs)
+
+      :ets.insert(:neonfs_client_services, {{:by_node, ServiceInfo.key(core)}, core})
+      :ets.insert(:neonfs_client_services, {{:by_node, ServiceInfo.key(nfs)}, nfs})
+      :ets.insert(:neonfs_client_services, {{:by_type, :core}, [core]})
+      :ets.insert(:neonfs_client_services, {{:by_type, :nfs}, [nfs]})
+
+      Connection.sync_services([core, nfs])
+      :sys.get_state(Connection)
+
+      pid = Process.whereis(Discovery)
+      send(pid, {:nodedown, nfs.node, []})
+      :sys.get_state(pid)
+
+      state = :sys.get_state(Connection)
+
+      assert MapSet.equal?(state.desired_nodes, MapSet.new([core.node]))
+      assert MapSet.equal?(state.core_nodes, MapSet.new([core.node]))
     end
 
     test "handles nodeup without crashing" do

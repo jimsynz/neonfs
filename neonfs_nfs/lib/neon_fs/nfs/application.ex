@@ -24,13 +24,6 @@ defmodule NeonFS.NFS.Application do
         Elixir.Supervisor.start_link([], strategy: :one_for_one, name: __MODULE__)
       end
 
-    # Register with the cluster after supervisor is running
-    # (Connection GenServer must be started first)
-    case result do
-      {:ok, _} -> register_with_cluster()
-      _ -> :ok
-    end
-
     result
   end
 
@@ -49,27 +42,5 @@ defmodule NeonFS.NFS.Application do
     end
 
     :ok
-  end
-
-  defp register_with_cluster do
-    # Async registration — don't block startup if core is unreachable.
-    # Delay gives Connection time to establish bootstrap connections.
-    Task.start(fn ->
-      Process.send_after(self(), :register, 500)
-
-      receive do
-        :register ->
-          case NeonFS.Client.register(:nfs, %{
-                 capabilities: [:export, :read, :write],
-                 version: to_string(Application.spec(:neonfs_nfs, :vsn) || "0.0.0")
-               }) do
-            :ok ->
-              Logger.info("Registered as NFS service with cluster")
-
-            {:error, reason} ->
-              Logger.warning("Failed to register with cluster", reason: inspect(reason))
-          end
-      end
-    end)
   end
 end

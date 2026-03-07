@@ -30,11 +30,11 @@ defmodule NeonFS.Client do
   end
 
   @doc """
-  Deregisters this node from the service registry.
+  Deregisters this node's service from the service registry.
   """
-  @spec deregister() :: :ok | {:error, term()}
-  def deregister do
-    case core_call(NeonFS.Core.ServiceRegistry, :deregister, [Node.self()]) do
+  @spec deregister(NeonFS.Client.ServiceType.t()) :: :ok | {:error, term()}
+  def deregister(type) do
+    case core_call(NeonFS.Core.ServiceRegistry, :deregister, [Node.self(), type]) do
       :ok -> :ok
       {:error, _} = error -> error
       other -> {:error, {:unexpected, other}}

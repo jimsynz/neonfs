@@ -843,7 +843,7 @@ defmodule NeonFS.CLI.Handler do
     local_events = AuditLog.query(query_opts)
 
     remote_events =
-      for node <- Node.list(), reduce: [] do
+      for node <- ServiceRegistry.connected_nodes_by_type(:core), reduce: [] do
         acc ->
           case safe_remote_audit_query(node, query_opts) do
             events when is_list(events) -> events ++ acc
@@ -1339,7 +1339,7 @@ defmodule NeonFS.CLI.Handler do
     local_status = worker_status_map(Node.self(), BackgroundWorker.status())
 
     remote_statuses =
-      for node <- Node.list(), reduce: [] do
+      for node <- ServiceRegistry.connected_nodes_by_type(:core), reduce: [] do
         acc ->
           case safe_remote_worker_status(node) do
             {:ok, status} -> [worker_status_map(node, status) | acc]
@@ -2590,7 +2590,7 @@ defmodule NeonFS.CLI.Handler do
   defp rebuild_quorum_ring_on_all_nodes do
     NeonFS.Core.Supervisor.rebuild_quorum_ring()
 
-    for node <- Node.list() do
+    for node <- ServiceRegistry.connected_nodes_by_type(:core) do
       try do
         :erpc.call(node, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [], 5_000)
       catch

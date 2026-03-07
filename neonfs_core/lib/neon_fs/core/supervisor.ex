@@ -313,7 +313,7 @@ defmodule NeonFS.Core.Supervisor do
 
   defp discover_core_nodes do
     other_core =
-      Node.list()
+      ServiceRegistry.connected_nodes_by_type(:core)
       |> Enum.filter(fn node ->
         try do
           has_metadata_store =

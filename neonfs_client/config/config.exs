@@ -18,6 +18,7 @@ config :logger, :default_formatter,
     :reason,
     :request_id,
     :retry_minutes,
+    :service_type,
     :threshold,
     :volume_id
   ]

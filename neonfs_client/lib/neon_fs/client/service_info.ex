@@ -2,8 +2,8 @@ defmodule NeonFS.Client.ServiceInfo do
   @moduledoc """
   Information about a registered service in the NeonFS cluster.
 
-  Each node that joins the cluster registers itself with its service type
-  and optional metadata describing its capabilities.
+  Each node that joins the cluster registers one or more service instances with
+  their service type and optional metadata describing capabilities.
   """
 
   alias NeonFS.Client.ServiceType
@@ -39,6 +39,18 @@ defmodule NeonFS.Client.ServiceInfo do
       status: Keyword.get(opts, :status, :online)
     }
   end
+
+  @doc """
+  Returns the registry key for a service instance.
+  """
+  @spec key(t()) :: {node(), ServiceType.t()}
+  def key(%__MODULE__{node: node, type: type}), do: {node, type}
+
+  @doc """
+  Returns the registry key for a node/type pair.
+  """
+  @spec key(node(), ServiceType.t()) :: {node(), ServiceType.t()}
+  def key(node, type), do: {node, type}
 
   @doc """
   Converts a ServiceInfo to a plain map for Ra storage.

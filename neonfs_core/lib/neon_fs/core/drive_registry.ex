@@ -18,8 +18,7 @@ defmodule NeonFS.Core.DriveRegistry do
   use GenServer
   require Logger
 
-  alias NeonFS.Core.Drive
-  alias NeonFS.Core.DriveConfig
+  alias NeonFS.Core.{Drive, DriveConfig, ServiceRegistry}
 
   @ets_table :drive_registry
   @sync_interval_ms 30_000
@@ -316,7 +315,7 @@ defmodule NeonFS.Core.DriveRegistry do
   end
 
   defp sync_remote_drives(table, local_drive_ids) do
-    remote_nodes = Node.list()
+    remote_nodes = ServiceRegistry.connected_nodes_by_type(:core)
 
     if Enum.empty?(remote_nodes) do
       :ok

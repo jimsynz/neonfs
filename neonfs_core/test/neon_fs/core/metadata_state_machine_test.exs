@@ -43,8 +43,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 7" do
-      assert MetadataStateMachine.version() == 7
+    test "returns 8" do
+      assert MetadataStateMachine.version() == 8
     end
   end
 
@@ -206,7 +206,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       {state, :ok, []} =
         MetadataStateMachine.apply(%{}, {:register_service, service}, base_state())
 
-      assert state.services[:node1@host] == service
+      assert state.services[{:node1@host, :core}] == service
 
       {state, :ok, []} =
         MetadataStateMachine.apply(%{}, {:deregister_service, :node1@host}, state)
@@ -216,7 +216,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
     test "update_service_status" do
       service = %{node: :node1@host, type: :core, status: :active}
-      state = %{base_state() | services: %{node1@host: service}}
+      state = %{base_state() | services: %{{:node1@host, :core} => service}}
 
       {state, :ok, []} =
         MetadataStateMachine.apply(
@@ -225,7 +225,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
           state
         )
 
-      assert state.services[:node1@host].status == :draining
+      assert state.services[{:node1@host, :core}].status == :draining
     end
 
     test "update_service_status returns error for unknown node" do
@@ -239,7 +239,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
     test "update_service_metrics" do
       service = %{node: :node1@host, type: :core, metrics: %{}}
-      state = %{base_state() | services: %{node1@host: service}}
+      state = %{base_state() | services: %{{:node1@host, :core} => service}}
 
       metrics = %{cpu: 0.5, memory: 1024}
 
@@ -250,7 +250,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
           state
         )
 
-      assert state.services[:node1@host].metrics == metrics
+      assert state.services[{:node1@host, :core}].metrics == metrics
     end
   end
 

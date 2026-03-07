@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.MetadataStateMachine do
   @moduledoc """
-  Ra state machine for cluster-wide metadata storage (v6).
+  Ra state machine for cluster-wide metadata storage (v8).
 
   Stores cluster-critical metadata with strong consistency via Raft consensus:
   - Service registry (nodes and their service types)
@@ -18,6 +18,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @behaviour :ra_machine
 
+  alias NeonFS.Client.ServiceInfo
   alias NeonFS.Core.Intent
 
   @type wrapped_key_entry :: %{
@@ -42,6 +43,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:delete_file, file_id :: binary()}
           | {:register_service, service_info :: map()}
           | {:deregister_service, node()}
+          | {:deregister_service, node(), atom()}
           | {:update_service_status, node(), atom()}
           | {:update_service_metrics, node(), map()}
           | {:put_stripe, stripe_data :: map()}
@@ -70,7 +72,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           data: %{optional(term()) => term()},
           chunks: %{optional(binary()) => map()},
           files: %{optional(binary()) => map()},
-          services: %{optional(node()) => map()},
+          services: %{optional({node(), atom()}) => map()},
           volumes: %{optional(binary()) => map()},
           stripes: %{optional(binary()) => map()},
           segment_assignments: %{optional(term()) => segment_assignment()},
@@ -137,7 +139,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Ra machine callbacks
 
   @doc """
-  Initialise the state machine with a clean v6 state.
+  Initialise the state machine with a clean v8 state.
   """
   @impl :ra_machine
   def init(_config) do
@@ -280,6 +282,19 @@ defmodule NeonFS.Core.MetadataStateMachine do
       end)
 
     new_state = %{state | volumes: volumes}
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 7, 8}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 7,
+      to: 8,
+      change: "multi-service registry keys"
+    )
+
+    new_state = %{state | services: migrate_services(state.services)}
     {new_state, :ok, []}
   end
 
@@ -495,21 +510,26 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Service registry commands
 
   def apply(_meta, {:register_service, service_info}, state) do
-    node = service_info.node
-    new_services = Map.put(state.services, node, service_info)
+    key = service_key(service_info)
+    new_services = Map.put(state.services, key, service_info)
     new_state = %{state | services: new_services, version: state.version + 1}
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :register_service],
       %{version: new_state.version},
-      %{node: node, type: service_info.type}
+      %{node: service_info.node, type: service_info.type}
     )
 
     {new_state, :ok, []}
   end
 
   def apply(_meta, {:deregister_service, node}, state) do
-    new_services = Map.delete(state.services, node)
+    new_services =
+      Enum.reject(state.services, fn service_entry ->
+        match_service_node?(service_entry, node)
+      end)
+      |> Map.new()
+
     new_state = %{state | services: new_services, version: state.version + 1}
 
     :telemetry.execute(
@@ -521,14 +541,28 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  def apply(_meta, {:deregister_service, node, type}, state) do
+    new_services = Map.delete(state.services, {node, type})
+    new_state = %{state | services: new_services, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :deregister_service],
+      %{version: new_state.version},
+      %{node: node, type: type}
+    )
+
+    {new_state, :ok, []}
+  end
+
   def apply(_meta, {:update_service_status, node, status}, state) do
-    case Map.get(state.services, node) do
-      nil ->
+    case matching_service_keys(state.services, node) do
+      [] ->
         {state, {:error, :not_found}, []}
 
-      service_info ->
-        updated = Map.put(service_info, :status, status)
-        new_services = Map.put(state.services, node, updated)
+      _keys ->
+        new_services =
+          update_matching_services(state.services, node, &Map.put(&1, :status, status))
+
         new_state = %{state | services: new_services, version: state.version + 1}
 
         :telemetry.execute(
@@ -542,13 +576,14 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:update_service_metrics, node, metrics}, state) do
-    case Map.get(state.services, node) do
-      nil ->
+    case matching_service_keys(state.services, node) do
+      [] ->
         {state, {:error, :not_found}, []}
 
-      service_info ->
-        updated = Map.put(service_info, :metrics, metrics)
-        new_services = Map.put(state.services, node, updated)
+      _keys ->
+        new_services =
+          update_matching_services(state.services, node, &Map.put(&1, :metrics, metrics))
+
         new_state = %{state | services: new_services, version: state.version + 1}
 
         :telemetry.execute(
@@ -945,7 +980,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 7
+  def version, do: 8
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -978,6 +1013,49 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp increment_version(state) do
     %{state | version: state.version + 1}
   end
+
+  defp matching_service_keys(services, node) do
+    services
+    |> Enum.filter(&match_service_node?(&1, node))
+    |> Enum.map(fn service_entry -> service_entry_key(service_entry) end)
+  end
+
+  defp migrate_services(services) do
+    Map.new(services, fn {_key, info} ->
+      migrated = ServiceInfo.from_map(info)
+      {service_key(migrated), ServiceInfo.to_map(migrated)}
+    end)
+  end
+
+  defp service_key(service_info) do
+    {service_info.node, service_info.type}
+  end
+
+  defp update_matching_services(services, node, fun) do
+    Map.new(services, fn service_entry ->
+      key = service_entry_key(service_entry)
+      info = service_entry_info(service_entry)
+
+      if elem(key, 0) == node do
+        {key, fun.(info)}
+      else
+        {key, info}
+      end
+    end)
+  end
+
+  defp match_service_node?(service_entry, node) do
+    service_entry
+    |> service_entry_key()
+    |> elem(0)
+    |> Kernel.==(node)
+  end
+
+  defp service_entry_info({_key, info}), do: info
+
+  defp service_entry_key({{node, type}, _info}), do: {node, type}
+
+  defp service_entry_key({_node, info}), do: service_key(ServiceInfo.from_map(info))
 
   # Migration helpers for version 2 -> 3
 

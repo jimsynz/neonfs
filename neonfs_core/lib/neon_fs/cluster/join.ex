@@ -183,7 +183,7 @@ defmodule NeonFS.Cluster.Join do
       info =
         ServiceInfo.new(this_node, :core, metadata: %{data_endpoint: endpoint})
 
-      for node <- Node.list() do
+      for node <- ServiceRegistry.connected_nodes_by_type(:core) do
         try do
           :erpc.call(node, ServiceRegistry, :register, [info], 5_000)
 
@@ -204,9 +204,9 @@ defmodule NeonFS.Cluster.Join do
   end
 
   defp create_peer_pools do
-    for peer <- Node.list() do
+    for peer <- ServiceRegistry.connected_nodes_by_type(:core) do
       try do
-        case :erpc.call(peer, ServiceRegistry, :get, [peer], 5_000) do
+        case :erpc.call(peer, ServiceRegistry, :get, [peer, :core], 5_000) do
           {:ok, info} ->
             endpoint = Map.get(info.metadata || %{}, :data_endpoint)
 
