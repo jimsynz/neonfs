@@ -63,7 +63,7 @@ defmodule NeonFS.Core.MixProject do
       {:msgpax, "~> 2.4"},
       {:neonfs_client, path: "../neonfs_client"},
       {:plug, "~> 1.15"},
-      {:ra, "~> 2.13"},
+      {:ra, "~> 3.0"},
       {:reactor, "~> 1.0"},
       {:rustler, "~> 0.37", runtime: false},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
