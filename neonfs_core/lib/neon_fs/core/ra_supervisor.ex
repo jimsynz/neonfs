@@ -90,12 +90,18 @@ defmodule NeonFS.Core.RaSupervisor do
   This performs a consistent read by querying the leader.
   """
   def query(fun, timeout \\ 5000) when is_function(fun, 1) do
-    case :ra.consistent_query(server_id(), fun, timeout) do
+    # Ra 3.0.2 requires {M, F, A} tuples for consistent_query
+    query_mfa = {__MODULE__, :apply_query, [fun]}
+
+    case :ra.consistent_query(server_id(), query_mfa, timeout) do
       {:ok, result, _leader} -> {:ok, result}
       {:error, _} = error -> error
       {:timeout, _} -> {:error, :timeout}
     end
   end
+
+  @doc false
+  def apply_query(fun, state), do: fun.(state)
 
   @doc """
   Get the current state (for testing/debugging).

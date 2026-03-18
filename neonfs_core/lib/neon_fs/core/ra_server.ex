@@ -322,7 +322,7 @@ defmodule NeonFS.Core.RaServer do
     if state.status in [:running, :joined] do
       server_id = {@cluster_name, Node.self()}
 
-      case :ra.stop_server(server_id) do
+      case :ra.stop_server(:default, server_id) do
         :ok ->
           Logger.info("Ra server stopped successfully")
 
@@ -505,7 +505,7 @@ defmodule NeonFS.Core.RaServer do
 
   # Start a new Ra server, or restart an existing one if it has persisted state
   defp start_or_restart_ra_server(ra_config, server_id) do
-    case :ra.start_server(ra_config) do
+    case :ra.start_server(:default, ra_config) do
       {:ok, pid} -> {:ok, pid}
       :ok -> {:ok, :started}
       {:error, {:already_started, pid}} -> {:error, {:already_started, pid}}
@@ -545,7 +545,7 @@ defmodule NeonFS.Core.RaServer do
       50 -> :ok
     end
 
-    case :ra.start_server(ra_config) do
+    case :ra.start_server(:default, ra_config) do
       {:ok, pid} -> {:ok, pid}
       :ok -> {:ok, :started}
       {:error, reason} -> {:error, {:fresh_start_failed, reason}}
