@@ -218,11 +218,17 @@ defmodule NeonFS.IO.SupervisorTest do
 
       assert Process.alive?(pid)
 
+      # Monitor before stopping so we can wait for the DOWN message,
+      # which guarantees the Registry has unregistered the process.
+      ref = Process.monitor(pid)
+
       # Stop it
       assert :ok = WorkerSupervisor.stop_worker("doomed-drive", supervisor: names.worker_sup)
 
+      # Wait for the process to fully terminate
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+
       # Worker should be gone
-      refute Process.alive?(pid)
       assert :error = WorkerSupervisor.lookup_worker("doomed-drive")
     end
 
