@@ -23,6 +23,16 @@ mix credo --strict             # Code style checker
 mix dialyzer                   # Static type analysis
 ```
 
+### Pre-Commit Checks
+
+After making changes, always run these before committing:
+```bash
+mix format
+mix credo --strict
+mix doctor
+```
+These checks frequently catch issues (missing struct specs, Credo warnings) that require follow-up fixes.
+
 ### Rust (from native/ crates)
 ```bash
 cargo test                                        # Run tests
@@ -118,6 +128,10 @@ Implementation follows 37 task specifications in `/workspace/tasks/`. Each task 
 ## Testing
 
 **CRITICAL: Never bypass or exclude tests.** Skipped tests create a false sense of confidence. If a test requires specific environment setup (FUSE support, privileges, etc.), the CI environment must be configured correctly - not the tests excluded. A failing build due to missing infrastructure is preferable to silently skipped tests.
+
+**Never use the `--no-start` flag when running tests.** The application must be started for tests to work correctly.
+
+**For integration tests in neonfs_integration**, ensure dependencies are fetched separately (`mix deps.get` in the subproject directory) before running tests.
 
 **Testing layers (bottom to top):**
 1. Static analysis: Dialyzer, Clippy, Credo
