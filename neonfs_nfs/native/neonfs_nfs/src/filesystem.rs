@@ -125,8 +125,17 @@ impl ElixirValue {
     }
 }
 
-/// Convert FileAttrs to nfs3 fattr3
-fn attrs_to_fattr3(attrs: &FileAttrs) -> fattr3 {
+/// Derive a per-volume fsid from the 16-byte volume ID.
+///
+/// Each volume gets a distinct fsid so NFS clients treat files in different
+/// volumes as belonging to different filesystems. Combined with deterministic
+/// hash-based inodes, this makes file handles portable across NFS cluster nodes.
+fn volume_id_to_fsid(volume_id: [u8; 16]) -> u64 {
+    u64::from_le_bytes(volume_id[0..8].try_into().unwrap())
+}
+
+/// Convert FileAttrs to nfs3 fattr3, using the volume ID to derive fsid.
+fn attrs_to_fattr3(attrs: &FileAttrs, volume_id: [u8; 16]) -> fattr3 {
     fattr3 {
         type_: match attrs.kind {
             FileKind::File => ftype3::NF3REG,
@@ -143,7 +152,7 @@ fn attrs_to_fattr3(attrs: &FileAttrs) -> fattr3 {
             specdata1: 0,
             specdata2: 0,
         },
-        fsid: 1,
+        fsid: volume_id_to_fsid(volume_id),
         fileid: attrs.file_id,
         atime: nfstime3 {
             seconds: attrs.atime_secs as u32,
@@ -244,7 +253,7 @@ impl NfsReadFileSystem for NeonFilesystem {
             .await;
 
         match reply {
-            NfsReply::Ok(NfsReplyData::Attrs(attrs)) => Ok(attrs_to_fattr3(&attrs)),
+            NfsReply::Ok(NfsReplyData::Attrs(attrs)) => Ok(attrs_to_fattr3(&attrs, id.volume_id())),
             NfsReply::Error(stat) => Err(stat),
             _ => Err(nfsstat3::NFS3ERR_IO),
         }
@@ -332,7 +341,7 @@ impl NfsReadFileSystem for NeonFilesystem {
                             fileid: entry.file_id,
                             name: entry.name.into_bytes().into(),
                             cookie: cookie + i as u64 + 1,
-                            name_attributes: Some(attrs_to_fattr3(&entry.attrs)),
+                            name_attributes: Some(attrs_to_fattr3(&entry.attrs, volume_id)),
                             name_handle: Some(handle),
                         }
                     })
@@ -376,7 +385,7 @@ impl NfsFileSystem for NeonFilesystem {
             .await;
 
         match reply {
-            NfsReply::Ok(NfsReplyData::Attrs(attrs)) => Ok(attrs_to_fattr3(&attrs)),
+            NfsReply::Ok(NfsReplyData::Attrs(attrs)) => Ok(attrs_to_fattr3(&attrs, id.volume_id())),
             NfsReply::Error(stat) => Err(stat),
             _ => Err(nfsstat3::NFS3ERR_IO),
         }
@@ -396,7 +405,9 @@ impl NfsFileSystem for NeonFilesystem {
             .await;
 
         match reply {
-            NfsReply::Ok(NfsReplyData::Write(_count, attrs)) => Ok(attrs_to_fattr3(&attrs)),
+            NfsReply::Ok(NfsReplyData::Write(_count, attrs)) => {
+                Ok(attrs_to_fattr3(&attrs, id.volume_id()))
+            }
             NfsReply::Error(stat) => Err(stat),
             _ => Err(nfsstat3::NFS3ERR_IO),
         }
@@ -430,7 +441,7 @@ impl NfsFileSystem for NeonFilesystem {
         match reply {
             NfsReply::Ok(NfsReplyData::Create(file_id, attrs)) => {
                 let handle = NeonFileHandle::new(file_id, dirid.volume_id());
-                Ok((handle, attrs_to_fattr3(&attrs)))
+                Ok((handle, attrs_to_fattr3(&attrs, dirid.volume_id())))
             }
             NfsReply::Error(stat) => Err(stat),
             _ => Err(nfsstat3::NFS3ERR_IO),
@@ -496,7 +507,7 @@ impl NfsFileSystem for NeonFilesystem {
         match reply {
             NfsReply::Ok(NfsReplyData::Create(file_id, attrs)) => {
                 let handle = NeonFileHandle::new(file_id, dirid.volume_id());
-                Ok((handle, attrs_to_fattr3(&attrs)))
+                Ok((handle, attrs_to_fattr3(&attrs, dirid.volume_id())))
             }
             NfsReply::Error(stat) => Err(stat),
             _ => Err(nfsstat3::NFS3ERR_IO),
@@ -602,7 +613,7 @@ impl NfsFileSystem for NeonFilesystem {
         match reply {
             NfsReply::Ok(NfsReplyData::Create(file_id, attrs)) => {
                 let handle = NeonFileHandle::new(file_id, dirid.volume_id());
-                Ok((handle, attrs_to_fattr3(&attrs)))
+                Ok((handle, attrs_to_fattr3(&attrs, dirid.volume_id())))
             }
             NfsReply::Error(stat) => Err(stat),
             _ => Err(nfsstat3::NFS3ERR_IO),
@@ -678,6 +689,7 @@ mod tests {
 
     #[test]
     fn test_attrs_to_fattr3_file() {
+        let volume_id = [1u8; 16];
         let attrs = FileAttrs {
             file_id: 42,
             size: 1024,
@@ -694,22 +706,37 @@ mod tests {
             ctime_nsecs: 0,
         };
 
-        let fattr = attrs_to_fattr3(&attrs);
+        let fattr = attrs_to_fattr3(&attrs, volume_id);
         assert_eq!(fattr.type_, ftype3::NF3REG);
         assert_eq!(fattr.size, 1024);
         assert_eq!(fattr.fileid, 42);
+        assert_eq!(fattr.fsid, volume_id_to_fsid(volume_id));
     }
 
     #[test]
     fn test_attrs_to_fattr3_dir() {
+        let volume_id = [2u8; 16];
         let attrs = FileAttrs {
             kind: FileKind::Directory,
             mode: 0o755,
             ..Default::default()
         };
 
-        let fattr = attrs_to_fattr3(&attrs);
+        let fattr = attrs_to_fattr3(&attrs, volume_id);
         assert_eq!(fattr.type_, ftype3::NF3DIR);
+    }
+
+    #[test]
+    fn test_different_volumes_get_different_fsid() {
+        let vol_a = [1u8; 16];
+        let vol_b = [2u8; 16];
+        assert_ne!(volume_id_to_fsid(vol_a), volume_id_to_fsid(vol_b));
+    }
+
+    #[test]
+    fn test_null_volume_fsid_is_zero() {
+        let null_vol = [0u8; 16];
+        assert_eq!(volume_id_to_fsid(null_vol), 0);
     }
 
     #[test]

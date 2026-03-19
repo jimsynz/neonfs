@@ -4,10 +4,18 @@ defmodule NeonFS.NFS.InodeTable do
 
   NFS uses file handles containing inode numbers to reference files and directories.
   This module maintains the mapping between these inodes and the actual file paths
-  within volumes. Unlike the FUSE inode table, the NFS table must be persistent
-  across server restarts (persistence is added in a later phase).
+  within volumes.
 
-  ## Implementation
+  ## Deterministic Inode Allocation
+
+  Inodes are derived from `SHA-256(volume_name + "\\0" + path)` truncated to 64 bits.
+  This makes inode numbers deterministic — the same (volume, path) always produces
+  the same inode regardless of allocation order or which NFS node computes it.
+  This enables portable NFS file handles across cluster nodes behind a load balancer.
+
+  The birthday bound for 64-bit hashes means collision probability is negligible
+  at realistic file counts (< 1 in 10^7 at 3.6M files). Collisions are detected
+  and fall back to sequential allocation (losing portability for that single entry).
 
   Uses ETS tables for fast concurrent reads:
   - `:nfs_inode_to_path` - Maps inode -> {volume_name, path}
@@ -25,7 +33,7 @@ defmodule NeonFS.NFS.InodeTable do
   require Logger
 
   @root_inode 1
-  @next_inode_key :next_inode
+  @reserved_inodes [0, 1]
 
   ## Client API
 
@@ -104,16 +112,12 @@ defmodule NeonFS.NFS.InodeTable do
     :ets.new(:nfs_inode_to_path, [:named_table, :public, :set, read_concurrency: true])
     :ets.new(:nfs_path_to_inode, [:named_table, :public, :set, read_concurrency: true])
 
-    # Pre-allocate root inode (inode 1 = virtual root directory)
     :ets.insert(:nfs_inode_to_path, {@root_inode, nil, "/"})
     :ets.insert(:nfs_path_to_inode, {{nil, "/"}, @root_inode})
 
-    # Track next available inode (start at 2, since 1 is root)
-    :ets.insert(:nfs_inode_to_path, {@next_inode_key, @root_inode + 1})
-
     Logger.info("NFS InodeTable started", root_inode: @root_inode)
 
-    {:ok, %{}}
+    {:ok, %{fallback_counter: 2}}
   end
 
   @impl true
@@ -123,14 +127,24 @@ defmodule NeonFS.NFS.InodeTable do
         {:reply, {:ok, existing_inode}, state}
 
       [] ->
-        [{@next_inode_key, next_inode}] = :ets.lookup(:nfs_inode_to_path, @next_inode_key)
-        inode = next_inode
+        inode = compute_inode(volume_name, path)
 
-        :ets.insert(:nfs_inode_to_path, {@next_inode_key, next_inode + 1})
-        :ets.insert(:nfs_inode_to_path, {inode, volume_name, path})
-        :ets.insert(:nfs_path_to_inode, {{volume_name, path}, inode})
+        case :ets.lookup(:nfs_inode_to_path, inode) do
+          [] ->
+            insert_mapping(inode, volume_name, path)
+            {:reply, {:ok, inode}, state}
 
-        {:reply, {:ok, inode}, state}
+          [{^inode, ^volume_name, ^path}] ->
+            {:reply, {:ok, inode}, state}
+
+          [{^inode, other_volume, other_path}] ->
+            Logger.warning(
+              "Inode hash collision: #{volume_name}:#{path} collides with #{other_volume}:#{other_path}"
+            )
+
+            {fallback_inode, new_state} = allocate_fallback(volume_name, path, state)
+            {:reply, {:ok, fallback_inode}, new_state}
+        end
     end
   end
 
@@ -148,14 +162,43 @@ defmodule NeonFS.NFS.InodeTable do
   end
 
   @impl true
-  def handle_call(:clear, _from, state) do
+  def handle_call(:clear, _from, _state) do
     :ets.delete_all_objects(:nfs_inode_to_path)
     :ets.delete_all_objects(:nfs_path_to_inode)
 
     :ets.insert(:nfs_inode_to_path, {@root_inode, nil, "/"})
     :ets.insert(:nfs_path_to_inode, {{nil, "/"}, @root_inode})
-    :ets.insert(:nfs_inode_to_path, {@next_inode_key, @root_inode + 1})
 
-    {:reply, :ok, state}
+    {:reply, :ok, %{fallback_counter: 2}}
+  end
+
+  ## Private: Inode Computation
+
+  defp compute_inode(volume_name, path) do
+    key = (volume_name || "") <> "\0" <> path
+    <<inode::unsigned-little-64, _::binary>> = :crypto.hash(:sha256, key)
+    if inode in @reserved_inodes, do: inode + 2, else: inode
+  end
+
+  defp insert_mapping(inode, volume_name, path) do
+    :ets.insert(:nfs_inode_to_path, {inode, volume_name, path})
+    :ets.insert(:nfs_path_to_inode, {{volume_name, path}, inode})
+  end
+
+  defp allocate_fallback(volume_name, path, state) do
+    inode = find_free_inode(state.fallback_counter)
+    insert_mapping(inode, volume_name, path)
+    {inode, %{state | fallback_counter: inode + 1}}
+  end
+
+  defp find_free_inode(candidate) when candidate in @reserved_inodes do
+    find_free_inode(candidate + 1)
+  end
+
+  defp find_free_inode(candidate) do
+    case :ets.lookup(:nfs_inode_to_path, candidate) do
+      [] -> candidate
+      _ -> find_free_inode(candidate + 1)
+    end
   end
 end

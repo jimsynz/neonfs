@@ -17,7 +17,15 @@ defmodule NeonFS.NFS.InodeTableTest do
     {:ok, inode1} = InodeTable.allocate_inode("vol1", "/file1.txt")
     {:ok, inode2} = InodeTable.allocate_inode("vol1", "/file2.txt")
     assert inode1 != inode2
-    assert inode1 > 1
+    assert inode1 not in [0, 1]
+    assert inode2 not in [0, 1]
+  end
+
+  test "allocate_inode is deterministic across clears" do
+    {:ok, inode1} = InodeTable.allocate_inode("vol1", "/stable.txt")
+    InodeTable.clear()
+    {:ok, inode2} = InodeTable.allocate_inode("vol1", "/stable.txt")
+    assert inode1 == inode2
   end
 
   test "allocate_inode is idempotent for same path" do
