@@ -187,13 +187,6 @@ defmodule NeonFS.Core.Supervisor do
           # Must start before ChunkIndex/FileIndex/StripeIndex (they need it for loading)
           NeonFS.Core.MetadataStore,
 
-          # Event notification infrastructure (Phase 10)
-          # :pg scope for cross-node event relay, Registry for node-local fan-out
-          %{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}},
-          {Registry, keys: :duplicate, name: NeonFS.Events.Registry},
-          NeonFS.Events.Relay,
-          NeonFS.Client.PartitionRecovery,
-
           # ClockMonitor detects clock skew and quarantines nodes
           NeonFS.Core.ClockMonitor,
 
@@ -242,18 +235,10 @@ defmodule NeonFS.Core.Supervisor do
           # AuditLog records security-relevant events in bounded ETS
           NeonFS.Core.AuditLog,
 
-          # Transport: HandlerSupervisor + Listener + PoolSupervisor + PoolManager for data transfer (Phase 9)
+          # Transport: HandlerSupervisor + Listener for data transfer (Phase 9)
+          # PoolSupervisor + PoolManager are owned by neonfs_client's supervisor
           NeonFS.Transport.HandlerSupervisor,
           NeonFS.Transport.Listener,
-          NeonFS.Transport.PoolSupervisor,
-          {NeonFS.Transport.PoolManager,
-           service_list_fn: fn ->
-             try do
-               ServiceRegistry.list()
-             rescue
-               _ -> []
-             end
-           end},
 
           # ServiceRegistry depends on Ra being available
           ServiceRegistry,

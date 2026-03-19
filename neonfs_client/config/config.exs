@@ -22,3 +22,7 @@ config :logger, :default_formatter,
     :threshold,
     :volume_id
   ]
+
+if Mix.env() == :test do
+  config :neonfs_client, start_children?: false
+end

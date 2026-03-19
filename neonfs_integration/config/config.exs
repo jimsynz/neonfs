@@ -8,6 +8,7 @@ if Mix.env() == :test do
   # only peer nodes should run MetadataStore, ChunkIndex, etc.
   # Without this, the test controller is included in the quorum ring
   # and causes 4-node rings instead of the expected 3.
+  config :neonfs_client, start_children?: false
   config :neonfs_core, start_children?: false
 
   # Disable metrics in integration tests to avoid port conflicts.

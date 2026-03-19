@@ -8,6 +8,8 @@ if Mix.env() == :test do
   config :ra,
     data_dir: ~c"/tmp/neonfs_omnibus_test/ra"
 
+  config :neonfs_client, start_children?: false
+
   config :neonfs_core,
     blob_store_base_dir: "/tmp/neonfs_omnibus_test/blobs",
     drives: [%{id: "default", path: "/tmp/neonfs_omnibus_test/blobs", tier: :hot, capacity: 0}],

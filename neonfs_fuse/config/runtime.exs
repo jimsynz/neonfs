@@ -21,6 +21,10 @@ if config_env() == :prod do
   metrics_port = String.to_integer(System.get_env("NEONFS_FUSE_METRICS_PORT", "9569"))
   metrics_bind = System.get_env("NEONFS_FUSE_METRICS_BIND", "0.0.0.0")
 
+  # Client infrastructure — bootstrap against core node
+  config :neonfs_client,
+    bootstrap_nodes: [String.to_atom(core_node)]
+
   config :neonfs_fuse,
     core_node: String.to_atom(core_node),
     fusermount_cmd: fusermount_cmd,

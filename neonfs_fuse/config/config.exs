@@ -80,6 +80,7 @@ end
 # In test mode, don't start the supervisor - tests use start_supervised
 # for the specific components they need, ensuring proper isolation
 if Mix.env() == :test do
+  config :neonfs_client, start_children?: false
   config :neonfs_fuse, start_supervisor: false
 
   # Suppress log output during tests (ExUnit's capture_log handles test-specific logs)

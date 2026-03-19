@@ -155,7 +155,8 @@ defmodule NeonFS.Integration.PeerCluster do
 
         client_config = [
           tls_dir: Path.join(data_dir, "tls"),
-          partition_recovery_debounce_ms: 200
+          partition_recovery_debounce_ms: 200,
+          service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
         ]
 
         app_config = [
@@ -620,7 +621,8 @@ defmodule NeonFS.Integration.PeerCluster do
       logger: [level: :warning],
       neonfs_client: [
         tls_dir: Path.join(data_dir, "tls"),
-        partition_recovery_debounce_ms: 200
+        partition_recovery_debounce_ms: 200,
+        service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
       ],
       neonfs_core: [
         data_dir: data_dir,

@@ -35,6 +35,10 @@ if config_env() == :prod do
   # ChunkCache memory limit (bytes) — default 256 MiB
   # config :neonfs_core, chunk_cache_max_memory: 536_870_912  # 512 MiB
 
+  # Client infrastructure — core uses ServiceRegistry directly for peer discovery
+  config :neonfs_client,
+    service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
+
   # Core configuration
   config :neonfs_core,
     blob_store_base_dir: "#{data_dir}/blobs",

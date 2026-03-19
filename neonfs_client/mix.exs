@@ -30,10 +30,10 @@ defmodule NeonFS.Client.MixProject do
     ]
   end
 
-  # No OTP application module — pure library
   def application do
     [
-      extra_applications: [:logger, :ssl]
+      extra_applications: [:logger, :ssl],
+      mod: {NeonFS.Client.Application, []}
     ]
   end
 

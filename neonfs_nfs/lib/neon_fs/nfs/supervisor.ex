@@ -20,19 +20,9 @@ defmodule NeonFS.NFS.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      # Client connectivity — must start before anything that needs core nodes
-      {NeonFS.Client.Connection, bootstrap_nodes: bootstrap_nodes()},
-      NeonFS.Client.Discovery,
-      NeonFS.Client.CostFunction,
-      {NeonFS.Client.Registrar, metadata: registration_metadata(), type: :nfs},
-      # Transport: PoolSupervisor + PoolManager for data transfer (Phase 9)
-      NeonFS.Transport.PoolSupervisor,
-      NeonFS.Transport.PoolManager,
-      # Event notification infrastructure (Phase 10)
-      %{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}},
-      {Registry, keys: :duplicate, name: NeonFS.Events.Registry},
-      NeonFS.Events.Relay,
-      NeonFS.Client.PartitionRecovery,
+      # Service registration (unique name — FUSE and NFS each need their own)
+      {NeonFS.Client.Registrar,
+       metadata: registration_metadata(), type: :nfs, name: NeonFS.Client.Registrar.NFS},
       # Inode table must start before handlers
       NeonFS.NFS.InodeTable,
       # Metadata cache for reducing RPC round-trips
@@ -44,13 +34,6 @@ defmodule NeonFS.NFS.Supervisor do
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
-  end
-
-  defp bootstrap_nodes do
-    case Application.get_env(:neonfs_nfs, :core_node) do
-      nil -> Application.get_env(:neonfs_client, :bootstrap_nodes, [])
-      core_node -> [core_node]
-    end
   end
 
   defp registration_metadata do

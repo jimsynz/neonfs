@@ -74,6 +74,10 @@ defmodule NeonFS.Client.Registrar do
         log_registration_failure(state, reason)
         %{state | registered?: false}
     end
+  catch
+    :exit, reason ->
+      log_registration_failure(state, reason)
+      %{state | registered?: false}
   end
 
   defp log_registration_success(%{registered?: true}), do: :ok

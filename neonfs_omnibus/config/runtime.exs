@@ -18,6 +18,11 @@ if config_env() == :prod do
 
   drives = [%{id: "default", path: "#{data_dir}/blobs", tier: :hot, capacity: 0}]
 
+  # Client infrastructure — shared across core, fuse, nfs in omnibus mode
+  config :neonfs_client,
+    bootstrap_nodes: [core_node],
+    service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
+
   # Core configuration
   config :neonfs_core,
     blob_store_base_dir: "#{data_dir}/blobs",

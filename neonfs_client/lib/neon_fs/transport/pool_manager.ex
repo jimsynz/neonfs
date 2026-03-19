@@ -18,10 +18,10 @@ defmodule NeonFS.Transport.PoolManager do
     * `:pool_supervisor` — DynamicSupervisor for ConnPool instances
       (default: `NeonFS.Transport.PoolSupervisor`)
     * `:ssl_opts` — TLS options for outbound connections (default: derived from TLS.tls_dir/0)
-    * `:service_list_fn` — zero-arity function returning a list of `ServiceInfo` structs.
-      Used as the service source for peer discovery. Defaults to querying
-      `NeonFS.Client.Discovery` (suitable for non-core nodes). Core nodes should
-      pass a function that calls `NeonFS.Core.ServiceRegistry.list/0` directly.
+    * `:service_list_fn` — configured via `Application.get_env(:neonfs_client, :service_list_fn)`.
+      Accepts an MFA tuple `{Module, :function, args}` or `nil` (default).
+      When `nil`, queries `NeonFS.Client.Discovery` (suitable for non-core nodes).
+      Core nodes should set `{NeonFS.Core.ServiceRegistry, :list, []}` in config.
     * `:name` — registered name (default: `NeonFS.Transport.PoolManager`)
 
   """
@@ -110,7 +110,6 @@ defmodule NeonFS.Transport.PoolManager do
 
     pool_supervisor = Keyword.get(opts, :pool_supervisor, PoolSupervisor)
     ssl_opts = Keyword.get(opts, :ssl_opts)
-    service_list_fn = Keyword.get(opts, :service_list_fn)
 
     @ets_table =
       :ets.new(@ets_table, [
@@ -128,7 +127,6 @@ defmodule NeonFS.Transport.PoolManager do
       refresh_interval: refresh_interval,
       pool_supervisor: pool_supervisor,
       ssl_opts: ssl_opts,
-      service_list_fn: service_list_fn,
       monitors: %{}
     }
 
@@ -281,7 +279,7 @@ defmodule NeonFS.Transport.PoolManager do
   end
 
   defp do_discovery_refresh(state) do
-    peers = discover_peer_endpoints(state.service_list_fn)
+    peers = discover_peer_endpoints()
     peer_nodes = MapSet.new(peers, fn {node, _endpoint} -> node end)
 
     # Create or replace pools — detect endpoint changes from container redeploys
@@ -343,8 +341,8 @@ defmodule NeonFS.Transport.PoolManager do
     create_pool(node, endpoint, state)
   end
 
-  defp discover_peer_endpoints(service_list_fn) do
-    services = list_services(service_list_fn)
+  defp discover_peer_endpoints do
+    services = list_services()
 
     for service <- services,
         service.node != Node.self(),
@@ -357,17 +355,17 @@ defmodule NeonFS.Transport.PoolManager do
     _ -> []
   end
 
-  defp list_services(nil) do
-    for type <- [:core, :fuse, :s3, :docker, :cifs],
-        service <- Discovery.list_by_type(type) do
-      service
-    end
-  rescue
-    _ -> []
-  end
+  defp list_services do
+    case Application.get_env(:neonfs_client, :service_list_fn) do
+      {mod, fun, args} ->
+        apply(mod, fun, args)
 
-  defp list_services(fun) when is_function(fun, 0) do
-    fun.()
+      nil ->
+        for type <- [:core, :fuse, :s3, :docker, :cifs],
+            service <- Discovery.list_by_type(type) do
+          service
+        end
+    end
   rescue
     _ -> []
   end
