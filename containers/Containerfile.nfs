@@ -12,7 +12,7 @@ ENV MIX_ENV=prod
 RUN export PATH="/root/.asdf/shims:$PATH"; mix compile
 RUN export PATH="/root/.asdf/shims:$PATH"; mix release --overwrite
 
-FROM debian:trixie
+FROM debian:trixie-20260316
 
 LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \

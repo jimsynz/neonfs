@@ -6,7 +6,7 @@ WORKDIR /workdir/neonfs-cli
 FROM deps AS releaser
 RUN export PATH="/root/.asdf/shims:$PATH"; cargo build --release
 
-FROM debian:trixie
+FROM debian:trixie-20260316
 
 LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
