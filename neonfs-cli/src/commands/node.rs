@@ -36,8 +36,12 @@ impl NodeCommand {
 
         let result = runtime.block_on(async {
             let mut conn = DaemonConnection::connect().await?;
-            conn.call("Elixir.NeonFS.CLI.Handler", "handle_node_status", vec![])
-                .await
+            conn.call(
+                "Elixir.NeonFS.Client.CLIHandler",
+                "handle_node_status",
+                vec![],
+            )
+            .await
         })?;
 
         if let Some(err) = extract_error(&result) {

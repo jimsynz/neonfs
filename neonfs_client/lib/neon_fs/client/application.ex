@@ -15,16 +15,59 @@ defmodule NeonFS.Client.Application do
 
   @impl true
   def start(_type, _args) do
+    start_children? = Application.get_env(:neonfs_client, :start_children?, true)
+
     children =
-      if Application.get_env(:neonfs_client, :start_children?, true) do
+      if start_children? do
         build_children()
       else
         []
       end
 
-    Supervisor.start_link(children,
-      strategy: :one_for_one,
-      name: NeonFS.Client.Supervisor
+    result =
+      Supervisor.start_link(children,
+        strategy: :one_for_one,
+        name: NeonFS.Client.Supervisor
+      )
+
+    if start_children? do
+      register_health_checks()
+    end
+
+    result
+  end
+
+  defp register_health_checks do
+    alias NeonFS.Client.{Connection, CostFunction, Discovery, HealthCheck}
+
+    HealthCheck.register(:client,
+      connection: fn ->
+        if Process.whereis(Connection) do
+          case Connection.connected_core_node() do
+            {:ok, node} -> %{status: :healthy, connected_node: node}
+            {:error, :no_connection} -> %{status: :degraded, reason: :no_connection}
+          end
+        else
+          %{status: :unhealthy, reason: :not_running}
+        end
+      end,
+      discovery: fn ->
+        if Process.whereis(Discovery) do
+          case Discovery.get_core_nodes() do
+            [_ | _] = nodes -> %{status: :healthy, core_node_count: length(nodes)}
+            [] -> %{status: :degraded, reason: :no_core_nodes}
+          end
+        else
+          %{status: :unhealthy, reason: :not_running}
+        end
+      end,
+      cost_function: fn ->
+        if Process.whereis(CostFunction) do
+          %{status: :healthy}
+        else
+          %{status: :unhealthy, reason: :not_running}
+        end
+      end
     )
   end
 

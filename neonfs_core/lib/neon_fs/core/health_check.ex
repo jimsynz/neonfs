@@ -1,7 +1,14 @@
 defmodule NeonFS.Core.HealthCheck do
   @moduledoc """
-  Aggregates subsystem health into a single report.
+  Core subsystem health checks.
+
+  Provides 7 checks for core-node subsystems (cache, clock, drives, Ra,
+  service registry, storage, volumes). Registration with the universal
+  `NeonFS.Client.HealthCheck` framework happens at application startup
+  via `register_checks/0`.
   """
+
+  alias NeonFS.Client.HealthCheck, as: ClientHealthCheck
 
   alias NeonFS.Core.{
     ChunkCache,
@@ -13,40 +20,27 @@ defmodule NeonFS.Core.HealthCheck do
     VolumeRegistry
   }
 
-  @default_timeout_ms 5_000
   @default_cache_max_memory 268_435_456
 
-  @type status :: :healthy | :degraded | :unhealthy
-  @type subsystem_report :: %{required(:status) => status(), optional(atom()) => term()}
-
   @doc """
-  Returns a health report for all core subsystems.
+  Registers all core subsystem checks with the client health check framework.
   """
-  @spec check() :: map()
-  def check, do: check([])
-
-  @doc """
-  Returns a health report with optional runtime overrides.
-
-  Supported options:
-  - `:timeout_ms` — per-subsystem timeout (default: `5000`)
-  - `:checks` — custom subsystem checks for tests
-  """
-  @spec check(keyword()) :: map()
-  def check(opts) when is_list(opts) do
-    timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
-    checks = Keyword.get(opts, :checks, default_checks(opts))
-    subsystem_reports = run_checks(checks, timeout_ms)
-
-    %{
-      checked_at: DateTime.utc_now(),
-      checks: subsystem_reports,
-      node: Node.self(),
-      status: overall_status(subsystem_reports)
-    }
+  @spec register_checks() :: :ok
+  def register_checks do
+    ClientHealthCheck.register(:core, checks())
   end
 
-  defp default_checks(opts) do
+  @doc """
+  Returns the keyword list of core health checks. Useful for testing.
+  """
+  @spec checks() :: keyword((-> map()))
+  def checks, do: checks([])
+
+  @doc """
+  Returns the keyword list of core health checks with custom options.
+  """
+  @spec checks(keyword()) :: keyword((-> map()))
+  def checks(opts) do
     cache_max_memory = Keyword.get(opts, :cache_max_memory, configured_cache_max_memory())
     chunk_cache_mod = Keyword.get(opts, :chunk_cache_mod, ChunkCache)
     clock_monitor_mod = Keyword.get(opts, :clock_monitor_mod, ClockMonitor)
@@ -68,44 +62,7 @@ defmodule NeonFS.Core.HealthCheck do
     ]
   end
 
-  defp run_checks(checks, timeout_ms) do
-    checks
-    |> Enum.zip(
-      Task.async_stream(
-        checks,
-        fn {name, fun} -> {name, safe_check(fun)} end,
-        ordered: true,
-        on_timeout: :kill_task,
-        timeout: timeout_ms
-      )
-    )
-    |> Enum.reduce(%{}, fn
-      {{name, _fun}, {:ok, {_name, report}}}, acc ->
-        Map.put(acc, name, report)
-
-      {{name, _fun}, {:exit, :timeout}}, acc ->
-        Map.put(acc, name, %{status: :unhealthy, reason: :timeout})
-
-      {{name, _fun}, {:exit, reason}}, acc ->
-        Map.put(acc, name, %{status: :unhealthy, reason: {:exit, inspect(reason)}})
-    end)
-  end
-
-  defp safe_check(fun) do
-    case fun.() do
-      %{status: status} = report when status in [:healthy, :degraded, :unhealthy] ->
-        report
-
-      report ->
-        %{status: :unhealthy, reason: {:invalid_response, inspect(report)}}
-    end
-  rescue
-    error ->
-      %{status: :unhealthy, reason: {:exception, Exception.message(error)}}
-  catch
-    kind, reason ->
-      %{status: :unhealthy, reason: {kind, inspect(reason)}}
-  end
+  # Subsystem check functions
 
   defp check_cache(chunk_cache_mod, cache_max_memory) do
     if Process.whereis(chunk_cache_mod) do
@@ -264,15 +221,7 @@ defmodule NeonFS.Core.HealthCheck do
     _ -> %{status: :unhealthy, reason: :not_available}
   end
 
-  defp overall_status(subsystem_reports) do
-    statuses = subsystem_reports |> Map.values() |> Enum.map(& &1.status)
-
-    cond do
-      :unhealthy in statuses -> :unhealthy
-      :degraded in statuses -> :degraded
-      true -> :healthy
-    end
-  end
+  # Private helpers
 
   defp cache_entry_count(chunk_cache_mod) do
     if function_exported?(chunk_cache_mod, :entry_count, 0),

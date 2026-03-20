@@ -13,7 +13,7 @@ defmodule NeonFS.Core.Application do
   require Logger
 
   alias NeonFS.Cluster.{Formation, State}
-  alias NeonFS.Core.{DriveConfig, Persistence}
+  alias NeonFS.Core.{DriveConfig, HealthCheck, Persistence}
 
   @impl true
   def start(_type, _args) do
@@ -26,7 +26,13 @@ defmodule NeonFS.Core.Application do
     cache_orphan_detection_result()
 
     # Start the core supervision tree
-    NeonFS.Core.Supervisor.start_link([])
+    result = NeonFS.Core.Supervisor.start_link([])
+
+    if Application.get_env(:neonfs_core, :start_children?, true) do
+      HealthCheck.register_checks()
+    end
+
+    result
   end
 
   @impl true

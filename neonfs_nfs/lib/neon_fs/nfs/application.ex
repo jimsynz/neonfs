@@ -8,21 +8,24 @@ defmodule NeonFS.NFS.Application do
   use Application
   require Logger
 
-  alias NeonFS.NFS.{ExportManager, Supervisor}
+  alias NeonFS.NFS.{ExportManager, HealthCheck, Supervisor}
 
   @impl true
   def start(_type, _args) do
     Logger.metadata(node_name: node())
 
-    # In test mode, don't start the supervisor - tests use start_supervised
-    # for the specific components they need
+    start_supervisor? = Application.get_env(:neonfs_nfs, :start_supervisor, true)
+
     result =
-      if Application.get_env(:neonfs_nfs, :start_supervisor, true) do
+      if start_supervisor? do
         Supervisor.start_link()
       else
-        # Return a minimal supervisor for test mode
         Elixir.Supervisor.start_link([], strategy: :one_for_one, name: __MODULE__)
       end
+
+    if start_supervisor? do
+      HealthCheck.register_checks()
+    end
 
     result
   end

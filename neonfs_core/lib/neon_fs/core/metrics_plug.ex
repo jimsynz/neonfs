@@ -6,7 +6,7 @@ defmodule NeonFS.Core.MetricsPlug do
 
   import Plug.Conn
 
-  alias NeonFS.Core.HealthCheck
+  alias NeonFS.Client.HealthCheck
 
   @impl Plug
   def init(opts) do
@@ -57,24 +57,8 @@ defmodule NeonFS.Core.MetricsPlug do
 
   defp json_body(value) do
     value
-    |> normalise_for_json()
+    |> HealthCheck.normalise_for_json()
     |> :json.encode()
     |> IO.iodata_to_binary()
   end
-
-  defp normalise_for_json(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
-
-  defp normalise_for_json(%_{} = struct) do
-    struct
-    |> Map.from_struct()
-    |> normalise_for_json()
-  end
-
-  defp normalise_for_json(map) when is_map(map) do
-    Map.new(map, fn {key, value} -> {normalise_for_json(key), normalise_for_json(value)} end)
-  end
-
-  defp normalise_for_json(list) when is_list(list), do: Enum.map(list, &normalise_for_json/1)
-  defp normalise_for_json(tuple) when is_tuple(tuple), do: inspect(tuple)
-  defp normalise_for_json(value), do: value
 end
