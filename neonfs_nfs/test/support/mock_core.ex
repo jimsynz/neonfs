@@ -54,14 +54,14 @@ defmodule NeonFS.NFS.MockCore do
 
   defp dispatch(table, NeonFS.Core.VolumeRegistry, :list, []) do
     [{:volumes, volumes}] = :ets.lookup(table, :volumes)
-    Enum.map(volumes, fn name -> %{name: name} end)
+    Enum.map(volumes, fn name -> %{name: name, id: name} end)
   end
 
   defp dispatch(table, NeonFS.Core.VolumeRegistry, :get_by_name, [name]) do
     [{:volumes, volumes}] = :ets.lookup(table, :volumes)
 
     if name in volumes do
-      {:ok, %{name: name}}
+      {:ok, %{name: name, id: name}}
     else
       {:error, :not_found}
     end

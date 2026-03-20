@@ -191,9 +191,9 @@ defmodule NeonFS.NFS.Handler do
       lookup_volume(name, state)
     else
       result =
-        with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+        with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
              {:ok, parent_path} <- inode_path(parent_inode) do
-          cached_lookup(state.cache_table, volume, parent_path, name)
+          cached_lookup(state.cache_table, vol, parent_path, name)
         end
 
       {result_to_reply(result), state}
@@ -209,7 +209,9 @@ defmodule NeonFS.NFS.Handler do
       if virtual_root?(volume_id_bytes, inode) do
         {:ok, build_reply("attrs", 1, synthetic_dir_attrs())}
       else
-        getattr_resolve(volume_id_bytes, inode, state)
+        with {:ok, vol} <- resolve_volume(volume_id_bytes, state) do
+          getattr_resolve(vol, inode, state)
+        end
       end
 
     {result_to_reply(result), state}
@@ -223,9 +225,9 @@ defmodule NeonFS.NFS.Handler do
     count = params["count"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, path} <- inode_path(inode),
-           {:ok, data} <- read_file(volume, path, offset: offset, length: count) do
+           {:ok, data} <- read_file(vol.id, path, offset: offset, length: count) do
         eof = byte_size(data) < count
         {:ok, {:ok, %{"type" => "read", "data" => data, "eof" => eof}}}
       end
@@ -239,9 +241,9 @@ defmodule NeonFS.NFS.Handler do
     volume_id_bytes = params["volume_id"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, path} <- inode_path(inode),
-           {:ok, file} <- file_index_get_by_path(volume, path) do
+           {:ok, file} <- file_index_get_by_path(vol.id, path) do
         target = Map.get(file, :symlink_target, "")
         {:ok, {:ok, %{"type" => "readlink", "target" => target}}}
       end
@@ -259,9 +261,9 @@ defmodule NeonFS.NFS.Handler do
       list_virtual_root(state)
     else
       result =
-        with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+        with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
              {:ok, path} <- inode_path(inode) do
-          cached_readdir(state.cache_table, volume, path)
+          cached_readdir(state.cache_table, vol, path)
         end
 
       {result_to_reply(result), state}
@@ -274,9 +276,9 @@ defmodule NeonFS.NFS.Handler do
     volume_id_bytes = params["volume_id"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, path} <- inode_path(inode),
-           {:ok, file} <- file_index_get_by_path(volume, path) do
+           {:ok, file} <- file_index_get_by_path(vol.id, path) do
         updates = build_setattr_updates(params)
         new_size = params["size"]
 
@@ -304,11 +306,11 @@ defmodule NeonFS.NFS.Handler do
     data = params["data"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, path} <- inode_path(inode),
-           {:ok, existing_file} <- file_index_get_by_path(volume, path),
-           merged <- merge_write_data(volume, existing_file, offset, data),
-           {:ok, file} <- write_file(volume, path, merged) do
+           {:ok, existing_file} <- file_index_get_by_path(vol.id, path),
+           merged <- merge_write_data(vol.id, existing_file, offset, data),
+           {:ok, file} <- write_file(vol.id, path, merged) do
         count = byte_size(data)
         {:ok, build_write_reply(count, inode, file)}
       end
@@ -324,11 +326,11 @@ defmodule NeonFS.NFS.Handler do
     mode = params["mode"] || 0o644
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
-           {:ok, file} <- write_file(volume, child_path, <<>>, mode: @s_ifreg ||| mode),
-           {:ok, inode} <- InodeTable.allocate_inode(volume, child_path) do
+           {:ok, file} <- write_file(vol.id, child_path, <<>>, mode: @s_ifreg ||| mode),
+           {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -342,12 +344,12 @@ defmodule NeonFS.NFS.Handler do
     name = params["name"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
-           :ok <- check_not_exists(volume, child_path),
-           {:ok, file} <- write_file(volume, child_path, <<>>),
-           {:ok, inode} <- InodeTable.allocate_inode(volume, child_path) do
+           :ok <- check_not_exists(vol.id, child_path),
+           {:ok, file} <- write_file(vol.id, child_path, <<>>),
+           {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -361,11 +363,11 @@ defmodule NeonFS.NFS.Handler do
     name = params["name"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
-           {:ok, file} <- write_file(volume, child_path, <<>>, mode: @s_ifdir ||| 0o755),
-           {:ok, inode} <- InodeTable.allocate_inode(volume, child_path) do
+           {:ok, file} <- write_file(vol.id, child_path, <<>>, mode: @s_ifdir ||| 0o755),
+           {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -379,12 +381,12 @@ defmodule NeonFS.NFS.Handler do
     name = params["name"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
-           {:ok, file} <- file_index_get_by_path(volume, child_path),
+           {:ok, file} <- file_index_get_by_path(vol.id, child_path),
            :ok <- file_index_delete(file.id) do
-        case InodeTable.get_inode(volume, child_path) do
+        case InodeTable.get_inode(vol.name, child_path) do
           {:ok, old_inode} -> InodeTable.release_inode(old_inode)
           _ -> :ok
         end
@@ -405,17 +407,17 @@ defmodule NeonFS.NFS.Handler do
     to_name = params["to_name"]
 
     result =
-      with {:ok, volume} <- resolve_volume(from_vol_bytes, state),
+      with {:ok, vol} <- resolve_volume(from_vol_bytes, state),
            {:ok, from_parent} <- inode_path(from_parent_inode),
            {:ok, to_parent} <- inode_path(to_parent_inode),
            from_path <- Path.join(from_parent, from_name),
            to_path <- Path.join(to_parent, to_name),
-           {:ok, file} <- file_index_get_by_path(volume, from_path),
+           {:ok, file} <- file_index_get_by_path(vol.id, from_path),
            {:ok, _} <- file_index_update(file.id, path: to_path) do
-        case InodeTable.get_inode(volume, from_path) do
+        case InodeTable.get_inode(vol.name, from_path) do
           {:ok, old_inode} ->
             InodeTable.release_inode(old_inode)
-            InodeTable.allocate_inode(volume, to_path)
+            InodeTable.allocate_inode(vol.name, to_path)
 
           _ ->
             :ok
@@ -435,16 +437,16 @@ defmodule NeonFS.NFS.Handler do
     target = params["target"]
 
     result =
-      with {:ok, volume} <- resolve_volume(volume_id_bytes, state),
+      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
            {:ok, file} <-
              core_call(NeonFS.Core.WriteOperation, :create_symlink, [
-               volume,
+               vol.id,
                child_path,
                target
              ]),
-           {:ok, inode} <- InodeTable.allocate_inode(volume, child_path) do
+           {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -459,87 +461,89 @@ defmodule NeonFS.NFS.Handler do
 
   ## Cache-Aware Operations
 
-  defp getattr_resolve(volume_id_bytes, inode, state) do
-    with {:ok, _volume} <- resolve_volume(volume_id_bytes, state),
-         {:ok, {volume, path}} <- InodeTable.get_path(inode) do
-      if path == "/" do
+  defp getattr_resolve(vol, inode, state) do
+    case InodeTable.get_path(inode) do
+      {:ok, {_volume_name, "/"}} ->
         {:ok, build_reply("attrs", inode, synthetic_dir_attrs())}
-      else
-        cached_getattr(state.cache_table, volume, path, inode)
-      end
+
+      {:ok, {_volume_name, path}} ->
+        cached_getattr(state.cache_table, vol, path, inode)
+
+      error ->
+        error
     end
   end
 
-  defp cached_lookup(cache_table, volume, parent_path, name) do
-    case cache_table && MetadataCache.get_lookup(cache_table, volume, parent_path, name) do
+  defp cached_lookup(cache_table, vol, parent_path, name) do
+    case cache_table && MetadataCache.get_lookup(cache_table, vol.name, parent_path, name) do
       {:ok, result} ->
-        emit_cache_telemetry(:hit, :lookup, volume)
+        emit_cache_telemetry(:hit, :lookup, vol.name)
         {:ok, result}
 
       _ ->
-        if cache_table, do: emit_cache_telemetry(:miss, :lookup, volume)
-        uncached_lookup(cache_table, volume, parent_path, name)
+        if cache_table, do: emit_cache_telemetry(:miss, :lookup, vol.name)
+        uncached_lookup(cache_table, vol, parent_path, name)
     end
   end
 
-  defp uncached_lookup(cache_table, volume, parent_path, name) do
+  defp uncached_lookup(cache_table, vol, parent_path, name) do
     child_path = Path.join(parent_path, name)
 
-    with {:ok, file} <- file_index_get_by_path(volume, child_path),
-         {:ok, inode} <- InodeTable.allocate_inode(volume, child_path) do
+    with {:ok, file} <- file_index_get_by_path(vol.id, child_path),
+         {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
       reply = build_reply("lookup", inode, file)
-      maybe_cache_lookup(cache_table, volume, parent_path, name, child_path, file, reply)
+      maybe_cache_lookup(cache_table, vol.name, parent_path, name, child_path, file, reply)
       {:ok, reply}
     end
   end
 
-  defp maybe_cache_lookup(nil, _vol, _parent, _name, _child, _file, _reply), do: :ok
+  defp maybe_cache_lookup(nil, _vol_name, _parent, _name, _child, _file, _reply), do: :ok
 
-  defp maybe_cache_lookup(cache_table, volume, parent_path, name, child_path, file, reply) do
-    MetadataCache.put_lookup(cache_table, volume, parent_path, name, reply)
-    MetadataCache.put_attrs(cache_table, volume, child_path, file)
+  defp maybe_cache_lookup(cache_table, vol_name, parent_path, name, child_path, file, reply) do
+    MetadataCache.put_lookup(cache_table, vol_name, parent_path, name, reply)
+    MetadataCache.put_attrs(cache_table, vol_name, child_path, file)
   end
 
-  defp cached_getattr(cache_table, volume, path, inode) do
-    case cache_table && MetadataCache.get_attrs(cache_table, volume, path) do
+  defp cached_getattr(cache_table, vol, path, inode) do
+    case cache_table && MetadataCache.get_attrs(cache_table, vol.name, path) do
       {:ok, attrs} ->
-        emit_cache_telemetry(:hit, :attrs, volume)
+        emit_cache_telemetry(:hit, :attrs, vol.name)
         {:ok, build_reply("attrs", inode, attrs)}
 
       _ ->
-        if cache_table, do: emit_cache_telemetry(:miss, :attrs, volume)
-        uncached_getattr(cache_table, volume, path, inode)
+        if cache_table, do: emit_cache_telemetry(:miss, :attrs, vol.name)
+        uncached_getattr(cache_table, vol, path, inode)
     end
   end
 
-  defp uncached_getattr(cache_table, volume, path, inode) do
-    with {:ok, file} <- file_index_get_by_path(volume, path) do
-      if cache_table, do: MetadataCache.put_attrs(cache_table, volume, path, file)
+  defp uncached_getattr(cache_table, vol, path, inode) do
+    with {:ok, file} <- file_index_get_by_path(vol.id, path) do
+      if cache_table, do: MetadataCache.put_attrs(cache_table, vol.name, path, file)
       {:ok, build_reply("attrs", inode, file)}
     end
   end
 
-  defp cached_readdir(cache_table, volume, path) do
-    case cache_table && MetadataCache.get_dir_listing(cache_table, volume, path) do
+  defp cached_readdir(cache_table, vol, path) do
+    case cache_table && MetadataCache.get_dir_listing(cache_table, vol.name, path) do
       {:ok, entries} ->
-        emit_cache_telemetry(:hit, :dir, volume)
+        emit_cache_telemetry(:hit, :dir, vol.name)
         {:ok, {:ok, %{"type" => "dir_entries", "entries" => entries}}}
 
       _ ->
-        if cache_table, do: emit_cache_telemetry(:miss, :dir, volume)
-        uncached_readdir(cache_table, volume, path)
+        if cache_table, do: emit_cache_telemetry(:miss, :dir, vol.name)
+        uncached_readdir(cache_table, vol, path)
     end
   end
 
-  defp uncached_readdir(cache_table, volume, path) do
-    with {:ok, entries} <- list_directory(volume, path) do
+  defp uncached_readdir(cache_table, vol, path) do
+    with {:ok, entries} <- list_directory(vol.id, path) do
       dir_entries =
         Enum.map(entries, fn {name, child_path, file_attrs} ->
-          {:ok, child_inode} = InodeTable.allocate_inode(volume, child_path)
+          {:ok, child_inode} = InodeTable.allocate_inode(vol.name, child_path)
           build_dir_entry(child_inode, name, file_attrs)
         end)
 
-      if cache_table, do: MetadataCache.put_dir_listing(cache_table, volume, path, dir_entries)
+      if cache_table, do: MetadataCache.put_dir_listing(cache_table, vol.name, path, dir_entries)
       {:ok, {:ok, %{"type" => "dir_entries", "entries" => dir_entries}}}
     end
   end
@@ -554,12 +558,12 @@ defmodule NeonFS.NFS.Handler do
     :crypto.hash(:md5, volume_name)
   end
 
-  defp register_volume(volume_name, state) do
+  defp register_volume(volume_name, core_volume_id, state) do
     hash = volume_id_hash(volume_name)
 
     %{
       state
-      | volume_ids: Map.put(state.volume_ids, hash, volume_name),
+      | volume_ids: Map.put(state.volume_ids, hash, {volume_name, core_volume_id}),
         volume_hashes: Map.put(state.volume_hashes, volume_name, hash)
     }
   end
@@ -567,14 +571,14 @@ defmodule NeonFS.NFS.Handler do
   defp resolve_volume(volume_id_bytes, state) do
     case Map.get(state.volume_ids, volume_id_bytes) do
       nil -> {:error, :stale}
-      name -> {:ok, name}
+      {name, id} -> {:ok, %{name: name, id: id}}
     end
   end
 
   defp lookup_volume(name, state) do
     case core_call(NeonFS.Core.VolumeRegistry, :get_by_name, [name]) do
-      {:ok, _volume} ->
-        new_state = register_volume(name, state)
+      {:ok, volume} ->
+        new_state = register_volume(name, volume.id, state)
         {:ok, _} = InodeTable.allocate_inode(name, "/")
         {:ok, root_inode} = InodeTable.get_inode(name, "/")
 
@@ -599,7 +603,8 @@ defmodule NeonFS.NFS.Handler do
         new_state =
           Enum.reduce(volumes, state, fn vol, acc ->
             name = volume_name(vol)
-            register_volume(name, acc)
+            core_id = volume_core_id(vol)
+            register_volume(name, core_id, acc)
           end)
 
         entries =
@@ -623,6 +628,8 @@ defmodule NeonFS.NFS.Handler do
 
   defp volume_name(vol) when is_binary(vol), do: vol
   defp volume_name(%{name: name}) when is_binary(name), do: name
+
+  defp volume_core_id(%{id: id}), do: id
 
   ## Reply Building
 
