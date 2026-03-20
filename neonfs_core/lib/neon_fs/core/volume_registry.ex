@@ -17,7 +17,9 @@ defmodule NeonFS.Core.VolumeRegistry do
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Error.Invalid, as: InvalidError
+  alias NeonFS.Events
   alias NeonFS.Events.Broadcaster
+  alias NeonFS.Events.Envelope
   alias NeonFS.Events.{VolumeCreated, VolumeDeleted, VolumeUpdated}
 
   @type volume_id :: binary()
@@ -206,6 +208,10 @@ defmodule NeonFS.Core.VolumeRegistry do
       read_concurrency: true
     ])
 
+    # Subscribe to volume lifecycle events so ETS stays in sync when
+    # volumes are created/updated/deleted on other nodes
+    Events.subscribe_volumes()
+
     # Try to restore volumes from Ra state into ETS
     # If Ra is not ready yet (e.g., during startup), that's okay - the index
     # will be populated as operations occur or when Ra becomes available
@@ -274,6 +280,29 @@ defmodule NeonFS.Core.VolumeRegistry do
   def handle_call({:update_stats, id, stats}, _from, state) do
     reply = do_update_stats(id, stats)
     {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_info(
+        {:neonfs_event, %Envelope{source_node: source, event: event}},
+        state
+      )
+      when source != node() do
+    sync_event_to_ets(event)
+    {:noreply, state}
+  end
+
+  def handle_info({:neonfs_event, %Envelope{}}, state), do: {:noreply, state}
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  defp sync_event_to_ets(%VolumeCreated{volume_id: id}), do: get_from_ra(id)
+  defp sync_event_to_ets(%VolumeUpdated{volume_id: id}), do: get_from_ra(id)
+
+  defp sync_event_to_ets(%VolumeDeleted{volume_id: id}) do
+    case :ets.lookup(:volumes_by_id, id) do
+      [{^id, volume}] -> delete_volume_from_ets(volume)
+      [] -> :ok
+    end
   end
 
   defp do_adjust_system_volume_replication(new_size) do

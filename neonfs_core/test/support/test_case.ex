@@ -27,6 +27,7 @@ defmodule NeonFS.TestCase do
   use ExUnit.CaseTemplate
 
   alias NeonFS.Core.{MetadataRing, RaServer, RaSupervisor}
+  alias NeonFS.Events.Relay
   alias NeonFS.IO.{Producer, Scheduler, WorkerSupervisor}
 
   # Mock volume registry for I/O scheduler tests — returns default io_weight
@@ -272,12 +273,13 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts VolumeRegistry.
+  Starts VolumeRegistry and its event infrastructure prerequisites.
   """
   def start_volume_registry do
     stop_if_running(NeonFS.Core.VolumeRegistry)
     cleanup_ets_table(:volumes_by_id)
     cleanup_ets_table(:volumes_by_name)
+    ensure_events_infrastructure()
     start_supervised!(NeonFS.Core.VolumeRegistry, restart: :temporary)
   end
 
@@ -366,6 +368,26 @@ defmodule NeonFS.TestCase do
 
   defp await_down({ref, pid}) do
     receive do: ({:DOWN, ^ref, :process, ^pid, _} -> :ok), after: (5000 -> :ok)
+  end
+
+  defp ensure_events_infrastructure do
+    try do
+      start_supervised!(%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}})
+    rescue
+      RuntimeError -> :ok
+    end
+
+    try do
+      start_supervised!({Registry, keys: :duplicate, name: NeonFS.Events.Registry})
+    rescue
+      RuntimeError -> :ok
+    end
+
+    try do
+      start_supervised!(Relay)
+    rescue
+      RuntimeError -> :ok
+    end
   end
 
   defp cleanup_ets_table(table) do
