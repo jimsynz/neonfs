@@ -193,31 +193,35 @@ defmodule NeonFS.Core.Persistence do
   @spec restore_from_open_dets(reference(), atom(), String.t()) :: :ok
   defp restore_from_open_dets(dets_ref, ets_table, dets_path) do
     # Wait for ETS table to be created by the owning GenServer
-    wait_for_ets_table(ets_table)
+    case wait_for_ets_table(ets_table) do
+      :not_found ->
+        :dets.close(dets_ref)
 
-    # Load DETS -> ETS
-    case :dets.to_ets(dets_ref, ets_table) do
-      ^ets_table ->
-        count = :ets.info(ets_table, :size)
+      :ok ->
+        case :dets.to_ets(dets_ref, ets_table) do
+          ^ets_table ->
+            count = :ets.info(ets_table, :size)
 
-        Logger.info("Restored entries from DETS",
-          count: count,
-          ets_table: ets_table,
-          dets_path: dets_path
-        )
+            Logger.info("Restored entries from DETS",
+              count: count,
+              ets_table: ets_table,
+              dets_path: dets_path
+            )
 
-      {:error, reason} ->
-        Logger.error("Failed to restore ETS table from DETS",
-          ets_table: ets_table,
-          reason: inspect(reason)
-        )
+          {:error, reason} ->
+            Logger.error("Failed to restore ETS table from DETS",
+              ets_table: ets_table,
+              reason: inspect(reason)
+            )
+        end
+
+        :dets.close(dets_ref)
     end
 
-    :dets.close(dets_ref)
     :ok
   end
 
-  @spec wait_for_ets_table(atom(), non_neg_integer()) :: :ok
+  @spec wait_for_ets_table(atom(), non_neg_integer()) :: :ok | :not_found
   defp wait_for_ets_table(table_name, max_retries \\ 50) do
     case :ets.whereis(table_name) do
       :undefined ->
@@ -233,7 +237,7 @@ defmodule NeonFS.Core.Persistence do
             table_name: table_name
           )
 
-          :ok
+          :not_found
         end
 
       _ref ->
