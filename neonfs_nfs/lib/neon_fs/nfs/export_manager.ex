@@ -26,7 +26,7 @@ defmodule NeonFS.NFS.ExportManager do
   use GenServer
   require Logger
 
-  alias NeonFS.NFS.{ExportInfo, ExportSupervisor, Handler, Native}
+  alias NeonFS.NFS.{ExportInfo, ExportSupervisor, Handler, MetadataCache, Native}
 
   defmodule State do
     @moduledoc false
@@ -126,6 +126,8 @@ defmodule NeonFS.NFS.ExportManager do
 
       new_exports = Map.put(state.exports, volume_name, export_info)
       new_state = %{state | exports: new_exports}
+
+      subscribe_cache_events(volume_name)
 
       Logger.info("Exported volume via NFS", volume_name: volume_name, export_id: export_id)
 
@@ -243,6 +245,23 @@ defmodule NeonFS.NFS.ExportManager do
           )
       end
     end)
+  end
+
+  defp subscribe_cache_events(volume_name) do
+    case NeonFS.Client.core_call(NeonFS.Core.VolumeRegistry, :get_by_name, [volume_name]) do
+      {:ok, volume} ->
+        MetadataCache.subscribe_volume(volume_name, volume.id)
+
+      {:error, reason} ->
+        Logger.warning("Could not subscribe to cache events for volume",
+          volume_name: volume_name,
+          reason: inspect(reason)
+        )
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp nfs_bind_address do

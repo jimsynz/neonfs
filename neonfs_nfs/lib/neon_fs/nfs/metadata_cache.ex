@@ -64,18 +64,22 @@ defmodule NeonFS.NFS.MetadataCache do
 
   @doc """
   Subscribe to events for a volume, enabling cache invalidation.
+
+  Requires both `volume_name` (used for cache keys) and `volume_id`
+  (the core UUID used for event topics). The mapping is stored internally
+  so event dispatch can translate volume_id → volume_name for cache lookups.
   """
-  @spec subscribe_volume(String.t()) :: :ok
-  def subscribe_volume(volume_name) do
-    GenServer.cast(__MODULE__, {:subscribe_volume, volume_name})
+  @spec subscribe_volume(String.t(), binary()) :: :ok
+  def subscribe_volume(volume_name, volume_id) do
+    GenServer.cast(__MODULE__, {:subscribe_volume, volume_name, volume_id})
   end
 
   @doc """
   Unsubscribe from events for a volume and clear its cache entries.
   """
-  @spec unsubscribe_volume(String.t()) :: :ok
-  def unsubscribe_volume(volume_name) do
-    GenServer.cast(__MODULE__, {:unsubscribe_volume, volume_name})
+  @spec unsubscribe_volume(String.t(), binary()) :: :ok
+  def unsubscribe_volume(volume_name, volume_id) do
+    GenServer.cast(__MODULE__, {:unsubscribe_volume, volume_name, volume_id})
   end
 
   @doc """
@@ -157,6 +161,39 @@ defmodule NeonFS.NFS.MetadataCache do
   end
 
   @doc """
+  Invalidate cached attributes for a specific path.
+  """
+  @spec invalidate_attrs(:ets.table(), String.t(), String.t()) :: :ok
+  def invalidate_attrs(table, volume_name, path) do
+    :ets.delete(table, {:attrs, volume_name, path})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc """
+  Invalidate a cached directory listing for a specific path.
+  """
+  @spec invalidate_dir_listing(:ets.table(), String.t(), String.t()) :: :ok
+  def invalidate_dir_listing(table, volume_name, path) do
+    :ets.delete(table, {:dir, volume_name, path})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc """
+  Invalidate a cached lookup result.
+  """
+  @spec invalidate_lookup(:ets.table(), String.t(), String.t(), String.t()) :: :ok
+  def invalidate_lookup(table, volume_name, parent_path, name) do
+    :ets.delete(table, {:lookup, volume_name, parent_path, name})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc """
   Invalidate all cache entries for a volume.
   """
   @spec invalidate_volume(:ets.table(), String.t()) :: :ok
@@ -175,7 +212,13 @@ defmodule NeonFS.NFS.MetadataCache do
   def init(_opts) do
     table = :ets.new(:nfs_metadata_cache, [:set, :public, read_concurrency: true])
 
-    {:ok, %{table: table, subscriptions: MapSet.new(), last_sequences: %{}}}
+    {:ok,
+     %{
+       table: table,
+       subscriptions: MapSet.new(),
+       last_sequences: %{},
+       volume_id_to_name: %{}
+     }}
   end
 
   @impl true
@@ -184,22 +227,36 @@ defmodule NeonFS.NFS.MetadataCache do
   end
 
   @impl true
-  def handle_cast({:subscribe_volume, volume_name}, state) do
-    NeonFS.Events.subscribe(volume_name)
-    {:noreply, %{state | subscriptions: MapSet.put(state.subscriptions, volume_name)}}
+  def handle_cast({:subscribe_volume, volume_name, volume_id}, state) do
+    NeonFS.Events.subscribe(volume_id)
+
+    new_state = %{
+      state
+      | subscriptions: MapSet.put(state.subscriptions, volume_name),
+        volume_id_to_name: Map.put(state.volume_id_to_name, volume_id, volume_name)
+    }
+
+    {:noreply, new_state}
   end
 
   @impl true
-  def handle_cast({:unsubscribe_volume, volume_name}, state) do
-    NeonFS.Events.unsubscribe(volume_name)
+  def handle_cast({:unsubscribe_volume, volume_name, volume_id}, state) do
+    NeonFS.Events.unsubscribe(volume_id)
     invalidate_volume(state.table, volume_name)
-    {:noreply, %{state | subscriptions: MapSet.delete(state.subscriptions, volume_name)}}
+
+    new_state = %{
+      state
+      | subscriptions: MapSet.delete(state.subscriptions, volume_name),
+        volume_id_to_name: Map.delete(state.volume_id_to_name, volume_id)
+    }
+
+    {:noreply, new_state}
   end
 
   @impl true
   def handle_info({:neonfs_event, %Envelope{} = envelope}, state) do
     state = check_sequence_gap(envelope, state)
-    dispatch_event(envelope, state.table)
+    dispatch_event(envelope, state.table, state.volume_id_to_name)
 
     new_sequences =
       Map.put(state.last_sequences, envelope.source_node, envelope.sequence)
@@ -218,94 +275,97 @@ defmodule NeonFS.NFS.MetadataCache do
   end
 
   # -- Internal event dispatch --
+  #
+  # Events carry `volume_id` (UUID) but cache keys use `volume_name`.
+  # The `id_to_name` map translates between them.
 
-  defp dispatch_event(%Envelope{event: %FileCreated{volume_id: vid, path: path}}, table) do
-    invalidate_dir_listing(table, vid, Path.dirname(path))
-    invalidate_lookup(table, vid, Path.dirname(path), Path.basename(path))
+  defp dispatch_event(envelope, table, id_to_name) do
+    case resolve_volume_name(envelope, id_to_name) do
+      {:ok, vol_name} -> do_dispatch_event(envelope, table, vol_name)
+      :skip -> :ok
+    end
   end
 
-  defp dispatch_event(%Envelope{event: %FileContentUpdated{volume_id: vid, path: path}}, table) do
-    invalidate_attrs(table, vid, path)
+  defp resolve_volume_name(%Envelope{event: event}, id_to_name) do
+    vid = Map.get(event, :volume_id)
+
+    case Map.get(id_to_name, vid) do
+      nil -> :skip
+      name -> {:ok, name}
+    end
   end
 
-  defp dispatch_event(%Envelope{event: %FileTruncated{volume_id: vid, path: path}}, table) do
-    invalidate_attrs(table, vid, path)
+  defp do_dispatch_event(%Envelope{event: %FileCreated{path: path}}, table, vol) do
+    invalidate_dir_listing(table, vol, Path.dirname(path))
+    invalidate_lookup(table, vol, Path.dirname(path), Path.basename(path))
   end
 
-  defp dispatch_event(%Envelope{event: %FileDeleted{volume_id: vid, path: path}}, table) do
-    invalidate_attrs(table, vid, path)
-    invalidate_dir_listing(table, vid, Path.dirname(path))
-    invalidate_lookup(table, vid, Path.dirname(path), Path.basename(path))
+  defp do_dispatch_event(%Envelope{event: %FileContentUpdated{path: path}}, table, vol) do
+    invalidate_attrs(table, vol, path)
   end
 
-  defp dispatch_event(%Envelope{event: %FileAttrsChanged{volume_id: vid, path: path}}, table) do
-    invalidate_attrs(table, vid, path)
+  defp do_dispatch_event(%Envelope{event: %FileTruncated{path: path}}, table, vol) do
+    invalidate_attrs(table, vol, path)
   end
 
-  defp dispatch_event(
-         %Envelope{
-           event: %FileRenamed{volume_id: vid, old_path: old_path, new_path: new_path}
-         },
-         table
+  defp do_dispatch_event(%Envelope{event: %FileDeleted{path: path}}, table, vol) do
+    invalidate_attrs(table, vol, path)
+    invalidate_dir_listing(table, vol, Path.dirname(path))
+    invalidate_lookup(table, vol, Path.dirname(path), Path.basename(path))
+  end
+
+  defp do_dispatch_event(%Envelope{event: %FileAttrsChanged{path: path}}, table, vol) do
+    invalidate_attrs(table, vol, path)
+  end
+
+  defp do_dispatch_event(
+         %Envelope{event: %FileRenamed{old_path: old_path, new_path: new_path}},
+         table,
+         vol
        ) do
-    invalidate_attrs(table, vid, old_path)
-    invalidate_dir_listing(table, vid, Path.dirname(old_path))
-    invalidate_dir_listing(table, vid, Path.dirname(new_path))
-    invalidate_lookup(table, vid, Path.dirname(old_path), Path.basename(old_path))
-    invalidate_lookup(table, vid, Path.dirname(new_path), Path.basename(new_path))
+    invalidate_attrs(table, vol, old_path)
+    invalidate_dir_listing(table, vol, Path.dirname(old_path))
+    invalidate_dir_listing(table, vol, Path.dirname(new_path))
+    invalidate_lookup(table, vol, Path.dirname(old_path), Path.basename(old_path))
+    invalidate_lookup(table, vol, Path.dirname(new_path), Path.basename(new_path))
   end
 
-  defp dispatch_event(%Envelope{event: %VolumeAclChanged{volume_id: vid}}, table) do
-    invalidate_volume(table, vid)
+  defp do_dispatch_event(%Envelope{event: %VolumeAclChanged{}}, table, vol) do
+    invalidate_volume(table, vol)
   end
 
-  defp dispatch_event(%Envelope{event: %FileAclChanged{volume_id: vid, path: path}}, table) do
-    invalidate_attrs(table, vid, path)
+  defp do_dispatch_event(%Envelope{event: %FileAclChanged{path: path}}, table, vol) do
+    invalidate_attrs(table, vol, path)
   end
 
-  defp dispatch_event(%Envelope{event: %DirCreated{volume_id: vid, path: path}}, table) do
-    invalidate_dir_listing(table, vid, Path.dirname(path))
-    invalidate_lookup(table, vid, Path.dirname(path), Path.basename(path))
+  defp do_dispatch_event(%Envelope{event: %DirCreated{path: path}}, table, vol) do
+    invalidate_dir_listing(table, vol, Path.dirname(path))
+    invalidate_lookup(table, vol, Path.dirname(path), Path.basename(path))
   end
 
-  defp dispatch_event(%Envelope{event: %DirDeleted{volume_id: vid, path: path}}, table) do
-    invalidate_dir_listing(table, vid, path)
-    invalidate_dir_listing(table, vid, Path.dirname(path))
-    invalidate_lookup(table, vid, Path.dirname(path), Path.basename(path))
+  defp do_dispatch_event(%Envelope{event: %DirDeleted{path: path}}, table, vol) do
+    invalidate_dir_listing(table, vol, path)
+    invalidate_dir_listing(table, vol, Path.dirname(path))
+    invalidate_lookup(table, vol, Path.dirname(path), Path.basename(path))
   end
 
-  defp dispatch_event(
-         %Envelope{
-           event: %DirRenamed{volume_id: vid, old_path: old_path, new_path: new_path}
-         },
-         table
+  defp do_dispatch_event(
+         %Envelope{event: %DirRenamed{old_path: old_path, new_path: new_path}},
+         table,
+         vol
        ) do
-    invalidate_dir_listing(table, vid, old_path)
-    invalidate_dir_listing(table, vid, Path.dirname(old_path))
-    invalidate_dir_listing(table, vid, Path.dirname(new_path))
-    invalidate_lookup(table, vid, Path.dirname(old_path), Path.basename(old_path))
-    invalidate_lookup(table, vid, Path.dirname(new_path), Path.basename(new_path))
+    invalidate_dir_listing(table, vol, old_path)
+    invalidate_dir_listing(table, vol, Path.dirname(old_path))
+    invalidate_dir_listing(table, vol, Path.dirname(new_path))
+    invalidate_lookup(table, vol, Path.dirname(old_path), Path.basename(old_path))
+    invalidate_lookup(table, vol, Path.dirname(new_path), Path.basename(new_path))
   end
 
-  defp dispatch_event(%Envelope{event: %VolumeUpdated{volume_id: vid}}, table) do
-    invalidate_volume(table, vid)
+  defp do_dispatch_event(%Envelope{event: %VolumeUpdated{}}, table, vol) do
+    invalidate_volume(table, vol)
   end
 
-  defp dispatch_event(_envelope, _table), do: :ok
-
-  # -- Invalidation helpers --
-
-  defp invalidate_attrs(table, volume_name, path) do
-    :ets.delete(table, {:attrs, volume_name, path})
-  end
-
-  defp invalidate_dir_listing(table, volume_name, path) do
-    :ets.delete(table, {:dir, volume_name, path})
-  end
-
-  defp invalidate_lookup(table, volume_name, parent_path, name) do
-    :ets.delete(table, {:lookup, volume_name, parent_path, name})
-  end
+  defp do_dispatch_event(_envelope, _table, _vol), do: :ok
 
   # -- Gap detection --
 
