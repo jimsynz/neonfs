@@ -404,6 +404,41 @@ defmodule NeonFS.NFS.HandlerTest do
       assert reply["data"] == "Hello World"
     end
 
+    test "partial write in middle preserves trailing data", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      created = create_file(handler, vol_hash, root_inode, "mid.txt")
+      file_inode = created["file_id"]
+
+      send_op(handler, 1, "write", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "data" => "hello world"
+      })
+
+      assert_ok(1)
+
+      send_op(handler, 2, "write", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 5,
+        "data" => "-"
+      })
+
+      assert_ok(2)
+
+      send_op(handler, 3, "read", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "count" => 1024
+      })
+
+      reply = assert_ok(3)
+      assert reply["data"] == "hello-world"
+    end
+
     test "read from nonexistent file returns ENOENT", ctx do
       %{handler: handler} = start_handler_with_mock(ctx)
       {vol_hash, _root_inode} = register_volume(handler)
@@ -626,6 +661,62 @@ defmodule NeonFS.NFS.HandlerTest do
       names = Enum.map(reply["entries"], & &1["name"])
       assert "alpha.txt" in names
       assert "beta.txt" in names
+    end
+  end
+
+  describe "cache invalidation" do
+    test "readdirplus shows files created after initial empty listing", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      cache_table = :ets.new(:test_cache, [:set, :public, read_concurrency: true])
+      :sys.replace_state(handler, fn state -> %{state | cache_table: cache_table} end)
+      {vol_hash, root_inode} = register_volume(handler)
+
+      send_op(handler, 1, "readdirplus", %{
+        "inode" => root_inode,
+        "volume_id" => vol_hash,
+        "cookie" => 0
+      })
+
+      reply = assert_ok(1)
+      assert reply["entries"] == []
+
+      create_file(handler, vol_hash, root_inode, "after.txt")
+
+      send_op(handler, 2, "readdirplus", %{
+        "inode" => root_inode,
+        "volume_id" => vol_hash,
+        "cookie" => 0
+      })
+
+      reply = assert_ok(2)
+      names = Enum.map(reply["entries"], & &1["name"])
+      assert "after.txt" in names
+    end
+
+    test "getattr reflects updated size after write", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      cache_table = :ets.new(:test_cache2, [:set, :public, read_concurrency: true])
+      :sys.replace_state(handler, fn state -> %{state | cache_table: cache_table} end)
+      {vol_hash, root_inode} = register_volume(handler)
+      created = create_file(handler, vol_hash, root_inode, "sized.txt")
+      file_inode = created["file_id"]
+
+      send_op(handler, 1, "getattr", %{"inode" => file_inode, "volume_id" => vol_hash})
+      reply = assert_ok(1)
+      assert reply["size"] == 0
+
+      send_op(handler, 2, "write", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "data" => "hello"
+      })
+
+      assert_ok(2)
+
+      send_op(handler, 3, "getattr", %{"inode" => file_inode, "volume_id" => vol_hash})
+      reply = assert_ok(3)
+      assert reply["size"] == 5
     end
   end
 

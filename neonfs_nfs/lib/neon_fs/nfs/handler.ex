@@ -290,8 +290,12 @@ defmodule NeonFS.NFS.Handler do
           end
 
         case update_result do
-          {:ok, updated} -> {:ok, build_reply("attrs", inode, updated)}
-          error -> error
+          {:ok, updated} ->
+            invalidate_after_write(state.cache_table, vol.name, path, updated)
+            {:ok, build_reply("attrs", inode, updated)}
+
+          error ->
+            error
         end
       end
 
@@ -311,6 +315,7 @@ defmodule NeonFS.NFS.Handler do
            {:ok, existing_file} <- file_index_get_by_path(vol.id, path),
            merged <- merge_write_data(vol.id, existing_file, offset, data),
            {:ok, file} <- write_file(vol.id, path, merged) do
+        invalidate_after_write(state.cache_table, vol.name, path, file)
         count = byte_size(data)
         {:ok, build_write_reply(count, inode, file)}
       end
@@ -331,6 +336,7 @@ defmodule NeonFS.NFS.Handler do
            child_path <- Path.join(parent_path, name),
            {:ok, file} <- write_file(vol.id, child_path, <<>>, mode: @s_ifreg ||| mode),
            {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
+        invalidate_after_create(state.cache_table, vol.name, parent_path, name, child_path, file)
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -350,6 +356,7 @@ defmodule NeonFS.NFS.Handler do
            :ok <- check_not_exists(vol.id, child_path),
            {:ok, file} <- write_file(vol.id, child_path, <<>>),
            {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
+        invalidate_after_create(state.cache_table, vol.name, parent_path, name, child_path, file)
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -368,6 +375,7 @@ defmodule NeonFS.NFS.Handler do
            child_path <- Path.join(parent_path, name),
            {:ok, file} <- write_file(vol.id, child_path, <<>>, mode: @s_ifdir ||| 0o755),
            {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
+        invalidate_after_create(state.cache_table, vol.name, parent_path, name, child_path, file)
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -391,6 +399,7 @@ defmodule NeonFS.NFS.Handler do
           _ -> :ok
         end
 
+        invalidate_after_remove(state.cache_table, vol.name, parent_path, name, child_path)
         {:ok, {:ok, %{"type" => "empty"}}}
       end
 
@@ -423,6 +432,17 @@ defmodule NeonFS.NFS.Handler do
             :ok
         end
 
+        invalidate_after_rename(
+          state.cache_table,
+          vol.name,
+          from_parent,
+          from_name,
+          from_path,
+          to_parent,
+          to_name,
+          to_path
+        )
+
         {:ok, {:ok, %{"type" => "empty"}}}
       end
 
@@ -447,6 +467,7 @@ defmodule NeonFS.NFS.Handler do
                target
              ]),
            {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
+        invalidate_after_create(state.cache_table, vol.name, parent_path, name, child_path, file)
         {:ok, build_reply("create", inode, file)}
       end
 
@@ -546,6 +567,60 @@ defmodule NeonFS.NFS.Handler do
       if cache_table, do: MetadataCache.put_dir_listing(cache_table, vol.name, path, dir_entries)
       {:ok, {:ok, %{"type" => "dir_entries", "entries" => dir_entries}}}
     end
+  end
+
+  ## Local Cache Invalidation
+
+  defp invalidate_after_create(nil, _vol_name, _parent, _name, _child, _file), do: :ok
+
+  defp invalidate_after_create(cache_table, vol_name, parent_path, name, child_path, file) do
+    MetadataCache.invalidate_dir_listing(cache_table, vol_name, parent_path)
+    MetadataCache.invalidate_lookup(cache_table, vol_name, parent_path, name)
+    MetadataCache.put_attrs(cache_table, vol_name, child_path, file)
+  end
+
+  defp invalidate_after_write(nil, _vol_name, _path, _file), do: :ok
+
+  defp invalidate_after_write(cache_table, vol_name, path, file) do
+    MetadataCache.put_attrs(cache_table, vol_name, path, file)
+  end
+
+  defp invalidate_after_remove(nil, _vol_name, _parent, _name, _child), do: :ok
+
+  defp invalidate_after_remove(cache_table, vol_name, parent_path, name, child_path) do
+    MetadataCache.invalidate_dir_listing(cache_table, vol_name, parent_path)
+    MetadataCache.invalidate_lookup(cache_table, vol_name, parent_path, name)
+    MetadataCache.invalidate_attrs(cache_table, vol_name, child_path)
+  end
+
+  defp invalidate_after_rename(
+         nil,
+         _vol_name,
+         _from_parent,
+         _from_name,
+         _from_path,
+         _to_parent,
+         _to_name,
+         _to_path
+       ),
+       do: :ok
+
+  defp invalidate_after_rename(
+         cache_table,
+         vol_name,
+         from_parent,
+         from_name,
+         from_path,
+         to_parent,
+         to_name,
+         to_path
+       ) do
+    MetadataCache.invalidate_attrs(cache_table, vol_name, from_path)
+    MetadataCache.invalidate_attrs(cache_table, vol_name, to_path)
+    MetadataCache.invalidate_dir_listing(cache_table, vol_name, from_parent)
+    MetadataCache.invalidate_dir_listing(cache_table, vol_name, to_parent)
+    MetadataCache.invalidate_lookup(cache_table, vol_name, from_parent, from_name)
+    MetadataCache.invalidate_lookup(cache_table, vol_name, to_parent, to_name)
   end
 
   ## Volume Management
@@ -761,8 +836,17 @@ defmodule NeonFS.NFS.Handler do
             existing
           end
 
-        <<before::binary-size(offset), _rest::binary>> = padded
-        before <> new_data
+        write_end = offset + byte_size(new_data)
+        <<before::binary-size(offset), _::binary>> = padded
+
+        after_data =
+          if write_end < byte_size(padded) do
+            binary_part(padded, write_end, byte_size(padded) - write_end)
+          else
+            <<>>
+          end
+
+        before <> new_data <> after_data
 
       {:error, _} ->
         if offset > 0 do
@@ -804,22 +888,9 @@ defmodule NeonFS.NFS.Handler do
 
   ## Directory Listing
 
-  defp list_directory(volume, "/") do
-    files = file_index_list_volume(volume)
-
-    entries =
-      files
-      |> Enum.filter(&top_level_file?/1)
-      |> Enum.map(fn file ->
-        name = Path.basename(file.path)
-        {name, file.path, file}
-      end)
-
-    {:ok, entries}
-  end
-
   defp list_directory(volume, path) do
     dir_path = String.trim_trailing(path, "/")
+    dir_path = if dir_path == "", do: "/", else: dir_path
 
     case file_index_list_dir(volume, dir_path) do
       children when is_map(children) ->
@@ -838,13 +909,6 @@ defmodule NeonFS.NFS.Handler do
 
   defp child_info_mode(:dir), do: @s_ifdir ||| 0o755
   defp child_info_mode(_), do: @s_ifreg ||| 0o644
-
-  defp top_level_file?(file) do
-    case String.split(file.path, "/", trim: true) do
-      [_single] -> true
-      _ -> false
-    end
-  end
 
   ## RPC Wrappers
 
@@ -880,13 +944,6 @@ defmodule NeonFS.NFS.Handler do
       {:ok, children} when is_map(children) -> children
       files when is_list(files) -> files
       {:error, _} -> %{}
-    end
-  end
-
-  defp file_index_list_volume(volume) do
-    case core_call(NeonFS.Core.FileIndex, :list_volume, [volume]) do
-      files when is_list(files) -> files
-      {:error, _} -> []
     end
   end
 
