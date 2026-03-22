@@ -413,7 +413,7 @@ defmodule NeonFS.Core.ServiceRegistry do
         {true, {_ref, _new_monitors}} ->
           state
 
-        {_, {nil, state}} ->
+        {_, {nil, _}} ->
           state
 
         {false, {ref, new_monitors}} when is_reference(ref) ->
