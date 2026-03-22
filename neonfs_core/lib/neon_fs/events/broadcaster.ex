@@ -14,11 +14,20 @@ defmodule NeonFS.Events.Broadcaster do
   """
 
   alias NeonFS.Core.HLC
-  alias NeonFS.Events.{Envelope, VolumeCreated, VolumeDeleted, VolumeUpdated}
+
+  alias NeonFS.Events.{
+    DriveAdded,
+    DriveRemoved,
+    Envelope,
+    VolumeCreated,
+    VolumeDeleted,
+    VolumeUpdated
+  }
 
   @pg_scope :neonfs_events
 
   @volume_events [VolumeCreated, VolumeUpdated, VolumeDeleted]
+  @drive_events [DriveAdded, DriveRemoved]
 
   @doc """
   Broadcasts an event to all nodes subscribed to the given volume.
@@ -50,6 +59,33 @@ defmodule NeonFS.Events.Broadcaster do
       for pid <- :pg.get_members(@pg_scope, {:volumes}) do
         send(pid, {:neonfs_event, envelope})
       end
+    end
+
+    :ok
+  end
+
+  @doc """
+  Broadcasts a drive event to all nodes subscribed to drive changes.
+
+  Uses a shared `:drives` sequence counter (not per-volume). Drive events
+  are sent to the `{:drives}` `:pg` group.
+
+  Fire-and-forget — returns `:ok` regardless of whether any subscribers exist.
+  """
+  @spec broadcast_drive_event(NeonFS.Events.event()) :: :ok
+  def broadcast_drive_event(event) when event.__struct__ in @drive_events do
+    sequence = next_drive_sequence()
+    hlc_timestamp = next_hlc_timestamp()
+
+    envelope = %Envelope{
+      event: event,
+      source_node: node(),
+      sequence: sequence,
+      hlc_timestamp: hlc_timestamp
+    }
+
+    for pid <- :pg.get_members(@pg_scope, {:drives}) do
+      send(pid, {:neonfs_event, envelope})
     end
 
     :ok
@@ -102,6 +138,11 @@ defmodule NeonFS.Events.Broadcaster do
   @spec next_sequence(binary()) :: pos_integer()
   def next_sequence(volume_id) do
     counter = get_or_create_counter(volume_id)
+    :atomics.add_get(counter, 1, 1)
+  end
+
+  defp next_drive_sequence do
+    counter = get_or_create_counter("__drives__")
     :atomics.add_get(counter, 1, 1)
   end
 

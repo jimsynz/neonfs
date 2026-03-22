@@ -19,6 +19,7 @@ defmodule NeonFS.Core.DriveManager do
 
   alias NeonFS.Cluster.State
   alias NeonFS.Core.{BlobStore, Drive, DriveConfig, DriveRegistry, DriveState}
+  alias NeonFS.Events.{Broadcaster, DriveAdded, DriveRemoved}
 
   @valid_tiers [:hot, :warm, :cold]
   @drive_state_supervisor NeonFS.Core.DriveStateSupervisor
@@ -126,14 +127,20 @@ defmodule NeonFS.Core.DriveManager do
   @impl true
   def handle_call({:add_drive, config}, _from, state) do
     case do_add_drive(config, state.command_module) do
-      {:ok, drive_map} ->
+      {:ok, %Drive{} = drive} ->
         :telemetry.execute(
           [:neonfs, :drive_manager, :add],
           %{},
-          %{drive_id: drive_map.id, tier: drive_map.tier}
+          %{drive_id: drive.id, tier: drive.tier}
         )
 
-        {:reply, {:ok, drive_map}, state}
+        safe_broadcast_drive(%DriveAdded{
+          node: drive.node,
+          drive_id: drive.id,
+          drive: drive_to_event_map(drive)
+        })
+
+        {:reply, {:ok, drive_to_map(drive)}, state}
 
       {:error, _reason} = error ->
         {:reply, error, state}
@@ -148,6 +155,11 @@ defmodule NeonFS.Core.DriveManager do
           %{},
           %{drive_id: drive_id}
         )
+
+        safe_broadcast_drive(%DriveRemoved{
+          node: Node.self(),
+          drive_id: drive_id
+        })
 
         {:reply, :ok, state}
 
@@ -188,7 +200,7 @@ defmodule NeonFS.Core.DriveManager do
          :ok <- start_single_drive_state(parsed, command_module),
          :ok <- validate_capacity(drive),
          :ok <- save_drives_to_cluster_state() do
-      {:ok, drive_to_map(drive)}
+      {:ok, drive}
     end
   end
 
@@ -367,5 +379,27 @@ defmodule NeonFS.Core.DriveManager do
       used_bytes: drive.used_bytes,
       state: Atom.to_string(drive.state)
     }
+  end
+
+  defp drive_to_event_map(%Drive{} = drive) do
+    %{
+      id: drive.id,
+      node: drive.node,
+      path: drive.path,
+      tier: drive.tier,
+      capacity_bytes: drive.capacity_bytes,
+      used_bytes: drive.used_bytes,
+      state: drive.state,
+      power_management: drive.power_management,
+      idle_timeout: drive.idle_timeout
+    }
+  end
+
+  defp safe_broadcast_drive(event) do
+    Broadcaster.broadcast_drive_event(event)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 end

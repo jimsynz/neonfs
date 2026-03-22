@@ -24,7 +24,7 @@ defmodule NeonFS.NFS.ProtocolTest do
       start_supervised({Handler, core_call_fn: mock.core_call_fn, test_notify: self()})
 
     # Start NFS server on port 0 (OS-assigned) with handler as callback
-    {:ok, server} = Native.start_nfs_server("127.0.0.1:0", handler)
+    {:ok, server} = Native.start_nfs_server("127.0.0.1:0", handler, 0)
     Handler.set_nfs_server(handler, server)
 
     # Wait for the server to bind and query the actual port

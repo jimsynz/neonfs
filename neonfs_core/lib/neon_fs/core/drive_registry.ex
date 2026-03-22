@@ -19,6 +19,8 @@ defmodule NeonFS.Core.DriveRegistry do
   require Logger
 
   alias NeonFS.Core.{Drive, DriveConfig, ServiceRegistry}
+  alias NeonFS.Events
+  alias NeonFS.Events.{DriveAdded, DriveRemoved, Envelope}
 
   @ets_table :drive_registry
   @sync_interval_ms 30_000
@@ -169,6 +171,12 @@ defmodule NeonFS.Core.DriveRegistry do
     table = :ets.new(@ets_table, [:named_table, :set, :public, read_concurrency: true])
     sync_interval = Keyword.get(opts, :sync_interval_ms, @sync_interval_ms)
 
+    try do
+      Events.subscribe_drives()
+    rescue
+      ArgumentError -> :ok
+    end
+
     # Register local drives from config
     drives_config = Keyword.get(opts, :drives, Application.get_env(:neonfs_core, :drives, []))
 
@@ -272,6 +280,18 @@ defmodule NeonFS.Core.DriveRegistry do
   end
 
   @impl true
+  def handle_info(
+        {:neonfs_event, %Envelope{source_node: source, event: event}},
+        state
+      )
+      when source != node() do
+    sync_drive_event(state.table, event)
+    {:noreply, state}
+  end
+
+  def handle_info({:neonfs_event, %Envelope{}}, state), do: {:noreply, state}
+
+  @impl true
   def handle_info(:sync_remote_drives, state) do
     sync_remote_drives(state.table, state.local_drive_ids)
 
@@ -287,6 +307,26 @@ defmodule NeonFS.Core.DriveRegistry do
   end
 
   ## Private Functions
+
+  defp sync_drive_event(table, %DriveAdded{node: node, drive_id: id, drive: drive_map}) do
+    drive = %Drive{
+      id: id,
+      node: node,
+      path: drive_map.path,
+      tier: drive_map.tier,
+      capacity_bytes: drive_map[:capacity_bytes] || 0,
+      used_bytes: drive_map[:used_bytes] || 0,
+      state: drive_map[:state] || :active,
+      power_management: drive_map[:power_management] || false,
+      idle_timeout: drive_map[:idle_timeout] || 1800
+    }
+
+    :ets.insert(table, {{node, id}, drive})
+  end
+
+  defp sync_drive_event(table, %DriveRemoved{node: node, drive_id: id}) do
+    :ets.delete(table, {node, id})
+  end
 
   defp drive_key(%Drive{node: node, id: id}), do: {node, id}
 

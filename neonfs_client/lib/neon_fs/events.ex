@@ -4,16 +4,19 @@ defmodule NeonFS.Events do
   metadata change notification.
 
   Events are hints, not data — they signal that something changed so subscribers
-  can invalidate caches and re-fetch as needed. Every event struct includes a
-  `volume_id` field for uniform routing.
+  can invalidate caches and re-fetch as needed. Volume-scoped events include a
+  `volume_id` field for routing; cluster-scoped events (drives) are routed to
+  dedicated groups.
 
   ## Subscribing
 
-  Processes subscribe at the volume level. File-level and directory-level
-  subscriptions are intentionally omitted to keep group count bounded.
+  Processes subscribe at the volume or cluster-resource level. File-level and
+  directory-level subscriptions are intentionally omitted to keep group count
+  bounded.
 
       NeonFS.Events.subscribe(volume_id)
       NeonFS.Events.subscribe_volumes()
+      NeonFS.Events.subscribe_drives()
 
   Subscribed processes receive `{:neonfs_event, %NeonFS.Events.Envelope{}}` messages.
   When the subscribing process exits, `Registry` automatically unregisters it.
@@ -36,6 +39,8 @@ defmodule NeonFS.Events do
           | NeonFS.Events.VolumeCreated.t()
           | NeonFS.Events.VolumeUpdated.t()
           | NeonFS.Events.VolumeDeleted.t()
+          | NeonFS.Events.DriveAdded.t()
+          | NeonFS.Events.DriveRemoved.t()
 
   @doc """
   Subscribe the calling process to events for a specific volume.
@@ -79,6 +84,27 @@ defmodule NeonFS.Events do
   @spec unsubscribe_volumes() :: :ok
   def unsubscribe_volumes do
     Registry.unregister(NeonFS.Events.Registry, {:volumes})
+    :ok
+  end
+
+  @doc """
+  Subscribe the calling process to drive lifecycle events
+  (DriveAdded, DriveRemoved).
+
+  No `:pg` join is needed — the Relay always joins the `{:drives}` group.
+  """
+  @spec subscribe_drives() :: :ok
+  def subscribe_drives do
+    Registry.register(NeonFS.Events.Registry, {:drives}, [])
+    :ok
+  end
+
+  @doc """
+  Unsubscribe the calling process from drive lifecycle events.
+  """
+  @spec unsubscribe_drives() :: :ok
+  def unsubscribe_drives do
+    Registry.unregister(NeonFS.Events.Registry, {:drives})
     :ok
   end
 end

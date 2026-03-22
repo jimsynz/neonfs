@@ -5,9 +5,9 @@ defmodule NeonFS.Events.Envelope do
   Every broadcast event is wrapped in an envelope that carries metadata for
   ordering, gap detection, and debugging:
 
-  - `event` — the event struct (one of the 14 event types)
+  - `event` — the event struct (volume-scoped or cluster-scoped)
   - `source_node` — the core node that originated the event
-  - `sequence` — per-volume monotonic counter from the source node
+  - `sequence` — monotonic counter (per-volume for volume events, shared for drive events)
   - `hlc_timestamp` — Hybrid Logical Clock timestamp `{wall_ms, counter, node_id}`
   """
 

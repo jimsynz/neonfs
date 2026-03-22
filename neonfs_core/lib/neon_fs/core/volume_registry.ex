@@ -213,17 +213,23 @@ defmodule NeonFS.Core.VolumeRegistry do
     Events.subscribe_volumes()
 
     # Try to restore volumes from Ra state into ETS
-    # If Ra is not ready yet (e.g., during startup), that's okay - the index
-    # will be populated as operations occur or when Ra becomes available
-    case restore_from_ra() do
-      {:ok, count} ->
-        Logger.info("VolumeRegistry started, restored volumes from Ra", count: count)
+    # If Ra is not ready yet (e.g., during startup), schedule retries
+    restored =
+      case restore_from_ra() do
+        {:ok, count} ->
+          Logger.info("VolumeRegistry started, restored volumes from Ra", count: count)
+          true
 
-      {:error, reason} ->
-        Logger.debug("VolumeRegistry started but Ra not ready yet", reason: reason)
-    end
+        {:error, reason} ->
+          Logger.debug("VolumeRegistry started but Ra not ready yet, will retry",
+            reason: reason
+          )
 
-    {:ok, %{}}
+          schedule_restore_retry(1_000)
+          false
+      end
+
+    {:ok, %{restored: restored, restore_backoff: 1_000}}
   end
 
   @impl true
@@ -293,6 +299,24 @@ defmodule NeonFS.Core.VolumeRegistry do
   end
 
   def handle_info({:neonfs_event, %Envelope{}}, state), do: {:noreply, state}
+
+  def handle_info(:retry_restore_from_ra, %{restored: true} = state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:retry_restore_from_ra, state) do
+    case restore_from_ra() do
+      {:ok, count} ->
+        Logger.info("VolumeRegistry restored volumes from Ra on retry", count: count)
+        {:noreply, %{state | restored: true}}
+
+      {:error, _reason} ->
+        next_backoff = min(state.restore_backoff * 2, 30_000)
+        schedule_restore_retry(next_backoff)
+        {:noreply, %{state | restore_backoff: next_backoff}}
+    end
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp sync_event_to_ets(%VolumeCreated{volume_id: id}), do: get_from_ra(id)
@@ -515,6 +539,10 @@ defmodule NeonFS.Core.VolumeRegistry do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp schedule_restore_retry(delay_ms) do
+    Process.send_after(self(), :retry_restore_from_ra, delay_ms)
   end
 
   # Event broadcasting

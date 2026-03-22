@@ -196,15 +196,25 @@ defmodule NeonFS.Core.ServiceRegistry do
       read_concurrency: true
     ])
 
-    case restore_from_ra() do
-      {:ok, count} ->
-        Logger.info("ServiceRegistry started, restored services from Ra", count: count)
+    :net_kernel.monitor_nodes(true, node_type: :visible)
 
-      {:error, reason} ->
-        Logger.debug("ServiceRegistry started but Ra not ready yet", reason: reason)
-    end
+    restored =
+      case restore_from_ra() do
+        {:ok, count} ->
+          Logger.info("ServiceRegistry started, restored services from Ra", count: count)
+          true
 
-    {:ok, %{monitors: %{}}, {:continue, :register_self}}
+        {:error, reason} ->
+          Logger.debug("ServiceRegistry started but Ra not ready yet, will retry",
+            reason: reason
+          )
+
+          schedule_restore_retry(1_000)
+          false
+      end
+
+    {:ok, %{monitors: %{}, restored: restored, restore_backoff: 1_000},
+     {:continue, :register_self}}
   end
 
   @impl true
@@ -274,7 +284,37 @@ defmodule NeonFS.Core.ServiceRegistry do
     {:noreply, new_state}
   end
 
+  @impl true
+  def handle_info({:nodeup, _node, _info}, state) do
+    case restore_from_ra() do
+      {:ok, _count} -> {:noreply, %{state | restored: true}}
+      {:error, _} -> {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info(:retry_restore_from_ra, %{restored: true} = state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:retry_restore_from_ra, state) do
+    case restore_from_ra() do
+      {:ok, count} ->
+        Logger.info("ServiceRegistry restored services from Ra on retry", count: count)
+        {:noreply, %{state | restored: true}}
+
+      {:error, _reason} ->
+        next_backoff = min(state.restore_backoff * 2, 30_000)
+        schedule_restore_retry(next_backoff)
+        {:noreply, %{state | restore_backoff: next_backoff}}
+    end
+  end
+
   ## Private helpers
+
+  defp schedule_restore_retry(delay_ms) do
+    Process.send_after(self(), :retry_restore_from_ra, delay_ms)
+  end
 
   defp build_self_metadata do
     case Process.whereis(Listener) do

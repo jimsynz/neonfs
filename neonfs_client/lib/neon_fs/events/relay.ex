@@ -16,7 +16,14 @@ defmodule NeonFS.Events.Relay do
 
   use GenServer
 
-  alias NeonFS.Events.{Envelope, VolumeCreated, VolumeDeleted, VolumeUpdated}
+  alias NeonFS.Events.{
+    DriveAdded,
+    DriveRemoved,
+    Envelope,
+    VolumeCreated,
+    VolumeDeleted,
+    VolumeUpdated
+  }
 
   @pg_scope :neonfs_events
 
@@ -55,6 +62,7 @@ defmodule NeonFS.Events.Relay do
   @impl true
   def init(_opts) do
     :pg.join(@pg_scope, {:volumes}, self())
+    :pg.join(@pg_scope, {:drives}, self())
 
     {:ok,
      %{
@@ -118,6 +126,8 @@ defmodule NeonFS.Events.Relay do
   defp event_group(%VolumeCreated{}), do: {:volumes}
   defp event_group(%VolumeDeleted{}), do: {:volumes}
   defp event_group(%VolumeUpdated{}), do: {:volumes}
+  defp event_group(%DriveAdded{}), do: {:drives}
+  defp event_group(%DriveRemoved{}), do: {:drives}
   defp event_group(event), do: {:volume, event.volume_id}
 
   defp maybe_monitor(state, pid) do
