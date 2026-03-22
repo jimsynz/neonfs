@@ -123,7 +123,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5db3edd0a12b49bc187a15f7ba37539ecc69b3052d71a08f36f816db906d98b7"
 dependencies = [
  "fastrand",
- "nfs3_types",
+ "nfs3_types 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
 ]
 
@@ -139,13 +139,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nfs3_macros"
+version = "0.5.0"
+source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#ae51b7dede696b4b831d5db87a52225c46b9df1f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "nfs3_server"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8302897e551f46259823ae0974784c887bb52ec4edc326c9a500071ce9ef2a"
+source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#ae51b7dede696b4b831d5db87a52225c46b9df1f"
 dependencies = [
  "anyhow",
- "nfs3_types",
+ "nfs3_types 0.5.0 (git+https://github.com/jimsynz/nfs3?branch=custom-generation)",
  "tokio",
  "tracing",
 ]
@@ -156,7 +165,15 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0513b89e459cc2d0a5831073f0389fa7d37bff99be6fc7d1c5e57e447ce928a0"
 dependencies = [
- "nfs3_macros",
+ "nfs3_macros 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "nfs3_types"
+version = "0.5.0"
+source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#ae51b7dede696b4b831d5db87a52225c46b9df1f"
+dependencies = [
+ "nfs3_macros 0.5.0 (git+https://github.com/jimsynz/nfs3?branch=custom-generation)",
 ]
 
 [[package]]

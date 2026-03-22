@@ -28,6 +28,7 @@ impl rustler::Resource for NfsServerResource {}
 fn start_nfs_server(
     bind_address: String,
     callback_pid: LocalPid,
+    generation_number: u64,
 ) -> Result<ResourceArc<NfsServerResource>, String> {
     let reply_manager = ReplyManager::new();
     let fs = NeonFilesystem::new(callback_pid, reply_manager.clone());
@@ -59,7 +60,7 @@ fn start_nfs_server(
 
         rt.block_on(async move {
             eprintln!("[neonfs_nfs] Tokio runtime started, binding...");
-            match NFSTcpListener::bind(&bind_address, fs).await {
+            match NFSTcpListener::bind_with_generation(&bind_address, fs, generation_number).await {
                 Ok(listener) => {
                     let port = listener.get_listen_port();
                     eprintln!(

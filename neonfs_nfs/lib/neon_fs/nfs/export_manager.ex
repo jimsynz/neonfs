@@ -185,10 +185,11 @@ defmodule NeonFS.NFS.ExportManager do
 
   defp start_nfs_server(state) do
     bind_address = nfs_bind_address()
+    generation_number = derive_generation_number()
 
     with {:ok, handler_pid} <- ExportSupervisor.start_handler([]),
          _ <- Process.monitor(handler_pid),
-         {:ok, nfs_server} <- start_native_server(bind_address, handler_pid),
+         {:ok, nfs_server} <- start_native_server(bind_address, handler_pid, generation_number),
          :ok <- Handler.set_nfs_server(handler_pid, nfs_server) do
       Logger.info("NFS server started", bind_address: bind_address)
 
@@ -200,8 +201,8 @@ defmodule NeonFS.NFS.ExportManager do
     end
   end
 
-  defp start_native_server(bind_address, handler_pid) do
-    case Native.start_nfs_server(bind_address, handler_pid) do
+  defp start_native_server(bind_address, handler_pid, generation_number) do
+    case Native.start_nfs_server(bind_address, handler_pid, generation_number) do
       {:ok, server} -> {:ok, server}
       {:error, reason} -> {:error, {:nfs_bind_failed, reason}}
     end
@@ -262,6 +263,12 @@ defmodule NeonFS.NFS.ExportManager do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  defp derive_generation_number do
+    cookie = :erlang.get_cookie()
+    <<generation_number::unsigned-64, _::binary>> = :crypto.hash(:sha256, Atom.to_string(cookie))
+    generation_number
   end
 
   defp nfs_bind_address do

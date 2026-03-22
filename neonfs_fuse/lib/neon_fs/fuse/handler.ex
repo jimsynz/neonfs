@@ -242,9 +242,8 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          :ok <- check_file_permission(volume_id, path, :write, state),
-         {:ok, existing_file} <- file_index_get_by_path(volume_id, path),
-         merged_data <- merge_write_data(existing_file, offset, data),
-         {:ok, _file} <- write_file(volume_id, path, merged_data) do
+         {:ok, _file} <-
+           core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume_id, path, offset, data]) do
       {"write_ok", %{"size" => byte_size(data)}}
     else
       {:error, :forbidden} ->
@@ -679,32 +678,6 @@ defmodule NeonFS.FUSE.Handler do
   # Build child path from parent path and name
   defp build_child_path(parent, name), do: Path.join(parent, name)
 
-  # Merge write data at offset with existing file data
-  defp merge_write_data(file, offset, new_data) do
-    case read_file(file.volume_id, file.path) do
-      {:ok, existing} ->
-        # Pad if offset is beyond current size
-        padded =
-          if offset > byte_size(existing) do
-            existing <> :binary.copy(<<0>>, offset - byte_size(existing))
-          else
-            existing
-          end
-
-        # Split at offset and insert new data
-        <<before::binary-size(offset), _rest::binary>> = padded
-        before <> new_data
-
-      {:error, _} ->
-        # File doesn't exist or read failed, just use new data with padding
-        if offset > 0 do
-          :binary.copy(<<0>>, offset) <> new_data
-        else
-          new_data
-        end
-    end
-  end
-
   # Apply setattr, routing to truncate when size is being reduced
   defp apply_setattr(file, params) do
     new_size = params["size"]
@@ -845,11 +818,11 @@ defmodule NeonFS.FUSE.Handler do
     core_call(NeonFS.Core.FileIndex, :truncate, [file_id, new_size, additional_updates])
   end
 
-  defp read_file(volume_id, path, opts \\ []) do
+  defp read_file(volume_id, path, opts) do
     core_call(NeonFS.Core.ReadOperation, :read_file, [volume_id, path, opts])
   end
 
-  defp write_file(volume_id, path, data, opts \\ []) do
+  defp write_file(volume_id, path, data, opts) do
     core_call(NeonFS.Core.WriteOperation, :write_file, [volume_id, path, data, opts])
   end
 

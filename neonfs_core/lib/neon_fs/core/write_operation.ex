@@ -22,6 +22,7 @@ defmodule NeonFS.Core.WriteOperation do
     Blob.Native,
     BlobStore,
     ChunkCrypto,
+    ChunkFetcher,
     ChunkIndex,
     ChunkMeta,
     DriveRegistry,
@@ -107,6 +108,67 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   @doc """
+  Writes data at a specific byte offset within an existing file.
+
+  Instead of replacing the entire file, only the chunks (or stripes) overlapping
+  the write range are read, modified, and re-stored. Chunks outside the write
+  range are carried forward by hash reference without any I/O.
+
+  Falls back to `write_file/4` when the file doesn't exist yet or has no chunks.
+
+  ## Parameters
+
+    * `volume_id` - Volume identifier
+    * `path` - File path within the volume
+    * `offset` - Byte offset to write at
+    * `data` - Binary data to write
+    * `opts` - Options (same as `write_file/4`)
+  """
+  @spec write_file_at(binary(), String.t(), non_neg_integer(), binary(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def write_file_at(volume_id, path, offset, data, opts \\ []) do
+    Logger.metadata(component: :write, volume_id: volume_id, file_path: path)
+
+    write_id = generate_write_id()
+    start_time = System.monotonic_time()
+
+    :telemetry.execute(
+      [:neonfs, :write_operation, :start],
+      %{bytes: byte_size(data)},
+      %{volume_id: volume_id, path: path, write_id: write_id, offset: offset}
+    )
+
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    result =
+      with {:ok, volume} <- get_volume(volume_id),
+           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}) do
+        case FileIndex.get_by_path(volume_id, path) do
+          {:ok, file_meta} ->
+            do_write_at(volume, file_meta, offset, data, write_id, opts)
+
+          {:error, :not_found} ->
+            if offset == 0 do
+              do_write(volume, path, data, write_id, opts)
+            else
+              padded = :binary.copy(<<0>>, offset) <> data
+              do_write(volume, path, padded, write_id, opts)
+            end
+        end
+      end
+
+    case result do
+      {:ok, file_meta} -> evict_resolved_cache(file_meta.id)
+      _ -> :ok
+    end
+
+    duration = System.monotonic_time() - start_time
+    emit_completion_telemetry(result, duration, volume_id, path, write_id, data)
+    result
+  end
+
+  @doc """
   Generates a unique write ID for tracking write operations.
   """
   @spec generate_write_id() :: write_id()
@@ -153,6 +215,315 @@ defmodule NeonFS.Core.WriteOperation do
     case VolumeRegistry.get(volume_id) do
       {:ok, volume} -> {:ok, volume}
       {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
+    end
+  end
+
+  # ─── Offset Write (replicated) ─────────────────────────────────────────
+
+  defp do_write_at(%{durability: %{type: :erasure}} = volume, file_meta, offset, data, write_id, opts) do
+    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+      write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
+      erasure_write_at(volume, file_meta, offset, data, write_ctx, opts)
+    end
+  end
+
+  defp do_write_at(volume, file_meta, offset, data, write_id, opts) do
+    write_end = offset + byte_size(data)
+
+    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+      write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
+      chunk_positions = build_chunk_info_list(file_meta.chunks, 0, [])
+
+      {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end)
+
+      with {:ok, modified_data} <- splice_affected_chunks(affected, offset, data, write_end, volume.id),
+           new_data = maybe_pad_before(modified_data, offset, file_meta.size, chunk_positions),
+           {:ok, new_chunks} <- chunk_and_store(new_data, volume, write_ctx, opts) do
+        prefix_hashes = Enum.map(prefix, fn {hash, _start, _end} -> hash end)
+        suffix_hashes = Enum.map(suffix, fn {hash, _start, _end} -> hash end)
+        new_hashes = Enum.map(Enum.sort_by(new_chunks, & &1.offset), & &1.hash)
+
+        all_hashes = prefix_hashes ++ new_hashes ++ suffix_hashes
+        new_size = max(file_meta.size, write_end)
+
+        now = DateTime.utc_now()
+
+        case FileIndex.update(file_meta.id,
+               chunks: all_hashes,
+               size: new_size,
+               modified_at: now,
+               changed_at: now
+             ) do
+          {:ok, updated_meta} ->
+            commit_chunks(write_id, new_chunks)
+            {:ok, updated_meta}
+
+          {:error, _reason} = error ->
+            abort_chunks(write_id)
+            error
+        end
+      else
+        {:error, _reason} = error ->
+          abort_chunks(write_id)
+          error
+      end
+    end
+  end
+
+  defp build_chunk_info_list([], _offset, acc), do: Enum.reverse(acc)
+
+  defp build_chunk_info_list([hash | rest], current_offset, acc) do
+    case ChunkIndex.get(hash) do
+      {:ok, chunk_meta} ->
+        chunk_end = current_offset + chunk_meta.original_size
+        build_chunk_info_list(rest, chunk_end, [{hash, current_offset, chunk_end} | acc])
+
+      {:error, :not_found} ->
+        Logger.error("Chunk metadata not found during offset write",
+          chunk_hash: Base.encode16(hash)
+        )
+
+        build_chunk_info_list(rest, current_offset, acc)
+    end
+  end
+
+  defp partition_chunks(chunk_positions, write_start, write_end) do
+    prefix = Enum.filter(chunk_positions, fn {_h, _s, e} -> e <= write_start end)
+    suffix = Enum.filter(chunk_positions, fn {_h, s, _e} -> s >= write_end end)
+
+    affected =
+      Enum.filter(chunk_positions, fn {_h, s, e} ->
+        s < write_end and e > write_start
+      end)
+
+    {prefix, affected, suffix}
+  end
+
+  defp splice_affected_chunks([], offset, data, _write_end, _volume_id) do
+    if offset > 0 do
+      {:ok, :binary.copy(<<0>>, offset) <> data}
+    else
+      {:ok, data}
+    end
+  end
+
+  defp splice_affected_chunks(affected, offset, data, write_end, volume_id) do
+    first_chunk_start = affected |> List.first() |> elem(1)
+
+    chunk_data_results =
+      Enum.map(affected, fn {hash, _start, _end} ->
+        fetch_chunk_for_write(hash, volume_id)
+      end)
+
+    if Enum.all?(chunk_data_results, &match?({:ok, _}, &1)) do
+      existing_data =
+        chunk_data_results
+        |> Enum.map(fn {:ok, d} -> d end)
+        |> IO.iodata_to_binary()
+
+      splice_start = offset - first_chunk_start
+      splice_end = write_end - first_chunk_start
+
+      before_splice =
+        if splice_start > 0 do
+          binary_part(existing_data, 0, splice_start)
+        else
+          <<>>
+        end
+
+      after_splice =
+        if splice_end < byte_size(existing_data) do
+          binary_part(existing_data, splice_end, byte_size(existing_data) - splice_end)
+        else
+          <<>>
+        end
+
+      result = before_splice <> data <> after_splice
+
+      if first_chunk_start < offset do
+        {:ok, result}
+      else
+        {:ok, result}
+      end
+    else
+      Enum.find(chunk_data_results, &match?({:error, _}, &1))
+    end
+  end
+
+  defp maybe_pad_before(data, _offset, _file_size, _chunk_positions), do: data
+
+  defp fetch_chunk_for_write(hash, volume_id) do
+    case ChunkIndex.get(hash) do
+      {:ok, chunk_meta} ->
+        {tier, drive_id} =
+          case chunk_meta.locations do
+            [location | _] ->
+              {Atom.to_string(location.tier), Map.get(location, :drive_id, "default")}
+
+            [] ->
+              {"hot", "default"}
+          end
+
+        needs_decompress =
+          chunk_meta.compression != :none or
+            (chunk_meta.crypto == nil and chunk_meta.stored_size != chunk_meta.original_size)
+
+        decrypt_opts =
+          case chunk_meta.crypto do
+            nil ->
+              []
+
+            crypto ->
+              case KeyManager.get_volume_key(volume_id, crypto.key_version) do
+                {:ok, key} -> [key: key, nonce: crypto.nonce]
+                {:error, _} -> []
+              end
+          end
+
+        fetch_opts =
+          [
+            tier: tier,
+            drive_id: drive_id,
+            verify: false,
+            decompress: needs_decompress,
+            volume_id: volume_id
+          ] ++ decrypt_opts
+
+        ChunkFetcher.fetch_chunk(hash, fetch_opts)
+
+      {:error, :not_found} ->
+        {:error, :chunk_not_found}
+    end
+  end
+
+  # ─── Offset Write (erasure-coded) ──────────────────────────────────────
+
+  defp erasure_write_at(volume, file_meta, offset, data, write_ctx, opts) do
+    write_end = offset + byte_size(data)
+
+    stripe_refs = file_meta.stripes || []
+
+    {prefix_stripes, affected_stripes, suffix_stripes} =
+      partition_stripes(stripe_refs, offset, write_end)
+
+    with {:ok, new_stripe_results} <-
+           rewrite_affected_stripes(affected_stripes, offset, data, write_end, volume, write_ctx, opts) do
+      all_new_chunks = Enum.flat_map(new_stripe_results, fn sr -> sr.chunks end)
+      new_stripe_refs = Enum.map(new_stripe_results, fn sr -> %{stripe_id: sr.stripe_id, byte_range: sr.byte_range} end)
+
+      new_size = max(file_meta.size, write_end)
+      all_stripes = prefix_stripes ++ new_stripe_refs ++ suffix_stripes
+
+      now = DateTime.utc_now()
+
+      case FileIndex.update(file_meta.id,
+             stripes: all_stripes,
+             size: new_size,
+             modified_at: now,
+             changed_at: now
+           ) do
+        {:ok, updated_meta} ->
+          commit_chunks(write_ctx.write_id, all_new_chunks)
+          {:ok, updated_meta}
+
+        {:error, _reason} = error ->
+          abort_chunks(write_ctx.write_id)
+          error
+      end
+    else
+      {:error, _reason} = error ->
+        abort_chunks(write_ctx.write_id)
+        error
+    end
+  end
+
+  defp partition_stripes(stripe_refs, write_start, write_end) do
+    prefix =
+      Enum.filter(stripe_refs, fn %{byte_range: {_s, e}} -> e <= write_start end)
+
+    suffix =
+      Enum.filter(stripe_refs, fn %{byte_range: {s, _e}} -> s >= write_end end)
+
+    affected =
+      Enum.filter(stripe_refs, fn %{byte_range: {s, e}} ->
+        s < write_end and e > write_start
+      end)
+
+    {prefix, affected, suffix}
+  end
+
+  defp rewrite_affected_stripes(affected_stripes, offset, data, write_end, volume, write_ctx, opts) do
+    results =
+      Enum.reduce_while(affected_stripes, {:ok, []}, fn stripe_ref, {:ok, acc} ->
+        case rewrite_single_stripe(stripe_ref, offset, data, write_end, volume, write_ctx, opts) do
+          {:ok, stripe_result} -> {:cont, {:ok, [stripe_result | acc]}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+
+    case results do
+      {:ok, list} -> {:ok, Enum.reverse(list)}
+      error -> error
+    end
+  end
+
+  defp rewrite_single_stripe(stripe_ref, offset, data, write_end, volume, write_ctx, opts) do
+    %{stripe_id: old_stripe_id, byte_range: {stripe_start, stripe_end}} = stripe_ref
+
+    case StripeIndex.get(old_stripe_id) do
+      {:ok, stripe} ->
+        data_chunk_count = stripe.config.data_chunks
+        data_hashes = Enum.take(stripe.chunks, data_chunk_count)
+
+        with {:ok, stripe_data} <- read_stripe_data(data_hashes, volume.id, stripe.data_bytes) do
+          splice_start = max(0, offset - stripe_start)
+          splice_end = min(stripe_end - stripe_start, write_end - stripe_start)
+          data_offset_in_write = max(0, stripe_start - offset)
+          data_len = splice_end - splice_start
+
+          new_data_slice = binary_part(data, data_offset_in_write, data_len)
+
+          before = if splice_start > 0, do: binary_part(stripe_data, 0, splice_start), else: <<>>
+
+          after_data =
+            if splice_end < byte_size(stripe_data) do
+              binary_part(stripe_data, splice_end, byte_size(stripe_data) - splice_end)
+            else
+              <<>>
+            end
+
+          modified_stripe_data = before <> new_data_slice <> after_data
+
+          with {:ok, chunk_results} <- chunk_data(modified_stripe_data, opts),
+               {:ok, [stripe_result]} <-
+                 build_and_store_stripes(
+                   chunk_results,
+                   volume,
+                   write_ctx,
+                   opts
+                 ) do
+            new_byte_range = {stripe_start, stripe_start + stripe_result.data_bytes}
+            {:ok, %{stripe_result | byte_range: new_byte_range}}
+          end
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp read_stripe_data(data_hashes, volume_id, data_bytes) do
+    results = Enum.map(data_hashes, fn hash -> fetch_chunk_for_write(hash, volume_id) end)
+
+    if Enum.all?(results, &match?({:ok, _}, &1)) do
+      full_data =
+        results
+        |> Enum.map(fn {:ok, d} -> d end)
+        |> IO.iodata_to_binary()
+
+      {:ok, binary_part(full_data, 0, min(data_bytes, byte_size(full_data)))}
+    else
+      Enum.find(results, &match?({:error, _}, &1))
     end
   end
 

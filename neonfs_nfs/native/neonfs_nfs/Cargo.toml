@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = "0.37.2"
-nfs3_server = "0.10"
+nfs3_server = { git = "https://github.com/jimsynz/nfs3", branch = "custom-generation" }
 nfs3_client = { version = "0.8", features = ["tokio"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "time", "net", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

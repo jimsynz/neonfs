@@ -222,6 +222,56 @@ defmodule NeonFS.NFS.MockCore do
     {:ok, file}
   end
 
+  defp dispatch(table, NeonFS.Core.WriteOperation, :write_file_at, [volume, path, offset, data]) do
+    existing_data =
+      case :ets.lookup(table, {:data, volume, path}) do
+        [{_, d}] -> d
+        [] -> <<>>
+      end
+
+    padded =
+      if offset > byte_size(existing_data) do
+        existing_data <> :binary.copy(<<0>>, offset - byte_size(existing_data))
+      else
+        existing_data
+      end
+
+    write_end = offset + byte_size(data)
+    before = if offset > 0, do: binary_part(padded, 0, offset), else: <<>>
+
+    after_data =
+      if write_end < byte_size(padded) do
+        binary_part(padded, write_end, byte_size(padded) - write_end)
+      else
+        <<>>
+      end
+
+    merged = before <> data <> after_data
+    now = DateTime.utc_now()
+
+    file_id =
+      case :ets.lookup(table, {:file, volume, path}) do
+        [{_, existing}] -> existing.id
+        [] -> next_id(table)
+      end
+
+    file = %{
+      id: file_id,
+      path: path,
+      size: byte_size(merged),
+      mode: 0o100644,
+      uid: 0,
+      gid: 0,
+      accessed_at: now,
+      modified_at: now,
+      changed_at: now
+    }
+
+    :ets.insert(table, {{:file, volume, path}, file})
+    :ets.insert(table, {{:data, volume, path}, merged})
+    {:ok, file}
+  end
+
   defp dispatch(_table, module, function, _args) do
     {:error, {:mock_not_implemented, module, function}}
   end

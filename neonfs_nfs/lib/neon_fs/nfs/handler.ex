@@ -312,9 +312,8 @@ defmodule NeonFS.NFS.Handler do
     result =
       with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, path} <- inode_path(inode),
-           {:ok, existing_file} <- file_index_get_by_path(vol.id, path),
-           merged <- merge_write_data(vol.id, existing_file, offset, data),
-           {:ok, file} <- write_file(vol.id, path, merged) do
+           {:ok, file} <-
+             core_call(NeonFS.Core.WriteOperation, :write_file_at, [vol.id, path, offset, data]) do
         invalidate_after_write(state.cache_table, vol.name, path, file)
         count = byte_size(data)
         {:ok, build_write_reply(count, inode, file)}
@@ -826,37 +825,6 @@ defmodule NeonFS.NFS.Handler do
 
   defp datetime_to_nfs_time(_), do: {0, 0}
 
-  defp merge_write_data(volume, file, offset, new_data) do
-    case read_file(volume, file.path) do
-      {:ok, existing} ->
-        padded =
-          if offset > byte_size(existing) do
-            existing <> :binary.copy(<<0>>, offset - byte_size(existing))
-          else
-            existing
-          end
-
-        write_end = offset + byte_size(new_data)
-        <<before::binary-size(offset), _::binary>> = padded
-
-        after_data =
-          if write_end < byte_size(padded) do
-            binary_part(padded, write_end, byte_size(padded) - write_end)
-          else
-            <<>>
-          end
-
-        before <> new_data <> after_data
-
-      {:error, _} ->
-        if offset > 0 do
-          :binary.copy(<<0>>, offset) <> new_data
-        else
-          new_data
-        end
-    end
-  end
-
   defp check_not_exists(volume, path) do
     case file_index_get_by_path(volume, path) do
       {:ok, _} -> {:error, :exists}
@@ -955,7 +923,7 @@ defmodule NeonFS.NFS.Handler do
     core_call(NeonFS.Core.FileIndex, :update, [file_id, updates])
   end
 
-  defp read_file(volume, path, opts \\ []) do
+  defp read_file(volume, path, opts) do
     core_call(NeonFS.Core.ReadOperation, :read_file, [volume, path, opts])
   end
 

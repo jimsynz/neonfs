@@ -22,8 +22,10 @@ defmodule NeonFS.NFS.Native do
 
   Returns `{:ok, server}` where server is an opaque reference.
   """
-  @spec start_nfs_server(String.t(), pid()) :: {:ok, nfs_server()} | {:error, String.t()}
-  def start_nfs_server(_bind_address, _callback_pid), do: :erlang.nif_error(:nif_not_loaded)
+  @spec start_nfs_server(String.t(), pid(), non_neg_integer()) ::
+          {:ok, nfs_server()} | {:error, String.t()}
+  def start_nfs_server(_bind_address, _callback_pid, _generation_number),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Stop a running NFS server.
