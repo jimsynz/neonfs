@@ -426,11 +426,12 @@ jobs:
           mix check
 
   # =========================================================================
-  # containers - Docker buildx multi-platform builds (QEMU cross-compilation)
+  # containers - Native multi-arch builds
+  # Build each architecture on its own native runner in parallel, then
+  # combine into multi-arch manifests. No QEMU emulation needed.
   # Only runs on push (not PRs), after integration tests pass.
-  # Pinned to amd64 runner; arm64 images are cross-built via QEMU.
   # =========================================================================
-  containers:
+  containers-amd64:
     runs-on: amd64
     needs: [neonfs_client, neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_integration]
     if: forgejo.event_name == 'push'
@@ -443,11 +444,8 @@ jobs:
 
       - name: Start Docker daemon
         run: |
-          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
+          dockerd --host=unix:///var/run/docker.sock --iptables=false --insecure-registry=forgejo.dmz &
           timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-      - name: Set up QEMU
-        run: docker run --privileged --rm tonistiigi/binfmt --install all
 
       - name: Login to Forgejo Registry
         run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
@@ -465,8 +463,94 @@ jobs:
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
 
-      - name: Build and push
+      - name: Build and push (amd64)
         run: |
-          # Replace / with - for branch names like feature/foo
+          TAG=${GITHUB_REF_NAME//\//-}-amd64
+          PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl --push
+
+  containers-arm64:
+    runs-on: arm64
+    needs: [neonfs_client, neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_integration]
+    if: forgejo.event_name == 'push'
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Start Docker daemon
+        run: |
+          dockerd --host=unix:///var/run/docker.sock --iptables=false --insecure-registry=forgejo.dmz &
+          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Login to Forgejo Registry
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
+
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
+
+      - name: Set up Docker Buildx
+        run: |
+          cat > /tmp/buildkitd.toml << 'TOML'
+          [registry."forgejo.dmz"]
+            http = true
+            insecure = true
+          TOML
+          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+          docker buildx use builder
+
+      - name: Build and push (arm64)
+        run: |
+          TAG=${GITHUB_REF_NAME//\//-}-arm64
+          PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl --push
+
+  containers-manifest:
+    runs-on: amd64
+    needs: [containers-amd64, containers-arm64]
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - name: Start Docker daemon
+        run: |
+          dockerd --host=unix:///var/run/docker.sock --iptables=false --insecure-registry=forgejo.dmz &
+          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Login to Forgejo Registry
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
+
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
+
+      - name: Set up Docker Buildx
+        run: |
+          cat > /tmp/buildkitd.toml << 'TOML'
+          [registry."forgejo.dmz"]
+            http = true
+            insecure = true
+          TOML
+          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+          docker buildx use builder
+
+      - name: Create multi-arch manifests
+        run: |
           TAG=${GITHUB_REF_NAME//\//-}
-          TAG=$TAG docker buildx bake -f bake.hcl --push
+
+          FORGEJO_IMAGES="dev core fuse nfs omnibus cli"
+          GHCR_IMAGES="core fuse nfs omnibus cli"
+
+          for image in $FORGEJO_IMAGES; do
+            docker buildx imagetools create \
+              -t forgejo.dmz/project-neon/neonfs/${image}:${TAG} \
+              forgejo.dmz/project-neon/neonfs/${image}:${TAG}-amd64 \
+              forgejo.dmz/project-neon/neonfs/${image}:${TAG}-arm64
+          done
+
+          for image in $GHCR_IMAGES; do
+            docker buildx imagetools create \
+              -t ghcr.io/jimsynz/neonfs/${image}:${TAG} \
+              ghcr.io/jimsynz/neonfs/${image}:${TAG}-amd64 \
+              ghcr.io/jimsynz/neonfs/${image}:${TAG}-arm64
+          done
