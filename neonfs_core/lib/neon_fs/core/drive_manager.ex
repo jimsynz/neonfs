@@ -198,8 +198,8 @@ defmodule NeonFS.Core.DriveManager do
          drive = parsed |> Drive.from_config(Node.self()) |> DriveConfig.detect_capacity(),
          :ok <- DriveRegistry.register_drive(drive, timeout: :infinity),
          :ok <- start_single_drive_state(parsed, command_module),
-         :ok <- validate_capacity(drive),
-         :ok <- save_drives_to_cluster_state() do
+         :ok <- validate_capacity(drive) do
+      warn_on_persistence_failure(save_drives_to_cluster_state(), "add", drive.id)
       {:ok, drive}
     end
   end
@@ -270,7 +270,8 @@ defmodule NeonFS.Core.DriveManager do
          :ok <- BlobStore.close_store(drive_id, timeout: :infinity),
          :ok <- DriveRegistry.deregister_drive(drive_id, timeout: :infinity),
          :ok <- stop_drive_state(drive_id) do
-      save_drives_to_cluster_state()
+      warn_on_persistence_failure(save_drives_to_cluster_state(), "remove", drive_id)
+      :ok
     end
   end
 
@@ -317,19 +318,16 @@ defmodule NeonFS.Core.DriveManager do
         }
       end)
 
-    case State.update_drives(drives) do
-      :ok ->
-        :ok
+    State.update_drives(drives)
+  end
 
-      {:error, :not_found} ->
-        # cluster.json doesn't exist yet — this is fine for fresh installs
-        Logger.debug("Skipping drive persistence: cluster.json not found")
-        :ok
+  defp warn_on_persistence_failure(:ok, _operation, _drive_id), do: :ok
 
-      {:error, reason} ->
-        Logger.warning("Failed to persist drives to cluster.json", reason: reason)
-        :ok
-    end
+  defp warn_on_persistence_failure({:error, reason}, operation, drive_id) do
+    Logger.warning(
+      "Drive #{operation} succeeded but config will not survive restart: #{inspect(reason)}",
+      drive_id: drive_id
+    )
   end
 
   ## Private — DriveState management

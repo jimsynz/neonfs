@@ -48,11 +48,12 @@ defmodule NeonFS.Cluster.FormationTest do
       refute Formation.orphaned_data_detected?()
     end
 
-    test "returns false for empty DETS tables", %{tmp_dir: tmp_dir} do
-      # An empty DETS table (no records) should not trigger orphan detection,
-      # even though the file itself has header overhead (~5KB).
-      dets_path = Path.join(tmp_dir, "empty.dets")
-      {:ok, tab} = :dets.open_file(:orphan_test_empty, file: String.to_charlist(dets_path))
+    test "returns false for DETS files with records", %{tmp_dir: tmp_dir} do
+      # DETS files are created by Persistence/VolumeRegistry on every run
+      # regardless of cluster state — they are NOT reliable orphan indicators
+      dets_path = Path.join(tmp_dir, "volumes.dets")
+      {:ok, tab} = :dets.open_file(:orphan_test_data, file: String.to_charlist(dets_path))
+      :dets.insert(tab, {"vol-1", %{name: "test-volume"}})
       :dets.close(tab)
       refute Formation.orphaned_data_detected?()
     end
@@ -64,15 +65,6 @@ defmodule NeonFS.Cluster.FormationTest do
       snapshot_dir = Path.join(server_dir, "snapshots")
       File.mkdir_p!(snapshot_dir)
 
-      assert Formation.orphaned_data_detected?()
-    end
-
-    test "detects orphaned DETS files with records", %{tmp_dir: tmp_dir} do
-      # A DETS file with actual records indicates prior cluster activity
-      dets_path = Path.join(tmp_dir, "volumes.dets")
-      {:ok, tab} = :dets.open_file(:orphan_test_data, file: String.to_charlist(dets_path))
-      :dets.insert(tab, {"vol-1", %{name: "test-volume"}})
-      :dets.close(tab)
       assert Formation.orphaned_data_detected?()
     end
 

@@ -129,17 +129,19 @@ defmodule NeonFS.Core.VolumeRegistry do
   """
   @spec list(keyword()) :: [Volume.t()]
   def list(opts \\ []) do
+    restored? = :persistent_term.get({__MODULE__, :restored}, false)
+
     local_volumes =
       :ets.tab2list(:volumes_by_id)
       |> Enum.map(fn {_id, volume} -> volume end)
 
-    # If local ETS is empty, try to sync from Ra (handles case where
-    # VolumeRegistry started before Ra was ready)
+    # Sync from Ra when ETS is empty or when the initial Ra restore hasn't
+    # completed yet (ETS may have stale data from DETS restore)
     volumes =
-      if Enum.empty?(local_volumes) do
+      if Enum.empty?(local_volumes) or not restored? do
         case sync_from_ra() do
-          {:ok, synced_volumes} -> synced_volumes
-          {:error, _} -> local_volumes
+          {:ok, synced_volumes} when synced_volumes != [] -> synced_volumes
+          _ -> local_volumes
         end
       else
         local_volumes
@@ -218,6 +220,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       case restore_from_ra() do
         {:ok, count} ->
           Logger.info("VolumeRegistry started, restored volumes from Ra", count: count)
+          :persistent_term.put({__MODULE__, :restored}, true)
           true
 
         {:error, reason} ->
@@ -308,6 +311,7 @@ defmodule NeonFS.Core.VolumeRegistry do
     case restore_from_ra() do
       {:ok, count} ->
         Logger.info("VolumeRegistry restored volumes from Ra on retry", count: count)
+        :persistent_term.put({__MODULE__, :restored}, true)
         {:noreply, %{state | restored: true}}
 
       {:error, _reason} ->
