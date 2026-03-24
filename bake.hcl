@@ -1,5 +1,5 @@
 group "default" {
-  targets = ["dev", "core", "fuse", "nfs", "omnibus", "cli"]
+  targets = ["core", "fuse", "nfs", "omnibus", "cli"]
 }
 
 variable "TAG" {
@@ -16,17 +16,6 @@ target "base" {
   tags       = ["forgejo.dmz/project-neon/neonfs/base:${TAG}"]
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/base:latest"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG},mode=max"]
-}
-
-target "dev" {
-  dockerfile = "containers/Containerfile.dev"
-  platforms  = split(",", PLATFORMS)
-  tags       = ["forgejo.dmz/project-neon/neonfs/dev:${TAG}"]
-  contexts = {
-    "base": "target:base"
-  }
-  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/dev:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/dev:latest"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/dev:${TAG},mode=max"]
 }
 
 target "core" {

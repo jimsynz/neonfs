@@ -538,7 +538,7 @@ jobs:
         run: |
           TAG=${GITHUB_REF_NAME//\//-}
 
-          FORGEJO_IMAGES="dev core fuse nfs omnibus cli"
+          FORGEJO_IMAGES="core fuse nfs omnibus cli"
           GHCR_IMAGES="core fuse nfs omnibus cli"
 
           for image in $FORGEJO_IMAGES; do
