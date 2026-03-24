@@ -126,7 +126,8 @@ defmodule NeonFS.Cluster.State do
             "id" => to_string(drive[:id] || drive["id"]),
             "path" => to_string(drive[:path] || drive["path"]),
             "tier" => to_string(drive[:tier] || drive["tier"]),
-            "capacity" => to_string(drive[:capacity] || drive["capacity"] || "0")
+            "capacity" =>
+              to_string(drive[:capacity] || drive[:capacity_bytes] || drive["capacity"] || "0")
           }
         end),
       "master_key" => state.master_key,

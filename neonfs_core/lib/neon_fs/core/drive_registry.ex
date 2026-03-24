@@ -205,7 +205,8 @@ defmodule NeonFS.Core.DriveRegistry do
     state = %{
       table: table,
       sync_interval: sync_interval,
-      local_drive_ids: Enum.map(local_drives, & &1.id)
+      local_drive_ids: Enum.map(local_drives, & &1.id),
+      initial_retries: 5
     }
 
     # Sync remote drives immediately via handle_continue, then schedule periodic syncs
@@ -214,10 +215,16 @@ defmodule NeonFS.Core.DriveRegistry do
 
   @impl true
   def handle_continue(:initial_sync, state) do
+    remote_count = count_remote_drives(state.table, state.local_drive_ids)
     sync_remote_drives(state.table, state.local_drive_ids)
 
+    next_interval =
+      if remote_count == 0 and state.initial_retries > 0,
+        do: 2_000,
+        else: state.sync_interval
+
     if state.sync_interval > 0 do
-      Process.send_after(self(), :sync_remote_drives, state.sync_interval)
+      Process.send_after(self(), :sync_remote_drives, next_interval)
     end
 
     {:noreply, state}
@@ -294,12 +301,20 @@ defmodule NeonFS.Core.DriveRegistry do
   @impl true
   def handle_info(:sync_remote_drives, state) do
     sync_remote_drives(state.table, state.local_drive_ids)
+    remote_count = count_remote_drives(state.table, state.local_drive_ids)
+
+    {next_interval, new_retries} =
+      if remote_count == 0 and state.initial_retries > 0 do
+        {2_000, state.initial_retries - 1}
+      else
+        {state.sync_interval, 0}
+      end
 
     if state.sync_interval > 0 do
-      Process.send_after(self(), :sync_remote_drives, state.sync_interval)
+      Process.send_after(self(), :sync_remote_drives, next_interval)
     end
 
-    {:noreply, state}
+    {:noreply, %{state | initial_retries: new_retries}}
   end
 
   def handle_info(_msg, state) do
@@ -329,6 +344,15 @@ defmodule NeonFS.Core.DriveRegistry do
   end
 
   defp drive_key(%Drive{node: node, id: id}), do: {node, id}
+
+  defp count_remote_drives(table, local_drive_ids) do
+    local_node = Node.self()
+
+    :ets.tab2list(table)
+    |> Enum.count(fn {{node, id}, _drive} ->
+      node != local_node or id not in local_drive_ids
+    end)
+  end
 
   defp update_drive_field(table, drive_id, field, value) do
     # Find the drive across all nodes

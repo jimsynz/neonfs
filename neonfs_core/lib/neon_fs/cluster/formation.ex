@@ -73,18 +73,16 @@ defmodule NeonFS.Cluster.Formation do
   @spec orphaned_data_detected?() :: boolean()
   def orphaned_data_detected? do
     ra = has_ra_data?()
-    dets = has_dets_files?()
     blob = has_blob_data?()
 
-    if ra or dets or blob do
+    if ra or blob do
       Logger.warning("Orphan detection triggered",
         has_ra_data: ra,
-        has_dets_files: dets,
         has_blob_data: blob
       )
     end
 
-    ra or dets or blob
+    ra or blob
   end
 
   # ── GenServer callbacks ─────────────────────────────────────────
@@ -532,7 +530,7 @@ defmodule NeonFS.Cluster.Formation do
 
   defp persist_drives do
     drives = DriveRegistry.drives_for_node(Node.self())
-    drive_configs = Enum.map(drives, &Map.take(&1, [:id, :path, :tier, :capacity]))
+    drive_configs = Enum.map(drives, &Map.take(&1, [:id, :path, :tier, :capacity_bytes]))
     State.update_drives(drive_configs)
   catch
     _, reason ->
@@ -583,46 +581,6 @@ defmodule NeonFS.Cluster.Formation do
 
       _ ->
         false
-    end
-  end
-
-  defp has_dets_files? do
-    meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/var/lib/neonfs/meta")
-
-    with true <- File.exists?(meta_dir),
-         {:ok, files} <- File.ls(meta_dir) do
-      Enum.any?(files, &populated_dets_file?(meta_dir, &1))
-    else
-      _ -> false
-    end
-  end
-
-  defp populated_dets_file?(dir, filename) do
-    String.ends_with?(filename, ".dets") and
-      dets_file_has_data?(Path.join(dir, filename))
-  end
-
-  defp dets_file_has_data?(path) do
-    # Open the DETS file read-only and check for actual records rather than
-    # relying on a file size threshold (empty DETS tables have ~5KB of header
-    # overhead which varies by OTP version, making size checks unreliable).
-    #
-    # This is safe because orphan detection now runs in Application.start/2
-    # before the supervisor starts, so no other process has these files open.
-    tab = :"orphan_check_#{:erlang.unique_integer([:positive])}"
-
-    case :dets.open_file(tab, file: String.to_charlist(path), access: :read) do
-      {:ok, ref} ->
-        count = :dets.info(ref, :size)
-        :dets.close(ref)
-        is_integer(count) and count > 0
-
-      {:error, _} ->
-        # File locked or corrupt — fall back to generous size threshold
-        case File.stat(path) do
-          {:ok, %{size: size}} -> size > 8192
-          _ -> false
-        end
     end
   end
 
