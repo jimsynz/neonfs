@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  containers-amd64:
+    runs-on: amd64
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Start Docker daemon
+        run: |
+          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
+          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Login to Forgejo Registry
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
+
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
+
+      - name: Set up Docker Buildx
+        run: |
+          cat > /tmp/buildkitd.toml << 'TOML'
+          [registry."forgejo.dmz"]
+            http = true
+            insecure = true
+          TOML
+          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+          docker buildx use builder
+
+      - name: Build and push (amd64)
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          PLATFORMS=linux/amd64 TAG=${VERSION}-amd64 docker buildx bake -f bake.hcl --push
+
+  containers-arm64:
+    runs-on: arm64
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Start Docker daemon
+        run: |
+          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
+          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Login to Forgejo Registry
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
+
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
+
+      - name: Set up Docker Buildx
+        run: |
+          cat > /tmp/buildkitd.toml << 'TOML'
+          [registry."forgejo.dmz"]
+            http = true
+            insecure = true
+          TOML
+          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+          docker buildx use builder
+
+      - name: Build and push (arm64)
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          PLATFORMS=linux/arm64 TAG=${VERSION}-arm64 docker buildx bake -f bake.hcl --push
+
+  containers-manifest:
+    runs-on: amd64
+    needs: [containers-amd64, containers-arm64]
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - name: Start Docker daemon
+        run: |
+          dockerd --host=unix:///var/run/docker.sock --insecure-registry=forgejo.dmz &
+          timeout 60 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Login to Forgejo Registry
+        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login --username=james --password-stdin forgejo.dmz
+
+      - name: Login to GitHub Container Registry
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login --username=jimsynz --password-stdin ghcr.io
+
+      - name: Set up Docker Buildx
+        run: |
+          cat > /tmp/buildkitd.toml << 'TOML'
+          [registry."forgejo.dmz"]
+            http = true
+            insecure = true
+          TOML
+          docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
+          docker buildx use builder
+
+      - name: Create multi-arch manifests
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          IMAGES="core fuse nfs omnibus cli"
+
+          for image in $IMAGES; do
+            docker buildx imagetools create \
+              -t forgejo.dmz/project-neon/neonfs/${image}:${VERSION} \
+              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-amd64 \
+              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-arm64
+
+            docker buildx imagetools create \
+              -t ghcr.io/jimsynz/neonfs/${image}:${VERSION} \
+              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-amd64 \
+              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
+
+            docker buildx imagetools create \
+              -t forgejo.dmz/project-neon/neonfs/${image}:latest \
+              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-amd64 \
+              forgejo.dmz/project-neon/neonfs/${image}:${VERSION}-arm64
+
+            docker buildx imagetools create \
+              -t ghcr.io/jimsynz/neonfs/${image}:latest \
+              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-amd64 \
+              ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
+          done
+
+  forgejo-release:
+    runs-on: docker
+    needs: [containers-manifest]
+    container:
+      image: harton.dev/james/asdf_container:latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract changelog and create release
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+
+          CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md)
+
+          curl -sf -X POST \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases" \
+            -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg tag "${{ github.ref_name }}" \
+              --arg name "${{ github.ref_name }}" \
+              --arg body "$CHANGELOG" \
+              '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}'
+            )"
