@@ -9,7 +9,7 @@ defmodule NeonFS.MixProject do
 
     @behaviour Access
 
-    @localonly [:loadconfig, :new]
+    @localonly [:loadconfig, :new, :"archive.check", :"deps.loadpaths", :"git_ops.release"]
 
     @impl Access
     def fetch(_, task) when task in @localonly, do: :error
@@ -58,6 +58,7 @@ defmodule NeonFS.MixProject do
     do: [
       app: :neonfs,
       aliases: %DynamicAlias{},
+      deps: [{:git_ops, "~> 2.9", only: [:dev, :test], runtime: false}],
       version: @version
     ]
 end
