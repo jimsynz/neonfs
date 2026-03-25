@@ -459,13 +459,6 @@ jobs:
           [registry."forgejo.dmz"]
             http = true
             insecure = true
-          [worker.oci]
-            gc = true
-            gckeepBytes = 20_000_000_000
-            [[worker.oci.gcpolicy]]
-              keepBytes = 15_000_000_000
-              keepDuration = 3600
-              all = true
           TOML
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
@@ -478,20 +471,12 @@ jobs:
       - name: Build and push services (amd64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-amd64
-          docker buildx prune -f
           PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl core fuse nfs --push
 
       - name: Build and push omnibus (amd64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-amd64
-          docker buildx prune -f
           PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl omnibus --push
-
-      - name: Cleanup
-        if: always()
-        run: |
-          docker buildx prune -af
-          docker system prune -af
 
   containers-arm64:
     runs-on: arm64
@@ -521,13 +506,6 @@ jobs:
           [registry."forgejo.dmz"]
             http = true
             insecure = true
-          [worker.oci]
-            gc = true
-            gckeepBytes = 20_000_000_000
-            [[worker.oci.gcpolicy]]
-              keepBytes = 15_000_000_000
-              keepDuration = 3600
-              all = true
           TOML
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
@@ -540,20 +518,12 @@ jobs:
       - name: Build and push services (arm64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-arm64
-          docker buildx prune -f
           PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl core fuse nfs --push
 
       - name: Build and push omnibus (arm64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-arm64
-          docker buildx prune -f
           PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl omnibus --push
-
-      - name: Cleanup
-        if: always()
-        run: |
-          docker buildx prune -af
-          docker system prune -af
 
   containers-manifest:
     runs-on: amd64
