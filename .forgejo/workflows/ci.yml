@@ -463,20 +463,10 @@ jobs:
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
 
-      - name: Build and push base and cli (amd64)
+      - name: Build and push (amd64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-amd64
-          PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl base cli --push
-
-      - name: Build and push services (amd64)
-        run: |
-          TAG=${GITHUB_REF_NAME//\//-}-amd64
-          PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl core fuse nfs --push
-
-      - name: Build and push omnibus (amd64)
-        run: |
-          TAG=${GITHUB_REF_NAME//\//-}-amd64
-          PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl omnibus --push
+          PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl --pull --push
 
   containers-arm64:
     runs-on: arm64
@@ -510,20 +500,10 @@ jobs:
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
 
-      - name: Build and push base and cli (arm64)
+      - name: Build and push (arm64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-arm64
-          PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl base cli --push
-
-      - name: Build and push services (arm64)
-        run: |
-          TAG=${GITHUB_REF_NAME//\//-}-arm64
-          PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl core fuse nfs --push
-
-      - name: Build and push omnibus (arm64)
-        run: |
-          TAG=${GITHUB_REF_NAME//\//-}-arm64
-          PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl omnibus --push
+          PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl --pull --push
 
   containers-manifest:
     runs-on: amd64
