@@ -9,7 +9,7 @@ defmodule NeonFS.MixProject do
 
     @behaviour Access
 
-    @localonly [:loadconfig, :new, :"archive.check", :"deps.loadpaths", :"git_ops.release"]
+    @localonly [:loadconfig, :new, :"archive.check", :"deps.loadpaths", :"git_ops.release", :"local.hex", :"local.rebar"]
 
     @impl Access
     def fetch(_, task) when task in @localonly, do: :error

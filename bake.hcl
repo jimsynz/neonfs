@@ -15,7 +15,7 @@ target "base" {
   platforms  = split(",", PLATFORMS)
   tags       = ["forgejo.dmz/project-neon/neonfs/base:${TAG}"]
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/base:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG},mode=min"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG},mode=min,ignore-error=true"]
 }
 
 target "core" {
@@ -32,7 +32,7 @@ target "core" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/core:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG},mode=min"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG},mode=min,ignore-error=true"]
 }
 
 target "fuse" {
@@ -49,7 +49,7 @@ target "fuse" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/fuse:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG},mode=min"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG},mode=min,ignore-error=true"]
 }
 
 target "nfs" {
@@ -66,7 +66,7 @@ target "nfs" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/nfs:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG},mode=min"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG},mode=min,ignore-error=true"]
 }
 
 target "omnibus" {
@@ -86,7 +86,7 @@ target "omnibus" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:${TAG},mode=min"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:${TAG},mode=min,ignore-error=true"]
 }
 
 target "cli" {
@@ -101,5 +101,5 @@ target "cli" {
     "base": "target:base"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/cli:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG},mode=min"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG},mode=min,ignore-error=true"]
 }
