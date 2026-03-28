@@ -95,9 +95,9 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "mio"
-version = "1.1.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a69bcab0ad47271a0234d9422b131806bf3968021e5dc9328caf2d4cd58557fc"
+checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
 dependencies = [
  "libc",
  "wasi",
@@ -141,7 +141,7 @@ dependencies = [
 [[package]]
 name = "nfs3_macros"
 version = "0.5.0"
-source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#ae51b7dede696b4b831d5db87a52225c46b9df1f"
+source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#1165ce57448f1ddb35fda8809d1aa1a4ec0fb7f7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -151,7 +151,7 @@ dependencies = [
 [[package]]
 name = "nfs3_server"
 version = "0.10.0"
-source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#ae51b7dede696b4b831d5db87a52225c46b9df1f"
+source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#1165ce57448f1ddb35fda8809d1aa1a4ec0fb7f7"
 dependencies = [
  "anyhow",
  "nfs3_types 0.5.0 (git+https://github.com/jimsynz/nfs3?branch=custom-generation)",
@@ -171,7 +171,7 @@ dependencies = [
 [[package]]
 name = "nfs3_types"
 version = "0.5.0"
-source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#ae51b7dede696b4b831d5db87a52225c46b9df1f"
+source = "git+https://github.com/jimsynz/nfs3?branch=custom-generation#1165ce57448f1ddb35fda8809d1aa1a4ec0fb7f7"
 dependencies = [
  "nfs3_macros 0.5.0 (git+https://github.com/jimsynz/nfs3?branch=custom-generation)",
 ]
