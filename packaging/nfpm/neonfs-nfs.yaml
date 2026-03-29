@@ -1,0 +1,39 @@
+name: neonfs-nfs
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "James Harton <james@harton.dev>"
+description: "NeonFS NFSv3 server daemon for NFS-compatible access"
+vendor: "harton.dev"
+homepage: "https://harton.dev/project-neon/neonfs"
+license: "Apache-2.0"
+
+depends:
+  - neonfs-common (= ${VERSION})
+  - neonfs-cli (= ${VERSION})
+  - libstdc++6
+  - openssl
+  - libssl3t64
+  - libncurses6
+  - ca-certificates
+
+conflicts:
+  - neonfs-omnibus
+
+contents:
+  - src: "${BUILD_DIR}/neonfs_nfs/_build/prod/rel/neonfs_nfs/"
+    dst: /usr/lib/neonfs/nfs/
+
+  - src: ../systemd/neonfs-nfs.service
+    dst: /usr/lib/systemd/system/neonfs-nfs.service
+
+  - src: ../systemd/neonfs-nfs-daemon
+    dst: /usr/bin/neonfs-nfs-daemon
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: ../scripts/post-install.sh
+  preremove: ../scripts/pre-remove.sh

@@ -1,41 +1,23 @@
 #!/bin/bash
-# NeonFS daemon wrapper script
-# This script provides systemd-compatible start/stop commands for the NeonFS release
+# NeonFS NFS daemon wrapper script
+# This script provides systemd-compatible start/stop commands for the neonfs_nfs release
 
 set -e
 
 # Default paths (can be overridden by environment variables)
-RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs}"
-RELEASE_NAME="${RELEASE_NAME:-neonfs}"
+RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/nfs}"
+RELEASE_NAME="${RELEASE_NAME:-neonfs_nfs}"
 NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
-RELEASE_NODE="${RELEASE_NODE:-neonfs@localhost}"
+RELEASE_NODE="${NEONFS_NFS_NODE:-${RELEASE_NODE:-neonfs_nfs@localhost}}"
 RELEASE_COOKIE_PATH="${RELEASE_COOKIE_PATH:-/var/lib/neonfs/.erlang.cookie}"
+NEONFS_CORE_NODE="${NEONFS_CORE_NODE:-neonfs_core@localhost}"
 
-# Ensure base data directories exist
-# Note: Tier subdirectories (hot/warm/cold) are created by BlobStore
-# based on volume configuration, not at daemon startup
-ensure_directories() {
-    mkdir -p "${NEONFS_DATA_DIR}/data"
-    mkdir -p "${NEONFS_DATA_DIR}/meta"
-    mkdir -p "${NEONFS_DATA_DIR}/wal"
-
-    # Set ownership if running as root
-    if [ "$EUID" -eq 0 ]; then
-        chown -R neonfs:neonfs "${NEONFS_DATA_DIR}"
-    fi
-}
-
-# Generate cookie if it doesn't exist
+# Verify cookie exists (should be created by core daemon)
 ensure_cookie() {
     if [ ! -f "${RELEASE_COOKIE_PATH}" ]; then
-        # Generate a secure random cookie (20 characters, alphanumeric)
-        tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20 > "${RELEASE_COOKIE_PATH}"
-        chmod 600 "${RELEASE_COOKIE_PATH}"
-
-        # Set ownership if running as root
-        if [ "$EUID" -eq 0 ]; then
-            chown neonfs:neonfs "${RELEASE_COOKIE_PATH}"
-        fi
+        echo "Error: Erlang cookie not found at ${RELEASE_COOKIE_PATH}"
+        echo "Ensure neonfs-core.service is running first, or create a cookie manually."
+        exit 1
     fi
 }
 
@@ -44,8 +26,9 @@ write_runtime_info() {
     local runtime_dir="${RUNTIME_DIR:-/run/neonfs}"
     mkdir -p "${runtime_dir}"
 
-    echo "${RELEASE_NODE}" > "${runtime_dir}/node_name"
-    echo $$ > "${runtime_dir}/daemon.pid"
+    echo "${RELEASE_NODE}" > "${runtime_dir}/nfs_node_name"
+    echo "${NEONFS_CORE_NODE}" > "${runtime_dir}/core_node_name"
+    echo $$ > "${runtime_dir}/nfs.pid"
 
     # Set ownership if running as root
     if [ "$EUID" -eq 0 ]; then
@@ -55,7 +38,6 @@ write_runtime_info() {
 
 # Start the daemon
 start_daemon() {
-    ensure_directories
     ensure_cookie
     write_runtime_info
 

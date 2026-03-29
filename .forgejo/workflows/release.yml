@@ -131,14 +131,200 @@ jobs:
               ghcr.io/jimsynz/neonfs/${image}:${VERSION}-arm64
           done
 
+  # =========================================================================
+  # Debian packages - Native multi-arch builds
+  # Build each architecture on its own native runner, then upload to Forgejo.
+  # =========================================================================
+  debs-amd64:
+    runs-on: amd64
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore toolchain cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            .asdf
+            .hex
+            .mix
+            .cargo
+          key: toolchain-amd64-${{ hashFiles('.tool-versions') }}
+
+      - name: Install ASDF tools
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          asdf_install
+          asdf reshim
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=$(curl -sfL https://api.github.com/repos/goreleaser/nfpm/releases/latest | jq -r .tag_name)
+          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_$(uname -m).tar.gz" \
+            | tar xz -C /usr/local/bin nfpm
+
+      - name: Build releases
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+
+          # Build CLI
+          cd neonfs-cli && cargo build --release && cd ..
+
+          # Build Elixir releases
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_omnibus; do
+            cd "$component"
+            mix local.hex --force && mix local.rebar --force
+            mix deps.get --only prod
+            MIX_ENV=prod mix compile
+            MIX_ENV=prod mix release --overwrite
+            cd ..
+          done
+
+      - name: Package .deb files
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          export VERSION ARCH=amd64 BUILD_DIR="$FORGEJO_WORKSPACE"
+          mkdir -p dist
+
+          cd packaging/nfpm
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-omnibus; do
+            envsubst < "${config}.yaml" > "/tmp/${config}.yaml"
+            nfpm package --config "/tmp/${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
+          done
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-amd64
+          path: dist/*.deb
+
+  debs-arm64:
+    runs-on: arm64
+    container:
+      image: harton.dev/james/asdf_container:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore toolchain cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            .asdf
+            .hex
+            .mix
+            .cargo
+          key: toolchain-arm64-${{ hashFiles('.tool-versions') }}
+
+      - name: Install ASDF tools
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          asdf_install
+          asdf reshim
+
+      - name: Install nfpm
+        run: |
+          curl -sfL https://github.com/goreleaser/nfpm/releases/latest/download/nfpm_linux_arm64.tar.gz \
+            | tar xz -C /usr/local/bin nfpm
+
+      - name: Build releases
+        run: |
+          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
+          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
+          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
+          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
+          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+
+          # Build CLI
+          cd neonfs-cli && cargo build --release && cd ..
+
+          # Build Elixir releases
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_omnibus; do
+            cd "$component"
+            mix local.hex --force && mix local.rebar --force
+            mix deps.get --only prod
+            MIX_ENV=prod mix compile
+            MIX_ENV=prod mix release --overwrite
+            cd ..
+          done
+
+      - name: Package .deb files
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          export VERSION ARCH=arm64 BUILD_DIR="$FORGEJO_WORKSPACE"
+          mkdir -p dist
+
+          cd packaging/nfpm
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-omnibus; do
+            envsubst < "${config}.yaml" > "/tmp/${config}.yaml"
+            nfpm package --config "/tmp/${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
+          done
+
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debs-arm64
+          path: dist/*.deb
+
+  debs-upload:
+    runs-on: docker
+    needs: [debs-amd64, debs-arm64]
+    container:
+      image: harton.dev/james/asdf_container:latest
+
+    steps:
+      - name: Download amd64 .deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: debs-amd64
+          path: dist/
+
+      - name: Download arm64 .deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: debs-arm64
+          path: dist/
+
+      - name: Upload to Forgejo Debian repository
+        run: |
+          for deb in dist/*.deb; do
+            echo "Uploading $(basename "$deb")..."
+            curl -sf \
+              -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+              --upload-file "$deb" \
+              "https://harton.dev/api/packages/project-neon/debian/pool/trixie/main/upload"
+          done
+
   forgejo-release:
     runs-on: docker
-    needs: [containers-manifest]
+    needs: [containers-manifest, debs-upload]
     container:
       image: harton.dev/james/asdf_container:latest
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Download all .deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
 
       - name: Extract changelog and create release
         run: |
@@ -146,7 +332,8 @@ jobs:
 
           CHANGELOG=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[/{if(found) exit} found{print}' CHANGELOG.md)
 
-          curl -sf -X POST \
+          # Create the release
+          RELEASE_ID=$(curl -sf -X POST \
             "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases" \
             -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -155,4 +342,15 @@ jobs:
               --arg name "${{ github.ref_name }}" \
               --arg body "$CHANGELOG" \
               '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}'
-            )"
+            )" | jq -r '.id')
+
+          # Attach .deb files as release assets
+          for deb in dist/*.deb; do
+            echo "Attaching $(basename "$deb") to release..."
+            curl -sf \
+              -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+              -X POST \
+              "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=$(basename "$deb")" \
+              -F "attachment=@${deb}" \
+              > /dev/null
+          done

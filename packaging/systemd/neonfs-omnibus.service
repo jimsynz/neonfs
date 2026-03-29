@@ -1,14 +1,15 @@
 [Unit]
-Description=NeonFS FUSE Filesystem Daemon
+Description=NeonFS Omnibus Daemon (Core + FUSE + NFS)
 After=network.target
+Wants=epmd.service
 Documentation=https://neonfs.dev/docs
 
 [Service]
 Type=notify
 User=neonfs
 Group=neonfs
-ExecStart=/usr/bin/neonfs-fuse-daemon start
-ExecStop=/usr/bin/neonfs-fuse-daemon stop
+ExecStart=/usr/bin/neonfs-omnibus-daemon start
+ExecStop=/usr/bin/neonfs-omnibus-daemon stop
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
@@ -18,6 +19,7 @@ EnvironmentFile=-/etc/neonfs/neonfs.conf
 
 RuntimeDirectory=neonfs
 StateDirectory=neonfs
+ConfigurationDirectory=neonfs
 
 # FUSE requires CAP_SYS_ADMIN for mounting
 AmbientCapabilities=CAP_SYS_ADMIN

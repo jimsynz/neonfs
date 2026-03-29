@@ -1,0 +1,43 @@
+name: neonfs-omnibus
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "James Harton <james@harton.dev>"
+description: "NeonFS all-in-one daemon (core + FUSE + NFS in a single node)"
+vendor: "harton.dev"
+homepage: "https://harton.dev/project-neon/neonfs"
+license: "Apache-2.0"
+
+depends:
+  - neonfs-common (= ${VERSION})
+  - neonfs-cli (= ${VERSION})
+  - libstdc++6
+  - openssl
+  - libssl3t64
+  - libncurses6
+  - ca-certificates
+  - libfuse3-4
+  - fuse3
+
+conflicts:
+  - neonfs-core
+  - neonfs-fuse
+  - neonfs-nfs
+
+contents:
+  - src: "${BUILD_DIR}/neonfs_omnibus/_build/prod/rel/neonfs_omnibus/"
+    dst: /usr/lib/neonfs/omnibus/
+
+  - src: ../systemd/neonfs-omnibus.service
+    dst: /usr/lib/systemd/system/neonfs-omnibus.service
+
+  - src: ../systemd/neonfs-omnibus-daemon
+    dst: /usr/bin/neonfs-omnibus-daemon
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: ../scripts/post-install.sh
+  preremove: ../scripts/pre-remove.sh

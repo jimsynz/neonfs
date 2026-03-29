@@ -1,0 +1,42 @@
+name: neonfs-core
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "James Harton <james@harton.dev>"
+description: "NeonFS core storage and coordination daemon"
+vendor: "harton.dev"
+homepage: "https://harton.dev/project-neon/neonfs"
+license: "Apache-2.0"
+
+depends:
+  - neonfs-common (= ${VERSION})
+  - neonfs-cli (= ${VERSION})
+  - libstdc++6
+  - openssl
+  - libssl3t64
+  - libncurses6
+  - ca-certificates
+
+conflicts:
+  - neonfs-omnibus
+
+contents:
+  - src: "${BUILD_DIR}/neonfs_core/_build/prod/rel/neonfs_core/"
+    dst: /usr/lib/neonfs/core/
+
+  - src: ../systemd/neonfs-core.service
+    dst: /usr/lib/systemd/system/neonfs-core.service
+
+  - src: ../systemd/neonfs-core-daemon
+    dst: /usr/bin/neonfs-core-daemon
+    file_info:
+      mode: 0755
+
+  - src: ../systemd/neonfs.target
+    dst: /usr/lib/systemd/system/neonfs.target
+
+scripts:
+  postinstall: ../scripts/post-install.sh
+  preremove: ../scripts/pre-remove.sh

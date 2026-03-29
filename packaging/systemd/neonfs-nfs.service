@@ -1,5 +1,5 @@
 [Unit]
-Description=NeonFS Distributed Filesystem Daemon
+Description=NeonFS NFS Server Daemon
 After=network.target
 Wants=epmd.service
 Documentation=https://neonfs.dev/docs
@@ -8,20 +8,17 @@ Documentation=https://neonfs.dev/docs
 Type=notify
 User=neonfs
 Group=neonfs
-ExecStart=/usr/bin/neonfs-daemon start
-ExecStop=/usr/bin/neonfs-daemon stop
+ExecStart=/usr/bin/neonfs-nfs-daemon start
+ExecStop=/usr/bin/neonfs-nfs-daemon stop
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
 TimeoutStopSec=30
 
-Environment=RELEASE_NODE=neonfs@localhost
-Environment=RELEASE_COOKIE_PATH=/var/lib/neonfs/.erlang.cookie
-Environment=NEONFS_DATA_DIR=/var/lib/neonfs
+EnvironmentFile=-/etc/neonfs/neonfs.conf
 
 RuntimeDirectory=neonfs
 StateDirectory=neonfs
-ConfigurationDirectory=neonfs
 
 # Security hardening
 NoNewPrivileges=true

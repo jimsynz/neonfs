@@ -1,0 +1,17 @@
+name: neonfs-cli
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "James Harton <james@harton.dev>"
+description: "NeonFS command-line interface for managing NeonFS clusters"
+vendor: "harton.dev"
+homepage: "https://harton.dev/project-neon/neonfs"
+license: "Apache-2.0"
+
+contents:
+  - src: "${BUILD_DIR}/neonfs-cli/target/release/neonfs-cli"
+    dst: /usr/bin/neonfs
+    file_info:
+      mode: 0755

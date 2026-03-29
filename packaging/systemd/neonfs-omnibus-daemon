@@ -1,19 +1,18 @@
 #!/bin/bash
-# NeonFS Core daemon wrapper script
-# This script provides systemd-compatible start/stop commands for the neonfs_core release
+# NeonFS Omnibus daemon wrapper script
+# This script provides systemd-compatible start/stop commands for the neonfs_omnibus release
+# Omnibus mode runs core, FUSE, and NFS in a single BEAM node.
 
 set -e
 
 # Default paths (can be overridden by environment variables)
-RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/core}"
-RELEASE_NAME="${RELEASE_NAME:-neonfs_core}"
+RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/omnibus}"
+RELEASE_NAME="${RELEASE_NAME:-neonfs_omnibus}"
 NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
-RELEASE_NODE="${NEONFS_CORE_NODE:-${RELEASE_NODE:-neonfs_core@localhost}}"
+RELEASE_NODE="${NEONFS_OMNIBUS_NODE:-${RELEASE_NODE:-neonfs@localhost}}"
 RELEASE_COOKIE_PATH="${RELEASE_COOKIE_PATH:-/var/lib/neonfs/.erlang.cookie}"
 
 # Ensure base data directories exist
-# Note: Tier subdirectories (hot/warm/cold) are created by BlobStore
-# based on volume configuration, not at daemon startup
 ensure_directories() {
     mkdir -p "${NEONFS_DATA_DIR}/data"
     mkdir -p "${NEONFS_DATA_DIR}/meta"
@@ -28,7 +27,6 @@ ensure_directories() {
 # Generate cookie if it doesn't exist
 ensure_cookie() {
     if [ ! -f "${RELEASE_COOKIE_PATH}" ]; then
-        # Generate a secure random cookie (20 characters, alphanumeric)
         tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20 > "${RELEASE_COOKIE_PATH}"
         chmod 600 "${RELEASE_COOKIE_PATH}"
 
@@ -45,7 +43,7 @@ write_runtime_info() {
     mkdir -p "${runtime_dir}"
 
     echo "${RELEASE_NODE}" > "${runtime_dir}/core_node_name"
-    echo $$ > "${runtime_dir}/core.pid"
+    echo $$ > "${runtime_dir}/omnibus.pid"
 
     # Set ownership if running as root
     if [ "$EUID" -eq 0 ]; then
