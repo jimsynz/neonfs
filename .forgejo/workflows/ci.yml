@@ -466,7 +466,7 @@ jobs:
       - name: Build all targets (amd64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-amd64
-          for target in cli core fuse nfs omnibus; do
+          for target in base cli core fuse nfs omnibus; do
             PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl --pull --load "$target"
           done
 
@@ -513,7 +513,7 @@ jobs:
       - name: Build all targets (arm64)
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-arm64
-          for target in cli core fuse nfs omnibus; do
+          for target in base cli core fuse nfs omnibus; do
             PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl --pull --load "$target"
           done
 
