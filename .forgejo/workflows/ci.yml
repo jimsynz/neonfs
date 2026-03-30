@@ -6,37 +6,52 @@ on:
   pull_request:
 
 env:
-  ASDF_DIR: /root/.asdf
   MIX_ENV: test
 
 jobs:
+  # ==========================================================================
+  # Resolve tool versions from .tool-versions so all jobs use the same images
+  # ==========================================================================
+  resolve-versions:
+    runs-on: docker
+    container:
+      image: debian:trixie-20260316-slim
+    outputs:
+      elixir: ${{ steps.parse.outputs.elixir }}
+      erlang: ${{ steps.parse.outputs.erlang }}
+      rust: ${{ steps.parse.outputs.rust }}
+      hexpm_image: ${{ steps.parse.outputs.hexpm_image }}
+      rust_image: ${{ steps.parse.outputs.rust_image }}
+    steps:
+      - name: Install checkout dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends nodejs git ca-certificates && rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v6
+
+      - id: parse
+        run: |
+          ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
+          ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
+          RUST=$(awk '/^rust/ {print $2}' .tool-versions)
+          echo "elixir=${ELIXIR}" >> "$GITHUB_OUTPUT"
+          echo "erlang=${ERLANG}" >> "$GITHUB_OUTPUT"
+          echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
+          echo "hexpm_image=hexpm/elixir:${ELIXIR}-erlang-${ERLANG}-debian-trixie-20260316-slim" >> "$GITHUB_OUTPUT"
+          echo "rust_image=rust:${RUST}-slim-trixie" >> "$GITHUB_OUTPUT"
+
   # =========================================================================
   # neonfs_client - Pure Elixir shared types & service discovery
   # =========================================================================
   neonfs_client:
+    needs: resolve-versions
     runs-on: docker
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
     steps:
+      - name: Install checkout dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends nodejs git ca-certificates && rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v6
-
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
-        run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
 
       - name: Restore build cache
         uses: actions/cache@v5
@@ -44,16 +59,13 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
-          key: build-neonfs_client-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_client/mix.lock') }}
-          restore-keys: build-neonfs_client-${{ runner.arch }}-
+          key: v2-build-neonfs_client-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_client/mix.lock') }}
+          restore-keys: v2-build-neonfs_client-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_client
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
           if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
@@ -61,10 +73,6 @@ jobs:
       - name: Check
         working-directory: neonfs_client
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
           epmd -daemon
           mix check
 
@@ -72,31 +80,24 @@ jobs:
   # neonfs_core - Elixir + Rustler NIFs
   # =========================================================================
   neonfs_core:
+    needs: resolve-versions
     runs-on: docker
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
     steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl ca-certificates git nodejs \
+          && rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v6
 
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-            .cargo
-          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
+      - name: Install Rust
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "${{ needs.resolve-versions.outputs.rust }}"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Restore build cache
         uses: actions/cache@v5
@@ -108,17 +109,13 @@ jobs:
             neonfs_core/_build
             neonfs_core/target
             neonfs_core/priv/native
-          key: build-neonfs_core-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_core/mix.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: build-neonfs_core-${{ runner.arch }}-
+          key: v2-build-neonfs_core-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_core/mix.lock', 'neonfs_core/Cargo.lock') }}
+          restore-keys: v2-build-neonfs_core-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_core
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
           if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
@@ -126,11 +123,6 @@ jobs:
       - name: Check
         working-directory: neonfs_core
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
           epmd -daemon
           mix check
 
@@ -138,32 +130,25 @@ jobs:
   # neonfs_fuse - Elixir + Rustler NIFs
   # =========================================================================
   neonfs_fuse:
+    needs: resolve-versions
     runs-on: docker
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
       options: --privileged --device /dev/fuse
     steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl ca-certificates git nodejs libfuse3-dev fuse3 \
+          && rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v6
 
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-            .cargo
-          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
+      - name: Install Rust
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "${{ needs.resolve-versions.outputs.rust }}"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Restore build cache
         uses: actions/cache@v5
@@ -175,17 +160,13 @@ jobs:
             neonfs_fuse/_build
             neonfs_fuse/target
             neonfs_fuse/priv/native
-          key: build-neonfs_fuse-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock') }}
-          restore-keys: build-neonfs_fuse-${{ runner.arch }}-
+          key: v2-build-neonfs_fuse-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock') }}
+          restore-keys: v2-build-neonfs_fuse-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_fuse
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
           if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
@@ -193,11 +174,6 @@ jobs:
       - name: Check
         working-directory: neonfs_fuse
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
           epmd -daemon
           mix check
 
@@ -205,31 +181,24 @@ jobs:
   # neonfs_nfs - Elixir + Rustler NIFs (NFSv3 server)
   # =========================================================================
   neonfs_nfs:
+    needs: resolve-versions
     runs-on: docker
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
     steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl ca-certificates git nodejs \
+          && rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v6
 
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-            .cargo
-          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
+      - name: Install Rust
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "${{ needs.resolve-versions.outputs.rust }}"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Restore build cache
         uses: actions/cache@v5
@@ -241,17 +210,13 @@ jobs:
             neonfs_nfs/_build
             neonfs_nfs/target
             neonfs_nfs/priv/native
-          key: build-neonfs_nfs-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_nfs/mix.lock', 'neonfs_nfs/native/neonfs_nfs/Cargo.lock') }}
-          restore-keys: build-neonfs_nfs-${{ runner.arch }}-
+          key: v2-build-neonfs_nfs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_nfs/mix.lock', 'neonfs_nfs/native/neonfs_nfs/Cargo.lock') }}
+          restore-keys: v2-build-neonfs_nfs-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_nfs
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
           if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
@@ -259,11 +224,6 @@ jobs:
       - name: Check
         working-directory: neonfs_nfs
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
           epmd -daemon
           mix check
 
@@ -271,110 +231,68 @@ jobs:
   # neonfs-cli - Rust CLI
   # =========================================================================
   neonfs-cli:
+    needs: resolve-versions
     runs-on: docker
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.rust_image }}
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-            .cargo
-          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
+      - name: Install build dependencies
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
+          apt-get update && apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev git nodejs ca-certificates \
+          && rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v6
 
       - name: Restore build cache
         uses: actions/cache@v5
         with:
           path: |
             neonfs-cli/target
-          key: build-neonfs-cli-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs-cli/Cargo.lock') }}
-          restore-keys: build-neonfs-cli-${{ runner.arch }}-
+          key: v2-build-neonfs-cli-${{ runner.arch }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs-cli/Cargo.lock') }}
+          restore-keys: v2-build-neonfs-cli-${{ runner.arch }}-
 
       - name: Setup clippy
-        run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          rustup component add clippy
+        run: rustup component add clippy
 
       - name: Build
         working-directory: neonfs-cli
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
           cargo fetch
           cargo test --no-run --release
 
       - name: Test
         working-directory: neonfs-cli
-        run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          cargo test --jobs 1 --release
+        run: cargo test --jobs 1 --release
 
       - name: Clippy
         working-directory: neonfs-cli
-        run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   # =========================================================================
   # neonfs_integration - Integration tests
   # =========================================================================
   neonfs_integration:
+    needs: resolve-versions
     runs-on: docker
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
       options: --privileged --device /dev/fuse
     steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl ca-certificates git nodejs \
+            libfuse3-dev fuse3 e2fsprogs mount \
+          && rm -rf /var/lib/apt/lists/*
+
       - uses: actions/checkout@v6
 
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-            .cargo
-          key: toolchain-${{ runner.arch }}-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
+      - name: Install Rust
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "${{ needs.resolve-versions.outputs.rust }}"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Restore build cache
         uses: actions/cache@v5
@@ -390,17 +308,13 @@ jobs:
             neonfs_core/priv/native
             neonfs_fuse/target
             neonfs_fuse/priv/native
-          key: build-neonfs_integration-${{ runner.arch }}-${{ hashFiles('.tool-versions', 'neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_fuse/Cargo.lock') }}
-          restore-keys: build-neonfs_integration-${{ runner.arch }}-
+          key: v2-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_fuse/Cargo.lock') }}
+          restore-keys: v2-build-neonfs_integration-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_integration
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
           mix compile
@@ -417,11 +331,6 @@ jobs:
       - name: Check
         working-directory: neonfs_integration
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
           epmd -daemon
           mix check
 
@@ -436,10 +345,13 @@ jobs:
     needs: [neonfs_client, neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_integration]
     if: forgejo.event_name == 'push'
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: docker:27-dind
       options: --privileged
 
     steps:
+      - name: Install checkout dependencies
+        run: apk add --no-cache nodejs git
+
       - uses: actions/checkout@v6
 
       - name: Start Docker daemon
@@ -467,7 +379,7 @@ jobs:
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-amd64
           for target in base cli core fuse nfs omnibus; do
-            PLATFORMS=linux/amd64 TAG=$TAG docker buildx bake -f bake.hcl --pull --load "$target"
+            PLATFORMS=linux/amd64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
           done
 
       - name: Push all images (amd64)
@@ -483,10 +395,13 @@ jobs:
     needs: [neonfs_client, neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_integration]
     if: forgejo.event_name == 'push'
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: docker:27-dind
       options: --privileged
 
     steps:
+      - name: Install checkout dependencies
+        run: apk add --no-cache nodejs git
+
       - uses: actions/checkout@v6
 
       - name: Start Docker daemon
@@ -514,7 +429,7 @@ jobs:
         run: |
           TAG=${GITHUB_REF_NAME//\//-}-arm64
           for target in base cli core fuse nfs omnibus; do
-            PLATFORMS=linux/arm64 TAG=$TAG docker buildx bake -f bake.hcl --pull --load "$target"
+            PLATFORMS=linux/arm64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
           done
 
       - name: Push all images (arm64)
@@ -529,7 +444,7 @@ jobs:
     runs-on: amd64
     needs: [containers-amd64, containers-arm64]
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: docker:27-dind
       options: --privileged
 
     steps:

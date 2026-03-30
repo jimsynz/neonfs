@@ -1,10 +1,20 @@
-FROM base AS deps
-RUN mkdir /workdir/neonfs-cli
+ARG RUST_VERSION
+FROM rust:${RUST_VERSION}-slim-trixie AS deps
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir /workdir
 COPY --from=src . /workdir/neonfs-cli
 WORKDIR /workdir/neonfs-cli
 
 FROM deps AS releaser
-RUN export PATH="/root/.asdf/shims:$PATH"; cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/workdir/neonfs-cli/target \
+    cargo build --release && \
+    cp target/release/neonfs-cli /usr/local/bin/neonfs-cli
 
 FROM debian:trixie-20260316
 
@@ -14,6 +24,6 @@ LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.title="neonfs-cli" \
       org.opencontainers.image.description="NeonFS CLI container"
 
-COPY --from=releaser /workdir/neonfs-cli/target/release/neonfs-cli /bin/neonfs
+COPY --from=releaser /usr/local/bin/neonfs-cli /bin/neonfs
 
 ENTRYPOINT ["/bin/neonfs"]

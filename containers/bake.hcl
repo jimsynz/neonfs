@@ -10,12 +10,30 @@ variable "PLATFORMS" {
   default = "linux/amd64,linux/arm64"
 }
 
+# Tool versions — set via env vars parsed from .tool-versions by bake.sh
+variable "ELIXIR_VERSION" {
+  default = ""
+}
+
+variable "ERLANG_VERSION" {
+  default = ""
+}
+
+variable "RUST_VERSION" {
+  default = ""
+}
+
 target "base" {
   dockerfile = "containers/Containerfile.base"
   platforms  = split(",", PLATFORMS)
   tags       = ["forgejo.dmz/project-neon/neonfs/base:${TAG}"]
+  args = {
+    ELIXIR_VERSION = ELIXIR_VERSION
+    ERLANG_VERSION = ERLANG_VERSION
+    RUST_VERSION   = RUST_VERSION
+  }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/base:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG},mode=min,ignore-error=true"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/base:${TAG},mode=max,ignore-error=true"]
 }
 
 target "core" {
@@ -32,7 +50,7 @@ target "core" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/core:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG},mode=min,ignore-error=true"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/core:${TAG},mode=max,ignore-error=true"]
 }
 
 target "fuse" {
@@ -49,7 +67,7 @@ target "fuse" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/fuse:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG},mode=min,ignore-error=true"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/fuse:${TAG},mode=max,ignore-error=true"]
 }
 
 target "nfs" {
@@ -66,7 +84,7 @@ target "nfs" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/nfs:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG},mode=min,ignore-error=true"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG},mode=max,ignore-error=true"]
 }
 
 target "omnibus" {
@@ -86,7 +104,7 @@ target "omnibus" {
     "cli": "target:cli"
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:${TAG},mode=min,ignore-error=true"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/omnibus:${TAG},mode=max,ignore-error=true"]
 }
 
 target "cli" {
@@ -98,8 +116,10 @@ target "cli" {
   ]
   contexts = {
     "src": "./neonfs-cli"
-    "base": "target:base"
+  }
+  args = {
+    RUST_VERSION = RUST_VERSION
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/cli:main"]
-  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG},mode=min,ignore-error=true"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/cli:${TAG},mode=max,ignore-error=true"]
 }

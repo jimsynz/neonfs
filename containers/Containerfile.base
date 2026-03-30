@@ -1,4 +1,9 @@
-FROM harton.dev/james/asdf_container:latest
+ARG ELIXIR_VERSION
+ARG ERLANG_VERSION
+ARG RUST_VERSION
+FROM hexpm/elixir:${ELIXIR_VERSION}-erlang-${ERLANG_VERSION}-debian-trixie-20260316-slim
+
+ARG RUST_VERSION
 
 LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
@@ -6,16 +11,20 @@ LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.title="neonfs-base" \
       org.opencontainers.image.description="Base build image for NeonFS containers"
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     libfuse3-dev \
     fuse3 \
     pkg-config \
-    systemd \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir /workdir
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain "${RUST_VERSION}"
+
+ENV PATH="/root/.cargo/bin:$PATH"
+
+RUN mix local.hex --force && mix local.rebar --force
+
 WORKDIR /workdir
-COPY .tool-versions /workdir
-ENV ASDF_DIR=/root/.asdf
-RUN /usr/local/bin/asdf_install
-RUN export PATH="/root/.asdf/shims:$PATH"; asdf reshim

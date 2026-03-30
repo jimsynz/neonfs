@@ -1,16 +1,23 @@
 FROM base AS deps
-RUN mkdir /workdir/neonfs_client
-COPY --from=client . /workdir/neonfs_client
-RUN mkdir /workdir/neonfs_nfs
-COPY --from=src . /workdir/neonfs_nfs
+
+# Copy only lockfiles and project config to cache the deps.get layer
+COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
+COPY --from=src mix.exs mix.lock /workdir/neonfs_nfs/
+
 WORKDIR /workdir/neonfs_nfs
-RUN export PATH="/root/.asdf/shims:$PATH"; mix local.hex --force && mix local.rebar --force
-RUN export PATH="/root/.asdf/shims:$PATH"; mix deps.get
+RUN mix deps.get
 
 FROM deps AS releaser
 ENV MIX_ENV=prod
-RUN export PATH="/root/.asdf/shims:$PATH"; mix compile
-RUN export PATH="/root/.asdf/shims:$PATH"; mix release --overwrite
+
+# Now copy the full source for compilation
+COPY --from=client . /workdir/neonfs_client
+COPY --from=src . /workdir/neonfs_nfs
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workdir/neonfs_nfs/target \
+    mix compile && mix release --overwrite
 
 FROM debian:trixie-20260316
 
