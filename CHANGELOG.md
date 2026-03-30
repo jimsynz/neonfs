@@ -5,6 +5,19 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.1](https://harton.dev/project-neon/neonfs/compare/v0.1.0...v0.1.1) (2026-03-30)
+
+
+
+
+### Bug Fixes:
+
+* ci: build container targets sequentially to avoid BuildKit session timeout by [@jimsynz](https://github.com/jimsynz)
+
+### Improvements:
+
+* replace ASDF with pre-built images for faster container builds (#90) by [@jimsynz](https://github.com/jimsynz)
+
 ## [0.1.0](https://harton.dev/project-neon/neonfs/compare/0.1.0...0.1.0) (2026-03-25)
 
 
