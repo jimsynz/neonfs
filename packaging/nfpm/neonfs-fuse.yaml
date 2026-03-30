@@ -27,6 +27,7 @@ conflicts:
 contents:
   - src: "${BUILD_DIR}/neonfs_fuse/_build/prod/rel/neonfs_fuse/"
     dst: /usr/lib/neonfs/fuse/
+    type: tree
 
   - src: ../systemd/neonfs-fuse.service
     dst: /usr/lib/systemd/system/neonfs-fuse.service

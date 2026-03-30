@@ -199,8 +199,9 @@ jobs:
 
           cd packaging/nfpm
           for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-omnibus; do
-            envsubst < "${config}.yaml" > "/tmp/${config}.yaml"
-            nfpm package --config "/tmp/${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
+            envsubst < "${config}.yaml" > ".generated-${config}.yaml"
+            nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
+            rm -f ".generated-${config}.yaml"
           done
 
       - name: Upload .deb artifacts
@@ -272,8 +273,9 @@ jobs:
 
           cd packaging/nfpm
           for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-omnibus; do
-            envsubst < "${config}.yaml" > "/tmp/${config}.yaml"
-            nfpm package --config "/tmp/${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
+            envsubst < "${config}.yaml" > ".generated-${config}.yaml"
+            nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
+            rm -f ".generated-${config}.yaml"
           done
 
       - name: Upload .deb artifacts

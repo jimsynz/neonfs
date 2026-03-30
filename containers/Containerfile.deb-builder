@@ -1,0 +1,32 @@
+ARG ELIXIR_VERSION=1.19.5
+ARG ERLANG_VERSION=28.4.1
+ARG RUST_VERSION=1.94.1
+
+FROM hexpm/elixir:${ELIXIR_VERSION}-erlang-${ERLANG_VERSION}-debian-trixie-20260316-slim
+
+ARG RUST_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libfuse3-dev \
+    pkg-config \
+    gettext-base \
+    curl \
+    ca-certificates \
+    jq \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain "${RUST_VERSION}"
+
+ENV PATH="/root/.cargo/bin:$PATH"
+
+RUN mix local.hex --force && mix local.rebar --force
+
+RUN NFPM_VERSION=$(curl -sfL https://api.github.com/repos/goreleaser/nfpm/releases/latest | jq -r .tag_name) \
+    && NFPM_ARCH=$(uname -m | sed 's/aarch64/arm64/') \
+    && curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_${NFPM_ARCH}.tar.gz" \
+    | tar xz -C /usr/local/bin nfpm
+
+WORKDIR /workdir

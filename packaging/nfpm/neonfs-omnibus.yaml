@@ -29,6 +29,7 @@ conflicts:
 contents:
   - src: "${BUILD_DIR}/neonfs_omnibus/_build/prod/rel/neonfs_omnibus/"
     dst: /usr/lib/neonfs/omnibus/
+    type: tree
 
   - src: ../systemd/neonfs-omnibus.service
     dst: /usr/lib/systemd/system/neonfs-omnibus.service

@@ -25,6 +25,7 @@ conflicts:
 contents:
   - src: "${BUILD_DIR}/neonfs_nfs/_build/prod/rel/neonfs_nfs/"
     dst: /usr/lib/neonfs/nfs/
+    type: tree
 
   - src: ../systemd/neonfs-nfs.service
     dst: /usr/lib/systemd/system/neonfs-nfs.service
