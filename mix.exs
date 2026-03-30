@@ -9,13 +9,25 @@ defmodule NeonFS.MixProject do
 
     @behaviour Access
 
-    @localonly [:loadconfig, :new, :"archive.check", :"deps.loadpaths", :"git_ops.release", :"local.hex", :"local.rebar"]
+    @workspace_only [
+      :loadconfig,
+      :new,
+      :"archive.check",
+      :"deps.loadpaths",
+      :"git_ops.release",
+      :"local.hex",
+      :"local.rebar"
+    ]
 
     @impl Access
-    def fetch(_, task) when task in @localonly, do: :error
+    def fetch(_, task) when task in @workspace_only, do: :error
 
     def fetch(_, task) do
-      {:ok, &in_all(&1, task)}
+      if System.get_env("WORKSPACE_ONLY") do
+        :error
+      else
+        {:ok, &in_all(&1, task)}
+      end
     end
 
     @impl Access
@@ -58,7 +70,10 @@ defmodule NeonFS.MixProject do
     do: [
       app: :neonfs,
       aliases: %DynamicAlias{},
-      deps: [{:git_ops, "~> 2.9", only: [:dev, :test], runtime: false}],
+      deps: [
+        {:git_ops,
+         github: "zachdaniel/git_ops", branch: "master", only: [:dev, :test], runtime: false}
+      ],
       version: @version
     ]
 end

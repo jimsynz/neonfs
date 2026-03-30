@@ -1,17 +1,28 @@
 import Config
 
+cargo_version_replace = fn version ->
+  version = String.trim_leading(version, "v")
+  "version = \"#{version}\"\n"
+end
+
 config :git_ops,
   mix_project: Mix.Project.get!(),
   changelog_file: "CHANGELOG.md",
   github_handle_lookup?: true,
   github_api_base_url: "https://api.github.com",
   repository_url: "https://harton.dev/project-neon/neonfs",
+  version_tag_prefix: "v",
   managed_files: "*/{mix.exs,README.md,Cargo.toml}"
     |> Path.wildcard()
     |> Enum.map(fn path ->
-      if String.ends_with?(path, "mix.exs") do
-        {path, :mix}
-      else
-        {path, :string}
+      cond do
+        String.ends_with?(path, "mix.exs") ->
+          {path, :mix}
+
+        String.ends_with?(path, "Cargo.toml") ->
+          {path, cargo_version_replace, cargo_version_replace}
+
+        true ->
+          {path, :string}
       end
     end)
