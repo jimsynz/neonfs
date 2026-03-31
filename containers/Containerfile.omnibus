@@ -20,8 +20,8 @@ COPY --from=fuse . /workdir/neonfs_fuse
 COPY --from=nfs . /workdir/neonfs_nfs
 COPY --from=src . /workdir/neonfs_omnibus
 
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=cache,target=/workdir/neonfs_core/target \
     --mount=type=cache,target=/workdir/neonfs_fuse/target \
     --mount=type=cache,target=/workdir/neonfs_nfs/target \

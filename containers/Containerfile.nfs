@@ -14,8 +14,8 @@ ENV MIX_ENV=prod
 COPY --from=client . /workdir/neonfs_client
 COPY --from=src . /workdir/neonfs_nfs
 
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     --mount=type=cache,target=/workdir/neonfs_nfs/target \
     mix compile && mix release --overwrite
 
