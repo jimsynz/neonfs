@@ -455,13 +455,14 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert {:ok, hash, _info} =
                BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
+      expected_hash = Base.encode16(hash, case: :lower)
       ref = telemetry_listen([:neonfs, :blob_store, :read_chunk])
 
       assert {:ok, _data} =
                BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :read_chunk, :start], _measurements,
-                      metadata}
+                      %{hash: ^expected_hash} = metadata}
 
       assert metadata.tier == "hot"
       assert metadata.drive_id == "default"
@@ -469,7 +470,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert metadata.decompress == false
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :read_chunk, :stop], measurements,
-                      _metadata}
+                      %{hash: ^expected_hash}}
 
       assert measurements.duration > 0
       assert measurements.bytes_read > 0
@@ -483,17 +484,18 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert {:ok, hash, _info} =
                BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
+      expected_hash = Base.encode16(hash, case: :lower)
       ref = telemetry_listen([:neonfs, :blob_store, :delete_chunk])
 
       assert {:ok, _bytes_freed} = BlobStore.delete_chunk(hash, "default", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :delete_chunk, :start], _measurements,
-                      metadata}
+                      %{hash: ^expected_hash} = metadata}
 
       assert metadata.drive_id == "default"
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :delete_chunk, :stop], measurements,
-                      _metadata}
+                      %{hash: ^expected_hash}}
 
       assert measurements.duration > 0
 
@@ -506,20 +508,21 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert {:ok, hash, _info} =
                BlobStore.write_chunk(data, "default", "hot", server: test_server())
 
+      expected_hash = Base.encode16(hash, case: :lower)
       ref = telemetry_listen([:neonfs, :blob_store, :migrate_chunk])
 
       assert {:ok, {}} =
                BlobStore.migrate_chunk(hash, "default", "hot", "cold", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :migrate_chunk, :start], _measurements,
-                      metadata}
+                      %{hash: ^expected_hash} = metadata}
 
       assert metadata.from_tier == "hot"
       assert metadata.to_tier == "cold"
       assert metadata.drive_id == "default"
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :migrate_chunk, :stop], measurements,
-                      _metadata}
+                      %{hash: ^expected_hash}}
 
       assert measurements.duration > 0
 
@@ -530,15 +533,16 @@ defmodule NeonFS.Core.BlobStoreTest do
       ref = telemetry_listen([:neonfs, :blob_store, :read_chunk])
 
       fake_hash = :crypto.strong_rand_bytes(32)
+      expected_hash = Base.encode16(fake_hash, case: :lower)
 
       assert {:error, _reason} =
                BlobStore.read_chunk(fake_hash, "default", tier: "hot", server: test_server())
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :read_chunk, :start], _measurements,
-                      _metadata}
+                      %{hash: ^expected_hash}}
 
       assert_receive {:telemetry, [:neonfs, :blob_store, :read_chunk, :exception], measurements,
-                      metadata}
+                      %{hash: ^expected_hash} = metadata}
 
       assert measurements.duration > 0
       assert is_binary(metadata.error)

@@ -300,7 +300,7 @@ defmodule NeonFS.Core.DriveState do
     command_module = state.command_module
     path = state.drive_path
 
-    Task.start(fn ->
+    Task.start_link(fn ->
       result = command_module.spin_down(path)
       send(parent, {:spin_down_complete, result})
     end)
@@ -311,7 +311,7 @@ defmodule NeonFS.Core.DriveState do
     command_module = state.command_module
     path = state.drive_path
 
-    Task.start(fn ->
+    Task.start_link(fn ->
       result = command_module.spin_up(path)
       send(parent, {:spin_up_complete, result})
     end)
