@@ -98,7 +98,7 @@ defmodule NeonFS.Core.DriveCommand do
       end
 
       :ets.insert(@ets_table, [
-        {:calls, []},
+        {:call_counter, 0},
         {:spin_down_result, :ok},
         {:spin_up_result, :ok},
         {:check_state_result, :active},
@@ -118,16 +118,17 @@ defmodule NeonFS.Core.DriveCommand do
     @doc "Returns all recorded calls in chronological order."
     @spec get_calls() :: [{atom(), String.t()}]
     def get_calls do
-      case :ets.lookup(@ets_table, :calls) do
-        [{:calls, calls}] -> Enum.reverse(calls)
-        [] -> []
-      end
+      @ets_table
+      |> :ets.match({{:call, :"$1"}, :"$2", :"$3"})
+      |> Enum.sort_by(fn [seq, _action, _path] -> seq end)
+      |> Enum.map(fn [_seq, action, path] -> {action, path} end)
     end
 
     @doc "Clears the call log."
     @spec reset() :: true
     def reset do
-      :ets.insert(@ets_table, {:calls, []})
+      :ets.match_delete(@ets_table, {{:call, :_}, :_, :_})
+      :ets.insert(@ets_table, {:call_counter, 0})
     end
 
     @impl true
@@ -156,13 +157,8 @@ defmodule NeonFS.Core.DriveCommand do
     end
 
     defp record_call(action, path) do
-      calls =
-        case :ets.lookup(@ets_table, :calls) do
-          [{:calls, c}] -> c
-          [] -> []
-        end
-
-      :ets.insert(@ets_table, {:calls, [{action, path} | calls]})
+      seq = :ets.update_counter(@ets_table, :call_counter, 1)
+      :ets.insert(@ets_table, {{:call, seq}, action, path})
     end
 
     defp get_config(key, default) do

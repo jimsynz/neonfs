@@ -61,15 +61,12 @@ defmodule NeonFS.Core.ChunkAccessTracker do
   def record_access(chunk_hash) when is_binary(chunk_hash) do
     now = System.system_time(:second)
 
-    # Try to update existing entry; insert new if not found
-    try do
-      :ets.update_counter(@ets_table, chunk_hash, [{2, 1}, {3, 1}])
-      :ets.update_element(@ets_table, chunk_hash, [{4, now}, {5, 0}])
-    rescue
-      ArgumentError ->
-        # Entry doesn't exist yet — insert new
-        :ets.insert(@ets_table, {chunk_hash, 1, 1, now, 0})
-    end
+    :ets.update_counter(
+      @ets_table,
+      chunk_hash,
+      [{2, 1}, {3, 1}, {4, 1, 0, now}, {5, 1, 0, 0}],
+      {chunk_hash, 0, 0, now, 0}
+    )
 
     maybe_trigger_prune()
 
