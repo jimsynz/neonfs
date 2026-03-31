@@ -345,7 +345,7 @@ jobs:
     needs: [neonfs_client, neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_integration]
     if: forgejo.event_name == 'push'
     container:
-      image: docker:27-dind
+      image: docker:29-dind
       options: --privileged
 
     steps:
@@ -395,7 +395,7 @@ jobs:
     needs: [neonfs_client, neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_integration]
     if: forgejo.event_name == 'push'
     container:
-      image: docker:27-dind
+      image: docker:29-dind
       options: --privileged
 
     steps:
@@ -444,7 +444,7 @@ jobs:
     runs-on: amd64
     needs: [containers-amd64, containers-arm64]
     container:
-      image: docker:27-dind
+      image: docker:29-dind
       options: --privileged
 
     steps:

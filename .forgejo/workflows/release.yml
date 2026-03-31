@@ -8,7 +8,7 @@ jobs:
   containers-amd64:
     runs-on: amd64
     container:
-      image: docker:27-dind
+      image: docker:29-dind
       options: --privileged
 
     steps:
@@ -46,7 +46,7 @@ jobs:
   containers-arm64:
     runs-on: arm64
     container:
-      image: docker:27-dind
+      image: docker:29-dind
       options: --privileged
 
     steps:
@@ -85,7 +85,7 @@ jobs:
     runs-on: amd64
     needs: [containers-amd64, containers-arm64]
     container:
-      image: docker:27-dind
+      image: docker:29-dind
       options: --privileged
 
     steps:
