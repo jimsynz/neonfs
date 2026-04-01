@@ -10,7 +10,7 @@ by adding `neonfs_omnibus` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:neonfs_omnibus, "~> 0.1.2"}
+    {:neonfs_omnibus, "~> 0.1.3"}
   ]
 end
 ```

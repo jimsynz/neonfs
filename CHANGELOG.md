@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.3](https://harton.dev/project-neon/neonfs/compare/v0.1.2...v0.1.3) (2026-04-01)
+
+
+
+
+### Bug Fixes:
+
+* ci: downgrade artifact actions to v3 for Forgejo compatibility by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.2](https://harton.dev/project-neon/neonfs/compare/v0.1.1...v0.1.2) (2026-04-01)
 
 
