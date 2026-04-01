@@ -211,7 +211,7 @@ jobs:
           done
 
       - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         with:
           name: debs-amd64
           path: dist/*.deb
@@ -286,7 +286,7 @@ jobs:
           done
 
       - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         with:
           name: debs-arm64
           path: dist/*.deb
@@ -299,13 +299,13 @@ jobs:
 
     steps:
       - name: Download amd64 .deb artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: debs-amd64
           path: dist/
 
       - name: Download arm64 .deb artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: debs-arm64
           path: dist/
@@ -330,13 +330,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download amd64 .deb artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: debs-amd64
           path: dist/
 
       - name: Download arm64 .deb artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v8
         with:
           name: debs-arm64
           path: dist/
