@@ -5,6 +5,19 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.2](https://harton.dev/project-neon/neonfs/compare/v0.1.1...v0.1.2) (2026-04-01)
+
+
+
+
+### Bug Fixes:
+
+* core: fix two pre-existing test flakiness issues by [@jimsynz](https://github.com/jimsynz)
+
+* core: eliminate ETS TOCTOU race conditions in concurrent write paths by [@jimsynz](https://github.com/jimsynz)
+
+* containers: serialise cargo cache access to prevent arm64 build race by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.1](https://harton.dev/project-neon/neonfs/compare/v0.1.0...v0.1.1) (2026-03-30)
 
 
