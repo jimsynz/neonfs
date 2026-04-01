@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.4](https://harton.dev/project-neon/neonfs/compare/v0.1.3...v0.1.4) (2026-04-01)
+
+
+
+
+### Bug Fixes:
+
+* ci: use dynamic nfpm download URL for arm64 release builds by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.3](https://harton.dev/project-neon/neonfs/compare/v0.1.2...v0.1.3) (2026-04-01)
 
 
