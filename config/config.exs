@@ -14,6 +14,7 @@ config :git_ops,
   version_tag_prefix: "v",
   managed_files: "*/{mix.exs,README.md,Cargo.toml}"
     |> Path.wildcard()
+    |> Enum.concat(["mix.exs"])
     |> Enum.map(fn path ->
       cond do
         String.ends_with?(path, "mix.exs") ->
