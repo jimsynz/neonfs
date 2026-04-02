@@ -38,10 +38,20 @@ jobs:
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
 
-      - name: Build and push (amd64)
+      - name: Build all targets
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          PLATFORMS=linux/amd64 TAG=${VERSION}-amd64 ./containers/bake.sh --push
+          TAG=${GITHUB_REF_NAME#v}-amd64
+          for target in base cli core fuse nfs omnibus; do
+            PLATFORMS=linux/amd64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
+          done
+
+      - name: Push all targets
+        run: |
+          TAG=${GITHUB_REF_NAME#v}-amd64
+          for image in core fuse nfs omnibus cli; do
+            docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
+            docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
+          done
 
   containers-arm64:
     runs-on: arm64
@@ -76,10 +86,20 @@ jobs:
           docker buildx create --name builder --config /tmp/buildkitd.toml --driver-opt network=host
           docker buildx use builder
 
-      - name: Build and push (arm64)
+      - name: Build all targets
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          PLATFORMS=linux/arm64 TAG=${VERSION}-arm64 ./containers/bake.sh --push
+          TAG=${GITHUB_REF_NAME#v}-arm64
+          for target in base cli core fuse nfs omnibus; do
+            PLATFORMS=linux/arm64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
+          done
+
+      - name: Push all targets
+        run: |
+          TAG=${GITHUB_REF_NAME#v}-arm64
+          for image in core fuse nfs omnibus cli; do
+            docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
+            docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
+          done
 
   containers-manifest:
     runs-on: amd64
@@ -173,7 +193,7 @@ jobs:
       - name: Install nfpm
         run: |
           NFPM_VERSION=$(curl -sfL https://api.github.com/repos/goreleaser/nfpm/releases/latest | jq -r .tag_name)
-          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_$(uname -m).tar.gz" \
+          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz" \
             | tar xz -C /usr/local/bin nfpm
 
       - name: Build releases
@@ -211,7 +231,7 @@ jobs:
           done
 
       - name: Upload .deb artifacts
-        uses: code.forgejo.org/forgejo/upload-artifact@v5
+        uses: forgejo/upload-artifact@v5
         with:
           name: debs-amd64
           path: dist/*.deb
@@ -248,7 +268,7 @@ jobs:
       - name: Install nfpm
         run: |
           NFPM_VERSION=$(curl -sfL https://api.github.com/repos/goreleaser/nfpm/releases/latest | jq -r .tag_name)
-          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_$(uname -m).tar.gz" \
+          curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_arm64.tar.gz" \
             | tar xz -C /usr/local/bin nfpm
 
       - name: Build releases
@@ -286,7 +306,7 @@ jobs:
           done
 
       - name: Upload .deb artifacts
-        uses: code.forgejo.org/forgejo/upload-artifact@v5
+        uses: forgejo/upload-artifact@v5
         with:
           name: debs-arm64
           path: dist/*.deb
@@ -299,13 +319,13 @@ jobs:
 
     steps:
       - name: Download amd64 .deb artifacts
-        uses: actions/download-artifact@v8
+        uses: forgejo/download-artifact@v7
         with:
           name: debs-amd64
           path: dist/
 
       - name: Download arm64 .deb artifacts
-        uses: actions/download-artifact@v8
+        uses: forgejo/download-artifact@v7
         with:
           name: debs-arm64
           path: dist/
@@ -315,7 +335,7 @@ jobs:
           for deb in dist/*.deb; do
             echo "Uploading $(basename "$deb")..."
             curl -sf \
-              -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+              -H "Authorization: token ${{ secrets.REGISTRY_TOKEN }}" \
               --upload-file "$deb" \
               "https://harton.dev/api/packages/project-neon/debian/pool/trixie/main/upload"
           done
@@ -330,13 +350,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download amd64 .deb artifacts
-        uses: actions/download-artifact@v8
+        uses: forgejo/download-artifact@v7
         with:
           name: debs-amd64
           path: dist/
 
       - name: Download arm64 .deb artifacts
-        uses: actions/download-artifact@v8
+        uses: forgejo/download-artifact@v7
         with:
           name: debs-arm64
           path: dist/
