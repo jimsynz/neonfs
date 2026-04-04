@@ -142,11 +142,7 @@ defmodule NeonFS.Core.RaServer do
         Logger.debug("Could not delete Ra server state", reason: inspect(reason))
     end
 
-    # Brief delay to ensure Ra cleanup completes
-    receive do
-    after
-      100 -> :ok
-    end
+    wait_for_ra_cleanup(server_id)
 
     {:reply, :ok, %{state | status: :waiting_for_cluster}}
   end
@@ -365,7 +361,7 @@ defmodule NeonFS.Core.RaServer do
   # Trigger an election and wait for it to complete
   defp trigger_and_wait_for_election(server_id, attempts \\ 0, max_attempts \\ 10) do
     Logger.info("Triggering Ra election", server_id: inspect(server_id))
-    result = :ra.trigger_election(server_id)
+    result = :ra.trigger_election(server_id, 15_000)
     Logger.debug("trigger_election result", result: inspect(result))
 
     # Brief delay to allow election to start, then check for leader
@@ -535,15 +531,32 @@ defmodule NeonFS.Core.RaServer do
     end
   end
 
+  # Poll until Ra's directory no longer holds a pid for this server.
+  # Used after force_delete_server to avoid racing the next start_server call.
+  defp wait_for_ra_cleanup(server_id, attempts \\ 0) do
+    {_name, node} = server_id
+    sanitized = node |> to_string() |> String.replace(~r/[@\.]/, "_")
+    uid = "neonfs_meta_#{sanitized}"
+
+    case :ra_directory.pid_of(:default, uid) do
+      :undefined ->
+        :ok
+
+      _pid when attempts >= 50 ->
+        Logger.warning("Ra cleanup did not complete after 5s, proceeding anyway")
+        :ok
+
+      _pid ->
+        Process.sleep(100)
+        wait_for_ra_cleanup(server_id, attempts + 1)
+    end
+  end
+
   # Data files were deleted but registry still thinks server exists
   defp force_fresh_start(ra_config, server_id) do
     Logger.info("Restart failed (files missing), cleaning up and starting fresh...")
     :ra.force_delete_server(:default, server_id)
-
-    receive do
-    after
-      50 -> :ok
-    end
+    wait_for_ra_cleanup(server_id)
 
     case :ra.start_server(:default, ra_config) do
       {:ok, pid} -> {:ok, pid}
