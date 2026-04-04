@@ -10,6 +10,9 @@ vendor: "harton.dev"
 homepage: "https://harton.dev/project-neon/neonfs"
 license: "Apache-2.0"
 
+depends:
+  - hostname
+
 contents:
   - src: ../systemd/neonfs.conf
     dst: /etc/neonfs/neonfs.conf

@@ -17,8 +17,11 @@ use std::path::Path;
 /// Default cookie file location
 const DEFAULT_COOKIE_PATH: &str = "/var/lib/neonfs/.erlang.cookie";
 
-/// Default daemon node name
-const DEFAULT_DAEMON_NODE: &str = "neonfs_core@localhost";
+/// Default daemon node name (last resort fallback)
+const DEFAULT_DAEMON_NODE: &str = "neonfs@localhost";
+
+/// Runtime file written by the daemon wrapper with the actual node name
+const RUNTIME_NODE_NAME_PATH: &str = "/run/neonfs/core_node_name";
 
 /// Connection to the NeonFS daemon via Erlang distribution
 pub struct DaemonConnection {
@@ -34,8 +37,13 @@ impl DaemonConnection {
     /// 3. Connect to the daemon via Erlang distribution
     /// 4. Start the RPC client as a background task
     pub async fn connect() -> Result<Self> {
-        let daemon_node =
-            std::env::var("NEONFS_NODE").unwrap_or_else(|_| DEFAULT_DAEMON_NODE.to_string());
+        let daemon_node = std::env::var("NEONFS_NODE").unwrap_or_else(|_| {
+            fs::read_to_string(RUNTIME_NODE_NAME_PATH)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| DEFAULT_DAEMON_NODE.to_string())
+        });
         Self::connect_with_options(DEFAULT_COOKIE_PATH, &daemon_node).await
     }
 

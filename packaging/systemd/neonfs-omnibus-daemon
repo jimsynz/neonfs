@@ -9,7 +9,8 @@ set -e
 RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/omnibus}"
 RELEASE_NAME="${RELEASE_NAME:-neonfs_omnibus}"
 NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
-RELEASE_NODE="${NEONFS_OMNIBUS_NODE:-${RELEASE_NODE:-neonfs@localhost}}"
+DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname)"
+RELEASE_NODE="${NEONFS_OMNIBUS_NODE:-${RELEASE_NODE:-neonfs@${DEFAULT_HOST}}}"
 RELEASE_COOKIE_PATH="${RELEASE_COOKIE_PATH:-/var/lib/neonfs/.erlang.cookie}"
 
 # Ensure base data directories exist
