@@ -5,6 +5,17 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.6](https://harton.dev/project-neon/neonfs/compare/v0.1.5...v0.1.6) (2026-04-04)
+
+
+
+
+### Bug Fixes:
+
+* Ra election timeout and cleanup race on slow hardware by [@jimsynz](https://github.com/jimsynz)
+
+* use long names for Erlang distribution and default to `hostname -f` by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.5](https://harton.dev/project-neon/neonfs/compare/v0.1.4...v0.1.5) (2026-04-02)
 
 
