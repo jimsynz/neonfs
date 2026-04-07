@@ -2,5 +2,15 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>renovate/renovate"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update pinned nfpm version in release workflow",
+      "fileMatch": ["\\.forgejo/workflows/release\\.yml$"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\n\\s*\\w+=(?<currentValue>v\\S+)"
+      ]
+    }
   ]
 }
