@@ -6,9 +6,7 @@
 set -e
 
 # Source shared TLS distribution functions
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=neonfs-tls-common.sh
-. "${NEONFS_TLS_COMMON:-${SCRIPT_DIR}/neonfs-tls-common.sh}"
+. "${NEONFS_TLS_COMMON:-/usr/lib/neonfs/neonfs-tls-common.sh}"
 
 # Default paths (can be overridden by environment variables)
 RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/omnibus}"

@@ -18,6 +18,11 @@ contents:
     dst: /etc/neonfs/neonfs.conf
     type: config|noreplace
 
+  - src: ../systemd/neonfs-tls-common.sh
+    dst: /usr/lib/neonfs/neonfs-tls-common.sh
+    file_info:
+      mode: 0755
+
 scripts:
   preinstall: ../scripts/pre-install.sh
   postinstall: ../scripts/post-install.sh
