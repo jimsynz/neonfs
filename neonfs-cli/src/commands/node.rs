@@ -32,9 +32,7 @@ impl NodeCommand {
     }
 
     fn status(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.Client.CLIHandler",
@@ -107,9 +105,7 @@ impl NodeCommand {
     }
 
     fn list(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "handle_node_list", vec![])
                 .await
@@ -179,7 +175,7 @@ fn term_to_json(term: &Term) -> serde_json::Value {
             }
         }
         Term::Float(f) => serde_json::json!(f.value),
-        Term::Map(Map { entries }) => {
+        Term::Map(Map { map: entries }) => {
             let mut map = serde_json::Map::new();
             for (key, value) in entries {
                 let key_str = match key {
@@ -204,6 +200,7 @@ fn term_to_json(term: &Term) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_node_command_parsing() {
@@ -257,7 +254,7 @@ mod tests {
     #[test]
     fn test_term_to_json_map() {
         let term = Term::Map(Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Atom(Atom::from("status")),
                     Term::Atom(Atom::from("healthy")),
@@ -266,7 +263,7 @@ mod tests {
                     Term::Atom(Atom::from("count")),
                     Term::FixInteger(FixInteger::from(42)),
                 ),
-            ],
+            ]),
         });
         let json = term_to_json(&term);
         assert_eq!(json["status"], "healthy");
@@ -276,13 +273,13 @@ mod tests {
     #[test]
     fn test_term_to_json_nested_map() {
         let inner = Term::Map(Map {
-            entries: vec![(
+            map: HashMap::from([(
                 Term::Atom(Atom::from("status")),
                 Term::Atom(Atom::from("degraded")),
-            )],
+            )]),
         });
         let term = Term::Map(Map {
-            entries: vec![(Term::Atom(Atom::from("cache")), inner)],
+            map: HashMap::from([(Term::Atom(Atom::from("cache")), inner)]),
         });
         let json = term_to_json(&term);
         assert_eq!(json["cache"]["status"], "degraded");

@@ -1,4 +1,6 @@
 unless Node.alive?() do
+  # Ensure EPMD is running (needed for Erlang distribution)
+  System.cmd("epmd", ["-daemon"], stderr_to_stdout: true)
   {:ok, _} = Node.start(:neonfs_integration_test, name_domain: :shortnames)
 end
 

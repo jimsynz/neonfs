@@ -38,13 +38,11 @@ impl NfsCommand {
     }
 
     fn mount(&self, volume: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "nfs_mount", vec![volume_term])
                 .await
@@ -70,13 +68,11 @@ impl NfsCommand {
     }
 
     fn unmount(&self, target: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let target_term = Term::Binary(Binary {
             bytes: target.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -107,9 +103,7 @@ impl NfsCommand {
     }
 
     fn list(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "nfs_list_mounts", vec![])
                 .await

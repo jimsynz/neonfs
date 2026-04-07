@@ -572,6 +572,20 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Ensures a cluster.json exists in the configured meta_dir.
+  Creates a minimal cluster state so `State.exists?()` returns true.
+  """
+  def ensure_cluster_state do
+    alias NeonFS.Cluster.State, as: ClusterState
+
+    unless ClusterState.exists?() do
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp")
+      write_cluster_json(meta_dir, master_key)
+    end
+  end
+
+  @doc """
   Writes a cluster.json file with a master key for encryption tests.
   """
   def write_cluster_json(dir, master_key) do

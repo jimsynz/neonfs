@@ -60,8 +60,6 @@ impl JobCommand {
         node_only: bool,
         format: OutputFormat,
     ) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mut filter_entries = vec![];
 
         if let Some(s) = status {
@@ -96,10 +94,10 @@ impl JobCommand {
         }
 
         let filters_term = Term::Map(Map {
-            entries: filter_entries,
+            map: filter_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -152,13 +150,11 @@ impl JobCommand {
     }
 
     fn show(&self, job_id: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let job_id_term = Term::Binary(Binary {
             bytes: job_id.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -207,13 +203,11 @@ impl JobCommand {
     }
 
     fn cancel(&self, job_id: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let job_id_term = Term::Binary(Binary {
             bytes: job_id.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",

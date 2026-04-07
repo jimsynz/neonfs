@@ -19,7 +19,8 @@ defmodule NeonFS.Integration.PeerCluster do
   @type node_info :: %{
           name: atom(),
           peer: pid(),
-          node: node()
+          node: node(),
+          metrics_port: non_neg_integer() | nil
         }
 
   @type cluster :: %{
@@ -65,6 +66,9 @@ defmodule NeonFS.Integration.PeerCluster do
   - `:enable_ra` - Enable Ra consensus (default: true)
   - `:drives` - Custom drive configs per node. A function `(node_name, data_dir) -> [drive_config]`
     that returns drive config maps. When not provided, uses a single default drive.
+  - `:metrics_port` - Base port for HTTP metrics/API server (Bandit). When set, each node
+    gets `metrics_enabled: true` with sequential ports (node1 = base, node2 = base+1, etc.).
+    The allocated port is stored in `node_info.metrics_port`.
 
   ## Ra Notes
 
@@ -80,6 +84,7 @@ defmodule NeonFS.Integration.PeerCluster do
     enable_ra = Keyword.get(opts, :enable_ra, true)
     drives_fn = Keyword.get(opts, :drives, nil)
     formation_config = Keyword.get(opts, :formation, nil)
+    metrics_base_port = Keyword.get(opts, :metrics_port, nil)
 
     # Ensure controller is distributed
     ensure_distributed!()
@@ -120,17 +125,25 @@ defmodule NeonFS.Integration.PeerCluster do
         # Configure neonfs_core to use the test data directories
         # IMPORTANT: Ra expects data_dir as a charlist, not a binary!
         # DETS in Erlang requires charlist file paths.
+        node_metrics_port =
+          if metrics_base_port, do: metrics_base_port + i - 1
+
         core_config = [
           data_dir: data_dir,
           meta_dir: meta_dir,
           blob_store_base_dir: Path.join(data_dir, "blobs"),
-          metrics_enabled: false,
+          metrics_enabled: metrics_base_port != nil,
           ra_data_dir: to_charlist(ra_dir),
           enable_ra: enable_ra,
-          # Increase quorum timeout for integration tests where 3 peer nodes
-          # share a single machine and BEAM schedulers are heavily contended.
           quorum_timeout_ms: 15_000
         ]
+
+        core_config =
+          if node_metrics_port do
+            core_config ++ [metrics_port: node_metrics_port, metrics_bind: "127.0.0.1"]
+          else
+            core_config
+          end
 
         core_config =
           if drives_fn do
@@ -166,7 +179,15 @@ defmodule NeonFS.Integration.PeerCluster do
           ra: [data_dir: to_charlist(ra_dir)]
         ]
 
-        start_cluster_node(alias_name, peer_opts, applications, app_config, enable_ra, acc)
+        start_cluster_node(
+          alias_name,
+          peer_opts,
+          applications,
+          app_config,
+          enable_ra,
+          node_metrics_port,
+          acc
+        )
       end)
 
     %{
@@ -423,11 +444,19 @@ defmodule NeonFS.Integration.PeerCluster do
 
   # Private helpers
 
-  defp start_cluster_node(node_name, peer_opts, applications, app_config, enable_ra, acc) do
+  defp start_cluster_node(
+         node_name,
+         peer_opts,
+         applications,
+         app_config,
+         enable_ra,
+         metrics_port,
+         acc
+       ) do
     case start_peer(peer_opts, applications, app_config) do
       {:ok, peer, node} ->
         if enable_ra, do: wait_for_ra_ready(peer)
-        acc ++ [%{name: node_name, peer: peer, node: node}]
+        acc ++ [%{name: node_name, peer: peer, node: node, metrics_port: metrics_port}]
 
       {:error, reason} ->
         raise "Failed to start peer node #{node_name}: #{inspect(reason)}"
@@ -642,7 +671,7 @@ defmodule NeonFS.Integration.PeerCluster do
   defp replace_node_info(cluster, node_name, peer, node) do
     new_nodes =
       Enum.map(cluster.nodes, fn
-        %{name: ^node_name} -> %{name: node_name, peer: peer, node: node}
+        %{name: ^node_name} = old -> %{old | peer: peer, node: node}
         other -> other
       end)
 

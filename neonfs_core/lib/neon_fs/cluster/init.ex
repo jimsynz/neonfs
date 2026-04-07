@@ -23,6 +23,7 @@ defmodule NeonFS.Cluster.Init do
     VolumeRegistry
   }
 
+  alias NeonFS.TLSDistConfig
   alias NeonFS.Transport.{Listener, PoolManager, TLS}
 
   require Logger
@@ -85,7 +86,8 @@ defmodule NeonFS.Cluster.Init do
          {:ok, _volume} <- create_system_volume(),
          :ok <- write_cluster_identity(cluster_name),
          {:ok, _ca_cert, _ca_key} <- init_cluster_ca(cluster_name),
-         :ok <- issue_first_node_cert() do
+         :ok <- issue_first_node_cert(),
+         :ok <- TLSDistConfig.regenerate(TLS.tls_dir()) do
       activate_data_plane()
       {:ok, cluster_id}
     else

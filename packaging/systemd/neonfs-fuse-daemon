@@ -4,6 +4,11 @@
 
 set -e
 
+# Source shared TLS distribution functions
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=neonfs-tls-common.sh
+. "${NEONFS_TLS_COMMON:-${SCRIPT_DIR}/neonfs-tls-common.sh}"
+
 # Default paths (can be overridden by environment variables)
 RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/fuse}"
 RELEASE_NAME="${RELEASE_NAME:-neonfs_fuse}"
@@ -40,6 +45,7 @@ write_runtime_info() {
 # Start the daemon
 start_daemon() {
     ensure_cookie
+    ensure_local_tls
     write_runtime_info
 
     # Start the release in foreground mode (systemd will manage daemonization)

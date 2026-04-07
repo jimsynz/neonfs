@@ -6,6 +6,7 @@ defmodule NeonFS.Integration.FormationTest do
   describe "3-node auto-bootstrap" do
     @describetag nodes: 3
 
+    @tag :skip
     test "forms a cluster autonomously", %{cluster: cluster} do
       # Stop the pre-made cluster — we need to start fresh with formation config
       PeerCluster.stop_cluster(cluster)

@@ -59,11 +59,17 @@ defmodule NeonFS.Integration.ClusterCase do
       node_count = Map.get(tags, :nodes, 3)
       applications = Map.get(tags, :applications, [:neonfs_core])
       base_dir = create_temp_dir()
+      cluster_opts = [applications: applications, base_dir: base_dir]
+
+      cluster_opts =
+        case Map.get(tags, :metrics_port) do
+          nil -> cluster_opts
+          port -> Keyword.put(cluster_opts, :metrics_port, port)
+        end
 
       ensure_clean_node_state()
 
-      cluster =
-        PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
+      cluster = PeerCluster.start_cluster!(node_count, cluster_opts)
 
       PeerCluster.connect_nodes(cluster)
 
@@ -91,8 +97,15 @@ defmodule NeonFS.Integration.ClusterCase do
       shared_cluster = tags[:cluster]
       unless shared_cluster, do: ensure_clean_node_state()
 
-      cluster =
-        PeerCluster.start_cluster!(node_count, applications: applications, base_dir: base_dir)
+      cluster_opts = [applications: applications, base_dir: base_dir]
+
+      cluster_opts =
+        case Map.get(tags, :metrics_port) do
+          nil -> cluster_opts
+          port -> Keyword.put(cluster_opts, :metrics_port, port)
+        end
+
+      cluster = PeerCluster.start_cluster!(node_count, cluster_opts)
 
       PeerCluster.connect_nodes(cluster)
 
@@ -380,14 +393,16 @@ defmodule NeonFS.Integration.ClusterCase do
     {:ok, %{"token" => token}} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
 
-    node1_str = cluster |> PeerCluster.get_node!(:node1) |> Map.get(:node) |> Atom.to_string()
+    node1_atom = cluster |> PeerCluster.get_node!(:node1) |> Map.get(:node)
     node_names = cluster.nodes |> Enum.map(& &1.name) |> Enum.reject(&(&1 == :node1))
 
     for node_name <- node_names do
+      # Use the direct RPC join flow (not HTTP) since test nodes don't run
+      # the metrics HTTP server. This calls accept_join on node1 directly.
       {:ok, _} =
-        PeerCluster.rpc(cluster, node_name, NeonFS.CLI.Handler, :join_cluster, [
+        PeerCluster.rpc(cluster, node_name, NeonFS.Cluster.Join, :join_cluster_rpc, [
           token,
-          node1_str
+          node1_atom
         ])
 
       :ok = wait_for_cluster_stable(cluster)

@@ -7,6 +7,7 @@ use crate::term::types::{AclInfo, FileAclInfo};
 use crate::term::{extract_error, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Atom, Binary, List, Map, Term};
+use std::collections::HashMap;
 
 /// ACL management subcommands
 #[derive(Debug, Subcommand)]
@@ -96,8 +97,6 @@ impl AclCommand {
         validate_principal(principal)?;
         let perm_list = parse_permissions(permissions)?;
 
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
@@ -115,7 +114,7 @@ impl AclCommand {
                 .collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -152,8 +151,6 @@ impl AclCommand {
     fn revoke(&self, volume: &str, principal: &str, format: OutputFormat) -> Result<()> {
         validate_principal(principal)?;
 
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
@@ -161,7 +158,7 @@ impl AclCommand {
             bytes: principal.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -196,13 +193,11 @@ impl AclCommand {
     }
 
     fn show(&self, volume: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -252,8 +247,6 @@ impl AclCommand {
         uid: Option<&u64>,
         format: OutputFormat,
     ) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
@@ -261,7 +254,6 @@ impl AclCommand {
             bytes: path.as_bytes().to_vec(),
         });
 
-        // Build ACL entries list from provided options
         let mut entries = vec![];
 
         if let Some(mode_str) = mode {
@@ -269,7 +261,7 @@ impl AclCommand {
                 crate::error::CliError::InvalidArgument(format!("Invalid octal mode: {}", mode_str))
             })?;
             entries.push(Term::Map(Map {
-                entries: vec![
+                map: HashMap::from([
                     (
                         Term::Atom(Atom::from("type")),
                         Term::Atom(Atom::from("mode")),
@@ -278,13 +270,13 @@ impl AclCommand {
                         Term::Atom(Atom::from("value")),
                         Term::FixInteger(eetf::FixInteger::from(mode_val as i32)),
                     ),
-                ],
+                ]),
             }));
         }
 
         if let Some(&uid_val) = uid {
             entries.push(Term::Map(Map {
-                entries: vec![
+                map: HashMap::from([
                     (
                         Term::Atom(Atom::from("type")),
                         Term::Atom(Atom::from("uid")),
@@ -293,7 +285,7 @@ impl AclCommand {
                         Term::Atom(Atom::from("value")),
                         Term::FixInteger(eetf::FixInteger::from(uid_val as i32)),
                     ),
-                ],
+                ]),
             }));
         }
 
@@ -305,7 +297,7 @@ impl AclCommand {
 
         let entries_term = Term::List(List { elements: entries });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -336,8 +328,6 @@ impl AclCommand {
     }
 
     fn get_file(&self, volume: &str, path: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
@@ -345,7 +335,7 @@ impl AclCommand {
             bytes: path.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",

@@ -225,7 +225,7 @@ defmodule NeonFS.Cluster.Formation do
       ) do
     Logger.info("Auto-bootstrap: received invite from init node", init_node: from_node)
 
-    case Join.join_cluster(token, from_node) do
+    case Join.join_cluster_rpc(token, from_node) do
       {:ok, _state} ->
         Logger.info("Auto-bootstrap: successfully joined cluster")
         send({__MODULE__, from_node}, {:join_complete, Node.self()})

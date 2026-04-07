@@ -98,8 +98,6 @@ impl DriveCommand {
             )));
         }
 
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mut entries = vec![
             (
                 Term::Binary(Binary {
@@ -138,9 +136,11 @@ impl DriveCommand {
             ));
         }
 
-        let config_term = Term::Map(Map { entries });
+        let config_term = Term::Map(Map {
+            map: entries.into_iter().collect(),
+        });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -175,15 +175,13 @@ impl DriveCommand {
     }
 
     fn remove(&self, drive_id: &str, force: bool, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let drive_id_term = Term::Binary(Binary {
             bytes: drive_id.as_bytes().to_vec(),
         });
 
         let force_term = Term::Atom(Atom::from(if force { "true" } else { "false" }));
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -223,8 +221,6 @@ impl DriveCommand {
     }
 
     fn list(&self, node: Option<&str>, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mut filter_entries = vec![];
 
         if let Some(n) = node {
@@ -239,10 +235,10 @@ impl DriveCommand {
         }
 
         let filters_term = Term::Map(Map {
-            entries: filter_entries,
+            map: filter_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -304,13 +300,10 @@ impl DriveCommand {
         any_tier: bool,
         format: OutputFormat,
     ) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        // Get the local node name from the daemon if no node specified
         let node_name = match node {
             Some(n) => n.to_string(),
             None => {
-                let status = runtime.block_on(async {
+                let status = smol::block_on(async {
                     let mut conn = DaemonConnection::connect().await?;
                     conn.call("Elixir.NeonFS.CLI.Handler", "cluster_status", vec![])
                         .await
@@ -345,10 +338,10 @@ impl DriveCommand {
             ));
         }
         let opts_term = Term::Map(Map {
-            entries: opts_entries,
+            map: opts_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",

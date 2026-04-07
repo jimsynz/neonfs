@@ -25,7 +25,17 @@ defmodule NeonFS.CLI.HandlerTest do
       :ok
     end
 
-    test "returns cluster status map" do
+    test "returns not_initialised when no cluster state" do
+      assert {:ok, status} = Handler.cluster_status()
+      assert status.name == nil
+      assert is_binary(status.node)
+      assert status.status == :not_initialised
+      assert status.volumes == 0
+      assert is_integer(status.uptime_seconds)
+    end
+
+    test "returns running status when cluster exists" do
+      ensure_cluster_state()
       assert {:ok, status} = Handler.cluster_status()
       assert is_binary(status.name)
       assert is_binary(status.node)
@@ -36,6 +46,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns serializable data" do
+      ensure_cluster_state()
       assert {:ok, status} = Handler.cluster_status()
       assert is_map(status)
 
@@ -161,7 +172,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns error if cluster not initialized" do
-      assert {:error, %NeonFS.Error.Unavailable{}} = Handler.create_invite(3600)
+      assert {:error, %NeonFS.Error.NotFound{}} = Handler.create_invite(3600)
     end
   end
 
@@ -206,6 +217,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "list_volumes/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
 
       # Ensure Ra is stopped so VolumeRegistry starts fresh
       stop_ra()
@@ -285,6 +297,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "create_volume/2" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -323,6 +336,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "get_volume/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
       vol_name = "get-test-vol-#{:rand.uniform(999_999)}"
@@ -351,6 +365,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "delete_volume/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_file_index()
       start_volume_registry()
@@ -380,6 +395,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "create_volume/2 with durability strings" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -495,6 +511,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "volume display with erasure config" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -541,6 +558,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "mount/3" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
       vol_name = "mount-test-vol-#{:rand.uniform(999_999)}"
@@ -560,6 +578,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "unmount/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -577,6 +596,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "list_mounts/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -593,6 +613,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "nfs_mount/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -609,6 +630,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "nfs_unmount/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -625,6 +647,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "nfs_list_mounts/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -641,6 +664,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "update_volume/2" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
       vol_name = "update-test-vol-#{:rand.uniform(999_999)}"
@@ -735,6 +759,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "handle_ca_info/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
 
       master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
@@ -769,6 +794,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "handle_ca_info/0 without CA" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
       start_volume_registry()
 
@@ -784,6 +810,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "handle_ca_list/0 and handle_ca_revoke/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
       stop_ra()
 
       master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
@@ -900,6 +927,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "handle_worker_status/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
 
       start_supervised!({Task.Supervisor, name: NeonFS.Core.BackgroundTaskSupervisor})
       start_supervised!(NeonFS.Core.BackgroundWorker)
@@ -941,6 +969,7 @@ defmodule NeonFS.CLI.HandlerTest do
   describe "handle_worker_configure/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
 
       # Write a minimal cluster.json so persistence works
       meta_dir = Application.get_env(:neonfs_core, :meta_dir)

@@ -62,9 +62,9 @@ pub fn term_to_u64(term: &Term) -> Result<u64> {
 /// Convert Erlang map to HashMap<String, Term>
 pub fn term_to_map(term: &Term) -> Result<HashMap<String, Term>> {
     match term {
-        Term::Map(Map { entries }) => {
+        Term::Map(Map { map }) => {
             let mut result = HashMap::new();
-            for (key, value) in entries {
+            for (key, value) in map {
                 let key_str = term_to_string(key)?;
                 result.insert(key_str, value.clone());
             }
@@ -161,13 +161,13 @@ fn extract_error_reason(reason: &Term) -> Option<CliError> {
 /// Elixir structs are encoded as maps with a `__struct__` atom key.
 /// We look for `class` (atom) and `message` (binary) fields.
 fn try_extract_struct_error(term: &Term) -> Option<CliError> {
-    let entries = match term {
-        Term::Map(Map { entries }) => entries,
+    let map = match term {
+        Term::Map(Map { map }) => map,
         _ => return None,
     };
 
     // Check for __struct__ key to confirm this is an Elixir struct
-    let has_struct_key = entries
+    let has_struct_key = map
         .iter()
         .any(|(k, _)| matches!(k, Term::Atom(Atom { name }) if name == "__struct__"));
 
@@ -176,7 +176,7 @@ fn try_extract_struct_error(term: &Term) -> Option<CliError> {
     }
 
     // Extract class atom
-    let class = entries
+    let class = map
         .iter()
         .find_map(|(k, v)| match (k, v) {
             (Term::Atom(Atom { name: key }), Term::Atom(Atom { name: val })) if key == "class" => {
@@ -187,7 +187,7 @@ fn try_extract_struct_error(term: &Term) -> Option<CliError> {
         .unwrap_or(ErrorClass::Internal);
 
     // Extract message (binary string)
-    let message = entries
+    let message = map
         .iter()
         .find_map(|(k, v)| match k {
             Term::Atom(Atom { name }) if name == "message" => term_to_string(v).ok(),
@@ -196,7 +196,7 @@ fn try_extract_struct_error(term: &Term) -> Option<CliError> {
         .unwrap_or_else(|| "Unknown error".to_string());
 
     // Extract details map (best-effort: string keys and string values)
-    let details = entries
+    let details = map
         .iter()
         .find_map(|(k, v)| match k {
             Term::Atom(Atom { name }) if name == "details" => extract_details_map(v),
@@ -214,7 +214,7 @@ fn try_extract_struct_error(term: &Term) -> Option<CliError> {
 /// Best-effort extraction of the details map into string key-value pairs.
 fn extract_details_map(term: &Term) -> Option<HashMap<String, String>> {
     match term {
-        Term::Map(Map { entries }) => {
+        Term::Map(Map { map: entries }) => {
             let mut map = HashMap::new();
             for (k, v) in entries {
                 if let Ok(key) = term_to_string(k) {
@@ -363,7 +363,7 @@ mod tests {
             ),
         ];
 
-        let detail_entries: Vec<(Term, Term)> = details
+        let detail_map: HashMap<Term, Term> = details
             .into_iter()
             .map(|(k, v)| {
                 (
@@ -377,12 +377,12 @@ mod tests {
 
         entries.push((
             Term::Atom(Atom::from("details")),
-            Term::Map(Map {
-                entries: detail_entries,
-            }),
+            Term::Map(Map { map: detail_map }),
         ));
 
-        Term::Map(Map { entries })
+        Term::Map(Map {
+            map: entries.into_iter().collect(),
+        })
     }
 
     /// Wrap a reason term in an {:error, reason} tuple.
@@ -517,9 +517,13 @@ mod tests {
         ];
         entries.push((
             Term::Atom(Atom::from("details")),
-            Term::Map(Map { entries: vec![] }),
+            Term::Map(Map {
+                map: HashMap::new(),
+            }),
         ));
-        let reason = Term::Map(Map { entries });
+        let reason = Term::Map(Map {
+            map: entries.into_iter().collect(),
+        });
         let term = wrap_error(reason);
 
         let err = extract_error(&term).unwrap();
@@ -544,7 +548,9 @@ mod tests {
                 Term::Atom(Atom::from("internal")),
             ),
         ];
-        let reason = Term::Map(Map { entries });
+        let reason = Term::Map(Map {
+            map: entries.into_iter().collect(),
+        });
         let term = wrap_error(reason);
 
         let err = extract_error(&term).unwrap();

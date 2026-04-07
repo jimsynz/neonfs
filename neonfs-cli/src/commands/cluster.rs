@@ -39,7 +39,7 @@ pub enum ClusterCommand {
         #[arg(long)]
         token: String,
 
-        /// Node name of existing cluster member (e.g., neonfs_core@node1)
+        /// Address of existing cluster member (host:port, e.g., node1:9568)
         #[arg(long)]
         via: String,
     },
@@ -104,11 +104,7 @@ impl ClusterCommand {
     }
 
     fn init(&self, name: &str, format: OutputFormat) -> Result<()> {
-        // Create tokio runtime for async calls
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        // Connect to daemon and call cluster_init
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             let name_binary = Binary::from(name.as_bytes().to_vec());
             conn.call(
@@ -150,11 +146,7 @@ impl ClusterCommand {
     }
 
     fn status(&self, format: OutputFormat) -> Result<()> {
-        // Create tokio runtime for async calls
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        // Connect to daemon and call cluster_status
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "cluster_status", vec![])
                 .await
@@ -193,11 +185,7 @@ impl ClusterCommand {
         // Parse expiration duration to seconds
         let expires_in = parse_duration(expires)?;
 
-        // Create tokio runtime for async calls
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        // Connect to daemon and call create_invite
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -242,11 +230,7 @@ impl ClusterCommand {
     }
 
     fn join(&self, token: &str, via: &str, format: OutputFormat) -> Result<()> {
-        // Create tokio runtime for async calls
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        // Connect to daemon and call join_cluster
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             let token_binary = Binary::from(token.as_bytes().to_vec());
             let via_binary = Binary::from(via.as_bytes().to_vec());
@@ -296,8 +280,6 @@ impl ClusterCommand {
         batch_size: &str,
         format: OutputFormat,
     ) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mut opts_entries = vec![
             (
                 Term::Binary(Binary {
@@ -335,10 +317,10 @@ impl ClusterCommand {
         }
 
         let opts_term = Term::Map(Map {
-            entries: opts_entries,
+            map: opts_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -411,9 +393,7 @@ impl ClusterCommand {
     }
 
     fn rebalance_status(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -493,9 +473,7 @@ impl CaCommand {
     }
 
     fn info(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "handle_ca_info", vec![])
                 .await
@@ -533,9 +511,7 @@ impl CaCommand {
     }
 
     fn list(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "handle_ca_list", vec![])
                 .await
@@ -585,9 +561,7 @@ impl CaCommand {
     }
 
     fn revoke(&self, node: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             let node_binary = Binary::from(node.as_bytes().to_vec());
             conn.call(
@@ -693,7 +667,7 @@ fn parse_duration(duration: &str) -> Result<i64> {
 fn extract_token(term: &Term) -> Result<String> {
     match term {
         Term::Map(map) => {
-            for (key, value) in &map.entries {
+            for (key, value) in &map.map {
                 if let Term::Binary(key_bin) = key {
                     let key_str = String::from_utf8_lossy(&key_bin.bytes);
                     if key_str == "token" {

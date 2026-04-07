@@ -5,6 +5,7 @@ mod daemon;
 mod error;
 mod output;
 mod term;
+mod tls;
 
 use clap::{Parser, Subcommand};
 use commands::{

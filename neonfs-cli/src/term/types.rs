@@ -877,7 +877,7 @@ mod tests {
     #[test]
     fn test_drive_info_from_term() {
         let term = Term::Map(eetf::Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Binary(Binary {
                         bytes: b"id".to_vec(),
@@ -930,7 +930,7 @@ mod tests {
                         bytes: b"active".to_vec(),
                     }),
                 ),
-            ],
+            ]),
         });
         let info = DriveInfo::from_term(term).unwrap();
         assert_eq!(info.id, "nvme0");
@@ -1042,7 +1042,7 @@ mod tests {
     #[test]
     fn test_ca_info_from_term() {
         let term = Term::Map(eetf::Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Binary(Binary {
                         bytes: b"subject".to_vec(),
@@ -1087,7 +1087,7 @@ mod tests {
                     }),
                     Term::FixInteger(FixInteger::from(5)),
                 ),
-            ],
+            ]),
         });
         let info = CaInfo::from_term(term).unwrap();
         assert_eq!(info.subject, "/O=NeonFS/CN=test CA");
@@ -1097,7 +1097,7 @@ mod tests {
     #[test]
     fn test_certificate_entry_from_term() {
         let term = Term::Map(eetf::Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Binary(Binary {
                         bytes: b"node_name".to_vec(),
@@ -1136,7 +1136,7 @@ mod tests {
                         bytes: b"valid".to_vec(),
                     }),
                 ),
-            ],
+            ]),
         });
         let entry = CertificateEntry::from_term(term).unwrap();
         assert_eq!(entry.hostname, "node-1.example.com");
@@ -1196,7 +1196,7 @@ mod tests {
     #[test]
     fn test_ca_revoke_result_from_term() {
         let term = Term::Map(eetf::Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Binary(Binary {
                         bytes: b"serial".to_vec(),
@@ -1219,7 +1219,7 @@ mod tests {
                         bytes: b"revoked".to_vec(),
                     }),
                 ),
-            ],
+            ]),
         });
         let result = CaRevokeResult::from_term(term).unwrap();
         assert_eq!(result.serial, 2);
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn test_node_info_from_term() {
         let term = Term::Map(eetf::Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Binary(Binary {
                         bytes: b"node".to_vec(),
@@ -1269,7 +1269,7 @@ mod tests {
                     }),
                     Term::FixInteger(FixInteger::from(186300)),
                 ),
-            ],
+            ]),
         });
         let info = NodeInfo::from_term(term).unwrap();
         assert_eq!(info.node, "neonfs_core@host1");

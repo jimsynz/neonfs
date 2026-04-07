@@ -7,6 +7,7 @@ use crate::term::types::MountInfo;
 use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Binary, Map, Term};
+use std::collections::HashMap;
 
 /// FUSE mount management subcommands
 #[derive(Debug, Subcommand)]
@@ -41,17 +42,17 @@ impl FuseCommand {
     }
 
     fn mount(&self, volume: &str, mountpoint: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
         let mountpoint_term = Term::Binary(Binary {
             bytes: mountpoint.as_bytes().to_vec(),
         });
-        let options_term = Term::Map(Map { entries: vec![] });
+        let options_term = Term::Map(Map {
+            map: HashMap::new(),
+        });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -84,13 +85,11 @@ impl FuseCommand {
     }
 
     fn unmount(&self, mountpoint: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mountpoint_term = Term::Binary(Binary {
             bytes: mountpoint.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -121,9 +120,7 @@ impl FuseCommand {
     }
 
     fn list(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "list_mounts", vec![])
                 .await

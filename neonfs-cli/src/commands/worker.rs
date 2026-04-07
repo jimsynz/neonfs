@@ -57,8 +57,6 @@ impl WorkerCommand {
             ));
         }
 
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mut opts_entries = vec![];
         if let Some(val) = max_concurrent {
             opts_entries.push((
@@ -86,10 +84,10 @@ impl WorkerCommand {
         }
 
         let opts_term = Term::Map(Map {
-            entries: opts_entries,
+            map: opts_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -133,9 +131,7 @@ impl WorkerCommand {
     }
 
     fn status(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "handle_worker_status", vec![])
                 .await
@@ -234,6 +230,7 @@ fn extract_priority_counts(status: &std::collections::HashMap<String, Term>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_worker_status_parsing() {
@@ -334,17 +331,17 @@ mod tests {
 
     #[test]
     fn test_term_construction_for_configure() {
-        // Verify the term map we'd send to the handler
-        let entries = vec![(
-            Term::Binary(Binary {
-                bytes: b"max_concurrent".to_vec(),
-            }),
-            Term::FixInteger(FixInteger::from(8)),
-        )];
-        let term = Term::Map(Map { entries });
+        let term = Term::Map(Map {
+            map: HashMap::from([(
+                Term::Binary(Binary {
+                    bytes: b"max_concurrent".to_vec(),
+                }),
+                Term::FixInteger(FixInteger::from(8)),
+            )]),
+        });
 
-        if let Term::Map(Map { entries }) = term {
-            assert_eq!(entries.len(), 1);
+        if let Term::Map(Map { map }) = term {
+            assert_eq!(map.len(), 1);
         } else {
             panic!("Expected Map term");
         }

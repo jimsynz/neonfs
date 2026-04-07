@@ -73,9 +73,6 @@ impl AuditCommand {
         limit: u64,
         format: OutputFormat,
     ) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        // Build filters map
         let mut filter_entries = vec![];
 
         if let Some(t) = event_type {
@@ -139,10 +136,10 @@ impl AuditCommand {
         ));
 
         let filters_term = Term::Map(Map {
-            entries: filter_entries,
+            map: filter_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",

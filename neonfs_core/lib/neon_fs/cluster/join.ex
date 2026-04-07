@@ -8,8 +8,9 @@ defmodule NeonFS.Cluster.Join do
   """
 
   alias NeonFS.Client.{ServiceInfo, ServiceType}
-  alias NeonFS.Cluster.{Invite, State}
+  alias NeonFS.Cluster.{Invite, InviteRedemption, State}
   alias NeonFS.Core.{CertificateAuthority, RaServer, ServiceRegistry, VolumeRegistry}
+  alias NeonFS.TLSDistConfig
   alias NeonFS.Transport.{Listener, PoolManager, TLS}
 
   require Logger
@@ -26,11 +27,14 @@ defmodule NeonFS.Cluster.Join do
   @doc """
   Requests cluster membership from an existing node using an invite token.
 
-  This function should be called on the joining node.
+  This function should be called on the joining node. It contacts the via
+  node over HTTP to redeem the invite token and obtain cluster credentials,
+  then starts TLS distribution with the cluster certificates and completes
+  the join via Erlang distribution.
 
   ## Parameters
   - `token` - The invite token provided by the existing cluster
-  - `via_node` - The node name of an existing cluster member (e.g., :neonfs_core@node1)
+  - `via_address` - HTTP address of an existing cluster member (e.g., "node1:9568")
   - `type` - Service type for this node (default: `:core`). Non-core types
     skip Ra cluster membership but are registered in ServiceRegistry.
 
@@ -40,32 +44,69 @@ defmodule NeonFS.Cluster.Join do
 
   ## Examples
 
-      iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", :neonfs_core@node1)
+      iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", "node1:9568")
       {:ok, %NeonFS.Cluster.State{}}
 
-      iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", :neonfs_core@node1, :fuse)
+      iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", "node1:9568", :fuse)
       {:ok, %NeonFS.Cluster.State{}}
   """
-  @spec join_cluster(String.t(), atom(), ServiceType.t()) ::
+  @spec join_cluster(String.t(), String.t(), ServiceType.t()) ::
           {:ok, State.t()} | {:error, term()}
-  def join_cluster(token, via_node, type \\ :core)
-      when is_binary(token) and is_atom(via_node) and is_service_type(type) do
+  def join_cluster(token, via_address, type \\ :core)
+      when is_binary(token) and is_binary(via_address) and is_service_type(type) do
     this_node = Node.self()
     node_name = Atom.to_string(this_node)
     node_key = TLS.generate_node_key()
     csr = TLS.create_csr(node_key, node_name)
 
+    with :ok <- validate_not_in_cluster(),
+         {:ok, credentials} <- request_join_http(via_address, token, csr, node_name),
+         :ok <- store_credentials(credentials, node_key),
+         :ok <- TLSDistConfig.regenerate(TLS.tls_dir()),
+         :ok <- activate_cluster_distribution(credentials),
+         {:ok, cluster_info} <-
+           complete_join_via_distribution(credentials, token, this_node, type),
+         {:ok, state} <- build_cluster_state(cluster_info, type),
+         :ok <- State.save(state) do
+      activate_data_plane()
+
+      if ServiceType.core?(type) do
+        schedule_ra_join_async(state)
+      end
+
+      {:ok, state}
+    end
+  end
+
+  @doc """
+  Join a cluster via direct RPC (for testing or pre-connected nodes).
+
+  Unlike `join_cluster/3` which uses HTTP for credential exchange, this
+  function uses direct Erlang RPC to the via node. This requires that:
+  - The joining node is already connected to the via node
+  - The cookie is already set correctly
+
+  Used by integration tests where nodes share a cookie and metrics HTTP
+  server is not running.
+  """
+  @spec join_cluster_rpc(String.t(), atom(), ServiceType.t()) ::
+          {:ok, State.t()} | {:error, term()}
+  def join_cluster_rpc(token, via_node, type \\ :core)
+      when is_binary(token) and is_atom(via_node) and is_service_type(type) do
+    this_node = Node.self()
+    node_name = Atom.to_string(this_node)
+    node_key = TLS.generate_node_key()
+    csr = TLS.create_csr(node_key, node_name)
     data_endpoint = local_data_endpoint()
 
     with :ok <- validate_not_in_cluster(),
          {:ok, cluster_info} <-
-           request_join(via_node, token, this_node, type, csr, data_endpoint),
+           request_join_rpc(via_node, token, this_node, type, csr, data_endpoint),
          {:ok, state} <- build_cluster_state(cluster_info, type),
          :ok <- State.save(state),
-         :ok <- store_local_tls(cluster_info, node_key) do
+         :ok <- store_rpc_tls(cluster_info, node_key) do
       activate_data_plane()
 
-      # Only core nodes join the Ra cluster
       if ServiceType.core?(type) do
         schedule_ra_join_async(state)
       end
@@ -241,18 +282,6 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp store_local_tls(%{node_cert_pem: nil}, _node_key), do: :ok
-  defp store_local_tls(%{ca_cert_pem: nil}, _node_key), do: :ok
-
-  defp store_local_tls(%{node_cert_pem: node_cert_pem, ca_cert_pem: ca_cert_pem}, node_key) do
-    ca_cert = TLS.decode_cert!(ca_cert_pem)
-    node_cert = TLS.decode_cert!(node_cert_pem)
-    TLS.write_local_tls(ca_cert, node_cert, node_key)
-    :ok
-  end
-
-  defp store_local_tls(_cluster_info, _node_key), do: :ok
-
   defp validate_not_in_cluster do
     if State.exists?() do
       {:error, :already_in_cluster}
@@ -261,12 +290,112 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp request_join(via_node, token, this_node, type, csr, data_endpoint) do
+  defp request_join_http(via_address, token, csr, node_name) do
+    :inets.start()
+    csr_pem = TLS.encode_csr(csr)
+    {random, expiry} = parse_token_parts(token)
+    proof = :crypto.mac(:hmac, :sha256, token, csr_pem) |> Base.encode64()
+
+    body =
+      %{
+        "csr_pem" => csr_pem,
+        "token_random" => random,
+        "token_expiry" => expiry,
+        "proof" => proof,
+        "node_name" => node_name
+      }
+      |> :json.encode()
+      |> IO.iodata_to_binary()
+
+    url = ~c"http://#{via_address}/api/cluster/redeem-invite"
+    request = {url, [], ~c"application/json", body}
+
+    case :httpc.request(:post, request, [{:timeout, 30_000}], []) do
+      {:ok, {{_, 200, _}, _headers, response_body}} ->
+        response_binary = IO.iodata_to_binary(response_body)
+        InviteRedemption.decrypt_response(response_binary, token)
+
+      {:ok, {{_, status, _}, _, response_body}} ->
+        Logger.error(
+          "Invite redemption HTTP error: status=#{status} body=#{IO.iodata_to_binary(response_body)}"
+        )
+
+        {:error, {:http_error, status}}
+
+      {:error, reason} ->
+        Logger.error("Invite redemption HTTP failed", reason: inspect(reason))
+        {:error, {:http_failed, reason}}
+    end
+  end
+
+  defp parse_token_parts(token) do
+    case String.split(token, "_") do
+      ["nfs", "inv", random, expiry, _signature] -> {random, expiry}
+    end
+  end
+
+  defp request_join_rpc(via_node, token, this_node, type, csr, data_endpoint) do
     case :rpc.call(via_node, __MODULE__, :accept_join, [
            token,
            this_node,
            type,
            csr,
+           data_endpoint
+         ]) do
+      {:ok, cluster_info} ->
+        {:ok, cluster_info}
+
+      {:error, reason} ->
+        {:error, {:join_rejected, reason}}
+
+      {:badrpc, reason} ->
+        {:error, {:rpc_failed, reason}}
+    end
+  end
+
+  defp store_rpc_tls(%{node_cert_pem: nil}, _node_key), do: :ok
+  defp store_rpc_tls(%{ca_cert_pem: nil}, _node_key), do: :ok
+
+  defp store_rpc_tls(%{node_cert_pem: node_cert_pem, ca_cert_pem: ca_cert_pem}, node_key) do
+    ca_cert = TLS.decode_cert!(ca_cert_pem)
+    node_cert = TLS.decode_cert!(node_cert_pem)
+    TLS.write_local_tls(ca_cert, node_cert, node_key)
+    :ok
+  end
+
+  defp store_rpc_tls(_cluster_info, _node_key), do: :ok
+
+  defp store_credentials(credentials, node_key) do
+    ca_cert = TLS.decode_cert!(credentials["ca_cert_pem"])
+    node_cert = TLS.decode_cert!(credentials["node_cert_pem"])
+    TLS.write_local_tls(ca_cert, node_cert, node_key)
+    :ok
+  end
+
+  defp activate_cluster_distribution(credentials) do
+    cookie = credentials["cookie"] |> String.to_atom()
+    via_node = credentials["via_node"] |> String.to_atom()
+    :erlang.set_cookie(Node.self(), cookie)
+
+    case Node.connect(via_node) do
+      true ->
+        :ok
+
+      false ->
+        Logger.error("Failed to connect to via node: #{via_node}")
+        {:error, {:connect_failed, via_node}}
+    end
+  end
+
+  defp complete_join_via_distribution(credentials, token, this_node, type) do
+    via_node = credentials["via_node"] |> String.to_atom()
+    data_endpoint = local_data_endpoint()
+
+    case :rpc.call(via_node, __MODULE__, :accept_join, [
+           token,
+           this_node,
+           type,
+           nil,
            data_endpoint
          ]) do
       {:ok, cluster_info} ->

@@ -7,6 +7,7 @@ use crate::term::types::{RotationStatus, VolumeInfo};
 use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Atom, Binary, FixInteger, Map, Term};
+use std::collections::HashMap;
 
 /// Volume management subcommands
 #[derive(Debug, Subcommand)]
@@ -215,8 +216,6 @@ impl VolumeCommand {
     }
 
     fn list(&self, all: bool, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mut filter_entries = vec![];
 
         if all {
@@ -229,10 +228,10 @@ impl VolumeCommand {
         }
 
         let filters_term = Term::Map(Map {
-            entries: filter_entries,
+            map: filter_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -304,14 +303,12 @@ impl VolumeCommand {
             }
         };
 
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
 
         let durability_map = Term::Map(Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Atom(Atom::from("type")),
                     Term::Atom(Atom::from("replicate")),
@@ -324,11 +321,11 @@ impl VolumeCommand {
                     Term::Atom(Atom::from("min_copies")),
                     Term::FixInteger(FixInteger::from(std::cmp::min(replicas, 2) as i32)),
                 ),
-            ],
+            ]),
         });
 
         let compression_map = Term::Map(Map {
-            entries: vec![
+            map: HashMap::from([
                 (
                     Term::Atom(Atom::from("algorithm")),
                     Term::Atom(Atom::from(compression)),
@@ -341,14 +338,14 @@ impl VolumeCommand {
                     Term::Atom(Atom::from("min_size")),
                     Term::FixInteger(FixInteger::from(4096)),
                 ),
-            ],
+            ]),
         });
 
         let encryption_map = Term::Map(Map {
-            entries: vec![(
+            map: HashMap::from([(
                 Term::Atom(Atom::from("mode")),
                 Term::Atom(Atom::from(encryption_mode)),
-            )],
+            )]),
         });
 
         let mut config_entries = vec![
@@ -359,10 +356,10 @@ impl VolumeCommand {
 
         if let Some(interval) = scrub_interval {
             let verification_map = Term::Map(Map {
-                entries: vec![(
+                map: HashMap::from([(
                     Term::Atom(Atom::from("scrub_interval")),
                     Term::FixInteger(FixInteger::from(interval as i32)),
-                )],
+                )]),
             });
             config_entries.push((Term::Atom(Atom::from("verification")), verification_map));
         }
@@ -385,10 +382,10 @@ impl VolumeCommand {
         }
 
         let config_term = Term::Map(Map {
-            entries: config_entries,
+            map: config_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -420,13 +417,11 @@ impl VolumeCommand {
     }
 
     fn delete(&self, name: &str, _force: bool, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -457,13 +452,11 @@ impl VolumeCommand {
     }
 
     fn show(&self, name: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "get_volume", vec![name_term])
                 .await
@@ -604,16 +597,14 @@ impl VolumeCommand {
             ));
         }
 
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
         let config_term = Term::Map(Map {
-            entries: config_entries,
+            map: config_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -644,13 +635,11 @@ impl VolumeCommand {
     }
 
     fn rotate_key(&self, name: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -684,13 +673,11 @@ impl VolumeCommand {
     }
 
     fn rotation_status(&self, name: &str, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",

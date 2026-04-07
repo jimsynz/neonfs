@@ -32,8 +32,6 @@ impl GcCommand {
     }
 
     fn collect(&self, volume: Option<&str>, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
         let mut opts_entries = vec![];
         if let Some(vol) = volume {
             opts_entries.push((
@@ -46,10 +44,10 @@ impl GcCommand {
             ));
         }
         let opts_term = Term::Map(Map {
-            entries: opts_entries,
+            map: opts_entries.into_iter().collect(),
         });
 
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
@@ -93,9 +91,7 @@ impl GcCommand {
     }
 
     fn status(&self, format: OutputFormat) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        let result = runtime.block_on(async {
+        let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call("Elixir.NeonFS.CLI.Handler", "handle_gc_status", vec![])
                 .await
