@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release && \
     cp target/release/neonfs-cli /usr/local/bin/neonfs-cli
 
-FROM debian:trixie-20260316
+FROM debian:trixie-20260406
 
 LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
