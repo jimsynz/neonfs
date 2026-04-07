@@ -4,7 +4,7 @@ defmodule NeonFS.FUSE.MixProject do
   @moduledoc """
   FUSE filesystem interface for NeonFS.
   """
-  @version "0.1.6"
+  @version "0.1.7"
 
   def project do
     [

@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.7](https://harton.dev/project-neon/neonfs/compare/v0.1.6...v0.1.7) (2026-04-07)
+
+
+
+
+### Improvements:
+
+* TLS distribution and secure cluster join (#98) by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.6](https://harton.dev/project-neon/neonfs/compare/v0.1.5...v0.1.6) (2026-04-04)
 
 

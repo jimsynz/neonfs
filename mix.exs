@@ -2,7 +2,7 @@ defmodule NeonFS.MixProject do
   use Mix.Project
   @moduledoc false
 
-  @version "0.1.6"
+  @version "0.1.7"
 
   defmodule DynamicAlias do
     defstruct []
@@ -72,7 +72,10 @@ defmodule NeonFS.MixProject do
       aliases: %DynamicAlias{},
       deps: [
         {:git_ops,
-         github: "zachdaniel/git_ops", branch: "master", only: [:dev, :test], runtime: false}
+         github: "jimsynz/git_ops",
+         branch: "fix/multi-line-commits",
+         only: [:dev, :test],
+         runtime: false}
       ],
       version: @version
     ]
