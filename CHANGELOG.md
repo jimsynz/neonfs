@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.8](https://harton.dev/project-neon/neonfs/compare/v0.1.7...v0.1.8) (2026-04-08)
+
+
+
+
+### Bug Fixes:
+
+* packaging: include `neonfs-tls-common.sh` in neonfs-common deb package by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.7](https://harton.dev/project-neon/neonfs/compare/v0.1.6...v0.1.7) (2026-04-07)
 
 
