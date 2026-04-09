@@ -20,6 +20,11 @@ defmodule NeonFS.Core.ReadySignal do
   @impl true
   def init(_opts) do
     :pg.join(@pg_scope, {:node, :ready}, self())
+
+    unless Application.spec(:neonfs_omnibus) do
+      NeonFS.Systemd.notify_ready()
+    end
+
     {:ok, %{}}
   end
 

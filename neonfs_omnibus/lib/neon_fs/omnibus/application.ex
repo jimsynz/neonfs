@@ -20,6 +20,7 @@ defmodule NeonFS.Omnibus.Application do
          :ok <- Logger.info("NeonFS FUSE started"),
          {:ok, _} <- Application.ensure_all_started(:neonfs_nfs),
          :ok <- Logger.info("NeonFS NFS started") do
+      NeonFS.Systemd.notify_ready()
       {:ok, pid}
     end
   end

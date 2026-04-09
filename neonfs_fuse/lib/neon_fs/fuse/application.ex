@@ -27,6 +27,10 @@ defmodule NeonFS.FUSE.Application do
       HealthCheck.register_checks()
     end
 
+    unless Application.spec(:neonfs_omnibus) do
+      NeonFS.Systemd.notify_ready()
+    end
+
     result
   end
 
