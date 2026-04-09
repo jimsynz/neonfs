@@ -24,7 +24,7 @@ num-traits = "0.2"  # For BigInteger → u64/i64 via ToPrimitive
 hex = "0.4"         # For cookie encoding
 rand = "0.10"       # For generating node names
 futures = "0.3"     # For AsyncRead/AsyncWrite trait impls
-md5 = "0.7"         # For distribution handshake challenge/response
+md5 = "0.8"         # For distribution handshake challenge/response
 
 # TLS for distribution connections
 rustls-pemfile = "2"
