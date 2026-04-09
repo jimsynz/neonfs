@@ -4,7 +4,7 @@ defmodule NeonFS.Integration.MixProject do
   @moduledoc """
   Multi-node integration test suite for NeonFS.
   """
-  @version "0.1.9"
+  @version "0.1.10"
 
   def project do
     [
