@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.9](https://harton.dev/project-neon/neonfs/compare/v0.1.8...v0.1.9) (2026-04-09)
+
+
+
+
+### Bug Fixes:
+
+* replace EPMD with custom NeonFS.Epmd module (#104) by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.8](https://harton.dev/project-neon/neonfs/compare/v0.1.7...v0.1.8) (2026-04-08)
 
 
