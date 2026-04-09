@@ -20,6 +20,7 @@ defmodule NeonFS.Integration.PeerCluster do
           name: atom(),
           peer: pid(),
           node: node(),
+          dist_port: non_neg_integer(),
           metrics_port: non_neg_integer() | nil
         }
 
@@ -95,14 +96,23 @@ defmodule NeonFS.Integration.PeerCluster do
     # Use provided base_dir or create a new one
     base_dir = Keyword.get_lazy(opts, :base_dir, fn -> create_cluster_dir(cluster_id) end)
 
-    # Pre-compute all peer node names for formation config (bootstrap_peers
-    # needs the full list before any node starts)
-    all_peer_names =
-      if formation_config do
-        Enum.map(1..node_count, fn i -> :"node#{i}_#{cluster_id}@localhost" end)
-      else
-        []
-      end
+    # Pre-compute all peer node names and distribution ports
+    # (formation needs the full list before any node starts)
+    all_peer_info =
+      Enum.map(1..node_count, fn i ->
+        {:"node#{i}_#{cluster_id}@localhost", allocate_peer_port()}
+      end)
+
+    all_peer_names = Enum.map(all_peer_info, fn {name, _port} -> name end)
+
+    # Build NEONFS_PEER_PORTS for all nodes (used by custom EPMD module).
+    # Set on the controller so it propagates to peer env via build_peer_opts.
+    all_peer_ports_env =
+      Enum.map_join(all_peer_info, ",", fn {name, port} -> "#{name}:#{port}" end)
+
+    if all_peer_ports_env != "" do
+      System.put_env("NEONFS_PEER_PORTS", all_peer_ports_env)
+    end
 
     # Start nodes sequentially to avoid DETS name conflicts during Ra initialization
     nodes =
@@ -120,7 +130,9 @@ defmodule NeonFS.Integration.PeerCluster do
         File.mkdir_p!(meta_dir)
         File.mkdir_p!(ra_dir)
 
-        peer_opts = build_peer_opts(peer_name, cookie, data_dir)
+        dist_port = lookup_peer_port(all_peer_info, :"#{peer_name}@localhost")
+
+        {peer_opts, dist_port} = build_peer_opts(peer_name, cookie, data_dir, dist_port)
 
         # Configure neonfs_core to use the test data directories
         # IMPORTANT: Ra expects data_dir as a charlist, not a binary!
@@ -186,6 +198,7 @@ defmodule NeonFS.Integration.PeerCluster do
           app_config,
           enable_ra,
           node_metrics_port,
+          dist_port,
           acc
         )
       end)
@@ -422,7 +435,27 @@ defmodule NeonFS.Integration.PeerCluster do
   """
   @spec connect_nodes(cluster()) :: :ok
   def connect_nodes(cluster) do
-    # First, connect the controller to all peer nodes
+    # Build peer port mapping for the custom EPMD module
+    peer_ports =
+      Enum.map_join(cluster.nodes, ",", fn info -> "#{info.node}:#{info.dist_port}" end)
+
+    # Set on the controller so it can resolve peer addresses
+    System.put_env("NEONFS_PEER_PORTS", peer_ports)
+
+    # Set on each peer so they can resolve each other
+    for node_info <- cluster.nodes do
+      :peer.call(node_info.peer, System, :put_env, ["NEONFS_PEER_PORTS", peer_ports])
+    end
+
+    # Verify each peer's distribution port is reachable before connecting.
+    # Without EPMD, our custom module returns the port immediately from env
+    # even if a previous test's peer hasn't fully released it yet. A quick
+    # TCP probe avoids a long kernel-level connect timeout.
+    for node_info <- cluster.nodes do
+      wait_for_dist_port(node_info.dist_port)
+    end
+
+    # Connect the controller to all peer nodes
     for node_info <- cluster.nodes do
       Node.connect(node_info.node)
     end
@@ -451,12 +484,23 @@ defmodule NeonFS.Integration.PeerCluster do
          app_config,
          enable_ra,
          metrics_port,
+         dist_port,
          acc
        ) do
     case start_peer(peer_opts, applications, app_config) do
       {:ok, peer, node} ->
         if enable_ra, do: wait_for_ra_ready(peer)
-        acc ++ [%{name: node_name, peer: peer, node: node, metrics_port: metrics_port}]
+
+        acc ++
+          [
+            %{
+              name: node_name,
+              peer: peer,
+              node: node,
+              dist_port: dist_port,
+              metrics_port: metrics_port
+            }
+          ]
 
       {:error, reason} ->
         raise "Failed to start peer node #{node_name}: #{inspect(reason)}"
@@ -488,7 +532,7 @@ defmodule NeonFS.Integration.PeerCluster do
     end
   end
 
-  defp build_peer_opts(node_name, cookie, data_dir) do
+  defp build_peer_opts(node_name, cookie, data_dir, dist_port) do
     code_paths = build_code_paths()
 
     # Ensure directories exist
@@ -500,6 +544,11 @@ defmodule NeonFS.Integration.PeerCluster do
       [
         ~c"-setcookie",
         to_charlist(cookie),
+        # Custom EPMD module — no external EPMD daemon needed
+        ~c"-start_epmd",
+        ~c"false",
+        ~c"-epmd_module",
+        ~c"Elixir.NeonFS.Epmd",
         # Disable global's partition prevention — tests rapidly create/destroy
         # clusters and global misinterprets this as overlapping partitions
         ~c"-kernel",
@@ -510,23 +559,65 @@ defmodule NeonFS.Integration.PeerCluster do
           [~c"-pa", to_charlist(path)]
         end)
 
-    # Environment variables passed via env option
-    env = [
-      {~c"NEONFS_DATA_DIR", to_charlist(data_dir)},
-      {~c"NEONFS_META_DIR", to_charlist(meta_dir)}
-    ]
+    # Environment variables passed via env option.
+    # NEONFS_PEER_PORTS is set on the controller before node startup and
+    # propagated here so each peer's custom EPMD module can resolve others.
+    env =
+      [
+        {~c"NEONFS_DATA_DIR", to_charlist(data_dir)},
+        {~c"NEONFS_META_DIR", to_charlist(meta_dir)},
+        {~c"NEONFS_DIST_PORT", to_charlist(Integer.to_string(dist_port))}
+      ] ++
+        case System.get_env("NEONFS_PEER_PORTS") do
+          nil -> []
+          ports -> [{~c"NEONFS_PEER_PORTS", to_charlist(ports)}]
+        end
 
-    %{
-      name: node_name,
-      host: ~c"localhost",
-      args: args,
-      env: env,
-      # Use 0 (no auto-connection) to avoid DETS table name conflicts during startup
-      # We'll connect nodes manually after Ra has initialized
-      connection: 0,
-      # Default wait_boot is 15s which is too short on slow CI runners
-      wait_boot: 60_000
-    }
+    {%{
+       name: node_name,
+       host: ~c"localhost",
+       args: args,
+       env: env,
+       # Use 0 (no auto-connection) to avoid DETS table name conflicts during startup
+       # We'll connect nodes manually after Ra has initialized
+       connection: 0,
+       # Default wait_boot is 15s which is too short on slow CI runners
+       wait_boot: 60_000
+     }, dist_port}
+  end
+
+  defp wait_for_dist_port(port, attempts \\ 0)
+
+  defp wait_for_dist_port(_port, attempts) when attempts >= 50 do
+    :ok
+  end
+
+  defp wait_for_dist_port(port, attempts) do
+    case :gen_tcp.connect(~c"localhost", port, [], 200) do
+      {:ok, sock} ->
+        :gen_tcp.close(sock)
+
+      {:error, _} ->
+        Process.sleep(100)
+        wait_for_dist_port(port, attempts + 1)
+    end
+  end
+
+  defp lookup_peer_port(all_peer_info, node_name) do
+    case Enum.find(all_peer_info, fn {name, _port} -> name == node_name end) do
+      {_, port} -> port
+      nil -> allocate_peer_port()
+    end
+  end
+
+  defp allocate_peer_port do
+    # Bind-and-release to get a guaranteed free port from the OS.
+    # This avoids collisions with ports still in TIME_WAIT from
+    # previous test clusters that haven't fully released yet.
+    {:ok, socket} = :gen_tcp.listen(0, reuseaddr: true)
+    {:ok, port} = :inet.port(socket)
+    :gen_tcp.close(socket)
+    port
   end
 
   defp build_code_paths do
@@ -558,7 +649,6 @@ defmodule NeonFS.Integration.PeerCluster do
 
   defp wait_for_peers_gone(nodes) do
     # Wait up to 5 seconds for all peer nodes to fully terminate.
-    # This prevents the next test from hitting EPMD name conflicts.
     deadline = System.monotonic_time(:millisecond) + 5_000
 
     Enum.each(nodes, fn node_info ->
@@ -644,7 +734,11 @@ defmodule NeonFS.Integration.PeerCluster do
     meta_dir = Path.join(data_dir, "meta")
     ra_dir = Path.join(data_dir, "ra")
 
-    peer_opts = build_peer_opts(peer_name, cluster.cookie, data_dir)
+    # Reuse the same dist_port the node had before restart
+    old_info = get_node!(cluster, node_name)
+
+    {peer_opts, _dist_port} =
+      build_peer_opts(peer_name, cluster.cookie, data_dir, old_info.dist_port)
 
     app_config = [
       logger: [level: :warning],
@@ -680,6 +774,13 @@ defmodule NeonFS.Integration.PeerCluster do
 
   defp connect_restarted_node(cluster, restarted_name) do
     restarted = get_node!(cluster, restarted_name)
+
+    # Set peer ports on the restarted node so its EPMD module can resolve peers
+    peer_ports =
+      Enum.map_join(cluster.nodes, ",", fn info -> "#{info.node}:#{info.dist_port}" end)
+
+    :peer.call(restarted.peer, System, :put_env, ["NEONFS_PEER_PORTS", peer_ports])
+
     Node.connect(restarted.node)
 
     for node_info <- cluster.nodes, node_info.name != restarted_name do

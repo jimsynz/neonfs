@@ -12,13 +12,15 @@ defmodule NeonFS.Cluster.State do
   @type node_info :: %{
           id: String.t(),
           name: atom(),
-          joined_at: DateTime.t()
+          joined_at: DateTime.t(),
+          dist_port: non_neg_integer()
         }
 
   @type peer_info :: %{
           id: String.t(),
           name: atom(),
-          last_seen: DateTime.t()
+          last_seen: DateTime.t(),
+          dist_port: non_neg_integer()
         }
 
   @type drive_config :: %{
@@ -134,14 +136,16 @@ defmodule NeonFS.Cluster.State do
       "this_node" => %{
         "id" => state.this_node.id,
         "name" => Atom.to_string(state.this_node.name),
-        "joined_at" => DateTime.to_iso8601(state.this_node.joined_at)
+        "joined_at" => DateTime.to_iso8601(state.this_node.joined_at),
+        "dist_port" => state.this_node[:dist_port] || 0
       },
       "known_peers" =>
         Enum.map(state.known_peers, fn peer ->
           %{
             "id" => peer.id,
             "name" => Atom.to_string(peer.name),
-            "last_seen" => DateTime.to_iso8601(peer.last_seen)
+            "last_seen" => DateTime.to_iso8601(peer.last_seen),
+            "dist_port" => peer[:dist_port] || 0
           }
         end),
       "metrics" => serialise_map_config(state.metrics),
@@ -302,7 +306,8 @@ defmodule NeonFS.Cluster.State do
     %{
       id: node_data["id"],
       name: String.to_atom(node_data["name"]),
-      joined_at: parse_datetime!(node_data["joined_at"])
+      joined_at: parse_datetime!(node_data["joined_at"]),
+      dist_port: node_data["dist_port"] || 0
     }
   end
 
@@ -317,7 +322,8 @@ defmodule NeonFS.Cluster.State do
       %{
         id: peer["id"],
         name: String.to_atom(peer["name"]),
-        last_seen: parse_datetime!(peer["last_seen"])
+        last_seen: parse_datetime!(peer["last_seen"]),
+        dist_port: peer["dist_port"] || 0
       }
     end)
   end

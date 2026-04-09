@@ -1,6 +1,7 @@
 # Ensure the FUSE application is started
 Application.ensure_all_started(:neonfs_fuse)
 
+Application.put_env(:kernel, :epmd_module, NeonFS.Epmd)
 {:ok, _} = Node.start(:neonfs_fuse_test, name_domain: :shortnames)
 
 # Note: FUSE mount tests have been moved to Rust integration tests because

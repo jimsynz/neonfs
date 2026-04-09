@@ -187,10 +187,20 @@ defmodule NeonFS.Cluster.InviteRedemption do
       "ca_cert_pem" => ca_cert_pem,
       "node_cert_pem" => node_cert_pem,
       "cookie" => cookie,
-      "via_node" => Atom.to_string(Node.self())
+      "via_node" => Atom.to_string(Node.self()),
+      "via_dist_port" => local_dist_port()
     }
     |> :json.encode()
     |> IO.iodata_to_binary()
+  end
+
+  defp local_dist_port do
+    case System.get_env("NEONFS_DIST_PORT") do
+      nil -> 0
+      port_str -> String.to_integer(port_str)
+    end
+  rescue
+    _ -> 0
   end
 
   defp encrypt_response(plaintext, token) do

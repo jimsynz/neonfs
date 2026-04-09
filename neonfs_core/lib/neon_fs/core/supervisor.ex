@@ -350,6 +350,8 @@ defmodule NeonFS.Core.Supervisor do
                  cluster_name: Application.fetch_env!(:neonfs_core, :cluster_name),
                  bootstrap_expect: Application.fetch_env!(:neonfs_core, :bootstrap_expect),
                  bootstrap_peers: Application.fetch_env!(:neonfs_core, :bootstrap_peers),
+                 bootstrap_peer_ports:
+                   Application.get_env(:neonfs_core, :bootstrap_peer_ports, %{}),
                  bootstrap_timeout: Application.get_env(:neonfs_core, :bootstrap_timeout, 300_000)
                ]
              ]},

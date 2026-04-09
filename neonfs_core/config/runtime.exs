@@ -68,14 +68,35 @@ if config_env() == :prod do
       System.get_env("NEONFS_BOOTSTRAP_PEERS") ||
         raise "NEONFS_BOOTSTRAP_PEERS required when NEONFS_AUTO_BOOTSTRAP=true"
 
+    # Parse peer entries which may include dist_port: "neonfs@node1:9100,neonfs@node2:9200"
+    parsed_peers =
+      bootstrap_peers
+      |> String.split(",", trim: true)
+      |> Enum.map(fn entry ->
+        entry = String.trim(entry)
+
+        case Regex.run(~r/^(.+@.+):(\d+)$/, entry) do
+          [_, node_name, port_str] ->
+            {String.to_atom(node_name), String.to_integer(port_str)}
+
+          _ ->
+            {String.to_atom(entry), 0}
+        end
+      end)
+
+    peer_atoms = Enum.map(parsed_peers, fn {node, _port} -> node end)
+
+    peer_ports =
+      parsed_peers
+      |> Enum.filter(fn {_node, port} -> port > 0 end)
+      |> Map.new()
+
     config :neonfs_core,
       auto_bootstrap: true,
       cluster_name: cluster_name,
       bootstrap_expect: String.to_integer(bootstrap_expect),
-      bootstrap_peers:
-        bootstrap_peers
-        |> String.split(",", trim: true)
-        |> Enum.map(&String.to_atom(String.trim(&1))),
+      bootstrap_peers: peer_atoms,
+      bootstrap_peer_ports: peer_ports,
       bootstrap_timeout: String.to_integer(System.get_env("NEONFS_BOOTSTRAP_TIMEOUT", "300000"))
   end
 

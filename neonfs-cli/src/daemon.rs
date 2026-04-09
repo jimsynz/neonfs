@@ -13,7 +13,6 @@
 
 use crate::error::{CliError, Result};
 use eetf::{Atom, List, Term, Tuple};
-use erl_dist::epmd::{EpmdClient, DEFAULT_EPMD_PORT};
 use erl_dist::handshake::{ClientSideHandshake, HandshakeStatus};
 use erl_dist::message;
 use erl_dist::node::{Creation, LocalNode, NodeName};
@@ -30,6 +29,9 @@ const DEFAULT_DAEMON_NODE: &str = "neonfs@localhost";
 
 /// Runtime file written by the daemon wrapper with the actual node name
 const RUNTIME_NODE_NAME_PATH: &str = "/run/neonfs/core_node_name";
+
+/// Runtime file written by the daemon wrapper with the distribution port
+const RUNTIME_DIST_PORT_PATH: &str = "/run/neonfs/dist_port";
 
 /// Connection to the NeonFS daemon via Erlang distribution
 pub struct DaemonConnection {
@@ -59,31 +61,9 @@ impl DaemonConnection {
             CliError::ConnectionFailed(format!("Invalid node name '{}': {}", daemon_node, e))
         })?;
 
-        // 1. EPMD lookup to get distribution port
+        // 1. Read distribution port from env or runtime file
         let epmd_host = node_name.host();
-        let epmd_addr = format!("{}:{}", epmd_host, DEFAULT_EPMD_PORT);
-        let epmd_stream = smol::net::TcpStream::connect(&epmd_addr)
-            .await
-            .map_err(|e| {
-                CliError::ConnectionFailed(format!(
-                    "Cannot connect to EPMD at {}: {}. Is the daemon running?",
-                    epmd_addr, e
-                ))
-            })?;
-
-        let epmd_client = EpmdClient::new(epmd_stream);
-        let node_entry = epmd_client
-            .get_node(node_name.name())
-            .await
-            .map_err(|e| CliError::ConnectionFailed(format!("EPMD lookup failed: {}", e)))?
-            .ok_or_else(|| {
-                CliError::ConnectionFailed(format!(
-                    "Node '{}' not found in EPMD. Is the daemon running?",
-                    daemon_node
-                ))
-            })?;
-
-        let dist_port = node_entry.port;
+        let dist_port = read_dist_port()?;
 
         // 2. TCP connect to distribution port
         let dist_addr = format!("{}:{}", epmd_host, dist_port);
@@ -284,6 +264,40 @@ fn extract_erpc_result(reason: Term) -> Result<Term> {
             other
         ))),
     }
+}
+
+/// Read the distribution port from environment variable or runtime file
+fn read_dist_port() -> Result<u16> {
+    if let Ok(port_str) = std::env::var("NEONFS_DIST_PORT") {
+        let port_str = port_str.trim();
+        if !port_str.is_empty() {
+            return port_str.parse::<u16>().map_err(|e| {
+                CliError::ConnectionFailed(format!(
+                    "Invalid NEONFS_DIST_PORT '{}': {}",
+                    port_str, e
+                ))
+            });
+        }
+    }
+
+    let path = Path::new(RUNTIME_DIST_PORT_PATH);
+    if !path.exists() {
+        return Err(CliError::ConnectionFailed(format!(
+            "Distribution port file not found at {}. Is the daemon running?",
+            RUNTIME_DIST_PORT_PATH
+        )));
+    }
+
+    let content = fs::read_to_string(path).map_err(|e| {
+        CliError::ConnectionFailed(format!("Failed to read distribution port file: {}", e))
+    })?;
+
+    content.trim().parse::<u16>().map_err(|e| {
+        CliError::ConnectionFailed(format!(
+            "Invalid distribution port in {}: {}",
+            RUNTIME_DIST_PORT_PATH, e
+        ))
+    })
 }
 
 /// Read the Erlang cookie from environment variable or file

@@ -1,7 +1,6 @@
 [Unit]
 Description=NeonFS NFS Server Daemon
 After=network.target
-Wants=epmd.service
 Documentation=https://neonfs.dev/docs
 
 [Service]

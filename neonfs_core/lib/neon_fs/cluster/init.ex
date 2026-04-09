@@ -76,7 +76,8 @@ defmodule NeonFS.Cluster.Init do
     node_info = %{
       id: node_id,
       name: node_name,
-      joined_at: DateTime.utc_now()
+      joined_at: DateTime.utc_now(),
+      dist_port: local_dist_port()
     }
 
     state = State.new(cluster_id, cluster_name, master_key, node_info)
@@ -205,6 +206,15 @@ defmodule NeonFS.Cluster.Init do
       {:error, reason} ->
         {:error, {:node_cert_failed, reason}}
     end
+  end
+
+  defp local_dist_port do
+    case System.get_env("NEONFS_DIST_PORT") do
+      nil -> 0
+      port_str -> String.to_integer(port_str)
+    end
+  rescue
+    _ -> 0
   end
 
   defp node_hostname do

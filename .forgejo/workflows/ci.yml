@@ -73,7 +73,6 @@ jobs:
       - name: Check
         working-directory: neonfs_client
         run: |
-          epmd -daemon
           mix check
 
   # =========================================================================
@@ -123,7 +122,6 @@ jobs:
       - name: Check
         working-directory: neonfs_core
         run: |
-          epmd -daemon
           mix check
 
   # =========================================================================
@@ -174,7 +172,6 @@ jobs:
       - name: Check
         working-directory: neonfs_fuse
         run: |
-          epmd -daemon
           mix check
 
   # =========================================================================
@@ -224,7 +221,6 @@ jobs:
       - name: Check
         working-directory: neonfs_nfs
         run: |
-          epmd -daemon
           mix check
 
   # =========================================================================
@@ -331,5 +327,4 @@ jobs:
       - name: Check
         working-directory: neonfs_integration
         run: |
-          epmd -daemon
           mix check

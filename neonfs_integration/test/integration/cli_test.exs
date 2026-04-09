@@ -22,11 +22,8 @@ defmodule NeonFS.Integration.CLITest do
         )
       end
 
-      # Get cluster info for CLI
-      node_info = PeerCluster.get_node!(cluster, :node1)
-
       # Run the CLI binary against the peer node
-      result = run_cli(cluster.cookie, node_info.node, ["cluster", "status"])
+      result = run_cli(cluster, :node1, ["cluster", "status"])
 
       assert {:ok, output} = result
       assert output =~ "running"
@@ -40,15 +37,13 @@ defmodule NeonFS.Integration.CLITest do
         )
       end
 
-      node_info = PeerCluster.get_node!(cluster, :node1)
-
       # Create volume via CLI
       assert {:ok, _} =
-               run_cli(cluster.cookie, node_info.node, ["volume", "create", "cli-test-volume"])
+               run_cli(cluster, :node1, ["volume", "create", "cli-test-volume"])
 
       # Wait for volume to be created, then list via CLI
       assert_eventually do
-        case run_cli(cluster.cookie, node_info.node, ["volume", "list"]) do
+        case run_cli(cluster, :node1, ["volume", "list"]) do
           {:ok, output} -> output =~ "cli-test-volume"
           _ -> false
         end
@@ -97,13 +92,15 @@ defmodule NeonFS.Integration.CLITest do
     end
   end
 
-  defp run_cli(cookie, node, args) do
-    cookie_str = Atom.to_string(cookie)
-    node_str = Atom.to_string(node)
+  defp run_cli(cluster, node_name, args) do
+    node_info = PeerCluster.get_node!(cluster, node_name)
+    cookie_str = Atom.to_string(cluster.cookie)
+    node_str = Atom.to_string(node_info.node)
 
     env = [
       {"NEONFS_COOKIE", cookie_str},
-      {"NEONFS_NODE", node_str}
+      {"NEONFS_NODE", node_str},
+      {"NEONFS_DIST_PORT", Integer.to_string(node_info.dist_port)}
     ]
 
     case System.cmd(@cli_path, args, stderr_to_stdout: true, env: env) do

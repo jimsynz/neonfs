@@ -128,13 +128,12 @@ defmodule NeonFS.Integration.ClusterCase do
 
   defp ensure_clean_node_state do
     # Wait for stale peer VMs from a previous test's async on_exit to fully
-    # terminate. We check EPMD directly — any "node*" entry is from a previous
-    # test cluster and must be gone before we start new peers to avoid resource
-    # contention (CPU/memory from zombie VMs slowing down new cluster startup).
+    # terminate. Check Node.list() for any stale "node*" connections and
+    # disconnect them before starting new peers.
     wait_until(
       fn ->
         disconnect_stale_peers()
-        no_stale_epmd_entries?()
+        no_stale_peer_connections?()
       end,
       timeout: 15_000,
       interval: 200
@@ -152,16 +151,10 @@ defmodule NeonFS.Integration.ClusterCase do
         do: Node.disconnect(node)
   end
 
-  defp no_stale_epmd_entries? do
-    case :erl_epmd.names() do
-      {:ok, names} ->
-        not Enum.any?(names, fn {name, _port} ->
-          String.starts_with?(to_string(name), "node")
-        end)
-
-      {:error, _} ->
-        true
-    end
+  defp no_stale_peer_connections? do
+    not Enum.any?(Node.list(), fn node ->
+      String.starts_with?(Atom.to_string(node), "node")
+    end)
   end
 
   defp create_temp_dir do

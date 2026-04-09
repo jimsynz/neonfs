@@ -36,6 +36,7 @@ defmodule NeonFS.Cluster.Formation do
   @type t :: %__MODULE__{
           bootstrap_expect: pos_integer(),
           bootstrap_peers: [node()],
+          bootstrap_peer_ports: %{node() => non_neg_integer()},
           bootstrap_timeout: pos_integer(),
           cluster_name: String.t(),
           connected_peers: MapSet.t(node()),
@@ -54,6 +55,7 @@ defmodule NeonFS.Cluster.Formation do
     :deadline,
     :pg_monitor_ref,
     :init_node,
+    bootstrap_peer_ports: %{},
     phase: :checking_preconditions,
     connected_peers: MapSet.new(),
     ready_peers: MapSet.new()
@@ -89,14 +91,19 @@ defmodule NeonFS.Cluster.Formation do
 
   @impl true
   def init(opts) do
+    peer_ports = Keyword.get(opts, :bootstrap_peer_ports, %{})
+
     state = %__MODULE__{
       cluster_name: Keyword.fetch!(opts, :cluster_name),
       bootstrap_expect: Keyword.fetch!(opts, :bootstrap_expect),
       bootstrap_peers: Keyword.fetch!(opts, :bootstrap_peers),
+      bootstrap_peer_ports: peer_ports,
       bootstrap_timeout: Keyword.get(opts, :bootstrap_timeout, 300_000),
       deadline:
         System.monotonic_time(:millisecond) + Keyword.get(opts, :bootstrap_timeout, 300_000)
     }
+
+    set_peer_ports_env(peer_ports)
 
     {:ok, state, {:continue, :check_preconditions}}
   end
@@ -616,5 +623,13 @@ defmodule NeonFS.Cluster.Formation do
 
   defp past_deadline?(state) do
     System.monotonic_time(:millisecond) > state.deadline
+  end
+
+  defp set_peer_ports_env(peer_ports) when map_size(peer_ports) == 0, do: :ok
+
+  defp set_peer_ports_env(peer_ports) do
+    value = Enum.map_join(peer_ports, ",", fn {node, port} -> "#{node}:#{port}" end)
+
+    System.put_env("NEONFS_PEER_PORTS", value)
   end
 end

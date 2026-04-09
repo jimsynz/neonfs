@@ -79,6 +79,28 @@ defmodule NeonFS.IO.SupervisorTest do
     end
   end
 
+  # Waits for a worker to be removed from the Registry after process termination.
+  # The Registry partition needs time to process its own DOWN monitor message.
+  defp await_deregistered(drive_id, timeout \\ 1000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_await_deregistered(drive_id, deadline)
+  end
+
+  defp do_await_deregistered(drive_id, deadline) do
+    case WorkerSupervisor.lookup_worker(drive_id) do
+      :error ->
+        :ok
+
+      {:ok, _} ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(5)
+          do_await_deregistered(drive_id, deadline)
+        else
+          flunk("Worker #{inspect(drive_id)} still registered after timeout")
+        end
+    end
+  end
+
   describe "supervision tree structure" do
     test "starts with expected children" do
       names = unique_names()
@@ -228,8 +250,8 @@ defmodule NeonFS.IO.SupervisorTest do
       # Wait for the process to fully terminate
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
-      # Worker should be gone
-      assert :error = WorkerSupervisor.lookup_worker("doomed-drive")
+      # Wait for the Registry partition to process its DOWN and clean up the entry
+      await_deregistered("doomed-drive")
     end
 
     test "stopping a non-existent worker returns error" do

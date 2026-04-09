@@ -155,42 +155,53 @@ defmodule NeonFS.Cluster.Join do
   - `{:ok, cluster_info}` containing cluster details and TLS certs for the joining node
   - `{:error, reason}` on failure
   """
-  @spec accept_join(String.t(), atom(), ServiceType.t(), TLS.csr() | nil, term()) ::
+  @spec accept_join(
+          String.t(),
+          atom(),
+          ServiceType.t(),
+          TLS.csr() | nil,
+          term(),
+          non_neg_integer()
+        ) ::
           {:ok, map()} | {:error, term()}
-  def accept_join(token, joining_node, type \\ :core, csr \\ nil, data_endpoint \\ nil)
+  def accept_join(
+        token,
+        joining_node,
+        type \\ :core,
+        csr \\ nil,
+        data_endpoint \\ nil,
+        dist_port \\ 0
+      )
       when is_binary(token) and is_atom(joining_node) and is_service_type(type) do
     hostname = joining_node |> Atom.to_string() |> String.split("@") |> List.last()
 
     with :ok <- Invite.validate_invite(token),
          {:ok, state} <- State.load(),
          {:ok, node_cert_pem, ca_cert_pem} <- sign_joining_node_csr(csr, hostname),
-         {:ok, updated_state} <- add_peer_to_state(state, joining_node, type),
+         {:ok, updated_state} <- add_peer_to_state(state, joining_node, type, dist_port),
          :ok <- State.save(updated_state),
          :ok <- maybe_add_to_ra_cluster(joining_node, type) do
-      # Register in ServiceRegistry for all node types
       register_service(joining_node, type, data_endpoint)
-
-      # Adjust system volume replication for core node joins (non-fatal)
       maybe_adjust_system_volume_replication(updated_state, type)
 
       cluster_info = %{
         cluster_id: state.cluster_id,
         cluster_name: state.cluster_name,
-        # Convert DateTime to ISO8601 string for RPC transport
         created_at: DateTime.to_iso8601(state.created_at),
         master_key: state.master_key,
-        # Convert peer info to serialisable format
         known_peers:
           Enum.map(updated_state.known_peers, fn peer ->
             %{
               id: peer.id,
               name: Atom.to_string(peer.name),
-              last_seen: DateTime.to_iso8601(peer.last_seen)
+              last_seen: DateTime.to_iso8601(peer.last_seen),
+              dist_port: peer[:dist_port] || 0
             }
           end),
         ra_cluster_members: Enum.map(updated_state.ra_cluster_members, &Atom.to_string/1),
         node_cert_pem: node_cert_pem,
-        ca_cert_pem: ca_cert_pem
+        ca_cert_pem: ca_cert_pem,
+        via_dist_port: local_dist_port()
       }
 
       Logger.info("Accepted join request", type: type, joining_node: joining_node)
@@ -302,7 +313,8 @@ defmodule NeonFS.Cluster.Join do
         "token_random" => random,
         "token_expiry" => expiry,
         "proof" => proof,
-        "node_name" => node_name
+        "node_name" => node_name,
+        "dist_port" => local_dist_port()
       }
       |> :json.encode()
       |> IO.iodata_to_binary()
@@ -340,7 +352,8 @@ defmodule NeonFS.Cluster.Join do
            this_node,
            type,
            csr,
-           data_endpoint
+           data_endpoint,
+           local_dist_port()
          ]) do
       {:ok, cluster_info} ->
         {:ok, cluster_info}
@@ -375,7 +388,13 @@ defmodule NeonFS.Cluster.Join do
   defp activate_cluster_distribution(credentials) do
     cookie = credentials["cookie"] |> String.to_atom()
     via_node = credentials["via_node"] |> String.to_atom()
+    via_dist_port = credentials["via_dist_port"]
+
     :erlang.set_cookie(Node.self(), cookie)
+
+    if is_integer(via_dist_port) and via_dist_port > 0 do
+      System.put_env("NEONFS_PEER_PORTS", "#{via_node}:#{via_dist_port}")
+    end
 
     case Node.connect(via_node) do
       true ->
@@ -396,7 +415,8 @@ defmodule NeonFS.Cluster.Join do
            this_node,
            type,
            nil,
-           data_endpoint
+           data_endpoint,
+           local_dist_port()
          ]) do
       {:ok, cluster_info} ->
         {:ok, cluster_info}
@@ -416,7 +436,8 @@ defmodule NeonFS.Cluster.Join do
     node_info = %{
       id: node_id,
       name: this_node,
-      joined_at: DateTime.utc_now()
+      joined_at: DateTime.utc_now(),
+      dist_port: local_dist_port()
     }
 
     # Parse created_at from ISO8601 string
@@ -432,7 +453,8 @@ defmodule NeonFS.Cluster.Join do
         %{
           id: peer["id"] || peer.id,
           name: parse_atom(peer["name"] || peer.name),
-          last_seen: parse_datetime(peer["last_seen"] || peer.last_seen)
+          last_seen: parse_datetime(peer["last_seen"] || peer.last_seen),
+          dist_port: peer["dist_port"] || peer[:dist_port] || 0
         }
       end)
 
@@ -484,13 +506,14 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp add_peer_to_state(%State{} = state, joining_node, type) do
+  defp add_peer_to_state(%State{} = state, joining_node, type, dist_port) do
     node_id = generate_node_id()
 
     peer_info = %{
       id: node_id,
       name: joining_node,
-      last_seen: DateTime.utc_now()
+      last_seen: DateTime.utc_now(),
+      dist_port: dist_port
     }
 
     # Only core nodes are added to ra_cluster_members
@@ -696,6 +719,15 @@ defmodule NeonFS.Cluster.Join do
         Logger.error("Failed to join Ra cluster", reason: inspect(reason))
         {:error, {:ra_join_failed, reason}}
     end
+  end
+
+  defp local_dist_port do
+    case System.get_env("NEONFS_DIST_PORT") do
+      nil -> 0
+      port_str -> String.to_integer(port_str)
+    end
+  rescue
+    _ -> 0
   end
 
   defp local_data_endpoint do

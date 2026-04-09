@@ -1,7 +1,6 @@
 [Unit]
 Description=NeonFS Omnibus Daemon (Core + FUSE + NFS)
 After=network.target
-Wants=epmd.service
 Documentation=https://neonfs.dev/docs
 
 [Service]

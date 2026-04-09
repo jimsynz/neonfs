@@ -23,7 +23,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
   @chunk_size 50 * 1024
 
   setup do
-    wait_for_clean_epmd()
+    wait_for_clean_peers()
     :ok
   end
 
@@ -359,17 +359,15 @@ defmodule NeonFS.Integration.DriveSpaceTest do
     end
   end
 
-  defp wait_for_clean_epmd do
-    wait_until(&no_stale_epmd_nodes?/0, timeout: 15_000, interval: 200)
+  defp wait_for_clean_peers do
+    wait_until(
+      fn ->
+        not Enum.any?(Node.list(), fn node ->
+          String.starts_with?(Atom.to_string(node), "node")
+        end)
+      end,
+      timeout: 15_000,
+      interval: 200
+    )
   end
-
-  defp no_stale_epmd_nodes? do
-    case :erl_epmd.names() do
-      {:ok, names} -> not Enum.any?(names, &stale_node_entry?/1)
-      {:error, _} -> true
-    end
-  end
-
-  defp stale_node_entry?({name, _port}),
-    do: String.starts_with?(to_string(name), "node")
 end
