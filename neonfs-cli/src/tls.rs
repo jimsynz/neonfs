@@ -1,11 +1,7 @@
 //! TLS certificate utilities for NeonFS CLI.
 //!
 //! Loads the CLI certificate, key, and local CA from the TLS directory.
-//! Used for building TLS configurations when TLS distribution is enabled.
-//!
-//! Note: TLS distribution transport is not yet implemented due to the
-//! `Clone` bound on `erl_dist::message::channel()`. The certificates
-//! and config are ready; only the async stream wrapper needs resolving.
+//! Used for building TLS client config when TLS distribution is enabled.
 
 use crate::error::{CliError, Result};
 use std::fs;
@@ -28,7 +24,6 @@ pub fn tls_dir() -> PathBuf {
 ///
 /// - Client identity: `cli.crt` + `cli.key`
 /// - Trusted CA: `local-ca.crt` (and `ca.crt` if present)
-#[allow(dead_code)]
 pub fn build_client_config() -> Result<Arc<rustls::ClientConfig>> {
     let dir = tls_dir();
 
@@ -93,7 +88,10 @@ pub fn build_client_config() -> Result<Arc<rustls::ClientConfig>> {
         .map_err(|e| CliError::TlsError(format!("Failed to parse client key: {}", e)))?
         .ok_or_else(|| CliError::TlsError("No private key found in cli.key".to_string()))?;
 
-    let config = rustls::ClientConfig::builder()
+    let provider = rustls::crypto::ring::default_provider();
+    let config = rustls::ClientConfig::builder_with_provider(provider.into())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| CliError::TlsError(format!("Failed to configure TLS versions: {}", e)))?
         .with_root_certificates(root_store)
         .with_client_auth_cert(client_certs, client_key)
         .map_err(|e| CliError::TlsError(format!("Failed to build TLS config: {}", e)))?;
@@ -101,11 +99,11 @@ pub fn build_client_config() -> Result<Arc<rustls::ClientConfig>> {
     Ok(Arc::new(config))
 }
 
-/// Check if TLS certificates are available.
-#[allow(dead_code)]
-pub fn tls_available() -> bool {
-    let dir = tls_dir();
-    dir.join("local-ca.crt").exists()
-        && dir.join("cli.crt").exists()
-        && dir.join("cli.key").exists()
+/// Check if the daemon has TLS distribution configured.
+///
+/// Returns true when `ssl_dist.conf` exists in the TLS directory,
+/// which means the daemon wrapper generated certs and the BEAM VM
+/// was started with `-proto_dist inet_tls`.
+pub fn tls_configured() -> bool {
+    tls_dir().join("ssl_dist.conf").exists()
 }

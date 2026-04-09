@@ -89,12 +89,10 @@ pub enum CliError {
     },
 
     /// TLS certificate not found
-    #[allow(dead_code)]
     #[error("TLS certificate not found at {0}. Is the NeonFS daemon running?")]
     TlsCertNotFound(String),
 
     /// Failed to read TLS certificate
-    #[allow(dead_code)]
     #[error("Failed to read TLS certificate: {0}")]
     TlsError(String),
 
