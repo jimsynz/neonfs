@@ -4,7 +4,7 @@ defmodule NeonFS.NFS.MixProject do
   @moduledoc """
   NFSv3 server interface for NeonFS.
   """
-  @version "0.1.10"
+  @version "0.1.11"
 
   def project do
     [

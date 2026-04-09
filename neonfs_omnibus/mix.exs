@@ -4,7 +4,7 @@ defmodule NeonFS.Omnibus.MixProject do
   @moduledoc """
   All-in-one NeonFS deployment combining core, FUSE, and NFS services.
   """
-  @version "0.1.10"
+  @version "0.1.11"
 
   def project do
     [

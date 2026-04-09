@@ -5,6 +5,17 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.11](https://harton.dev/project-neon/neonfs/compare/v0.1.10...v0.1.11) (2026-04-09)
+
+
+
+
+### Bug Fixes:
+
+* deps: update rust crate md5 to 0.8 (#106) by Renovate Bot
+
+* use TLS distribution for CLI-to-daemon connections by [@jimsynz](https://github.com/jimsynz)
+
 ## [v0.1.10](https://harton.dev/project-neon/neonfs/compare/v0.1.9...v0.1.10) (2026-04-09)
 
 
