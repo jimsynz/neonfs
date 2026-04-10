@@ -202,6 +202,7 @@ impl BlobStore {
         options: &WriteOptions,
     ) -> Result<ChunkInfo, StoreError> {
         let final_path = self.chunk_path(hash, tier);
+        let temp_path = self.temp_path(&final_path);
         let original_size = data.len();
 
         // Step 1: Apply compression if specified
@@ -232,7 +233,18 @@ impl BlobStore {
 
         let stored_size = data_to_write.len();
 
-        self.atomic_write(&final_path, &data_to_write)?;
+        // Ensure parent directories exist
+        ensure_parent_dirs(&final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
+
+        // Write to temporary file
+        let mut file = File::create(&temp_path).map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.write_all(&data_to_write)
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.sync_all()
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+
+        // Atomic rename to final path
+        fs::rename(&temp_path, &final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
 
         Ok(ChunkInfo {
             hash: *hash,
@@ -450,7 +462,15 @@ impl BlobStore {
 
         let stored_size = new_encrypted.len();
 
-        self.atomic_write(&path, &new_encrypted)?;
+        // Write back atomically
+        let temp_path = self.temp_path(&path);
+        let mut file = File::create(&temp_path).map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.write_all(&new_encrypted)
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.sync_all()
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+
+        fs::rename(&temp_path, &path).map_err(|e| StoreError::io_error(&path, e))?;
 
         Ok(stored_size)
     }
@@ -483,7 +503,19 @@ impl BlobStore {
         data: &[u8],
     ) -> Result<(), StoreError> {
         let final_path = self.metadata_path(segment_id_hex, key_hash);
-        self.atomic_write(&final_path, data)
+        let temp_path = self.temp_path(&final_path);
+
+        ensure_parent_dirs(&final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
+
+        let mut file = File::create(&temp_path).map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.write_all(data)
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+        file.sync_all()
+            .map_err(|e| StoreError::io_error(&temp_path, e))?;
+
+        fs::rename(&temp_path, &final_path).map_err(|e| StoreError::io_error(&final_path, e))?;
+
+        Ok(())
     }
 
     /// Reads metadata from the store.
@@ -569,33 +601,6 @@ impl BlobStore {
         }
 
         Ok(())
-    }
-
-    /// Writes data to a file atomically via a temp file, with cleanup on failure.
-    ///
-    /// Creates a temp file, writes data, syncs, then renames to the final path.
-    /// If any step fails, the temp file is removed before returning the error.
-    fn atomic_write(&self, final_path: &Path, data: &[u8]) -> Result<(), StoreError> {
-        let temp_path = self.temp_path(final_path);
-
-        ensure_parent_dirs(final_path).map_err(|e| StoreError::io_error(final_path, e))?;
-
-        let result = (|| {
-            let mut file =
-                File::create(&temp_path).map_err(|e| StoreError::io_error(&temp_path, e))?;
-            file.write_all(data)
-                .map_err(|e| StoreError::io_error(&temp_path, e))?;
-            file.sync_all()
-                .map_err(|e| StoreError::io_error(&temp_path, e))?;
-            fs::rename(&temp_path, final_path).map_err(|e| StoreError::io_error(final_path, e))?;
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ = fs::remove_file(&temp_path);
-        }
-
-        result
     }
 
     /// Generates a temporary file path for atomic writes.
@@ -1610,34 +1615,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(read_data, data);
-    }
-
-    #[test]
-    fn test_atomic_write_cleans_up_temp_on_failure() {
-        let (store, temp_dir) = create_test_store();
-
-        // Create a read-only directory so the rename step fails
-        let hash = sha256(b"will_fail");
-        let chunk_dir = temp_dir
-            .path()
-            .join("blobs")
-            .join("hot")
-            .join(&hash.to_hex()[0..2])
-            .join(&hash.to_hex()[2..4]);
-        fs::create_dir_all(&chunk_dir).unwrap();
-
-        // Write should succeed (the directory exists)
-        store.write_chunk(&hash, b"test data", Tier::Hot).unwrap();
-
-        // Verify no .tmp files remain in the chunk directory
-        let temp_files: Vec<_> = fs::read_dir(&chunk_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
-            .collect();
-        assert!(
-            temp_files.is_empty(),
-            "No temp files should remain after successful write"
-        );
     }
 }
