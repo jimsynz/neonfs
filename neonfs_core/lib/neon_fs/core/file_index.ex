@@ -640,22 +640,38 @@ defmodule NeonFS.Core.FileIndex do
              :ok <-
                quorum_remove_dir_child(file.volume_id, parent_path, name, quorum_opts) do
           complete_intent(intent_id)
-          :ets.delete(:file_index_by_id, file_id)
-
-          safe_broadcast(file.volume_id, %FileDeleted{
-            volume_id: file.volume_id,
-            file_id: file_id,
-            path: file.path
-          })
-
+          delete_file_from_ets(file_id, file)
           :ok
         else
-          {:error, reason} -> {:error, reason}
+          {:error, reason} ->
+            # When quorum writes fail (e.g. ENOSPC), still delete from the local
+            # ETS cache so GC can identify orphaned chunks. The tombstone will be
+            # missing from the quorum store — anti-entropy or the next successful
+            # delete will reconcile. Without this fallback, a full disk creates a
+            # deadlock: file delete needs disk space for tombstone, GC needs file
+            # delete to identify orphans, disk space needs GC to free blobs.
+            Logger.warning(
+              "FileIndex delete quorum write failed (#{inspect(reason)}), " <>
+                "proceeding with local-only delete for file #{file_id}"
+            )
+
+            delete_file_from_ets(file_id, file)
+            :ok
         end
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp delete_file_from_ets(file_id, file) do
+    :ets.delete(:file_index_by_id, file_id)
+
+    safe_broadcast(file.volume_id, %FileDeleted{
+      volume_id: file.volume_id,
+      file_id: file_id,
+      path: file.path
+    })
   end
 
   ## Private — Mkdir
