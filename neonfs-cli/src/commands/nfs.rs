@@ -12,15 +12,15 @@ use eetf::{Binary, Term};
 #[derive(Debug, Subcommand)]
 pub enum NfsCommand {
     /// Export a volume via NFS
-    Mount {
+    Export {
         /// Volume name
         volume: String,
     },
 
     /// Unexport a volume from NFS
-    Unmount {
-        /// Export ID or volume name
-        target: String,
+    Unexport {
+        /// Volume name
+        volume: String,
     },
 
     /// List all NFS exports
@@ -31,20 +31,20 @@ impl NfsCommand {
     /// Execute the NFS command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            NfsCommand::Mount { volume } => self.mount(volume, format),
-            NfsCommand::Unmount { target } => self.unmount(target, format),
+            NfsCommand::Export { volume } => self.export(volume, format),
+            NfsCommand::Unexport { volume } => self.unexport(volume, format),
             NfsCommand::List => self.list(format),
         }
     }
 
-    fn mount(&self, volume: &str, format: OutputFormat) -> Result<()> {
+    fn export(&self, volume: &str, format: OutputFormat) -> Result<()> {
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
 
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
-            conn.call("Elixir.NeonFS.CLI.Handler", "nfs_mount", vec![volume_term])
+            conn.call("Elixir.NeonFS.CLI.Handler", "nfs_export", vec![volume_term])
                 .await
         })?;
 
@@ -61,23 +61,33 @@ impl NfsCommand {
             }
             OutputFormat::Table => {
                 println!("✓ Volume '{}' exported via NFS", export.volume_name);
-                println!("  Export ID: {}", export.id);
+                println!();
+                println!("  To mount:");
+                let port_opt = if export.port != 2049 {
+                    format!(",port={},mountport={}", export.port, export.port)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "    mount -t nfs -o nfsvers=3,proto=tcp{} {}:/{} /mnt/point",
+                    port_opt, export.server_address, export.volume_name
+                );
             }
         }
         Ok(())
     }
 
-    fn unmount(&self, target: &str, format: OutputFormat) -> Result<()> {
-        let target_term = Term::Binary(Binary {
-            bytes: target.as_bytes().to_vec(),
+    fn unexport(&self, volume: &str, format: OutputFormat) -> Result<()> {
+        let volume_term = Term::Binary(Binary {
+            bytes: volume.as_bytes().to_vec(),
         });
 
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
-                "nfs_unmount",
-                vec![target_term],
+                "nfs_unexport",
+                vec![volume_term],
             )
             .await
         })?;
@@ -90,13 +100,13 @@ impl NfsCommand {
             OutputFormat::Json => {
                 let response = serde_json::json!({
                     "status": "success",
-                    "target": target,
+                    "volume": volume,
                     "message": "Volume unexported"
                 });
                 println!("{}", json::format(&response)?);
             }
             OutputFormat::Table => {
-                println!("✓ Volume unexported from NFS: '{}'", target);
+                println!("✓ Volume '{}' unexported from NFS", volume);
             }
         }
         Ok(())
@@ -105,7 +115,7 @@ impl NfsCommand {
     fn list(&self, format: OutputFormat) -> Result<()> {
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
-            conn.call("Elixir.NeonFS.CLI.Handler", "nfs_list_mounts", vec![])
+            conn.call("Elixir.NeonFS.CLI.Handler", "nfs_list_exports", vec![])
                 .await
         })?;
 
@@ -132,14 +142,12 @@ impl NfsCommand {
                 } else {
                     let mut tbl = table::Table::new(vec![
                         "NODE".to_string(),
-                        "EXPORT ID".to_string(),
                         "VOLUME".to_string(),
                         "EXPORTED AT".to_string(),
                     ]);
                     for export in &exports {
                         tbl.add_row(vec![
                             export.node.clone(),
-                            export.id.clone(),
                             export.volume_name.clone(),
                             export.exported_at.clone(),
                         ]);

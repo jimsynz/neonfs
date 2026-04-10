@@ -705,11 +705,11 @@ impl MountInfo {
 /// NFS export information response
 #[derive(Debug, Serialize)]
 pub struct NfsExportInfo {
-    #[serde(rename = "export_id")]
-    pub id: String,
     pub node: String,
     pub volume_name: String,
     pub exported_at: String,
+    pub server_address: String,
+    pub port: u16,
 }
 
 impl NfsExportInfo {
@@ -718,11 +718,6 @@ impl NfsExportInfo {
         let map = term_to_map(&term)?;
 
         Ok(Self {
-            id: term_to_string(
-                map.get("id").ok_or_else(|| {
-                    CliError::TermConversionError("Missing 'id' field".to_string())
-                })?,
-            )?,
             node: term_to_string(map.get("node").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'node' field".to_string())
             })?)?,
@@ -732,6 +727,12 @@ impl NfsExportInfo {
             exported_at: term_to_string(map.get("exported_at").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'exported_at' field".to_string())
             })?)?,
+            server_address: term_to_string(map.get("server_address").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'server_address' field".to_string())
+            })?)?,
+            port: term_to_u64(map.get("port").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'port' field".to_string())
+            })?)? as u16,
         })
     }
 }

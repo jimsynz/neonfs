@@ -610,7 +610,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "nfs_mount/1" do
+  describe "nfs_export/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       ensure_cluster_state()
@@ -622,12 +622,12 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns error for non-existent volume or NFS unavailable" do
-      result = Handler.nfs_mount("no-such-vol")
+      result = Handler.nfs_export("no-such-vol")
       assert match?({:error, _}, result)
     end
   end
 
-  describe "nfs_unmount/1" do
+  describe "nfs_unexport/1" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       ensure_cluster_state()
@@ -639,12 +639,12 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns error for non-existent export or NFS unavailable" do
-      result = Handler.nfs_unmount("no-such-export")
+      result = Handler.nfs_unexport("no-such-export")
       assert match?({:error, _}, result)
     end
   end
 
-  describe "nfs_list_mounts/0" do
+  describe "nfs_list_exports/0" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       ensure_cluster_state()
@@ -656,7 +656,7 @@ defmodule NeonFS.CLI.HandlerTest do
     end
 
     test "returns list or error depending on NFS availability" do
-      result = Handler.nfs_list_mounts()
+      result = Handler.nfs_list_exports()
       assert match?({:ok, _}, result) or match?({:error, _}, result)
     end
   end

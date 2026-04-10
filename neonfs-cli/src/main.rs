@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_nfs_subcommand_parsing() {
-        let cli = Cli::try_parse_from(["neonfs-cli", "nfs", "mount", "myvol"]);
+        let cli = Cli::try_parse_from(["neonfs-cli", "nfs", "export", "myvol"]);
         assert!(cli.is_ok());
     }
 
