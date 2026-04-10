@@ -146,6 +146,28 @@ defmodule NeonFS.NFS.HandlerTest do
       assert "vol_a" in names
       assert "vol_b" in names
     end
+
+    test "includes . and .. entries pointing to root inode", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx, volumes: ["vol_a"])
+
+      send_op(handler, 1, "readdirplus", %{
+        "inode" => 1,
+        "volume_id" => @null_volume_id,
+        "cookie" => 0
+      })
+
+      reply = assert_ok(1)
+      names = Enum.map(reply["entries"], & &1["name"])
+      assert "." in names
+      assert ".." in names
+
+      dot = Enum.find(reply["entries"], &(&1["name"] == "."))
+      dotdot = Enum.find(reply["entries"], &(&1["name"] == ".."))
+      assert dot["file_id"] == 1
+      assert dotdot["file_id"] == 1
+      assert dot["kind"] == "directory"
+      assert dotdot["kind"] == "directory"
+    end
   end
 
   ## Unregistered Volume Tests
@@ -664,7 +686,7 @@ defmodule NeonFS.NFS.HandlerTest do
   end
 
   describe "readdirplus on volume" do
-    test "returns empty list for empty volume", ctx do
+    test "empty volume still includes . and .. entries", ctx do
       %{handler: handler} = start_handler_with_mock(ctx)
       {vol_hash, root_inode} = register_volume(handler)
 
@@ -676,10 +698,31 @@ defmodule NeonFS.NFS.HandlerTest do
 
       reply = assert_ok(1)
       assert reply["type"] == "dir_entries"
-      assert reply["entries"] == []
+      names = Enum.map(reply["entries"], & &1["name"])
+      assert names == [".", ".."]
     end
 
-    test "lists created files", ctx do
+    test ". points to directory itself and .. points to virtual root for volume root", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+
+      send_op(handler, 1, "readdirplus", %{
+        "inode" => root_inode,
+        "volume_id" => vol_hash,
+        "cookie" => 0
+      })
+
+      reply = assert_ok(1)
+      dot = Enum.find(reply["entries"], &(&1["name"] == "."))
+      dotdot = Enum.find(reply["entries"], &(&1["name"] == ".."))
+
+      assert dot["file_id"] == root_inode
+      assert dotdot["file_id"] == 1
+      assert dot["kind"] == "directory"
+      assert dotdot["kind"] == "directory"
+    end
+
+    test "lists created files alongside . and ..", ctx do
       %{handler: handler} = start_handler_with_mock(ctx)
       {vol_hash, root_inode} = register_volume(handler)
       create_file(handler, vol_hash, root_inode, "alpha.txt")
@@ -693,6 +736,8 @@ defmodule NeonFS.NFS.HandlerTest do
 
       reply = assert_ok(1)
       names = Enum.map(reply["entries"], & &1["name"])
+      assert "." in names
+      assert ".." in names
       assert "alpha.txt" in names
       assert "beta.txt" in names
     end
@@ -738,7 +783,8 @@ defmodule NeonFS.NFS.HandlerTest do
       })
 
       reply = assert_ok(1)
-      assert reply["entries"] == []
+      names = Enum.map(reply["entries"], & &1["name"])
+      assert names == [".", ".."]
 
       create_file(handler, vol_hash, root_inode, "after.txt")
 

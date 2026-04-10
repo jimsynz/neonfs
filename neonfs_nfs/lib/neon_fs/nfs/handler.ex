@@ -263,7 +263,7 @@ defmodule NeonFS.NFS.Handler do
       result =
         with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
              {:ok, path} <- inode_path(inode) do
-          cached_readdir(state.cache_table, vol, path)
+          cached_readdir(state.cache_table, vol, path, inode)
         end
 
       {result_to_reply(result), state}
@@ -543,7 +543,7 @@ defmodule NeonFS.NFS.Handler do
     end
   end
 
-  defp cached_readdir(cache_table, vol, path) do
+  defp cached_readdir(cache_table, vol, path, dir_inode) do
     case cache_table && MetadataCache.get_dir_listing(cache_table, vol.name, path) do
       {:ok, entries} ->
         emit_cache_telemetry(:hit, :dir, vol.name)
@@ -551,17 +551,19 @@ defmodule NeonFS.NFS.Handler do
 
       _ ->
         if cache_table, do: emit_cache_telemetry(:miss, :dir, vol.name)
-        uncached_readdir(cache_table, vol, path)
+        uncached_readdir(cache_table, vol, path, dir_inode)
     end
   end
 
-  defp uncached_readdir(cache_table, vol, path) do
+  defp uncached_readdir(cache_table, vol, path, dir_inode) do
     with {:ok, entries} <- list_directory(vol.id, path) do
-      dir_entries =
+      child_entries =
         Enum.map(entries, fn {name, child_path, file_attrs} ->
           {:ok, child_inode} = InodeTable.allocate_inode(vol.name, child_path)
           build_dir_entry(child_inode, name, file_attrs)
         end)
+
+      dir_entries = dot_entries(dir_inode, vol.name, path) ++ child_entries
 
       if cache_table, do: MetadataCache.put_dir_listing(cache_table, vol.name, path, dir_entries)
       {:ok, {:ok, %{"type" => "dir_entries", "entries" => dir_entries}}}
@@ -681,7 +683,7 @@ defmodule NeonFS.NFS.Handler do
             register_volume(name, core_id, acc)
           end)
 
-        entries =
+        volume_entries =
           Enum.map(volumes, fn vol ->
             name = volume_name(vol)
             {:ok, _} = InodeTable.allocate_inode(name, "/")
@@ -690,6 +692,10 @@ defmodule NeonFS.NFS.Handler do
             build_dir_entry(inode, name, synthetic_dir_attrs())
             |> Map.put("volume_id", volume_id_hash(name))
           end)
+
+        root_dot = build_dir_entry(1, ".", synthetic_dir_attrs())
+        root_dotdot = build_dir_entry(1, "..", synthetic_dir_attrs())
+        entries = [root_dot, root_dotdot | volume_entries]
 
         reply = {:ok, %{"type" => "dir_entries", "entries" => entries}}
         {reply, new_state}
@@ -742,6 +748,33 @@ defmodule NeonFS.NFS.Handler do
       "ctime_secs" => ctime_secs,
       "ctime_nsecs" => ctime_nsecs
     }
+  end
+
+  defp dot_entries(dir_inode, volume_name, path) do
+    attrs = synthetic_dir_attrs()
+    dot = build_dir_entry(dir_inode, ".", attrs)
+
+    parent_inode =
+      case parent_path(path) do
+        :virtual_root ->
+          1
+
+        parent ->
+          {:ok, inode} = InodeTable.allocate_inode(volume_name, parent)
+          inode
+      end
+
+    dotdot = build_dir_entry(parent_inode, "..", attrs)
+    [dot, dotdot]
+  end
+
+  defp parent_path("/"), do: :virtual_root
+
+  defp parent_path(path) do
+    case Path.dirname(path) do
+      "/" -> "/"
+      parent -> parent
+    end
   end
 
   defp file_to_nfs_attrs(type, inode, file_or_attrs) when is_map(file_or_attrs) do
