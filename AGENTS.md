@@ -180,9 +180,52 @@ Always consult these before implementing:
 This repository is hosted on a Forgejo instance at `harton.dev`. Use the `fj` CLI (not `gh`) for pull requests, issues, and other forge operations:
 ```bash
 fj pr create --base main "PR title"    # Create a pull request
-fj pr list                              # List pull requests
-fj issue list                           # List issues
+fj pr search --state open              # List open pull requests
+fj issue search --state open           # List open issues
+fj issue view 123                      # View issue details
+fj pr view 123                         # View PR details
 ```
+
+### Retrieving CI Status and Logs
+
+The `fj pr status` command is broken on this Forgejo version. Use the API instead. Obtain a token via git credentials:
+
+```bash
+TOKEN=$(echo -e "protocol=https\nhost=harton.dev" | git credential fill | awk -F= '/password/{print $2}')
+```
+
+**Check CI status for a commit:**
+```bash
+COMMIT=$(git rev-parse HEAD)
+curl -s -H "Authorization: token $TOKEN" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$COMMIT/statuses" \
+  | jq '.[] | {context, status, description}'
+```
+
+**Show only failures:**
+```bash
+curl -s -H "Authorization: token $TOKEN" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$COMMIT/statuses" \
+  | jq '.[] | select(.status == "failure") | {context, description}'
+```
+
+**List workflow runs for the current branch (with job-level detail):**
+```bash
+SHA=$(git rev-parse HEAD)
+curl -s -H "Authorization: token $TOKEN" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/actions/tasks?limit=20" \
+  | jq ".workflow_runs[] | select(.head_sha == \"$SHA\") | {id, name, status, event}"
+```
+
+**Compare against main to identify pre-existing failures:**
+```bash
+MAIN_SHA=$(git rev-parse origin/main)
+curl -s -H "Authorization: token $TOKEN" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$MAIN_SHA/statuses" \
+  | jq '.[] | select(.status == "failure") | {context, description}'
+```
+
+**Note:** Forgejo does not expose job logs via the API. If you need to see the actual log output of a failing CI job, reproduce the failure locally by running the same commands from the workflow file (`.forgejo/workflows/ci.yml`). Each CI job runs `mix check` or `cargo test`/`cargo clippy` in the relevant package directory.
 
 ## Container Building
 

@@ -1,0 +1,550 @@
+defmodule S3Server.Plug do
+  @moduledoc """
+  Plug that serves an S3-compatible HTTP API.
+
+  Mount this plug in your router and provide a backend module:
+
+      forward "/s3", S3Server.Plug, backend: MyApp.S3Backend, region: "us-east-1"
+
+  ## Options
+
+    * `:backend` (required) — module implementing `S3Server.Backend`
+    * `:region` — AWS region string for SigV4 scope and GetBucketLocation
+      (default: `"us-east-1"`)
+    * `:request_id_prefix` — prefix for X-Amz-Request-Id header
+      (default: `"s3srv"`)
+  """
+
+  @behaviour Plug
+
+  require Logger
+
+  @impl Plug
+  @spec init(keyword()) :: map()
+  def init(opts) do
+    %{
+      backend: Keyword.fetch!(opts, :backend),
+      region: Keyword.get(opts, :region, "us-east-1"),
+      request_id_prefix: Keyword.get(opts, :request_id_prefix, "s3srv")
+    }
+  end
+
+  @impl Plug
+  @spec call(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def call(conn, opts) do
+    request_id = generate_request_id(opts.request_id_prefix)
+
+    conn
+    |> Plug.Conn.put_resp_header("x-amz-request-id", request_id)
+    |> Plug.Conn.put_resp_header("server", "S3Server")
+    |> authenticate_and_dispatch(opts, request_id)
+  end
+
+  defp authenticate_and_dispatch(conn, opts, request_id) do
+    case S3Server.Auth.authenticate(conn, opts.backend) do
+      {:ok, auth_context} ->
+        dispatch(conn, opts, auth_context, request_id)
+
+      {:error, :credential_not_found} ->
+        send_error(conn, %S3Server.Error{code: :access_denied, request_id: request_id})
+
+      {:error, :invalid_signature} ->
+        send_error(conn, %S3Server.Error{
+          code: :signature_does_not_match,
+          request_id: request_id
+        })
+
+      {:error, :expired} ->
+        send_error(conn, %S3Server.Error{code: :access_denied, request_id: request_id})
+    end
+  end
+
+  defp dispatch(conn, opts, auth_context, request_id) do
+    {bucket, key} = extract_bucket_key(conn)
+    query = URI.decode_query(conn.query_string)
+
+    route(conn, conn.method, bucket, key, query, opts, auth_context, request_id)
+  rescue
+    e ->
+      Logger.error("S3Server dispatch error: #{Exception.message(e)}")
+
+      send_error(conn, %S3Server.Error{code: :internal_error, request_id: request_id})
+  end
+
+  # Service-level: GET / → ListBuckets
+  defp route(conn, "GET", nil, nil, _query, opts, ctx, req_id) do
+    handle_list_buckets(conn, opts.backend, ctx, req_id)
+  end
+
+  # Bucket-level operations with query parameter dispatch
+  defp route(conn, "GET", bucket, nil, %{"location" => _}, opts, ctx, req_id) do
+    handle_get_bucket_location(conn, opts, bucket, ctx, req_id)
+  end
+
+  defp route(conn, "GET", bucket, nil, %{"uploads" => _}, opts, ctx, req_id) do
+    handle_list_multipart_uploads(conn, opts.backend, bucket, ctx, req_id)
+  end
+
+  defp route(conn, "GET", bucket, nil, query, opts, ctx, req_id) do
+    handle_list_objects_v2(conn, opts.backend, bucket, query, ctx, req_id)
+  end
+
+  defp route(conn, "PUT", bucket, nil, _query, opts, ctx, req_id) do
+    handle_create_bucket(conn, opts.backend, bucket, ctx, req_id)
+  end
+
+  defp route(conn, "DELETE", bucket, nil, _query, opts, ctx, req_id) do
+    handle_delete_bucket(conn, opts.backend, bucket, ctx, req_id)
+  end
+
+  defp route(conn, "HEAD", bucket, nil, _query, opts, ctx, req_id) do
+    handle_head_bucket(conn, opts.backend, bucket, ctx, req_id)
+  end
+
+  defp route(conn, "POST", bucket, nil, %{"delete" => _}, opts, ctx, req_id) do
+    handle_delete_objects(conn, opts.backend, bucket, ctx, req_id)
+  end
+
+  # Object-level operations with query parameter dispatch
+  defp route(conn, "POST", bucket, key, %{"uploads" => _}, opts, ctx, req_id) do
+    handle_create_multipart_upload(conn, opts.backend, bucket, key, ctx, req_id)
+  end
+
+  defp route(conn, "POST", bucket, key, %{"uploadId" => upload_id}, opts, ctx, req_id) do
+    handle_complete_multipart_upload(conn, opts.backend, bucket, key, upload_id, ctx, req_id)
+  end
+
+  defp route(
+         conn,
+         "PUT",
+         bucket,
+         key,
+         %{"partNumber" => part_num, "uploadId" => upload_id},
+         opts,
+         ctx,
+         req_id
+       ) do
+    handle_upload_part(conn, opts.backend, bucket, key, upload_id, part_num, ctx, req_id)
+  end
+
+  defp route(conn, "DELETE", bucket, key, %{"uploadId" => upload_id}, opts, ctx, req_id) do
+    handle_abort_multipart_upload(conn, opts.backend, bucket, key, upload_id, ctx, req_id)
+  end
+
+  defp route(conn, "GET", bucket, key, %{"uploadId" => upload_id}, opts, ctx, req_id) do
+    handle_list_parts(conn, opts.backend, bucket, key, upload_id, ctx, req_id)
+  end
+
+  # CopyObject: PUT with x-amz-copy-source header
+  defp route(conn, "PUT", bucket, key, _query, opts, ctx, req_id) do
+    case Plug.Conn.get_req_header(conn, "x-amz-copy-source") do
+      [copy_source | _] ->
+        handle_copy_object(conn, opts.backend, bucket, key, copy_source, ctx, req_id)
+
+      [] ->
+        handle_put_object(conn, opts.backend, bucket, key, ctx, req_id)
+    end
+  end
+
+  defp route(conn, "GET", bucket, key, _query, opts, ctx, req_id) do
+    handle_get_object(conn, opts.backend, bucket, key, ctx, req_id)
+  end
+
+  defp route(conn, "HEAD", bucket, key, _query, opts, ctx, req_id) do
+    handle_head_object(conn, opts.backend, bucket, key, ctx, req_id)
+  end
+
+  defp route(conn, "DELETE", bucket, key, _query, opts, ctx, req_id) do
+    handle_delete_object(conn, opts.backend, bucket, key, ctx, req_id)
+  end
+
+  defp route(conn, _method, _bucket, _key, _query, _opts, _ctx, req_id) do
+    send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+  end
+
+  # Operation handlers
+
+  defp handle_list_buckets(conn, backend, ctx, req_id) do
+    case backend.list_buckets(ctx) do
+      {:ok, buckets} ->
+        send_xml(conn, 200, S3Server.XML.list_buckets_response(buckets))
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_create_bucket(conn, backend, bucket, ctx, req_id) do
+    case backend.create_bucket(ctx, bucket) do
+      :ok ->
+        conn
+        |> Plug.Conn.put_resp_header("location", "/#{bucket}")
+        |> Plug.Conn.send_resp(200, "")
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_delete_bucket(conn, backend, bucket, ctx, req_id) do
+    case backend.delete_bucket(ctx, bucket) do
+      :ok -> Plug.Conn.send_resp(conn, 204, "")
+      {:error, error} -> send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_head_bucket(conn, backend, bucket, ctx, req_id) do
+    case backend.head_bucket(ctx, bucket) do
+      :ok -> Plug.Conn.send_resp(conn, 200, "")
+      {:error, error} -> send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_get_bucket_location(conn, opts, bucket, ctx, req_id) do
+    case opts.backend.get_bucket_location(ctx, bucket) do
+      {:ok, location} ->
+        send_xml(conn, 200, S3Server.XML.get_bucket_location_response(location))
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_list_objects_v2(conn, backend, bucket, query, ctx, req_id) do
+    list_opts = %S3Server.ListOpts{
+      prefix: Map.get(query, "prefix"),
+      delimiter: Map.get(query, "delimiter"),
+      max_keys: parse_int(Map.get(query, "max-keys"), 1000),
+      continuation_token: Map.get(query, "continuation-token"),
+      start_after: Map.get(query, "start-after"),
+      fetch_owner: Map.get(query, "fetch-owner") == "true"
+    }
+
+    case backend.list_objects_v2(ctx, bucket, list_opts) do
+      {:ok, result} ->
+        send_xml(conn, 200, S3Server.XML.list_objects_v2_response(result))
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_put_object(conn, backend, bucket, key, ctx, req_id) do
+    {:ok, body, conn} = read_full_body(conn)
+
+    put_opts = %S3Server.PutOpts{
+      content_type: get_content_type(conn),
+      metadata: extract_user_metadata(conn)
+    }
+
+    case backend.put_object(ctx, bucket, key, body, put_opts) do
+      {:ok, etag} ->
+        conn
+        |> Plug.Conn.put_resp_header("etag", ensure_quoted(etag))
+        |> Plug.Conn.send_resp(200, "")
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_get_object(conn, backend, bucket, key, ctx, req_id) do
+    get_opts = %S3Server.GetOpts{
+      range: parse_range(conn),
+      if_match: get_header(conn, "if-match"),
+      if_none_match: get_header(conn, "if-none-match"),
+      if_modified_since: parse_http_date(get_header(conn, "if-modified-since")),
+      if_unmodified_since: parse_http_date(get_header(conn, "if-unmodified-since"))
+    }
+
+    case backend.get_object(ctx, bucket, key, get_opts) do
+      {:ok, object} ->
+        status = if get_opts.range, do: 206, else: 200
+
+        conn
+        |> Plug.Conn.put_resp_header("etag", ensure_quoted(object.etag))
+        |> Plug.Conn.put_resp_header("content-type", object.content_type)
+        |> Plug.Conn.put_resp_header("content-length", to_string(object.content_length))
+        |> Plug.Conn.put_resp_header("last-modified", format_http_date(object.last_modified))
+        |> put_user_metadata(object.metadata)
+        |> Plug.Conn.send_resp(status, object.body)
+
+      {:error, %{code: :not_modified} = error} ->
+        send_error(conn, %{error | request_id: req_id})
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_head_object(conn, backend, bucket, key, ctx, req_id) do
+    case backend.head_object(ctx, bucket, key) do
+      {:ok, meta} ->
+        conn
+        |> Plug.Conn.put_resp_header("etag", ensure_quoted(meta.etag))
+        |> Plug.Conn.put_resp_header("content-type", meta.content_type)
+        |> Plug.Conn.put_resp_header("content-length", to_string(meta.size))
+        |> Plug.Conn.put_resp_header("last-modified", format_http_date(meta.last_modified))
+        |> put_user_metadata(meta.metadata)
+        |> Plug.Conn.send_resp(200, "")
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_delete_object(conn, backend, bucket, key, ctx, req_id) do
+    case backend.delete_object(ctx, bucket, key) do
+      :ok -> Plug.Conn.send_resp(conn, 204, "")
+      {:error, error} -> send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_delete_objects(conn, backend, bucket, ctx, req_id) do
+    {:ok, body, conn} = read_full_body(conn)
+
+    case S3Server.XML.parse_delete_objects(body) do
+      {:ok, keys} ->
+        case backend.delete_objects(ctx, bucket, keys) do
+          {:ok, result} ->
+            send_xml(conn, 200, S3Server.XML.delete_objects_response(result))
+
+          {:error, error} ->
+            send_error(conn, %{error | request_id: req_id})
+        end
+
+      {:error, :invalid_xml} ->
+        send_error(conn, %S3Server.Error{code: :invalid_argument, request_id: req_id})
+    end
+  end
+
+  defp handle_copy_object(conn, backend, bucket, key, copy_source, ctx, req_id) do
+    {source_bucket, source_key} = parse_copy_source(copy_source)
+
+    case backend.copy_object(ctx, bucket, key, source_bucket, source_key) do
+      {:ok, result} ->
+        send_xml(conn, 200, S3Server.XML.copy_object_response(result))
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  # Multipart operations
+
+  defp handle_create_multipart_upload(conn, backend, bucket, key, ctx, req_id) do
+    if function_exported?(backend, :create_multipart_upload, 4) do
+      opts = %{content_type: get_content_type(conn), metadata: extract_user_metadata(conn)}
+
+      case backend.create_multipart_upload(ctx, bucket, key, opts) do
+        {:ok, upload_id} ->
+          send_xml(
+            conn,
+            200,
+            S3Server.XML.initiate_multipart_upload_response(bucket, key, upload_id)
+          )
+
+        {:error, error} ->
+          send_error(conn, %{error | request_id: req_id})
+      end
+    else
+      send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+    end
+  end
+
+  defp handle_upload_part(conn, backend, bucket, key, upload_id, part_num_str, ctx, req_id) do
+    if function_exported?(backend, :upload_part, 6) do
+      {:ok, body, conn} = read_full_body(conn)
+      part_number = String.to_integer(part_num_str)
+
+      case backend.upload_part(ctx, bucket, key, upload_id, part_number, body) do
+        {:ok, etag} ->
+          conn
+          |> Plug.Conn.put_resp_header("etag", ensure_quoted(etag))
+          |> Plug.Conn.send_resp(200, "")
+
+        {:error, error} ->
+          send_error(conn, %{error | request_id: req_id})
+      end
+    else
+      send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+    end
+  end
+
+  defp handle_complete_multipart_upload(conn, backend, bucket, key, upload_id, ctx, req_id) do
+    if function_exported?(backend, :complete_multipart_upload, 5) do
+      {:ok, body, conn} = read_full_body(conn)
+      do_complete_multipart(conn, backend, bucket, key, upload_id, body, ctx, req_id)
+    else
+      send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+    end
+  end
+
+  defp do_complete_multipart(conn, backend, bucket, key, upload_id, body, ctx, req_id) do
+    with {:ok, parts} <- S3Server.XML.parse_complete_multipart(body),
+         {:ok, result} <- backend.complete_multipart_upload(ctx, bucket, key, upload_id, parts) do
+      send_xml(conn, 200, S3Server.XML.complete_multipart_upload_response(result))
+    else
+      {:error, :invalid_xml} ->
+        send_error(conn, %S3Server.Error{code: :invalid_argument, request_id: req_id})
+
+      {:error, error} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp handle_abort_multipart_upload(conn, backend, bucket, key, upload_id, ctx, req_id) do
+    if function_exported?(backend, :abort_multipart_upload, 4) do
+      case backend.abort_multipart_upload(ctx, bucket, key, upload_id) do
+        :ok -> Plug.Conn.send_resp(conn, 204, "")
+        {:error, error} -> send_error(conn, %{error | request_id: req_id})
+      end
+    else
+      send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+    end
+  end
+
+  defp handle_list_multipart_uploads(conn, backend, bucket, ctx, req_id) do
+    if function_exported?(backend, :list_multipart_uploads, 3) do
+      case backend.list_multipart_uploads(ctx, bucket, %{}) do
+        {:ok, result} ->
+          send_xml(conn, 200, S3Server.XML.list_multipart_uploads_response(result))
+
+        {:error, error} ->
+          send_error(conn, %{error | request_id: req_id})
+      end
+    else
+      send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+    end
+  end
+
+  defp handle_list_parts(conn, backend, bucket, key, upload_id, ctx, req_id) do
+    if function_exported?(backend, :list_parts, 5) do
+      case backend.list_parts(ctx, bucket, key, upload_id, %{}) do
+        {:ok, result} ->
+          send_xml(conn, 200, S3Server.XML.list_parts_response(result))
+
+        {:error, error} ->
+          send_error(conn, %{error | request_id: req_id})
+      end
+    else
+      send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+    end
+  end
+
+  # Response helpers
+
+  defp send_xml(conn, status, xml) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/xml")
+    |> Plug.Conn.send_resp(status, xml)
+  end
+
+  defp send_error(conn, %S3Server.Error{code: :not_modified}) do
+    Plug.Conn.send_resp(conn, 304, "")
+  end
+
+  defp send_error(conn, %S3Server.Error{} = error) do
+    status = S3Server.Error.to_http_status(error.code)
+    xml = S3Server.XML.error_response(error)
+
+    conn
+    |> Plug.Conn.put_resp_content_type("application/xml")
+    |> Plug.Conn.send_resp(status, xml)
+  end
+
+  # Request parsing helpers
+
+  defp extract_bucket_key(conn) do
+    case conn.path_info do
+      [] -> {nil, nil}
+      [bucket] -> {bucket, nil}
+      [bucket | key_parts] -> {bucket, Enum.join(key_parts, "/")}
+    end
+  end
+
+  defp parse_copy_source(source) do
+    source = String.trim_leading(source, "/")
+
+    case String.split(source, "/", parts: 2) do
+      [bucket, key] -> {bucket, key}
+      [bucket] -> {bucket, ""}
+    end
+  end
+
+  defp read_full_body(conn, acc \\ []) do
+    case Plug.Conn.read_body(conn) do
+      {:ok, body, conn} -> {:ok, IO.iodata_to_binary([acc, body]), conn}
+      {:more, partial, conn} -> read_full_body(conn, [acc, partial])
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp get_content_type(conn) do
+    case Plug.Conn.get_req_header(conn, "content-type") do
+      [ct | _] -> ct
+      [] -> "application/octet-stream"
+    end
+  end
+
+  defp extract_user_metadata(conn) do
+    conn.req_headers
+    |> Enum.filter(fn {k, _} -> String.starts_with?(k, "x-amz-meta-") end)
+    |> Map.new(fn {k, v} -> {String.replace_leading(k, "x-amz-meta-", ""), v} end)
+  end
+
+  defp put_user_metadata(conn, metadata) do
+    Enum.reduce(metadata, conn, fn {k, v}, acc ->
+      Plug.Conn.put_resp_header(acc, "x-amz-meta-#{k}", v)
+    end)
+  end
+
+  defp get_header(conn, name) do
+    case Plug.Conn.get_req_header(conn, name) do
+      [value | _] -> value
+      [] -> nil
+    end
+  end
+
+  defp parse_range(conn) do
+    case get_header(conn, "range") do
+      "bytes=" <> range_str -> parse_byte_range(range_str)
+      _ -> nil
+    end
+  end
+
+  defp parse_byte_range(range_str) do
+    with [start_str, end_str] <- String.split(range_str, "-", parts: 2),
+         {start_byte, ""} <- Integer.parse(start_str),
+         {end_byte, ""} <- Integer.parse(end_str) do
+      {start_byte, end_byte}
+    else
+      _ -> nil
+    end
+  end
+
+  defp parse_http_date(nil), do: nil
+  defp parse_http_date(_date_str), do: nil
+
+  defp format_http_date(%DateTime{} = dt) do
+    Calendar.strftime(dt, "%a, %d %b %Y %H:%M:%S GMT")
+  end
+
+  defp parse_int(nil, default), do: default
+
+  defp parse_int(str, default) do
+    case Integer.parse(str) do
+      {n, ""} -> n
+      _ -> default
+    end
+  end
+
+  defp ensure_quoted(etag) do
+    if String.starts_with?(etag, "\""), do: etag, else: "\"#{etag}\""
+  end
+
+  defp generate_request_id(prefix) do
+    random = :crypto.strong_rand_bytes(8) |> Base.encode16(case: :upper)
+    "#{prefix}-#{random}"
+  end
+end
