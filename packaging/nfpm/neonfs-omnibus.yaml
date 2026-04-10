@@ -21,6 +21,9 @@ depends:
   - libfuse3-4
   - fuse3
 
+recommends:
+  - nfs-common
+
 conflicts:
   - neonfs-core
   - neonfs-fuse

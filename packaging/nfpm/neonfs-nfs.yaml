@@ -19,6 +19,9 @@ depends:
   - libncurses6
   - ca-certificates
 
+recommends:
+  - nfs-common
+
 conflicts:
   - neonfs-omnibus
 
