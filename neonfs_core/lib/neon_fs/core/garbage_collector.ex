@@ -142,10 +142,16 @@ defmodule NeonFS.Core.GarbageCollector do
           {deleted, protected + 1}
 
         true ->
-          delete_chunk(chunk_meta)
-          {deleted + 1, protected}
+          sweep_unreferenced_chunk(chunk_meta, deleted, protected)
       end
     end)
+  end
+
+  defp sweep_unreferenced_chunk(chunk_meta, deleted, protected) do
+    case delete_chunk(chunk_meta) do
+      :ok -> {deleted + 1, protected}
+      :error -> {deleted, protected}
+    end
   end
 
   defp sweep_stripes(referenced_set) do
@@ -178,15 +184,65 @@ defmodule NeonFS.Core.GarbageCollector do
   end
 
   defp delete_chunk(chunk_meta) do
-    delete_chunk_from_storage(chunk_meta)
-    ChunkIndex.delete(chunk_meta.hash)
+    case delete_chunk_from_storage(chunk_meta) do
+      :ok ->
+        ChunkIndex.delete(chunk_meta.hash)
+        :ok
+
+      :error ->
+        :error
+    end
   end
 
-  defp delete_chunk_from_storage(chunk_meta) do
-    Enum.each(chunk_meta.locations, fn location ->
-      drive_id = Map.get(location, :drive_id, "default")
-      BlobStore.delete_chunk(chunk_meta.hash, drive_id)
-    end)
+  defp delete_chunk_from_storage(%{locations: locations, hash: hash})
+       when is_list(locations) and locations != [] do
+    results =
+      Enum.map(locations, fn location ->
+        drive_id = Map.get(location, :drive_id, "default")
+
+        case BlobStore.delete_chunk(hash, drive_id) do
+          {:ok, _bytes_freed} ->
+            :ok
+
+          {:error, reason} ->
+            hex = Base.encode16(hash, case: :lower)
+
+            Logger.warning(
+              "GC failed to delete blob #{hex} from drive #{drive_id}: #{inspect(reason)}"
+            )
+
+            :error
+        end
+      end)
+
+    if Enum.any?(results, &(&1 == :ok)), do: :ok, else: :error
+  end
+
+  defp delete_chunk_from_storage(%{hash: hash}) do
+    case delete_from_all_drives(hash) do
+      :ok ->
+        :ok
+
+      :error ->
+        hex = Base.encode16(hash, case: :lower)
+        Logger.warning("GC failed to delete blob #{hex} from any drive")
+        :error
+    end
+  end
+
+  defp delete_from_all_drives(hash) do
+    {:ok, drives} = BlobStore.list_drives()
+    drive_ids = Map.keys(drives)
+
+    results =
+      Enum.map(drive_ids, fn drive_id ->
+        case BlobStore.delete_chunk(hash, drive_id) do
+          {:ok, _bytes_freed} -> :ok
+          {:error, _} -> :error
+        end
+      end)
+
+    if Enum.any?(results, &(&1 == :ok)), do: :ok, else: :error
   end
 
   defp emit_gc_telemetry(result, duration) do

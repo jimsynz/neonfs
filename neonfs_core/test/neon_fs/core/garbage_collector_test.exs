@@ -3,6 +3,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{
+    BlobStore,
     ChunkIndex,
     FileIndex,
     GarbageCollector,
@@ -54,6 +55,26 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       # Chunks should be gone from ChunkIndex
       Enum.each(chunk_hashes, fn hash ->
         assert {:error, :not_found} = ChunkIndex.get(hash)
+      end)
+    end
+
+    test "removes blob files from disk when deleting unreferenced chunks", %{volume: vol} do
+      {:ok, file} = WriteOperation.write_file(vol.id, "/blob-check.txt", "blob data here")
+      chunk_hashes = file.chunks
+
+      # Verify blobs exist on disk before GC
+      Enum.each(chunk_hashes, fn hash ->
+        assert {:ok, _tier, _size} = BlobStore.chunk_info(hash)
+      end)
+
+      # Delete the file and run GC
+      FileIndex.delete(file.id)
+      assert {:ok, result} = GarbageCollector.collect()
+      assert result.chunks_deleted > 0
+
+      # Blob files should be gone from disk
+      Enum.each(chunk_hashes, fn hash ->
+        assert {:error, :not_found} = BlobStore.chunk_info(hash)
       end)
     end
 
