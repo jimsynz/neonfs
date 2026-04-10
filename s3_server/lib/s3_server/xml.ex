@@ -25,6 +25,7 @@ defmodule S3Server.XML do
     build_xml(
       {"ListAllMyBucketsResult", [{"xmlns", @s3_xmlns}],
        [
+         {"Owner", [], [{"ID", [], [""]}, {"DisplayName", [], [""]}]},
          {"Buckets", [], bucket_elements}
        ]}
     )

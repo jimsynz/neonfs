@@ -47,6 +47,11 @@ defmodule S3Server.MixProject do
 
       # dev/test
       {:bandit, "~> 1.5", only: [:test]},
+      {:ex_aws, "~> 2.6", only: [:test]},
+      {:ex_aws_s3, "~> 2.5", only: [:test]},
+      {:hackney, "~> 1.9", only: [:test]},
+      {:sweet_xml, "~> 0.7", only: [:test]},
+      {:jason, "~> 1.0", only: [:dev, :test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},
