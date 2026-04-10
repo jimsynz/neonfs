@@ -1,4 +1,21 @@
-_build/
-deps/
-.elixir_ls/
-target/
+# Elixir build artefacts (nested in each subproject)
+**/_build/
+**/deps/
+
+# Rust build artefacts (nested in each subproject)
+**/target/
+
+# Editor/tooling
+**/.elixir_ls/
+.claude/
+.envrc
+.mcp.json
+
+# Git
+.git/
+
+# Crash dumps
+erl_crash.dump
+
+# Packaging artefacts
+dist/
