@@ -104,6 +104,25 @@ defmodule NeonFS.NFS.MockCore do
     {:ok, children}
   end
 
+  defp dispatch(table, NeonFS.Core.FileIndex, :list_dir_full, [volume, dir_path]) do
+    prefix = String.trim_trailing(dir_path, "/") <> "/"
+
+    entries =
+      :ets.foldl(
+        fn
+          {{:file, ^volume, path}, file}, acc when is_binary(path) ->
+            maybe_add_full_child(acc, path, prefix, file)
+
+          _, acc ->
+            acc
+        end,
+        [],
+        table
+      )
+
+    {:ok, entries}
+  end
+
   defp dispatch(table, NeonFS.Core.FileIndex, :delete, [file_id]) do
     # Find and delete the file by id
     :ets.foldl(
@@ -319,6 +338,23 @@ defmodule NeonFS.NFS.MockCore do
     else
       type = if directory?(file.mode), do: :dir, else: :file
       Map.put(acc, rest, %{type: type})
+    end
+  end
+
+  defp maybe_add_full_child(acc, path, prefix, file) do
+    if String.starts_with?(path, prefix) do
+      rest = String.replace_prefix(path, prefix, "")
+      add_full_direct_child(acc, rest, path, file)
+    else
+      acc
+    end
+  end
+
+  defp add_full_direct_child(acc, rest, path, file) when not is_nil(rest) do
+    if String.contains?(rest, "/") do
+      acc
+    else
+      [{rest, path, file} | acc]
     end
   end
 end

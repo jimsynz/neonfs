@@ -184,6 +184,83 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  Lists directory children with full file metadata.
+
+  Like `list_dir/2`, but resolves each child's FileMeta (for files) so that
+  timestamps, size, mode, uid, and gid are all present. Directory children
+  receive a synthetic attributes map with current timestamps.
+
+  Returns `{:ok, [{name, child_path, attrs}]}` where attrs is either a
+  `FileMeta` struct or a map with synthetic directory attributes.
+  """
+  @spec list_dir_full(volume_id(), path()) ::
+          {:ok, [{String.t(), String.t(), map()}]} | {:error, term()}
+  def list_dir_full(volume_id, dir_path) do
+    normalized = FileMeta.normalize_path(dir_path)
+
+    case read_dir_entry(volume_id, normalized) do
+      {:ok, dir_entry} ->
+        entries =
+          Enum.map(dir_entry.children, fn {name, child_info} ->
+            child_path = Path.join(normalized, name)
+            attrs = resolve_child_attrs(child_info, volume_id, child_path)
+            {name, child_path, attrs}
+          end)
+
+        {:ok, entries}
+
+      {:error, :not_found} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_child_attrs(%{type: :dir} = child_info, _volume_id, _child_path) do
+    now = DateTime.utc_now()
+
+    %{
+      size: 0,
+      mode: 0o040755,
+      uid: Map.get(child_info, :uid, 0),
+      gid: Map.get(child_info, :gid, 0),
+      accessed_at: now,
+      modified_at: now,
+      changed_at: now
+    }
+  end
+
+  defp resolve_child_attrs(child_info, volume_id, child_path) do
+    file_id = Map.get(child_info, :id) || Map.get(child_info, "id")
+
+    file_result =
+      if file_id do
+        get(file_id)
+      else
+        get_by_path(volume_id, child_path)
+      end
+
+    case file_result do
+      {:ok, file} ->
+        file
+
+      {:error, _} ->
+        now = DateTime.utc_now()
+
+        %{
+          size: 0,
+          mode: 0o100644,
+          uid: 0,
+          gid: 0,
+          accessed_at: now,
+          modified_at: now,
+          changed_at: now
+        }
+    end
+  end
+
+  @doc """
   Creates a directory.
 
   Creates a DirectoryEntry for the new directory and adds a child entry

@@ -859,24 +859,8 @@ defmodule NeonFS.NFS.Handler do
   defp list_directory(volume, path) do
     dir_path = String.trim_trailing(path, "/")
     dir_path = if dir_path == "", do: "/", else: dir_path
-
-    case file_index_list_dir(volume, dir_path) do
-      children when is_map(children) ->
-        {:ok, Enum.map(children, &child_info_to_entry(dir_path, &1))}
-
-      files when is_list(files) ->
-        {:ok, Enum.map(files, fn file -> {Path.basename(file.path), file.path, file} end)}
-    end
+    file_index_list_dir_full(volume, dir_path)
   end
-
-  defp child_info_to_entry(dir_path, {name, child_info}) do
-    child_path = Path.join(dir_path, name)
-    mode = child_info_mode(child_info[:type])
-    {name, child_path, %{size: 0, mode: mode, uid: 0, gid: 0}}
-  end
-
-  defp child_info_mode(:dir), do: @s_ifdir ||| 0o755
-  defp child_info_mode(_), do: @s_ifreg ||| 0o644
 
   ## RPC Wrappers
 
@@ -907,12 +891,8 @@ defmodule NeonFS.NFS.Handler do
     core_call(NeonFS.Core.FileIndex, :get_by_path, [volume, path])
   end
 
-  defp file_index_list_dir(volume, path) do
-    case core_call(NeonFS.Core.FileIndex, :list_dir, [volume, path]) do
-      {:ok, children} when is_map(children) -> children
-      files when is_list(files) -> files
-      {:error, _} -> %{}
-    end
+  defp file_index_list_dir_full(volume, path) do
+    core_call(NeonFS.Core.FileIndex, :list_dir_full, [volume, path])
   end
 
   defp file_index_truncate(file_id, new_size, additional_updates) do

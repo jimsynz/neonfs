@@ -255,6 +255,40 @@ defmodule NeonFS.NFS.HandlerTest do
       assert is_integer(reply["file_id"])
     end
 
+    test "created file has non-epoch timestamps", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      reply = create_file(handler, vol_hash, root_inode, "stamped.txt")
+
+      assert reply["mtime_secs"] > 0,
+             "mtime should not be epoch (0), got: #{reply["mtime_secs"]}"
+
+      assert reply["atime_secs"] > 0,
+             "atime should not be epoch (0), got: #{reply["atime_secs"]}"
+
+      assert reply["ctime_secs"] > 0,
+             "ctime should not be epoch (0), got: #{reply["ctime_secs"]}"
+    end
+
+    test "getattr returns non-epoch timestamps", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      created = create_file(handler, vol_hash, root_inode, "getattr_ts.txt")
+      file_inode = created["file_id"]
+
+      send_op(handler, 1, "getattr", %{"inode" => file_inode, "volume_id" => vol_hash})
+      reply = assert_ok(1)
+
+      assert reply["mtime_secs"] > 0,
+             "mtime should not be epoch (0), got: #{reply["mtime_secs"]}"
+
+      assert reply["atime_secs"] > 0,
+             "atime should not be epoch (0), got: #{reply["atime_secs"]}"
+
+      assert reply["ctime_secs"] > 0,
+             "ctime should not be epoch (0), got: #{reply["ctime_secs"]}"
+    end
+
     test "created file is visible via lookup", ctx do
       %{handler: handler} = start_handler_with_mock(ctx)
       {vol_hash, root_inode} = register_volume(handler)
@@ -661,6 +695,32 @@ defmodule NeonFS.NFS.HandlerTest do
       names = Enum.map(reply["entries"], & &1["name"])
       assert "alpha.txt" in names
       assert "beta.txt" in names
+    end
+
+    test "directory entries include non-epoch timestamps", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      create_file(handler, vol_hash, root_inode, "timestamped.txt")
+
+      send_op(handler, 1, "readdirplus", %{
+        "inode" => root_inode,
+        "volume_id" => vol_hash,
+        "cookie" => 0
+      })
+
+      reply = assert_ok(1)
+
+      entry =
+        Enum.find(reply["entries"], fn e -> e["name"] == "timestamped.txt" end)
+
+      assert entry["mtime_secs"] > 0,
+             "mtime should not be epoch (0), got: #{entry["mtime_secs"]}"
+
+      assert entry["atime_secs"] > 0,
+             "atime should not be epoch (0), got: #{entry["atime_secs"]}"
+
+      assert entry["ctime_secs"] > 0,
+             "ctime should not be epoch (0), got: #{entry["ctime_secs"]}"
     end
   end
 
