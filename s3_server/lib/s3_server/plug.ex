@@ -263,39 +263,49 @@ defmodule S3Server.Plug do
       if_unmodified_since: parse_http_date(get_header(conn, "if-unmodified-since"))
     }
 
-    case backend.get_object(ctx, bucket, key, get_opts) do
-      {:ok, object} ->
-        status = if get_opts.range, do: 206, else: 200
+    with {:ok, object} <- backend.get_object(ctx, bucket, key, get_opts),
+         :ok <- check_preconditions(get_opts, object.etag, object.last_modified) do
+      status = if get_opts.range, do: 206, else: 200
 
-        conn
-        |> Plug.Conn.put_resp_header("etag", ensure_quoted(object.etag))
-        |> Plug.Conn.put_resp_header("content-type", object.content_type)
-        |> Plug.Conn.put_resp_header("content-length", to_string(object.content_length))
-        |> Plug.Conn.put_resp_header("last-modified", format_http_date(object.last_modified))
-        |> put_user_metadata(object.metadata)
-        |> Plug.Conn.send_resp(status, object.body)
-
-      {:error, %{code: :not_modified} = error} ->
+      conn
+      |> Plug.Conn.put_resp_header("etag", ensure_quoted(object.etag))
+      |> Plug.Conn.put_resp_header("content-type", object.content_type)
+      |> Plug.Conn.put_resp_header("content-length", to_string(object.content_length))
+      |> Plug.Conn.put_resp_header("last-modified", format_http_date(object.last_modified))
+      |> put_user_metadata(object.metadata)
+      |> Plug.Conn.send_resp(status, object.body)
+    else
+      {:error, %S3Server.Error{} = error} ->
         send_error(conn, %{error | request_id: req_id})
 
-      {:error, error} ->
-        send_error(conn, %{error | request_id: req_id})
+      {:error, code} when is_atom(code) ->
+        send_error(conn, %S3Server.Error{code: code, request_id: req_id})
     end
   end
 
   defp handle_head_object(conn, backend, bucket, key, ctx, req_id) do
-    case backend.head_object(ctx, bucket, key) do
-      {:ok, meta} ->
-        conn
-        |> Plug.Conn.put_resp_header("etag", ensure_quoted(meta.etag))
-        |> Plug.Conn.put_resp_header("content-type", meta.content_type)
-        |> Plug.Conn.put_resp_header("content-length", to_string(meta.size))
-        |> Plug.Conn.put_resp_header("last-modified", format_http_date(meta.last_modified))
-        |> put_user_metadata(meta.metadata)
-        |> Plug.Conn.send_resp(200, "")
+    head_opts = %S3Server.GetOpts{
+      if_match: get_header(conn, "if-match"),
+      if_none_match: get_header(conn, "if-none-match"),
+      if_modified_since: parse_http_date(get_header(conn, "if-modified-since")),
+      if_unmodified_since: parse_http_date(get_header(conn, "if-unmodified-since"))
+    }
 
-      {:error, error} ->
+    with {:ok, meta} <- backend.head_object(ctx, bucket, key),
+         :ok <- check_preconditions(head_opts, meta.etag, meta.last_modified) do
+      conn
+      |> Plug.Conn.put_resp_header("etag", ensure_quoted(meta.etag))
+      |> Plug.Conn.put_resp_header("content-type", meta.content_type)
+      |> Plug.Conn.put_resp_header("content-length", to_string(meta.size))
+      |> Plug.Conn.put_resp_header("last-modified", format_http_date(meta.last_modified))
+      |> put_user_metadata(meta.metadata)
+      |> Plug.Conn.send_resp(200, "")
+    else
+      {:error, %S3Server.Error{} = error} ->
         send_error(conn, %{error | request_id: req_id})
+
+      {:error, code} when is_atom(code) ->
+        send_error(conn, %S3Server.Error{code: code, request_id: req_id})
     end
   end
 
@@ -575,8 +585,79 @@ defmodule S3Server.Plug do
     end
   end
 
+  # Evaluates conditional request headers per RFC 7232 §6.
+  # Order: If-Match → If-Unmodified-Since → If-None-Match → If-Modified-Since
+  @spec check_preconditions(S3Server.GetOpts.t(), String.t(), DateTime.t()) ::
+          :ok | {:error, :precondition_failed | :not_modified}
+  defp check_preconditions(opts, etag, last_modified) do
+    quoted_etag = ensure_quoted(etag)
+
+    with :ok <- check_if_match(opts.if_match, quoted_etag),
+         :ok <- check_if_unmodified_since(opts.if_unmodified_since, last_modified, opts.if_match),
+         :ok <- check_if_none_match(opts.if_none_match, quoted_etag) do
+      check_if_modified_since(opts.if_modified_since, last_modified, opts.if_none_match)
+    end
+  end
+
+  defp check_if_match(nil, _etag), do: :ok
+
+  defp check_if_match(if_match, etag) do
+    if etag_matches?(if_match, etag), do: :ok, else: {:error, :precondition_failed}
+  end
+
+  # If-Match is present, If-Unmodified-Since is ignored (RFC 7232 §3.4)
+  defp check_if_unmodified_since(_date, _last_modified, if_match) when not is_nil(if_match),
+    do: :ok
+
+  defp check_if_unmodified_since(nil, _last_modified, _if_match), do: :ok
+
+  defp check_if_unmodified_since(date, last_modified, _if_match) do
+    if DateTime.compare(last_modified, date) == :gt,
+      do: {:error, :precondition_failed},
+      else: :ok
+  end
+
+  defp check_if_none_match(nil, _etag), do: :ok
+
+  defp check_if_none_match(if_none_match, etag) do
+    if etag_matches?(if_none_match, etag), do: {:error, :not_modified}, else: :ok
+  end
+
+  # If-None-Match is present, If-Modified-Since is ignored (RFC 7232 §3.3)
+  defp check_if_modified_since(_date, _last_modified, if_none_match)
+       when not is_nil(if_none_match),
+       do: :ok
+
+  defp check_if_modified_since(nil, _last_modified, _if_none_match), do: :ok
+
+  defp check_if_modified_since(date, last_modified, _if_none_match) do
+    if DateTime.compare(last_modified, date) == :gt, do: :ok, else: {:error, :not_modified}
+  end
+
+  defp etag_matches?("*", _etag), do: true
+
+  defp etag_matches?(header_value, etag) do
+    header_value
+    |> String.split(",")
+    |> Enum.any?(fn candidate -> String.trim(candidate) == etag end)
+  end
+
   defp parse_http_date(nil), do: nil
-  defp parse_http_date(_date_str), do: nil
+
+  defp parse_http_date(date_str) do
+    case :httpd_util.convert_request_date(String.to_charlist(date_str)) do
+      :bad_date ->
+        nil
+
+      {date, time} ->
+        with {:ok, naive} <- NaiveDateTime.from_erl({date, time}),
+             {:ok, dt} <- DateTime.from_naive(naive, "Etc/UTC") do
+          dt
+        else
+          _ -> nil
+        end
+    end
+  end
 
   defp format_http_date(%DateTime{} = dt) do
     Calendar.strftime(dt, "%a, %d %b %Y %H:%M:%S GMT")

@@ -518,6 +518,193 @@ defmodule S3Server.PlugTest do
     end
   end
 
+  describe "conditional requests" do
+    setup %{opts: opts} do
+      signed_conn(:put, "/cond-bucket") |> call(opts)
+
+      signed_conn(:put, "/cond-bucket/file.txt",
+        body: "conditional content",
+        headers: [{"content-type", "text/plain"}]
+      )
+      |> call(opts)
+
+      # Get the etag and last-modified from a normal GET
+      get_conn = signed_conn(:get, "/cond-bucket/file.txt") |> call(opts)
+      [etag] = Plug.Conn.get_resp_header(get_conn, "etag")
+      [last_modified] = Plug.Conn.get_resp_header(get_conn, "last-modified")
+
+      {:ok, etag: etag, last_modified: last_modified}
+    end
+
+    test "If-None-Match with matching etag returns 304", %{opts: opts, etag: etag} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt", headers: [{"if-none-match", etag}])
+        |> call(opts)
+
+      assert conn.status == 304
+    end
+
+    test "If-None-Match with non-matching etag returns 200", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-none-match", "\"nonexistent\""}]
+        )
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "If-None-Match with wildcard returns 304", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt", headers: [{"if-none-match", "*"}])
+        |> call(opts)
+
+      assert conn.status == 304
+    end
+
+    test "If-Match with matching etag returns 200", %{opts: opts, etag: etag} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt", headers: [{"if-match", etag}])
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "If-Match with non-matching etag returns 412", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt", headers: [{"if-match", "\"wrong-etag\""}])
+        |> call(opts)
+
+      assert conn.status == 412
+    end
+
+    test "If-Modified-Since with old date returns 200", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-modified-since", "Mon, 01 Jan 2024 00:00:00 GMT"}]
+        )
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "If-Modified-Since with future date returns 304", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-modified-since", "Fri, 01 Jan 2100 00:00:00 GMT"}]
+        )
+        |> call(opts)
+
+      assert conn.status == 304
+    end
+
+    test "If-Unmodified-Since with future date returns 200", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-unmodified-since", "Fri, 01 Jan 2100 00:00:00 GMT"}]
+        )
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "If-Unmodified-Since with old date returns 412", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-unmodified-since", "Mon, 01 Jan 2024 00:00:00 GMT"}]
+        )
+        |> call(opts)
+
+      assert conn.status == 412
+    end
+
+    test "If-None-Match takes precedence over If-Modified-Since", %{opts: opts, etag: etag} do
+      # Per RFC 7232: If-None-Match present → If-Modified-Since is ignored
+      # Etag matches (→ 304), but date is old (→ would be 200 if evaluated)
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [
+            {"if-none-match", etag},
+            {"if-modified-since", "Mon, 01 Jan 2024 00:00:00 GMT"}
+          ]
+        )
+        |> call(opts)
+
+      assert conn.status == 304
+    end
+
+    test "If-Match takes precedence over If-Unmodified-Since", %{opts: opts, etag: etag} do
+      # Per RFC 7232: If-Match present → If-Unmodified-Since is ignored
+      # Etag matches (→ ok), but date is old (→ would be 412 if evaluated)
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [
+            {"if-match", etag},
+            {"if-unmodified-since", "Mon, 01 Jan 2024 00:00:00 GMT"}
+          ]
+        )
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "If-None-Match with multiple etags", %{opts: opts, etag: etag} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-none-match", "\"other\", #{etag}, \"another\""}]
+        )
+        |> call(opts)
+
+      assert conn.status == 304
+    end
+
+    test "conditional headers work with HEAD requests", %{opts: opts, etag: etag} do
+      conn =
+        signed_conn(:head, "/cond-bucket/file.txt", headers: [{"if-none-match", etag}])
+        |> call(opts)
+
+      assert conn.status == 304
+    end
+
+    test "HEAD with If-Unmodified-Since old date returns 412", %{opts: opts} do
+      conn =
+        signed_conn(:head, "/cond-bucket/file.txt",
+          headers: [{"if-unmodified-since", "Mon, 01 Jan 2024 00:00:00 GMT"}]
+        )
+        |> call(opts)
+
+      assert conn.status == 412
+    end
+
+    test "invalid date in If-Modified-Since is ignored", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt", headers: [{"if-modified-since", "not a date"}])
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "RFC 850 date format is parsed", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-modified-since", "Monday, 01-Jan-24 00:00:00 GMT"}]
+        )
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "asctime date format is parsed", %{opts: opts} do
+      conn =
+        signed_conn(:get, "/cond-bucket/file.txt",
+          headers: [{"if-modified-since", "Mon Jan  1 00:00:00 2024"}]
+        )
+        |> call(opts)
+
+      assert conn.status == 200
+    end
+  end
+
   # Helper to extract a value from XML by tag name (simple case)
   defp extract_xml_value(xml, tag) do
     case Regex.run(~r/<#{tag}>([^<]+)<\/#{tag}>/, xml) do
