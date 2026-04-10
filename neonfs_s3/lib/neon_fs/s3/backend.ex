@@ -1,0 +1,527 @@
+defmodule NeonFS.S3.Backend do
+  @moduledoc """
+  S3Server.Backend implementation that maps S3 operations to NeonFS core calls.
+
+  Buckets map 1:1 to NeonFS volumes. S3 object keys map to file paths within
+  the volume. All communication with core nodes goes through
+  `NeonFS.Client.Router`.
+  """
+
+  @behaviour S3Server.Backend
+
+  alias NeonFS.Client.Router
+  alias NeonFS.S3.MultipartStore
+
+  require Logger
+
+  @region Application.compile_env(:neonfs_s3, :region, "neonfs")
+
+  # Credential lookup
+
+  @impl true
+  def lookup_credential(access_key_id) do
+    case call_core(:lookup_s3_credential, [access_key_id]) do
+      {:ok, %{secret_access_key: secret, identity: identity}} ->
+        {:ok,
+         %S3Server.Credential{
+           access_key_id: access_key_id,
+           secret_access_key: secret,
+           identity: identity
+         }}
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, _reason} ->
+        {:error, :not_found}
+    end
+  end
+
+  # Bucket operations
+
+  @impl true
+  def list_buckets(_ctx) do
+    case call_core(:list_volumes, []) do
+      {:ok, volumes} ->
+        buckets =
+          volumes
+          |> Enum.map(fn vol ->
+            %S3Server.Bucket{name: vol.name, creation_date: vol.created_at}
+          end)
+          |> Enum.sort_by(& &1.name)
+
+        {:ok, buckets}
+
+      {:error, reason} ->
+        {:error, internal_error(reason)}
+    end
+  end
+
+  @impl true
+  def create_bucket(_ctx, bucket) do
+    case call_core(:create_volume, [bucket]) do
+      {:ok, _volume} -> :ok
+      {:error, :already_exists} -> {:error, %S3Server.Error{code: :bucket_already_exists}}
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  @impl true
+  def delete_bucket(_ctx, bucket) do
+    with :ok <- ensure_bucket_exists(bucket),
+         :ok <- ensure_bucket_empty(bucket) do
+      case call_core(:delete_volume, [bucket]) do
+        :ok -> :ok
+        {:error, reason} -> {:error, internal_error(reason)}
+      end
+    end
+  end
+
+  @impl true
+  def head_bucket(_ctx, bucket) do
+    ensure_bucket_exists(bucket)
+  end
+
+  @impl true
+  def get_bucket_location(_ctx, bucket) do
+    case ensure_bucket_exists(bucket) do
+      :ok -> {:ok, @region}
+      error -> error
+    end
+  end
+
+  # Object operations
+
+  @impl true
+  def get_object(_ctx, bucket, key, _opts) do
+    with :ok <- ensure_bucket_exists(bucket),
+         {:ok, content} <- read_object_content(bucket, key),
+         {:ok, meta} <- fetch_object_meta(bucket, key) do
+      {:ok, file_meta_to_object(meta, content)}
+    end
+  end
+
+  @impl true
+  def put_object(_ctx, bucket, key, body, opts) do
+    with :ok <- ensure_bucket_exists(bucket) do
+      body_binary = IO.iodata_to_binary(body)
+      etag = compute_etag(body_binary)
+
+      write_opts =
+        []
+        |> maybe_put_content_type(opts.content_type)
+        |> maybe_put_metadata(opts.metadata)
+
+      case call_core(:write_file, [bucket, key, body_binary, write_opts]) do
+        {:ok, _meta} -> {:ok, etag}
+        {:error, reason} -> {:error, internal_error(reason)}
+      end
+    end
+  end
+
+  @impl true
+  def delete_object(_ctx, bucket, key) do
+    case call_core(:delete_file, [bucket, key]) do
+      :ok -> :ok
+      {:error, :not_found} -> :ok
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  @impl true
+  def delete_objects(_ctx, bucket, keys) do
+    results =
+      Enum.map(keys, fn key ->
+        case call_core(:delete_file, [bucket, key]) do
+          :ok ->
+            {:deleted, %{key: key}}
+
+          {:error, :not_found} ->
+            {:deleted, %{key: key}}
+
+          {:error, reason} ->
+            {:error, %{key: key, code: "InternalError", message: inspect(reason)}}
+        end
+      end)
+
+    deleted = for {:deleted, entry} <- results, do: entry
+    errors = for {:error, entry} <- results, do: entry
+
+    {:ok, %S3Server.DeleteResult{deleted: deleted, errors: errors}}
+  end
+
+  @impl true
+  def head_object(_ctx, bucket, key) do
+    with :ok <- ensure_bucket_exists(bucket) do
+      case call_core(:get_file_meta, [bucket, key]) do
+        {:ok, meta} ->
+          {:ok, file_meta_to_object_meta(meta, key)}
+
+        {:error, :not_found} ->
+          {:error, %S3Server.Error{code: :no_such_key}}
+
+        {:error, reason} ->
+          {:error, internal_error(reason)}
+      end
+    end
+  end
+
+  @impl true
+  def list_objects_v2(_ctx, bucket, opts) do
+    with :ok <- ensure_bucket_exists(bucket) do
+      list_path = prefix_to_path(opts.prefix)
+
+      case call_core(:list_files, [bucket, list_path]) do
+        {:ok, entries} ->
+          {:ok, build_list_result(bucket, entries, opts)}
+
+        {:error, :not_found} ->
+          {:ok, empty_list_result(bucket, opts)}
+
+        {:error, reason} ->
+          {:error, internal_error(reason)}
+      end
+    end
+  end
+
+  @impl true
+  def copy_object(_ctx, dest_bucket, dest_key, source_bucket, source_key) do
+    with :ok <- ensure_bucket_exists(source_bucket),
+         :ok <- ensure_bucket_exists(dest_bucket),
+         {:ok, content} <- read_object_content(source_bucket, source_key),
+         etag = compute_etag(content),
+         {:ok, _meta} <- write_object_content(dest_bucket, dest_key, content) do
+      {:ok, %S3Server.CopyResult{etag: etag, last_modified: DateTime.utc_now()}}
+    end
+  end
+
+  # Multipart upload operations
+
+  @impl true
+  def create_multipart_upload(_ctx, bucket, key, opts) do
+    with :ok <- ensure_bucket_exists(bucket) do
+      content_type = Map.get(opts, :content_type, "application/octet-stream")
+      upload_id = MultipartStore.create(bucket, key, content_type)
+      {:ok, upload_id}
+    end
+  end
+
+  @impl true
+  def upload_part(_ctx, _bucket, _key, upload_id, part_number, body) do
+    body_binary = IO.iodata_to_binary(body)
+    etag = compute_etag(body_binary)
+
+    case MultipartStore.get(upload_id) do
+      {:ok, upload} ->
+        part_path = multipart_staging_path(upload.bucket, upload.key, upload_id, part_number)
+
+        case call_core(:write_file, [upload.bucket, part_path, body_binary]) do
+          {:ok, _meta} ->
+            part = %{etag: etag, size: byte_size(body_binary), path: part_path}
+            MultipartStore.put_part(upload_id, part_number, part)
+            {:ok, etag}
+
+          {:error, reason} ->
+            {:error, internal_error(reason)}
+        end
+
+      {:error, :not_found} ->
+        {:error, %S3Server.Error{code: :no_such_upload}}
+    end
+  end
+
+  @impl true
+  def complete_multipart_upload(_ctx, bucket, key, upload_id, _parts) do
+    case MultipartStore.get(upload_id) do
+      {:ok, upload} ->
+        sorted_parts =
+          upload.parts
+          |> Enum.sort_by(&elem(&1, 0))
+
+        with {:ok, combined} <- read_and_combine_parts(upload.bucket, sorted_parts),
+             etag = compute_etag(combined),
+             {:ok, _meta} <- call_core(:write_file, [bucket, key, combined]) do
+          cleanup_staging_parts(upload.bucket, sorted_parts)
+          MultipartStore.delete(upload_id)
+
+          {:ok,
+           %S3Server.CompleteResult{
+             location: "/#{bucket}/#{key}",
+             bucket: bucket,
+             key: key,
+             etag: etag
+           }}
+        else
+          {:error, reason} -> {:error, internal_error(reason)}
+        end
+
+      {:error, :not_found} ->
+        {:error, %S3Server.Error{code: :no_such_upload}}
+    end
+  end
+
+  @impl true
+  def abort_multipart_upload(_ctx, _bucket, _key, upload_id) do
+    case MultipartStore.get(upload_id) do
+      {:ok, upload} ->
+        sorted_parts = Enum.sort_by(upload.parts, &elem(&1, 0))
+        cleanup_staging_parts(upload.bucket, sorted_parts)
+        MultipartStore.delete(upload_id)
+        :ok
+
+      {:error, :not_found} ->
+        {:error, %S3Server.Error{code: :no_such_upload}}
+    end
+  end
+
+  @impl true
+  def list_multipart_uploads(_ctx, bucket, _opts) do
+    uploads = MultipartStore.list_for_bucket(bucket)
+    {:ok, %S3Server.MultipartList{bucket: bucket, uploads: uploads}}
+  end
+
+  @impl true
+  def list_parts(_ctx, _bucket, _key, upload_id, _opts) do
+    case MultipartStore.get(upload_id) do
+      {:ok, upload} ->
+        parts =
+          upload.parts
+          |> Enum.map(fn {num, part} ->
+            %{
+              part_number: num,
+              etag: part.etag,
+              size: part.size,
+              last_modified: DateTime.utc_now()
+            }
+          end)
+          |> Enum.sort_by(& &1.part_number)
+
+        {:ok,
+         %S3Server.PartList{
+           bucket: upload.bucket,
+           key: upload.key,
+           upload_id: upload_id,
+           parts: parts
+         }}
+
+      {:error, :not_found} ->
+        {:error, %S3Server.Error{code: :no_such_upload}}
+    end
+  end
+
+  # Private helpers
+
+  defp call_core(function, args) do
+    case Application.get_env(:neonfs_s3, :core_call_fn) do
+      nil -> Router.call(NeonFS.Core, function, args)
+      fun when is_function(fun, 2) -> fun.(function, args)
+    end
+  end
+
+  defp ensure_bucket_exists(bucket) do
+    case call_core(:get_volume, [bucket]) do
+      {:ok, _volume} -> :ok
+      {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_bucket}}
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  defp ensure_bucket_empty(bucket) do
+    case call_core(:list_files, [bucket, "/"]) do
+      {:ok, []} -> :ok
+      {:ok, _entries} -> {:error, %S3Server.Error{code: :bucket_not_empty}}
+      {:error, :not_found} -> :ok
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  defp read_object_content(bucket, key) do
+    case call_core(:read_file, [bucket, key]) do
+      {:ok, content} -> {:ok, content}
+      {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_key}}
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  defp fetch_object_meta(bucket, key) do
+    case call_core(:get_file_meta, [bucket, key]) do
+      {:ok, meta} -> {:ok, meta}
+      {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_key}}
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  defp write_object_content(bucket, key, content) do
+    case call_core(:write_file, [bucket, key, content]) do
+      {:ok, meta} -> {:ok, meta}
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  defp compute_etag(data) when is_binary(data) do
+    :crypto.hash(:md5, data) |> Base.encode16(case: :lower)
+  end
+
+  defp file_meta_to_object(meta, content) do
+    etag = compute_etag(content)
+
+    %S3Server.Object{
+      body: content,
+      content_type: meta_content_type(meta),
+      content_length: byte_size(content),
+      etag: etag,
+      last_modified: meta.modified_at || meta.created_at || DateTime.utc_now(),
+      metadata: %{}
+    }
+  end
+
+  defp file_meta_to_object_meta(meta, key) do
+    %S3Server.ObjectMeta{
+      key: strip_leading_slash(key),
+      etag: compute_etag_from_meta(meta),
+      size: meta.size,
+      last_modified: meta.modified_at || meta.created_at || DateTime.utc_now(),
+      content_type: meta_content_type(meta)
+    }
+  end
+
+  defp meta_content_type(_meta), do: "application/octet-stream"
+
+  defp compute_etag_from_meta(%{size: size}) do
+    placeholder = :crypto.hash(:md5, <<size::64>>) |> Base.encode16(case: :lower)
+    placeholder
+  end
+
+  defp prefix_to_path(nil), do: "/"
+  defp prefix_to_path(""), do: "/"
+
+  defp prefix_to_path(prefix) do
+    parts = String.split(prefix, "/", trim: true)
+
+    case parts do
+      [] -> "/"
+      _ -> "/" <> Enum.join(parts, "/")
+    end
+  end
+
+  defp build_list_result(bucket, entries, opts) do
+    prefix = opts.prefix
+    delimiter = opts.delimiter
+
+    object_metas =
+      entries
+      |> Enum.map(fn meta ->
+        key = strip_leading_slash(meta.path)
+
+        %S3Server.ObjectMeta{
+          key: key,
+          etag: compute_etag_from_meta(meta),
+          size: meta.size,
+          last_modified: meta.modified_at || meta.created_at || DateTime.utc_now(),
+          content_type: meta_content_type(meta)
+        }
+      end)
+      |> Enum.filter(fn meta ->
+        if prefix, do: String.starts_with?(meta.key, prefix), else: true
+      end)
+      |> Enum.sort_by(& &1.key)
+
+    {contents, common_prefixes} = split_by_delimiter(object_metas, prefix, delimiter)
+
+    max_keys = opts.max_keys
+    truncated = length(contents) > max_keys
+    contents = Enum.take(contents, max_keys)
+
+    %S3Server.ListResult{
+      name: bucket,
+      prefix: prefix,
+      delimiter: delimiter,
+      contents: contents,
+      common_prefixes: common_prefixes,
+      key_count: length(contents),
+      max_keys: max_keys,
+      is_truncated: truncated
+    }
+  end
+
+  defp empty_list_result(bucket, opts) do
+    %S3Server.ListResult{
+      name: bucket,
+      prefix: opts.prefix,
+      delimiter: opts.delimiter,
+      contents: [],
+      common_prefixes: [],
+      key_count: 0,
+      max_keys: opts.max_keys,
+      is_truncated: false
+    }
+  end
+
+  defp split_by_delimiter(entries, _prefix, nil), do: {entries, []}
+
+  defp split_by_delimiter(entries, prefix, delimiter) do
+    prefix_len = String.length(prefix || "")
+
+    {regular, prefixed} =
+      Enum.split_with(entries, fn meta ->
+        rest = String.slice(meta.key, prefix_len..-1//1)
+        not String.contains?(rest, delimiter)
+      end)
+
+    prefix_set =
+      prefixed
+      |> Enum.map(fn meta ->
+        rest = String.slice(meta.key, prefix_len..-1//1)
+        idx = :binary.match(rest, delimiter) |> elem(0)
+        (prefix || "") <> String.slice(rest, 0, idx + 1)
+      end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    {regular, prefix_set}
+  end
+
+  defp strip_leading_slash("/" <> rest), do: rest
+  defp strip_leading_slash(path), do: path
+
+  defp multipart_staging_path(bucket, key, upload_id, part_number) do
+    "/.neonfs-staging/#{bucket}/#{key}/#{upload_id}/part-#{part_number}"
+  end
+
+  defp read_and_combine_parts(bucket, sorted_parts) do
+    results =
+      Enum.map(sorted_parts, fn {_num, part} ->
+        call_core(:read_file, [bucket, part.path])
+      end)
+
+    case Enum.find(results, &match?({:error, _}, &1)) do
+      nil ->
+        combined =
+          results
+          |> Enum.map(fn {:ok, data} -> data end)
+          |> IO.iodata_to_binary()
+
+        {:ok, combined}
+
+      error ->
+        error
+    end
+  end
+
+  defp cleanup_staging_parts(bucket, sorted_parts) do
+    Enum.each(sorted_parts, fn {_num, part} ->
+      call_core(:delete_file, [bucket, part.path])
+    end)
+  end
+
+  defp internal_error(reason) do
+    Logger.error("S3 backend error", reason: inspect(reason))
+    %S3Server.Error{code: :internal_error}
+  end
+
+  defp maybe_put_content_type(opts, "application/octet-stream"), do: opts
+  defp maybe_put_content_type(opts, content_type), do: [{:content_type, content_type} | opts]
+
+  defp maybe_put_metadata(opts, metadata) when map_size(metadata) == 0, do: opts
+  defp maybe_put_metadata(opts, metadata), do: [{:metadata, metadata} | opts]
+end

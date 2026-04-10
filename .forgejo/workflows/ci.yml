@@ -260,6 +260,46 @@ jobs:
           mix check
 
   # =========================================================================
+  # neonfs_s3 - S3-compatible API interface (pure Elixir)
+  # =========================================================================
+  neonfs_s3:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
+    steps:
+      - name: Install checkout dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends nodejs git ca-certificates && rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v6
+
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            neonfs_client/deps
+            neonfs_client/_build
+            s3_server/deps
+            s3_server/_build
+            neonfs_s3/deps
+            neonfs_s3/_build
+          key: v2-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_s3/mix.lock') }}
+          restore-keys: v2-build-neonfs_s3-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_s3
+        run: |
+          mix local.hex --force && mix local.rebar --force
+          mix deps.get
+          mix deps.compile
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+
+      - name: Check
+        working-directory: neonfs_s3
+        run: |
+          mix check
+
+  # =========================================================================
   # neonfs-cli - Rust CLI
   # =========================================================================
   neonfs-cli:
