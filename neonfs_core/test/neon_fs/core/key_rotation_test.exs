@@ -247,6 +247,36 @@ defmodule NeonFS.Core.KeyRotationTest do
     end
   end
 
+  describe "reencrypt_chunk edge cases" do
+    test "skips metadata update when chunk has no local replicas" do
+      volume_id = create_encrypted_volume("no-local-replicas")
+      write_test_file(volume_id, "/test.txt", "Data on remote node")
+
+      chunks = ChunkIndex.get_chunks_for_volume(volume_id)
+      assert [chunk | _] = chunks
+      assert chunk.crypto.key_version == 1
+
+      old_nonce = chunk.crypto.nonce
+
+      # Rewrite the chunk's locations to point to a fake remote node so the
+      # rotation runner sees no local replicas for this chunk.
+      remote_chunk = %{chunk | locations: [%{node: :fake@remote, drive_id: "d0", tier: :hot}]}
+      :ets.insert(:chunk_index, {remote_chunk.hash, remote_chunk})
+
+      # Start rotation — the runner should skip this chunk (no local replicas)
+      # and complete without error.
+      ref = attach_job_telemetry()
+      {:ok, _info} = KeyRotation.start_rotation(volume_id)
+      wait_for_rotation_complete(ref)
+
+      # The chunk metadata must NOT have been updated — nonce and key_version
+      # should still be the originals, because no blob was re-encrypted.
+      {:ok, after_chunk} = ChunkIndex.get(chunk.hash)
+      assert after_chunk.crypto.key_version == 1
+      assert after_chunk.crypto.nonce == old_nonce
+    end
+  end
+
   describe "handler integration" do
     test "rotate_volume_key handler starts rotation" do
       _volume_id = create_encrypted_volume("handler-rotate")

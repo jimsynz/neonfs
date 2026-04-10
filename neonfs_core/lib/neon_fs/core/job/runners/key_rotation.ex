@@ -77,9 +77,13 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
   end
 
   defp chunks_needing_rotation(volume_id, old_version) do
+    local_node = Node.self()
+
     ChunkIndex.get_chunks_for_volume(volume_id)
     |> Enum.filter(fn chunk ->
-      chunk.crypto != nil and chunk.crypto.key_version == old_version
+      chunk.crypto != nil and
+        chunk.crypto.key_version == old_version and
+        Enum.any?(chunk.locations, fn loc -> loc.node == local_node end)
     end)
   end
 
@@ -102,6 +106,34 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
     local_locations =
       Enum.filter(chunk.locations, fn loc -> loc.node == Node.self() end)
 
+    if local_locations == [] do
+      Logger.warning("Skipping chunk with no local replicas during key rotation",
+        chunk_hash: Base.encode16(chunk.hash, case: :lower)
+      )
+
+      :ok
+    else
+      reencrypt_local_replicas(
+        chunk,
+        local_locations,
+        old_key,
+        old_nonce,
+        new_key,
+        new_nonce,
+        new_version
+      )
+    end
+  end
+
+  defp reencrypt_local_replicas(
+         chunk,
+         local_locations,
+         old_key,
+         old_nonce,
+         new_key,
+         new_nonce,
+         new_version
+       ) do
     reencrypt_results =
       Enum.map(local_locations, fn loc ->
         tier = Atom.to_string(loc.tier)
@@ -122,7 +154,19 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
         updated_crypto = ChunkCrypto.new(nonce: new_nonce, key_version: new_version)
         updated_stored_size = extract_stored_size(reencrypt_results)
         updated_meta = %{chunk | crypto: updated_crypto, stored_size: updated_stored_size}
-        ChunkIndex.put(updated_meta)
+
+        case ChunkIndex.put(updated_meta) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.error("Failed to persist chunk metadata after re-encryption",
+              chunk_hash: Base.encode16(chunk.hash, case: :lower),
+              reason: inspect(reason)
+            )
+
+            {:error, {:metadata_update_failed, reason}}
+        end
 
       error ->
         error
