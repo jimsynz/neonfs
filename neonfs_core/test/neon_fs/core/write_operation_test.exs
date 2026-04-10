@@ -27,6 +27,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     start_file_index()
     start_stripe_index()
     start_volume_registry()
+    ensure_chunk_access_tracker()
 
     # Set up telemetry test handler
     :telemetry.attach_many(
@@ -740,6 +741,49 @@ defmodule NeonFS.Core.WriteOperationTest do
         {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
         assert chunk_meta.crypto == nil
       end
+    end
+  end
+
+  describe "write_file_at/5 (offset writes)" do
+    test "appending at non-zero offset does not crash", %{volume: volume} do
+      initial_data = "Hello, NeonFS!"
+
+      {:ok, _file_meta} =
+        WriteOperation.write_file(volume.id, "/offset.txt", initial_data, chunk_strategy: :single)
+
+      append_data = " More data."
+
+      # Before the fix for issue #110, this crashed with {:else_clause, nil}
+      # because ChunkFetcher.fetch_chunk/2 returns a 3-tuple {:ok, data, source}
+      # but callers pattern-matched on 2-tuple {:ok, _}
+      assert {:ok, updated_meta} =
+               WriteOperation.write_file_at(
+                 volume.id,
+                 "/offset.txt",
+                 byte_size(initial_data),
+                 append_data
+               )
+
+      assert updated_meta.size == byte_size(initial_data) + byte_size(append_data)
+    end
+
+    test "overwriting middle of existing file does not crash", %{volume: volume} do
+      initial_data = String.duplicate("A", 100)
+
+      {:ok, _file_meta} =
+        WriteOperation.write_file(volume.id, "/middle.txt", initial_data, chunk_strategy: :single)
+
+      overwrite_data = "BBBBBBBBBB"
+
+      assert {:ok, updated_meta} =
+               WriteOperation.write_file_at(volume.id, "/middle.txt", 10, overwrite_data)
+
+      assert updated_meta.size == 100
+
+      alias NeonFS.Core.ReadOperation
+      assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/middle.txt")
+      expected = String.duplicate("A", 10) <> overwrite_data <> String.duplicate("A", 80)
+      assert read_data == expected
     end
   end
 

@@ -343,7 +343,8 @@ defmodule NeonFS.Core.WriteOperation do
         {:ok, result}
       end
     else
-      Enum.find(chunk_data_results, &match?({:error, _}, &1))
+      Enum.find(chunk_data_results, &match?({:error, _}, &1)) ||
+        {:error, :chunk_fetch_failed}
     end
   end
 
@@ -353,7 +354,11 @@ defmodule NeonFS.Core.WriteOperation do
     case ChunkIndex.get(hash) do
       {:ok, chunk_meta} ->
         fetch_opts = build_chunk_fetch_opts(chunk_meta, volume_id)
-        ChunkFetcher.fetch_chunk(hash, fetch_opts)
+
+        case ChunkFetcher.fetch_chunk(hash, fetch_opts) do
+          {:ok, data, _source} -> {:ok, data}
+          {:error, _} = error -> error
+        end
 
       {:error, :not_found} ->
         {:error, :chunk_not_found}
@@ -529,7 +534,8 @@ defmodule NeonFS.Core.WriteOperation do
 
       {:ok, binary_part(full_data, 0, min(data_bytes, byte_size(full_data)))}
     else
-      Enum.find(results, &match?({:error, _}, &1))
+      Enum.find(results, &match?({:error, _}, &1)) ||
+        {:error, :chunk_fetch_failed}
     end
   end
 
