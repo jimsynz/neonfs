@@ -11,6 +11,11 @@ defmodule S3Server.Plug do
     * `:backend` (required) — module implementing `S3Server.Backend`
     * `:region` — AWS region string for SigV4 scope and GetBucketLocation
       (default: `"us-east-1"`)
+    * `:hostname` — base hostname for virtual-hosted-style requests.
+      When set, requests with `Host: bucket.hostname` extract the bucket
+      from the hostname instead of the path. Path-style requests continue
+      to work regardless.
+      (default: `nil` — virtual-hosted-style disabled)
     * `:request_id_prefix` — prefix for X-Amz-Request-Id header
       (default: `"s3srv"`)
   """
@@ -25,6 +30,7 @@ defmodule S3Server.Plug do
     %{
       backend: Keyword.fetch!(opts, :backend),
       region: Keyword.get(opts, :region, "us-east-1"),
+      hostname: Keyword.get(opts, :hostname),
       request_id_prefix: Keyword.get(opts, :request_id_prefix, "s3srv")
     }
   end
@@ -60,7 +66,7 @@ defmodule S3Server.Plug do
   end
 
   defp dispatch(conn, opts, auth_context, request_id) do
-    {bucket, key} = extract_bucket_key(conn)
+    {bucket, key} = extract_bucket_key(conn, opts.hostname)
     query = URI.decode_query(conn.query_string)
 
     route(conn, conn.method, bucket, key, query, opts, auth_context, request_id)
@@ -455,12 +461,58 @@ defmodule S3Server.Plug do
 
   # Request parsing helpers
 
-  defp extract_bucket_key(conn) do
-    case conn.path_info do
-      [] -> {nil, nil}
-      [bucket] -> {bucket, nil}
-      [bucket | key_parts] -> {bucket, Enum.join(key_parts, "/")}
+  defp extract_bucket_key(conn, hostname) do
+    case extract_virtual_hosted_bucket(conn, hostname) do
+      {:ok, bucket} -> extract_key_from_path(bucket, conn.path_info)
+      :path_style -> extract_bucket_key_from_path(conn.path_info)
     end
+  end
+
+  defp extract_virtual_hosted_bucket(conn, hostname) when is_binary(hostname) do
+    case Plug.Conn.get_req_header(conn, "host") do
+      [host | _] ->
+        bare_host = strip_port(host)
+        suffix = "." <> hostname
+
+        if String.ends_with?(bare_host, suffix) and bare_host != hostname do
+          bucket = String.slice(bare_host, 0, byte_size(bare_host) - byte_size(suffix))
+          {:ok, bucket}
+        else
+          :path_style
+        end
+
+      [] ->
+        :path_style
+    end
+  end
+
+  defp extract_virtual_hosted_bucket(_conn, _hostname), do: :path_style
+
+  defp strip_port(host) do
+    case String.split(host, ":", parts: 2) do
+      [bare, _port] -> bare
+      [bare] -> bare
+    end
+  end
+
+  defp extract_key_from_path(bucket, []) do
+    {bucket, nil}
+  end
+
+  defp extract_key_from_path(bucket, key_parts) do
+    {bucket, Enum.join(key_parts, "/")}
+  end
+
+  defp extract_bucket_key_from_path([]) do
+    {nil, nil}
+  end
+
+  defp extract_bucket_key_from_path([bucket]) do
+    {bucket, nil}
+  end
+
+  defp extract_bucket_key_from_path([bucket | key_parts]) do
+    {bucket, Enum.join(key_parts, "/")}
   end
 
   defp parse_copy_source(source) do

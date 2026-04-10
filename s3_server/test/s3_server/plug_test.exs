@@ -399,6 +399,125 @@ defmodule S3Server.PlugTest do
     end
   end
 
+  describe "virtual-hosted-style routing" do
+    setup do
+      vhost_opts =
+        S3Server.Plug.init(
+          backend: MemoryBackend,
+          region: "us-east-1",
+          hostname: "s3.example.com"
+        )
+
+      {:ok, vhost_opts: vhost_opts}
+    end
+
+    defp vhost_conn(method, path, host, opts \\ []) do
+      body = Keyword.get(opts, :body, "")
+      headers = [{"host", host} | Keyword.get(opts, :headers, [])]
+
+      conn =
+        Plug.Test.conn(method, path, body)
+        |> Map.put(:req_headers, headers)
+
+      SigV4Helper.sign_conn(conn, @access_key, @secret_key, body: body)
+    end
+
+    test "extracts bucket from Host header", %{vhost_opts: opts} do
+      # Create bucket first via path-style
+      signed_conn(:put, "/vhost-bucket") |> call(opts)
+
+      # PUT object via virtual-hosted-style: Host: vhost-bucket.s3.example.com
+      data = "virtual hosted data"
+
+      vhost_conn(:put, "/greeting.txt", "vhost-bucket.s3.example.com",
+        body: data,
+        headers: [{"content-type", "text/plain"}]
+      )
+      |> call(opts)
+
+      # GET object via virtual-hosted-style
+      conn = vhost_conn(:get, "/greeting.txt", "vhost-bucket.s3.example.com") |> call(opts)
+      assert conn.status == 200
+      assert conn.resp_body == data
+    end
+
+    test "falls back to path-style when Host does not match hostname", %{vhost_opts: opts} do
+      signed_conn(:put, "/path-bucket") |> call(opts)
+
+      conn =
+        vhost_conn(:get, "/path-bucket", "other-host.example.com")
+        |> call(opts)
+
+      # Should list objects for path-bucket (path-style), not treat "path-bucket" as a key
+      assert conn.status == 200
+      assert conn.resp_body =~ "ListBucketResult"
+    end
+
+    test "falls back to path-style when hostname is not configured" do
+      no_vhost_opts = S3Server.Plug.init(backend: MemoryBackend, region: "us-east-1")
+      signed_conn(:put, "/novhost-bucket") |> call(no_vhost_opts)
+
+      conn =
+        vhost_conn(:get, "/novhost-bucket", "novhost-bucket.s3.example.com")
+        |> call(no_vhost_opts)
+
+      assert conn.status == 200
+      assert conn.resp_body =~ "ListBucketResult"
+    end
+
+    test "Host with port is handled correctly", %{vhost_opts: opts} do
+      signed_conn(:put, "/port-bucket") |> call(opts)
+
+      conn =
+        vhost_conn(:get, "/", "port-bucket.s3.example.com:4566")
+        |> call(opts)
+
+      assert conn.status == 200
+      assert conn.resp_body =~ "ListBucketResult"
+    end
+
+    test "service-level ListBuckets via base hostname", %{vhost_opts: opts} do
+      signed_conn(:put, "/lb-bucket") |> call(opts)
+
+      # Host: s3.example.com (no bucket prefix) with path / → ListBuckets
+      conn = vhost_conn(:get, "/", "s3.example.com") |> call(opts)
+      assert conn.status == 200
+      assert conn.resp_body =~ "ListAllMyBucketsResult"
+    end
+
+    test "bucket-level operations via virtual-hosted-style", %{vhost_opts: opts} do
+      signed_conn(:put, "/ops-bucket") |> call(opts)
+
+      # HEAD bucket
+      conn = vhost_conn(:head, "/", "ops-bucket.s3.example.com") |> call(opts)
+      assert conn.status == 200
+
+      # ListObjectsV2
+      conn = vhost_conn(:get, "/", "ops-bucket.s3.example.com") |> call(opts)
+      assert conn.status == 200
+      assert conn.resp_body =~ "ListBucketResult"
+    end
+
+    test "nested key paths work with virtual-hosted-style", %{vhost_opts: opts} do
+      signed_conn(:put, "/nested-bucket") |> call(opts)
+
+      data = "nested content"
+
+      vhost_conn(:put, "/path/to/deep/file.txt", "nested-bucket.s3.example.com",
+        body: data,
+        headers: [{"content-type", "text/plain"}]
+      )
+      |> call(opts)
+
+      conn =
+        vhost_conn(:get, "/path/to/deep/file.txt", "nested-bucket.s3.example.com")
+        |> call(opts)
+
+      assert conn.status == 200
+      assert conn.resp_body == data
+    end
+  end
+
   # Helper to extract a value from XML by tag name (simple case)
   defp extract_xml_value(xml, tag) do
     case Regex.run(~r/<#{tag}>([^<]+)<\/#{tag}>/, xml) do
