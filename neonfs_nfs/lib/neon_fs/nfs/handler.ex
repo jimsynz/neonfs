@@ -28,7 +28,7 @@ defmodule NeonFS.NFS.Handler do
   import Bitwise
   require Logger
 
-  alias NeonFS.NFS.{InodeTable, MetadataCache, Native}
+  alias NeonFS.NFS.{InodeTable, MetadataCache, Native, WriteThrottle}
 
   @null_volume_id <<0::128>>
 
@@ -310,16 +310,35 @@ defmodule NeonFS.NFS.Handler do
     data = params["data"]
 
     result =
-      with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
-           {:ok, path} <- inode_path(inode),
-           {:ok, file} <-
-             core_call(NeonFS.Core.WriteOperation, :write_file_at, [vol.id, path, offset, data]) do
-        invalidate_after_write(state.cache_table, vol.name, path, file)
-        count = byte_size(data)
-        {:ok, build_write_reply(count, inode, file)}
-      end
+      WriteThrottle.with_permit(byte_size(data), fn ->
+        with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
+             {:ok, path} <- inode_path(inode),
+             {:ok, file} <-
+               core_call(NeonFS.Core.WriteOperation, :write_file_at, [
+                 vol.id,
+                 path,
+                 offset,
+                 data
+               ]) do
+          invalidate_after_write(state.cache_table, vol.name, path, file)
+          count = byte_size(data)
+          {:ok, build_write_reply(count, inode, file)}
+        end
+      end)
 
-    {result_to_reply(result), state}
+    case result do
+      {:error, :overloaded} ->
+        :telemetry.execute(
+          [:neonfs, :nfs, :write_throttle, :reject],
+          %{bytes: byte_size(data)},
+          %{reason: :overloaded}
+        )
+
+        {{:error, errno(:ejukebox)}, state}
+
+      _ ->
+        {result_to_reply(result), state}
+    end
   end
 
   # Create: create a new file
@@ -952,6 +971,7 @@ defmodule NeonFS.NFS.Handler do
   defp errno(:eio), do: 5
   defp errno(:enoent), do: 2
   defp errno(:enosys), do: 38
+  defp errno(:ejukebox), do: 10_008
   defp errno(:estale), do: 70
   defp errno(_), do: 5
 end

@@ -188,6 +188,7 @@ pub fn errno_to_nfsstat(errno: i32) -> nfsstat3 {
         39 | 66 => nfsstat3::NFS3ERR_NOTEMPTY,
         63 => nfsstat3::NFS3ERR_NAMETOOLONG,
         70 => nfsstat3::NFS3ERR_STALE,
+        10008 => nfsstat3::NFS3ERR_JUKEBOX,
         _ => nfsstat3::NFS3ERR_IO,
     }
 }

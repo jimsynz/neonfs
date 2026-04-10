@@ -23,6 +23,8 @@ defmodule NeonFS.NFS.Supervisor do
       # Service registration (unique name — FUSE and NFS each need their own)
       {NeonFS.Client.Registrar,
        metadata: registration_metadata(), type: :nfs, name: NeonFS.Client.Registrar.NFS},
+      # Write throttle limits concurrent write pressure across all handlers
+      NeonFS.NFS.WriteThrottle,
       # Inode table must start before handlers
       NeonFS.NFS.InodeTable,
       # Metadata cache for reducing RPC round-trips

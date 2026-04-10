@@ -1090,11 +1090,22 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
+  @max_chunk_concurrency 8
+
   defp process_chunks(chunk_results, volume, write_ctx, opts) do
     compression_config = Keyword.get(opts, :compression, volume.compression)
 
-    chunk_results
-    |> Enum.with_index()
+    indexed_chunks = Enum.with_index(chunk_results)
+
+    if length(indexed_chunks) <= 1 do
+      process_chunks_sequential(indexed_chunks, compression_config, volume, write_ctx)
+    else
+      process_chunks_parallel(indexed_chunks, compression_config, volume, write_ctx)
+    end
+  end
+
+  defp process_chunks_sequential(indexed_chunks, compression_config, volume, write_ctx) do
+    indexed_chunks
     |> Enum.reduce_while({:ok, []}, fn {{data, hash, offset, size}, index}, {:ok, acc} ->
       case process_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
         {:ok, chunk_info} ->
@@ -1106,6 +1117,39 @@ defmodule NeonFS.Core.WriteOperation do
       end
     end)
     |> case do
+      {:ok, chunks} -> {:ok, Enum.reverse(chunks)}
+      error -> error
+    end
+  end
+
+  defp process_chunks_parallel(indexed_chunks, compression_config, volume, write_ctx) do
+    max_concurrency =
+      Application.get_env(:neonfs_core, :chunk_write_concurrency, @max_chunk_concurrency)
+
+    results =
+      indexed_chunks
+      |> Task.async_stream(
+        fn {{data, hash, offset, size}, index} ->
+          process_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx)
+        end,
+        max_concurrency: max_concurrency,
+        ordered: true,
+        timeout: 30_000
+      )
+      |> Enum.reduce_while({:ok, []}, fn
+        {:ok, {:ok, chunk_info}}, {:ok, acc} ->
+          {:cont, {:ok, [chunk_info | acc]}}
+
+        {:ok, {:error, reason}}, _acc ->
+          Logger.debug("Chunk processing failed", reason: reason)
+          {:halt, {:error, reason}}
+
+        {:exit, reason}, _acc ->
+          Logger.debug("Chunk processing task exited", reason: reason)
+          {:halt, {:error, {:chunk_task_failed, reason}}}
+      end)
+
+    case results do
       {:ok, chunks} -> {:ok, Enum.reverse(chunks)}
       error -> error
     end

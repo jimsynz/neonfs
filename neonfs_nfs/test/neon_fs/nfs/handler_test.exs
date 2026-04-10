@@ -837,6 +837,60 @@ defmodule NeonFS.NFS.HandlerTest do
     end
   end
 
+  describe "write throttle" do
+    @ejukebox 10_008
+
+    alias NeonFS.NFS.WriteThrottle
+
+    test "returns JUKEBOX when write throttle is saturated", ctx do
+      start_supervised!(WriteThrottle)
+
+      Application.put_env(:neonfs_nfs, :max_in_flight_writes, 1)
+      Application.put_env(:neonfs_nfs, :write_acquire_timeout, 50)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_nfs, :max_in_flight_writes)
+        Application.delete_env(:neonfs_nfs, :write_acquire_timeout)
+      end)
+
+      # Hold a permit so the handler can't acquire one
+      {:ok, _permit} = WriteThrottle.acquire(100)
+
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      created = create_file(handler, vol_hash, root_inode, "throttled.txt")
+      file_inode = created["file_id"]
+
+      send_op(handler, 1, "write", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "data" => "data"
+      })
+
+      assert_error(1, @ejukebox)
+    end
+
+    test "allows write when throttle has capacity", ctx do
+      start_supervised!(WriteThrottle)
+
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      created = create_file(handler, vol_hash, root_inode, "ok.txt")
+      file_inode = created["file_id"]
+
+      send_op(handler, 1, "write", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "data" => "hello"
+      })
+
+      reply = assert_ok(1)
+      assert reply["count"] == 5
+    end
+  end
+
   describe "telemetry" do
     test "emits request telemetry", ctx do
       %{handler: handler} = start_handler_without_core(ctx)
