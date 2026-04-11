@@ -186,25 +186,49 @@ fj issue view 123                      # View issue details
 fj pr view 123                         # View PR details
 ```
 
-### Retrieving CI Status and Logs
+### API Access
 
-The `fj pr status` command is broken on this Forgejo version. Use the API instead. Obtain a token via git credentials:
+For API operations that `fj` doesn't support well (CI status, issue comments, PR creation with body), use the Forgejo REST API with the `fj` CLI's stored token:
 
 ```bash
-TOKEN=$(echo -e "protocol=https\nhost=harton.dev" | git credential fill | awk -F= '/password/{print $2}')
+FJ_TOKEN=$(jq -r '.hosts["harton.dev"].token' ~/.local/share/forgejo-cli/keys.json)
 ```
+
+The git credential token (`git credential fill`) has limited scopes and cannot read/write issues or comments. Always use the `fj` CLI token for API calls.
+
+**Add a comment to an issue:**
+```bash
+curl -s -X POST \
+  -H "Authorization: token $FJ_TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/issues/123/comments" \
+  -d '{"body": "Comment text here"}'
+```
+
+**Create a pull request with body:**
+```bash
+curl -s -X POST \
+  -H "Authorization: token $FJ_TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/pulls" \
+  -d '{"title": "PR title", "body": "PR body", "head": "branch-name", "base": "main"}'
+```
+
+### Retrieving CI Status and Logs
+
+The `fj pr status` command is broken on this Forgejo version. Use the API with `FJ_TOKEN` (see above).
 
 **Check CI status for a commit:**
 ```bash
 COMMIT=$(git rev-parse HEAD)
-curl -s -H "Authorization: token $TOKEN" \
+curl -s -H "Authorization: token $FJ_TOKEN" \
   "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$COMMIT/statuses" \
   | jq '.[] | {context, status, description}'
 ```
 
 **Show only failures:**
 ```bash
-curl -s -H "Authorization: token $TOKEN" \
+curl -s -H "Authorization: token $FJ_TOKEN" \
   "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$COMMIT/statuses" \
   | jq '.[] | select(.status == "failure") | {context, description}'
 ```
@@ -212,7 +236,7 @@ curl -s -H "Authorization: token $TOKEN" \
 **List workflow runs for the current branch (with job-level detail):**
 ```bash
 SHA=$(git rev-parse HEAD)
-curl -s -H "Authorization: token $TOKEN" \
+curl -s -H "Authorization: token $FJ_TOKEN" \
   "https://harton.dev/api/v1/repos/project-neon/neonfs/actions/tasks?limit=20" \
   | jq ".workflow_runs[] | select(.head_sha == \"$SHA\") | {id, name, status, event}"
 ```
@@ -220,7 +244,7 @@ curl -s -H "Authorization: token $TOKEN" \
 **Compare against main to identify pre-existing failures:**
 ```bash
 MAIN_SHA=$(git rev-parse origin/main)
-curl -s -H "Authorization: token $TOKEN" \
+curl -s -H "Authorization: token $FJ_TOKEN" \
   "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$MAIN_SHA/statuses" \
   | jq '.[] | select(.status == "failure") | {context, description}'
 ```
