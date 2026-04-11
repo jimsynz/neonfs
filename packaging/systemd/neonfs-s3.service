@@ -1,0 +1,30 @@
+[Unit]
+Description=NeonFS S3 API Gateway Daemon
+After=network.target
+Documentation=https://neonfs.dev/docs
+
+[Service]
+Type=notify
+User=neonfs
+Group=neonfs
+ExecStart=/usr/bin/neonfs-s3-daemon start
+ExecStop=/usr/bin/neonfs-s3-daemon stop
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+EnvironmentFile=-/etc/neonfs/neonfs.conf
+
+RuntimeDirectory=neonfs
+StateDirectory=neonfs
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/neonfs
+
+[Install]
+WantedBy=multi-user.target

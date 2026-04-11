@@ -1,14 +1,14 @@
-name: neonfs-omnibus
+name: neonfs-s3
 arch: "${ARCH}"
 platform: linux
 version: "${VERSION}"
 section: net
 priority: optional
 maintainer: "James Harton <james@harton.dev>"
-description: "NeonFS all-in-one daemon (core + FUSE + NFS in a single node)"
 vendor: "harton.dev"
 homepage: "https://harton.dev/project-neon/neonfs"
 license: "Apache-2.0"
+description: "NeonFS S3-compatible API gateway daemon"
 
 depends:
   - neonfs-common (= ${VERSION})
@@ -18,28 +18,20 @@ depends:
   - libssl3t64
   - libncurses6
   - ca-certificates
-  - libfuse3-4
-  - fuse3
-
-recommends:
-  - nfs-common
 
 conflicts:
-  - neonfs-core
-  - neonfs-fuse
-  - neonfs-nfs
-  - neonfs-s3
+  - neonfs-omnibus
 
 contents:
-  - src: "${BUILD_DIR}/neonfs_omnibus/_build/prod/rel/neonfs_omnibus/"
-    dst: /usr/lib/neonfs/omnibus/
+  - src: "${BUILD_DIR}/neonfs_s3/_build/prod/rel/neonfs_s3/"
+    dst: /usr/lib/neonfs/s3/
     type: tree
 
-  - src: ../systemd/neonfs-omnibus.service
-    dst: /usr/lib/systemd/system/neonfs-omnibus.service
+  - src: ../systemd/neonfs-s3.service
+    dst: /usr/lib/systemd/system/neonfs-s3.service
 
-  - src: ../systemd/neonfs-omnibus-daemon
-    dst: /usr/bin/neonfs-omnibus-daemon
+  - src: ../systemd/neonfs-s3-daemon
+    dst: /usr/bin/neonfs-s3-daemon
     file_info:
       mode: 0755
 
