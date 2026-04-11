@@ -231,6 +231,39 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
     end
   end
 
+  describe "check_write/3 share mode enforcement" do
+    test "blocks write when another client has deny_write open", %{pid: pid} do
+      assert :ok = FileLock.open(pid, :client_a, :read, :write, ttl: 60_000)
+      assert {:error, :share_denied} = FileLock.check_write(pid, :client_b, {0, 100})
+    end
+
+    test "blocks write when another client has deny_read_write open", %{pid: pid} do
+      assert :ok = FileLock.open(pid, :client_a, :read, :read_write, ttl: 60_000)
+      assert {:error, :share_denied} = FileLock.check_write(pid, :client_b, {0, 100})
+    end
+
+    test "permits write when another client has deny_read open", %{pid: pid} do
+      assert :ok = FileLock.open(pid, :client_a, :write, :read, ttl: 60_000)
+      assert :ok = FileLock.check_write(pid, :client_b, {0, 100})
+    end
+
+    test "permits write when another client has deny_none open", %{pid: pid} do
+      assert :ok = FileLock.open(pid, :client_a, :read, :none, ttl: 60_000)
+      assert :ok = FileLock.check_write(pid, :client_b, {0, 100})
+    end
+
+    test "permits write by the client that holds the deny_write open", %{pid: pid} do
+      assert :ok = FileLock.open(pid, :client_a, :read_write, :write, ttl: 60_000)
+      assert :ok = FileLock.check_write(pid, :client_a, {0, 100})
+    end
+
+    test "blocks write when any of multiple opens has deny_write", %{pid: pid} do
+      assert :ok = FileLock.open(pid, :client_a, :read, :none, ttl: 60_000)
+      assert :ok = FileLock.open(pid, :client_b, :read_write, :write, ttl: 60_000)
+      assert {:error, :share_denied} = FileLock.check_write(pid, :client_c, {0, 100})
+    end
+  end
+
   describe "process lifecycle" do
     test "process stops when all state is released" do
       {:ok, pid} =

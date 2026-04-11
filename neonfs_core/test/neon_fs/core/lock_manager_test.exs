@@ -152,6 +152,38 @@ defmodule NeonFS.Core.LockManagerTest do
     end
   end
 
+  describe "check_write/3 share mode enforcement" do
+    test "blocks write when another client has deny_write open" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.open(file_id, :client_a, :read, :write)
+      assert {:error, :share_denied} = LockManager.check_write(file_id, :client_b, {0, 100})
+    end
+
+    test "blocks write when another client has deny_read_write open" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.open(file_id, :client_a, :read, :read_write)
+      assert {:error, :share_denied} = LockManager.check_write(file_id, :client_b, {0, 100})
+    end
+
+    test "permits write by the client that holds the deny_write open" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.open(file_id, :client_a, :read_write, :write)
+      assert :ok = LockManager.check_write(file_id, :client_a, {0, 100})
+    end
+
+    test "permits write when deny is only :read" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.open(file_id, :client_a, :write, :read)
+      assert :ok = LockManager.check_write(file_id, :client_b, {0, 100})
+    end
+
+    test "permits write when deny is :none" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.open(file_id, :client_a, :read, :none)
+      assert :ok = LockManager.check_write(file_id, :client_b, {0, 100})
+    end
+  end
+
   describe "master_for/1" do
     test "returns a node" do
       master = LockManager.master_for("some-file-id")

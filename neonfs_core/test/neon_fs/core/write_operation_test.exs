@@ -911,6 +911,86 @@ defmodule NeonFS.Core.WriteOperationTest do
     end
   end
 
+  describe "share mode (deny-write) enforcement" do
+    setup %{tmp_dir: _tmp_dir} do
+      start_lock_manager()
+      :ok
+    end
+
+    test "rejects write when another client has deny_write open", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/shared.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
+
+      assert {:error, :share_denied} =
+               WriteOperation.write_file(volume.id, "/shared.txt", "blocked",
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "rejects write when another client has deny_read_write open", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/exclusive.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :read_write)
+
+      assert {:error, :share_denied} =
+               WriteOperation.write_file(volume.id, "/exclusive.txt", "blocked",
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "permits write by the client that holds deny_write open", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/mine.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
+
+      assert {:ok, file_meta} =
+               WriteOperation.write_file(volume.id, "/mine.txt", "my data",
+                 client_ref: :smb_client_a
+               )
+
+      assert file_meta.size == byte_size("my data")
+    end
+
+    test "permits write when deny is only :read", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/deny-read.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :write, :read)
+
+      assert {:ok, _file_meta} =
+               WriteOperation.write_file(volume.id, "/deny-read.txt", "allowed",
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "rejects offset write when deny_write open is held", %{volume: volume} do
+      assert {:ok, _} =
+               WriteOperation.write_file(
+                 volume.id,
+                 "/offset-share.txt",
+                 String.duplicate("A", 200)
+               )
+
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/offset-share.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
+
+      assert {:error, :share_denied} =
+               WriteOperation.write_file_at(volume.id, "/offset-share.txt", 50, "blocked",
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "permits write when no client_ref provided (backward compatible)", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/legacy-share.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
+
+      assert {:ok, _file_meta} =
+               WriteOperation.write_file(volume.id, "/legacy-share.txt", "no client ref")
+    end
+  end
+
   # Telemetry event handler
   defp handle_telemetry_event(event, measurements, metadata, _config) do
     events = Process.get(:telemetry_events, [])

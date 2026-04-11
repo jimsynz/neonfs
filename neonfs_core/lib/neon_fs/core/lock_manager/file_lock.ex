@@ -163,13 +163,16 @@ defmodule NeonFS.Core.LockManager.FileLock do
   @doc """
   Checks whether a write to the given byte range is permitted.
 
-  Returns `:ok` if no mandatory lock held by another client overlaps
-  the range, or `{:error, :lock_conflict}` if a conflicting mandatory
-  lock exists. Advisory locks are ignored — enforcement is the protocol
-  adapter's responsibility.
+  Returns `:ok` if the write is allowed, or an error if blocked:
+
+  - `{:error, :lock_conflict}` — a mandatory byte-range lock held by
+    another client overlaps the write range. Advisory locks are ignored.
+  - `{:error, :share_denied}` — another client has the file open with
+    `deny: :write` or `deny: :read_write`, blocking writes from other
+    clients regardless of byte range.
   """
   @spec check_write(pid() | GenServer.name(), client_ref(), range()) ::
-          :ok | {:error, :lock_conflict}
+          :ok | {:error, :lock_conflict | :share_denied}
   def check_write(server, client_ref, range) do
     GenServer.call(server, {:check_write, client_ref, range})
   end
@@ -350,9 +353,12 @@ defmodule NeonFS.Core.LockManager.FileLock do
     now = System.monotonic_time(:millisecond)
     state = purge_expired(state, now)
 
-    case check_mandatory_write_conflict(state.locks, client_ref, range) do
-      :ok -> {:reply, :ok, state, @idle_timeout_ms}
+    with :ok <- check_mandatory_write_conflict(state.locks, client_ref, range),
+         :ok <- check_write_share_mode(state.opens, client_ref) do
+      {:reply, :ok, state, @idle_timeout_ms}
+    else
       :conflict -> {:reply, {:error, :lock_conflict}, state, @idle_timeout_ms}
+      :share_denied -> {:reply, {:error, :share_denied}, state, @idle_timeout_ms}
     end
   end
 
@@ -416,6 +422,16 @@ defmodule NeonFS.Core.LockManager.FileLock do
   end
 
   ## Private functions
+
+  defp check_write_share_mode(opens, client_ref) do
+    denied =
+      Enum.any?(opens, fn entry ->
+        entry.client_ref != client_ref and
+          entry.deny in [:write, :read_write]
+      end)
+
+    if denied, do: :share_denied, else: :ok
+  end
 
   defp check_mandatory_write_conflict(locks, client_ref, {offset, length}) do
     conflict =
