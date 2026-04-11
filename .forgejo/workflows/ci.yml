@@ -404,3 +404,50 @@ jobs:
         working-directory: neonfs_integration
         run: |
           mix check
+          
+  # =========================================================================
+  # neonfs_omnibus - Elixir + Rustler NIFs (contains core, nfs, fuse, etc)
+  # =========================================================================
+  neonfs_omnibus:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl ca-certificates git nodejs \
+          && rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain "${{ needs.resolve-versions.outputs.rust }}"
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_omnibus/deps
+            neonfs_omnibus/_build
+          key: v2-build-neonfs_omnibus-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_omnibus/mix.lock', 'neonfs_omnibus/native/neonfs_omnibus/Cargo.lock') }}
+          restore-keys: build-neonfs_omnibus-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_omnibus
+        run: |
+          mix local.hex --force && mix local.rebar --force
+          mix deps.get
+          mix deps.compile
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+
+      - name: Check
+        working-directory: neonfs_omnibus
+        run: |
+          mix check
