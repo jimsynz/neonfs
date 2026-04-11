@@ -1,5 +1,5 @@
 group "default" {
-  targets = ["core", "fuse", "nfs", "omnibus", "cli"]
+  targets = ["core", "fuse", "nfs", "s3", "omnibus", "cli"]
 }
 
 variable "TAG" {
@@ -85,6 +85,24 @@ target "nfs" {
   }
   cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/nfs:main"]
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/nfs:${TAG},mode=max,ignore-error=true"]
+}
+
+target "s3" {
+  dockerfile = "containers/Containerfile.s3"
+  platforms  = split(",", PLATFORMS)
+  tags       = [
+    "forgejo.dmz/project-neon/neonfs/s3:${TAG}",
+    "ghcr.io/jimsynz/neonfs/s3:${TAG}"
+  ]
+  contexts = {
+    "client": "./neonfs_client"
+    "s3_server": "./s3_server"
+    "src": "./neonfs_s3"
+    "base": "target:base"
+    "cli": "target:cli"
+  }
+  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/s3:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/s3:main"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/s3:${TAG},mode=max,ignore-error=true"]
 }
 
 target "omnibus" {
