@@ -7,6 +7,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     ChunkIndex,
     FileIndex,
     KeyManager,
+    LockManager,
     RaServer,
     StripeIndex,
     VolumeEncryption,
@@ -784,6 +785,129 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/middle.txt")
       expected = String.duplicate("A", 10) <> overwrite_data <> String.duplicate("A", 80)
       assert read_data == expected
+    end
+  end
+
+  describe "mandatory lock enforcement" do
+    setup %{tmp_dir: _tmp_dir} do
+      start_lock_manager()
+      :ok
+    end
+
+    test "rejects write when mandatory lock held by another client", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/locked.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {0, 1000},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:error, :lock_conflict} =
+               WriteOperation.write_file(volume.id, "/locked.txt", "blocked data",
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "permits write when mandatory lock held by same client", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/my-locked.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {0, 1000},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:ok, file_meta} =
+               WriteOperation.write_file(volume.id, "/my-locked.txt", "my data",
+                 client_ref: :smb_client_a
+               )
+
+      assert file_meta.size == byte_size("my data")
+    end
+
+    test "permits write when no client_ref provided (backward compatible)", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/legacy.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {0, 1000},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:ok, _file_meta} =
+               WriteOperation.write_file(volume.id, "/legacy.txt", "no client ref")
+    end
+
+    test "permits write when only advisory locks exist", %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/advisory.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :nfs_client,
+                 {0, 1000},
+                 :exclusive,
+                 mode: :advisory
+               )
+
+      assert {:ok, _file_meta} =
+               WriteOperation.write_file(volume.id, "/advisory.txt", "allowed",
+                 client_ref: :other_client
+               )
+    end
+
+    test "rejects offset write when mandatory lock overlaps range", %{volume: volume} do
+      assert {:ok, _} =
+               WriteOperation.write_file(volume.id, "/partial.txt", String.duplicate("A", 200))
+
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/partial.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {50, 100},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:error, :lock_conflict} =
+               WriteOperation.write_file_at(volume.id, "/partial.txt", 75, "blocked",
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "permits offset write to non-overlapping range", %{volume: volume} do
+      assert {:ok, _} =
+               WriteOperation.write_file(volume.id, "/nonoverlap.txt", String.duplicate("A", 200),
+                 chunk_strategy: :single
+               )
+
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/nonoverlap.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {0, 50},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:ok, _file_meta} =
+               WriteOperation.write_file_at(volume.id, "/nonoverlap.txt", 100, "allowed",
+                 client_ref: :smb_client_b
+               )
     end
   end
 

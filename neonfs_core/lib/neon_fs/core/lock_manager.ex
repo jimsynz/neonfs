@@ -155,6 +155,24 @@ defmodule NeonFS.Core.LockManager do
   end
 
   @doc """
+  Checks whether a write to the given byte range of a file is permitted.
+
+  Returns `:ok` if there are no conflicting mandatory locks, or
+  `{:error, :lock_conflict}` if a mandatory lock held by another client
+  overlaps the write range. Advisory locks are ignored.
+
+  If no lock state exists for the file (no FileLock process), the write
+  is always permitted.
+  """
+  @spec check_write(file_id(), FileLock.client_ref(), FileLock.range()) ::
+          :ok | {:error, :lock_conflict | :unavailable}
+  def check_write(file_id, client_ref, range) do
+    with_existing_file_lock(file_id, fn pid ->
+      FileLock.check_write(pid, client_ref, range)
+    end)
+  end
+
+  @doc """
   Returns the status of locks on a file.
   """
   @spec status(file_id()) :: {:ok, map()} | {:error, :not_found | :unavailable}

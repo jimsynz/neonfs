@@ -200,6 +200,37 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
     end
   end
 
+  describe "check_write/3" do
+    test "permits write when no mandatory locks exist", %{pid: pid} do
+      assert :ok = FileLock.check_write(pid, :client_b, {0, 100})
+    end
+
+    test "permits write past advisory exclusive lock", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :advisory)
+      assert :ok = FileLock.check_write(pid, :client_b, {0, 100})
+    end
+
+    test "blocks write at mandatory exclusive lock from another client", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert {:error, :lock_conflict} = FileLock.check_write(pid, :client_b, {50, 50})
+    end
+
+    test "blocks write at mandatory shared lock from another client", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :shared, mode: :mandatory)
+      assert {:error, :lock_conflict} = FileLock.check_write(pid, :client_b, {50, 50})
+    end
+
+    test "permits write when mandatory lock held by same client", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert :ok = FileLock.check_write(pid, :client_a, {0, 100})
+    end
+
+    test "permits write to non-overlapping range", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert :ok = FileLock.check_write(pid, :client_b, {200, 50})
+    end
+  end
+
   describe "process lifecycle" do
     test "process stops when all state is released" do
       {:ok, pid} =

@@ -29,6 +29,7 @@ defmodule NeonFS.Core.WriteOperation do
     FileIndex,
     FileMeta,
     KeyManager,
+    LockManager,
     Replication,
     ResolvedLookupCache,
     Stripe,
@@ -90,9 +91,12 @@ defmodule NeonFS.Core.WriteOperation do
     uid = Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :gids, [])
 
+    client_ref = Keyword.get(opts, :client_ref)
+
     result =
       with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}) do
+           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
+           :ok <- check_lock(volume_id, path, client_ref, {0, byte_size(data)}) do
         do_write(volume, path, data, write_id, opts)
       end
 
@@ -140,10 +144,12 @@ defmodule NeonFS.Core.WriteOperation do
 
     uid = Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :gids, [])
+    client_ref = Keyword.get(opts, :client_ref)
 
     result =
       with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}) do
+           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
+           :ok <- check_lock(volume_id, path, client_ref, {offset, byte_size(data)}) do
         case FileIndex.get_by_path(volume_id, path) do
           {:ok, file_meta} ->
             do_write_at(volume, file_meta, offset, data, write_id, opts)
@@ -221,6 +227,22 @@ defmodule NeonFS.Core.WriteOperation do
       {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
     end
   end
+
+  defp check_lock(_volume_id, _path, nil, _range), do: :ok
+
+  defp check_lock(volume_id, path, client_ref, range) do
+    lock_file_id = lock_file_id(volume_id, path)
+    LockManager.check_write(lock_file_id, client_ref, range)
+  end
+
+  @doc """
+  Returns the lock file ID for a given volume and path.
+
+  Protocol adapters must use this same key when acquiring locks so that
+  the write pipeline's lock check matches.
+  """
+  @spec lock_file_id(binary(), String.t()) :: binary()
+  def lock_file_id(volume_id, path), do: "#{volume_id}:#{path}"
 
   # ─── Offset Write (replicated) ─────────────────────────────────────────
 

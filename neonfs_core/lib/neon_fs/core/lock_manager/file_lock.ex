@@ -161,6 +161,20 @@ defmodule NeonFS.Core.LockManager.FileLock do
   end
 
   @doc """
+  Checks whether a write to the given byte range is permitted.
+
+  Returns `:ok` if no mandatory lock held by another client overlaps
+  the range, or `{:error, :lock_conflict}` if a conflicting mandatory
+  lock exists. Advisory locks are ignored — enforcement is the protocol
+  adapter's responsibility.
+  """
+  @spec check_write(pid() | GenServer.name(), client_ref(), range()) ::
+          :ok | {:error, :lock_conflict}
+  def check_write(server, client_ref, range) do
+    GenServer.call(server, {:check_write, client_ref, range})
+  end
+
+  @doc """
   Returns the current lock/open/lease status for this file.
   """
   @spec status(pid() | GenServer.name()) :: map()
@@ -332,6 +346,16 @@ defmodule NeonFS.Core.LockManager.FileLock do
     end
   end
 
+  def handle_call({:check_write, client_ref, range}, _from, state) do
+    now = System.monotonic_time(:millisecond)
+    state = purge_expired(state, now)
+
+    case check_mandatory_write_conflict(state.locks, client_ref, range) do
+      :ok -> {:reply, :ok, state, @idle_timeout_ms}
+      :conflict -> {:reply, {:error, :lock_conflict}, state, @idle_timeout_ms}
+    end
+  end
+
   def handle_call(:status, _from, state) do
     now = System.monotonic_time(:millisecond)
 
@@ -392,6 +416,17 @@ defmodule NeonFS.Core.LockManager.FileLock do
   end
 
   ## Private functions
+
+  defp check_mandatory_write_conflict(locks, client_ref, {offset, length}) do
+    conflict =
+      Enum.any?(locks, fn entry ->
+        entry.client_ref != client_ref and
+          entry.mode == :mandatory and
+          ranges_overlap?(entry.range, {offset, length})
+      end)
+
+    if conflict, do: :conflict, else: :ok
+  end
 
   defp check_lock_conflict(locks, client_ref, {offset, length}, type) do
     conflicting =

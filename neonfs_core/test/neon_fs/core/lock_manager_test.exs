@@ -115,6 +115,43 @@ defmodule NeonFS.Core.LockManagerTest do
     end
   end
 
+  describe "check_write/3" do
+    test "permits write when no locks exist" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.check_write(file_id, :client_a, {0, 100})
+    end
+
+    test "permits write when only advisory locks exist" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :exclusive, mode: :advisory)
+      assert :ok = LockManager.check_write(file_id, :client_b, {0, 100})
+    end
+
+    test "blocks write when mandatory lock held by another client" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert {:error, :lock_conflict} = LockManager.check_write(file_id, :client_b, {50, 50})
+    end
+
+    test "permits write when mandatory lock held by the same client" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert :ok = LockManager.check_write(file_id, :client_a, {0, 100})
+    end
+
+    test "permits write to non-overlapping range" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert :ok = LockManager.check_write(file_id, :client_b, {100, 50})
+    end
+
+    test "blocks write when shared mandatory lock held by another client" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :shared, mode: :mandatory)
+      assert {:error, :lock_conflict} = LockManager.check_write(file_id, :client_b, {50, 50})
+    end
+  end
+
   describe "master_for/1" do
     test "returns a node" do
       master = LockManager.master_for("some-file-id")
