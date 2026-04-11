@@ -63,6 +63,32 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
     end
   end
 
+  describe "rotate/1" do
+    test "generates a new secret key while keeping the same access key ID" do
+      {:ok, original} = S3CredentialManager.create(%{user: "dave"})
+
+      assert {:ok, rotated} = S3CredentialManager.rotate(original.access_key_id)
+
+      assert rotated.access_key_id == original.access_key_id
+      assert rotated.identity == original.identity
+      refute rotated.secret_access_key == original.secret_access_key
+      assert is_binary(rotated.secret_access_key)
+      assert byte_size(rotated.secret_access_key) > 20
+    end
+
+    test "rotated credential can be looked up with the new secret" do
+      {:ok, original} = S3CredentialManager.create(%{user: "eve"})
+      {:ok, rotated} = S3CredentialManager.rotate(original.access_key_id)
+
+      {:ok, found} = S3CredentialManager.lookup(original.access_key_id)
+      assert found.secret_access_key == rotated.secret_access_key
+    end
+
+    test "returns not_found for unknown access key" do
+      assert {:error, :not_found} = S3CredentialManager.rotate("NEONFS_NONEXISTENT")
+    end
+  end
+
   describe "list/1" do
     test "returns all credentials without secrets" do
       {:ok, _} = S3CredentialManager.create(%{user: "alice"})

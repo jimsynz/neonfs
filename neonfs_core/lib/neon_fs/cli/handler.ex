@@ -1588,6 +1588,126 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
+  @doc """
+  Rotates the secret access key for an S3 credential.
+
+  ## Parameters
+  - `access_key_id` - The access key ID to rotate
+
+  ## Returns
+  - `{:ok, map}` - Updated credential with new secret key (shown once)
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_s3_rotate_credential(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_s3_rotate_credential(access_key_id) when is_binary(access_key_id) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, credential} <- S3CredentialManager.rotate(access_key_id) do
+      AuditLog.log_event(
+        event_type: :s3_credential_rotated,
+        actor_uid: 0,
+        resource: access_key_id,
+        details: %{}
+      )
+
+      {:ok, credential_to_serialisable(credential)}
+    else
+      {:error, :not_found} ->
+        {:error, NotFound.exception(message: "S3 credential '#{access_key_id}' not found")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Shows details of a single S3 credential by access key ID.
+
+  ## Parameters
+  - `access_key_id` - The access key ID to look up
+
+  ## Returns
+  - `{:ok, map}` - Credential details (secret redacted)
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_s3_show_credential(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_s3_show_credential(access_key_id) when is_binary(access_key_id) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, credential} <- S3CredentialManager.lookup(access_key_id) do
+      {:ok, credential |> Map.delete(:secret_access_key) |> credential_to_serialisable()}
+    else
+      {:error, :not_found} ->
+        {:error, NotFound.exception(message: "S3 credential '#{access_key_id}' not found")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  # S3 bucket management (volumes exposed as S3 buckets)
+
+  @doc """
+  Lists all volumes available as S3 buckets.
+
+  ## Returns
+  - `{:ok, [map]}` - List of bucket info maps
+  """
+  @spec handle_s3_list_buckets() :: {:ok, [map()]}
+  def handle_s3_list_buckets do
+    set_cli_metadata()
+
+    with :ok <- require_cluster() do
+      buckets =
+        VolumeRegistry.list()
+        |> Enum.map(&volume_to_bucket/1)
+        |> Enum.sort_by(& &1.name)
+
+      {:ok, buckets}
+    end
+  end
+
+  @doc """
+  Shows details of a single S3 bucket (volume).
+
+  ## Parameters
+  - `bucket_name` - The bucket (volume) name
+
+  ## Returns
+  - `{:ok, map}` - Bucket details
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_s3_show_bucket(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_s3_show_bucket(bucket_name) when is_binary(bucket_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster() do
+      case VolumeRegistry.get_by_name(bucket_name) do
+        {:ok, volume} ->
+          {:ok, volume_to_bucket(volume)}
+
+        {:error, :not_found} ->
+          {:error, NotFound.exception(message: "Bucket '#{bucket_name}' not found")}
+
+        {:error, reason} ->
+          {:error, wrap_error(reason)}
+      end
+    end
+  end
+
+  defp volume_to_bucket(volume) do
+    %{
+      name: volume.name,
+      created_at: DateTime.to_iso8601(volume.created_at),
+      durability: volume.durability,
+      compression: volume.compression,
+      logical_size: volume.logical_size,
+      physical_size: volume.physical_size
+    }
+  end
+
   defp credential_to_serialisable(credential) do
     Map.take(credential, [:access_key_id, :secret_access_key, :identity, :created_at])
   end
