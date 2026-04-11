@@ -62,6 +62,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:set_current_key_version, volume_id :: binary(), version :: pos_integer()}
           | {:put_volume_acl, volume_id :: binary(), acl_data :: map()}
           | {:update_volume_acl, volume_id :: binary(), updates :: map()}
+          | {:put_s3_credential, cred_data :: map()}
+          | {:delete_s3_credential, access_key_id :: String.t()}
 
   @type segment_assignment :: %{
           replica_set: [node()],
@@ -82,6 +84,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
             optional(binary()) => %{optional(pos_integer()) => wrapped_key_entry()}
           },
           volume_acls: %{optional(binary()) => map()},
+          s3_credentials: %{optional(String.t()) => map()},
           version: non_neg_integer()
         }
 
@@ -139,7 +142,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Ra machine callbacks
 
   @doc """
-  Initialise the state machine with a clean v8 state.
+  Initialise the state machine with a clean v9 state.
   """
   @impl :ra_machine
   def init(_config) do
@@ -155,6 +158,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       active_intents_by_conflict_key: %{},
       encryption_keys: %{},
       volume_acls: %{},
+      s3_credentials: %{},
       version: 0
     }
   end
@@ -746,6 +750,37 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  # S3 credential commands (new in v9)
+
+  def apply(_meta, {:put_s3_credential, cred_data}, state) do
+    access_key_id = cred_data.access_key_id
+    state = ensure_s3_credentials(state)
+    new_creds = Map.put(state.s3_credentials, access_key_id, cred_data)
+    new_state = %{state | s3_credentials: new_creds, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_s3_credential],
+      %{version: new_state.version},
+      %{access_key_id: access_key_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:delete_s3_credential, access_key_id}, state) do
+    state = ensure_s3_credentials(state)
+    new_creds = Map.delete(state.s3_credentials, access_key_id)
+    new_state = %{state | s3_credentials: new_creds, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :delete_s3_credential],
+      %{version: new_state.version},
+      %{access_key_id: access_key_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
   # Segment assignment commands (new in v5)
 
   def apply(_meta, {:assign_segment, segment_id, replica_set}, state) do
@@ -1088,4 +1123,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp migrate_volume_io_weight(vol) do
     Map.put_new(vol, :io_weight, 100)
   end
+
+  # Migration helper for v8 -> v9: ensure s3_credentials key exists
+  defp ensure_s3_credentials(%{s3_credentials: _} = state), do: state
+  defp ensure_s3_credentials(state), do: Map.put(state, :s3_credentials, %{})
 end

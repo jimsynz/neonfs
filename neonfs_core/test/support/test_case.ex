@@ -326,6 +326,15 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts S3CredentialManager.
+  """
+  def start_s3_credential_manager do
+    stop_if_running(NeonFS.Core.S3CredentialManager)
+    cleanup_ets_table(:s3_credentials)
+    start_supervised!(NeonFS.Core.S3CredentialManager, restart: :temporary)
+  end
+
+  @doc """
   Starts ACLManager.
   """
   def start_acl_manager do

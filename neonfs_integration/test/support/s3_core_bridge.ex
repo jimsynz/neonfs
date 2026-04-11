@@ -3,21 +3,14 @@ defmodule NeonFS.Integration.S3CoreBridge do
 
   # Bridges S3 Backend `call_core` calls to real core nodes via RPC.
   #
-  # Since #140 (S3 credential management) is not yet implemented, credential
-  # lookups are handled locally with test-only credentials.
+  # Credential lookups are routed to NeonFS.Core.S3CredentialManager on the
+  # core node. Call `create_test_credential/1` during setup to provision a
+  # credential for the test run.
   #
   # Usage:
   #   S3CoreBridge.store_core_node(node_atom)
+  #   {access_key, secret_key} = S3CoreBridge.create_test_credential(node_atom)
   #   Application.put_env(:neonfs_s3, :core_call_fn, &S3CoreBridge.call/2)
-
-  @test_access_key "neonfs-s3-integration-test"
-  @test_secret_key "neonfs-s3-integration-test-secret-key"
-
-  @spec test_access_key() :: String.t()
-  def test_access_key, do: @test_access_key
-
-  @spec test_secret_key() :: String.t()
-  def test_secret_key, do: @test_secret_key
 
   @spec store_core_node(node()) :: :ok
   def store_core_node(node_atom) do
@@ -25,9 +18,40 @@ defmodule NeonFS.Integration.S3CoreBridge do
     :ok
   end
 
+  @spec create_test_credential(node()) :: {String.t(), String.t()}
+  def create_test_credential(node_atom) do
+    {:ok, credential} =
+      rpc(node_atom, NeonFS.Core.S3CredentialManager, :create, [
+        %{user: "integration-test"}
+      ])
+
+    access_key = credential.access_key_id
+    secret_key = credential.secret_access_key
+
+    :persistent_term.put(:s3_integration_test_access_key, access_key)
+    :persistent_term.put(:s3_integration_test_secret_key, secret_key)
+
+    {access_key, secret_key}
+  end
+
+  @spec test_access_key() :: String.t()
+  def test_access_key, do: :persistent_term.get(:s3_integration_test_access_key)
+
+  @spec test_secret_key() :: String.t()
+  def test_secret_key, do: :persistent_term.get(:s3_integration_test_secret_key)
+
   @spec cleanup :: :ok
   def cleanup do
     :persistent_term.erase(:s3_integration_core_node)
+
+    for key <- [:s3_integration_test_access_key, :s3_integration_test_secret_key] do
+      try do
+        :persistent_term.erase(key)
+      rescue
+        ArgumentError -> :ok
+      end
+    end
+
     :ok
   end
 
@@ -37,12 +61,8 @@ defmodule NeonFS.Integration.S3CoreBridge do
     do_call(core_node, function, args)
   end
 
-  defp do_call(_node, :lookup_s3_credential, [access_key_id]) do
-    if access_key_id == @test_access_key do
-      {:ok, %{secret_access_key: @test_secret_key, identity: %{user: access_key_id}}}
-    else
-      {:error, :not_found}
-    end
+  defp do_call(node, :lookup_s3_credential, [access_key_id]) do
+    rpc(node, NeonFS.Core, :lookup_s3_credential, [access_key_id])
   end
 
   defp do_call(node, :list_volumes, []) do

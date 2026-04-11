@@ -240,6 +240,9 @@ defmodule NeonFS.Core.Supervisor do
           NeonFS.Transport.HandlerSupervisor,
           NeonFS.Transport.Listener,
 
+          # S3CredentialManager manages S3 access key lifecycle (ETS+Ra)
+          NeonFS.Core.S3CredentialManager,
+
           # ServiceRegistry depends on Ra being available
           ServiceRegistry,
 

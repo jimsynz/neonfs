@@ -6,8 +6,8 @@ defmodule NeonFS.Integration.S3Test do
   server running the S3 plug on the test runner. Uses ExAws.S3 as an external
   client to verify end-to-end S3 protocol compatibility.
 
-  Since #140 (S3 credential management) is not yet implemented, credential
-  lookups are handled by the S3CoreBridge with test-only credentials.
+  Credential lookups go through real NeonFS.Core.S3CredentialManager on the
+  core nodes via RPC.
   """
   use NeonFS.Integration.ClusterCase, async: false
 
@@ -23,6 +23,7 @@ defmodule NeonFS.Integration.S3Test do
 
     node1 = PeerCluster.get_node!(cluster, :node1)
     S3CoreBridge.store_core_node(node1.node)
+    {_access_key, _secret_key} = S3CoreBridge.create_test_credential(node1.node)
 
     Application.put_env(:neonfs_s3, :core_call_fn, &S3CoreBridge.call/2)
 

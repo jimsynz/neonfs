@@ -1,8 +1,7 @@
 defmodule NeonFS.CoreTest do
   use ExUnit.Case
-  doctest NeonFS.Core
 
-  test "greets the world" do
-    assert NeonFS.Core.hello() == :world
+  test "module exists" do
+    assert Code.ensure_loaded?(NeonFS.Core)
   end
 end

@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use commands::{
     acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, drive::DriveCommand,
     fuse::FuseCommand, gc::GcCommand, job::JobCommand, nfs::NfsCommand, node::NodeCommand,
-    scrub::ScrubCommand, volume::VolumeCommand, worker::WorkerCommand,
+    s3::S3Command, scrub::ScrubCommand, volume::VolumeCommand, worker::WorkerCommand,
 };
 use output::OutputFormat;
 
@@ -90,6 +90,12 @@ enum Commands {
         command: NodeCommand,
     },
 
+    /// S3 credential management
+    S3 {
+        #[command(subcommand)]
+        command: S3Command,
+    },
+
     /// Integrity scrubbing
     Scrub {
         #[command(subcommand)]
@@ -134,6 +140,7 @@ fn main() {
         Commands::Fuse { command } => command.execute(format),
         Commands::Nfs { command } => command.execute(format),
         Commands::Node { command } => command.execute(format),
+        Commands::S3 { command } => command.execute(format),
         Commands::Scrub { command } => command.execute(format),
         Commands::Volume { command } => command.execute(format),
         Commands::Worker { command } => command.execute(format),
@@ -351,6 +358,24 @@ mod tests {
     #[test]
     fn test_cluster_ca_rotate() {
         let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "rotate"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_s3_create_credential() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "create-credential", "--user", "alice"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_s3_list_credentials() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "list-credentials"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_s3_delete_credential() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "delete-credential", "NEONFS_SOME_KEY"]);
         assert!(cli.is_ok());
     }
 

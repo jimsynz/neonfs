@@ -26,6 +26,7 @@ defmodule NeonFS.CLI.Handler do
     KeyManager,
     KeyRotation,
     RaSupervisor,
+    S3CredentialManager,
     ServiceRegistry,
     StorageMetrics,
     Volume,
@@ -1493,6 +1494,102 @@ defmodule NeonFS.CLI.Handler do
 
       {:ok, nodes}
     end
+  end
+
+  # S3 credential management
+
+  @doc """
+  Creates a new S3 credential for the given user identity.
+
+  ## Parameters
+  - `identity` - User identity to associate with the credential
+
+  ## Returns
+  - `{:ok, map}` - Credential details including secret key (shown once)
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_s3_create_credential(term()) :: {:ok, map()} | {:error, term()}
+  def handle_s3_create_credential(identity) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, credential} <- S3CredentialManager.create(identity) do
+      AuditLog.log_event(
+        event_type: :s3_credential_created,
+        actor_uid: 0,
+        resource: credential.access_key_id,
+        details: %{identity: identity}
+      )
+
+      {:ok, credential_to_serialisable(credential)}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Lists S3 credentials, optionally filtered by identity.
+
+  ## Parameters
+  - `filters` - Optional map with `:identity` key
+
+  ## Returns
+  - `{:ok, [map]}` - List of credentials (secrets redacted)
+  """
+  @spec handle_s3_list_credentials(map()) :: {:ok, [map()]}
+  def handle_s3_list_credentials(filters \\ %{}) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster() do
+      opts =
+        case Map.get(filters, "identity") || Map.get(filters, :identity) do
+          nil -> []
+          id -> [identity: id]
+        end
+
+      credentials =
+        S3CredentialManager.list(opts)
+        |> Enum.map(&credential_to_serialisable/1)
+
+      {:ok, credentials}
+    end
+  end
+
+  @doc """
+  Deletes an S3 credential by access key ID.
+
+  ## Parameters
+  - `access_key_id` - The access key ID to delete
+
+  ## Returns
+  - `{:ok, map}` - Empty map on success
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_s3_delete_credential(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_s3_delete_credential(access_key_id) when is_binary(access_key_id) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         :ok <- S3CredentialManager.delete(access_key_id) do
+      AuditLog.log_event(
+        event_type: :s3_credential_deleted,
+        actor_uid: 0,
+        resource: access_key_id,
+        details: %{}
+      )
+
+      {:ok, %{}}
+    else
+      {:error, :not_found} ->
+        {:error, NotFound.exception(message: "S3 credential '#{access_key_id}' not found")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  defp credential_to_serialisable(credential) do
+    Map.take(credential, [:access_key_id, :secret_access_key, :identity, :created_at])
   end
 
   # Private helper functions
