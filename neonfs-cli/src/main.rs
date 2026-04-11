@@ -374,8 +374,32 @@ mod tests {
     }
 
     #[test]
+    fn test_s3_show_credential() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "show-credential", "NEONFS_SOME_KEY"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_s3_rotate_credential() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "rotate-credential", "NEONFS_SOME_KEY"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
     fn test_s3_delete_credential() {
         let cli = Cli::try_parse_from(["neonfs-cli", "s3", "delete-credential", "NEONFS_SOME_KEY"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_s3_bucket_list() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "bucket", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_s3_bucket_show() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "bucket", "show", "my-data"]);
         assert!(cli.is_ok());
     }
 

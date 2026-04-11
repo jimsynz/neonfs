@@ -50,6 +50,17 @@ defmodule NeonFS.Core.S3CredentialManager do
   end
 
   @doc """
+  Rotates the secret access key for an existing S3 credential.
+
+  Generates a new secret key while keeping the same access key ID and identity.
+  Returns the updated credential including the new secret (shown once).
+  """
+  @spec rotate(access_key_id()) :: {:ok, credential()} | {:error, :not_found}
+  def rotate(access_key_id) do
+    GenServer.call(__MODULE__, {:rotate, access_key_id}, 10_000)
+  end
+
+  @doc """
   Lists all S3 credentials, optionally filtered by identity.
 
   Returns credentials without their secret keys for security.
@@ -145,6 +156,12 @@ defmodule NeonFS.Core.S3CredentialManager do
   end
 
   @impl true
+  def handle_call({:rotate, access_key_id}, _from, state) do
+    reply = do_rotate(access_key_id)
+    {:reply, reply, state}
+  end
+
+  @impl true
   def handle_info(:retry_restore_from_ra, %{restored: true} = state) do
     {:noreply, state}
   end
@@ -194,6 +211,21 @@ defmodule NeonFS.Core.S3CredentialManager do
       [{^access_key_id, _cred}] ->
         case delete_credential_persisted(access_key_id) do
           :ok -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      [] ->
+        {:error, :not_found}
+    end
+  end
+
+  defp do_rotate(access_key_id) do
+    case :ets.lookup(@ets_table, access_key_id) do
+      [{^access_key_id, cred}] ->
+        rotated = %{cred | secret_access_key: generate_secret_access_key()}
+
+        case persist_credential(rotated) do
+          :ok -> {:ok, rotated}
           {:error, reason} -> {:error, reason}
         end
 
