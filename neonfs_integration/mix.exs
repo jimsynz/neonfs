@@ -22,7 +22,7 @@ defmodule NeonFS.Integration.MixProject do
   defp dialyzer do
     [
       ignore_warnings: ".dialyzer_ignore.exs",
-      plt_add_apps: [:neonfs_client, :neonfs_core, :neonfs_fuse]
+      plt_add_apps: [:neonfs_client, :neonfs_core, :neonfs_fuse, :neonfs_s3]
     ]
   end
 
@@ -42,6 +42,14 @@ defmodule NeonFS.Integration.MixProject do
       # Path dependencies for testing (runtime: false since only used in tests)
       {:neonfs_core, path: "../neonfs_core", runtime: false},
       {:neonfs_fuse, path: "../neonfs_fuse", runtime: false},
+      {:neonfs_s3, path: "../neonfs_s3", runtime: false},
+
+      # S3 integration test client
+      {:ex_aws, "~> 2.6", only: :test},
+      {:ex_aws_s3, "~> 2.5", only: :test},
+      {:hackney, "~> 1.9", only: :test},
+      {:jason, "~> 1.0"},
+      {:sweet_xml, "~> 0.7", only: :test},
 
       # dev/test
       {:stream_data, "~> 1.0", only: [:test]},

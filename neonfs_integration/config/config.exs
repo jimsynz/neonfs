@@ -18,6 +18,10 @@ if Mix.env() == :test do
   # share a single machine. The default 5s is tight when BEAM schedulers
   # are contended across 4+ nodes; 15s gives ample headroom.
   config :neonfs_core, quorum_timeout_ms: 15_000
+
+  # Don't start the S3 supervisor on the test controller —
+  # tests start Bandit manually with a core bridge function.
+  config :neonfs_s3, start_supervisor: false
 end
 
 if Mix.env() in [:dev, :test] do
