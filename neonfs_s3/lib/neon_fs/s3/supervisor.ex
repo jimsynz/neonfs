@@ -11,6 +11,9 @@ defmodule NeonFS.S3.Supervisor do
 
   use Supervisor
 
+  alias NeonFS.Client.Registrar
+  alias NeonFS.S3.{Backend, HealthCheck, HealthPlug, MultipartStore}
+
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -21,12 +24,13 @@ defmodule NeonFS.S3.Supervisor do
     port = Application.get_env(:neonfs_s3, :s3_port, 8080)
     bind = Application.get_env(:neonfs_s3, :s3_bind, "0.0.0.0")
 
+    HealthCheck.register_checks()
+
     children = [
-      {NeonFS.Client.Registrar,
-       metadata: registration_metadata(), type: :s3, name: NeonFS.Client.Registrar.S3},
-      NeonFS.S3.MultipartStore,
+      {Registrar, metadata: registration_metadata(), type: :s3, name: NeonFS.Client.Registrar.S3},
+      MultipartStore,
       {Bandit,
-       plug: {S3Server.Plug, backend: NeonFS.S3.Backend},
+       plug: {HealthPlug, backend: Backend},
        port: port,
        ip: parse_bind_address(bind),
        scheme: :http}
