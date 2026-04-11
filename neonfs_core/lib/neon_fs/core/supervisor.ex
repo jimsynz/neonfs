@@ -259,7 +259,13 @@ defmodule NeonFS.Core.Supervisor do
           NeonFS.Core.AntiEntropy,
 
           # Retention prunes old audit log files from the system volume
-          NeonFS.Core.SystemVolume.Retention
+          NeonFS.Core.SystemVolume.Retention,
+
+          # LockManager: Registry for per-file lock process naming
+          {Registry, keys: :unique, name: NeonFS.Core.LockManager.Registry},
+
+          # LockManager: DynamicSupervisor for per-file lock GenServers
+          NeonFS.Core.LockManager.Supervisor
         ] ++
         maybe_metrics_child() ++
         [

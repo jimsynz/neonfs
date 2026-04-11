@@ -354,6 +354,20 @@ defmodule NeonFS.TestCase do
     start_supervised!({NeonFS.Core.AuditLog, opts}, restart: :temporary)
   end
 
+  @doc """
+  Starts the LockManager infrastructure (Registry + DynamicSupervisor).
+  """
+  def start_lock_manager do
+    case Registry.start_link(keys: :unique, name: NeonFS.Core.LockManager.Registry) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    stop_if_running(NeonFS.Core.LockManager.Supervisor)
+
+    start_supervised!(NeonFS.Core.LockManager.Supervisor, restart: :temporary)
+  end
+
   defp stop_if_running(name) do
     case Process.whereis(name) do
       nil ->
