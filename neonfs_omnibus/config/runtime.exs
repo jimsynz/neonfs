@@ -94,4 +94,22 @@ if config_env() == :prod do
     nfs_bind: nfs_bind,
     nfs_port: nfs_port,
     node_name: node_name
+
+  # S3 configuration
+  s3_bind = System.get_env("NEONFS_S3_BIND", "0.0.0.0")
+  s3_port = String.to_integer(System.get_env("NEONFS_S3_PORT", "8080"))
+  s3_region = System.get_env("NEONFS_S3_REGION", "neonfs")
+  s3_metrics_enabled = System.get_env("NEONFS_S3_METRICS", "false") == "true"
+  s3_metrics_port = String.to_integer(System.get_env("NEONFS_S3_METRICS_PORT", "9571"))
+  s3_metrics_bind = System.get_env("NEONFS_S3_METRICS_BIND", "0.0.0.0")
+
+  config :neonfs_s3,
+    core_node: core_node,
+    metrics_bind: s3_metrics_bind,
+    metrics_enabled: s3_metrics_enabled,
+    metrics_port: s3_metrics_port,
+    node_name: node_name,
+    region: s3_region,
+    s3_bind: s3_bind,
+    s3_port: s3_port
 end

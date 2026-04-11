@@ -117,6 +117,8 @@ target "omnibus" {
     "core": "./neonfs_core"
     "fuse": "./neonfs_fuse"
     "nfs": "./neonfs_nfs"
+    "s3_server": "./s3_server"
+    "s3": "./neonfs_s3"
     "src": "./neonfs_omnibus"
     "base": "target:base"
     "cli": "target:cli"
