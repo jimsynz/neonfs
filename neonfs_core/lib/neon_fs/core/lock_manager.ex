@@ -35,6 +35,7 @@ defmodule NeonFS.Core.LockManager do
   """
 
   alias NeonFS.Core.LockManager.FileLock
+  alias NeonFS.Core.LockManager.GraceCoordinator
   alias NeonFS.Core.LockManager.Supervisor, as: LockSupervisor
   alias NeonFS.Core.{MetadataRing, ServiceRegistry}
 
@@ -52,13 +53,17 @@ defmodule NeonFS.Core.LockManager do
     * `:ttl` — lock TTL in milliseconds (default: 90_000)
     * `:mode` — `:advisory` or `:mandatory` (default: `:advisory`)
     * `:timeout` — call timeout in milliseconds (default: 5_000)
+    * `:reclaim` — `true` to reclaim a lock during a grace period
+      after lock master failover (default: `false`)
   """
   @spec lock(file_id(), FileLock.client_ref(), FileLock.range(), FileLock.lock_type(), keyword()) ::
-          :ok | {:error, :timeout | :unavailable}
+          :ok | {:error, :timeout | :grace_period | :unavailable}
   def lock(file_id, client_ref, range, type, opts \\ []) do
-    with_file_lock(file_id, fn pid ->
-      FileLock.lock(pid, client_ref, range, type, opts)
-    end)
+    with :ok <- check_grace(file_id, opts) do
+      with_file_lock(file_id, fn pid ->
+        FileLock.lock(pid, client_ref, range, type, opts)
+      end)
+    end
   end
 
   @doc """
@@ -88,6 +93,7 @@ defmodule NeonFS.Core.LockManager do
   ## Options
 
     * `:ttl` — open TTL in milliseconds (default: 90_000)
+    * `:reclaim` — `true` to reclaim during a grace period (default: `false`)
   """
   @spec open(
           file_id(),
@@ -95,11 +101,13 @@ defmodule NeonFS.Core.LockManager do
           FileLock.share_access(),
           FileLock.share_deny(),
           keyword()
-        ) :: :ok | {:error, :share_violation | :unavailable}
+        ) :: :ok | {:error, :share_violation | :grace_period | :unavailable}
   def open(file_id, client_ref, access, deny, opts \\ []) do
-    with_file_lock(file_id, fn pid ->
-      FileLock.open(pid, client_ref, access, deny, opts)
-    end)
+    with :ok <- check_grace(file_id, opts) do
+      with_file_lock(file_id, fn pid ->
+        FileLock.open(pid, client_ref, access, deny, opts)
+      end)
+    end
   end
 
   @doc """
@@ -119,13 +127,16 @@ defmodule NeonFS.Core.LockManager do
 
     * `:ttl` — lease TTL in milliseconds (default: 90_000)
     * `:break_callback` — zero-arity function called when the lease is broken
+    * `:reclaim` — `true` to reclaim during a grace period (default: `false`)
   """
   @spec grant_lease(file_id(), FileLock.client_ref(), FileLock.lease_type(), keyword()) ::
-          :ok | {:error, :conflict | :unavailable}
+          :ok | {:error, :conflict | :grace_period | :unavailable}
   def grant_lease(file_id, client_ref, lease_type, opts \\ []) do
-    with_file_lock(file_id, fn pid ->
-      FileLock.grant_lease(pid, client_ref, lease_type, opts)
-    end)
+    with :ok <- check_grace(file_id, opts) do
+      with_file_lock(file_id, fn pid ->
+        FileLock.grant_lease(pid, client_ref, lease_type, opts)
+      end)
+    end
   end
 
   @doc """
@@ -270,6 +281,14 @@ defmodule NeonFS.Core.LockManager do
     case lookup_file_lock(file_id) do
       {:ok, pid} -> fun.(pid)
       :not_found -> :ok
+    end
+  end
+
+  defp check_grace(file_id, opts) do
+    if Keyword.get(opts, :reclaim, false) or not GraceCoordinator.in_grace?(file_id) do
+      :ok
+    else
+      {:error, :grace_period}
     end
   end
 

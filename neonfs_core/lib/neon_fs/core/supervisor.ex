@@ -261,6 +261,9 @@ defmodule NeonFS.Core.Supervisor do
           # Retention prunes old audit log files from the system volume
           NeonFS.Core.SystemVolume.Retention,
 
+          # LockManager: Grace period coordinator for lock recovery after failover
+          NeonFS.Core.LockManager.GraceCoordinator,
+
           # LockManager: Registry for per-file lock process naming
           {Registry, keys: :unique, name: NeonFS.Core.LockManager.Registry},
 
