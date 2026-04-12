@@ -260,6 +260,42 @@ jobs:
           mix check
 
   # =========================================================================
+  # webdav_server - Standalone WebDAV server library (pure Elixir)
+  # =========================================================================
+  webdav_server:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.hexpm_image }}
+    steps:
+      - name: Install checkout dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends nodejs git ca-certificates && rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v6
+
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            webdav_server/deps
+            webdav_server/_build
+          key: v2-build-webdav_server-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('webdav_server/mix.lock') }}
+          restore-keys: v2-build-webdav_server-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: webdav_server
+        run: |
+          mix local.hex --force && mix local.rebar --force
+          mix deps.get
+          mix deps.compile
+          if grep -sL dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+
+      - name: Check
+        working-directory: webdav_server
+        run: |
+          mix check
+
+  # =========================================================================
   # neonfs_s3 - S3-compatible API interface (pure Elixir)
   # =========================================================================
   neonfs_s3:
