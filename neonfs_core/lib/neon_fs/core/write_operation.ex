@@ -69,6 +69,11 @@ defmodule NeonFS.Core.WriteOperation do
   ## Options
     * `:chunk_strategy` - Override volume's default chunking strategy
     * `:compression` - Override volume's compression settings
+    * `:block_on_lock` - When `true`, wait for conflicting locks to be
+      released instead of returning `{:error, :lock_conflict}` or
+      `{:error, :share_denied}` immediately (default: `false`)
+    * `:block_on_lock_timeout` - How long to wait in milliseconds when
+      `:block_on_lock` is `true` (default: 5_000)
 
   ## Returns
     * `{:ok, file_meta}` - File successfully written
@@ -96,7 +101,7 @@ defmodule NeonFS.Core.WriteOperation do
     result =
       with {:ok, volume} <- get_volume(volume_id),
            :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
-           :ok <- check_lock(volume_id, path, client_ref, {0, byte_size(data)}) do
+           :ok <- check_lock(volume_id, path, client_ref, {0, byte_size(data)}, opts) do
         do_write(volume, path, data, write_id, opts)
       end
 
@@ -126,7 +131,7 @@ defmodule NeonFS.Core.WriteOperation do
     * `path` - File path within the volume
     * `offset` - Byte offset to write at
     * `data` - Binary data to write
-    * `opts` - Options (same as `write_file/4`)
+    * `opts` - Options (same as `write_file/4`, including `:block_on_lock`)
   """
   @spec write_file_at(binary(), String.t(), non_neg_integer(), binary(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
@@ -149,7 +154,7 @@ defmodule NeonFS.Core.WriteOperation do
     result =
       with {:ok, volume} <- get_volume(volume_id),
            :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
-           :ok <- check_lock(volume_id, path, client_ref, {offset, byte_size(data)}) do
+           :ok <- check_lock(volume_id, path, client_ref, {offset, byte_size(data)}, opts) do
         case FileIndex.get_by_path(volume_id, path) do
           {:ok, file_meta} ->
             do_write_at(volume, file_meta, offset, data, write_id, opts)
@@ -228,11 +233,17 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp check_lock(_volume_id, _path, nil, _range), do: :ok
+  defp check_lock(_volume_id, _path, nil, _range, _opts), do: :ok
 
-  defp check_lock(volume_id, path, client_ref, range) do
+  defp check_lock(volume_id, path, client_ref, range, opts) do
     lock_file_id = lock_file_id(volume_id, path)
-    LockManager.check_write(lock_file_id, client_ref, range)
+
+    if Keyword.get(opts, :block_on_lock, false) do
+      timeout = Keyword.get(opts, :block_on_lock_timeout, 5_000)
+      LockManager.check_write_blocking(lock_file_id, client_ref, range, timeout: timeout)
+    else
+      LockManager.check_write(lock_file_id, client_ref, range)
+    end
   end
 
   @doc """

@@ -69,6 +69,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
           opens: [open_entry()],
           leases: [lease_entry()],
           wait_queue: :queue.queue(),
+          write_wait_queue: :queue.queue(),
           ttl_timer: reference() | nil
         }
 
@@ -178,6 +179,22 @@ defmodule NeonFS.Core.LockManager.FileLock do
   end
 
   @doc """
+  Checks whether a write is permitted, blocking until the conflict clears.
+
+  Like `check_write/3` but instead of returning an error immediately when
+  a mandatory lock or deny-write share mode blocks the write, the caller
+  is queued and unblocked when the conflict is released.
+
+  The `timeout` on the GenServer call controls how long the caller waits.
+  """
+  @spec check_write_blocking(pid() | GenServer.name(), client_ref(), range(), keyword()) ::
+          :ok | {:error, :lock_conflict | :share_denied}
+  def check_write_blocking(server, client_ref, range, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    GenServer.call(server, {:check_write_blocking, client_ref, range}, timeout)
+  end
+
+  @doc """
   Returns the current lock/open/lease status for this file.
   """
   @spec status(pid() | GenServer.name()) :: map()
@@ -211,6 +228,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
        opens: [],
        leases: [],
        wait_queue: :queue.new(),
+       write_wait_queue: :queue.new(),
        ttl_timer: timer
      }, @idle_timeout_ms}
   end
@@ -254,6 +272,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
 
     new_state = %{state | locks: new_locks}
     new_state = process_wait_queue(new_state)
+    new_state = process_write_wait_queue(new_state)
 
     :telemetry.execute(
       [:neonfs, :lock_manager, :file_lock, :unlocked],
@@ -271,6 +290,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
 
     new_state = %{state | locks: new_locks, opens: new_opens, leases: new_leases}
     new_state = process_wait_queue(new_state)
+    new_state = process_write_wait_queue(new_state)
 
     maybe_stop(new_state)
   end
@@ -299,6 +319,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
   def handle_call({:close, client_ref}, _from, state) do
     new_opens = Enum.reject(state.opens, &(&1.client_ref == client_ref))
     new_state = %{state | opens: new_opens}
+    new_state = process_write_wait_queue(new_state)
     maybe_stop(new_state)
   end
 
@@ -362,6 +383,27 @@ defmodule NeonFS.Core.LockManager.FileLock do
     end
   end
 
+  def handle_call({:check_write_blocking, client_ref, range}, from, state) do
+    now = System.monotonic_time(:millisecond)
+    state = purge_expired(state, now)
+
+    with :ok <- check_mandatory_write_conflict(state.locks, client_ref, range),
+         :ok <- check_write_share_mode(state.opens, client_ref) do
+      {:reply, :ok, state, @idle_timeout_ms}
+    else
+      _reason ->
+        new_queue = :queue.in({from, client_ref, range}, state.write_wait_queue)
+
+        :telemetry.execute(
+          [:neonfs, :lock_manager, :file_lock, :write_blocked],
+          %{},
+          %{file_id: state.file_id, client_ref: client_ref}
+        )
+
+        {:noreply, %{state | write_wait_queue: new_queue}, @idle_timeout_ms}
+    end
+  end
+
   def handle_call(:status, _from, state) do
     now = System.monotonic_time(:millisecond)
 
@@ -371,6 +413,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
       open_count: length(state.opens),
       lease_count: length(state.leases),
       wait_queue_length: :queue.len(state.wait_queue),
+      write_wait_queue_length: :queue.len(state.write_wait_queue),
       locks: Enum.map(state.locks, &sanitise_entry(&1, now)),
       opens: Enum.map(state.opens, &sanitise_entry(&1, now)),
       leases: Enum.map(state.leases, &sanitise_entry(&1, now))
@@ -384,6 +427,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
     now = System.monotonic_time(:millisecond)
     new_state = purge_expired(state, now)
     new_state = process_wait_queue(new_state)
+    new_state = process_write_wait_queue(new_state)
     timer = schedule_ttl_check()
     new_state = %{new_state | ttl_timer: timer}
 
@@ -530,6 +574,11 @@ defmodule NeonFS.Core.LockManager.FileLock do
     %{new_state | wait_queue: :queue.from_list(new_queue)}
   end
 
+  defp process_write_wait_queue(state) do
+    new_queue = drain_write_wait_queue(:queue.to_list(state.write_wait_queue), state, [])
+    %{state | write_wait_queue: :queue.from_list(new_queue)}
+  end
+
   defp drain_wait_queue([], state, still_waiting) do
     {Enum.reverse(still_waiting), state}
   end
@@ -562,6 +611,31 @@ defmodule NeonFS.Core.LockManager.FileLock do
     end
   end
 
+  defp drain_write_wait_queue([], _state, still_waiting) do
+    Enum.reverse(still_waiting)
+  end
+
+  defp drain_write_wait_queue(
+         [{from, client_ref, range} | rest],
+         state,
+         still_waiting
+       ) do
+    with :ok <- check_mandatory_write_conflict(state.locks, client_ref, range),
+         :ok <- check_write_share_mode(state.opens, client_ref) do
+      :telemetry.execute(
+        [:neonfs, :lock_manager, :file_lock, :write_unblocked],
+        %{},
+        %{file_id: state.file_id, client_ref: client_ref}
+      )
+
+      GenServer.reply(from, :ok)
+      drain_write_wait_queue(rest, state, still_waiting)
+    else
+      _ ->
+        drain_write_wait_queue(rest, state, [{from, client_ref, range} | still_waiting])
+    end
+  end
+
   defp renew_entries(state, client_ref, new_expires) do
     {found_lock, new_locks} = renew_list(state.locks, client_ref, new_expires)
     {found_open, new_opens} = renew_list(state.opens, client_ref, new_expires)
@@ -586,7 +660,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
 
   defp empty?(state) do
     state.locks == [] and state.opens == [] and state.leases == [] and
-      :queue.is_empty(state.wait_queue)
+      :queue.is_empty(state.wait_queue) and :queue.is_empty(state.write_wait_queue)
   end
 
   defp maybe_stop(new_state) do

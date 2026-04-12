@@ -184,6 +184,41 @@ defmodule NeonFS.Core.LockManagerTest do
     end
   end
 
+  describe "check_write_blocking/4" do
+    test "permits write when no locks exist" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.check_write_blocking(file_id, :client_a, {0, 100})
+    end
+
+    test "blocks until mandatory lock is released" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+
+      task =
+        Task.async(fn ->
+          LockManager.check_write_blocking(file_id, :client_b, {50, 50}, timeout: 2_000)
+        end)
+
+      Process.sleep(50)
+      assert :ok = LockManager.unlock(file_id, :client_a, {0, 100})
+      assert :ok = Task.await(task)
+    end
+
+    test "blocks until share mode is released" do
+      file_id = "file-#{System.unique_integer([:positive])}"
+      assert :ok = LockManager.open(file_id, :client_a, :read, :write)
+
+      task =
+        Task.async(fn ->
+          LockManager.check_write_blocking(file_id, :client_b, {0, 100}, timeout: 2_000)
+        end)
+
+      Process.sleep(50)
+      assert :ok = LockManager.close(file_id, :client_a)
+      assert :ok = Task.await(task)
+    end
+  end
+
   describe "master_for/1" do
     test "returns a node" do
       master = LockManager.master_for("some-file-id")

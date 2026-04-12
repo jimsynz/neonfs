@@ -177,6 +177,25 @@ defmodule NeonFS.Core.LockManager do
   end
 
   @doc """
+  Like `check_write/3` but blocks until the conflict clears.
+
+  When a mandatory byte-range lock or deny-write share mode would block
+  the write, the caller is queued and unblocked when the conflicting
+  entry is released or expires.
+
+  ## Options
+
+    * `:timeout` — how long to wait in milliseconds (default: 5_000)
+  """
+  @spec check_write_blocking(file_id(), FileLock.client_ref(), FileLock.range(), keyword()) ::
+          :ok | {:error, :unavailable}
+  def check_write_blocking(file_id, client_ref, range, opts \\ []) do
+    with_existing_file_lock(file_id, fn pid ->
+      FileLock.check_write_blocking(pid, client_ref, range, opts)
+    end)
+  end
+
+  @doc """
   Returns the status of locks on a file.
   """
   @spec status(file_id()) :: {:ok, map()} | {:error, :not_found | :unavailable}

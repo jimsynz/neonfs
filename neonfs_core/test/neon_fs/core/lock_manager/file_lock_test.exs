@@ -264,6 +264,115 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
     end
   end
 
+  describe "check_write_blocking/4" do
+    test "permits write immediately when no conflicts exist", %{pid: pid} do
+      assert :ok = FileLock.check_write_blocking(pid, :client_a, {0, 100})
+    end
+
+    test "blocks until mandatory lock is released", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+
+      task =
+        Task.async(fn ->
+          FileLock.check_write_blocking(pid, :client_b, {50, 50}, timeout: 2_000)
+        end)
+
+      Process.sleep(50)
+      FileLock.unlock(pid, :client_a, {0, 100})
+      assert :ok = Task.await(task)
+    end
+
+    test "blocks until deny-write share mode is closed", %{pid: pid} do
+      assert :ok = FileLock.open(pid, :client_a, :read, :write, ttl: 60_000)
+
+      task =
+        Task.async(fn ->
+          FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 2_000)
+        end)
+
+      Process.sleep(50)
+      FileLock.close(pid, :client_a)
+      assert :ok = Task.await(task)
+    end
+
+    test "does not block when advisory lock is held", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :advisory)
+      assert :ok = FileLock.check_write_blocking(pid, :client_b, {0, 100})
+    end
+
+    test "does not block for the lock-holding client", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert :ok = FileLock.check_write_blocking(pid, :client_a, {0, 100})
+    end
+
+    test "unblocks after unlock_all releases the conflict", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+      assert :ok = FileLock.open(pid, :client_a, :read, :write, ttl: 60_000)
+
+      task =
+        Task.async(fn ->
+          FileLock.check_write_blocking(pid, :client_b, {50, 50}, timeout: 2_000)
+        end)
+
+      Process.sleep(50)
+      FileLock.unlock_all(pid, :client_a)
+      assert :ok = Task.await(task)
+    end
+
+    @tag timeout: 20_000
+    test "unblocks after conflicting lock expires", %{pid: pid} do
+      # Lock TTL is 50ms but the TTL check interval is 10s, so the blocking
+      # call needs a timeout that spans at least one TTL check cycle.
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory, ttl: 50)
+
+      task =
+        Task.async(fn ->
+          FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 15_000)
+        end)
+
+      assert :ok = Task.await(task, 15_000)
+    end
+
+    test "times out when conflict is not released", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+
+      assert {:timeout, _} =
+               catch_exit(FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 100))
+    end
+
+    test "write_wait_queue_length is reflected in status", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+
+      Task.async(fn ->
+        FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 5_000)
+      end)
+
+      Process.sleep(50)
+      status = FileLock.status(pid)
+      assert status.write_wait_queue_length == 1
+
+      FileLock.unlock(pid, :client_a, {0, 100})
+      Process.sleep(50)
+    end
+
+    test "multiple blocked writers are all unblocked", %{pid: pid} do
+      assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
+
+      tasks =
+        for client <- [:client_b, :client_c, :client_d] do
+          Task.async(fn ->
+            FileLock.check_write_blocking(pid, client, {0, 100}, timeout: 2_000)
+          end)
+        end
+
+      Process.sleep(50)
+      FileLock.unlock(pid, :client_a, {0, 100})
+
+      results = Task.await_many(tasks)
+      assert results == [:ok, :ok, :ok]
+    end
+  end
+
   describe "process lifecycle" do
     test "process stops when all state is released" do
       {:ok, pid} =
