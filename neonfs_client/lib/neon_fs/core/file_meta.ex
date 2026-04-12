@@ -22,6 +22,7 @@ defmodule NeonFS.Core.FileMeta do
           chunks: [binary()],
           stripes: nil | [%{stripe_id: String.t(), byte_range: Range.t()}],
           size: non_neg_integer(),
+          content_type: String.t(),
           mode: non_neg_integer(),
           uid: non_neg_integer(),
           gid: non_neg_integer(),
@@ -43,6 +44,7 @@ defmodule NeonFS.Core.FileMeta do
     :chunks,
     :stripes,
     :size,
+    :content_type,
     :mode,
     :uid,
     :gid,
@@ -67,6 +69,7 @@ defmodule NeonFS.Core.FileMeta do
     - `:id` - Custom file ID (default: generated UUID)
     - `:chunks` - Initial chunk list (default: [])
     - `:size` - Initial file size (default: 0)
+    - `:content_type` - MIME content type (default: auto-detected from path extension)
     - `:mode` - POSIX mode (default: 0o644)
     - `:uid` - Owner user ID (default: 0)
     - `:gid` - Owner group ID (default: 0)
@@ -82,14 +85,16 @@ defmodule NeonFS.Core.FileMeta do
   @spec new(String.t(), String.t(), keyword()) :: t()
   def new(volume_id, path, opts \\ []) do
     now = DateTime.utc_now()
+    normalized = normalize_path(path)
 
     %__MODULE__{
       id: Keyword.get(opts, :id, generate_id()),
       volume_id: volume_id,
-      path: normalize_path(path),
+      path: normalized,
       chunks: Keyword.get(opts, :chunks, []),
       stripes: nil,
       size: Keyword.get(opts, :size, 0),
+      content_type: Keyword.get(opts, :content_type, MIME.from_path(normalized)),
       mode: Keyword.get(opts, :mode, 0o644),
       uid: Keyword.get(opts, :uid, 0),
       gid: Keyword.get(opts, :gid, 0),

@@ -13,6 +13,7 @@ defmodule NeonFS.Core.FileMetaTest do
       assert meta.chunks == []
       assert meta.stripes == nil
       assert meta.size == 0
+      assert meta.content_type == "text/plain"
       assert meta.mode == 0o644
       assert meta.uid == 0
       assert meta.gid == 0
@@ -63,6 +64,24 @@ defmodule NeonFS.Core.FileMetaTest do
       meta2 = FileMeta.new("vol1", "/b.txt")
 
       refute meta1.id == meta2.id
+    end
+
+    test "auto-detects content_type from file extension" do
+      assert FileMeta.new("v", "/image.png").content_type == "image/png"
+      assert FileMeta.new("v", "/doc.pdf").content_type == "application/pdf"
+      assert FileMeta.new("v", "/page.html").content_type == "text/html"
+      assert FileMeta.new("v", "/data.json").content_type == "application/json"
+      assert FileMeta.new("v", "/style.css").content_type == "text/css"
+    end
+
+    test "falls back to application/octet-stream for unknown extensions" do
+      assert FileMeta.new("v", "/noext").content_type == "application/octet-stream"
+      assert FileMeta.new("v", "/file.xyz123").content_type == "application/octet-stream"
+    end
+
+    test "allows content_type override via opts" do
+      meta = FileMeta.new("v", "/data.bin", content_type: "text/csv")
+      assert meta.content_type == "text/csv"
     end
   end
 

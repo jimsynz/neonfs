@@ -57,8 +57,9 @@ defmodule NeonFS.WebDAV.Test.MockCore do
 
   # File operations
 
-  @spec write_file(String.t(), String.t(), binary()) :: {:ok, FileMeta.t()} | {:error, term()}
-  def write_file(volume_name, path, content) do
+  @spec write_file(String.t(), String.t(), binary(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def write_file(volume_name, path, content, write_opts \\ []) do
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, volume_name) do
@@ -66,11 +67,11 @@ defmodule NeonFS.WebDAV.Test.MockCore do
       volume = Map.get(volumes, volume_name)
       normalised = normalise_path(path)
 
-      meta =
-        FileMeta.new(volume.id, normalised,
-          size: byte_size(content),
-          mode: @s_ifreg
-        )
+      file_opts =
+        [size: byte_size(content), mode: @s_ifreg]
+        |> maybe_forward_opt(write_opts, :content_type)
+
+      meta = FileMeta.new(volume.id, normalised, file_opts)
 
       key = {volume_name, normalised}
       Process.put(:mock_files, Map.put(files, key, {meta, content}))
@@ -210,6 +211,13 @@ defmodule NeonFS.WebDAV.Test.MockCore do
       "/" <> _ = p -> p
       p -> "/" <> p
     end)
+  end
+
+  defp maybe_forward_opt(target, source, key) do
+    case Keyword.fetch(source, key) do
+      {:ok, value} -> Keyword.put(target, key, value)
+      :error -> target
+    end
   end
 
   defp direct_child?("/", file_path) do

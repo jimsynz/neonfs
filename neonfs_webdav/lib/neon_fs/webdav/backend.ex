@@ -92,12 +92,19 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   @impl true
-  def put_content(_auth, [volume_name | rest], body, _opts) do
+  def put_content(_auth, [volume_name | rest], body, opts) do
     file_path = "/" <> Enum.join(rest, "/")
     body_binary = IO.iodata_to_binary(body)
 
+    write_opts =
+      case Map.get(opts, :content_type) do
+        nil -> []
+        "application/octet-stream" -> []
+        ct -> [content_type: ct]
+      end
+
     with {:ok, volume} <- resolve_volume(volume_name),
-         {:ok, meta} <- call_core(:write_file, [volume_name, file_path, body_binary]) do
+         {:ok, meta} <- call_core(:write_file, [volume_name, file_path, body_binary, write_opts]) do
       {:ok, file_resource(volume_name, volume.id, rest, meta)}
     else
       {:error, :not_found} ->
@@ -281,7 +288,7 @@ defmodule NeonFS.WebDAV.Backend do
       path: [volume_name | path_segments],
       type: type,
       etag: compute_etag(meta),
-      content_type: if(type == :file, do: "application/octet-stream"),
+      content_type: if(type == :file, do: meta.content_type || "application/octet-stream"),
       content_length: if(type == :file, do: meta.size),
       last_modified: meta.modified_at || meta.created_at,
       creation_date: meta.created_at,

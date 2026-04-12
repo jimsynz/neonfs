@@ -238,9 +238,13 @@ defmodule NeonFS.S3.Backend do
           upload.parts
           |> Enum.sort_by(&elem(&1, 0))
 
+        write_opts =
+          []
+          |> maybe_put_content_type(upload.content_type)
+
         with {:ok, combined} <- read_and_combine_parts(upload.bucket, sorted_parts),
              etag = compute_etag(combined),
-             {:ok, _meta} <- call_core(:write_file, [bucket, key, combined]) do
+             {:ok, _meta} <- call_core(:write_file, [bucket, key, combined, write_opts]) do
           cleanup_staging_parts(upload.bucket, sorted_parts)
           MultipartStore.delete(upload_id)
 
@@ -385,6 +389,7 @@ defmodule NeonFS.S3.Backend do
     }
   end
 
+  defp meta_content_type(%{content_type: ct}) when is_binary(ct), do: ct
   defp meta_content_type(_meta), do: "application/octet-stream"
 
   defp compute_etag_from_meta(%{size: size}) do

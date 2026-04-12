@@ -1059,6 +1059,7 @@ defmodule NeonFS.Core.FileIndex do
       chunks: file.chunks,
       stripes: file.stripes,
       size: file.size,
+      content_type: file.content_type,
       mode: file.mode,
       uid: file.uid,
       gid: file.gid,
@@ -1073,13 +1074,16 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   defp storable_map_to_file(map) when is_map(map) do
+    path = get_field(map, :path)
+
     %FileMeta{
       id: get_field(map, :id),
       volume_id: get_field(map, :volume_id),
-      path: get_field(map, :path),
+      path: path,
       chunks: get_field(map, :chunks, []),
       stripes: decode_stripes(get_field(map, :stripes)),
       size: get_field(map, :size, 0),
+      content_type: get_field(map, :content_type) || MIME.from_path(path || ""),
       mode: get_field(map, :mode, 0o644),
       uid: get_field(map, :uid, 0),
       gid: get_field(map, :gid, 0),

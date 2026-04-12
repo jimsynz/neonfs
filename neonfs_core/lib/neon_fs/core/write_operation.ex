@@ -1069,6 +1069,7 @@ defmodule NeonFS.Core.WriteOperation do
         :error -> file_opts
       end
 
+    file_opts = maybe_forward_opt(file_opts, opts, :content_type)
     file_opts = apply_uid_gid_opts(file_opts, opts)
     file_opts = maybe_inherit_default_acl(file_opts, volume_id, path)
 
@@ -1341,6 +1342,7 @@ defmodule NeonFS.Core.WriteOperation do
         :error -> file_opts
       end
 
+    file_opts = maybe_forward_opt(file_opts, opts, :content_type)
     file_opts = apply_uid_gid_opts(file_opts, opts)
     file_opts = maybe_inherit_default_acl(file_opts, volume_id, path)
 
@@ -1475,6 +1477,13 @@ defmodule NeonFS.Core.WriteOperation do
     ResolvedLookupCache.evict(file_id)
   rescue
     _ -> :ok
+  end
+
+  defp maybe_forward_opt(file_opts, opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> Keyword.put(file_opts, key, value)
+      :error -> file_opts
+    end
   end
 
   defp apply_uid_gid_opts(file_opts, opts) do

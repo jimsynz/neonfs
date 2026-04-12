@@ -140,6 +140,36 @@ defmodule NeonFS.S3.BackendTest do
       assert {:error, %S3Server.Error{code: :no_such_bucket}} =
                Backend.put_object(@ctx, "missing", "file.txt", "data", %S3Server.PutOpts{})
     end
+
+    test "stores client-provided content type" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      opts = %S3Server.PutOpts{content_type: "text/csv"}
+
+      assert {:ok, _etag} = Backend.put_object(@ctx, "my-bucket", "data.bin", "a,b,c", opts)
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "data.bin", %S3Server.GetOpts{})
+
+      assert object.content_type == "text/csv"
+    end
+
+    test "auto-detects content type from extension when client sends default" do
+      Backend.create_bucket(@ctx, "my-bucket")
+
+      assert {:ok, _etag} =
+               Backend.put_object(
+                 @ctx,
+                 "my-bucket",
+                 "page.html",
+                 "<html></html>",
+                 %S3Server.PutOpts{}
+               )
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "page.html", %S3Server.GetOpts{})
+
+      assert object.content_type == "text/html"
+    end
   end
 
   describe "get_object/4" do
@@ -152,6 +182,7 @@ defmodule NeonFS.S3.BackendTest do
 
       assert object.body == "hello world"
       assert object.content_length == 11
+      assert object.content_type == "text/plain"
       assert is_binary(object.etag)
     end
 

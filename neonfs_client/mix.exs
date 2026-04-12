@@ -45,6 +45,7 @@ defmodule NeonFS.Client.MixProject do
 
   defp deps do
     [
+      {:mime, "~> 2.0"},
       {:nimble_pool, "~> 1.1"},
       {:splode, "~> 0.3"},
       {:telemetry, "~> 1.2"},

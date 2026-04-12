@@ -61,6 +61,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert resource.type == :file
       assert resource.path == ["docs", "readme.txt"]
       assert resource.content_length == 5
+      assert resource.content_type == "text/plain"
       assert resource.display_name == "readme.txt"
     end
 
@@ -101,7 +102,7 @@ defmodule NeonFS.WebDAV.BackendTest do
 
       assert {{"DAV:", "resourcetype"}, {:ok, nil}} in results
       assert {{"DAV:", "getcontentlength"}, {:ok, "7"}} in results
-      assert {{"DAV:", "getcontenttype"}, {:ok, "application/octet-stream"}} in results
+      assert {{"DAV:", "getcontenttype"}, {:ok, "text/plain"}} in results
       assert {{"DAV:", "displayname"}, {:ok, "test.txt"}} in results
 
       etag_result = Enum.find(results, fn {prop, _} -> prop == {"DAV:", "getetag"} end)
@@ -192,6 +193,43 @@ defmodule NeonFS.WebDAV.BackendTest do
                Backend.put_content(@auth, ["docs", "sub", "dir", "file.txt"], "nested", %{})
 
       assert resource.path == ["docs", "sub", "dir", "file.txt"]
+    end
+
+    test "auto-detects content type from file extension" do
+      MockCore.create_volume("docs")
+
+      assert {:ok, resource} =
+               Backend.put_content(@auth, ["docs", "image.png"], "PNG data", %{})
+
+      assert resource.content_type == "image/png"
+    end
+
+    test "honours client-provided content type" do
+      MockCore.create_volume("docs")
+
+      assert {:ok, resource} =
+               Backend.put_content(
+                 @auth,
+                 ["docs", "data.bin"],
+                 "csv,data",
+                 %{content_type: "text/csv"}
+               )
+
+      assert resource.content_type == "text/csv"
+    end
+
+    test "falls back to extension detection when client sends octet-stream" do
+      MockCore.create_volume("docs")
+
+      assert {:ok, resource} =
+               Backend.put_content(
+                 @auth,
+                 ["docs", "doc.html"],
+                 "<html></html>",
+                 %{content_type: "application/octet-stream"}
+               )
+
+      assert resource.content_type == "text/html"
     end
   end
 
