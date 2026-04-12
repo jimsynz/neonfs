@@ -17,6 +17,10 @@ if config_env() == :prod do
   nfs_bind = System.get_env("NEONFS_NFS_BIND", "0.0.0.0")
   nfs_port = String.to_integer(System.get_env("NEONFS_NFS_PORT", "2049"))
 
+  # NLM (Network Lock Manager) bind address and port
+  nlm_bind = System.get_env("NEONFS_NLM_BIND", "0.0.0.0")
+  nlm_port = String.to_integer(System.get_env("NEONFS_NLM_PORT", "4045"))
+
   # Metrics endpoint (disabled by default, set NEONFS_NFS_METRICS=true to enable)
   metrics_enabled = System.get_env("NEONFS_NFS_METRICS", "false") == "true"
   metrics_port = String.to_integer(System.get_env("NEONFS_NFS_METRICS_PORT", "9570"))
@@ -33,6 +37,8 @@ if config_env() == :prod do
     metrics_port: metrics_port,
     nfs_bind: nfs_bind,
     nfs_port: nfs_port,
+    nlm_bind: nlm_bind,
+    nlm_port: nlm_port,
     node_name: node_name
 
   # BEAM VM will use RELEASE_NODE environment variable for actual node name

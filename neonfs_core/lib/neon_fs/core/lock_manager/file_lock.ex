@@ -86,6 +86,18 @@ defmodule NeonFS.Core.LockManager.FileLock do
   end
 
   @doc """
+  Tests whether a byte-range lock would conflict without acquiring it.
+
+  Returns `:ok` if the lock would be granted, or
+  `{:error, :conflict, holder_info}` with details of the conflicting lock.
+  """
+  @spec test_lock(pid() | GenServer.name(), client_ref(), range(), lock_type()) ::
+          :ok | {:error, :conflict, map()}
+  def test_lock(server, client_ref, range, type) do
+    GenServer.call(server, {:test_lock, client_ref, range, type})
+  end
+
+  @doc """
   Acquires a byte-range lock. Blocks if a conflicting lock is held.
   """
   @spec lock(pid() | GenServer.name(), client_ref(), range(), lock_type(), keyword()) ::
@@ -234,6 +246,28 @@ defmodule NeonFS.Core.LockManager.FileLock do
   end
 
   @impl true
+  def handle_call({:test_lock, client_ref, range, type}, _from, state) do
+    now = System.monotonic_time(:millisecond)
+    state = purge_expired(state, now)
+
+    case check_lock_conflict(state.locks, client_ref, range, type) do
+      :ok ->
+        {:reply, :ok, state, @idle_timeout_ms}
+
+      {:wait, _holder_ref} ->
+        holder = find_conflicting_lock(state.locks, client_ref, range, type)
+
+        holder_info = %{
+          type: holder.type,
+          range: holder.range,
+          svid: extract_svid(holder.client_ref),
+          oh: extract_oh(holder.client_ref)
+        }
+
+        {:reply, {:error, :conflict, holder_info}, state, @idle_timeout_ms}
+    end
+  end
+
   def handle_call({:lock, client_ref, range, type, mode, ttl}, from, state) do
     now = System.monotonic_time(:millisecond)
     state = purge_expired(state, now)
@@ -686,6 +720,20 @@ defmodule NeonFS.Core.LockManager.FileLock do
     |> Map.delete(:expires_at)
     |> Map.delete(:break_callback)
   end
+
+  defp find_conflicting_lock(locks, client_ref, {offset, length}, type) do
+    Enum.find(locks, fn entry ->
+      entry.client_ref != client_ref and
+        ranges_overlap?(entry.range, {offset, length}) and
+        lock_types_conflict?(entry.type, type)
+    end)
+  end
+
+  defp extract_svid({_caller_name, svid}) when is_integer(svid), do: svid
+  defp extract_svid(_), do: 0
+
+  defp extract_oh({_caller_name, _svid}), do: <<>>
+  defp extract_oh(_), do: <<>>
 
   defp safe_break_callback(callback) do
     Task.start(fn ->

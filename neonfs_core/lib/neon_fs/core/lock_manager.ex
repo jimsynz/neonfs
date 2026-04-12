@@ -67,6 +67,37 @@ defmodule NeonFS.Core.LockManager do
   end
 
   @doc """
+  Tests whether a byte-range lock would conflict without acquiring it.
+
+  Returns `:ok` if the lock would be granted, or
+  `{:error, :conflict, holder_info}` with details of the conflicting lock.
+  """
+  @spec test_lock(file_id(), FileLock.client_ref(), FileLock.range(), FileLock.lock_type()) ::
+          :ok | {:error, :conflict, map()} | {:error, :unavailable}
+  def test_lock(file_id, client_ref, range, type) do
+    master = master_for(file_id)
+
+    if master == Node.self() do
+      local_test_lock(file_id, client_ref, range, type)
+    else
+      :erpc.call(master, __MODULE__, :local_test_lock, [file_id, client_ref, range, type])
+    end
+  catch
+    :exit, {:erpc, :noconnection} -> {:error, :unavailable}
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  @doc false
+  @spec local_test_lock(file_id(), FileLock.client_ref(), FileLock.range(), FileLock.lock_type()) ::
+          :ok | {:error, :conflict, map()}
+  def local_test_lock(file_id, client_ref, range, type) do
+    case lookup_file_lock(file_id) do
+      {:ok, pid} -> FileLock.test_lock(pid, client_ref, range, type)
+      :not_found -> :ok
+    end
+  end
+
+  @doc """
   Releases a specific byte-range lock.
   """
   @spec unlock(file_id(), FileLock.client_ref(), FileLock.range()) ::

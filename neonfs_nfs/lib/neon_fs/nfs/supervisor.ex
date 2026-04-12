@@ -8,6 +8,7 @@ defmodule NeonFS.NFS.Supervisor do
   - InodeTable: Manages inode-to-path mappings
   - ExportSupervisor: DynamicSupervisor for handler processes
   - ExportManager: Coordinates NFS server and volume export lifecycle
+  - NLM.Server: Network Lock Manager (program 100021) for advisory locking
   """
 
   use Supervisor
@@ -32,7 +33,9 @@ defmodule NeonFS.NFS.Supervisor do
       # DynamicSupervisor for handler processes
       NeonFS.NFS.ExportSupervisor,
       # ExportManager starts NFS server and manages volume exports
-      NeonFS.NFS.ExportManager
+      NeonFS.NFS.ExportManager,
+      # NLM (Network Lock Manager) server for NFSv3 advisory locking
+      NeonFS.NFS.NLM.Server
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
