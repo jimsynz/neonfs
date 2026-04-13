@@ -663,6 +663,187 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
+  describe "ACL serialisation round-trip" do
+    test "acl_entries and default_acl survive create/get round-trip" do
+      acl_entries = [
+        %{type: :user, id: 1000, permissions: MapSet.new([:r, :w])},
+        %{type: :group, id: 100, permissions: MapSet.new([:r])},
+        %{type: :mask, id: nil, permissions: MapSet.new([:r, :w, :x])},
+        %{type: :other, id: nil, permissions: MapSet.new([:r])}
+      ]
+
+      default_acl = [
+        %{type: :user, id: nil, permissions: MapSet.new([:r, :w, :x])},
+        %{type: :group, id: nil, permissions: MapSet.new([:r, :x])},
+        %{type: :other, id: nil, permissions: MapSet.new([:r])}
+      ]
+
+      file =
+        FileMeta.new("vol1", "/acl-test.txt",
+          acl_entries: acl_entries,
+          default_acl: default_acl
+        )
+
+      {:ok, created} = FileIndex.create(file)
+
+      # Clear ETS cache to force quorum read + deserialization
+      :ets.delete(:file_index_by_id, created.id)
+
+      {:ok, retrieved} = FileIndex.get(created.id)
+
+      assert retrieved.acl_entries == acl_entries
+      assert retrieved.default_acl == default_acl
+    end
+
+    test "file without ACLs round-trips with defaults" do
+      file = FileMeta.new("vol1", "/no-acl.txt")
+
+      {:ok, created} = FileIndex.create(file)
+      :ets.delete(:file_index_by_id, created.id)
+
+      {:ok, retrieved} = FileIndex.get(created.id)
+
+      assert retrieved.acl_entries == []
+      assert retrieved.default_acl == nil
+    end
+
+    test "ACL entries survive update round-trip" do
+      file = FileMeta.new("vol1", "/update-acl.txt")
+      {:ok, created} = FileIndex.create(file)
+
+      acl_entries = [
+        %{type: :user, id: 1000, permissions: MapSet.new([:r, :w, :x])}
+      ]
+
+      {:ok, updated} = FileIndex.update(created.id, acl_entries: acl_entries)
+
+      # Clear ETS cache to force quorum read
+      :ets.delete(:file_index_by_id, updated.id)
+
+      {:ok, retrieved} = FileIndex.get(updated.id)
+      assert retrieved.acl_entries == acl_entries
+    end
+
+    test "ACL entries survive MetadataCodec round-trip" do
+      alias NeonFS.Core.MetadataCodec
+
+      acl_entries = [
+        %{type: :user, id: 1000, permissions: MapSet.new([:r, :w])},
+        %{type: :group, id: nil, permissions: MapSet.new([:r, :x])}
+      ]
+
+      default_acl = [
+        %{type: :other, id: nil, permissions: MapSet.new([:r])}
+      ]
+
+      file =
+        FileMeta.new("vol1", "/codec-test.txt",
+          acl_entries: acl_entries,
+          default_acl: default_acl
+        )
+
+      # Build a storable map matching what file_to_storable_map produces,
+      # then round-trip through MetadataCodec to verify atom-to-string
+      # conversion is handled correctly on decode.
+      storable_map = %{
+        id: file.id,
+        volume_id: file.volume_id,
+        path: file.path,
+        chunks: file.chunks,
+        stripes: file.stripes,
+        size: file.size,
+        content_type: file.content_type,
+        mode: file.mode,
+        uid: file.uid,
+        gid: file.gid,
+        acl_entries: file.acl_entries,
+        default_acl: file.default_acl,
+        created_at: file.created_at,
+        modified_at: file.modified_at,
+        accessed_at: file.accessed_at,
+        changed_at: file.changed_at,
+        version: file.version,
+        previous_version_id: file.previous_version_id,
+        hlc_timestamp: file.hlc_timestamp
+      }
+
+      record = %{
+        value: storable_map,
+        hlc_timestamp: {1_000_000, 0, node()},
+        tombstone: false
+      }
+
+      {:ok, encoded} = MetadataCodec.encode_record(record)
+      {:ok, decoded} = MetadataCodec.decode_record(encoded)
+
+      # After msgpax round-trip, atom keys become strings and atom values
+      # become strings. Verify the decoded value has ACL data in the
+      # string-key form that storable_map_to_file must handle.
+      decoded_value = decoded.value
+      assert is_list(decoded_value["acl_entries"])
+      assert length(decoded_value["acl_entries"]) == 2
+
+      first_entry = hd(decoded_value["acl_entries"])
+      assert first_entry["type"] == "user"
+      assert first_entry["id"] == 1000
+      assert MapSet.new(["r", "w"]) == first_entry["permissions"]
+
+      assert [default_entry] = decoded_value["default_acl"]
+      assert default_entry["type"] == "other"
+    end
+
+    test "storable_map_to_file reconstructs ACLs from string-keyed data", %{store: store} do
+      file_id = UUIDv7.generate()
+
+      # Simulate what MetadataCodec produces after msgpax round-trip:
+      # all atom keys become strings, atom values become strings,
+      # MapSets are preserved but contain strings instead of atoms.
+      stringified = %{
+        "id" => file_id,
+        "volume_id" => "vol1",
+        "path" => "/string-keys.txt",
+        "chunks" => [],
+        "stripes" => nil,
+        "size" => 42,
+        "content_type" => "text/plain",
+        "mode" => 0o644,
+        "uid" => 1000,
+        "gid" => 1000,
+        "acl_entries" => [
+          %{"type" => "user", "id" => 1000, "permissions" => MapSet.new(["r", "w"])},
+          %{"type" => "mask", "id" => nil, "permissions" => MapSet.new(["r", "w", "x"])}
+        ],
+        "default_acl" => [
+          %{"type" => "other", "id" => nil, "permissions" => MapSet.new(["r"])}
+        ],
+        "created_at" => "2026-01-01T00:00:00Z",
+        "modified_at" => "2026-01-01T00:00:00Z",
+        "accessed_at" => "2026-01-01T00:00:00Z",
+        "changed_at" => "2026-01-01T00:00:00Z",
+        "version" => 1,
+        "previous_version_id" => nil,
+        "hlc_timestamp" => nil
+      }
+
+      # Inject directly into mock quorum store
+      file_key = "file:" <> file_id
+      :ets.insert(store, {file_key, stringified})
+
+      # Also insert into ETS so get_by_path can find it... actually, just use get/1
+      # which falls back to quorum when ETS misses.
+      {:ok, retrieved} = FileIndex.get(file_id)
+
+      assert retrieved.acl_entries == [
+               %{type: :user, id: 1000, permissions: MapSet.new([:r, :w])},
+               %{type: :mask, id: nil, permissions: MapSet.new([:r, :w, :x])}
+             ]
+
+      assert retrieved.default_acl == [
+               %{type: :other, id: nil, permissions: MapSet.new([:r])}
+             ]
+    end
+  end
+
   # Private helpers
 
   defp stop_if_running(name) do

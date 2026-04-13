@@ -1063,6 +1063,8 @@ defmodule NeonFS.Core.FileIndex do
       mode: file.mode,
       uid: file.uid,
       gid: file.gid,
+      acl_entries: file.acl_entries,
+      default_acl: file.default_acl,
       created_at: file.created_at,
       modified_at: file.modified_at,
       accessed_at: file.accessed_at,
@@ -1087,6 +1089,8 @@ defmodule NeonFS.Core.FileIndex do
       mode: get_field(map, :mode, 0o644),
       uid: get_field(map, :uid, 0),
       gid: get_field(map, :gid, 0),
+      acl_entries: decode_acl_entries(get_field(map, :acl_entries, [])),
+      default_acl: decode_default_acl(get_field(map, :default_acl)),
       created_at: decode_datetime(get_field(map, :created_at)),
       modified_at: decode_datetime(get_field(map, :modified_at)),
       accessed_at: decode_datetime(get_field(map, :accessed_at)),
@@ -1133,6 +1137,34 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   defp decode_datetime(_), do: nil
+
+  defp decode_acl_entries(nil), do: []
+
+  defp decode_acl_entries(entries) when is_list(entries),
+    do: Enum.map(entries, &decode_acl_entry/1)
+
+  defp decode_default_acl(nil), do: nil
+
+  defp decode_default_acl(entries) when is_list(entries),
+    do: Enum.map(entries, &decode_acl_entry/1)
+
+  defp decode_acl_entry(entry) when is_map(entry) do
+    %{
+      type: decode_acl_tag(get_field(entry, :type)),
+      id: get_field(entry, :id),
+      permissions: decode_permissions(get_field(entry, :permissions, MapSet.new()))
+    }
+  end
+
+  defp decode_acl_tag(tag) when is_atom(tag), do: tag
+  defp decode_acl_tag(tag) when is_binary(tag), do: String.to_existing_atom(tag)
+
+  defp decode_permissions(%MapSet{} = ms), do: MapSet.new(ms, &decode_permission/1)
+  defp decode_permissions(list) when is_list(list), do: MapSet.new(list, &decode_permission/1)
+  defp decode_permissions(nil), do: MapSet.new()
+
+  defp decode_permission(p) when is_atom(p), do: p
+  defp decode_permission(p) when is_binary(p), do: String.to_existing_atom(p)
 
   ## Private — Local store loading
 
