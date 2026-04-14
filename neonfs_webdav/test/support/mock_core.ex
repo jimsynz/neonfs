@@ -148,6 +148,11 @@ defmodule NeonFS.WebDAV.Test.MockCore do
     end
   end
 
+  @spec list_dir(String.t(), String.t()) :: {:ok, [FileMeta.t()]} | {:error, :not_found}
+  def list_dir(volume_name, path \\ "/") do
+    list_files(volume_name, path)
+  end
+
   @spec mkdir(String.t(), String.t()) :: {:ok, FileMeta.t()} | {:error, term()}
   def mkdir(volume_name, path) do
     volumes = Process.get(:mock_volumes, %{})

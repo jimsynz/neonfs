@@ -324,7 +324,7 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   defp list_dir_members(volume_name, volume_id, dir_path) do
-    case call_core(:list_files, [volume_name, dir_path]) do
+    case call_core(:list_dir, [volume_name, dir_path]) do
       {:ok, entries} ->
         resources =
           Enum.map(entries, fn meta ->

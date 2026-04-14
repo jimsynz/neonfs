@@ -2,6 +2,8 @@ defmodule NeonFS.Core.FileIndexTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
+  import Bitwise
+
   alias NeonFS.Core.{ChunkMeta, DirectoryEntry, FileIndex, FileMeta, MetadataRing}
 
   @moduletag :tmp_dir
@@ -192,6 +194,42 @@ defmodule NeonFS.Core.FileIndexTest do
       assert found2.id == file2.id
       refute found1.id == found2.id
     end
+
+    test "resolves directory-only entries created via mkdir" do
+      {:ok, _dir} = FileIndex.mkdir("vol1", "/documents")
+
+      assert {:ok, meta} = FileIndex.get_by_path("vol1", "/documents")
+      assert %FileMeta{} = meta
+      assert meta.volume_id == "vol1"
+      assert meta.path == "/documents"
+      assert meta.size == 0
+      assert band(meta.mode, 0o040000) == 0o040000
+    end
+
+    test "resolves nested directory entries" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/a/b/c")
+
+      assert {:ok, meta} = FileIndex.get_by_path("vol1", "/a")
+      assert meta.path == "/a"
+      assert band(meta.mode, 0o040000) == 0o040000
+
+      assert {:ok, meta_b} = FileIndex.get_by_path("vol1", "/a/b")
+      assert meta_b.path == "/a/b"
+
+      assert {:ok, meta_c} = FileIndex.get_by_path("vol1", "/a/b/c")
+      assert meta_c.path == "/a/b/c"
+    end
+
+    test "resolves directory alongside files in same parent" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/docs")
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/readme.txt"))
+
+      assert {:ok, dir_meta} = FileIndex.get_by_path("vol1", "/docs")
+      assert band(dir_meta.mode, 0o040000) == 0o040000
+
+      assert {:ok, file_meta} = FileIndex.get_by_path("vol1", "/readme.txt")
+      assert band(file_meta.mode, 0o040000) == 0
+    end
   end
 
   describe "update/2" do
@@ -299,6 +337,31 @@ defmodule NeonFS.Core.FileIndexTest do
       assert Map.has_key?(vol1_children, "file.txt")
       refute Map.has_key?(vol1_children, "other.txt")
       assert Map.has_key?(vol2_children, "other.txt")
+    end
+  end
+
+  describe "list_dir_full/2" do
+    test "returns FileMeta structs for both files and directories" do
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/readme.txt"))
+      {:ok, _} = FileIndex.mkdir("vol1", "/docs")
+
+      assert {:ok, entries} = FileIndex.list_dir_full("vol1", "/")
+
+      file_entry = Enum.find(entries, fn {name, _, _} -> name == "readme.txt" end)
+      dir_entry = Enum.find(entries, fn {name, _, _} -> name == "docs" end)
+
+      assert file_entry != nil
+      assert dir_entry != nil
+
+      {_, _, file_attrs} = file_entry
+      {_, _, dir_attrs} = dir_entry
+
+      assert %FileMeta{} = file_attrs
+      assert %FileMeta{} = dir_attrs
+
+      assert file_attrs.path == "/readme.txt"
+      assert dir_attrs.path == "/docs"
+      assert band(dir_attrs.mode, 0o040000) == 0o040000
     end
   end
 

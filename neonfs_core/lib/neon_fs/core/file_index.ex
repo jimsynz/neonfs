@@ -21,6 +21,7 @@ defmodule NeonFS.Core.FileIndex do
 
   use GenServer
   require Logger
+  import Bitwise, only: [|||: 2]
 
   alias NeonFS.Core.{
     ChunkIndex,
@@ -104,10 +105,20 @@ defmodule NeonFS.Core.FileIndex do
     {parent, name} = split_path(normalized)
 
     with {:ok, dir_entry} <- read_dir_entry(volume_id, parent),
-         {:ok, child} <- DirectoryEntry.get_child(dir_entry, name),
-         {:ok, file} <- get(child.id) do
-      {:ok, file}
+         {:ok, child} <- DirectoryEntry.get_child(dir_entry, name) do
+      resolve_child(volume_id, normalized, child)
     else
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
+  defp resolve_child(volume_id, path, %{type: :dir} = child) do
+    {:ok, synthesise_dir_file_meta(volume_id, path, child)}
+  end
+
+  defp resolve_child(_volume_id, _path, child) do
+    case get(child.id) do
+      {:ok, file} -> {:ok, file}
       {:error, _} -> {:error, :not_found}
     end
   end
@@ -217,18 +228,8 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  defp resolve_child_attrs(%{type: :dir} = child_info, _volume_id, _child_path) do
-    now = DateTime.utc_now()
-
-    %{
-      size: 0,
-      mode: 0o040755,
-      uid: Map.get(child_info, :uid, 0),
-      gid: Map.get(child_info, :gid, 0),
-      accessed_at: now,
-      modified_at: now,
-      changed_at: now
-    }
+  defp resolve_child_attrs(%{type: :dir} = child_info, volume_id, child_path) do
+    synthesise_dir_file_meta(volume_id, child_path, child_info)
   end
 
   defp resolve_child_attrs(child_info, volume_id, child_path) do
@@ -887,6 +888,43 @@ defmodule NeonFS.Core.FileIndex do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  ## Private — Directory metadata synthesis
+
+  defp synthesise_dir_file_meta(volume_id, path, child_info) do
+    {mode, uid, gid, hlc_timestamp} =
+      case read_dir_entry(volume_id, path) do
+        {:ok, dir_entry} ->
+          {0o040000 ||| dir_entry.mode, dir_entry.uid, dir_entry.gid, dir_entry.hlc_timestamp}
+
+        {:error, _} ->
+          {0o040755, Map.get(child_info, :uid, 0), Map.get(child_info, :gid, 0), nil}
+      end
+
+    now = DateTime.utc_now()
+
+    %FileMeta{
+      id: Map.get(child_info, :id),
+      volume_id: volume_id,
+      path: path,
+      chunks: [],
+      stripes: nil,
+      size: 0,
+      content_type: "inode/directory",
+      mode: mode,
+      uid: uid,
+      gid: gid,
+      acl_entries: [],
+      default_acl: nil,
+      created_at: now,
+      modified_at: now,
+      accessed_at: now,
+      changed_at: now,
+      version: 1,
+      previous_version_id: nil,
+      hlc_timestamp: hlc_timestamp
+    }
   end
 
   ## Private — Read helpers

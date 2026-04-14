@@ -143,11 +143,11 @@ defmodule NeonFS.Core do
   end
 
   @doc """
-  Lists direct children of a directory within a volume.
+  Lists files in a volume matching a directory prefix.
 
-  Returns file metadata maps for each child entry. Directory entries
-  are returned as maps with the same fields as `FileMeta` for uniform
-  access by callers.
+  Returns all `FileMeta` records whose paths start with `dir_path`.
+  Does not include directory entries. Used by the S3 backend where
+  prefix-based listing across all descendants is needed.
   """
   @spec list_files(String.t(), String.t()) :: {:ok, [NeonFS.Core.FileMeta.t()]} | {:error, term()}
   def list_files(volume_name, dir_path) do
@@ -161,6 +161,27 @@ defmodule NeonFS.Core do
         end)
 
       {:ok, filtered}
+    end
+  end
+
+  @doc """
+  Lists the direct children of a directory within a volume.
+
+  Returns `FileMeta` structs for each child entry. Directory children
+  are synthesised as `FileMeta` structs with `mode` including the
+  S_IFDIR bit (`0o040000`), making them distinguishable from files.
+  """
+  @spec list_dir(String.t(), String.t()) ::
+          {:ok, [NeonFS.Core.FileMeta.t()]} | {:error, term()}
+  def list_dir(volume_name, dir_path) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      case FileIndex.list_dir_full(volume.id, normalize_path(dir_path)) do
+        {:ok, entries} ->
+          {:ok, Enum.map(entries, fn {_name, _path, attrs} -> attrs end)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 

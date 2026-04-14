@@ -197,6 +197,34 @@ defmodule NeonFS.Integration.WebDAVTest do
 
       assert resp.status == 201
     end
+
+    test "PROPFIND depth=0 on MKCOL'd directory returns 207", %{port: port} do
+      WebDAVCoreBridge.call(:create_volume, ["wdv-mkcol-propfind"])
+
+      mkcol_resp = webdav_request(:mkcol, "/wdv-mkcol-propfind/subdir/", port)
+      assert mkcol_resp.status == 201
+
+      resp =
+        webdav_request(:propfind, "/wdv-mkcol-propfind/subdir/", port, headers: [{"depth", "0"}])
+
+      assert resp.status == 207
+      assert resp.body =~ "subdir"
+    end
+
+    test "PROPFIND depth=1 on volume includes MKCOL'd directories", %{port: port} do
+      WebDAVCoreBridge.call(:create_volume, ["wdv-mkcol-list"])
+
+      webdav_request(:mkcol, "/wdv-mkcol-list/alpha/", port)
+
+      webdav_request(:put, "/wdv-mkcol-list/file.txt", port, body: "content")
+
+      resp =
+        webdav_request(:propfind, "/wdv-mkcol-list/", port, headers: [{"depth", "1"}])
+
+      assert resp.status == 207
+      assert resp.body =~ "alpha"
+      assert resp.body =~ "file.txt"
+    end
   end
 
   describe "DELETE" do
