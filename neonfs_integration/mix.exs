@@ -22,7 +22,7 @@ defmodule NeonFS.Integration.MixProject do
   defp dialyzer do
     [
       ignore_warnings: ".dialyzer_ignore.exs",
-      plt_add_apps: [:neonfs_client, :neonfs_core, :neonfs_fuse, :neonfs_s3]
+      plt_add_apps: [:neonfs_client, :neonfs_core, :neonfs_fuse, :neonfs_s3, :neonfs_webdav]
     ]
   end
 
@@ -43,6 +43,7 @@ defmodule NeonFS.Integration.MixProject do
       {:neonfs_core, path: "../neonfs_core", runtime: false},
       {:neonfs_fuse, path: "../neonfs_fuse", runtime: false},
       {:neonfs_s3, path: "../neonfs_s3", runtime: false},
+      {:neonfs_webdav, path: "../neonfs_webdav", runtime: false},
 
       # S3 integration test client
       {:ex_aws, "~> 2.6", only: :test},
@@ -50,6 +51,9 @@ defmodule NeonFS.Integration.MixProject do
       {:hackney, "~> 1.9", only: :test},
       {:jason, "~> 1.0"},
       {:sweet_xml, "~> 0.7", only: :test},
+
+      # WebDAV integration test client
+      {:req, "~> 0.5", only: [:dev, :test]},
 
       # dev/test
       {:stream_data, "~> 1.0", only: [:test]},
