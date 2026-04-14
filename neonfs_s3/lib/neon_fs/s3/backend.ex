@@ -189,8 +189,10 @@ defmodule NeonFS.S3.Backend do
     with :ok <- ensure_bucket_exists(source_bucket),
          :ok <- ensure_bucket_exists(dest_bucket),
          {:ok, content} <- read_object_content(source_bucket, source_key),
+         {:ok, source_meta} <- fetch_object_meta(source_bucket, source_key),
          etag = compute_etag(content),
-         {:ok, _meta} <- write_object_content(dest_bucket, dest_key, content) do
+         write_opts = content_type_write_opts(source_meta),
+         {:ok, _meta} <- write_object_content(dest_bucket, dest_key, content, write_opts) do
       {:ok, %S3Server.CopyResult{etag: etag, last_modified: DateTime.utc_now()}}
     end
   end
@@ -355,8 +357,8 @@ defmodule NeonFS.S3.Backend do
     end
   end
 
-  defp write_object_content(bucket, key, content) do
-    case call_core(:write_file, [bucket, key, content]) do
+  defp write_object_content(bucket, key, content, write_opts) do
+    case call_core(:write_file, [bucket, key, content, write_opts]) do
       {:ok, meta} -> {:ok, meta}
       {:error, reason} -> {:error, internal_error(reason)}
     end
@@ -523,6 +525,9 @@ defmodule NeonFS.S3.Backend do
     Logger.error("S3 backend error", reason: inspect(reason))
     %S3Server.Error{code: :internal_error}
   end
+
+  defp content_type_write_opts(%{content_type: ct}) when is_binary(ct), do: [content_type: ct]
+  defp content_type_write_opts(_meta), do: []
 
   defp maybe_put_content_type(opts, "application/octet-stream"), do: opts
   defp maybe_put_content_type(opts, content_type), do: [{:content_type, content_type} | opts]

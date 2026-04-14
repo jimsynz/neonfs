@@ -276,6 +276,45 @@ defmodule NeonFS.S3.BackendTest do
       assert object.body == "data"
     end
 
+    test "preserves content type on copy" do
+      Backend.create_bucket(@ctx, "my-bucket")
+
+      Backend.put_object(@ctx, "my-bucket", "original.bin", "csv,data", %S3Server.PutOpts{
+        content_type: "text/csv"
+      })
+
+      assert {:ok, _result} =
+               Backend.copy_object(
+                 @ctx,
+                 "my-bucket",
+                 "copy.bin",
+                 "my-bucket",
+                 "original.bin"
+               )
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "copy.bin", %S3Server.GetOpts{})
+
+      assert object.content_type == "text/csv"
+    end
+
+    test "preserves content type on cross-bucket copy" do
+      Backend.create_bucket(@ctx, "source")
+      Backend.create_bucket(@ctx, "dest")
+
+      Backend.put_object(@ctx, "source", "data.bin", "json", %S3Server.PutOpts{
+        content_type: "application/json"
+      })
+
+      assert {:ok, _result} =
+               Backend.copy_object(@ctx, "dest", "data.bin", "source", "data.bin")
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "dest", "data.bin", %S3Server.GetOpts{})
+
+      assert object.content_type == "application/json"
+    end
+
     test "returns error for non-existent source" do
       Backend.create_bucket(@ctx, "my-bucket")
 

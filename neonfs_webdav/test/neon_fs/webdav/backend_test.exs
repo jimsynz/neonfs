@@ -281,6 +281,17 @@ defmodule NeonFS.WebDAV.BackendTest do
       {:ok, "content"} = MockCore.read_file("docs", "/copy.txt")
     end
 
+    test "preserves content type on copy" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/data.bin", "csv,data", content_type: "text/csv")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "data.bin"])
+
+      assert {:ok, :created} = Backend.copy(@auth, resource, ["docs", "copy.bin"], true)
+
+      {:ok, copy_meta} = MockCore.get_file_meta("docs", "/copy.bin")
+      assert copy_meta.content_type == "text/csv"
+    end
+
     test "returns no_content when overwriting" do
       MockCore.create_volume("docs")
       MockCore.write_file("docs", "/src.txt", "source")
@@ -332,6 +343,18 @@ defmodule NeonFS.WebDAV.BackendTest do
 
       assert {:error, :not_found} = MockCore.read_file("vol-a", "/file.txt")
       assert {:ok, "cross-volume"} = MockCore.read_file("vol-b", "/file.txt")
+    end
+
+    test "preserves content type on cross-volume move" do
+      MockCore.create_volume("vol-a")
+      MockCore.create_volume("vol-b")
+      MockCore.write_file("vol-a", "/data.bin", "csv,data", content_type: "text/csv")
+      {:ok, resource} = Backend.resolve(@auth, ["vol-a", "data.bin"])
+
+      assert {:ok, :created} = Backend.move(@auth, resource, ["vol-b", "data.bin"], true)
+
+      {:ok, moved_meta} = MockCore.get_file_meta("vol-b", "/data.bin")
+      assert moved_meta.content_type == "text/csv"
     end
   end
 
