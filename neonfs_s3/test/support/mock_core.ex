@@ -132,8 +132,9 @@ defmodule NeonFS.S3.Test.MockCore do
     end
   end
 
-  @spec list_files(String.t(), String.t()) :: {:ok, [FileMeta.t()]} | {:error, :not_found}
-  def list_files(volume_name, path \\ "/") do
+  @spec list_files_recursive(String.t(), String.t()) ::
+          {:ok, [FileMeta.t()]} | {:error, :not_found}
+  def list_files_recursive(volume_name, path \\ "/") do
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, volume_name) do
@@ -143,7 +144,8 @@ defmodule NeonFS.S3.Test.MockCore do
       entries =
         files
         |> Enum.filter(fn {{vol, file_path}, _} ->
-          vol == volume_name and direct_child?(normalised, file_path)
+          vol == volume_name and file_path != normalised and
+            String.starts_with?(file_path, normalised)
         end)
         |> Enum.map(fn {_key, {meta, _content}} -> meta end)
         |> Enum.sort_by(& &1.path)
@@ -202,17 +204,5 @@ defmodule NeonFS.S3.Test.MockCore do
       {:ok, value} -> Keyword.put(target, key, value)
       :error -> target
     end
-  end
-
-  defp direct_child?("/", file_path) do
-    trimmed = String.trim_leading(file_path, "/")
-    trimmed != "" and not String.contains?(trimmed, "/")
-  end
-
-  defp direct_child?(parent, file_path) do
-    parent_with_slash = if String.ends_with?(parent, "/"), do: parent, else: parent <> "/"
-
-    String.starts_with?(file_path, parent_with_slash) and
-      not String.contains?(String.trim_leading(file_path, parent_with_slash), "/")
   end
 end

@@ -138,12 +138,12 @@ defmodule NeonFS.CoreTest do
     end
   end
 
-  describe "list_files/2" do
+  describe "list_files_recursive/2" do
     test "lists files under path", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file(vol_name, "/a.txt", "aaa")
       {:ok, _} = Core.write_file(vol_name, "/b.txt", "bbb")
 
-      assert {:ok, entries} = Core.list_files(vol_name, "/")
+      assert {:ok, entries} = Core.list_files_recursive(vol_name, "/")
       paths = Enum.map(entries, & &1.path)
       assert "/a.txt" in paths
       assert "/b.txt" in paths
@@ -153,29 +153,54 @@ defmodule NeonFS.CoreTest do
       {:ok, _} = Core.mkdir(vol_name, "/docs")
       {:ok, _} = Core.write_file(vol_name, "/docs/readme.txt", "read me")
 
-      assert {:ok, entries} = Core.list_files(vol_name, "/docs")
+      assert {:ok, entries} = Core.list_files_recursive(vol_name, "/docs")
       paths = Enum.map(entries, & &1.path)
       assert "/docs/readme.txt" in paths
     end
 
     test "returns empty list for path with no files", %{volume_name: vol_name} do
       {:ok, _} = Core.mkdir(vol_name, "/empty")
-      assert {:ok, []} = Core.list_files(vol_name, "/empty")
+      assert {:ok, []} = Core.list_files_recursive(vol_name, "/empty")
     end
 
-    test "includes nested files", %{volume_name: vol_name} do
+    test "includes nested files at any depth", %{volume_name: vol_name} do
       {:ok, _} = Core.mkdir(vol_name, "/parent")
       {:ok, _} = Core.mkdir(vol_name, "/parent/child")
       {:ok, _} = Core.write_file(vol_name, "/parent/child/deep.txt", "deep")
 
-      assert {:ok, entries} = Core.list_files(vol_name, "/parent")
+      assert {:ok, entries} = Core.list_files_recursive(vol_name, "/parent")
       paths = Enum.map(entries, & &1.path)
       assert "/parent/child/deep.txt" in paths
     end
 
-    test "normalizes path without leading slash", %{volume_name: vol_name} do
+    test "normalises path without leading slash", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file(vol_name, "/file.txt", "data")
-      assert {:ok, [_ | _]} = Core.list_files(vol_name, "/")
+      assert {:ok, [_ | _]} = Core.list_files_recursive(vol_name, "/")
+    end
+
+    test "returns all descendants while list_dir returns only direct children", %{
+      volume_name: vol_name
+    } do
+      {:ok, _} = Core.mkdir(vol_name, "/sub")
+      {:ok, _} = Core.mkdir(vol_name, "/sub/deep")
+      {:ok, _} = Core.write_file(vol_name, "/top.txt", "top")
+      {:ok, _} = Core.write_file(vol_name, "/sub/mid.txt", "mid")
+      {:ok, _} = Core.write_file(vol_name, "/sub/deep/bottom.txt", "bottom")
+
+      {:ok, recursive_entries} = Core.list_files_recursive(vol_name, "/")
+      recursive_paths = Enum.map(recursive_entries, & &1.path) |> Enum.sort()
+
+      assert "/sub/deep/bottom.txt" in recursive_paths
+      assert "/sub/mid.txt" in recursive_paths
+      assert "/top.txt" in recursive_paths
+
+      {:ok, dir_entries} = Core.list_dir(vol_name, "/")
+      dir_paths = Enum.map(dir_entries, & &1.path) |> Enum.sort()
+
+      assert "/top.txt" in dir_paths
+      assert "/sub" in dir_paths
+      refute "/sub/mid.txt" in dir_paths
+      refute "/sub/deep/bottom.txt" in dir_paths
     end
   end
 

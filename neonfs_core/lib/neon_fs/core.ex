@@ -143,14 +143,15 @@ defmodule NeonFS.Core do
   end
 
   @doc """
-  Lists files in a volume matching a directory prefix.
+  Lists all descendant files under a directory prefix within a volume.
 
-  Returns all `FileMeta` records whose paths start with `dir_path`.
-  Does not include directory entries. Used by the S3 backend where
-  prefix-based listing across all descendants is needed.
+  Returns all `FileMeta` records whose paths start with `dir_path`,
+  at any depth. Does not include directory entries. For direct children
+  only (including synthesised directory entries), use `list_dir/2`.
   """
-  @spec list_files(String.t(), String.t()) :: {:ok, [NeonFS.Core.FileMeta.t()]} | {:error, term()}
-  def list_files(volume_name, dir_path) do
+  @spec list_files_recursive(String.t(), String.t()) ::
+          {:ok, [NeonFS.Core.FileMeta.t()]} | {:error, term()}
+  def list_files_recursive(volume_name, dir_path) do
     with {:ok, volume} <- resolve_volume(volume_name) do
       normalized = normalize_path(dir_path)
       files = FileIndex.list_volume(volume.id)

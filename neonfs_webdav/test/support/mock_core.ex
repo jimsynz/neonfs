@@ -126,8 +126,32 @@ defmodule NeonFS.WebDAV.Test.MockCore do
     end
   end
 
-  @spec list_files(String.t(), String.t()) :: {:ok, [FileMeta.t()]} | {:error, :not_found}
-  def list_files(volume_name, path \\ "/") do
+  @spec list_files_recursive(String.t(), String.t()) ::
+          {:ok, [FileMeta.t()]} | {:error, :not_found}
+  def list_files_recursive(volume_name, path \\ "/") do
+    volumes = Process.get(:mock_volumes, %{})
+
+    if Map.has_key?(volumes, volume_name) do
+      files = Process.get(:mock_files, %{})
+      normalised = normalise_path(path)
+
+      entries =
+        files
+        |> Enum.filter(fn {{vol, file_path}, _} ->
+          vol == volume_name and file_path != normalised and
+            String.starts_with?(file_path, normalised)
+        end)
+        |> Enum.map(fn {_key, {meta, _content}} -> meta end)
+        |> Enum.sort_by(& &1.path)
+
+      {:ok, entries}
+    else
+      {:error, :not_found}
+    end
+  end
+
+  @spec list_dir(String.t(), String.t()) :: {:ok, [FileMeta.t()]} | {:error, :not_found}
+  def list_dir(volume_name, path \\ "/") do
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, volume_name) do
@@ -146,11 +170,6 @@ defmodule NeonFS.WebDAV.Test.MockCore do
     else
       {:error, :not_found}
     end
-  end
-
-  @spec list_dir(String.t(), String.t()) :: {:ok, [FileMeta.t()]} | {:error, :not_found}
-  def list_dir(volume_name, path \\ "/") do
-    list_files(volume_name, path)
   end
 
   @spec mkdir(String.t(), String.t()) :: {:ok, FileMeta.t()} | {:error, term()}

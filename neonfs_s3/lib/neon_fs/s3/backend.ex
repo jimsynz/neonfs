@@ -171,7 +171,7 @@ defmodule NeonFS.S3.Backend do
     with :ok <- ensure_bucket_exists(bucket) do
       list_path = prefix_to_path(opts.prefix)
 
-      case call_core(:list_files, [bucket, list_path]) do
+      case call_core(:list_files_recursive, [bucket, list_path]) do
         {:ok, entries} ->
           {:ok, build_list_result(bucket, entries, opts)}
 
@@ -333,7 +333,7 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp ensure_bucket_empty(bucket) do
-    case call_core(:list_files, [bucket, "/"]) do
+    case call_core(:list_files_recursive, [bucket, "/"]) do
       {:ok, []} -> :ok
       {:ok, _entries} -> {:error, %S3Server.Error{code: :bucket_not_empty}}
       {:error, :not_found} -> :ok
