@@ -143,6 +143,21 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Updates file metadata fields by volume name and path.
+
+  Accepts a keyword list of fields to update on the FileMeta struct.
+  Automatically increments the version and updates timestamps.
+  """
+  @spec update_file_meta(String.t(), String.t(), keyword()) ::
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, :not_found | term()}
+  def update_file_meta(volume_name, path, updates) do
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, file} <- FileIndex.get_by_path(volume.id, normalize_path(path)) do
+      FileIndex.update(file.id, updates)
+    end
+  end
+
+  @doc """
   Lists all descendant files under a directory prefix within a volume.
 
   Returns all `FileMeta` records whose paths start with `dir_path`,

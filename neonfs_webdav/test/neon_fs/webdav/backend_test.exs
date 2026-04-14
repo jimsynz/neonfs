@@ -127,6 +127,145 @@ defmodule NeonFS.WebDAV.BackendTest do
       results = Backend.get_properties(@auth, resource, [{"custom:", "prop"}])
       assert {{"custom:", "prop"}, {:error, :not_found}} in results
     end
+
+    test "returns dead properties stored in metadata" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/props.txt", "data")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "props.txt"])
+
+      :ok = Backend.set_properties(@auth, resource, [{:set, {"custom:", "colour"}, "blue"}])
+
+      {:ok, updated_resource} = Backend.resolve(@auth, ["docs", "props.txt"])
+      results = Backend.get_properties(@auth, updated_resource, [{"custom:", "colour"}])
+      assert {{"custom:", "colour"}, {:ok, "blue"}} in results
+    end
+  end
+
+  describe "set_properties/3" do
+    test "sets a single dead property" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/test.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "test.txt"])
+
+      assert :ok =
+               Backend.set_properties(@auth, resource, [{:set, {"custom:", "author"}, "James"}])
+
+      {:ok, meta} = MockCore.get_file_meta("docs", "/test.txt")
+      assert meta.metadata["custom:author"] == "James"
+    end
+
+    test "sets multiple dead properties" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/multi.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "multi.txt"])
+
+      operations = [
+        {:set, {"custom:", "author"}, "James"},
+        {:set, {"custom:", "priority"}, "high"}
+      ]
+
+      assert :ok = Backend.set_properties(@auth, resource, operations)
+
+      {:ok, meta} = MockCore.get_file_meta("docs", "/multi.txt")
+      assert meta.metadata["custom:author"] == "James"
+      assert meta.metadata["custom:priority"] == "high"
+    end
+
+    test "removes a dead property" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/remove.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "remove.txt"])
+
+      :ok = Backend.set_properties(@auth, resource, [{:set, {"custom:", "temp"}, "value"}])
+
+      {:ok, updated_resource} = Backend.resolve(@auth, ["docs", "remove.txt"])
+      :ok = Backend.set_properties(@auth, updated_resource, [{:remove, {"custom:", "temp"}}])
+
+      {:ok, meta} = MockCore.get_file_meta("docs", "/remove.txt")
+      refute Map.has_key?(meta.metadata, "custom:temp")
+    end
+
+    test "set and remove in the same request" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/mixed.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "mixed.txt"])
+
+      :ok = Backend.set_properties(@auth, resource, [{:set, {"custom:", "old"}, "stale"}])
+
+      {:ok, updated_resource} = Backend.resolve(@auth, ["docs", "mixed.txt"])
+
+      operations = [
+        {:set, {"custom:", "new"}, "fresh"},
+        {:remove, {"custom:", "old"}}
+      ]
+
+      assert :ok = Backend.set_properties(@auth, updated_resource, operations)
+
+      {:ok, meta} = MockCore.get_file_meta("docs", "/mixed.txt")
+      assert meta.metadata["custom:new"] == "fresh"
+      refute Map.has_key?(meta.metadata, "custom:old")
+    end
+
+    test "overwriting an existing property" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/overwrite.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "overwrite.txt"])
+
+      :ok = Backend.set_properties(@auth, resource, [{:set, {"custom:", "val"}, "first"}])
+
+      {:ok, updated_resource} = Backend.resolve(@auth, ["docs", "overwrite.txt"])
+
+      :ok =
+        Backend.set_properties(@auth, updated_resource, [{:set, {"custom:", "val"}, "second"}])
+
+      {:ok, meta} = MockCore.get_file_meta("docs", "/overwrite.txt")
+      assert meta.metadata["custom:val"] == "second"
+    end
+
+    test "removing a non-existent property succeeds" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/noop.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "noop.txt"])
+
+      assert :ok =
+               Backend.set_properties(@auth, resource, [{:remove, {"custom:", "nonexistent"}}])
+    end
+
+    test "forbids setting properties on root" do
+      {:ok, root} = Backend.resolve(@auth, [])
+
+      assert {:error, %WebdavServer.Error{code: :forbidden}} =
+               Backend.set_properties(@auth, root, [{:set, {"custom:", "x"}, "y"}])
+    end
+
+    test "forbids setting properties on volumes" do
+      MockCore.create_volume("docs")
+      {:ok, volume} = Backend.resolve(@auth, ["docs"])
+
+      assert {:error, %WebdavServer.Error{code: :forbidden}} =
+               Backend.set_properties(@auth, volume, [{:set, {"custom:", "x"}, "y"}])
+    end
+
+    test "preserves properties with different namespaces" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/ns.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "ns.txt"])
+
+      operations = [
+        {:set, {"urn:custom:", "tag"}, "alpha"},
+        {:set, {"urn:other:", "tag"}, "beta"}
+      ]
+
+      :ok = Backend.set_properties(@auth, resource, operations)
+
+      {:ok, updated} = Backend.resolve(@auth, ["docs", "ns.txt"])
+
+      results =
+        Backend.get_properties(@auth, updated, [{"urn:custom:", "tag"}, {"urn:other:", "tag"}])
+
+      assert {{"urn:custom:", "tag"}, {:ok, "alpha"}} in results
+      assert {{"urn:other:", "tag"}, {:ok, "beta"}} in results
+    end
   end
 
   # File operations

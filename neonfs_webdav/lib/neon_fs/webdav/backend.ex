@@ -68,9 +68,28 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   @impl true
-  def set_properties(_auth, _resource, _operations) do
-    {:error,
-     %WebdavServer.Error{code: :forbidden, message: "Property modification not supported"}}
+  def set_properties(_auth, %{backend_data: %{type: type}}, _operations)
+      when type in [:root, :volume] do
+    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot set properties on #{type}"}}
+  end
+
+  def set_properties(_auth, resource, operations) do
+    %{volume_name: volume_name, file_path: file_path, meta: meta} = resource.backend_data
+    current_metadata = meta.metadata || %{}
+
+    new_metadata =
+      Enum.reduce(operations, current_metadata, fn
+        {:set, {namespace, name}, value}, acc ->
+          Map.put(acc, "#{namespace}#{name}", value)
+
+        {:remove, {namespace, name}}, acc ->
+          Map.delete(acc, "#{namespace}#{name}")
+      end)
+
+    case call_core(:update_file_meta, [volume_name, file_path, [metadata: new_metadata]]) do
+      {:ok, _updated} -> :ok
+      {:error, _reason} -> {:error, internal_error()}
+    end
   end
 
   # --- File operations ---
@@ -394,8 +413,17 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  defp get_property(_resource, _prop) do
-    {:error, :not_found}
+  defp get_property(resource, {namespace, name}) do
+    case resource.backend_data do
+      %{meta: %{metadata: metadata}} when is_map(metadata) ->
+        case Map.fetch(metadata, "#{namespace}#{name}") do
+          {:ok, value} -> {:ok, value}
+          :error -> {:error, :not_found}
+        end
+
+      _ ->
+        {:error, :not_found}
+    end
   end
 
   defp validate_dest([_ | _]), do: :ok

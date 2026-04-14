@@ -126,6 +126,23 @@ defmodule NeonFS.WebDAV.Test.MockCore do
     end
   end
 
+  @spec update_file_meta(String.t(), String.t(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, :not_found}
+  def update_file_meta(volume_name, path, updates) do
+    files = Process.get(:mock_files, %{})
+    key = {volume_name, normalise_path(path)}
+
+    case Map.get(files, key) do
+      {meta, content} ->
+        updated_meta = FileMeta.update(meta, updates)
+        Process.put(:mock_files, Map.put(files, key, {updated_meta, content}))
+        {:ok, updated_meta}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
   @spec list_files_recursive(String.t(), String.t()) ::
           {:ok, [FileMeta.t()]} | {:error, :not_found}
   def list_files_recursive(volume_name, path \\ "/") do

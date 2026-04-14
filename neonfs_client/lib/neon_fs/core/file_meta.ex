@@ -28,6 +28,7 @@ defmodule NeonFS.Core.FileMeta do
           gid: non_neg_integer(),
           acl_entries: [acl_entry()],
           default_acl: [acl_entry()] | nil,
+          metadata: %{optional(String.t()) => term()},
           created_at: DateTime.t(),
           modified_at: DateTime.t(),
           accessed_at: DateTime.t(),
@@ -56,7 +57,8 @@ defmodule NeonFS.Core.FileMeta do
     :previous_version_id,
     :hlc_timestamp,
     acl_entries: [],
-    default_acl: nil
+    default_acl: nil,
+    metadata: %{}
   ]
 
   @doc """
@@ -77,6 +79,7 @@ defmodule NeonFS.Core.FileMeta do
     - `:previous_version_id` - Previous version ID (default: nil)
     - `:acl_entries` - Extended ACL entries (default: [])
     - `:default_acl` - Default ACL for directories (default: nil)
+    - `:metadata` - Arbitrary key-value metadata map (default: %{})
 
   ## Examples
       iex> FileMeta.new("vol1", "/test.txt")
@@ -100,6 +103,7 @@ defmodule NeonFS.Core.FileMeta do
       gid: Keyword.get(opts, :gid, 0),
       acl_entries: Keyword.get(opts, :acl_entries, []),
       default_acl: Keyword.get(opts, :default_acl),
+      metadata: Keyword.get(opts, :metadata, %{}),
       created_at: now,
       modified_at: now,
       accessed_at: now,
