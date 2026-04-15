@@ -38,17 +38,27 @@ defmodule WebdavServer.Handler.Get do
       |> put_last_modified(resource)
       |> put_resp_header("accept-ranges", "bytes")
 
+    body = if is_list(content), do: IO.iodata_to_binary(content), else: content
+
     {status, conn} =
-      if Map.has_key?(range_opts, :range) do
-        {206, conn}
-      else
-        {200, put_content_length(conn, resource)}
+      case range_opts do
+        %{range: {start_byte, _}} ->
+          actual_end = start_byte + byte_size(body) - 1
+          total = if is_integer(resource.content_length), do: resource.content_length, else: "*"
+          range_header = "bytes #{start_byte}-#{actual_end}/#{total}"
+
+          {206,
+           conn
+           |> put_resp_header("content-range", range_header)
+           |> put_resp_header("content-length", Integer.to_string(byte_size(body)))}
+
+        _ ->
+          {200, put_content_length(conn, resource)}
       end
 
     if conn.method == "HEAD" do
       send_resp(conn, status, "")
     else
-      body = if is_list(content), do: IO.iodata_to_binary(content), else: content
       send_resp(conn, status, body)
     end
   end

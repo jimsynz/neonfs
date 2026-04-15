@@ -95,10 +95,11 @@ defmodule NeonFS.WebDAV.Backend do
   # --- File operations ---
 
   @impl true
-  def get_content(_auth, resource, _opts) do
+  def get_content(_auth, resource, opts) do
     %{volume_name: volume_name, file_path: file_path} = resource.backend_data
+    read_opts = range_to_read_opts(opts)
 
-    case call_core(:read_file, [volume_name, file_path]) do
+    case call_core(:read_file, [volume_name, file_path, read_opts]) do
       {:ok, content} ->
         {:ok, content}
 
@@ -281,6 +282,14 @@ defmodule NeonFS.WebDAV.Backend do
       fun when is_function(fun, 2) -> fun.(function, args)
     end
   end
+
+  defp range_to_read_opts(%{range: {start_byte, nil}}), do: [offset: start_byte]
+
+  defp range_to_read_opts(%{range: {start_byte, end_byte}}) do
+    [offset: start_byte, length: end_byte - start_byte + 1]
+  end
+
+  defp range_to_read_opts(_), do: []
 
   defp root_resource do
     %WebdavServer.Resource{

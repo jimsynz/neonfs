@@ -209,14 +209,108 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "reads single byte from middle", %{volume: volume} do
       data = "ABCDEFGHIJ"
 
-      # Write the file
       {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/single-byte.txt", data)
 
-      # Read single byte from middle
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/single-byte.txt", offset: 5, length: 1)
 
       assert read_data == "F"
+    end
+
+    test "zero-length read returns empty binary", %{volume: volume} do
+      data = "Hello, NeonFS!"
+
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/zero-len.txt", data)
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/zero-len.txt", offset: 5, length: 0)
+
+      assert read_data == ""
+    end
+
+    test "reads first byte of file", %{volume: volume} do
+      data = "ABCDEFGHIJ"
+
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/first-byte.txt", data)
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/first-byte.txt", offset: 0, length: 1)
+
+      assert read_data == "A"
+    end
+
+    test "reads at exact chunk boundary on multi-chunk file", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(500 * 1024)
+
+      {:ok, file_meta} =
+        WriteOperation.write_file(volume.id, "/boundary.bin", data,
+          chunk_strategy: {:fixed, 64_000}
+        )
+
+      # Read starting at exactly the second chunk boundary
+      offset = 64_000
+      length = 100
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/boundary.bin", offset: offset, length: length)
+
+      assert read_data == binary_part(data, offset, length)
+
+      # Verify we have multiple chunks
+      assert length(file_meta.chunks) > 1
+    end
+
+    test "reads ending at exact chunk boundary on multi-chunk file", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(500 * 1024)
+
+      {:ok, _file_meta} =
+        WriteOperation.write_file(volume.id, "/end-boundary.bin", data,
+          chunk_strategy: {:fixed, 64_000}
+        )
+
+      # Read ending exactly at the chunk boundary
+      offset = 63_900
+      length = 100
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/end-boundary.bin",
+                 offset: offset,
+                 length: length
+               )
+
+      assert read_data == binary_part(data, offset, length)
+    end
+
+    test "reads spanning three chunks", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(500 * 1024)
+
+      {:ok, _file_meta} =
+        WriteOperation.write_file(volume.id, "/three-chunks.bin", data,
+          chunk_strategy: {:fixed, 64_000}
+        )
+
+      # Read from middle of chunk 0 through chunk 1 into chunk 2
+      offset = 32_000
+      length = 128_100
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/three-chunks.bin",
+                 offset: offset,
+                 length: length
+               )
+
+      assert read_data == binary_part(data, offset, length)
+    end
+
+    test "reads entire file with explicit offset 0 and length :all", %{volume: volume} do
+      data = "full file content"
+
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/explicit-all.txt", data)
+
+      assert {:ok, read_data} =
+               ReadOperation.read_file(volume.id, "/explicit-all.txt", offset: 0, length: :all)
+
+      assert read_data == data
     end
   end
 

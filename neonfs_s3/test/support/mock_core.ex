@@ -97,14 +97,36 @@ defmodule NeonFS.S3.Test.MockCore do
     end
   end
 
-  @spec read_file(String.t(), String.t()) :: {:ok, binary()} | {:error, :not_found}
-  def read_file(volume_name, path) do
+  @spec read_file(String.t(), String.t(), keyword()) :: {:ok, binary()} | {:error, :not_found}
+  def read_file(volume_name, path, opts \\ []) do
     files = Process.get(:mock_files, %{})
     key = {volume_name, normalise_path(path)}
 
     case Map.get(files, key) do
-      {_meta, content} -> {:ok, content}
-      nil -> {:error, :not_found}
+      {_meta, content} ->
+        offset = Keyword.get(opts, :offset, 0)
+        length = Keyword.get(opts, :length, :all)
+        {:ok, slice_content(content, offset, length)}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  defp slice_content(content, 0, :all), do: content
+
+  defp slice_content(content, offset, :all) do
+    if offset >= byte_size(content),
+      do: <<>>,
+      else: binary_part(content, offset, byte_size(content) - offset)
+  end
+
+  defp slice_content(content, offset, length) do
+    if offset >= byte_size(content) do
+      <<>>
+    else
+      actual_length = min(length, byte_size(content) - offset)
+      binary_part(content, offset, actual_length)
     end
   end
 

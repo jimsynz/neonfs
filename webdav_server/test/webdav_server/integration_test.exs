@@ -62,6 +62,27 @@ defmodule WebdavServer.IntegrationTest do
       assert resp.body == ""
       assert header(resp, "content-type") == "text/plain"
     end
+
+    test "GET with Range header returns partial content", %{port: port} do
+      WebdavClient.put(port, "/range.txt", "0123456789ABCDEF")
+
+      resp =
+        WebdavClient.get(port, "/range.txt", headers: [{"range", "bytes=5-9"}])
+
+      assert resp.status == 206
+      assert resp.body == "56789"
+      assert header(resp, "content-range") =~ "bytes 5-9/"
+      assert header(resp, "accept-ranges") == "bytes"
+    end
+
+    test "GET without Range header returns full content", %{port: port} do
+      WebdavClient.put(port, "/full.txt", "complete")
+
+      resp = WebdavClient.get(port, "/full.txt")
+      assert resp.status == 200
+      assert resp.body == "complete"
+      assert header(resp, "accept-ranges") == "bytes"
+    end
   end
 
   describe "collections" do

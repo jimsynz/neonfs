@@ -107,6 +107,22 @@ defmodule NeonFS.CoreTest do
     end
   end
 
+  describe "read_file/3 with offset and length" do
+    test "reads partial content from a file", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file(vol_name, "/partial.txt", "0123456789")
+      assert {:ok, "345"} = Core.read_file(vol_name, "/partial.txt", offset: 3, length: 3)
+    end
+
+    test "reads from offset to end when length is :all", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file(vol_name, "/tail.txt", "ABCDEFGHIJ")
+      assert {:ok, "FGHIJ"} = Core.read_file(vol_name, "/tail.txt", offset: 5, length: :all)
+    end
+
+    test "returns error for nonexistent volume" do
+      assert {:error, :not_found} = Core.read_file("no-such-volume", "/file.txt", offset: 0)
+    end
+  end
+
   describe "read_file/2 errors" do
     test "returns error for nonexistent volume" do
       assert {:error, :not_found} = Core.read_file("no-such-volume", "/file.txt")

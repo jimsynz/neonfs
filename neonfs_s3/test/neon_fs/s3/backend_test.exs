@@ -197,6 +197,42 @@ defmodule NeonFS.S3.BackendTest do
       assert {:error, %S3Server.Error{code: :no_such_bucket}} =
                Backend.get_object(@ctx, "missing", "file.txt", %S3Server.GetOpts{})
     end
+
+    test "returns partial content for range request" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "data.txt", "0123456789ABCDEF", %S3Server.PutOpts{})
+
+      opts = %S3Server.GetOpts{range: {5, 9}}
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "data.txt", opts)
+      assert object.body == "56789"
+      assert object.content_length == 5
+      assert object.total_size == 16
+    end
+
+    test "range request clamps to file size" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "short.txt", "hello", %S3Server.PutOpts{})
+
+      opts = %S3Server.GetOpts{range: {2, 100}}
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "short.txt", opts)
+      assert object.body == "llo"
+      assert object.content_length == 3
+      assert object.total_size == 5
+    end
+
+    test "full request without range returns complete content" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "full.txt", "all content", %S3Server.PutOpts{})
+
+      opts = %S3Server.GetOpts{range: nil}
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "full.txt", opts)
+      assert object.body == "all content"
+      assert object.content_length == 11
+      assert object.total_size == 11
+    end
   end
 
   describe "head_object/3" do

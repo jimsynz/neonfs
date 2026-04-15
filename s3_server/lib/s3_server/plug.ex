@@ -268,10 +268,12 @@ defmodule S3Server.Plug do
       status = if get_opts.range, do: 206, else: 200
 
       conn
+      |> Plug.Conn.put_resp_header("accept-ranges", "bytes")
       |> Plug.Conn.put_resp_header("etag", ensure_quoted(object.etag))
       |> Plug.Conn.put_resp_header("content-type", object.content_type)
       |> Plug.Conn.put_resp_header("content-length", to_string(object.content_length))
       |> Plug.Conn.put_resp_header("last-modified", format_http_date(object.last_modified))
+      |> maybe_put_content_range(get_opts.range, object)
       |> put_user_metadata(object.metadata)
       |> Plug.Conn.send_resp(status, object.body)
     else
@@ -553,6 +555,14 @@ defmodule S3Server.Plug do
     conn.req_headers
     |> Enum.filter(fn {k, _} -> String.starts_with?(k, "x-amz-meta-") end)
     |> Map.new(fn {k, v} -> {String.replace_leading(k, "x-amz-meta-", ""), v} end)
+  end
+
+  defp maybe_put_content_range(conn, nil, _object), do: conn
+
+  defp maybe_put_content_range(conn, {start_byte, _end_byte}, object) do
+    actual_end = start_byte + object.content_length - 1
+    total = object.total_size || "*"
+    Plug.Conn.put_resp_header(conn, "content-range", "bytes #{start_byte}-#{actual_end}/#{total}")
   end
 
   defp put_user_metadata(conn, metadata) do

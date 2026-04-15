@@ -9,7 +9,8 @@ defmodule S3Server.Object do
           content_length: non_neg_integer(),
           etag: String.t(),
           last_modified: DateTime.t(),
-          metadata: %{String.t() => String.t()}
+          metadata: %{String.t() => String.t()},
+          total_size: non_neg_integer() | nil
         }
 
   @enforce_keys [:body, :content_length, :etag, :last_modified]
@@ -18,6 +19,7 @@ defmodule S3Server.Object do
     :content_length,
     :etag,
     :last_modified,
+    :total_size,
     content_type: "application/octet-stream",
     metadata: %{}
   ]

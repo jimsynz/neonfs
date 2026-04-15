@@ -93,10 +93,11 @@ defmodule NeonFS.S3.Backend do
   # Object operations
 
   @impl true
-  def get_object(_ctx, bucket, key, _opts) do
+  def get_object(_ctx, bucket, key, opts) do
     with :ok <- ensure_bucket_exists(bucket),
-         {:ok, content} <- read_object_content(bucket, key),
-         {:ok, meta} <- fetch_object_meta(bucket, key) do
+         {:ok, meta} <- fetch_object_meta(bucket, key),
+         read_opts <- range_to_read_opts(opts.range, meta.size),
+         {:ok, content} <- read_object_content(bucket, key, read_opts) do
       {:ok, file_meta_to_object(meta, content)}
     end
   end
@@ -105,7 +106,6 @@ defmodule NeonFS.S3.Backend do
   def put_object(_ctx, bucket, key, body, opts) do
     with :ok <- ensure_bucket_exists(bucket) do
       body_binary = IO.iodata_to_binary(body)
-      etag = compute_etag(body_binary)
 
       write_opts =
         []
@@ -113,7 +113,7 @@ defmodule NeonFS.S3.Backend do
         |> maybe_put_metadata(opts.metadata)
 
       case call_core(:write_file, [bucket, key, body_binary, write_opts]) do
-        {:ok, _meta} -> {:ok, etag}
+        {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
         {:error, reason} -> {:error, internal_error(reason)}
       end
     end
@@ -190,10 +190,13 @@ defmodule NeonFS.S3.Backend do
          :ok <- ensure_bucket_exists(dest_bucket),
          {:ok, content} <- read_object_content(source_bucket, source_key),
          {:ok, source_meta} <- fetch_object_meta(source_bucket, source_key),
-         etag = compute_etag(content),
          write_opts = content_type_write_opts(source_meta),
-         {:ok, _meta} <- write_object_content(dest_bucket, dest_key, content, write_opts) do
-      {:ok, %S3Server.CopyResult{etag: etag, last_modified: DateTime.utc_now()}}
+         {:ok, dest_meta} <- write_object_content(dest_bucket, dest_key, content, write_opts) do
+      {:ok,
+       %S3Server.CopyResult{
+         etag: compute_etag_from_meta(dest_meta),
+         last_modified: DateTime.utc_now()
+       }}
     end
   end
 
@@ -245,8 +248,7 @@ defmodule NeonFS.S3.Backend do
           |> maybe_put_content_type(upload.content_type)
 
         with {:ok, combined} <- read_and_combine_parts(upload.bucket, sorted_parts),
-             etag = compute_etag(combined),
-             {:ok, _meta} <- call_core(:write_file, [bucket, key, combined, write_opts]) do
+             {:ok, meta} <- call_core(:write_file, [bucket, key, combined, write_opts]) do
           cleanup_staging_parts(upload.bucket, sorted_parts)
           MultipartStore.delete(upload_id)
 
@@ -255,7 +257,7 @@ defmodule NeonFS.S3.Backend do
              location: "/#{bucket}/#{key}",
              bucket: bucket,
              key: key,
-             etag: etag
+             etag: compute_etag_from_meta(meta)
            }}
         else
           {:error, reason} -> {:error, internal_error(reason)}
@@ -341,12 +343,19 @@ defmodule NeonFS.S3.Backend do
     end
   end
 
-  defp read_object_content(bucket, key) do
-    case call_core(:read_file, [bucket, key]) do
+  defp read_object_content(bucket, key, read_opts \\ []) do
+    case call_core(:read_file, [bucket, key, read_opts]) do
       {:ok, content} -> {:ok, content}
       {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_key}}
       {:error, reason} -> {:error, internal_error(reason)}
     end
+  end
+
+  defp range_to_read_opts(nil, _file_size), do: []
+
+  defp range_to_read_opts({start_byte, end_byte}, file_size) do
+    clamped_end = min(end_byte, file_size - 1)
+    [offset: start_byte, length: clamped_end - start_byte + 1]
   end
 
   defp fetch_object_meta(bucket, key) do
@@ -369,12 +378,13 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp file_meta_to_object(meta, content) do
-    etag = compute_etag(content)
+    etag = compute_etag_from_meta(meta)
 
     %S3Server.Object{
       body: content,
       content_type: meta_content_type(meta),
       content_length: byte_size(content),
+      total_size: meta.size,
       etag: etag,
       last_modified: meta.modified_at || meta.created_at || DateTime.utc_now(),
       metadata: %{}
@@ -394,9 +404,15 @@ defmodule NeonFS.S3.Backend do
   defp meta_content_type(%{content_type: ct}) when is_binary(ct), do: ct
   defp meta_content_type(_meta), do: "application/octet-stream"
 
+  defp compute_etag_from_meta(%{chunks: chunks}) when is_list(chunks) and chunks != [] do
+    chunks
+    |> IO.iodata_to_binary()
+    |> then(&:crypto.hash(:md5, &1))
+    |> Base.encode16(case: :lower)
+  end
+
   defp compute_etag_from_meta(%{size: size}) do
-    placeholder = :crypto.hash(:md5, <<size::64>>) |> Base.encode16(case: :lower)
-    placeholder
+    :crypto.hash(:md5, <<size::64>>) |> Base.encode16(case: :lower)
   end
 
   defp prefix_to_path(nil), do: "/"

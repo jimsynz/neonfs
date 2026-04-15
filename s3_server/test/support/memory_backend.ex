@@ -146,7 +146,7 @@ defmodule S3Server.Test.MemoryBackend do
   end
 
   @impl true
-  def get_object(_ctx, bucket, key, _opts) do
+  def get_object(_ctx, bucket, key, opts) do
     [{:objects, objects}] = :ets.lookup(@table, :objects)
 
     case Map.get(objects, {bucket, key}) do
@@ -154,16 +154,27 @@ defmodule S3Server.Test.MemoryBackend do
         {:error, %S3Server.Error{code: :no_such_key}}
 
       obj ->
+        {body, content_length} = apply_range(obj.body, opts.range)
+
         {:ok,
          %S3Server.Object{
-           body: obj.body,
+           body: body,
            content_type: obj.content_type,
-           content_length: obj.size,
+           content_length: content_length,
+           total_size: obj.size,
            etag: obj.etag,
            last_modified: obj.last_modified,
            metadata: obj.metadata
          }}
     end
+  end
+
+  defp apply_range(body, nil), do: {body, byte_size(body)}
+
+  defp apply_range(body, {start_byte, end_byte}) do
+    clamped_end = min(end_byte, byte_size(body) - 1)
+    length = clamped_end - start_byte + 1
+    {binary_part(body, start_byte, length), length}
   end
 
   @impl true

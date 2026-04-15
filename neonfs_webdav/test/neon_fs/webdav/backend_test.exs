@@ -290,6 +290,30 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert {:error, %WebdavServer.Error{code: :not_found}} =
                Backend.get_content(@auth, resource, %{})
     end
+
+    test "returns partial content for range request" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/range.txt", "0123456789ABCDEF")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "range.txt"])
+
+      assert {:ok, "56789"} = Backend.get_content(@auth, resource, %{range: {5, 9}})
+    end
+
+    test "returns content from offset to end for open-ended range" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/open.txt", "0123456789")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "open.txt"])
+
+      assert {:ok, "6789"} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+    end
+
+    test "returns full content when no range specified" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/full.txt", "complete content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "full.txt"])
+
+      assert {:ok, "complete content"} = Backend.get_content(@auth, resource, %{})
+    end
   end
 
   describe "put_content/4" do

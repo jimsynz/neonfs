@@ -159,6 +159,31 @@ defmodule S3Server.PlugTest do
       assert conn.status == 404
       assert conn.resp_body =~ "NoSuchKey"
     end
+
+    test "GetObject with Range header returns 206 and partial content", %{opts: opts} do
+      signed_conn(:put, "/obj-bucket/range.txt", body: "0123456789ABCDEF")
+      |> call(opts)
+
+      conn =
+        signed_conn(:get, "/obj-bucket/range.txt", headers: [{"range", "bytes=5-9"}])
+        |> call(opts)
+
+      assert conn.status == 206
+      assert conn.resp_body == "56789"
+      assert [content_range] = Plug.Conn.get_resp_header(conn, "content-range")
+      assert content_range =~ "bytes 5-9/"
+      assert Plug.Conn.get_resp_header(conn, "accept-ranges") == ["bytes"]
+    end
+
+    test "GetObject without Range returns 200 with accept-ranges", %{opts: opts} do
+      signed_conn(:put, "/obj-bucket/full.txt", body: "all content")
+      |> call(opts)
+
+      conn = signed_conn(:get, "/obj-bucket/full.txt") |> call(opts)
+      assert conn.status == 200
+      assert conn.resp_body == "all content"
+      assert Plug.Conn.get_resp_header(conn, "accept-ranges") == ["bytes"]
+    end
   end
 
   describe "ListObjectsV2 (GET /{bucket})" do

@@ -49,12 +49,24 @@ defmodule WebdavServer.Test.MemoryBackend do
   def set_properties(_auth, _resource, _operations), do: :ok
 
   @impl true
-  def get_content(_auth, resource, _opts) do
+  def get_content(_auth, resource, opts) do
     case :ets.lookup(@table, resource.path) do
-      [{_, _, content}] when content != nil -> {:ok, content}
+      [{_, _, content}] when content != nil -> {:ok, apply_range(content, opts)}
       _ -> {:error, %Error{code: :not_found}}
     end
   end
+
+  defp apply_range(content, %{range: {start_byte, nil}}) do
+    size = byte_size(content)
+    if start_byte >= size, do: <<>>, else: binary_part(content, start_byte, size - start_byte)
+  end
+
+  defp apply_range(content, %{range: {start_byte, end_byte}}) do
+    clamped_end = min(end_byte, byte_size(content) - 1)
+    binary_part(content, start_byte, clamped_end - start_byte + 1)
+  end
+
+  defp apply_range(content, _), do: content
 
   @impl true
   def put_content(_auth, path, body, opts) do
