@@ -106,6 +106,29 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Returns a lazy stream of chunk data for a file's byte range.
+
+  Performs authorisation and metadata resolution eagerly. Chunk data is
+  fetched lazily so at most one chunk is held in memory at a time.
+
+  Streams cannot be serialised across Erlang distribution. This API is
+  for local consumption on core nodes only.
+
+  ## Options
+
+    * `:offset` - Byte offset to start streaming from (default: 0)
+    * `:length` - Number of bytes to stream (default: `:all` for entire file)
+
+  """
+  @spec read_file_stream(String.t(), String.t(), keyword()) ::
+          {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}} | {:error, term()}
+  def read_file_stream(volume_name, path, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      ReadOperation.read_file_stream(volume.id, normalize_path(path), opts)
+    end
+  end
+
+  @doc """
   Writes content to a file in a volume.
   """
   @spec write_file(String.t(), String.t(), binary()) ::

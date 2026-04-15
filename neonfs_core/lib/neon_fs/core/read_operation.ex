@@ -30,6 +30,8 @@ defmodule NeonFS.Core.ReadOperation do
   require Logger
 
   @type read_result :: {:ok, binary()} | {:error, term()}
+  @type stream_result ::
+          {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}} | {:error, term()}
 
   @doc """
   Reads a file from a volume with optional offset and length.
@@ -78,6 +80,61 @@ defmodule NeonFS.Core.ReadOperation do
     duration = System.monotonic_time() - start_time
     emit_read_telemetry(result, duration, volume_id, path)
     result
+  end
+
+  @doc """
+  Returns a lazy stream of chunk data for a file's byte range.
+
+  Performs authorisation, volume lookup, and file metadata resolution eagerly
+  before returning the stream. Chunk data is fetched lazily as the stream is
+  consumed, so at most one chunk is held in memory at a time.
+
+  The stream yields raw `binary()` slices. If a chunk fetch fails mid-stream
+  the stream halts and the error is logged; consumers can detect truncation by
+  comparing received bytes against `file_size` in the returned metadata.
+
+  **Note:** Elixir streams contain anonymous functions and cannot be serialised
+  across Erlang distribution. This API is for local consumption on core nodes.
+  Remote callers should use `read_file/3` instead.
+
+  ## Parameters
+
+    * `volume_id` - Volume identifier
+    * `path` - File path within the volume
+    * `opts` - Optional keyword list:
+      * `:offset` - Byte offset to start streaming from (default: 0)
+      * `:length` - Number of bytes to stream (default: :all for entire file)
+      * `:uid` - User ID for authorisation (default: 0)
+      * `:gids` - Group IDs for authorisation (default: [])
+
+  ## Returns
+
+    * `{:ok, %{stream: stream, file_size: size}}` on success
+    * `{:error, reason}` if authorisation fails or volume/file not found
+  """
+  @spec read_file_stream(binary(), String.t(), keyword()) :: stream_result()
+  def read_file_stream(volume_id, path, opts \\ []) do
+    Logger.metadata(component: :read_stream, volume_id: volume_id, file_path: path)
+
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, :all)
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, volume} <- get_volume(volume_id),
+         :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
+         {:ok, file_meta} <- get_file(volume_id, path) do
+      :telemetry.execute(
+        [:neonfs, :read_stream, :start],
+        %{offset: offset, file_size: file_meta.size},
+        %{volume_id: volume_id, path: path, length: length}
+      )
+
+      populate_resolved_cache(file_meta)
+      stream = build_stream(file_meta, volume, offset, length)
+
+      {:ok, %{stream: stream, file_size: file_meta.size}}
+    end
   end
 
   # ─── Cache-aware read ─────────────────────────────────────────────────
@@ -143,6 +200,102 @@ defmodule NeonFS.Core.ReadOperation do
 
   defp do_read(file_meta, volume, offset, length) do
     read_from_chunks(file_meta, volume, offset, length)
+  end
+
+  # ─── Stream Builders ──────────────────────────────────────────────────
+
+  defp build_stream(file_meta, volume, offset, length) when is_list(file_meta.stripes) do
+    build_stripe_stream(file_meta, volume, offset, length)
+  end
+
+  defp build_stream(file_meta, volume, offset, length) do
+    build_chunk_stream(file_meta, volume, offset, length)
+  end
+
+  defp build_chunk_stream(file_meta, volume, offset, length) do
+    end_byte = calculate_end_byte(file_meta.size, offset, length)
+
+    if offset >= file_meta.size or end_byte <= offset do
+      Stream.unfold(nil, fn _ -> nil end)
+    else
+      chunk_infos = build_chunk_info_list(file_meta.chunks, 0, [])
+
+      needed =
+        chunk_infos
+        |> Enum.filter(fn {_hash, chunk_start, chunk_end} ->
+          chunk_start < end_byte and chunk_end > offset
+        end)
+        |> Enum.map(fn {hash, chunk_start, chunk_end} ->
+          read_start = max(0, offset - chunk_start)
+          read_end = min(chunk_end - chunk_start, end_byte - chunk_start)
+          %{hash: hash, read_start: read_start, read_end: read_end}
+        end)
+
+      should_verify = should_verify_on_read?(volume.verification)
+      volume_id = volume.id
+
+      Stream.unfold(needed, &stream_next_chunk(&1, should_verify, volume_id))
+    end
+  end
+
+  defp stream_next_chunk([], _should_verify, _volume_id), do: nil
+
+  defp stream_next_chunk([chunk_info | rest], should_verify, volume_id) do
+    case fetch_single_chunk(chunk_info.hash, should_verify, volume_id) do
+      {:ok, chunk_data} ->
+        read_length = chunk_info.read_end - chunk_info.read_start
+        sliced = binary_part(chunk_data, chunk_info.read_start, read_length)
+        {sliced, rest}
+
+      {:error, reason} ->
+        Logger.error("Stream chunk fetch failed",
+          chunk_hash: Base.encode16(chunk_info.hash, case: :lower),
+          volume_id: volume_id,
+          reason: inspect(reason)
+        )
+
+        nil
+    end
+  end
+
+  defp build_stripe_stream(file_meta, volume, offset, length) do
+    end_byte = calculate_end_byte(file_meta.size, offset, length)
+
+    if offset >= file_meta.size or end_byte <= offset do
+      Stream.unfold(nil, fn _ -> nil end)
+    else
+      should_verify = should_verify_on_read?(volume.verification)
+      volume_id = volume.id
+
+      relevant =
+        file_meta.stripes
+        |> Enum.filter(fn %{byte_range: {s, e}} -> s < end_byte and e > offset end)
+
+      Stream.unfold({relevant, offset, end_byte, should_verify, volume_id}, &stream_next_stripe/1)
+    end
+  end
+
+  defp stream_next_stripe({[], _offset, _end_byte, _should_verify, _volume_id}), do: nil
+
+  defp stream_next_stripe(
+         {[%{stripe_id: sid, byte_range: {s, _e}} | rest], offset, end_byte, should_verify,
+          volume_id}
+       ) do
+    stripe_offset = max(0, offset - s)
+    stripe_length = min_stripe_read_length(s, offset, end_byte)
+
+    case read_stripe(sid, stripe_offset, stripe_length, should_verify, volume_id) do
+      {:ok, data} ->
+        {data, {rest, offset, end_byte, should_verify, volume_id}}
+
+      {:error, reason} ->
+        Logger.error("Stream stripe fetch failed",
+          volume_id: volume_id,
+          reason: inspect(reason)
+        )
+
+        nil
+    end
   end
 
   # ─── Chunk-based Read Path (replicated) ───────────────────────────────

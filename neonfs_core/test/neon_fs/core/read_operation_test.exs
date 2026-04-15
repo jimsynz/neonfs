@@ -36,7 +36,8 @@ defmodule NeonFS.Core.ReadOperationTest do
         [:neonfs, :read_operation, :start],
         [:neonfs, :read_operation, :stop],
         [:neonfs, :read_operation, :exception],
-        [:neonfs, :read_operation, :stripe_read]
+        [:neonfs, :read_operation, :stripe_read],
+        [:neonfs, :read_stream, :start]
       ],
       &handle_telemetry_event/4,
       nil
@@ -948,6 +949,257 @@ defmodule NeonFS.Core.ReadOperationTest do
       assert metadata.volume_id == volume.id
       assert is_binary(metadata.drive_id)
       assert metadata.node == node()
+    end
+  end
+
+  describe "read_file_stream/3 chunk-based" do
+    test "streams entire small file as single element", %{volume: volume} do
+      data = "Hello, streaming NeonFS!"
+
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_small.txt", data)
+
+      assert {:ok, %{stream: stream, file_size: file_size}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_small.txt")
+
+      assert file_size == byte_size(data)
+
+      chunks = Enum.to_list(stream)
+      assert length(chunks) == 1
+      assert IO.iodata_to_binary(chunks) == data
+    end
+
+    test "streams multi-chunk file with one element per chunk", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(500 * 1024)
+
+      {:ok, file_meta} =
+        WriteOperation.write_file(volume.id, "/stream_multi.bin", data,
+          chunk_strategy: {:fixed, 64_000}
+        )
+
+      assert {:ok, %{stream: stream, file_size: file_size}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_multi.bin")
+
+      assert file_size == byte_size(data)
+
+      chunks = Enum.to_list(stream)
+      assert length(chunks) == length(file_meta.chunks)
+      assert IO.iodata_to_binary(chunks) == data
+    end
+
+    test "streams with offset", %{volume: volume} do
+      data = "0123456789ABCDEFGHIJ"
+
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_offset.txt", data)
+
+      assert {:ok, %{stream: stream}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_offset.txt", offset: 10)
+
+      assert IO.iodata_to_binary(Enum.to_list(stream)) == "ABCDEFGHIJ"
+    end
+
+    test "streams with offset and length", %{volume: volume} do
+      data = "0123456789ABCDEFGHIJ"
+
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_partial.txt", data)
+
+      assert {:ok, %{stream: stream}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_partial.txt",
+                 offset: 5,
+                 length: 5
+               )
+
+      assert IO.iodata_to_binary(Enum.to_list(stream)) == "56789"
+    end
+
+    test "streams spanning chunk boundaries", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(500 * 1024)
+
+      {:ok, _} =
+        WriteOperation.write_file(volume.id, "/stream_boundary.bin", data,
+          chunk_strategy: {:fixed, 64_000}
+        )
+
+      offset = 60_000
+      length = 10_000
+
+      assert {:ok, %{stream: stream}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_boundary.bin",
+                 offset: offset,
+                 length: length
+               )
+
+      assert IO.iodata_to_binary(Enum.to_list(stream)) == binary_part(data, offset, length)
+    end
+
+    test "offset beyond file size returns empty stream", %{volume: volume} do
+      data = "Short file"
+
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_past.txt", data)
+
+      assert {:ok, %{stream: stream, file_size: 10}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_past.txt",
+                 offset: 1000,
+                 length: 10
+               )
+
+      assert Enum.to_list(stream) == []
+    end
+
+    test "zero-length read returns empty stream", %{volume: volume} do
+      data = "Hello, NeonFS!"
+
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_zero.txt", data)
+
+      assert {:ok, %{stream: stream}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_zero.txt",
+                 offset: 5,
+                 length: 0
+               )
+
+      assert Enum.to_list(stream) == []
+    end
+
+    test "empty file returns empty stream", %{volume: volume} do
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_empty.txt", "")
+
+      assert {:ok, %{stream: stream, file_size: 0}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_empty.txt")
+
+      assert Enum.to_list(stream) == []
+    end
+
+    test "stream is lazy (chunks fetched on demand)", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(500 * 1024)
+
+      {:ok, file_meta} =
+        WriteOperation.write_file(volume.id, "/stream_lazy.bin", data,
+          chunk_strategy: {:fixed, 64_000}
+        )
+
+      assert length(file_meta.chunks) > 1
+
+      assert {:ok, %{stream: stream}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_lazy.bin")
+
+      # Taking only the first element should not fetch all chunks
+      [first_chunk] = Enum.take(stream, 1)
+      assert is_binary(first_chunk)
+      assert byte_size(first_chunk) > 0
+    end
+  end
+
+  describe "read_file_stream/3 error handling" do
+    test "returns error for non-existent file", %{volume: volume} do
+      assert {:error, %FileNotFoundError{}} =
+               ReadOperation.read_file_stream(volume.id, "/no-such-file.txt")
+    end
+
+    test "returns error for non-existent volume" do
+      fake_volume_id = UUIDv7.generate()
+
+      assert {:error, %VolumeNotFound{volume_id: ^fake_volume_id}} =
+               ReadOperation.read_file_stream(fake_volume_id, "/test.txt")
+    end
+  end
+
+  describe "read_file_stream/3 metadata" do
+    test "returns correct file_size", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(12_345)
+
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_size.bin", data)
+
+      assert {:ok, %{file_size: 12_345}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_size.bin")
+    end
+  end
+
+  describe "read_file_stream/3 telemetry" do
+    test "emits :read_stream :start event", %{volume: volume} do
+      Process.put(:telemetry_events, [])
+
+      data = "Telemetry stream test"
+      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_telem.txt", data)
+
+      {:ok, _} = ReadOperation.read_file_stream(volume.id, "/stream_telem.txt")
+
+      events = Process.get(:telemetry_events, [])
+
+      start_event = Enum.find(events, &(&1.event == [:neonfs, :read_stream, :start]))
+      assert start_event
+      assert start_event.measurements.offset == 0
+      assert start_event.measurements.file_size == byte_size(data)
+      assert start_event.metadata.volume_id == volume.id
+      assert start_event.metadata.path == "/stream_telem.txt"
+    end
+
+    test "does not emit telemetry on error" do
+      Process.put(:telemetry_events, [])
+
+      fake_volume_id = UUIDv7.generate()
+      {:error, _} = ReadOperation.read_file_stream(fake_volume_id, "/nope.txt")
+
+      events = Process.get(:telemetry_events, [])
+
+      stream_events = Enum.filter(events, &(&1.event == [:neonfs, :read_stream, :start]))
+      assert stream_events == []
+    end
+  end
+
+  describe "read_file_stream/3 erasure-coded" do
+    setup %{volume: _volume} do
+      vol_name = "erasure-stream-vol-#{:rand.uniform(999_999)}"
+
+      {:ok, ec_volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1},
+          compression: %{algorithm: :none}
+        )
+
+      {:ok, ec_volume: ec_volume}
+    end
+
+    test "streams entire erasure-coded file", %{ec_volume: volume} do
+      data = "Hello, erasure streaming!"
+
+      {:ok, _} =
+        WriteOperation.write_file(volume.id, "/stream_ec.txt", data, chunk_strategy: :single)
+
+      assert {:ok, %{stream: stream, file_size: file_size}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_ec.txt")
+
+      assert file_size == byte_size(data)
+      assert IO.iodata_to_binary(Enum.to_list(stream)) == data
+    end
+
+    test "streams multi-stripe erasure-coded file", %{ec_volume: volume} do
+      data = :crypto.strong_rand_bytes(4096)
+
+      {:ok, _} =
+        WriteOperation.write_file(volume.id, "/stream_ec_multi.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      assert {:ok, %{stream: stream}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_ec_multi.bin")
+
+      assert IO.iodata_to_binary(Enum.to_list(stream)) == data
+    end
+
+    test "streams with offset spanning stripe boundary", %{ec_volume: volume} do
+      data = :crypto.strong_rand_bytes(4096)
+
+      {:ok, _} =
+        WriteOperation.write_file(volume.id, "/stream_ec_span.bin", data,
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      assert {:ok, %{stream: stream}} =
+               ReadOperation.read_file_stream(volume.id, "/stream_ec_span.bin",
+                 offset: 2000,
+                 length: 200
+               )
+
+      assert IO.iodata_to_binary(Enum.to_list(stream)) == binary_part(data, 2000, 200)
     end
   end
 
