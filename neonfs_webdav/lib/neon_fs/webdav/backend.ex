@@ -164,7 +164,7 @@ defmodule NeonFS.WebDAV.Backend do
          {dest_volume, dest_file_path} = split_dest(dest_path),
          :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?),
          %{volume_name: src_volume, file_path: src_path, meta: src_meta} = resource.backend_data,
-         {:ok, content} <- call_core(:read_file, [src_volume, src_path]),
+         {:ok, content} <- call_core(:read_file, [src_volume, src_path, []]),
          existed? = resource_exists?(dest_volume, dest_file_path),
          write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
          {:ok, _meta} <-
@@ -264,7 +264,7 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   defp move_cross_volume(src_volume, src_path, dest_volume, dest_path, existed?) do
-    with {:ok, content} <- call_core(:read_file, [src_volume, src_path]),
+    with {:ok, content} <- call_core(:read_file, [src_volume, src_path, []]),
          {:ok, src_meta} <- call_core(:get_file_meta, [src_volume, src_path]),
          write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
          {:ok, _meta} <- call_core(:write_file, [dest_volume, dest_path, content, write_opts]),

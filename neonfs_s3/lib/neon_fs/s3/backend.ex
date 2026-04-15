@@ -514,7 +514,7 @@ defmodule NeonFS.S3.Backend do
   defp read_and_combine_parts(bucket, sorted_parts) do
     results =
       Enum.map(sorted_parts, fn {_num, part} ->
-        call_core(:read_file, [bucket, part.path])
+        call_core(:read_file, [bucket, part.path, []])
       end)
 
     case Enum.find(results, &match?({:error, _}, &1)) do

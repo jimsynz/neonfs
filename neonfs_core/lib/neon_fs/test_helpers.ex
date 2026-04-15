@@ -45,13 +45,11 @@ defmodule NeonFS.TestHelpers do
 
   Returns `{:ok, content}` on success.
   """
-  @spec read_file(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
-  def read_file(volume_name, path) do
-    # Lookup volume by name
+  @spec read_file(String.t(), String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def read_file(volume_name, path, opts \\ []) do
     case VolumeRegistry.get_by_name(volume_name) do
       {:ok, volume} ->
-        # Read the file using the read operation
-        ReadOperation.read_file(volume.id, path)
+        ReadOperation.read_file(volume.id, path, opts)
 
       {:error, _} = error ->
         error

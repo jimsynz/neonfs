@@ -88,13 +88,13 @@ defmodule NeonFS.CoreTest do
 
   # --- File operations ---
 
-  describe "write_file/3 and read_file/2" do
+  describe "write_file/3 and read_file/3" do
     test "round-trips file content", %{volume_name: vol_name} do
       content = "Hello from the facade"
       assert {:ok, meta} = Core.write_file(vol_name, "/test.txt", content)
       assert meta.path == "/test.txt"
 
-      assert {:ok, ^content} = Core.read_file(vol_name, "/test.txt")
+      assert {:ok, ^content} = Core.read_file(vol_name, "/test.txt", [])
     end
   end
 
@@ -123,9 +123,9 @@ defmodule NeonFS.CoreTest do
     end
   end
 
-  describe "read_file/2 errors" do
+  describe "read_file/3 errors" do
     test "returns error for nonexistent volume" do
-      assert {:error, :not_found} = Core.read_file("no-such-volume", "/file.txt")
+      assert {:error, :not_found} = Core.read_file("no-such-volume", "/file.txt", [])
     end
   end
 

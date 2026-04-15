@@ -88,16 +88,6 @@ defmodule NeonFS.Core do
 
   @doc """
   Reads a file's content from a volume.
-  """
-  @spec read_file(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
-  def read_file(volume_name, path) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
-      ReadOperation.read_file(volume.id, normalize_path(path))
-    end
-  end
-
-  @doc """
-  Reads a file's content from a volume with options.
 
   Supports partial reads via offset and length, avoiding full-file
   materialisation for range requests.
@@ -109,7 +99,7 @@ defmodule NeonFS.Core do
 
   """
   @spec read_file(String.t(), String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
-  def read_file(volume_name, path, opts) do
+  def read_file(volume_name, path, opts \\ []) do
     with {:ok, volume} <- resolve_volume(volume_name) do
       ReadOperation.read_file(volume.id, normalize_path(path), opts)
     end
