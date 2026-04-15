@@ -1070,6 +1070,7 @@ defmodule NeonFS.Core.WriteOperation do
       end
 
     file_opts = maybe_forward_opt(file_opts, opts, :content_type)
+    file_opts = maybe_forward_opt(file_opts, opts, :metadata)
     file_opts = apply_uid_gid_opts(file_opts, opts)
     file_opts = maybe_inherit_default_acl(file_opts, volume_id, path)
 
@@ -1343,6 +1344,7 @@ defmodule NeonFS.Core.WriteOperation do
       end
 
     file_opts = maybe_forward_opt(file_opts, opts, :content_type)
+    file_opts = maybe_forward_opt(file_opts, opts, :metadata)
     file_opts = apply_uid_gid_opts(file_opts, opts)
     file_opts = maybe_inherit_default_acl(file_opts, volume_id, path)
 

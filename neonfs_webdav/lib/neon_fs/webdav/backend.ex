@@ -165,7 +165,7 @@ defmodule NeonFS.WebDAV.Backend do
          %{volume_name: src_volume, file_path: src_path, meta: src_meta} = resource.backend_data,
          {:ok, content} <- call_core(:read_file, [src_volume, src_path]),
          existed? = resource_exists?(dest_volume, dest_file_path),
-         write_opts = content_type_opts(src_meta),
+         write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
          {:ok, _meta} <-
            call_core(:write_file, [dest_volume, dest_file_path, content, write_opts]) do
       if existed?, do: {:ok, :no_content}, else: {:ok, :created}
@@ -265,7 +265,7 @@ defmodule NeonFS.WebDAV.Backend do
   defp move_cross_volume(src_volume, src_path, dest_volume, dest_path, existed?) do
     with {:ok, content} <- call_core(:read_file, [src_volume, src_path]),
          {:ok, src_meta} <- call_core(:get_file_meta, [src_volume, src_path]),
-         write_opts = content_type_opts(src_meta),
+         write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
          {:ok, _meta} <- call_core(:write_file, [dest_volume, dest_path, content, write_opts]),
          _ <- call_core(:delete_file, [src_volume, src_path]) do
       if existed?, do: {:ok, :no_content}, else: {:ok, :created}
@@ -453,6 +453,9 @@ defmodule NeonFS.WebDAV.Backend do
 
   defp content_type_opts(%{content_type: ct}) when is_binary(ct), do: [content_type: ct]
   defp content_type_opts(_meta), do: []
+
+  defp metadata_opts(%{metadata: md}) when is_map(md) and md != %{}, do: [metadata: md]
+  defp metadata_opts(_meta), do: []
 
   defp internal_error do
     %WebdavServer.Error{code: :bad_request, message: "Internal error"}

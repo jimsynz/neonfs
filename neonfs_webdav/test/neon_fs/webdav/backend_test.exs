@@ -449,6 +449,43 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert {:error, %WebdavServer.Error{code: :precondition_failed}} =
                Backend.copy(@auth, resource, ["docs", "dst.txt"], false)
     end
+
+    test "preserves dead properties on copy within same volume" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/original.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "original.txt"])
+
+      :ok =
+        Backend.set_properties(@auth, resource, [
+          {:set, {"custom:", "author"}, "James"},
+          {:set, {"custom:", "priority"}, "high"}
+        ])
+
+      {:ok, updated_resource} = Backend.resolve(@auth, ["docs", "original.txt"])
+      assert {:ok, :created} = Backend.copy(@auth, updated_resource, ["docs", "copy.txt"], true)
+
+      {:ok, copy_meta} = MockCore.get_file_meta("docs", "/copy.txt")
+      assert copy_meta.metadata["custom:author"] == "James"
+      assert copy_meta.metadata["custom:priority"] == "high"
+    end
+
+    test "preserves dead properties on copy across volumes" do
+      MockCore.create_volume("vol-a")
+      MockCore.create_volume("vol-b")
+      MockCore.write_file("vol-a", "/source.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["vol-a", "source.txt"])
+
+      :ok =
+        Backend.set_properties(@auth, resource, [{:set, {"urn:test:", "tag"}, "cross-vol"}])
+
+      {:ok, updated_resource} = Backend.resolve(@auth, ["vol-a", "source.txt"])
+
+      assert {:ok, :created} =
+               Backend.copy(@auth, updated_resource, ["vol-b", "source.txt"], true)
+
+      {:ok, copy_meta} = MockCore.get_file_meta("vol-b", "/source.txt")
+      assert copy_meta.metadata["urn:test:tag"] == "cross-vol"
+    end
   end
 
   describe "move/4" do
@@ -494,6 +531,30 @@ defmodule NeonFS.WebDAV.BackendTest do
 
       {:ok, moved_meta} = MockCore.get_file_meta("vol-b", "/data.bin")
       assert moved_meta.content_type == "text/csv"
+    end
+
+    test "preserves dead properties on cross-volume move" do
+      MockCore.create_volume("vol-a")
+      MockCore.create_volume("vol-b")
+      MockCore.write_file("vol-a", "/props.txt", "content")
+      {:ok, resource} = Backend.resolve(@auth, ["vol-a", "props.txt"])
+
+      :ok =
+        Backend.set_properties(@auth, resource, [
+          {:set, {"custom:", "author"}, "James"},
+          {:set, {"urn:ns:", "rating"}, "5"}
+        ])
+
+      {:ok, updated_resource} = Backend.resolve(@auth, ["vol-a", "props.txt"])
+
+      assert {:ok, :created} =
+               Backend.move(@auth, updated_resource, ["vol-b", "props.txt"], true)
+
+      assert {:error, :not_found} = MockCore.read_file("vol-a", "/props.txt")
+
+      {:ok, moved_meta} = MockCore.get_file_meta("vol-b", "/props.txt")
+      assert moved_meta.metadata["custom:author"] == "James"
+      assert moved_meta.metadata["urn:ns:rating"] == "5"
     end
   end
 

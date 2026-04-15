@@ -40,6 +40,15 @@ cargo clippy --all-targets -- -D warnings         # Linting
 cargo fmt --check                                 # Format check
 ```
 
+## Git Commit Signing
+
+The DevPod environment configures `devpod-ssh-signature` as the GPG signing program for SSH-based commit signing. This tool does not support the `-U` flag that newer versions of git pass for the signing buffer file, causing `fatal: failed to write commit object` errors.
+
+**Workaround:** Use `-c commit.gpgsign=false` when committing:
+```bash
+git -c commit.gpgsign=false commit -m "commit message"
+```
+
 ## Architecture
 
 ```

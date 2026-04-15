@@ -70,6 +70,7 @@ defmodule NeonFS.WebDAV.Test.MockCore do
       file_opts =
         [size: byte_size(content), mode: @s_ifreg]
         |> maybe_forward_opt(write_opts, :content_type)
+        |> maybe_forward_opt(write_opts, :metadata)
 
       meta = FileMeta.new(volume.id, normalised, file_opts)
 
