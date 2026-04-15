@@ -163,12 +163,7 @@ fn chunk_fastcdc(data: &[u8], min: usize, avg: usize, max: usize) -> Vec<ChunkRe
     let avg = avg.max(min);
     let max = max.max(avg);
 
-    // FastCDC expects u32 for size parameters
-    let min_u32 = min as u32;
-    let avg_u32 = avg as u32;
-    let max_u32 = max as u32;
-
-    let chunker = FastCDC::new(data, min_u32, avg_u32, max_u32);
+    let chunker = FastCDC::new(data, min, avg, max);
     chunker
         .map(|chunk| {
             ChunkResult::new(
