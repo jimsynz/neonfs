@@ -11,7 +11,7 @@ defmodule NeonFS.WebDAV.Supervisor do
   use Supervisor
 
   alias NeonFS.Client.Registrar
-  alias NeonFS.WebDAV.{Backend, HealthCheck, HealthPlug}
+  alias NeonFS.WebDAV.{Backend, HealthCheck, HealthPlug, LockStore}
 
   @doc "Starts the WebDAV supervisor."
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -25,12 +25,13 @@ defmodule NeonFS.WebDAV.Supervisor do
     bind = Application.get_env(:neonfs_webdav, :webdav_bind, "0.0.0.0")
 
     HealthCheck.register_checks()
+    LockStore.init()
 
     children = [
       {Registrar,
        metadata: registration_metadata(), type: :webdav, name: NeonFS.Client.Registrar.WebDAV},
       {Bandit,
-       plug: {HealthPlug, backend: Backend},
+       plug: {HealthPlug, backend: Backend, lock_store: LockStore},
        port: port,
        ip: parse_bind_address(bind),
        scheme: :http}

@@ -190,6 +190,11 @@ defmodule NeonFS.Events.SubscriptionTest do
                       %{pid: ^pid, volumes_left: _}},
                      1_000
 
+      # The Registry partition cleans up dead processes asynchronously via its
+      # own :DOWN handler. Flush the partition's mailbox to ensure the entry
+      # has been removed before we assert.
+      :sys.get_state(NeonFS.Events.Registry.PIDPartition0)
+
       entries = Registry.lookup(NeonFS.Events.Registry, {:volume, @volume_id})
       refute Enum.any?(entries, fn {p, _} -> p == pid end)
     end

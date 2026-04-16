@@ -1,0 +1,334 @@
+defmodule NeonFS.WebDAV.LockStoreTest do
+  use ExUnit.Case, async: false
+
+  alias NeonFS.Core.FileMeta
+  alias NeonFS.WebDAV.LockStore
+
+  @file_path ["my-volume", "docs", "file.txt"]
+  @file_id "test-file-id-001"
+
+  setup do
+    LockStore.reset()
+
+    on_exit(fn ->
+      Application.delete_env(:neonfs_webdav, :core_call_fn)
+      Application.delete_env(:neonfs_webdav, :lock_manager_call_fn)
+      LockStore.reset()
+    end)
+
+    :ok
+  end
+
+  defp setup_mock_core(file_id \\ @file_id) do
+    Application.put_env(:neonfs_webdav, :core_call_fn, fn
+      :get_file_meta, [_volume, _path] ->
+        {:ok, %FileMeta{id: file_id, volume_id: "vol-1", path: "/docs/file.txt"}}
+    end)
+  end
+
+  defp setup_mock_lock_manager do
+    test_pid = self()
+
+    Application.put_env(:neonfs_webdav, :lock_manager_call_fn, fn function, args ->
+      send(test_pid, {:lock_manager, function, args})
+
+      case function do
+        :lock -> :ok
+        :unlock -> :ok
+        :renew -> :ok
+      end
+    end)
+  end
+
+  defp setup_conflicting_lock_manager do
+    Application.put_env(:neonfs_webdav, :lock_manager_call_fn, fn :lock, _args ->
+      {:error, :timeout}
+    end)
+  end
+
+  defp setup_core_not_found do
+    Application.put_env(:neonfs_webdav, :core_call_fn, fn
+      :get_file_meta, _args -> {:error, :not_found}
+    end)
+  end
+
+  describe "lock/5 with DLM" do
+    setup do
+      setup_mock_core()
+      setup_mock_lock_manager()
+      :ok
+    end
+
+    test "acquires exclusive lock via DLM and returns token" do
+      assert {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert is_binary(token)
+      assert byte_size(token) > 0
+
+      file_id = @file_id
+
+      assert_received {:lock_manager, :lock, [^file_id, ^token, {0, _}, :exclusive, opts]}
+
+      assert Keyword.get(opts, :ttl) == 300_000
+    end
+
+    test "acquires shared lock via DLM" do
+      assert {:ok, token} = LockStore.lock(@file_path, :shared, :write, "user-a", 600)
+      file_id = @file_id
+
+      assert_received {:lock_manager, :lock, [^file_id, ^token, {0, _}, :shared, opts]}
+
+      assert Keyword.get(opts, :ttl) == 600_000
+    end
+
+    test "returns conflict when DLM rejects lock" do
+      setup_conflicting_lock_manager()
+
+      assert {:error, :conflict} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+    end
+
+    test "stores lock info in ETS" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+
+      assert [lock] = LockStore.get_locks(@file_path)
+      assert lock.token == token
+      assert lock.scope == :exclusive
+      assert lock.type == :write
+      assert lock.owner == "user-a"
+      assert lock.timeout == 300
+    end
+  end
+
+  describe "lock/5 local-only (non-existent file)" do
+    setup do
+      setup_core_not_found()
+      :ok
+    end
+
+    test "falls back to local locking" do
+      assert {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert is_binary(token)
+
+      assert [lock] = LockStore.get_locks(@file_path)
+      assert lock.token == token
+    end
+
+    test "detects local exclusive conflict" do
+      assert {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert {:error, :conflict} = LockStore.lock(@file_path, :exclusive, :write, "user-b", 300)
+    end
+
+    test "detects local shared vs exclusive conflict" do
+      assert {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert {:error, :conflict} = LockStore.lock(@file_path, :shared, :write, "user-b", 300)
+    end
+
+    test "allows multiple shared locks" do
+      assert {:ok, _} = LockStore.lock(@file_path, :shared, :write, "user-a", 300)
+      assert {:ok, _} = LockStore.lock(@file_path, :shared, :write, "user-b", 300)
+
+      assert length(LockStore.get_locks(@file_path)) == 2
+    end
+
+    test "exclusive conflicts with existing shared" do
+      assert {:ok, _} = LockStore.lock(@file_path, :shared, :write, "user-a", 300)
+      assert {:error, :conflict} = LockStore.lock(@file_path, :exclusive, :write, "user-b", 300)
+    end
+  end
+
+  describe "lock/5 for root and volume paths" do
+    test "locks root path locally" do
+      assert {:ok, token} = LockStore.lock([], :exclusive, :write, "user-a", 300)
+      assert is_binary(token)
+    end
+
+    test "locks volume path locally" do
+      assert {:ok, token} = LockStore.lock(["my-volume"], :exclusive, :write, "user-a", 300)
+      assert is_binary(token)
+    end
+  end
+
+  describe "unlock/1" do
+    setup do
+      setup_mock_core()
+      setup_mock_lock_manager()
+      :ok
+    end
+
+    test "releases DLM lock and removes from ETS" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, _}
+
+      assert :ok = LockStore.unlock(token)
+      file_id = @file_id
+      assert_received {:lock_manager, :unlock, [^file_id, ^token, {0, _}]}
+
+      assert LockStore.get_locks(@file_path) == []
+    end
+
+    test "returns not_found for unknown token" do
+      assert {:error, :not_found} = LockStore.unlock("nonexistent-token")
+    end
+
+    test "unlocks local-only lock without DLM call" do
+      setup_core_not_found()
+
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert :ok = LockStore.unlock(token)
+
+      assert LockStore.get_locks(@file_path) == []
+    end
+  end
+
+  describe "refresh/2" do
+    setup do
+      setup_mock_core()
+      setup_mock_lock_manager()
+      :ok
+    end
+
+    test "renews DLM lock and updates ETS" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, _}
+
+      assert {:ok, updated} = LockStore.refresh(token, 600)
+      assert updated.timeout == 600
+
+      file_id = @file_id
+      assert_received {:lock_manager, :renew, [^file_id, ^token, opts]}
+      assert Keyword.get(opts, :ttl) == 600_000
+    end
+
+    test "returns not_found for unknown token" do
+      assert {:error, :not_found} = LockStore.refresh("nonexistent", 600)
+    end
+
+    test "returns not_found for expired lock" do
+      setup_core_not_found()
+
+      # Create a lock with 1-second timeout, then manipulate expiry
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 1)
+
+      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
+      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+
+      assert {:error, :not_found} = LockStore.refresh(token, 600)
+      assert LockStore.get_locks(@file_path) == []
+    end
+
+    test "refreshes local-only lock without DLM call" do
+      setup_core_not_found()
+
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert {:ok, updated} = LockStore.refresh(token, 600)
+      assert updated.timeout == 600
+    end
+  end
+
+  describe "get_locks/1" do
+    test "returns empty list for unlocked path" do
+      assert LockStore.get_locks(@file_path) == []
+    end
+
+    test "returns active locks on path" do
+      setup_core_not_found()
+
+      {:ok, _} = LockStore.lock(@file_path, :shared, :write, "user-a", 300)
+      {:ok, _} = LockStore.lock(@file_path, :shared, :write, "user-b", 300)
+
+      locks = LockStore.get_locks(@file_path)
+      assert length(locks) == 2
+      assert Enum.all?(locks, &(&1.scope == :shared))
+    end
+
+    test "excludes expired locks" do
+      setup_core_not_found()
+
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 1)
+
+      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
+      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+
+      assert LockStore.get_locks(@file_path) == []
+    end
+
+    test "does not return locks from different paths" do
+      setup_core_not_found()
+
+      other_path = ["my-volume", "other", "file.txt"]
+      {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      {:ok, _} = LockStore.lock(other_path, :exclusive, :write, "user-b", 300)
+
+      assert length(LockStore.get_locks(@file_path)) == 1
+      assert length(LockStore.get_locks(other_path)) == 1
+    end
+
+    test "does not expose file_id in returned lock info" do
+      setup_mock_core()
+      setup_mock_lock_manager()
+
+      {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+
+      [lock] = LockStore.get_locks(@file_path)
+      refute Map.has_key?(lock, :file_id)
+    end
+  end
+
+  describe "check_token/2" do
+    setup do
+      setup_core_not_found()
+      :ok
+    end
+
+    test "returns ok for valid token on matching path" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert :ok = LockStore.check_token(@file_path, token)
+    end
+
+    test "returns invalid_token for wrong path" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      other_path = ["my-volume", "other", "file.txt"]
+      assert {:error, :invalid_token} = LockStore.check_token(other_path, token)
+    end
+
+    test "returns invalid_token for unknown token" do
+      assert {:error, :invalid_token} = LockStore.check_token(@file_path, "bogus-token")
+    end
+
+    test "returns invalid_token for expired lock and cleans up" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 1)
+
+      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
+      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+
+      assert {:error, :invalid_token} = LockStore.check_token(@file_path, token)
+      # Should have been cleaned up
+      assert :ets.lookup(NeonFS.WebDAV.LockStore, token) == []
+    end
+  end
+
+  describe "cross-protocol conflict detection" do
+    test "DLM conflict prevents WebDAV lock" do
+      setup_mock_core()
+      setup_conflicting_lock_manager()
+
+      assert {:error, :conflict} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+
+      assert LockStore.get_locks(@file_path) == []
+    end
+  end
+
+  describe "reset/0" do
+    test "clears all locks" do
+      setup_core_not_found()
+
+      {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert length(LockStore.get_locks(@file_path)) == 1
+
+      LockStore.reset()
+      assert LockStore.get_locks(@file_path) == []
+    end
+  end
+end
