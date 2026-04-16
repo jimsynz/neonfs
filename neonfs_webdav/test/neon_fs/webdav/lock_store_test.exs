@@ -13,6 +13,8 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     on_exit(fn ->
       Application.delete_env(:neonfs_webdav, :core_call_fn)
       Application.delete_env(:neonfs_webdav, :lock_manager_call_fn)
+      Application.delete_env(:neonfs_webdav, :peer_webdav_nodes_fn)
+      Application.delete_env(:neonfs_webdav, :peer_call_fn)
       LockStore.reset()
     end)
 
@@ -699,6 +701,170 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       [lock] = LockStore.get_descendant_locks(@collection_path)
       refute Map.has_key?(lock, :file_id)
       refute Map.has_key?(lock, :lock_null)
+    end
+  end
+
+  describe "peer_check_conflict/3" do
+    @collection_path ["my-volume", "docs"]
+    @child_path ["my-volume", "docs", "file.txt"]
+    @sibling_path ["my-volume", "other", "file.txt"]
+
+    setup do
+      setup_core_unavailable()
+      :ok
+    end
+
+    test "returns true when a descendant lock conflicts with a proposed depth:infinity lock" do
+      {:ok, _} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
+
+      assert LockStore.peer_check_conflict(@collection_path, :infinity, :exclusive)
+    end
+
+    test "returns true when a depth:infinity ancestor lock conflicts with a descendant" do
+      {:ok, _} = LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert LockStore.peer_check_conflict(@child_path, 0, :exclusive)
+    end
+
+    test "returns false for sibling paths" do
+      {:ok, _} = LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      refute LockStore.peer_check_conflict(@sibling_path, 0, :exclusive)
+    end
+
+    test "returns false for compatible shared scopes" do
+      {:ok, _} = LockStore.lock(@collection_path, :shared, :write, :infinity, "user-a", 300)
+
+      refute LockStore.peer_check_conflict(@child_path, 0, :shared)
+    end
+
+    test "ignores expired locks" do
+      {:ok, token} = LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 1)
+
+      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
+      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+
+      refute LockStore.peer_check_conflict(@child_path, 0, :exclusive)
+    end
+  end
+
+  describe "cross-node hierarchical conflict detection" do
+    @collection_path ["my-volume", "docs"]
+    @child_path ["my-volume", "docs", "file.txt"]
+    @sibling_path ["my-volume", "other", "file.txt"]
+
+    defp setup_peer_nodes(nodes) do
+      Application.put_env(:neonfs_webdav, :peer_webdav_nodes_fn, fn -> nodes end)
+    end
+
+    defp setup_peer_responses(responses) do
+      test_pid = self()
+
+      Application.put_env(:neonfs_webdav, :peer_call_fn, fn node, path, depth, scope ->
+        send(test_pid, {:peer_call, node, path, depth, scope})
+
+        case Map.fetch(responses, node) do
+          {:ok, response} when is_function(response, 0) -> response.()
+          {:ok, response} -> response
+          :error -> false
+        end
+      end)
+    end
+
+    setup do
+      setup_core_unavailable()
+      :ok
+    end
+
+    test "rejects depth:infinity lock when a peer holds a descendant lock" do
+      setup_peer_nodes([:peer_a@host])
+      setup_peer_responses(%{:peer_a@host => true})
+
+      assert {:error, :conflict} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert_received {:peer_call, :peer_a@host, @collection_path, :infinity, :exclusive}
+    end
+
+    test "rejects descendant lock when a peer holds a depth:infinity ancestor" do
+      setup_peer_nodes([:peer_a@host])
+      setup_peer_responses(%{:peer_a@host => true})
+
+      assert {:error, :conflict} =
+               LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
+
+      assert_received {:peer_call, :peer_a@host, @child_path, 0, :exclusive}
+    end
+
+    test "allows the lock when no peer reports a conflict" do
+      setup_peer_nodes([:peer_a@host, :peer_b@host])
+      setup_peer_responses(%{:peer_a@host => false, :peer_b@host => false})
+
+      assert {:ok, _token} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert_received {:peer_call, :peer_a@host, _, _, _}
+      assert_received {:peer_call, :peer_b@host, _, _, _}
+    end
+
+    test "rejects the lock when any peer reports a conflict" do
+      setup_peer_nodes([:peer_a@host, :peer_b@host])
+      setup_peer_responses(%{:peer_a@host => false, :peer_b@host => true})
+
+      assert {:error, :conflict} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+    end
+
+    test "treats unreachable peers as non-conflicting" do
+      setup_peer_nodes([:peer_a@host])
+
+      setup_peer_responses(%{
+        :peer_a@host => fn -> exit(:noconnection) end
+      })
+
+      assert {:ok, _token} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+    end
+
+    test "skips peer query when no peers are known" do
+      setup_peer_nodes([])
+      setup_peer_responses(%{})
+
+      assert {:ok, _token} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      refute_received {:peer_call, _, _, _, _}
+    end
+
+    test "peer reporting conflict on sibling path does not block unrelated lock" do
+      # The peer_call_fn is only invoked for the lock being taken; a sibling
+      # lock held on a peer should not affect an unrelated target path.
+      setup_peer_nodes([:peer_a@host])
+      test_pid = self()
+
+      Application.put_env(:neonfs_webdav, :peer_call_fn, fn node, path, _depth, _scope ->
+        send(test_pid, {:peer_call, node, path})
+        # Peer only reports conflicts for the collection_path
+        path == @collection_path
+      end)
+
+      assert {:ok, _token} =
+               LockStore.lock(@sibling_path, :exclusive, :write, 0, "user-a", 300)
+
+      assert_received {:peer_call, :peer_a@host, @sibling_path}
+    end
+
+    test "local conflict short-circuits — still acquires lock (no peer call) when no local conflict" do
+      # This is a regression test to ensure the peer query is not
+      # unconditionally bypassed when there is no local conflict.
+      setup_peer_nodes([:peer_a@host])
+      setup_peer_responses(%{:peer_a@host => false})
+
+      assert {:ok, _token} =
+               LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
+
+      assert_received {:peer_call, :peer_a@host, @child_path, 0, :exclusive}
     end
   end
 end

@@ -20,6 +20,18 @@ defmodule NeonFS.WebDAV.LockStore do
   lock token in the `If` header. Conflict detection considers both
   direct-path locks and ancestor collection locks.
 
+  ## Cross-node hierarchical conflict detection
+
+  Hierarchical conflicts cannot be detected by the DLM alone because it
+  operates on flat file IDs — a `Depth: infinity` lock on `/docs`
+  (one file ID) cannot see a descendant lock on `/docs/child.txt`
+  (a different file ID). Before taking a lock, we query peer WebDAV
+  nodes' ETS tables over Erlang distribution so that a lock acquired
+  on node A is visible to node B. Peer nodes are discovered via
+  `NeonFS.Client.Discovery`. Peer queries run in parallel with a short
+  timeout; unreachable peers are treated as having no conflicts (the
+  DLM TTL bounds the window during a peer partition).
+
   A local ETS table indexes lock tokens to their DLM state. If the
   WebDAV node restarts, the ETS table is lost but DLM locks expire
   via TTL — clients simply re-lock.
@@ -27,6 +39,7 @@ defmodule NeonFS.WebDAV.LockStore do
 
   @behaviour WebdavServer.LockStore
 
+  alias NeonFS.Client.Discovery
   alias NeonFS.Client.Router
 
   require Logger
@@ -38,6 +51,10 @@ defmodule NeonFS.WebDAV.LockStore do
 
   # Prefix for deterministic lock-null IDs to avoid collision with real file IDs.
   @lock_null_prefix "lock-null:"
+
+  # How long to wait for peer WebDAV nodes to respond before treating them as
+  # having no conflicting locks. Short because the query runs on every LOCK.
+  @peer_query_timeout_ms 2_000
 
   # --- Lifecycle ---
 
@@ -69,7 +86,7 @@ defmodule NeonFS.WebDAV.LockStore do
   def lock(path, scope, type, depth, owner, timeout) do
     init()
 
-    if local_conflict?(path, depth, scope) do
+    if conflict?(path, depth, scope) do
       {:error, :conflict}
     else
       case resolve_file_id(path) do
@@ -191,6 +208,21 @@ defmodule NeonFS.WebDAV.LockStore do
     end)
     |> Enum.map(fn {_token, info} -> info.path end)
     |> Enum.uniq()
+  end
+
+  @doc """
+  Check whether a peer WebDAV node holds a lock that hierarchically conflicts
+  with the proposed lock. Called via Erlang distribution from peer nodes —
+  inspects only this node's local ETS table.
+  """
+  @spec peer_check_conflict(
+          WebdavServer.LockStore.path(),
+          WebdavServer.LockStore.lock_depth(),
+          WebdavServer.LockStore.lock_scope()
+        ) :: boolean()
+  def peer_check_conflict(path, depth, scope) do
+    init()
+    table_conflict?(path, depth, scope)
   end
 
   @doc """
@@ -378,7 +410,11 @@ defmodule NeonFS.WebDAV.LockStore do
     List.starts_with?(lock_path, ancestor_path) and length(lock_path) > length(ancestor_path)
   end
 
-  defp local_conflict?(path, depth, scope) do
+  defp conflict?(path, depth, scope) do
+    table_conflict?(path, depth, scope) or peer_conflict?(path, depth, scope)
+  end
+
+  defp table_conflict?(path, depth, scope) do
     now = System.system_time(:second)
 
     :ets.tab2list(@table)
@@ -386,6 +422,76 @@ defmodule NeonFS.WebDAV.LockStore do
     |> Enum.any?(fn {_t, info} ->
       overlaps?(info, path, depth) and scope_conflicts?(info.scope, scope)
     end)
+  end
+
+  defp peer_conflict?(path, depth, scope) do
+    case peer_webdav_nodes() do
+      [] ->
+        false
+
+      nodes ->
+        nodes
+        |> Task.async_stream(
+          fn node -> safe_peer_check(node, path, depth, scope) end,
+          max_concurrency: length(nodes),
+          timeout: @peer_query_timeout_ms,
+          on_timeout: :kill_task
+        )
+        |> Enum.any?(fn
+          {:ok, true} -> true
+          _ -> false
+        end)
+    end
+  end
+
+  defp safe_peer_check(node, path, depth, scope) do
+    rpc_peer_check_conflict(node, path, depth, scope)
+  catch
+    kind, reason ->
+      Logger.debug(
+        "Peer WebDAV conflict check raised on #{inspect(node)}: #{kind} #{inspect(reason)}"
+      )
+
+      false
+  end
+
+  defp peer_webdav_nodes do
+    case Application.get_env(:neonfs_webdav, :peer_webdav_nodes_fn) do
+      nil ->
+        Discovery.list_by_type(:webdav)
+        |> Enum.map(& &1.node)
+        |> Enum.reject(&(&1 == Node.self()))
+
+      fun when is_function(fun, 0) ->
+        fun.()
+    end
+  rescue
+    _ -> []
+  end
+
+  defp rpc_peer_check_conflict(node, path, depth, scope) do
+    case Application.get_env(:neonfs_webdav, :peer_call_fn) do
+      nil ->
+        try do
+          :erpc.call(
+            node,
+            __MODULE__,
+            :peer_check_conflict,
+            [path, depth, scope],
+            @peer_query_timeout_ms
+          )
+        catch
+          :exit, reason ->
+            Logger.debug(
+              "Peer WebDAV conflict check failed on #{inspect(node)}: #{inspect(reason)}"
+            )
+
+            false
+        end
+
+      fun when is_function(fun, 4) ->
+        fun.(node, path, depth, scope)
+    end
   end
 
   defp overlaps?(%{path: existing_path, depth: existing_depth}, path, depth) do
