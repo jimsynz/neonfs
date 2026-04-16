@@ -1,7 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "local>renovate/renovate"
+    "local>renovate/renovate",
+    "group:all",
+    "schedule:weekly"
   ],
   "customManagers": [
     {
