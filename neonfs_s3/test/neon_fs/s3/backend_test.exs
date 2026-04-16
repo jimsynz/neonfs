@@ -383,6 +383,68 @@ defmodule NeonFS.S3.BackendTest do
     end
   end
 
+  describe "get_object/4 streaming" do
+    setup do
+      Application.put_env(:neonfs_s3, :core_stream_fn, fn volume, path, opts ->
+        MockCore.read_file_stream(volume, path, opts)
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_s3, :core_stream_fn)
+      end)
+
+      :ok
+    end
+
+    test "returns stream body when streaming is available" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "stream.txt", "streamed content", %S3Server.PutOpts{})
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "stream.txt", %S3Server.GetOpts{})
+
+      assert not is_binary(object.body)
+      assert Enum.into(object.body, <<>>) == "streamed content"
+      assert object.content_length == 16
+      assert object.total_size == 16
+    end
+
+    test "streams partial content for range request" do
+      Backend.create_bucket(@ctx, "my-bucket")
+
+      Backend.put_object(
+        @ctx,
+        "my-bucket",
+        "range-stream.txt",
+        "0123456789ABCDEF",
+        %S3Server.PutOpts{}
+      )
+
+      opts = %S3Server.GetOpts{range: {5, 9}}
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "range-stream.txt", opts)
+      assert not is_binary(object.body)
+      assert Enum.into(object.body, <<>>) == "56789"
+      assert object.content_length == 5
+      assert object.total_size == 16
+    end
+
+    test "preserves etag and metadata with streaming" do
+      Backend.create_bucket(@ctx, "my-bucket")
+
+      Backend.put_object(@ctx, "my-bucket", "meta.txt", "test data", %S3Server.PutOpts{
+        content_type: "text/csv"
+      })
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "meta.txt", %S3Server.GetOpts{})
+
+      assert is_binary(object.etag)
+      assert object.content_type == "text/csv"
+      assert %DateTime{} = object.last_modified
+    end
+  end
+
   # Multipart upload operations
 
   describe "multipart upload lifecycle" do

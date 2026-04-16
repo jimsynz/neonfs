@@ -99,15 +99,21 @@ defmodule NeonFS.WebDAV.Backend do
     %{volume_name: volume_name, file_path: file_path} = resource.backend_data
     read_opts = range_to_read_opts(opts)
 
-    case call_core(:read_file, [volume_name, file_path, read_opts]) do
-      {:ok, content} ->
-        {:ok, content}
+    case try_stream_read(volume_name, file_path, read_opts) do
+      {:ok, %{stream: stream}} ->
+        {:ok, stream}
 
-      {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :not_found}}
+      _fallback ->
+        case call_core(:read_file, [volume_name, file_path, read_opts]) do
+          {:ok, content} ->
+            {:ok, content}
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+          {:error, :not_found} ->
+            {:error, %WebdavServer.Error{code: :not_found}}
+
+          {:error, _reason} ->
+            {:error, internal_error()}
+        end
     end
   end
 
@@ -249,6 +255,18 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   # --- Private helpers ---
+
+  defp try_stream_read(volume_name, file_path, read_opts) do
+    case Application.get_env(:neonfs_webdav, :core_stream_fn) do
+      fun when is_function(fun, 3) ->
+        fun.(volume_name, file_path, read_opts)
+
+      nil ->
+        Router.read_file_stream(volume_name, file_path, read_opts)
+    end
+  rescue
+    _ -> {:error, :not_available}
+  end
 
   defp move_same_volume(volume, src_path, dest_path, existed?) do
     case call_core(:rename_file, [volume, src_path, dest_path]) do

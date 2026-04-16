@@ -130,6 +130,30 @@ defmodule NeonFS.S3.Test.MockCore do
     end
   end
 
+  @spec read_file_stream(String.t(), String.t(), keyword()) ::
+          {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}} | {:error, :not_found}
+  def read_file_stream(volume_name, path, opts \\ []) do
+    files = Process.get(:mock_files, %{})
+    key = {volume_name, normalise_path(path)}
+
+    case Map.get(files, key) do
+      {meta, content} ->
+        sliced =
+          slice_content(content, Keyword.get(opts, :offset, 0), Keyword.get(opts, :length, :all))
+
+        stream =
+          Stream.unfold(sliced, fn
+            <<>> -> nil
+            data -> {data, <<>>}
+          end)
+
+        {:ok, %{stream: stream, file_size: meta.size}}
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
   @spec delete_file(String.t(), String.t()) :: :ok | {:error, :not_found}
   def delete_file(volume_name, path) do
     files = Process.get(:mock_files, %{})

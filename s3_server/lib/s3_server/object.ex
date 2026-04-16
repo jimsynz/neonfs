@@ -4,7 +4,7 @@ defmodule S3Server.Object do
   """
 
   @type t :: %__MODULE__{
-          body: iodata(),
+          body: iodata() | Enumerable.t(),
           content_type: String.t(),
           content_length: non_neg_integer(),
           etag: String.t(),

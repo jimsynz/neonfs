@@ -316,6 +316,60 @@ defmodule NeonFS.WebDAV.BackendTest do
     end
   end
 
+  describe "get_content/3 streaming" do
+    setup do
+      Application.put_env(:neonfs_webdav, :core_stream_fn, fn volume, path, opts ->
+        MockCore.read_file_stream(volume, path, opts)
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_webdav, :core_stream_fn)
+      end)
+
+      :ok
+    end
+
+    test "returns stream when streaming is available" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/stream.txt", "streamed data")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "stream.txt"])
+
+      assert {:ok, content} = Backend.get_content(@auth, resource, %{})
+      assert not is_binary(content)
+      assert Enum.into(content, <<>>) == "streamed data"
+    end
+
+    test "streams partial content for range request" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/range-stream.txt", "0123456789ABCDEF")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "range-stream.txt"])
+
+      assert {:ok, content} = Backend.get_content(@auth, resource, %{range: {5, 9}})
+      assert not is_binary(content)
+      assert Enum.into(content, <<>>) == "56789"
+    end
+
+    test "streams content from offset to end for open-ended range" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/open-stream.txt", "0123456789")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "open-stream.txt"])
+
+      assert {:ok, content} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+      assert not is_binary(content)
+      assert Enum.into(content, <<>>) == "6789"
+    end
+
+    test "returns error for missing file in stream path" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/exists.txt", "x")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "exists.txt"])
+      MockCore.delete_file("docs", "/exists.txt")
+
+      assert {:error, %WebdavServer.Error{code: :not_found}} =
+               Backend.get_content(@auth, resource, %{})
+    end
+  end
+
   describe "put_content/4" do
     test "creates a new file" do
       MockCore.create_volume("docs")

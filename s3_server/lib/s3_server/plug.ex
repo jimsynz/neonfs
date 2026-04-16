@@ -275,7 +275,7 @@ defmodule S3Server.Plug do
       |> Plug.Conn.put_resp_header("last-modified", format_http_date(object.last_modified))
       |> maybe_put_content_range(get_opts.range, object)
       |> put_user_metadata(object.metadata)
-      |> Plug.Conn.send_resp(status, object.body)
+      |> send_body(status, object.body)
     else
       {:error, %S3Server.Error{} = error} ->
         send_error(conn, %{error | request_id: req_id})
@@ -451,6 +451,21 @@ defmodule S3Server.Plug do
   end
 
   # Response helpers
+
+  defp send_body(conn, status, body) when is_binary(body) or is_list(body) do
+    Plug.Conn.send_resp(conn, status, body)
+  end
+
+  defp send_body(conn, status, stream) do
+    conn = Plug.Conn.send_chunked(conn, status)
+
+    Enum.reduce_while(stream, conn, fn chunk, conn ->
+      case Plug.Conn.chunk(conn, chunk) do
+        {:ok, conn} -> {:cont, conn}
+        {:error, :closed} -> {:halt, conn}
+      end
+    end)
+  end
 
   defp send_xml(conn, status, xml) do
     conn

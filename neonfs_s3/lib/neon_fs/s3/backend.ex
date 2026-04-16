@@ -95,10 +95,21 @@ defmodule NeonFS.S3.Backend do
   @impl true
   def get_object(_ctx, bucket, key, opts) do
     with :ok <- ensure_bucket_exists(bucket),
-         {:ok, meta} <- fetch_object_meta(bucket, key),
-         read_opts <- range_to_read_opts(opts.range, meta.size),
-         {:ok, content} <- read_object_content(bucket, key, read_opts) do
-      {:ok, file_meta_to_object(meta, content)}
+         {:ok, meta} <- fetch_object_meta(bucket, key) do
+      read_opts = range_to_read_opts(opts.range, meta.size)
+      build_object(bucket, key, meta, read_opts)
+    end
+  end
+
+  defp build_object(bucket, key, meta, read_opts) do
+    case try_stream_read(bucket, key, read_opts) do
+      {:ok, %{stream: stream}} ->
+        {:ok, file_meta_to_stream_object(meta, stream, read_opts)}
+
+      _fallback ->
+        with {:ok, content} <- read_object_content(bucket, key, read_opts) do
+          {:ok, file_meta_to_object(meta, content)}
+        end
     end
   end
 
@@ -318,6 +329,41 @@ defmodule NeonFS.S3.Backend do
   end
 
   # Private helpers
+
+  defp try_stream_read(bucket, key, read_opts) do
+    case Application.get_env(:neonfs_s3, :core_stream_fn) do
+      fun when is_function(fun, 3) ->
+        fun.(bucket, key, read_opts)
+
+      nil ->
+        Router.read_file_stream(bucket, key, read_opts)
+    end
+  rescue
+    _ -> {:error, :not_available}
+  end
+
+  defp file_meta_to_stream_object(meta, stream, read_opts) do
+    etag = compute_etag_from_meta(meta)
+    content_length = stream_content_length(meta.size, read_opts)
+
+    %S3Server.Object{
+      body: stream,
+      content_type: meta_content_type(meta),
+      content_length: content_length,
+      total_size: meta.size,
+      etag: etag,
+      last_modified: meta.modified_at || meta.created_at || DateTime.utc_now(),
+      metadata: %{}
+    }
+  end
+
+  defp stream_content_length(file_size, []), do: file_size
+
+  defp stream_content_length(file_size, opts) do
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, file_size - offset)
+    min(length, file_size - offset)
+  end
 
   defp call_core(function, args) do
     case Application.get_env(:neonfs_s3, :core_call_fn) do
