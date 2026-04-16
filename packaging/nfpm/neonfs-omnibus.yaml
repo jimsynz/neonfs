@@ -5,7 +5,7 @@ version: "${VERSION}"
 section: net
 priority: optional
 maintainer: "James Harton <james@harton.dev>"
-description: "NeonFS all-in-one daemon (core + FUSE + NFS in a single node)"
+description: "NeonFS all-in-one daemon (core + FUSE + NFS + S3 + WebDAV in a single node)"
 vendor: "harton.dev"
 homepage: "https://harton.dev/project-neon/neonfs"
 license: "Apache-2.0"
@@ -29,6 +29,7 @@ conflicts:
   - neonfs-fuse
   - neonfs-nfs
   - neonfs-s3
+  - neonfs-webdav
 
 contents:
   - src: "${BUILD_DIR}/neonfs_omnibus/_build/prod/rel/neonfs_omnibus/"

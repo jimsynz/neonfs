@@ -2,7 +2,7 @@ defmodule NeonFS.Omnibus.MixProject do
   use Mix.Project
 
   @moduledoc """
-  All-in-one NeonFS deployment combining core, FUSE, NFS, and S3 services.
+  All-in-one NeonFS deployment combining core, FUSE, NFS, S3, and WebDAV services.
   """
   @version "0.1.11"
 
@@ -46,7 +46,8 @@ defmodule NeonFS.Omnibus.MixProject do
         applications: [
           neonfs_fuse: :load,
           neonfs_nfs: :load,
-          neonfs_s3: :load
+          neonfs_s3: :load,
+          neonfs_webdav: :load
         ]
       ]
     ]
@@ -64,6 +65,7 @@ defmodule NeonFS.Omnibus.MixProject do
       {:neonfs_fuse, path: "../neonfs_fuse", runtime: false},
       {:neonfs_nfs, path: "../neonfs_nfs", runtime: false},
       {:neonfs_s3, path: "../neonfs_s3", runtime: false},
+      {:neonfs_webdav, path: "../neonfs_webdav", runtime: false},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
