@@ -131,11 +131,14 @@ defmodule WebdavServer.Handler.Helpers do
 
   @doc """
   Check lock tokens on a write operation.
-  Returns `:ok` if the path is not locked or if a valid token is provided.
+
+  Returns `:ok` if neither the path nor any ancestor collection with
+  `depth: :infinity` is locked, or if a valid token covering the write
+  is provided in the `If` header.
   """
   @spec check_lock(Plug.Conn.t(), [String.t()], module()) :: :ok | {:error, :locked}
   def check_lock(conn, path, lock_store) do
-    locks = lock_store.get_locks(path)
+    locks = lock_store.get_locks_covering(path)
 
     if locks == [] do
       :ok

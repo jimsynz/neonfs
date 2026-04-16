@@ -14,39 +14,44 @@ defmodule WebdavServer.Handler.Lock do
   defp handle_lock(conn, opts) do
     path = Helpers.resource_path(conn)
     timeout = Helpers.parse_timeout(conn, opts.lock_timeout)
+    depth = parse_lock_depth(conn)
 
     case {Helpers.extract_lock_tokens(conn), peek_body(conn)} do
       {[token | _], :empty} -> refresh_lock(conn, opts, token, timeout)
-      _ -> create_lock(conn, opts, path, timeout)
+      _ -> create_lock(conn, opts, path, depth, timeout)
     end
   end
 
-  defp create_lock(conn, opts, path, timeout) do
+  defp create_lock(conn, opts, path, depth, timeout) do
     case read_body(conn) do
       {:ok, "", _conn} ->
         send_resp(conn, 400, "Lock request requires a body")
 
       {:ok, body, _conn} ->
         case parse_lock_body(body) do
-          {:ok, scope, owner} -> acquire_lock(conn, opts, path, scope, owner, timeout)
+          {:ok, scope, owner} -> acquire_lock(conn, opts, path, scope, depth, owner, timeout)
           {:error, :bad_request} -> send_resp(conn, 400, "Invalid LOCK body")
         end
     end
   end
 
-  defp acquire_lock(conn, opts, path, scope, owner, timeout) do
-    case opts.lock_store.lock(path, scope, :write, owner, timeout) do
-      {:ok, token} -> send_lock_response(conn, opts, path, scope, owner, token, timeout)
-      {:error, :conflict} -> send_resp(conn, 423, "Locked")
+  defp acquire_lock(conn, opts, path, scope, depth, owner, timeout) do
+    case opts.lock_store.lock(path, scope, :write, depth, owner, timeout) do
+      {:ok, token} ->
+        send_lock_response(conn, opts, path, scope, depth, owner, token, timeout)
+
+      {:error, :conflict} ->
+        send_resp(conn, 423, "Locked")
     end
   end
 
-  defp send_lock_response(conn, opts, path, scope, owner, token, timeout) do
+  defp send_lock_response(conn, opts, path, scope, depth, owner, token, timeout) do
     lock_info = %{
       token: token,
       path: path,
       scope: scope,
       type: :write,
+      depth: depth,
       owner: owner,
       timeout: timeout,
       expires_at: System.system_time(:second) + timeout
@@ -157,6 +162,13 @@ defmodule WebdavServer.Handler.Lock do
       ["0"] -> :empty
       [] -> :empty
       _ -> :has_body
+    end
+  end
+
+  defp parse_lock_depth(conn) do
+    case Helpers.parse_depth(conn, :infinity) do
+      0 -> 0
+      _ -> :infinity
     end
   end
 

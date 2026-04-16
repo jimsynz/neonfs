@@ -692,7 +692,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.create_volume("docs")
       path = ["docs", "new-file.txt"]
 
-      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, 0, "user-a", 300)
 
       assert {:ok, resource} = Backend.resolve(@auth, path)
       assert resource.type == :file
@@ -713,7 +713,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.create_volume("docs")
       path = ["docs", "locked-new.txt"]
 
-      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, 0, "user-a", 300)
       {:ok, resource} = Backend.resolve(@auth, path)
 
       assert {:error, %WebdavServer.Error{code: :not_found}} =
@@ -724,7 +724,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.create_volume("docs")
       path = ["docs", "promoted.txt"]
 
-      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, 0, "user-a", 300)
       assert LockStore.lock_null?(path)
 
       {:ok, resource} = Backend.put_content(@auth, path, "real content", %{})
@@ -743,7 +743,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       lock_null_path = ["docs", "pending.txt"]
 
       {:ok, _token} =
-        LockStore.lock(lock_null_path, :exclusive, :write, "user-a", 300)
+        LockStore.lock(lock_null_path, :exclusive, :write, 0, "user-a", 300)
 
       {:ok, volume} = Backend.resolve(@auth, ["docs"])
       {:ok, members} = Backend.get_members(@auth, volume)
@@ -761,7 +761,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       lock_null_path = ["docs", "sub", "draft.txt"]
 
       {:ok, _token} =
-        LockStore.lock(lock_null_path, :exclusive, :write, "user-a", 300)
+        LockStore.lock(lock_null_path, :exclusive, :write, 0, "user-a", 300)
 
       {:ok, dir} = Backend.resolve(@auth, ["docs", "sub"])
       {:ok, members} = Backend.get_members(@auth, dir)
@@ -775,7 +775,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.create_volume("docs")
       path = ["docs", "to-delete.txt"]
 
-      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, 0, "user-a", 300)
       {:ok, resource} = Backend.resolve(@auth, path)
 
       assert :ok = Backend.delete(@auth, resource)
@@ -787,7 +787,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.create_volume("docs")
       path = ["docs", "upgrade.txt"]
 
-      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, 0, "user-a", 300)
       assert LockStore.lock_null?(path)
 
       {:ok, _resource} = Backend.put_content(@auth, path, "now real", %{})

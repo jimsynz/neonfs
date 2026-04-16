@@ -34,12 +34,11 @@ defmodule WebdavServer.LockStore.ETS do
   end
 
   @impl true
-  def lock(path, scope, type, owner, timeout) do
+  def lock(path, scope, type, depth, owner, timeout) do
     init()
     now = System.system_time(:second)
-    existing = get_active_locks(path, now)
 
-    if conflict?(existing, scope) do
+    if conflict_with_existing?(path, depth, scope, now) do
       {:error, :conflict}
     else
       token = generate_token()
@@ -49,6 +48,7 @@ defmodule WebdavServer.LockStore.ETS do
         path: path,
         scope: scope,
         type: type,
+        depth: depth,
         owner: owner,
         timeout: timeout,
         expires_at: now + timeout
@@ -102,13 +102,25 @@ defmodule WebdavServer.LockStore.ETS do
   end
 
   @impl true
+  def get_locks_covering(path) do
+    init()
+    now = System.system_time(:second)
+
+    :ets.tab2list(@table)
+    |> Enum.filter(fn {_token, info} ->
+      info.expires_at > now and covers?(info, path)
+    end)
+    |> Enum.map(fn {_token, info} -> info end)
+  end
+
+  @impl true
   def check_token(path, token) do
     init()
     now = System.system_time(:second)
 
     case :ets.lookup(@table, token) do
-      [{^token, %{path: ^path, expires_at: expires_at}}] when expires_at > now ->
-        :ok
+      [{^token, %{expires_at: expires_at} = info}] when expires_at > now ->
+        if covers?(info, path), do: :ok, else: {:error, :invalid_token}
 
       [{^token, %{expires_at: expires_at}}] when expires_at <= now ->
         :ets.delete(@table, token)
@@ -125,10 +137,34 @@ defmodule WebdavServer.LockStore.ETS do
     |> Enum.map(fn {_token, info} -> info end)
   end
 
-  defp conflict?(existing_locks, :exclusive), do: existing_locks != []
+  defp covers?(%{path: lock_path}, lock_path), do: true
 
-  defp conflict?(existing_locks, :shared),
-    do: Enum.any?(existing_locks, &(&1.scope == :exclusive))
+  defp covers?(%{path: lock_path, depth: :infinity}, target_path) do
+    List.starts_with?(target_path, lock_path) and length(target_path) > length(lock_path)
+  end
+
+  defp covers?(_, _), do: false
+
+  defp conflict_with_existing?(path, depth, scope, now) do
+    :ets.tab2list(@table)
+    |> Enum.filter(fn {_t, info} -> info.expires_at > now end)
+    |> Enum.any?(fn {_t, info} ->
+      overlaps?(info, path, depth) and scope_conflicts?(info.scope, scope)
+    end)
+  end
+
+  defp overlaps?(%{path: existing_path, depth: existing_depth}, path, depth) do
+    cond do
+      existing_path == path -> true
+      depth == :infinity and List.starts_with?(existing_path, path) -> true
+      existing_depth == :infinity and List.starts_with?(path, existing_path) -> true
+      true -> false
+    end
+  end
+
+  defp scope_conflicts?(:exclusive, _), do: true
+  defp scope_conflicts?(_, :exclusive), do: true
+  defp scope_conflicts?(_, _), do: false
 
   defp generate_token, do: Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
 end

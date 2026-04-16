@@ -26,18 +26,19 @@ defmodule WebdavServer.Test.WebdavClient do
   @spec put(pos_integer(), String.t(), iodata(), keyword()) :: Req.Response.t()
   def put(port, path, body, opts \\ []) do
     content_type = Keyword.get(opts, :content_type, "application/octet-stream")
+    headers = [{"content-type", content_type}] ++ if_header(opts)
 
     request!(port,
       method: :put,
       url: path,
       body: body,
-      headers: [{"content-type", content_type}]
+      headers: headers
     )
   end
 
-  @spec delete(pos_integer(), String.t()) :: Req.Response.t()
-  def delete(port, path) do
-    request!(port, method: :delete, url: path)
+  @spec delete(pos_integer(), String.t(), keyword()) :: Req.Response.t()
+  def delete(port, path, opts \\ []) do
+    request!(port, method: :delete, url: path, headers: if_header(opts))
   end
 
   @spec mkcol(pos_integer(), String.t()) :: Req.Response.t()
@@ -96,6 +97,7 @@ defmodule WebdavServer.Test.WebdavClient do
   @spec lock(pos_integer(), String.t(), keyword()) :: Req.Response.t()
   def lock(port, path, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, "Second-1800")
+    depth = Keyword.get(opts, :depth, "infinity")
 
     body =
       Keyword.get_lazy(opts, :body, fn ->
@@ -114,7 +116,11 @@ defmodule WebdavServer.Test.WebdavClient do
       method: :lock,
       url: path,
       body: body,
-      headers: [{"content-type", "application/xml"}, {"timeout", timeout}]
+      headers: [
+        {"content-type", "application/xml"},
+        {"timeout", timeout},
+        {"depth", depth}
+      ]
     )
   end
 
@@ -128,6 +134,21 @@ defmodule WebdavServer.Test.WebdavClient do
   end
 
   @standard_methods ~w(get post put patch delete head options)a
+
+  defp if_header(opts) do
+    case Keyword.get(opts, :lock_token) do
+      nil -> []
+      token -> [{"if", "(#{normalise_token(token)})"}]
+    end
+  end
+
+  defp normalise_token(token) do
+    cond do
+      String.starts_with?(token, "<") -> token
+      String.starts_with?(token, "opaquelocktoken:") -> "<#{token}>"
+      true -> "<opaquelocktoken:#{token}>"
+    end
+  end
 
   defp request!(port, opts) do
     url = Keyword.fetch!(opts, :url)

@@ -217,10 +217,16 @@ defmodule WebdavServer.XML do
     timeout_str =
       if lock_info.timeout == :infinity, do: "Infinite", else: "Second-#{lock_info.timeout}"
 
+    depth_str =
+      case Map.get(lock_info, :depth, :infinity) do
+        0 -> "0"
+        _ -> "infinity"
+      end
+
     children = [
       element("D:locktype", [], [empty_element("D:write", [])]),
       element("D:lockscope", [], [empty_element("D:#{lock_info.scope}", [])]),
-      element("D:depth", [], ["infinity"]),
+      element("D:depth", [], [depth_str]),
       element("D:timeout", [], [timeout_str]),
       element("D:locktoken", [], [
         element("D:href", [], ["opaquelocktoken:#{lock_info.token}"])

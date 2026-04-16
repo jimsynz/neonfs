@@ -280,6 +280,105 @@ defmodule WebdavServer.IntegrationTest do
     end
   end
 
+  describe "collection locking with Depth:infinity" do
+    test "locking a collection with Depth:infinity blocks descendant writes", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+      WebdavClient.put(port, "/docs/readme.txt", "initial")
+
+      lock_resp = WebdavClient.lock(port, "/docs", depth: "infinity")
+      assert lock_resp.status in [200, 201]
+
+      put_resp = WebdavClient.put(port, "/docs/readme.txt", "modified")
+      assert put_resp.status == 423
+    end
+
+    test "locking with Depth:0 does not block descendant writes", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+      WebdavClient.put(port, "/docs/readme.txt", "initial")
+
+      lock_resp = WebdavClient.lock(port, "/docs", depth: "0")
+      assert lock_resp.status in [200, 201]
+
+      put_resp = WebdavClient.put(port, "/docs/readme.txt", "modified")
+      assert put_resp.status == 204
+    end
+
+    test "Depth:infinity lock allows writes with valid token", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+      WebdavClient.put(port, "/docs/readme.txt", "initial")
+
+      lock_resp = WebdavClient.lock(port, "/docs", depth: "infinity")
+      token = header(lock_resp, "lock-token")
+
+      put_resp = WebdavClient.put(port, "/docs/readme.txt", "modified", lock_token: token)
+      assert put_resp.status == 204
+
+      get_resp = WebdavClient.get(port, "/docs/readme.txt")
+      assert get_resp.body == "modified"
+    end
+
+    test "Depth:infinity lock blocks nested MKCOL", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+
+      lock_resp = WebdavClient.lock(port, "/docs", depth: "infinity")
+      assert lock_resp.status in [200, 201]
+
+      mkcol_resp = WebdavClient.mkcol(port, "/docs/subdir")
+      assert mkcol_resp.status == 423
+    end
+
+    test "Depth:infinity lock blocks DELETE of descendant", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+      WebdavClient.put(port, "/docs/readme.txt", "data")
+
+      WebdavClient.lock(port, "/docs", depth: "infinity")
+
+      del_resp = WebdavClient.delete(port, "/docs/readme.txt")
+      assert del_resp.status == 423
+    end
+
+    test "cannot acquire descendant lock while collection Depth:infinity held", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+      WebdavClient.put(port, "/docs/readme.txt", "data")
+
+      WebdavClient.lock(port, "/docs", depth: "infinity")
+
+      resp = WebdavClient.lock(port, "/docs/readme.txt")
+      assert resp.status == 423
+    end
+
+    test "cannot acquire Depth:infinity lock when descendant is locked", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+      WebdavClient.put(port, "/docs/readme.txt", "data")
+
+      WebdavClient.lock(port, "/docs/readme.txt")
+
+      resp = WebdavClient.lock(port, "/docs", depth: "infinity")
+      assert resp.status == 423
+    end
+
+    test "lock response emits correct depth field", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+
+      infinity_resp = WebdavClient.lock(port, "/docs", depth: "infinity")
+      assert infinity_resp.body =~ ~r{<D:depth>infinity</D:depth>}
+
+      WebdavClient.mkcol(port, "/other")
+      zero_resp = WebdavClient.lock(port, "/other", depth: "0")
+      assert zero_resp.body =~ ~r{<D:depth>0</D:depth>}
+    end
+
+    test "sibling directory writes unaffected", %{port: port} do
+      WebdavClient.mkcol(port, "/docs")
+      WebdavClient.mkcol(port, "/other")
+
+      WebdavClient.lock(port, "/docs", depth: "infinity")
+
+      resp = WebdavClient.put(port, "/other/file.txt", "data")
+      assert resp.status == 201
+    end
+  end
+
   describe "error cases" do
     test "unsupported method returns 405", %{port: port} do
       resp =

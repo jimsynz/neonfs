@@ -15,6 +15,11 @@ defmodule NeonFS.WebDAV.LockStore do
   return 404 on GET. When a PUT creates the real file, the lock is
   promoted to use the actual file ID.
 
+  Collection locks with `Depth:infinity` propagate to all descendants:
+  writes to any child resource must present the parent collection's
+  lock token in the `If` header. Conflict detection considers both
+  direct-path locks and ancestor collection locks.
+
   A local ETS table indexes lock tokens to their DLM state. If the
   WebDAV node restarts, the ETS table is lost but DLM locks expire
   via TTL — clients simply re-lock.
@@ -61,18 +66,22 @@ defmodule NeonFS.WebDAV.LockStore do
   # --- LockStore callbacks ---
 
   @impl true
-  def lock(path, scope, type, owner, timeout) do
+  def lock(path, scope, type, depth, owner, timeout) do
     init()
 
-    case resolve_file_id(path) do
-      {:ok, file_id, :existing} ->
-        lock_via_dlm(file_id, path, scope, type, owner, timeout, false)
+    if local_conflict?(path, depth, scope) do
+      {:error, :conflict}
+    else
+      case resolve_file_id(path) do
+        {:ok, file_id, :existing} ->
+          lock_via_dlm(file_id, path, scope, type, depth, owner, timeout, false)
 
-      {:ok, path_id, :lock_null} ->
-        lock_via_dlm(path_id, path, scope, type, owner, timeout, true)
+        {:ok, path_id, :lock_null} ->
+          lock_via_dlm(path_id, path, scope, type, depth, owner, timeout, true)
 
-      :local_only ->
-        lock_local(path, scope, type, owner, timeout)
+        :local_only ->
+          lock_local(path, scope, type, depth, owner, timeout)
+      end
     end
   end
 
@@ -118,6 +127,18 @@ defmodule NeonFS.WebDAV.LockStore do
     init()
     now = System.system_time(:second)
     get_active_locks(path, now)
+  end
+
+  @impl true
+  def get_locks_covering(path) do
+    init()
+    now = System.system_time(:second)
+
+    :ets.tab2list(@table)
+    |> Enum.filter(fn {_token, info} ->
+      info.expires_at > now and covers?(info, path)
+    end)
+    |> Enum.map(fn {_token, info} -> info |> Map.delete(:file_id) |> Map.delete(:lock_null) end)
   end
 
   # --- Lock-null resource queries ---
@@ -206,8 +227,8 @@ defmodule NeonFS.WebDAV.LockStore do
     now = System.system_time(:second)
 
     case :ets.lookup(@table, token) do
-      [{^token, %{path: ^path, expires_at: expires_at}}] when expires_at > now ->
-        :ok
+      [{^token, %{expires_at: expires_at} = info}] when expires_at > now ->
+        if covers?(info, path), do: :ok, else: {:error, :invalid_token}
 
       [{^token, %{expires_at: expires_at}}] when expires_at <= now ->
         :ets.delete(@table, token)
@@ -220,7 +241,7 @@ defmodule NeonFS.WebDAV.LockStore do
 
   # --- DLM integration ---
 
-  defp lock_via_dlm(file_id, path, scope, type, owner, timeout, lock_null?) do
+  defp lock_via_dlm(file_id, path, scope, type, depth, owner, timeout, lock_null?) do
     token = generate_token()
     lock_type = scope_to_lock_type(scope)
     ttl_ms = timeout * 1000
@@ -234,6 +255,7 @@ defmodule NeonFS.WebDAV.LockStore do
           path: path,
           scope: scope,
           type: type,
+          depth: depth,
           owner: owner,
           timeout: timeout,
           expires_at: now + timeout,
@@ -252,30 +274,25 @@ defmodule NeonFS.WebDAV.LockStore do
     end
   end
 
-  defp lock_local(path, scope, type, owner, timeout) do
+  defp lock_local(path, scope, type, depth, owner, timeout) do
+    token = generate_token()
     now = System.system_time(:second)
-    existing = get_active_locks(path, now)
 
-    if conflict?(existing, scope) do
-      {:error, :conflict}
-    else
-      token = generate_token()
+    lock_info = %{
+      token: token,
+      path: path,
+      scope: scope,
+      type: type,
+      depth: depth,
+      owner: owner,
+      timeout: timeout,
+      expires_at: now + timeout,
+      file_id: nil,
+      lock_null: false
+    }
 
-      lock_info = %{
-        token: token,
-        path: path,
-        scope: scope,
-        type: type,
-        owner: owner,
-        timeout: timeout,
-        expires_at: now + timeout,
-        file_id: nil,
-        lock_null: false
-      }
-
-      :ets.insert(@table, {token, lock_info})
-      {:ok, token}
-    end
+    :ets.insert(@table, {token, lock_info})
+    {:ok, token}
   end
 
   defp maybe_unlock_dlm(%{file_id: nil}), do: :ok
@@ -337,10 +354,36 @@ defmodule NeonFS.WebDAV.LockStore do
     |> Enum.map(fn {_token, info} -> info |> Map.delete(:file_id) |> Map.delete(:lock_null) end)
   end
 
-  defp conflict?(existing_locks, :exclusive), do: existing_locks != []
+  defp covers?(%{path: lock_path}, lock_path), do: true
 
-  defp conflict?(existing_locks, :shared),
-    do: Enum.any?(existing_locks, &(&1.scope == :exclusive))
+  defp covers?(%{path: lock_path, depth: :infinity}, target_path) do
+    List.starts_with?(target_path, lock_path) and length(target_path) > length(lock_path)
+  end
+
+  defp covers?(_, _), do: false
+
+  defp local_conflict?(path, depth, scope) do
+    now = System.system_time(:second)
+
+    :ets.tab2list(@table)
+    |> Enum.filter(fn {_t, info} -> info.expires_at > now end)
+    |> Enum.any?(fn {_t, info} ->
+      overlaps?(info, path, depth) and scope_conflicts?(info.scope, scope)
+    end)
+  end
+
+  defp overlaps?(%{path: existing_path, depth: existing_depth}, path, depth) do
+    cond do
+      existing_path == path -> true
+      depth == :infinity and List.starts_with?(existing_path, path) -> true
+      existing_depth == :infinity and List.starts_with?(path, existing_path) -> true
+      true -> false
+    end
+  end
+
+  defp scope_conflicts?(:exclusive, _), do: true
+  defp scope_conflicts?(_, :exclusive), do: true
+  defp scope_conflicts?(_, _), do: false
 
   defp scope_to_lock_type(:exclusive), do: :exclusive
   defp scope_to_lock_type(:shared), do: :shared
