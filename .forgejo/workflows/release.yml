@@ -41,14 +41,14 @@ jobs:
       - name: Build all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-amd64
-          for target in base cli core fuse nfs omnibus; do
+          for target in base cli core fuse nfs s3 webdav omnibus; do
             PLATFORMS=linux/amd64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
           done
 
       - name: Push all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-amd64
-          for image in core fuse nfs omnibus cli; do
+          for image in core fuse nfs s3 webdav omnibus cli; do
             docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
             docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
           done
@@ -89,14 +89,14 @@ jobs:
       - name: Build all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-arm64
-          for target in base cli core fuse nfs omnibus; do
+          for target in base cli core fuse nfs s3 webdav omnibus; do
             PLATFORMS=linux/arm64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
           done
 
       - name: Push all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-arm64
-          for image in core fuse nfs omnibus cli; do
+          for image in core fuse nfs s3 webdav omnibus cli; do
             docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
             docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
           done
@@ -133,7 +133,7 @@ jobs:
       - name: Create multi-arch manifests
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          IMAGES="core fuse nfs omnibus cli"
+          IMAGES="core fuse nfs s3 webdav omnibus cli"
 
           for image in $IMAGES; do
             docker buildx imagetools create \
@@ -209,7 +209,7 @@ jobs:
           cd neonfs-cli && cargo build --release && cd ..
 
           # Build Elixir releases
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_omnibus; do
             cd "$component"
             mix local.hex --force && mix local.rebar --force
             mix deps.get --only prod
@@ -225,7 +225,7 @@ jobs:
           mkdir -p dist
 
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"
@@ -285,7 +285,7 @@ jobs:
           cd neonfs-cli && cargo build --release && cd ..
 
           # Build Elixir releases
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_omnibus; do
             cd "$component"
             mix local.hex --force && mix local.rebar --force
             mix deps.get --only prod
@@ -301,7 +301,7 @@ jobs:
           mkdir -p dist
 
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"

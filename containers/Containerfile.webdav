@@ -1,0 +1,64 @@
+FROM base AS deps
+
+# Copy only lockfiles and project config to cache the deps.get layer
+COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
+COPY --from=webdav_server mix.exs mix.lock /workdir/webdav_server/
+COPY --from=src mix.exs mix.lock /workdir/neonfs_webdav/
+
+WORKDIR /workdir/neonfs_webdav
+RUN mix deps.get
+
+FROM deps AS releaser
+ENV MIX_ENV=prod
+
+# Now copy the full source for compilation
+COPY --from=client . /workdir/neonfs_client
+COPY --from=webdav_server . /workdir/webdav_server
+COPY --from=src . /workdir/neonfs_webdav
+
+RUN mix compile && mix release --overwrite
+
+FROM debian:trixie-20260406
+
+LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="neonfs-webdav" \
+      org.opencontainers.image.description="NeonFS WebDAV service container"
+
+RUN apt-get update -y && \
+  apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates \
+  && apt-get clean && rm -f /var/lib/apt/lists/*_*
+
+# Set the locale
+RUN sed -i '/en_NZ.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
+
+ENV LANG=en_NZ.UTF-8
+ENV LANGUAGE=en_NZ:en
+ENV LC_ALL=en_NZ.UTF-8
+
+WORKDIR "/app"
+RUN chown nobody /app
+
+# Create data directory with correct ownership
+RUN mkdir -p /var/lib/neonfs && chown -R nobody:nogroup /var/lib/neonfs
+
+VOLUME ["/var/lib/neonfs"]
+
+# Expose WebDAV port
+EXPOSE 8081/tcp
+
+# set runner ENV
+ENV MIX_ENV="prod"
+
+# Only copy the final release from the build stage
+COPY --from=releaser --chown=nobody:root /workdir/neonfs_webdav/_build/${MIX_ENV}/rel/neonfs_webdav ./
+
+COPY --from=cli --chown=nobody:root /bin/neonfs /app/bin
+
+USER nobody
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD ["/app/bin/neonfs", "node", "status", "--json"]
+
+CMD ["/app/bin/neonfs_webdav", "start"]
