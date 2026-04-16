@@ -2,6 +2,7 @@ defmodule NeonFS.WebDAV.BackendTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.WebDAV.Backend
+  alias NeonFS.WebDAV.LockStore
   alias NeonFS.WebDAV.Test.MockCore
 
   @auth %{user: "anonymous"}
@@ -664,6 +665,137 @@ defmodule NeonFS.WebDAV.BackendTest do
     test "forbids creating root collection" do
       assert {:error, %WebdavServer.Error{code: :forbidden}} =
                Backend.create_collection(@auth, [])
+    end
+  end
+
+  describe "lock-null resources" do
+    setup do
+      LockStore.reset()
+
+      Application.put_env(:neonfs_webdav, :lock_manager_call_fn, fn function, _args ->
+        case function do
+          :lock -> :ok
+          :unlock -> :ok
+          :renew -> :ok
+        end
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_webdav, :lock_manager_call_fn)
+        LockStore.reset()
+      end)
+
+      :ok
+    end
+
+    test "resolve returns lock-null resource when path has active lock-null" do
+      MockCore.create_volume("docs")
+      path = ["docs", "new-file.txt"]
+
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+
+      assert {:ok, resource} = Backend.resolve(@auth, path)
+      assert resource.type == :file
+      assert resource.content_length == 0
+      assert resource.content_type == "application/octet-stream"
+      assert resource.display_name == "new-file.txt"
+      assert resource.backend_data.lock_null == true
+    end
+
+    test "resolve returns not_found when no lock-null exists" do
+      MockCore.create_volume("docs")
+
+      assert {:error, %WebdavServer.Error{code: :not_found}} =
+               Backend.resolve(@auth, ["docs", "missing.txt"])
+    end
+
+    test "get_content returns not_found for lock-null resource" do
+      MockCore.create_volume("docs")
+      path = ["docs", "locked-new.txt"]
+
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      {:ok, resource} = Backend.resolve(@auth, path)
+
+      assert {:error, %WebdavServer.Error{code: :not_found}} =
+               Backend.get_content(@auth, resource, %{})
+    end
+
+    test "put_content promotes lock-null to real resource" do
+      MockCore.create_volume("docs")
+      path = ["docs", "promoted.txt"]
+
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      assert LockStore.lock_null?(path)
+
+      {:ok, resource} = Backend.put_content(@auth, path, "real content", %{})
+      assert resource.type == :file
+      assert resource.content_length == 12
+
+      refute LockStore.lock_null?(path)
+      assert [lock] = LockStore.get_locks(path)
+      assert lock.scope == :exclusive
+    end
+
+    test "get_members includes lock-null resources in volume listing" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/existing.txt", "hello")
+
+      lock_null_path = ["docs", "pending.txt"]
+
+      {:ok, _token} =
+        LockStore.lock(lock_null_path, :exclusive, :write, "user-a", 300)
+
+      {:ok, volume} = Backend.resolve(@auth, ["docs"])
+      {:ok, members} = Backend.get_members(@auth, volume)
+
+      names = Enum.map(members, & &1.display_name)
+      assert "existing.txt" in names
+      assert "pending.txt" in names
+    end
+
+    test "get_members includes lock-null resources in subdirectory listing" do
+      MockCore.create_volume("docs")
+      MockCore.mkdir("docs", "/sub")
+      MockCore.write_file("docs", "/sub/real.txt", "data")
+
+      lock_null_path = ["docs", "sub", "draft.txt"]
+
+      {:ok, _token} =
+        LockStore.lock(lock_null_path, :exclusive, :write, "user-a", 300)
+
+      {:ok, dir} = Backend.resolve(@auth, ["docs", "sub"])
+      {:ok, members} = Backend.get_members(@auth, dir)
+
+      names = Enum.map(members, & &1.display_name)
+      assert "real.txt" in names
+      assert "draft.txt" in names
+    end
+
+    test "delete cleans up lock-null resource" do
+      MockCore.create_volume("docs")
+      path = ["docs", "to-delete.txt"]
+
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      {:ok, resource} = Backend.resolve(@auth, path)
+
+      assert :ok = Backend.delete(@auth, resource)
+      refute LockStore.lock_null?(path)
+      assert LockStore.get_locks(path) == []
+    end
+
+    test "resolve returns real resource after lock-null is promoted" do
+      MockCore.create_volume("docs")
+      path = ["docs", "upgrade.txt"]
+
+      {:ok, _token} = LockStore.lock(path, :exclusive, :write, "user-a", 300)
+      assert LockStore.lock_null?(path)
+
+      {:ok, _resource} = Backend.put_content(@auth, path, "now real", %{})
+
+      {:ok, resource} = Backend.resolve(@auth, path)
+      assert resource.backend_data.type == :file
+      refute Map.get(resource.backend_data, :lock_null)
+      assert resource.content_length == 8
     end
   end
 

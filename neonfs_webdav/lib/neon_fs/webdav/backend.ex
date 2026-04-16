@@ -11,6 +11,7 @@ defmodule NeonFS.WebDAV.Backend do
   @behaviour WebdavServer.Backend
 
   alias NeonFS.Client.Router
+  alias NeonFS.WebDAV.LockStore
 
   require Logger
   import Bitwise
@@ -45,7 +46,7 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  def resolve(_auth, [volume_name | rest]) do
+  def resolve(_auth, [volume_name | rest] = path) do
     file_path = "/" <> Enum.join(rest, "/")
 
     with {:ok, volume} <- resolve_volume(volume_name),
@@ -53,7 +54,11 @@ defmodule NeonFS.WebDAV.Backend do
       {:ok, file_resource(volume_name, volume.id, rest, meta)}
     else
       {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :not_found}}
+        if LockStore.lock_null?(path) do
+          {:ok, lock_null_resource(volume_name, rest)}
+        else
+          {:error, %WebdavServer.Error{code: :not_found}}
+        end
 
       {:error, _reason} ->
         {:error, internal_error()}
@@ -95,6 +100,10 @@ defmodule NeonFS.WebDAV.Backend do
   # --- File operations ---
 
   @impl true
+  def get_content(_auth, %{backend_data: %{lock_null: true}}, _opts) do
+    {:error, %WebdavServer.Error{code: :not_found}}
+  end
+
   def get_content(_auth, resource, opts) do
     %{volume_name: volume_name, file_path: file_path} = resource.backend_data
     read_opts = range_to_read_opts(opts)
@@ -118,7 +127,7 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   @impl true
-  def put_content(_auth, [volume_name | rest], body, opts) do
+  def put_content(_auth, [volume_name | rest] = path, body, opts) do
     file_path = "/" <> Enum.join(rest, "/")
     body_binary = IO.iodata_to_binary(body)
 
@@ -131,6 +140,7 @@ defmodule NeonFS.WebDAV.Backend do
 
     with {:ok, volume} <- resolve_volume(volume_name),
          {:ok, meta} <- call_core(:write_file, [volume_name, file_path, body_binary, write_opts]) do
+      LockStore.promote_lock_null(path, meta.id)
       {:ok, file_resource(volume_name, volume.id, rest, meta)}
     else
       {:error, :not_found} ->
@@ -152,6 +162,18 @@ defmodule NeonFS.WebDAV.Backend do
 
   def delete(_auth, %{backend_data: %{type: :volume}}) do
     {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot delete volumes via WebDAV"}}
+  end
+
+  def delete(_auth, %{backend_data: %{lock_null: true}} = resource) do
+    path = resource.path
+
+    locks = LockStore.get_locks(path)
+
+    Enum.each(locks, fn lock ->
+      LockStore.unlock(lock.token)
+    end)
+
+    :ok
   end
 
   def delete(_auth, resource) do
@@ -244,14 +266,20 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   def get_members(_auth, %{backend_data: %{type: :volume, volume_name: volume_name}} = resource) do
-    list_dir_members(volume_name, resource.backend_data.volume_id, "/")
+    list_dir_members_with_lock_null(
+      volume_name,
+      resource.backend_data.volume_id,
+      "/",
+      [volume_name]
+    )
   end
 
   def get_members(_auth, resource) do
     %{volume_name: volume_name, volume_id: volume_id, file_path: file_path} =
       resource.backend_data
 
-    list_dir_members(volume_name, volume_id, file_path)
+    parent_path = [volume_name | path_to_segments(file_path)]
+    list_dir_members_with_lock_null(volume_name, volume_id, file_path, parent_path)
   end
 
   # --- Private helpers ---
@@ -353,6 +381,24 @@ defmodule NeonFS.WebDAV.Backend do
     }
   end
 
+  defp lock_null_resource(volume_name, path_segments) do
+    %WebdavServer.Resource{
+      path: [volume_name | path_segments],
+      type: :file,
+      content_type: "application/octet-stream",
+      content_length: 0,
+      last_modified: nil,
+      creation_date: nil,
+      display_name: List.last(path_segments),
+      backend_data: %{
+        type: :file,
+        lock_null: true,
+        volume_name: volume_name,
+        file_path: "/" <> Enum.join(path_segments, "/")
+      }
+    }
+  end
+
   defp directory?(nil), do: false
   defp directory?(mode), do: (mode &&& @s_ifmt) == @s_ifdir
 
@@ -369,16 +415,21 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  defp list_dir_members(volume_name, volume_id, dir_path) do
+  defp list_dir_members_with_lock_null(volume_name, volume_id, dir_path, parent_path) do
     case call_core(:list_dir, [volume_name, dir_path]) do
       {:ok, entries} ->
-        resources =
+        real_resources =
           Enum.map(entries, fn meta ->
             segments = path_to_segments(meta.path)
             file_resource(volume_name, volume_id, segments, meta)
           end)
 
-        {:ok, resources}
+        lock_null_resources =
+          parent_path
+          |> LockStore.get_lock_null_paths()
+          |> Enum.map(fn [_vol | rest] = _path -> lock_null_resource(volume_name, rest) end)
+
+        {:ok, real_resources ++ lock_null_resources}
 
       {:error, :not_found} ->
         {:ok, []}

@@ -52,6 +52,12 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end)
   end
 
+  defp setup_core_unavailable do
+    Application.put_env(:neonfs_webdav, :core_call_fn, fn
+      :get_file_meta, _args -> {:error, :unavailable}
+    end)
+  end
+
   describe "lock/5 with DLM" do
     setup do
       setup_mock_core()
@@ -98,9 +104,9 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
   end
 
-  describe "lock/5 local-only (non-existent file)" do
+  describe "lock/5 local-only (core unavailable)" do
     setup do
-      setup_core_not_found()
+      setup_core_unavailable()
       :ok
     end
 
@@ -170,7 +176,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
 
     test "unlocks local-only lock without DLM call" do
-      setup_core_not_found()
+      setup_core_unavailable()
 
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
       assert :ok = LockStore.unlock(token)
@@ -203,7 +209,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
 
     test "returns not_found for expired lock" do
-      setup_core_not_found()
+      setup_core_unavailable()
 
       # Create a lock with 1-second timeout, then manipulate expiry
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 1)
@@ -217,7 +223,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
 
     test "refreshes local-only lock without DLM call" do
-      setup_core_not_found()
+      setup_core_unavailable()
 
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
       assert {:ok, updated} = LockStore.refresh(token, 600)
@@ -231,7 +237,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
 
     test "returns active locks on path" do
-      setup_core_not_found()
+      setup_core_unavailable()
 
       {:ok, _} = LockStore.lock(@file_path, :shared, :write, "user-a", 300)
       {:ok, _} = LockStore.lock(@file_path, :shared, :write, "user-b", 300)
@@ -242,7 +248,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
 
     test "excludes expired locks" do
-      setup_core_not_found()
+      setup_core_unavailable()
 
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 1)
 
@@ -254,7 +260,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
 
     test "does not return locks from different paths" do
-      setup_core_not_found()
+      setup_core_unavailable()
 
       other_path = ["my-volume", "other", "file.txt"]
       {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
@@ -264,7 +270,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       assert length(LockStore.get_locks(other_path)) == 1
     end
 
-    test "does not expose file_id in returned lock info" do
+    test "does not expose internal fields in returned lock info" do
       setup_mock_core()
       setup_mock_lock_manager()
 
@@ -272,12 +278,13 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
       [lock] = LockStore.get_locks(@file_path)
       refute Map.has_key?(lock, :file_id)
+      refute Map.has_key?(lock, :lock_null)
     end
   end
 
   describe "check_token/2" do
     setup do
-      setup_core_not_found()
+      setup_core_unavailable()
       :ok
     end
 
@@ -322,13 +329,169 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
   describe "reset/0" do
     test "clears all locks" do
-      setup_core_not_found()
+      setup_core_unavailable()
 
       {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
       assert length(LockStore.get_locks(@file_path)) == 1
 
       LockStore.reset()
       assert LockStore.get_locks(@file_path) == []
+    end
+  end
+
+  describe "lock-null resources" do
+    setup do
+      setup_core_not_found()
+      setup_mock_lock_manager()
+      :ok
+    end
+
+    test "locks non-existent file via DLM with path-based ID" do
+      assert {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert is_binary(token)
+
+      assert_received {:lock_manager, :lock, [path_id, ^token, {0, _}, :exclusive, opts]}
+      assert String.starts_with?(path_id, "lock-null:")
+      assert Keyword.get(opts, :ttl) == 300_000
+    end
+
+    test "generates deterministic path-based IDs" do
+      {:ok, token1} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, [id1, ^token1, _, _, _]}
+
+      LockStore.reset()
+
+      {:ok, token2} = LockStore.lock(@file_path, :exclusive, :write, "user-b", 300)
+      assert_received {:lock_manager, :lock, [id2, ^token2, _, _, _]}
+
+      assert id1 == id2
+    end
+
+    test "different paths generate different IDs" do
+      {:ok, token1} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, [id1, ^token1, _, _, _]}
+
+      other_path = ["my-volume", "other", "file.txt"]
+      {:ok, token2} = LockStore.lock(other_path, :exclusive, :write, "user-b", 300)
+      assert_received {:lock_manager, :lock, [id2, ^token2, _, _, _]}
+
+      refute id1 == id2
+    end
+
+    test "is_lock_null? returns true for lock-null path" do
+      {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert LockStore.lock_null?(@file_path)
+    end
+
+    test "is_lock_null? returns false for non-locked path" do
+      refute LockStore.lock_null?(@file_path)
+    end
+
+    test "is_lock_null? returns false for existing file lock" do
+      setup_mock_core()
+
+      {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      refute LockStore.lock_null?(@file_path)
+    end
+
+    test "is_lock_null? returns false for expired lock-null" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 1)
+
+      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
+      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+
+      refute LockStore.lock_null?(@file_path)
+    end
+
+    test "get_lock_null_paths returns child lock-null paths" do
+      {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      other = ["my-volume", "docs", "other.txt"]
+      {:ok, _} = LockStore.lock(other, :exclusive, :write, "user-b", 300)
+
+      paths = LockStore.get_lock_null_paths(["my-volume", "docs"])
+      assert length(paths) == 2
+      assert @file_path in paths
+      assert other in paths
+    end
+
+    test "get_lock_null_paths excludes non-child paths" do
+      {:ok, _} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      nested = ["my-volume", "docs", "sub", "deep.txt"]
+      {:ok, _} = LockStore.lock(nested, :exclusive, :write, "user-b", 300)
+
+      paths = LockStore.get_lock_null_paths(["my-volume", "docs"])
+      assert @file_path in paths
+      refute nested in paths
+    end
+
+    test "get_lock_null_paths excludes expired entries" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 1)
+
+      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
+      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+
+      assert LockStore.get_lock_null_paths(["my-volume", "docs"]) == []
+    end
+
+    test "unlock releases DLM lock for lock-null resource" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, [path_id, ^token, _, _, _]}
+
+      assert :ok = LockStore.unlock(token)
+      assert_received {:lock_manager, :unlock, [^path_id, ^token, {0, _}]}
+
+      refute LockStore.lock_null?(@file_path)
+    end
+
+    test "refresh renews DLM lock for lock-null resource" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, [path_id, ^token, _, _, _]}
+
+      assert {:ok, updated} = LockStore.refresh(token, 600)
+      assert updated.timeout == 600
+
+      assert_received {:lock_manager, :renew, [^path_id, ^token, opts]}
+      assert Keyword.get(opts, :ttl) == 600_000
+    end
+  end
+
+  describe "promote_lock_null/2" do
+    setup do
+      setup_core_not_found()
+      setup_mock_lock_manager()
+      :ok
+    end
+
+    test "promotes lock-null to real file lock" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, [path_id, ^token, _, _, _]}
+      assert LockStore.lock_null?(@file_path)
+
+      real_file_id = "real-file-id-001"
+      assert :ok = LockStore.promote_lock_null(@file_path, real_file_id)
+
+      assert_received {:lock_manager, :lock, [^real_file_id, ^token, {0, _}, :exclusive, _]}
+      assert_received {:lock_manager, :unlock, [^path_id, ^token, {0, _}]}
+
+      refute LockStore.lock_null?(@file_path)
+      assert [lock] = LockStore.get_locks(@file_path)
+      assert lock.token == token
+    end
+
+    test "does nothing for non-lock-null paths" do
+      setup_mock_core()
+      {:ok, _token} = LockStore.lock(@file_path, :exclusive, :write, "user-a", 300)
+      assert_received {:lock_manager, :lock, _}
+
+      assert :ok = LockStore.promote_lock_null(@file_path, "new-id")
+      refute_received {:lock_manager, :lock, _}
+    end
+
+    test "does nothing for paths with no locks" do
+      assert :ok = LockStore.promote_lock_null(@file_path, "some-id")
+      refute_received {:lock_manager, _, _}
     end
   end
 end
