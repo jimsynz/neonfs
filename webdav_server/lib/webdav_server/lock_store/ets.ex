@@ -114,6 +114,18 @@ defmodule WebdavServer.LockStore.ETS do
   end
 
   @impl true
+  def get_descendant_locks(path) do
+    init()
+    now = System.system_time(:second)
+
+    :ets.tab2list(@table)
+    |> Enum.filter(fn {_token, info} ->
+      info.expires_at > now and descendant?(info.path, path)
+    end)
+    |> Enum.map(fn {_token, info} -> info end)
+  end
+
+  @impl true
   def check_token(path, token) do
     init()
     now = System.system_time(:second)
@@ -144,6 +156,10 @@ defmodule WebdavServer.LockStore.ETS do
   end
 
   defp covers?(_, _), do: false
+
+  defp descendant?(lock_path, ancestor_path) do
+    List.starts_with?(lock_path, ancestor_path) and length(lock_path) > length(ancestor_path)
+  end
 
   defp conflict_with_existing?(path, depth, scope, now) do
     :ets.tab2list(@table)

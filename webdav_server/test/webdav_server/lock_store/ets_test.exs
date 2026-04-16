@@ -154,6 +154,35 @@ defmodule WebdavServer.LockStore.ETSTest do
     end
   end
 
+  describe "get_descendant_locks/1" do
+    test "returns locks on descendants" do
+      {:ok, a_token} = ETS.lock(["dir", "a.txt"], :exclusive, :write, 0, nil, 1800)
+      {:ok, b_token} = ETS.lock(["dir", "sub", "b.txt"], :exclusive, :write, 0, nil, 1800)
+
+      tokens = ETS.get_descendant_locks(["dir"]) |> Enum.map(& &1.token) |> Enum.sort()
+      assert tokens == Enum.sort([a_token, b_token])
+    end
+
+    test "excludes the target path itself" do
+      {:ok, _} = ETS.lock(["dir"], :exclusive, :write, 0, nil, 1800)
+      assert ETS.get_descendant_locks(["dir"]) == []
+    end
+
+    test "excludes sibling paths" do
+      {:ok, _} = ETS.lock(["other", "file.txt"], :exclusive, :write, 0, nil, 1800)
+      assert ETS.get_descendant_locks(["dir"]) == []
+    end
+
+    test "excludes ancestor locks" do
+      {:ok, _} = ETS.lock(["dir"], :exclusive, :write, :infinity, nil, 1800)
+      assert ETS.get_descendant_locks(["dir", "sub"]) == []
+    end
+
+    test "returns empty for unlocked collection" do
+      assert ETS.get_descendant_locks(["nothing"]) == []
+    end
+  end
+
   describe "check_token/2" do
     test "validates matching token and path" do
       {:ok, token} = ETS.lock(["file.txt"], :exclusive, :write, 0, nil, 1800)

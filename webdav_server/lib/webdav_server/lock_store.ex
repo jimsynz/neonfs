@@ -70,6 +70,16 @@ defmodule WebdavServer.LockStore do
   @callback get_locks_covering(path()) :: [lock_info()]
 
   @doc """
+  Return all active locks on descendants of the given path, regardless of
+  depth. The lock on the path itself is NOT included.
+
+  Used when DELETE targets a collection — per RFC 4918 §9.11 the request
+  must fail if any descendant is locked by a principal who has not
+  supplied the matching token.
+  """
+  @callback get_descendant_locks(path()) :: [lock_info()]
+
+  @doc """
   Check whether a lock token is valid for the given path.
 
   Returns `:ok` if the token identifies an active lock whose path either

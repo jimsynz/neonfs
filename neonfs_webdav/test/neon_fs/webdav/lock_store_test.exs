@@ -645,4 +645,60 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       refute Map.has_key?(lock, :lock_null)
     end
   end
+
+  describe "get_descendant_locks/1" do
+    @collection_path ["my-volume", "docs"]
+    @child_path ["my-volume", "docs", "file.txt"]
+    @nested_path ["my-volume", "docs", "sub", "deep.txt"]
+    @sibling_path ["my-volume", "other", "file.txt"]
+
+    setup do
+      setup_core_unavailable()
+      :ok
+    end
+
+    test "returns locks on direct and nested descendants" do
+      {:ok, child} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
+      {:ok, nested} = LockStore.lock(@nested_path, :exclusive, :write, 0, "user-b", 300)
+
+      tokens =
+        @collection_path
+        |> LockStore.get_descendant_locks()
+        |> Enum.map(& &1.token)
+        |> Enum.sort()
+
+      assert tokens == Enum.sort([child, nested])
+    end
+
+    test "excludes the target path itself" do
+      {:ok, _} =
+        LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert LockStore.get_descendant_locks(@collection_path) == []
+    end
+
+    test "excludes sibling paths" do
+      {:ok, _} = LockStore.lock(@sibling_path, :exclusive, :write, 0, "user-a", 300)
+
+      assert LockStore.get_descendant_locks(@collection_path) == []
+    end
+
+    test "excludes expired descendant locks" do
+      {:ok, token} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 1)
+
+      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
+      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+
+      assert LockStore.get_descendant_locks(@collection_path) == []
+    end
+
+    test "does not expose internal fields" do
+      {:ok, _} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
+
+      [lock] = LockStore.get_descendant_locks(@collection_path)
+      refute Map.has_key?(lock, :file_id)
+      refute Map.has_key?(lock, :lock_null)
+    end
+  end
 end

@@ -379,6 +379,68 @@ defmodule WebdavServer.IntegrationTest do
     end
   end
 
+  describe "DELETE collection with locked descendants" do
+    test "returns 207 Multi-Status with 423 for descendant locked by another principal", %{
+      port: port
+    } do
+      WebdavClient.mkcol(port, "/dir")
+      WebdavClient.put(port, "/dir/a.txt", "a")
+      WebdavClient.put(port, "/dir/b.txt", "b")
+
+      WebdavClient.lock(port, "/dir/a.txt")
+
+      resp = WebdavClient.delete(port, "/dir")
+      assert resp.status == 207
+      assert resp.body =~ "multistatus"
+      assert resp.body =~ "/dir/a.txt"
+      assert resp.body =~ "423 Locked"
+      refute resp.body =~ ~r{<D:href>/dir/b.txt</D:href>}
+
+      assert WebdavClient.get(port, "/dir/a.txt").status == 200
+      assert WebdavClient.get(port, "/dir/b.txt").status == 200
+    end
+
+    test "succeeds when If header carries token for locked descendant", %{port: port} do
+      WebdavClient.mkcol(port, "/dir")
+      WebdavClient.put(port, "/dir/a.txt", "a")
+
+      lock_resp = WebdavClient.lock(port, "/dir/a.txt")
+      token = header(lock_resp, "lock-token")
+
+      resp = WebdavClient.delete(port, "/dir", lock_token: token)
+      assert resp.status == 204
+
+      assert WebdavClient.get(port, "/dir/a.txt").status == 404
+    end
+
+    test "reports every locked descendant across subdirectories", %{port: port} do
+      WebdavClient.mkcol(port, "/dir")
+      WebdavClient.mkcol(port, "/dir/sub")
+      WebdavClient.put(port, "/dir/a.txt", "a")
+      WebdavClient.put(port, "/dir/sub/b.txt", "b")
+
+      WebdavClient.lock(port, "/dir/a.txt")
+      WebdavClient.lock(port, "/dir/sub/b.txt")
+
+      resp = WebdavClient.delete(port, "/dir")
+      assert resp.status == 207
+      assert resp.body =~ "/dir/a.txt"
+      assert resp.body =~ "/dir/sub/b.txt"
+      assert resp.body =~ "423 Locked"
+    end
+
+    test "DELETE of unlocked file succeeds while a sibling is locked", %{port: port} do
+      WebdavClient.mkcol(port, "/dir")
+      WebdavClient.put(port, "/dir/locked.txt", "x")
+      WebdavClient.put(port, "/dir/free.txt", "y")
+
+      WebdavClient.lock(port, "/dir/locked.txt")
+
+      resp = WebdavClient.delete(port, "/dir/free.txt")
+      assert resp.status == 204
+    end
+  end
+
   describe "error cases" do
     test "unsupported method returns 405", %{port: port} do
       resp =
