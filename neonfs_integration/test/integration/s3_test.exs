@@ -11,6 +11,7 @@ defmodule NeonFS.Integration.S3Test do
   """
   use NeonFS.Integration.ClusterCase, async: false
 
+  alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.Integration.S3CoreBridge
   alias NeonFS.S3.MultipartStore
 
@@ -26,6 +27,28 @@ defmodule NeonFS.Integration.S3Test do
     {_access_key, _secret_key} = S3CoreBridge.create_test_credential(node1.node)
 
     Application.put_env(:neonfs_s3, :core_call_fn, &S3CoreBridge.call/2)
+
+    # Start client infrastructure on the test runner so NeonFS.Client.ChunkReader
+    # can resolve a core node via Router → CostFunction for object GETs.
+    start_supervised!({Connection, bootstrap_nodes: [node1.node]})
+    start_supervised!(Discovery)
+    start_supervised!(CostFunction)
+
+    :ok =
+      wait_until(fn ->
+        match?({:ok, _}, Connection.connected_core_node())
+      end)
+
+    :ok =
+      wait_until(
+        fn ->
+          case Discovery.get_core_nodes() do
+            [_ | _] -> true
+            _ -> false
+          end
+        end,
+        timeout: 10_000
+      )
 
     {:ok, server} =
       Bandit.start_link(

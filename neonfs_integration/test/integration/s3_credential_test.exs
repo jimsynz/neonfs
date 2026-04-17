@@ -8,6 +8,7 @@ defmodule NeonFS.Integration.S3CredentialTest do
   """
   use NeonFS.Integration.ClusterCase, async: false
 
+  alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.Integration.S3CoreBridge
   alias NeonFS.S3.MultipartStore
 
@@ -20,6 +21,28 @@ defmodule NeonFS.Integration.S3CredentialTest do
 
     node1 = PeerCluster.get_node!(cluster, :node1)
     S3CoreBridge.store_core_node(node1.node)
+
+    # Start client infrastructure on the test runner so NeonFS.Client.ChunkReader
+    # can resolve a core node via Router → CostFunction for object GETs.
+    start_supervised!({Connection, bootstrap_nodes: [node1.node]})
+    start_supervised!(Discovery)
+    start_supervised!(CostFunction)
+
+    :ok =
+      wait_until(fn ->
+        match?({:ok, _}, Connection.connected_core_node())
+      end)
+
+    :ok =
+      wait_until(
+        fn ->
+          case Discovery.get_core_nodes() do
+            [_ | _] -> true
+            _ -> false
+          end
+        end,
+        timeout: 10_000
+      )
 
     on_exit(fn ->
       S3CoreBridge.cleanup()

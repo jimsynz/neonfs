@@ -1,11 +1,16 @@
 defmodule NeonFS.S3.BackendTest do
   use ExUnit.Case, async: false
+  use Mimic
 
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.S3.Backend
   alias NeonFS.S3.MultipartStore
   alias NeonFS.S3.Test.MockCore
 
   @ctx %{access_key_id: "test-key", identity: %{user: "test-key"}}
+
+  setup :set_mimic_global
+  setup :verify_on_exit!
 
   setup do
     MockCore.setup()
@@ -13,6 +18,10 @@ defmodule NeonFS.S3.BackendTest do
 
     Application.put_env(:neonfs_s3, :core_call_fn, fn function, args ->
       apply(MockCore, function, args)
+    end)
+
+    stub(ChunkReader, :read_file, fn volume_name, path, opts ->
+      MockCore.read_file(volume_name, path, opts)
     end)
 
     start_supervised!(MultipartStore)
@@ -534,6 +543,93 @@ defmodule NeonFS.S3.BackendTest do
     test "abort returns error for non-existent upload" do
       assert {:error, %S3Server.Error{code: :no_such_upload}} =
                Backend.abort_multipart_upload(@ctx, "bucket", "key", "bad-id")
+    end
+  end
+
+  describe "get_object/4 — data plane routing" do
+    test "dispatches GET fallback through NeonFS.Client.ChunkReader" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "dp.txt", "over data plane", %S3Server.PutOpts{})
+
+      test_pid = self()
+
+      expect(ChunkReader, :read_file, fn volume_name, path, opts ->
+        send(test_pid, {:chunk_reader_called, volume_name, path, opts})
+        {:ok, "over data plane"}
+      end)
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "dp.txt", %S3Server.GetOpts{})
+
+      assert object.body == "over data plane"
+
+      assert_receive {:chunk_reader_called, "my-bucket", "dp.txt", opts}, 1_000
+      refute Keyword.has_key?(opts, :offset)
+      refute Keyword.has_key?(opts, :length)
+    end
+
+    test "forwards range requests as :offset/:length through ChunkReader" do
+      Backend.create_bucket(@ctx, "my-bucket")
+
+      Backend.put_object(
+        @ctx,
+        "my-bucket",
+        "range.bin",
+        "0123456789ABCDEF",
+        %S3Server.PutOpts{}
+      )
+
+      expect(ChunkReader, :read_file, fn "my-bucket", "range.bin", opts ->
+        assert Keyword.get(opts, :offset) == 5
+        assert Keyword.get(opts, :length) == 5
+        {:ok, "56789"}
+      end)
+
+      opts = %S3Server.GetOpts{range: {5, 9}}
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "range.bin", opts)
+      assert object.body == "56789"
+      assert object.content_length == 5
+      assert object.total_size == 16
+    end
+
+    test "maps ChunkReader :not_found to no_such_key" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %S3Server.PutOpts{})
+
+      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :not_found} end)
+
+      assert {:error, %S3Server.Error{code: :no_such_key}} =
+               Backend.get_object(@ctx, "my-bucket", "exists.txt", %S3Server.GetOpts{})
+    end
+
+    test "maps other ChunkReader errors to internal_error" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %S3Server.PutOpts{})
+
+      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :no_available_locations} end)
+
+      assert {:error, %S3Server.Error{code: :internal_error}} =
+               Backend.get_object(@ctx, "my-bucket", "exists.txt", %S3Server.GetOpts{})
+    end
+
+    test "skips ChunkReader when streaming fast path is available" do
+      Application.put_env(:neonfs_s3, :core_stream_fn, fn volume, path, opts ->
+        MockCore.read_file_stream(volume, path, opts)
+      end)
+
+      on_exit(fn -> Application.delete_env(:neonfs_s3, :core_stream_fn) end)
+
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "stream.txt", "streaming", %S3Server.PutOpts{})
+
+      reject(&ChunkReader.read_file/3)
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "stream.txt", %S3Server.GetOpts{})
+
+      assert not is_binary(object.body)
+      assert Enum.into(object.body, <<>>) == "streaming"
     end
   end
 end

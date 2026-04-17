@@ -76,6 +76,7 @@ defmodule NeonFS.S3.MixProject do
       {:ex_aws_s3, "~> 2.5", only: :test},
       {:hackney, "~> 1.9", only: :test},
       {:jason, "~> 1.0", only: [:dev, :test]},
+      {:mimic, "~> 2.0", only: [:test]},
       {:sweet_xml, "~> 0.7", only: :test}
     ]
   end

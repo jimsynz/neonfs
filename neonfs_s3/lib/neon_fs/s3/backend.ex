@@ -3,12 +3,15 @@ defmodule NeonFS.S3.Backend do
   S3Server.Backend implementation that maps S3 operations to NeonFS core calls.
 
   Buckets map 1:1 to NeonFS volumes. S3 object keys map to file paths within
-  the volume. All communication with core nodes goes through
-  `NeonFS.Client.Router`.
+  the volume. Control-plane operations go through `NeonFS.Client.Router`;
+  object GET falls back to `NeonFS.Client.ChunkReader` so chunk bytes are
+  fetched over the TLS data plane rather than shipped across Erlang
+  distribution when streaming isn't available.
   """
 
   @behaviour S3Server.Backend
 
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.Client.Router
   alias NeonFS.S3.MultipartStore
 
@@ -390,7 +393,7 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp read_object_content(bucket, key, read_opts \\ []) do
-    case call_core(:read_file, [bucket, key, read_opts]) do
+    case ChunkReader.read_file(bucket, key, read_opts) do
       {:ok, content} -> {:ok, content}
       {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_key}}
       {:error, reason} -> {:error, internal_error(reason)}
