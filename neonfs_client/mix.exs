@@ -62,6 +62,7 @@ defmodule NeonFS.Client.MixProject do
       {:earmark, "~> 1.4", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.7", only: [:dev, :test]},
+      {:mimic, "~> 2.0", only: [:test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false}
     ]
   end

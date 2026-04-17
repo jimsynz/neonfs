@@ -15,6 +15,7 @@ defmodule NeonFS.Core.ReadOperation do
     BlobStore,
     ChunkFetcher,
     ChunkIndex,
+    ChunkMeta,
     FileIndex,
     KeyManager,
     ResolvedLookupCache,
@@ -32,6 +33,22 @@ defmodule NeonFS.Core.ReadOperation do
   @type read_result :: {:ok, binary()} | {:error, term()}
   @type stream_result ::
           {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}} | {:error, term()}
+
+  @type chunk_ref :: %{
+          hash: binary(),
+          original_size: non_neg_integer(),
+          stored_size: non_neg_integer(),
+          chunk_offset: non_neg_integer(),
+          read_start: non_neg_integer(),
+          read_length: non_neg_integer(),
+          compression: :none | :zstd,
+          encrypted: boolean(),
+          locations: [ChunkMeta.location()]
+        }
+
+  @type refs_result ::
+          {:ok, %{file_size: non_neg_integer(), chunks: [chunk_ref()]}}
+          | {:error, term()}
 
   @doc """
   Reads a file from a volume with optional offset and length.
@@ -134,6 +151,102 @@ defmodule NeonFS.Core.ReadOperation do
       stream = build_stream(file_meta, volume, offset, length)
 
       {:ok, %{stream: stream, file_size: file_meta.size}}
+    end
+  end
+
+  @doc """
+  Returns chunk references for a file's byte range without fetching chunk data.
+
+  Used by interface nodes (FUSE, NFS, S3, WebDAV) that call into core to
+  retrieve metadata, then fetch chunk bytes directly over the TLS data plane
+  via `NeonFS.Client.Router.data_call/4`. Keeps bulk data off the Erlang
+  distribution control plane.
+
+  Each returned ref carries the chunk hash, the chunk's byte offset within
+  the file, the slice to read from the chunk, and the list of storage
+  locations (node/drive/tier triples). Callers select a location and issue a
+  `:get_chunk` data-plane call to read the raw bytes.
+
+  Only replicated (chunk-based) volumes are supported. Erasure-coded
+  (stripe-based) files return `{:error, :stripe_refs_unsupported}` so callers
+  can fall back to `read_file/3` for now.
+
+  ## Options
+
+    * `:offset` - Byte offset to start from (default: 0)
+    * `:length` - Number of bytes to include (default: :all)
+    * `:uid` - User ID for authorisation (default: 0)
+    * `:gids` - Group IDs for authorisation (default: [])
+
+  ## Returns
+
+    * `{:ok, %{file_size: size, chunks: [ref, ...]}}` on success
+    * `{:error, :stripe_refs_unsupported}` for erasure-coded files
+    * `{:error, reason}` on auth / lookup failure
+  """
+  @spec read_file_refs(binary(), String.t(), keyword()) :: refs_result()
+  def read_file_refs(volume_id, path, opts \\ []) do
+    Logger.metadata(component: :read_refs, volume_id: volume_id, file_path: path)
+
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, :all)
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, _volume} <- get_volume(volume_id),
+         :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
+         {:ok, file_meta} <- get_file(volume_id, path) do
+      build_refs_result(file_meta, offset, length)
+    end
+  end
+
+  defp build_refs_result(%{stripes: stripes}, _offset, _length) when is_list(stripes) do
+    {:error, :stripe_refs_unsupported}
+  end
+
+  defp build_refs_result(file_meta, offset, length) do
+    end_byte = calculate_end_byte(file_meta.size, offset, length)
+
+    refs =
+      if offset >= file_meta.size or end_byte <= offset do
+        []
+      else
+        file_meta.chunks
+        |> build_chunk_info_list(0, [])
+        |> Enum.filter(fn {_hash, chunk_start, chunk_end} ->
+          chunk_start < end_byte and chunk_end > offset
+        end)
+        |> Enum.map(&to_chunk_ref(&1, offset, end_byte))
+        |> Enum.reject(&is_nil/1)
+      end
+
+    {:ok, %{file_size: file_meta.size, chunks: refs}}
+  end
+
+  defp to_chunk_ref({hash, chunk_start, chunk_end}, offset, end_byte) do
+    case ChunkIndex.get(hash) do
+      {:ok, chunk_meta} ->
+        read_start = max(0, offset - chunk_start)
+        read_end = min(chunk_end - chunk_start, end_byte - chunk_start)
+
+        %{
+          hash: hash,
+          original_size: chunk_meta.original_size,
+          stored_size: chunk_meta.stored_size,
+          chunk_offset: chunk_start,
+          read_start: read_start,
+          read_length: read_end - read_start,
+          compression: chunk_meta.compression,
+          encrypted: not is_nil(chunk_meta.crypto),
+          locations: chunk_meta.locations
+        }
+
+      {:error, :not_found} ->
+        Logger.error("Chunk metadata missing while building refs",
+          chunk_hash: Base.encode16(hash, case: :lower)
+        )
+
+        nil
     end
   end
 

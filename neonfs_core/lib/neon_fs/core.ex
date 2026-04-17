@@ -129,6 +129,31 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Returns chunk references for a file's byte range without fetching data.
+
+  Interface nodes (FUSE, NFS, S3, WebDAV) call this to get metadata then
+  fetch chunks directly over the TLS data plane, keeping bulk data off
+  Erlang distribution. See `NeonFS.Client.ChunkReader` for a ready-made
+  consumer.
+
+  Only replicated (chunk-based) volumes are supported for now; erasure-coded
+  files return `{:error, :stripe_refs_unsupported}`.
+
+  ## Options
+
+    * `:offset` - Byte offset to start from (default: 0)
+    * `:length` - Number of bytes to include (default: `:all`)
+
+  """
+  @spec read_file_refs(String.t(), String.t(), keyword()) ::
+          {:ok, %{file_size: non_neg_integer(), chunks: [map()]}} | {:error, term()}
+  def read_file_refs(volume_name, path, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      ReadOperation.read_file_refs(volume.id, normalize_path(path), opts)
+    end
+  end
+
+  @doc """
   Writes content to a file in a volume.
   """
   @spec write_file(String.t(), String.t(), binary()) ::
