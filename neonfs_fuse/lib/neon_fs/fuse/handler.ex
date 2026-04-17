@@ -28,6 +28,7 @@ defmodule NeonFS.FUSE.Handler do
   import Bitwise
   require Logger
 
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.FUSE.{InodeTable, MetadataCache, Native}
 
   @default_volume "default"
@@ -48,6 +49,8 @@ defmodule NeonFS.FUSE.Handler do
 
   Options:
   - `:volume` - Volume ID to use for this mount (default: "default")
+  - `:volume_name` - Volume name used for data-plane reads via
+    `NeonFS.Client.ChunkReader` (defaults to the `:volume` value)
   - `:mount_id` - Mount ID for logging purposes
   - `:name` - Optional name for registration (default: no registration)
   - `:cache_table` - ETS table reference for MetadataCache (default: nil)
@@ -81,6 +84,7 @@ defmodule NeonFS.FUSE.Handler do
   @impl true
   def init(opts) do
     volume = Keyword.get(opts, :volume, @default_volume)
+    volume_name = Keyword.get(opts, :volume_name, volume)
     Logger.metadata(component: :fuse, volume_id: volume)
     fuse_server = Keyword.get(opts, :fuse_server)
     uid = Keyword.get(opts, :uid, 0)
@@ -95,6 +99,7 @@ defmodule NeonFS.FUSE.Handler do
      %{
        fuse_server: fuse_server,
        volume: volume,
+       volume_name: volume_name,
        uid: uid,
        gid: gid,
        gids: gids,
@@ -212,7 +217,7 @@ defmodule NeonFS.FUSE.Handler do
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          :ok <- check_file_permission(volume_id, path, :read, state),
-         {:ok, data} <- read_file(volume_id, path, offset: offset, length: size) do
+         {:ok, data} <- read_file(state.volume_name, path, offset: offset, length: size) do
       maybe_update_atime(volume_id, path, state.atime_mode)
       {"read_ok", %{"data" => data}}
     else
@@ -819,7 +824,7 @@ defmodule NeonFS.FUSE.Handler do
   end
 
   defp read_file(volume_id, path, opts) do
-    core_call(NeonFS.Core.ReadOperation, :read_file, [volume_id, path, opts])
+    ChunkReader.read_file(volume_id, path, opts)
   end
 
   defp write_file(volume_id, path, data, opts) do

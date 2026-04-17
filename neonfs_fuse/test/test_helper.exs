@@ -10,4 +10,6 @@ Application.put_env(:kernel, :epmd_module, NeonFS.Epmd)
 #
 # Handler tests that require neonfs_core have been moved to neonfs_integration.
 
+Mimic.copy(NeonFS.Client.ChunkReader)
+
 ExUnit.start(capture_log: true)

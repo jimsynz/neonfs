@@ -21,6 +21,11 @@ defmodule NeonFS.Client.ChunkReader do
 
   Erasure-coded (stripe-based) files likewise fall back to `read_file/3`
   until streaming stripe reconstruction over the data plane is implemented.
+
+  If every location for a chunk returns `:no_data_endpoint` (no TLS pool
+  configured to that peer), the helper also falls back to `read_file/3`
+  so that callers on nodes without a data-plane pool still get correct
+  results. All other data-plane errors propagate.
   """
 
   require Logger
@@ -56,17 +61,24 @@ defmodule NeonFS.Client.ChunkReader do
 
     case Router.call(NeonFS.Core, :read_file_refs, [volume_name, path, refs_opts]) do
       {:ok, %{chunks: chunks} = result} ->
-        if Enum.any?(chunks, &needs_server_processing?/1) do
-          fallback_read(volume_name, path, opts)
-        else
-          assemble(chunks, result.file_size, opts)
-        end
+        dispatch_read(chunks, result.file_size, volume_name, path, opts)
 
       {:error, :stripe_refs_unsupported} ->
         fallback_read(volume_name, path, opts)
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  defp dispatch_read(chunks, file_size, volume_name, path, opts) do
+    if Enum.any?(chunks, &needs_server_processing?/1) do
+      fallback_read(volume_name, path, opts)
+    else
+      case assemble(chunks, file_size, opts) do
+        {:error, :no_data_endpoint} -> fallback_read(volume_name, path, opts)
+        other -> other
+      end
     end
   end
 

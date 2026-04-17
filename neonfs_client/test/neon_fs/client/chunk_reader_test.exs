@@ -300,6 +300,36 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert {:ok, "ec-file-bytes"} = ChunkReader.read_file("vol", "/ec.bin")
     end
 
+    test "falls back to read_file when every location lacks a data-plane pool" do
+      refs = [
+        ref(
+          seed: 1,
+          original_size: 4,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 4,
+          locations: [
+            %{node: :a@host, drive_id: "d1", tier: :hot},
+            %{node: :b@host, drive_id: "d2", tier: :hot}
+          ]
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 4, chunks: refs}}
+      end)
+
+      stub(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
+        {:error, :no_data_endpoint}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, _ ->
+        {:ok, "abcd"}
+      end)
+
+      assert {:ok, "abcd"} = ChunkReader.read_file("vol", "/nopool.txt")
+    end
+
     test "fallback forwards offset and length" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
         {:error, :stripe_refs_unsupported}

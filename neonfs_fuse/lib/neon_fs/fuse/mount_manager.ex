@@ -268,6 +268,7 @@ defmodule NeonFS.FUSE.MountManager do
       # Start the handler process for this mount under the DynamicSupervisor
       handler_opts = [
         volume: volume_id,
+        volume_name: volume_name,
         mount_id: mount_id,
         cache_table: cache_table
       ]

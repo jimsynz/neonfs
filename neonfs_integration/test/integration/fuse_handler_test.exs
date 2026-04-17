@@ -24,10 +24,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
         %{}
       ])
 
-    %{volume_id: volume_map[:id]}
+    %{volume_id: volume_map[:id], volume_name: "test-volume"}
   end
 
-  setup %{cluster: cluster, volume_id: volume_id} do
+  setup %{cluster: cluster, volume_id: volume_id, volume_name: volume_name} do
     # Start client infrastructure on the test runner, pointing at the core peer
     core_node = PeerCluster.get_node!(cluster, :node1).node
 
@@ -58,7 +58,8 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       )
 
     # Start a handler for testing with test_notify so we can assert_receive
-    {:ok, handler} = Handler.start_link(volume: volume_id, test_notify: self())
+    {:ok, handler} =
+      Handler.start_link(volume: volume_id, volume_name: volume_name, test_notify: self())
 
     on_exit(fn ->
       if Process.alive?(handler), do: GenServer.stop(handler)
@@ -122,9 +123,32 @@ defmodule NeonFS.Integration.FuseHandlerTest do
 
       assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
 
-      # Read the data back
+      # Read the data back — goes through NeonFS.Client.ChunkReader
       send(handler, {:fuse_op, 3, {"read", %{"ino" => inode, "offset" => 0, "size" => 100}}})
-      assert_receive {:fuse_op_complete, 3, {"read_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"read_ok", %{"data" => "hello world"}}}, 5_000
+    end
+
+    test "reads at non-zero offset and bounded length", %{
+      handler: handler,
+      volume_id: volume_id
+    } do
+      send(
+        handler,
+        {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "ranged.txt", "mode" => 0o644}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      {:ok, inode} = InodeTable.get_inode(volume_id, "/ranged.txt")
+
+      send(
+        handler,
+        {:fuse_op, 2, {"write", %{"ino" => inode, "offset" => 0, "data" => "0123456789abcdef"}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
+
+      send(handler, {:fuse_op, 3, {"read", %{"ino" => inode, "offset" => 4, "size" => 8}}})
+      assert_receive {:fuse_op_complete, 3, {"read_ok", %{"data" => "456789ab"}}}, 5_000
     end
   end
 
