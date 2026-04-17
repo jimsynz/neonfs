@@ -7,6 +7,9 @@ defmodule NeonFS.NFS.Handler do
 
   Dispatches operations to the appropriate NeonFS.Core modules via
   `NeonFS.Client.core_call/3` and replies via the NIF with results or errors.
+  File reads are routed through `NeonFS.Client.ChunkReader` so chunk bytes
+  travel over the TLS data plane rather than being materialised and shipped
+  across Erlang distribution.
 
   ## Volume Routing
 
@@ -28,6 +31,7 @@ defmodule NeonFS.NFS.Handler do
   import Bitwise
   require Logger
 
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.NFS.{InodeTable, MetadataCache, Native, WriteThrottle}
 
   @null_volume_id <<0::128>>
@@ -227,7 +231,7 @@ defmodule NeonFS.NFS.Handler do
     result =
       with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, path} <- inode_path(inode),
-           {:ok, data} <- read_file(vol.id, path, offset: offset, length: count) do
+           {:ok, data} <- read_file(vol.name, path, offset: offset, length: count) do
         eof = byte_size(data) < count
         {:ok, {:ok, %{"type" => "read", "data" => data, "eof" => eof}}}
       end
@@ -955,8 +959,8 @@ defmodule NeonFS.NFS.Handler do
     core_call(NeonFS.Core.FileIndex, :update, [file_id, updates])
   end
 
-  defp read_file(volume, path, opts) do
-    core_call(NeonFS.Core.ReadOperation, :read_file, [volume, path, opts])
+  defp read_file(volume_name, path, opts) do
+    ChunkReader.read_file(volume_name, path, opts)
   end
 
   defp write_file(volume, path, data, opts \\ []) do

@@ -63,6 +63,7 @@ defmodule NeonFS.NFS.MixProject do
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test
+      {:mimic, "~> 2.0", only: [:test]},
       {:stream_data, "~> 1.0", only: [:test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

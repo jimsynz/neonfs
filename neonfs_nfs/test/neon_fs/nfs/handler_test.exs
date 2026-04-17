@@ -1,7 +1,12 @@
 defmodule NeonFS.NFS.HandlerTest do
   use ExUnit.Case, async: false
+  use Mimic
 
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.NFS.{Handler, InodeTable, MockCore}
+
+  setup :set_mimic_global
+  setup :verify_on_exit!
 
   @volume "testvol"
   @null_volume_id <<0::128>>
@@ -27,6 +32,10 @@ defmodule NeonFS.NFS.HandlerTest do
     volumes = Keyword.get(opts, :volumes, [@volume])
     mock = MockCore.start(volumes: volumes)
     on_exit(fn -> if :ets.info(mock.table) != :undefined, do: MockCore.stop(mock) end)
+
+    stub(ChunkReader, :read_file, fn volume_name, path, opts ->
+      mock.core_call_fn.(NeonFS.Core.ReadOperation, :read_file, [volume_name, path, opts])
+    end)
 
     {:ok, handler} =
       start_supervised({Handler, core_call_fn: mock.core_call_fn, test_notify: self()})
@@ -510,6 +519,114 @@ defmodule NeonFS.NFS.HandlerTest do
       })
 
       assert_error(1, @enoent)
+    end
+  end
+
+  describe "read — data plane routing" do
+    test "dispatches reads through NeonFS.Client.ChunkReader", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      created = create_file(handler, vol_hash, root_inode, "data.txt")
+      file_inode = created["file_id"]
+
+      send_op(handler, 1, "write", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "data" => "hello world"
+      })
+
+      assert_ok(1)
+
+      test_pid = self()
+
+      expect(ChunkReader, :read_file, fn volume_name, path, opts ->
+        send(test_pid, {:chunk_reader_called, volume_name, path, opts})
+        {:ok, "hello world"}
+      end)
+
+      send_op(handler, 2, "read", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "count" => 1024
+      })
+
+      reply = assert_ok(2)
+      assert reply["data"] == "hello world"
+
+      assert_receive {:chunk_reader_called, volume_name, path, opts}, 1_000
+      assert volume_name == @volume
+      assert path == "/data.txt"
+      assert Keyword.get(opts, :offset) == 0
+      assert Keyword.get(opts, :length) == 1024
+    end
+
+    test "forwards non-zero offsets and lengths to ChunkReader", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, root_inode} = register_volume(handler)
+      created = create_file(handler, vol_hash, root_inode, "range.bin")
+      file_inode = created["file_id"]
+
+      send_op(handler, 1, "write", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "data" => :binary.copy("x", 8192)
+      })
+
+      assert_ok(1)
+
+      expect(ChunkReader, :read_file, fn @volume, "/range.bin", opts ->
+        assert Keyword.get(opts, :offset) == 4096
+        assert Keyword.get(opts, :length) == 512
+        {:ok, :binary.copy("x", 512)}
+      end)
+
+      send_op(handler, 2, "read", %{
+        "inode" => file_inode,
+        "volume_id" => vol_hash,
+        "offset" => 4096,
+        "count" => 512
+      })
+
+      reply = assert_ok(2)
+      assert byte_size(reply["data"]) == 512
+      assert reply["eof"] == false
+    end
+
+    test "maps ChunkReader :not_found to ENOENT", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, _root_inode} = register_volume(handler)
+      {:ok, inode} = InodeTable.allocate_inode(@volume, "/missing.txt")
+
+      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :not_found} end)
+
+      send_op(handler, 1, "read", %{
+        "inode" => inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "count" => 1024
+      })
+
+      assert_error(1, @enoent)
+    end
+
+    test "maps other ChunkReader errors to EIO", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx)
+      {vol_hash, _root_inode} = register_volume(handler)
+      {:ok, inode} = InodeTable.allocate_inode(@volume, "/broken.txt")
+
+      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :no_available_locations} end)
+
+      send_op(handler, 1, "read", %{
+        "inode" => inode,
+        "volume_id" => vol_hash,
+        "offset" => 0,
+        "count" => 1024
+      })
+
+      assert_error(1, @eio)
     end
   end
 

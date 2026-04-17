@@ -7,10 +7,15 @@ defmodule NeonFS.NFS.ProtocolTest do
   TCP connection to the NFS server started on an OS-assigned port.
   """
   use ExUnit.Case, async: false
+  use Mimic
 
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.NFS.{Handler, InodeTable, MockCore, Native, TestClient}
 
   @volume "testvol"
+
+  setup :set_mimic_global
+  setup :verify_on_exit!
 
   setup_all do
     # Start InodeTable (global, needed by Handler)
@@ -45,6 +50,14 @@ defmodule NeonFS.NFS.ProtocolTest do
     {:ok, root_fh} = TestClient.root_handle(client)
 
     %{client: client, root_fh: root_fh, mock: mock}
+  end
+
+  setup %{mock: mock} do
+    stub(ChunkReader, :read_file, fn volume_name, path, opts ->
+      mock.core_call_fn.(NeonFS.Core.ReadOperation, :read_file, [volume_name, path, opts])
+    end)
+
+    :ok
   end
 
   describe "NULL" do
