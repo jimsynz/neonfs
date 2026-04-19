@@ -19,6 +19,7 @@ defmodule NeonFS.Core.ReadOperation do
     FileIndex,
     KeyManager,
     ResolvedLookupCache,
+    Stripe,
     StripeIndex,
     VolumeRegistry
   }
@@ -167,9 +168,14 @@ defmodule NeonFS.Core.ReadOperation do
   locations (node/drive/tier triples). Callers select a location and issue a
   `:get_chunk` data-plane call to read the raw bytes.
 
-  Only replicated (chunk-based) volumes are supported. Erasure-coded
-  (stripe-based) files return `{:error, :stripe_refs_unsupported}` so callers
-  can fall back to `read_file/3` for now.
+  Replicated (chunk-based) volumes return refs for each relevant file chunk.
+
+  Erasure-coded (stripe-based) volumes return refs for the data chunks of
+  each stripe that overlaps the read range. This only applies when every
+  data chunk in each relevant stripe is available — if any data chunk is
+  missing (i.e. the stripe would require parity-based reconstruction),
+  `{:error, :stripe_refs_unsupported}` is returned so the caller can fall
+  back to `read_file/3`.
 
   ## Options
 
@@ -181,7 +187,8 @@ defmodule NeonFS.Core.ReadOperation do
   ## Returns
 
     * `{:ok, %{file_size: size, chunks: [ref, ...]}}` on success
-    * `{:error, :stripe_refs_unsupported}` for erasure-coded files
+    * `{:error, :stripe_refs_unsupported}` when a relevant stripe requires
+      reconstruction (one or more data chunks are missing)
     * `{:error, reason}` on auth / lookup failure
   """
   @spec read_file_refs(binary(), String.t(), keyword()) :: refs_result()
@@ -200,8 +207,24 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp build_refs_result(%{stripes: stripes}, _offset, _length) when is_list(stripes) do
-    {:error, :stripe_refs_unsupported}
+  defp build_refs_result(%{stripes: stripes} = file_meta, offset, length)
+       when is_list(stripes) do
+    end_byte = calculate_end_byte(file_meta.size, offset, length)
+
+    if offset >= file_meta.size or end_byte <= offset do
+      {:ok, %{file_size: file_meta.size, chunks: []}}
+    else
+      stripes
+      |> Enum.filter(fn stripe_ref ->
+        {s, e} = normalise_byte_range(stripe_ref.byte_range)
+        s < end_byte and e > offset
+      end)
+      |> build_stripe_refs_list(offset, end_byte)
+      |> case do
+        {:ok, refs} -> {:ok, %{file_size: file_meta.size, chunks: refs}}
+        {:error, _} = err -> err
+      end
+    end
   end
 
   defp build_refs_result(file_meta, offset, length) do
@@ -249,6 +272,103 @@ defmodule NeonFS.Core.ReadOperation do
         nil
     end
   end
+
+  defp build_stripe_refs_list(stripe_refs, offset, end_byte) do
+    stripe_refs
+    |> Enum.reduce_while({:ok, []}, fn stripe_ref, {:ok, acc} ->
+      case build_stripe_refs(stripe_ref, offset, end_byte) do
+        {:ok, refs} -> {:cont, {:ok, [refs | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, refs_lists} -> {:ok, refs_lists |> Enum.reverse() |> List.flatten()}
+      error -> error
+    end
+  end
+
+  defp build_stripe_refs(%{stripe_id: stripe_id} = stripe_ref, offset, end_byte) do
+    case StripeIndex.get(stripe_id) do
+      {:ok, stripe} ->
+        {stripe_start, _} = normalise_byte_range(stripe_ref.byte_range)
+        data_hashes = Stripe.data_chunk_hashes(stripe)
+
+        if Enum.all?(data_hashes, &chunk_available?/1) do
+          build_stripe_data_chunk_refs(stripe, stripe_start, offset, end_byte)
+        else
+          {:error, :stripe_refs_unsupported}
+        end
+
+      {:error, :not_found} ->
+        {:error, :stripe_refs_unsupported}
+    end
+  end
+
+  defp build_stripe_data_chunk_refs(stripe, stripe_start, offset, end_byte) do
+    chunk_size = stripe.config.chunk_size
+    data_bytes = stripe.data_bytes
+
+    refs =
+      stripe
+      |> Stripe.data_chunk_hashes()
+      |> Enum.with_index()
+      |> Enum.map(fn {hash, idx} ->
+        build_single_stripe_ref(hash, idx, chunk_size, data_bytes, stripe_start, offset, end_byte)
+      end)
+      |> Enum.reject(&is_nil/1)
+
+    case Enum.find(refs, &match?({:error, _}, &1)) do
+      nil -> {:ok, refs}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp build_single_stripe_ref(hash, idx, chunk_size, data_bytes, stripe_start, offset, end_byte) do
+    chunk_start_in_stripe = idx * chunk_size
+    real_end_in_stripe = min((idx + 1) * chunk_size, data_bytes)
+
+    cond do
+      real_end_in_stripe <= chunk_start_in_stripe ->
+        nil
+
+      stripe_start + real_end_in_stripe <= offset ->
+        nil
+
+      stripe_start + chunk_start_in_stripe >= end_byte ->
+        nil
+
+      true ->
+        chunk_file_start = stripe_start + chunk_start_in_stripe
+        real_chunk_length = real_end_in_stripe - chunk_start_in_stripe
+        read_start = max(0, offset - chunk_file_start)
+        read_end = min(real_chunk_length, end_byte - chunk_file_start)
+
+        to_stripe_chunk_ref(hash, chunk_file_start, read_start, read_end - read_start)
+    end
+  end
+
+  defp to_stripe_chunk_ref(hash, chunk_offset, read_start, read_length) do
+    case ChunkIndex.get(hash) do
+      {:ok, chunk_meta} ->
+        %{
+          hash: hash,
+          original_size: chunk_meta.original_size,
+          stored_size: chunk_meta.stored_size,
+          chunk_offset: chunk_offset,
+          read_start: read_start,
+          read_length: read_length,
+          compression: chunk_meta.compression,
+          encrypted: not is_nil(chunk_meta.crypto),
+          locations: chunk_meta.locations
+        }
+
+      {:error, :not_found} ->
+        {:error, :stripe_refs_unsupported}
+    end
+  end
+
+  defp normalise_byte_range({s, e}), do: {s, e}
+  defp normalise_byte_range(s..e//_), do: {s, e}
 
   # ─── Cache-aware read ─────────────────────────────────────────────────
 

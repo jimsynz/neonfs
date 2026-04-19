@@ -19,8 +19,11 @@ defmodule NeonFS.Client.ChunkReader do
   correct result; the data plane optimisation applies to uncompressed,
   unencrypted volumes.
 
-  Erasure-coded (stripe-based) files likewise fall back to `read_file/3`
-  until streaming stripe reconstruction over the data plane is implemented.
+  Erasure-coded (stripe-based) files return data-chunk refs for each
+  overlapping stripe when every data chunk is available. When any data
+  chunk is missing and parity-based reconstruction is required, core
+  returns `{:error, :stripe_refs_unsupported}` and this helper falls back
+  to `read_file/3` so the server handles reconstruction.
 
   If every location for a chunk returns `:no_data_endpoint` (no TLS pool
   configured to that peer), the helper also falls back to `read_file/3`

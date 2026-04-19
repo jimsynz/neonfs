@@ -10,7 +10,14 @@ defmodule NeonFS.Core.ReadFileRefsTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{ReadOperation, VolumeRegistry, WriteOperation}
+  alias NeonFS.Core.{
+    BlobStore,
+    ChunkIndex,
+    ReadOperation,
+    StripeIndex,
+    VolumeRegistry,
+    WriteOperation
+  }
 
   alias NeonFS.Error.FileNotFound, as: FileNotFoundError
   alias NeonFS.Error.VolumeNotFound
@@ -292,5 +299,156 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       total = Enum.reduce(sliced, 0, &(&1.read_length + &2))
       assert total == length
     end
+  end
+
+  describe "read_file_refs/3 — erasure-coded (stripe) volumes" do
+    test "returns data-chunk refs for a fully healthy stripe" do
+      {:ok, volume} = create_erasure_volume()
+      data = "stripe data example"
+      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/striped.txt", data)
+
+      {:ok, result} = ReadOperation.read_file_refs(volume.id, "/striped.txt")
+
+      assert result.file_size == byte_size(data)
+      assert result.chunks != []
+
+      # Every ref must resolve to a real stripe data chunk (not a parity shard).
+      stripe_data_hashes = stripe_data_hashes_for(file_meta)
+      Enum.each(result.chunks, fn ref -> assert ref.hash in stripe_data_hashes end)
+
+      total = Enum.reduce(result.chunks, 0, &(&1.read_length + &2))
+      assert total == byte_size(data)
+    end
+
+    test "assembling fetched chunk slices reconstructs the original bytes" do
+      {:ok, volume} = create_erasure_volume_without_compression()
+      data = :crypto.strong_rand_bytes(200 * 1024)
+      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/assemble.bin", data)
+
+      {:ok, %{chunks: refs, file_size: file_size}} =
+        ReadOperation.read_file_refs(volume.id, "/assemble.bin")
+
+      assert file_size == byte_size(data)
+      Enum.each(refs, fn ref -> assert ref.compression == :none end)
+
+      # Fetch each chunk and slice using the ref's read_start/read_length.
+      # Concatenating the slices must reproduce the originally written data.
+      assembled =
+        refs
+        |> Enum.map(fn ref ->
+          [loc | _] = ref.locations
+          drive_id = Map.get(loc, :drive_id, "default")
+          tier = loc |> Map.get(:tier, :hot) |> to_string()
+          {:ok, chunk_bytes} = BlobStore.read_chunk(ref.hash, drive_id, tier: tier)
+          binary_part(chunk_bytes, ref.read_start, ref.read_length)
+        end)
+        |> IO.iodata_to_binary()
+
+      assert assembled == data
+    end
+
+    test "respects offset and length in a stripe" do
+      {:ok, volume} = create_erasure_volume()
+      data = :crypto.strong_rand_bytes(200 * 1024)
+      {:ok, _} = WriteOperation.write_file(volume.id, "/slice.bin", data)
+
+      offset = 13_000
+      length = 42_000
+
+      {:ok, %{chunks: refs}} =
+        ReadOperation.read_file_refs(volume.id, "/slice.bin", offset: offset, length: length)
+
+      total = Enum.reduce(refs, 0, &(&1.read_length + &2))
+      assert total == length
+
+      first = List.first(refs)
+      last = List.last(refs)
+
+      assert first.chunk_offset + first.read_start == offset
+      assert last.chunk_offset + last.read_start + last.read_length == offset + length
+    end
+
+    test "returns empty chunks when offset is at or past EOF" do
+      {:ok, volume} = create_erasure_volume()
+      data = "short striped"
+      {:ok, _} = WriteOperation.write_file(volume.id, "/eof.txt", data)
+
+      assert {:ok, %{chunks: []}} =
+               ReadOperation.read_file_refs(volume.id, "/eof.txt", offset: byte_size(data))
+
+      assert {:ok, %{chunks: []}} =
+               ReadOperation.read_file_refs(volume.id, "/eof.txt", offset: 9999)
+    end
+
+    test "returns empty chunks for zero-length read on striped file" do
+      {:ok, volume} = create_erasure_volume()
+      {:ok, _} = WriteOperation.write_file(volume.id, "/zero.txt", "hello stripe")
+
+      assert {:ok, %{chunks: []}} =
+               ReadOperation.read_file_refs(volume.id, "/zero.txt", length: 0)
+    end
+
+    test "returns :stripe_refs_unsupported when a data chunk is missing" do
+      {:ok, volume} = create_erasure_volume()
+      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/degraded.txt", "degraded data")
+
+      # Remove one data chunk so the stripe requires reconstruction.
+      [missing_hash | _] = stripe_data_hashes_for(file_meta)
+      ChunkIndex.delete(missing_hash)
+
+      assert {:error, :stripe_refs_unsupported} =
+               ReadOperation.read_file_refs(volume.id, "/degraded.txt")
+    end
+
+    test "returns refs when only a parity chunk is missing (data chunks intact)" do
+      {:ok, volume} = create_erasure_volume()
+      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/parity.txt", "parity intact")
+
+      [%{stripe_id: sid} | _] = file_meta.stripes
+      {:ok, stripe} = StripeIndex.get(sid)
+
+      # Remove a parity chunk (index >= data_chunks).
+      parity_hash = Enum.at(stripe.chunks, stripe.config.data_chunks)
+      ChunkIndex.delete(parity_hash)
+
+      assert {:ok, %{chunks: refs}} = ReadOperation.read_file_refs(volume.id, "/parity.txt")
+      assert refs != []
+    end
+
+    test "returns empty chunks for an empty striped file" do
+      # An empty write produces no stripes (stripes: nil), so we also cover the
+      # boundary where the file is an erasure-coded volume but contains zero
+      # bytes of data — should behave exactly like any other empty file.
+      {:ok, volume} = create_erasure_volume()
+      {:ok, _} = WriteOperation.write_file(volume.id, "/empty.bin", "")
+
+      assert {:ok, %{file_size: 0, chunks: []}} =
+               ReadOperation.read_file_refs(volume.id, "/empty.bin")
+    end
+  end
+
+  defp create_erasure_volume(name \\ "refs-erasure") do
+    full_name = "#{name}-#{:rand.uniform(999_999)}"
+
+    VolumeRegistry.create(full_name,
+      durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1}
+    )
+  end
+
+  defp create_erasure_volume_without_compression do
+    full_name = "refs-erasure-raw-#{:rand.uniform(999_999)}"
+
+    VolumeRegistry.create(full_name,
+      durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1},
+      compression: %{algorithm: :none, level: 0, min_size: 0}
+    )
+  end
+
+  defp stripe_data_hashes_for(file_meta) do
+    file_meta.stripes
+    |> Enum.flat_map(fn %{stripe_id: sid} ->
+      {:ok, stripe} = StripeIndex.get(sid)
+      Enum.take(stripe.chunks, stripe.config.data_chunks)
+    end)
   end
 end

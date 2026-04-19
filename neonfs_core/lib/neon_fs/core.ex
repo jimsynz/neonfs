@@ -136,8 +136,11 @@ defmodule NeonFS.Core do
   Erlang distribution. See `NeonFS.Client.ChunkReader` for a ready-made
   consumer.
 
-  Only replicated (chunk-based) volumes are supported for now; erasure-coded
-  files return `{:error, :stripe_refs_unsupported}`.
+  Replicated volumes return refs for each relevant file chunk. Erasure-coded
+  volumes return refs for the data chunks of each overlapping stripe when
+  all data chunks are available; if any data chunk is missing (requiring
+  parity-based reconstruction), `{:error, :stripe_refs_unsupported}` is
+  returned so the caller can fall back to `read_file/3`.
 
   ## Options
 
