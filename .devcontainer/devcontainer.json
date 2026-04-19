@@ -4,6 +4,9 @@
   "privileged": true,
   "workspaceFolder": "/workspaces/neonfs",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/neonfs,type=bind,consistency=cached",
+  "containerEnv": {
+    "ERL_ZFLAGS": "+Q 65536"
+  },
   "features": {
     "ghcr.io/devcontainers/features/github-cli": {},
     "ghcr.io/devcontainers-extra/features/apt-packages:1": {

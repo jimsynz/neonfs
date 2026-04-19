@@ -161,6 +161,24 @@ grep -E 'failure|FAILED|✕' /tmp/neonfs_check.txt
 ```
 Run individual test files first to iterate quickly before running the full suite.
 
+## BEAM Memory in Containers
+
+Docker 25+ containers inherit the kernel's `nr_open` as `RLIMIT_NOFILE`
+(~1e9 on modern kernels). OTP sizes its port table from that, capped at
+`2^27-1` entries, which pre-allocates ~1.6 GB **per BEAM VM** before any
+code runs. Multiplied by peer-cluster integration tests, this will OOM a
+laptop quickly.
+
+We pin the port table to a sensible size in two places:
+- `.devcontainer/devcontainer.json` via `containerEnv.ERL_ZFLAGS`
+- `.forgejo/workflows/ci.yml` via the top-level `env.ERL_ZFLAGS`
+
+Both set `ERL_ZFLAGS="+Q 65536"`, which propagates to every BEAM
+including peer VMs spawned by `:peer.start_link`. Releases already cap
+ports via `rel/vm.args.eex` (`ERL_MAX_PORTS 4096`), so production was
+unaffected. If you see baseline BEAM RSS above ~100 MB with no code
+loaded, check `erlang:system_info(port_limit)` and `ulimit -n`.
+
 ## Version Requirements
 
 From `.tool-versions`:

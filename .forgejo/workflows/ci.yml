@@ -7,6 +7,10 @@ on:
 
 env:
   MIX_ENV: test
+  # Cap the BEAM port table size. Docker 25+ containers inherit an
+  # enormous RLIMIT_NOFILE (~1e9), which OTP uses to size the port table
+  # and allocates ~1.6 GB per VM before user code runs.
+  ERL_ZFLAGS: "+Q 65536"
 
 jobs:
   # ==========================================================================
