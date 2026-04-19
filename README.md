@@ -1,93 +1,136 @@
 # NeonFS
 
-A BEAM-orchestrated distributed filesystem combining Elixir's coordination
-strengths with Rust's performance for storage operations.
+A BEAM-orchestrated distributed filesystem combining Elixir's coordination strengths with Rust's performance for storage operations.
 
-NeonFS provides location-transparent storage where data is accessible from any
-node regardless of where it's physically stored. It offers configurable
-durability, tiered storage, and multiple access methods including FUSE, an
-S3-compatible API, Docker volume plugin, and CIFS/SMB.
+NeonFS provides location-transparent storage where data is accessible from any node regardless of where it's physically stored. It offers configurable durability, tiered storage, compression, encryption, and multiple access methods.
+
+Current version: **v0.1.11**.
 
 ## Design Principles
 
-- **Separation of concerns** — Elixir handles coordination, policy, and APIs;
-  Rust handles I/O, chunking, and cryptography via Rustler NIFs
-- **Content-addressed storage** — immutable, SHA-256-identified chunks enable
-  deduplication, integrity verification, and data recovery
-- **Location transparency** — all data flows through Elixir for a single code
-  path regardless of whether access is local or remote
-- **Per-volume isolation** — each volume has its own supervision tree with
-  independent durability, tiering, compression, and encryption settings
+- **Separation of concerns** — Elixir handles coordination, policy, and APIs; Rust handles I/O, chunking, and cryptography via Rustler NIFs.
+- **Content-addressed storage** — immutable, SHA-256-identified chunks enable deduplication, integrity verification, and data recovery.
+- **Location transparency** — metadata flows through Elixir for a single code path, while bulk chunk data moves over a dedicated TLS data plane.
+- **Per-volume isolation** — each volume has its own supervision tree with independent durability, tiering, compression, encryption, and ACL settings.
+- **No whole-file buffering** — read and write paths process data as streams of chunks; RAM usage is bounded by chunk size, not file size.
 
 ## Architecture
 
 ```
-                  ┌──────────────────────────────────────┐
-                  │       Elixir Control Plane            │
-                  │  Ra consensus · policy · APIs         │
-                  │           │            │              │
-                  │    ┌──────┴──┐   ┌─────┴───┐         │
-                  │    │neonfs_  │   │neonfs_  │         │
-                  │    │blob NIF │   │fuse NIF │         │
-                  │    └─────────┘   └─────────┘         │
-                  └──────────────────────────────────────┘
-                            │                │
-                     Chunk storage      FUSE mounts
+    ┌────────────────────────────────────────────────────────────┐
+    │                 Elixir control plane (neonfs_core)         │
+    │         Ra consensus · quorum metadata · policy · ACLs     │
+    │                │              │              │             │
+    │         neonfs_blob NIF   key mgmt    cluster CA (x509)    │
+    └────────────────────────────────────────────────────────────┘
+         ▲                                 ▲
+         │ Erlang distribution             │ TLS data plane
+         │ (metadata RPCs)                 │ (bulk chunks)
+         │                                 │
+    ┌────┴─────────────────────────────────┴─────────────────────┐
+    │                    neonfs_client (shared)                  │
+    │      Router · Discovery · ChunkReader · Transport pool     │
+    └────────────────────────────────────────────────────────────┘
+        │            │            │            │
+  ┌─────┴───┐  ┌─────┴───┐  ┌─────┴───┐  ┌─────┴───┐
+  │ FUSE    │  │ NFSv3 + │  │ S3-     │  │ WebDAV  │
+  │ mount   │  │ NLM v4  │  │ compat  │  │ + locks │
+  └─────────┘  └─────────┘  └─────────┘  └─────────┘
 ```
+
+Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They talk to core nodes via Erlang distribution for metadata and fetch chunk data directly over a dedicated TLS data plane, keeping bulk traffic off the BEAM distribution channel.
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| [`neonfs_client`](neonfs_client/) | Shared types and service discovery client library |
-| [`neonfs_core`](neonfs_core/) | Storage engine, metadata, and cluster coordination |
+| [`neonfs_client`](neonfs_client/) | Shared types, service discovery, `Router`, `ChunkReader`, transport pooling |
+| [`neonfs_core`](neonfs_core/) | Storage engine, metadata, Ra consensus, cluster CA, policy |
 | [`neonfs_fuse`](neonfs_fuse/) | FUSE filesystem interface |
-| [`neonfs_integration`](neonfs_integration/) | Multi-node integration test suite |
-| [`neonfs-cli`](neonfs-cli/) | Command-line interface for cluster management |
+| [`neonfs_nfs`](neonfs_nfs/) | NFSv3 server with NLM v4 advisory locking |
+| [`neonfs_s3`](neonfs_s3/) | S3-compatible HTTP server |
+| [`neonfs_webdav`](neonfs_webdav/) | WebDAV server with collection locking and dead properties |
+| [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle of core + all interface packages |
+| [`neonfs_integration`](neonfs_integration/) | Peer-based multi-node integration test suite |
+| [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster management |
+| [`s3_server`](s3_server/) | Standalone S3-compatible HTTP server (pluggable backend, hex-releasable) |
+| [`webdav_server`](webdav_server/) | Standalone WebDAV server (pluggable backend, hex-releasable) |
 
-### Dependency Graph
+### Dependency graph
 
 ```
 neonfs_client  ← neonfs_core
 neonfs_client  ← neonfs_fuse
-neonfs_core    ← neonfs_integration
-neonfs_fuse    ← neonfs_integration
+neonfs_client  ← neonfs_nfs
+neonfs_client  ← neonfs_s3     ← s3_server
+neonfs_client  ← neonfs_webdav ← webdav_server
+neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_s3, neonfs_webdav  ← neonfs_omnibus
+all of the above                                                ← neonfs_integration
 ```
 
-`neonfs_fuse` has no dependency on `neonfs_core`. All communication between FUSE
-and core nodes happens via Erlang distribution, routed through `NeonFS.Client.Router`.
+Interface packages have **no dependency** on `neonfs_core`. All communication with core nodes goes through `NeonFS.Client.Router`.
 
 ## Features
 
-- **Flexible durability** — choose between replication (factor N) for fast access
-  or erasure coding (e.g. 10+4) for storage efficiency
-- **Storage tiering** — hot (NVMe), warm (SATA SSD), and cold (HDD) tiers with
-  automatic promotion/demotion based on access patterns
-- **Compression** — per-volume Zstandard compression with configurable levels
-- **Encryption** — server-side (AES-256-GCM) or envelope encryption with
-  per-volume and per-chunk key management
-- **Cluster CA** — self-signed ECDSA P-256 certificate authority for TLS on the
-  data transfer plane
-- **Event notification** — push-based cache invalidation and event dispatch
-- **Multiple access methods** — FUSE mounts, S3-compatible API, Docker/Podman
-  volumes, Kubernetes CSI, CIFS/SMB
+### Storage
+- **Flexible durability** — replication (factor N) or Reed–Solomon erasure coding (e.g. 10+4) per volume.
+- **Storage tiering** — hot (NVMe), warm (SATA SSD), and cold (HDD) tiers with access-based promotion/demotion and HDD spin-down.
+- **Content-addressed chunks** — FastCDC chunking, SHA-256 addressing, automatic deduplication.
+- **Compression** — per-volume Zstandard with configurable levels.
+- **Encryption** — server-side AES-256-GCM or envelope encryption, per-volume key management with background rotation.
+
+### Cluster
+- **Ra consensus** — metadata and service registry backed by Raft.
+- **Leaderless quorum metadata** — chunk, file, and stripe indexes use R+W>N quorum reads/writes.
+- **HLC-based conflict resolution** — hybrid logical clocks for ordering across nodes.
+- **Self-signed cluster CA** — ECDSA P-256 via pure-Elixir `x509`, mTLS on the data plane, auto-renewing node certificates.
+- **TLS Erlang distribution** — all BEAM distribution traffic encrypted.
+- **Event notification** — `:pg`-based cache invalidation for interface nodes.
+- **Distributed lock manager** — quorum-backed DLM shared across all interface protocols.
+
+### Access methods
+
+Shipped:
+
+- FUSE mounts
+- NFSv3 + NLM v4 advisory locking
+- S3-compatible HTTP API (virtual-hosted-style, RFC 7232 conditional requests, multipart uploads)
+- WebDAV with collection locking and dead property storage
+
+Tracked for future work:
+
+- Docker/Podman VolumeDriver plugin ([#243](https://harton.dev/project-neon/neonfs/issues/243))
+- Kubernetes CSI driver ([#244](https://harton.dev/project-neon/neonfs/issues/244))
+- CIFS/SMB via Samba VFS ([#116](https://harton.dev/project-neon/neonfs/issues/116))
+- containerd content store ([#196](https://harton.dev/project-neon/neonfs/issues/196))
+
+### Operations
+
+- Prometheus metrics exporter with alerting rules.
+- HTTP health endpoint for load balancers and orchestrators.
+- Cluster-wide CLI queries (`drive list`, `volume list`, `gc status`, `scrub status`, etc.).
+- Debian packages (amd64 + arm64) and multi-arch container images.
+- systemd integration with `sd_notify` readiness.
 
 ## Prerequisites
 
-- Elixir 1.19+ (OTP 28)
-- Rust 1.93+
-- FUSE (libfuse3-dev on Debian/Ubuntu)
+- Elixir 1.19.5 (OTP 28)
+- Erlang 28.3.1
+- Rust 1.93.0
+- FUSE (`libfuse3-dev` on Debian/Ubuntu)
 
-## Getting Started
+All managed via `.tool-versions` — `asdf install` or `mise install` will fetch them.
 
-Build all packages from the repository root:
+## Getting started
+
+Build everything from the repository root:
 
 ```bash
 mix deps.get
 mix compile
 ```
 
-Run the test suite:
+Run the full check suite (formatting, Credo, Dialyzer, Clippy, tests) across every subproject:
 
 ```bash
 mix check --no-retry
@@ -99,21 +142,30 @@ Run tests for a specific package:
 cd neonfs_core && mix test
 ```
 
-## Container Builds
+## Container builds
 
-Build container images for local testing:
+Targets live in `containers/bake.hcl`:
 
 ```bash
-PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse cli
+PLATFORMS='linux/amd64' docker buildx bake -f containers/bake.hcl --load \
+  base core fuse nfs s3 webdav omnibus cli
 ```
 
-## Multi-Node Deployment
+`--load` is required for local testing; it loads images into the local Docker daemon rather than pushing to a registry.
 
-NeonFS core and FUSE nodes run as separate Erlang nodes communicating via
-distribution. Bootstrap a cluster by initialising the first core node, then
-join additional nodes using single-use invite tokens.
+## Deployment
 
-See the [wiki](https://harton.dev/project-neon/neonfs/wiki) for the full specification, patterns, and historical progress, and the [issue tracker](https://harton.dev/project-neon/neonfs/issues) for active work.
+Interface nodes (FUSE, NFS, S3, WebDAV) run as separate Erlang nodes and connect to core nodes via Erlang distribution. For small deployments, `neonfs_omnibus` bundles core + all interfaces into a single release.
+
+Bootstrap a cluster by initialising the first core node, then join additional nodes using single-use invite tokens that carry a CSR for TLS certificate issuance.
+
+See [`docs/deployment.md`](docs/deployment.md) and [`docs/orchestration.md`](docs/orchestration.md) for examples. Full operator and user guides are in progress — see [the documentation issues](https://harton.dev/project-neon/neonfs/issues?q=documentation&type=issues&state=open).
+
+## Project resources
+
+- **[Wiki](https://harton.dev/project-neon/neonfs/wiki)** — full specification, architecture, codebase patterns, historical progress.
+- **[Issues](https://harton.dev/project-neon/neonfs/issues)** — active work, feature requests, bug reports.
+- **[Changelog](CHANGELOG.md)** — release notes (v0.1.0 onwards).
 
 ## Licence
 
