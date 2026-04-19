@@ -438,7 +438,8 @@ defmodule NeonFS.FUSE.Handler do
     new_name = params["new_name"]
 
     with {:ok, {volume_id, old_parent_path}} <- resolve_inode(old_parent, state),
-         {:ok, {^volume_id, new_parent_path}} <- resolve_inode(new_parent, state),
+         {:ok, {new_volume_id, new_parent_path}} <- resolve_inode(new_parent, state),
+         :ok <- check_same_volume(volume_id, new_volume_id),
          :ok <- check_file_permission(volume_id, old_parent_path, :write, state),
          :ok <- check_file_permission(volume_id, new_parent_path, :write, state),
          old_path <- build_child_path(old_parent_path, old_name),
@@ -450,6 +451,9 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, _new_inode} <- InodeTable.allocate_inode(volume_id, new_path) do
       {"ok", %{}}
     else
+      {:error, :cross_volume} ->
+        {"error", %{"errno" => errno(:exdev)}}
+
       {:error, :forbidden} ->
         {"error", %{"errno" => errno(:eacces)}}
 
@@ -683,6 +687,9 @@ defmodule NeonFS.FUSE.Handler do
   # Build child path from parent path and name
   defp build_child_path(parent, name), do: Path.join(parent, name)
 
+  defp check_same_volume(vol, vol), do: :ok
+  defp check_same_volume(_old_vol, _new_vol), do: {:error, :cross_volume}
+
   # Apply setattr, routing to truncate when size is being reduced
   defp apply_setattr(file, params) do
     new_size = params["size"]
@@ -840,6 +847,7 @@ defmodule NeonFS.FUSE.Handler do
   defp errno(:enoent), do: 2
   defp errno(:eio), do: 5
   defp errno(:eacces), do: 13
+  defp errno(:exdev), do: 18
   defp errno(:enotempty), do: 39
   defp errno(:enosys), do: 38
   defp errno(_), do: 5

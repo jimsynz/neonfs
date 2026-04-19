@@ -646,22 +646,16 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert copy_meta.metadata["custom:priority"] == "high"
     end
 
-    test "preserves dead properties on copy across volumes" do
+    test "rejects cross-volume copy with bad_gateway" do
       MockCore.create_volume("vol-a")
       MockCore.create_volume("vol-b")
       MockCore.write_file("vol-a", "/source.txt", "content")
       {:ok, resource} = Backend.resolve(@auth, ["vol-a", "source.txt"])
 
-      :ok =
-        Backend.set_properties(@auth, resource, [{:set, {"urn:test:", "tag"}, "cross-vol"}])
+      assert {:error, %WebdavServer.Error{code: :bad_gateway}} =
+               Backend.copy(@auth, resource, ["vol-b", "source.txt"], true)
 
-      {:ok, updated_resource} = Backend.resolve(@auth, ["vol-a", "source.txt"])
-
-      assert {:ok, :created} =
-               Backend.copy(@auth, updated_resource, ["vol-b", "source.txt"], true)
-
-      {:ok, copy_meta} = MockCore.get_file_meta("vol-b", "/source.txt")
-      assert copy_meta.metadata["urn:test:tag"] == "cross-vol"
+      assert {:error, :not_found} = MockCore.read_file("vol-b", "/source.txt")
     end
   end
 
@@ -686,52 +680,17 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert {:ok, :no_content} = Backend.move(@auth, resource, ["docs", "dst.txt"], true)
     end
 
-    test "moves between volumes via copy+delete" do
+    test "rejects cross-volume move with bad_gateway" do
       MockCore.create_volume("vol-a")
       MockCore.create_volume("vol-b")
       MockCore.write_file("vol-a", "/file.txt", "cross-volume")
       {:ok, resource} = Backend.resolve(@auth, ["vol-a", "file.txt"])
 
-      assert {:ok, :created} = Backend.move(@auth, resource, ["vol-b", "file.txt"], true)
+      assert {:error, %WebdavServer.Error{code: :bad_gateway}} =
+               Backend.move(@auth, resource, ["vol-b", "file.txt"], true)
 
-      assert {:error, :not_found} = MockCore.read_file("vol-a", "/file.txt")
-      assert {:ok, "cross-volume"} = MockCore.read_file("vol-b", "/file.txt")
-    end
-
-    test "preserves content type on cross-volume move" do
-      MockCore.create_volume("vol-a")
-      MockCore.create_volume("vol-b")
-      MockCore.write_file("vol-a", "/data.bin", "csv,data", content_type: "text/csv")
-      {:ok, resource} = Backend.resolve(@auth, ["vol-a", "data.bin"])
-
-      assert {:ok, :created} = Backend.move(@auth, resource, ["vol-b", "data.bin"], true)
-
-      {:ok, moved_meta} = MockCore.get_file_meta("vol-b", "/data.bin")
-      assert moved_meta.content_type == "text/csv"
-    end
-
-    test "preserves dead properties on cross-volume move" do
-      MockCore.create_volume("vol-a")
-      MockCore.create_volume("vol-b")
-      MockCore.write_file("vol-a", "/props.txt", "content")
-      {:ok, resource} = Backend.resolve(@auth, ["vol-a", "props.txt"])
-
-      :ok =
-        Backend.set_properties(@auth, resource, [
-          {:set, {"custom:", "author"}, "James"},
-          {:set, {"urn:ns:", "rating"}, "5"}
-        ])
-
-      {:ok, updated_resource} = Backend.resolve(@auth, ["vol-a", "props.txt"])
-
-      assert {:ok, :created} =
-               Backend.move(@auth, updated_resource, ["vol-b", "props.txt"], true)
-
-      assert {:error, :not_found} = MockCore.read_file("vol-a", "/props.txt")
-
-      {:ok, moved_meta} = MockCore.get_file_meta("vol-b", "/props.txt")
-      assert moved_meta.metadata["custom:author"] == "James"
-      assert moved_meta.metadata["urn:ns:rating"] == "5"
+      assert {:ok, "cross-volume"} = MockCore.read_file("vol-a", "/file.txt")
+      assert {:error, :not_found} = MockCore.read_file("vol-b", "/file.txt")
     end
   end
 

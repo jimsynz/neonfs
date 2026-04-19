@@ -434,11 +434,12 @@ defmodule NeonFS.NFS.Handler do
     from_vol_bytes = params["from_parent_volume_id"]
     from_name = params["from_name"]
     to_parent_inode = params["to_parent_inode"]
-    _to_vol_bytes = params["to_parent_volume_id"]
+    to_vol_bytes = params["to_parent_volume_id"]
     to_name = params["to_name"]
 
     result =
-      with {:ok, vol} <- resolve_volume(from_vol_bytes, state),
+      with :ok <- check_same_volume(from_vol_bytes, to_vol_bytes),
+           {:ok, vol} <- resolve_volume(from_vol_bytes, state),
            {:ok, from_parent} <- inode_path(from_parent_inode),
            {:ok, to_parent} <- inode_path(to_parent_inode),
            from_path <- Path.join(from_parent, from_name),
@@ -847,6 +848,7 @@ defmodule NeonFS.NFS.Handler do
   defp result_to_reply({:error, %{class: :forbidden}}), do: {:error, errno(:eacces)}
   defp result_to_reply({:error, :stale}), do: {:error, errno(:estale)}
   defp result_to_reply({:error, :exists}), do: {:error, errno(:eexist)}
+  defp result_to_reply({:error, :cross_volume}), do: {:error, errno(:exdev)}
 
   defp result_to_reply({:error, reason}) do
     Logger.warning("Operation failed", reason: inspect(reason))
@@ -854,6 +856,9 @@ defmodule NeonFS.NFS.Handler do
   end
 
   ## Helpers
+
+  defp check_same_volume(vol, vol), do: :ok
+  defp check_same_volume(_from_vol, _to_vol), do: {:error, :cross_volume}
 
   defp inode_path(inode) do
     case InodeTable.get_path(inode) do
@@ -977,5 +982,6 @@ defmodule NeonFS.NFS.Handler do
   defp errno(:enosys), do: 38
   defp errno(:ejukebox), do: 10_008
   defp errno(:estale), do: 70
+  defp errno(:exdev), do: 18
   defp errno(_), do: 5
 end

@@ -226,16 +226,21 @@ defmodule NeonFS.Integration.S3Test do
       :ok
     end
 
-    test "copies object between buckets", %{config: config} do
-      result =
-        ExAws.S3.put_object_copy("s3t-copy-dst", "copied.txt", "s3t-copy-src", "original.txt")
-        |> request!(config)
+    test "rejects cross-bucket copy with NotImplemented", %{config: config} do
+      assert {:error, {:http_error, 501, _body}} =
+               ExAws.S3.put_object_copy(
+                 "s3t-copy-dst",
+                 "copied.txt",
+                 "s3t-copy-src",
+                 "original.txt"
+               )
+               |> ExAws.request(config)
 
-      assert result.status_code == 200
+      # Destination is not created
+      assert {:error, {:http_error, 404, _}} =
+               ExAws.S3.get_object("s3t-copy-dst", "copied.txt") |> ExAws.request(config)
 
-      get_result = ExAws.S3.get_object("s3t-copy-dst", "copied.txt") |> request!(config)
-      assert get_result.body == "original data"
-
+      # Source is untouched
       source = ExAws.S3.get_object("s3t-copy-src", "original.txt") |> request!(config)
       assert source.body == "original data"
     end

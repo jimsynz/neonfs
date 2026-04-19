@@ -178,6 +178,7 @@ pub fn errno_to_nfsstat(errno: i32) -> nfsstat3 {
         6 => nfsstat3::NFS3ERR_NXIO,
         13 => nfsstat3::NFS3ERR_ACCES,
         17 => nfsstat3::NFS3ERR_EXIST,
+        18 => nfsstat3::NFS3ERR_XDEV,
         20 => nfsstat3::NFS3ERR_NOTDIR,
         21 => nfsstat3::NFS3ERR_ISDIR,
         22 => nfsstat3::NFS3ERR_INVAL,

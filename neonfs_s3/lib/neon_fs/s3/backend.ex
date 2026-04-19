@@ -199,13 +199,21 @@ defmodule NeonFS.S3.Backend do
   end
 
   @impl true
-  def copy_object(_ctx, dest_bucket, dest_key, source_bucket, source_key) do
-    with :ok <- ensure_bucket_exists(source_bucket),
-         :ok <- ensure_bucket_exists(dest_bucket),
-         {:ok, content} <- read_object_content(source_bucket, source_key),
-         {:ok, source_meta} <- fetch_object_meta(source_bucket, source_key),
+  def copy_object(_ctx, dest_bucket, _dest_key, source_bucket, _source_key)
+      when dest_bucket != source_bucket do
+    {:error,
+     %S3Server.Error{
+       code: :not_implemented,
+       message: "Cross-bucket CopyObject is not supported"
+     }}
+  end
+
+  def copy_object(_ctx, bucket, dest_key, bucket, source_key) do
+    with :ok <- ensure_bucket_exists(bucket),
+         {:ok, content} <- read_object_content(bucket, source_key),
+         {:ok, source_meta} <- fetch_object_meta(bucket, source_key),
          write_opts = content_type_write_opts(source_meta),
-         {:ok, dest_meta} <- write_object_content(dest_bucket, dest_key, content, write_opts) do
+         {:ok, dest_meta} <- write_object_content(bucket, dest_key, content, write_opts) do
       {:ok,
        %S3Server.CopyResult{
          etag: compute_etag_from_meta(dest_meta),
