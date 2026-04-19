@@ -1,145 +1,193 @@
 # Ralph Agent Instructions
 
-You are an autonomous coding agent working on a software project.
+You are an autonomous coding agent working on NeonFS. Each iteration picks one issue, implements it, and opens a pull request.
 
 ## Your Task
 
-1. Read the task index at `tasks/README.md`.
-2. Read the progress log at `tasks/progress.md` (check Codebase Patterns section first).
-4. Pick the **highest priority** task where the Status is "Not Started".
-5. Update the task Status to "In Progress".
-6. Implement that single task.
-7. Run quality checks (e.g., `mix check` - use whatever your project requires).
-8. Update `AGENTS.md` files if you discover reusable patterns (see below).
-9. If checks pass;
-  1. Update the task Status to "Complete".
-  2. Append your progress to `progress.md`.
-  3. Commit ALL changes with message: `feat: [Task ID] - [Task Name]`.
+1. Read the [Codebase Patterns wiki page](https://harton.dev/project-neon/neonfs/wiki/Codebase-Patterns) — this is institutional memory. Skim the whole thing; apply what's relevant.
+2. List open issues: `fj issue search --state open`.
+3. Pick **one** issue to work on (see selection rules below).
+4. Self-assign the issue and create a feature branch from `main`.
+5. Implement the issue. One issue per iteration — don't scope-creep into adjacent work.
+6. Run quality checks from the repo root: `mix check --no-retry`. All subprojects must pass.
+7. If you discovered a reusable pattern, update the Codebase Patterns wiki page (see below).
+8. Commit, push, and open a pull request that closes the issue.
 
-## Progress Report Format
+## Issue Selection
 
-APPEND to `progress.md` (never replace, always append):
-```
-## [Date/Time] - [Task ID]
-- What was implemented
-- Files changed
-- **Learnings for future iterations:**
-  - Patterns discovered (e.g., "this codebase uses X for Y")
-  - Gotchas encountered (e.g., "don't forget to update Z when changing W")
-  - Useful context (e.g., "the evaluation panel is in component X")
----
-```
+Skip issues that are:
+- Labelled `blocked`, `wontfix`, `duplicate`, or `invalid`.
+- Marked as blocked or deferred in the issue body.
+- Waiting on an upstream issue that is still open (look for `Depends on #N` in the body).
+- Already assigned to someone else.
 
-The learnings section is critical - it helps future iterations avoid repeating mistakes and understand the codebase better.
+Among the remaining issues, pick the **oldest** one by number unless the issue body, a label, or a milestone indicates higher priority. If you have genuine doubt about which to pick, ask rather than guess.
 
-## Consolidate Patterns
+To inspect an issue: `fj issue view <N>`.
 
-If you discover a **reusable pattern** that future iterations should know, add it to the `## Codebase Patterns` section at the TOP of `progress.md` (create it if it doesn't exist). This section should consolidate the most important learnings:
+## Starting Work
 
-```
-## Codebase Patterns
-- Example: Use `sql<number>` template for aggregations
-- Example: Always use `IF NOT EXISTS` for migrations
-- Example: Export types from actions.ts for UI components
+Once you've picked issue `#N`:
+
+```bash
+# Self-assign via API (fj doesn't do assignment well).
+FJ_TOKEN=$(jq -r '.hosts["harton.dev"].token' ~/.local/share/forgejo-cli/keys.json)
+ME=$(curl -s -H "Authorization: token $FJ_TOKEN" https://harton.dev/api/v1/user | jq -r .login)
+curl -s -X POST -H "Authorization: token $FJ_TOKEN" -H "Content-Type: application/json" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/issues/$N/assignees" \
+  -d "{\"assignees\":[\"$ME\"]}"
+
+# Create a branch. Use type/N-short-slug, matching the commit type you intend to use.
+git checkout -b feat/N-short-slug main     # or fix/ improve/ docs/ chore/ etc.
 ```
 
-Only add patterns that are **general and reusable**, not story-specific details.
+Branch naming follows the repo convention: `<type>/<N>-<short-slug>` where `<type>` is the conventional-commit type. Look at existing branches in `git branch -a` for examples.
 
-## Update AGENTS.md Files
+## Conventional Commits (REQUIRED)
 
-Before committing, check if any edited files have learnings worth preserving in nearby `AGENTS.md` files:
+**Every commit message and every PR title must follow [Conventional Commits](https://www.conventionalcommits.org/).** This is non-negotiable — `git_ops` uses commit messages to generate `CHANGELOG.md` and bump versions, so non-conforming commits break the release pipeline.
 
-1. **Identify directories with edited files** - Look at which directories you modified.
-2. **Check for existing AGENTS.md** - Look for `AGENTS.md` in those directories or parent directories.
-3. **Add valuable learnings** - If you discovered something future developers/agents should know:
-   - API patterns or conventions specific to that module.
-   - Gotchas or non-obvious requirements.
-   - Dependencies between files.
-   - Testing approaches for that area.
-   - Configuration or environment requirements.
+Format:
 
-**Examples of good AGENTS.md additions:**
-- "When modifying X, also update Y to keep them in sync"
-- "This module uses pattern Z for all API calls"
-- "Tests require the dev server running on PORT 3000"
-- "Field names must match the template exactly"
+```
+<type>(<optional scope>): <lowercase description>
+```
 
-**Do NOT add:**
-- Story-specific implementation details
-- Temporary debugging notes
-- Information already in `progress.md`
+Types used in this repo (match one exactly):
 
-Only update AGENTS.md if you have **genuinely reusable knowledge** that would help future work in that directory.
+- `feat` — new user-facing feature. **Prefer `improvement` over `feat` for enhancements to existing features.**
+- `improvement` — enhancement to an existing feature (most common type in this repo).
+- `fix` — bug fix.
+- `docs` — documentation only.
+- `chore` — tooling, deps, CI, packaging, internal cleanup.
+- `test` — test-only changes.
+- `refactor` — code restructure with no behavioural change.
 
-## Build vs Buy: Check for Existing Packages
+Breaking changes append `!` before the colon: `improvement(core)!: ...`.
 
-Before implementing non-trivial functionality from scratch, **check whether an existing Elixir or Rust package already solves the problem**. Search hex.pm (Elixir) and crates.io (Rust) for relevant libraries.
+Scope is optional but recommended: it names the affected package, subsystem, or module — `core`, `client`, `fuse`, `nfs`, `s3`, `webdav`, `cli`, `deps`, `ci`, `packaging`, etc. For multi-area changes use a comma list: `improvement(webdav,s3,nfs): ...`.
 
-When evaluating a package, consider:
-1. **Does it actually cover the key requirements?** Match the task's acceptance criteria against the library's features. Pay attention to the specific kind of limits, eviction strategies, data structures, etc. the task requires — not just the general category.
-2. **What's the abstraction mismatch cost?** If you'd need to reimplement most of the logic on top of the library anyway, it's not saving time.
-3. **Is it actively maintained?** Check release dates, open issues, and download counts on hex.pm / crates.io.
-4. **Does it add unnecessary complexity?** A 150-line focused module is often better than a dependency that brings features you don't need.
+Examples:
 
-**Use a package** when it genuinely covers the requirements and saves significant implementation effort.
-**Build it custom** when the requirements are specific enough that you'd be fighting the library's abstractions.
+```
+improvement(core): add distributed lock manager
+fix(webdav): preserve dead properties across COPY
+improvement(s3,client): virtual-hosted-style routing
+chore(deps): update rust crate clap to v4.6.1
+docs: point AGENTS.md to wiki
+fix(deps)!: update Erlang to v28.3.1 (breaks OTP 27 compatibility)
+```
 
-If you find a promising package, briefly note the comparison (what it covers, what it doesn't) in your progress report so future iterations don't re-evaluate the same options.
+Rules:
+
+- Lowercase description (proper nouns and code identifiers keep their casing).
+- Backtick code identifiers: `` fix(fuse): handle `ENOSPC` in write path ``.
+- Include the PR number suffix `(#N)` only on squash-merge commits — `git_ops` adds it automatically; don't type it yourself.
+- Do NOT include `Co-Authored-By` or `Generated by` footers.
+- Do NOT amend previous commits unless explicitly asked.
+
+**PR titles use the same format** — they become the squash-merge commit subject.
+
+## Commit and PR
+
+Push the branch and open a PR via the Forgejo API (the `fj` CLI's PR creation is limited):
+
+```bash
+curl -s -X POST -H "Authorization: token $FJ_TOKEN" -H "Content-Type: application/json" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/pulls" \
+  -d "$(jq -n --arg title "<conventional-commit-style title>" \
+        --arg body "Closes #<N>\n\n<short summary of what changed and why>" \
+        --arg head "<branch>" \
+        '{title: $title, body: $body, head: $head, base: "main"}')"
+```
+
+The PR body **must** include `Closes #<N>` so Forgejo auto-closes the issue on merge.
+
+Keep PRs focused — one issue, one PR. If mid-implementation you discover the issue needs to be split or changed, comment on the issue rather than silently widening scope.
 
 ## Quality Requirements
 
-- **Before every commit**, run `mix check --no-retry` from the **repository root**. This runs checks across **all subprojects** (neonfs_client, neonfs_core, neonfs_fuse, neonfs_integration). The build MUST pass in **every subproject** before committing — not just the one you changed. Changes to shared code (e.g. neonfs_client types, state machine versions, new supervisor children) frequently break downstream packages.
+- **Before every commit**, run `mix check --no-retry` from the repository root. This runs checks across all subprojects. The build MUST pass in every subproject before committing — changes to shared code (e.g. `neonfs_client` types, state machine versions, new supervisor children) frequently break downstream packages.
 - Do NOT commit broken code.
 - Keep changes focused and minimal.
-- Follow existing code patterns.
-- When adding new components to the supervision tree, ensure **all test files** that start related services are updated to also start the new component. Check `test/support/test_case.ex` helpers and any test setup blocks that manually start subsystems.
-- **If you are unsure how to implement something, ask me.** Do not guess or make assumptions about architecture, API design, or behaviour — check with me first.
+- Follow existing code patterns — look at recent PRs in the same area.
+- When adding new components to the supervision tree, ensure **all test files** that start related services are updated to also start the new component. Check `test/support/test_case.ex` helpers and any test setup blocks.
+- **If you are unsure how to implement something, ask.** Do not guess or make assumptions about architecture, API design, or behaviour.
 
-## Phase Completion Requirements
+## Updating the Codebase Patterns Wiki Page
 
-**CRITICAL: A phase is NOT complete until full integration testing passes.**
+If you discovered a pattern, gotcha, or convention that future iterations should know, update the wiki's Codebase Patterns page. The wiki is a git repo:
 
-When completing the final task of an implementation phase:
+```bash
+cd /tmp && git clone https://harton.dev/project-neon/neonfs.wiki.git neonfs-wiki
+cd neonfs-wiki
+# Edit Codebase-Patterns.md — add your finding in the relevant section or create a new section.
+git -c commit.gpgsign=false commit -am "docs: add <one-line description> pattern"
+git push origin main
+cd /workspaces/neonfs && rm -rf /tmp/neonfs-wiki
+```
 
-1. **Run the full acceptance test suite**: `./scripts/acceptance-test-containers.sh`
-2. **ALL tests must pass** - unit tests alone are NOT sufficient
-3. **Verify all services communicate correctly in containers**:
-   - CLI → Core (Erlang distribution)
-   - Core → FUSE (RPC)
-   - Multi-node Ra cluster (if Phase 2+)
-4. **Document any integration fixes** in progress.md
+Only add patterns that are **genuinely reusable** — not PR-specific implementation details. Good examples:
 
-Do NOT mark a phase as complete if acceptance tests fail. Integration issues (missing env vars, nodes not connecting, RPC failures) must be resolved before proceeding.
+- "GenServer.cast raises if the process doesn't exist — wrap with `rescue`/`catch :exit`."
+- "Rustler encodes `Result<(), E>` as `{:ok, {}}` — adjust Elixir specs accordingly."
+- "Don't use `|| []` fallback on struct fields with defaults — Dialyzer flags the nil-check as impossible."
 
-Common issues to check:
-- `NEONFS_FUSE_NODE` / `NEONFS_CORE_NODE` environment variables
-- `RELEASE_COOKIE` matching across all nodes
-- `Node.connect/1` called on startup for service discovery
-- `Node.list()` showing expected peer nodes
+Do NOT add:
 
-## Browser Testing (Required for Frontend Stories)
+- Specific files or line numbers you changed.
+- Temporary debugging notes.
+- Anything that's already covered by the existing patterns.
 
-For any story that changes UI, you MUST verify it works in the browser:
+## Nearby AGENTS.md Files
 
-1. Start the `playwright` MCP
-2. Navigate to the relevant page
-3. Verify the UI changes work as expected
-4. Take a screenshot if helpful for the progress log
+When editing code, check whether a nearby `AGENTS.md` file (in the same directory or a parent directory) should be updated with module-specific knowledge: API patterns, gotchas, file-level dependencies, test setup requirements. These are more local than the wiki Codebase Patterns page.
 
-A frontend story is NOT complete until browser verification passes.
+Do NOT update `AGENTS.md` for PR-specific details. Only for durable, module-local knowledge.
+
+## Build vs Buy: Check for Existing Packages
+
+Before implementing non-trivial functionality from scratch, check whether an existing Elixir or Rust package already solves the problem. Search hex.pm (Elixir) and crates.io (Rust) for relevant libraries.
+
+When evaluating a package:
+
+1. **Does it actually cover the key requirements?** Match the issue's acceptance criteria against the library's features. Pay attention to the specific kind of limits, eviction strategies, data structures, etc. the issue requires — not just the general category.
+2. **What's the abstraction mismatch cost?** If you'd need to reimplement most of the logic on top of the library anyway, it's not saving time.
+3. **Is it actively maintained?** Check release dates, open issues, and download counts.
+4. **Does it add unnecessary complexity?** A 150-line focused module is often better than a dependency that brings features you don't need.
+
+Use a package when it genuinely covers the requirements. Build custom when the requirements are specific enough that you'd be fighting the library's abstractions.
+
+If you find a promising package, note the comparison in the PR description so reviewers don't re-evaluate the same options.
+
+## Browser Testing (Frontend Changes)
+
+For any issue that changes UI, you MUST verify it works in the browser:
+
+1. Start the `playwright` MCP.
+2. Navigate to the relevant page.
+3. Verify the UI changes work as expected.
+4. Attach a screenshot to the PR if it helps the reviewer.
+
+A frontend issue is NOT complete until browser verification passes.
 
 ## Stop Condition
 
-After completing a task, check if ALL tasks have Status "Complete" or "Blocked".
+After opening your PR, check the issue list:
 
-If ALL stories are complete and passing, reply with:
+```bash
+fj issue search --state open
+```
+
+If every remaining open issue is blocked, assigned to someone else, or depends on an open issue, reply with:
+
 <promise>COMPLETE</promise>
 
-If there are still stories with Status "Not Started" or "In Progress", end your response normally (another iteration will pick up the next story).
+Otherwise end your response normally — the next iteration will pick up another issue.
 
-## Important
+## Reference
 
-- Work on ONE story per iteration
-- Commit frequently
-- Keep CI green
-- Read the Codebase Patterns section in `progress.md` before starting
+- Main repo: https://harton.dev/project-neon/neonfs
+- Wiki: https://harton.dev/project-neon/neonfs/wiki
+- Issues: https://harton.dev/project-neon/neonfs/issues
+- CI status and API details: see `CLAUDE.md` / `AGENTS.md` in the repo root.
