@@ -113,6 +113,80 @@ neonfs_fuse and neonfs_nfs have **no dependency** on neonfs_core. All communicat
 - Per-volume supervision trees for isolation
 - Async Rust NIFs for backpressure via BEAM scheduler
 
+## No Whole-File Buffering (CRITICAL)
+
+**Never load an entire file's contents into memory.** This is a recurring bug in this codebase and every instance is a correctness defect, not a performance nit.
+
+A single volume can hold files much larger than available RAM. Buffering a whole file — as a binary, iolist, `Vec<u8>`, or any other "one value holding all the bytes" — will OOM the node under realistic workloads. It has already happened multiple times.
+
+### The rule
+
+When reading or writing file contents, process data as a stream of chunks with a bounded working set. The working set may be a single chunk, a small sliding window, or a fixed-size buffer — it must NOT scale with file size.
+
+This applies everywhere: core read/write paths, interface packages (FUSE, NFS, S3, WebDAV, Docker, CSI), content-type detection, checksums, compression, encryption, backup/restore, copy/move, and any new feature that touches file bytes.
+
+### Concrete guidance
+
+Reads:
+
+- Use `NeonFS.Core.read_file_stream/3` — returns a `Stream` that pulls chunks lazily. This is the canonical API.
+- For byte-range reads, pass `:offset` and `:length` and consume the stream; don't `Enum.into(<<>>)` the whole thing.
+- On the interface side, use `NeonFS.Client.ChunkReader` for data-plane reads. If a callsite calls `read_file/2,3` and buffers the result, that's a bug — convert it to a stream.
+
+Writes:
+
+- Accept an `Enumerable` / `Stream` input, not a binary blob (streaming write API tracked in #195).
+- If you must stage a partial chunk to align to the volume's chunk boundary, the staging buffer is bounded by **chunk size** — never by file size.
+- Multipart / chunked HTTP uploads (S3 multipart, WebDAV PUT) must feed chunks through as they arrive. Collecting all parts before a single write is a violation.
+
+### Prohibited patterns
+
+```elixir
+# WRONG — File.read/1 loads the entire file into memory.
+{:ok, data} = File.read(path)
+write_file(volume, dest, data)
+
+# WRONG — Stream collapsed into a single binary.
+stream
+|> Enum.into(<<>>, fn chunk -> chunk end)
+|> then(&write_file(volume, dest, &1))
+
+# WRONG — Plug conn body read to completion before forwarding.
+{:ok, body, conn} = Plug.Conn.read_body(conn, length: :infinity)
+```
+
+```rust
+// WRONG — reads the whole file into a Vec<u8>.
+let data = std::fs::read(path)?;
+
+// WRONG — read_to_end on an untrusted-size stream.
+let mut buf = Vec::new();
+reader.read_to_end(&mut buf).await?;
+```
+
+### Required patterns
+
+```elixir
+# Right — pull chunks lazily, send each one downstream.
+NeonFS.Core.read_file_stream(volume, path)
+|> Stream.each(&handler.send_chunk/1)
+|> Stream.run()
+```
+
+```rust
+// Right — bounded 64 KiB buffer, copy in a loop.
+let mut buf = [0u8; 64 * 1024];
+loop {
+    let n = reader.read(&mut buf).await?;
+    if n == 0 { break; }
+    writer.write_all(&buf[..n]).await?;
+}
+```
+
+### If you think you need to violate this
+
+Don't. If you believe a case genuinely requires whole-file buffering, stop and ask — there is almost always a streaming alternative, and the correct answer is to push streaming further up the call chain rather than buffer here.
+
 ## Work Tracking
 
 Work items are tracked as [repository issues on Forgejo](https://harton.dev/project-neon/neonfs/issues). Pick one, work it, close it.
