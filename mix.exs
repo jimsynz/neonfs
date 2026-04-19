@@ -71,11 +71,7 @@ defmodule NeonFS.MixProject do
       app: :neonfs,
       aliases: %DynamicAlias{},
       deps: [
-        {:git_ops,
-         github: "jimsynz/git_ops",
-         branch: "fix/multi-line-commits",
-         only: [:dev, :test],
-         runtime: false}
+        {:git_ops, "~> 2.10", only: [:dev, :test], runtime: false}
       ],
       version: @version
     ]
