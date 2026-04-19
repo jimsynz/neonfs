@@ -72,6 +72,7 @@ defmodule NeonFS.WebDAV.MixProject do
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
 
       # test
+      {:mimic, "~> 2.0", only: [:test]},
       {:req, "~> 0.5", only: [:dev, :test]}
     ]
   end

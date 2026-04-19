@@ -5,11 +5,15 @@ defmodule NeonFS.WebDAV.Backend do
 
   The root collection lists NeonFS volumes. The first path segment identifies
   the volume, and remaining segments map to file paths within the volume.
-  All communication with core nodes goes through `NeonFS.Client.Router`.
+  Control-plane operations go through `NeonFS.Client.Router`; GET content
+  falls back to `NeonFS.Client.ChunkReader` so chunk bytes are fetched over
+  the TLS data plane rather than shipped across Erlang distribution when
+  streaming isn't available.
   """
 
   @behaviour WebdavServer.Backend
 
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.Client.Router
   alias NeonFS.WebDAV.LockStore
 
@@ -113,7 +117,7 @@ defmodule NeonFS.WebDAV.Backend do
         {:ok, stream}
 
       _fallback ->
-        case call_core(:read_file, [volume_name, file_path, read_opts]) do
+        case ChunkReader.read_file(volume_name, file_path, read_opts) do
           {:ok, content} ->
             {:ok, content}
 

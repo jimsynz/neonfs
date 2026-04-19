@@ -8,6 +8,7 @@ defmodule NeonFS.Integration.WebDAVTest do
   """
   use NeonFS.Integration.ClusterCase, async: false
 
+  alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.Integration.WebDAVCoreBridge
 
   @moduletag timeout: 180_000
@@ -21,6 +22,28 @@ defmodule NeonFS.Integration.WebDAVTest do
     WebDAVCoreBridge.store_core_node(node1.node)
 
     Application.put_env(:neonfs_webdav, :core_call_fn, &WebDAVCoreBridge.call/2)
+
+    # Start client infrastructure on the test runner so NeonFS.Client.ChunkReader
+    # can resolve a core node via Router → CostFunction for WebDAV GETs.
+    start_supervised!({Connection, bootstrap_nodes: [node1.node]})
+    start_supervised!(Discovery)
+    start_supervised!(CostFunction)
+
+    :ok =
+      wait_until(fn ->
+        match?({:ok, _}, Connection.connected_core_node())
+      end)
+
+    :ok =
+      wait_until(
+        fn ->
+          case Discovery.get_core_nodes() do
+            [_ | _] -> true
+            _ -> false
+          end
+        end,
+        timeout: 10_000
+      )
 
     {:ok, server} =
       Bandit.start_link(
