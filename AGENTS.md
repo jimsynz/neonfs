@@ -96,10 +96,6 @@ spec/                 # Specification documents (start here)
 ├── architecture.md      # System design, supervision trees
 ├── implementation.md    # Phases 1-7, dependencies
 └── testing.md           # Testing strategy
-
-tasks/                # Implementation task specifications
-├── README.md         # Task overview & dependency graph
-└── task_NNNN_*.md    # Individual tasks with acceptance criteria
 ```
 
 ### Dependency Graph
@@ -120,19 +116,15 @@ neonfs_fuse and neonfs_nfs have **no dependency** on neonfs_core. All communicat
 - Per-volume supervision trees for isolation
 - Async Rust NIFs for backpressure via BEAM scheduler
 
-## Task System
+## Work Tracking
 
-Implementation follows 37 task specifications in `/workspace/tasks/`. Each task has:
-- Status, phase, description
-- Acceptance criteria checkboxes
-- Testing strategy
-- Dependencies on other tasks
+Work items are tracked as [repository issues on Forgejo](https://harton.dev/project-neon/neonfs/issues). Pick one, work it, close it.
 
-**Parallel work streams (Phase 1):**
-- Tasks 0001-0009: neonfs_blob Rust crate (independent)
-- Tasks 0010-0013: neonfs_fuse Rust crate (independent)
-- Tasks 0014-0019: Elixir metadata & read/write (depends on blob scaffolding)
-- Tasks 0022-0025: CLI (can develop alongside core)
+Historical context:
+- [Progress Archive wiki page](https://harton.dev/project-neon/neonfs/wiki/Progress-Archive) — chronological log through 2026-04-19
+- [Codebase Patterns wiki page](https://harton.dev/project-neon/neonfs/wiki/Codebase-Patterns) — living reference of patterns and gotchas; update as you learn
+
+Release notes live in [`CHANGELOG.md`](CHANGELOG.md), generated from conventional commits.
 
 ## Testing
 
@@ -194,7 +186,6 @@ Always consult these before implementing:
 - `spec/implementation.md` - Phase roadmap, dependency tables
 - `spec/testing.md` - Test examples and patterns
 - `spec/service_discovery.md` - Node discovery and cluster formation
-- `tasks/README.md` - Task dependency graph
 
 ## Module Naming
 
