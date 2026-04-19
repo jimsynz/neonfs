@@ -15,6 +15,7 @@ defmodule NeonFS.NFS.HandlerTest do
   @enoent 2
   @eio 5
   @eexist 17
+  @exdev 18
   @enosys 38
   @estale 70
 
@@ -57,16 +58,18 @@ defmodule NeonFS.NFS.HandlerTest do
   end
 
   defp register_volume(handler) do
-    send_op(handler, 0, "lookup", %{
+    lookup_volume_root(handler, 0, @volume)
+  end
+
+  defp lookup_volume_root(handler, op_id, volume_name) do
+    send_op(handler, op_id, "lookup", %{
       "parent_inode" => 1,
       "parent_volume_id" => @null_volume_id,
-      "name" => @volume
+      "name" => volume_name
     })
 
-    reply = assert_ok(0)
-    vol_hash = :crypto.hash(:md5, @volume)
-    root_inode = reply["file_id"]
-    {vol_hash, root_inode}
+    reply = assert_ok(op_id)
+    {:crypto.hash(:md5, volume_name), reply["file_id"]}
   end
 
   defp create_file(handler, vol_hash, parent_inode, name) do
@@ -771,6 +774,35 @@ defmodule NeonFS.NFS.HandlerTest do
       })
 
       assert_error(3, @enoent)
+    end
+
+    test "rejects cross-volume rename with EXDEV", ctx do
+      %{handler: handler} = start_handler_with_mock(ctx, volumes: ["vol-a", "vol-b"])
+
+      {vol_a, root_a} = lookup_volume_root(handler, 100, "vol-a")
+      {vol_b, root_b} = lookup_volume_root(handler, 101, "vol-b")
+
+      create_file(handler, vol_a, root_a, "src.txt")
+
+      send_op(handler, 1, "rename", %{
+        "from_parent_inode" => root_a,
+        "from_parent_volume_id" => vol_a,
+        "from_name" => "src.txt",
+        "to_parent_inode" => root_b,
+        "to_parent_volume_id" => vol_b,
+        "to_name" => "dst.txt"
+      })
+
+      assert_error(1, @exdev)
+
+      # Source is untouched
+      send_op(handler, 2, "lookup", %{
+        "parent_inode" => root_a,
+        "parent_volume_id" => vol_a,
+        "name" => "src.txt"
+      })
+
+      assert_ok(2)
     end
   end
 

@@ -25,6 +25,7 @@ defmodule WebdavServer.Error do
     unsupported_media_type: 415,
     locked: 423,
     failed_dependency: 424,
+    bad_gateway: 502,
     insufficient_storage: 507
   }
 

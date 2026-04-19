@@ -192,10 +192,12 @@ defmodule NeonFS.WebDAV.Backend do
 
   @impl true
   def copy(_auth, resource, dest_path, overwrite?) do
+    %{volume_name: src_volume, file_path: src_path, meta: src_meta} = resource.backend_data
+
     with :ok <- validate_dest(dest_path),
          {dest_volume, dest_file_path} = split_dest(dest_path),
+         :ok <- check_same_volume(src_volume, dest_volume),
          :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?),
-         %{volume_name: src_volume, file_path: src_path, meta: src_meta} = resource.backend_data,
          {:ok, content} <- call_core(:read_file, [src_volume, src_path, []]),
          existed? = resource_exists?(dest_volume, dest_file_path),
          write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
@@ -211,17 +213,14 @@ defmodule NeonFS.WebDAV.Backend do
 
   @impl true
   def move(_auth, resource, dest_path, overwrite?) do
+    %{volume_name: src_volume, file_path: src_path} = resource.backend_data
+
     with :ok <- validate_dest(dest_path),
          {dest_volume, dest_file_path} = split_dest(dest_path),
+         :ok <- check_same_volume(src_volume, dest_volume),
          :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?) do
-      %{volume_name: src_volume, file_path: src_path} = resource.backend_data
       existed? = resource_exists?(dest_volume, dest_file_path)
-
-      if src_volume == dest_volume do
-        move_same_volume(src_volume, src_path, dest_file_path, existed?)
-      else
-        move_cross_volume(src_volume, src_path, dest_volume, dest_file_path, existed?)
-      end
+      move_same_volume(src_volume, src_path, dest_file_path, existed?)
     end
   end
 
@@ -313,17 +312,14 @@ defmodule NeonFS.WebDAV.Backend do
     end
   end
 
-  defp move_cross_volume(src_volume, src_path, dest_volume, dest_path, existed?) do
-    with {:ok, content} <- call_core(:read_file, [src_volume, src_path, []]),
-         {:ok, src_meta} <- call_core(:get_file_meta, [src_volume, src_path]),
-         write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
-         {:ok, _meta} <- call_core(:write_file, [dest_volume, dest_path, content, write_opts]),
-         _ <- call_core(:delete_file, [src_volume, src_path]) do
-      if existed?, do: {:ok, :no_content}, else: {:ok, :created}
-    else
-      {:error, :not_found} -> {:error, %WebdavServer.Error{code: :not_found}}
-      {:error, _reason} -> {:error, internal_error()}
-    end
+  defp check_same_volume(src_volume, dest_volume) when src_volume == dest_volume, do: :ok
+
+  defp check_same_volume(_src_volume, _dest_volume) do
+    {:error,
+     %WebdavServer.Error{
+       code: :bad_gateway,
+       message: "Cross-volume COPY/MOVE is not supported"
+     }}
   end
 
   defp call_core(function, args) do

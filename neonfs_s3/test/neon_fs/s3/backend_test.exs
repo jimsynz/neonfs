@@ -309,16 +309,16 @@ defmodule NeonFS.S3.BackendTest do
       assert object.body == "hello"
     end
 
-    test "copies an object across buckets" do
+    test "rejects cross-bucket copy with not_implemented" do
       Backend.create_bucket(@ctx, "source")
       Backend.create_bucket(@ctx, "dest")
       Backend.put_object(@ctx, "source", "file.txt", "data", %S3Server.PutOpts{})
 
-      assert {:ok, _result} =
+      assert {:error, %S3Server.Error{code: :not_implemented}} =
                Backend.copy_object(@ctx, "dest", "file.txt", "source", "file.txt")
 
-      assert {:ok, object} = Backend.get_object(@ctx, "dest", "file.txt", %S3Server.GetOpts{})
-      assert object.body == "data"
+      assert {:error, %S3Server.Error{code: :no_such_key}} =
+               Backend.get_object(@ctx, "dest", "file.txt", %S3Server.GetOpts{})
     end
 
     test "preserves content type on copy" do
@@ -341,23 +341,6 @@ defmodule NeonFS.S3.BackendTest do
                Backend.get_object(@ctx, "my-bucket", "copy.bin", %S3Server.GetOpts{})
 
       assert object.content_type == "text/csv"
-    end
-
-    test "preserves content type on cross-bucket copy" do
-      Backend.create_bucket(@ctx, "source")
-      Backend.create_bucket(@ctx, "dest")
-
-      Backend.put_object(@ctx, "source", "data.bin", "json", %S3Server.PutOpts{
-        content_type: "application/json"
-      })
-
-      assert {:ok, _result} =
-               Backend.copy_object(@ctx, "dest", "data.bin", "source", "data.bin")
-
-      assert {:ok, object} =
-               Backend.get_object(@ctx, "dest", "data.bin", %S3Server.GetOpts{})
-
-      assert object.content_type == "application/json"
     end
 
     test "returns error for non-existent source" do
