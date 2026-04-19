@@ -769,6 +769,92 @@ defmodule NeonFS.Core.Blob.NativeTest do
     end
   end
 
+  describe "incremental chunker" do
+    test "init rejects unknown strategy" do
+      assert {:error, _reason} = Native.chunker_init("bogus", 0)
+    end
+
+    test "init rejects fixed strategy with zero size" do
+      assert {:error, _reason} = Native.chunker_init("fixed", 0)
+    end
+
+    test "single strategy buffers until finish" do
+      {:ok, chunker} = Native.chunker_init("single", 0)
+      assert [] = Native.chunker_feed(chunker, "hello ")
+      assert [] = Native.chunker_feed(chunker, "world")
+
+      assert [{data, hash, 0, 11}] = Native.chunker_finish(chunker)
+      assert data == "hello world"
+      assert hash == :crypto.hash(:sha256, "hello world")
+    end
+
+    test "fixed strategy emits chunks at the size threshold" do
+      {:ok, chunker} = Native.chunker_init("fixed", 4)
+
+      assert [] = Native.chunker_feed(chunker, "ab")
+      assert [{"abcd", _, 0, 4}] = Native.chunker_feed(chunker, "cd")
+      assert [{"efgh", _, 4, 4}, {"ijkl", _, 8, 4}] = Native.chunker_feed(chunker, "efghijkl")
+      assert [] = Native.chunker_feed(chunker, "mn")
+      assert [{"mn", _, 12, 2}] = Native.chunker_finish(chunker)
+    end
+
+    test "incremental output equals batch output for the same input" do
+      data = :crypto.strong_rand_bytes(50_000)
+
+      {:ok, batch} = Native.chunk_data(data, "fixed", 256)
+      {:ok, chunker} = Native.chunker_init("fixed", 256)
+
+      emitted =
+        data
+        |> chunk_binary(1024)
+        |> Enum.flat_map(&Native.chunker_feed(chunker, &1))
+        |> Kernel.++(Native.chunker_finish(chunker))
+
+      assert emitted == batch
+    end
+
+    test "fastcdc incremental output equals batch output across many slice sizes" do
+      data = :crypto.strong_rand_bytes(8 * 1024)
+
+      {:ok, batch} = Native.chunk_data(data, "fastcdc", 512)
+
+      for slice_size <- [1, 64, 512, 1024, 4096] do
+        {:ok, chunker} = Native.chunker_init("fastcdc", 512)
+
+        emitted =
+          data
+          |> chunk_binary(slice_size)
+          |> Enum.flat_map(&Native.chunker_feed(chunker, &1))
+          |> Kernel.++(Native.chunker_finish(chunker))
+
+        assert emitted == batch, "incremental != batch for slice_size=#{slice_size}"
+      end
+    end
+
+    test "finish on empty chunker returns empty list" do
+      {:ok, chunker} = Native.chunker_init("single", 0)
+      assert [] = Native.chunker_finish(chunker)
+    end
+
+    test "chunker can be reused after finish, offset continues" do
+      {:ok, chunker} = Native.chunker_init("fixed", 4)
+
+      assert [{"abcd", _, 0, 4}] = Native.chunker_feed(chunker, "abcd")
+      assert [] = Native.chunker_finish(chunker)
+
+      assert [{"wxyz", _, 4, 4}] = Native.chunker_feed(chunker, "wxyz")
+    end
+  end
+
+  defp chunk_binary(<<>>, _size), do: []
+
+  defp chunk_binary(data, size) do
+    case data do
+      <<head::binary-size(size), rest::binary>> -> [head | chunk_binary(rest, size)]
+      tail -> [tail]
+    end
+  end
+
   describe "chunk tier migration" do
     setup %{tmp_dir: tmp_dir} do
       store_dir = Path.join(tmp_dir, "migrate")

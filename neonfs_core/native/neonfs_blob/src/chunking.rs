@@ -174,6 +174,140 @@ fn chunk_fastcdc(data: &[u8], min: usize, avg: usize, max: usize) -> Vec<ChunkRe
         .collect()
 }
 
+/// Normalises FastCDC parameters to satisfy the crate's invariants:
+/// `min >= 64` and `min <= avg <= max`.
+fn normalise_fastcdc_params(min: usize, avg: usize, max: usize) -> (usize, usize, usize) {
+    let min = min.max(64);
+    let avg = avg.max(min);
+    let max = max.max(avg);
+    (min, avg, max)
+}
+
+/// Incremental chunker that accepts data in arbitrary-sized slices and emits
+/// complete chunks as they become available.
+///
+/// The total size of the input is not required up front, and the working set
+/// is bounded by the strategy's maximum chunk size — a multi-gigabyte input
+/// is processed in constant memory.
+///
+/// Contract: for any input split into a sequence of [`feed`] calls followed
+/// by [`finish`], the concatenation of all emitted chunks equals the
+/// concatenation of inputs, and the chunk list is byte-for-byte identical to
+/// what [`chunk_data`] would produce on the same total input.
+///
+/// [`feed`]: IncrementalChunker::feed
+/// [`finish`]: IncrementalChunker::finish
+pub struct IncrementalChunker {
+    strategy: ChunkStrategy,
+    buffer: Vec<u8>,
+    offset: usize,
+}
+
+impl IncrementalChunker {
+    /// Creates a new incremental chunker for the given strategy.
+    pub fn new(strategy: ChunkStrategy) -> Self {
+        Self {
+            strategy,
+            buffer: Vec::new(),
+            offset: 0,
+        }
+    }
+
+    /// Appends `data` to the chunker and returns any complete chunks that
+    /// became available. Bytes that may still belong to a future chunk remain
+    /// buffered internally.
+    pub fn feed(&mut self, data: &[u8]) -> Vec<ChunkResult> {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        self.buffer.extend_from_slice(data);
+        match self.strategy.clone() {
+            ChunkStrategy::Single => Vec::new(),
+            ChunkStrategy::Fixed { size } => self.feed_fixed(size),
+            ChunkStrategy::FastCDC { min, avg, max } => self.feed_fastcdc(min, avg, max),
+        }
+    }
+
+    /// Flushes any remaining buffered data as the final chunks. After this
+    /// call the chunker is empty and may be reused with further [`feed`]
+    /// calls (the offset continues from where it left off).
+    ///
+    /// [`feed`]: IncrementalChunker::feed
+    pub fn finish(&mut self) -> Vec<ChunkResult> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+        let chunks = match self.strategy.clone() {
+            ChunkStrategy::Single => chunk_single(&self.buffer),
+            ChunkStrategy::Fixed { size } => chunk_fixed(&self.buffer, size),
+            ChunkStrategy::FastCDC { min, avg, max } => chunk_fastcdc(&self.buffer, min, avg, max),
+        };
+        let consumed = self.buffer.len();
+        let base_offset = self.offset;
+        self.buffer.clear();
+        self.offset += consumed;
+        chunks
+            .into_iter()
+            .map(|c| ChunkResult {
+                offset: base_offset + c.offset,
+                ..c
+            })
+            .collect()
+    }
+
+    fn feed_fixed(&mut self, size: usize) -> Vec<ChunkResult> {
+        let size = if size == 0 { 1 } else { size };
+        let mut emitted = Vec::new();
+        while self.buffer.len() >= size {
+            let chunk_data: Vec<u8> = self.buffer.drain(..size).collect();
+            let chunk = ChunkResult::new(chunk_data, self.offset);
+            self.offset += size;
+            emitted.push(chunk);
+        }
+        emitted
+    }
+
+    fn feed_fastcdc(&mut self, min: usize, avg: usize, max: usize) -> Vec<ChunkResult> {
+        use fastcdc::v2020::FastCDC;
+
+        let (min, avg, max) = normalise_fastcdc_params(min, avg, max);
+
+        // Without `max` bytes available the very first FastCDC boundary may
+        // still shift as more data arrives, so wait before emitting anything.
+        if self.buffer.len() < max {
+            return Vec::new();
+        }
+
+        let chunks: Vec<_> = FastCDC::new(&self.buffer, min, avg, max).collect();
+        if chunks.len() <= 1 {
+            // Only one (potentially incomplete) chunk — defer until we have
+            // enough lookahead to know its true boundary.
+            return Vec::new();
+        }
+
+        // All chunks except the last are at content-defined boundaries that
+        // cannot shift as more data arrives. The last is uncertain — keep it
+        // in the buffer for the next round.
+        let last = chunks.last().expect("len > 1 above");
+        let consume_until = last.offset;
+        let base_offset = self.offset;
+
+        let emitted: Vec<ChunkResult> = chunks[..chunks.len() - 1]
+            .iter()
+            .map(|chunk| {
+                ChunkResult::new(
+                    self.buffer[chunk.offset..chunk.offset + chunk.length].to_vec(),
+                    base_offset + chunk.offset,
+                )
+            })
+            .collect();
+
+        self.buffer.drain(..consume_until);
+        self.offset += consume_until;
+        emitted
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +585,157 @@ mod tests {
         // Should still produce chunks (treated as size 1)
         assert!(!chunks.is_empty());
     }
+
+    fn feed_in_slices(strategy: ChunkStrategy, data: &[u8], slice_size: usize) -> Vec<ChunkResult> {
+        let mut chunker = IncrementalChunker::new(strategy);
+        let mut emitted = Vec::new();
+        let step = slice_size.max(1);
+        for slice in data.chunks(step) {
+            emitted.extend(chunker.feed(slice));
+        }
+        emitted.extend(chunker.finish());
+        emitted
+    }
+
+    fn assert_equivalent(strategy: ChunkStrategy, data: &[u8], slice_size: usize) {
+        let batch = chunk_data(data, &strategy);
+        let incremental = feed_in_slices(strategy, data, slice_size);
+        assert_eq!(
+            incremental.len(),
+            batch.len(),
+            "chunk count differs (slice_size={})",
+            slice_size
+        );
+        for (i, (inc, bat)) in incremental.iter().zip(batch.iter()).enumerate() {
+            assert_eq!(inc.data, bat.data, "chunk {} data differs", i);
+            assert_eq!(inc.hash, bat.hash, "chunk {} hash differs", i);
+            assert_eq!(inc.offset, bat.offset, "chunk {} offset differs", i);
+            assert_eq!(inc.size, bat.size, "chunk {} size differs", i);
+        }
+    }
+
+    #[test]
+    fn test_incremental_empty_input() {
+        let mut chunker = IncrementalChunker::new(ChunkStrategy::Single);
+        assert!(chunker.feed(&[]).is_empty());
+        assert!(chunker.finish().is_empty());
+    }
+
+    #[test]
+    fn test_incremental_single_strategy_buffers_until_finish() {
+        let data = b"streaming hello world";
+        let mut chunker = IncrementalChunker::new(ChunkStrategy::Single);
+        // Single buffers everything; feed never emits.
+        for slice in data.chunks(3) {
+            assert!(chunker.feed(slice).is_empty());
+        }
+        let final_chunks = chunker.finish();
+        assert_eq!(final_chunks.len(), 1);
+        assert_eq!(final_chunks[0].data, data);
+    }
+
+    #[test]
+    fn test_incremental_fixed_emits_on_threshold() {
+        let data = vec![7u8; 1000];
+        let mut chunker = IncrementalChunker::new(ChunkStrategy::Fixed { size: 300 });
+
+        // Feed less than one chunk worth.
+        let early = chunker.feed(&data[..200]);
+        assert!(early.is_empty(), "no chunks before reaching size");
+
+        // Cross the boundary — should emit exactly one chunk.
+        let crossed = chunker.feed(&data[200..400]);
+        assert_eq!(crossed.len(), 1);
+        assert_eq!(crossed[0].size, 300);
+        assert_eq!(crossed[0].offset, 0);
+
+        // Feed the rest in one go — emits two more (300 + 300).
+        let rest = chunker.feed(&data[400..]);
+        assert_eq!(rest.len(), 2);
+        assert_eq!(rest[0].offset, 300);
+        assert_eq!(rest[1].offset, 600);
+
+        // Finish flushes the trailing 100 bytes.
+        let tail = chunker.finish();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].size, 100);
+        assert_eq!(tail[0].offset, 900);
+    }
+
+    #[test]
+    fn test_incremental_fixed_matches_batch_across_slice_sizes() {
+        let data: Vec<u8> = (0..10_000).map(|i| (i % 251) as u8).collect();
+        let strategy = ChunkStrategy::Fixed { size: 256 };
+
+        for slice_size in [1, 7, 64, 256, 1024, 4096, 10_000] {
+            assert_equivalent(strategy.clone(), &data, slice_size);
+        }
+    }
+
+    #[test]
+    fn test_incremental_single_matches_batch_across_slice_sizes() {
+        let data: Vec<u8> = (0..2_000).map(|i| (i % 199) as u8).collect();
+        for slice_size in [1, 64, 1024, 2_000] {
+            assert_equivalent(ChunkStrategy::Single, &data, slice_size);
+        }
+    }
+
+    #[test]
+    fn test_incremental_fastcdc_matches_batch_across_slice_sizes() {
+        let data: Vec<u8> = (0..3 * 1024 * 1024)
+            .map(|i| ((i * 31 + 7) % 256) as u8)
+            .collect();
+        let strategy = ChunkStrategy::FastCDC {
+            min: 64 * 1024,
+            avg: 256 * 1024,
+            max: 1024 * 1024,
+        };
+
+        for slice_size in [
+            128,
+            8 * 1024,
+            64 * 1024,
+            256 * 1024,
+            1024 * 1024,
+            3 * 1024 * 1024,
+        ] {
+            assert_equivalent(strategy.clone(), &data, slice_size);
+        }
+    }
+
+    #[test]
+    fn test_incremental_fastcdc_below_max_buffers() {
+        let strategy = ChunkStrategy::FastCDC {
+            min: 64 * 1024,
+            avg: 256 * 1024,
+            max: 1024 * 1024,
+        };
+        let mut chunker = IncrementalChunker::new(strategy);
+
+        // Feed half a max chunk — should buffer, emit nothing.
+        let half = vec![0u8; 512 * 1024];
+        assert!(chunker.feed(&half).is_empty());
+
+        // Even after another large feed below the 2x-max threshold, emission
+        // is permitted only once the post-trim buffer holds a deferrable last
+        // chunk. The contract only requires equivalence on finish.
+        let final_chunks = chunker.finish();
+        assert!(!final_chunks.is_empty());
+        let total: usize = final_chunks.iter().map(|c| c.size).sum();
+        assert_eq!(total, 512 * 1024);
+    }
+
+    #[test]
+    fn test_incremental_resumes_offset_after_finish() {
+        let mut chunker = IncrementalChunker::new(ChunkStrategy::Fixed { size: 100 });
+        let _ = chunker.feed(&[1u8; 250]);
+        let first_finish = chunker.finish();
+        assert_eq!(first_finish.last().unwrap().offset, 200);
+
+        let later = chunker.feed(&[2u8; 100]);
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].offset, 250);
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +770,61 @@ mod proptests {
 
             let total_size: usize = chunks.iter().map(|c| c.size).sum();
             prop_assert_eq!(total_size, data.len());
+        }
+
+        #[test]
+        fn test_incremental_matches_batch_fixed(
+            data in proptest::collection::vec(any::<u8>(), 0..50_000),
+            slice_size in 1usize..2048,
+            chunk_size in 1usize..4096,
+        ) {
+            let strategy = ChunkStrategy::Fixed { size: chunk_size };
+            let batch = chunk_data(&data, &strategy);
+
+            let mut chunker = IncrementalChunker::new(strategy);
+            let mut emitted = Vec::new();
+            for slice in data.chunks(slice_size) {
+                emitted.extend(chunker.feed(slice));
+            }
+            emitted.extend(chunker.finish());
+
+            prop_assert_eq!(emitted.len(), batch.len());
+            for (a, b) in emitted.iter().zip(batch.iter()) {
+                prop_assert_eq!(&a.data, &b.data);
+                prop_assert_eq!(a.hash, b.hash);
+                prop_assert_eq!(a.offset, b.offset);
+                prop_assert_eq!(a.size, b.size);
+            }
+        }
+
+        #[test]
+        fn test_incremental_matches_batch_fastcdc(
+            // FastCDC with small parameters keeps proptest cycles cheap; the
+            // chunking algorithm is the same regardless of size.
+            data in proptest::collection::vec(any::<u8>(), 0..16_384),
+            slice_size in 1usize..1024,
+        ) {
+            let strategy = ChunkStrategy::FastCDC {
+                min: 64,
+                avg: 512,
+                max: 4096,
+            };
+            let batch = chunk_data(&data, &strategy);
+
+            let mut chunker = IncrementalChunker::new(strategy);
+            let mut emitted = Vec::new();
+            for slice in data.chunks(slice_size) {
+                emitted.extend(chunker.feed(slice));
+            }
+            emitted.extend(chunker.finish());
+
+            prop_assert_eq!(emitted.len(), batch.len());
+            for (a, b) in emitted.iter().zip(batch.iter()) {
+                prop_assert_eq!(&a.data, &b.data);
+                prop_assert_eq!(a.hash, b.hash);
+                prop_assert_eq!(a.offset, b.offset);
+                prop_assert_eq!(a.size, b.size);
+            }
         }
     }
 }

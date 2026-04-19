@@ -477,6 +477,62 @@ defmodule NeonFS.Core.Blob.Native do
   def nif_auto_chunk_strategy(_data_len),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  @typedoc """
+  Opaque handle to an incremental chunker resource.
+  """
+  @type chunker :: reference()
+
+  @doc """
+  Creates an incremental chunker that emits chunks as data is fed in.
+
+  Use this when the total input size is unknown or larger than memory.
+  Feed slices via `chunker_feed/2` and call `chunker_finish/1` once all
+  input has been provided to flush any remaining buffered data.
+
+  The strategy/`strategy_param` arguments follow the same convention as
+  `chunk_data/3`.
+
+  ## Examples
+
+      iex> {:ok, c} = NeonFS.Core.Blob.Native.chunker_init("fixed", 4)
+      iex> emitted = NeonFS.Core.Blob.Native.chunker_feed(c, "abcdefg")
+      iex> length(emitted)
+      1
+      iex> {chunk, _hash, 0, 4} = hd(emitted)
+      iex> chunk
+      "abcd"
+      iex> [{tail, _hash, 4, 3}] = NeonFS.Core.Blob.Native.chunker_finish(c)
+      iex> tail
+      "efg"
+
+  """
+  @spec chunker_init(chunk_strategy(), non_neg_integer()) ::
+          {:ok, chunker()} | {:error, String.t()}
+  def chunker_init(_strategy, _strategy_param),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Feeds a slice of data into the chunker.
+
+  Returns any chunks that became complete as a result of this slice. Bytes
+  that may still belong to a future chunk remain buffered inside the
+  resource — the working set is bounded by the strategy's maximum chunk
+  size, regardless of how much data is fed in total.
+  """
+  @spec chunker_feed(chunker(), binary()) :: [chunk_result()]
+  def chunker_feed(_chunker, _data),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Flushes any remaining buffered data as the final chunks.
+
+  After `chunker_finish/1`, the chunker may be reused with further
+  `chunker_feed/2` calls; offsets continue from where they left off.
+  """
+  @spec chunker_finish(chunker()) :: [chunk_result()]
+  def chunker_finish(_chunker),
+    do: :erlang.nif_error(:nif_not_loaded)
+
   # Erasure coding types
   @type shard :: binary()
   @type shard_with_index :: {non_neg_integer(), binary()}

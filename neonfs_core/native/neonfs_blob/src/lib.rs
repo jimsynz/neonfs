@@ -7,7 +7,7 @@ pub mod hash;
 pub mod path;
 pub mod store;
 
-use crate::chunking::{auto_strategy, chunk_data, ChunkStrategy};
+use crate::chunking::{auto_strategy, chunk_data, ChunkResult, ChunkStrategy, IncrementalChunker};
 use crate::compression::Compression;
 use crate::encryption::EncryptionParams;
 use crate::hash::Hash;
@@ -531,6 +531,75 @@ fn parse_chunk_strategy(strategy: &str, param: usize) -> Result<ChunkStrategy, S
             strategy
         )),
     }
+}
+
+/// Resource wrapping an `IncrementalChunker` so it can be passed back and
+/// forth between Elixir calls. The mutex protects state that must be mutated
+/// across feed/finish calls; lock contention is irrelevant in normal use
+/// because callers own the chunker and call it serially.
+pub struct ChunkerResource {
+    inner: Mutex<IncrementalChunker>,
+}
+
+#[rustler::resource_impl]
+impl Resource for ChunkerResource {}
+
+fn chunks_to_tuples<'a>(env: Env<'a>, chunks: Vec<ChunkResult>) -> Vec<ChunkResultTuple<'a>> {
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let mut data_bin = NewBinary::new(env, chunk.data.len());
+            data_bin.copy_from_slice(&chunk.data);
+
+            let mut hash_bin = NewBinary::new(env, 32);
+            hash_bin.copy_from_slice(chunk.hash.as_bytes());
+
+            (data_bin.into(), hash_bin.into(), chunk.offset, chunk.size)
+        })
+        .collect()
+}
+
+/// Creates an incremental chunker for the given strategy. The strategy/param
+/// arguments follow the same convention as [`nif_chunk_data`].
+///
+/// # Returns
+/// A resource handle that must be passed to [`chunker_feed`] and
+/// [`chunker_finish`].
+#[rustler::nif]
+fn chunker_init(
+    strategy: String,
+    strategy_param: usize,
+) -> Result<ResourceArc<ChunkerResource>, String> {
+    let strategy = parse_chunk_strategy(&strategy, strategy_param)?;
+    Ok(ResourceArc::new(ChunkerResource {
+        inner: Mutex::new(IncrementalChunker::new(strategy)),
+    }))
+}
+
+/// Feeds a slice of data into the chunker and returns any complete chunks
+/// that became available. Bytes that may still belong to a future chunk
+/// remain buffered inside the resource.
+#[rustler::nif]
+fn chunker_feed<'a>(
+    env: Env<'a>,
+    chunker: ResourceArc<ChunkerResource>,
+    data: Binary,
+) -> Vec<ChunkResultTuple<'a>> {
+    let mut state = chunker.inner.lock().expect("chunker mutex poisoned");
+    let chunks = state.feed(data.as_slice());
+    chunks_to_tuples(env, chunks)
+}
+
+/// Flushes any remaining buffered data as the final chunks. The chunker may
+/// be reused after `finish`; offsets continue from where they left off.
+#[rustler::nif]
+fn chunker_finish<'a>(
+    env: Env<'a>,
+    chunker: ResourceArc<ChunkerResource>,
+) -> Vec<ChunkResultTuple<'a>> {
+    let mut state = chunker.inner.lock().expect("chunker mutex poisoned");
+    let chunks = state.finish();
+    chunks_to_tuples(env, chunks)
 }
 
 /// Encodes data shards and returns parity shards using Reed-Solomon erasure coding.
