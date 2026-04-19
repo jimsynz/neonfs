@@ -113,7 +113,7 @@ NeonFS core and FUSE nodes run as separate Erlang nodes communicating via
 distribution. Bootstrap a cluster by initialising the first core node, then
 join additional nodes using single-use invite tokens.
 
-See `spec/` for the full specification, the [issue tracker](https://harton.dev/project-neon/neonfs/issues) for active work, and the [wiki](https://harton.dev/project-neon/neonfs/wiki) for patterns and historical progress.
+See the [wiki](https://harton.dev/project-neon/neonfs/wiki) for the full specification, patterns, and historical progress, and the [issue tracker](https://harton.dev/project-neon/neonfs/issues) for active work.
 
 ## Licence
 

@@ -91,12 +91,9 @@ neonfs_integration/   # Peer-based integration tests
 │   └── peer_cluster.ex   # Spawns real peer nodes for testing
 └── test/integration/     # Multi-node integration tests
 
-spec/                 # Specification documents (start here)
-├── specification.md     # Entry point & overview
-├── architecture.md      # System design, supervision trees
-├── implementation.md    # Phases 1-7, dependencies
-└── testing.md           # Testing strategy
 ```
+
+Architecture and design documentation lives in the [wiki](https://harton.dev/project-neon/neonfs/wiki) — start with [Specification](https://harton.dev/project-neon/neonfs/wiki/Specification).
 
 ### Dependency Graph
 
@@ -180,12 +177,12 @@ From `.tool-versions`:
 
 ## Key Specification Documents
 
-Always consult these before implementing:
-- `spec/specification.md` - Start here for overview
-- `spec/architecture.md` - System design, NIF boundaries
-- `spec/implementation.md` - Phase roadmap, dependency tables
-- `spec/testing.md` - Test examples and patterns
-- `spec/service_discovery.md` - Node discovery and cluster formation
+Always consult these before implementing (all live in the [wiki](https://harton.dev/project-neon/neonfs/wiki)):
+- [Specification](https://harton.dev/project-neon/neonfs/wiki/Specification) — start here for overview
+- [Architecture](https://harton.dev/project-neon/neonfs/wiki/Architecture) — system design, NIF boundaries
+- [Implementation](https://harton.dev/project-neon/neonfs/wiki/Implementation) — phase roadmap, dependency tables
+- [Testing](https://harton.dev/project-neon/neonfs/wiki/Testing) — test examples and patterns
+- [Service Discovery](https://harton.dev/project-neon/neonfs/wiki/Service-Discovery) — node discovery and cluster formation
 
 ## Module Naming
 
