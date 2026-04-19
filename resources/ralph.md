@@ -105,6 +105,52 @@ The PR body **must** include `Closes #<N>` so Forgejo auto-closes the issue on m
 
 Keep PRs focused — one issue, one PR. If mid-implementation you discover the issue needs to be split or changed, comment on the issue rather than silently widening scope.
 
+## Capturing Follow-Up Work
+
+While implementing, you will regularly notice things that are out of scope for the current issue but should not be lost:
+
+- A missing feature or abstraction adjacent to what you're building.
+- A piece of work that turned out to be significantly more complex than expected and is better deferred.
+- A bug, rough edge, or architectural smell in neighbouring code.
+- A test that should exist but doesn't.
+- A refactor that would unblock something else.
+
+**Open a new issue for each finding before you finish the current PR.** This is mandatory, not optional. The goal is zero context loss between iterations.
+
+Good follow-up issues:
+
+- State what you found, why it matters, and what "done" looks like.
+- Are scoped to one concrete concern — split into multiple issues if needed.
+- Reference the issue or PR where you found it, so future readers can reconstruct the context.
+
+Link the new issues from the current PR body so the reviewer sees the trail. Use `Follow-ups:` (not `Closes`, which would auto-close them on merge):
+
+```
+Closes #<N>
+Follow-ups: #<M>, #<O>
+
+<short summary of what changed and why>
+```
+
+What **not** to do:
+
+- Do NOT expand the current PR to handle the follow-up — that violates "one issue, one PR".
+- Do NOT leave a `TODO` / `FIXME` / `For now...` comment in the code — those rot, hide, and become future bug reports. `AGENTS.md` already forbids them as a crutch.
+- Do NOT rely on remembering the finding for next iteration. Context is gone by then.
+
+If the "follow-up" is actually a direct blocker — you genuinely can't finish the current issue without it — stop and ask rather than quietly expanding scope.
+
+Creating an issue:
+
+```bash
+curl -s -X POST -H "Authorization: token $FJ_TOKEN" -H "Content-Type: application/json" \
+  "https://harton.dev/api/v1/repos/project-neon/neonfs/issues" \
+  -d "$(jq -n --arg title "..." --arg body "Found while working on #<N>. ..." \
+        '{title: $title, body: $body, labels: [128]}')"
+```
+
+Label IDs: `128` = enhancement, `126` = bug. For others: `curl -s -H "Authorization: token $FJ_TOKEN" "https://harton.dev/api/v1/repos/project-neon/neonfs/labels" | jq -r '.[] | "\(.id) \(.name)"'`.
+
 ## Quality Requirements
 
 - **Before every commit**, run `mix check --no-retry` from the repository root. This runs checks across all subprojects. The build MUST pass in every subproject before committing — changes to shared code (e.g. `neonfs_client` types, state machine versions, new supervisor children) frequently break downstream packages.
