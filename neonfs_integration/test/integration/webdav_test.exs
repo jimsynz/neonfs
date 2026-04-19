@@ -318,7 +318,7 @@ defmodule NeonFS.Integration.WebDAVTest do
       assert old_resp.status == 404
     end
 
-    test "moves a file between volumes", %{port: port} do
+    test "rejects cross-volume move with 502 Bad Gateway", %{port: port} do
       WebDAVCoreBridge.call(:create_volume, ["wdv-move-src"])
       WebDAVCoreBridge.call(:create_volume, ["wdv-move-dst"])
 
@@ -329,14 +329,15 @@ defmodule NeonFS.Integration.WebDAVTest do
           headers: [{"destination", "#{base_url(port)}/wdv-move-dst/cross.txt"}]
         )
 
-      assert move_resp.status == 201
+      assert move_resp.status == 502
 
-      get_resp = webdav_request(:get, "/wdv-move-dst/cross.txt", port)
-      assert get_resp.status == 200
-      assert get_resp.body == "cross-volume"
+      # Source is untouched; destination is not created
+      src_resp = webdav_request(:get, "/wdv-move-src/cross.txt", port)
+      assert src_resp.status == 200
+      assert src_resp.body == "cross-volume"
 
-      old_resp = webdav_request(:get, "/wdv-move-src/cross.txt", port)
-      assert old_resp.status == 404
+      dst_resp = webdav_request(:get, "/wdv-move-dst/cross.txt", port)
+      assert dst_resp.status == 404
     end
   end
 
