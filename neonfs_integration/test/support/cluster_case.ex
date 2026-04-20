@@ -214,6 +214,104 @@ defmodule NeonFS.Integration.ClusterCase do
   end
 
   @doc """
+  Start a Bandit HTTP server with automatic retry for transient listener bind
+  failures.
+
+  Under heavy load (for example `mix check` running cargo builds in parallel),
+  `gen_tcp.listen` port operations inside ThousandIsland can time out with
+  `{:inet_async, :timeout}`. The failure is transient — no socket is actually
+  in use — and retrying succeeds. This wrapper traps exits so a linked
+  supervisor death does not kill the caller, confirms listener readiness via
+  `ThousandIsland.listener_info/1`, and retries on transient errors.
+
+  Returns `{server_pid, port}` on success, raises on persistent failure.
+
+  ## Options
+  - `:retries` - Maximum attempts (default: 5)
+  - `:backoff_ms` - Delay between attempts (default: 200)
+
+  ## Example
+
+      {server, port} =
+        start_bandit_with_retry(
+          plug: {MyPlug, []},
+          port: 0,
+          ip: :loopback,
+          startup_log: false
+        )
+  """
+  @spec start_bandit_with_retry(keyword(), keyword()) :: {pid(), :inet.port_number()}
+  def start_bandit_with_retry(bandit_opts, retry_opts \\ []) do
+    retries = Keyword.get(retry_opts, :retries, 5)
+    backoff_ms = Keyword.get(retry_opts, :backoff_ms, 200)
+    previous_trap = Process.flag(:trap_exit, true)
+
+    try do
+      do_start_bandit(bandit_opts, retries, backoff_ms)
+    after
+      Process.flag(:trap_exit, previous_trap)
+    end
+  end
+
+  defp do_start_bandit(_bandit_opts, 0, _backoff_ms) do
+    raise "Bandit failed to start after repeated :inet_async timeouts"
+  end
+
+  defp do_start_bandit(bandit_opts, attempts_left, backoff_ms) do
+    case Bandit.start_link(bandit_opts) do
+      {:ok, server} ->
+        case confirm_listener(server) do
+          {:ok, port} ->
+            {server, port}
+
+          :transient ->
+            Process.sleep(backoff_ms)
+            do_start_bandit(bandit_opts, attempts_left - 1, backoff_ms)
+        end
+
+      {:error, reason} ->
+        if transient_listener_error?(reason) do
+          Process.sleep(backoff_ms)
+          do_start_bandit(bandit_opts, attempts_left - 1, backoff_ms)
+        else
+          raise "Bandit.start_link failed: #{inspect(reason)}"
+        end
+    end
+  end
+
+  # After `Bandit.start_link` returns `{:ok, pid}`, the listener can still
+  # crash asynchronously with `{:inet_async, :timeout}` — the EXIT arrives at
+  # the caller via the Bandit supervisor link. Settle briefly so any delayed
+  # EXIT lands in the mailbox, then confirm the listener is reachable.
+  defp confirm_listener(server) do
+    receive do
+      {:EXIT, ^server, reason} ->
+        if transient_listener_error?(reason) do
+          :transient
+        else
+          exit(reason)
+        end
+    after
+      150 ->
+        try do
+          case ThousandIsland.listener_info(server) do
+            {:ok, {_ip, port}} -> {:ok, port}
+            :error -> :transient
+          end
+        catch
+          :exit, _ -> :transient
+        end
+    end
+  end
+
+  defp transient_listener_error?({:inet_async, :timeout}), do: true
+
+  defp transient_listener_error?({:shutdown, {:failed_to_start_child, _, inner}}),
+    do: transient_listener_error?(inner)
+
+  defp transient_listener_error?(_), do: false
+
+  @doc """
   Wait for a telemetry event to be emitted.
 
   Subscribe to a telemetry event and wait for it to fire.

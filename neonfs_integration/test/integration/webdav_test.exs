@@ -45,8 +45,8 @@ defmodule NeonFS.Integration.WebDAVTest do
         timeout: 10_000
       )
 
-    {:ok, server} =
-      Bandit.start_link(
+    {server, port} =
+      start_bandit_with_retry(
         plug:
           {NeonFS.WebDAV.HealthPlug,
            backend: NeonFS.WebDAV.Backend, core_nodes_fn: fn -> [node1.node] end},
@@ -54,8 +54,6 @@ defmodule NeonFS.Integration.WebDAVTest do
         ip: :loopback,
         startup_log: false
       )
-
-    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
 
     on_exit(fn ->
       Supervisor.stop(server)

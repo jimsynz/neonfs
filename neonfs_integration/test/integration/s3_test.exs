@@ -50,8 +50,8 @@ defmodule NeonFS.Integration.S3Test do
         timeout: 10_000
       )
 
-    {:ok, server} =
-      Bandit.start_link(
+    {server, port} =
+      start_bandit_with_retry(
         plug:
           {NeonFS.S3.HealthPlug,
            backend: NeonFS.S3.Backend, core_nodes_fn: fn -> [node1.node] end},
@@ -59,8 +59,6 @@ defmodule NeonFS.Integration.S3Test do
         ip: :loopback,
         startup_log: false
       )
-
-    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
 
     {:ok, multipart_store} = MultipartStore.start_link([])
 
