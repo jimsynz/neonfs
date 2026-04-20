@@ -43,11 +43,17 @@ check_pattern() {
     lineno=$(printf '%s' "$line" | cut -d: -f2)
     content=$(printf '%s' "$line" | cut -d: -f3-)
 
-    # Allow `audit:bounded` annotation on the hit line or the one above.
-    local this_line prev_line
+    # Allow `audit:bounded` annotation on the hit line or within the two
+    # lines above. Two lines covers the common "comment above
+    # left-hand-side of a multi-line assignment" shape that mix format
+    # produces, e.g. `# audit:bounded ...` then `existing =` then the
+    # hit on the `case` line.
+    local this_line prev_line prev2_line
     this_line=$(sed -n "${lineno}p" "$file" 2>/dev/null || true)
     prev_line=$(sed -n "$((lineno - 1))p" "$file" 2>/dev/null || true)
-    if printf '%s\n%s\n' "$prev_line" "$this_line" | grep -qE 'audit:bounded'; then
+    prev2_line=$(sed -n "$((lineno - 2))p" "$file" 2>/dev/null || true)
+    if printf '%s\n%s\n%s\n' "$prev2_line" "$prev_line" "$this_line" \
+         | grep -qE 'audit:bounded'; then
       continue
     fi
 
@@ -79,6 +85,15 @@ check_pattern \
 check_pattern \
   'Stream.to_list on a file-body stream — materialises whole stream' \
   '\|>\s*Enum\.to_list\(\)\s*\|>\s*IO\.iodata_to_binary' \
+  '*/lib/*.ex' '*/lib/**/*.ex'
+
+# 2-arg calls to ReadOperation.read_file / NeonFS.Core.read_file — no
+# length:/opts, so they default to whole-file materialisation. Streaming
+# callers must either pass length:/offset: or use read_file_stream /
+# read_file_refs. Bounded internal callers annotate with audit:bounded.
+check_pattern \
+  'read_file/2 — whole-file materialisation; use read_file_stream or pass length:' \
+  '(NeonFS\.Core|ReadOperation)\.read_file\(\s*[^,()]+,\s*[^,()]+\s*\)' \
   '*/lib/*.ex' '*/lib/**/*.ex'
 
 # ── Rust ──────────────────────────────────────────────────────────────────

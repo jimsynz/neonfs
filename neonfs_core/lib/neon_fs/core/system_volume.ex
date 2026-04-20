@@ -14,10 +14,16 @@ defmodule NeonFS.Core.SystemVolume do
 
   @doc """
   Reads a file from the system volume.
+
+  The system volume stores small, bounded operational state (PKI material,
+  cluster identity, retention policies). Callers of this function are the
+  only production users of the whole-file read path — audit log files and
+  anything that could grow unbounded must use streaming APIs instead.
   """
   @spec read(String.t()) :: {:ok, binary()} | {:error, term()}
   def read(path) do
     with {:ok, volume} <- get_system_volume() do
+      # audit:bounded system-volume files are small operational state
       ReadOperation.read_file(volume.id, path)
     end
   end
@@ -38,10 +44,14 @@ defmodule NeonFS.Core.SystemVolume do
 
   Reads the existing file content (if any), concatenates the new content,
   and writes the result back. Creates the file if it does not exist.
+
+  As with `read/1`, this is intended for bounded system files — not for
+  anything that could accumulate without rotation.
   """
   @spec append(String.t(), binary()) :: :ok | {:error, term()}
   def append(path, content) do
     with {:ok, volume} <- get_system_volume() do
+      # audit:bounded system-volume files are small operational state
       existing =
         case ReadOperation.read_file(volume.id, path) do
           {:ok, data} -> data
