@@ -29,9 +29,11 @@ defmodule NeonFS.Client.ChunkReader do
   Erasure-coded (stripe-based) files return data-chunk refs for each
   overlapping stripe when every data chunk is available. When any data
   chunk is missing and parity-based reconstruction is required, core
-  returns `{:error, :stripe_refs_unsupported}` and this helper falls back
-  to `read_file/3` so the server handles reconstruction. This fallback is
-  still buffered; degraded stripe streaming is tracked separately (#242).
+  returns `{:error, :stripe_refs_unsupported}`; this helper then falls
+  back to reading the file **one stripe at a time** via
+  `NeonFS.Core.read_file/3`, using stripe ranges from `get_file_meta/2`.
+  The server does reconstruction per stripe, so the peak working set is
+  bounded by the stripe size rather than the file size.
 
   If every location for a chunk returns `:no_data_endpoint` (no TLS pool
   configured to that peer), the chunk is fetched via the per-chunk core
@@ -264,8 +266,21 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   defp fallback_stream(volume_name, path, opts) do
-    with {:ok, meta} <- Router.call(NeonFS.Core, :get_file_meta, [volume_name, path]),
-         {:ok, bytes} <- fallback_read(volume_name, path, opts) do
+    case Router.call(NeonFS.Core, :get_file_meta, [volume_name, path]) do
+      {:ok, %{stripes: stripes} = meta} when is_list(stripes) ->
+        {:ok,
+         %{stream: stripe_fallback_stream(meta, volume_name, path, opts), file_size: meta.size}}
+
+      {:ok, meta} ->
+        buffered_fallback_stream(meta, volume_name, path, opts)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp buffered_fallback_stream(meta, volume_name, path, opts) do
+    with {:ok, bytes} <- fallback_read(volume_name, path, opts) do
       stream =
         Stream.unfold(bytes, fn
           <<>> -> nil
@@ -275,4 +290,60 @@ defmodule NeonFS.Client.ChunkReader do
       {:ok, %{stream: stream, file_size: meta.size}}
     end
   end
+
+  defp stripe_fallback_stream(meta, volume_name, path, opts) do
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, :all)
+    end_byte = compute_end_byte(meta.size, offset, length)
+
+    if offset >= meta.size or end_byte <= offset do
+      Stream.unfold(nil, fn _ -> nil end)
+    else
+      segments =
+        meta.stripes
+        |> Enum.map(&stripe_segment(&1, offset, end_byte))
+        |> Enum.reject(&is_nil/1)
+
+      Stream.unfold(segments, &pull_stripe_segment(&1, volume_name, path))
+    end
+  end
+
+  defp stripe_segment(%{byte_range: byte_range}, offset, end_byte) do
+    {s, e} = normalise_byte_range(byte_range)
+    read_start = max(s, offset)
+    read_end = min(e, end_byte)
+
+    if read_start < read_end do
+      %{offset: read_start, length: read_end - read_start}
+    end
+  end
+
+  defp pull_stripe_segment([], _volume_name, _path), do: nil
+
+  defp pull_stripe_segment([%{offset: offset, length: length} | rest], volume_name, path) do
+    case Router.call(NeonFS.Core, :read_file, [
+           volume_name,
+           path,
+           [offset: offset, length: length]
+         ]) do
+      {:ok, <<>>} ->
+        pull_stripe_segment(rest, volume_name, path)
+
+      {:ok, bytes} ->
+        {bytes, rest}
+
+      {:error, reason} ->
+        Logger.error("Stripe fallback segment read failed, halting stream",
+          reason: inspect(reason)
+        )
+
+        nil
+    end
+  end
+
+  defp compute_end_byte(file_size, _offset, :all), do: file_size
+  defp compute_end_byte(file_size, offset, length), do: min(file_size, offset + length)
+
+  defp normalise_byte_range({s, e}), do: {s, e}
+  defp normalise_byte_range(s..e//_), do: {s, e}
 end

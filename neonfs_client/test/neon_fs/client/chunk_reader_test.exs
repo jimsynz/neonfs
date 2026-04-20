@@ -524,13 +524,13 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert Enum.into(stream, <<>>) == "abcd"
     end
 
-    test "returns a stream wrapping the buffered read on :stripe_refs_unsupported" do
+    test "returns a stream wrapping the buffered read on :stripe_refs_unsupported for non-EC meta" do
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
         {:error, :stripe_refs_unsupported}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin"] ->
-        {:ok, %{size: 100}}
+        {:ok, %{size: 100, stripes: nil}}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", _] ->
@@ -549,6 +549,144 @@ defmodule NeonFS.Client.ChunkReaderTest do
       end)
 
       assert {:error, :not_found} = ChunkReader.read_file_stream("vol", "/missing.txt")
+    end
+  end
+
+  describe "read_file_stream/3 — erasure-coded degraded fallback" do
+    test "iterates stripes one at a time bounded by stripe size" do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}},
+        %{stripe_id: "s2", byte_range: {100, 200}},
+        %{stripe_id: "s3", byte_range: {200, 250}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin"] ->
+        {:ok, %{size: 250, stripes: stripes}}
+      end)
+
+      expect(Router, :call, 3, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", opts] ->
+        case {opts[:offset], opts[:length]} do
+          {0, 100} -> {:ok, String.duplicate("A", 100)}
+          {100, 100} -> {:ok, String.duplicate("B", 100)}
+          {200, 50} -> {:ok, String.duplicate("C", 50)}
+        end
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 250}} =
+               ChunkReader.read_file_stream("vol", "/ec.bin")
+
+      chunks = Enum.to_list(stream)
+      assert length(chunks) == 3
+      assert Enum.at(chunks, 0) == String.duplicate("A", 100)
+      assert Enum.at(chunks, 1) == String.duplicate("B", 100)
+      assert Enum.at(chunks, 2) == String.duplicate("C", 50)
+    end
+
+    test "reads only stripes overlapping the requested range" do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}},
+        %{stripe_id: "s2", byte_range: {100, 200}},
+        %{stripe_id: "s3", byte_range: {200, 300}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
+        {:ok, %{size: 300, stripes: stripes}}
+      end)
+
+      # Only stripe 2 overlaps byte range 120..180
+      expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", opts] ->
+        assert opts[:offset] == 120
+        assert opts[:length] == 60
+        {:ok, String.duplicate("B", 60)}
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 300}} =
+               ChunkReader.read_file_stream("vol", "/ec.bin", offset: 120, length: 60)
+
+      assert Enum.into(stream, <<>>) == String.duplicate("B", 60)
+    end
+
+    test "clips partial-overlap stripes at both ends of the range" do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}},
+        %{stripe_id: "s2", byte_range: {100, 200}},
+        %{stripe_id: "s3", byte_range: {200, 300}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
+        {:ok, %{size: 300, stripes: stripes}}
+      end)
+
+      expect(Router, :call, 3, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", opts] ->
+        case {opts[:offset], opts[:length]} do
+          {80, 20} -> {:ok, String.duplicate("A", 20)}
+          {100, 100} -> {:ok, String.duplicate("B", 100)}
+          {200, 10} -> {:ok, String.duplicate("C", 10)}
+        end
+      end)
+
+      assert {:ok, %{stream: stream}} =
+               ChunkReader.read_file_stream("vol", "/ec.bin", offset: 80, length: 130)
+
+      assert Enum.into(stream, <<>>) ==
+               String.duplicate("A", 20) <>
+                 String.duplicate("B", 100) <> String.duplicate("C", 10)
+    end
+
+    test "halts the stream if a stripe read fails mid-stream" do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}},
+        %{stripe_id: "s2", byte_range: {100, 200}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
+        {:ok, %{size: 200, stripes: stripes}}
+      end)
+
+      expect(Router, :call, 2, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", opts] ->
+        case opts[:offset] do
+          0 -> {:ok, String.duplicate("A", 100)}
+          100 -> {:error, %NeonFS.Error.Unavailable{message: "Insufficient chunks"}}
+        end
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/ec.bin")
+      assert Enum.to_list(stream) == [String.duplicate("A", 100)]
+    end
+
+    test "range that falls past the last stripe yields an empty stream" do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, _ ->
+        {:ok, %{size: 100, stripes: stripes}}
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 100}} =
+               ChunkReader.read_file_stream("vol", "/ec.bin", offset: 200, length: 10)
+
+      assert Enum.to_list(stream) == []
     end
   end
 
