@@ -3,7 +3,6 @@ defmodule NeonFS.Core.WriteOperationTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{
-    BlobStore,
     ChunkIndex,
     FileIndex,
     KeyManager,
@@ -769,17 +768,22 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/verify_enc.txt", data)
 
-      # Read raw bytes from BlobStore (without decryption) and confirm they differ from input
+      # Read raw bytes from disk (without decryption) and confirm they
+      # differ from input. Reach into the on-disk file directly because the
+      # codec-aware read path (#270) would attempt decryption.
+      blob_dir = Application.get_env(:neonfs_core, :blob_store_base_dir)
+
       for chunk_hash <- file_meta.chunks do
         {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
         [location | _] = chunk_meta.locations
-        drive_id = Map.get(location, :drive_id, "default")
         tier_str = Atom.to_string(Map.get(location, :tier, :hot))
+        hex = Base.encode16(chunk_hash, case: :lower)
+        prefix1 = String.slice(hex, 0, 2)
+        prefix2 = String.slice(hex, 2, 2)
+        chunk_dir = Path.join([blob_dir, "blobs", tier_str, prefix1, prefix2])
+        [chunk_path] = Path.wildcard(Path.join(chunk_dir, "#{hex}.*"))
+        raw_bytes = File.read!(chunk_path)
 
-        {:ok, raw_bytes} =
-          BlobStore.read_chunk(chunk_hash, drive_id, tier: tier_str)
-
-        # Raw bytes should NOT match the original data
         refute raw_bytes == data
       end
     end

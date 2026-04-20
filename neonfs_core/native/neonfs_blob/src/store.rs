@@ -4,11 +4,12 @@
 //! and reading them back. Writes are atomic (write to temp file, then rename)
 //! to prevent partial chunks.
 
+use crate::codec::CodecSuffix;
 use crate::compression::{compress, decompress, Compression};
 use crate::encryption::{self, EncryptionParams};
 use crate::error::StoreError;
 use crate::hash::{sha256, Hash};
-use crate::path::{chunk_path, ensure_parent_dirs, metadata_path, Tier};
+use crate::path::{chunk_path, ensure_parent_dirs, list_chunk_variants, metadata_path, Tier};
 use rand::RngExt;
 use std::fs::{self, File};
 use std::io::Write;
@@ -34,9 +35,12 @@ pub struct ReadOptions {
     /// This adds CPU overhead but detects corruption.
     pub verify: bool,
     /// If true, decompress the data after reading.
-    /// The Rust layer doesn't track compression state - the caller must know
-    /// whether the chunk was compressed.
     pub decompress: bool,
+    /// Compression variant the chunk was written with. Used to locate the
+    /// codec-discriminated on-disk file (even when `decompress` is false, the
+    /// caller must supply the original compression so the path resolves).
+    /// `None` / `Some(Compression::None)` map to the plain suffix.
+    pub compression: Option<Compression>,
     /// If set, decrypt the data after reading (before decompression).
     /// The read pipeline is: read → decrypt → decompress → verify.
     pub encryption: Option<EncryptionParams>,
@@ -48,6 +52,7 @@ impl ReadOptions {
         Self {
             verify: true,
             decompress: false,
+            compression: None,
             encryption: None,
         }
     }
@@ -57,6 +62,7 @@ impl ReadOptions {
         Self {
             verify: false,
             decompress: true,
+            compression: None,
             encryption: None,
         }
     }
@@ -66,6 +72,7 @@ impl ReadOptions {
         Self {
             verify: true,
             decompress: true,
+            compression: None,
             encryption: None,
         }
     }
@@ -151,9 +158,15 @@ impl BlobStore {
         &self.config
     }
 
-    /// Computes the path for a chunk.
-    fn chunk_path(&self, hash: &Hash, tier: Tier) -> PathBuf {
-        chunk_path(&self.base_dir, hash, tier, self.config.prefix_depth)
+    /// Computes the path for a chunk at a specific codec variant.
+    fn chunk_path(&self, hash: &Hash, tier: Tier, suffix: &CodecSuffix) -> PathBuf {
+        chunk_path(&self.base_dir, hash, tier, self.config.prefix_depth, suffix)
+    }
+
+    /// Returns on-disk paths for every codec variant of a chunk at a tier.
+    fn list_variants(&self, hash: &Hash, tier: Tier) -> Result<Vec<PathBuf>, StoreError> {
+        list_chunk_variants(&self.base_dir, hash, tier, self.config.prefix_depth)
+            .map_err(|e| StoreError::io_error(&self.base_dir, e))
     }
 
     /// Writes a chunk to the store atomically without compression.
@@ -201,7 +214,8 @@ impl BlobStore {
         tier: Tier,
         options: &WriteOptions,
     ) -> Result<ChunkInfo, StoreError> {
-        let final_path = self.chunk_path(hash, tier);
+        let suffix = CodecSuffix::new(options.compression.as_ref(), options.encryption.as_ref());
+        let final_path = self.chunk_path(hash, tier, &suffix);
         let original_size = data.len();
 
         // Step 1: Apply compression if specified
@@ -282,7 +296,8 @@ impl BlobStore {
         tier: Tier,
         options: &ReadOptions,
     ) -> Result<Vec<u8>, StoreError> {
-        let path = self.chunk_path(hash, tier);
+        let suffix = CodecSuffix::new(options.compression.as_ref(), options.encryption.as_ref());
+        let path = self.chunk_path(hash, tier, &suffix);
 
         if !path.exists() {
             return Err(StoreError::ChunkNotFound(hash.to_hex()));
@@ -319,17 +334,21 @@ impl BlobStore {
         Ok(data)
     }
 
-    /// Deletes a chunk from the store.
+    /// Deletes a specific codec variant of a chunk from the store.
     ///
-    /// # Arguments
-    /// * `hash` - The SHA-256 hash of the chunk to delete.
-    /// * `tier` - The storage tier to delete from.
-    ///
-    /// # Errors
-    /// Returns `ChunkNotFound` if the chunk does not exist.
-    /// Returns `IoError` if the delete fails.
-    pub fn delete_chunk(&self, hash: &Hash, tier: Tier) -> Result<u64, StoreError> {
-        let path = self.chunk_path(hash, tier);
+    /// Pass the `(compression, encryption)` tuple the chunk was written with —
+    /// codec variants are distinct on-disk files and this only removes the
+    /// matching one. To remove every variant at a tier, use
+    /// `delete_chunk_any_codec`.
+    pub fn delete_chunk(
+        &self,
+        hash: &Hash,
+        tier: Tier,
+        compression: Option<&Compression>,
+        encryption: Option<&EncryptionParams>,
+    ) -> Result<u64, StoreError> {
+        let suffix = CodecSuffix::new(compression, encryption);
+        let path = self.chunk_path(hash, tier, &suffix);
 
         if !path.exists() {
             return Err(StoreError::ChunkNotFound(hash.to_hex()));
@@ -344,70 +363,107 @@ impl BlobStore {
         Ok(file_size)
     }
 
-    /// Checks if a chunk exists in the store.
-    ///
-    /// # Arguments
-    /// * `hash` - The SHA-256 hash of the chunk.
-    /// * `tier` - The storage tier to check.
-    ///
-    /// # Returns
-    /// `true` if the chunk exists, `false` otherwise.
-    pub fn chunk_exists(&self, hash: &Hash, tier: Tier) -> bool {
-        self.chunk_path(hash, tier).exists()
+    /// Deletes every codec variant of a chunk at a tier. Returns the total
+    /// bytes freed. Returns `ChunkNotFound` if no variants were present.
+    pub fn delete_chunk_any_codec(&self, hash: &Hash, tier: Tier) -> Result<u64, StoreError> {
+        let variants = self.list_variants(hash, tier)?;
+        if variants.is_empty() {
+            return Err(StoreError::ChunkNotFound(hash.to_hex()));
+        }
+
+        let mut bytes_freed = 0u64;
+        for path in variants {
+            let meta = fs::metadata(&path).map_err(|e| StoreError::io_error(&path, e))?;
+            bytes_freed += meta.len();
+            fs::remove_file(&path).map_err(|e| StoreError::io_error(&path, e))?;
+        }
+        Ok(bytes_freed)
     }
 
-    /// Migrates a chunk from one tier to another.
+    /// Checks if a specific codec variant of the chunk exists.
+    pub fn chunk_exists(
+        &self,
+        hash: &Hash,
+        tier: Tier,
+        compression: Option<&Compression>,
+        encryption: Option<&EncryptionParams>,
+    ) -> bool {
+        let suffix = CodecSuffix::new(compression, encryption);
+        self.chunk_path(hash, tier, &suffix).exists()
+    }
+
+    /// Checks whether any codec variant of the chunk exists at the given tier.
+    pub fn chunk_exists_any_codec(&self, hash: &Hash, tier: Tier) -> Result<bool, StoreError> {
+        Ok(!self.list_variants(hash, tier)?.is_empty())
+    }
+
+    /// Returns the on-disk size of an arbitrary codec variant of the chunk, or
+    /// `None` if no variant exists at the given tier. When multiple variants
+    /// exist (same hash, different codecs) the returned size is the first
+    /// match; callers that need a specific variant should use
+    /// `chunk_path`-based queries with explicit codec info.
+    pub fn chunk_any_codec_size(&self, hash: &Hash, tier: Tier) -> Result<Option<u64>, StoreError> {
+        let variants = self.list_variants(hash, tier)?;
+        match variants.first() {
+            Some(path) => {
+                let meta = fs::metadata(path).map_err(|e| StoreError::io_error(path, e))?;
+                Ok(Some(meta.len()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Migrates a specific codec variant of a chunk from one tier to another.
     ///
-    /// This operation is atomic: the chunk is written to the destination tier,
-    /// verified, and only then deleted from the source tier. If any step fails,
-    /// the migration is aborted and the source chunk remains intact.
-    ///
-    /// # Arguments
-    /// * `hash` - The SHA-256 hash of the chunk to migrate.
-    /// * `from_tier` - The source storage tier.
-    /// * `to_tier` - The destination storage tier.
-    ///
-    /// # Errors
-    /// Returns `ChunkNotFound` if the chunk does not exist in the source tier.
-    /// Returns `IoError` if any read/write/delete operation fails.
-    /// Returns `CorruptChunk` if verification fails during migration.
-    ///
-    /// # Note
-    /// If `from_tier` equals `to_tier`, this is a no-op and returns Ok(()).
-    /// Verification is enabled during migration to ensure data integrity.
+    /// Raw bytes are copied as-is — compression/encryption are preserved on
+    /// disk and the destination file gets the same codec suffix. If any step
+    /// fails the source chunk remains intact. No-op when `from_tier == to_tier`.
     pub fn migrate_chunk(
         &self,
         hash: &Hash,
         from_tier: Tier,
         to_tier: Tier,
+        compression: Option<&Compression>,
+        encryption: Option<&EncryptionParams>,
     ) -> Result<(), StoreError> {
-        // No-op if migrating to the same tier
         if from_tier == to_tier {
             return Ok(());
         }
 
-        // Read from source with verification enabled
-        let options = ReadOptions {
-            verify: true,
-            decompress: false, // Read raw data (may be compressed)
-            encryption: None,
-        };
-        let data = self.read_chunk_with_options(hash, from_tier, &options)?;
+        let suffix = CodecSuffix::new(compression, encryption);
+        let src_path = self.chunk_path(hash, from_tier, &suffix);
+        if !src_path.exists() {
+            return Err(StoreError::ChunkNotFound(hash.to_hex()));
+        }
+        let raw = fs::read(&src_path).map_err(|e| StoreError::io_error(&src_path, e))?;
 
-        // Write to destination tier
-        self.write_chunk(hash, &data, to_tier)?;
+        let dst_path = self.chunk_path(hash, to_tier, &suffix);
+        self.atomic_write(&dst_path, &raw)?;
 
-        // Verify the destination (belt and suspenders approach)
-        let verify_options = ReadOptions {
-            verify: true,
-            decompress: false,
-            encryption: None,
-        };
-        let _ = self.read_chunk_with_options(hash, to_tier, &verify_options)?;
+        // Belt-and-suspenders: verify the destination file is readable before
+        // we remove the source. For unencrypted, uncompressed chunks we can
+        // cheaply hash-check; for encoded variants we can only confirm the
+        // file exists and has the expected size.
+        let dst_meta = fs::metadata(&dst_path).map_err(|e| StoreError::io_error(&dst_path, e))?;
+        if dst_meta.len() as usize != raw.len() {
+            let _ = fs::remove_file(&dst_path);
+            return Err(StoreError::io_error(
+                &dst_path,
+                std::io::Error::other("short write during migration"),
+            ));
+        }
+        if compression.is_none_or(|c| c.is_none()) && encryption.is_none() {
+            let actual_hash = sha256(&raw);
+            if &actual_hash != hash {
+                let _ = fs::remove_file(&dst_path);
+                return Err(StoreError::CorruptChunk {
+                    expected: hash.to_hex(),
+                    actual: actual_hash.to_hex(),
+                });
+            }
+        }
 
-        // Only delete source after successful destination write and verification
-        self.delete_chunk(hash, from_tier)?;
-
+        fs::remove_file(&src_path).map_err(|e| StoreError::io_error(&src_path, e))?;
         Ok(())
     }
 
@@ -430,27 +486,32 @@ impl BlobStore {
         &self,
         hash: &Hash,
         tier: Tier,
+        compression: Option<&Compression>,
         old_params: &EncryptionParams,
         new_params: &EncryptionParams,
     ) -> Result<usize, StoreError> {
-        let path = self.chunk_path(hash, tier);
+        let old_suffix = CodecSuffix::new(compression, Some(old_params));
+        let new_suffix = CodecSuffix::new(compression, Some(new_params));
+        let old_path = self.chunk_path(hash, tier, &old_suffix);
 
-        if !path.exists() {
+        if !old_path.exists() {
             return Err(StoreError::ChunkNotFound(hash.to_hex()));
         }
 
-        // Read raw encrypted data from disk
-        let raw_data = fs::read(&path).map_err(|e| StoreError::io_error(&path, e))?;
-
-        // Decrypt with old key/nonce (result is compressed data or raw data)
+        let raw_data = fs::read(&old_path).map_err(|e| StoreError::io_error(&old_path, e))?;
         let intermediate = encryption::decrypt(&raw_data, old_params)?;
-
-        // Re-encrypt with new key/nonce
         let new_encrypted = encryption::encrypt(&intermediate, new_params)?;
-
         let stored_size = new_encrypted.len();
 
-        self.atomic_write(&path, &new_encrypted)?;
+        if old_suffix == new_suffix {
+            // Same suffix (extraordinary: same nonce). Overwrite in place.
+            self.atomic_write(&old_path, &new_encrypted)?;
+        } else {
+            let new_path = self.chunk_path(hash, tier, &new_suffix);
+            self.atomic_write(&new_path, &new_encrypted)?;
+            // Only remove the old variant once the new one is on disk.
+            fs::remove_file(&old_path).map_err(|e| StoreError::io_error(&old_path, e))?;
+        }
 
         Ok(stored_size)
     }
@@ -664,10 +725,10 @@ mod tests {
         let hash = sha256(data);
 
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
-        assert!(store.chunk_exists(&hash, Tier::Hot));
+        assert!(store.chunk_exists(&hash, Tier::Hot, None, None));
 
-        store.delete_chunk(&hash, Tier::Hot).unwrap();
-        assert!(!store.chunk_exists(&hash, Tier::Hot));
+        store.delete_chunk(&hash, Tier::Hot, None, None).unwrap();
+        assert!(!store.chunk_exists(&hash, Tier::Hot, None, None));
     }
 
     #[test]
@@ -675,7 +736,7 @@ mod tests {
         let (store, _temp) = create_test_store();
         let hash = sha256(b"nonexistent");
 
-        let result = store.delete_chunk(&hash, Tier::Hot);
+        let result = store.delete_chunk(&hash, Tier::Hot, None, None);
 
         assert!(matches!(result, Err(StoreError::ChunkNotFound(_))));
     }
@@ -686,11 +747,11 @@ mod tests {
         let data = b"test data";
         let hash = sha256(data);
 
-        assert!(!store.chunk_exists(&hash, Tier::Hot));
+        assert!(!store.chunk_exists(&hash, Tier::Hot, None, None));
 
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
 
-        assert!(store.chunk_exists(&hash, Tier::Hot));
+        assert!(store.chunk_exists(&hash, Tier::Hot, None, None));
     }
 
     #[test]
@@ -700,7 +761,7 @@ mod tests {
         let hash = sha256(data);
 
         // The directory structure shouldn't exist yet
-        let chunk_path = chunk_path(store.base_dir(), &hash, Tier::Hot, 2);
+        let chunk_path = chunk_path(store.base_dir(), &hash, Tier::Hot, 2, &CodecSuffix::plain());
         assert!(!chunk_path.parent().unwrap().exists());
 
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
@@ -733,9 +794,9 @@ mod tests {
 
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
 
-        assert!(store.chunk_exists(&hash, Tier::Hot));
-        assert!(!store.chunk_exists(&hash, Tier::Warm));
-        assert!(!store.chunk_exists(&hash, Tier::Cold));
+        assert!(store.chunk_exists(&hash, Tier::Hot, None, None));
+        assert!(!store.chunk_exists(&hash, Tier::Warm, None, None));
+        assert!(!store.chunk_exists(&hash, Tier::Cold, None, None));
     }
 
     #[test]
@@ -848,7 +909,7 @@ mod tests {
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
 
         // Manually corrupt the chunk file
-        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2);
+        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2, &CodecSuffix::plain());
         fs::write(&chunk_path, b"corrupted data").unwrap();
 
         let options = ReadOptions::with_verify();
@@ -872,7 +933,7 @@ mod tests {
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
 
         // Manually corrupt the chunk file
-        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2);
+        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2, &CodecSuffix::plain());
         let corrupt_data = b"corrupted data";
         fs::write(&chunk_path, corrupt_data).unwrap();
 
@@ -895,7 +956,7 @@ mod tests {
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
 
         // Corrupt the file
-        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2);
+        let chunk_path = chunk_path(temp_dir.path(), &hash, Tier::Hot, 2, &CodecSuffix::plain());
         let corrupt_data = b"corrupted convenience data";
         fs::write(&chunk_path, corrupt_data).unwrap();
 
@@ -921,8 +982,12 @@ mod tests {
         assert_eq!(chunk_info.original_size, data.len());
         assert_eq!(chunk_info.hash, hash);
 
-        // Read with decompression
-        let read_options = ReadOptions::with_decompress();
+        // Read with decompression — must supply the compression that was
+        // written so we resolve to the matching codec suffix.
+        let read_options = ReadOptions {
+            compression: Some(Compression::zstd(3)),
+            ..ReadOptions::with_decompress()
+        };
         let read_data = store
             .read_chunk_with_options(&hash, Tier::Hot, &read_options)
             .unwrap();
@@ -980,8 +1045,12 @@ mod tests {
             .write_chunk_with_options(&hash, &data, Tier::Hot, &write_options_1)
             .unwrap();
 
-        // Delete and write again with level 9
-        store.delete_chunk(&hash, Tier::Hot).unwrap();
+        // Delete and write again with level 9 (level is part of the codec
+        // suffix, so the two writes land at distinct paths; we delete the
+        // level-1 variant explicitly).
+        store
+            .delete_chunk(&hash, Tier::Hot, Some(&Compression::zstd(1)), None)
+            .unwrap();
         let write_options_9 = WriteOptions::with_compression(Compression::zstd(9));
         let chunk_info_9 = store
             .write_chunk_with_options(&hash, &data, Tier::Hot, &write_options_9)
@@ -1004,7 +1073,10 @@ mod tests {
             .unwrap();
 
         // Read with decompression and verification
-        let read_options = ReadOptions::with_verify_and_decompress();
+        let read_options = ReadOptions {
+            compression: Some(Compression::zstd(3)),
+            ..ReadOptions::with_verify_and_decompress()
+        };
         let read_data = store
             .read_chunk_with_options(&hash, Tier::Hot, &read_options)
             .unwrap();
@@ -1044,7 +1116,10 @@ mod tests {
         assert_eq!(chunk_info.original_size, 0);
 
         // Read with decompression
-        let read_options = ReadOptions::with_decompress();
+        let read_options = ReadOptions {
+            compression: Some(Compression::zstd(3)),
+            ..ReadOptions::with_decompress()
+        };
         let read_data = store
             .read_chunk_with_options(&hash, Tier::Hot, &read_options)
             .unwrap();
@@ -1067,7 +1142,10 @@ mod tests {
         assert_eq!(chunk_info.original_size, 1_048_576);
 
         // Read with decompression
-        let read_options = ReadOptions::with_decompress();
+        let read_options = ReadOptions {
+            compression: Some(Compression::zstd(3)),
+            ..ReadOptions::with_decompress()
+        };
         let read_data = store
             .read_chunk_with_options(&hash, Tier::Hot, &read_options)
             .unwrap();
@@ -1083,15 +1161,17 @@ mod tests {
 
         // Write to hot tier
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
-        assert!(store.chunk_exists(&hash, Tier::Hot));
-        assert!(!store.chunk_exists(&hash, Tier::Cold));
+        assert!(store.chunk_exists(&hash, Tier::Hot, None, None));
+        assert!(!store.chunk_exists(&hash, Tier::Cold, None, None));
 
         // Migrate to cold tier
-        store.migrate_chunk(&hash, Tier::Hot, Tier::Cold).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Hot, Tier::Cold, None, None)
+            .unwrap();
 
         // Verify chunk moved: in cold, not in hot
-        assert!(!store.chunk_exists(&hash, Tier::Hot));
-        assert!(store.chunk_exists(&hash, Tier::Cold));
+        assert!(!store.chunk_exists(&hash, Tier::Hot, None, None));
+        assert!(store.chunk_exists(&hash, Tier::Cold, None, None));
 
         // Verify data integrity
         let read_data = store.read_chunk(&hash, Tier::Cold).unwrap();
@@ -1108,11 +1188,13 @@ mod tests {
         store.write_chunk(&hash, data, Tier::Cold).unwrap();
 
         // Migrate to hot tier
-        store.migrate_chunk(&hash, Tier::Cold, Tier::Hot).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Cold, Tier::Hot, None, None)
+            .unwrap();
 
         // Verify chunk moved
-        assert!(store.chunk_exists(&hash, Tier::Hot));
-        assert!(!store.chunk_exists(&hash, Tier::Cold));
+        assert!(store.chunk_exists(&hash, Tier::Hot, None, None));
+        assert!(!store.chunk_exists(&hash, Tier::Cold, None, None));
 
         // Verify data integrity
         let read_data = store.read_chunk(&hash, Tier::Hot).unwrap();
@@ -1129,10 +1211,12 @@ mod tests {
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
 
         // "Migrate" to same tier should be no-op
-        store.migrate_chunk(&hash, Tier::Hot, Tier::Hot).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Hot, Tier::Hot, None, None)
+            .unwrap();
 
         // Verify: still in hot tier
-        assert!(store.chunk_exists(&hash, Tier::Hot));
+        assert!(store.chunk_exists(&hash, Tier::Hot, None, None));
         let read_data = store.read_chunk(&hash, Tier::Hot).unwrap();
         assert_eq!(read_data, data);
     }
@@ -1142,7 +1226,7 @@ mod tests {
         let (store, _temp) = create_test_store();
         let hash = sha256(b"nonexistent");
 
-        let result = store.migrate_chunk(&hash, Tier::Hot, Tier::Cold);
+        let result = store.migrate_chunk(&hash, Tier::Hot, Tier::Cold, None, None);
         assert!(matches!(result, Err(StoreError::ChunkNotFound(_))));
     }
 
@@ -1157,15 +1241,21 @@ mod tests {
         store.write_chunk(&hash, &data, Tier::Hot).unwrap();
 
         // Migrate through all tiers
-        store.migrate_chunk(&hash, Tier::Hot, Tier::Warm).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Hot, Tier::Warm, None, None)
+            .unwrap();
         let read1 = store.read_chunk(&hash, Tier::Warm).unwrap();
         assert_eq!(read1, data);
 
-        store.migrate_chunk(&hash, Tier::Warm, Tier::Cold).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Warm, Tier::Cold, None, None)
+            .unwrap();
         let read2 = store.read_chunk(&hash, Tier::Cold).unwrap();
         assert_eq!(read2, data);
 
-        store.migrate_chunk(&hash, Tier::Cold, Tier::Hot).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Cold, Tier::Hot, None, None)
+            .unwrap();
         let read3 = store.read_chunk(&hash, Tier::Hot).unwrap();
         assert_eq!(read3, data);
 
@@ -1180,10 +1270,12 @@ mod tests {
         let hash = sha256(data);
 
         store.write_chunk(&hash, data, Tier::Hot).unwrap();
-        store.migrate_chunk(&hash, Tier::Hot, Tier::Cold).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Hot, Tier::Cold, None, None)
+            .unwrap();
 
-        assert!(!store.chunk_exists(&hash, Tier::Hot));
-        assert!(store.chunk_exists(&hash, Tier::Cold));
+        assert!(!store.chunk_exists(&hash, Tier::Hot, None, None));
+        assert!(store.chunk_exists(&hash, Tier::Cold, None, None));
 
         let read_data = store.read_chunk(&hash, Tier::Cold).unwrap();
         assert_eq!(read_data, data);
@@ -1200,11 +1292,13 @@ mod tests {
 
         // Migration should succeed with valid data
         // (internally uses verification)
-        store.migrate_chunk(&hash, Tier::Hot, Tier::Cold).unwrap();
+        store
+            .migrate_chunk(&hash, Tier::Hot, Tier::Cold, None, None)
+            .unwrap();
 
         // Chunk should be in cold, not hot
-        assert!(!store.chunk_exists(&hash, Tier::Hot));
-        assert!(store.chunk_exists(&hash, Tier::Cold));
+        assert!(!store.chunk_exists(&hash, Tier::Hot, None, None));
+        assert!(store.chunk_exists(&hash, Tier::Cold, None, None));
     }
 
     // Metadata tests
@@ -1385,6 +1479,7 @@ mod tests {
         let read_opts = ReadOptions {
             verify: false,
             decompress: false,
+            compression: None,
             encryption: Some(enc),
         };
         let read_data = store
@@ -1417,6 +1512,7 @@ mod tests {
         let read_opts = ReadOptions {
             verify: true,
             decompress: true,
+            compression: Some(Compression::zstd(3)),
             encryption: Some(enc),
         };
         let read_data = store
@@ -1448,6 +1544,7 @@ mod tests {
         let read_opts = ReadOptions {
             verify: false,
             decompress: false,
+            compression: None,
             encryption: Some(wrong_enc),
         };
         let result = store.read_chunk_with_options(&hash, Tier::Hot, &read_opts);
@@ -1495,15 +1592,16 @@ mod tests {
             nonce: [0x02u8; 12],
         };
         let stored_size = store
-            .reencrypt_chunk(&hash, Tier::Hot, &old_enc, &new_enc)
+            .reencrypt_chunk(&hash, Tier::Hot, None, &old_enc, &new_enc)
             .unwrap();
 
         assert_eq!(stored_size, data.len() + 16);
 
-        // Old key should fail
+        // Old key should fail — and the old-suffix path is gone.
         let old_read = ReadOptions {
             verify: false,
             decompress: false,
+            compression: None,
             encryption: Some(old_enc),
         };
         assert!(store
@@ -1514,6 +1612,7 @@ mod tests {
         let new_read = ReadOptions {
             verify: false,
             decompress: false,
+            compression: None,
             encryption: Some(new_enc),
         };
         let read_data = store
@@ -1553,13 +1652,20 @@ mod tests {
             nonce: [0x04u8; 12],
         };
         store
-            .reencrypt_chunk(&hash, Tier::Hot, &old_enc, &new_enc)
+            .reencrypt_chunk(
+                &hash,
+                Tier::Hot,
+                Some(&Compression::zstd(3)),
+                &old_enc,
+                &new_enc,
+            )
             .unwrap();
 
         // Read with new key + decompress and verify
         let read_opts = ReadOptions {
             verify: true,
             decompress: true,
+            compression: Some(Compression::zstd(3)),
             encryption: Some(new_enc),
         };
         let read_data = store
@@ -1578,7 +1684,7 @@ mod tests {
             nonce: [0xFFu8; 12],
         };
 
-        let result = store.reencrypt_chunk(&hash, Tier::Hot, &old_enc, &new_enc);
+        let result = store.reencrypt_chunk(&hash, Tier::Hot, None, &old_enc, &new_enc);
         assert!(matches!(result, Err(StoreError::ChunkNotFound(_))));
     }
 
@@ -1603,6 +1709,7 @@ mod tests {
         let read_opts = ReadOptions {
             verify: false,
             decompress: false,
+            compression: None,
             encryption: Some(enc),
         };
         let read_data = store

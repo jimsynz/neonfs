@@ -145,7 +145,8 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
           old_key,
           old_nonce,
           new_key,
-          new_nonce
+          new_nonce,
+          compression: chunk.compression
         )
       end)
 

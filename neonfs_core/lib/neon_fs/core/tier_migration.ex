@@ -29,6 +29,7 @@ defmodule NeonFS.Core.TierMigration do
 
   require Logger
 
+  alias NeonFS.Core.{BlobStore, ChunkIndex}
   alias NeonFS.Core.TierMigration.LockTable
   alias NeonFS.IO.{Operation, Scheduler}
 
@@ -108,9 +109,9 @@ defmodule NeonFS.Core.TierMigration do
         _ -> :none
       end
 
-    with {:ok, data} <- copy_read(params, chunk_compression != :none),
+    with {:ok, data} <- copy_read(params, chunk_compression),
          {:ok, _hash, _info} <- copy_write(params, data, chunk_compression),
-         :ok <- verify_copy(params, chunk_compression != :none),
+         :ok <- verify_copy(params, chunk_compression),
          :ok <- update_metadata(params),
          _ <- cleanup_source(params) do
       {:ok, :migrated}
@@ -127,10 +128,11 @@ defmodule NeonFS.Core.TierMigration do
     end
   end
 
-  defp copy_read(params, decompress?) do
+  defp copy_read(params, compression) do
     blob_store = NeonFS.Core.BlobStore
     tier_str = Atom.to_string(params.source_tier)
     volume_id = Map.get(params, :volume_id, "_migration")
+    read_opts = [verify: true, decompress: compression != :none, compression: compression]
 
     if params.source_node == Node.self() do
       op =
@@ -144,8 +146,7 @@ defmodule NeonFS.Core.TierMigration do
               params.chunk_hash,
               params.source_drive,
               tier_str,
-              verify: true,
-              decompress: decompress?
+              read_opts
             )
           end
         )
@@ -160,7 +161,7 @@ defmodule NeonFS.Core.TierMigration do
           params.chunk_hash,
           params.source_drive,
           tier_str,
-          [verify: true, decompress: decompress?]
+          read_opts
         ],
         10_000
       )
@@ -199,10 +200,11 @@ defmodule NeonFS.Core.TierMigration do
     end
   end
 
-  defp verify_copy(params, decompress?) do
+  defp verify_copy(params, compression) do
     blob_store = NeonFS.Core.BlobStore
     tier_str = Atom.to_string(params.target_tier)
     volume_id = Map.get(params, :volume_id, "_migration")
+    read_opts = [verify: true, decompress: compression != :none, compression: compression]
 
     result =
       if params.target_node == Node.self() do
@@ -217,8 +219,7 @@ defmodule NeonFS.Core.TierMigration do
                 params.chunk_hash,
                 params.target_drive,
                 tier_str,
-                verify: true,
-                decompress: decompress?
+                read_opts
               )
             end
           )
@@ -233,7 +234,7 @@ defmodule NeonFS.Core.TierMigration do
             params.chunk_hash,
             params.target_drive,
             tier_str,
-            [verify: true, decompress: decompress?]
+            read_opts
           ],
           10_000
         )
@@ -281,16 +282,17 @@ defmodule NeonFS.Core.TierMigration do
 
   defp cleanup_source(params) do
     blob_store = NeonFS.Core.BlobStore
+    delete_opts = cleanup_delete_opts(params.chunk_hash)
 
     result =
       if params.source_node == Node.self() do
-        blob_store.delete_chunk(params.chunk_hash, params.source_drive)
+        blob_store.delete_chunk(params.chunk_hash, params.source_drive, delete_opts)
       else
         :rpc.call(
           params.source_node,
           blob_store,
           :delete_chunk,
-          [params.chunk_hash, params.source_drive],
+          [params.chunk_hash, params.source_drive, delete_opts],
           10_000
         )
         |> handle_rpc_result()
@@ -309,16 +311,17 @@ defmodule NeonFS.Core.TierMigration do
 
   defp rollback_copy(params) do
     blob_store = NeonFS.Core.BlobStore
+    delete_opts = cleanup_delete_opts(params.chunk_hash)
 
     result =
       if params.target_node == Node.self() do
-        blob_store.delete_chunk(params.chunk_hash, params.target_drive)
+        blob_store.delete_chunk(params.chunk_hash, params.target_drive, delete_opts)
       else
         :rpc.call(
           params.target_node,
           blob_store,
           :delete_chunk,
-          [params.chunk_hash, params.target_drive],
+          [params.chunk_hash, params.target_drive, delete_opts],
           10_000
         )
         |> handle_rpc_result()
@@ -327,6 +330,13 @@ defmodule NeonFS.Core.TierMigration do
     case result do
       {:ok, _} -> :ok
       {:error, _} -> :ok
+    end
+  end
+
+  defp cleanup_delete_opts(chunk_hash) do
+    case ChunkIndex.get(chunk_hash) do
+      {:ok, chunk_meta} -> BlobStore.codec_opts_for_chunk(chunk_meta)
+      _ -> []
     end
   end
 

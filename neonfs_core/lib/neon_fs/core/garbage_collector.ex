@@ -194,13 +194,15 @@ defmodule NeonFS.Core.GarbageCollector do
     end
   end
 
-  defp delete_chunk_from_storage(%{locations: locations, hash: hash})
+  defp delete_chunk_from_storage(%{locations: locations, hash: hash} = chunk_meta)
        when is_list(locations) and locations != [] do
+    delete_opts = BlobStore.codec_opts_for_chunk(chunk_meta)
+
     results =
       Enum.map(locations, fn location ->
         drive_id = Map.get(location, :drive_id, "default")
 
-        case BlobStore.delete_chunk(hash, drive_id) do
+        case BlobStore.delete_chunk(hash, drive_id, delete_opts) do
           {:ok, _bytes_freed} ->
             :ok
 
@@ -218,8 +220,8 @@ defmodule NeonFS.Core.GarbageCollector do
     if Enum.any?(results, &(&1 == :ok)), do: :ok, else: :error
   end
 
-  defp delete_chunk_from_storage(%{hash: hash}) do
-    case delete_from_all_drives(hash) do
+  defp delete_chunk_from_storage(%{hash: hash} = chunk_meta) do
+    case delete_from_all_drives(hash, BlobStore.codec_opts_for_chunk(chunk_meta)) do
       :ok ->
         :ok
 
@@ -230,13 +232,13 @@ defmodule NeonFS.Core.GarbageCollector do
     end
   end
 
-  defp delete_from_all_drives(hash) do
+  defp delete_from_all_drives(hash, delete_opts) do
     {:ok, drives} = BlobStore.list_drives()
     drive_ids = Map.keys(drives)
 
     results =
       Enum.map(drive_ids, fn drive_id ->
-        case BlobStore.delete_chunk(hash, drive_id) do
+        case BlobStore.delete_chunk(hash, drive_id, delete_opts) do
           {:ok, _bytes_freed} -> :ok
           {:error, _} -> :error
         end

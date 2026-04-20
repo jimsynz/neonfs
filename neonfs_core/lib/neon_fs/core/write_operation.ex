@@ -540,6 +540,7 @@ defmodule NeonFS.Core.WriteOperation do
       drive_id: drive_id,
       verify: false,
       decompress: needs_decompress,
+      compression: chunk_meta.compression,
       volume_id: volume_id
     ]
 
@@ -1577,7 +1578,7 @@ defmodule NeonFS.Core.WriteOperation do
     case meta.locations do
       [location | _] ->
         drive_id = Map.get(location, :drive_id, "default")
-        BlobStore.delete_chunk(meta.hash, drive_id)
+        BlobStore.delete_chunk(meta.hash, drive_id, BlobStore.codec_opts_for_chunk(meta))
 
       [] ->
         :ok

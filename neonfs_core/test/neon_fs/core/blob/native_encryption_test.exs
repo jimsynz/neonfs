@@ -47,8 +47,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  "hot",
                  false,
                  false,
-                 key,
-                 nonce
+                 {"", 0, key, nonce}
                )
 
       assert read_data == data
@@ -86,8 +85,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  "hot",
                  true,
                  true,
-                 key,
-                 nonce
+                 {"zstd", 3, key, nonce}
                )
 
       assert read_data == data
@@ -120,8 +118,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  "hot",
                  false,
                  false,
-                 wrong_key,
-                 nonce
+                 {"", 0, wrong_key, nonce}
                )
 
       assert reason =~ "authentication failed"
@@ -156,8 +153,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  "hot",
                  false,
                  false,
-                 <<>>,
-                 <<>>
+                 {"", 0, <<>>, <<>>}
                )
 
       assert read_data == data
@@ -192,15 +188,14 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  store,
                  hash,
                  "hot",
-                 old_key,
-                 old_nonce,
-                 new_key,
-                 new_nonce
+                 {"", 0},
+                 {old_key, old_nonce},
+                 {new_key, new_nonce}
                )
 
       assert stored_size == byte_size(data) + 16
 
-      # Old key should fail
+      # Old key should fail — the old-suffix path no longer exists
       assert {:error, _} =
                Native.store_read_chunk_with_options(
                  store,
@@ -208,8 +203,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  "hot",
                  false,
                  false,
-                 old_key,
-                 old_nonce
+                 {"", 0, old_key, old_nonce}
                )
 
       # New key should work
@@ -220,8 +214,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  "hot",
                  false,
                  false,
-                 new_key,
-                 new_nonce
+                 {"", 0, new_key, new_nonce}
                )
 
       assert read_data == data
@@ -254,10 +247,9 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  store,
                  hash,
                  "hot",
-                 old_key,
-                 old_nonce,
-                 new_key,
-                 new_nonce
+                 {"zstd", 3},
+                 {old_key, old_nonce},
+                 {new_key, new_nonce}
                )
 
       # Read with new key + decompress + verify
@@ -268,8 +260,7 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                  "hot",
                  true,
                  true,
-                 new_key,
-                 new_nonce
+                 {"zstd", 3, new_key, new_nonce}
                )
 
       assert read_data == data

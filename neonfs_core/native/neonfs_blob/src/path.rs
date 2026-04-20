@@ -4,6 +4,7 @@
 //! Chunks are stored in sharded directories using the first characters of the hash
 //! as directory prefixes to prevent any single directory from containing too many entries.
 
+use crate::codec::CodecSuffix;
 use crate::hash::Hash;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -43,50 +44,97 @@ impl fmt::Display for Tier {
     }
 }
 
-/// Generates the path for a chunk file based on its hash and storage tier.
+/// Generates the path for a chunk file based on its hash, tier, and codec.
 ///
 /// The path follows the format:
-/// `{base_dir}/blobs/{tier}/{prefix_1}/{prefix_2}/.../{hash}`
+/// `{base_dir}/blobs/{tier}/{prefix_1}/{prefix_2}/.../{hash}.{codec_suffix}`
+///
+/// The codec suffix discriminates between chunks that hash the same plaintext
+/// but were written with different compression/encryption settings. See the
+/// `codec` module for the suffix encoding.
 ///
 /// # Arguments
 /// * `base_dir` - The base directory for blob storage.
 /// * `hash` - The SHA-256 hash of the chunk.
 /// * `tier` - The storage tier (hot, warm, cold).
 /// * `prefix_depth` - Number of 2-character prefix directories (1=256 dirs, 2=65K dirs).
+/// * `suffix` - The codec suffix identifying the chunk's codec variant.
+pub fn chunk_path(
+    base_dir: &Path,
+    hash: &Hash,
+    tier: Tier,
+    prefix_depth: usize,
+    suffix: &CodecSuffix,
+) -> PathBuf {
+    let mut path = chunk_dir(base_dir, hash, tier, prefix_depth);
+    path.push(chunk_filename(hash, suffix));
+    path
+}
+
+/// Generates the directory that holds all codec variants for a given hash.
 ///
-/// # Examples
-/// ```
-/// use neonfs_blob::path::{chunk_path, Tier};
-/// use neonfs_blob::hash::Hash;
-/// use std::path::Path;
-///
-/// let hash = Hash::from_hex("abcd7c9e1234567890abcdef1234567890abcdef1234567890abcdef12345678").unwrap();
-/// let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 2);
-/// assert_eq!(
-///     path,
-///     Path::new("/var/lib/neonfs/blobs/hot/ab/cd/abcd7c9e1234567890abcdef1234567890abcdef1234567890abcdef12345678")
-/// );
-/// ```
-pub fn chunk_path(base_dir: &Path, hash: &Hash, tier: Tier, prefix_depth: usize) -> PathBuf {
+/// Format: `{base_dir}/blobs/{tier}/{prefix_1}/.../{prefix_n}`.
+pub fn chunk_dir(base_dir: &Path, hash: &Hash, tier: Tier, prefix_depth: usize) -> PathBuf {
     let hex = hash.to_hex();
     let mut path = base_dir.to_path_buf();
 
-    // Add the blobs directory and tier
     path.push("blobs");
     path.push(tier.as_str());
 
-    // Add prefix directories based on depth
-    // Each prefix is 2 hex characters (1 byte)
     for i in 0..prefix_depth {
         let start = i * 2;
         let end = start + 2;
         path.push(&hex[start..end]);
     }
 
-    // Add the full hash as the filename
-    path.push(&hex);
-
     path
+}
+
+/// Leaf filename: `{hash_hex}.{codec_suffix}`.
+pub fn chunk_filename(hash: &Hash, suffix: &CodecSuffix) -> String {
+    format!("{}.{}", hash.to_hex(), suffix)
+}
+
+/// Lists on-disk codec variants of a chunk by enumerating the prefix directory.
+///
+/// Returns the full path of every file named `{hash_hex}.*`, skipping `.tmp.*`
+/// files produced by in-progress atomic writes. Missing directories are
+/// reported as an empty list rather than an error.
+pub fn list_chunk_variants(
+    base_dir: &Path,
+    hash: &Hash,
+    tier: Tier,
+    prefix_depth: usize,
+) -> io::Result<Vec<PathBuf>> {
+    let dir = chunk_dir(base_dir, hash, tier, prefix_depth);
+    let hex = hash.to_hex();
+    let match_prefix = format!("{}.", hex);
+
+    let read_result = fs::read_dir(&dir);
+    let entries = match read_result {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+
+    let mut variants = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !name_str.starts_with(&match_prefix) {
+            continue;
+        }
+        let tail = &name_str[match_prefix.len()..];
+        // Skip the leftover tempfile of an in-progress atomic_write.
+        if tail.contains(".tmp.") || tail.starts_with("tmp.") {
+            continue;
+        }
+        variants.push(entry.path());
+    }
+    Ok(variants)
 }
 
 /// Generates the path for a metadata file based on its segment and key hash.
@@ -180,6 +228,10 @@ mod tests {
         Hash::from_hex(TEST_HASH_HEX).unwrap()
     }
 
+    fn plain() -> CodecSuffix {
+        CodecSuffix::plain()
+    }
+
     #[test]
     fn test_tier_as_str() {
         assert_eq!(Tier::Hot.as_str(), "hot");
@@ -219,24 +271,29 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_path_hot_depth_1() {
+    fn test_chunk_path_includes_codec_suffix() {
         let hash = test_hash();
-        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 1);
+        let suffix = plain();
+        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 2, &suffix);
         assert_eq!(
             path,
-            Path::new(&format!("/var/lib/neonfs/blobs/hot/ab/{}", TEST_HASH_HEX))
+            Path::new(&format!(
+                "/var/lib/neonfs/blobs/hot/ab/cd/{}.{}",
+                TEST_HASH_HEX, suffix
+            ))
         );
     }
 
     #[test]
-    fn test_chunk_path_hot_depth_2() {
+    fn test_chunk_path_hot_depth_1() {
         let hash = test_hash();
-        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 2);
+        let suffix = plain();
+        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 1, &suffix);
         assert_eq!(
             path,
             Path::new(&format!(
-                "/var/lib/neonfs/blobs/hot/ab/cd/{}",
-                TEST_HASH_HEX
+                "/var/lib/neonfs/blobs/hot/ab/{}.{}",
+                TEST_HASH_HEX, suffix
             ))
         );
     }
@@ -244,12 +301,13 @@ mod tests {
     #[test]
     fn test_chunk_path_warm_depth_2() {
         let hash = test_hash();
-        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Warm, 2);
+        let suffix = plain();
+        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Warm, 2, &suffix);
         assert_eq!(
             path,
             Path::new(&format!(
-                "/var/lib/neonfs/blobs/warm/ab/cd/{}",
-                TEST_HASH_HEX
+                "/var/lib/neonfs/blobs/warm/ab/cd/{}.{}",
+                TEST_HASH_HEX, suffix
             ))
         );
     }
@@ -257,12 +315,13 @@ mod tests {
     #[test]
     fn test_chunk_path_cold_depth_2() {
         let hash = test_hash();
-        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Cold, 2);
+        let suffix = plain();
+        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Cold, 2, &suffix);
         assert_eq!(
             path,
             Path::new(&format!(
-                "/var/lib/neonfs/blobs/cold/ab/cd/{}",
-                TEST_HASH_HEX
+                "/var/lib/neonfs/blobs/cold/ab/cd/{}.{}",
+                TEST_HASH_HEX, suffix
             ))
         );
     }
@@ -270,22 +329,27 @@ mod tests {
     #[test]
     fn test_chunk_path_depth_0() {
         let hash = test_hash();
-        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 0);
+        let suffix = plain();
+        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 0, &suffix);
         assert_eq!(
             path,
-            Path::new(&format!("/var/lib/neonfs/blobs/hot/{}", TEST_HASH_HEX))
+            Path::new(&format!(
+                "/var/lib/neonfs/blobs/hot/{}.{}",
+                TEST_HASH_HEX, suffix
+            ))
         );
     }
 
     #[test]
     fn test_chunk_path_depth_3() {
         let hash = test_hash();
-        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 3);
+        let suffix = plain();
+        let path = chunk_path(Path::new("/var/lib/neonfs"), &hash, Tier::Hot, 3, &suffix);
         assert_eq!(
             path,
             Path::new(&format!(
-                "/var/lib/neonfs/blobs/hot/ab/cd/7c/{}",
-                TEST_HASH_HEX
+                "/var/lib/neonfs/blobs/hot/ab/cd/7c/{}.{}",
+                TEST_HASH_HEX, suffix
             ))
         );
     }
@@ -296,13 +360,64 @@ mod tests {
         let hash =
             Hash::from_hex("ABCD7C9E00000000000000000000000000000000000000000000000000000000")
                 .unwrap();
-        let path = chunk_path(Path::new("/base"), &hash, Tier::Hot, 2);
+        let suffix = plain();
+        let path = chunk_path(Path::new("/base"), &hash, Tier::Hot, 2, &suffix);
 
         // Path should have lowercase hex components
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("/ab/cd/"));
         assert!(!path_str.contains("/AB/"));
         assert!(!path_str.contains("/CD/"));
+    }
+
+    #[test]
+    fn test_list_chunk_variants_empty_when_dir_missing() {
+        let temp =
+            std::env::temp_dir().join(format!("neonfs_variants_missing_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        let variants = list_chunk_variants(&temp, &test_hash(), Tier::Hot, 2).unwrap();
+        assert!(variants.is_empty());
+    }
+
+    #[test]
+    fn test_list_chunk_variants_matches_hash_prefix() {
+        let temp =
+            std::env::temp_dir().join(format!("neonfs_variants_prefix_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        let hash = test_hash();
+        let dir = chunk_dir(&temp, &hash, Tier::Hot, 2);
+        fs::create_dir_all(&dir).unwrap();
+
+        let variant_a = dir.join(format!("{}.aaaaaaaaaaaaaaaa", TEST_HASH_HEX));
+        let variant_b = dir.join(format!("{}.bbbbbbbbbbbbbbbb", TEST_HASH_HEX));
+        let other_hash = dir.join(
+            "ffff7c9e00000000000000000000000000000000000000000000000000000000.aaaaaaaaaaaaaaaa",
+        );
+        let tempfile = dir.join(format!(
+            "{}.aaaaaaaaaaaaaaaa.tmp.0000000000000000",
+            TEST_HASH_HEX
+        ));
+        fs::write(&variant_a, b"a").unwrap();
+        fs::write(&variant_b, b"b").unwrap();
+        fs::write(&other_hash, b"x").unwrap();
+        fs::write(&tempfile, b"t").unwrap();
+
+        let variants = list_chunk_variants(&temp, &hash, Tier::Hot, 2).unwrap();
+        let mut names: Vec<_> = variants
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+
+        assert_eq!(
+            names,
+            vec![
+                format!("{}.aaaaaaaaaaaaaaaa", TEST_HASH_HEX),
+                format!("{}.bbbbbbbbbbbbbbbb", TEST_HASH_HEX),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]
@@ -360,9 +475,10 @@ mod tests {
     #[test]
     fn test_chunk_path_different_base_dirs() {
         let hash = test_hash();
+        let suffix = plain();
 
-        let path1 = chunk_path(Path::new("/data"), &hash, Tier::Hot, 2);
-        let path2 = chunk_path(Path::new("/storage"), &hash, Tier::Hot, 2);
+        let path1 = chunk_path(Path::new("/data"), &hash, Tier::Hot, 2, &suffix);
+        let path2 = chunk_path(Path::new("/storage"), &hash, Tier::Hot, 2, &suffix);
 
         assert!(path1.starts_with("/data"));
         assert!(path2.starts_with("/storage"));

@@ -14,6 +14,7 @@ defmodule NeonFS.Core.Blob.Native do
   @type store :: reference()
   @type hash :: binary()
   @type tier :: String.t()
+  @type compression :: String.t()
 
   @doc """
   Test function that adds two integers.
@@ -159,87 +160,127 @@ defmodule NeonFS.Core.Blob.Native do
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Deletes a chunk from the blob store.
+  Deletes a specific codec variant of a chunk from the blob store.
 
   ## Parameters
     - `store` - Reference to the blob store
     - `hash` - 32-byte binary hash of the chunk
     - `tier` - Storage tier ("hot", "warm", or "cold")
+    - `compression` - `"none"`, `"zstd"`, or `""` to select the plain variant
+    - `compression_level` - zstd level (use `0` when compression is `"none"` or `""`)
+    - `key` - 32-byte AES-256 key (`<<>>` for unencrypted variants)
+    - `nonce` - 12-byte nonce (`<<>>` for unencrypted variants)
 
-  ## Returns
-    - `{:ok, {}}` - On success
-    - `{:error, reason}` - If the chunk does not exist or delete fails
-
-  ## Examples
-
-      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
-      iex> data = "hello world"
-      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
-      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
-      iex> {:ok, _bytes_freed} = NeonFS.Core.Blob.Native.store_delete_chunk(store, hash, "hot")
-
+  The codec tuple must match what was used on write, because different codec
+  tuples map to different on-disk files. Use `store_delete_chunk_any_codec/3`
+  to remove every variant.
   """
-  @spec store_delete_chunk(store(), hash(), tier()) ::
+  @spec store_delete_chunk(
+          store(),
+          hash(),
+          tier(),
+          compression(),
+          integer(),
+          binary(),
+          binary()
+        ) ::
           {:ok, non_neg_integer()} | {:error, String.t()}
-  def store_delete_chunk(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
+  def store_delete_chunk(
+        _store,
+        _hash,
+        _tier,
+        _compression,
+        _compression_level,
+        _key,
+        _nonce
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Checks if a chunk exists in the blob store.
+  Deletes every codec variant of a chunk at a tier.
 
-  ## Parameters
-    - `store` - Reference to the blob store
-    - `hash` - 32-byte binary hash of the chunk
-    - `tier` - Storage tier ("hot", "warm", or "cold")
-
-  ## Returns
-    - `{:ok, true}` - If the chunk exists
-    - `{:ok, false}` - If the chunk does not exist
-    - `{:error, reason}` - If the check fails
-
-  ## Examples
-
-      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/blobs", 2)
-      iex> hash = NeonFS.Core.Blob.Native.compute_hash("test")
-      iex> {:ok, false} = NeonFS.Core.Blob.Native.store_chunk_exists(store, hash, "hot")
-
+  Intended for orphan cleanup paths that don't track codec settings per chunk.
+  Returns the total bytes freed.
   """
-  @spec store_chunk_exists(store(), hash(), tier()) :: {:ok, boolean()} | {:error, String.t()}
-  def store_chunk_exists(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
-
-  @doc """
-  Migrates a chunk from one storage tier to another.
-
-  This operation is atomic: the chunk is copied to the destination tier,
-  verified for integrity, and only then deleted from the source tier.
-  If any step fails, the migration is aborted and the source chunk remains intact.
-
-  ## Parameters
-    - `store` - Reference to the blob store
-    - `hash` - SHA-256 hash of the chunk (32 bytes)
-    - `from_tier` - Source tier: "hot", "warm", or "cold"
-    - `to_tier` - Destination tier: "hot", "warm", or "cold"
-
-  ## Returns
-    - `{:ok, {}}` on successful migration
-    - `{:error, reason}` if the chunk doesn't exist or migration fails
-
-  ## Examples
-
-      iex> {:ok, store} = NeonFS.Core.Blob.Native.store_open("/tmp/store", 2)
-      iex> data = "migrate me"
-      iex> hash = NeonFS.Core.Blob.Native.compute_hash(data)
-      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_write_chunk(store, hash, data, "hot")
-      iex> {:ok, _} = NeonFS.Core.Blob.Native.store_migrate_chunk(store, hash, "hot", "cold")
-      iex> {:ok, false} = NeonFS.Core.Blob.Native.store_chunk_exists(store, hash, "hot")
-      iex> {:ok, true} = NeonFS.Core.Blob.Native.store_chunk_exists(store, hash, "cold")
-
-  """
-  @spec store_migrate_chunk(store(), hash(), tier(), tier()) ::
-          {:ok, {}} | {:error, String.t()}
-  def store_migrate_chunk(_store, _hash, _from_tier, _to_tier),
+  @spec store_delete_chunk_any_codec(store(), hash(), tier()) ::
+          {:ok, non_neg_integer()} | {:error, String.t()}
+  def store_delete_chunk_any_codec(_store, _hash, _tier),
     do: :erlang.nif_error(:nif_not_loaded)
 
-  @type compression :: String.t()
+  @doc """
+  Checks whether a specific codec variant of a chunk exists.
+
+  See `store_delete_chunk/7` for the meaning of the codec parameters.
+  """
+  @spec store_chunk_exists(
+          store(),
+          hash(),
+          tier(),
+          compression(),
+          integer(),
+          binary(),
+          binary()
+        ) ::
+          {:ok, boolean()} | {:error, String.t()}
+  def store_chunk_exists(
+        _store,
+        _hash,
+        _tier,
+        _compression,
+        _compression_level,
+        _key,
+        _nonce
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Checks whether any codec variant of a chunk exists at a tier.
+  """
+  @spec store_chunk_exists_any_codec(store(), hash(), tier()) ::
+          {:ok, boolean()} | {:error, String.t()}
+  def store_chunk_exists_any_codec(_store, _hash, _tier),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Returns the on-disk size of any codec variant of the chunk at a tier.
+
+  Returns `{:ok, 0}` if no variant exists. Use in combination with
+  `store_chunk_exists_any_codec/3` to distinguish missing from zero-byte.
+  """
+  @spec store_chunk_any_codec_size(store(), hash(), tier()) ::
+          {:ok, non_neg_integer()} | {:error, String.t()}
+  def store_chunk_any_codec_size(_store, _hash, _tier),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Migrates a specific codec variant of a chunk from one tier to another.
+
+  The codec tuple is the one the chunk was written with — the bytes on disk
+  are copied as-is, so the destination gets the same codec suffix.
+  """
+  @spec store_migrate_chunk(
+          store(),
+          hash(),
+          tier(),
+          tier(),
+          compression(),
+          integer(),
+          binary(),
+          binary()
+        ) ::
+          {:ok, {}} | {:error, String.t()}
+  def store_migrate_chunk(
+        _store,
+        _hash,
+        _from_tier,
+        _to_tier,
+        _compression,
+        _compression_level,
+        _key,
+        _nonce
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
+
   @type chunk_info :: {non_neg_integer(), non_neg_integer(), compression()}
 
   @doc """
@@ -338,17 +379,25 @@ defmodule NeonFS.Core.Blob.Native do
       true
 
   """
+  @typedoc """
+  Codec locator tuple: `{compression_kind, compression_level, key, nonce}`.
+
+  Empty strings / empty binaries mean "not applicable". Callers build this
+  from ChunkMeta.compression + ChunkMeta.crypto to locate the right codec
+  variant on disk (#270).
+  """
+  @type codec_locator :: {compression(), integer(), binary(), binary()}
+
   @spec store_read_chunk_with_options(
           store(),
           hash(),
           tier(),
           boolean(),
           boolean(),
-          binary(),
-          binary()
+          codec_locator()
         ) ::
           {:ok, binary()} | {:error, String.t()}
-  def store_read_chunk_with_options(_store, _hash, _tier, _verify, _decompress, _key, _nonce),
+  def store_read_chunk_with_options(_store, _hash, _tier, _verify, _decompress, _codec),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -376,13 +425,19 @@ defmodule NeonFS.Core.Blob.Native do
           store(),
           hash(),
           tier(),
-          binary(),
-          binary(),
-          binary(),
-          binary()
+          {compression(), integer()},
+          {binary(), binary()},
+          {binary(), binary()}
         ) :: {:ok, non_neg_integer()} | {:error, String.t()}
-  def store_reencrypt_chunk(_store, _hash, _tier, _old_key, _old_nonce, _new_key, _new_nonce),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def store_reencrypt_chunk(
+        _store,
+        _hash,
+        _tier,
+        _compression,
+        _old_enc,
+        _new_enc
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   # Chunking types
   @type chunk_result :: {binary(), hash(), non_neg_integer(), non_neg_integer()}

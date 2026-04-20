@@ -931,6 +931,7 @@ defmodule NeonFS.Core.ReadOperation do
           drive_id: drive_id,
           verify: should_verify,
           decompress: needs_decompress,
+          compression: chunk_meta.compression,
           volume_id: volume_id
         ] ++ decrypt_opts
 

@@ -61,6 +61,7 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
           BlobStore.read_chunk_with_options(hash, "default", "hot",
             decompress: true,
             verify: true,
+            compression: "zstd:3",
             server: server
           )
 
@@ -120,7 +121,11 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
               key_a != key_b,
               max_runs: 100
             ) do
-        # Write with key_a, read raw (encrypted) data
+        # Write with key_a and the same nonce. Since encrypted chunks live
+        # at a nonce-derived codec suffix on disk (issue #270), writing
+        # with key_b + same nonce overwrites the file in place. The test
+        # verifies that the resulting ciphertext really did change by
+        # attempting to decrypt with the old key — it must now fail.
         {:ok, hash, _} =
           BlobStore.write_chunk(data, "default", "hot",
             key: key_a,
@@ -128,10 +133,13 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
             server: server
           )
 
-        {:ok, encrypted_a} =
-          BlobStore.read_chunk(hash, "default", tier: "hot", server: server)
+        assert {:ok, ^data} =
+                 BlobStore.read_chunk_with_options(hash, "default", "hot",
+                   key: key_a,
+                   nonce: nonce,
+                   server: server
+                 )
 
-        # Write same data with key_b (same hash → overwrites on disk)
         {:ok, ^hash, _} =
           BlobStore.write_chunk(data, "default", "hot",
             key: key_b,
@@ -139,10 +147,23 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
             server: server
           )
 
-        {:ok, encrypted_b} =
-          BlobStore.read_chunk(hash, "default", tier: "hot", server: server)
+        # After the rewrite with key_b the on-disk ciphertext is different.
+        # Decrypting with key_a must now fail authentication.
+        assert {:error, reason} =
+                 BlobStore.read_chunk_with_options(hash, "default", "hot",
+                   key: key_a,
+                   nonce: nonce,
+                   server: server
+                 )
 
-        assert encrypted_a != encrypted_b
+        assert reason =~ "authentication failed" or reason =~ "encryption error"
+
+        assert {:ok, ^data} =
+                 BlobStore.read_chunk_with_options(hash, "default", "hot",
+                   key: key_b,
+                   nonce: nonce,
+                   server: server
+                 )
       end
     end
   end

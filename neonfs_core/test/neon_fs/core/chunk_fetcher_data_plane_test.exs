@@ -102,8 +102,10 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
 
       ChunkIndex.put(chunk_meta)
 
-      # Local read with decompression works
-      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, decompress: true)
+      # Local read with decompression works. Compression must be passed so
+      # the fetcher can resolve to the codec-suffixed file on disk (#270).
+      assert {:ok, ^data, :local} =
+               ChunkFetcher.fetch_chunk(hash, decompress: true, compression: :zstd)
     end
   end
 

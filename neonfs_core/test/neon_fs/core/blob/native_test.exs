@@ -145,15 +145,15 @@ defmodule NeonFS.Core.Blob.NativeTest do
       hash = Native.compute_hash(data)
 
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
 
-      assert {:ok, _} = Native.store_delete_chunk(store, hash, "hot")
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, _} = Native.store_delete_chunk(store, hash, "hot", "", 0, <<>>, <<>>)
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
     end
 
     test "delete nonexistent chunk returns error", %{store: store} do
       hash = Native.compute_hash("nonexistent")
-      assert {:error, reason} = Native.store_delete_chunk(store, hash, "hot")
+      assert {:error, reason} = Native.store_delete_chunk(store, hash, "hot", "", 0, <<>>, <<>>)
       assert reason =~ "not found"
     end
 
@@ -161,11 +161,11 @@ defmodule NeonFS.Core.Blob.NativeTest do
       data = "existence test"
       hash = Native.compute_hash(data)
 
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
 
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
     end
 
     test "handles different tiers independently", %{store: store} do
@@ -174,9 +174,9 @@ defmodule NeonFS.Core.Blob.NativeTest do
 
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "warm")
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "warm", "", 0, <<>>, <<>>)
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold", "", 0, <<>>, <<>>)
     end
 
     test "write is idempotent", %{store: store} do
@@ -279,11 +279,13 @@ defmodule NeonFS.Core.Blob.NativeTest do
 
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
-      # Manually corrupt the chunk file
+      # Manually corrupt the chunk file (on-disk name includes codec suffix
+      # since issue #270; find the matching file under the prefix dir).
       hash_hex = Base.encode16(hash, case: :lower)
       prefix1 = String.slice(hash_hex, 0, 2)
       prefix2 = String.slice(hash_hex, 2, 2)
-      chunk_path = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2, hash_hex])
+      chunk_dir = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2])
+      [chunk_path] = Path.wildcard(Path.join(chunk_dir, "#{hash_hex}.*"))
       File.write!(chunk_path, "corrupted data")
 
       # Read with verification should fail
@@ -300,11 +302,13 @@ defmodule NeonFS.Core.Blob.NativeTest do
 
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
-      # Manually corrupt the chunk file
+      # Manually corrupt the chunk file (on-disk name includes codec suffix
+      # since issue #270; find the matching file under the prefix dir).
       hash_hex = Base.encode16(hash, case: :lower)
       prefix1 = String.slice(hash_hex, 0, 2)
       prefix2 = String.slice(hash_hex, 2, 2)
-      chunk_path = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2, hash_hex])
+      chunk_dir = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2])
+      [chunk_path] = Path.wildcard(Path.join(chunk_dir, "#{hash_hex}.*"))
       corrupt_data = "corrupted data"
       File.write!(chunk_path, corrupt_data)
 
@@ -399,7 +403,14 @@ defmodule NeonFS.Core.Blob.NativeTest do
                )
 
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, true, <<>>, <<>>)
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 false,
+                 true,
+                 {"zstd", 3, <<>>, <<>>}
+               )
 
       assert read_data == data
     end
@@ -421,7 +432,14 @@ defmodule NeonFS.Core.Blob.NativeTest do
                )
 
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, false, <<>>, <<>>)
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 false,
+                 false,
+                 {"zstd", 3, <<>>, <<>>}
+               )
 
       # Should return compressed data
       assert byte_size(read_data) == stored_size
@@ -437,7 +455,14 @@ defmodule NeonFS.Core.Blob.NativeTest do
       # Reading with decompress=true on uncompressed data should fail
       # because zstd decoder expects a valid zstd frame
       assert {:error, _reason} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, true, <<>>, <<>>)
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 false,
+                 true,
+                 {"", 0, <<>>, <<>>}
+               )
     end
 
     test "read with verify=true and decompress=true verifies original data", %{store: store} do
@@ -457,7 +482,14 @@ defmodule NeonFS.Core.Blob.NativeTest do
                )
 
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", true, true, <<>>, <<>>)
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 true,
+                 true,
+                 {"zstd", 3, <<>>, <<>>}
+               )
 
       assert read_data == data
     end
@@ -481,11 +513,14 @@ defmodule NeonFS.Core.Blob.NativeTest do
                  <<>>
                )
 
-      # Corrupt the file (but keep it as valid zstd)
+      # Corrupt the file (but keep it as valid zstd). The on-disk filename
+      # includes the codec suffix (issue #270); we find the matching file
+      # under the chunk's hash prefix directory.
       hash_hex = Base.encode16(hash, case: :lower)
       prefix1 = String.slice(hash_hex, 0, 2)
       prefix2 = String.slice(hash_hex, 2, 2)
-      chunk_path = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2, hash_hex])
+      chunk_dir = Path.join([tmp_dir, "blobs", "hot", prefix1, prefix2])
+      [chunk_path] = Path.wildcard(Path.join(chunk_dir, "#{hash_hex}.*"))
 
       # Write different compressed data
       other_data = String.duplicate("different data ", 1000)
@@ -509,15 +544,21 @@ defmodule NeonFS.Core.Blob.NativeTest do
           "warm",
           false,
           false,
-          <<>>,
-          <<>>
+          {"zstd", 3, <<>>, <<>>}
         )
 
       File.write!(chunk_path, wrong_compressed_data)
 
       # Verification should fail because decompressed data doesn't match expected hash
       assert {:error, reason} =
-               Native.store_read_chunk_with_options(store, hash, "hot", true, true, <<>>, <<>>)
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 true,
+                 true,
+                 {"zstd", 3, <<>>, <<>>}
+               )
 
       assert reason =~ "corrupt chunk"
     end
@@ -580,7 +621,14 @@ defmodule NeonFS.Core.Blob.NativeTest do
 
       # Should decompress back to empty
       assert {:ok, read_data} =
-               Native.store_read_chunk_with_options(store, hash, "hot", false, true, <<>>, <<>>)
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 false,
+                 true,
+                 {"zstd", 3, <<>>, <<>>}
+               )
 
       assert read_data == data
     end
@@ -869,15 +917,15 @@ defmodule NeonFS.Core.Blob.NativeTest do
 
       # Write to hot tier
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold", "", 0, <<>>, <<>>)
 
       # Migrate to cold tier
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "cold")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "cold", "", 0, <<>>, <<>>)
 
       # Verify: chunk now in cold, not in hot
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "cold")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "cold", "", 0, <<>>, <<>>)
 
       # Verify data integrity
       assert {:ok, read_data} = Native.store_read_chunk(store, hash, "cold")
@@ -892,11 +940,11 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "cold")
 
       # Migrate to hot tier
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "cold", "hot")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "cold", "hot", "", 0, <<>>, <<>>)
 
       # Verify: chunk now in hot, not in cold
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "cold", "", 0, <<>>, <<>>)
 
       # Verify data integrity
       assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
@@ -911,11 +959,11 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "warm")
 
       # Migrate to hot tier
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "warm", "hot")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "warm", "hot", "", 0, <<>>, <<>>)
 
       # Verify: chunk now in hot, not in warm
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "warm")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "warm", "", 0, <<>>, <<>>)
     end
 
     test "migrating to same tier is a no-op", %{store: store} do
@@ -926,10 +974,10 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
       # "Migrate" to same tier
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "hot")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "hot", "", 0, <<>>, <<>>)
 
       # Verify: still in hot tier
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot")
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
       assert {:ok, read_data} = Native.store_read_chunk(store, hash, "hot")
       assert read_data == data
     end
@@ -937,7 +985,9 @@ defmodule NeonFS.Core.Blob.NativeTest do
     test "migration of nonexistent chunk returns error", %{store: store} do
       hash = Native.compute_hash("nonexistent")
 
-      assert {:error, reason} = Native.store_migrate_chunk(store, hash, "hot", "cold")
+      assert {:error, reason} =
+               Native.store_migrate_chunk(store, hash, "hot", "cold", "", 0, <<>>, <<>>)
+
       assert reason =~ "not found"
     end
 
@@ -949,15 +999,15 @@ defmodule NeonFS.Core.Blob.NativeTest do
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
 
       # Migrate through all tiers
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "warm")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "warm", "", 0, <<>>, <<>>)
       assert {:ok, read1} = Native.store_read_chunk(store, hash, "warm")
       assert read1 == data
 
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "warm", "cold")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "warm", "cold", "", 0, <<>>, <<>>)
       assert {:ok, read2} = Native.store_read_chunk(store, hash, "cold")
       assert read2 == data
 
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "cold", "hot")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "cold", "hot", "", 0, <<>>, <<>>)
       assert {:ok, read3} = Native.store_read_chunk(store, hash, "hot")
       assert read3 == data
 
@@ -970,10 +1020,10 @@ defmodule NeonFS.Core.Blob.NativeTest do
       hash = Native.compute_hash(data)
 
       assert {:ok, _} = Native.store_write_chunk(store, hash, data, "hot")
-      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "cold")
+      assert {:ok, _} = Native.store_migrate_chunk(store, hash, "hot", "cold", "", 0, <<>>, <<>>)
 
-      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot")
-      assert {:ok, true} = Native.store_chunk_exists(store, hash, "cold")
+      assert {:ok, false} = Native.store_chunk_exists(store, hash, "hot", "", 0, <<>>, <<>>)
+      assert {:ok, true} = Native.store_chunk_exists(store, hash, "cold", "", 0, <<>>, <<>>)
       assert {:ok, read_data} = Native.store_read_chunk(store, hash, "cold")
       assert read_data == data
     end

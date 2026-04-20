@@ -103,13 +103,28 @@ defmodule NeonFS.Integration.EncryptionTest do
       # Get chunk hash from file metadata
       [chunk_hash | _] = file.chunks
 
-      # Read raw chunk from BlobStore without decryption
-      {:ok, raw_data} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.BlobStore, :read_chunk, [
-          chunk_hash,
-          "default",
-          [tier: "hot", verify: false, decompress: false]
+      # Locate the raw on-disk file directly. Going through BlobStore.read_chunk
+      # with no codec info can't find the chunk now that encrypted writes have
+      # a nonce-derived codec suffix (#270) — and supplying the nonce would
+      # trigger decryption. For this assertion we just want to compare raw
+      # bytes on disk against the plaintext marker.
+      blob_dir =
+        PeerCluster.rpc(cluster, :node1, Application, :get_env, [
+          :neonfs_core,
+          :blob_store_base_dir
         ])
+
+      hex = Base.encode16(chunk_hash, case: :lower)
+      prefix1 = String.slice(hex, 0, 2)
+      prefix2 = String.slice(hex, 2, 2)
+      chunk_dir = Path.join([blob_dir, "blobs", "hot", prefix1, prefix2])
+
+      [chunk_path] =
+        PeerCluster.rpc(cluster, :node1, Path, :wildcard, [
+          Path.join(chunk_dir, "#{hex}.*")
+        ])
+
+      raw_data = PeerCluster.rpc(cluster, :node1, File, :read!, [chunk_path])
 
       # Raw data should NOT contain our plaintext marker
       refute String.contains?(raw_data, "PLAINTEXT_MARKER_DATA_"),

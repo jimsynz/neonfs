@@ -146,7 +146,12 @@ defmodule NeonFS.Core.BlobStore do
     decompress = Keyword.get(opts, :decompress, false)
     key = Keyword.get(opts, :key, <<>>)
     nonce = Keyword.get(opts, :nonce, <<>>)
-    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce})
+    codec_opts = Keyword.take(opts, [:compression, :compression_level])
+
+    GenServer.call(
+      server,
+      {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce, codec_opts}
+    )
   end
 
   @doc """
@@ -177,7 +182,12 @@ defmodule NeonFS.Core.BlobStore do
     decompress = Keyword.get(read_opts, :decompress, false)
     key = Keyword.get(read_opts, :key, <<>>)
     nonce = Keyword.get(read_opts, :nonce, <<>>)
-    GenServer.call(server, {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce})
+    codec_opts = Keyword.take(read_opts, [:compression, :compression_level])
+
+    GenServer.call(
+      server,
+      {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce, codec_opts}
+    )
   end
 
   @doc """
@@ -201,8 +211,9 @@ defmodule NeonFS.Core.BlobStore do
   @spec delete_chunk(chunk_hash(), drive_id(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, String.t()}
   def delete_chunk(hash, drive_id, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:delete_chunk, hash, drive_id})
+    server = Keyword.pop(opts, :server, __MODULE__) |> elem(0)
+    opts = Keyword.delete(opts, :server)
+    GenServer.call(server, {:delete_chunk, hash, drive_id, opts})
   end
 
   @doc """
@@ -246,8 +257,8 @@ defmodule NeonFS.Core.BlobStore do
   @spec migrate_chunk(chunk_hash(), drive_id(), tier(), tier(), keyword()) ::
           {:ok, {}} | {:error, String.t()}
   def migrate_chunk(hash, drive_id, from_tier, to_tier, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:migrate_chunk, hash, drive_id, from_tier, to_tier})
+    {server, opts} = Keyword.pop(opts, :server, __MODULE__)
+    GenServer.call(server, {:migrate_chunk, hash, drive_id, from_tier, to_tier, opts})
   end
 
   @doc """
@@ -285,11 +296,11 @@ defmodule NeonFS.Core.BlobStore do
           keyword()
         ) :: {:ok, non_neg_integer()} | {:error, String.t()}
   def reencrypt_chunk(hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
+    {server, opts} = Keyword.pop(opts, :server, __MODULE__)
 
     GenServer.call(
       server,
-      {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce}
+      {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce, opts}
     )
   end
 
@@ -594,13 +605,25 @@ defmodule NeonFS.Core.BlobStore do
 
   @impl true
   def handle_call(
-        {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce},
+        {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce, codec_opts},
         _from,
         state
       ) do
     case get_store(state, drive_id) do
       {:ok, store} ->
-        result = do_read_chunk(store, hash, drive_id, tier, verify, decompress, key, nonce)
+        read_args = %{
+          hash: hash,
+          drive_id: drive_id,
+          tier: tier,
+          verify: verify,
+          decompress: decompress,
+          key: key,
+          nonce: nonce,
+          codec_opts: codec_opts
+        }
+
+        result = do_read_chunk(store, read_args)
+
         if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
         {:reply, result, state}
 
@@ -610,10 +633,10 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @impl true
-  def handle_call({:delete_chunk, hash, drive_id}, _from, state) do
+  def handle_call({:delete_chunk, hash, drive_id, codec_opts}, _from, state) do
     case get_store(state, drive_id) do
       {:ok, store} ->
-        result = do_delete_chunk(store, hash, drive_id)
+        result = do_delete_chunk(store, hash, drive_id, codec_opts)
         if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
         {:reply, result, state}
 
@@ -629,10 +652,10 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @impl true
-  def handle_call({:migrate_chunk, hash, drive_id, from_tier, to_tier}, _from, state) do
+  def handle_call({:migrate_chunk, hash, drive_id, from_tier, to_tier, codec_opts}, _from, state) do
     case get_store(state, drive_id) do
       {:ok, store} ->
-        result = do_migrate_chunk(store, hash, drive_id, from_tier, to_tier)
+        result = do_migrate_chunk(store, hash, drive_id, from_tier, to_tier, codec_opts)
         if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
         {:reply, result, state}
 
@@ -643,14 +666,24 @@ defmodule NeonFS.Core.BlobStore do
 
   @impl true
   def handle_call(
-        {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce},
+        {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce,
+         codec_opts},
         _from,
         state
       ) do
     case get_store(state, drive_id) do
       {:ok, store} ->
+        compression = codec_compression_args(codec_opts)
+
         result =
-          Native.store_reencrypt_chunk(store, hash, tier, old_key, old_nonce, new_key, new_nonce)
+          Native.store_reencrypt_chunk(
+            store,
+            hash,
+            tier,
+            compression,
+            {old_key, old_nonce},
+            {new_key, new_nonce}
+          )
 
         if match?({:ok, _}, result), do: DriveState.record_io(drive_id)
         {:reply, result, state}
@@ -777,6 +810,66 @@ defmodule NeonFS.Core.BlobStore do
 
       {:error, _reason} = error ->
         {:reply, error, state}
+    end
+  end
+
+  ## Codec helpers
+
+  @doc """
+  Extracts codec opts from a `ChunkMeta`-shaped map so delete/migrate/read
+  calls resolve to the correct on-disk variant. Handles both `:none`/`:zstd`
+  atoms and `"zstd:3"`-style strings on the compression field.
+  """
+  @spec codec_opts_for_chunk(map()) :: keyword()
+  def codec_opts_for_chunk(chunk_meta) when is_map(chunk_meta) do
+    compression =
+      case Map.get(chunk_meta, :compression) do
+        nil -> []
+        :none -> [compression: :none]
+        :zstd -> [compression: :zstd]
+        other -> [compression: other]
+      end
+
+    case Map.get(chunk_meta, :crypto) do
+      %{nonce: nonce} when is_binary(nonce) ->
+        # The key is not part of the codec suffix — only the nonce is. The
+        # NIF uses (key, nonce) emptiness to detect unencrypted reads, so
+        # pass a zero-bytes placeholder to keep the "encrypted" branch
+        # active for callers that only need to locate the file (delete,
+        # chunk_exists, migrate).
+        compression ++ [key: <<0::256>>, nonce: nonce]
+
+      _ ->
+        compression
+    end
+  end
+
+  @doc false
+  @spec codec_compression_args(keyword()) :: {String.t(), integer()}
+  def codec_compression_args(opts) do
+    normalise_compression(Keyword.get(opts, :compression), opts)
+  end
+
+  defp normalise_compression(nil, _opts), do: {"", 0}
+  defp normalise_compression("", _opts), do: {"", 0}
+  defp normalise_compression(:none, _opts), do: {"none", 0}
+  defp normalise_compression("none", _opts), do: {"none", 0}
+  defp normalise_compression(:zstd, opts), do: {"zstd", default_zstd_level(opts)}
+  defp normalise_compression("zstd", opts), do: {"zstd", default_zstd_level(opts)}
+  defp normalise_compression({:zstd, level}, _opts), do: {"zstd", level}
+
+  defp normalise_compression("zstd:" <> level_str, opts),
+    do: {"zstd", parse_level(level_str, opts)}
+
+  defp normalise_compression(value, opts) when is_atom(value),
+    do: normalise_compression(Atom.to_string(value), opts)
+
+  defp default_zstd_level(opts), do: Keyword.get(opts, :compression_level, 3)
+
+  defp parse_level(level_str, opts) do
+    case Integer.parse(level_str) do
+      {level, ""} -> level
+      _ -> default_zstd_level(opts)
     end
   end
 
@@ -910,7 +1003,16 @@ defmodule NeonFS.Core.BlobStore do
 
   ## Private: Read
 
-  defp do_read_chunk(store, hash, drive_id, tier, verify, decompress, key, nonce) do
+  defp do_read_chunk(store, %{
+         hash: hash,
+         drive_id: drive_id,
+         tier: tier,
+         verify: verify,
+         decompress: decompress,
+         key: key,
+         nonce: nonce,
+         codec_opts: codec_opts
+       }) do
     metadata = %{
       drive_id: drive_id,
       tier: tier,
@@ -927,17 +1029,12 @@ defmodule NeonFS.Core.BlobStore do
       metadata
     )
 
+    {comp_str, comp_level} = codec_compression_args(codec_opts)
+    locator = {comp_str, comp_level, key, nonce}
+
     result =
       try do
-        case Native.store_read_chunk_with_options(
-               store,
-               hash,
-               tier,
-               verify,
-               decompress,
-               key,
-               nonce
-             ) do
+        case Native.store_read_chunk_with_options(store, hash, tier, verify, decompress, locator) do
           {:ok, data} ->
             duration = System.monotonic_time() - start_time
 
@@ -989,16 +1086,28 @@ defmodule NeonFS.Core.BlobStore do
 
   defp find_chunk_on_store(store, hash) do
     Enum.reduce_while(@tiers, {:error, :not_found}, fn tier, acc ->
-      with {:ok, true} <- Native.store_chunk_exists(store, hash, tier),
-           {:ok, data} <- Native.store_read_chunk(store, hash, tier) do
-        {:halt, {:ok, tier, byte_size(data)}}
-      else
-        _ -> {:cont, acc}
+      case chunk_found_at_tier(store, hash, tier) do
+        {:ok, _size} = found -> {:halt, {:ok, tier, elem(found, 1)}}
+        :not_found -> {:cont, acc}
       end
     end)
   end
 
-  defp do_delete_chunk(store, hash, drive_id) do
+  defp chunk_found_at_tier(store, hash, tier) do
+    case Native.store_chunk_exists_any_codec(store, hash, tier) do
+      {:ok, true} -> {:ok, chunk_any_codec_size(store, hash, tier)}
+      _ -> :not_found
+    end
+  end
+
+  defp chunk_any_codec_size(store, hash, tier) do
+    case Native.store_chunk_any_codec_size(store, hash, tier) do
+      {:ok, n} -> n
+      _ -> 0
+    end
+  end
+
+  defp do_delete_chunk(store, hash, drive_id, codec_opts) do
     metadata = %{drive_id: drive_id, hash: Base.encode16(hash, case: :lower)}
     start_time = System.monotonic_time()
 
@@ -1010,7 +1119,7 @@ defmodule NeonFS.Core.BlobStore do
 
     result =
       try do
-        case try_delete_from_tiers(store, hash) do
+        case try_delete_from_tiers(store, hash, codec_opts) do
           {:ok, bytes_freed} ->
             duration = System.monotonic_time() - start_time
 
@@ -1049,10 +1158,25 @@ defmodule NeonFS.Core.BlobStore do
     result
   end
 
-  defp try_delete_from_tiers(store, hash) do
-    # Try each tier, return success on first hit
+  defp try_delete_from_tiers(store, hash, codec_opts) do
+    {comp_str, comp_level} = codec_compression_args(codec_opts)
+    key = Keyword.get(codec_opts, :key, <<>>)
+    nonce = Keyword.get(codec_opts, :nonce, <<>>)
+
+    # Try each tier, return success on first hit. When codec_opts are empty
+    # (the common orphan-delete case), fall back to "any codec" so we clean
+    # up every variant at the hit tier.
+    any_codec? = comp_str == "" and key == <<>> and nonce == <<>>
+
     Enum.reduce_while(@tiers, {:error, "chunk not found in any tier"}, fn tier, acc ->
-      case Native.store_delete_chunk(store, hash, tier) do
+      result =
+        if any_codec? do
+          Native.store_delete_chunk_any_codec(store, hash, tier)
+        else
+          Native.store_delete_chunk(store, hash, tier, comp_str, comp_level, key, nonce)
+        end
+
+      case result do
         {:ok, bytes_freed} -> {:halt, {:ok, bytes_freed}}
         {:error, _} -> {:cont, acc}
       end
@@ -1093,7 +1217,7 @@ defmodule NeonFS.Core.BlobStore do
 
   ## Private: Migrate
 
-  defp do_migrate_chunk(store, hash, drive_id, from_tier, to_tier) do
+  defp do_migrate_chunk(store, hash, drive_id, from_tier, to_tier, codec_opts) do
     metadata = %{
       drive_id: drive_id,
       hash: Base.encode16(hash, case: :lower),
@@ -1109,9 +1233,22 @@ defmodule NeonFS.Core.BlobStore do
       metadata
     )
 
+    {comp_str, comp_level} = codec_compression_args(codec_opts)
+    key = Keyword.get(codec_opts, :key, <<>>)
+    nonce = Keyword.get(codec_opts, :nonce, <<>>)
+
     result =
       try do
-        case Native.store_migrate_chunk(store, hash, from_tier, to_tier) do
+        case Native.store_migrate_chunk(
+               store,
+               hash,
+               from_tier,
+               to_tier,
+               comp_str,
+               comp_level,
+               key,
+               nonce
+             ) do
           {:ok, {}} = success ->
             duration = System.monotonic_time() - start_time
 

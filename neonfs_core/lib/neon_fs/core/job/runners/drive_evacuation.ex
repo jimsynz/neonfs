@@ -142,12 +142,13 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
     ChunkIndex.update_locations(chunk.hash, updated_locations)
 
-    # Delete the physical data
+    delete_opts = BlobStore.codec_opts_for_chunk(chunk)
+
     delete_result =
       if node == Node.self() do
-        BlobStore.delete_chunk(chunk.hash, drive_id)
+        BlobStore.delete_chunk(chunk.hash, drive_id, delete_opts)
       else
-        :rpc.call(node, BlobStore, :delete_chunk, [chunk.hash, drive_id], 30_000)
+        :rpc.call(node, BlobStore, :delete_chunk, [chunk.hash, drive_id, delete_opts], 30_000)
         |> handle_rpc_result()
       end
 

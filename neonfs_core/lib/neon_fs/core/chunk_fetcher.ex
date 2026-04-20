@@ -181,7 +181,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   end
 
   defp fetch_from_local_then_remote(hash, start_time, opts) do
-    read_opts = build_read_opts(opts)
+    read_opts = build_read_opts(opts) |> with_compression_locator(hash)
     drive_id = Keyword.get(opts, :drive_id, "default")
     tier = Keyword.get(opts, :tier, "hot")
     volume_id = Keyword.get(opts, :volume_id, "_system")
@@ -224,7 +224,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   end
 
   defp try_remote_fetch(hash, start_time, opts, local_reason) do
-    read_opts = build_read_opts(opts)
+    read_opts = build_read_opts(opts) |> with_compression_locator(hash)
     tier = Keyword.get(opts, :tier, "hot")
     cache_remote = Keyword.get(opts, :cache_remote, false)
 
@@ -382,12 +382,32 @@ defmodule NeonFS.Core.ChunkFetcher do
   defp drive_score(_hdd, _state, false), do: 30
 
   defp build_read_opts(opts) do
-    [
+    base = [
       verify: Keyword.get(opts, :verify, false),
       decompress: Keyword.get(opts, :decompress, false),
       key: Keyword.get(opts, :key, <<>>),
       nonce: Keyword.get(opts, :nonce, <<>>)
     ]
+
+    # Codec suffix locator fields — without them the chunk file won't be
+    # found for compressed/encrypted chunks. Callers that know the codec
+    # can pass `:compression` and/or `:nonce` directly; otherwise we look
+    # the compression up from ChunkIndex in `with_compression_locator/2`.
+    case Keyword.fetch(opts, :compression) do
+      {:ok, compression} -> Keyword.put(base, :compression, compression)
+      :error -> base
+    end
+  end
+
+  defp with_compression_locator(read_opts, hash) do
+    if Keyword.has_key?(read_opts, :compression) do
+      read_opts
+    else
+      case ChunkIndex.get(hash) do
+        {:ok, meta} -> Keyword.put(read_opts, :compression, meta.compression)
+        {:error, _} -> read_opts
+      end
+    end
   end
 
   defp read_remote_chunk(node, hash, drive_id, tier, read_opts) do

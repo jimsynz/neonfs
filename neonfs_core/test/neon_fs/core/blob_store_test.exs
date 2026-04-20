@@ -54,9 +54,15 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert info.stored_size < info.original_size
       assert info.compression == "zstd:3"
 
-      # Read without decompression returns compressed data
+      # Read without decompression returns compressed data. The compression
+      # type must be passed so the reader resolves to the codec-suffixed file
+      # (issue #270).
       assert {:ok, compressed} =
-               BlobStore.read_chunk(hash, "default", tier: "hot", server: test_server())
+               BlobStore.read_chunk(hash, "default",
+                 tier: "hot",
+                 compression: "zstd:3",
+                 server: test_server()
+               )
 
       assert byte_size(compressed) < byte_size(data)
 
@@ -64,6 +70,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert {:ok, decompressed} =
                BlobStore.read_chunk_with_options(hash, "default", "hot",
                  decompress: true,
+                 compression: "zstd:3",
                  server: test_server()
                )
 

@@ -160,7 +160,11 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
     local_loc = Enum.find(chunk.locations, &(&1.node == node()))
     tier = Atom.to_string(local_loc.tier)
     decompress = chunk.compression != :none
-    opts = [verify: true, decompress: decompress, tier: tier] ++ extra_opts
+    # Pass compression through so the blob store resolves to the correct
+    # codec-suffixed file (issue #270).
+    opts =
+      [verify: true, decompress: decompress, tier: tier, compression: chunk.compression] ++
+        extra_opts
 
     op =
       Operation.new(

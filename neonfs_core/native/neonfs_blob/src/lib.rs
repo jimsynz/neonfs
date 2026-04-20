@@ -1,4 +1,5 @@
 pub mod chunking;
+pub mod codec;
 pub mod compression;
 pub mod encryption;
 pub mod erasure;
@@ -212,6 +213,7 @@ fn store_read_chunk_verified<'a>(
     let options = ReadOptions {
         verify,
         decompress: false,
+        compression: None,
         encryption: None,
     };
 
@@ -240,7 +242,21 @@ fn store_read_chunk_verified<'a>(
 ///
 /// # Returns
 /// The chunk data as a binary, or an error tuple.
-#[allow(clippy::too_many_arguments)]
+/// Codec locator tuple passed as a single arg from Elixir to avoid inflating
+/// arity on NIFs that already carry a lot of positional state.
+/// `(compression_kind, compression_level, key, nonce)` — empty strings/binaries
+/// mean "not applicable".
+type CodecLocator<'a> = (String, i32, Binary<'a>, Binary<'a>);
+
+fn parse_codec_locator<'a>(
+    locator: &CodecLocator<'a>,
+) -> Result<(Option<Compression>, Option<EncryptionParams>), String> {
+    let (ref comp, level, ref key, ref nonce) = *locator;
+    let compression = parse_optional_compression(comp, level)?;
+    let encryption = parse_encryption_params(key, nonce)?;
+    Ok((compression, encryption))
+}
+
 #[rustler::nif]
 fn store_read_chunk_with_options<'a>(
     env: Env<'a>,
@@ -249,16 +265,16 @@ fn store_read_chunk_with_options<'a>(
     tier: String,
     verify: bool,
     decompress: bool,
-    key_binary: Binary,
-    nonce_binary: Binary,
+    codec: CodecLocator<'a>,
 ) -> Result<Binary<'a>, String> {
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
-    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
+    let (compression, encryption) = parse_codec_locator(&codec)?;
 
     let options = ReadOptions {
         verify,
         decompress,
+        compression,
         encryption,
     };
 
@@ -281,8 +297,34 @@ fn store_read_chunk_with_options<'a>(
 ///
 /// # Returns
 /// `{:ok, bytes_freed}` on success, or an error tuple.
+#[allow(clippy::too_many_arguments)]
 #[rustler::nif]
 fn store_delete_chunk(
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    tier: String,
+    compression: String,
+    compression_level: i32,
+    key_binary: Binary,
+    nonce_binary: Binary,
+) -> Result<u64, String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let tier = parse_tier(&tier)?;
+    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
+    let compression = parse_optional_compression(&compression, compression_level)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    store_guard
+        .delete_chunk(&hash, tier, compression.as_ref(), encryption.as_ref())
+        .map_err(|e| e.to_string())
+}
+
+/// Deletes every codec variant of a chunk at a tier.
+///
+/// Intended for orphan cleanup paths that don't track codec settings.
+/// Returns the total bytes freed across all variants.
+#[rustler::nif]
+fn store_delete_chunk_any_codec(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
     tier: String,
@@ -292,21 +334,34 @@ fn store_delete_chunk(
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
     store_guard
-        .delete_chunk(&hash, tier)
+        .delete_chunk_any_codec(&hash, tier)
         .map_err(|e| e.to_string())
 }
 
-/// Checks if a chunk exists in the blob store.
-///
-/// # Arguments
-/// * `store` - Resource reference to the blob store.
-/// * `hash` - 32-byte binary hash of the chunk.
-/// * `tier` - Storage tier ("hot", "warm", or "cold").
-///
-/// # Returns
-/// `true` if the chunk exists, `false` otherwise.
+/// Checks if a specific codec variant of a chunk exists in the blob store.
+#[allow(clippy::too_many_arguments)]
 #[rustler::nif]
 fn store_chunk_exists(
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    tier: String,
+    compression: String,
+    compression_level: i32,
+    key_binary: Binary,
+    nonce_binary: Binary,
+) -> Result<bool, String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let tier = parse_tier(&tier)?;
+    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
+    let compression = parse_optional_compression(&compression, compression_level)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    Ok(store_guard.chunk_exists(&hash, tier, compression.as_ref(), encryption.as_ref()))
+}
+
+/// Checks whether any codec variant of a chunk exists at a tier.
+#[rustler::nif]
+fn store_chunk_exists_any_codec(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
     tier: String,
@@ -315,7 +370,28 @@ fn store_chunk_exists(
     let tier = parse_tier(&tier)?;
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    Ok(store_guard.chunk_exists(&hash, tier))
+    store_guard
+        .chunk_exists_any_codec(&hash, tier)
+        .map_err(|e| e.to_string())
+}
+
+/// Returns the on-disk size of any codec variant of the chunk, or `0` if no
+/// variant exists. Use together with `store_chunk_exists_any_codec` to
+/// distinguish "missing" from "zero-byte".
+#[rustler::nif]
+fn store_chunk_any_codec_size(
+    store: ResourceArc<BlobStoreResource>,
+    hash_bytes: Binary,
+    tier: String,
+) -> Result<u64, String> {
+    let hash = parse_hash(&hash_bytes)?;
+    let tier = parse_tier(&tier)?;
+
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    store_guard
+        .chunk_any_codec_size(&hash, tier)
+        .map(|opt| opt.unwrap_or(0))
+        .map_err(|e| e.to_string())
 }
 
 /// Migrates a chunk from one tier to another.
@@ -331,20 +407,27 @@ fn store_chunk_exists(
 ///
 /// # Returns
 /// `:ok` on success, or an error tuple.
+#[allow(clippy::too_many_arguments)]
 #[rustler::nif]
 fn store_migrate_chunk(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
     from_tier: String,
     to_tier: String,
+    compression: String,
+    compression_level: i32,
+    key_binary: Binary,
+    nonce_binary: Binary,
 ) -> Result<(), String> {
     let hash = parse_hash(&hash_bytes)?;
     let from = parse_tier(&from_tier)?;
     let to = parse_tier(&to_tier)?;
+    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
+    let compression = parse_optional_compression(&compression, compression_level)?;
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
     store_guard
-        .migrate_chunk(&hash, from, to)
+        .migrate_chunk(&hash, from, to, compression.as_ref(), encryption.as_ref())
         .map_err(|e| e.to_string())
 }
 
@@ -367,20 +450,21 @@ fn store_reencrypt_chunk(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
     tier: String,
-    old_key: Binary,
-    old_nonce: Binary,
-    new_key: Binary,
-    new_nonce: Binary,
+    compression: (String, i32),
+    old_enc: (Binary, Binary),
+    new_enc: (Binary, Binary),
 ) -> Result<usize, String> {
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
+    let (comp_str, comp_level) = compression;
+    let compression = parse_optional_compression(&comp_str, comp_level)?;
 
-    let old_params = parse_required_encryption_params(&old_key, &old_nonce)?;
-    let new_params = parse_required_encryption_params(&new_key, &new_nonce)?;
+    let old_params = parse_required_encryption_params(&old_enc.0, &old_enc.1)?;
+    let new_params = parse_required_encryption_params(&new_enc.0, &new_enc.1)?;
 
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
     store_guard
-        .reencrypt_chunk(&hash, tier, &old_params, &new_params)
+        .reencrypt_chunk(&hash, tier, compression.as_ref(), &old_params, &new_params)
         .map_err(|e| e.to_string())
 }
 
@@ -419,6 +503,22 @@ fn parse_compression(compression: &str, level: i32) -> Result<Compression, Strin
             "invalid compression: expected 'none' or 'zstd', got '{}'",
             compression
         )),
+    }
+}
+
+/// Parses the codec-locator compression string.
+///
+/// `""` (empty) means "caller doesn't know or doesn't care" → `None`. Any other
+/// value parses as a normal compression spec; `"none"` returns
+/// `Some(Compression::None)` which maps to the same plain-codec suffix.
+fn parse_optional_compression(
+    compression: &str,
+    level: i32,
+) -> Result<Option<Compression>, String> {
+    if compression.is_empty() {
+        Ok(None)
+    } else {
+        parse_compression(compression, level).map(Some)
     }
 }
 
