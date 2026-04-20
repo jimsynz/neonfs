@@ -549,6 +549,43 @@ defmodule NeonFS.WebDAV.BackendTest do
     end
   end
 
+  describe "put_content_stream/4" do
+    test "writes a streamed file end-to-end" do
+      MockCore.create_volume("docs")
+      stream = Stream.map(["hello ", "streamed ", "world"], & &1)
+
+      assert {:ok, resource} =
+               Backend.put_content_stream(@auth, ["docs", "stream.txt"], stream, %{})
+
+      assert resource.content_length == 20
+      assert {:ok, "hello streamed world"} = MockCore.read_file("docs", "/stream.txt")
+    end
+
+    test "honours client-provided content type" do
+      MockCore.create_volume("docs")
+
+      assert {:ok, resource} =
+               Backend.put_content_stream(
+                 @auth,
+                 ["docs", "data.bin"],
+                 ["x"],
+                 %{content_type: "text/csv"}
+               )
+
+      assert resource.content_type == "text/csv"
+    end
+
+    test "returns conflict for unknown volume" do
+      assert {:error, %WebdavServer.Error{code: :conflict}} =
+               Backend.put_content_stream(@auth, ["nope", "f.txt"], ["data"], %{})
+    end
+
+    test "rejects writes at root" do
+      assert {:error, %WebdavServer.Error{code: :forbidden}} =
+               Backend.put_content_stream(@auth, [], ["data"], %{})
+    end
+  end
+
   describe "delete/2" do
     test "deletes a file" do
       MockCore.create_volume("docs")

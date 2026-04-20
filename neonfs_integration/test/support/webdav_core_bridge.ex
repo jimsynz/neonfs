@@ -28,6 +28,16 @@ defmodule NeonFS.Integration.WebDAVCoreBridge do
   end
 
   @spec call(atom(), [term()]) :: term()
+  def call(:write_file_streamed, [volume_name, path, stream, opts]) do
+    # Streams cannot cross `:rpc.call`: their closures often capture local
+    # process state (e.g. WebDAV's `Plug.Conn` in the process dictionary).
+    # Drain the stream here in the WebDAV handler process so the closure
+    # has access to its captured state, then send the assembled binary
+    # over to the remote core node via the batch write API.
+    body = stream |> Enum.to_list() |> IO.iodata_to_binary()
+    call(:write_file, [volume_name, path, body, opts])
+  end
+
   def call(function, args) do
     core_node = :persistent_term.get(:webdav_integration_core_node)
     rpc(core_node, NeonFS.Core, function, args)

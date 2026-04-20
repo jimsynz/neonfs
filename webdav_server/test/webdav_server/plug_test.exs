@@ -2,7 +2,7 @@ defmodule WebdavServer.PlugTest do
   use ExUnit.Case, async: true
 
   alias WebdavServer.LockStore
-  alias WebdavServer.Test.MemoryBackend
+  alias WebdavServer.Test.{MemoryBackend, StreamingBackend}
 
   setup do
     MemoryBackend.start()
@@ -53,6 +53,52 @@ defmodule WebdavServer.PlugTest do
       resp = conn(:put, "/no/such/file.txt", "data") |> call(opts)
 
       assert resp.status == 409
+    end
+  end
+
+  describe "PUT (streaming backend)" do
+    setup do
+      StreamingBackend.start()
+      LockStore.ETS.reset()
+      opts = WebdavServer.Plug.init(backend: StreamingBackend)
+      {:ok, opts: opts}
+    end
+
+    test "creates a new file via the streaming callback", %{opts: opts} do
+      resp =
+        conn(:put, "/streamed.txt", "hello streamed world")
+        |> put_req_header("content-type", "text/plain")
+        |> call(opts)
+
+      assert resp.status == 201
+      segments = StreamingBackend.segments_for(["streamed.txt"])
+      assert IO.iodata_to_binary(segments) == "hello streamed world"
+    end
+
+    test "feeds the body in bounded slices", %{opts: opts} do
+      # 200 KiB body — the 64 KiB slice size should produce 4 segments
+      # (3 × 64 KiB + 1 × 8 KiB).
+      body = :crypto.strong_rand_bytes(200 * 1024)
+
+      resp =
+        conn(:put, "/large.bin", body)
+        |> put_req_header("content-type", "application/octet-stream")
+        |> call(opts)
+
+      assert resp.status == 201
+      segments = StreamingBackend.segments_for(["large.bin"])
+      assert IO.iodata_to_binary(segments) == body
+      assert length(segments) >= 2
+
+      assert Enum.all?(segments, &(byte_size(&1) <= 64 * 1024)),
+             "expected each segment to fit in the 64 KiB slice"
+    end
+
+    test "overwrites an existing file via streaming", %{opts: opts} do
+      conn(:put, "/over.txt", "v1") |> call(opts)
+      resp = conn(:put, "/over.txt", "v2-streamed-content") |> call(opts)
+
+      assert resp.status == 204
     end
   end
 

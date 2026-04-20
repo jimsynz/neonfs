@@ -93,6 +93,27 @@ defmodule WebdavServer.Backend do
               {:ok, resource()} | {:error, error()}
 
   @doc """
+  Create or replace a file from a stream of binary segments.
+
+  Optional. When implemented, `WebdavServer.Handler.Put` reads the
+  request body in bounded slices and feeds them to the backend as a
+  `Stream` instead of materialising the whole body in memory. Backends
+  that don't implement this callback are dispatched through
+  `put_content/4` as before.
+
+  Return `{:ok, resource}` with the created/updated resource.
+  """
+  @callback put_content_stream(
+              auth_context(),
+              path(),
+              Enumerable.t(binary()),
+              opts :: map()
+            ) ::
+              {:ok, resource()} | {:error, error()}
+
+  @optional_callbacks put_content_stream: 4
+
+  @doc """
   Delete a resource. For collections, the backend should handle recursive
   deletion. Return `:ok` on full success, or `{:error, error}` with a list
   of partial failures via `{:partial, [{path, error}]}` for 207 responses.

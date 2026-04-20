@@ -14,6 +14,7 @@ defmodule NeonFS.WebDAV.Backend do
   @behaviour WebdavServer.Backend
 
   alias NeonFS.Client.ChunkReader
+  alias NeonFS.Client.Discovery
   alias NeonFS.Client.Router
   alias NeonFS.WebDAV.LockStore
 
@@ -134,13 +135,7 @@ defmodule NeonFS.WebDAV.Backend do
   def put_content(_auth, [volume_name | rest] = path, body, opts) do
     file_path = "/" <> Enum.join(rest, "/")
     body_binary = IO.iodata_to_binary(body)
-
-    write_opts =
-      case Map.get(opts, :content_type) do
-        nil -> []
-        "application/octet-stream" -> []
-        ct -> [content_type: ct]
-      end
+    write_opts = put_content_opts(opts)
 
     with {:ok, volume} <- resolve_volume(volume_name),
          {:ok, meta} <- call_core(:write_file, [volume_name, file_path, body_binary, write_opts]) do
@@ -157,6 +152,72 @@ defmodule NeonFS.WebDAV.Backend do
 
   def put_content(_auth, [], _body, _opts) do
     {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot write to root"}}
+  end
+
+  @impl true
+  def put_content_stream(_auth, [volume_name | rest] = path, stream, opts) do
+    file_path = "/" <> Enum.join(rest, "/")
+    write_opts = put_content_opts(opts)
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, meta} <- streaming_write(volume_name, file_path, stream, write_opts) do
+      LockStore.promote_lock_null(path, meta.id)
+      {:ok, file_resource(volume_name, volume.id, rest, meta)}
+    else
+      {:error, :not_found} ->
+        {:error, %WebdavServer.Error{code: :conflict, message: "Volume not found"}}
+
+      {:error, _reason} ->
+        {:error, internal_error()}
+    end
+  end
+
+  def put_content_stream(_auth, [], _stream, _opts) do
+    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot write to root"}}
+  end
+
+  defp streaming_write(volume_name, file_path, stream, write_opts) do
+    case call_core_stream(:write_file_streamed, [volume_name, file_path, stream, write_opts]) do
+      {:error, :not_available} ->
+        # Streams cannot cross Erlang distribution. When the core node is
+        # remote we drain the stream into a binary and use the batch API
+        # — same memory characteristics as the non-streaming code path.
+        body = stream |> Enum.to_list() |> IO.iodata_to_binary()
+        call_core(:write_file, [volume_name, file_path, body, write_opts])
+
+      other ->
+        other
+    end
+  end
+
+  defp call_core_stream(function, args) do
+    case Application.get_env(:neonfs_webdav, :core_call_fn) do
+      nil ->
+        if local_core?() do
+          apply(NeonFS.Core, function, args)
+        else
+          {:error, :not_available}
+        end
+
+      fun when is_function(fun, 2) ->
+        fun.(function, args)
+    end
+  end
+
+  defp local_core? do
+    node() in Discovery.get_core_nodes()
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp put_content_opts(opts) do
+    case Map.get(opts, :content_type) do
+      nil -> []
+      "application/octet-stream" -> []
+      ct -> [content_type: ct]
+    end
   end
 
   @impl true
