@@ -6,6 +6,7 @@ import Config
 config :logger, :default_formatter,
   metadata: [
     :bind_address,
+    :chunk_hash,
     :component,
     :core_node,
     :count,
@@ -38,6 +39,7 @@ config :logger, :default_handler,
     Logger.Formatter.new(
       metadata: [
         :bind_address,
+        :chunk_hash,
         :component,
         :core_node,
         :count,

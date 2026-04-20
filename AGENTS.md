@@ -129,9 +129,9 @@ This applies everywhere: core read/write paths, interface packages (FUSE, NFS, S
 
 Reads:
 
-- Use `NeonFS.Core.read_file_stream/3` — returns a `Stream` that pulls chunks lazily. This is the canonical API.
+- On core, use `NeonFS.Core.read_file_stream/3` — returns a `Stream` that pulls chunks lazily. This is the canonical API.
 - For byte-range reads, pass `:offset` and `:length` and consume the stream; don't `Enum.into(<<>>)` the whole thing.
-- On the interface side, use `NeonFS.Client.ChunkReader` for data-plane reads. If a callsite calls `read_file/2,3` and buffers the result, that's a bug — convert it to a stream.
+- On interface nodes (S3, WebDAV, NFS, FUSE), use `NeonFS.Client.ChunkReader.read_file_stream/3` — it builds a distribution-safe stream locally and fetches each chunk via the TLS data plane (or a range-limited per-chunk RPC for compressed/encrypted chunks). If a callsite calls `read_file/2,3` and buffers the result, that's a bug — convert it to a stream.
 
 Writes:
 

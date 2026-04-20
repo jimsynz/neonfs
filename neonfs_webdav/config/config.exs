@@ -2,6 +2,7 @@ import Config
 
 config :logger, :default_formatter,
   metadata: [
+    :chunk_hash,
     :component,
     :core_node,
     :method,

@@ -23,6 +23,10 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.read_file(volume_name, path, opts)
     end)
 
+    stub(ChunkReader, :read_file_stream, fn volume_name, path, opts ->
+      MockCore.read_file_stream(volume_name, path, opts)
+    end)
+
     on_exit(fn ->
       Application.delete_env(:neonfs_webdav, :core_call_fn)
     end)
@@ -281,12 +285,13 @@ defmodule NeonFS.WebDAV.BackendTest do
   # File operations
 
   describe "get_content/3" do
-    test "reads file content" do
+    test "reads file content as a stream" do
       MockCore.create_volume("docs")
       MockCore.write_file("docs", "/hello.txt", "Hello, world!")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "hello.txt"])
 
-      assert {:ok, "Hello, world!"} = Backend.get_content(@auth, resource, %{})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{})
+      assert Enum.into(stream, <<>>) == "Hello, world!"
     end
 
     test "returns not_found for missing file" do
@@ -306,7 +311,8 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/range.txt", "0123456789ABCDEF")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "range.txt"])
 
-      assert {:ok, "56789"} = Backend.get_content(@auth, resource, %{range: {5, 9}})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {5, 9}})
+      assert Enum.into(stream, <<>>) == "56789"
     end
 
     test "returns content from offset to end for open-ended range" do
@@ -314,7 +320,8 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/open.txt", "0123456789")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "open.txt"])
 
-      assert {:ok, "6789"} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+      assert Enum.into(stream, <<>>) == "6789"
     end
 
     test "returns full content when no range specified" do
@@ -322,80 +329,28 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/full.txt", "complete content")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "full.txt"])
 
-      assert {:ok, "complete content"} = Backend.get_content(@auth, resource, %{})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{})
+      assert Enum.into(stream, <<>>) == "complete content"
     end
   end
 
-  describe "get_content/3 streaming" do
-    setup do
-      Application.put_env(:neonfs_webdav, :core_stream_fn, fn volume, path, opts ->
-        MockCore.read_file_stream(volume, path, opts)
-      end)
-
-      on_exit(fn ->
-        Application.delete_env(:neonfs_webdav, :core_stream_fn)
-      end)
-
-      :ok
-    end
-
-    test "returns stream when streaming is available" do
-      MockCore.create_volume("docs")
-      MockCore.write_file("docs", "/stream.txt", "streamed data")
-      {:ok, resource} = Backend.resolve(@auth, ["docs", "stream.txt"])
-
-      assert {:ok, content} = Backend.get_content(@auth, resource, %{})
-      assert not is_binary(content)
-      assert Enum.into(content, <<>>) == "streamed data"
-    end
-
-    test "streams partial content for range request" do
-      MockCore.create_volume("docs")
-      MockCore.write_file("docs", "/range-stream.txt", "0123456789ABCDEF")
-      {:ok, resource} = Backend.resolve(@auth, ["docs", "range-stream.txt"])
-
-      assert {:ok, content} = Backend.get_content(@auth, resource, %{range: {5, 9}})
-      assert not is_binary(content)
-      assert Enum.into(content, <<>>) == "56789"
-    end
-
-    test "streams content from offset to end for open-ended range" do
-      MockCore.create_volume("docs")
-      MockCore.write_file("docs", "/open-stream.txt", "0123456789")
-      {:ok, resource} = Backend.resolve(@auth, ["docs", "open-stream.txt"])
-
-      assert {:ok, content} = Backend.get_content(@auth, resource, %{range: {6, nil}})
-      assert not is_binary(content)
-      assert Enum.into(content, <<>>) == "6789"
-    end
-
-    test "returns error for missing file in stream path" do
-      MockCore.create_volume("docs")
-      MockCore.write_file("docs", "/exists.txt", "x")
-      {:ok, resource} = Backend.resolve(@auth, ["docs", "exists.txt"])
-      MockCore.delete_file("docs", "/exists.txt")
-
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
-               Backend.get_content(@auth, resource, %{})
-    end
-  end
-
-  describe "get_content/3 — data plane routing" do
-    test "dispatches GET fallback through NeonFS.Client.ChunkReader" do
+  describe "get_content/3 — streaming routing" do
+    test "dispatches GET through NeonFS.Client.ChunkReader.read_file_stream" do
       MockCore.create_volume("docs")
       MockCore.write_file("docs", "/dp.txt", "over data plane")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "dp.txt"])
 
       test_pid = self()
 
-      expect(ChunkReader, :read_file, fn volume_name, path, opts ->
-        send(test_pid, {:chunk_reader_called, volume_name, path, opts})
-        {:ok, "over data plane"}
+      expect(ChunkReader, :read_file_stream, fn volume_name, path, opts ->
+        send(test_pid, {:chunk_reader_stream_called, volume_name, path, opts})
+        MockCore.read_file_stream(volume_name, path, opts)
       end)
 
-      assert {:ok, "over data plane"} = Backend.get_content(@auth, resource, %{})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{})
+      assert Enum.into(stream, <<>>) == "over data plane"
 
-      assert_receive {:chunk_reader_called, "docs", "/dp.txt", opts}, 1_000
+      assert_receive {:chunk_reader_stream_called, "docs", "/dp.txt", opts}, 1_000
       refute Keyword.has_key?(opts, :offset)
       refute Keyword.has_key?(opts, :length)
     end
@@ -405,13 +360,14 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/range.bin", "0123456789ABCDEF")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "range.bin"])
 
-      expect(ChunkReader, :read_file, fn "docs", "/range.bin", opts ->
+      expect(ChunkReader, :read_file_stream, fn "docs", "/range.bin", opts ->
         assert Keyword.get(opts, :offset) == 5
         assert Keyword.get(opts, :length) == 5
-        {:ok, "56789"}
+        MockCore.read_file_stream("docs", "/range.bin", opts)
       end)
 
-      assert {:ok, "56789"} = Backend.get_content(@auth, resource, %{range: {5, 9}})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {5, 9}})
+      assert Enum.into(stream, <<>>) == "56789"
     end
 
     test "forwards open-ended range requests as :offset only" do
@@ -419,13 +375,14 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/open.bin", "0123456789")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "open.bin"])
 
-      expect(ChunkReader, :read_file, fn "docs", "/open.bin", opts ->
+      expect(ChunkReader, :read_file_stream, fn "docs", "/open.bin", opts ->
         assert Keyword.get(opts, :offset) == 6
         refute Keyword.has_key?(opts, :length)
-        {:ok, "6789"}
+        MockCore.read_file_stream("docs", "/open.bin", opts)
       end)
 
-      assert {:ok, "6789"} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{range: {6, nil}})
+      assert Enum.into(stream, <<>>) == "6789"
     end
 
     test "maps ChunkReader :not_found to WebDAV not_found" do
@@ -433,7 +390,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/exists.txt", "hi")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "exists.txt"])
 
-      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :not_found} end)
+      expect(ChunkReader, :read_file_stream, fn _, _, _ -> {:error, :not_found} end)
 
       assert {:error, %WebdavServer.Error{code: :not_found}} =
                Backend.get_content(@auth, resource, %{})
@@ -444,13 +401,15 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/exists.txt", "hi")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "exists.txt"])
 
-      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :no_available_locations} end)
+      expect(ChunkReader, :read_file_stream, fn _, _, _ ->
+        {:error, :no_available_locations}
+      end)
 
       assert {:error, %WebdavServer.Error{code: :bad_request}} =
                Backend.get_content(@auth, resource, %{})
     end
 
-    test "skips ChunkReader when streaming fast path is available" do
+    test "core_stream_fn override replaces ChunkReader streaming" do
       Application.put_env(:neonfs_webdav, :core_stream_fn, fn volume, path, opts ->
         MockCore.read_file_stream(volume, path, opts)
       end)
@@ -461,11 +420,10 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/stream.txt", "streaming")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "stream.txt"])
 
-      reject(&ChunkReader.read_file/3)
+      reject(&ChunkReader.read_file_stream/3)
 
-      assert {:ok, content} = Backend.get_content(@auth, resource, %{})
-      refute is_binary(content)
-      assert Enum.into(content, <<>>) == "streaming"
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{})
+      assert Enum.into(stream, <<>>) == "streaming"
     end
   end
 

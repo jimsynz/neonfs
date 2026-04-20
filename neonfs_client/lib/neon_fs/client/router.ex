@@ -86,35 +86,6 @@ defmodule NeonFS.Client.Router do
     do_call(module, function, args, 10_000, @max_retries, prefer_leader: true)
   end
 
-  @doc """
-  Opens a seekable chunked stream for reading a file on a core node.
-
-  Streams contain anonymous functions and cannot be serialised across
-  Erlang distribution. This function only succeeds when a core node is
-  running on the **same** Erlang node as the caller. Returns
-  `{:error, :not_available}` when no co-located core node is found.
-
-  ## Options
-
-    * `:offset` - byte offset to start streaming from (default: 0)
-    * `:length` - number of bytes to stream (default: entire file)
-
-  Returns `{:ok, %{stream: stream, file_size: size}}` or `{:error, reason}`.
-  """
-  @spec read_file_stream(String.t(), String.t(), keyword()) ::
-          {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}} | {:error, term()}
-  def read_file_stream(volume_name, path, opts \\ []) do
-    if core_colocated?() do
-      call(NeonFS.Core, :read_file_stream, [volume_name, path, opts])
-    else
-      {:error, :not_available}
-    end
-  end
-
-  defp core_colocated? do
-    node() in Discovery.get_core_nodes()
-  end
-
   ## Private helpers — data_call
 
   defp build_data_message(:put_chunk, ref, args) do

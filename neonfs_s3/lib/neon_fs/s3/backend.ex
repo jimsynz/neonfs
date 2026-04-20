@@ -3,10 +3,11 @@ defmodule NeonFS.S3.Backend do
   S3Server.Backend implementation that maps S3 operations to NeonFS core calls.
 
   Buckets map 1:1 to NeonFS volumes. S3 object keys map to file paths within
-  the volume. Control-plane operations go through `NeonFS.Client.Router`;
-  object GET falls back to `NeonFS.Client.ChunkReader` so chunk bytes are
-  fetched over the TLS data plane rather than shipped across Erlang
-  distribution when streaming isn't available.
+  the volume. Control-plane operations go through `NeonFS.Client.Router`.
+  Object GET streams chunks via `NeonFS.Client.ChunkReader.read_file_stream/3`
+  so bulk bytes are fetched over the TLS data plane (or range-limited
+  per-chunk RPCs for compressed/encrypted volumes) regardless of whether a
+  core node is co-located on the S3 node's VM.
   """
 
   @behaviour S3Server.Backend
@@ -109,10 +110,11 @@ defmodule NeonFS.S3.Backend do
       {:ok, %{stream: stream}} ->
         {:ok, file_meta_to_stream_object(meta, stream, read_opts)}
 
-      _fallback ->
-        with {:ok, content} <- read_object_content(bucket, key, read_opts) do
-          {:ok, file_meta_to_object(meta, content)}
-        end
+      {:error, :not_found} ->
+        {:error, %S3Server.Error{code: :no_such_key}}
+
+      {:error, reason} ->
+        {:error, internal_error(reason)}
     end
   end
 
@@ -347,10 +349,8 @@ defmodule NeonFS.S3.Backend do
         fun.(bucket, key, read_opts)
 
       nil ->
-        Router.read_file_stream(bucket, key, read_opts)
+        ChunkReader.read_file_stream(bucket, key, read_opts)
     end
-  rescue
-    _ -> {:error, :not_available}
   end
 
   defp file_meta_to_stream_object(meta, stream, read_opts) do
@@ -432,20 +432,6 @@ defmodule NeonFS.S3.Backend do
 
   defp compute_etag(data) when is_binary(data) do
     :crypto.hash(:md5, data) |> Base.encode16(case: :lower)
-  end
-
-  defp file_meta_to_object(meta, content) do
-    etag = compute_etag_from_meta(meta)
-
-    %S3Server.Object{
-      body: content,
-      content_type: meta_content_type(meta),
-      content_length: byte_size(content),
-      total_size: meta.size,
-      etag: etag,
-      last_modified: meta.modified_at || meta.created_at || DateTime.utc_now(),
-      metadata: %{}
-    }
   end
 
   defp file_meta_to_object_meta(meta, key) do

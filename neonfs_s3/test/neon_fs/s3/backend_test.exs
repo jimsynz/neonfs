@@ -24,6 +24,10 @@ defmodule NeonFS.S3.BackendTest do
       MockCore.read_file(volume_name, path, opts)
     end)
 
+    stub(ChunkReader, :read_file_stream, fn volume_name, path, opts ->
+      MockCore.read_file_stream(volume_name, path, opts)
+    end)
+
     start_supervised!(MultipartStore)
 
     on_exit(fn ->
@@ -189,7 +193,7 @@ defmodule NeonFS.S3.BackendTest do
       assert {:ok, object} =
                Backend.get_object(@ctx, "my-bucket", "hello.txt", %S3Server.GetOpts{})
 
-      assert object.body == "hello world"
+      assert Enum.into(object.body, <<>>) == "hello world"
       assert object.content_length == 11
       assert object.content_type == "text/plain"
       assert is_binary(object.etag)
@@ -214,7 +218,7 @@ defmodule NeonFS.S3.BackendTest do
       opts = %S3Server.GetOpts{range: {5, 9}}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "data.txt", opts)
-      assert object.body == "56789"
+      assert Enum.into(object.body, <<>>) == "56789"
       assert object.content_length == 5
       assert object.total_size == 16
     end
@@ -226,7 +230,7 @@ defmodule NeonFS.S3.BackendTest do
       opts = %S3Server.GetOpts{range: {2, 100}}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "short.txt", opts)
-      assert object.body == "llo"
+      assert Enum.into(object.body, <<>>) == "llo"
       assert object.content_length == 3
       assert object.total_size == 5
     end
@@ -238,7 +242,7 @@ defmodule NeonFS.S3.BackendTest do
       opts = %S3Server.GetOpts{range: nil}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "full.txt", opts)
-      assert object.body == "all content"
+      assert Enum.into(object.body, <<>>) == "all content"
       assert object.content_length == 11
       assert object.total_size == 11
     end
@@ -306,7 +310,7 @@ defmodule NeonFS.S3.BackendTest do
       assert {:ok, object} =
                Backend.get_object(@ctx, "my-bucket", "copy.txt", %S3Server.GetOpts{})
 
-      assert object.body == "hello"
+      assert Enum.into(object.body, <<>>) == "hello"
     end
 
     test "rejects cross-bucket copy with not_implemented" do
@@ -375,68 +379,6 @@ defmodule NeonFS.S3.BackendTest do
     end
   end
 
-  describe "get_object/4 streaming" do
-    setup do
-      Application.put_env(:neonfs_s3, :core_stream_fn, fn volume, path, opts ->
-        MockCore.read_file_stream(volume, path, opts)
-      end)
-
-      on_exit(fn ->
-        Application.delete_env(:neonfs_s3, :core_stream_fn)
-      end)
-
-      :ok
-    end
-
-    test "returns stream body when streaming is available" do
-      Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "stream.txt", "streamed content", %S3Server.PutOpts{})
-
-      assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "stream.txt", %S3Server.GetOpts{})
-
-      assert not is_binary(object.body)
-      assert Enum.into(object.body, <<>>) == "streamed content"
-      assert object.content_length == 16
-      assert object.total_size == 16
-    end
-
-    test "streams partial content for range request" do
-      Backend.create_bucket(@ctx, "my-bucket")
-
-      Backend.put_object(
-        @ctx,
-        "my-bucket",
-        "range-stream.txt",
-        "0123456789ABCDEF",
-        %S3Server.PutOpts{}
-      )
-
-      opts = %S3Server.GetOpts{range: {5, 9}}
-
-      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "range-stream.txt", opts)
-      assert not is_binary(object.body)
-      assert Enum.into(object.body, <<>>) == "56789"
-      assert object.content_length == 5
-      assert object.total_size == 16
-    end
-
-    test "preserves etag and metadata with streaming" do
-      Backend.create_bucket(@ctx, "my-bucket")
-
-      Backend.put_object(@ctx, "my-bucket", "meta.txt", "test data", %S3Server.PutOpts{
-        content_type: "text/csv"
-      })
-
-      assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "meta.txt", %S3Server.GetOpts{})
-
-      assert is_binary(object.etag)
-      assert object.content_type == "text/csv"
-      assert %DateTime{} = object.last_modified
-    end
-  end
-
   # Multipart upload operations
 
   describe "multipart upload lifecycle" do
@@ -475,7 +417,7 @@ defmodule NeonFS.S3.BackendTest do
       assert {:ok, object} =
                Backend.get_object(@ctx, "my-bucket", "big-file.bin", %S3Server.GetOpts{})
 
-      assert object.body == "part-one-part-two"
+      assert Enum.into(object.body, <<>>) == "part-one-part-two"
     end
 
     test "abort multipart upload" do
@@ -529,24 +471,24 @@ defmodule NeonFS.S3.BackendTest do
     end
   end
 
-  describe "get_object/4 — data plane routing" do
-    test "dispatches GET fallback through NeonFS.Client.ChunkReader" do
+  describe "get_object/4 — streaming routing" do
+    test "dispatches GET through NeonFS.Client.ChunkReader.read_file_stream" do
       Backend.create_bucket(@ctx, "my-bucket")
       Backend.put_object(@ctx, "my-bucket", "dp.txt", "over data plane", %S3Server.PutOpts{})
 
       test_pid = self()
 
-      expect(ChunkReader, :read_file, fn volume_name, path, opts ->
-        send(test_pid, {:chunk_reader_called, volume_name, path, opts})
-        {:ok, "over data plane"}
+      expect(ChunkReader, :read_file_stream, fn volume_name, path, opts ->
+        send(test_pid, {:chunk_reader_stream_called, volume_name, path, opts})
+        MockCore.read_file_stream(volume_name, path, opts)
       end)
 
       assert {:ok, object} =
                Backend.get_object(@ctx, "my-bucket", "dp.txt", %S3Server.GetOpts{})
 
-      assert object.body == "over data plane"
+      assert Enum.into(object.body, <<>>) == "over data plane"
 
-      assert_receive {:chunk_reader_called, "my-bucket", "dp.txt", opts}, 1_000
+      assert_receive {:chunk_reader_stream_called, "my-bucket", "dp.txt", opts}, 1_000
       refute Keyword.has_key?(opts, :offset)
       refute Keyword.has_key?(opts, :length)
     end
@@ -562,16 +504,16 @@ defmodule NeonFS.S3.BackendTest do
         %S3Server.PutOpts{}
       )
 
-      expect(ChunkReader, :read_file, fn "my-bucket", "range.bin", opts ->
+      expect(ChunkReader, :read_file_stream, fn "my-bucket", "range.bin", opts ->
         assert Keyword.get(opts, :offset) == 5
         assert Keyword.get(opts, :length) == 5
-        {:ok, "56789"}
+        MockCore.read_file_stream("my-bucket", "range.bin", opts)
       end)
 
       opts = %S3Server.GetOpts{range: {5, 9}}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "range.bin", opts)
-      assert object.body == "56789"
+      assert Enum.into(object.body, <<>>) == "56789"
       assert object.content_length == 5
       assert object.total_size == 16
     end
@@ -580,7 +522,7 @@ defmodule NeonFS.S3.BackendTest do
       Backend.create_bucket(@ctx, "my-bucket")
       Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %S3Server.PutOpts{})
 
-      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :not_found} end)
+      expect(ChunkReader, :read_file_stream, fn _, _, _ -> {:error, :not_found} end)
 
       assert {:error, %S3Server.Error{code: :no_such_key}} =
                Backend.get_object(@ctx, "my-bucket", "exists.txt", %S3Server.GetOpts{})
@@ -590,13 +532,15 @@ defmodule NeonFS.S3.BackendTest do
       Backend.create_bucket(@ctx, "my-bucket")
       Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %S3Server.PutOpts{})
 
-      expect(ChunkReader, :read_file, fn _, _, _ -> {:error, :no_available_locations} end)
+      expect(ChunkReader, :read_file_stream, fn _, _, _ ->
+        {:error, :no_available_locations}
+      end)
 
       assert {:error, %S3Server.Error{code: :internal_error}} =
                Backend.get_object(@ctx, "my-bucket", "exists.txt", %S3Server.GetOpts{})
     end
 
-    test "skips ChunkReader when streaming fast path is available" do
+    test "core_stream_fn override replaces ChunkReader streaming" do
       Application.put_env(:neonfs_s3, :core_stream_fn, fn volume, path, opts ->
         MockCore.read_file_stream(volume, path, opts)
       end)
@@ -606,12 +550,11 @@ defmodule NeonFS.S3.BackendTest do
       Backend.create_bucket(@ctx, "my-bucket")
       Backend.put_object(@ctx, "my-bucket", "stream.txt", "streaming", %S3Server.PutOpts{})
 
-      reject(&ChunkReader.read_file/3)
+      reject(&ChunkReader.read_file_stream/3)
 
       assert {:ok, object} =
                Backend.get_object(@ctx, "my-bucket", "stream.txt", %S3Server.GetOpts{})
 
-      assert not is_binary(object.body)
       assert Enum.into(object.body, <<>>) == "streaming"
     end
   end

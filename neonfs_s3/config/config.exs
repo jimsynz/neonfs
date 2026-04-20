@@ -3,6 +3,7 @@ import Config
 config :logger, :default_formatter,
   metadata: [
     :bucket,
+    :chunk_hash,
     :component,
     :core_node,
     :key,

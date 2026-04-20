@@ -371,4 +371,207 @@ defmodule NeonFS.Client.ChunkReaderTest do
                ChunkReader.read_file("vol", "/x", offset: 1_000, length: 50)
     end
   end
+
+  describe "read_file_stream/3 — happy path" do
+    test "returns a stream that assembles chunks lazily via the data plane" do
+      chunk_a = String.duplicate("A", 10)
+      chunk_b = String.duplicate("B", 10)
+
+      refs = [
+        ref(seed: :a, original_size: 10, chunk_offset: 0, read_start: 0, read_length: 10),
+        ref(seed: :b, original_size: 10, chunk_offset: 10, read_start: 0, read_length: 10)
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, ["vol", "/f.txt", []] ->
+        {:ok, %{file_size: 20, chunks: refs}}
+      end)
+
+      stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
+        cond do
+          args[:hash] == fake_hash(:a) -> {:ok, chunk_a}
+          args[:hash] == fake_hash(:b) -> {:ok, chunk_b}
+        end
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 20}} =
+               ChunkReader.read_file_stream("vol", "/f.txt")
+
+      assert Enum.to_list(stream) == [chunk_a, chunk_b]
+    end
+
+    test "forwards offset and length to read_file_refs" do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, [_, _, opts] ->
+        assert opts[:offset] == 100
+        assert opts[:length] == 50
+        {:ok, %{file_size: 200, chunks: []}}
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 200}} =
+               ChunkReader.read_file_stream("vol", "/x", offset: 100, length: 50)
+
+      assert Enum.to_list(stream) == []
+    end
+
+    test "slices each chunk by read_start and read_length" do
+      chunk_bytes = "0123456789abcdef"
+
+      refs = [
+        ref(seed: :a, original_size: 16, chunk_offset: 0, read_start: 4, read_length: 8)
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 16, chunks: refs}}
+      end)
+
+      expect(Router, :data_call, fn _, :get_chunk, _args, _opts ->
+        {:ok, chunk_bytes}
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/slice.txt")
+      assert Enum.into(stream, <<>>) == "456789ab"
+    end
+  end
+
+  describe "read_file_stream/3 — per-chunk fallback" do
+    test "fetches compressed chunks via a range-limited read_file RPC" do
+      refs = [
+        ref(seed: :a, original_size: 10, chunk_offset: 0, read_start: 0, read_length: 10),
+        ref(
+          seed: :b,
+          original_size: 10,
+          chunk_offset: 10,
+          read_start: 0,
+          read_length: 10,
+          compression: :zstd
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 20, chunks: refs}}
+      end)
+
+      expect(Router, :data_call, fn _, :get_chunk, args, _ ->
+        assert args[:hash] == fake_hash(:a)
+        {:ok, String.duplicate("A", 10)}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/mixed.txt", opts] ->
+        assert opts[:offset] == 10
+        assert opts[:length] == 10
+        {:ok, String.duplicate("B", 10)}
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/mixed.txt")
+      assert Enum.into(stream, <<>>) == String.duplicate("A", 10) <> String.duplicate("B", 10)
+    end
+
+    test "fetches encrypted chunks via a range-limited read_file RPC" do
+      refs = [
+        ref(
+          seed: :a,
+          original_size: 10,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 10,
+          encrypted: true
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 10, chunks: refs}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/e.txt", opts] ->
+        assert opts[:offset] == 0
+        assert opts[:length] == 10
+        {:ok, "decrypted!"}
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/e.txt")
+      assert Enum.into(stream, <<>>) == "decrypted!"
+    end
+
+    test "falls back to read_file for a chunk when every location lacks a data-plane pool" do
+      refs = [
+        ref(
+          seed: :a,
+          original_size: 4,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 4,
+          locations: [
+            %{node: :a@host, drive_id: "d1", tier: :hot},
+            %{node: :b@host, drive_id: "d2", tier: :hot}
+          ]
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 4, chunks: refs}}
+      end)
+
+      stub(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
+        {:error, :no_data_endpoint}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/nopool.txt", opts] ->
+        assert opts[:offset] == 0
+        assert opts[:length] == 4
+        {:ok, "abcd"}
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/nopool.txt")
+      assert Enum.into(stream, <<>>) == "abcd"
+    end
+
+    test "returns a stream wrapping the buffered read on :stripe_refs_unsupported" do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin"] ->
+        {:ok, %{size: 100}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/ec.bin", _] ->
+        {:ok, "ec-file-bytes"}
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 100}} =
+               ChunkReader.read_file_stream("vol", "/ec.bin")
+
+      assert Enum.into(stream, <<>>) == "ec-file-bytes"
+    end
+
+    test "propagates metadata errors" do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:error, :not_found}
+      end)
+
+      assert {:error, :not_found} = ChunkReader.read_file_stream("vol", "/missing.txt")
+    end
+  end
+
+  describe "read_file_stream/3 — mid-stream failure" do
+    test "halts the stream when a chunk fetch fails" do
+      refs = [
+        ref(seed: :a, original_size: 4, chunk_offset: 0, read_start: 0, read_length: 4),
+        ref(seed: :b, original_size: 4, chunk_offset: 4, read_start: 0, read_length: 4)
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 8, chunks: refs}}
+      end)
+
+      stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
+        cond do
+          args[:hash] == fake_hash(:a) -> {:ok, "abcd"}
+          args[:hash] == fake_hash(:b) -> {:error, :connection_refused}
+        end
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/half.txt")
+      assert Enum.to_list(stream) == ["abcd"]
+    end
+  end
 end
