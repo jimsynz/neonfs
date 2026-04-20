@@ -175,6 +175,58 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   @doc """
+  Streams file data to a volume, chunking and storing each chunk as it
+  arrives instead of buffering the whole binary in memory.
+
+  Accepts an `Enumerable.t()` of binary segments — empty stream creates
+  an empty file. The peak working set is bounded by the strategy's
+  maximum chunk size, so multi-gigabyte streams complete without
+  OOMing the core node.
+
+  Currently supports replicated volumes only; erasure-coded volumes
+  return `{:error, :streaming_writes_not_supported_for_erasure}` until
+  streaming erasure encoding lands.
+
+  Options match `write_file/4`.
+  """
+  @spec write_file_streamed(binary(), String.t(), Enumerable.t(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def write_file_streamed(volume_id, path, stream, opts \\ []) do
+    Logger.metadata(component: :write, volume_id: volume_id, file_path: path)
+
+    write_id = generate_write_id()
+    start_time = System.monotonic_time()
+
+    :telemetry.execute(
+      [:neonfs, :write_operation, :start],
+      %{bytes: 0},
+      %{volume_id: volume_id, path: path, write_id: write_id, streamed: true}
+    )
+
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+    client_ref = Keyword.get(opts, :client_ref)
+
+    result =
+      with {:ok, volume} <- get_volume(volume_id),
+           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
+           # Streaming writes don't know the byte range up front; lock check
+           # uses {0, 0} which still validates exclusive/share semantics.
+           :ok <- check_lock(volume_id, path, client_ref, {0, 0}, opts) do
+        do_write_streamed(volume, path, stream, write_id, opts)
+      end
+
+    case result do
+      {:ok, file_meta} -> evict_resolved_cache(file_meta.id)
+      _ -> :ok
+    end
+
+    duration = System.monotonic_time() - start_time
+    emit_streamed_completion_telemetry(result, duration, volume_id, path, write_id)
+    result
+  end
+
+  @doc """
   Generates a unique write ID for tracking write operations.
   """
   @spec generate_write_id() :: write_id()
@@ -224,6 +276,84 @@ defmodule NeonFS.Core.WriteOperation do
           error
       end
     end
+  end
+
+  defp do_write_streamed(%{durability: %{type: :erasure}}, _path, _stream, _write_id, _opts) do
+    {:error, :streaming_writes_not_supported_for_erasure}
+  end
+
+  defp do_write_streamed(volume, path, stream, write_id, opts) do
+    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+      write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
+      strategy = resolve_chunk_strategy(opts)
+      compression_config = Keyword.get(opts, :compression, volume.compression)
+
+      with {:ok, chunker} <- BlobStore.chunker_init(strategy),
+           {:ok, chunks, total_bytes} <-
+             stream_chunks(stream, chunker, compression_config, volume, write_ctx),
+           {:ok, file_meta} <-
+             create_file_metadata_with_size(volume.id, path, chunks, total_bytes, opts),
+           :ok <- commit_chunks(write_id, chunks),
+           :ok <- update_volume_stats_with_size(volume.id, total_bytes, chunks) do
+        {:ok, file_meta}
+      else
+        {:error, _reason} = error ->
+          abort_chunks(write_id)
+          error
+      end
+    end
+  end
+
+  defp stream_chunks(stream, chunker, compression_config, volume, write_ctx) do
+    init_acc = {:ok, [], 0}
+
+    fed =
+      Enum.reduce_while(stream, init_acc, fn segment, {:ok, acc, index} ->
+        emitted = BlobStore.chunker_feed(chunker, segment)
+
+        case process_streamed_chunks(emitted, index, compression_config, volume, write_ctx) do
+          {:ok, processed} ->
+            {:cont, {:ok, acc ++ processed, index + length(processed)}}
+
+          {:error, _} = err ->
+            {:halt, err}
+        end
+      end)
+
+    with {:ok, acc, index} <- fed,
+         tail = BlobStore.chunker_finish(chunker),
+         {:ok, processed} <-
+           process_streamed_chunks(tail, index, compression_config, volume, write_ctx) do
+      all = acc ++ processed
+      {:ok, all, total_bytes_for_chunks(all)}
+    end
+  end
+
+  defp process_streamed_chunks([], _base_index, _compression, _volume, _write_ctx), do: {:ok, []}
+
+  defp process_streamed_chunks(raw_chunks, base_index, compression_config, volume, write_ctx) do
+    raw_chunks
+    |> Enum.with_index(base_index)
+    |> Enum.reduce_while({:ok, []}, fn {{data, hash, offset, size}, index}, {:ok, acc} ->
+      case process_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
+        {:ok, chunk_info} ->
+          {:cont, {:ok, [chunk_info | acc]}}
+
+        {:error, _reason} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, chunks} -> {:ok, Enum.reverse(chunks)}
+      err -> err
+    end
+  end
+
+  defp total_bytes_for_chunks([]), do: 0
+
+  defp total_bytes_for_chunks(chunks) do
+    last = List.last(chunks)
+    last.offset + last.size
   end
 
   defp get_volume(volume_id) do
@@ -1323,6 +1453,10 @@ defmodule NeonFS.Core.WriteOperation do
   defp should_compress_chunk?(_size, _config), do: {false, :none}
 
   defp create_file_metadata(volume_id, path, chunks, data, opts) do
+    create_file_metadata_with_size(volume_id, path, chunks, byte_size(data), opts)
+  end
+
+  defp create_file_metadata_with_size(volume_id, path, chunks, size, opts) do
     sorted_chunks = Enum.sort_by(chunks, & &1.offset)
     chunk_hashes = Enum.map(sorted_chunks, & &1.hash)
 
@@ -1335,7 +1469,7 @@ defmodule NeonFS.Core.WriteOperation do
         :ok
     end
 
-    file_opts = [chunks: chunk_hashes, size: byte_size(data)]
+    file_opts = [chunks: chunk_hashes, size: size]
 
     file_opts =
       case Keyword.fetch(opts, :mode) do
@@ -1451,10 +1585,14 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp update_volume_stats(volume_id, data, chunks) do
+    update_volume_stats_with_size(volume_id, byte_size(data), chunks)
+  end
+
+  defp update_volume_stats_with_size(volume_id, size, chunks) do
     case VolumeRegistry.get(volume_id) do
       {:ok, volume} ->
         new_chunks = Enum.filter(chunks, & &1.new)
-        new_logical_size = volume.logical_size + byte_size(data)
+        new_logical_size = volume.logical_size + size
 
         new_physical_size =
           volume.physical_size + Enum.sum(Enum.map(new_chunks, & &1.stored_size))
@@ -1520,6 +1658,26 @@ defmodule NeonFS.Core.WriteOperation do
     _ -> file_opts
   catch
     :exit, _ -> file_opts
+  end
+
+  defp emit_streamed_completion_telemetry(result, duration, volume_id, path, write_id) do
+    case result do
+      {:ok, file_meta} ->
+        chunk_count = length(file_meta.chunks) + length(file_meta.stripes || [])
+
+        :telemetry.execute(
+          [:neonfs, :write_operation, :stop],
+          %{duration: duration, bytes: file_meta.size, chunks: chunk_count},
+          %{volume_id: volume_id, path: path, write_id: write_id, streamed: true}
+        )
+
+      {:error, reason} ->
+        :telemetry.execute(
+          [:neonfs, :write_operation, :exception],
+          %{duration: duration},
+          %{volume_id: volume_id, path: path, write_id: write_id, streamed: true, error: reason}
+        )
+    end
   end
 
   defp emit_completion_telemetry(result, duration, volume_id, path, write_id, data) do

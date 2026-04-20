@@ -506,6 +506,55 @@ defmodule NeonFS.Core.BlobStore do
     GenServer.call(server, {:chunk_data, data, strategy})
   end
 
+  @typedoc """
+  Opaque handle to an incremental chunker; pass it to `chunker_feed/2` and
+  `chunker_finish/1`.
+  """
+  @type chunker :: reference()
+
+  @doc """
+  Initialises an incremental chunker for streaming writes.
+
+  Unlike `chunk_data/3`, this returns a stateful handle that the caller
+  feeds bytes into as they arrive. Each emitted chunk has the same shape
+  (`{data, hash, offset, size}`) as a `chunk_data` result; the working
+  set is bounded by the strategy's maximum chunk size.
+
+  When `:auto` is given without a size hint, the chunker defaults to
+  `:fastcdc` with the standard parameters — the auto strategy needs the
+  total size to pick between single/fixed/fastcdc, which streaming
+  callers don't have up front. Pass an explicit strategy to override.
+
+  This call does not go through the BlobStore GenServer — the chunker
+  resource is process-safe and held directly by the caller.
+  """
+  @spec chunker_init(chunk_strategy) :: {:ok, chunker()} | {:error, String.t()}
+        when chunk_strategy:
+               :auto | {:single} | {:fixed, pos_integer()} | {:fastcdc, pos_integer()}
+  def chunker_init(strategy) do
+    {strategy_str, param} = native_strategy(strategy)
+    Native.chunker_init(strategy_str, param)
+  end
+
+  @doc """
+  Feeds a slice into the chunker; returns chunks completed by this slice.
+  """
+  @spec chunker_feed(chunker(), binary()) :: [chunk_result]
+        when chunk_result: {binary(), chunk_hash(), non_neg_integer(), non_neg_integer()}
+  def chunker_feed(chunker, data), do: Native.chunker_feed(chunker, data)
+
+  @doc """
+  Flushes any remaining buffered data as the final chunks.
+  """
+  @spec chunker_finish(chunker()) :: [chunk_result]
+        when chunk_result: {binary(), chunk_hash(), non_neg_integer(), non_neg_integer()}
+  def chunker_finish(chunker), do: Native.chunker_finish(chunker)
+
+  defp native_strategy(:auto), do: {"fastcdc", 0}
+  defp native_strategy({:single}), do: {"single", 0}
+  defp native_strategy({:fixed, size}), do: {"fixed", size}
+  defp native_strategy({:fastcdc, avg_size}), do: {"fastcdc", avg_size}
+
   ## GenServer Callbacks
 
   @impl true

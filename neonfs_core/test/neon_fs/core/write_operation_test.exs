@@ -215,6 +215,99 @@ defmodule NeonFS.Core.WriteOperationTest do
     end
   end
 
+  describe "write_file_streamed/4" do
+    test "writes empty stream to an empty file", %{volume: volume} do
+      assert {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/empty.txt", [])
+      assert file_meta.size == 0
+      assert is_list(file_meta.chunks)
+    end
+
+    test "single-segment stream produces same chunks as write_file/4", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(50_000)
+
+      {:ok, batch} = WriteOperation.write_file(volume.id, "/batch.bin", data)
+      {:ok, streamed} = WriteOperation.write_file_streamed(volume.id, "/streamed.bin", [data])
+
+      assert streamed.size == batch.size
+      assert streamed.chunks == batch.chunks
+    end
+
+    test "multi-segment stream crossing chunk boundaries matches write_file/4", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
+      slices = for <<slice::binary-size(7919) <- data>>, do: slice
+      tail = binary_part(data, length(slices) * 7919, byte_size(data) - length(slices) * 7919)
+      segments = if tail == "", do: slices, else: slices ++ [tail]
+
+      {:ok, batch} = WriteOperation.write_file(volume.id, "/batch-large.bin", data)
+
+      {:ok, streamed} =
+        WriteOperation.write_file_streamed(volume.id, "/streamed-large.bin", segments)
+
+      assert streamed.size == byte_size(data)
+      assert streamed.chunks == batch.chunks
+    end
+
+    test "respects explicit chunk_strategy override", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(10_000)
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/fixed.bin", [data],
+          chunk_strategy: {:fixed, 1024}
+        )
+
+      assert file_meta.size == 10_000
+      # 10000 / 1024 = 9 full chunks + 1 partial = 10 chunks total
+      assert length(file_meta.chunks) == 10
+    end
+
+    test "deduplicates against existing batch-written content", %{volume: volume} do
+      data = :crypto.strong_rand_bytes(100_000)
+
+      {:ok, batch} = WriteOperation.write_file(volume.id, "/dedup-a.bin", data)
+
+      chunks_before =
+        :ets.tab2list(:chunk_index)
+        |> length()
+
+      {:ok, streamed} =
+        WriteOperation.write_file_streamed(
+          volume.id,
+          "/dedup-b.bin",
+          Stream.unfold(data, fn
+            "" -> nil
+            d when byte_size(d) <= 1024 -> {d, ""}
+            d -> {binary_part(d, 0, 1024), binary_part(d, 1024, byte_size(d) - 1024)}
+          end)
+        )
+
+      chunks_after =
+        :ets.tab2list(:chunk_index)
+        |> length()
+
+      assert streamed.chunks == batch.chunks
+      assert chunks_before == chunks_after
+    end
+
+    test "returns not-supported error for erasure-coded volumes", %{volume: _volume} do
+      vol_name = "erasure-#{:rand.uniform(999_999)}"
+
+      {:ok, erasure_volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1}
+        )
+
+      assert {:error, :streaming_writes_not_supported_for_erasure} =
+               WriteOperation.write_file_streamed(erasure_volume.id, "/x.bin", ["data"])
+    end
+
+    test "returns VolumeNotFound for unknown volume" do
+      fake_volume_id = UUIDv7.generate()
+
+      assert {:error, %VolumeNotFound{volume_id: ^fake_volume_id}} =
+               WriteOperation.write_file_streamed(fake_volume_id, "/fail.txt", ["data"])
+    end
+  end
+
   describe "generate_write_id/0" do
     test "generates unique IDs" do
       id1 = WriteOperation.generate_write_id()

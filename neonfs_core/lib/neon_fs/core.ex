@@ -181,6 +181,27 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Streams content to a file, chunking and storing each chunk as it
+  arrives instead of buffering the whole file in memory.
+
+  Accepts an `Enumerable.t()` of binary segments. The peak working set
+  is bounded by the strategy's maximum chunk size, so multi-gigabyte
+  files complete without OOMing the core node.
+
+  Currently supports replicated volumes only; erasure-coded volumes
+  return `{:error, :streaming_writes_not_supported_for_erasure}`.
+
+  Options match `write_file/4`.
+  """
+  @spec write_file_streamed(String.t(), String.t(), Enumerable.t(), keyword()) ::
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
+  def write_file_streamed(volume_name, path, stream, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      WriteOperation.write_file_streamed(volume.id, normalize_path(path), stream, opts)
+    end
+  end
+
+  @doc """
   Deletes a file from a volume by path.
   """
   @spec delete_file(String.t(), String.t()) :: :ok | {:error, term()}
