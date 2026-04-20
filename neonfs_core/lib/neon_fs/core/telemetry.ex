@@ -30,6 +30,7 @@ defmodule NeonFS.Core.Telemetry do
     cache_metrics() ++
       chunk_metrics() ++
       cluster_metrics() ++
+      escalation_metrics() ++
       fuse_metrics() ++
       io_scheduler_metrics() ++
       read_write_metrics() ++
@@ -197,6 +198,34 @@ defmodule NeonFS.Core.Telemetry do
         event_name: [:neonfs, :clock, :quarantine],
         description: "Total node quarantine events due to clock skew",
         tags: [:node]
+      )
+    ]
+  end
+
+  # -- Escalation metrics -----------------------------------------------------
+
+  defp escalation_metrics do
+    [
+      counter("neonfs.escalations.raised.count",
+        event_name: [:neonfs, :escalation, :raised],
+        tags: [:category, :severity],
+        description: "Total escalations raised"
+      ),
+      counter("neonfs.escalations.resolved.count",
+        event_name: [:neonfs, :escalation, :resolved],
+        tags: [:category, :choice],
+        description: "Total escalations resolved via operator action"
+      ),
+      counter("neonfs.escalations.expired.count",
+        event_name: [:neonfs, :escalation, :expired],
+        tags: [:category],
+        description: "Total escalations that expired without resolution"
+      ),
+      last_value("neonfs.escalations.pending",
+        event_name: [:neonfs, :escalation, :pending_by_category],
+        measurement: :count,
+        tags: [:category],
+        description: "Pending escalations by category"
       )
     ]
   end

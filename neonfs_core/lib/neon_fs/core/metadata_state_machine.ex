@@ -64,6 +64,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:update_volume_acl, volume_id :: binary(), updates :: map()}
           | {:put_s3_credential, cred_data :: map()}
           | {:delete_s3_credential, access_key_id :: String.t()}
+          | {:put_escalation, escalation_data :: map()}
+          | {:delete_escalation, escalation_id :: String.t()}
 
   @type segment_assignment :: %{
           replica_set: [node()],
@@ -85,6 +87,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           },
           volume_acls: %{optional(binary()) => map()},
           s3_credentials: %{optional(String.t()) => map()},
+          escalations: %{optional(String.t()) => map()},
           version: non_neg_integer()
         }
 
@@ -159,6 +162,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       encryption_keys: %{},
       volume_acls: %{},
       s3_credentials: %{},
+      escalations: %{},
       version: 0
     }
   end
@@ -781,6 +785,37 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  # Escalation commands (decision escalation system, issue #245)
+
+  def apply(_meta, {:put_escalation, escalation_data}, state) do
+    state = ensure_escalations(state)
+    id = escalation_data.id
+    new_escalations = Map.put(state.escalations, id, escalation_data)
+    new_state = %{state | escalations: new_escalations, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_escalation],
+      %{version: new_state.version},
+      %{id: id, category: escalation_data[:category], status: escalation_data[:status]}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:delete_escalation, id}, state) do
+    state = ensure_escalations(state)
+    new_escalations = Map.delete(state.escalations, id)
+    new_state = %{state | escalations: new_escalations, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :delete_escalation],
+      %{version: new_state.version},
+      %{id: id}
+    )
+
+    {new_state, :ok, []}
+  end
+
   # Segment assignment commands (new in v5)
 
   def apply(_meta, {:assign_segment, segment_id, replica_set}, state) do
@@ -1127,4 +1162,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Migration helper for v8 -> v9: ensure s3_credentials key exists
   defp ensure_s3_credentials(%{s3_credentials: _} = state), do: state
   defp ensure_s3_credentials(state), do: Map.put(state, :s3_credentials, %{})
+
+  # Defensive init for pre-escalation-era snapshots
+  defp ensure_escalations(%{escalations: _} = state), do: state
+  defp ensure_escalations(state), do: Map.put(state, :escalations, %{})
 end

@@ -243,6 +243,12 @@ defmodule NeonFS.Core.Supervisor do
           # S3CredentialManager manages S3 access key lifecycle (ETS+Ra)
           NeonFS.Core.S3CredentialManager,
 
+          # Escalation surfaces ambiguous operator decisions (ETS+Ra)
+          NeonFS.Core.Escalation,
+
+          # EscalationWebhook forwards :raised telemetry to an HTTP endpoint
+          NeonFS.Core.EscalationWebhook,
+
           # ServiceRegistry depends on Ra being available
           ServiceRegistry,
 

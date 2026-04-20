@@ -335,6 +335,15 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts the Escalation manager.
+  """
+  def start_escalation_manager do
+    stop_if_running(NeonFS.Core.Escalation)
+    cleanup_ets_table(:escalations)
+    start_supervised!(NeonFS.Core.Escalation, restart: :temporary)
+  end
+
+  @doc """
   Starts ACLManager.
   """
   def start_acl_manager do
