@@ -25,6 +25,18 @@ Among the remaining issues, pick the **oldest** one by number unless the issue b
 
 To inspect an issue: `fj issue view <N>`.
 
+## Breaking Down Large Issues
+
+If the issue you've picked is too large to land in a single PR without scope-creep — multiple independent concerns, a multi-phase migration, or work that spans several packages in ways that deserve separate review — it's fine to spend an iteration breaking it down rather than implementing it.
+
+In that case:
+
+- Open a new sub-issue for each concrete, independently-shippable slice. Each sub-issue should state what "done" looks like and reference the parent with `Part of #<N>`.
+- Update the parent issue body to list the sub-issues and mark it as blocked on them (or convert it into a tracking issue).
+- Don't open a PR for this iteration — the issues themselves are the deliverable. Leave the parent assigned to yourself only if you intend to pick up a sub-issue next iteration; otherwise unassign.
+
+Only do this when the breakdown is genuinely needed. A single focused issue should still be implemented in one iteration.
+
 ## Starting Work
 
 Once you've picked issue `#N`:
