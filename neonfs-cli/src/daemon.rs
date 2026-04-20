@@ -159,6 +159,7 @@ impl DaemonConnection {
     /// Connect to the NeonFS daemon
     pub async fn connect() -> Result<Self> {
         let daemon_node = std::env::var("NEONFS_NODE").unwrap_or_else(|_| {
+            // audit:bounded runtime node name file is a single short atom
             fs::read_to_string(RUNTIME_NODE_NAME_PATH)
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -629,6 +630,7 @@ fn read_dist_port() -> Result<u16> {
         )));
     }
 
+    // audit:bounded dist port file is a single integer
     let content = fs::read_to_string(path).map_err(|e| {
         CliError::ConnectionFailed(format!("Failed to read distribution port file: {}", e))
     })?;
@@ -659,6 +661,7 @@ fn read_cookie(path: &str) -> Result<String> {
         )));
     }
 
+    // audit:bounded Erlang cookie file holds a single short atom
     fs::read_to_string(path_obj)
         .map(|s| s.trim().to_string())
         .map_err(|e| CliError::CookieReadError(format!("Failed to read cookie file: {}", e)))

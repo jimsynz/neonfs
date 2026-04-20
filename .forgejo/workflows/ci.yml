@@ -42,6 +42,18 @@ jobs:
           echo "rust_image=harton.dev/james/workflows/rust:${RUST}" >> "$GITHUB_OUTPUT"
 
   # =========================================================================
+  # buffering-check - Guard against whole-file buffering regressions (#254)
+  # =========================================================================
+  buffering-check:
+    runs-on: docker
+    container:
+      image: harton.dev/james/workflows/ci-base:latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check for whole-file buffering patterns
+        run: bash scripts/check_buffering.sh
+
+  # =========================================================================
   # neonfs_client - Pure Elixir shared types & service discovery
   # =========================================================================
   neonfs_client:

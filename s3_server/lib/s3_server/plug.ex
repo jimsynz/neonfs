@@ -552,6 +552,7 @@ defmodule S3Server.Plug do
   end
 
   defp read_full_body(conn, acc \\ []) do
+    # audit:bounded for XML bodies; unbounded PUT/UploadPart callers tracked in #267
     case Plug.Conn.read_body(conn) do
       {:ok, body, conn} -> {:ok, IO.iodata_to_binary([acc, body]), conn}
       {:more, partial, conn} -> read_full_body(conn, [acc, partial])

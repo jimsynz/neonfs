@@ -57,6 +57,7 @@ defmodule NeonFS.Core.MetricsPlug do
   end
 
   defp handle_redeem_invite(conn) do
+    # audit:bounded invite redemption body is a CSR + fixed-size fields (few KB)
     with {:ok, body, conn} <- read_body(conn),
          {:ok, params} <- decode_json(body),
          {:ok, encrypted_response} <- InviteRedemption.redeem(params) do

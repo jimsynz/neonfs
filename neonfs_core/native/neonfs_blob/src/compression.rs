@@ -71,6 +71,7 @@ pub fn compress(data: &[u8], compression: &Compression) -> std::io::Result<Vec<u
 pub fn decompress(data: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut decoder = zstd::Decoder::new(data)?;
     let mut result = Vec::new();
+    // audit:bounded input is a single already-loaded chunk; output is capped by chunk size
     decoder.read_to_end(&mut result)?;
     Ok(result)
 }

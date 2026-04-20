@@ -92,6 +92,7 @@ defmodule WebdavServer.Handler.Put do
   end
 
   defp buffered_put(conn, opts, path, backend_opts) do
+    # audit:bounded legacy fallback — NeonFS backends implement the streaming path, #266 will retire this
     {:ok, body, conn} = read_body(conn)
     result = opts.backend.put_content(opts.auth, path, body, backend_opts)
     {result, conn}

@@ -182,6 +182,7 @@ defmodule NeonFS.WebDAV.Backend do
         # Streams cannot cross Erlang distribution. When the core node is
         # remote we drain the stream into a binary and use the batch API
         # — same memory characteristics as the non-streaming code path.
+        # audit:bounded cross-node fallback tracked in #207 (streaming RPC)
         body = stream |> Enum.to_list() |> IO.iodata_to_binary()
         call_core(:write_file, [volume_name, file_path, body, write_opts])
 

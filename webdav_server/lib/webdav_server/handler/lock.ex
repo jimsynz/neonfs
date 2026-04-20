@@ -23,6 +23,7 @@ defmodule WebdavServer.Handler.Lock do
   end
 
   defp create_lock(conn, opts, path, depth, timeout) do
+    # audit:bounded WebDAV LOCK body is a small lockinfo XML (RFC 4918 §9.10)
     case read_body(conn) do
       {:ok, "", _conn} ->
         send_resp(conn, 400, "Lock request requires a body")

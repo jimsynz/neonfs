@@ -42,6 +42,7 @@ defmodule WebdavServer.Handler.Propfind do
   end
 
   defp parse_propfind_body(conn) do
+    # audit:bounded PROPFIND body is a small XML property list (RFC 4918 §9.1)
     case read_body(conn) do
       {:ok, "", _conn} ->
         :allprop
