@@ -10,8 +10,9 @@ mod tls;
 use clap::{Parser, Subcommand};
 use commands::{
     acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, drive::DriveCommand,
-    fuse::FuseCommand, gc::GcCommand, job::JobCommand, nfs::NfsCommand, node::NodeCommand,
-    s3::S3Command, scrub::ScrubCommand, volume::VolumeCommand, worker::WorkerCommand,
+    escalation::EscalationCommand, fuse::FuseCommand, gc::GcCommand, job::JobCommand,
+    nfs::NfsCommand, node::NodeCommand, s3::S3Command, scrub::ScrubCommand, volume::VolumeCommand,
+    worker::WorkerCommand,
 };
 use output::OutputFormat;
 
@@ -58,6 +59,12 @@ enum Commands {
     Drive {
         #[command(subcommand)]
         command: DriveCommand,
+    },
+
+    /// Decision escalation management
+    Escalation {
+        #[command(subcommand)]
+        command: EscalationCommand,
     },
 
     /// Garbage collection
@@ -135,6 +142,7 @@ fn main() {
         Commands::Audit { command } => command.execute(format),
         Commands::Cluster { command } => command.execute(format),
         Commands::Drive { command } => command.execute(format),
+        Commands::Escalation { command } => command.execute(format),
         Commands::Gc { command } => command.execute(format),
         Commands::Job { command } => command.execute(format),
         Commands::Fuse { command } => command.execute(format),
@@ -400,6 +408,45 @@ mod tests {
     #[test]
     fn test_s3_bucket_show() {
         let cli = Cli::try_parse_from(["neonfs-cli", "s3", "bucket", "show", "my-data"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_escalation_list() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "escalation", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_escalation_list_with_filters() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "escalation",
+            "list",
+            "--status",
+            "pending",
+            "--category",
+            "quorum_loss",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_escalation_show() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "escalation", "show", "esc-abc"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_escalation_resolve() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "escalation",
+            "resolve",
+            "esc-abc",
+            "--choice",
+            "approve",
+        ]);
         assert!(cli.is_ok());
     }
 

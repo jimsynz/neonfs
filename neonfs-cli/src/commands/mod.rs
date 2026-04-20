@@ -4,6 +4,7 @@ pub mod acl;
 pub mod audit;
 pub mod cluster;
 pub mod drive;
+pub mod escalation;
 pub mod fuse;
 pub mod gc;
 pub mod job;

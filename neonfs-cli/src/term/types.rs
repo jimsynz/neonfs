@@ -737,6 +737,105 @@ impl NfsExportInfo {
     }
 }
 
+/// A single choice option on an escalation
+#[derive(Debug, Serialize)]
+pub struct EscalationOption {
+    pub value: String,
+    pub label: String,
+}
+
+impl EscalationOption {
+    /// Parse from Erlang term (map with `value` and `label` keys)
+    pub fn from_term(term: &Term) -> Result<Self> {
+        let map = term_to_map(term)?;
+
+        Ok(Self {
+            value: term_to_string(map.get("value").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'value' field in option".to_string())
+            })?)?,
+            label: term_to_string(map.get("label").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'label' field in option".to_string())
+            })?)?,
+        })
+    }
+}
+
+/// A decision escalation awaiting operator input
+#[derive(Debug, Serialize)]
+pub struct EscalationEntry {
+    pub id: String,
+    pub category: String,
+    pub severity: String,
+    pub description: String,
+    pub options: Vec<EscalationOption>,
+    pub status: String,
+    pub choice: Option<String>,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub resolved_at: Option<String>,
+}
+
+impl EscalationEntry {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let option_terms = map
+            .get("options")
+            .and_then(|t| term_to_list(t).ok())
+            .unwrap_or_default();
+        let options: Result<Vec<EscalationOption>> = option_terms
+            .iter()
+            .map(EscalationOption::from_term)
+            .collect();
+
+        Ok(Self {
+            id: term_to_string(
+                map.get("id").ok_or_else(|| {
+                    CliError::TermConversionError("Missing 'id' field".to_string())
+                })?,
+            )?,
+            category: term_to_string(map.get("category").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'category' field".to_string())
+            })?)?,
+            severity: term_to_string(map.get("severity").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'severity' field".to_string())
+            })?)?,
+            description: term_to_string(map.get("description").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'description' field".to_string())
+            })?)?,
+            options: options?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+            choice: map
+                .get("choice")
+                .and_then(|t| term_to_string(t).ok())
+                .filter(|s| s != "nil"),
+            created_at: term_to_string(map.get("created_at").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'created_at' field".to_string())
+            })?)?,
+            expires_at: map
+                .get("expires_at")
+                .and_then(|t| term_to_string(t).ok())
+                .filter(|s| s != "nil"),
+            resolved_at: map
+                .get("resolved_at")
+                .and_then(|t| term_to_string(t).ok())
+                .filter(|s| s != "nil"),
+        })
+    }
+
+    /// Returns a truncated ID for table display
+    pub fn id_short(&self) -> String {
+        if self.id.len() > 12 {
+            self.id[..12].to_string()
+        } else {
+            self.id.clone()
+        }
+    }
+}
+
 /// Job information response
 #[derive(Debug, Serialize)]
 pub struct JobInfo {
@@ -1278,6 +1377,216 @@ mod tests {
         assert_eq!(info.role, "leader");
         assert_eq!(info.status, "online");
         assert_eq!(info.uptime_seconds, 186300);
+    }
+
+    #[test]
+    fn test_escalation_entry_from_term() {
+        let option_map: HashMap<Term, Term> = HashMap::from([
+            (
+                Term::Binary(Binary {
+                    bytes: b"value".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"approve".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"label".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"Approve write".to_vec(),
+                }),
+            ),
+        ]);
+
+        let entries = vec![
+            (
+                Term::Binary(Binary {
+                    bytes: b"id".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"esc-abc-123".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"category".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"quorum_loss".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"severity".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"critical".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"description".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"Quorum lost during write".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"options".to_vec(),
+                }),
+                Term::List(eetf::List {
+                    elements: vec![Term::Map(eetf::Map { map: option_map })],
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"status".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"pending".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"choice".to_vec(),
+                }),
+                Term::Atom(Atom::from("nil")),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"created_at".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"2026-04-20T10:00:00Z".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"expires_at".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"2026-04-21T10:00:00Z".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"resolved_at".to_vec(),
+                }),
+                Term::Atom(Atom::from("nil")),
+            ),
+        ];
+
+        let term = Term::Map(eetf::Map {
+            map: entries.into_iter().collect(),
+        });
+
+        let entry = EscalationEntry::from_term(term).unwrap();
+        assert_eq!(entry.id, "esc-abc-123");
+        assert_eq!(entry.category, "quorum_loss");
+        assert_eq!(entry.severity, "critical");
+        assert_eq!(entry.status, "pending");
+        assert_eq!(entry.options.len(), 1);
+        assert_eq!(entry.options[0].value, "approve");
+        assert_eq!(entry.options[0].label, "Approve write");
+        assert_eq!(entry.choice, None);
+        assert_eq!(entry.resolved_at, None);
+        assert_eq!(entry.expires_at.as_deref(), Some("2026-04-21T10:00:00Z"));
+    }
+
+    #[test]
+    fn test_escalation_entry_resolved_from_term() {
+        let entries = vec![
+            (
+                Term::Binary(Binary {
+                    bytes: b"id".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"esc-x".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"category".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"drive_flapping".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"severity".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"warning".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"description".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"desc".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"options".to_vec(),
+                }),
+                Term::List(eetf::List { elements: vec![] }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"status".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"resolved".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"choice".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"retire".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"created_at".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"2026-04-19T00:00:00Z".to_vec(),
+                }),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"expires_at".to_vec(),
+                }),
+                Term::Atom(Atom::from("nil")),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"resolved_at".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: b"2026-04-19T01:00:00Z".to_vec(),
+                }),
+            ),
+        ];
+
+        let term = Term::Map(eetf::Map {
+            map: entries.into_iter().collect(),
+        });
+
+        let entry = EscalationEntry::from_term(term).unwrap();
+        assert_eq!(entry.status, "resolved");
+        assert_eq!(entry.choice.as_deref(), Some("retire"));
+        assert_eq!(entry.resolved_at.as_deref(), Some("2026-04-19T01:00:00Z"));
+        assert_eq!(entry.expires_at, None);
+        assert_eq!(entry.id_short(), "esc-x");
     }
 
     #[test]
