@@ -92,10 +92,44 @@ defmodule WebdavServer.Handler.Put do
   end
 
   defp buffered_put(conn, opts, path, backend_opts) do
-    # audit:bounded legacy fallback — NeonFS backends implement the streaming path, #266 will retire this
-    {:ok, body, conn} = read_body(conn)
-    result = opts.backend.put_content(opts.auth, path, body, backend_opts)
-    {result, conn}
+    # The backend opted into the whole-body `put_content/4` path. Cap the
+    # read at `:max_buffered_put_bytes` so an oversized upload returns
+    # 413 rather than silently buffering gigabytes into memory.
+    cap = Map.fetch!(opts, :max_buffered_put_bytes)
+
+    case read_capped_body(conn, cap) do
+      {:ok, body, conn} ->
+        result = opts.backend.put_content(opts.auth, path, body, backend_opts)
+        {result, conn}
+
+      {:too_large, conn} ->
+        {{:error,
+          %WebdavServer.Error{
+            code: :request_entity_too_large,
+            message:
+              "Body exceeds buffered PUT cap (#{cap} bytes). Configure the backend to implement put_content_stream/4, or raise :max_buffered_put_bytes."
+          }}, conn}
+    end
+  end
+
+  # Reads up to `cap` bytes from the request body. `Plug.Conn.read_body/2`
+  # returns `{:ok, _, _}` when the whole body has been consumed and
+  # `{:more, _, _}` when more bytes are still pending — so `:more` here means
+  # the peer is still sending after `cap` bytes, i.e. the upload exceeds the
+  # cap. We drain the rest to let the connection close cleanly without
+  # keeping the drained bytes in memory.
+  defp read_capped_body(conn, cap) do
+    case read_body(conn, length: cap, read_length: @body_chunk_size) do
+      {:ok, body, conn} -> {:ok, body, conn}
+      {:more, _partial, conn} -> {:too_large, drain_body(conn)}
+    end
+  end
+
+  defp drain_body(conn) do
+    case read_body(conn, length: @body_chunk_size, read_length: @body_chunk_size) do
+      {:ok, _final, conn} -> conn
+      {:more, _partial, conn} -> drain_body(conn)
+    end
   end
 
   defp maybe_put_etag(conn, %{etag: etag}) when is_binary(etag),

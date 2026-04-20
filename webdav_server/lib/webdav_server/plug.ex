@@ -14,11 +14,17 @@ defmodule WebdavServer.Plug do
     (default: `WebdavServer.LockStore.ETS`)
   - `:lock_timeout` — default lock timeout in seconds (default: 1800)
   - `:allow_infinity_depth` — allow `Depth: infinity` on PROPFIND (default: false)
+  - `:max_buffered_put_bytes` — cap on PUT bodies when the backend does not
+    implement `put_content_stream/4`. Bodies larger than this return
+    `413 Request Entity Too Large`. Has no effect when the backend implements
+    the streaming callback. (default: 16 MiB)
   """
 
   @behaviour Plug
 
   alias WebdavServer.Handler
+
+  @default_max_buffered_put_bytes 16 * 1024 * 1024
 
   @impl true
   def init(opts) do
@@ -26,7 +32,9 @@ defmodule WebdavServer.Plug do
       backend: Keyword.fetch!(opts, :backend),
       lock_store: Keyword.get(opts, :lock_store, WebdavServer.LockStore.ETS),
       lock_timeout: Keyword.get(opts, :lock_timeout, 1800),
-      allow_infinity_depth: Keyword.get(opts, :allow_infinity_depth, false)
+      allow_infinity_depth: Keyword.get(opts, :allow_infinity_depth, false),
+      max_buffered_put_bytes:
+        Keyword.get(opts, :max_buffered_put_bytes, @default_max_buffered_put_bytes)
     }
   end
 

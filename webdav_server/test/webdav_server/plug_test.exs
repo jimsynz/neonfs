@@ -54,6 +54,36 @@ defmodule WebdavServer.PlugTest do
 
       assert resp.status == 409
     end
+
+    test "returns 413 when body exceeds max_buffered_put_bytes", _ do
+      MemoryBackend.start()
+      LockStore.ETS.reset()
+      opts = WebdavServer.Plug.init(backend: MemoryBackend, max_buffered_put_bytes: 1024)
+
+      body = :crypto.strong_rand_bytes(2048)
+
+      resp =
+        conn(:put, "/too-big.bin", body)
+        |> put_req_header("content-type", "application/octet-stream")
+        |> call(opts)
+
+      assert resp.status == 413
+    end
+
+    test "accepts a body exactly at the cap", _ do
+      MemoryBackend.start()
+      LockStore.ETS.reset()
+      opts = WebdavServer.Plug.init(backend: MemoryBackend, max_buffered_put_bytes: 1024)
+
+      body = :crypto.strong_rand_bytes(1024)
+
+      resp =
+        conn(:put, "/exact.bin", body)
+        |> put_req_header("content-type", "application/octet-stream")
+        |> call(opts)
+
+      assert resp.status == 201
+    end
   end
 
   describe "PUT (streaming backend)" do

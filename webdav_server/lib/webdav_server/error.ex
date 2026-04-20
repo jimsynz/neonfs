@@ -22,6 +22,7 @@ defmodule WebdavServer.Error do
     method_not_allowed: 405,
     conflict: 409,
     precondition_failed: 412,
+    request_entity_too_large: 413,
     unsupported_media_type: 415,
     locked: 423,
     failed_dependency: 424,
