@@ -353,21 +353,6 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts `NeonFS.Core.KVStore` with a clean ETS table.
-
-  Also tears down Ra — the store hydrates ETS from Ra on boot via
-  `handle_continue(:load_from_ra, ...)`, so state left over from an
-  earlier test would otherwise reload into a freshly-started store
-  and leak into the next test.
-  """
-  def start_kv_store do
-    stop_if_running(NeonFS.Core.KVStore)
-    cleanup_ets_table(:neonfs_kv)
-    stop_ra()
-    start_supervised!(NeonFS.Core.KVStore, restart: :temporary)
-  end
-
-  @doc """
   Starts AuditLog with test configuration.
   """
   def start_audit_log(opts \\ []) do

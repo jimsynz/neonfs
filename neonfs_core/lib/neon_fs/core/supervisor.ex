@@ -232,11 +232,6 @@ defmodule NeonFS.Core.Supervisor do
           # ACLManager caches volume ACLs in ETS, backed by Ra
           NeonFS.Core.ACLManager,
 
-          # KVStore caches a generic Ra-backed key/value table in ETS.
-          # Used by orchestration-layer packages (e.g. `neonfs_iam`)
-          # for durable cluster-wide state without depending on core.
-          NeonFS.Core.KVStore,
-
           # PendingWriteRecovery opens the pending-write DETS log and
           # reclaims chunks orphaned by interrupted streaming writes
           # on startup (#296). Must start AFTER ChunkIndex so the

@@ -2,10 +2,19 @@ defmodule NeonFS.Core.KVStoreTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.KVStore
+  alias NeonFS.Core.{KVStore, RaServer}
 
-  setup do
-    start_kv_store()
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+
+    ensure_node_named()
+    start_ra()
+    :ok = RaServer.init_cluster()
+
+    on_exit(fn -> cleanup_test_dirs() end)
+
     :ok
   end
 
@@ -55,12 +64,16 @@ defmodule NeonFS.Core.KVStoreTest do
   end
 
   describe "list/0 and list_prefix/1" do
-    test "list/0 returns every record" do
-      :ok = KVStore.put("a", 1)
-      :ok = KVStore.put("b", 2)
+    test "list/0 returns records written through the store" do
+      # Use unique keys so the test is robust to any Ra state left over
+      # from earlier tests in this module (Ra persists to disk and can
+      # leak across a module's tests on some runs).
+      :ok = KVStore.put("list_0_test/a", 1)
+      :ok = KVStore.put("list_0_test/b", 2)
 
-      entries = KVStore.list() |> Enum.sort()
-      assert [{"a", 1}, {"b", 2}] = entries
+      entries = KVStore.list()
+      assert {"list_0_test/a", 1} in entries
+      assert {"list_0_test/b", 2} in entries
     end
 
     test "list_prefix/1 filters by key prefix" do
@@ -76,11 +89,28 @@ defmodule NeonFS.Core.KVStoreTest do
     end
   end
 
-  describe "ETS read path" do
-    test "non-GenServer callers can read without blocking on the store" do
-      :ok = KVStore.put("direct", %{hello: "world"})
+  describe "bootstrap — Ra unavailable" do
+    setup do
+      # This describe block tests the bootstrap path where Ra is NOT
+      # running — KVStore is a stateless module so there's nothing to
+      # restart; we just tear down the Ra supervisor started by the
+      # module-level setup.
+      stop_ra()
+      :ok
+    end
 
-      assert [{"direct", %{hello: "world"}}] = :ets.lookup(:neonfs_kv, "direct")
+    test "writes return {:error, :ra_not_available}" do
+      assert {:error, :ra_not_available} = KVStore.put("during-boot", %{})
+      assert {:error, :ra_not_available} = KVStore.delete("during-boot")
+    end
+
+    test "reads return {:error, :not_found} when the state is unreachable" do
+      # local_query surfaces a :noproc exit when Ra is not started; the
+      # get/list_prefix/list functions translate that to :not_found /
+      # empty so callers don't need to special-case pre-cluster reads.
+      assert {:error, :not_found} = KVStore.get("during-boot")
+      assert [] = KVStore.list()
+      assert [] = KVStore.list_prefix("anything:")
     end
   end
 end

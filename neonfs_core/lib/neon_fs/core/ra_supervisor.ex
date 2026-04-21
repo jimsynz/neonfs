@@ -100,6 +100,32 @@ defmodule NeonFS.Core.RaSupervisor do
     end
   end
 
+  @doc """
+  Read the current state from the local Ra replica without going through
+  the leader.
+
+  `apply/3` runs on every cluster member as commands commit, so every
+  replica's in-memory state is the committed state — a local read is
+  correct for orchestration-layer lookups (auth, ACL checks, KV fetches)
+  and avoids the leader round-trip cost of `query/2`.
+
+  Returns the same `{:ok, result} | {:error, reason}` shape as `query/2`
+  for caller convenience.
+  """
+  @spec local_query((term() -> term()), timeout()) :: {:ok, term()} | {:error, term()}
+  def local_query(fun, timeout \\ 5000) when is_function(fun, 1) do
+    # Ra requires {M, F, A} tuples for queries that cross the cluster —
+    # match the convention of `query/2` even though local reads never
+    # serialise the fun.
+    query_mfa = {__MODULE__, :apply_query, [fun]}
+
+    case :ra.local_query(server_id(), query_mfa, timeout) do
+      {:ok, {_idxterm, result}, _local_server} -> {:ok, result}
+      {:error, _} = error -> error
+      {:timeout, _} -> {:error, :timeout}
+    end
+  end
+
   @doc false
   def apply_query(fun, state), do: fun.(state)
 

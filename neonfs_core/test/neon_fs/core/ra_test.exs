@@ -99,6 +99,24 @@ defmodule NeonFS.Core.RaTest do
       assert state == :value
     end
 
+    test "local_query/1 reads state from the local replica" do
+      {:ok, :ok, _} = RaSupervisor.command({:put, :local_query_test, :local_value})
+
+      {:ok, value} =
+        RaSupervisor.local_query(fn state -> state.data[:local_query_test] end)
+
+      assert value == :local_value
+    end
+
+    test "local_query/1 unwraps the {idxterm, reply} payload from :ra.local_query" do
+      # ra.local_query returns {:ok, {{idx, term}, reply}, local_server}; the
+      # wrapper must peel off the idxterm so callers see the same shape as
+      # query/2.
+      {:ok, :ok, _} = RaSupervisor.command({:put, :unwrap_test, 42})
+
+      assert {:ok, 42} = RaSupervisor.local_query(fn state -> state.data[:unwrap_test] end)
+    end
+
     test "get_state/0 returns full state" do
       # Put a value
       {:ok, :ok, _} = RaSupervisor.command({:put, :state_test, :state_value})

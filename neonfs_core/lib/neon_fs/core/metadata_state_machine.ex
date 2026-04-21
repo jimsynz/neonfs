@@ -151,7 +151,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @doc """
   Returns the entire generic KV table as a `key => value` map.
   Returns an empty map when the state was produced by a pre-v10
-  machine. Used by `NeonFS.Core.KVStore` to hydrate ETS on startup.
+  machine. Used by `NeonFS.Core.KVStore` to serve reads through
+  `:ra.local_query`.
   """
   @spec get_kv(state()) :: %{optional(binary()) => term()}
   def get_kv(state), do: Map.get(state, :kv, %{})
