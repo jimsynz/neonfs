@@ -335,12 +335,17 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts the Escalation manager.
+  Starts the Escalation expiry ticker with the periodic tick disabled
+  by default. Tests that exercise expiry drive `Escalation.expire_overdue/0`
+  directly.
+
+  Escalation itself is a stateless module backed by Ra; callers must
+  start Ra (via `start_ra/0` + `RaServer.init_cluster/0`) before using
+  the `NeonFS.Core.Escalation` API.
   """
-  def start_escalation_manager do
-    stop_if_running(NeonFS.Core.Escalation)
-    cleanup_ets_table(:escalations)
-    start_supervised!(NeonFS.Core.Escalation, restart: :temporary)
+  def start_escalation_ticker(opts \\ [expire_interval_ms: 0]) do
+    stop_if_running(NeonFS.Core.Escalation.Ticker)
+    start_supervised!({NeonFS.Core.Escalation.Ticker, opts}, restart: :temporary)
   end
 
   @doc """

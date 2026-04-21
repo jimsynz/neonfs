@@ -161,6 +161,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @spec get_kv(state()) :: %{optional(binary()) => term()}
   def get_kv(state), do: Map.get(state, :kv, %{})
 
+  @doc """
+  Returns the escalation with the given ID, or nil.
+  """
+  @spec get_escalation(state(), String.t()) :: map() | nil
+  def get_escalation(state, id) do
+    state
+    |> Map.get(:escalations, %{})
+    |> Map.get(id)
+  end
+
+  @doc """
+  Returns every escalation as an `id => escalation` map.
+  """
+  @spec get_escalations(state()) :: %{optional(String.t()) => map()}
+  def get_escalations(state), do: Map.get(state, :escalations, %{})
+
   # Ra machine callbacks
 
   @doc """

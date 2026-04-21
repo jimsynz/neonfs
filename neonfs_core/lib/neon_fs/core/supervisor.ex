@@ -246,8 +246,10 @@ defmodule NeonFS.Core.Supervisor do
           # S3CredentialManager manages S3 access key lifecycle (ETS+Ra)
           NeonFS.Core.S3CredentialManager,
 
-          # Escalation surfaces ambiguous operator decisions (ETS+Ra)
-          NeonFS.Core.Escalation,
+          # Escalation expiry ticker — Escalation itself is stateless and
+          # Ra-backed; the ticker periodically reaps overdue pending entries
+          # and emits pending-count metrics.
+          NeonFS.Core.Escalation.Ticker,
 
           # EscalationWebhook forwards :raised telemetry to an HTTP endpoint
           NeonFS.Core.EscalationWebhook,

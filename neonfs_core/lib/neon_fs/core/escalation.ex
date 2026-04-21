@@ -8,20 +8,18 @@ defmodule NeonFS.Core.Escalation do
   instead of guessing. The escalation sits in a queue until an operator resolves
   it via the CLI or a webhook handler.
 
-  Uses ETS for concurrent read access with serialised writes through GenServer.
-  Backed by Ra for cluster-wide persistence and replication — every core node
-  sees the same queue.
+  Stateless facade over Ra: reads go through `RaSupervisor.local_query/2` against
+  the `MetadataStateMachine`; writes go through Raft consensus via
+  `RaSupervisor.command/2`. There is no ETS cache and no DETS snapshot. The
+  periodic expiry sweep lives in `NeonFS.Core.Escalation.Ticker`.
 
   Escalations expire if unresolved past their expiry, at which point they are
-  reaped by the periodic `:expire` tick.
+  reaped by the periodic tick.
   """
 
-  use GenServer
   require Logger
 
-  alias NeonFS.Core.Persistence
-  alias NeonFS.Core.RaServer
-  alias NeonFS.Core.RaSupervisor
+  alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
 
   @type id :: String.t()
   @type severity :: :info | :warning | :critical
@@ -45,11 +43,6 @@ defmodule NeonFS.Core.Escalation do
           resolved_at: DateTime.t() | nil
         }
 
-  @ets_table :escalations
-  @expire_interval_ms 60_000
-
-  # Client API
-
   @doc """
   Raise a new escalation. `attrs` requires `:category`, `:severity`,
   `:description`, and `:options` (list of `%{value:, label:}`). Optional keys
@@ -57,162 +50,8 @@ defmodule NeonFS.Core.Escalation do
   """
   @spec create(map()) :: {:ok, t()} | {:error, term()}
   def create(attrs) when is_map(attrs) do
-    GenServer.call(__MODULE__, {:create, attrs}, 10_000)
-  end
-
-  @doc """
-  Resolve a pending escalation by choosing one of its options. Returns the
-  updated record, or `{:error, :not_found}` / `{:error, :already_resolved}` /
-  `{:error, {:invalid_choice, choice}}`.
-  """
-  @spec resolve(id(), String.t()) :: {:ok, t()} | {:error, term()}
-  def resolve(id, choice) when is_binary(id) and is_binary(choice) do
-    GenServer.call(__MODULE__, {:resolve, id, choice}, 10_000)
-  end
-
-  @doc """
-  Delete an escalation by ID. Primarily for administrative cleanup.
-  """
-  @spec delete(id()) :: :ok | {:error, :not_found}
-  def delete(id) when is_binary(id) do
-    GenServer.call(__MODULE__, {:delete, id}, 10_000)
-  end
-
-  @doc """
-  List escalations, optionally filtered by `:status` (default: all) and
-  `:category`. Results are sorted by `:created_at` ascending.
-  """
-  @spec list(keyword()) :: [t()]
-  def list(opts \\ []) do
-    status = Keyword.get(opts, :status)
-    category = Keyword.get(opts, :category)
-
-    @ets_table
-    |> :ets.tab2list()
-    |> Enum.map(fn {_key, escalation} -> escalation end)
-    |> filter_by_status(status)
-    |> filter_by_category(category)
-    |> Enum.sort_by(& &1.created_at, DateTime)
-  end
-
-  @doc """
-  Fetch a single escalation by ID.
-  """
-  @spec get(id()) :: {:ok, t()} | {:error, :not_found}
-  def get(id) when is_binary(id) do
-    case :ets.lookup(@ets_table, id) do
-      [{^id, escalation}] -> {:ok, escalation}
-      [] -> lookup_from_ra(id)
-    end
-  end
-
-  @doc """
-  Starts the escalation manager.
-  """
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  # Server callbacks
-
-  @impl true
-  def init(_opts) do
-    Process.flag(:trap_exit, true)
-
-    :ets.new(@ets_table, [
-      :named_table,
-      :set,
-      :public,
-      read_concurrency: true
-    ])
-
-    restored =
-      case restore_from_ra() do
-        {:ok, count} ->
-          Logger.info("Escalation manager started, restored escalations from Ra", count: count)
-          true
-
-        {:error, reason} ->
-          Logger.debug("Escalation manager started but Ra not ready yet, will retry",
-            reason: reason
-          )
-
-          schedule_restore_retry(1_000)
-          false
-      end
-
-    schedule_expire_tick()
-    emit_pending_metrics()
-
-    {:ok, %{restored: restored, restore_backoff: 1_000}}
-  end
-
-  @impl true
-  def terminate(_reason, _state) do
-    Logger.info("Escalation manager shutting down, saving table...")
-    meta_dir = Persistence.meta_dir()
-
-    Persistence.snapshot_table(
-      @ets_table,
-      Path.join(meta_dir, "escalations.dets")
-    )
-
-    Logger.info("Escalation manager table saved")
-    :ok
-  end
-
-  @impl true
-  def handle_call({:create, attrs}, _from, state) do
-    reply = do_create(attrs)
-    {:reply, reply, state}
-  end
-
-  @impl true
-  def handle_call({:resolve, id, choice}, _from, state) do
-    reply = do_resolve(id, choice)
-    {:reply, reply, state}
-  end
-
-  @impl true
-  def handle_call({:delete, id}, _from, state) do
-    reply = do_delete(id)
-    {:reply, reply, state}
-  end
-
-  @impl true
-  def handle_info(:retry_restore_from_ra, %{restored: true} = state) do
-    {:noreply, state}
-  end
-
-  def handle_info(:retry_restore_from_ra, state) do
-    case restore_from_ra() do
-      {:ok, count} ->
-        Logger.info("Escalation manager restored from Ra on retry", count: count)
-        emit_pending_metrics()
-        {:noreply, %{state | restored: true}}
-
-      {:error, _reason} ->
-        next_backoff = min(state.restore_backoff * 2, 30_000)
-        schedule_restore_retry(next_backoff)
-        {:noreply, %{state | restore_backoff: next_backoff}}
-    end
-  end
-
-  def handle_info(:expire_tick, state) do
-    expire_overdue()
-    emit_pending_metrics()
-    schedule_expire_tick()
-    {:noreply, state}
-  end
-
-  def handle_info(_msg, state), do: {:noreply, state}
-
-  # Private helpers
-
-  defp do_create(attrs) do
     with {:ok, escalation} <- build_escalation(attrs),
-         :ok <- persist(escalation) do
+         :ok <- ra_command({:put_escalation, escalation_to_map(escalation)}) do
       :telemetry.execute(
         [:neonfs, :escalation, :raised],
         %{count: 1},
@@ -224,7 +63,13 @@ defmodule NeonFS.Core.Escalation do
     end
   end
 
-  defp do_resolve(id, choice) do
+  @doc """
+  Resolve a pending escalation by choosing one of its options. Returns the
+  updated record, or `{:error, :not_found}` / `{:error, :already_resolved}` /
+  `{:error, {:invalid_choice, choice}}`.
+  """
+  @spec resolve(id(), String.t()) :: {:ok, t()} | {:error, term()}
+  def resolve(id, choice) when is_binary(id) and is_binary(choice) do
     with {:ok, existing} <- get(id),
          :ok <- ensure_pending(existing),
          :ok <- ensure_valid_choice(existing, choice) do
@@ -235,7 +80,7 @@ defmodule NeonFS.Core.Escalation do
           resolved_at: DateTime.utc_now()
       }
 
-      with :ok <- persist(resolved) do
+      with :ok <- ra_command({:put_escalation, escalation_to_map(resolved)}) do
         :telemetry.execute(
           [:neonfs, :escalation, :resolved],
           %{count: 1},
@@ -248,22 +93,122 @@ defmodule NeonFS.Core.Escalation do
     end
   end
 
-  defp do_delete(id) do
-    case :ets.lookup(@ets_table, id) do
-      [{^id, _}] ->
-        case delete_persisted(id) do
+  @doc """
+  Delete an escalation by ID. Primarily for administrative cleanup.
+  """
+  @spec delete(id()) :: :ok | {:error, :not_found}
+  def delete(id) when is_binary(id) do
+    case get(id) do
+      {:ok, _} ->
+        case ra_command({:delete_escalation, id}) do
           :ok ->
             emit_pending_metrics()
             :ok
 
-          {:error, reason} ->
-            {:error, reason}
+          {:error, _} = error ->
+            error
         end
 
-      [] ->
+      {:error, :not_found} ->
         {:error, :not_found}
     end
   end
+
+  @doc """
+  List escalations, optionally filtered by `:status` (default: all) and
+  `:category`. Results are sorted by `:created_at` ascending.
+  """
+  @spec list(keyword()) :: [t()]
+  def list(opts \\ []) do
+    status = Keyword.get(opts, :status)
+    category = Keyword.get(opts, :category)
+
+    case read_escalations() do
+      {:ok, escalations_map} ->
+        escalations_map
+        |> Map.values()
+        |> Enum.map(&map_to_escalation/1)
+        |> filter_by_status(status)
+        |> filter_by_category(category)
+        |> Enum.sort_by(& &1.created_at, DateTime)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  @doc """
+  Fetch a single escalation by ID.
+  """
+  @spec get(id()) :: {:ok, t()} | {:error, :not_found}
+  def get(id) when is_binary(id) do
+    case read_escalation(id) do
+      {:ok, map} when is_map(map) -> {:ok, map_to_escalation(map)}
+      {:ok, nil} -> {:error, :not_found}
+      {:error, _} -> {:error, :not_found}
+    end
+  end
+
+  @doc false
+  # Invoked from `Escalation.Ticker` — walks pending escalations and moves
+  # overdue ones to `:expired`. Exposed as a module function so the ticker
+  # stays a dumb timer and so tests can drive expiry synchronously.
+  @spec expire_overdue() :: :ok
+  def expire_overdue do
+    now = DateTime.utc_now()
+
+    for escalation <- list(status: :pending),
+        not is_nil(escalation.expires_at),
+        DateTime.compare(escalation.expires_at, now) == :lt do
+      expired = %{escalation | status: :expired, resolved_at: now}
+
+      case ra_command({:put_escalation, escalation_to_map(expired)}) do
+        :ok ->
+          :telemetry.execute(
+            [:neonfs, :escalation, :expired],
+            %{count: 1},
+            %{id: escalation.id, category: escalation.category}
+          )
+
+        {:error, reason} ->
+          Logger.warning("Failed to expire escalation #{escalation.id}",
+            reason: inspect(reason)
+          )
+      end
+    end
+
+    :ok
+  end
+
+  @doc false
+  @spec emit_pending_metrics() :: :ok
+  def emit_pending_metrics do
+    pending = list(status: :pending)
+    pending_count = length(pending)
+
+    by_category =
+      pending
+      |> Enum.group_by(& &1.category)
+      |> Map.new(fn {cat, list} -> {cat, length(list)} end)
+
+    :telemetry.execute(
+      [:neonfs, :escalation, :state],
+      %{pending_count: pending_count},
+      %{by_category: by_category}
+    )
+
+    for {category, count} <- by_category do
+      :telemetry.execute(
+        [:neonfs, :escalation, :pending_by_category],
+        %{count: count},
+        %{category: category}
+      )
+    end
+
+    :ok
+  end
+
+  # Private
 
   defp build_escalation(attrs) do
     required = [:category, :severity, :description, :options]
@@ -307,164 +252,17 @@ defmodule NeonFS.Core.Escalation do
     end
   end
 
-  defp persist(escalation) do
-    case maybe_ra_command({:put_escalation, escalation_to_map(escalation)}) do
-      {:ok, :ok} ->
-        :ets.insert(@ets_table, {escalation.id, escalation})
-        :ok
-
-      {:error, :ra_not_available} ->
-        :ets.insert(@ets_table, {escalation.id, escalation})
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp delete_persisted(id) do
-    case maybe_ra_command({:delete_escalation, id}) do
-      {:ok, :ok} ->
-        :ets.delete(@ets_table, id)
-        :ok
-
-      {:error, :ra_not_available} ->
-        :ets.delete(@ets_table, id)
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp lookup_from_ra(id) do
-    query_fn = fn state ->
-      state
-      |> Map.get(:escalations, %{})
-      |> Map.get(id)
-    end
-
-    case RaSupervisor.query(query_fn) do
-      {:ok, nil} -> {:error, :not_found}
-      {:ok, map} -> cache_and_return(map)
-      {:error, _} -> {:error, :not_found}
-    end
+  defp read_escalation(id) do
+    RaSupervisor.local_query(&MetadataStateMachine.get_escalation(&1, id))
   catch
-    :exit, _ -> {:error, :not_found}
+    :exit, _ -> {:error, :ra_not_available}
   end
 
-  defp cache_and_return(map) do
-    escalation = map_to_escalation(map)
-    :ets.insert(@ets_table, {escalation.id, escalation})
-    {:ok, escalation}
-  end
-
-  defp restore_from_ra do
-    case RaSupervisor.query(fn state -> Map.get(state, :escalations, %{}) end) do
-      {:ok, escalations} when is_map(escalations) ->
-        count =
-          Enum.reduce(escalations, 0, fn {_id, map}, acc ->
-            escalation = map_to_escalation(map)
-            :ets.insert(@ets_table, {escalation.id, escalation})
-            acc + 1
-          end)
-
-        {:ok, count}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp expire_overdue do
-    now = DateTime.utc_now()
-
-    for escalation <- list(status: :pending),
-        not is_nil(escalation.expires_at),
-        DateTime.compare(escalation.expires_at, now) == :lt do
-      expired = %{escalation | status: :expired, resolved_at: now}
-
-      case persist(expired) do
-        :ok ->
-          :telemetry.execute(
-            [:neonfs, :escalation, :expired],
-            %{count: 1},
-            %{id: escalation.id, category: escalation.category}
-          )
-
-        {:error, reason} ->
-          Logger.warning("Failed to expire escalation #{escalation.id}",
-            reason: inspect(reason)
-          )
-      end
-    end
-  end
-
-  defp emit_pending_metrics do
-    pending = list(status: :pending)
-    pending_count = length(pending)
-
-    by_category =
-      pending
-      |> Enum.group_by(& &1.category)
-      |> Map.new(fn {cat, list} -> {cat, length(list)} end)
-
-    :telemetry.execute(
-      [:neonfs, :escalation, :state],
-      %{pending_count: pending_count},
-      %{by_category: by_category}
-    )
-
-    for {category, count} <- by_category do
-      :telemetry.execute(
-        [:neonfs, :escalation, :pending_by_category],
-        %{count: count},
-        %{category: category}
-      )
-    end
-  end
-
-  defp maybe_ra_command(cmd) do
-    case RaSupervisor.command(cmd) do
-      {:ok, result, _leader} ->
-        {:ok, result}
-
-      {:error, :noproc} ->
-        ra_unavailable_reason()
-
-      {:error, reason} ->
-        {:error, reason}
-
-      {:timeout, _node} ->
-        {:error, :timeout}
-    end
+  defp read_escalations do
+    RaSupervisor.local_query(&MetadataStateMachine.get_escalations/1)
   catch
-    :exit, {:noproc, _} ->
-      ra_unavailable_reason()
-
-    kind, reason ->
-      Logger.debug("Ra command error", kind: kind, reason: reason)
-
-      if RaServer.initialized?() do
-        {:error, {:ra_error, {kind, reason}}}
-      else
-        {:error, :ra_not_available}
-      end
+    :exit, _ -> {:error, :ra_not_available}
   end
-
-  defp ra_unavailable_reason do
-    if RaServer.initialized?() do
-      {:error, :ra_unavailable}
-    else
-      {:error, :ra_not_available}
-    end
-  end
-
-  defp schedule_restore_retry(delay_ms),
-    do: Process.send_after(self(), :retry_restore_from_ra, delay_ms)
-
-  defp schedule_expire_tick,
-    do: Process.send_after(self(), :expire_tick, @expire_interval_ms)
 
   defp escalation_to_map(escalation) do
     %{
@@ -533,5 +331,18 @@ defmodule NeonFS.Core.Escalation do
 
   defp generate_id do
     "esc-" <> (:crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false))
+  end
+
+  defp ra_command(cmd) do
+    case RaSupervisor.command(cmd) do
+      {:ok, :ok, _leader} -> :ok
+      {:ok, {:error, reason}, _leader} -> {:error, reason}
+      {:ok, other, _leader} -> {:error, {:unexpected_reply, other}}
+      {:error, :noproc} -> {:error, :ra_not_available}
+      {:error, reason} -> {:error, reason}
+      {:timeout, _node} -> {:error, :timeout}
+    end
+  catch
+    :exit, _ -> {:error, :ra_not_available}
   end
 end
