@@ -13,6 +13,7 @@ defmodule NeonFS.S3.Backend do
   @behaviour S3Server.Backend
 
   alias NeonFS.Client.ChunkReader
+  alias NeonFS.Client.Discovery
   alias NeonFS.Client.Router
   alias NeonFS.S3.MultipartStore
 
@@ -123,16 +124,51 @@ defmodule NeonFS.S3.Backend do
     with :ok <- ensure_bucket_exists(bucket) do
       body_binary = IO.iodata_to_binary(body)
 
-      write_opts =
-        []
-        |> maybe_put_content_type(opts.content_type)
-        |> maybe_put_metadata(opts.metadata)
-
-      case call_core(:write_file, [bucket, key, body_binary, write_opts]) do
+      case call_core(:write_file, [bucket, key, body_binary, put_object_write_opts(opts)]) do
         {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
         {:error, reason} -> {:error, internal_error(reason)}
       end
     end
+  end
+
+  @impl true
+  def put_object_stream(_ctx, bucket, key, body, opts) do
+    with :ok <- ensure_bucket_exists(bucket) do
+      write_opts = put_object_write_opts(opts)
+      do_put_object_stream(bucket, key, body, write_opts)
+    end
+  end
+
+  defp do_put_object_stream(bucket, key, body, write_opts) do
+    case call_core_stream(:write_file_streamed, [bucket, key, body, write_opts]) do
+      {:ok, meta} ->
+        {:ok, compute_etag_from_meta(meta)}
+
+      {:error, :not_available} ->
+        put_object_drain_and_write(bucket, key, body, write_opts)
+
+      {:error, reason} ->
+        {:error, internal_error(reason)}
+    end
+  end
+
+  # Streams cannot cross Erlang distribution. When the core node is remote
+  # we drain the stream into a binary and use the batch API — same memory
+  # characteristics as the non-streaming code path.
+  # audit:bounded cross-node fallback tracked in #299 (streaming write RPC)
+  defp put_object_drain_and_write(bucket, key, body, write_opts) do
+    body_binary = body |> Enum.to_list() |> IO.iodata_to_binary()
+
+    case call_core(:write_file, [bucket, key, body_binary, write_opts]) do
+      {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  defp put_object_write_opts(opts) do
+    []
+    |> maybe_put_content_type(opts.content_type)
+    |> maybe_put_metadata(opts.metadata)
   end
 
   @impl true
@@ -257,6 +293,106 @@ defmodule NeonFS.S3.Backend do
       {:error, :not_found} ->
         {:error, %S3Server.Error{code: :no_such_upload}}
     end
+  end
+
+  @impl true
+  def upload_part_stream(_ctx, _bucket, _key, upload_id, part_number, body) do
+    case MultipartStore.get(upload_id) do
+      {:ok, upload} ->
+        part_path = multipart_staging_path(upload.bucket, upload.key, upload_id, part_number)
+        do_upload_part_stream(upload, upload_id, part_path, part_number, body)
+
+      {:error, :not_found} ->
+        {:error, %S3Server.Error{code: :no_such_upload}}
+    end
+  end
+
+  defp do_upload_part_stream(upload, upload_id, part_path, part_number, body) do
+    {tracked, finish} = track_md5_and_size(body)
+
+    case call_core_stream(:write_file_streamed, [upload.bucket, part_path, tracked, []]) do
+      {:ok, _meta} ->
+        %{md5: md5, size: size} = finish.()
+        record_part(upload_id, part_number, part_path, md5, size)
+
+      {:error, :not_available} ->
+        # Drain to binary and route through the batch API. The md5 tracker
+        # has already accumulated state during the drain, which we complete
+        # before writing. audit:bounded cross-node fallback tracked in #299.
+        chunks = Enum.to_list(tracked)
+        %{md5: md5, size: size} = finish.()
+        body_binary = IO.iodata_to_binary(chunks)
+
+        case call_core(:write_file, [upload.bucket, part_path, body_binary]) do
+          {:ok, _meta} ->
+            record_part(upload_id, part_number, part_path, md5, size)
+
+          {:error, reason} ->
+            {:error, internal_error(reason)}
+        end
+
+      {:error, reason} ->
+        _ = finish.()
+        {:error, internal_error(reason)}
+    end
+  end
+
+  defp record_part(upload_id, part_number, part_path, md5, size) do
+    etag = Base.encode16(md5, case: :lower)
+    MultipartStore.put_part(upload_id, part_number, %{etag: etag, size: size, path: part_path})
+    {:ok, etag}
+  end
+
+  # Returns `{stream, finish_fn}` where `stream` yields each chunk of `body`
+  # unchanged while accumulating md5 state and total size in the process
+  # dictionary. After the stream is consumed (by `call_core_stream` or an
+  # explicit `Enum.to_list` drain), call `finish_fn.()` to retrieve the
+  # final md5 digest and size.
+  defp track_md5_and_size(body) do
+    key = {__MODULE__, :md5_tracker, make_ref()}
+    Process.put(key, %{md5: :crypto.hash_init(:md5), size: 0})
+
+    stream =
+      Stream.map(body, fn chunk ->
+        state = Process.get(key)
+
+        Process.put(key, %{
+          md5: :crypto.hash_update(state.md5, chunk),
+          size: state.size + IO.iodata_length(chunk)
+        })
+
+        chunk
+      end)
+
+    finish = fn ->
+      state = Process.get(key)
+      Process.delete(key)
+      %{md5: :crypto.hash_final(state.md5), size: state.size}
+    end
+
+    {stream, finish}
+  end
+
+  defp call_core_stream(function, args) do
+    case Application.get_env(:neonfs_s3, :core_call_fn) do
+      nil ->
+        if local_core?() do
+          apply(NeonFS.Core, function, args)
+        else
+          {:error, :not_available}
+        end
+
+      fun when is_function(fun, 2) ->
+        fun.(function, args)
+    end
+  end
+
+  defp local_core? do
+    node() in Discovery.get_core_nodes()
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   @impl true

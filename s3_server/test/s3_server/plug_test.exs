@@ -1,7 +1,7 @@
 defmodule S3Server.PlugTest do
   use ExUnit.Case, async: false
 
-  alias S3Server.Test.{MemoryBackend, SigV4Helper}
+  alias S3Server.Test.{MemoryBackend, NonStreamingBackend, SigV4Helper}
 
   @access_key "TESTKEY123"
   @secret_key "TESTSECRET456"
@@ -725,6 +725,81 @@ defmodule S3Server.PlugTest do
           headers: [{"if-modified-since", "Mon Jan  1 00:00:00 2024"}]
         )
         |> call(opts)
+
+      assert conn.status == 200
+    end
+  end
+
+  describe "PUT/UploadPart streaming and cap" do
+    setup do
+      opts =
+        S3Server.Plug.init(
+          backend: NonStreamingBackend,
+          region: "us-east-1",
+          max_buffered_put_bytes: 32
+        )
+
+      NonStreamingBackend.start()
+      NonStreamingBackend.add_credential(@access_key, @secret_key)
+      signed_conn(:put, "/cap-bucket") |> call(opts)
+
+      {:ok, cap_opts: opts}
+    end
+
+    test "PutObject body under the cap goes through the buffered path", %{cap_opts: opts} do
+      body = String.duplicate("a", 20)
+
+      conn =
+        signed_conn(:put, "/cap-bucket/small.txt", body: body)
+        |> call(opts)
+
+      assert conn.status == 200
+      assert [_etag] = Plug.Conn.get_resp_header(conn, "etag")
+    end
+
+    test "PutObject body exceeding the cap returns 400 EntityTooLarge", %{cap_opts: opts} do
+      body = String.duplicate("a", 128)
+
+      conn =
+        signed_conn(:put, "/cap-bucket/big.txt", body: body)
+        |> call(opts)
+
+      assert conn.status == 400
+      assert conn.resp_body =~ "EntityTooLarge"
+      assert conn.resp_body =~ "put_object_stream"
+    end
+
+    test "UploadPart body exceeding the cap returns 400 EntityTooLarge", %{cap_opts: opts} do
+      init_conn = signed_conn(:post, "/cap-bucket/multi.bin?uploads") |> call(opts)
+      upload_id = extract_xml_value(init_conn.resp_body, "UploadId")
+
+      body = String.duplicate("b", 128)
+
+      part_conn =
+        signed_conn(:put, "/cap-bucket/multi.bin?partNumber=1&uploadId=#{upload_id}", body: body)
+        |> call(opts)
+
+      assert part_conn.status == 400
+      assert part_conn.resp_body =~ "EntityTooLarge"
+    end
+
+    test "PutObject on a streaming backend bypasses the cap", %{opts: opts} do
+      signed_conn(:put, "/stream-bucket") |> call(opts)
+
+      # MemoryBackend implements put_object_stream so uploads beyond any
+      # configured cap still work — the bytes are streamed, not buffered.
+      big_opts =
+        S3Server.Plug.init(
+          backend: MemoryBackend,
+          region: "us-east-1",
+          max_buffered_put_bytes: 8
+        )
+
+      body = String.duplicate("x", 1_024)
+
+      conn =
+        signed_conn(:put, "/stream-bucket/big.txt", body: body)
+        |> call(big_opts)
 
       assert conn.status == 200
     end

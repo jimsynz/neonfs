@@ -18,7 +18,17 @@ defmodule S3Server.Plug do
       (default: `nil` — virtual-hosted-style disabled)
     * `:request_id_prefix` — prefix for X-Amz-Request-Id header
       (default: `"s3srv"`)
+    * `:max_buffered_put_bytes` — cap (in bytes) on PUT/UploadPart bodies
+      when the backend has opted into the buffered `put_object/5` /
+      `upload_part/6` path. Bodies exceeding the cap return
+      `413 Request Entity Too Large` instead of silently allocating
+      gigabytes of iodata. Ignored when the backend implements
+      `put_object_stream/5` / `upload_part_stream/6`. Default:
+      `#{div(16 * 1024 * 1024, 1024)} KiB`.
   """
+
+  @default_max_buffered_put_bytes 16 * 1024 * 1024
+  @body_chunk_size 64 * 1024
 
   @behaviour Plug
 
@@ -31,7 +41,9 @@ defmodule S3Server.Plug do
       backend: Keyword.fetch!(opts, :backend),
       region: Keyword.get(opts, :region, "us-east-1"),
       hostname: Keyword.get(opts, :hostname),
-      request_id_prefix: Keyword.get(opts, :request_id_prefix, "s3srv")
+      request_id_prefix: Keyword.get(opts, :request_id_prefix, "s3srv"),
+      max_buffered_put_bytes:
+        Keyword.get(opts, :max_buffered_put_bytes, @default_max_buffered_put_bytes)
     }
   end
 
@@ -130,7 +142,7 @@ defmodule S3Server.Plug do
          ctx,
          req_id
        ) do
-    handle_upload_part(conn, opts.backend, bucket, key, upload_id, part_num, ctx, req_id)
+    handle_upload_part(conn, opts, bucket, key, upload_id, part_num, ctx, req_id)
   end
 
   defp route(conn, "DELETE", bucket, key, %{"uploadId" => upload_id}, opts, ctx, req_id) do
@@ -148,7 +160,7 @@ defmodule S3Server.Plug do
         handle_copy_object(conn, opts.backend, bucket, key, copy_source, ctx, req_id)
 
       [] ->
-        handle_put_object(conn, opts.backend, bucket, key, ctx, req_id)
+        handle_put_object(conn, opts, bucket, key, ctx, req_id)
     end
   end
 
@@ -235,15 +247,20 @@ defmodule S3Server.Plug do
     end
   end
 
-  defp handle_put_object(conn, backend, bucket, key, ctx, req_id) do
-    {:ok, body, conn} = read_full_body(conn)
-
+  defp handle_put_object(conn, opts, bucket, key, ctx, req_id) do
     put_opts = %S3Server.PutOpts{
       content_type: get_content_type(conn),
       metadata: extract_user_metadata(conn)
     }
 
-    case backend.put_object(ctx, bucket, key, body, put_opts) do
+    {result, conn} =
+      if function_exported?(opts.backend, :put_object_stream, 5) do
+        stream_put_object(conn, opts.backend, ctx, bucket, key, put_opts)
+      else
+        buffered_put_object(conn, opts, ctx, bucket, key, put_opts)
+      end
+
+    case result do
       {:ok, etag} ->
         conn
         |> Plug.Conn.put_resp_header("etag", ensure_quoted(etag))
@@ -251,6 +268,23 @@ defmodule S3Server.Plug do
 
       {:error, error} ->
         send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp stream_put_object(conn, backend, ctx, bucket, key, put_opts) do
+    {body_stream, finish} = build_body_stream(conn)
+
+    result = backend.put_object_stream(ctx, bucket, key, body_stream, put_opts)
+    {result, finish.()}
+  end
+
+  defp buffered_put_object(conn, opts, ctx, bucket, key, put_opts) do
+    case read_capped_body(conn, opts.max_buffered_put_bytes) do
+      {:ok, body, conn} ->
+        {opts.backend.put_object(ctx, bucket, key, body, put_opts), conn}
+
+      {:too_large, conn} ->
+        {{:error, too_large_error(opts.max_buffered_put_bytes)}, conn}
     end
   end
 
@@ -370,22 +404,60 @@ defmodule S3Server.Plug do
     end
   end
 
-  defp handle_upload_part(conn, backend, bucket, key, upload_id, part_num_str, ctx, req_id) do
-    if function_exported?(backend, :upload_part, 6) do
-      {:ok, body, conn} = read_full_body(conn)
-      part_number = String.to_integer(part_num_str)
+  defp handle_upload_part(conn, opts, bucket, key, upload_id, part_num_str, ctx, req_id) do
+    cond do
+      function_exported?(opts.backend, :upload_part_stream, 6) ->
+        part_number = String.to_integer(part_num_str)
 
-      case backend.upload_part(ctx, bucket, key, upload_id, part_number, body) do
-        {:ok, etag} ->
-          conn
-          |> Plug.Conn.put_resp_header("etag", ensure_quoted(etag))
-          |> Plug.Conn.send_resp(200, "")
+        dispatch_upload_part(
+          conn,
+          req_id,
+          fn conn ->
+            stream_upload_part(conn, opts.backend, ctx, bucket, key, upload_id, part_number)
+          end
+        )
 
-        {:error, error} ->
-          send_error(conn, %{error | request_id: req_id})
-      end
-    else
-      send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+      function_exported?(opts.backend, :upload_part, 6) ->
+        part_number = String.to_integer(part_num_str)
+
+        dispatch_upload_part(
+          conn,
+          req_id,
+          fn conn ->
+            buffered_upload_part(conn, opts, ctx, bucket, key, upload_id, part_number)
+          end
+        )
+
+      true ->
+        send_error(conn, %S3Server.Error{code: :not_implemented, request_id: req_id})
+    end
+  end
+
+  defp dispatch_upload_part(conn, req_id, fun) do
+    case fun.(conn) do
+      {{:ok, etag}, conn} ->
+        conn
+        |> Plug.Conn.put_resp_header("etag", ensure_quoted(etag))
+        |> Plug.Conn.send_resp(200, "")
+
+      {{:error, error}, conn} ->
+        send_error(conn, %{error | request_id: req_id})
+    end
+  end
+
+  defp stream_upload_part(conn, backend, ctx, bucket, key, upload_id, part_number) do
+    {body_stream, finish} = build_body_stream(conn)
+    result = backend.upload_part_stream(ctx, bucket, key, upload_id, part_number, body_stream)
+    {result, finish.()}
+  end
+
+  defp buffered_upload_part(conn, opts, ctx, bucket, key, upload_id, part_number) do
+    case read_capped_body(conn, opts.max_buffered_put_bytes) do
+      {:ok, body, conn} ->
+        {opts.backend.upload_part(ctx, bucket, key, upload_id, part_number, body), conn}
+
+      {:too_large, conn} ->
+        {{:error, too_large_error(opts.max_buffered_put_bytes)}, conn}
     end
   end
 
@@ -552,12 +624,89 @@ defmodule S3Server.Plug do
   end
 
   defp read_full_body(conn, acc \\ []) do
-    # audit:bounded for XML bodies; unbounded PUT/UploadPart callers tracked in #267
+    # PUT/UploadPart bodies go through build_body_stream/1 (streaming) or
+    # read_capped_body/2 (capped buffered fallback); this helper is used
+    # only for small XML bodies (DeleteObjects, CompleteMultipartUpload).
+    # audit:bounded XML-only helper — S3 DeleteObjects/CompleteMultipart are kilobytes at most
     case Plug.Conn.read_body(conn) do
       {:ok, body, conn} -> {:ok, IO.iodata_to_binary([acc, body]), conn}
       {:more, partial, conn} -> read_full_body(conn, [acc, partial])
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # Builds a lazy `Stream` over the request body without buffering the
+  # full payload. Returns `{stream, finish_fn}`. Callers must invoke
+  # `finish_fn.()` after the backend finishes consuming the stream to
+  # retrieve the up-to-date `Plug.Conn` (Stream.resource discards its
+  # accumulator so we stash the evolving conn in the process dictionary
+  # — safe because each request runs in a dedicated plug pipeline
+  # process).
+  defp build_body_stream(conn) do
+    key = {__MODULE__, make_ref()}
+    Process.put(key, conn)
+
+    stream =
+      Stream.resource(
+        fn -> :continue end,
+        fn
+          :done ->
+            {:halt, :done}
+
+          :continue ->
+            conn = Process.get(key)
+
+            case Plug.Conn.read_body(conn, length: @body_chunk_size) do
+              {:ok, "", new_conn} ->
+                Process.put(key, new_conn)
+                {:halt, :done}
+
+              {:ok, chunk, new_conn} ->
+                Process.put(key, new_conn)
+                {[chunk], :done}
+
+              {:more, chunk, new_conn} ->
+                Process.put(key, new_conn)
+                {[chunk], :continue}
+            end
+        end,
+        fn _ -> :ok end
+      )
+
+    finish = fn ->
+      final_conn = Process.get(key, conn)
+      Process.delete(key)
+      final_conn
+    end
+
+    {stream, finish}
+  end
+
+  # Reads up to `cap` bytes from the request body. Returns `:too_large`
+  # when the peer is still sending after the cap so the caller can
+  # respond 413.
+  defp read_capped_body(conn, cap) do
+    case Plug.Conn.read_body(conn, length: cap, read_length: @body_chunk_size) do
+      {:ok, body, conn} -> {:ok, body, conn}
+      {:more, _partial, conn} -> {:too_large, drain_body(conn)}
+    end
+  end
+
+  defp drain_body(conn) do
+    case Plug.Conn.read_body(conn, length: @body_chunk_size, read_length: @body_chunk_size) do
+      {:ok, _final, conn} -> conn
+      {:more, _partial, conn} -> drain_body(conn)
+    end
+  end
+
+  defp too_large_error(cap) do
+    %S3Server.Error{
+      code: :entity_too_large,
+      message:
+        "Body exceeds buffered PUT cap (#{cap} bytes). Implement " <>
+          "put_object_stream/5 or upload_part_stream/6 on the backend, " <>
+          "or raise :max_buffered_put_bytes."
+    }
   end
 
   defp get_content_type(conn) do

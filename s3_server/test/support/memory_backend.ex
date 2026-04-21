@@ -122,11 +122,20 @@ defmodule S3Server.Test.MemoryBackend do
 
   @impl true
   def put_object(_ctx, bucket, key, body, opts) do
+    do_put_object(bucket, key, IO.iodata_to_binary(body), opts)
+  end
+
+  @impl true
+  def put_object_stream(_ctx, bucket, key, body, opts) do
+    body_binary = body |> Enum.to_list() |> IO.iodata_to_binary()
+    do_put_object(bucket, key, body_binary, opts)
+  end
+
+  defp do_put_object(bucket, key, body_binary, opts) do
     [{:buckets, buckets}] = :ets.lookup(@table, :buckets)
     [{:objects, objects}] = :ets.lookup(@table, :objects)
 
     if Map.has_key?(buckets, bucket) do
-      body_binary = IO.iodata_to_binary(body)
       etag = :crypto.hash(:md5, body_binary) |> Base.encode16(case: :lower)
 
       object = %{
@@ -341,6 +350,16 @@ defmodule S3Server.Test.MemoryBackend do
 
   @impl true
   def upload_part(_ctx, _bucket, _key, upload_id, part_number, body) do
+    do_upload_part(upload_id, part_number, IO.iodata_to_binary(body))
+  end
+
+  @impl true
+  def upload_part_stream(_ctx, _bucket, _key, upload_id, part_number, body) do
+    body_binary = body |> Enum.to_list() |> IO.iodata_to_binary()
+    do_upload_part(upload_id, part_number, body_binary)
+  end
+
+  defp do_upload_part(upload_id, part_number, body_binary) do
     [{:uploads, uploads}] = :ets.lookup(@table, :uploads)
 
     case Map.get(uploads, upload_id) do
@@ -348,7 +367,6 @@ defmodule S3Server.Test.MemoryBackend do
         {:error, %S3Server.Error{code: :no_such_upload}}
 
       upload ->
-        body_binary = IO.iodata_to_binary(body)
         etag = :crypto.hash(:md5, body_binary) |> Base.encode16(case: :lower)
 
         part = %{body: body_binary, etag: etag, size: byte_size(body_binary)}
