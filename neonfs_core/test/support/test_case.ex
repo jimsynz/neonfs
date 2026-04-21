@@ -354,6 +354,12 @@ defmodule NeonFS.TestCase do
 
   @doc """
   Starts the IAM Manager with clean ETS tables.
+
+  Also tears down Ra — the Manager hydrates ETS from Ra on boot via
+  `handle_continue(:load_from_ra, ...)`, so state left over from an
+  earlier test (same file or earlier file in the suite) would reload
+  into a freshly-started Manager and leak into the next test's
+  observations.
   """
   def start_iam_manager do
     stop_if_running(NeonFS.Core.IAM.Manager)
@@ -362,6 +368,8 @@ defmodule NeonFS.TestCase do
       [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings],
       &cleanup_ets_table/1
     )
+
+    stop_ra()
 
     start_supervised!(NeonFS.Core.IAM.Manager, restart: :temporary)
   end
