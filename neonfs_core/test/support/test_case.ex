@@ -263,12 +263,13 @@ defmodule NeonFS.TestCase do
 
   @doc """
   Starts ServiceRegistry.
+
+  ServiceRegistry is Ra-backed since #349, so callers must start Ra
+  (via `start_ra/0` + `RaServer.init_cluster/0`) before invoking this
+  helper.
   """
   def start_service_registry do
     stop_if_running(NeonFS.Core.ServiceRegistry)
-    cleanup_ets_table(:services_by_key)
-    cleanup_ets_table(:services_by_node)
-    cleanup_ets_table(:services_by_type)
     start_supervised!(NeonFS.Core.ServiceRegistry, restart: :temporary)
   end
 

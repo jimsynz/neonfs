@@ -177,6 +177,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @spec get_escalations(state()) :: %{optional(String.t()) => map()}
   def get_escalations(state), do: Map.get(state, :escalations, %{})
 
+  @doc """
+  Returns every registered service as a `{node, type} => service_map` map.
+  """
+  @spec get_services(state()) :: %{optional({node(), atom()}) => map()}
+  def get_services(state), do: Map.get(state, :services, %{})
+
+  @doc """
+  Returns the service registered at the given `{node, type}`, or nil.
+  """
+  @spec get_service(state(), node(), atom()) :: map() | nil
+  def get_service(state, node, type) do
+    state
+    |> Map.get(:services, %{})
+    |> Map.get({node, type})
+  end
+
   # Ra machine callbacks
 
   @doc """

@@ -3,10 +3,21 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   use NeonFS.TestCase
 
   alias NeonFS.Client.ServiceInfo
-  alias NeonFS.Core.ServiceRegistry
+  alias NeonFS.Core.{RaServer, ServiceRegistry}
 
-  setup do
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+
+    ensure_node_named()
+    start_ra()
+    :ok = RaServer.init_cluster()
+
     start_service_registry()
+
+    on_exit(fn -> cleanup_test_dirs() end)
+
     :ok
   end
 

@@ -2,13 +2,21 @@ defmodule NeonFS.Core.ServiceRegistry do
   @moduledoc """
   Registry for cluster service instances.
 
-  Tracks which nodes are running which services (core, fuse, s3, etc.) using
-  ETS for concurrent read access and Ra for cluster-wide persistence.
+  Tracks which nodes are running which services (core, fuse, s3, etc.).
+  Backed entirely by Ra: reads go through `RaSupervisor.local_query/2`
+  against the `MetadataStateMachine`; writes go through Raft consensus
+  via `RaSupervisor.command/2`. There is no ETS cache — every query
+  hits the locally-committed state, so registrations replicated by the
+  leader are immediately visible on every follower.
 
-  A single BEAM node may host multiple NeonFS services, so registry entries are
-  keyed by `{node, type}` rather than node alone.
+  A single BEAM node may host multiple NeonFS services, so registry
+  entries are keyed by `{node, type}` rather than node alone.
 
-  Follows the same dual-path (ETS + Ra) pattern as VolumeRegistry.
+  The GenServer remains in the supervision tree because it still owns:
+  self-registration on startup (`handle_continue(:register_self, …)`),
+  re-registration on data-plane endpoint changes (`refresh_self/0`),
+  node-down monitoring via `:net_kernel.monitor_nodes/2`, and
+  best-effort deregistration of the local core service on shutdown.
   """
 
   use GenServer
@@ -16,7 +24,7 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   alias NeonFS.Client.{ServiceInfo, ServiceType}
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{RaServer, RaSupervisor}
+  alias NeonFS.Core.{MetadataStateMachine, RaServer, RaSupervisor}
   alias NeonFS.Transport.{Listener, PoolManager}
 
   @core_probe_timeout_ms 1_000
@@ -59,7 +67,9 @@ defmodule NeonFS.Core.ServiceRegistry do
   end
 
   @doc """
-  Gets service info for a specific node.
+  Gets service info for a specific node. Returns the `:core` service
+  if one is registered, otherwise the first (alphabetical by type) of
+  whatever is registered on that node.
   """
   @spec get(node()) :: {:ok, ServiceInfo.t()} | {:error, :not_found}
   def get(node) do
@@ -75,11 +85,10 @@ defmodule NeonFS.Core.ServiceRegistry do
   """
   @spec get(node(), ServiceType.t()) :: {:ok, ServiceInfo.t()} | {:error, :not_found}
   def get(node, type) do
-    key = service_key(node, type)
-
-    case :ets.lookup(:services_by_key, key) do
-      [{^key, info}] -> {:ok, info}
-      [] -> {:error, :not_found}
+    case read_service(node, type) do
+      {:ok, service_map} when is_map(service_map) -> {:ok, ServiceInfo.from_map(service_map)}
+      {:ok, nil} -> {:error, :not_found}
+      {:error, _} -> {:error, :not_found}
     end
   end
 
@@ -88,9 +97,16 @@ defmodule NeonFS.Core.ServiceRegistry do
   """
   @spec list() :: [ServiceInfo.t()]
   def list do
-    :ets.tab2list(:services_by_key)
-    |> Enum.map(fn {_key, info} -> info end)
-    |> Enum.sort_by(&{&1.node, &1.type})
+    case read_services() do
+      {:ok, services_map} ->
+        services_map
+        |> Map.values()
+        |> Enum.map(&ServiceInfo.from_map/1)
+        |> Enum.sort_by(&{&1.node, &1.type})
+
+      {:error, _} ->
+        []
+    end
   end
 
   @doc """
@@ -98,8 +114,8 @@ defmodule NeonFS.Core.ServiceRegistry do
   """
   @spec list_by_node(node()) :: [ServiceInfo.t()]
   def list_by_node(node) do
-    :ets.lookup(:services_by_node, node)
-    |> Enum.map(fn {_node, info} -> info end)
+    list()
+    |> Enum.filter(&(&1.node == node))
     |> Enum.sort_by(& &1.type)
   end
 
@@ -108,8 +124,7 @@ defmodule NeonFS.Core.ServiceRegistry do
   """
   @spec list_by_type(ServiceType.t()) :: [ServiceInfo.t()]
   def list_by_type(type) do
-    :ets.lookup(:services_by_type, type)
-    |> Enum.map(fn {_type, info} -> info end)
+    Enum.filter(list(), &(&1.type == type))
   end
 
   @doc """
@@ -125,8 +140,6 @@ defmodule NeonFS.Core.ServiceRegistry do
     |> Enum.uniq()
     |> Enum.filter(&(&1 in connected_nodes))
     |> Enum.sort()
-  rescue
-    ArgumentError -> connected_core_fallback_nodes(Node.list())
   end
 
   def connected_nodes_by_type(type) do
@@ -138,8 +151,6 @@ defmodule NeonFS.Core.ServiceRegistry do
     |> Enum.uniq()
     |> Enum.filter(&(&1 in connected_nodes))
     |> Enum.sort()
-  rescue
-    ArgumentError -> connected_app_nodes(type, Node.list())
   end
 
   @doc """
@@ -174,47 +185,8 @@ defmodule NeonFS.Core.ServiceRegistry do
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
-
-    :ets.new(:services_by_key, [
-      :named_table,
-      :set,
-      :public,
-      read_concurrency: true
-    ])
-
-    :ets.new(:services_by_node, [
-      :named_table,
-      :bag,
-      :public,
-      read_concurrency: true
-    ])
-
-    :ets.new(:services_by_type, [
-      :named_table,
-      :bag,
-      :public,
-      read_concurrency: true
-    ])
-
     :net_kernel.monitor_nodes(true, node_type: :visible)
-
-    restored =
-      case restore_from_ra() do
-        {:ok, count} ->
-          Logger.info("ServiceRegistry started, restored services from Ra", count: count)
-          true
-
-        {:error, reason} ->
-          Logger.debug("ServiceRegistry started but Ra not ready yet, will retry",
-            reason: reason
-          )
-
-          schedule_restore_retry(1_000)
-          false
-      end
-
-    {:ok, %{monitors: %{}, restored: restored, restore_backoff: 1_000},
-     {:continue, :register_self}}
+    {:ok, %{monitors: %{}}, {:continue, :register_self}}
   end
 
   @impl true
@@ -240,7 +212,6 @@ defmodule NeonFS.Core.ServiceRegistry do
         Logger.debug("Failed to deregister core service", reason: inspect(reason))
     end
 
-    remove_from_ets(Node.self(), :core)
     :ok
   end
 
@@ -286,35 +257,13 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @impl true
   def handle_info({:nodeup, _node, _info}, state) do
-    case restore_from_ra() do
-      {:ok, _count} -> {:noreply, %{state | restored: true}}
-      {:error, _} -> {:noreply, state}
-    end
-  end
-
-  @impl true
-  def handle_info(:retry_restore_from_ra, %{restored: true} = state) do
+    # State lives in Ra — no local restore needed on nodeup.
     {:noreply, state}
   end
 
-  def handle_info(:retry_restore_from_ra, state) do
-    case restore_from_ra() do
-      {:ok, count} ->
-        Logger.info("ServiceRegistry restored services from Ra on retry", count: count)
-        {:noreply, %{state | restored: true}}
-
-      {:error, _reason} ->
-        next_backoff = min(state.restore_backoff * 2, 30_000)
-        schedule_restore_retry(next_backoff)
-        {:noreply, %{state | restore_backoff: next_backoff}}
-    end
-  end
+  def handle_info(_msg, state), do: {:noreply, state}
 
   ## Private helpers
-
-  defp schedule_restore_retry(delay_ms) do
-    Process.send_after(self(), :retry_restore_from_ra, delay_ms)
-  end
 
   defp build_self_metadata do
     case Process.whereis(Listener) do
@@ -369,32 +318,38 @@ defmodule NeonFS.Core.ServiceRegistry do
   defp do_register(info, state) do
     info_map = ServiceInfo.to_map(info)
 
-    # Service registration is best-effort in Ra — the service is always inserted
-    # into ETS regardless. Use a short timeout to avoid blocking during cluster
-    # transitions (e.g. when a new member has been added but hasn't started yet,
-    # quorum is temporarily unreachable).
     case maybe_ra_command({:register_service, info_map}, 500) do
       {:ok, :ok} -> :ok
       {:error, :ra_not_available} -> :ok
       {:error, reason} -> Logger.warning("Ra register_service failed", reason: reason)
     end
 
-    insert_service(info)
+    maybe_monitor_node(info.node, state)
+  end
 
-    # Monitor the node if it's remote
-    state =
-      if info.node != Node.self() and not Map.has_key?(state.monitors, info.node) do
-        ref = Node.monitor(info.node, true)
-        put_in(state.monitors[info.node], ref)
-      else
+  defp maybe_monitor_node(node, state) do
+    # Only set up a node monitor if the node is currently connected.
+    # `:erlang.monitor_node/2` on an unreachable node fires `:nodedown`
+    # immediately, which would synchronously deregister a service we
+    # just registered — the entry would disappear from Ra between the
+    # caller's `register/1` returning and the next read.
+    cond do
+      node == Node.self() ->
         state
-      end
 
-    state
+      Map.has_key?(state.monitors, node) ->
+        state
+
+      node not in Node.list() ->
+        state
+
+      true ->
+        ref = Node.monitor(node, true)
+        put_in(state.monitors[node], ref)
+    end
   end
 
   defp do_deregister(node, type, state) do
-    # Best-effort Ra replication — use short timeout like do_register.
     command = if type, do: {:deregister_service, node, type}, else: {:deregister_service, node}
 
     case maybe_ra_command(command, 500) do
@@ -403,11 +358,10 @@ defmodule NeonFS.Core.ServiceRegistry do
       {:error, reason} -> Logger.warning("Ra deregister_service failed", reason: reason)
     end
 
-    remove_from_ets(node, type)
-
+    # Only drop the node-monitor when no other services remain registered
+    # for this node — a fuse-only node stays monitored for future nodedowns.
     keep_monitor? = list_by_node(node) != []
 
-    # Demonitor if we were monitoring
     state =
       case {keep_monitor?, Map.pop(state.monitors, node)} do
         {true, {_ref, _new_monitors}} ->
@@ -435,43 +389,17 @@ defmodule NeonFS.Core.ServiceRegistry do
     end
   end
 
-  defp insert_service(%ServiceInfo{} = info) do
-    key = service_key(info)
-
-    case :ets.lookup(:services_by_key, key) do
-      [{^key, existing}] -> remove_service_from_ets(existing)
-      [] -> :ok
-    end
-
-    :ets.insert(:services_by_key, {key, info})
-    :ets.insert(:services_by_node, {info.node, info})
-    :ets.insert(:services_by_type, {info.type, info})
+  defp read_service(node, type) do
+    RaSupervisor.local_query(&MetadataStateMachine.get_service(&1, node, type))
+  catch
+    :exit, _ -> {:error, :ra_not_available}
   end
 
-  defp remove_from_ets(node, nil) do
-    list_by_node(node)
-    |> Enum.each(fn info -> remove_service_from_ets(info) end)
-  rescue
-    ArgumentError -> :ok
+  defp read_services do
+    RaSupervisor.local_query(&MetadataStateMachine.get_services/1)
+  catch
+    :exit, _ -> {:error, :ra_not_available}
   end
-
-  defp remove_from_ets(node, type) do
-    case get(node, type) do
-      {:ok, info} -> remove_service_from_ets(info)
-      {:error, :not_found} -> :ok
-    end
-  rescue
-    ArgumentError -> :ok
-  end
-
-  defp remove_service_from_ets(%ServiceInfo{} = info) do
-    :ets.delete(:services_by_key, service_key(info))
-    :ets.match_delete(:services_by_node, {info.node, info})
-    :ets.match_delete(:services_by_type, {info.type, info})
-  end
-
-  defp service_key(%ServiceInfo{node: node, type: type}), do: {node, type}
-  defp service_key(node, type), do: {node, type}
 
   defp maybe_ra_command(cmd, timeout \\ 5000) do
     if RaServer.initialized?() do
@@ -515,22 +443,5 @@ defmodule NeonFS.Core.ServiceRegistry do
       else
         {:error, :ra_not_available}
       end
-  end
-
-  defp restore_from_ra do
-    case RaSupervisor.query(fn state -> Map.get(state, :services, %{}) end) do
-      {:ok, services} when is_map(services) ->
-        count =
-          Enum.reduce(services, 0, fn {_service_key, service_map}, acc ->
-            info = ServiceInfo.from_map(service_map)
-            insert_service(info)
-            acc + 1
-          end)
-
-        {:ok, count}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
   end
 end
