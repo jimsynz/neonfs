@@ -232,6 +232,10 @@ defmodule NeonFS.Core.Supervisor do
           # ACLManager caches volume ACLs in ETS, backed by Ra
           NeonFS.Core.ACLManager,
 
+          # IAM.Manager caches users/groups/policies/identity-mappings in
+          # ETS, backed by Ra (plumbing for the IAM epic, #135)
+          NeonFS.Core.IAM.Manager,
+
           # AuditLog records security-relevant events in bounded ETS
           NeonFS.Core.AuditLog,
 

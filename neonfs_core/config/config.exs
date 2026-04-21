@@ -14,6 +14,7 @@ config :logger, :default_formatter,
     :backoff_ms,
     :bootstrap_expect,
     :bytes_moved,
+    :category,
     :change,
     :check_interval_ms,
     :chunk_hash,
@@ -134,6 +135,7 @@ config :logger, :default_handler,
        :backoff_ms,
        :bootstrap_expect,
        :bytes_moved,
+       :category,
        :change,
        :check_interval_ms,
        :chunk_hash,
@@ -275,6 +277,8 @@ if Mix.env() == :test do
     # Don't auto-start children in tests - each test starts what it needs
     start_children?: false
 end
+
+config :neonfs_core, ash_domains: [NeonFS.Core.IAM]
 
 if Mix.env() in [:dev, :test] do
   config :git_ops,

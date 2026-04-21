@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.MetadataStateMachine do
   @moduledoc """
-  Ra state machine for cluster-wide metadata storage (v8).
+  Ra state machine for cluster-wide metadata storage (v9).
 
   Stores cluster-critical metadata with strong consistency via Raft consensus:
   - Service registry (nodes and their service types)
@@ -66,6 +66,15 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:delete_s3_credential, access_key_id :: String.t()}
           | {:put_escalation, escalation_data :: map()}
           | {:delete_escalation, escalation_id :: String.t()}
+          | {:iam_put, iam_category(), key :: term(), value :: map()}
+          | {:iam_delete, iam_category(), key :: term()}
+
+  @typedoc """
+  Category key for the generic IAM primitives. One entry per category
+  in the Ra state.
+  """
+  @type iam_category ::
+          :iam_users | :iam_groups | :iam_policies | :iam_identity_mappings
 
   @type segment_assignment :: %{
           replica_set: [node()],
@@ -88,6 +97,10 @@ defmodule NeonFS.Core.MetadataStateMachine do
           volume_acls: %{optional(binary()) => map()},
           s3_credentials: %{optional(String.t()) => map()},
           escalations: %{optional(String.t()) => map()},
+          iam_users: %{optional(term()) => map()},
+          iam_groups: %{optional(term()) => map()},
+          iam_policies: %{optional(term()) => map()},
+          iam_identity_mappings: %{optional(term()) => map()},
           version: non_neg_integer()
         }
 
@@ -142,6 +155,17 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @spec get_volume_acl(state(), binary()) :: map() | nil
   def get_volume_acl(state, volume_id), do: Map.get(state.volume_acls, volume_id)
 
+  @doc """
+  Returns the entire IAM table for a category as a `key => value`
+  map. Returns an empty map when the category is empty. Used by
+  `NeonFS.Core.IAM.Manager` to hydrate ETS on startup.
+  """
+  @spec get_iam_table(state(), iam_category()) :: %{optional(term()) => map()}
+  def get_iam_table(state, category)
+      when category in [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings] do
+    Map.get(state, category, %{})
+  end
+
   # Ra machine callbacks
 
   @doc """
@@ -163,6 +187,10 @@ defmodule NeonFS.Core.MetadataStateMachine do
       volume_acls: %{},
       s3_credentials: %{},
       escalations: %{},
+      iam_users: %{},
+      iam_groups: %{},
+      iam_policies: %{},
+      iam_identity_mappings: %{},
       version: 0
     }
   end
@@ -303,6 +331,25 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     new_state = %{state | services: migrate_services(state.services)}
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 8, 9}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 8,
+      to: 9,
+      change: "IAM tables"
+    )
+
+    new_state =
+      state
+      |> Map.put_new(:iam_users, %{})
+      |> Map.put_new(:iam_groups, %{})
+      |> Map.put_new(:iam_policies, %{})
+      |> Map.put_new(:iam_identity_mappings, %{})
+
     {new_state, :ok, []}
   end
 
@@ -816,6 +863,40 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  # IAM commands (new in v9) — generic CRUD keyed on one of the four
+  # IAM categories. Subsequent IAM slices (User, Group, AccessPolicy,
+  # IdentityMapping) layer Ash resources on top of these primitives.
+
+  def apply(_meta, {:iam_put, category, key, value}, state)
+      when category in [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings] do
+    state = ensure_iam_tables(state)
+    table = Map.put(Map.get(state, category), key, value)
+    new_state = %{state | version: state.version + 1} |> Map.put(category, table)
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :iam_put],
+      %{version: new_state.version},
+      %{category: category, key: key}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:iam_delete, category, key}, state)
+      when category in [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings] do
+    state = ensure_iam_tables(state)
+    table = Map.delete(Map.get(state, category), key)
+    new_state = %{state | version: state.version + 1} |> Map.put(category, table)
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :iam_delete],
+      %{version: new_state.version},
+      %{category: category, key: key}
+    )
+
+    {new_state, :ok, []}
+  end
+
   # Segment assignment commands (new in v5)
 
   def apply(_meta, {:assign_segment, segment_id, replica_set}, state) do
@@ -1050,7 +1131,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 8
+  def version, do: 9
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -1166,4 +1247,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Defensive init for pre-escalation-era snapshots
   defp ensure_escalations(%{escalations: _} = state), do: state
   defp ensure_escalations(state), do: Map.put(state, :escalations, %{})
+
+  # Defensive init for pre-v9 snapshots (before IAM tables existed).
+  defp ensure_iam_tables(state) do
+    state
+    |> Map.put_new(:iam_users, %{})
+    |> Map.put_new(:iam_groups, %{})
+    |> Map.put_new(:iam_policies, %{})
+    |> Map.put_new(:iam_identity_mappings, %{})
+  end
 end

@@ -57,6 +57,7 @@ defmodule NeonFS.Core.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:ash, "~> 3.6"},
       {:bandit, "~> 1.5"},
       {:gen_stage, "~> 1.3"},
       {:logger_json, "~> 7.0"},
@@ -80,7 +81,7 @@ defmodule NeonFS.Core.MixProject do
       {:igniter, "~> 0.7", only: [:dev, :test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
       {:mimic, "~> 2.0", only: [:test]},
-      {:stream_data, "~> 1.0", only: [:test]}
+      {:stream_data, "~> 1.0"}
     ]
   end
 end

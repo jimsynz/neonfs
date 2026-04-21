@@ -64,7 +64,7 @@ defmodule NeonFS.Integration.MixProject do
       {:req, "~> 0.5", only: [:dev, :test]},
 
       # dev/test
-      {:stream_data, "~> 1.0", only: [:test]},
+      {:stream_data, "~> 1.0"},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_check, "~> 0.16", only: [:dev, :test], runtime: false},

@@ -353,6 +353,20 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts the IAM Manager with clean ETS tables.
+  """
+  def start_iam_manager do
+    stop_if_running(NeonFS.Core.IAM.Manager)
+
+    Enum.each(
+      [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings],
+      &cleanup_ets_table/1
+    )
+
+    start_supervised!(NeonFS.Core.IAM.Manager, restart: :temporary)
+  end
+
+  @doc """
   Starts AuditLog with test configuration.
   """
   def start_audit_log(opts \\ []) do

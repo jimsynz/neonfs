@@ -43,8 +43,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 8" do
-      assert MetadataStateMachine.version() == 8
+    test "returns 9" do
+      assert MetadataStateMachine.version() == 9
     end
   end
 
@@ -103,6 +103,132 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert new_state.segment_assignments == %{}
       assert new_state.intents == %{}
       assert new_state.active_intents_by_conflict_key == %{}
+    end
+  end
+
+  describe "machine version migration 8 -> 9 (IAM tables)" do
+    test "adds the four IAM tables as empty maps" do
+      old_state = %{
+        data: %{},
+        chunks: %{},
+        files: %{},
+        services: %{},
+        volumes: %{},
+        stripes: %{},
+        segment_assignments: %{},
+        intents: %{},
+        active_intents_by_conflict_key: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        s3_credentials: %{},
+        escalations: %{},
+        version: 200
+      }
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:machine_version, 8, 9}, old_state)
+
+      assert new_state.iam_users == %{}
+      assert new_state.iam_groups == %{}
+      assert new_state.iam_policies == %{}
+      assert new_state.iam_identity_mappings == %{}
+      # Existing state untouched.
+      assert new_state.volume_acls == %{}
+      assert new_state.version == 200
+    end
+
+    test "leaves existing IAM tables intact when they already exist" do
+      existing_users = %{"u-1" => %{name: "pre-existing"}}
+
+      old_state = %{
+        data: %{},
+        chunks: %{},
+        files: %{},
+        services: %{},
+        volumes: %{},
+        stripes: %{},
+        segment_assignments: %{},
+        intents: %{},
+        active_intents_by_conflict_key: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        s3_credentials: %{},
+        escalations: %{},
+        iam_users: existing_users,
+        version: 200
+      }
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:machine_version, 8, 9}, old_state)
+
+      assert new_state.iam_users == existing_users
+      assert new_state.iam_groups == %{}
+    end
+  end
+
+  describe "IAM commands (v9)" do
+    defp v9_state do
+      %{
+        data: %{},
+        chunks: %{},
+        files: %{},
+        services: %{},
+        volumes: %{},
+        stripes: %{},
+        segment_assignments: %{},
+        intents: %{},
+        active_intents_by_conflict_key: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        s3_credentials: %{},
+        escalations: %{},
+        iam_users: %{},
+        iam_groups: %{},
+        iam_policies: %{},
+        iam_identity_mappings: %{},
+        version: 0
+      }
+    end
+
+    test "iam_put/iam_delete round-trip across all four categories" do
+      state = v9_state()
+
+      for category <- [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings] do
+        {state_after_put, :ok, []} =
+          MetadataStateMachine.apply(%{}, {:iam_put, category, "k", %{v: 1}}, state)
+
+        assert Map.get(state_after_put, category) == %{"k" => %{v: 1}}
+        assert state_after_put.version == state.version + 1
+
+        {state_after_delete, :ok, []} =
+          MetadataStateMachine.apply(%{}, {:iam_delete, category, "k"}, state_after_put)
+
+        assert Map.get(state_after_delete, category) == %{}
+        assert state_after_delete.version == state_after_put.version + 1
+      end
+    end
+
+    test "get_iam_table/2 returns the requested category as a map" do
+      state =
+        v9_state()
+        |> Map.put(:iam_users, %{"u-1" => %{name: "alice"}})
+
+      assert MetadataStateMachine.get_iam_table(state, :iam_users) ==
+               %{"u-1" => %{name: "alice"}}
+
+      assert MetadataStateMachine.get_iam_table(state, :iam_groups) == %{}
+    end
+
+    test "iam_put defensively re-creates missing tables on a pre-v9 snapshot" do
+      # A snapshot captured under a v8-or-older state machine may lack
+      # the IAM maps entirely. Commands should not crash in that case —
+      # they should recreate the table.
+      pre_v9 = v9_state() |> Map.delete(:iam_users)
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:iam_put, :iam_users, "k", %{v: 1}}, pre_v9)
+
+      assert Map.get(new_state, :iam_users) == %{"k" => %{v: 1}}
     end
   end
 
