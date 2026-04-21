@@ -15,13 +15,23 @@ You are an autonomous coding agent working on NeonFS. Each iteration picks one i
 
 ## Issue Selection
 
-Skip issues that are:
+First filter out everything you can't work on:
+
 - Labelled `blocked`, `wontfix`, `duplicate`, or `invalid`.
 - Marked as blocked or deferred in the issue body.
 - Waiting on an upstream issue that is still open (look for `Depends on #N` in the body).
 - Already assigned to someone else.
 
-Among the remaining issues, pick the **oldest** one by number unless the issue body, a label, or a milestone indicates higher priority. If you have genuine doubt about which to pick, ask rather than guess.
+Among the remaining issues, pick in this priority order. Only fall through to the next tier when the current one is empty.
+
+1. **Bugs first.** Any issue labelled `bug`. Bugs represent user-facing harm or latent defects and always take priority over new work.
+2. **Stand-alone issues.** Issues whose body does not reference a parent (no `Part of #N`) — self-contained, no coordination cost with a wider initiative.
+3. **Continuation of an existing epic.** Issues with `Part of #N` where `#N` already has at least one closed / merged sub-issue. Keep momentum on work that's partially landed — finishing an epic is more valuable than starting a new one.
+4. **Starting a new epic.** Issues with `Part of #N` where `#N` has no closed sub-issues yet. Only pick these when tiers 1–3 are empty, and prefer the first slice of the epic (the one everything else depends on).
+
+Within each tier, pick the **oldest** remaining issue by number unless the issue body, a label, or a milestone indicates higher priority. If you have genuine doubt about which to pick, ask rather than guess.
+
+To determine an epic's state, check the parent issue's sub-issue checkboxes, its comment thread, or `fj issue search --state closed` filtered by the relevant prefix in the title.
 
 To inspect an issue: `fj issue view <N>`.
 
