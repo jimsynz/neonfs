@@ -63,17 +63,15 @@ defmodule NeonFS.Core.ChunkIndex do
   @doc """
   Retrieves chunk metadata by hash.
 
-  First checks local ETS cache, then falls back to quorum read if not found locally.
+  Always resolves through `QuorumCoordinator.quorum_read/2` (or the Ra
+  fallback when `quorum_opts` is nil). The local ETS table is a
+  write-through materialisation for list operations on this node —
+  serving point reads from it would return stale values for keys
+  written or deleted elsewhere in the cluster (#342).
   """
   @spec get(binary()) :: {:ok, ChunkMeta.t()} | {:error, :not_found}
   def get(hash) when is_binary(hash) do
-    case :ets.lookup(:chunk_index, hash) do
-      [{^hash, chunk_meta}] ->
-        {:ok, chunk_meta}
-
-      [] ->
-        get_from_quorum(hash)
-    end
+    get_from_quorum(hash)
   end
 
   @doc """
@@ -87,14 +85,12 @@ defmodule NeonFS.Core.ChunkIndex do
   @doc """
   Checks whether chunk metadata exists for the given hash.
 
-  Checks local ETS cache first, then falls back to quorum read.
+  Always resolves through `QuorumCoordinator.quorum_read/2` — see
+  `get/1` for rationale.
   """
   @spec exists?(binary()) :: boolean()
   def exists?(hash) when is_binary(hash) do
-    case :ets.lookup(:chunk_index, hash) do
-      [{^hash, _}] -> true
-      [] -> match?({:ok, _}, get_from_quorum(hash))
-    end
+    match?({:ok, _}, get_from_quorum(hash))
   end
 
   @doc """
@@ -530,25 +526,37 @@ defmodule NeonFS.Core.ChunkIndex do
         key = chunk_key(hash)
 
         case QuorumCoordinator.quorum_read(key, opts) do
-          {:ok, value} ->
-            chunk_meta = storable_map_to_chunk(value)
-            :ets.insert(:chunk_index, {hash, chunk_meta})
-            {:ok, chunk_meta}
-
-          {:ok, value, :possibly_stale} ->
-            chunk_meta = storable_map_to_chunk(value)
-            :ets.insert(:chunk_index, {hash, chunk_meta})
-            {:ok, chunk_meta}
-
-          {:error, :not_found} ->
-            {:error, :not_found}
-
-          {:error, _reason} ->
-            {:error, :not_found}
+          {:ok, value} -> finalise_quorum_read(hash, value)
+          {:ok, value, :possibly_stale} -> finalise_quorum_read(hash, value)
+          {:error, :not_found} -> {:error, :not_found}
+          {:error, _reason} -> {:error, :not_found}
         end
     end
   rescue
     _ -> {:error, :not_found}
+  end
+
+  defp finalise_quorum_read(hash, value) do
+    chunk_meta =
+      value
+      |> storable_map_to_chunk()
+      |> merge_local_only_fields(hash)
+
+    :ets.insert(:chunk_index, {hash, chunk_meta})
+    {:ok, chunk_meta}
+  end
+
+  # active_write_refs are local-only (ephemeral, per-node) and never
+  # replicated, so they are absent from the quorum payload. Preserve
+  # them from the local ETS entry when present.
+  defp merge_local_only_fields(%ChunkMeta{} = chunk_meta, hash) do
+    case :ets.lookup(:chunk_index, hash) do
+      [{^hash, %ChunkMeta{active_write_refs: refs}}] when refs != nil ->
+        %{chunk_meta | active_write_refs: refs}
+
+      _ ->
+        chunk_meta
+    end
   end
 
   # Private — Commit

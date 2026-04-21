@@ -80,17 +80,14 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Retrieves a file by its ID.
 
-  Checks local ETS cache first, falls back to quorum read.
+  Always resolves through `QuorumCoordinator.quorum_read/2`. The local
+  ETS table is a write-through materialisation for list operations on
+  this node — serving point reads from it would return stale values
+  for files written or deleted elsewhere in the cluster (#342).
   """
   @spec get(file_id()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get(file_id) do
-    case :ets.lookup(:file_index_by_id, file_id) do
-      [{^file_id, file}] ->
-        {:ok, file}
-
-      [] ->
-        get_from_quorum(file_id)
-    end
+    get_from_quorum(file_id)
   end
 
   @doc """

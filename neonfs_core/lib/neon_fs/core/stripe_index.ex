@@ -41,17 +41,14 @@ defmodule NeonFS.Core.StripeIndex do
   @doc """
   Retrieves stripe metadata by ID.
 
-  First checks local ETS cache, then falls back to quorum read if not found locally.
+  Always resolves through `QuorumCoordinator.quorum_read/2`. The local
+  ETS table is a write-through materialisation for list operations on
+  this node — serving point reads from it would return stale values
+  for keys written or deleted elsewhere in the cluster (#342).
   """
   @spec get(binary()) :: {:ok, Stripe.t()} | {:error, :not_found}
   def get(stripe_id) when is_binary(stripe_id) do
-    case :ets.lookup(:stripe_index, stripe_id) do
-      [{^stripe_id, stripe}] ->
-        {:ok, stripe}
-
-      [] ->
-        get_from_quorum(stripe_id)
-    end
+    get_from_quorum(stripe_id)
   end
 
   @doc """
@@ -65,14 +62,12 @@ defmodule NeonFS.Core.StripeIndex do
   @doc """
   Checks whether stripe metadata exists for the given ID.
 
-  Checks local ETS cache first, then falls back to quorum read.
+  Always resolves through `QuorumCoordinator.quorum_read/2` — see
+  `get/1` for rationale.
   """
   @spec exists?(binary()) :: boolean()
   def exists?(stripe_id) when is_binary(stripe_id) do
-    case :ets.lookup(:stripe_index, stripe_id) do
-      [{^stripe_id, _}] -> true
-      [] -> match?({:ok, _}, get_from_quorum(stripe_id))
-    end
+    match?({:ok, _}, get_from_quorum(stripe_id))
   end
 
   @doc """

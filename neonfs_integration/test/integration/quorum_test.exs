@@ -351,6 +351,63 @@ defmodule NeonFS.Integration.QuorumTest do
     end
   end
 
+  describe "cache coherence (#342)" do
+    test "point read after remote delete does not return stale cached value",
+         %{cluster: cluster} do
+      :ok = init_quorum_cluster(cluster, "coherence-vol")
+
+      {:ok, volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "coherence-vol"
+        ])
+
+      # Write on node1. The event proves quorum replication reached node2.
+      {:ok, file} =
+        subscribe_then_act(
+          cluster,
+          :node2,
+          volume.id,
+          fn ->
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              "coherence-vol",
+              "/doomed.bin",
+              "payload"
+            ])
+          end,
+          timeout: 15_000
+        )
+
+      # Prime node2's FileIndex ETS cache by reading the file through the
+      # public API. get_from_quorum inserts the decoded FileMeta into
+      # :file_index_by_id on success — this is the cache entry that the
+      # pre-#342 code would subsequently serve without consulting the
+      # quorum store.
+      {:ok, ^file} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.id])
+
+      # Delete on node1 via the high-level helper (quorum-delete of the
+      # FileMeta + the parent DirectoryEntry child). Node1's local ETS
+      # clears; node2's ETS still has the stale cached FileMeta.
+      :ok =
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :delete_file, [
+          "coherence-vol",
+          "/doomed.bin"
+        ])
+
+      # Node2 must report the file gone. Pre-#342 the ETS-first check
+      # returned the stale {:ok, file}; the fix routes get/1 through
+      # QuorumCoordinator.quorum_read, which sees the tombstone and
+      # returns :not_found.
+      #
+      # Quorum writes ack at W=2 but the third replica's apply is async —
+      # poll briefly so we do not race the tombstone replication.
+      assert_eventually timeout: 10_000 do
+        PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.id]) ==
+          {:error, :not_found}
+      end
+    end
+  end
+
   # ─── Helpers ──────────────────────────────────────────────────────────
 
   defp init_quorum_cluster(cluster, volume_name) do
