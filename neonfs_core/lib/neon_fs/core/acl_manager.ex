@@ -1,85 +1,131 @@
 defmodule NeonFS.Core.ACLManager do
   @moduledoc """
-  Manages volume ACLs with ETS cache and Ra-backed durability.
+  Stateless facade over Ra-backed volume and file ACLs.
 
-  Provides fast permission lookups via a public ETS table (`:volume_acls`),
-  with all mutations persisted through Ra consensus. Restores state from Ra
-  on startup.
+  All volume ACL reads go through `RaSupervisor.local_query/2` against
+  the `MetadataStateMachine`; all writes go through `RaSupervisor.command/2`.
+  `grant/3` and `revoke/2` are implemented as dedicated Ra commands so the
+  read-modify-write is atomic on the state machine — concurrent grants on
+  the same volume can't lose entries to a race.
 
-  Follows the VolumeRegistry pattern: serialised writes through GenServer,
-  concurrent reads directly from ETS.
+  File ACLs live on `FileMeta` and are read/written through `FileIndex`,
+  which already serialises mutations.
   """
 
-  use GenServer
   require Logger
 
-  alias NeonFS.Core.{AuditLog, FileIndex, Persistence, RaSupervisor, VolumeACL}
+  alias NeonFS.Core.{AuditLog, FileIndex, MetadataStateMachine, RaSupervisor, VolumeACL}
   alias NeonFS.Events.Broadcaster
   alias NeonFS.Events.{FileAclChanged, VolumeAclChanged}
-
-  @ets_table :volume_acls
-
-  # Client API
-
-  @doc """
-  Starts the ACL manager.
-  """
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
 
   @doc """
   Creates or replaces the ACL for a volume.
   """
   @spec set_volume_acl(binary(), VolumeACL.t()) :: :ok | {:error, term()}
   def set_volume_acl(volume_id, %VolumeACL{} = acl) do
-    GenServer.call(__MODULE__, {:set_volume_acl, volume_id, acl})
+    case ra_command({:put_volume_acl, volume_id, acl_to_map(acl)}) do
+      :ok ->
+        AuditLog.log_event(
+          event_type: :volume_acl_changed,
+          actor_uid: acl.owner_uid,
+          resource: volume_id,
+          details: %{action: :set, owner_uid: acl.owner_uid, owner_gid: acl.owner_gid}
+        )
+
+        safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
   end
 
   @doc """
   Grants permissions to a principal on a volume.
 
-  If the principal already has an entry, it is replaced.
+  Atomic on Ra: if the principal already has an entry it's replaced,
+  otherwise it's appended. Returns `{:error, :not_found}` if the volume
+  has no ACL.
   """
-  @spec grant(binary(), VolumeACL.principal(), [VolumeACL.permission()]) :: :ok | {:error, term()}
+  @spec grant(binary(), VolumeACL.principal(), [VolumeACL.permission()]) ::
+          :ok | {:error, term()}
   def grant(volume_id, principal, permissions) do
-    GenServer.call(__MODULE__, {:grant, volume_id, principal, permissions})
-  end
+    case ra_command({:grant_volume_acl_entry, volume_id, principal, Enum.to_list(permissions)}) do
+      :ok ->
+        AuditLog.log_event(
+          event_type: :volume_acl_changed,
+          actor_uid: 0,
+          resource: volume_id,
+          details: %{action: :grant, principal: principal, permissions: permissions}
+        )
 
-  @doc """
-  Revokes all permissions for a principal on a volume.
-  """
-  @spec revoke(binary(), VolumeACL.principal()) :: :ok | {:error, term()}
-  def revoke(volume_id, principal) do
-    GenServer.call(__MODULE__, {:revoke, volume_id, principal})
-  end
+        safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
+        :ok
 
-  @doc """
-  Gets the ACL for a volume from ETS cache.
-
-  This is a direct ETS read — no GenServer call, no Ra round-trip.
-  """
-  @spec get_volume_acl(binary()) :: {:ok, VolumeACL.t()} | {:error, :not_found}
-  def get_volume_acl(volume_id) do
-    case :ets.whereis(@ets_table) do
-      :undefined ->
-        {:error, :not_found}
-
-      _ref ->
-        case :ets.lookup(@ets_table, volume_id) do
-          [{^volume_id, acl}] -> {:ok, acl}
-          [] -> {:error, :not_found}
-        end
+      {:error, _} = error ->
+        error
     end
   end
 
   @doc """
-  Deletes the ACL for a volume from ETS cache and Ra.
+  Revokes all permissions for a principal on a volume.
+
+  No-op if the principal has no entry. Returns `{:error, :not_found}` if
+  the volume has no ACL.
   """
-  @spec delete_volume_acl(binary()) :: :ok
+  @spec revoke(binary(), VolumeACL.principal()) :: :ok | {:error, term()}
+  def revoke(volume_id, principal) do
+    case ra_command({:revoke_volume_acl_entry, volume_id, principal}) do
+      :ok ->
+        AuditLog.log_event(
+          event_type: :volume_acl_changed,
+          actor_uid: 0,
+          resource: volume_id,
+          details: %{action: :revoke, principal: principal}
+        )
+
+        safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  @doc """
+  Gets the ACL for a volume from the local Ra replica.
+
+  Reads go directly to Ra with no process hop. The `apply/3` callback
+  runs on every cluster member as commands commit, so the local
+  replica's view is the committed state.
+  """
+  @spec get_volume_acl(binary()) :: {:ok, VolumeACL.t()} | {:error, :not_found}
+  def get_volume_acl(volume_id) do
+    case read_volume_acl(volume_id) do
+      {:ok, acl_data} when is_map(acl_data) ->
+        {:ok, map_to_acl(volume_id, acl_data)}
+
+      {:ok, nil} ->
+        {:error, :not_found}
+
+      {:error, _} ->
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Deletes the ACL for a volume via Ra.
+  """
+  @spec delete_volume_acl(binary()) :: :ok | {:error, term()}
   def delete_volume_acl(volume_id) do
-    GenServer.call(__MODULE__, {:delete_volume_acl, volume_id})
+    case ra_command({:delete_volume_acl, volume_id}) do
+      :ok ->
+        safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
   end
 
   @doc """
@@ -89,13 +135,24 @@ defmodule NeonFS.Core.ACLManager do
   """
   @spec set_file_acl(binary(), String.t(), [map()]) :: :ok | {:error, term()}
   def set_file_acl(volume_id, path, acl_entries) when is_list(acl_entries) do
-    GenServer.call(__MODULE__, {:set_file_acl, volume_id, path, acl_entries})
+    with {:ok, file_meta} <- FileIndex.get_by_path(volume_id, path),
+         {:ok, _updated} <- FileIndex.update(file_meta.id, acl_entries: acl_entries) do
+      AuditLog.log_event(
+        event_type: :file_acl_changed,
+        actor_uid: 0,
+        resource: volume_id,
+        details: %{path: path, entries_count: length(acl_entries)}
+      )
+
+      safe_broadcast(volume_id, %FileAclChanged{volume_id: volume_id, path: path})
+      :ok
+    end
   end
 
   @doc """
   Retrieves the file ACL (mode + extended entries) for a file or directory.
 
-  This is a direct read from FileIndex — no GenServer call needed.
+  This is a direct read from FileIndex.
   """
   @spec get_file_acl(binary(), String.t()) ::
           {:ok,
@@ -131,159 +188,13 @@ defmodule NeonFS.Core.ACLManager do
   """
   @spec set_default_acl(binary(), String.t(), [map()]) :: :ok | {:error, term()}
   def set_default_acl(volume_id, path, default_acl) when is_list(default_acl) do
-    GenServer.call(__MODULE__, {:set_default_acl, volume_id, path, default_acl})
-  end
-
-  # Server Callbacks
-
-  @impl true
-  def init(_opts) do
-    Process.flag(:trap_exit, true)
-    :ets.new(@ets_table, [:set, :named_table, :public, read_concurrency: true])
-    {:ok, %{}, {:continue, :load_from_ra}}
-  end
-
-  @impl true
-  def handle_continue(:load_from_ra, state) do
-    load_acls_from_ra()
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_call({:set_volume_acl, volume_id, acl}, _from, state) do
-    reply = persist_and_cache(volume_id, acl)
-
-    if reply == :ok do
-      AuditLog.log_event(
-        event_type: :volume_acl_changed,
-        actor_uid: acl.owner_uid,
-        resource: volume_id,
-        details: %{action: :set, owner_uid: acl.owner_uid, owner_gid: acl.owner_gid}
-      )
-
-      safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
-    end
-
-    {:reply, reply, state}
-  end
-
-  @impl true
-  def handle_call({:grant, volume_id, principal, permissions}, _from, state) do
-    case get_volume_acl(volume_id) do
-      {:ok, acl} ->
-        entry = %{principal: principal, permissions: MapSet.new(permissions)}
-        updated_entries = upsert_entry(acl.entries, principal, entry)
-        updated_acl = %{acl | entries: updated_entries}
-        reply = persist_and_cache(volume_id, updated_acl)
-
-        if reply == :ok do
-          AuditLog.log_event(
-            event_type: :volume_acl_changed,
-            actor_uid: 0,
-            resource: volume_id,
-            details: %{action: :grant, principal: principal, permissions: permissions}
-          )
-
-          safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
-        end
-
-        {:reply, reply, state}
-
-      {:error, :not_found} ->
-        {:reply, {:error, :not_found}, state}
+    with {:ok, file_meta} <- FileIndex.get_by_path(volume_id, path),
+         {:ok, _updated} <- FileIndex.update(file_meta.id, default_acl: default_acl) do
+      :ok
     end
   end
 
-  @impl true
-  def handle_call({:revoke, volume_id, principal}, _from, state) do
-    case get_volume_acl(volume_id) do
-      {:ok, acl} ->
-        updated_entries = Enum.reject(acl.entries, &(&1.principal == principal))
-        updated_acl = %{acl | entries: updated_entries}
-        reply = persist_and_cache(volume_id, updated_acl)
-
-        if reply == :ok do
-          AuditLog.log_event(
-            event_type: :volume_acl_changed,
-            actor_uid: 0,
-            resource: volume_id,
-            details: %{action: :revoke, principal: principal}
-          )
-
-          safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
-        end
-
-        {:reply, reply, state}
-
-      {:error, :not_found} ->
-        {:reply, {:error, :not_found}, state}
-    end
-  end
-
-  @impl true
-  def handle_call({:delete_volume_acl, volume_id}, _from, state) do
-    :ets.delete(@ets_table, volume_id)
-    safe_broadcast(volume_id, %VolumeAclChanged{volume_id: volume_id})
-    {:reply, :ok, state}
-  end
-
-  @impl true
-  def handle_call({:set_file_acl, volume_id, path, acl_entries}, _from, state) do
-    reply =
-      case FileIndex.get_by_path(volume_id, path) do
-        {:ok, file_meta} ->
-          case FileIndex.update(file_meta.id, acl_entries: acl_entries) do
-            {:ok, _updated} ->
-              AuditLog.log_event(
-                event_type: :file_acl_changed,
-                actor_uid: 0,
-                resource: volume_id,
-                details: %{path: path, entries_count: length(acl_entries)}
-              )
-
-              safe_broadcast(volume_id, %FileAclChanged{volume_id: volume_id, path: path})
-              :ok
-
-            {:error, reason} ->
-              {:error, reason}
-          end
-
-        {:error, :not_found} ->
-          {:error, :not_found}
-      end
-
-    {:reply, reply, state}
-  end
-
-  @impl true
-  def handle_call({:set_default_acl, volume_id, path, default_acl}, _from, state) do
-    reply =
-      case FileIndex.get_by_path(volume_id, path) do
-        {:ok, file_meta} ->
-          case FileIndex.update(file_meta.id, default_acl: default_acl) do
-            {:ok, _updated} -> :ok
-            {:error, reason} -> {:error, reason}
-          end
-
-        {:error, :not_found} ->
-          {:error, :not_found}
-      end
-
-    {:reply, reply, state}
-  end
-
-  @impl true
-  def terminate(_reason, _state) do
-    meta_dir = Persistence.meta_dir()
-    dets_path = Path.join(meta_dir, "volume_acls.dets")
-    Persistence.snapshot_table(@ets_table, dets_path)
-    Logger.info("ACLManager table saved")
-    :ok
-  rescue
-    _ -> :ok
-  end
-
-  # Event broadcasting
+  # Private
 
   defp safe_broadcast(volume_id, event) do
     Broadcaster.broadcast(volume_id, event)
@@ -297,52 +208,10 @@ defmodule NeonFS.Core.ACLManager do
       :ok
   end
 
-  # Private
-
-  defp persist_and_cache(volume_id, acl) do
-    acl_data = acl_to_map(acl)
-
-    case maybe_ra_command({:put_volume_acl, volume_id, acl_data}) do
-      {:ok, :ok} ->
-        :ets.insert(@ets_table, {volume_id, acl})
-        :ok
-
-      {:error, :ra_not_available} ->
-        :ets.insert(@ets_table, {volume_id, acl})
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp upsert_entry(entries, principal, new_entry) do
-    case Enum.find_index(entries, &(&1.principal == principal)) do
-      nil -> entries ++ [new_entry]
-      idx -> List.replace_at(entries, idx, new_entry)
-    end
-  end
-
-  defp load_acls_from_ra do
-    query_fn = fn state -> Map.get(state, :volume_acls, %{}) end
-
-    case RaSupervisor.query(query_fn) do
-      {:ok, acl_map} when is_map(acl_map) ->
-        Enum.each(acl_map, fn {volume_id, acl_data} ->
-          acl = map_to_acl(volume_id, acl_data)
-          :ets.insert(@ets_table, {volume_id, acl})
-        end)
-
-        count = map_size(acl_map)
-        if count > 0, do: Logger.info("Loaded volume ACLs from Ra", count: count)
-
-      {:error, reason} ->
-        Logger.debug("Could not load ACLs from Ra", reason: reason)
-    end
-  rescue
-    e -> Logger.debug("Could not load ACLs from Ra", reason: e)
+  defp read_volume_acl(volume_id) do
+    RaSupervisor.local_query(&MetadataStateMachine.get_volume_acl(&1, volume_id))
   catch
-    :exit, reason -> Logger.debug("Could not load ACLs from Ra (exit)", reason: reason)
+    :exit, _ -> {:error, :ra_not_available}
   end
 
   defp acl_to_map(%VolumeACL{} = acl) do
@@ -375,10 +244,11 @@ defmodule NeonFS.Core.ACLManager do
     }
   end
 
-  # Follow VolumeRegistry pattern for Ra interaction
-  defp maybe_ra_command(cmd) do
+  defp ra_command(cmd) do
     case RaSupervisor.command(cmd) do
-      {:ok, result, _leader} -> {:ok, result}
+      {:ok, :ok, _leader} -> :ok
+      {:ok, {:error, reason}, _leader} -> {:error, reason}
+      {:ok, other, _leader} -> {:error, {:unexpected_reply, other}}
       {:error, :noproc} -> {:error, :ra_not_available}
       {:error, reason} -> {:error, reason}
       {:timeout, _node} -> {:error, :timeout}

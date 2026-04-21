@@ -344,15 +344,6 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts ACLManager.
-  """
-  def start_acl_manager do
-    stop_if_running(NeonFS.Core.ACLManager)
-    cleanup_ets_table(:volume_acls)
-    start_supervised!(NeonFS.Core.ACLManager, restart: :temporary)
-  end
-
-  @doc """
   Starts AuditLog with test configuration.
   """
   def start_audit_log(opts \\ []) do
@@ -547,7 +538,6 @@ defmodule NeonFS.TestCase do
     tables = [
       :volumes_by_id,
       :volumes_by_name,
-      :volume_acls,
       :audit_log,
       :file_index_by_id,
       :chunk_index,

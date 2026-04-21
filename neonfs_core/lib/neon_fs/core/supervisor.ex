@@ -229,9 +229,6 @@ defmodule NeonFS.Core.Supervisor do
           # VolumeRegistry depends on FileIndex
           NeonFS.Core.VolumeRegistry,
 
-          # ACLManager caches volume ACLs in ETS, backed by Ra
-          NeonFS.Core.ACLManager,
-
           # PendingWriteRecovery opens the pending-write DETS log and
           # reclaims chunks orphaned by interrupted streaming writes
           # on startup (#296). Must start AFTER ChunkIndex so the

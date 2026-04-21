@@ -107,7 +107,6 @@ defmodule NeonFS.Core.Persistence do
         ets_table: :volumes_by_name,
         dets_path: Path.join(meta_dir, "volume_registry_by_name.dets")
       },
-      %{ets_table: :volume_acls, dets_path: Path.join(meta_dir, "volume_acls.dets")},
       %{ets_table: :audit_log, dets_path: Path.join(meta_dir, "audit_log.dets")},
       %{ets_table: :neonfs_jobs, dets_path: Path.join(meta_dir, "jobs.dets")}
     ]

@@ -2,10 +2,21 @@ defmodule NeonFS.Core.ACLManagerTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{ACLManager, VolumeACL}
+  alias NeonFS.Core.{ACLManager, MetadataStateMachine, RaServer, RaSupervisor, VolumeACL}
 
-  setup do
-    start_acl_manager()
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    configure_test_dirs(tmp_dir)
+
+    ensure_node_named()
+    start_ra()
+    :ok = RaServer.init_cluster()
+
+    start_audit_log()
+
+    on_exit(fn -> cleanup_test_dirs() end)
+
     :ok
   end
 
@@ -109,13 +120,29 @@ defmodule NeonFS.Core.ACLManagerTest do
   end
 
   describe "delete_volume_acl/1" do
-    test "removes ACL from cache" do
+    test "removes ACL and the delete replicates via Ra" do
       acl = make_acl("vol-delete")
       :ok = ACLManager.set_volume_acl("vol-delete", acl)
       assert {:ok, _} = ACLManager.get_volume_acl("vol-delete")
 
+      # Ra reflects the ACL before the delete.
+      assert {:ok, acl_map} =
+               RaSupervisor.local_query(&MetadataStateMachine.get_volume_acl(&1, "vol-delete"))
+
+      assert is_map(acl_map)
+
       :ok = ACLManager.delete_volume_acl("vol-delete")
       assert {:error, :not_found} = ACLManager.get_volume_acl("vol-delete")
+
+      # Regression: before this migration, delete_volume_acl/1 only cleared
+      # the local ETS cache and never issued a Ra command — the ACL
+      # resurrected on other nodes. Assert the Ra state itself changes.
+      assert {:ok, nil} =
+               RaSupervisor.local_query(&MetadataStateMachine.get_volume_acl(&1, "vol-delete"))
+    end
+
+    test "is a no-op when the ACL doesn't exist" do
+      assert :ok = ACLManager.delete_volume_acl("never-existed")
     end
   end
 

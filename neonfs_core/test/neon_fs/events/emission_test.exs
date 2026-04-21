@@ -7,7 +7,7 @@ defmodule NeonFS.Events.EmissionTest do
   use NeonFS.TestCase
   use ExUnit.Case, async: false
 
-  alias NeonFS.Core.{ACLManager, FileIndex, FileMeta, VolumeACL, VolumeRegistry}
+  alias NeonFS.Core.{ACLManager, FileIndex, FileMeta, RaServer, VolumeACL, VolumeRegistry}
   alias NeonFS.Events.Broadcaster
 
   alias NeonFS.Events.{
@@ -33,6 +33,10 @@ defmodule NeonFS.Events.EmissionTest do
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
 
+    ensure_node_named()
+    start_ra()
+    :ok = RaServer.init_cluster()
+
     # Start :pg for event broadcasting
     start_supervised!(%{id: :pg_events, start: {:pg, :start_link, [@pg_scope]}})
 
@@ -43,7 +47,6 @@ defmodule NeonFS.Events.EmissionTest do
     start_file_index()
     start_volume_registry()
     start_audit_log()
-    start_acl_manager()
 
     # Subscribe to volume events
     :pg.join(@pg_scope, {:volume, @volume_id}, self())

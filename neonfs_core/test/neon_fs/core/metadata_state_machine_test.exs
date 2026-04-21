@@ -43,8 +43,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 10" do
-      assert MetadataStateMachine.version() == 10
+    test "returns 11" do
+      assert MetadataStateMachine.version() == 11
     end
   end
 
@@ -1011,6 +1011,107 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         MetadataStateMachine.apply(
           %{},
           {:update_volume_acl, "nonexistent", %{entries: []}},
+          base_state()
+        )
+    end
+
+    test "delete_volume_acl removes the ACL" do
+      acl = %{owner_uid: 1000, owner_gid: 1000, entries: []}
+      state = %{base_state() | volume_acls: %{"vol-1" => acl, "vol-2" => acl}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_volume_acl, "vol-1"}, state)
+
+      refute Map.has_key?(state.volume_acls, "vol-1")
+      assert Map.has_key?(state.volume_acls, "vol-2")
+      assert state.version == 1
+    end
+
+    test "delete_volume_acl is idempotent for unknown volumes" do
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_volume_acl, "ghost"}, base_state())
+
+      assert state.volume_acls == %{}
+      assert state.version == 1
+    end
+
+    test "grant_volume_acl_entry appends a new entry" do
+      acl = %{owner_uid: 1000, owner_gid: 1000, entries: []}
+      state = %{base_state() | volume_acls: %{"vol-1" => acl}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:grant_volume_acl_entry, "vol-1", {:uid, 2000}, [:read, :write]},
+          state
+        )
+
+      assert [%{principal: {:uid, 2000}, permissions: [:read, :write]}] =
+               state.volume_acls["vol-1"].entries
+
+      assert state.version == 1
+    end
+
+    test "grant_volume_acl_entry replaces an existing entry atomically" do
+      existing = %{principal: {:uid, 2000}, permissions: [:read]}
+      acl = %{owner_uid: 1000, owner_gid: 1000, entries: [existing]}
+      state = %{base_state() | volume_acls: %{"vol-1" => acl}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:grant_volume_acl_entry, "vol-1", {:uid, 2000}, [:read, :write, :admin]},
+          state
+        )
+
+      assert [%{principal: {:uid, 2000}, permissions: [:read, :write, :admin]}] =
+               state.volume_acls["vol-1"].entries
+    end
+
+    test "grant_volume_acl_entry returns :not_found when the volume has no ACL" do
+      {_state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:grant_volume_acl_entry, "ghost", {:uid, 1}, [:read]},
+          base_state()
+        )
+    end
+
+    test "revoke_volume_acl_entry removes an entry" do
+      entry_a = %{principal: {:uid, 2000}, permissions: [:read]}
+      entry_b = %{principal: {:uid, 3000}, permissions: [:write]}
+      acl = %{owner_uid: 1000, owner_gid: 1000, entries: [entry_a, entry_b]}
+      state = %{base_state() | volume_acls: %{"vol-1" => acl}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:revoke_volume_acl_entry, "vol-1", {:uid, 2000}},
+          state
+        )
+
+      assert state.volume_acls["vol-1"].entries == [entry_b]
+    end
+
+    test "revoke_volume_acl_entry is a no-op when the principal has no entry" do
+      acl = %{owner_uid: 1000, owner_gid: 1000, entries: []}
+      state = %{base_state() | volume_acls: %{"vol-1" => acl}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:revoke_volume_acl_entry, "vol-1", {:uid, 9999}},
+          state
+        )
+
+      assert state.volume_acls["vol-1"].entries == []
+    end
+
+    test "revoke_volume_acl_entry returns :not_found when the volume has no ACL" do
+      {_state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:revoke_volume_acl_entry, "ghost", {:uid, 1}},
           base_state()
         )
     end

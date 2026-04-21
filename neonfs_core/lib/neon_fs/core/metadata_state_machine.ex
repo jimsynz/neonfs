@@ -1,6 +1,6 @@
 defmodule NeonFS.Core.MetadataStateMachine do
   @moduledoc """
-  Ra state machine for cluster-wide metadata storage (v10).
+  Ra state machine for cluster-wide metadata storage (v11).
 
   Stores cluster-critical metadata with strong consistency via Raft consensus:
   - Service registry (nodes and their service types)
@@ -65,6 +65,10 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:set_current_key_version, volume_id :: binary(), version :: pos_integer()}
           | {:put_volume_acl, volume_id :: binary(), acl_data :: map()}
           | {:update_volume_acl, volume_id :: binary(), updates :: map()}
+          | {:delete_volume_acl, volume_id :: binary()}
+          | {:grant_volume_acl_entry, volume_id :: binary(), principal :: term(),
+             permissions :: [atom()]}
+          | {:revoke_volume_acl_entry, volume_id :: binary(), principal :: term()}
           | {:put_s3_credential, cred_data :: map()}
           | {:delete_s3_credential, access_key_id :: String.t()}
           | {:put_escalation, escalation_data :: map()}
@@ -359,6 +363,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
       |> Map.put_new(:kv, %{})
 
     {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 10, 11}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 10,
+      to: 11,
+      change: "add delete/grant/revoke volume_acl commands"
+    )
+
+    {state, :ok, []}
   end
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
@@ -809,6 +825,64 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  def apply(_meta, {:delete_volume_acl, volume_id}, state) do
+    new_acls = Map.delete(state.volume_acls, volume_id)
+    new_state = %{state | volume_acls: new_acls, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :delete_volume_acl],
+      %{version: new_state.version},
+      %{volume_id: volume_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:grant_volume_acl_entry, volume_id, principal, permissions}, state) do
+    case Map.get(state.volume_acls, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      acl_data ->
+        existing_entries = Map.get(acl_data, :entries, [])
+        new_entry = %{principal: principal, permissions: permissions}
+        updated_entries = upsert_acl_entry(existing_entries, principal, new_entry)
+        updated_acl_data = Map.put(acl_data, :entries, updated_entries)
+        new_acls = Map.put(state.volume_acls, volume_id, updated_acl_data)
+        new_state = %{state | volume_acls: new_acls, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :grant_volume_acl_entry],
+          %{version: new_state.version},
+          %{volume_id: volume_id}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:revoke_volume_acl_entry, volume_id, principal}, state) do
+    case Map.get(state.volume_acls, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      acl_data ->
+        existing_entries = Map.get(acl_data, :entries, [])
+        updated_entries = Enum.reject(existing_entries, &(&1.principal == principal))
+        updated_acl_data = Map.put(acl_data, :entries, updated_entries)
+        new_acls = Map.put(state.volume_acls, volume_id, updated_acl_data)
+        new_state = %{state | volume_acls: new_acls, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :revoke_volume_acl_entry],
+          %{version: new_state.version},
+          %{volume_id: volume_id}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
   # S3 credential commands (new in v9)
 
   def apply(_meta, {:put_s3_credential, cred_data}, state) do
@@ -1136,7 +1210,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 10
+  def version, do: 11
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -1259,4 +1333,11 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # nothing ever wrote production data through them).
   defp ensure_kv(%{kv: _} = state), do: state
   defp ensure_kv(state), do: Map.put(state, :kv, %{})
+
+  defp upsert_acl_entry(entries, principal, new_entry) do
+    case Enum.find_index(entries, &(&1.principal == principal)) do
+      nil -> entries ++ [new_entry]
+      idx -> List.replace_at(entries, idx, new_entry)
+    end
+  end
 end
