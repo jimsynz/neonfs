@@ -1,5 +1,9 @@
 import Config
 
+# Register custom metadata keys for structured logging in this
+# library. Consumers can extend this list in their own config.
+config :logger, :default_formatter, metadata: [:bind, :kind, :port, :reason]
+
 if Mix.env() in [:dev, :test] do
   config :git_ops,
     mix_project: Mix.Project.get!(),
