@@ -86,6 +86,27 @@ defmodule NeonFS.Core.IAM.Manager do
     end
   end
 
+  @doc """
+  Insert a user record, rejecting duplicates with the same email.
+
+  Email uniqueness is checked at the manager (Ra write boundary) rather
+  than only on the resource side, because Ash manual actions can't lean
+  on a data-layer uniqueness constraint. The check is serialised
+  through the GenServer so two concurrent registrations cannot both
+  observe a free slot.
+
+  `email` must already be normalised (downcased, trimmed) by the caller
+  — see `NeonFS.Core.IAM.User.normalise_email/1`.
+
+  Returns `:ok` on success, `{:error, :email_taken}` if another user
+  already owns that email, or `{:error, reason}` for Ra-layer failures.
+  """
+  @spec put_user(NeonFS.Core.IAM.User.t(), exclude :: binary() | nil) ::
+          :ok | {:error, :email_taken | term()}
+  def put_user(%NeonFS.Core.IAM.User{} = user, exclude \\ nil) do
+    GenServer.call(__MODULE__, {:put_user, user, exclude})
+  end
+
   # ——— Server callbacks ——————————————————————————————————————————
 
   @impl true
@@ -115,6 +136,18 @@ defmodule NeonFS.Core.IAM.Manager do
 
         {:error, reason} ->
           {:error, reason}
+      end
+
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:put_user, %NeonFS.Core.IAM.User{} = user, exclude}, _from, state) do
+    reply =
+      if email_taken?(user.email, exclude) do
+        {:error, :email_taken}
+      else
+        write_user(user)
       end
 
     {:reply, reply, state}
@@ -199,6 +232,36 @@ defmodule NeonFS.Core.IAM.Manager do
         category: category,
         reason: inspect(reason)
       )
+  end
+
+  # The map stored in ETS is a plain map (the User struct serialised
+  # via `Map.from_struct/1`), so we look up by email by scanning. The
+  # set is small (per-cluster user count), so an ETS scan is fine for
+  # the registration / password-change paths. If this ever becomes a
+  # hot-path bottleneck we'll add a second ETS table keyed by email.
+  defp email_taken?(email, exclude) do
+    :iam_users
+    |> :ets.tab2list()
+    |> Enum.any?(fn {id, record} ->
+      id != exclude and Map.get(record, :email) == email
+    end)
+  end
+
+  defp write_user(%NeonFS.Core.IAM.User{} = user) do
+    record = Map.from_struct(user)
+
+    case maybe_ra_command({:iam_put, :iam_users, user.id, record}) do
+      {:ok, :ok} ->
+        :ets.insert(:iam_users, {user.id, record})
+        :ok
+
+      {:error, :ra_not_available} ->
+        :ets.insert(:iam_users, {user.id, record})
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp maybe_ra_command(cmd) do

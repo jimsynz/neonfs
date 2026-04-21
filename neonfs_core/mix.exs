@@ -59,6 +59,7 @@ defmodule NeonFS.Core.MixProject do
     [
       {:ash, "~> 3.6"},
       {:bandit, "~> 1.5"},
+      {:bcrypt_elixir, "~> 3.3"},
       {:gen_stage, "~> 1.3"},
       {:logger_json, "~> 7.0"},
       {:msgpax, "~> 2.4"},
