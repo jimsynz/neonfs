@@ -62,7 +62,7 @@ defmodule NeonFS.S3.BackendTest do
     test "returns error for duplicate bucket" do
       Backend.create_bucket(@ctx, "my-bucket")
 
-      assert {:error, %S3Server.Error{code: :bucket_already_exists}} =
+      assert {:error, %Firkin.Error{code: :bucket_already_exists}} =
                Backend.create_bucket(@ctx, "my-bucket")
     end
   end
@@ -90,7 +90,7 @@ defmodule NeonFS.S3.BackendTest do
     end
 
     test "returns error for non-existent bucket" do
-      assert {:error, %S3Server.Error{code: :no_such_bucket}} =
+      assert {:error, %Firkin.Error{code: :no_such_bucket}} =
                Backend.head_bucket(@ctx, "missing")
     end
   end
@@ -100,20 +100,20 @@ defmodule NeonFS.S3.BackendTest do
       Backend.create_bucket(@ctx, "my-bucket")
       assert :ok = Backend.delete_bucket(@ctx, "my-bucket")
 
-      assert {:error, %S3Server.Error{code: :no_such_bucket}} =
+      assert {:error, %Firkin.Error{code: :no_such_bucket}} =
                Backend.head_bucket(@ctx, "my-bucket")
     end
 
     test "returns error for non-existent bucket" do
-      assert {:error, %S3Server.Error{code: :no_such_bucket}} =
+      assert {:error, %Firkin.Error{code: :no_such_bucket}} =
                Backend.delete_bucket(@ctx, "missing")
     end
 
     test "returns error for non-empty bucket" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "file.txt", "content", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "file.txt", "content", %Firkin.PutOpts{})
 
-      assert {:error, %S3Server.Error{code: :bucket_not_empty}} =
+      assert {:error, %Firkin.Error{code: :bucket_not_empty}} =
                Backend.delete_bucket(@ctx, "my-bucket")
     end
   end
@@ -125,7 +125,7 @@ defmodule NeonFS.S3.BackendTest do
     end
 
     test "returns error for non-existent bucket" do
-      assert {:error, %S3Server.Error{code: :no_such_bucket}} =
+      assert {:error, %Firkin.Error{code: :no_such_bucket}} =
                Backend.get_bucket_location(@ctx, "missing")
     end
   end
@@ -142,7 +142,7 @@ defmodule NeonFS.S3.BackendTest do
                  "my-bucket",
                  "hello.txt",
                  "hello world",
-                 %S3Server.PutOpts{}
+                 %Firkin.PutOpts{}
                )
 
       assert is_binary(etag)
@@ -150,18 +150,18 @@ defmodule NeonFS.S3.BackendTest do
     end
 
     test "returns error for non-existent bucket" do
-      assert {:error, %S3Server.Error{code: :no_such_bucket}} =
-               Backend.put_object(@ctx, "missing", "file.txt", "data", %S3Server.PutOpts{})
+      assert {:error, %Firkin.Error{code: :no_such_bucket}} =
+               Backend.put_object(@ctx, "missing", "file.txt", "data", %Firkin.PutOpts{})
     end
 
     test "stores client-provided content type" do
       Backend.create_bucket(@ctx, "my-bucket")
-      opts = %S3Server.PutOpts{content_type: "text/csv"}
+      opts = %Firkin.PutOpts{content_type: "text/csv"}
 
       assert {:ok, _etag} = Backend.put_object(@ctx, "my-bucket", "data.bin", "a,b,c", opts)
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "data.bin", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "data.bin", %Firkin.GetOpts{})
 
       assert object.content_type == "text/csv"
     end
@@ -175,11 +175,11 @@ defmodule NeonFS.S3.BackendTest do
                  "my-bucket",
                  "page.html",
                  "<html></html>",
-                 %S3Server.PutOpts{}
+                 %Firkin.PutOpts{}
                )
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "page.html", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "page.html", %Firkin.GetOpts{})
 
       assert object.content_type == "text/html"
     end
@@ -188,10 +188,10 @@ defmodule NeonFS.S3.BackendTest do
   describe "get_object/4" do
     test "retrieves a stored object" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "hello.txt", "hello world", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "hello.txt", "hello world", %Firkin.PutOpts{})
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "hello.txt", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "hello.txt", %Firkin.GetOpts{})
 
       assert Enum.into(object.body, <<>>) == "hello world"
       assert object.content_length == 11
@@ -202,20 +202,20 @@ defmodule NeonFS.S3.BackendTest do
     test "returns error for non-existent key" do
       Backend.create_bucket(@ctx, "my-bucket")
 
-      assert {:error, %S3Server.Error{code: :no_such_key}} =
-               Backend.get_object(@ctx, "my-bucket", "missing.txt", %S3Server.GetOpts{})
+      assert {:error, %Firkin.Error{code: :no_such_key}} =
+               Backend.get_object(@ctx, "my-bucket", "missing.txt", %Firkin.GetOpts{})
     end
 
     test "returns error for non-existent bucket" do
-      assert {:error, %S3Server.Error{code: :no_such_bucket}} =
-               Backend.get_object(@ctx, "missing", "file.txt", %S3Server.GetOpts{})
+      assert {:error, %Firkin.Error{code: :no_such_bucket}} =
+               Backend.get_object(@ctx, "missing", "file.txt", %Firkin.GetOpts{})
     end
 
     test "returns partial content for range request" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "data.txt", "0123456789ABCDEF", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "data.txt", "0123456789ABCDEF", %Firkin.PutOpts{})
 
-      opts = %S3Server.GetOpts{range: {5, 9}}
+      opts = %Firkin.GetOpts{range: {5, 9}}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "data.txt", opts)
       assert Enum.into(object.body, <<>>) == "56789"
@@ -225,9 +225,9 @@ defmodule NeonFS.S3.BackendTest do
 
     test "range request clamps to file size" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "short.txt", "hello", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "short.txt", "hello", %Firkin.PutOpts{})
 
-      opts = %S3Server.GetOpts{range: {2, 100}}
+      opts = %Firkin.GetOpts{range: {2, 100}}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "short.txt", opts)
       assert Enum.into(object.body, <<>>) == "llo"
@@ -237,9 +237,9 @@ defmodule NeonFS.S3.BackendTest do
 
     test "full request without range returns complete content" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "full.txt", "all content", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "full.txt", "all content", %Firkin.PutOpts{})
 
-      opts = %S3Server.GetOpts{range: nil}
+      opts = %Firkin.GetOpts{range: nil}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "full.txt", opts)
       assert Enum.into(object.body, <<>>) == "all content"
@@ -251,7 +251,7 @@ defmodule NeonFS.S3.BackendTest do
   describe "head_object/3" do
     test "returns metadata without body" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "hello.txt", "hello world", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "hello.txt", "hello world", %Firkin.PutOpts{})
 
       assert {:ok, meta} = Backend.head_object(@ctx, "my-bucket", "hello.txt")
       assert meta.size == 11
@@ -262,7 +262,7 @@ defmodule NeonFS.S3.BackendTest do
     test "returns error for non-existent key" do
       Backend.create_bucket(@ctx, "my-bucket")
 
-      assert {:error, %S3Server.Error{code: :no_such_key}} =
+      assert {:error, %Firkin.Error{code: :no_such_key}} =
                Backend.head_object(@ctx, "my-bucket", "missing.txt")
     end
   end
@@ -270,12 +270,12 @@ defmodule NeonFS.S3.BackendTest do
   describe "delete_object/3" do
     test "deletes an existing object" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "hello.txt", "hello world", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "hello.txt", "hello world", %Firkin.PutOpts{})
 
       assert :ok = Backend.delete_object(@ctx, "my-bucket", "hello.txt")
 
-      assert {:error, %S3Server.Error{code: :no_such_key}} =
-               Backend.get_object(@ctx, "my-bucket", "hello.txt", %S3Server.GetOpts{})
+      assert {:error, %Firkin.Error{code: :no_such_key}} =
+               Backend.get_object(@ctx, "my-bucket", "hello.txt", %Firkin.GetOpts{})
     end
 
     test "succeeds silently for non-existent key" do
@@ -287,8 +287,8 @@ defmodule NeonFS.S3.BackendTest do
   describe "delete_objects/3" do
     test "deletes multiple objects" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "a.txt", "a", %S3Server.PutOpts{})
-      Backend.put_object(@ctx, "my-bucket", "b.txt", "b", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "a.txt", "a", %Firkin.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "b.txt", "b", %Firkin.PutOpts{})
 
       assert {:ok, result} = Backend.delete_objects(@ctx, "my-bucket", ["a.txt", "b.txt"])
       assert length(result.deleted) == 2
@@ -299,7 +299,7 @@ defmodule NeonFS.S3.BackendTest do
   describe "copy_object/5" do
     test "copies an object within the same bucket" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "original.txt", "hello", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "original.txt", "hello", %Firkin.PutOpts{})
 
       assert {:ok, result} =
                Backend.copy_object(@ctx, "my-bucket", "copy.txt", "my-bucket", "original.txt")
@@ -308,7 +308,7 @@ defmodule NeonFS.S3.BackendTest do
       assert %DateTime{} = result.last_modified
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "copy.txt", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "copy.txt", %Firkin.GetOpts{})
 
       assert Enum.into(object.body, <<>>) == "hello"
     end
@@ -316,19 +316,19 @@ defmodule NeonFS.S3.BackendTest do
     test "rejects cross-bucket copy with not_implemented" do
       Backend.create_bucket(@ctx, "source")
       Backend.create_bucket(@ctx, "dest")
-      Backend.put_object(@ctx, "source", "file.txt", "data", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "source", "file.txt", "data", %Firkin.PutOpts{})
 
-      assert {:error, %S3Server.Error{code: :not_implemented}} =
+      assert {:error, %Firkin.Error{code: :not_implemented}} =
                Backend.copy_object(@ctx, "dest", "file.txt", "source", "file.txt")
 
-      assert {:error, %S3Server.Error{code: :no_such_key}} =
-               Backend.get_object(@ctx, "dest", "file.txt", %S3Server.GetOpts{})
+      assert {:error, %Firkin.Error{code: :no_such_key}} =
+               Backend.get_object(@ctx, "dest", "file.txt", %Firkin.GetOpts{})
     end
 
     test "preserves content type on copy" do
       Backend.create_bucket(@ctx, "my-bucket")
 
-      Backend.put_object(@ctx, "my-bucket", "original.bin", "csv,data", %S3Server.PutOpts{
+      Backend.put_object(@ctx, "my-bucket", "original.bin", "csv,data", %Firkin.PutOpts{
         content_type: "text/csv"
       })
 
@@ -342,7 +342,7 @@ defmodule NeonFS.S3.BackendTest do
                )
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "copy.bin", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "copy.bin", %Firkin.GetOpts{})
 
       assert object.content_type == "text/csv"
     end
@@ -350,7 +350,7 @@ defmodule NeonFS.S3.BackendTest do
     test "returns error for non-existent source" do
       Backend.create_bucket(@ctx, "my-bucket")
 
-      assert {:error, %S3Server.Error{code: :no_such_key}} =
+      assert {:error, %Firkin.Error{code: :no_such_key}} =
                Backend.copy_object(@ctx, "my-bucket", "copy.txt", "my-bucket", "missing.txt")
     end
   end
@@ -358,10 +358,10 @@ defmodule NeonFS.S3.BackendTest do
   describe "list_objects_v2/3" do
     test "lists objects in a bucket" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "a.txt", "a", %S3Server.PutOpts{})
-      Backend.put_object(@ctx, "my-bucket", "b.txt", "b", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "a.txt", "a", %Firkin.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "b.txt", "b", %Firkin.PutOpts{})
 
-      assert {:ok, result} = Backend.list_objects_v2(@ctx, "my-bucket", %S3Server.ListOpts{})
+      assert {:ok, result} = Backend.list_objects_v2(@ctx, "my-bucket", %Firkin.ListOpts{})
       assert result.name == "my-bucket"
       assert length(result.contents) == 2
     end
@@ -369,13 +369,13 @@ defmodule NeonFS.S3.BackendTest do
     test "returns empty list for empty bucket" do
       Backend.create_bucket(@ctx, "my-bucket")
 
-      assert {:ok, result} = Backend.list_objects_v2(@ctx, "my-bucket", %S3Server.ListOpts{})
+      assert {:ok, result} = Backend.list_objects_v2(@ctx, "my-bucket", %Firkin.ListOpts{})
       assert result.contents == []
     end
 
     test "returns error for non-existent bucket" do
-      assert {:error, %S3Server.Error{code: :no_such_bucket}} =
-               Backend.list_objects_v2(@ctx, "missing", %S3Server.ListOpts{})
+      assert {:error, %Firkin.Error{code: :no_such_bucket}} =
+               Backend.list_objects_v2(@ctx, "missing", %Firkin.ListOpts{})
     end
   end
 
@@ -415,7 +415,7 @@ defmodule NeonFS.S3.BackendTest do
       assert is_binary(result.etag)
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "big-file.bin", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "big-file.bin", %Firkin.GetOpts{})
 
       assert Enum.into(object.body, <<>>) == "part-one-part-two"
     end
@@ -429,7 +429,7 @@ defmodule NeonFS.S3.BackendTest do
       Backend.upload_part(@ctx, "my-bucket", "aborted.bin", upload_id, 1, "data")
       assert :ok = Backend.abort_multipart_upload(@ctx, "my-bucket", "aborted.bin", upload_id)
 
-      assert {:error, %S3Server.Error{code: :no_such_upload}} =
+      assert {:error, %Firkin.Error{code: :no_such_upload}} =
                Backend.upload_part(@ctx, "my-bucket", "aborted.bin", upload_id, 2, "more")
     end
 
@@ -456,17 +456,17 @@ defmodule NeonFS.S3.BackendTest do
     end
 
     test "upload_part returns error for non-existent upload" do
-      assert {:error, %S3Server.Error{code: :no_such_upload}} =
+      assert {:error, %Firkin.Error{code: :no_such_upload}} =
                Backend.upload_part(@ctx, "bucket", "key", "bad-id", 1, "data")
     end
 
     test "complete returns error for non-existent upload" do
-      assert {:error, %S3Server.Error{code: :no_such_upload}} =
+      assert {:error, %Firkin.Error{code: :no_such_upload}} =
                Backend.complete_multipart_upload(@ctx, "bucket", "key", "bad-id", [])
     end
 
     test "abort returns error for non-existent upload" do
-      assert {:error, %S3Server.Error{code: :no_such_upload}} =
+      assert {:error, %Firkin.Error{code: :no_such_upload}} =
                Backend.abort_multipart_upload(@ctx, "bucket", "key", "bad-id")
     end
   end
@@ -474,7 +474,7 @@ defmodule NeonFS.S3.BackendTest do
   describe "get_object/4 — streaming routing" do
     test "dispatches GET through NeonFS.Client.ChunkReader.read_file_stream" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "dp.txt", "over data plane", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "dp.txt", "over data plane", %Firkin.PutOpts{})
 
       test_pid = self()
 
@@ -484,7 +484,7 @@ defmodule NeonFS.S3.BackendTest do
       end)
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "dp.txt", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "dp.txt", %Firkin.GetOpts{})
 
       assert Enum.into(object.body, <<>>) == "over data plane"
 
@@ -501,7 +501,7 @@ defmodule NeonFS.S3.BackendTest do
         "my-bucket",
         "range.bin",
         "0123456789ABCDEF",
-        %S3Server.PutOpts{}
+        %Firkin.PutOpts{}
       )
 
       expect(ChunkReader, :read_file_stream, fn "my-bucket", "range.bin", opts ->
@@ -510,7 +510,7 @@ defmodule NeonFS.S3.BackendTest do
         MockCore.read_file_stream("my-bucket", "range.bin", opts)
       end)
 
-      opts = %S3Server.GetOpts{range: {5, 9}}
+      opts = %Firkin.GetOpts{range: {5, 9}}
 
       assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "range.bin", opts)
       assert Enum.into(object.body, <<>>) == "56789"
@@ -520,24 +520,24 @@ defmodule NeonFS.S3.BackendTest do
 
     test "maps ChunkReader :not_found to no_such_key" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %Firkin.PutOpts{})
 
       expect(ChunkReader, :read_file_stream, fn _, _, _ -> {:error, :not_found} end)
 
-      assert {:error, %S3Server.Error{code: :no_such_key}} =
-               Backend.get_object(@ctx, "my-bucket", "exists.txt", %S3Server.GetOpts{})
+      assert {:error, %Firkin.Error{code: :no_such_key}} =
+               Backend.get_object(@ctx, "my-bucket", "exists.txt", %Firkin.GetOpts{})
     end
 
     test "maps other ChunkReader errors to internal_error" do
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "exists.txt", "hi", %Firkin.PutOpts{})
 
       expect(ChunkReader, :read_file_stream, fn _, _, _ ->
         {:error, :no_available_locations}
       end)
 
-      assert {:error, %S3Server.Error{code: :internal_error}} =
-               Backend.get_object(@ctx, "my-bucket", "exists.txt", %S3Server.GetOpts{})
+      assert {:error, %Firkin.Error{code: :internal_error}} =
+               Backend.get_object(@ctx, "my-bucket", "exists.txt", %Firkin.GetOpts{})
     end
 
     test "core_stream_fn override replaces ChunkReader streaming" do
@@ -548,12 +548,12 @@ defmodule NeonFS.S3.BackendTest do
       on_exit(fn -> Application.delete_env(:neonfs_s3, :core_stream_fn) end)
 
       Backend.create_bucket(@ctx, "my-bucket")
-      Backend.put_object(@ctx, "my-bucket", "stream.txt", "streaming", %S3Server.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "stream.txt", "streaming", %Firkin.PutOpts{})
 
       reject(&ChunkReader.read_file_stream/3)
 
       assert {:ok, object} =
-               Backend.get_object(@ctx, "my-bucket", "stream.txt", %S3Server.GetOpts{})
+               Backend.get_object(@ctx, "my-bucket", "stream.txt", %Firkin.GetOpts{})
 
       assert Enum.into(object.body, <<>>) == "streaming"
     end

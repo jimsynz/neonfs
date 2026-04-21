@@ -1,6 +1,6 @@
 defmodule NeonFS.S3.HealthPlug do
   @moduledoc """
-  Plug that wraps S3Server.Plug with health endpoint and degraded mode handling.
+  Plug that wraps Firkin.Plug with health endpoint and degraded mode handling.
 
   Intercepts `GET /health` to return cluster health as JSON. For all other
   requests, checks cluster status and either blocks write operations with
@@ -17,7 +17,7 @@ defmodule NeonFS.S3.HealthPlug do
   @impl Plug
   @spec init(keyword()) :: map()
   def init(opts) do
-    inner_opts = S3Server.Plug.init(opts)
+    inner_opts = Firkin.Plug.init(opts)
     %{inner: inner_opts, core_nodes_fn: Keyword.get(opts, :core_nodes_fn)}
   end
 
@@ -37,7 +37,7 @@ defmodule NeonFS.S3.HealthPlug do
 
     case status.status do
       :ok ->
-        S3Server.Plug.call(conn, opts.inner)
+        Firkin.Plug.call(conn, opts.inner)
 
       degraded_or_unavailable when conn.method in @write_methods ->
         reason = status.reason || to_string(degraded_or_unavailable)
@@ -50,7 +50,7 @@ defmodule NeonFS.S3.HealthPlug do
       _degraded_or_unavailable ->
         conn
         |> Plug.Conn.put_resp_header("x-neonfs-status", status.reason || "degraded")
-        |> S3Server.Plug.call(opts.inner)
+        |> Firkin.Plug.call(opts.inner)
     end
   end
 

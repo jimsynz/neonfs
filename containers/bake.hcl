@@ -96,7 +96,6 @@ target "s3" {
   ]
   contexts = {
     "client": "./neonfs_client"
-    "s3_server": "./s3_server"
     "src": "./neonfs_s3"
     "base": "target:base"
     "cli": "target:cli"
@@ -135,7 +134,6 @@ target "omnibus" {
     "core": "./neonfs_core"
     "fuse": "./neonfs_fuse"
     "nfs": "./neonfs_nfs"
-    "s3_server": "./s3_server"
     "s3": "./neonfs_s3"
     "webdav_server": "./webdav_server"
     "webdav": "./neonfs_webdav"

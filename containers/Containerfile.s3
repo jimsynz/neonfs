@@ -2,7 +2,6 @@ FROM base AS deps
 
 # Copy only lockfiles and project config to cache the deps.get layer
 COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
-COPY --from=s3_server mix.exs mix.lock /workdir/s3_server/
 COPY --from=src mix.exs mix.lock /workdir/neonfs_s3/
 
 WORKDIR /workdir/neonfs_s3
@@ -13,7 +12,6 @@ ENV MIX_ENV=prod
 
 # Now copy the full source for compilation
 COPY --from=client . /workdir/neonfs_client
-COPY --from=s3_server . /workdir/s3_server
 COPY --from=src . /workdir/neonfs_s3
 
 RUN mix compile && mix release --overwrite

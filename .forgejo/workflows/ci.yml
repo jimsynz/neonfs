@@ -264,38 +264,6 @@ jobs:
         run: mix check
 
   # =========================================================================
-  # s3_server - Standalone S3-compatible server library (pure Elixir)
-  # =========================================================================
-  s3_server:
-    needs: resolve-versions
-    runs-on: docker
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_image }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Restore build cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            s3_server/deps
-            s3_server/_build
-          key: v3-build-s3_server-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('s3_server/mix.lock') }}
-          restore-keys: v3-build-s3_server-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: s3_server
-        run: |
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: s3_server
-        run: mix check
-
-  # =========================================================================
   # webdav_server - Standalone WebDAV server library (pure Elixir)
   # =========================================================================
   webdav_server:
@@ -344,8 +312,6 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
-            s3_server/deps
-            s3_server/_build
             neonfs_s3/deps
             neonfs_s3/_build
           key: v3-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_s3/mix.lock') }}

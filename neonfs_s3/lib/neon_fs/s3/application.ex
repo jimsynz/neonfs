@@ -3,7 +3,7 @@ defmodule NeonFS.S3.Application do
   OTP Application for neonfs_s3.
 
   Starts the S3 supervision tree including client infrastructure
-  and the Bandit HTTP server running S3Server.Plug.
+  and the Bandit HTTP server running Firkin.Plug.
   """
 
   use Application

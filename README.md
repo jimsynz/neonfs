@@ -53,7 +53,6 @@ Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They 
 | [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle of core + all interface packages |
 | [`neonfs_integration`](neonfs_integration/) | Peer-based multi-node integration test suite |
 | [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster management |
-| [`s3_server`](s3_server/) | Standalone S3-compatible HTTP server (pluggable backend, hex-releasable) |
 | [`webdav_server`](webdav_server/) | Standalone WebDAV server (pluggable backend, hex-releasable) |
 
 ### Dependency graph
@@ -62,7 +61,7 @@ Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They 
 neonfs_client  ← neonfs_core
 neonfs_client  ← neonfs_fuse
 neonfs_client  ← neonfs_nfs
-neonfs_client  ← neonfs_s3     ← s3_server
+neonfs_client  ← neonfs_s3     (firkin)
 neonfs_client  ← neonfs_webdav ← webdav_server
 neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_s3, neonfs_webdav  ← neonfs_omnibus
 all of the above                                                ← neonfs_integration

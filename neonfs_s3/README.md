@@ -8,7 +8,7 @@ communicating with core nodes via `NeonFS.Client.Router`.
 ## Architecture
 
 ```
-aws-cli / SDK ──── HTTP ──────→ neonfs_s3 (Bandit + S3Server.Plug)
+aws-cli / SDK ──── HTTP ──────→ neonfs_s3 (Bandit + Firkin.Plug)
                                      │
                                      │ NeonFS.Client.Router
                                      │ (Erlang distribution)

@@ -77,7 +77,7 @@ defmodule NeonFS.S3.HealthPlugTest do
       conn = call_health(:get, "/my-bucket/my-key", unhealthy_fn())
 
       assert get_resp_header(conn, "x-neonfs-status") == "no-core-nodes"
-      # Request reaches S3Server.Plug (403 from SigV4 auth proves delegation)
+      # Request reaches Firkin.Plug (403 from SigV4 auth proves delegation)
       assert conn.status != 503
     end
 
@@ -93,14 +93,14 @@ defmodule NeonFS.S3.HealthPlugTest do
     test "requests delegate without x-neonfs-status header" do
       conn = call_health(:get, "/my-bucket/my-key", healthy_fn())
 
-      # Reaches S3Server.Plug without degraded headers
+      # Reaches Firkin.Plug without degraded headers
       assert get_resp_header(conn, "x-neonfs-status") == nil
     end
 
     test "write operations delegate when healthy" do
       conn = call_health(:put, "/my-bucket/my-key", healthy_fn())
 
-      # Not blocked — reaches S3Server.Plug (any non-503 status)
+      # Not blocked — reaches Firkin.Plug (any non-503 status)
       assert conn.status != 503
       assert get_resp_header(conn, "retry-after") == nil
     end
@@ -115,12 +115,12 @@ defmodule NeonFS.S3.HealthPlugTest do
 
   defmodule StubBackend do
     @moduledoc false
-    @behaviour S3Server.Backend
+    @behaviour Firkin.Backend
 
     @impl true
     def lookup_credential(_access_key_id) do
       {:ok,
-       %S3Server.Credential{
+       %Firkin.Credential{
          access_key_id: "stub",
          secret_access_key: "stub-secret",
          identity: %{}
@@ -145,7 +145,7 @@ defmodule NeonFS.S3.HealthPlugTest do
     @impl true
     def get_object(_ctx, _bucket, _key, _opts) do
       {:ok,
-       %S3Server.Object{
+       %Firkin.Object{
          body: "data",
          content_type: "application/octet-stream",
          content_length: 4,
@@ -163,12 +163,12 @@ defmodule NeonFS.S3.HealthPlugTest do
 
     @impl true
     def delete_objects(_ctx, _bucket, _keys),
-      do: {:ok, %S3Server.DeleteResult{deleted: [], errors: []}}
+      do: {:ok, %Firkin.DeleteResult{deleted: [], errors: []}}
 
     @impl true
     def head_object(_ctx, _bucket, _key) do
       {:ok,
-       %S3Server.ObjectMeta{
+       %Firkin.ObjectMeta{
          key: "key",
          etag: "etag",
          size: 4,
@@ -180,7 +180,7 @@ defmodule NeonFS.S3.HealthPlugTest do
     @impl true
     def list_objects_v2(_ctx, _bucket, _opts) do
       {:ok,
-       %S3Server.ListResult{
+       %Firkin.ListResult{
          name: "bucket",
          prefix: nil,
          delimiter: nil,
@@ -194,7 +194,7 @@ defmodule NeonFS.S3.HealthPlugTest do
 
     @impl true
     def copy_object(_ctx, _dest_bucket, _dest_key, _src_bucket, _src_key) do
-      {:ok, %S3Server.CopyResult{etag: "etag", last_modified: DateTime.utc_now()}}
+      {:ok, %Firkin.CopyResult{etag: "etag", last_modified: DateTime.utc_now()}}
     end
   end
 end

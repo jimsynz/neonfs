@@ -1,6 +1,6 @@
 defmodule NeonFS.S3.Backend do
   @moduledoc """
-  S3Server.Backend implementation that maps S3 operations to NeonFS core calls.
+  Firkin.Backend implementation that maps S3 operations to NeonFS core calls.
 
   Buckets map 1:1 to NeonFS volumes. S3 object keys map to file paths within
   the volume. Control-plane operations go through `NeonFS.Client.Router`.
@@ -10,7 +10,7 @@ defmodule NeonFS.S3.Backend do
   core node is co-located on the S3 node's VM.
   """
 
-  @behaviour S3Server.Backend
+  @behaviour Firkin.Backend
 
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Client.Discovery
@@ -28,7 +28,7 @@ defmodule NeonFS.S3.Backend do
     case call_core(:lookup_s3_credential, [access_key_id]) do
       {:ok, %{secret_access_key: secret, identity: identity}} ->
         {:ok,
-         %S3Server.Credential{
+         %Firkin.Credential{
            access_key_id: access_key_id,
            secret_access_key: secret,
            identity: identity
@@ -51,7 +51,7 @@ defmodule NeonFS.S3.Backend do
         buckets =
           volumes
           |> Enum.map(fn vol ->
-            %S3Server.Bucket{name: vol.name, creation_date: vol.created_at}
+            %Firkin.Bucket{name: vol.name, creation_date: vol.created_at}
           end)
           |> Enum.sort_by(& &1.name)
 
@@ -66,7 +66,7 @@ defmodule NeonFS.S3.Backend do
   def create_bucket(_ctx, bucket) do
     case call_core(:create_volume, [bucket]) do
       {:ok, _volume} -> :ok
-      {:error, :already_exists} -> {:error, %S3Server.Error{code: :bucket_already_exists}}
+      {:error, :already_exists} -> {:error, %Firkin.Error{code: :bucket_already_exists}}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
@@ -112,7 +112,7 @@ defmodule NeonFS.S3.Backend do
         {:ok, file_meta_to_stream_object(meta, stream, read_opts)}
 
       {:error, :not_found} ->
-        {:error, %S3Server.Error{code: :no_such_key}}
+        {:error, %Firkin.Error{code: :no_such_key}}
 
       {:error, reason} ->
         {:error, internal_error(reason)}
@@ -199,7 +199,7 @@ defmodule NeonFS.S3.Backend do
     deleted = for {:deleted, entry} <- results, do: entry
     errors = for {:error, entry} <- results, do: entry
 
-    {:ok, %S3Server.DeleteResult{deleted: deleted, errors: errors}}
+    {:ok, %Firkin.DeleteResult{deleted: deleted, errors: errors}}
   end
 
   @impl true
@@ -210,7 +210,7 @@ defmodule NeonFS.S3.Backend do
           {:ok, file_meta_to_object_meta(meta, key)}
 
         {:error, :not_found} ->
-          {:error, %S3Server.Error{code: :no_such_key}}
+          {:error, %Firkin.Error{code: :no_such_key}}
 
         {:error, reason} ->
           {:error, internal_error(reason)}
@@ -240,7 +240,7 @@ defmodule NeonFS.S3.Backend do
   def copy_object(_ctx, dest_bucket, _dest_key, source_bucket, _source_key)
       when dest_bucket != source_bucket do
     {:error,
-     %S3Server.Error{
+     %Firkin.Error{
        code: :not_implemented,
        message: "Cross-bucket CopyObject is not supported"
      }}
@@ -253,7 +253,7 @@ defmodule NeonFS.S3.Backend do
          write_opts = content_type_write_opts(source_meta),
          {:ok, dest_meta} <- write_object_content(bucket, dest_key, content, write_opts) do
       {:ok,
-       %S3Server.CopyResult{
+       %Firkin.CopyResult{
          etag: compute_etag_from_meta(dest_meta),
          last_modified: DateTime.utc_now()
        }}
@@ -291,7 +291,7 @@ defmodule NeonFS.S3.Backend do
         end
 
       {:error, :not_found} ->
-        {:error, %S3Server.Error{code: :no_such_upload}}
+        {:error, %Firkin.Error{code: :no_such_upload}}
     end
   end
 
@@ -303,7 +303,7 @@ defmodule NeonFS.S3.Backend do
         do_upload_part_stream(upload, upload_id, part_path, part_number, body)
 
       {:error, :not_found} ->
-        {:error, %S3Server.Error{code: :no_such_upload}}
+        {:error, %Firkin.Error{code: :no_such_upload}}
     end
   end
 
@@ -413,7 +413,7 @@ defmodule NeonFS.S3.Backend do
           MultipartStore.delete(upload_id)
 
           {:ok,
-           %S3Server.CompleteResult{
+           %Firkin.CompleteResult{
              location: "/#{bucket}/#{key}",
              bucket: bucket,
              key: key,
@@ -424,7 +424,7 @@ defmodule NeonFS.S3.Backend do
         end
 
       {:error, :not_found} ->
-        {:error, %S3Server.Error{code: :no_such_upload}}
+        {:error, %Firkin.Error{code: :no_such_upload}}
     end
   end
 
@@ -438,14 +438,14 @@ defmodule NeonFS.S3.Backend do
         :ok
 
       {:error, :not_found} ->
-        {:error, %S3Server.Error{code: :no_such_upload}}
+        {:error, %Firkin.Error{code: :no_such_upload}}
     end
   end
 
   @impl true
   def list_multipart_uploads(_ctx, bucket, _opts) do
     uploads = MultipartStore.list_for_bucket(bucket)
-    {:ok, %S3Server.MultipartList{bucket: bucket, uploads: uploads}}
+    {:ok, %Firkin.MultipartList{bucket: bucket, uploads: uploads}}
   end
 
   @impl true
@@ -465,7 +465,7 @@ defmodule NeonFS.S3.Backend do
           |> Enum.sort_by(& &1.part_number)
 
         {:ok,
-         %S3Server.PartList{
+         %Firkin.PartList{
            bucket: upload.bucket,
            key: upload.key,
            upload_id: upload_id,
@@ -473,7 +473,7 @@ defmodule NeonFS.S3.Backend do
          }}
 
       {:error, :not_found} ->
-        {:error, %S3Server.Error{code: :no_such_upload}}
+        {:error, %Firkin.Error{code: :no_such_upload}}
     end
   end
 
@@ -493,7 +493,7 @@ defmodule NeonFS.S3.Backend do
     etag = compute_etag_from_meta(meta)
     content_length = stream_content_length(meta.size, read_opts)
 
-    %S3Server.Object{
+    %Firkin.Object{
       body: stream,
       content_type: meta_content_type(meta),
       content_length: content_length,
@@ -522,7 +522,7 @@ defmodule NeonFS.S3.Backend do
   defp ensure_bucket_exists(bucket) do
     case call_core(:get_volume, [bucket]) do
       {:ok, _volume} -> :ok
-      {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_bucket}}
+      {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_bucket}}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
@@ -530,7 +530,7 @@ defmodule NeonFS.S3.Backend do
   defp ensure_bucket_empty(bucket) do
     case call_core(:list_files_recursive, [bucket, "/"]) do
       {:ok, []} -> :ok
-      {:ok, _entries} -> {:error, %S3Server.Error{code: :bucket_not_empty}}
+      {:ok, _entries} -> {:error, %Firkin.Error{code: :bucket_not_empty}}
       {:error, :not_found} -> :ok
       {:error, reason} -> {:error, internal_error(reason)}
     end
@@ -539,7 +539,7 @@ defmodule NeonFS.S3.Backend do
   defp read_object_content(bucket, key, read_opts \\ []) do
     case ChunkReader.read_file(bucket, key, read_opts) do
       {:ok, content} -> {:ok, content}
-      {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_key}}
+      {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
@@ -554,7 +554,7 @@ defmodule NeonFS.S3.Backend do
   defp fetch_object_meta(bucket, key) do
     case call_core(:get_file_meta, [bucket, key]) do
       {:ok, meta} -> {:ok, meta}
-      {:error, :not_found} -> {:error, %S3Server.Error{code: :no_such_key}}
+      {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
@@ -571,7 +571,7 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp file_meta_to_object_meta(meta, key) do
-    %S3Server.ObjectMeta{
+    %Firkin.ObjectMeta{
       key: strip_leading_slash(key),
       etag: compute_etag_from_meta(meta),
       size: meta.size,
@@ -615,7 +615,7 @@ defmodule NeonFS.S3.Backend do
       |> Enum.map(fn meta ->
         key = strip_leading_slash(meta.path)
 
-        %S3Server.ObjectMeta{
+        %Firkin.ObjectMeta{
           key: key,
           etag: compute_etag_from_meta(meta),
           size: meta.size,
@@ -634,7 +634,7 @@ defmodule NeonFS.S3.Backend do
     truncated = length(contents) > max_keys
     contents = Enum.take(contents, max_keys)
 
-    %S3Server.ListResult{
+    %Firkin.ListResult{
       name: bucket,
       prefix: prefix,
       delimiter: delimiter,
@@ -647,7 +647,7 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp empty_list_result(bucket, opts) do
-    %S3Server.ListResult{
+    %Firkin.ListResult{
       name: bucket,
       prefix: opts.prefix,
       delimiter: opts.delimiter,
@@ -718,7 +718,7 @@ defmodule NeonFS.S3.Backend do
 
   defp internal_error(reason) do
     Logger.error("S3 backend error", reason: inspect(reason))
-    %S3Server.Error{code: :internal_error}
+    %Firkin.Error{code: :internal_error}
   end
 
   defp content_type_write_opts(%{content_type: ct}) when is_binary(ct), do: [content_type: ct]

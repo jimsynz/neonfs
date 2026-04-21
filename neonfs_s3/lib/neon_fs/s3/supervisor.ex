@@ -6,7 +6,7 @@ defmodule NeonFS.S3.Supervisor do
   - Client connectivity (Connection, Discovery, CostFunction)
   - Service registration with the core cluster
   - MultipartStore for tracking in-progress multipart uploads
-  - Bandit HTTP server running S3Server.Plug
+  - Bandit HTTP server running Firkin.Plug
   """
 
   use Supervisor
