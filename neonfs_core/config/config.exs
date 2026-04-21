@@ -280,8 +280,6 @@ if Mix.env() == :test do
     start_children?: false
 end
 
-config :neonfs_core, ash_domains: [NeonFS.Core.IAM]
-
 if Mix.env() in [:dev, :test] do
   config :git_ops,
     mix_project: Mix.Project.get!(),

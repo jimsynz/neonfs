@@ -353,17 +353,18 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts the IAM Manager with clean ETS tables.
+  Starts `NeonFS.Core.KVStore` with a clean ETS table.
+
+  Also tears down Ra — the store hydrates ETS from Ra on boot via
+  `handle_continue(:load_from_ra, ...)`, so state left over from an
+  earlier test would otherwise reload into a freshly-started store
+  and leak into the next test.
   """
-  def start_iam_manager do
-    stop_if_running(NeonFS.Core.IAM.Manager)
-
-    Enum.each(
-      [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings],
-      &cleanup_ets_table/1
-    )
-
-    start_supervised!(NeonFS.Core.IAM.Manager, restart: :temporary)
+  def start_kv_store do
+    stop_if_running(NeonFS.Core.KVStore)
+    cleanup_ets_table(:neonfs_kv)
+    stop_ra()
+    start_supervised!(NeonFS.Core.KVStore, restart: :temporary)
   end
 
   @doc """

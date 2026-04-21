@@ -43,8 +43,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 9" do
-      assert MetadataStateMachine.version() == 9
+    test "returns 10" do
+      assert MetadataStateMachine.version() == 10
     end
   end
 
@@ -166,9 +166,70 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
-  describe "IAM commands (v9)" do
-    defp v9_state do
+  describe "KV commands (v10)" do
+    defp v10_state do
       %{
+        data: %{},
+        chunks: %{},
+        files: %{},
+        services: %{},
+        volumes: %{},
+        stripes: %{},
+        segment_assignments: %{},
+        intents: %{},
+        active_intents_by_conflict_key: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        s3_credentials: %{},
+        escalations: %{},
+        kv: %{},
+        version: 0
+      }
+    end
+
+    test "kv_put / kv_delete round-trip" do
+      state = v10_state()
+
+      {after_put, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:kv_put, "alice", %{name: "Alice"}}, state)
+
+      assert after_put.kv == %{"alice" => %{name: "Alice"}}
+      assert after_put.version == state.version + 1
+
+      {after_delete, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:kv_delete, "alice"}, after_put)
+
+      assert after_delete.kv == %{}
+      assert after_delete.version == after_put.version + 1
+    end
+
+    test "kv_put stores arbitrary (non-map) values" do
+      state = v10_state()
+
+      {after_put, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:kv_put, "count", 42}, state)
+
+      assert after_put.kv == %{"count" => 42}
+    end
+
+    test "get_kv/1 returns the kv map" do
+      state = v10_state() |> Map.put(:kv, %{"k" => "v"})
+      assert MetadataStateMachine.get_kv(state) == %{"k" => "v"}
+    end
+
+    test "kv_put defensively re-creates a missing :kv on a pre-v10 snapshot" do
+      pre_v10 = v10_state() |> Map.delete(:kv)
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:kv_put, "k", %{v: 1}}, pre_v10)
+
+      assert new_state.kv == %{"k" => %{v: 1}}
+    end
+  end
+
+  describe "machine version migration 9 -> 10 (generic kv)" do
+    test "drops the four IAM tables and introduces the flat :kv map" do
+      old_state = %{
         data: %{},
         chunks: %{},
         files: %{},
@@ -186,49 +247,18 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         iam_groups: %{},
         iam_policies: %{},
         iam_identity_mappings: %{},
-        version: 0
+        version: 300
       }
-    end
-
-    test "iam_put/iam_delete round-trip across all four categories" do
-      state = v9_state()
-
-      for category <- [:iam_users, :iam_groups, :iam_policies, :iam_identity_mappings] do
-        {state_after_put, :ok, []} =
-          MetadataStateMachine.apply(%{}, {:iam_put, category, "k", %{v: 1}}, state)
-
-        assert Map.get(state_after_put, category) == %{"k" => %{v: 1}}
-        assert state_after_put.version == state.version + 1
-
-        {state_after_delete, :ok, []} =
-          MetadataStateMachine.apply(%{}, {:iam_delete, category, "k"}, state_after_put)
-
-        assert Map.get(state_after_delete, category) == %{}
-        assert state_after_delete.version == state_after_put.version + 1
-      end
-    end
-
-    test "get_iam_table/2 returns the requested category as a map" do
-      state =
-        v9_state()
-        |> Map.put(:iam_users, %{"u-1" => %{name: "alice"}})
-
-      assert MetadataStateMachine.get_iam_table(state, :iam_users) ==
-               %{"u-1" => %{name: "alice"}}
-
-      assert MetadataStateMachine.get_iam_table(state, :iam_groups) == %{}
-    end
-
-    test "iam_put defensively re-creates missing tables on a pre-v9 snapshot" do
-      # A snapshot captured under a v8-or-older state machine may lack
-      # the IAM maps entirely. Commands should not crash in that case —
-      # they should recreate the table.
-      pre_v9 = v9_state() |> Map.delete(:iam_users)
 
       {new_state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:iam_put, :iam_users, "k", %{v: 1}}, pre_v9)
+        MetadataStateMachine.apply(%{}, {:machine_version, 9, 10}, old_state)
 
-      assert Map.get(new_state, :iam_users) == %{"k" => %{v: 1}}
+      refute Map.has_key?(new_state, :iam_users)
+      refute Map.has_key?(new_state, :iam_groups)
+      refute Map.has_key?(new_state, :iam_policies)
+      refute Map.has_key?(new_state, :iam_identity_mappings)
+      assert new_state.kv == %{}
+      assert new_state.version == 300
     end
   end
 
