@@ -260,9 +260,16 @@ defmodule NeonFS.Core.WriteOperationTest do
     end
 
     test "deduplicates against existing batch-written content", %{volume: volume} do
+      # Both paths must use the same explicit chunk strategy — `:auto`
+      # resolves differently between batch (size-aware: fixed/256KB for
+      # 100KB) and streamed (always fastcdc with content-defined cuts),
+      # so `:auto` on both sides produces non-identical chunk sets for
+      # random payloads. See #329.
+      strategy = {:fixed, 32_768}
       data = :crypto.strong_rand_bytes(100_000)
 
-      {:ok, batch} = WriteOperation.write_file(volume.id, "/dedup-a.bin", data)
+      {:ok, batch} =
+        WriteOperation.write_file(volume.id, "/dedup-a.bin", data, chunk_strategy: strategy)
 
       chunks_before =
         :ets.tab2list(:chunk_index)
@@ -276,7 +283,8 @@ defmodule NeonFS.Core.WriteOperationTest do
             "" -> nil
             d when byte_size(d) <= 1024 -> {d, ""}
             d -> {binary_part(d, 0, 1024), binary_part(d, 1024, byte_size(d) - 1024)}
-          end)
+          end),
+          chunk_strategy: strategy
         )
 
       chunks_after =
