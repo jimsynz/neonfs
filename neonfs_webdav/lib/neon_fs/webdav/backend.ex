@@ -126,26 +126,18 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   @impl true
-  def put_content(_auth, [volume_name | rest] = path, body, opts) do
-    file_path = "/" <> Enum.join(rest, "/")
-    body_binary = IO.iodata_to_binary(body)
-    write_opts = put_content_opts(opts)
-
-    with {:ok, volume} <- resolve_volume(volume_name),
-         {:ok, meta} <- call_core(:write_file, [volume_name, file_path, body_binary, write_opts]) do
-      LockStore.promote_lock_null(path, meta.id)
-      {:ok, file_resource(volume_name, volume.id, rest, meta)}
-    else
-      {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :conflict, message: "Volume not found"}}
-
-      {:error, _reason} ->
-        {:error, internal_error()}
-    end
-  end
-
-  def put_content(_auth, [], _body, _opts) do
-    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot write to root"}}
+  def put_content(auth, path, body, opts) do
+    # Delegate to the streaming callback. The buffered-body callers have
+    # already materialised the bytes in memory; wrap them as a
+    # single-element stream so the write path can continue to be a
+    # single `write_file_streamed/4` call. The stream doesn't introduce
+    # any new buffering — the body is already one value.
+    #
+    # `body` is iodata from Plug; the streaming write path's chunker NIF
+    # requires a binary segment, so collapse iodata to a binary at the
+    # stream boundary.
+    stream = Stream.map([body], &IO.iodata_to_binary/1)
+    put_content_stream(auth, path, stream, opts)
   end
 
   @impl true
@@ -254,11 +246,11 @@ defmodule NeonFS.WebDAV.Backend do
          {dest_volume, dest_file_path} = split_dest(dest_path),
          :ok <- check_same_volume(src_volume, dest_volume),
          :ok <- check_overwrite(dest_volume, dest_file_path, overwrite?),
-         {:ok, content} <- call_core(:read_file, [src_volume, src_path, []]),
+         {:ok, %{stream: stream}} <- try_stream_read(src_volume, src_path, []),
          existed? = resource_exists?(dest_volume, dest_file_path),
          write_opts = content_type_opts(src_meta) ++ metadata_opts(src_meta),
          {:ok, _meta} <-
-           call_core(:write_file, [dest_volume, dest_file_path, content, write_opts]) do
+           streaming_write(dest_volume, dest_file_path, stream, write_opts) do
       if existed?, do: {:ok, :no_content}, else: {:ok, :created}
     else
       {:error, %WebdavServer.Error{}} = err -> err
