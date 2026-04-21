@@ -45,6 +45,7 @@ defmodule FuseServer.MixProject do
       {:rustler, "~> 0.37"},
 
       # dev/test
+      {:stream_data, "~> 1.1", only: [:dev, :test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},
