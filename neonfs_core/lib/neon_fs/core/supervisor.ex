@@ -236,6 +236,12 @@ defmodule NeonFS.Core.Supervisor do
           # ETS, backed by Ra (plumbing for the IAM epic, #135)
           NeonFS.Core.IAM.Manager,
 
+          # PendingWriteRecovery opens the pending-write DETS log and
+          # reclaims chunks orphaned by interrupted streaming writes
+          # on startup (#296). Must start AFTER ChunkIndex so the
+          # recovery sweep can call WriteOperation.abort_chunks/1.
+          NeonFS.Core.PendingWriteRecovery,
+
           # AuditLog records security-relevant events in bounded ETS
           NeonFS.Core.AuditLog,
 

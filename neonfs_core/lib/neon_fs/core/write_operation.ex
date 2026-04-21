@@ -30,6 +30,7 @@ defmodule NeonFS.Core.WriteOperation do
     FileMeta,
     KeyManager,
     LockManager,
+    PendingWriteLog,
     Replication,
     ResolvedLookupCache,
     Stripe,
@@ -284,7 +285,12 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp do_write_streamed(volume, path, stream, write_id, opts) do
     with {:ok, enc_ctx} <- resolve_encryption(volume) do
-      write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
+      # Open a persistent pending-write record so chunks can be
+      # reclaimed immediately on startup if the node crashes before
+      # the commit below. See `NeonFS.Core.PendingWriteLog`.
+      _ = PendingWriteLog.open_write(write_id, volume.id, path)
+
+      write_ctx = %{write_id: write_id, enc_ctx: enc_ctx, streaming: true}
       strategy = resolve_chunk_strategy(opts)
       compression_config = Keyword.get(opts, :compression, volume.compression)
 
@@ -295,10 +301,12 @@ defmodule NeonFS.Core.WriteOperation do
              create_file_metadata_with_size(volume.id, path, chunks, total_bytes, opts),
            :ok <- commit_chunks(write_id, chunks),
            :ok <- update_volume_stats_with_size(volume.id, total_bytes, chunks) do
+        PendingWriteLog.clear(write_id)
         {:ok, file_meta}
       else
         {:error, _reason} = error ->
           abort_chunks(write_id)
+          PendingWriteLog.clear(write_id)
           error
       end
     end
@@ -337,6 +345,9 @@ defmodule NeonFS.Core.WriteOperation do
     |> Enum.reduce_while({:ok, []}, fn {{data, hash, offset, size}, index}, {:ok, acc} ->
       case process_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
         {:ok, chunk_info} ->
+          # Persist the chunk hash against the in-flight write_id so
+          # a subsequent crash can reclaim it without waiting for GC.
+          _ = PendingWriteLog.record_chunk(write_ctx.write_id, chunk_info.hash)
           {:cont, {:ok, [chunk_info | acc]}}
 
         {:error, _reason} = err ->
@@ -1546,7 +1557,16 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp abort_chunks(write_id) do
+  @doc """
+  Abort every chunk that still references `write_id`. Removes the
+  write ref and, when no other refs remain, deletes the chunk from
+  both storage and the `ChunkIndex`. Safe to call multiple times.
+
+  Made public so `NeonFS.Core.PendingWriteRecovery` can drive orphan
+  cleanup on startup (#296).
+  """
+  @spec abort_chunks(write_id()) :: :ok
+  def abort_chunks(write_id) do
     uncommitted = ChunkIndex.list_uncommitted()
 
     to_abort =

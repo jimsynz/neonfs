@@ -119,7 +119,8 @@ config :logger, :default_formatter,
     :volume_id,
     :volume_name,
     :work_id,
-    :work_label
+    :work_label,
+    :write_id
   ]
 
 config :logger, :default_handler,
@@ -235,7 +236,8 @@ config :logger, :default_handler,
        :volume_id,
        :volume_name,
        :work_id,
-       :work_label
+       :work_label,
+       :write_id
      ]}
 
 config :neonfs_core,
