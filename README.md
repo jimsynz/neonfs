@@ -46,10 +46,12 @@ Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They 
 |---------|-------------|
 | [`neonfs_client`](neonfs_client/) | Shared types, service discovery, `Router`, `ChunkReader`, transport pooling |
 | [`neonfs_core`](neonfs_core/) | Storage engine, metadata, Ra consensus, cluster CA, policy |
+| [`neonfs_iam`](neonfs_iam/) | Identity and access management (users, groups, policies, identity mappings) |
 | [`neonfs_fuse`](neonfs_fuse/) | FUSE filesystem interface |
 | [`neonfs_nfs`](neonfs_nfs/) | NFSv3 server with NLM v4 advisory locking |
 | [`neonfs_s3`](neonfs_s3/) | S3-compatible HTTP server |
 | [`neonfs_webdav`](neonfs_webdav/) | WebDAV server with collection locking and dead properties |
+| [`neonfs_docker`](neonfs_docker/) | Docker / Podman VolumeDriver plugin (HTTP over Unix socket) |
 | [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle of core + all interface packages |
 | [`neonfs_integration`](neonfs_integration/) | Peer-based multi-node integration test suite |
 | [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster management |
@@ -58,12 +60,14 @@ Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They 
 
 ```
 neonfs_client  ← neonfs_core
+neonfs_client  ← neonfs_iam
 neonfs_client  ← neonfs_fuse
 neonfs_client  ← neonfs_nfs
-neonfs_client  ← neonfs_s3     (firkin)
-neonfs_client  ← neonfs_webdav (davy)
-neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_s3, neonfs_webdav  ← neonfs_omnibus
-all of the above                                                ← neonfs_integration
+neonfs_client  ← neonfs_s3       (firkin)
+neonfs_client  ← neonfs_webdav   (davy)
+neonfs_client  ← neonfs_docker
+neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_s3, neonfs_webdav, neonfs_docker  ← neonfs_omnibus
+all of the above                                                               ← neonfs_integration
 ```
 
 Interface packages have **no dependency** on `neonfs_core`. All communication with core nodes goes through `NeonFS.Client.Router`.
