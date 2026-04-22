@@ -655,12 +655,14 @@ defmodule NeonFS.Integration.PeerCluster do
   end
 
   defp wait_for_ra_ready(peer) do
-    # Wait for Ra system to be ready on the peer
-    # Try up to 30 times with 100ms delay (3 seconds total)
+    # Wait for Ra system to be ready on the peer. `:ra_system.fetch/1`
+    # returns the system's config map once Ra is up, or the atom
+    # `:undefined` before it is. Try up to 30 times with a 100ms
+    # delay (3 seconds total). See #429.
     Enum.reduce_while(1..30, :not_ready, fn _i, _acc ->
       try do
         case :peer.call(peer, :ra_system, :fetch, [:default]) do
-          {:ok, _} ->
+          system when is_map(system) ->
             {:halt, :ok}
 
           _ ->
