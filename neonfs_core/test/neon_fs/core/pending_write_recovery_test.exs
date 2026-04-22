@@ -100,4 +100,38 @@ defmodule NeonFS.Core.PendingWriteRecoveryTest do
       assert {:ok, _} = PendingWriteLog.get(write_id)
     end
   end
+
+  describe "crash durability" do
+    test "records survive a Process.exit(:kill) on the DETS owner", %{tmp_dir: tmp_dir} do
+      # The setup opens the log from the test process. Close it so the
+      # child process can become the sole owner and exercise a real
+      # crash path (no cooperative `terminate/2` unwind on kill -9).
+      :ok = PendingWriteLog.close()
+
+      parent = self()
+      write_id = WriteOperation.generate_write_id()
+
+      {pid, mref} =
+        spawn_monitor(fn ->
+          :ok = PendingWriteLog.open(meta_dir: tmp_dir)
+          :ok = PendingWriteLog.open_write(write_id, "vol-crash", "/crashed.bin")
+          :ok = PendingWriteLog.record_chunk(write_id, "hash-1")
+          send(parent, :synced)
+
+          receive do
+          end
+        end)
+
+      assert_receive :synced, 2_000
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^mref, :process, ^pid, :killed}, 2_000
+
+      # Re-open in the test process — the `:dets.sync/1` calls inside
+      # open_write/record_chunk must have made the record durable.
+      :ok = PendingWriteLog.open(meta_dir: tmp_dir)
+      assert {:ok, record} = PendingWriteLog.get(write_id)
+      assert record.write_id == write_id
+      assert record.chunk_hashes == ["hash-1"]
+    end
+  end
 end
