@@ -4,8 +4,13 @@ defmodule NeonFS.Core.KeyManager do
 
   Stateless functions for generating, wrapping, unwrapping, and rotating
   AES-256 volume keys. Volume keys are wrapped (encrypted) with the cluster
-  master key using AES-256-GCM before storage in Ra via MetadataStateMachine v6
+  master key using AES-256-GCM before storage in Ra via MetadataStateMachine
   commands.
+
+  Reads go through `RaSupervisor.local_query/2` — every core node has
+  the same committed state after `apply/3`, so the leader round-trip
+  of a consistent-query is unnecessary overhead for key lookups.
+  Writes still go through `RaSupervisor.command/2` (leader-routed).
 
   The master key is read from the local cluster.json on each operation to
   minimise exposure window — it is never cached in process state or ETS.
@@ -176,7 +181,7 @@ defmodule NeonFS.Core.KeyManager do
   end
 
   defp next_key_version(volume_id) do
-    case RaSupervisor.query(fn state ->
+    case RaSupervisor.local_query(fn state ->
            MetadataStateMachine.get_encryption_keys(state, volume_id)
          end) do
       {:ok, nil} ->
@@ -205,7 +210,7 @@ defmodule NeonFS.Core.KeyManager do
   end
 
   defp query_volume_encryption(volume_id) do
-    case RaSupervisor.query(&Map.get(&1.volumes, volume_id)) do
+    case RaSupervisor.local_query(&Map.get(&1.volumes, volume_id)) do
       {:ok, nil} -> {:error, :volume_not_found}
       {:ok, volume_data} -> {:ok, Map.get(volume_data, :encryption, %{})}
       {:error, _} = error -> error
@@ -213,7 +218,7 @@ defmodule NeonFS.Core.KeyManager do
   end
 
   defp get_wrapped_entry(volume_id, key_version) do
-    case RaSupervisor.query(fn state ->
+    case RaSupervisor.local_query(fn state ->
            MetadataStateMachine.get_encryption_keys(state, volume_id)
          end) do
       {:ok, nil} ->
