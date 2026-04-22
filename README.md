@@ -161,7 +161,7 @@ Interface nodes (FUSE, NFS, S3, WebDAV) run as separate Erlang nodes and connect
 
 Bootstrap a cluster by initialising the first core node, then join additional nodes using single-use invite tokens that carry a CSR for TLS certificate issuance.
 
-See [`docs/deployment.md`](docs/deployment.md) and [`docs/orchestration.md`](docs/orchestration.md) for examples. Full operator and user guides are in progress — see [the documentation issues](https://harton.dev/project-neon/neonfs/issues?q=documentation&type=issues&state=open).
+See [`docs/deployment.md`](docs/deployment.md) and [`docs/orchestration.md`](docs/orchestration.md) for examples, and [`docs/cli-reference.md`](docs/cli-reference.md) for the full `neonfs` command-line reference. Full operator and user guides are in progress — see [the documentation issues](https://harton.dev/project-neon/neonfs/issues?q=documentation&type=issues&state=open).
 
 ## Project resources
 
