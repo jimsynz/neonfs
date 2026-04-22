@@ -352,6 +352,44 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
+  Starts JobTracker with a per-test meta_dir.
+
+  Opens a fresh DETS jobs table at `<meta_dir>/job_tracker/jobs.dets`.
+  Pair with `start_job_task_supervisor/0` if the suite hasn't already
+  started it.
+  """
+  def start_job_tracker(tmp_dir) do
+    meta_dir = Path.join(tmp_dir, "job_tracker")
+    File.mkdir_p!(meta_dir)
+
+    start_job_task_supervisor()
+
+    start_supervised!(
+      {NeonFS.Core.JobTracker,
+       name: NeonFS.Core.JobTracker,
+       meta_dir: meta_dir,
+       task_supervisor: NeonFS.Core.JobTaskSupervisor}
+    )
+  end
+
+  @doc """
+  Starts the `Task.Supervisor` JobTracker uses for its step-loop tasks.
+  Safe to call multiple times.
+  """
+  def start_job_task_supervisor do
+    case Process.whereis(NeonFS.Core.JobTaskSupervisor) do
+      nil ->
+        start_supervised!(
+          {Task.Supervisor, name: NeonFS.Core.JobTaskSupervisor},
+          restart: :temporary
+        )
+
+      _pid ->
+        :ok
+    end
+  end
+
+  @doc """
   Starts the LockManager infrastructure (Registry + DynamicSupervisor).
   """
   def start_lock_manager do

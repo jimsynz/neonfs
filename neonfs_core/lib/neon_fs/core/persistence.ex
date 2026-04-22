@@ -99,7 +99,8 @@ defmodule NeonFS.Core.Persistence do
     cleanup_temp_files(meta_dir)
 
     # Define table configurations
-    # Only VolumeRegistry tables are persisted via DETS.
+    # Only VolumeRegistry and AuditLog tables are persisted via DETS here.
+    # JobTracker owns its own DETS table directly (#359).
     # ChunkIndex, FileIndex, StripeIndex load from BlobStore on startup (Phase 5).
     tables = [
       %{ets_table: :volumes_by_id, dets_path: Path.join(meta_dir, "volume_registry_by_id.dets")},
@@ -107,8 +108,7 @@ defmodule NeonFS.Core.Persistence do
         ets_table: :volumes_by_name,
         dets_path: Path.join(meta_dir, "volume_registry_by_name.dets")
       },
-      %{ets_table: :audit_log, dets_path: Path.join(meta_dir, "audit_log.dets")},
-      %{ets_table: :neonfs_jobs, dets_path: Path.join(meta_dir, "jobs.dets")}
+      %{ets_table: :audit_log, dets_path: Path.join(meta_dir, "audit_log.dets")}
     ]
 
     state = %{tables: tables, snapshot_interval_ms: snapshot_interval_ms}

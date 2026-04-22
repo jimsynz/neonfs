@@ -55,6 +55,8 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
     # Wait for StorageMetrics to finish computing initial usage
     :sys.get_state(NeonFS.Core.StorageMetrics)
 
+    start_job_tracker(tmp_dir)
+
     {:ok,
      drives: drives, drive1_path: drive1_path, drive2_path: drive2_path, drive3_path: drive3_path}
   end
@@ -103,12 +105,10 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
     end
 
     test "rejects when rebalance already running" do
-      # Create the ETS table and insert a mock running job
-      :ets.new(:neonfs_jobs, [:named_table, :set, :public])
-
+      # Insert a mock running job directly into the JobTracker's DETS table.
       job = Job.new(RebalanceRunner, %{tiers: [:hot], threshold: 0.10, batch_size: 50})
       job = %{job | status: :running}
-      :ets.insert(:neonfs_jobs, {job.id, job})
+      :dets.insert(:neonfs_jobs, {job.id, job})
 
       # Make drives imbalanced to pass earlier checks
       DriveRegistry.update_usage("drive1", 800_000)
@@ -121,16 +121,9 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
       DriveRegistry.update_usage("drive1", 0)
       DriveRegistry.update_usage("drive2", 0)
       DriveRegistry.update_usage("drive3", 0)
-    after
-      try do
-        :ets.delete(:neonfs_jobs)
-      rescue
-        _ -> :ok
-      end
     end
 
     test "includes standby drives in eligible set" do
-      :ets.new(:neonfs_jobs, [:named_table, :set, :public])
       DriveRegistry.update_state("drive2", :standby)
 
       # Imbalanced usage
@@ -157,17 +150,9 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
       DriveRegistry.update_usage("drive1", 0)
       DriveRegistry.update_usage("drive2", 0)
       DriveRegistry.update_usage("drive3", 0)
-    after
-      try do
-        :ets.delete(:neonfs_jobs)
-      rescue
-        _ -> :ok
-      end
     end
 
     test "passes with imbalanced drives" do
-      :ets.new(:neonfs_jobs, [:named_table, :set, :public])
-
       DriveRegistry.update_usage("drive1", 800_000)
       DriveRegistry.update_usage("drive2", 100_000)
       DriveRegistry.update_usage("drive3", 100_000)
@@ -194,17 +179,9 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
       DriveRegistry.update_usage("drive1", 0)
       DriveRegistry.update_usage("drive2", 0)
       DriveRegistry.update_usage("drive3", 0)
-    after
-      try do
-        :ets.delete(:neonfs_jobs)
-      rescue
-        _ -> :ok
-      end
     end
 
     test "filters to specific tier when given" do
-      :ets.new(:neonfs_jobs, [:named_table, :set, :public])
-
       DriveRegistry.update_usage("drive1", 800_000)
       DriveRegistry.update_usage("drive2", 100_000)
       DriveRegistry.update_usage("drive3", 100_000)
@@ -228,12 +205,6 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
       DriveRegistry.update_usage("drive1", 0)
       DriveRegistry.update_usage("drive2", 0)
       DriveRegistry.update_usage("drive3", 0)
-    after
-      try do
-        :ets.delete(:neonfs_jobs)
-      rescue
-        _ -> :ok
-      end
     end
 
     test "rejects non-existent tier" do
@@ -378,15 +349,7 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
 
   describe "rebalance_status/0" do
     test "returns :no_rebalance when no jobs exist" do
-      :ets.new(:neonfs_jobs, [:named_table, :set, :public])
-
       assert {:error, :no_rebalance} = ClusterRebalance.rebalance_status()
-    after
-      try do
-        :ets.delete(:neonfs_jobs)
-      rescue
-        _ -> :ok
-      end
     end
   end
 

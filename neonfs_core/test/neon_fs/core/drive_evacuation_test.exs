@@ -54,6 +54,8 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     # Wait for StorageMetrics to finish computing initial usage
     :sys.get_state(NeonFS.Core.StorageMetrics)
 
+    start_job_tracker(tmp_dir)
+
     {:ok, drives: drives, drive1_path: drive1_path, drive2_path: drive2_path}
   end
 
@@ -209,16 +211,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
 
   describe "evacuation_status/1" do
     test "returns :no_evacuation when no jobs exist" do
-      # Create the ETS table manually since JobTracker isn't started
-      :ets.new(:neonfs_jobs, [:named_table, :set, :public])
-
       assert {:error, :no_evacuation} = DriveEvacuation.evacuation_status("drive1")
-    after
-      try do
-        :ets.delete(:neonfs_jobs)
-      rescue
-        _ -> :ok
-      end
     end
   end
 

@@ -3,12 +3,19 @@ defmodule NeonFS.Core.JobTracker do
   Cluster-visible, persistent job tracker.
 
   Manages long-running background jobs (key rotation, drive evacuation, etc.)
-  with persistence via ETS + DETS snapshots. Jobs survive node restarts and
-  are visible across the cluster via `list_cluster/1`.
+  backed by a node-local DETS table. Jobs survive node restarts and are
+  visible across the cluster via `list_cluster/1`.
 
   Each job runs as a supervised task at `:low` BEAM priority. The step loop
   calls `job.type.step(job)` repeatedly, persisting after each step. On
   restart, incomplete jobs are automatically resumed.
+
+  ## Persistence
+
+  Writes go directly to a DETS file opened by the manager — there is no ETS
+  mirror. Public read functions (`get/1`, `list/1`) read DETS without going
+  through the GenServer, so reads stay concurrent. Writes are serialised
+  through the manager's `handle_call` / `handle_info` callbacks.
 
   ## Telemetry Events
 
@@ -25,7 +32,7 @@ defmodule NeonFS.Core.JobTracker do
 
   alias NeonFS.Core.{Job, Persistence, ServiceRegistry}
 
-  @ets_table :neonfs_jobs
+  @dets_table :neonfs_jobs
   @prune_interval_ms :timer.hours(1)
   @retention_days 7
   @max_terminal_jobs 100
@@ -68,7 +75,7 @@ defmodule NeonFS.Core.JobTracker do
   """
   @spec get(String.t()) :: {:ok, Job.t()} | {:error, :not_found}
   def get(job_id) when is_binary(job_id) do
-    case :ets.lookup(@ets_table, job_id) do
+    case :dets.lookup(@dets_table, job_id) do
       [{^job_id, job}] -> {:ok, job}
       [] -> {:error, :not_found}
     end
@@ -84,9 +91,8 @@ defmodule NeonFS.Core.JobTracker do
   """
   @spec list(keyword()) :: [Job.t()]
   def list(filters \\ []) do
-    @ets_table
-    |> :ets.tab2list()
-    |> Enum.map(fn {_id, job} -> job end)
+    @dets_table
+    |> all_jobs()
     |> apply_filters(filters)
     |> Enum.sort_by(& &1.created_at, {:desc, DateTime})
   end
@@ -114,15 +120,14 @@ defmodule NeonFS.Core.JobTracker do
 
   @impl true
   def init(opts) do
-    Process.flag(:trap_exit, true)
-
     meta_dir = Keyword.get(opts, :meta_dir, Persistence.meta_dir())
     task_supervisor = Keyword.get(opts, :task_supervisor, NeonFS.Core.JobTaskSupervisor)
 
-    # Create ETS table
-    :ets.new(@ets_table, [:named_table, :set, :public, read_concurrency: true])
-
+    File.mkdir_p!(meta_dir)
     dets_path = Path.join(meta_dir, "jobs.dets")
+
+    {:ok, @dets_table} =
+      :dets.open_file(@dets_table, type: :set, file: String.to_charlist(dets_path))
 
     state = %{
       dets_path: dets_path,
@@ -131,12 +136,11 @@ defmodule NeonFS.Core.JobTracker do
       task_supervisor: task_supervisor
     }
 
-    {:ok, state, {:continue, :restore_and_resume}}
+    {:ok, state, {:continue, :resume_incomplete_jobs}}
   end
 
   @impl true
-  def handle_continue(:restore_and_resume, state) do
-    state = restore_from_dets(state)
+  def handle_continue(:resume_incomplete_jobs, state) do
     state = resume_incomplete_jobs(state)
     schedule_prune()
     {:noreply, state}
@@ -162,7 +166,7 @@ defmodule NeonFS.Core.JobTracker do
   end
 
   def handle_call({:cancel, job_id}, _from, state) do
-    case :ets.lookup(@ets_table, job_id) do
+    case :dets.lookup(@dets_table, job_id) do
       [{^job_id, job}] when job.status in [:completed, :failed, :cancelled] ->
         {:reply, {:error, :already_terminal}, state}
 
@@ -210,13 +214,6 @@ defmodule NeonFS.Core.JobTracker do
     {:noreply, state}
   end
 
-  @impl true
-  def terminate(_reason, state) do
-    Logger.info("JobTracker shutting down, snapshotting jobs...")
-    Persistence.snapshot_table(@ets_table, state.dets_path)
-    :ok
-  end
-
   # Private — Cancellation hooks
 
   defp invoke_on_cancel(job, job_id) do
@@ -251,7 +248,7 @@ defmodule NeonFS.Core.JobTracker do
 
   defp run_job_loop(job) do
     # Check for cancellation before each step
-    case :ets.lookup(@ets_table, job.id) do
+    case :dets.lookup(@dets_table, job.id) do
       [{_, %Job{status: :cancelled}}] ->
         :cancelled
 
@@ -312,7 +309,7 @@ defmodule NeonFS.Core.JobTracker do
 
       {job_id, task_refs} ->
         # Mark job as failed if it wasn't already cancelled
-        case :ets.lookup(@ets_table, job_id) do
+        case :dets.lookup(@dets_table, job_id) do
           [{^job_id, %Job{status: status} = job}]
           when status not in [:cancelled, :completed, :failed] ->
             failed = %{
@@ -359,31 +356,20 @@ defmodule NeonFS.Core.JobTracker do
   # Private — Persistence
 
   defp persist_job(job) do
-    :ets.insert(@ets_table, {job.id, job})
+    :dets.insert(@dets_table, {job.id, job})
   end
 
-  defp restore_from_dets(state) do
-    if File.exists?(state.dets_path) do
-      case :dets.open_file(@ets_table, type: :set, file: String.to_charlist(state.dets_path)) do
-        {:ok, dets_ref} ->
-          :dets.to_ets(dets_ref, @ets_table)
-          count = :ets.info(@ets_table, :size)
-          :dets.close(dets_ref)
-          Logger.info("JobTracker restored jobs from DETS", count: count)
-
-        {:error, reason} ->
-          Logger.error("JobTracker failed to restore from DETS", reason: inspect(reason))
-      end
-    end
-
-    state
+  defp all_jobs(dets_table) do
+    dets_table
+    |> :dets.match_object(:_)
+    |> Enum.map(fn {_id, job} -> job end)
   end
 
   defp resume_incomplete_jobs(state) do
-    @ets_table
-    |> :ets.tab2list()
-    |> Enum.filter(fn {_id, job} -> job.status in [:running, :pending] end)
-    |> Enum.reduce(state, fn {_id, job}, acc ->
+    @dets_table
+    |> all_jobs()
+    |> Enum.filter(fn job -> job.status in [:running, :pending] end)
+    |> Enum.reduce(state, fn job, acc ->
       Logger.info("Resuming job", job_id: job.id, job_label: job.type.label())
       spawn_step_loop(acc, job)
     end)
@@ -395,33 +381,33 @@ defmodule NeonFS.Core.JobTracker do
     cutoff = DateTime.add(DateTime.utc_now(), -@retention_days, :day)
 
     terminal_jobs =
-      @ets_table
-      |> :ets.tab2list()
-      |> Enum.filter(fn {_id, job} -> Job.terminal?(job) end)
-      |> Enum.sort_by(fn {_id, job} -> job.completed_at || job.updated_at end, {:asc, DateTime})
+      @dets_table
+      |> all_jobs()
+      |> Enum.filter(&Job.terminal?/1)
+      |> Enum.sort_by(fn job -> job.completed_at || job.updated_at end, {:asc, DateTime})
 
     # Prune by age
-    Enum.each(terminal_jobs, fn {id, job} ->
+    Enum.each(terminal_jobs, fn job ->
       completed_at = job.completed_at || job.updated_at
 
       if DateTime.compare(completed_at, cutoff) == :lt do
-        :ets.delete(@ets_table, id)
+        :dets.delete(@dets_table, job.id)
       end
     end)
 
     # Prune by count (keep at most @max_terminal_jobs)
     remaining_terminal =
-      @ets_table
-      |> :ets.tab2list()
-      |> Enum.filter(fn {_id, job} -> Job.terminal?(job) end)
-      |> Enum.sort_by(fn {_id, job} -> job.completed_at || job.updated_at end, {:asc, DateTime})
+      @dets_table
+      |> all_jobs()
+      |> Enum.filter(&Job.terminal?/1)
+      |> Enum.sort_by(fn job -> job.completed_at || job.updated_at end, {:asc, DateTime})
 
     overflow = length(remaining_terminal) - @max_terminal_jobs
 
     if overflow > 0 do
       remaining_terminal
       |> Enum.take(overflow)
-      |> Enum.each(fn {id, _job} -> :ets.delete(@ets_table, id) end)
+      |> Enum.each(fn job -> :dets.delete(@dets_table, job.id) end)
     end
   end
 
