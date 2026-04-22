@@ -317,4 +317,31 @@ defmodule NeonFS.Docker.PlugTest do
       assert %{"Err" => "not found"} = decode(conn)
     end
   end
+
+  describe "GET /health" do
+    test "returns 503 with body when no checks are healthy" do
+      conn =
+        :get
+        |> conn("/health")
+        |> Plug.Conn.put_private(:health_checks,
+          stub: fn -> %{status: :unhealthy, reason: :stub} end
+        )
+        |> DockerPlug.call(DockerPlug.init([]))
+
+      assert conn.status == 503
+      assert %{"status" => "unhealthy", "checks" => checks} = decode(conn)
+      assert is_map(checks)
+    end
+
+    test "returns 200 when every check is healthy" do
+      conn =
+        :get
+        |> conn("/health")
+        |> Plug.Conn.put_private(:health_checks, stub: fn -> %{status: :healthy} end)
+        |> DockerPlug.call(DockerPlug.init([]))
+
+      assert conn.status == 200
+      assert %{"status" => "healthy"} = decode(conn)
+    end
+  end
 end

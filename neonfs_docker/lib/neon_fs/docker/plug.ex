@@ -16,10 +16,15 @@ defmodule NeonFS.Docker.Plug do
     * `:core_create_fn` — 2-arity function called as
       `core_create_fn.(name, opts)` in the `Create` handler to propagate
       the volume to NeonFS core. Default calls `NeonFS.Client.Router`.
+    * `:health_checks` — keyword list of `{name, fun}` entries passed
+      directly to `NeonFS.Client.HealthCheck.check/1` from the `/health`
+      route. Default reads from the global registry populated by
+      `NeonFS.Docker.HealthCheck.register_checks/0`.
   """
 
   use Plug.Router
 
+  alias NeonFS.Client.HealthCheck
   alias NeonFS.Docker.{MountTracker, VolumeStore}
 
   plug(Plug.Parsers,
@@ -30,6 +35,22 @@ defmodule NeonFS.Docker.Plug do
 
   plug(:match)
   plug(:dispatch)
+
+  ## Health
+
+  get "/health" do
+    report =
+      case conn.private[:health_checks] do
+        nil -> HealthCheck.check()
+        checks -> HealthCheck.check(checks: checks)
+      end
+
+    http_status = if report.status == :healthy, do: 200, else: 503
+
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(http_status, encode_health(report))
+  end
 
   ## Plugin activation
 
@@ -185,5 +206,11 @@ defmodule NeonFS.Docker.Plug do
     conn
     |> Plug.Conn.put_resp_content_type("application/vnd.docker.plugins.v1.2+json")
     |> Plug.Conn.send_resp(status, Jason.encode!(body))
+  end
+
+  defp encode_health(report) do
+    report
+    |> HealthCheck.normalise_for_json()
+    |> Jason.encode!()
   end
 end
