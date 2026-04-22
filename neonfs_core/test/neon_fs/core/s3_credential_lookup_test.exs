@@ -2,15 +2,19 @@ defmodule NeonFS.Core.S3CredentialLookupTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.S3CredentialManager
+  alias NeonFS.Core.{RaServer, S3CredentialManager}
 
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
-    stop_ra()
-    start_s3_credential_manager()
+
+    ensure_node_named()
+    start_ra()
+    :ok = RaServer.init_cluster()
+
     on_exit(fn -> cleanup_test_dirs() end)
+
     :ok
   end
 

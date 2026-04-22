@@ -243,9 +243,6 @@ defmodule NeonFS.Core.Supervisor do
           NeonFS.Transport.HandlerSupervisor,
           NeonFS.Transport.Listener,
 
-          # S3CredentialManager manages S3 access key lifecycle (ETS+Ra)
-          NeonFS.Core.S3CredentialManager,
-
           # Escalation expiry ticker — Escalation itself is stateless and
           # Ra-backed; the ticker periodically reaps overdue pending entries
           # and emits pending-count metrics.

@@ -193,6 +193,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
     |> Map.get({node, type})
   end
 
+  @doc """
+  Returns the S3 credential for the given access key ID, or nil.
+  """
+  @spec get_s3_credential(state(), String.t()) :: map() | nil
+  def get_s3_credential(state, access_key_id) do
+    state
+    |> Map.get(:s3_credentials, %{})
+    |> Map.get(access_key_id)
+  end
+
+  @doc """
+  Returns every S3 credential as an `access_key_id => cred` map.
+  """
+  @spec get_s3_credentials(state()) :: %{optional(String.t()) => map()}
+  def get_s3_credentials(state), do: Map.get(state, :s3_credentials, %{})
+
   # Ra machine callbacks
 
   @doc """

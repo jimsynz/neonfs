@@ -2,15 +2,19 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.S3CredentialManager
+  alias NeonFS.Core.{RaServer, S3CredentialManager}
 
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
-    stop_ra()
-    start_s3_credential_manager()
+
+    ensure_node_named()
+    start_ra()
+    :ok = RaServer.init_cluster()
+
     on_exit(fn -> cleanup_test_dirs() end)
+
     :ok
   end
 
@@ -90,28 +94,56 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
   end
 
   describe "list/1" do
-    test "returns all credentials without secrets" do
-      {:ok, _} = S3CredentialManager.create(%{user: "alice"})
-      {:ok, _} = S3CredentialManager.create(%{user: "bob"})
+    # Ra persists to disk across tests within a module (see
+    # Codebase-Patterns wiki), so each test namespaces its identity to
+    # make assertions robust against leftover state from earlier tests.
+    test "returns credentials without secrets, filtered by identity" do
+      id1 = %{user: "list_#{System.unique_integer([:positive])}_a"}
+      id2 = %{user: "list_#{System.unique_integer([:positive])}_b"}
 
-      credentials = S3CredentialManager.list()
+      {:ok, _} = S3CredentialManager.create(id1)
+      {:ok, _} = S3CredentialManager.create(id2)
 
-      assert length(credentials) == 2
-      assert Enum.all?(credentials, fn c -> not Map.has_key?(c, :secret_access_key) end)
+      listed = S3CredentialManager.list(identity: id1)
+
+      assert length(listed) == 1
+      assert Enum.all?(listed, fn c -> c.identity == id1 end)
+      assert Enum.all?(listed, fn c -> not Map.has_key?(c, :secret_access_key) end)
     end
 
-    test "filters by identity" do
-      {:ok, _} = S3CredentialManager.create(%{user: "alice"})
-      {:ok, _} = S3CredentialManager.create(%{user: "alice"})
-      {:ok, _} = S3CredentialManager.create(%{user: "bob"})
+    test "filters by identity and returns multiple matching entries" do
+      identity = %{user: "list_#{System.unique_integer([:positive])}"}
+      {:ok, _} = S3CredentialManager.create(identity)
+      {:ok, _} = S3CredentialManager.create(identity)
+      {:ok, _} = S3CredentialManager.create(%{user: "someone_else"})
 
-      alice_creds = S3CredentialManager.list(identity: %{user: "alice"})
-      assert length(alice_creds) == 2
-      assert Enum.all?(alice_creds, fn c -> c.identity == %{user: "alice"} end)
+      listed = S3CredentialManager.list(identity: identity)
+
+      assert length(listed) == 2
+      assert Enum.all?(listed, fn c -> c.identity == identity end)
     end
 
-    test "returns empty list when no credentials exist" do
-      assert S3CredentialManager.list() == []
+    test "filter by unknown identity returns an empty list" do
+      unknown = %{user: "list_unknown_#{System.unique_integer([:positive])}"}
+      assert [] = S3CredentialManager.list(identity: unknown)
+    end
+  end
+
+  describe "Ra unavailable" do
+    setup do
+      stop_ra()
+      :ok
+    end
+
+    test "writes return {:error, :ra_not_available}" do
+      assert {:error, :ra_not_available} = S3CredentialManager.create(%{user: "alice"})
+      assert {:error, :not_found} = S3CredentialManager.delete("NEONFS_UNKNOWN")
+      assert {:error, :not_found} = S3CredentialManager.rotate("NEONFS_UNKNOWN")
+    end
+
+    test "reads return :not_found / empty when the state is unreachable" do
+      assert {:error, :not_found} = S3CredentialManager.lookup("NEONFS_UNKNOWN")
+      assert [] = S3CredentialManager.list()
     end
   end
 end

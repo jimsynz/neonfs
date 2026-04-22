@@ -3,7 +3,7 @@ defmodule NeonFS.CoreTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core
-  alias NeonFS.Core.VolumeRegistry
+  alias NeonFS.Core.{RaServer, VolumeRegistry}
 
   @moduletag :tmp_dir
 
@@ -266,8 +266,12 @@ defmodule NeonFS.CoreTest do
   # --- S3 credential operations ---
 
   describe "lookup_s3_credential/1" do
+    # S3CredentialManager reads via Ra since #347; the outer setup
+    # stops Ra, so this describe re-enables it.
     setup do
-      start_s3_credential_manager()
+      ensure_node_named()
+      start_ra()
+      :ok = RaServer.init_cluster()
       :ok
     end
 
