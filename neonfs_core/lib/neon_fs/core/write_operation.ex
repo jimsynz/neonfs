@@ -211,9 +211,12 @@ defmodule NeonFS.Core.WriteOperation do
     result =
       with {:ok, volume} <- get_volume(volume_id),
            :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
-           # Streaming writes don't know the byte range up front; lock check
-           # uses {0, 0} which still validates exclusive/share semantics.
-           :ok <- check_lock(volume_id, path, client_ref, {0, 0}, opts) do
+           # Streaming writes don't know the byte range up front, so the
+           # lock check uses a conservative full-file range — any mandatory
+           # byte-range lock or deny-write share mode on the file conflicts.
+           # Callers that need range-precise locking must use
+           # `write_file_at/5` per chunk.
+           :ok <- check_lock(volume_id, path, client_ref, streamed_lock_range(), opts) do
         do_write_streamed(volume, path, stream, write_id, opts)
       end
 
@@ -395,6 +398,13 @@ defmodule NeonFS.Core.WriteOperation do
   """
   @spec lock_file_id(binary(), String.t()) :: binary()
   def lock_file_id(volume_id, path), do: "#{volume_id}:#{path}"
+
+  # Conservative full-file range for `write_file_streamed/4`'s lock check.
+  # `ranges_overlap?/2` uses `offset + length`; picking `9_223_372_036_854_775_807`
+  # (max signed 64-bit int) makes the range cover any byte position a caller
+  # could plausibly lock.
+  @streamed_lock_length 9_223_372_036_854_775_807
+  defp streamed_lock_range, do: {0, @streamed_lock_length}
 
   # ─── Offset Write (replicated) ─────────────────────────────────────────
 
