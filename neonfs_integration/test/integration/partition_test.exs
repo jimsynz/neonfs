@@ -40,7 +40,7 @@ defmodule NeonFS.Integration.PartitionTest do
           cluster,
           :node3,
           NeonFS.TestHelpers,
-          :write_file,
+          :write_file_from_binary,
           ["test-volume", "/should-fail.txt", "data"],
           120_000
         )
