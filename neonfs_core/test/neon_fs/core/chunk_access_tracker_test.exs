@@ -19,8 +19,7 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
       ArgumentError -> :ok
     end
 
-    dets_path = Path.join(tmp_dir, "chunk_access_tracker.dets")
-    {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0, dets_path: dets_path)
+    {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0)
 
     on_exit(fn ->
       case GenServer.whereis(ChunkAccessTracker) do
@@ -42,7 +41,7 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
       end
     end)
 
-    {:ok, dets_path: dets_path, tmp_dir: tmp_dir}
+    {:ok, tmp_dir: tmp_dir}
   end
 
   defp make_hash(n) do
@@ -283,9 +282,9 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
     end
   end
 
-  describe "DETS persistence" do
-    test "stats survive a process restart", %{dets_path: dets_path} do
-      hash = make_hash(:persist)
+  describe "persistence" do
+    test "stats are lost across a process restart" do
+      hash = make_hash(:fresh_start)
 
       for _ <- 1..7 do
         ChunkAccessTracker.record_access(hash)
@@ -293,55 +292,27 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
 
       assert ChunkAccessTracker.get_stats(hash).hourly == 7
 
-      # Stop the tracker (triggers terminate → DETS sync)
+      # Restarting the manager drops all stats — the table is ETS-only.
+      # Operators and the tiering heuristics both tolerate a cold start.
       GenServer.stop(GenServer.whereis(ChunkAccessTracker), :normal, 5_000)
+      {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0)
 
-      # Verify DETS file was written
-      assert File.exists?(dets_path)
-
-      # Restart with same DETS path
-      {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0, dets_path: dets_path)
-
-      # Stats should be restored
       stats = ChunkAccessTracker.get_stats(hash)
-      assert stats.hourly == 7
-      assert stats.daily == 7
-    end
-
-    test "DETS sync occurs on decay timer", %{dets_path: dets_path} do
-      hash = make_hash(:decay_sync)
-      ChunkAccessTracker.record_access(hash)
-
-      # Trigger decay (which also syncs to DETS)
-      send(GenServer.whereis(ChunkAccessTracker), :decay)
-      :sys.get_state(ChunkAccessTracker)
-
-      assert File.exists?(dets_path)
-
-      # Verify DETS contains the entry
-      {:ok, dets_ref} =
-        :dets.open_file(:test_verify_dets, type: :set, file: String.to_charlist(dets_path))
-
-      entries = :dets.match_object(dets_ref, :_)
-      :dets.close(dets_ref)
-
-      assert entries != []
-      assert Enum.any?(entries, fn {h, _hourly, _daily, _ts, _stale} -> h == hash end)
+      assert stats.hourly == 0
+      assert stats.daily == 0
+      assert stats.last_accessed == nil
     end
   end
 
   describe "table size management" do
-    test "inserting beyond max triggers pruning", %{tmp_dir: tmp_dir} do
+    test "inserting beyond max triggers pruning" do
       # Stop current tracker
       GenServer.stop(GenServer.whereis(ChunkAccessTracker), :normal, 5_000)
 
       # Start with a very small max
-      dets_path = Path.join(tmp_dir, "prune_test.dets")
-
       {:ok, _pid} =
         ChunkAccessTracker.start_link(
           decay_interval_ms: 0,
-          dets_path: dets_path,
           max_chunks: 10
         )
 
