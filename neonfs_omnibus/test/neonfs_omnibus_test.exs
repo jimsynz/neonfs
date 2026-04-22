@@ -27,6 +27,10 @@ defmodule NeonFS.Omnibus.ApplicationTest do
     test "NeonFS.WebDAV" do
       assert Code.ensure_loaded?(NeonFS.WebDAV)
     end
+
+    test "NeonFS.Docker" do
+      assert Code.ensure_loaded?(NeonFS.Docker)
+    end
   end
 
   describe "release configuration" do
@@ -45,6 +49,7 @@ defmodule NeonFS.Omnibus.ApplicationTest do
       assert apps[:neonfs_nfs] == :load
       assert apps[:neonfs_s3] == :load
       assert apps[:neonfs_webdav] == :load
+      assert apps[:neonfs_docker] == :load
     end
   end
 end

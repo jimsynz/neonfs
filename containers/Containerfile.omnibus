@@ -7,6 +7,7 @@ COPY --from=fuse mix.exs mix.lock /workdir/neonfs_fuse/
 COPY --from=nfs mix.exs mix.lock /workdir/neonfs_nfs/
 COPY --from=s3 mix.exs mix.lock /workdir/neonfs_s3/
 COPY --from=webdav mix.exs mix.lock /workdir/neonfs_webdav/
+COPY --from=docker mix.exs mix.lock /workdir/neonfs_docker/
 COPY --from=src mix.exs mix.lock /workdir/neonfs_omnibus/
 
 WORKDIR /workdir/neonfs_omnibus
@@ -22,6 +23,7 @@ COPY --from=fuse . /workdir/neonfs_fuse
 COPY --from=nfs . /workdir/neonfs_nfs
 COPY --from=s3 . /workdir/neonfs_s3
 COPY --from=webdav . /workdir/neonfs_webdav
+COPY --from=docker . /workdir/neonfs_docker
 COPY --from=src . /workdir/neonfs_omnibus
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
@@ -37,7 +39,7 @@ LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.title="neonfs-omnibus" \
-      org.opencontainers.image.description="NeonFS all-in-one container (core + FUSE + NFS + S3 + WebDAV)"
+      org.opencontainers.image.description="NeonFS all-in-one container (core + FUSE + NFS + S3 + WebDAV + Docker)"
 
 RUN apt-get update -y && \
   apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates libfuse3-4 fuse3 \

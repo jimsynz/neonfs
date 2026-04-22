@@ -135,6 +135,7 @@ target "omnibus" {
     "nfs": "./neonfs_nfs"
     "s3": "./neonfs_s3"
     "webdav": "./neonfs_webdav"
+    "docker": "./neonfs_docker"
     "src": "./neonfs_omnibus"
     "base": "target:base"
     "cli": "target:cli"
