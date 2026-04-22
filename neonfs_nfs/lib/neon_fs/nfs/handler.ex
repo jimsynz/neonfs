@@ -356,7 +356,7 @@ defmodule NeonFS.NFS.Handler do
       with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
-           {:ok, file} <- write_file(vol.id, child_path, <<>>, mode: @s_ifreg ||| mode),
+           {:ok, file} <- create_empty_file(vol.id, child_path, mode: @s_ifreg ||| mode),
            {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
         invalidate_after_create(state.cache_table, vol.name, parent_path, name, child_path, file)
         {:ok, build_reply("create", inode, file)}
@@ -376,7 +376,7 @@ defmodule NeonFS.NFS.Handler do
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
            :ok <- check_not_exists(vol.id, child_path),
-           {:ok, file} <- write_file(vol.id, child_path, <<>>),
+           {:ok, file} <- create_empty_file(vol.id, child_path),
            {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
         invalidate_after_create(state.cache_table, vol.name, parent_path, name, child_path, file)
         {:ok, build_reply("create", inode, file)}
@@ -395,7 +395,7 @@ defmodule NeonFS.NFS.Handler do
       with {:ok, vol} <- resolve_volume(volume_id_bytes, state),
            {:ok, parent_path} <- inode_path(parent_inode),
            child_path <- Path.join(parent_path, name),
-           {:ok, file} <- write_file(vol.id, child_path, <<>>, mode: @s_ifdir ||| 0o755),
+           {:ok, file} <- create_empty_file(vol.id, child_path, mode: @s_ifdir ||| 0o755),
            {:ok, inode} <- InodeTable.allocate_inode(vol.name, child_path) do
         invalidate_after_create(state.cache_table, vol.name, parent_path, name, child_path, file)
         {:ok, build_reply("create", inode, file)}
@@ -968,8 +968,12 @@ defmodule NeonFS.NFS.Handler do
     ChunkReader.read_file(volume_name, path, opts)
   end
 
-  defp write_file(volume, path, data, opts \\ []) do
-    core_call(NeonFS.Core.WriteOperation, :write_file, [volume, path, data, opts])
+  # Create an empty file or directory entry. NFS `create` / `create_exclusive`
+  # / `mkdir` all land here — they only ever produce an empty file on core,
+  # so we go through `write_file_at/5` with offset 0 rather than the
+  # streaming API (which doesn't support erasure-coded volumes yet).
+  defp create_empty_file(volume, path, opts \\ []) do
+    core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume, path, 0, <<>>, opts])
   end
 
   ## Errno Mapping

@@ -298,7 +298,7 @@ defmodule NeonFS.FUSE.Handler do
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: file_mode),
+         {:ok, _file} <- create_empty_file(volume_id, child_path, mode: file_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       # Allocate file handle (for now, just use inode as handle)
       fh = inode
@@ -326,7 +326,7 @@ defmodule NeonFS.FUSE.Handler do
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <- write_file(volume_id, child_path, <<>>, mode: dir_mode),
+         {:ok, _file} <- create_empty_file(volume_id, child_path, mode: dir_mode),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "directory", "fh" => 0}}
     else
@@ -834,8 +834,12 @@ defmodule NeonFS.FUSE.Handler do
     ChunkReader.read_file(volume_id, path, opts)
   end
 
-  defp write_file(volume_id, path, data, opts) do
-    core_call(NeonFS.Core.WriteOperation, :write_file, [volume_id, path, data, opts])
+  # Create an empty file or directory entry. FUSE `create`/`mkdir` both
+  # land here — they only ever produce an empty file on core, so we go
+  # through `write_file_at/5` with offset 0 rather than the streaming
+  # API (which doesn't support erasure-coded volumes yet).
+  defp create_empty_file(volume_id, path, opts) do
+    core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume_id, path, 0, <<>>, opts])
   end
 
   # Convert a DateTime to a POSIX timestamp (seconds since epoch)
