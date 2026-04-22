@@ -12,32 +12,49 @@ defmodule NeonFS.TestHelpers do
   alias NeonFS.Core.WriteOperation
 
   @doc """
-  Write a file to a volume with the given content.
+  Write a binary to a volume under `path`, creating the file if necessary.
 
-  Returns `{:ok, file_id}` on success.
+  The helper branches on the volume's durability type so integration
+  tests can exercise both replicated and erasure-coded volumes:
+
+    * replicated → `WriteOperation.write_file_streamed/4` with a
+      single-chunk `[content]` stream (empty content collapses to `[]`).
+    * erasure    → `WriteOperation.write_file_at/5` with `offset: 0`,
+      which routes through the existing `erasure_write` whole-binary
+      path (streaming erasure writes are out of scope for #195).
+
+  Returns whatever the underlying `WriteOperation` returns.
   """
-  @spec write_file(String.t(), String.t(), binary()) :: {:ok, term()} | {:error, term()}
-  def write_file(volume_name, path, content) when is_binary(content) do
+  @spec write_file_from_binary(String.t(), String.t(), binary(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def write_file_from_binary(volume_name, path, content, opts \\ []) when is_binary(content) do
     require Logger
 
-    # Lookup volume by name
     result =
       case VolumeRegistry.get_by_name(volume_name) do
         {:ok, volume} ->
-          # Write the file using the write operation
-          WriteOperation.write_file(volume.id, path, content)
+          do_write_binary(volume, path, content, opts)
 
         {:error, _} = error ->
           error
       end
 
-    Logger.info("TestHelpers.write_file returned",
+    Logger.info("TestHelpers.write_file_from_binary returned",
       volume_name: volume_name,
       path: path,
       result: inspect(result)
     )
 
     result
+  end
+
+  defp do_write_binary(%{durability: %{type: :replicate}} = volume, path, content, opts) do
+    stream = if content == <<>>, do: [], else: [content]
+    WriteOperation.write_file_streamed(volume.id, path, stream, opts)
+  end
+
+  defp do_write_binary(%{durability: %{type: :erasure}} = volume, path, content, opts) do
+    WriteOperation.write_file_at(volume.id, path, 0, content, opts)
   end
 
   @doc """

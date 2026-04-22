@@ -42,7 +42,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "ec-volume",
           "/basic.bin",
           test_data
@@ -65,7 +65,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       test_data = :crypto.strong_rand_bytes(512)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "ec-volume",
           "/small.bin",
           test_data
@@ -86,7 +86,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       test_data = :crypto.strong_rand_bytes(100 * 1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "ec-volume",
           "/large.bin",
           test_data
@@ -121,7 +121,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "ec-volume",
           "/degrade.bin",
           test_data
@@ -150,7 +150,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "ec-volume",
           "/critical.bin",
           test_data
@@ -183,7 +183,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "ec-volume",
           "/repair.bin",
           test_data
@@ -231,7 +231,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "gc-ec-volume",
           "/gc-test.bin",
           test_data
@@ -276,14 +276,14 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
       # Write to both volumes
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "rep-volume",
           "/rep.bin",
           rep_data
         ])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "ec-volume",
           "/ec.bin",
           ec_data

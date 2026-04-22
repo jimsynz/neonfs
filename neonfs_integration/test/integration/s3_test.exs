@@ -364,7 +364,7 @@ defmodule NeonFS.Integration.S3Test do
       test_data = :crypto.strong_rand_bytes(16 * 1024)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :write_file_from_binary, [
           "s3t-cross",
           "/direct-write.bin",
           test_data

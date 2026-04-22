@@ -35,7 +35,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
       for {path, content} <- files do
         {:ok, _} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "dir-vol",
             path,
             content
@@ -92,7 +92,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "atomic-vol",
               "/atomic-test.txt",
               "atomic content"
@@ -184,7 +184,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
       # Now creating a file at the same path should succeed
       # (expired intent is overwritten by new intent)
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "crash-vol",
           "/crash_test.txt",
           "recovered content"
@@ -326,7 +326,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "ec-quorum-vol",
               "/erasure.bin",
               test_data
@@ -390,7 +390,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
           :node2,
           rep_volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "rep-vol",
               "/rep.bin",
               rep_data
@@ -406,7 +406,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
           :node2,
           ec_volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "ec-vol",
               "/ec.bin",
               ec_data

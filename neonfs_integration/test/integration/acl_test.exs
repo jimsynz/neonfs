@@ -54,7 +54,7 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Write as root (UID 0) should succeed
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "acl-volume",
           "/readable.bin",
           "test data"
@@ -172,7 +172,7 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Write a file as root so there's something to read
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "acl-volume",
           "/gid-test.bin",
           "gid data"
@@ -300,7 +300,7 @@ defmodule NeonFS.Integration.ACLTest do
     test "default ACL inheritance via parent file", %{cluster: cluster, volume_id: vid} do
       # Write a parent file that will hold default_acl
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "acl-volume",
           "/parent.bin",
           "parent"

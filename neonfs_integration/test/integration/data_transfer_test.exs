@@ -194,7 +194,7 @@ defmodule NeonFS.Integration.DataTransferTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "data-plane-vol",
               "/test.txt",
               "data plane replication test content"
@@ -246,7 +246,7 @@ defmodule NeonFS.Integration.DataTransferTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "remote-read-vol",
               "/remote-read.txt",
               content
@@ -312,7 +312,7 @@ defmodule NeonFS.Integration.DataTransferTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "failure-vol",
               "/before.txt",
               "before node failure"
@@ -333,7 +333,7 @@ defmodule NeonFS.Integration.DataTransferTest do
 
       # Write more data with node3 down — replication uses remaining nodes
       assert_eventually timeout: 60_000 do
-        case PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        case PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
                "failure-vol",
                "/after.txt",
                "after node failure"
@@ -389,7 +389,7 @@ defmodule NeonFS.Integration.DataTransferTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "ec-data-plane-vol",
               "/ec-test.bin",
               content

@@ -48,7 +48,7 @@ defmodule NeonFS.Integration.QuorumTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "consistency-vol",
               "/quorum.bin",
               test_data
@@ -98,7 +98,7 @@ defmodule NeonFS.Integration.QuorumTest do
             :node2,
             volume.id,
             fn ->
-              PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
                 "multi-vol",
                 path,
                 content
@@ -148,7 +148,7 @@ defmodule NeonFS.Integration.QuorumTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "failure-vol",
               "/before.txt",
               test_data
@@ -282,7 +282,7 @@ defmodule NeonFS.Integration.QuorumTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "lifecycle-vol",
               "/lifecycle.bin",
               test_data
@@ -368,7 +368,7 @@ defmodule NeonFS.Integration.QuorumTest do
           :node2,
           volume.id,
           fn ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "coherence-vol",
               "/doomed.bin",
               "payload"

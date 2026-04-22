@@ -30,7 +30,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       test_data = :crypto.strong_rand_bytes(100 * 1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "io-test-vol",
           "/scheduler_test.bin",
           test_data
@@ -52,7 +52,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       test_data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "io-test-vol",
           "/scheduler_large.bin",
           test_data
@@ -78,14 +78,14 @@ defmodule NeonFS.Integration.IOSchedulerTest do
 
       for i <- 1..op_count do
         {:ok, _} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "io-weight-low",
             "/wfq_low_#{i}.txt",
             "low-weight-data-#{i}"
           ])
 
         {:ok, _} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "io-weight-high",
             "/wfq_high_#{i}.txt",
             "high-weight-data-#{i}"
@@ -146,7 +146,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
         # Scheduler may not be running if no drives are registered (test env).
         # Verify that submit_sync falls back to direct execution.
         {:ok, _} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "io-test-vol",
             "/status_fallback.txt",
             "fallback works"
@@ -191,7 +191,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
     test "operations succeed after drive worker restart", %{cluster: cluster} do
       # Write a file to confirm the scheduler is functional
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "io-test-vol",
           "/pre_crash.txt",
           "before crash"
@@ -223,7 +223,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
 
           # Operations should work after worker recovery
           {:ok, _} =
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "io-test-vol",
               "/post_crash.txt",
               "after crash"
@@ -241,7 +241,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
           # No drive workers registered (test env without physical drives).
           # Verify the scheduler's direct-execution fallback still works.
           {:ok, _} =
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "io-test-vol",
               "/fallback.txt",
               "fallback data"
@@ -277,7 +277,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
         test_files
         |> Task.async_stream(
           fn {path, data} ->
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "io-test-vol",
               path,
               data
@@ -329,7 +329,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       test_data = :crypto.strong_rand_bytes(10 * 1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "repl-vol",
           "/repl_test.bin",
           test_data
@@ -375,7 +375,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       # Write all files
       for {path, data} <- all_files do
         {:ok, _} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "io-test-vol",
             path,
             data
