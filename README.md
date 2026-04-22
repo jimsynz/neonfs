@@ -150,7 +150,7 @@ Targets live in `containers/bake.hcl`:
 
 ```bash
 PLATFORMS='linux/amd64' docker buildx bake -f containers/bake.hcl --load \
-  base core fuse nfs s3 webdav omnibus cli
+  base core fuse nfs s3 webdav docker omnibus cli
 ```
 
 `--load` is required for local testing; it loads images into the local Docker daemon rather than pushing to a registry.
