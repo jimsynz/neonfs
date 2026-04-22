@@ -37,4 +37,4 @@ excludes =
     [:loopback]
   end
 
-ExUnit.start(capture_log: true, exclude: excludes)
+ExUnit.start(capture_log: true, exclude: excludes, slowest: 10)
