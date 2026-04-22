@@ -34,7 +34,8 @@ defmodule NeonFS.Core.SystemVolume do
   @spec write(String.t(), binary()) :: :ok | {:error, term()}
   def write(path, content) do
     with {:ok, volume} <- get_system_volume(),
-         {:ok, _file_meta} <- WriteOperation.write_file(volume.id, path, content) do
+         {:ok, _file_meta} <-
+           WriteOperation.write_file_streamed(volume.id, path, stream_for(content)) do
       :ok
     end
   end
@@ -58,7 +59,7 @@ defmodule NeonFS.Core.SystemVolume do
           {:error, %{class: :not_found}} -> <<>>
         end
 
-      case WriteOperation.write_file(volume.id, path, existing <> content) do
+      case WriteOperation.write_file_streamed(volume.id, path, stream_for(existing <> content)) do
         {:ok, _file_meta} -> :ok
         {:error, _reason} = error -> error
       end
@@ -112,6 +113,12 @@ defmodule NeonFS.Core.SystemVolume do
   end
 
   # Private
+
+  # Wrap a single binary as an Enumerable for `write_file_streamed/4`.
+  # Empty binaries collapse to `[]` so the streaming pipeline skips the
+  # chunker entirely and produces an empty file.
+  defp stream_for(<<>>), do: []
+  defp stream_for(content) when is_binary(content), do: [content]
 
   defp get_system_volume do
     case VolumeRegistry.get_by_name(@volume_name) do

@@ -242,43 +242,28 @@ defmodule NeonFS.NFS.MockCore do
   end
 
   defp dispatch(table, NeonFS.Core.WriteOperation, :write_file_at, [volume, path, offset, data]) do
-    existing_data =
-      case :ets.lookup(table, {:data, volume, path}) do
-        [{_, d}] -> d
-        [] -> <<>>
-      end
+    dispatch(table, NeonFS.Core.WriteOperation, :write_file_at, [volume, path, offset, data, []])
+  end
 
-    padded =
-      if offset > byte_size(existing_data) do
-        existing_data <> :binary.copy(<<0>>, offset - byte_size(existing_data))
-      else
-        existing_data
-      end
+  defp dispatch(table, NeonFS.Core.WriteOperation, :write_file_at, [
+         volume,
+         path,
+         offset,
+         data,
+         opts
+       ]) do
+    merged = merge_offset_write(lookup_file_data(table, volume, path), offset, data)
+    existing_file = lookup_existing_file(table, volume, path)
+    mode = Keyword.get(opts, :mode, Map.get(existing_file, :mode, @s_ifreg ||| 0o644))
+    file_id = Map.get_lazy(existing_file, :id, fn -> next_id(table) end)
 
-    write_end = offset + byte_size(data)
-    before = if offset > 0, do: binary_part(padded, 0, offset), else: <<>>
-
-    after_data =
-      if write_end < byte_size(padded) do
-        binary_part(padded, write_end, byte_size(padded) - write_end)
-      else
-        <<>>
-      end
-
-    merged = before <> data <> after_data
     now = DateTime.utc_now()
-
-    file_id =
-      case :ets.lookup(table, {:file, volume, path}) do
-        [{_, existing}] -> existing.id
-        [] -> next_id(table)
-      end
 
     file = %{
       id: file_id,
       path: path,
       size: byte_size(merged),
-      mode: 0o100644,
+      mode: mode,
       uid: 0,
       gid: 0,
       accessed_at: now,
@@ -296,6 +281,41 @@ defmodule NeonFS.NFS.MockCore do
   end
 
   ## Helpers
+
+  defp lookup_file_data(table, volume, path) do
+    case :ets.lookup(table, {:data, volume, path}) do
+      [{_, d}] -> d
+      [] -> <<>>
+    end
+  end
+
+  defp lookup_existing_file(table, volume, path) do
+    case :ets.lookup(table, {:file, volume, path}) do
+      [{_, existing}] -> existing
+      [] -> %{}
+    end
+  end
+
+  defp merge_offset_write(existing, offset, data) do
+    padded =
+      if offset > byte_size(existing) do
+        existing <> :binary.copy(<<0>>, offset - byte_size(existing))
+      else
+        existing
+      end
+
+    write_end = offset + byte_size(data)
+    before = if offset > 0, do: binary_part(padded, 0, offset), else: <<>>
+
+    after_data =
+      if write_end < byte_size(padded) do
+        binary_part(padded, write_end, byte_size(padded) - write_end)
+      else
+        <<>>
+      end
+
+    before <> data <> after_data
+  end
 
   defp next_id(table) do
     [{:next_id, id}] = :ets.lookup(table, :next_id)
