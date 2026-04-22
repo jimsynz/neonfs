@@ -9,7 +9,7 @@ defmodule NeonFS.Core.ChunkAccessTracker do
 
   `record_access/1` uses direct ETS operations (`ets.update_counter/3`) to avoid
   making the GenServer a bottleneck. The GenServer's role is limited to periodic
-  maintenance (decay, cleanup, DETS persistence).
+  maintenance (decay, cleanup).
 
   ## ETS Table
 
@@ -18,14 +18,15 @@ defmodule NeonFS.Core.ChunkAccessTracker do
 
   ## Persistence
 
-  Stats are periodically synced to DETS on each decay timer tick and on
-  graceful shutdown. On startup, existing stats are restored from DETS.
+  Access stats are **not** persisted. The write rate (one `:ets.update_counter/3`
+  per chunk read on a hot node) makes direct-DETS impractical, and the ETS +
+  periodic-DETS-snapshot pattern loses coherence on crash. On restart the table
+  starts empty; the tiering heuristics tolerate a cold start and rebuild stats
+  from real traffic within minutes to hours.
   """
 
   use GenServer
   require Logger
-
-  alias NeonFS.Core.Persistence
 
   @ets_table :chunk_access_tracker
   @decay_interval_ms 3_600_000
@@ -41,7 +42,6 @@ defmodule NeonFS.Core.ChunkAccessTracker do
   ## Options
 
     * `:decay_interval_ms` - Interval for hourly decay (default: 3_600_000 = 1 hour)
-    * `:dets_path` - Path to DETS persistence file (default: `meta_dir/chunk_access_tracker.dets`)
     * `:max_chunks` - Maximum tracked chunks before pruning (default: 1_000_000)
     * `:name` - GenServer name (default: `__MODULE__`)
   """
@@ -145,8 +145,6 @@ defmodule NeonFS.Core.ChunkAccessTracker do
 
   @impl true
   def init(opts) do
-    Process.flag(:trap_exit, true)
-
     table =
       :ets.new(@ets_table, [
         :named_table,
@@ -157,12 +155,9 @@ defmodule NeonFS.Core.ChunkAccessTracker do
       ])
 
     decay_interval = Keyword.get(opts, :decay_interval_ms, @decay_interval_ms)
-    dets_path = Keyword.get(opts, :dets_path)
     max_chunks = Keyword.get(opts, :max_chunks, @default_max_chunks)
 
     :persistent_term.put({__MODULE__, :max_chunks}, max_chunks)
-
-    restore_from_dets(dets_path)
 
     if decay_interval > 0 do
       Process.send_after(self(), :decay, decay_interval)
@@ -170,33 +165,12 @@ defmodule NeonFS.Core.ChunkAccessTracker do
 
     Logger.info("ChunkAccessTracker started")
 
-    {:ok,
-     %{table: table, decay_interval: decay_interval, dets_path: dets_path, max_chunks: max_chunks}}
-  end
-
-  @impl true
-  def terminate(_reason, state) do
-    try do
-      sync_to_dets(state.dets_path)
-    rescue
-      e ->
-        Logger.warning("ChunkAccessTracker DETS sync on terminate failed",
-          error: inspect(e)
-        )
-    catch
-      :exit, reason ->
-        Logger.warning("ChunkAccessTracker DETS sync on terminate exited",
-          reason: inspect(reason)
-        )
-    end
-
-    :ok
+    {:ok, %{table: table, decay_interval: decay_interval, max_chunks: max_chunks}}
   end
 
   @impl true
   def handle_info(:decay, state) do
     perform_decay(state.table)
-    sync_to_dets(state.dets_path)
 
     :telemetry.execute([:neonfs, :chunk_access_tracker, :decay_complete], %{}, %{})
 
@@ -293,91 +267,4 @@ defmodule NeonFS.Core.ChunkAccessTracker do
       |> Enum.each(fn {hash, _h, _d, _ts, _stale} -> :ets.delete(table, hash) end)
     end
   end
-
-  defp resolve_dets_path(nil) do
-    Path.join(Persistence.meta_dir(), "chunk_access_tracker.dets")
-  end
-
-  defp resolve_dets_path(path) when is_binary(path), do: path
-
-  defp restore_from_dets(dets_path_opt) do
-    path = resolve_dets_path(dets_path_opt)
-
-    if File.exists?(path) do
-      do_restore_from_dets(path)
-    end
-  end
-
-  defp do_restore_from_dets(path) do
-    case :dets.open_file(:chunk_access_tracker_dets, type: :set, file: String.to_charlist(path)) do
-      {:ok, dets_ref} ->
-        count =
-          :dets.foldl(
-            fn entry, acc ->
-              :ets.insert(@ets_table, normalise_entry(entry))
-              acc + 1
-            end,
-            0,
-            dets_ref
-          )
-
-        :dets.close(dets_ref)
-
-        Logger.info("ChunkAccessTracker restored entries from DETS",
-          count: count,
-          path: path
-        )
-
-      {:error, reason} ->
-        Logger.warning("Failed to open DETS file",
-          path: path,
-          reason: inspect(reason)
-        )
-    end
-  end
-
-  defp sync_to_dets(dets_path_opt) do
-    path = resolve_dets_path(dets_path_opt)
-    Path.dirname(path) |> File.mkdir_p!()
-    temp_path = "#{path}.tmp"
-
-    File.rm(temp_path)
-
-    case :dets.open_file(:chunk_access_tracker_dets,
-           type: :set,
-           file: String.to_charlist(temp_path)
-         ) do
-      {:ok, dets_ref} ->
-        :ets.to_dets(@ets_table, dets_ref)
-        :dets.sync(dets_ref)
-        :dets.close(dets_ref)
-
-        case File.rename(temp_path, path) do
-          :ok ->
-            :ok
-
-          {:error, reason} ->
-            Logger.error("Failed to rename DETS temp file",
-              temp_path: temp_path,
-              path: path,
-              reason: inspect(reason)
-            )
-
-            File.rm(temp_path)
-        end
-
-      {:error, reason} ->
-        Logger.error("Failed to open DETS for sync", reason: inspect(reason))
-    end
-  rescue
-    e ->
-      Logger.error("ChunkAccessTracker DETS sync failed", error: inspect(e))
-  end
-
-  # Handle legacy 4-element tuples from old DETS files
-  defp normalise_entry({hash, hourly, daily, last_ts}),
-    do: {hash, hourly, daily, last_ts, 0}
-
-  defp normalise_entry({_hash, _hourly, _daily, _last_ts, _staleness} = entry),
-    do: entry
 end
