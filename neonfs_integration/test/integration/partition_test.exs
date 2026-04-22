@@ -15,7 +15,7 @@ defmodule NeonFS.Integration.PartitionTest do
       partition_majority_minority(cluster)
 
       result =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/majority-write.txt",
           "majority data"
@@ -63,7 +63,7 @@ defmodule NeonFS.Integration.PartitionTest do
       partition_majority_minority(cluster)
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/during-partition.txt",
           "partition data"
@@ -107,7 +107,7 @@ defmodule NeonFS.Integration.PartitionTest do
       end
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/written-while-down.txt",
           "missed data"
@@ -139,7 +139,7 @@ defmodule NeonFS.Integration.PartitionTest do
         :node2,
         volume.id,
         fn ->
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "test-volume",
             "/test.txt",
             "test data"
@@ -205,7 +205,7 @@ defmodule NeonFS.Integration.PartitionTest do
   defp write_numbered_files(cluster, node_name, range) do
     for i <- range do
       {:ok, _} =
-        PeerCluster.rpc(cluster, node_name, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, node_name, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/consistency-#{i}.txt",
           "data-#{i}"

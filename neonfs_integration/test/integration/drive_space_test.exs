@@ -64,7 +64,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
       data = :crypto.strong_rand_bytes(@chunk_size)
 
       result =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "vol",
           "/overflow.bin",
           data
@@ -157,7 +157,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
       data = :crypto.strong_rand_bytes(large_chunk)
 
       result =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "vol",
           "/after_gc.bin",
           data
@@ -253,7 +253,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           path = "/file_#{i}.bin"
 
           {:ok, _} =
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               "vol",
               path,
               data
@@ -333,7 +333,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
       path = "/file_#{i}.bin"
 
       result =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           volume_name,
           path,
           data
@@ -351,7 +351,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
     for i <- 0..(count - 1) do
       data = :crypto.strong_rand_bytes(chunk_size)
 
-      PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
         volume_name,
         "/file_#{i}.bin",
         data

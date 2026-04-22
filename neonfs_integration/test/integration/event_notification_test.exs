@@ -48,7 +48,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
         PeerCluster.rpc(cluster, :node2, EventCollector, :start, [vid])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/hello.txt",
           "hello"
@@ -71,7 +71,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
     test "file deletion emits FileDeleted received by subscriber",
          %{cluster: cluster, volume_id: vid, volume_name: vname} do
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/to-delete.txt",
           "data"
@@ -163,7 +163,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
         PeerCluster.rpc(cluster, :node2, EventCollector, :start, [vid])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/envelope-test.txt",
           "data"
@@ -195,7 +195,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
 
       for i <- 1..5 do
         {:ok, _} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             vname,
             "/seq-#{i}.txt",
             "data-#{i}"
@@ -235,7 +235,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
         end
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/fanout.txt",
           "data"
@@ -264,7 +264,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
 
       # Write to volume Y on node1
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           other_name,
           "/other.txt",
           "data"
@@ -272,7 +272,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
 
       # Also write to volume X so we know events are flowing
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname_x,
           "/marker.txt",
           "data"
@@ -295,14 +295,14 @@ defmodule NeonFS.Integration.EventNotificationTest do
         PeerCluster.rpc(cluster, :node2, EventCollector, :start, [vid])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/from-node1.txt",
           "data1"
         ])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/from-node3.txt",
           "data3"
@@ -329,7 +329,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
         PeerCluster.rpc(cluster, :node2, EventCollector, :start, [vid])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/before-unsub.txt",
           "data"
@@ -364,7 +364,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
       PeerCluster.rpc(cluster, :node2, EventCollector, :clear, [new_collector])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/after-unsub.txt",
           "data"
@@ -389,7 +389,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
         PeerCluster.rpc(cluster, :node2, EventCollector, :start, [vid])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/pre-partition.txt",
           "data"
@@ -466,7 +466,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
         )
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/cached-file.txt",
           "real data"
@@ -483,7 +483,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
 
       # Write another file — triggers FileCreated which invalidates "/" dir listing
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           vname,
           "/new-file.txt",
           "data"

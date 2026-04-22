@@ -366,7 +366,7 @@ defmodule NeonFS.Integration.WebDAVTest do
       test_data = :crypto.strong_rand_bytes(16 * 1024)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node3, NeonFS.TestHelpers, :write_file_from_binary, [
           "wdv-cross-read",
           "/direct-write.bin",
           test_data

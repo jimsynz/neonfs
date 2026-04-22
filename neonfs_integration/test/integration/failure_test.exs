@@ -29,7 +29,7 @@ defmodule NeonFS.Integration.FailureTest do
 
       # Should still be able to write
       result =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/new.txt",
           "new data"
@@ -41,7 +41,7 @@ defmodule NeonFS.Integration.FailureTest do
     test "data written during outage is preserved on surviving nodes", %{cluster: cluster} do
       # Write data, then stop node3
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/before-crash.txt",
           "before"
@@ -59,7 +59,7 @@ defmodule NeonFS.Integration.FailureTest do
 
       # Write more data while node3 is down
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/during-outage.txt",
           "during"
@@ -101,7 +101,7 @@ defmodule NeonFS.Integration.FailureTest do
       # RPC timeout is 30 seconds, so we need at least one full cycle
       assert_eventually timeout: 60_000 do
         result =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "test-volume",
             "/should-fail.txt",
             "data"
@@ -125,7 +125,7 @@ defmodule NeonFS.Integration.FailureTest do
         :node2,
         volume.id,
         fn ->
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "test-volume",
             "/test.txt",
             "test data"

@@ -37,7 +37,7 @@ defmodule NeonFS.Integration.ReplicationTest do
         vid,
         fn ->
           {:ok, _} =
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               vname,
               "/test.txt",
               "hello world"
@@ -78,7 +78,7 @@ defmodule NeonFS.Integration.ReplicationTest do
         vid,
         fn ->
           {:ok, _} =
-            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+            PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
               vname,
               "/large.bin",
               data
@@ -115,7 +115,7 @@ defmodule NeonFS.Integration.ReplicationTest do
           vid,
           fn ->
             {:ok, _} =
-              PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+              PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
                 vname,
                 path,
                 content

@@ -27,7 +27,7 @@ defmodule NeonFS.Integration.Phase3Test do
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/tier-test.bin",
           test_data
@@ -51,7 +51,7 @@ defmodule NeonFS.Integration.Phase3Test do
       test_data = :crypto.strong_rand_bytes(10 * 1024)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/read-test.bin",
           test_data
@@ -70,7 +70,7 @@ defmodule NeonFS.Integration.Phase3Test do
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/access-test.bin",
           test_data
@@ -133,7 +133,7 @@ defmodule NeonFS.Integration.Phase3Test do
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/migrate-test.bin",
           test_data
@@ -173,7 +173,7 @@ defmodule NeonFS.Integration.Phase3Test do
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/cache-test.bin",
           test_data

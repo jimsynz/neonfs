@@ -28,7 +28,7 @@ defmodule NeonFS.Integration.SingleNodeTest do
       test_data = :crypto.strong_rand_bytes(100 * 1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/test.bin",
           test_data
@@ -52,7 +52,7 @@ defmodule NeonFS.Integration.SingleNodeTest do
       test_data = :crypto.strong_rand_bytes(1024)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/partial.bin",
           test_data
@@ -112,7 +112,7 @@ defmodule NeonFS.Integration.SingleNodeTest do
 
       for {path, content} <- files do
         {:ok, _file} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
             "test-volume",
             path,
             content
@@ -147,7 +147,7 @@ defmodule NeonFS.Integration.SingleNodeTest do
       test_data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/large.bin",
           test_data
@@ -182,7 +182,7 @@ defmodule NeonFS.Integration.SingleNodeTest do
       test_data = :crypto.strong_rand_bytes(10 * 1024)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/stats_test.bin",
           test_data
@@ -215,7 +215,7 @@ defmodule NeonFS.Integration.SingleNodeTest do
       test_data = :crypto.strong_rand_bytes(50 * 1024)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
           "/persist.bin",
           test_data

@@ -25,7 +25,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "rotation-volume",
           "/v1-file.bin",
           test_data
@@ -63,7 +63,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
 
       # Write a file so there's something to rotate
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "rotation-volume",
           "/status-test.bin",
           :crypto.strong_rand_bytes(4096)
@@ -103,7 +103,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "rotation-volume",
           "/rotate-complete.bin",
           test_data
@@ -169,7 +169,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
 
       # Write a file first
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "rotation-volume",
           "/cli-rotate.bin",
           :crypto.strong_rand_bytes(1024)
@@ -191,7 +191,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
       :ok = init_rotation_cluster(cluster)
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "rotation-volume",
           "/cli-status.bin",
           :crypto.strong_rand_bytes(1024)

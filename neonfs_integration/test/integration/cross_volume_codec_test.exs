@@ -66,7 +66,7 @@ defmodule NeonFS.Integration.CrossVolumeCodecTest do
 
     for volume <- ["squeak", "squashed", "secret"] do
       {:ok, _file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           volume,
           path,
           @plaintext

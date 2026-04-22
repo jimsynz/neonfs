@@ -71,7 +71,7 @@ defmodule NeonFS.Integration.EncryptionTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "enc-volume",
           "/secret.bin",
           test_data
@@ -94,7 +94,7 @@ defmodule NeonFS.Integration.EncryptionTest do
       test_data = String.duplicate("PLAINTEXT_MARKER_DATA_", 200)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "enc-volume",
           "/plaincheck.bin",
           test_data
@@ -139,14 +139,14 @@ defmodule NeonFS.Integration.EncryptionTest do
 
       # Write to both volumes
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "plain-volume",
           "/plain.bin",
           plain_data
         ])
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "enc-volume",
           "/secret.bin",
           secret_data
@@ -175,7 +175,7 @@ defmodule NeonFS.Integration.EncryptionTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "enc-ec-volume",
           "/ec-secret.bin",
           test_data
@@ -197,7 +197,7 @@ defmodule NeonFS.Integration.EncryptionTest do
       test_data = :crypto.strong_rand_bytes(4096)
 
       {:ok, file} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "enc-ec-volume",
           "/degrade-enc.bin",
           test_data
