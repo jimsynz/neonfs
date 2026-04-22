@@ -162,6 +162,40 @@ jobs:
         run: mix check
 
   # =========================================================================
+  # neonfs_docker - Pure Elixir Docker VolumeDriver plugin
+  # =========================================================================
+  neonfs_docker:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.elixir_image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_docker/deps
+            neonfs_docker/_build
+          key: v3-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_docker/mix.lock') }}
+          restore-keys: v3-build-neonfs_docker-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_docker
+        run: |
+          mix local.hex --force && mix local.rebar --force
+          mix deps.get
+          mix deps.compile
+          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+
+      - name: Check
+        working-directory: neonfs_docker
+        run: mix check
+
+  # =========================================================================
   # neonfs_nfs - Elixir + Rustler NIFs (NFSv3 server)
   # =========================================================================
   neonfs_nfs:
