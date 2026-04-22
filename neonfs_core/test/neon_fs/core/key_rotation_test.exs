@@ -5,7 +5,6 @@ defmodule NeonFS.Core.KeyRotationTest do
   alias NeonFS.Core.{
     BlobStore,
     ChunkIndex,
-    JobTracker,
     KeyManager,
     KeyRotation,
     RaServer,
@@ -86,11 +85,11 @@ defmodule NeonFS.Core.KeyRotationTest do
         updated_at: now
       }
 
-      :ets.insert(:neonfs_jobs, {fake_job.id, fake_job})
+      :dets.insert(:neonfs_jobs, {fake_job.id, fake_job})
 
       assert {:error, :rotation_in_progress} = KeyRotation.start_rotation(volume_id)
     after
-      :ets.delete(:neonfs_jobs, "fake-rotation-job")
+      :dets.delete(:neonfs_jobs, "fake-rotation-job")
     end
 
     test "tracks correct total chunk count" do
@@ -340,21 +339,6 @@ defmodule NeonFS.Core.KeyRotationTest do
     start_supervised!(
       {NeonFS.Core.BackgroundWorker, max_concurrent: 4, max_per_minute: 100},
       restart: :temporary
-    )
-  end
-
-  defp start_job_tracker(tmp_dir) do
-    meta_dir = Path.join(tmp_dir, "job_tracker")
-    File.mkdir_p!(meta_dir)
-
-    start_supervised!(
-      {Task.Supervisor, name: NeonFS.Core.JobTaskSupervisor},
-      restart: :temporary
-    )
-
-    start_supervised!(
-      {JobTracker,
-       name: JobTracker, meta_dir: meta_dir, task_supervisor: NeonFS.Core.JobTaskSupervisor}
     )
   end
 

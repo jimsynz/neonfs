@@ -316,4 +316,31 @@ defmodule NeonFS.Core.JobTrackerTest do
       assert job_id == job.id
     end
   end
+
+  describe "persistence across restarts" do
+    test "completed jobs survive a manager restart", %{meta_dir: meta_dir} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :job, :completed]
+        ])
+
+      {:ok, job} = JobTracker.create(TestRunner, %{total: 1})
+      assert_receive {[:neonfs, :job, :completed], ^ref, %{}, %{job_id: job_id}}, 2_000
+      assert job_id == job.id
+
+      # Restart the manager. start_supervised!/stop_supervised closes the
+      # DETS file cleanly; a new JobTracker opens it fresh and resume_incomplete_jobs
+      # replays whatever was persisted.
+      stop_supervised!(JobTracker)
+
+      start_supervised!(
+        {JobTracker,
+         name: JobTracker, meta_dir: meta_dir, task_supervisor: NeonFS.Core.JobTaskSupervisor}
+      )
+
+      assert {:ok, restored} = JobTracker.get(job.id)
+      assert restored.status == :completed
+      assert restored.id == job.id
+    end
+  end
 end
