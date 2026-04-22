@@ -59,7 +59,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     test "writes small file (single chunk)", %{volume: volume} do
       data = "Hello, NeonFS!"
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/test.txt", data)
+      assert {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/test.txt", [data])
 
       # Verify file metadata
       assert file_meta.volume_id == volume.id
@@ -85,7 +85,8 @@ defmodule NeonFS.Core.WriteOperationTest do
       # Create 2MB of data to ensure multiple chunks
       data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/large.bin", data)
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/large.bin", [data])
 
       # Verify file metadata
       assert file_meta.volume_id == volume.id
@@ -113,7 +114,8 @@ defmodule NeonFS.Core.WriteOperationTest do
       # Create compressible data (repeated pattern)
       data = String.duplicate("ABCDEFGH", 1000)
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/compressed.txt", data)
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/compressed.txt", [data])
 
       # Verify chunks have compression metadata
       for chunk_hash <- file_meta.chunks do
@@ -127,7 +129,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = "Duplicate content"
 
       # Write first file
-      assert {:ok, file1} = WriteOperation.write_file(volume.id, "/file1.txt", data)
+      assert {:ok, file1} = WriteOperation.write_file_streamed(volume.id, "/file1.txt", [data])
 
       # Count chunks before second write
       chunk_count_before =
@@ -135,7 +137,7 @@ defmodule NeonFS.Core.WriteOperationTest do
         |> length()
 
       # Write second file with same data
-      assert {:ok, file2} = WriteOperation.write_file(volume.id, "/file2.txt", data)
+      assert {:ok, file2} = WriteOperation.write_file_streamed(volume.id, "/file2.txt", [data])
 
       # Count chunks after second write
       chunk_count_after =
@@ -161,13 +163,14 @@ defmodule NeonFS.Core.WriteOperationTest do
       fake_volume_id = UUIDv7.generate()
 
       assert {:error, %VolumeNotFound{volume_id: ^fake_volume_id}} =
-               WriteOperation.write_file(fake_volume_id, "/test.txt", data)
+               WriteOperation.write_file_streamed(fake_volume_id, "/test.txt", [data])
     end
 
     test "handles empty file", %{volume: volume} do
       data = ""
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/empty.txt", data)
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/empty.txt", [data])
 
       assert file_meta.size == 0
       # Empty file may have 0 or 1 chunks depending on chunking strategy
@@ -179,7 +182,9 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Force single chunk
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/single.bin", data, chunk_strategy: :single)
+               WriteOperation.write_file_streamed(volume.id, "/single.bin", [data],
+                 chunk_strategy: :single
+               )
 
       # Should have exactly 1 chunk
       assert length(file_meta.chunks) == 1
@@ -189,10 +194,11 @@ defmodule NeonFS.Core.WriteOperationTest do
       path = "/overwrite.txt"
 
       # Write first version
-      {:ok, file1} = WriteOperation.write_file(volume.id, path, "Version 1")
+      {:ok, file1} = WriteOperation.write_file_streamed(volume.id, path, ["Version 1"])
 
       # Write second version
-      {:ok, file2} = WriteOperation.write_file(volume.id, path, "Version 2 - longer content")
+      {:ok, file2} =
+        WriteOperation.write_file_streamed(volume.id, path, ["Version 2 - longer content"])
 
       # Files should have different IDs
       assert file1.id != file2.id
@@ -205,7 +211,8 @@ defmodule NeonFS.Core.WriteOperationTest do
     test "unencrypted volume chunks have nil crypto field", %{volume: volume} do
       data = "Plaintext data"
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/plain.txt", data)
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/plain.txt", [data])
 
       for chunk_hash <- file_meta.chunks do
         {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
@@ -224,7 +231,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     test "single-segment stream produces same chunks as write_file/4", %{volume: volume} do
       data = :crypto.strong_rand_bytes(50_000)
 
-      {:ok, batch} = WriteOperation.write_file(volume.id, "/batch.bin", data)
+      {:ok, batch} = WriteOperation.write_file_streamed(volume.id, "/batch.bin", [data])
       {:ok, streamed} = WriteOperation.write_file_streamed(volume.id, "/streamed.bin", [data])
 
       assert streamed.size == batch.size
@@ -237,7 +244,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       tail = binary_part(data, length(slices) * 7919, byte_size(data) - length(slices) * 7919)
       segments = if tail == "", do: slices, else: slices ++ [tail]
 
-      {:ok, batch} = WriteOperation.write_file(volume.id, "/batch-large.bin", data)
+      {:ok, batch} = WriteOperation.write_file_streamed(volume.id, "/batch-large.bin", [data])
 
       {:ok, streamed} =
         WriteOperation.write_file_streamed(volume.id, "/streamed-large.bin", segments)
@@ -269,7 +276,9 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(100_000)
 
       {:ok, batch} =
-        WriteOperation.write_file(volume.id, "/dedup-a.bin", data, chunk_strategy: strategy)
+        WriteOperation.write_file_streamed(volume.id, "/dedup-a.bin", [data],
+          chunk_strategy: strategy
+        )
 
       chunks_before =
         :ets.tab2list(:chunk_index)
@@ -333,14 +342,15 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       data = "Test data for telemetry"
 
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/telemetry.txt", data)
+      {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/telemetry.txt", [data])
 
       events = Process.get(:telemetry_events, []) |> Enum.reverse()
 
       # Should have start and stop events
       assert [start_event | _] = events
       assert start_event.event == [:neonfs, :write_operation, :start]
-      assert start_event.measurements.bytes == byte_size(data)
+      # Streamed writes don't know the byte count up front — start fires with 0.
+      assert start_event.measurements.bytes == 0
       assert start_event.metadata.volume_id == volume.id
       assert start_event.metadata.path == "/telemetry.txt"
 
@@ -359,7 +369,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = "Test data"
 
       {:error, %VolumeNotFound{}} =
-        WriteOperation.write_file(fake_volume_id, "/fail.txt", data)
+        WriteOperation.write_file_streamed(fake_volume_id, "/fail.txt", [data])
 
       events = Process.get(:telemetry_events, []) |> Enum.reverse()
 
@@ -387,7 +397,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = "Test data"
 
       # Write successfully
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/test.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/test.txt", [data])
 
       # Verify no uncommitted chunks remain
       uncommitted = ChunkIndex.list_uncommitted()
@@ -416,7 +426,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       # Write small file (below threshold)
       small_data = "Small"
 
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/small.txt", small_data)
+      {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/small.txt", [small_data])
 
       # Small chunks should not be compressed
       for chunk_hash <- file_meta.chunks do
@@ -437,7 +447,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Force compression via option
       {:ok, file_meta} =
-        WriteOperation.write_file(volume.id, "/forced.txt", data,
+        WriteOperation.write_file_streamed(volume.id, "/forced.txt", [data],
           compression: %{algorithm: :zstd, level: 5, min_size: 100}
         )
 
@@ -465,7 +475,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = "Hello, erasure coding!"
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/small_ec.txt", data,
+               WriteOperation.write_file_at(volume.id, "/small_ec.txt", 0, data,
                  chunk_strategy: :single
                )
 
@@ -499,7 +509,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(4096)
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/exact_ec.bin", data,
+               WriteOperation.write_file_at(volume.id, "/exact_ec.bin", 0, data,
                  chunk_strategy: {:fixed, 1024}
                )
 
@@ -533,7 +543,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(5120)
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/partial_ec.bin", data,
+               WriteOperation.write_file_at(volume.id, "/partial_ec.bin", 0, data,
                  chunk_strategy: {:fixed, 1024}
                )
 
@@ -564,7 +574,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(2048)
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/meta_ec.bin", data,
+               WriteOperation.write_file_at(volume.id, "/meta_ec.bin", 0, data,
                  chunk_strategy: {:fixed, 1024}
                )
 
@@ -591,7 +601,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(6144)
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/ranges_ec.bin", data,
+               WriteOperation.write_file_at(volume.id, "/ranges_ec.bin", 0, data,
                  chunk_strategy: {:fixed, 1024}
                )
 
@@ -617,7 +627,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(3072)
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/commit_ec.bin", data,
+               WriteOperation.write_file_at(volume.id, "/commit_ec.bin", 0, data,
                  chunk_strategy: {:fixed, 1024}
                )
 
@@ -640,7 +650,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(2048)
 
       {:ok, file_meta} =
-        WriteOperation.write_file(volume.id, "/committed_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/committed_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -665,7 +675,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(4096)
 
       {:ok, _file_meta} =
-        WriteOperation.write_file(volume.id, "/telemetry_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/telemetry_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -690,10 +700,17 @@ defmodule NeonFS.Core.WriteOperationTest do
       path = "/overwrite_ec.txt"
 
       {:ok, file1} =
-        WriteOperation.write_file(volume.id, path, "Version 1", chunk_strategy: :single)
+        WriteOperation.write_file_at(volume.id, path, 0, "Version 1", chunk_strategy: :single)
+
+      # write_file_at on an existing erasure-coded file is an offset write, not
+      # a replacement — delete first to exercise the "overwrite" semantic the
+      # test name implies.
+      :ok = FileIndex.delete(file1.id)
 
       {:ok, file2} =
-        WriteOperation.write_file(volume.id, path, "Version 2 - longer", chunk_strategy: :single)
+        WriteOperation.write_file_at(volume.id, path, 0, "Version 2 - longer",
+          chunk_strategy: :single
+        )
 
       assert file1.id != file2.id
       assert {:ok, retrieved} = FileIndex.get_by_path(volume.id, path)
@@ -704,7 +721,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(2048)
 
       {:ok, _file_meta} =
-        WriteOperation.write_file(volume.id, "/stats_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/stats_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -743,7 +760,8 @@ defmodule NeonFS.Core.WriteOperationTest do
     test "writes to encrypted volume with crypto metadata", %{enc_volume: volume} do
       data = "Secret data for encryption test"
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/secret.txt", data)
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/secret.txt", [data])
 
       assert file_meta.volume_id == volume.id
       assert file_meta.size == byte_size(data)
@@ -762,7 +780,8 @@ defmodule NeonFS.Core.WriteOperationTest do
       # Use a compressible repeated pattern that won't compress much with :none
       data = :crypto.strong_rand_bytes(1024)
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/overhead.bin", data)
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/overhead.bin", [data])
 
       for chunk_hash <- file_meta.chunks do
         {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
@@ -774,7 +793,8 @@ defmodule NeonFS.Core.WriteOperationTest do
     test "stored bytes differ from plaintext", %{enc_volume: volume} do
       data = String.duplicate("KNOWN_PATTERN", 100)
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/verify_enc.txt", data)
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/verify_enc.txt", [data])
 
       # Read raw bytes from disk (without decryption) and confirm they
       # differ from input. Reach into the on-disk file directly because the
@@ -801,7 +821,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       data = :crypto.strong_rand_bytes(2048)
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/multi_chunk.bin", data,
+               WriteOperation.write_file_streamed(volume.id, "/multi_chunk.bin", [data],
                  chunk_strategy: {:fixed, 1024}
                )
 
@@ -819,7 +839,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       Process.put(:telemetry_events, [])
 
       data = "Telemetry encryption test"
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/telem_enc.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/telem_enc.txt", [data])
 
       events = Process.get(:telemetry_events, [])
 
@@ -841,7 +861,9 @@ defmodule NeonFS.Core.WriteOperationTest do
       {:ok, plain_vol} = VolumeRegistry.create(vol_name, compression: %{algorithm: :none})
 
       data = "Plaintext in Ra context"
-      assert {:ok, file_meta} = WriteOperation.write_file(plain_vol.id, "/plain.txt", data)
+
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(plain_vol.id, "/plain.txt", [data])
 
       for chunk_hash <- file_meta.chunks do
         {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
@@ -855,7 +877,9 @@ defmodule NeonFS.Core.WriteOperationTest do
       initial_data = "Hello, NeonFS!"
 
       {:ok, _file_meta} =
-        WriteOperation.write_file(volume.id, "/offset.txt", initial_data, chunk_strategy: :single)
+        WriteOperation.write_file_streamed(volume.id, "/offset.txt", [initial_data],
+          chunk_strategy: :single
+        )
 
       append_data = " More data."
 
@@ -877,7 +901,9 @@ defmodule NeonFS.Core.WriteOperationTest do
       initial_data = String.duplicate("A", 100)
 
       {:ok, _file_meta} =
-        WriteOperation.write_file(volume.id, "/middle.txt", initial_data, chunk_strategy: :single)
+        WriteOperation.write_file_streamed(volume.id, "/middle.txt", [initial_data],
+          chunk_strategy: :single
+        )
 
       overwrite_data = "BBBBBBBBBB"
 
@@ -912,7 +938,7 @@ defmodule NeonFS.Core.WriteOperationTest do
                )
 
       assert {:error, :lock_conflict} =
-               WriteOperation.write_file(volume.id, "/locked.txt", "blocked data",
+               WriteOperation.write_file_at(volume.id, "/locked.txt", 0, "blocked data",
                  client_ref: :smb_client_b
                )
     end
@@ -930,7 +956,7 @@ defmodule NeonFS.Core.WriteOperationTest do
                )
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/my-locked.txt", "my data",
+               WriteOperation.write_file_at(volume.id, "/my-locked.txt", 0, "my data",
                  client_ref: :smb_client_a
                )
 
@@ -950,7 +976,7 @@ defmodule NeonFS.Core.WriteOperationTest do
                )
 
       assert {:ok, _file_meta} =
-               WriteOperation.write_file(volume.id, "/legacy.txt", "no client ref")
+               WriteOperation.write_file_at(volume.id, "/legacy.txt", 0, "no client ref")
     end
 
     test "permits write when only advisory locks exist", %{volume: volume} do
@@ -966,14 +992,16 @@ defmodule NeonFS.Core.WriteOperationTest do
                )
 
       assert {:ok, _file_meta} =
-               WriteOperation.write_file(volume.id, "/advisory.txt", "allowed",
+               WriteOperation.write_file_at(volume.id, "/advisory.txt", 0, "allowed",
                  client_ref: :other_client
                )
     end
 
     test "rejects offset write when mandatory lock overlaps range", %{volume: volume} do
       assert {:ok, _} =
-               WriteOperation.write_file(volume.id, "/partial.txt", String.duplicate("A", 200))
+               WriteOperation.write_file_streamed(volume.id, "/partial.txt", [
+                 String.duplicate("A", 200)
+               ])
 
       lock_file_id = WriteOperation.lock_file_id(volume.id, "/partial.txt")
 
@@ -994,7 +1022,10 @@ defmodule NeonFS.Core.WriteOperationTest do
 
     test "permits offset write to non-overlapping range", %{volume: volume} do
       assert {:ok, _} =
-               WriteOperation.write_file(volume.id, "/nonoverlap.txt", String.duplicate("A", 200),
+               WriteOperation.write_file_streamed(
+                 volume.id,
+                 "/nonoverlap.txt",
+                 [String.duplicate("A", 200)],
                  chunk_strategy: :single
                )
 
@@ -1099,7 +1130,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
 
       assert {:error, :share_denied} =
-               WriteOperation.write_file(volume.id, "/shared.txt", "blocked",
+               WriteOperation.write_file_at(volume.id, "/shared.txt", 0, "blocked",
                  client_ref: :smb_client_b
                )
     end
@@ -1110,7 +1141,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :read_write)
 
       assert {:error, :share_denied} =
-               WriteOperation.write_file(volume.id, "/exclusive.txt", "blocked",
+               WriteOperation.write_file_at(volume.id, "/exclusive.txt", 0, "blocked",
                  client_ref: :smb_client_b
                )
     end
@@ -1121,7 +1152,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
 
       assert {:ok, file_meta} =
-               WriteOperation.write_file(volume.id, "/mine.txt", "my data",
+               WriteOperation.write_file_at(volume.id, "/mine.txt", 0, "my data",
                  client_ref: :smb_client_a
                )
 
@@ -1134,17 +1165,17 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert :ok = LockManager.open(lock_file_id, :smb_client_a, :write, :read)
 
       assert {:ok, _file_meta} =
-               WriteOperation.write_file(volume.id, "/deny-read.txt", "allowed",
+               WriteOperation.write_file_at(volume.id, "/deny-read.txt", 0, "allowed",
                  client_ref: :smb_client_b
                )
     end
 
     test "rejects offset write when deny_write open is held", %{volume: volume} do
       assert {:ok, _} =
-               WriteOperation.write_file(
+               WriteOperation.write_file_streamed(
                  volume.id,
                  "/offset-share.txt",
-                 String.duplicate("A", 200)
+                 [String.duplicate("A", 200)]
                )
 
       lock_file_id = WriteOperation.lock_file_id(volume.id, "/offset-share.txt")
@@ -1163,7 +1194,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
 
       assert {:ok, _file_meta} =
-               WriteOperation.write_file(volume.id, "/legacy-share.txt", "no client ref")
+               WriteOperation.write_file_at(volume.id, "/legacy-share.txt", 0, "no client ref")
     end
 
     test "write_file_streamed rejects when another client has deny_write open",

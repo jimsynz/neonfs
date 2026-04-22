@@ -45,7 +45,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
 
   describe "read_file_refs/3 — shape and metadata" do
     test "returns file size and an empty chunk list for an empty file", %{volume: volume} do
-      {:ok, _} = WriteOperation.write_file(volume.id, "/empty.txt", "")
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/empty.txt", [""])
 
       assert {:ok, %{file_size: 0, chunks: []}} =
                ReadOperation.read_file_refs(volume.id, "/empty.txt")
@@ -53,7 +53,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
 
     test "returns a single ref for a small file that fits in one chunk", %{volume: volume} do
       data = "small file"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/small.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/small.txt", [data])
 
       {:ok, result} = ReadOperation.read_file_refs(volume.id, "/small.txt")
 
@@ -82,7 +82,9 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, file_meta} =
-        WriteOperation.write_file(volume.id, "/multi.bin", data, chunk_strategy: {:fixed, 64_000})
+        WriteOperation.write_file_streamed(volume.id, "/multi.bin", [data],
+          chunk_strategy: {:fixed, 64_000}
+        )
 
       {:ok, result} = ReadOperation.read_file_refs(volume.id, "/multi.bin")
 
@@ -107,7 +109,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       data = :crypto.strong_rand_bytes(200 * 1024)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/offset.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/offset.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -124,7 +126,9 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/range.bin", data, chunk_strategy: {:fixed, 64_000})
+        WriteOperation.write_file_streamed(volume.id, "/range.bin", [data],
+          chunk_strategy: {:fixed, 64_000}
+        )
 
       {:ok, result} =
         ReadOperation.read_file_refs(volume.id, "/range.bin", offset: 100_000, length: 50_000)
@@ -143,7 +147,9 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/three.bin", data, chunk_strategy: {:fixed, 64_000})
+        WriteOperation.write_file_streamed(volume.id, "/three.bin", [data],
+          chunk_strategy: {:fixed, 64_000}
+        )
 
       offset = 32_000
       length = 128_100
@@ -161,7 +167,9 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       data = :crypto.strong_rand_bytes(200 * 1024)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/trim.bin", data, chunk_strategy: {:fixed, 64_000})
+        WriteOperation.write_file_streamed(volume.id, "/trim.bin", [data],
+          chunk_strategy: {:fixed, 64_000}
+        )
 
       {:ok, result} =
         ReadOperation.read_file_refs(volume.id, "/trim.bin", offset: 0, length: 70_000)
@@ -172,7 +180,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
 
     test "returns empty chunks when offset is at or past EOF", %{volume: volume} do
       data = "short"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/short.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/short.txt", [data])
 
       {:ok, result} =
         ReadOperation.read_file_refs(volume.id, "/short.txt", offset: byte_size(data))
@@ -186,7 +194,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
     end
 
     test "returns empty chunks for zero-length read", %{volume: volume} do
-      {:ok, _} = WriteOperation.write_file(volume.id, "/zero.txt", "hello")
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/zero.txt", ["hello"])
 
       assert {:ok, %{chunks: []}} =
                ReadOperation.read_file_refs(volume.id, "/zero.txt", length: 0)
@@ -194,7 +202,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
 
     test "clamps length that extends past EOF", %{volume: volume} do
       data = "10 bytes!!"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/clamp.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/clamp.txt", [data])
 
       {:ok, result} =
         ReadOperation.read_file_refs(volume.id, "/clamp.txt", offset: 0, length: 100)
@@ -226,7 +234,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
         )
 
       data = String.duplicate("ABCDEFGH", 1000)
-      {:ok, _} = WriteOperation.write_file(volume.id, "/compressed.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/compressed.txt", [data])
 
       {:ok, result} = ReadOperation.read_file_refs(volume.id, "/compressed.txt")
 
@@ -239,7 +247,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       data = :crypto.strong_rand_bytes(300 * 1024)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/invariant.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/invariant.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -265,7 +273,9 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       data = :crypto.strong_rand_bytes(300 * 1024)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/slice.bin", data, chunk_strategy: {:fixed, 64_000})
+        WriteOperation.write_file_streamed(volume.id, "/slice.bin", [data],
+          chunk_strategy: {:fixed, 64_000}
+        )
 
       {:ok, %{chunks: whole}} = ReadOperation.read_file_refs(volume.id, "/slice.bin")
 
@@ -305,7 +315,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
     test "returns data-chunk refs for a fully healthy stripe" do
       {:ok, volume} = create_erasure_volume()
       data = "stripe data example"
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/striped.txt", data)
+      {:ok, file_meta} = WriteOperation.write_file_at(volume.id, "/striped.txt", 0, data)
 
       {:ok, result} = ReadOperation.read_file_refs(volume.id, "/striped.txt")
 
@@ -323,7 +333,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
     test "assembling fetched chunk slices reconstructs the original bytes" do
       {:ok, volume} = create_erasure_volume_without_compression()
       data = :crypto.strong_rand_bytes(200 * 1024)
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/assemble.bin", data)
+      {:ok, _file_meta} = WriteOperation.write_file_at(volume.id, "/assemble.bin", 0, data)
 
       {:ok, %{chunks: refs, file_size: file_size}} =
         ReadOperation.read_file_refs(volume.id, "/assemble.bin")
@@ -350,7 +360,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
     test "respects offset and length in a stripe" do
       {:ok, volume} = create_erasure_volume()
       data = :crypto.strong_rand_bytes(200 * 1024)
-      {:ok, _} = WriteOperation.write_file(volume.id, "/slice.bin", data)
+      {:ok, _} = WriteOperation.write_file_at(volume.id, "/slice.bin", 0, data)
 
       offset = 13_000
       length = 42_000
@@ -371,7 +381,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
     test "returns empty chunks when offset is at or past EOF" do
       {:ok, volume} = create_erasure_volume()
       data = "short striped"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/eof.txt", data)
+      {:ok, _} = WriteOperation.write_file_at(volume.id, "/eof.txt", 0, data)
 
       assert {:ok, %{chunks: []}} =
                ReadOperation.read_file_refs(volume.id, "/eof.txt", offset: byte_size(data))
@@ -382,7 +392,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
 
     test "returns empty chunks for zero-length read on striped file" do
       {:ok, volume} = create_erasure_volume()
-      {:ok, _} = WriteOperation.write_file(volume.id, "/zero.txt", "hello stripe")
+      {:ok, _} = WriteOperation.write_file_at(volume.id, "/zero.txt", 0, "hello stripe")
 
       assert {:ok, %{chunks: []}} =
                ReadOperation.read_file_refs(volume.id, "/zero.txt", length: 0)
@@ -390,7 +400,9 @@ defmodule NeonFS.Core.ReadFileRefsTest do
 
     test "returns :stripe_refs_unsupported when a data chunk is missing" do
       {:ok, volume} = create_erasure_volume()
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/degraded.txt", "degraded data")
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_at(volume.id, "/degraded.txt", 0, "degraded data")
 
       # Remove one data chunk so the stripe requires reconstruction.
       [missing_hash | _] = stripe_data_hashes_for(file_meta)
@@ -402,7 +414,9 @@ defmodule NeonFS.Core.ReadFileRefsTest do
 
     test "returns refs when only a parity chunk is missing (data chunks intact)" do
       {:ok, volume} = create_erasure_volume()
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/parity.txt", "parity intact")
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_at(volume.id, "/parity.txt", 0, "parity intact")
 
       [%{stripe_id: sid} | _] = file_meta.stripes
       {:ok, stripe} = StripeIndex.get(sid)
@@ -420,7 +434,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
       # boundary where the file is an erasure-coded volume but contains zero
       # bytes of data — should behave exactly like any other empty file.
       {:ok, volume} = create_erasure_volume()
-      {:ok, _} = WriteOperation.write_file(volume.id, "/empty.bin", "")
+      {:ok, _} = WriteOperation.write_file_at(volume.id, "/empty.bin", 0, "")
 
       assert {:ok, %{file_size: 0, chunks: []}} =
                ReadOperation.read_file_refs(volume.id, "/empty.bin")

@@ -36,14 +36,14 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "keeps referenced chunks", %{volume: vol} do
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/keep.txt", "hello world")
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/keep.txt", ["hello world"])
 
       assert {:ok, result} = GarbageCollector.collect()
       assert result.chunks_deleted == 0
     end
 
     test "deletes unreferenced chunks after file deletion", %{volume: vol} do
-      {:ok, file} = WriteOperation.write_file(vol.id, "/delete-me.txt", "temp data")
+      {:ok, file} = WriteOperation.write_file_streamed(vol.id, "/delete-me.txt", ["temp data"])
       chunk_hashes = file.chunks
 
       # Delete the file
@@ -59,7 +59,9 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "removes blob files from disk when deleting unreferenced chunks", %{volume: vol} do
-      {:ok, file} = WriteOperation.write_file(vol.id, "/blob-check.txt", "blob data here")
+      {:ok, file} =
+        WriteOperation.write_file_streamed(vol.id, "/blob-check.txt", ["blob data here"])
+
       chunk_hashes = file.chunks
 
       # Verify blobs exist on disk before GC
@@ -79,7 +81,9 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "does not delete chunks with active_write_refs", %{volume: vol} do
-      {:ok, file} = WriteOperation.write_file(vol.id, "/protected.txt", "protected data")
+      {:ok, file} =
+        WriteOperation.write_file_streamed(vol.id, "/protected.txt", ["protected data"])
+
       [hash | _] = file.chunks
 
       # Add a write ref to protect the chunk
@@ -96,7 +100,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "emits telemetry event", %{volume: vol} do
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/telem.txt", "data")
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/telem.txt", ["data"])
 
       assert {:ok, _result} = GarbageCollector.collect()
 
@@ -118,7 +122,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "keeps stripe chunks for referenced erasure file", %{volume: vol} do
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/ec-keep.txt", "erasure data here")
+      {:ok, _file} = WriteOperation.write_file_at(vol.id, "/ec-keep.txt", 0, "erasure data here")
 
       assert {:ok, result} = GarbageCollector.collect()
       assert result.chunks_deleted == 0
@@ -126,7 +130,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "deletes stripe chunks after file deletion", %{volume: vol} do
-      {:ok, file} = WriteOperation.write_file(vol.id, "/ec-delete.txt", "erasure temp data")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/ec-delete.txt", 0, "erasure temp data")
 
       # Get stripe chunk hashes before deletion
       [%{stripe_id: sid} | _] = file.stripes
@@ -146,7 +150,8 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "cleans up orphaned stripe metadata", %{volume: vol} do
-      {:ok, file} = WriteOperation.write_file(vol.id, "/ec-orphan.txt", "orphan stripe data")
+      {:ok, file} =
+        WriteOperation.write_file_at(vol.id, "/ec-orphan.txt", 0, "orphan stripe data")
 
       [%{stripe_id: sid} | _] = file.stripes
 
@@ -161,7 +166,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     test "does not delete active-write-protected stripe chunks", %{volume: vol} do
-      {:ok, file} = WriteOperation.write_file(vol.id, "/ec-prot.txt", "protect me")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/ec-prot.txt", 0, "protect me")
 
       [%{stripe_id: sid} | _] = file.stripes
       {:ok, stripe} = StripeIndex.get(sid)
@@ -197,8 +202,8 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       rep_vol: rep_vol,
       ec_vol: ec_vol
     } do
-      {:ok, rep_file} = WriteOperation.write_file(rep_vol.id, "/rep.txt", "replicated")
-      {:ok, ec_file} = WriteOperation.write_file(ec_vol.id, "/ec.txt", "erasure coded")
+      {:ok, rep_file} = WriteOperation.write_file_at(rep_vol.id, "/rep.txt", 0, "replicated")
+      {:ok, ec_file} = WriteOperation.write_file_at(ec_vol.id, "/ec.txt", 0, "erasure coded")
 
       # Keep both files — nothing should be deleted
       assert {:ok, result} = GarbageCollector.collect()
@@ -222,8 +227,8 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       rep_vol: rep_vol,
       ec_vol: ec_vol
     } do
-      {:ok, rep_file} = WriteOperation.write_file(rep_vol.id, "/del-rep.txt", "delete rep")
-      {:ok, ec_file} = WriteOperation.write_file(ec_vol.id, "/del-ec.txt", "delete ec")
+      {:ok, rep_file} = WriteOperation.write_file_at(rep_vol.id, "/del-rep.txt", 0, "delete rep")
+      {:ok, ec_file} = WriteOperation.write_file_at(ec_vol.id, "/del-ec.txt", 0, "delete ec")
 
       FileIndex.delete(rep_file.id)
       FileIndex.delete(ec_file.id)

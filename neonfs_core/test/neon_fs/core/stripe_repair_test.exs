@@ -44,14 +44,14 @@ defmodule NeonFS.Core.StripeRepairTest do
   describe "scan_stripes/0" do
     test "returns empty list when all stripes healthy" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/healthy.txt", "healthy data here")
+      {:ok, _file} = WriteOperation.write_file_at(vol.id, "/healthy.txt", 0, "healthy data here")
 
       assert [] = StripeRepair.scan_stripes()
     end
 
     test "detects degraded stripe when one chunk is missing" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, file} = WriteOperation.write_file(vol.id, "/degrade.txt", "degrade data")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/degrade.txt", 0, "degrade data")
 
       [%{stripe_id: sid} | _] = file.stripes
       {:ok, stripe} = StripeIndex.get(sid)
@@ -66,7 +66,7 @@ defmodule NeonFS.Core.StripeRepairTest do
 
     test "detects critical stripe when too many chunks missing" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, file} = WriteOperation.write_file(vol.id, "/critical.txt", "critical data")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/critical.txt", 0, "critical data")
 
       [%{stripe_id: sid} | _] = file.stripes
       {:ok, stripe} = StripeIndex.get(sid)
@@ -82,8 +82,8 @@ defmodule NeonFS.Core.StripeRepairTest do
 
     test "sorts critical before degraded" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, f1} = WriteOperation.write_file(vol.id, "/f1.txt", "first file data")
-      {:ok, f2} = WriteOperation.write_file(vol.id, "/f2.txt", "second file data here")
+      {:ok, f1} = WriteOperation.write_file_at(vol.id, "/f1.txt", 0, "first file data")
+      {:ok, f2} = WriteOperation.write_file_at(vol.id, "/f2.txt", 0, "second file data here")
 
       [%{stripe_id: sid1} | _] = f1.stripes
       [%{stripe_id: sid2} | _] = f2.stripes
@@ -102,7 +102,7 @@ defmodule NeonFS.Core.StripeRepairTest do
 
     test "emits scan telemetry" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/telem.txt", "telemetry data")
+      {:ok, _file} = WriteOperation.write_file_at(vol.id, "/telem.txt", 0, "telemetry data")
 
       StripeRepair.scan_stripes()
 
@@ -116,7 +116,7 @@ defmodule NeonFS.Core.StripeRepairTest do
   describe "repair_stripe/1" do
     test "is a no-op for healthy stripe" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, file} = WriteOperation.write_file(vol.id, "/healthy.txt", "healthy repair data")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/healthy.txt", 0, "healthy repair data")
 
       [%{stripe_id: sid} | _] = file.stripes
 
@@ -125,7 +125,7 @@ defmodule NeonFS.Core.StripeRepairTest do
 
     test "reconstructs missing data chunk" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, file} = WriteOperation.write_file(vol.id, "/repair.txt", "repair this data")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/repair.txt", 0, "repair this data")
 
       [%{stripe_id: sid} | _] = file.stripes
       {:ok, stripe} = StripeIndex.get(sid)
@@ -148,7 +148,7 @@ defmodule NeonFS.Core.StripeRepairTest do
 
     test "returns error for critical stripe" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, file} = WriteOperation.write_file(vol.id, "/crit.txt", "critical stripe data")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/crit.txt", 0, "critical stripe data")
 
       [%{stripe_id: sid} | _] = file.stripes
       {:ok, stripe} = StripeIndex.get(sid)
@@ -165,7 +165,7 @@ defmodule NeonFS.Core.StripeRepairTest do
 
     test "prevents concurrent repair of same stripe" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, file} = WriteOperation.write_file(vol.id, "/conc.txt", "concurrent test")
+      {:ok, file} = WriteOperation.write_file_at(vol.id, "/conc.txt", 0, "concurrent test")
 
       [%{stripe_id: sid} | _] = file.stripes
 
@@ -181,7 +181,9 @@ defmodule NeonFS.Core.StripeRepairTest do
 
     test "emits repair telemetry" do
       {:ok, vol} = create_erasure_volume()
-      {:ok, file} = WriteOperation.write_file(vol.id, "/telem-repair.txt", "repair telem data")
+
+      {:ok, file} =
+        WriteOperation.write_file_at(vol.id, "/telem-repair.txt", 0, "repair telem data")
 
       [%{stripe_id: sid} | _] = file.stripes
       {:ok, stripe} = StripeIndex.get(sid)

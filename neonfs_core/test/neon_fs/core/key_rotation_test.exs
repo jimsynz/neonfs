@@ -322,7 +322,7 @@ defmodule NeonFS.Core.KeyRotationTest do
   end
 
   defp write_test_file(volume_id, path, data) do
-    {:ok, _file_meta} = WriteOperation.write_file(volume_id, path, data)
+    {:ok, _file_meta} = WriteOperation.write_file_streamed(volume_id, path, [data])
   end
 
   defp write_test_file_by_name(volume_name, path, data) do
