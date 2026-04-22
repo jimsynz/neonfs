@@ -334,6 +334,40 @@ jobs:
         run: mix check
 
   # =========================================================================
+  # neonfs_iam - Pure Elixir IAM package (Ash resources)
+  # =========================================================================
+  neonfs_iam:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.elixir_image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_iam/deps
+            neonfs_iam/_build
+          key: v3-build-neonfs_iam-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_iam/mix.lock') }}
+          restore-keys: v3-build-neonfs_iam-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_iam
+        run: |
+          mix local.hex --force && mix local.rebar --force
+          mix deps.get
+          mix deps.compile
+          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+
+      - name: Check
+        working-directory: neonfs_iam
+        run: mix check
+
+  # =========================================================================
   # neonfs-cli - Rust CLI
   # =========================================================================
   neonfs-cli:
