@@ -25,7 +25,7 @@ defmodule NeonFS.WebDAV.LockStore do
   via TTL — clients simply re-lock.
   """
 
-  @behaviour WebdavServer.LockStore
+  @behaviour Davy.LockStore
 
   alias NeonFS.Client.Router
 
@@ -158,7 +158,7 @@ defmodule NeonFS.WebDAV.LockStore do
   @doc """
   Check whether the given path has an active lock-null lock.
   """
-  @spec lock_null?(WebdavServer.LockStore.path()) :: boolean()
+  @spec lock_null?(Davy.LockStore.path()) :: boolean()
   def lock_null?(path) do
     init()
     now = System.system_time(:second)
@@ -198,7 +198,7 @@ defmodule NeonFS.WebDAV.LockStore do
   has been created. Acquires a DLM lock on the real file ID, releases the
   path-based lock-null DLM lock, and updates the ETS entry.
   """
-  @spec promote_lock_null(WebdavServer.LockStore.path(), String.t()) :: :ok
+  @spec promote_lock_null(Davy.LockStore.path(), String.t()) :: :ok
   def promote_lock_null(path, real_file_id) do
     init()
     now = System.system_time(:second)

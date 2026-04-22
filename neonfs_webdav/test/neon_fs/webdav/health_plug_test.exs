@@ -126,7 +126,7 @@ defmodule NeonFS.WebDAV.HealthPlugTest do
 
   defmodule StubBackend do
     @moduledoc false
-    @behaviour WebdavServer.Backend
+    @behaviour Davy.Backend
 
     @impl true
     def authenticate(_conn), do: {:ok, %{user: "stub"}}
@@ -134,7 +134,7 @@ defmodule NeonFS.WebDAV.HealthPlugTest do
     @impl true
     def resolve(_auth, _path) do
       {:ok,
-       %WebdavServer.Resource{
+       %Davy.Resource{
          path: ["stub"],
          type: :file,
          etag: "stub-etag",
@@ -157,7 +157,7 @@ defmodule NeonFS.WebDAV.HealthPlugTest do
 
     @impl true
     def put_content(_auth, path, _body, _opts) do
-      {:ok, %WebdavServer.Resource{path: path, type: :file, etag: "new-etag", content_length: 4}}
+      {:ok, %Davy.Resource{path: path, type: :file, etag: "new-etag", content_length: 4}}
     end
 
     @impl true

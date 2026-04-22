@@ -3,7 +3,7 @@ defmodule NeonFS.WebDAV.Application do
   OTP Application for neonfs_webdav.
 
   Starts the WebDAV supervision tree including client infrastructure
-  and the Bandit HTTP server running WebdavServer.Plug.
+  and the Bandit HTTP server running Davy.Plug.
   """
 
   use Application

@@ -2,7 +2,7 @@
 
 A standalone Elixir library for building NFSv3 file servers natively
 on the BEAM — no `nfs3_server` NIF, no out-of-tree Rust. Follows the
-same split-of-concerns pattern as `webdav_server` and `s3_server`: a
+same split-of-concerns pattern as `davy` and `s3_server`: a
 protocol-level library here, with the NeonFS-specific backend living
 in `neonfs_nfs`.
 

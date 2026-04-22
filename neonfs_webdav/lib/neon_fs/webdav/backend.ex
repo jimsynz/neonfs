@@ -1,6 +1,6 @@
 defmodule NeonFS.WebDAV.Backend do
   @moduledoc """
-  WebdavServer.Backend implementation that maps WebDAV operations to NeonFS
+  Davy.Backend implementation that maps WebDAV operations to NeonFS
   core calls.
 
   The root collection lists NeonFS volumes. The first path segment identifies
@@ -11,7 +11,7 @@ defmodule NeonFS.WebDAV.Backend do
   streaming isn't available.
   """
 
-  @behaviour WebdavServer.Backend
+  @behaviour Davy.Backend
 
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Client.Discovery
@@ -44,7 +44,7 @@ defmodule NeonFS.WebDAV.Backend do
         {:ok, volume_resource(volume)}
 
       {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :not_found}}
+        {:error, %Davy.Error{code: :not_found}}
 
       {:error, _reason} ->
         {:error, internal_error()}
@@ -62,7 +62,7 @@ defmodule NeonFS.WebDAV.Backend do
         if LockStore.lock_null?(path) do
           {:ok, lock_null_resource(volume_name, rest)}
         else
-          {:error, %WebdavServer.Error{code: :not_found}}
+          {:error, %Davy.Error{code: :not_found}}
         end
 
       {:error, _reason} ->
@@ -80,7 +80,7 @@ defmodule NeonFS.WebDAV.Backend do
   @impl true
   def set_properties(_auth, %{backend_data: %{type: type}}, _operations)
       when type in [:root, :volume] do
-    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot set properties on #{type}"}}
+    {:error, %Davy.Error{code: :forbidden, message: "Cannot set properties on #{type}"}}
   end
 
   def set_properties(_auth, resource, operations) do
@@ -106,7 +106,7 @@ defmodule NeonFS.WebDAV.Backend do
 
   @impl true
   def get_content(_auth, %{backend_data: %{lock_null: true}}, _opts) do
-    {:error, %WebdavServer.Error{code: :not_found}}
+    {:error, %Davy.Error{code: :not_found}}
   end
 
   def get_content(_auth, resource, opts) do
@@ -118,7 +118,7 @@ defmodule NeonFS.WebDAV.Backend do
         {:ok, stream}
 
       {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :not_found}}
+        {:error, %Davy.Error{code: :not_found}}
 
       {:error, _reason} ->
         {:error, internal_error()}
@@ -151,7 +151,7 @@ defmodule NeonFS.WebDAV.Backend do
       {:ok, file_resource(volume_name, volume.id, rest, meta)}
     else
       {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :conflict, message: "Volume not found"}}
+        {:error, %Davy.Error{code: :conflict, message: "Volume not found"}}
 
       {:error, _reason} ->
         {:error, internal_error()}
@@ -159,7 +159,7 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   def put_content_stream(_auth, [], _stream, _opts) do
-    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot write to root"}}
+    {:error, %Davy.Error{code: :forbidden, message: "Cannot write to root"}}
   end
 
   defp streaming_write(volume_name, file_path, stream, write_opts) do
@@ -209,11 +209,11 @@ defmodule NeonFS.WebDAV.Backend do
 
   @impl true
   def delete(_auth, %{backend_data: %{type: :root}}) do
-    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot delete root"}}
+    {:error, %Davy.Error{code: :forbidden, message: "Cannot delete root"}}
   end
 
   def delete(_auth, %{backend_data: %{type: :volume}}) do
-    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot delete volumes via WebDAV"}}
+    {:error, %Davy.Error{code: :forbidden, message: "Cannot delete volumes via WebDAV"}}
   end
 
   def delete(_auth, %{backend_data: %{lock_null: true}} = resource) do
@@ -253,8 +253,8 @@ defmodule NeonFS.WebDAV.Backend do
            streaming_write(dest_volume, dest_file_path, stream, write_opts) do
       if existed?, do: {:ok, :no_content}, else: {:ok, :created}
     else
-      {:error, %WebdavServer.Error{}} = err -> err
-      {:error, :not_found} -> {:error, %WebdavServer.Error{code: :not_found}}
+      {:error, %Davy.Error{}} = err -> err
+      {:error, :not_found} -> {:error, %Davy.Error{code: :not_found}}
       {:error, _reason} -> {:error, internal_error()}
     end
   end
@@ -283,12 +283,12 @@ defmodule NeonFS.WebDAV.Backend do
         case call_core(:mkdir, [volume_name, dir_path]) do
           {:ok, _meta} -> :ok
           :ok -> :ok
-          {:error, :already_exists} -> {:error, %WebdavServer.Error{code: :method_not_allowed}}
+          {:error, :already_exists} -> {:error, %Davy.Error{code: :method_not_allowed}}
           {:error, _reason} -> {:error, internal_error()}
         end
 
       {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :conflict, message: "Volume not found"}}
+        {:error, %Davy.Error{code: :conflict, message: "Volume not found"}}
 
       {:error, _reason} ->
         {:error, internal_error()}
@@ -296,7 +296,7 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   def create_collection(_auth, []) do
-    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot create root collection"}}
+    {:error, %Davy.Error{code: :forbidden, message: "Cannot create root collection"}}
   end
 
   @impl true
@@ -351,7 +351,7 @@ defmodule NeonFS.WebDAV.Backend do
         if existed?, do: {:ok, :no_content}, else: {:ok, :created}
 
       {:error, :not_found} ->
-        {:error, %WebdavServer.Error{code: :not_found}}
+        {:error, %Davy.Error{code: :not_found}}
 
       {:error, _reason} ->
         {:error, internal_error()}
@@ -362,7 +362,7 @@ defmodule NeonFS.WebDAV.Backend do
 
   defp check_same_volume(_src_volume, _dest_volume) do
     {:error,
-     %WebdavServer.Error{
+     %Davy.Error{
        code: :bad_gateway,
        message: "Cross-volume COPY/MOVE is not supported"
      }}
@@ -384,7 +384,7 @@ defmodule NeonFS.WebDAV.Backend do
   defp range_to_read_opts(_), do: []
 
   defp root_resource do
-    %WebdavServer.Resource{
+    %Davy.Resource{
       path: [],
       type: :collection,
       display_name: "NeonFS",
@@ -395,7 +395,7 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   defp volume_resource(volume) do
-    %WebdavServer.Resource{
+    %Davy.Resource{
       path: [volume.name],
       type: :collection,
       display_name: volume.name,
@@ -408,7 +408,7 @@ defmodule NeonFS.WebDAV.Backend do
   defp file_resource(volume_name, volume_id, path_segments, meta) do
     type = if directory?(meta.mode), do: :collection, else: :file
 
-    %WebdavServer.Resource{
+    %Davy.Resource{
       path: [volume_name | path_segments],
       type: type,
       etag: compute_etag(meta),
@@ -428,7 +428,7 @@ defmodule NeonFS.WebDAV.Backend do
   end
 
   defp lock_null_resource(volume_name, path_segments) do
-    %WebdavServer.Resource{
+    %Davy.Resource{
       path: [volume_name | path_segments],
       type: :file,
       content_type: "application/octet-stream",
@@ -553,7 +553,7 @@ defmodule NeonFS.WebDAV.Backend do
   defp validate_dest([_ | _]), do: :ok
 
   defp validate_dest([]) do
-    {:error, %WebdavServer.Error{code: :forbidden, message: "Cannot target root"}}
+    {:error, %Davy.Error{code: :forbidden, message: "Cannot target root"}}
   end
 
   defp split_dest([volume_name | rest]) do
@@ -562,7 +562,7 @@ defmodule NeonFS.WebDAV.Backend do
 
   defp check_overwrite(volume_name, file_path, overwrite?) do
     if not overwrite? and resource_exists?(volume_name, file_path) do
-      {:error, %WebdavServer.Error{code: :precondition_failed}}
+      {:error, %Davy.Error{code: :precondition_failed}}
     else
       :ok
     end
@@ -582,6 +582,6 @@ defmodule NeonFS.WebDAV.Backend do
   defp metadata_opts(_meta), do: []
 
   defp internal_error do
-    %WebdavServer.Error{code: :bad_request, message: "Internal error"}
+    %Davy.Error{code: :bad_request, message: "Internal error"}
   end
 end

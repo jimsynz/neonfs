@@ -5,7 +5,7 @@ defmodule NeonFS.WebDAV.Supervisor do
   Supervises:
   - Client connectivity (Connection, Discovery, CostFunction)
   - Service registration with the core cluster
-  - Bandit HTTP server running WebdavServer.Plug via HealthPlug
+  - Bandit HTTP server running Davy.Plug via HealthPlug
   """
 
   use Supervisor

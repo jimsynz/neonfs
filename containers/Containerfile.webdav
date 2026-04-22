@@ -2,7 +2,6 @@ FROM base AS deps
 
 # Copy only lockfiles and project config to cache the deps.get layer
 COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
-COPY --from=webdav_server mix.exs mix.lock /workdir/webdav_server/
 COPY --from=src mix.exs mix.lock /workdir/neonfs_webdav/
 
 WORKDIR /workdir/neonfs_webdav
@@ -13,7 +12,6 @@ ENV MIX_ENV=prod
 
 # Now copy the full source for compilation
 COPY --from=client . /workdir/neonfs_client
-COPY --from=webdav_server . /workdir/webdav_server
 COPY --from=src . /workdir/neonfs_webdav
 
 RUN mix compile && mix release --overwrite

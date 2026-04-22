@@ -57,7 +57,7 @@ defmodule NeonFS.WebDAV.MixProject do
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
       {:plug, "~> 1.15"},
-      {:webdav_server, path: "../webdav_server"},
+      {:davy, "~> 0.3.0"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test

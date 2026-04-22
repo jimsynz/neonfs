@@ -63,7 +63,7 @@ defmodule NeonFS.WebDAV.BackendTest do
     end
 
     test "returns not_found for unknown volume" do
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
+      assert {:error, %Davy.Error{code: :not_found}} =
                Backend.resolve(@auth, ["nonexistent"])
     end
 
@@ -91,7 +91,7 @@ defmodule NeonFS.WebDAV.BackendTest do
     test "returns not_found for missing file" do
       MockCore.create_volume("docs")
 
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
+      assert {:error, %Davy.Error{code: :not_found}} =
                Backend.resolve(@auth, ["docs", "missing.txt"])
     end
   end
@@ -248,7 +248,7 @@ defmodule NeonFS.WebDAV.BackendTest do
     test "forbids setting properties on root" do
       {:ok, root} = Backend.resolve(@auth, [])
 
-      assert {:error, %WebdavServer.Error{code: :forbidden}} =
+      assert {:error, %Davy.Error{code: :forbidden}} =
                Backend.set_properties(@auth, root, [{:set, {"custom:", "x"}, "y"}])
     end
 
@@ -256,7 +256,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.create_volume("docs")
       {:ok, volume} = Backend.resolve(@auth, ["docs"])
 
-      assert {:error, %WebdavServer.Error{code: :forbidden}} =
+      assert {:error, %Davy.Error{code: :forbidden}} =
                Backend.set_properties(@auth, volume, [{:set, {"custom:", "x"}, "y"}])
     end
 
@@ -302,7 +302,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       # Delete after resolving
       MockCore.delete_file("docs", "/exists.txt")
 
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
+      assert {:error, %Davy.Error{code: :not_found}} =
                Backend.get_content(@auth, resource, %{})
     end
 
@@ -392,7 +392,7 @@ defmodule NeonFS.WebDAV.BackendTest do
 
       expect(ChunkReader, :read_file_stream, fn _, _, _ -> {:error, :not_found} end)
 
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
+      assert {:error, %Davy.Error{code: :not_found}} =
                Backend.get_content(@auth, resource, %{})
     end
 
@@ -405,7 +405,7 @@ defmodule NeonFS.WebDAV.BackendTest do
         {:error, :no_available_locations}
       end)
 
-      assert {:error, %WebdavServer.Error{code: :bad_request}} =
+      assert {:error, %Davy.Error{code: :bad_request}} =
                Backend.get_content(@auth, resource, %{})
     end
 
@@ -447,7 +447,7 @@ defmodule NeonFS.WebDAV.BackendTest do
     end
 
     test "returns error for unknown volume" do
-      assert {:error, %WebdavServer.Error{code: :conflict}} =
+      assert {:error, %Davy.Error{code: :conflict}} =
                Backend.put_content(@auth, ["nonexistent", "file.txt"], "data", %{})
     end
 
@@ -534,12 +534,12 @@ defmodule NeonFS.WebDAV.BackendTest do
     end
 
     test "returns conflict for unknown volume" do
-      assert {:error, %WebdavServer.Error{code: :conflict}} =
+      assert {:error, %Davy.Error{code: :conflict}} =
                Backend.put_content_stream(@auth, ["nope", "f.txt"], ["data"], %{})
     end
 
     test "rejects writes at root" do
-      assert {:error, %WebdavServer.Error{code: :forbidden}} =
+      assert {:error, %Davy.Error{code: :forbidden}} =
                Backend.put_content_stream(@auth, [], ["data"], %{})
     end
   end
@@ -552,7 +552,7 @@ defmodule NeonFS.WebDAV.BackendTest do
 
       assert :ok = Backend.delete(@auth, resource)
 
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
+      assert {:error, %Davy.Error{code: :not_found}} =
                Backend.resolve(@auth, ["docs", "delete-me.txt"])
     end
 
@@ -568,14 +568,14 @@ defmodule NeonFS.WebDAV.BackendTest do
     test "forbids deleting root" do
       {:ok, root} = Backend.resolve(@auth, [])
 
-      assert {:error, %WebdavServer.Error{code: :forbidden}} = Backend.delete(@auth, root)
+      assert {:error, %Davy.Error{code: :forbidden}} = Backend.delete(@auth, root)
     end
 
     test "forbids deleting volumes" do
       MockCore.create_volume("protected")
       {:ok, volume} = Backend.resolve(@auth, ["protected"])
 
-      assert {:error, %WebdavServer.Error{code: :forbidden}} = Backend.delete(@auth, volume)
+      assert {:error, %Davy.Error{code: :forbidden}} = Backend.delete(@auth, volume)
     end
   end
 
@@ -618,7 +618,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("docs", "/dst.txt", "old")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "src.txt"])
 
-      assert {:error, %WebdavServer.Error{code: :precondition_failed}} =
+      assert {:error, %Davy.Error{code: :precondition_failed}} =
                Backend.copy(@auth, resource, ["docs", "dst.txt"], false)
     end
 
@@ -647,7 +647,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("vol-a", "/source.txt", "content")
       {:ok, resource} = Backend.resolve(@auth, ["vol-a", "source.txt"])
 
-      assert {:error, %WebdavServer.Error{code: :bad_gateway}} =
+      assert {:error, %Davy.Error{code: :bad_gateway}} =
                Backend.copy(@auth, resource, ["vol-b", "source.txt"], true)
 
       assert {:error, :not_found} = MockCore.read_file("vol-b", "/source.txt")
@@ -681,7 +681,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.write_file("vol-a", "/file.txt", "cross-volume")
       {:ok, resource} = Backend.resolve(@auth, ["vol-a", "file.txt"])
 
-      assert {:error, %WebdavServer.Error{code: :bad_gateway}} =
+      assert {:error, %Davy.Error{code: :bad_gateway}} =
                Backend.move(@auth, resource, ["vol-b", "file.txt"], true)
 
       assert {:ok, "cross-volume"} = MockCore.read_file("vol-a", "/file.txt")
@@ -705,17 +705,17 @@ defmodule NeonFS.WebDAV.BackendTest do
       MockCore.create_volume("docs")
       MockCore.mkdir("docs", "/existing")
 
-      assert {:error, %WebdavServer.Error{code: :method_not_allowed}} =
+      assert {:error, %Davy.Error{code: :method_not_allowed}} =
                Backend.create_collection(@auth, ["docs", "existing"])
     end
 
     test "returns conflict for unknown volume" do
-      assert {:error, %WebdavServer.Error{code: :conflict}} =
+      assert {:error, %Davy.Error{code: :conflict}} =
                Backend.create_collection(@auth, ["nonexistent", "dir"])
     end
 
     test "forbids creating root collection" do
-      assert {:error, %WebdavServer.Error{code: :forbidden}} =
+      assert {:error, %Davy.Error{code: :forbidden}} =
                Backend.create_collection(@auth, [])
     end
   end
@@ -757,7 +757,7 @@ defmodule NeonFS.WebDAV.BackendTest do
     test "resolve returns not_found when no lock-null exists" do
       MockCore.create_volume("docs")
 
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
+      assert {:error, %Davy.Error{code: :not_found}} =
                Backend.resolve(@auth, ["docs", "missing.txt"])
     end
 
@@ -768,7 +768,7 @@ defmodule NeonFS.WebDAV.BackendTest do
       {:ok, _token} = LockStore.lock(path, :exclusive, :write, 0, "user-a", 300)
       {:ok, resource} = Backend.resolve(@auth, path)
 
-      assert {:error, %WebdavServer.Error{code: :not_found}} =
+      assert {:error, %Davy.Error{code: :not_found}} =
                Backend.get_content(@auth, resource, %{})
     end
 
