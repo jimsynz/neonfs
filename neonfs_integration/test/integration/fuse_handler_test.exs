@@ -71,9 +71,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
   describe "lookup operation" do
     test "looks up existing file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create test file on core node
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
         volume_id,
         "/test.txt",
+        0,
         "hello"
       ])
 
@@ -293,9 +294,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
   describe "unlink and rmdir operations" do
     test "deletes a file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create file on core
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
         volume_id,
         "/delete_me.txt",
+        0,
         "content"
       ])
 
@@ -309,9 +311,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
 
     test "deletes empty directory", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create empty directory on core
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
         volume_id,
         "/empty_dir",
+        0,
         "",
         [mode: 0o040755]
       ])
@@ -328,9 +331,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
   describe "rename operation" do
     test "renames a file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create file on core
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
         volume_id,
         "/old_name.txt",
+        0,
         "content"
       ])
 
@@ -665,9 +669,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       cluster: cluster
     } do
       # Create file via RPC so we can capture its initial changed_at
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
         volume_id,
         "/ctime_file.txt",
+        0,
         "content"
       ])
 
@@ -707,9 +712,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       cluster: cluster
     } do
       # Create file owned by root (uid 0) via RPC
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
         volume_id,
         "/root_chmod.txt",
+        0,
         "content"
       ])
 
@@ -734,9 +740,10 @@ defmodule NeonFS.Integration.FuseHandlerTest do
       volume_id: volume_id,
       cluster: cluster
     } do
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
         volume_id,
         "/root_chown.txt",
+        0,
         "content"
       ])
 

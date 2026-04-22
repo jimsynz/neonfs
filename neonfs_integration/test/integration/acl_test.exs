@@ -43,9 +43,10 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Write as UID 1000 should be denied
       result =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
           vid,
           "/denied.bin",
+          0,
           "test",
           [uid: 1000]
         ])
@@ -82,9 +83,10 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Write as UID 1000 should succeed
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
           vid,
           "/writable.bin",
+          0,
           "written by 1000",
           [uid: 1000]
         ])
@@ -118,9 +120,10 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Owner UID 500 can write without explicit grant
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
           vid,
           "/owner.bin",
+          0,
           "owner data",
           [uid: 500]
         ])
@@ -141,9 +144,10 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Root can write
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
           vid,
           "/root.bin",
+          0,
           "root data",
           [uid: 0]
         ])
@@ -210,9 +214,10 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Write file as UID 1000 with mode 0600
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
           vid,
           "/private.bin",
+          0,
           "private data",
           [uid: 1000, mode: 0o600]
         ])
@@ -266,9 +271,10 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Write file as UID 1000
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file, [
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
           vid,
           "/extended.bin",
+          0,
           "extended acl data",
           [uid: 1000, mode: 0o600]
         ])
