@@ -1014,6 +1014,77 @@ defmodule NeonFS.Core.WriteOperationTest do
                  client_ref: :smb_client_b
                )
     end
+
+    test "write_file_streamed rejects write when mandatory lock held by another client",
+         %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/stream-locked.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {0, 1000},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:error, :lock_conflict} =
+               WriteOperation.write_file_streamed(
+                 volume.id,
+                 "/stream-locked.txt",
+                 ["streamed data"],
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "write_file_streamed permits write when mandatory lock held by same client",
+         %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/stream-mine.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {0, 1000},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(
+                 volume.id,
+                 "/stream-mine.txt",
+                 ["streamed payload"],
+                 client_ref: :smb_client_a
+               )
+
+      assert file_meta.size == byte_size("streamed payload")
+    end
+
+    test "write_file_streamed rejects even with a narrow lock range (conservative full-file check)",
+         %{volume: volume} do
+      # Regression for #374: a mandatory lock at bytes 50-100 previously did not
+      # block streamed writes because write_file_streamed/4 passed {0, 0} to
+      # check_lock, which never overlaps any finite range.
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/stream-narrow.txt")
+
+      assert :ok =
+               LockManager.lock(
+                 lock_file_id,
+                 :smb_client_a,
+                 {50, 50},
+                 :exclusive,
+                 mode: :mandatory
+               )
+
+      assert {:error, :lock_conflict} =
+               WriteOperation.write_file_streamed(
+                 volume.id,
+                 "/stream-narrow.txt",
+                 ["streamed"],
+                 client_ref: :smb_client_b
+               )
+    end
   end
 
   describe "share mode (deny-write) enforcement" do
@@ -1093,6 +1164,38 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       assert {:ok, _file_meta} =
                WriteOperation.write_file(volume.id, "/legacy-share.txt", "no client ref")
+    end
+
+    test "write_file_streamed rejects when another client has deny_write open",
+         %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/stream-share.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
+
+      assert {:error, :share_denied} =
+               WriteOperation.write_file_streamed(
+                 volume.id,
+                 "/stream-share.txt",
+                 ["streamed blocked"],
+                 client_ref: :smb_client_b
+               )
+    end
+
+    test "write_file_streamed permits write for the client holding deny_write",
+         %{volume: volume} do
+      lock_file_id = WriteOperation.lock_file_id(volume.id, "/stream-share-mine.txt")
+
+      assert :ok = LockManager.open(lock_file_id, :smb_client_a, :read_write, :write)
+
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(
+                 volume.id,
+                 "/stream-share-mine.txt",
+                 ["streamed mine"],
+                 client_ref: :smb_client_a
+               )
+
+      assert file_meta.size == byte_size("streamed mine")
     end
   end
 
