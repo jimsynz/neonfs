@@ -37,4 +37,14 @@ excludes =
     [:loopback]
   end
 
+# PeerClusterTelemetry accumulates per-phase timings across every
+# `PeerCluster.start_cluster!` call. We print the summary from an
+# `ExUnit.after_suite` callback so it runs after all tests finish but
+# while the GenServer is still alive. See #423.
+{:ok, _telemetry_pid} = NeonFS.Integration.PeerClusterTelemetry.start_link()
+
+ExUnit.after_suite(fn _results ->
+  NeonFS.Integration.PeerClusterTelemetry.print_summary()
+end)
+
 ExUnit.start(capture_log: true, exclude: excludes, slowest: 10)

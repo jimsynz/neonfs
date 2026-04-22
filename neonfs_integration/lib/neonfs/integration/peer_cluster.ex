@@ -38,7 +38,7 @@ defmodule NeonFS.Integration.PeerCluster do
   """
   @spec start_peer(map(), [atom()], keyword()) :: {:ok, pid(), node()} | {:error, term()}
   def start_peer(peer_opts, applications, app_config \\ []) do
-    case :peer.start_link(peer_opts) do
+    case span_peer_spawn(peer_opts) do
       {:ok, peer, node} ->
         # Suppress debug/info logs on peer nodes during tests
         # Configure both Elixir's Logger and Erlang's :logger
@@ -46,13 +46,41 @@ defmodule NeonFS.Integration.PeerCluster do
         :peer.call(peer, :logger, :set_primary_config, [:level, :warning])
 
         # Use :peer.call since nodes aren't connected yet (connection: 0)
-        apply_app_config(peer, app_config)
-        start_applications(peer, node, applications)
+        span_apply_config(peer, node, app_config)
+        span_start_applications(peer, node, applications)
+
         {:ok, peer, node}
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp span_peer_spawn(peer_opts) do
+    :telemetry.span([:neonfs, :peer_cluster, :node, :spawn], %{}, fn ->
+      case :peer.start_link(peer_opts) do
+        {:ok, peer, node} -> {{:ok, peer, node}, %{node: node}}
+        {:error, reason} -> {{:error, reason}, %{error: reason}}
+      end
+    end)
+  end
+
+  defp span_apply_config(peer, node, app_config) do
+    :telemetry.span([:neonfs, :peer_cluster, :node, :apply_config], %{node: node}, fn ->
+      {apply_app_config(peer, app_config), %{}}
+    end)
+  end
+
+  defp span_start_applications(peer, node, applications) do
+    :telemetry.span([:neonfs, :peer_cluster, :node, :start_applications], %{node: node}, fn ->
+      {start_applications(peer, node, applications), %{applications: applications}}
+    end)
+  end
+
+  defp span_wait_for_ra(peer, node) do
+    :telemetry.span([:neonfs, :peer_cluster, :node, :wait_for_ra], %{node: node}, fn ->
+      {wait_for_ra_ready(peer), %{}}
+    end)
   end
 
   @doc """
@@ -489,7 +517,7 @@ defmodule NeonFS.Integration.PeerCluster do
        ) do
     case start_peer(peer_opts, applications, app_config) do
       {:ok, peer, node} ->
-        if enable_ra, do: wait_for_ra_ready(peer)
+        if enable_ra, do: span_wait_for_ra(peer, node)
 
         acc ++
           [
