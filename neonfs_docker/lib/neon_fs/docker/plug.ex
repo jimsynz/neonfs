@@ -4,14 +4,15 @@ defmodule NeonFS.Docker.Plug do
 
   Every endpoint accepts `POST` with a JSON body and returns a JSON
   body. Response shape always includes an `"Err"` field (empty string
-  on success), per the Docker plugin contract. `Mount` and `Unmount`
-  are out of scope for this slice — they come in a follow-up and
-  currently return `405 Method Not Allowed`.
+  on success), per the Docker plugin contract.
 
   Injectable dependencies (for testing):
 
     * `:volume_store` — module or pid implementing the
       `NeonFS.Docker.VolumeStore` API (default: `NeonFS.Docker.VolumeStore`).
+    * `:mount_tracker` — pid or registered name of the
+      `NeonFS.Docker.MountTracker` GenServer handling ref-counted FUSE
+      mounts (default: `NeonFS.Docker.MountTracker`).
     * `:core_create_fn` — 2-arity function called as
       `core_create_fn.(name, opts)` in the `Create` handler to propagate
       the volume to NeonFS core. Default calls `NeonFS.Client.Router`.
@@ -19,7 +20,7 @@ defmodule NeonFS.Docker.Plug do
 
   use Plug.Router
 
-  alias NeonFS.Docker.VolumeStore
+  alias NeonFS.Docker.{MountTracker, VolumeStore}
 
   plug(Plug.Parsers,
     parsers: [:json],
@@ -73,7 +74,8 @@ defmodule NeonFS.Docker.Plug do
   post "/VolumeDriver.Get" do
     with {:ok, name} <- fetch_name(conn.body_params),
          {:ok, record} <- VolumeStore.get(volume_store(conn), name) do
-      reply(conn, 200, %{"Volume" => volume_view(record), "Err" => ""})
+      mountpoint = MountTracker.mountpoint_for(mount_tracker(conn), record.name)
+      reply(conn, 200, %{"Volume" => volume_view(record, mountpoint), "Err" => ""})
     else
       {:error, :not_found} -> reply(conn, 200, %{"Err" => "volume not found"})
       {:error, message} -> reply(conn, 200, %{"Err" => message})
@@ -83,10 +85,14 @@ defmodule NeonFS.Docker.Plug do
   ## List
 
   post "/VolumeDriver.List" do
+    tracker = mount_tracker(conn)
+
     volumes =
       volume_store(conn)
       |> VolumeStore.list()
-      |> Enum.map(&volume_view/1)
+      |> Enum.map(fn record ->
+        volume_view(record, MountTracker.mountpoint_for(tracker, record.name))
+      end)
 
     reply(conn, 200, %{"Volumes" => volumes, "Err" => ""})
   end
@@ -94,22 +100,44 @@ defmodule NeonFS.Docker.Plug do
   ## Path
 
   post "/VolumeDriver.Path" do
-    # Mount/Unmount aren't implemented yet, so every volume returns an
-    # empty mountpoint. Docker treats an empty string as "not mounted".
     case fetch_name(conn.body_params) do
-      {:ok, _name} -> reply(conn, 200, %{"Mountpoint" => "", "Err" => ""})
-      {:error, message} -> reply(conn, 200, %{"Err" => message})
+      {:ok, name} ->
+        mountpoint = MountTracker.mountpoint_for(mount_tracker(conn), name)
+        reply(conn, 200, %{"Mountpoint" => mountpoint, "Err" => ""})
+
+      {:error, message} ->
+        reply(conn, 200, %{"Err" => message})
     end
   end
 
-  ## Mount / Unmount — out of scope for this slice
+  ## Mount
 
   post "/VolumeDriver.Mount" do
-    reply(conn, 200, %{"Err" => "mount not implemented in this plugin version"})
+    with {:ok, name} <- fetch_name(conn.body_params),
+         {:ok, mountpoint} <- MountTracker.mount(mount_tracker(conn), name) do
+      reply(conn, 200, %{"Mountpoint" => mountpoint, "Err" => ""})
+    else
+      {:error, message} when is_binary(message) ->
+        reply(conn, 200, %{"Err" => message})
+
+      {:error, reason} ->
+        reply(conn, 200, %{"Err" => "mount failed: #{inspect(reason)}"})
+    end
   end
 
+  ## Unmount
+
   post "/VolumeDriver.Unmount" do
-    reply(conn, 200, %{"Err" => "unmount not implemented in this plugin version"})
+    with {:ok, name} <- fetch_name(conn.body_params),
+         :ok <- MountTracker.unmount(mount_tracker(conn), name) do
+      reply(conn, 200, %{"Err" => ""})
+    else
+      {:error, message} when is_binary(message) ->
+        reply(conn, 200, %{"Err" => message})
+
+      {:error, reason} ->
+        reply(conn, 200, %{"Err" => "unmount failed: #{inspect(reason)}"})
+    end
   end
 
   match _ do
@@ -125,15 +153,16 @@ defmodule NeonFS.Docker.Plug do
     end
   end
 
-  defp volume_view(%{name: name}) do
-    # Mountpoint left empty until #310 wires Mount/Unmount; Docker
-    # clients tolerate a blank mountpoint for a defined-but-not-mounted
-    # volume.
-    %{"Name" => name, "Mountpoint" => ""}
+  defp volume_view(%{name: name}, mountpoint) do
+    %{"Name" => name, "Mountpoint" => mountpoint}
   end
 
   defp volume_store(conn) do
     conn.private[:volume_store] || NeonFS.Docker.VolumeStore
+  end
+
+  defp mount_tracker(conn) do
+    conn.private[:mount_tracker] || NeonFS.Docker.MountTracker
   end
 
   defp propagate_to_core(conn, name, opts) do

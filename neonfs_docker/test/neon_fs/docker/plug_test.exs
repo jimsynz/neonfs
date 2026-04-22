@@ -2,15 +2,36 @@ defmodule NeonFS.Docker.PlugTest do
   use ExUnit.Case, async: true
   import Plug.Test
 
+  alias NeonFS.Docker.{MountTracker, VolumeStore}
   alias NeonFS.Docker.Plug, as: DockerPlug
-  alias NeonFS.Docker.VolumeStore
 
   setup do
-    # Each test gets its own isolated volume store.
-    name = :"volume_store_#{System.unique_integer([:positive])}"
-    {:ok, pid} = VolumeStore.start_link(name: name)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
-    {:ok, store: name}
+    suffix = System.unique_integer([:positive])
+    store_name = :"volume_store_#{suffix}"
+    tracker_name = :"mount_tracker_#{suffix}"
+
+    {:ok, store_pid} = VolumeStore.start_link(name: store_name)
+
+    {:ok, tracker_pid} =
+      MountTracker.start_link(
+        name: tracker_name,
+        mount_fn: fn vol -> {:ok, {{:mock_id, vol}, "/mnt/#{vol}"}} end,
+        unmount_fn: fn _ -> :ok end
+      )
+
+    Process.unlink(tracker_pid)
+
+    on_exit(fn ->
+      if Process.alive?(store_pid), do: GenServer.stop(store_pid)
+
+      try do
+        if Process.alive?(tracker_pid), do: GenServer.stop(tracker_pid, :shutdown, 1_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
+
+    {:ok, store: store_name, tracker: tracker_name}
   end
 
   defp ok_create_fn, do: fn _name, _opts -> :ok end
@@ -19,6 +40,7 @@ defmodule NeonFS.Docker.PlugTest do
     conn(:post, path, Jason.encode!(body))
     |> Plug.Conn.put_req_header("content-type", "application/json")
     |> Plug.Conn.put_private(:volume_store, Keyword.fetch!(opts, :store))
+    |> Plug.Conn.put_private(:mount_tracker, Keyword.fetch!(opts, :tracker))
     |> Plug.Conn.put_private(:core_create_fn, Keyword.get(opts, :core_create_fn, ok_create_fn()))
     |> DockerPlug.call(DockerPlug.init([]))
   end
@@ -26,26 +48,27 @@ defmodule NeonFS.Docker.PlugTest do
   defp decode(conn), do: Jason.decode!(conn.resp_body)
 
   describe "POST /Plugin.Activate" do
-    test "advertises VolumeDriver", %{store: store} do
-      conn = post("/Plugin.Activate", %{}, store: store)
+    test "advertises VolumeDriver", %{store: store, tracker: tracker} do
+      conn = post("/Plugin.Activate", %{}, store: store, tracker: tracker)
       assert conn.status == 200
       assert decode(conn) == %{"Implements" => ["VolumeDriver"]}
     end
   end
 
   describe "POST /VolumeDriver.Capabilities" do
-    test "returns scope: local", %{store: store} do
-      conn = post("/VolumeDriver.Capabilities", %{}, store: store)
+    test "returns scope: local", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Capabilities", %{}, store: store, tracker: tracker)
       assert conn.status == 200
       assert decode(conn) == %{"Capabilities" => %{"Scope" => "local"}}
     end
   end
 
   describe "POST /VolumeDriver.Create" do
-    test "records the volume locally and returns empty Err", %{store: store} do
+    test "records the volume locally and returns empty Err", %{store: store, tracker: tracker} do
       conn =
         post("/VolumeDriver.Create", %{"Name" => "vol-a", "Opts" => %{"replication" => "2"}},
-          store: store
+          store: store,
+          tracker: tracker
         )
 
       assert conn.status == 200
@@ -55,7 +78,7 @@ defmodule NeonFS.Docker.PlugTest do
                VolumeStore.get(store, "vol-a")
     end
 
-    test "propagates to core via core_create_fn", %{store: store} do
+    test "propagates to core via core_create_fn", %{store: store, tracker: tracker} do
       parent = self()
 
       fun = fn name, opts ->
@@ -66,6 +89,7 @@ defmodule NeonFS.Docker.PlugTest do
       conn =
         post("/VolumeDriver.Create", %{"Name" => "vol-b", "Opts" => %{"k" => "v"}},
           store: store,
+          tracker: tracker,
           core_create_fn: fun
         )
 
@@ -74,9 +98,15 @@ defmodule NeonFS.Docker.PlugTest do
       assert decode(conn) == %{"Err" => ""}
     end
 
-    test "reports core create failure in Err", %{store: store} do
+    test "reports core create failure in Err", %{store: store, tracker: tracker} do
       fun = fn _name, _opts -> {:error, "boom"} end
-      conn = post("/VolumeDriver.Create", %{"Name" => "vol-c"}, store: store, core_create_fn: fun)
+
+      conn =
+        post("/VolumeDriver.Create", %{"Name" => "vol-c"},
+          store: store,
+          tracker: tracker,
+          core_create_fn: fun
+        )
 
       assert conn.status == 200
       assert %{"Err" => err} = decode(conn)
@@ -84,48 +114,51 @@ defmodule NeonFS.Docker.PlugTest do
       assert {:error, :not_found} = VolumeStore.get(store, "vol-c")
     end
 
-    test "handles missing Opts as empty map", %{store: store} do
-      conn = post("/VolumeDriver.Create", %{"Name" => "vol-d"}, store: store)
+    test "handles missing Opts as empty map", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Create", %{"Name" => "vol-d"}, store: store, tracker: tracker)
 
       assert conn.status == 200
       assert {:ok, %{name: "vol-d", opts: %{}}} = VolumeStore.get(store, "vol-d")
     end
 
-    test "rejects missing Name with Err", %{store: store} do
-      conn = post("/VolumeDriver.Create", %{}, store: store)
+    test "rejects missing Name with Err", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Create", %{}, store: store, tracker: tracker)
       assert conn.status == 200
       assert %{"Err" => "missing or invalid Name"} = decode(conn)
     end
   end
 
   describe "POST /VolumeDriver.Remove" do
-    test "drops the local record and returns empty Err", %{store: store} do
+    test "drops the local record and returns empty Err", %{store: store, tracker: tracker} do
       :ok = VolumeStore.put(store, "vol-to-remove", %{})
 
-      conn = post("/VolumeDriver.Remove", %{"Name" => "vol-to-remove"}, store: store)
+      conn =
+        post("/VolumeDriver.Remove", %{"Name" => "vol-to-remove"}, store: store, tracker: tracker)
 
       assert conn.status == 200
       assert decode(conn) == %{"Err" => ""}
       assert {:error, :not_found} = VolumeStore.get(store, "vol-to-remove")
     end
 
-    test "idempotent for unknown name", %{store: store} do
-      conn = post("/VolumeDriver.Remove", %{"Name" => "never-created"}, store: store)
+    test "idempotent for unknown name", %{store: store, tracker: tracker} do
+      conn =
+        post("/VolumeDriver.Remove", %{"Name" => "never-created"}, store: store, tracker: tracker)
+
       assert conn.status == 200
       assert decode(conn) == %{"Err" => ""}
     end
 
-    test "rejects missing Name", %{store: store} do
-      conn = post("/VolumeDriver.Remove", %{}, store: store)
+    test "rejects missing Name", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Remove", %{}, store: store, tracker: tracker)
       assert %{"Err" => "missing or invalid Name"} = decode(conn)
     end
   end
 
   describe "POST /VolumeDriver.Get" do
-    test "returns the volume record for a known name", %{store: store} do
+    test "returns the volume record for a known name", %{store: store, tracker: tracker} do
       :ok = VolumeStore.put(store, "vol-x", %{})
 
-      conn = post("/VolumeDriver.Get", %{"Name" => "vol-x"}, store: store)
+      conn = post("/VolumeDriver.Get", %{"Name" => "vol-x"}, store: store, tracker: tracker)
 
       assert conn.status == 200
 
@@ -133,19 +166,19 @@ defmodule NeonFS.Docker.PlugTest do
                decode(conn)
     end
 
-    test "returns Err for unknown name", %{store: store} do
-      conn = post("/VolumeDriver.Get", %{"Name" => "missing"}, store: store)
+    test "returns Err for unknown name", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Get", %{"Name" => "missing"}, store: store, tracker: tracker)
       assert conn.status == 200
       assert %{"Err" => "volume not found"} = decode(conn)
     end
   end
 
   describe "POST /VolumeDriver.List" do
-    test "lists all recorded volumes", %{store: store} do
+    test "lists all recorded volumes", %{store: store, tracker: tracker} do
       :ok = VolumeStore.put(store, "vol-1", %{})
       :ok = VolumeStore.put(store, "vol-2", %{})
 
-      conn = post("/VolumeDriver.List", %{}, store: store)
+      conn = post("/VolumeDriver.List", %{}, store: store, tracker: tracker)
 
       assert conn.status == 200
       assert %{"Volumes" => vols, "Err" => ""} = decode(conn)
@@ -153,39 +186,133 @@ defmodule NeonFS.Docker.PlugTest do
       assert names == ["vol-1", "vol-2"]
     end
 
-    test "returns empty list when store is empty", %{store: store} do
-      conn = post("/VolumeDriver.List", %{}, store: store)
+    test "returns empty list when store is empty", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.List", %{}, store: store, tracker: tracker)
       assert decode(conn) == %{"Volumes" => [], "Err" => ""}
     end
   end
 
   describe "POST /VolumeDriver.Path" do
-    test "returns empty Mountpoint (Mount not yet implemented)", %{store: store} do
-      conn = post("/VolumeDriver.Path", %{"Name" => "anything"}, store: store)
+    test "returns empty Mountpoint before Mount", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Path", %{"Name" => "anything"}, store: store, tracker: tracker)
       assert conn.status == 200
       assert decode(conn) == %{"Mountpoint" => "", "Err" => ""}
     end
-  end
 
-  describe "Mount and Unmount placeholders" do
-    test "Mount returns a non-empty Err until #310 lands", %{store: store} do
-      conn = post("/VolumeDriver.Mount", %{"Name" => "any", "ID" => "abc"}, store: store)
+    test "returns the active mountpoint after Mount", %{store: store, tracker: tracker} do
+      post("/VolumeDriver.Mount", %{"Name" => "vol-p"}, store: store, tracker: tracker)
+      conn = post("/VolumeDriver.Path", %{"Name" => "vol-p"}, store: store, tracker: tracker)
+
       assert conn.status == 200
-      assert %{"Err" => err} = decode(conn)
-      assert err =~ "not implemented"
+      assert decode(conn) == %{"Mountpoint" => "/mnt/vol-p", "Err" => ""}
     end
 
-    test "Unmount returns a non-empty Err until #310 lands", %{store: store} do
-      conn = post("/VolumeDriver.Unmount", %{"Name" => "any", "ID" => "abc"}, store: store)
+    test "rejects missing Name", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Path", %{}, store: store, tracker: tracker)
+      assert %{"Err" => "missing or invalid Name"} = decode(conn)
+    end
+  end
+
+  describe "POST /VolumeDriver.Mount" do
+    test "returns the plugin-allocated mountpoint and empty Err", %{
+      store: store,
+      tracker: tracker
+    } do
+      conn = post("/VolumeDriver.Mount", %{"Name" => "vol-a"}, store: store, tracker: tracker)
       assert conn.status == 200
+      assert decode(conn) == %{"Mountpoint" => "/mnt/vol-a", "Err" => ""}
+    end
+
+    test "ref-counts concurrent Mount calls for the same volume", %{
+      store: store,
+      tracker: tracker
+    } do
+      conn1 = post("/VolumeDriver.Mount", %{"Name" => "vol-b"}, store: store, tracker: tracker)
+      conn2 = post("/VolumeDriver.Mount", %{"Name" => "vol-b"}, store: store, tracker: tracker)
+
+      assert decode(conn1) == %{"Mountpoint" => "/mnt/vol-b", "Err" => ""}
+      assert decode(conn2) == %{"Mountpoint" => "/mnt/vol-b", "Err" => ""}
+      assert [{"vol-b", %{ref_count: 2}}] = MountTracker.list(tracker)
+    end
+
+    test "reports mount_fn errors in Err", %{store: store} do
+      failing_tracker = :"failing_tracker_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        MountTracker.start_link(
+          name: failing_tracker,
+          mount_fn: fn _ -> {:error, :permission_denied} end,
+          unmount_fn: fn _ -> :ok end
+        )
+
+      Process.unlink(pid)
+
+      on_exit(fn ->
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :shutdown, 1_000)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      conn =
+        post("/VolumeDriver.Mount", %{"Name" => "vol-x"},
+          store: store,
+          tracker: failing_tracker
+        )
+
       assert %{"Err" => err} = decode(conn)
-      assert err =~ "not implemented"
+      assert err =~ "permission_denied"
+    end
+
+    test "rejects missing Name", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Mount", %{}, store: store, tracker: tracker)
+      assert %{"Err" => "missing or invalid Name"} = decode(conn)
+    end
+  end
+
+  describe "POST /VolumeDriver.Unmount" do
+    test "unmounts the volume after the last reference releases", %{
+      store: store,
+      tracker: tracker
+    } do
+      post("/VolumeDriver.Mount", %{"Name" => "vol-u"}, store: store, tracker: tracker)
+      conn = post("/VolumeDriver.Unmount", %{"Name" => "vol-u"}, store: store, tracker: tracker)
+
+      assert decode(conn) == %{"Err" => ""}
+      assert MountTracker.list(tracker) == []
+    end
+
+    test "keeps the mount alive until every reference releases", %{
+      store: store,
+      tracker: tracker
+    } do
+      post("/VolumeDriver.Mount", %{"Name" => "vol-u2"}, store: store, tracker: tracker)
+      post("/VolumeDriver.Mount", %{"Name" => "vol-u2"}, store: store, tracker: tracker)
+      post("/VolumeDriver.Unmount", %{"Name" => "vol-u2"}, store: store, tracker: tracker)
+
+      assert [{"vol-u2", %{ref_count: 1}}] = MountTracker.list(tracker)
+    end
+
+    test "is idempotent for volumes that were never mounted", %{store: store, tracker: tracker} do
+      conn =
+        post("/VolumeDriver.Unmount", %{"Name" => "never-mounted"},
+          store: store,
+          tracker: tracker
+        )
+
+      assert decode(conn) == %{"Err" => ""}
+    end
+
+    test "rejects missing Name", %{store: store, tracker: tracker} do
+      conn = post("/VolumeDriver.Unmount", %{}, store: store, tracker: tracker)
+      assert %{"Err" => "missing or invalid Name"} = decode(conn)
     end
   end
 
   describe "unknown paths" do
-    test "return 404 with Err", %{store: store} do
-      conn = post("/bogus", %{}, store: store)
+    test "return 404 with Err", %{store: store, tracker: tracker} do
+      conn = post("/bogus", %{}, store: store, tracker: tracker)
       assert conn.status == 404
       assert %{"Err" => "not found"} = decode(conn)
     end

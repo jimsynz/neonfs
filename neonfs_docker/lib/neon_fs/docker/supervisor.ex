@@ -11,7 +11,7 @@ defmodule NeonFS.Docker.Supervisor do
   use Supervisor
 
   alias NeonFS.Client.Registrar
-  alias NeonFS.Docker.{Plug, VolumeStore}
+  alias NeonFS.Docker.{MountTracker, Plug, VolumeStore}
 
   @default_socket_path "/run/docker/plugins/neonfs.sock"
 
@@ -25,7 +25,7 @@ defmodule NeonFS.Docker.Supervisor do
     register? = Application.get_env(:neonfs_docker, :register_service, true)
 
     children =
-      [VolumeStore]
+      [VolumeStore, MountTracker]
       |> maybe_add_registrar(register?)
       |> Kernel.++([bandit_child_spec()])
 
