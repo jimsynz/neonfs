@@ -209,7 +209,7 @@ jobs:
           cd neonfs-cli && cargo build --release && cd ..
 
           # Build Elixir releases
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
             cd "$component"
             mix local.hex --force && mix local.rebar --force
             mix deps.get --only prod
@@ -225,7 +225,7 @@ jobs:
           mkdir -p dist
 
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"
@@ -285,7 +285,7 @@ jobs:
           cd neonfs-cli && cargo build --release && cd ..
 
           # Build Elixir releases
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
             cd "$component"
             mix local.hex --force && mix local.rebar --force
             mix deps.get --only prod
@@ -301,7 +301,7 @@ jobs:
           mkdir -p dist
 
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"

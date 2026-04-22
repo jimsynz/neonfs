@@ -5,7 +5,7 @@
 set -e
 
 # Determine which service to stop based on installed units
-for service in neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-omnibus; do
+for service in neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-omnibus; do
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "${service}.service" 2>/dev/null; then
         systemctl stop "${service}.service" || true
     fi

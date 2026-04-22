@@ -1,0 +1,33 @@
+[Unit]
+Description=NeonFS Docker VolumeDriver Plugin
+After=network.target docker.service
+Wants=docker.service
+Documentation=https://neonfs.dev/docs
+
+[Service]
+Type=notify
+User=neonfs
+Group=neonfs
+ExecStart=/usr/bin/neonfs-docker-daemon start
+ExecStop=/usr/bin/neonfs-docker-daemon stop
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+EnvironmentFile=-/etc/neonfs/neonfs.conf
+
+RuntimeDirectory=neonfs
+StateDirectory=neonfs
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# /run/docker/plugins must be writable so dockerd can discover the plugin socket;
+# /var/lib/neonfs holds the cookie + TLS material shared with the core daemon.
+ReadWritePaths=/var/lib/neonfs /run/docker/plugins
+
+[Install]
+WantedBy=multi-user.target
