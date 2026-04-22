@@ -6,7 +6,7 @@ if config_env() == :prod do
   data_dir = System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs/data")
   node_name = System.get_env("RELEASE_NODE", "neonfs@localhost")
 
-  # In omnibus mode, core is local — FUSE/NFS client points at self
+  # In omnibus mode, core is local — every interface client points at self
   core_node =
     System.get_env("NEONFS_CORE_NODE", node_name)
     |> String.to_atom()

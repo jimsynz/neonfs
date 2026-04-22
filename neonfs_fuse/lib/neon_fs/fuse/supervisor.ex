@@ -24,7 +24,7 @@ defmodule NeonFS.FUSE.Supervisor do
   def init(_opts) do
     children =
       [
-        # Service registration (unique name — FUSE and NFS each need their own)
+        # Service registration (unique name — each service registers its own)
         {NeonFS.Client.Registrar,
          metadata: registration_metadata(), type: :fuse, name: NeonFS.Client.Registrar.FUSE},
         # Inode table must start before handlers
