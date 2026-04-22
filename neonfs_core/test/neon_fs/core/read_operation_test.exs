@@ -4,6 +4,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
   alias NeonFS.Core.{
     ChunkIndex,
+    FileIndex,
     KeyManager,
     RaServer,
     ReadOperation,
@@ -60,7 +61,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Hello, NeonFS! This is a test file."
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/test.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/test.txt", [data])
 
       # Read it back
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/test.txt")
@@ -72,7 +73,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/large.bin", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/large.bin", [data])
 
       # Read it back
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/large.bin")
@@ -90,7 +91,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = String.duplicate("ABCDEFGH", 1000)
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/compressed.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/compressed.txt", [data])
 
       # Read it back
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/compressed.txt")
@@ -101,7 +102,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = ""
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/empty.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/empty.txt", [data])
 
       # Read it back
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/empty.txt")
@@ -126,7 +127,8 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "0123456789ABCDEFGHIJ"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/offset-test.txt", data)
+      {:ok, _file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/offset-test.txt", [data])
 
       # Read from offset 10
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/offset-test.txt", offset: 10)
@@ -137,7 +139,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "0123456789ABCDEFGHIJ"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/partial.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/partial.txt", [data])
 
       # Read 5 bytes from offset 5
       assert {:ok, read_data} =
@@ -152,7 +154,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
       # Write with fixed chunk size
       {:ok, _file_meta} =
-        WriteOperation.write_file(volume.id, "/chunks.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/chunks.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -171,7 +173,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Short file"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/short.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/short.txt", [data])
 
       # Try to read 100 bytes
       assert {:ok, read_data} =
@@ -185,7 +187,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Short file"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/short.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/short.txt", [data])
 
       # Read from offset beyond file size
       assert {:ok, read_data} =
@@ -198,7 +200,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "0123456789"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/last-byte.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/last-byte.txt", [data])
 
       # Read last byte
       assert {:ok, read_data} =
@@ -210,7 +212,8 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "reads single byte from middle", %{volume: volume} do
       data = "ABCDEFGHIJ"
 
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/single-byte.txt", data)
+      {:ok, _file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/single-byte.txt", [data])
 
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/single-byte.txt", offset: 5, length: 1)
@@ -221,7 +224,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "zero-length read returns empty binary", %{volume: volume} do
       data = "Hello, NeonFS!"
 
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/zero-len.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/zero-len.txt", [data])
 
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/zero-len.txt", offset: 5, length: 0)
@@ -232,7 +235,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "reads first byte of file", %{volume: volume} do
       data = "ABCDEFGHIJ"
 
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/first-byte.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/first-byte.txt", [data])
 
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/first-byte.txt", offset: 0, length: 1)
@@ -244,7 +247,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, file_meta} =
-        WriteOperation.write_file(volume.id, "/boundary.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/boundary.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -265,7 +268,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, _file_meta} =
-        WriteOperation.write_file(volume.id, "/end-boundary.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/end-boundary.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -286,7 +289,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, _file_meta} =
-        WriteOperation.write_file(volume.id, "/three-chunks.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/three-chunks.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -306,7 +309,8 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "reads entire file with explicit offset 0 and length :all", %{volume: volume} do
       data = "full file content"
 
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/explicit-all.txt", data)
+      {:ok, _file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/explicit-all.txt", [data])
 
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/explicit-all.txt", offset: 0, length: :all)
@@ -326,7 +330,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Verified data content"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/verified.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/verified.txt", [data])
 
       # Read with verification
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/verified.txt")
@@ -343,7 +347,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Unverified data content"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/unverified.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/unverified.txt", [data])
 
       # Read without verification
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/unverified.txt")
@@ -360,7 +364,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Sampling verified data"
 
       # Write the file
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/sampling.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/sampling.txt", [data])
 
       # Read multiple times - some should verify, some should not
       # We can't predict which ones, but all should succeed
@@ -377,7 +381,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       Process.put(:telemetry_events, [])
 
       data = "Test data for telemetry"
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/telemetry.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/telemetry.txt", [data])
 
       # Read the file
       {:ok, read_data} = ReadOperation.read_file(volume.id, "/telemetry.txt")
@@ -423,8 +427,8 @@ defmodule NeonFS.Core.ReadOperationTest do
       # Write two files with same content (deduplication)
       data = "Duplicate content for dedup test"
 
-      {:ok, _file1} = WriteOperation.write_file(volume.id, "/file1.txt", data)
-      {:ok, _file2} = WriteOperation.write_file(volume.id, "/file2.txt", data)
+      {:ok, _file1} = WriteOperation.write_file_streamed(volume.id, "/file1.txt", [data])
+      {:ok, _file2} = WriteOperation.write_file_streamed(volume.id, "/file2.txt", [data])
 
       # Read both files
       assert {:ok, read_data1} = ReadOperation.read_file(volume.id, "/file1.txt")
@@ -438,11 +442,11 @@ defmodule NeonFS.Core.ReadOperationTest do
       path = "/overwrite.txt"
 
       # Write first version
-      {:ok, _file1} = WriteOperation.write_file(volume.id, path, "Version 1")
+      {:ok, _file1} = WriteOperation.write_file_streamed(volume.id, path, ["Version 1"])
 
       # Write second version
       data2 = "Version 2 - longer content"
-      {:ok, _file2} = WriteOperation.write_file(volume.id, path, data2)
+      {:ok, _file2} = WriteOperation.write_file_streamed(volume.id, path, [data2])
 
       # Read should return the latest version
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, path)
@@ -458,7 +462,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       ]
 
       for {path, data} <- files do
-        {:ok, _} = WriteOperation.write_file(volume.id, path, data)
+        {:ok, _} = WriteOperation.write_file_streamed(volume.id, path, [data])
       end
 
       # Read all in parallel
@@ -498,7 +502,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Hello, erasure coding read test!"
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/small_ec.txt", data, chunk_strategy: :single)
+        WriteOperation.write_file_at(volume.id, "/small_ec.txt", 0, data, chunk_strategy: :single)
 
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/small_ec.txt")
       assert read_data == data
@@ -508,7 +512,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(4096)
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/multi_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/multi_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -520,7 +524,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(5120)
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/three_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/three_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -532,7 +536,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(2048)
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/offset_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/offset_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -547,7 +551,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(4096)
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/boundary_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/boundary_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -565,7 +569,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Short erasure file"
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/short_ec.txt", data, chunk_strategy: :single)
+        WriteOperation.write_file_at(volume.id, "/short_ec.txt", 0, data, chunk_strategy: :single)
 
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/short_ec.txt", offset: 0, length: 1000)
@@ -577,7 +581,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Short"
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/past_ec.txt", data, chunk_strategy: :single)
+        WriteOperation.write_file_at(volume.id, "/past_ec.txt", 0, data, chunk_strategy: :single)
 
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/past_ec.txt", offset: 1000, length: 10)
@@ -589,7 +593,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(2048)
 
       {:ok, fm} =
-        WriteOperation.write_file(volume.id, "/degraded_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/degraded_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -610,7 +614,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(2048)
 
       {:ok, fm} =
-        WriteOperation.write_file(volume.id, "/critical_ec.bin", data,
+        WriteOperation.write_file_at(volume.id, "/critical_ec.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -631,7 +635,9 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Partial stripe data only"
 
       {:ok, _fm} =
-        WriteOperation.write_file(volume.id, "/partial_ec.txt", data, chunk_strategy: :single)
+        WriteOperation.write_file_at(volume.id, "/partial_ec.txt", 0, data,
+          chunk_strategy: :single
+        )
 
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/partial_ec.txt")
       # Should return only actual data, not padding
@@ -641,12 +647,18 @@ defmodule NeonFS.Core.ReadOperationTest do
 
     test "reads file after overwrite", %{ec_volume: volume} do
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/overwrite_ec.txt", "Version 1",
+        WriteOperation.write_file_at(volume.id, "/overwrite_ec.txt", 0, "Version 1",
           chunk_strategy: :single
         )
 
+      # write_file_at on an existing erasure-coded file is an offset write,
+      # not a replacement — delete first to exercise the "overwrite" semantic
+      # the test name implies.
+      {:ok, old_file} = FileIndex.get_by_path(volume.id, "/overwrite_ec.txt")
+      :ok = FileIndex.delete(old_file.id)
+
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/overwrite_ec.txt", "Version 2 longer",
+        WriteOperation.write_file_at(volume.id, "/overwrite_ec.txt", 0, "Version 2 longer",
           chunk_strategy: :single
         )
 
@@ -692,7 +704,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "full round-trip: encrypted write then read", %{enc_volume: volume} do
       data = "Secret data for encrypted round-trip test"
 
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/secret.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/secret.txt", [data])
 
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/secret.txt")
       assert read_data == data
@@ -701,7 +713,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "reads large encrypted file (multiple chunks)", %{enc_volume: volume} do
       data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
 
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/large_enc.bin", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/large_enc.bin", [data])
 
       assert {:ok, read_data} = ReadOperation.read_file(volume.id, "/large_enc.bin")
       assert read_data == data
@@ -710,7 +722,8 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "reads encrypted file with offset and length", %{enc_volume: volume} do
       data = "0123456789ABCDEFGHIJ"
 
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/partial_enc.txt", data)
+      {:ok, _file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/partial_enc.txt", [data])
 
       assert {:ok, read_data} =
                ReadOperation.read_file(volume.id, "/partial_enc.txt", offset: 5, length: 5)
@@ -721,14 +734,14 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "reads with mixed key versions after rotation", %{enc_volume: volume} do
       # Write first file at key version 1
       data_v1 = "Data encrypted with key version 1"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/v1.txt", data_v1)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/v1.txt", [data_v1])
 
       # Rotate key → version 2
       {:ok, 2} = KeyManager.rotate_volume_key(volume.id)
 
       # Write second file at key version 2
       data_v2 = "Data encrypted with key version 2"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/v2.txt", data_v2)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/v2.txt", [data_v2])
 
       # Both files should read correctly — each chunk uses its own key version
       assert {:ok, read_v1} = ReadOperation.read_file(volume.id, "/v1.txt")
@@ -740,7 +753,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
     test "tampered ciphertext returns decryption error", %{enc_volume: volume} do
       data = "Data to be tampered with"
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/tamper.txt", data)
+      {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/tamper.txt", [data])
 
       # Get chunk hash and metadata
       [chunk_hash] = file_meta.chunks
@@ -763,7 +776,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       {:ok, plain_vol} = VolumeRegistry.create(vol_name, compression: %{algorithm: :none})
 
       data = "Plaintext data in Ra context"
-      {:ok, _} = WriteOperation.write_file(plain_vol.id, "/plain.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(plain_vol.id, "/plain.txt", [data])
 
       assert {:ok, read_data} = ReadOperation.read_file(plain_vol.id, "/plain.txt")
       assert read_data == data
@@ -773,7 +786,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       Process.put(:telemetry_events, [])
 
       data = "Telemetry decrypt test"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/telem_dec.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/telem_dec.txt", [data])
       {:ok, _} = ReadOperation.read_file(volume.id, "/telem_dec.txt")
 
       events = Process.get(:telemetry_events, [])
@@ -822,7 +835,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
     test "local verification failure triggers remote fetch and returns data", %{volume: volume} do
       data = "data for verification failure test"
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/verify_fail.txt", data)
+      {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/verify_fail.txt", [data])
       [chunk_hash] = file_meta.chunks
 
       call_count = :counters.new(1, [:atomics])
@@ -854,7 +867,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
     test "successful remote fetch returns data to caller", %{volume: volume} do
       data = "remote recovery data"
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/remote_ok.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/remote_ok.txt", [data])
 
       call_count = :counters.new(1, [:atomics])
 
@@ -878,7 +891,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
     test "background repair is submitted after successful remote recovery", %{volume: volume} do
       data = "repair test data"
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/repair.txt", data)
+      {:ok, _file_meta} = WriteOperation.write_file_streamed(volume.id, "/repair.txt", [data])
 
       test_pid = self()
       call_count = :counters.new(1, [:atomics])
@@ -908,7 +921,9 @@ defmodule NeonFS.Core.ReadOperationTest do
 
     test "both local and remote failure returns :chunk_corrupted", %{volume: volume} do
       data = "double failure data"
-      {:ok, _file_meta} = WriteOperation.write_file(volume.id, "/double_fail.txt", data)
+
+      {:ok, _file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/double_fail.txt", [data])
 
       Mimic.stub(NeonFS.Core.ChunkFetcher, :fetch_chunk, fn _hash, _opts ->
         {:error, "corrupt chunk: expected xxx, got yyy"}
@@ -920,7 +935,10 @@ defmodule NeonFS.Core.ReadOperationTest do
 
     test "telemetry event emitted on verification failure", %{volume: volume} do
       data = "telemetry verification test"
-      {:ok, file_meta} = WriteOperation.write_file(volume.id, "/telem_verify.txt", data)
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/telem_verify.txt", [data])
+
       [chunk_hash] = file_meta.chunks
 
       call_count = :counters.new(1, [:atomics])
@@ -956,7 +974,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "streams entire small file as single element", %{volume: volume} do
       data = "Hello, streaming NeonFS!"
 
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_small.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_small.txt", [data])
 
       assert {:ok, %{stream: stream, file_size: file_size}} =
                ReadOperation.read_file_stream(volume.id, "/stream_small.txt")
@@ -972,7 +990,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, file_meta} =
-        WriteOperation.write_file(volume.id, "/stream_multi.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/stream_multi.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -989,7 +1007,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "streams with offset", %{volume: volume} do
       data = "0123456789ABCDEFGHIJ"
 
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_offset.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_offset.txt", [data])
 
       assert {:ok, %{stream: stream}} =
                ReadOperation.read_file_stream(volume.id, "/stream_offset.txt", offset: 10)
@@ -1000,7 +1018,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "streams with offset and length", %{volume: volume} do
       data = "0123456789ABCDEFGHIJ"
 
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_partial.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_partial.txt", [data])
 
       assert {:ok, %{stream: stream}} =
                ReadOperation.read_file_stream(volume.id, "/stream_partial.txt",
@@ -1015,7 +1033,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/stream_boundary.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/stream_boundary.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -1034,7 +1052,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "offset beyond file size returns empty stream", %{volume: volume} do
       data = "Short file"
 
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_past.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_past.txt", [data])
 
       assert {:ok, %{stream: stream, file_size: 10}} =
                ReadOperation.read_file_stream(volume.id, "/stream_past.txt",
@@ -1048,7 +1066,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "zero-length read returns empty stream", %{volume: volume} do
       data = "Hello, NeonFS!"
 
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_zero.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_zero.txt", [data])
 
       assert {:ok, %{stream: stream}} =
                ReadOperation.read_file_stream(volume.id, "/stream_zero.txt",
@@ -1060,7 +1078,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     end
 
     test "empty file returns empty stream", %{volume: volume} do
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_empty.txt", "")
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_empty.txt", [""])
 
       assert {:ok, %{stream: stream, file_size: 0}} =
                ReadOperation.read_file_stream(volume.id, "/stream_empty.txt")
@@ -1072,7 +1090,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(500 * 1024)
 
       {:ok, file_meta} =
-        WriteOperation.write_file(volume.id, "/stream_lazy.bin", data,
+        WriteOperation.write_file_streamed(volume.id, "/stream_lazy.bin", [data],
           chunk_strategy: {:fixed, 64_000}
         )
 
@@ -1106,7 +1124,7 @@ defmodule NeonFS.Core.ReadOperationTest do
     test "returns correct file_size", %{volume: volume} do
       data = :crypto.strong_rand_bytes(12_345)
 
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_size.bin", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_size.bin", [data])
 
       assert {:ok, %{file_size: 12_345}} =
                ReadOperation.read_file_stream(volume.id, "/stream_size.bin")
@@ -1118,7 +1136,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       Process.put(:telemetry_events, [])
 
       data = "Telemetry stream test"
-      {:ok, _} = WriteOperation.write_file(volume.id, "/stream_telem.txt", data)
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/stream_telem.txt", [data])
 
       {:ok, _} = ReadOperation.read_file_stream(volume.id, "/stream_telem.txt")
 
@@ -1162,7 +1180,9 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = "Hello, erasure streaming!"
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/stream_ec.txt", data, chunk_strategy: :single)
+        WriteOperation.write_file_at(volume.id, "/stream_ec.txt", 0, data,
+          chunk_strategy: :single
+        )
 
       assert {:ok, %{stream: stream, file_size: file_size}} =
                ReadOperation.read_file_stream(volume.id, "/stream_ec.txt")
@@ -1175,7 +1195,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(4096)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/stream_ec_multi.bin", data,
+        WriteOperation.write_file_at(volume.id, "/stream_ec_multi.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 
@@ -1189,7 +1209,7 @@ defmodule NeonFS.Core.ReadOperationTest do
       data = :crypto.strong_rand_bytes(4096)
 
       {:ok, _} =
-        WriteOperation.write_file(volume.id, "/stream_ec_span.bin", data,
+        WriteOperation.write_file_at(volume.id, "/stream_ec_span.bin", 0, data,
           chunk_strategy: {:fixed, 1024}
         )
 

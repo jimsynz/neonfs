@@ -37,7 +37,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
   describe "step/1 — all chunks valid" do
     test "completes with zero corrupted" do
       {:ok, vol} = VolumeRegistry.create("scrub-valid", [])
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/good.txt", "good data")
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/good.txt", ["good data"])
 
       job = Job.new(Scrub, %{})
 
@@ -53,7 +53,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
     test "updates last_verified on verified chunks" do
       {:ok, vol} = VolumeRegistry.create("scrub-verified", [])
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/verify.txt", "verify data")
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/verify.txt", ["verify data"])
 
       chunks_before = ChunkIndex.list_all()
       assert Enum.all?(chunks_before, &(&1.last_verified == nil))
@@ -69,7 +69,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
   describe "step/1 — corruption detection" do
     test "detects a corrupted chunk" do
       {:ok, vol} = VolumeRegistry.create("scrub-corrupt", [])
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/bad.txt", "original data")
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/bad.txt", ["original data"])
 
       # Find the chunk and tamper with it on disk
       [chunk | _] = ChunkIndex.list_all()
@@ -84,7 +84,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
     test "emits corruption_detected telemetry" do
       {:ok, vol} = VolumeRegistry.create("scrub-telemetry-corrupt", [])
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/telem.txt", "telemetry data")
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/telem.txt", ["telemetry data"])
 
       [chunk | _] = ChunkIndex.list_all()
       tamper_with_chunk(chunk)
@@ -102,7 +102,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
     test "emits complete telemetry" do
       {:ok, vol} = VolumeRegistry.create("scrub-telemetry-complete", [])
-      {:ok, _file} = WriteOperation.write_file(vol.id, "/done.txt", "done data")
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/done.txt", ["done data"])
 
       ref =
         :telemetry_test.attach_event_handlers(self(), [
@@ -121,8 +121,8 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
       {:ok, vol_a} = VolumeRegistry.create("scrub-vol-a", [])
       {:ok, vol_b} = VolumeRegistry.create("scrub-vol-b", [])
 
-      {:ok, _file_a} = WriteOperation.write_file(vol_a.id, "/a.txt", "volume a data")
-      {:ok, _file_b} = WriteOperation.write_file(vol_b.id, "/b.txt", "volume b data")
+      {:ok, _file_a} = WriteOperation.write_file_streamed(vol_a.id, "/a.txt", ["volume a data"])
+      {:ok, _file_b} = WriteOperation.write_file_streamed(vol_b.id, "/b.txt", ["volume b data"])
 
       # Tamper with vol_a's chunk
       vol_a_chunks = ChunkIndex.get_chunks_for_volume(vol_a.id)
@@ -162,7 +162,8 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
     end
 
     test "decrypts and verifies encrypted chunks successfully", %{enc_volume: volume} do
-      {:ok, _file} = WriteOperation.write_file(volume.id, "/secret.txt", "secret scrub data")
+      {:ok, _file} =
+        WriteOperation.write_file_streamed(volume.id, "/secret.txt", ["secret scrub data"])
 
       # Confirm the chunk is actually encrypted
       [chunk | _] = ChunkIndex.get_chunks_for_volume(volume.id)
@@ -178,7 +179,8 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
     end
 
     test "uses historical key version after rotation", %{enc_volume: volume} do
-      {:ok, _file} = WriteOperation.write_file(volume.id, "/pre-rotate.txt", "before rotation")
+      {:ok, _file} =
+        WriteOperation.write_file_streamed(volume.id, "/pre-rotate.txt", ["before rotation"])
 
       # Chunks are encrypted with key version 1
       [chunk | _] = ChunkIndex.get_chunks_for_volume(volume.id)
@@ -196,7 +198,8 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
     end
 
     test "tracks encrypted chunks separately in complete telemetry", %{enc_volume: volume} do
-      {:ok, _file} = WriteOperation.write_file(volume.id, "/telemetry.txt", "telemetry enc data")
+      {:ok, _file} =
+        WriteOperation.write_file_streamed(volume.id, "/telemetry.txt", ["telemetry enc data"])
 
       ref =
         :telemetry_test.attach_event_handlers(self(), [
@@ -226,7 +229,9 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
     test "reports key_unavailable instead of corruption" do
       {:ok, vol} = VolumeRegistry.create("scrub-key-unavail", [])
-      {:ok, file} = WriteOperation.write_file(vol.id, "/unavail.txt", "unavailable key data")
+
+      {:ok, file} =
+        WriteOperation.write_file_streamed(vol.id, "/unavail.txt", ["unavailable key data"])
 
       # Manually add crypto metadata to simulate an encrypted chunk
       for chunk_hash <- file.chunks do
@@ -263,7 +268,9 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
     test "key_unavailable chunks are not marked as verified" do
       {:ok, vol} = VolumeRegistry.create("scrub-key-no-verify", [])
-      {:ok, file} = WriteOperation.write_file(vol.id, "/no-verify.txt", "no verify data")
+
+      {:ok, file} =
+        WriteOperation.write_file_streamed(vol.id, "/no-verify.txt", ["no verify data"])
 
       for chunk_hash <- file.chunks do
         {:ok, chunk} = ChunkIndex.get(chunk_hash)

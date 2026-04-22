@@ -42,7 +42,7 @@ defmodule NeonFS.Core.Job.Runners.GarbageCollectionTest do
 
     test "reports correct counts after deleting orphaned chunks" do
       {:ok, vol} = VolumeRegistry.create("gc-runner-vol", [])
-      {:ok, file} = WriteOperation.write_file(vol.id, "/orphan.txt", "orphan data")
+      {:ok, file} = WriteOperation.write_file_streamed(vol.id, "/orphan.txt", ["orphan data"])
 
       FileIndex.delete(file.id)
 
@@ -59,8 +59,8 @@ defmodule NeonFS.Core.Job.Runners.GarbageCollectionTest do
       {:ok, vol_a} = VolumeRegistry.create("gc-runner-a", [])
       {:ok, vol_b} = VolumeRegistry.create("gc-runner-b", [])
 
-      {:ok, file_a} = WriteOperation.write_file(vol_a.id, "/a.txt", "volume a data")
-      {:ok, _file_b} = WriteOperation.write_file(vol_b.id, "/b.txt", "volume b data")
+      {:ok, file_a} = WriteOperation.write_file_streamed(vol_a.id, "/a.txt", ["volume a data"])
+      {:ok, _file_b} = WriteOperation.write_file_streamed(vol_b.id, "/b.txt", ["volume b data"])
 
       # Delete file in volume A only
       FileIndex.delete(file_a.id)

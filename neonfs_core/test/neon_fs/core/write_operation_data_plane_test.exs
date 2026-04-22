@@ -37,7 +37,7 @@ defmodule NeonFS.Core.WriteOperationDataPlaneTest do
     test "writes file locally without data plane", %{volume: volume} do
       data = "local write test data"
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/test.txt", data)
+      assert {:ok, file_meta} = WriteOperation.write_file_streamed(volume.id, "/test.txt", [data])
       assert file_meta.size == byte_size(data)
       assert file_meta.path == "/test.txt"
     end
@@ -74,7 +74,7 @@ defmodule NeonFS.Core.WriteOperationDataPlaneTest do
       # so write_chunk_to_target uses BlobStore directly (no data plane).
       data = String.duplicate("x", 4096)
 
-      assert {:ok, file_meta} = WriteOperation.write_file(volume.id, "/erasure.txt", data)
+      assert {:ok, file_meta} = WriteOperation.write_file_at(volume.id, "/erasure.txt", 0, data)
       assert file_meta.size == byte_size(data)
       assert file_meta.stripes != []
     end

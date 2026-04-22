@@ -91,7 +91,7 @@ defmodule NeonFS.CoreTest do
   describe "write_file/3 and read_file/3" do
     test "round-trips file content", %{volume_name: vol_name} do
       content = "Hello from the facade"
-      assert {:ok, meta} = Core.write_file(vol_name, "/test.txt", content)
+      assert {:ok, meta} = Core.write_file_streamed(vol_name, "/test.txt", [content])
       assert meta.path == "/test.txt"
 
       assert {:ok, ^content} = Core.read_file(vol_name, "/test.txt", [])
@@ -101,7 +101,9 @@ defmodule NeonFS.CoreTest do
   describe "write_file/4" do
     test "writes file with content type option", %{volume_name: vol_name} do
       assert {:ok, meta} =
-               Core.write_file(vol_name, "/typed.html", "<h1>Hi</h1>", content_type: "text/html")
+               Core.write_file_streamed(vol_name, "/typed.html", ["<h1>Hi</h1>"],
+                 content_type: "text/html"
+               )
 
       assert meta.content_type == "text/html"
     end
@@ -109,12 +111,12 @@ defmodule NeonFS.CoreTest do
 
   describe "read_file/3 with offset and length" do
     test "reads partial content from a file", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file(vol_name, "/partial.txt", "0123456789")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/partial.txt", ["0123456789"])
       assert {:ok, "345"} = Core.read_file(vol_name, "/partial.txt", offset: 3, length: 3)
     end
 
     test "reads from offset to end when length is :all", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file(vol_name, "/tail.txt", "ABCDEFGHIJ")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/tail.txt", ["ABCDEFGHIJ"])
       assert {:ok, "FGHIJ"} = Core.read_file(vol_name, "/tail.txt", offset: 5, length: :all)
     end
 
@@ -131,7 +133,7 @@ defmodule NeonFS.CoreTest do
 
   describe "delete_file/2" do
     test "deletes a file", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file(vol_name, "/to-delete.txt", "data")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/to-delete.txt", ["data"])
       assert :ok = Core.delete_file(vol_name, "/to-delete.txt")
       assert {:error, :not_found} = Core.get_file_meta(vol_name, "/to-delete.txt")
     end
@@ -143,7 +145,7 @@ defmodule NeonFS.CoreTest do
 
   describe "get_file_meta/2" do
     test "returns metadata for a file", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file(vol_name, "/meta-test.txt", "content")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/meta-test.txt", ["content"])
       assert {:ok, meta} = Core.get_file_meta(vol_name, "/meta-test.txt")
       assert meta.path == "/meta-test.txt"
       assert meta.size == byte_size("content")
@@ -156,8 +158,8 @@ defmodule NeonFS.CoreTest do
 
   describe "list_files_recursive/2" do
     test "lists files under path", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file(vol_name, "/a.txt", "aaa")
-      {:ok, _} = Core.write_file(vol_name, "/b.txt", "bbb")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/a.txt", ["aaa"])
+      {:ok, _} = Core.write_file_streamed(vol_name, "/b.txt", ["bbb"])
 
       assert {:ok, entries} = Core.list_files_recursive(vol_name, "/")
       paths = Enum.map(entries, & &1.path)
@@ -167,7 +169,7 @@ defmodule NeonFS.CoreTest do
 
     test "lists files in subdirectory", %{volume_name: vol_name} do
       {:ok, _} = Core.mkdir(vol_name, "/docs")
-      {:ok, _} = Core.write_file(vol_name, "/docs/readme.txt", "read me")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/docs/readme.txt", ["read me"])
 
       assert {:ok, entries} = Core.list_files_recursive(vol_name, "/docs")
       paths = Enum.map(entries, & &1.path)
@@ -182,7 +184,7 @@ defmodule NeonFS.CoreTest do
     test "includes nested files at any depth", %{volume_name: vol_name} do
       {:ok, _} = Core.mkdir(vol_name, "/parent")
       {:ok, _} = Core.mkdir(vol_name, "/parent/child")
-      {:ok, _} = Core.write_file(vol_name, "/parent/child/deep.txt", "deep")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/parent/child/deep.txt", ["deep"])
 
       assert {:ok, entries} = Core.list_files_recursive(vol_name, "/parent")
       paths = Enum.map(entries, & &1.path)
@@ -190,7 +192,7 @@ defmodule NeonFS.CoreTest do
     end
 
     test "normalises path without leading slash", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file(vol_name, "/file.txt", "data")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/file.txt", ["data"])
       assert {:ok, [_ | _]} = Core.list_files_recursive(vol_name, "/")
     end
 
@@ -199,9 +201,9 @@ defmodule NeonFS.CoreTest do
     } do
       {:ok, _} = Core.mkdir(vol_name, "/sub")
       {:ok, _} = Core.mkdir(vol_name, "/sub/deep")
-      {:ok, _} = Core.write_file(vol_name, "/top.txt", "top")
-      {:ok, _} = Core.write_file(vol_name, "/sub/mid.txt", "mid")
-      {:ok, _} = Core.write_file(vol_name, "/sub/deep/bottom.txt", "bottom")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/top.txt", ["top"])
+      {:ok, _} = Core.write_file_streamed(vol_name, "/sub/mid.txt", ["mid"])
+      {:ok, _} = Core.write_file_streamed(vol_name, "/sub/deep/bottom.txt", ["bottom"])
 
       {:ok, recursive_entries} = Core.list_files_recursive(vol_name, "/")
       recursive_paths = Enum.map(recursive_entries, & &1.path) |> Enum.sort()
@@ -232,7 +234,7 @@ defmodule NeonFS.CoreTest do
 
   describe "rename_file/3" do
     test "renames file in same directory", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file(vol_name, "/old-name.txt", "data")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/old-name.txt", ["data"])
       assert :ok = Core.rename_file(vol_name, "/old-name.txt", "/new-name.txt")
       assert {:error, :not_found} = Core.get_file_meta(vol_name, "/old-name.txt")
       assert {:ok, _} = Core.get_file_meta(vol_name, "/new-name.txt")
@@ -241,7 +243,7 @@ defmodule NeonFS.CoreTest do
     test "moves file to different directory", %{volume_name: vol_name} do
       {:ok, _} = Core.mkdir(vol_name, "/src")
       {:ok, _} = Core.mkdir(vol_name, "/dst")
-      {:ok, _} = Core.write_file(vol_name, "/src/file.txt", "data")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/src/file.txt", ["data"])
 
       assert :ok = Core.rename_file(vol_name, "/src/file.txt", "/dst/file.txt")
       assert {:error, :not_found} = Core.get_file_meta(vol_name, "/src/file.txt")
@@ -251,7 +253,7 @@ defmodule NeonFS.CoreTest do
     test "moves and renames file", %{volume_name: vol_name} do
       {:ok, _} = Core.mkdir(vol_name, "/from")
       {:ok, _} = Core.mkdir(vol_name, "/to")
-      {:ok, _} = Core.write_file(vol_name, "/from/original.txt", "data")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/from/original.txt", ["data"])
 
       assert :ok = Core.rename_file(vol_name, "/from/original.txt", "/to/renamed.txt")
       assert {:error, :not_found} = Core.get_file_meta(vol_name, "/from/original.txt")
