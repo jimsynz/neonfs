@@ -416,23 +416,60 @@ defmodule NeonFS.Integration.ClusterCase do
 
   @doc """
   Assert that all nodes in a group can see each other.
+
+  Visibility is polled with a bounded timeout — mesh reformation after
+  `heal_partition` and other cross-node helpers is asynchronous, and a
+  one-shot snapshot can catch the distribution layer mid-reconcile even
+  after `wait_for_partition_healed/2` returns (see #438). Callers that
+  want a strict snapshot can pass `timeout: 0`.
+
+  ## Options
+
+    * `:timeout` — maximum time to wait for full visibility (default: 5_000ms).
   """
-  @spec assert_connected(map(), [atom()]) :: :ok
-  def assert_connected(cluster, node_names) do
+  @spec assert_connected(map(), [atom()], keyword()) :: :ok
+  def assert_connected(cluster, node_names, opts \\ []) do
     import ExUnit.Assertions
 
-    for name <- node_names do
-      visible = PeerCluster.visible_nodes(cluster, name)
-      others = Enum.reject(node_names, &(&1 == name))
-      other_atoms = Enum.map(others, &PeerCluster.get_node!(cluster, &1).node)
+    timeout = Keyword.get(opts, :timeout, 5_000)
 
-      for other_atom <- other_atoms do
-        assert other_atom in visible,
-               "#{name} cannot see #{inspect(other_atom)} — expected connected"
-      end
+    check = fn ->
+      Enum.all?(node_names, fn name ->
+        visible = PeerCluster.visible_nodes(cluster, name)
+
+        node_names
+        |> Enum.reject(&(&1 == name))
+        |> Enum.map(&PeerCluster.get_node!(cluster, &1).node)
+        |> Enum.all?(&(&1 in visible))
+      end)
+    end
+
+    case wait_until(check, timeout: timeout) do
+      :ok -> :ok
+      {:error, :timeout} -> flunk_missing_links(cluster, node_names)
+    end
+  end
+
+  # Surface the specific missing visibility link in the failure message —
+  # same detail the old one-shot assert emitted, computed against the
+  # latest snapshot after timing out.
+  defp flunk_missing_links(cluster, node_names) do
+    import ExUnit.Assertions
+
+    for name <- node_names, other_atom <- missing_others(cluster, node_names, name) do
+      flunk("#{name} cannot see #{inspect(other_atom)} — expected connected")
     end
 
     :ok
+  end
+
+  defp missing_others(cluster, node_names, name) do
+    visible = PeerCluster.visible_nodes(cluster, name)
+
+    node_names
+    |> Enum.reject(&(&1 == name))
+    |> Enum.map(&PeerCluster.get_node!(cluster, &1).node)
+    |> Enum.reject(&(&1 in visible))
   end
 
   @doc """
