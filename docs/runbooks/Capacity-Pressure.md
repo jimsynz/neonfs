@@ -172,7 +172,7 @@ Capture before escalating:
 - Per-volume size and recent-growth data if available.
 - Timeline: first alert, first operator action, outcome of each step attempted.
 
-After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) _(forthcoming)_. Capacity post-mortems are particularly valuable because they tend to surface missing capacity-planning rhythm (no forecasting, no trend dashboard, no quarterly capacity review) more than any one technical defect.
+After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) (filled-in example: [Post-Mortem-Sample.md](Post-Mortem-Sample.md)). Capacity post-mortems are particularly valuable because they tend to surface missing capacity-planning rhythm (no forecasting, no trend dashboard, no quarterly capacity review) more than any one technical defect.
 
 ## Known limitations
 

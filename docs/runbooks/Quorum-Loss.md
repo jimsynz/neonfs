@@ -192,7 +192,7 @@ Capture before escalating:
 - Network topology: which nodes reach which peers, firewall changes in the last 24 hours, DNS changes in the last 24 hours.
 - The approximate time of the last successful metadata write (check any application log that would have caught it).
 
-After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) _(forthcoming)_. A quorum-loss post-mortem always captures: how quorum was lost, which path was taken, what data (if any) was lost, what alerting change would have surfaced it sooner, and what operator-facing-tooling gap would make the next one resolvable without engineering escalation.
+After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) (filled-in example: [Post-Mortem-Sample.md](Post-Mortem-Sample.md)). A quorum-loss post-mortem always captures: how quorum was lost, which path was taken, what data (if any) was lost, what alerting change would have surfaced it sooner, and what operator-facing-tooling gap would make the next one resolvable without engineering escalation.
 
 ## Known limitations
 

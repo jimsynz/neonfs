@@ -218,7 +218,7 @@ Capture before escalating:
 - `ls -la $NEONFS_TLS_DIR/` on each reachable core node.
 - Timeline: first handshake warning, first expiry failure, first operator action, outcome of each step attempted.
 
-After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) _(forthcoming)_. CA incidents always capture: what the rotation cadence was, what alerting was (or wasn't) in place, whether an off-cluster backup was tested, and what operator-facing-tooling gap made emergency recovery harder than it needed to be.
+After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) (filled-in example: [Post-Mortem-Sample.md](Post-Mortem-Sample.md)). CA incidents always capture: what the rotation cadence was, what alerting was (or wasn't) in place, whether an off-cluster backup was tested, and what operator-facing-tooling gap made emergency recovery harder than it needed to be.
 
 ## Known limitations
 

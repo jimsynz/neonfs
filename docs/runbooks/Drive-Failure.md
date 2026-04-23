@@ -183,7 +183,7 @@ Before escalating, capture:
 - `smartctl -x /dev/<device>` output.
 - The timeline: first SMART warning, first I/O error, first operator response, outcome of each step attempted.
 
-After the incident is fully resolved, write it up with the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) _(forthcoming)_.
+After the incident is fully resolved, write it up with the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md). A filled-in example drawn from a drive-evacuation scenario lives at [Post-Mortem-Sample.md](Post-Mortem-Sample.md).
 
 ## Known limitations
 

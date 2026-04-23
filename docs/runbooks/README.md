@@ -23,7 +23,7 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 - [Cluster upgrade](Cluster-Upgrade.md) — rolling core + interface upgrade, mid-upgrade incident handling, and the rollback decision tree (safe vs unsafe against a state-machine version bump).
 - [Key rotation](Key-Rotation.md) — scheduled-cadence and suspected-compromise key rotation for encrypted volumes, with backup-lifecycle guidance for ciphertext encrypted under the old key.
 
-_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): DR snapshot restore, post-mortem template.)_
+_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): DR snapshot restore.)_
 
 ## When nothing fits
 
@@ -35,5 +35,8 @@ If the symptom you see does not match any runbook here:
 4. File an incident issue against [project-neon/neonfs](https://harton.dev/project-neon/neonfs/issues) with the above, plus the current NeonFS version from `/etc/neonfs/neonfs.conf` or the package install record.
 
 ## Post-incident
+
+- [Post-mortem template](Post-Mortem-Template.md) — blameless template every runbook references in its Escalation / follow-up section. Copy, fill in, land as a PR.
+- [Post-mortem sample](Post-Mortem-Sample.md) — filled-in worked example using the template (fictional drive-evacuation-during-reboot scenario).
 
 Every runbook ends with an escalation path that links the post-mortem template. When a runbook has been fired, write it up. Over time the set of runbooks + post-mortems becomes the actual playbook — the wiki or this directory is just where it lives between incidents.

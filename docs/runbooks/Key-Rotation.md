@@ -131,7 +131,7 @@ neonfs audit list --volume <volume-name> --event key_rotation
 neonfs audit list --event key_rotation --since <compromise-window-start>
 ```
 
-The post-incident write-up (using [Post-Mortem-Template.md](Post-Mortem-Template.md) _(forthcoming)_) captures the compromise-window start, the rotation-completion time, the list of in-scope volumes, the backup-lifecycle outcome, and the alerting or process gap that let the compromise go undetected.
+The post-incident write-up (using [Post-Mortem-Template.md](Post-Mortem-Template.md); filled-in example at [Post-Mortem-Sample.md](Post-Mortem-Sample.md)) captures the compromise-window start, the rotation-completion time, the list of in-scope volumes, the backup-lifecycle outcome, and the alerting or process gap that let the compromise go undetected.
 
 ## Verification
 
