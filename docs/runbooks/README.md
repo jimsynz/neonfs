@@ -14,6 +14,7 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 
 - [Node down](Node-Down.md) — diagnosing a stopped core or interface node, short-term recovery, decommission decision.
 - [Drive failure](Drive-Failure.md) — SMART / I/O-error diagnosis, evacuation, physical replacement, replication-based recovery when evacuation is not possible.
+- [Quorum loss](Quorum-Loss.md) — Ra quorum broken, no leader, metadata writes hang. Partition-vs-failure assessment, wait-it-out vs forced-reset paths, explicit data-loss call-outs.
 
 ## Scheduled procedures
 
