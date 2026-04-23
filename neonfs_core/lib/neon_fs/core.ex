@@ -8,6 +8,7 @@ defmodule NeonFS.Core do
   appropriate internal module.
   """
 
+  alias NeonFS.Core.CommitChunks
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.ReadOperation
   alias NeonFS.Core.S3CredentialManager
@@ -190,6 +191,38 @@ defmodule NeonFS.Core do
   def write_file_at(volume_name, path, offset, data, opts \\ []) do
     with {:ok, volume} <- resolve_volume(volume_name) do
       WriteOperation.write_file_at(volume.id, normalize_path(path), offset, data, opts)
+    end
+  end
+
+  @doc """
+  Commits a file whose chunk bytes have already been written to their
+  replicas — the write-side counterpart to `read_file_refs/3`.
+
+  Interface nodes that chunked a stream locally (via
+  `NeonFS.Client.ChunkWriter`) and pushed each chunk to replicas through
+  `Router.data_call(:put_chunk, …)` call this RPC to lay down the
+  `FileIndex` entry and finalise the commit.
+
+  `chunk_hashes` is the ordered list of chunk hashes the writer produced.
+  `opts` must carry `:total_size` (the file's byte length) and
+  `:locations` (map `%{hash => [%{node, drive_id, tier}]}`) so each chunk
+  can be validated and have its `ChunkIndex` entry populated. Optional
+  fields (`:uid`, `:gids`, `:client_ref`, `:mode`, `:content_type`,
+  `:metadata`) mirror `write_file/4`.
+
+  Errors:
+
+    * `{:error, {:missing_chunk, hash}}` — no reported location answered
+      `has_chunk` for that hash.
+    * `{:error, {:unknown_chunk_location, hash}}` — a hash in
+      `chunk_hashes` has no entry in `opts[:locations]`.
+    * Any other error from the lock / authorisation / index layer.
+  """
+  @spec commit_chunks(String.t(), String.t(), [binary()], keyword()) ::
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
+  def commit_chunks(volume_name, path, chunk_hashes, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      CommitChunks.commit(volume.id, normalize_path(path), chunk_hashes, opts)
     end
   end
 
