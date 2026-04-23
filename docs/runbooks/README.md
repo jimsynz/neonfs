@@ -13,6 +13,7 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 ## Incident response
 
 - [Node down](Node-Down.md) — diagnosing a stopped core or interface node, short-term recovery, decommission decision.
+- [Drive failure](Drive-Failure.md) — SMART / I/O-error diagnosis, evacuation, physical replacement, replication-based recovery when evacuation is not possible.
 
 ## Scheduled procedures
 
