@@ -162,7 +162,7 @@ Before escalating, capture:
 - Timestamps of: first symptom, first response action, outcome of each step attempted.
 - The current NeonFS version (`neonfs --version` on any reachable node, or the package install record).
 
-After the incident is fully resolved, follow up with a post-mortem using the template at [Post-Mortem-Template.md](Post-Mortem-Template.md) _(to land)_.
+After the incident is fully resolved, follow up with a post-mortem using the template at [Post-Mortem-Template.md](Post-Mortem-Template.md). A filled-in example lives at [Post-Mortem-Sample.md](Post-Mortem-Sample.md).
 
 ## Known limitations
 

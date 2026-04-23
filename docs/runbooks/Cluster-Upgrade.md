@@ -220,7 +220,7 @@ Capture before escalating:
 - Full release-notes text for the target version.
 - Timeline: upgrade start, per-node upgrade completion, first symptom, first operator response.
 
-After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) _(forthcoming)_. Upgrade post-mortems are where "what made us land on this version" gets recorded — including who signed off and what validation was (or wasn't) done beforehand. That feedback shapes the next change-approval rhythm.
+After the incident, use the post-mortem template at [Post-Mortem-Template.md](Post-Mortem-Template.md) (filled-in example: [Post-Mortem-Sample.md](Post-Mortem-Sample.md)). Upgrade post-mortems are where "what made us land on this version" gets recorded — including who signed off and what validation was (or wasn't) done beforehand. That feedback shapes the next change-approval rhythm.
 
 ## Known limitations
 
