@@ -148,8 +148,12 @@ defmodule NeonFS.Integration.MetadataTieringTest do
 
       volume_id = volume_info[:id]
 
-      # Acquire an intent with very short TTL (simulating a writer that will crash)
+      # Simulate an intent from a crashed writer whose TTL has already elapsed:
+      # inject `started_at` in the past so `expires_at = started_at + ttl_seconds`
+      # is also in the past. Avoids `Process.sleep` — no wall-clock wait is
+      # needed because there is nothing to synchronise on.
       intent_id = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      started_at = DateTime.add(DateTime.utc_now(), -2, :second)
 
       intent =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.Intent, :new, [
@@ -157,6 +161,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
             id: intent_id,
             operation: :file_create,
             conflict_key: {:create, volume_id, "/", "crash_test.txt"},
+            started_at: started_at,
             ttl_seconds: 1
           ]
         ])
@@ -164,22 +169,16 @@ defmodule NeonFS.Integration.MetadataTieringTest do
       {:ok, ^intent_id} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.IntentLog, :try_acquire, [intent])
 
-      # Verify the intent is active
-      {:ok, active_intent} =
+      # The stored intent's `state` is `:pending` — that's the lifecycle field,
+      # independent of time-based expiry.
+      {:ok, stored_intent} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.IntentLog, :get, [intent_id])
 
-      assert active_intent.state == :pending
+      assert stored_intent.state == :pending
 
-      # Wait for the 1-second TTL to expire. Intent expiry is checked lazily
-      # via DateTime comparison (Intent.expired?/1), not by a background process,
-      # so there is no event to synchronise on — real wall time must elapse.
-      Process.sleep(1_100)
-
-      # Verify the intent is now expired
-      {:ok, expired_intent} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.IntentLog, :get, [intent_id])
-
-      assert Intent.expired?(expired_intent)
+      # `Intent.expired?/1` compares `expires_at` to `DateTime.utc_now()` —
+      # already true because `started_at` was pre-dated.
+      assert Intent.expired?(stored_intent)
 
       # Now creating a file at the same path should succeed
       # (expired intent is overwritten by new intent)
