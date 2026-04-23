@@ -27,7 +27,7 @@ defmodule NeonFS.Core.MetricsSupervisor do
       },
       %{
         id: Bandit,
-        start: {Bandit, :start_link, [bandit_opts(opts)]},
+        start: {NeonFS.Core.BanditLauncher, :start_link, [bandit_opts(opts)]},
         shutdown: 15_000
       }
     ]
