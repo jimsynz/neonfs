@@ -16,10 +16,11 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 - [Drive failure](Drive-Failure.md) — SMART / I/O-error diagnosis, evacuation, physical replacement, replication-based recovery when evacuation is not possible.
 - [Quorum loss](Quorum-Loss.md) — Ra quorum broken, no leader, metadata writes hang. Partition-vs-failure assessment, wait-it-out vs forced-reset paths, explicit data-loss call-outs.
 - [CA rotation](CA-Rotation.md) — cluster CA or node-cert expiry. Planned rotation ahead of time, and emergency rotation when expiry has already broken distribution.
+- [Capacity pressure](Capacity-Pressure.md) — drive, tier, or cluster running out of room. Immediate relief (GC, tier eviction, caching changes), permanent capacity growth, and the decisions not to make under pressure.
 
 ## Scheduled procedures
 
-_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): cluster upgrade, capacity pressure response, key rotation, DR snapshot restore, post-mortem template.)_
+_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): cluster upgrade, key rotation, DR snapshot restore, post-mortem template.)_
 
 ## When nothing fits
 
