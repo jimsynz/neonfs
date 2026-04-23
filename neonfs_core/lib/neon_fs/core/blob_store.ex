@@ -54,6 +54,8 @@ defmodule NeonFS.Core.BlobStore do
 
   alias NeonFS.Core.Blob.Native
   alias NeonFS.Core.DriveState
+  alias NeonFS.Core.Volume
+  alias NeonFS.Core.VolumeRegistry
 
   @type chunk_hash :: binary()
   @type tier :: String.t()
@@ -232,6 +234,47 @@ defmodule NeonFS.Core.BlobStore do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:chunk_info, hash})
   end
+
+  @doc """
+  Resolves volume-level write options for a put_chunk invocation.
+
+  Called by `NeonFS.Transport.Handler` when an interface node sends
+  plaintext chunks on the new 8-tuple put_chunk frame (see the #408
+  design note). The resolved options are then passed straight through
+  to `write_chunk/4` as the fourth argument — matching compression and,
+  in future, encryption settings per volume.
+
+  ## Current scope (MVP)
+
+    * Compression — resolved from `volume.compression` if the
+      algorithm is not `:none` AND the input size exceeds
+      `volume.compression.min_size`. Otherwise returns an empty list
+      (chunks stored as-is, matching legacy behaviour).
+    * Encryption — **not yet applied on this path**. Encrypted
+      volumes currently still store raw bytes via this handler, which
+      is the same behaviour as before this function existed. Tracked
+      for a follow-up.
+
+  ## Returns
+
+    * `[]` when no volume processing applies (volume uncompressed,
+      unknown volume, or encrypted — pending follow-up).
+    * Keyword list with `:compression` and `:compression_level` keys
+      when compression is configured for the volume.
+  """
+  @spec resolve_put_chunk_opts(binary()) :: keyword()
+  def resolve_put_chunk_opts(volume_id) when is_binary(volume_id) do
+    case VolumeRegistry.get(volume_id) do
+      {:ok, %Volume{} = volume} -> volume_write_opts(volume)
+      _ -> []
+    end
+  end
+
+  defp volume_write_opts(%Volume{compression: %{algorithm: :zstd, level: level}}) do
+    [compression: "zstd", compression_level: level]
+  end
+
+  defp volume_write_opts(_volume), do: []
 
   @doc """
   Migrates a chunk between tiers within a single drive.

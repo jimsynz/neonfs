@@ -65,7 +65,7 @@ defmodule NeonFS.Transport.HandlerTest do
   end
 
   describe "put_chunk dispatch" do
-    test "stores a chunk and returns {:ok, ref}", ctx do
+    test "7-tuple (legacy) stores a chunk as-is and returns {:ok, ref}", ctx do
       {client, _handler} = connect_and_start_handler(ctx)
 
       ref = make_ref()
@@ -73,6 +73,50 @@ defmodule NeonFS.Transport.HandlerTest do
       response = send_and_recv(client, message)
 
       assert {:ok, ^ref} = response
+
+      # The legacy path invokes write_chunk with empty opts — no
+      # compression / encryption resolution takes place. The stub
+      # records the opts it received for inspection.
+      assert StubBlobStore.last_write_opts() == []
+
+      :ssl.close(client)
+    end
+
+    test "8-tuple (new) triggers volume-opts resolution before write", ctx do
+      # Seed a stub volume with zstd compression configured.
+      StubBlobStore.put_volume_opts("vol-1", compression: "zstd", compression_level: 5)
+
+      {client, _handler} = connect_and_start_handler(ctx)
+
+      ref = make_ref()
+
+      message =
+        {:put_chunk, ref, <<0::256>>, "vol-1", "drive-1", "write-1", :hot, "plaintext payload"}
+
+      response = send_and_recv(client, message)
+
+      assert {:ok, ^ref} = response
+
+      # The new path invokes write_chunk with the resolved volume opts.
+      assert StubBlobStore.last_write_opts() == [compression: "zstd", compression_level: 5]
+
+      :ssl.close(client)
+    end
+
+    test "8-tuple with unknown volume_id falls back to empty opts", ctx do
+      # No volume-opts seeded — stub's resolver returns [] for unknown
+      # volume ids, matching the production BlobStore behaviour.
+      {client, _handler} = connect_and_start_handler(ctx)
+
+      ref = make_ref()
+
+      message =
+        {:put_chunk, ref, <<0::256>>, "vol-unknown", "drive-1", "write-1", :hot, "data"}
+
+      response = send_and_recv(client, message)
+
+      assert {:ok, ^ref} = response
+      assert StubBlobStore.last_write_opts() == []
 
       :ssl.close(client)
     end

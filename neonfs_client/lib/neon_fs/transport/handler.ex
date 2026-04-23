@@ -63,8 +63,36 @@ defmodule NeonFS.Transport.Handler do
 
   # Dispatch functions
 
-  defp dispatch({:put_chunk, ref, _hash, volume_id, _write_id, tier, data}, state) do
-    case state.dispatch.write_chunk(data, volume_id, tier, []) do
+  # New 8-tuple shape carries a real `volume_id` alongside `drive_id`.
+  # When present, the handler resolves the volume's compression /
+  # encryption settings via the dispatch module and applies them
+  # before storing the chunk — the interface-side chunking path
+  # established by the #408 design note. Frame layout:
+  # `{:put_chunk, ref, hash, volume_id, drive_id, write_id, tier, data}`.
+  defp dispatch(
+         {:put_chunk, ref, _hash, volume_id, drive_id, _write_id, tier, data},
+         state
+       )
+       when is_binary(volume_id) do
+    opts =
+      if function_exported?(state.dispatch, :resolve_put_chunk_opts, 1) do
+        state.dispatch.resolve_put_chunk_opts(volume_id)
+      else
+        []
+      end
+
+    case state.dispatch.write_chunk(data, drive_id, tier, opts) do
+      {:ok, _hash, _info} -> {:ok, ref}
+      {:error, reason} -> {:error, ref, reason}
+    end
+  end
+
+  # Legacy 7-tuple shape: the "volume_id" field is actually drive_id.
+  # Callers that don't know (or shouldn't apply) volume-level
+  # processing — replication, internal replay — stay on this path.
+  # Stored bytes are written as-is with empty opts.
+  defp dispatch({:put_chunk, ref, _hash, drive_id, _write_id, tier, data}, state) do
+    case state.dispatch.write_chunk(data, drive_id, tier, []) do
       {:ok, _hash, _info} -> {:ok, ref}
       {:error, reason} -> {:error, ref, reason}
     end
