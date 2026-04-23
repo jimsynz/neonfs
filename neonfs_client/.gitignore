@@ -23,3 +23,7 @@ erl_crash.dump
 neonfs_client-*.tar
 
 .elixir_ls
+
+# Rustler NIF build artefacts — mirrored from neonfs_core.
+target/
+priv/native

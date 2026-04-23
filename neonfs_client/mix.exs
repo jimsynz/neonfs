@@ -47,6 +47,7 @@ defmodule NeonFS.Client.MixProject do
     [
       {:mime, "~> 2.0"},
       {:nimble_pool, "~> 1.1"},
+      {:rustler, "~> 0.37", runtime: false},
       {:splode, "~> 0.3"},
       {:telemetry, "~> 1.2"},
       {:uuid_v7, "~> 0.6"},

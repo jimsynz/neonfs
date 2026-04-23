@@ -54,13 +54,14 @@ jobs:
         run: bash scripts/check_buffering.sh
 
   # =========================================================================
-  # neonfs_client - Pure Elixir shared types & service discovery
+  # neonfs_client - Elixir shared types, service discovery, and the
+  # neonfs_chunker NIF (interface-side chunker, #449).
   # =========================================================================
   neonfs_client:
     needs: resolve-versions
     runs-on: docker
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_image }}
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v6
 
@@ -70,7 +71,9 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
-          key: v3-build-neonfs_client-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_client/mix.lock') }}
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
+          key: v3-build-neonfs_client-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_client/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
           restore-keys: v3-build-neonfs_client-${{ runner.arch }}-
 
       - name: Build
@@ -162,13 +165,14 @@ jobs:
         run: mix check
 
   # =========================================================================
-  # neonfs_docker - Pure Elixir Docker VolumeDriver plugin
+  # neonfs_docker - Docker VolumeDriver plugin. Transitively pulls the
+  # neonfs_chunker NIF through its neonfs_client dep (#449).
   # =========================================================================
   neonfs_docker:
     needs: resolve-versions
     runs-on: docker
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_image }}
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v6
 
@@ -178,9 +182,11 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
             neonfs_docker/deps
             neonfs_docker/_build
-          key: v3-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_docker/mix.lock') }}
+          key: v3-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_docker/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
           restore-keys: v3-build-neonfs_docker-${{ runner.arch }}-
 
       - name: Build
@@ -298,13 +304,14 @@ jobs:
         run: mix check
 
   # =========================================================================
-  # neonfs_s3 - S3-compatible API interface (pure Elixir)
+  # neonfs_s3 - S3-compatible API interface. Transitively pulls the
+  # neonfs_chunker NIF through its neonfs_client dep (#449).
   # =========================================================================
   neonfs_s3:
     needs: resolve-versions
     runs-on: docker
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_image }}
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v6
 
@@ -314,9 +321,11 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
             neonfs_s3/deps
             neonfs_s3/_build
-          key: v3-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_s3/mix.lock') }}
+          key: v3-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
           restore-keys: v3-build-neonfs_s3-${{ runner.arch }}-
 
       - name: Build
@@ -332,13 +341,14 @@ jobs:
         run: mix check
 
   # =========================================================================
-  # neonfs_webdav - WebDAV interface (pure Elixir)
+  # neonfs_webdav - WebDAV interface. Transitively pulls the
+  # neonfs_chunker NIF through its neonfs_client dep (#449).
   # =========================================================================
   neonfs_webdav:
     needs: resolve-versions
     runs-on: docker
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_image }}
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v6
 
@@ -348,11 +358,13 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
             webdav_server/deps
             webdav_server/_build
             neonfs_webdav/deps
             neonfs_webdav/_build
-          key: v3-build-neonfs_webdav-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_webdav/mix.lock') }}
+          key: v3-build-neonfs_webdav-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_webdav/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
           restore-keys: v3-build-neonfs_webdav-${{ runner.arch }}-
 
       - name: Build
@@ -368,13 +380,14 @@ jobs:
         run: mix check
 
   # =========================================================================
-  # neonfs_iam - Pure Elixir IAM package (Ash resources)
+  # neonfs_iam - IAM package (Ash resources). Transitively pulls the
+  # neonfs_chunker NIF through its neonfs_client dep (#449).
   # =========================================================================
   neonfs_iam:
     needs: resolve-versions
     runs-on: docker
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_image }}
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v6
 
@@ -384,9 +397,11 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
             neonfs_iam/deps
             neonfs_iam/_build
-          key: v3-build-neonfs_iam-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('neonfs_iam/mix.lock') }}
+          key: v3-build-neonfs_iam-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_iam/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
           restore-keys: v3-build-neonfs_iam-${{ runner.arch }}-
 
       - name: Build

@@ -75,7 +75,12 @@ defmodule NeonFS.S3.MixProject do
       {:ex_aws, "~> 2.6", only: :test},
       {:ex_aws_s3, "~> 2.5", only: :test},
       {:hackney, "~> 1.9", only: :test},
-      {:jason, "~> 1.0", only: [:dev, :test]},
+      # `:only` dropped because `rustler` — pulled in transitively via
+      # neonfs_client's chunker NIF (#449) — declares jason as a
+      # runtime dep. Narrower `:only` bounds here fail the mix.exs
+      # consistency check (same shape as the `stream_data` / `ash`
+      # gotcha in the Codebase Patterns wiki).
+      {:jason, "~> 1.0"},
       {:mimic, "~> 2.0", only: [:test]},
       {:sweet_xml, "~> 0.7", only: :test}
     ]

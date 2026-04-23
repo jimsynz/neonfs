@@ -1,0 +1,20 @@
+[package]
+name = "neonfs_chunker"
+version = "0.1.0"
+authors = []
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.37.2"
+sha2 = "0.11"
+hex = "0.4"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+fastcdc = "4.0"
+
+[dev-dependencies]
+proptest = "1.6"
+serde_json = "1.0"
