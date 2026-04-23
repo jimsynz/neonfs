@@ -120,6 +120,42 @@ defmodule NeonFS.Transport.HandlerTest do
 
       :ssl.close(client)
     end
+
+    test "8-tuple propagates {:error, _} from resolve_put_chunk_opts/1 without writing", ctx do
+      # Encrypted volume whose KeyManager.get_current_key/1 would fail
+      # surfaces `{:error, reason}` from resolve_put_chunk_opts/1 in
+      # production. The handler must abort the write and send the reason
+      # back — storing plaintext on an encrypted volume would leak data.
+      StubBlobStore.put_volume_opts("vol-missing-key", {:error, :key_not_found})
+
+      {client, _handler} = connect_and_start_handler(ctx)
+
+      # Leave a sentinel on `last_write_opts` so we can confirm no
+      # write happened during the failing dispatch — any write call
+      # from the handler would overwrite this marker.
+      StubBlobStore.put_volume_opts("vol-ok", marker: :pre_test)
+      ref_ok = make_ref()
+      ok_msg = {:put_chunk, ref_ok, <<0::256>>, "vol-ok", "drive-1", "write-ok", :hot, "ok data"}
+      assert {:ok, ^ref_ok} = send_and_recv(client, ok_msg)
+      assert StubBlobStore.last_write_opts() == [marker: :pre_test]
+
+      ref = make_ref()
+
+      message =
+        {:put_chunk, ref, <<0::256>>, "vol-missing-key", "drive-1", "write-1", :hot,
+         "plaintext should never land"}
+
+      response = send_and_recv(client, message)
+
+      assert {:error, ^ref, :key_not_found} = response
+
+      # The sentinel from the previous successful dispatch is still in
+      # place — confirming the handler did NOT call write_chunk for the
+      # failing volume.
+      assert StubBlobStore.last_write_opts() == [marker: :pre_test]
+
+      :ssl.close(client)
+    end
   end
 
   describe "get_chunk dispatch" do

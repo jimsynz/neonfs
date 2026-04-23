@@ -69,20 +69,21 @@ defmodule NeonFS.Transport.Handler do
   # before storing the chunk — the interface-side chunking path
   # established by the #408 design note. Frame layout:
   # `{:put_chunk, ref, hash, volume_id, drive_id, write_id, tier, data}`.
+  #
+  # `resolve_put_chunk_opts/1` may return `{:error, reason}` — for
+  # example, an encrypted volume whose current key is unavailable.
+  # That failure is surfaced directly to the interface node: storing
+  # the chunk as plaintext on an encrypted volume would be a data-at-
+  # rest leak, not a recoverable fallback.
   defp dispatch(
          {:put_chunk, ref, _hash, volume_id, drive_id, _write_id, tier, data},
          state
        )
        when is_binary(volume_id) do
-    opts =
-      if function_exported?(state.dispatch, :resolve_put_chunk_opts, 1) do
-        state.dispatch.resolve_put_chunk_opts(volume_id)
-      else
-        []
-      end
-
-    case state.dispatch.write_chunk(data, drive_id, tier, opts) do
-      {:ok, _hash, _info} -> {:ok, ref}
+    with {:ok, opts} <- resolve_volume_opts(state.dispatch, volume_id),
+         {:ok, _hash, _info} <- state.dispatch.write_chunk(data, drive_id, tier, opts) do
+      {:ok, ref}
+    else
       {:error, reason} -> {:error, ref, reason}
     end
   end
@@ -113,6 +114,17 @@ defmodule NeonFS.Transport.Handler do
     case state.dispatch.chunk_info(hash) do
       {:ok, tier, size} -> {:ok, ref, tier, size}
       {:error, _reason} -> {:error, ref, :not_found}
+    end
+  end
+
+  defp resolve_volume_opts(dispatch, volume_id) do
+    if function_exported?(dispatch, :resolve_put_chunk_opts, 1) do
+      case dispatch.resolve_put_chunk_opts(volume_id) do
+        {:error, _} = err -> err
+        opts when is_list(opts) -> {:ok, opts}
+      end
+    else
+      {:ok, []}
     end
   end
 end

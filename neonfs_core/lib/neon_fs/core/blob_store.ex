@@ -54,6 +54,7 @@ defmodule NeonFS.Core.BlobStore do
 
   alias NeonFS.Core.Blob.Native
   alias NeonFS.Core.DriveState
+  alias NeonFS.Core.KeyManager
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeRegistry
 
@@ -239,42 +240,69 @@ defmodule NeonFS.Core.BlobStore do
   Resolves volume-level write options for a put_chunk invocation.
 
   Called by `NeonFS.Transport.Handler` when an interface node sends
-  plaintext chunks on the new 8-tuple put_chunk frame (see the #408
-  design note). The resolved options are then passed straight through
-  to `write_chunk/4` as the fourth argument — matching compression and,
-  in future, encryption settings per volume.
+  plaintext chunks on the 8-tuple put_chunk frame (see the #408 design
+  note). The resolved options are passed straight through to
+  `write_chunk/4` as the fourth argument — the BlobStore NIF pipeline
+  applies compression-then-encryption per the options supplied.
 
-  ## Current scope (MVP)
+  ## Supported options
 
-    * Compression — resolved from `volume.compression` if the
-      algorithm is not `:none` AND the input size exceeds
-      `volume.compression.min_size`. Otherwise returns an empty list
-      (chunks stored as-is, matching legacy behaviour).
-    * Encryption — **not yet applied on this path**. Encrypted
-      volumes currently still store raw bytes via this handler, which
-      is the same behaviour as before this function existed. Tracked
-      for a follow-up.
+    * Compression — resolved from `volume.compression` when the
+      algorithm is `:zstd`; the stored chunk is compressed at
+      `volume.compression.level`. Omitted for `:none`.
+    * Encryption — when `Volume.encrypted?/1`, the current volume key
+      is fetched via `KeyManager.get_current_key/1` and a fresh
+      12-byte nonce is generated per chunk. The returned `:key` and
+      `:nonce` opts are the same shape the co-located streaming-write
+      path uses in `WriteOperation.add_encryption_write_opts/2`, so
+      the NIF applies AES-256-GCM at write time. Interface nodes
+      never see the plaintext key — it enters the opts on core and
+      stays on core.
 
   ## Returns
 
-    * `[]` when no volume processing applies (volume uncompressed,
-      unknown volume, or encrypted — pending follow-up).
-    * Keyword list with `:compression` and `:compression_level` keys
-      when compression is configured for the volume.
+    * `[]` — for unknown volumes, and for volumes with no compression
+      and no encryption configured.
+    * Keyword list containing `:compression` / `:compression_level`
+      and/or `:key` / `:nonce`, depending on the volume's settings.
+    * `{:error, reason}` — the volume is encrypted but the current
+      key could not be resolved. Callers must not fall through to
+      plaintext writes on encrypted volumes; the calling handler
+      surfaces the error to the interface node.
   """
-  @spec resolve_put_chunk_opts(binary()) :: keyword()
+  @spec resolve_put_chunk_opts(binary()) :: keyword() | {:error, term()}
   def resolve_put_chunk_opts(volume_id) when is_binary(volume_id) do
     case VolumeRegistry.get(volume_id) do
-      {:ok, %Volume{} = volume} -> volume_write_opts(volume)
-      _ -> []
+      {:ok, %Volume{} = volume} ->
+        case encryption_opts(volume) do
+          {:ok, enc} -> compression_opts(volume) ++ enc
+          {:error, _} = err -> err
+        end
+
+      _ ->
+        []
     end
   end
 
-  defp volume_write_opts(%Volume{compression: %{algorithm: :zstd, level: level}}) do
+  defp compression_opts(%Volume{compression: %{algorithm: :zstd, level: level}}) do
     [compression: "zstd", compression_level: level]
   end
 
-  defp volume_write_opts(_volume), do: []
+  defp compression_opts(_volume), do: []
+
+  defp encryption_opts(%Volume{} = volume) do
+    if Volume.encrypted?(volume) do
+      case KeyManager.get_current_key(volume.id) do
+        {:ok, {key, _version}} ->
+          {:ok, [key: key, nonce: :crypto.strong_rand_bytes(12)]}
+
+        {:error, _} = err ->
+          err
+      end
+    else
+      {:ok, []}
+    end
+  end
 
   @doc """
   Migrates a chunk between tiers within a single drive.
