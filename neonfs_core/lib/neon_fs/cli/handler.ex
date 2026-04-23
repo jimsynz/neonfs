@@ -182,6 +182,68 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
+  Permanently decommissions a node from the cluster.
+
+  Composes the three decommission steps operators would otherwise run
+  separately: refusing under unsafe conditions, revoking the node's
+  certificate, and removing it from the Ra quorum membership.
+
+  Refuses if the target node is the current Ra leader (the leader must
+  step down first). Refuses if the target node still owns drives,
+  unless `opts["force"]` is truthy — force-removing a node with
+  resident chunks risks losing any chunk whose only replica was on
+  that node.
+
+  The Ra membership removal is a consensus operation against the
+  current leader; on success the departed node can no longer rejoin
+  without a fresh invite. Certificate revocation is best-effort — the
+  Ra removal is the authoritative step.
+
+  ## Parameters
+  - `node_name` - Target node name, matching the Erlang node atom string
+    (e.g. `"neonfs_core@host1"`) or the CN portion (`"host1"`).
+  - `opts` - Map of options. `"force"` (boolean, default false) skips
+    the drive-presence check.
+
+  ## Returns
+  - `{:ok, map}` - Result map with `node`, `status`, `remaining_members`,
+    and `certificate_revoked` (boolean).
+  - `{:error, reason}` - Error tuple if any safety check fails or the
+    Ra operation does not complete.
+  """
+  @spec handle_remove_node(String.t(), map()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_remove_node(node_name, opts \\ %{}) when is_binary(node_name) do
+    set_cli_metadata()
+    force = Map.get(opts, "force", false)
+
+    with :ok <- require_cluster(),
+         {:ok, target_node} <- resolve_target_node(node_name),
+         :ok <- refuse_if_self(target_node),
+         :ok <- refuse_if_leader(target_node),
+         :ok <- refuse_if_drives_present(target_node, force),
+         :ok <- ra_remove_member(target_node) do
+      revoked = best_effort_revoke(node_name)
+
+      remaining =
+        case :ra.members(RaSupervisor.server_id(), 2_000) do
+          {:ok, members, _leader} -> length(members)
+          _ -> 0
+        end
+
+      {:ok,
+       %{
+         node: Atom.to_string(target_node),
+         status: "removed",
+         remaining_members: remaining,
+         certificate_revoked: revoked
+       }}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
   Revokes a node's certificate by node name.
 
   Looks up the node in the issued certificates list and revokes its certificate.
@@ -3000,5 +3062,115 @@ defmodule NeonFS.CLI.Handler do
     end
 
     :ok
+  end
+
+  # ── handle_remove_node/2 helpers ─────────────────────────────────────
+
+  defp resolve_target_node(node_name) do
+    # First try ServiceRegistry — authoritative source for nodes currently
+    # in the cluster. Match on the full Erlang atom ("neonfs_core@host"),
+    # the CN portion after the `@`, or the entire string.
+    match =
+      ServiceRegistry.list()
+      |> Enum.find(fn %{node: node} ->
+        s = Atom.to_string(node)
+        s == node_name or host_part(s) == node_name or s == "neonfs_core@#{node_name}"
+      end)
+
+    case match do
+      %{node: node} ->
+        {:ok, node}
+
+      nil ->
+        # Fall back: accept a literal Erlang node atom. This covers the
+        # decommission case where the service has already been shut down
+        # (ServiceRegistry no longer lists it) but the Ra membership
+        # entry remains.
+        case safe_string_to_existing_atom(node_name) do
+          {:ok, atom} ->
+            {:ok, atom}
+
+          :error ->
+            {:error, NotFound.exception(message: "No node '#{node_name}' found in cluster")}
+        end
+    end
+  end
+
+  defp host_part(node_string) do
+    case String.split(node_string, "@", parts: 2) do
+      [_, host] -> host
+      _ -> node_string
+    end
+  end
+
+  defp safe_string_to_existing_atom(str) do
+    {:ok, String.to_existing_atom(str)}
+  rescue
+    ArgumentError -> :error
+  end
+
+  defp refuse_if_self(target_node) do
+    if target_node == node() do
+      {:error,
+       Unavailable.exception(
+         message:
+           "Cannot remove the node running this command (#{target_node}). Run remove-node from a peer."
+       )}
+    else
+      :ok
+    end
+  end
+
+  defp refuse_if_leader(target_node) do
+    case :ra.members(RaSupervisor.server_id(), 2_000) do
+      {:ok, _members, {_cluster_name, leader_node}} when leader_node == target_node ->
+        {:error,
+         Unavailable.exception(
+           message:
+             "Node '#{target_node}' is the current Ra leader. It must step down (or be stopped) before removal."
+         )}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp refuse_if_drives_present(_target_node, true), do: :ok
+
+  defp refuse_if_drives_present(target_node, false) do
+    case DriveManager.list_all_drives(node: target_node) do
+      [] ->
+        :ok
+
+      drives ->
+        {:error,
+         Unavailable.exception(
+           message:
+             "Node '#{target_node}' still owns #{length(drives)} drive(s). " <>
+               "Evacuate (`neonfs drive evacuate`) and remove them first, or pass --force " <>
+               "to accept potential data loss for any chunk whose only replica lives on that node."
+         )}
+    end
+  end
+
+  defp ra_remove_member(target_node) do
+    server_id = {RaSupervisor.cluster_name(), target_node}
+
+    case :ra.remove_member(RaSupervisor.server_id(), server_id, 10_000) do
+      {:ok, _, _} -> :ok
+      # Target is not a Ra member (e.g. interface-only node) — treat as
+      # success so the rest of the flow (cert revoke) still runs.
+      {:error, :not_member} -> :ok
+      {:error, :cluster_change_not_permitted} = err -> err
+      {:error, reason} -> {:error, reason}
+      {:timeout, _} -> {:error, :ra_remove_timeout}
+    end
+  end
+
+  defp best_effort_revoke(node_name) do
+    case handle_ca_revoke(node_name) do
+      {:ok, _} -> true
+      {:error, _} -> false
+    end
   end
 end

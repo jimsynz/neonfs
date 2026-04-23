@@ -316,6 +316,37 @@ impl CaRevokeResult {
     }
 }
 
+/// `cluster remove-node` response
+#[derive(Debug, Serialize)]
+pub struct RemoveNodeResult {
+    pub node: String,
+    pub status: String,
+    pub remaining_members: u64,
+    pub certificate_revoked: bool,
+}
+
+impl RemoveNodeResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+            remaining_members: term_to_u64(map.get("remaining_members").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'remaining_members' field".to_string())
+            })?)?,
+            certificate_revoked: term_to_bool(map.get("certificate_revoked").ok_or_else(
+                || CliError::TermConversionError("Missing 'certificate_revoked' field".to_string()),
+            )?)?,
+        })
+    }
+}
+
 /// Volume information response
 #[derive(Debug, Serialize)]
 pub struct VolumeInfo {

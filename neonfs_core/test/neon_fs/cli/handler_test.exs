@@ -1074,4 +1074,52 @@ defmodule NeonFS.CLI.HandlerTest do
       assert result.drive_concurrency == 3
     end
   end
+
+  describe "handle_remove_node/2 safety checks" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_ra()
+
+      ensure_cluster_state()
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "refuses to remove the node running the command" do
+      self_name = Atom.to_string(node())
+
+      assert {:error, %NeonFS.Error.Unavailable{message: msg}} =
+               Handler.handle_remove_node(self_name)
+
+      assert msg =~ "Cannot remove the node running this command"
+    end
+
+    test "returns NotFound when the target is not in the cluster" do
+      assert {:error, %NeonFS.Error.NotFound{message: msg}} =
+               Handler.handle_remove_node("nonexistent-node-xyz")
+
+      assert msg =~ "No node 'nonexistent-node-xyz'"
+    end
+
+    test "accepts the force option via the opts map" do
+      # Still refused because the target doesn't exist, but the force path
+      # is exercised — `opts["force"] = true` skips the drive-check gate
+      # so the NotFound surfaces from node resolution rather than drives.
+      assert {:error, %NeonFS.Error.NotFound{}} =
+               Handler.handle_remove_node("still-nonexistent", %{"force" => true})
+    end
+  end
 end

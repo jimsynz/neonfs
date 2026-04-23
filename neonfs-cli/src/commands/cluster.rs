@@ -4,7 +4,7 @@ use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
-    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus,
+    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus, RemoveNodeResult,
 };
 use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
@@ -64,6 +64,22 @@ pub enum ClusterCommand {
 
     /// Show cluster status
     Status,
+
+    /// Permanently decommission a node from the cluster
+    ///
+    /// Revokes the node's certificate and removes it from the Ra quorum
+    /// membership. Refuses if the node is the current Ra leader or still
+    /// owns drives (unless --force is passed).
+    RemoveNode {
+        /// Target node name (e.g. `neonfs_core@host2` or `host2`)
+        node: String,
+
+        /// Skip the drive-presence check. Force-removing a node with
+        /// resident chunks risks losing any chunk whose only replica
+        /// was on that node.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Certificate authority subcommands
@@ -100,6 +116,7 @@ impl ClusterCommand {
             } => self.rebalance(tier.as_deref(), threshold, batch_size, format),
             ClusterCommand::RebalanceStatus => self.rebalance_status(format),
             ClusterCommand::Status => self.status(format),
+            ClusterCommand::RemoveNode { node, force } => self.remove_node(node, *force, format),
         }
     }
 
@@ -455,6 +472,50 @@ impl ClusterCommand {
                 ]);
                 tbl.add_row(vec!["Description".to_string(), description]);
                 print!("{}", tbl.render()?);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_node(&self, node: &str, force: bool, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            let node_binary = Binary::from(node.as_bytes().to_vec());
+            let force_key = Binary::from(b"force".to_vec());
+            let force_value = Term::Atom(eetf::Atom::from(if force { "true" } else { "false" }));
+            let opts = Term::Map(Map::from([(Term::Binary(force_key), force_value)]));
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_remove_node",
+                vec![Term::Binary(node_binary), opts],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let remove_result = RemoveNodeResult::from_term(data)?;
+
+        match format {
+            OutputFormat::Json => {
+                println!("{}", json::format(&remove_result)?);
+            }
+            OutputFormat::Table => {
+                println!("✓ Removed node '{}'", remove_result.node);
+                println!();
+                println!("  Status:              {}", remove_result.status);
+                println!("  Remaining members:   {}", remove_result.remaining_members);
+                println!(
+                    "  Certificate revoked: {}",
+                    if remove_result.certificate_revoked {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
             }
         }
         Ok(())

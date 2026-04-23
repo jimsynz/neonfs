@@ -35,6 +35,24 @@ pub fn term_to_i64(term: &Term) -> Result<i64> {
     }
 }
 
+/// Convert Erlang `:true`/`:false` atom to a Rust `bool`.
+pub fn term_to_bool(term: &Term) -> Result<bool> {
+    match term {
+        Term::Atom(atom) => match atom.name.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(CliError::TermConversionError(format!(
+                "Cannot convert atom ':{}' to bool",
+                other
+            ))),
+        },
+        _ => Err(CliError::TermConversionError(format!(
+            "Cannot convert {:?} to bool",
+            term
+        ))),
+    }
+}
+
 /// Convert Erlang term to u64
 pub fn term_to_u64(term: &Term) -> Result<u64> {
     match term {
