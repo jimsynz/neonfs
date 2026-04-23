@@ -289,6 +289,8 @@ neonfs volume rotation-status my-data
 
 Rotation is online — the volume stays readable and writable throughout. `rotation-status` reports how many chunks have been migrated to the new key.
 
+For scheduled-cadence and suspected-compromise rotation flows (with backup-lifecycle guidance for ciphertext under the old key), see the [Key-Rotation runbook](runbooks/Key-Rotation.md).
+
 ### Deleting a volume
 
 ```bash
