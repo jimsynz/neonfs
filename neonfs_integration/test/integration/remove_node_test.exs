@@ -22,7 +22,42 @@ defmodule NeonFS.Integration.RemoveNodeTest do
 
   setup %{cluster: cluster} do
     :ok = init_multi_node_cluster(cluster)
+
+    # `init_multi_node_cluster` boots peer nodes with no `:drives` app-
+    # config and the join flow doesn't register any — so without this
+    # step the drives-present safety gate in `handle_remove_node/2`
+    # always passes, and the "refuses to remove a follower that still
+    # owns drives" / "--force removes a follower with drives attached"
+    # tests exercise a false premise. Register a default drive on each
+    # follower via `DriveManager.add_drive` (which propagates through
+    # the Ra-replicated `DriveRegistry`) so the safety gate sees real
+    # drives on the target node when the handler runs on node1.
+    for follower <- [:node2, :node3] do
+      register_default_drive!(cluster, follower)
+    end
+
     %{}
+  end
+
+  defp register_default_drive!(cluster, follower) do
+    data_dir =
+      PeerCluster.rpc(cluster, follower, Application, :get_env, [:neonfs_core, :data_dir])
+
+    drive_path = Path.join(data_dir, "drive_default")
+    :ok = PeerCluster.rpc(cluster, follower, File, :mkdir_p!, [drive_path])
+
+    # Drive IDs are unique across the cluster (DriveRegistry is Ra-
+    # replicated and rejects duplicates with `:duplicate_drive_id`).
+    # Suffix the ID with the node alias so each follower lands a
+    # distinct drive.
+    drive_id = "default-#{follower}"
+
+    {:ok, _drive} =
+      PeerCluster.rpc(cluster, follower, NeonFS.Core.DriveManager, :add_drive, [
+        %{id: drive_id, path: drive_path, tier: :hot, capacity: "1G"}
+      ])
+
+    :ok
   end
 
   describe "handle_remove_node/2 — live quorum" do
@@ -65,7 +100,7 @@ defmodule NeonFS.Integration.RemoveNodeTest do
     end
 
     test "refuses to remove a follower that still owns drives", %{cluster: cluster} do
-      # node3 was added to the cluster with its default drive; no
+      # `setup` registers a default drive on every follower; no
       # evacuation has been done, so the drives-present check should
       # fire regardless of chunk counts.
       target = PeerCluster.get_node!(cluster, :node3).node
