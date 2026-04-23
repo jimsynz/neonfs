@@ -20,7 +20,9 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 
 ## Scheduled procedures
 
-_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): cluster upgrade, key rotation, DR snapshot restore, post-mortem template.)_
+- [Cluster upgrade](Cluster-Upgrade.md) — rolling core + interface upgrade, mid-upgrade incident handling, and the rollback decision tree (safe vs unsafe against a state-machine version bump).
+
+_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): key rotation, DR snapshot restore, post-mortem template.)_
 
 ## When nothing fits
 

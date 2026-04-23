@@ -395,6 +395,8 @@ This is the break-glass path. Prefer the CLI whenever it's available.
 
 NeonFS supports rolling upgrades within the same major version. Cross-major upgrades need the release notes — check `CHANGELOG.md` for breaking changes before starting.
 
+For change-window execution with pre-flight / verification / mid-upgrade handling / rollback decision tree, see the [Cluster-Upgrade runbook](runbooks/Cluster-Upgrade.md).
+
 ### Rolling upgrade (core nodes)
 
 1. **Pre-flight**: confirm `neonfs cluster status` shows all nodes healthy and Ra quorum is intact.
