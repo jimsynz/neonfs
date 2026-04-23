@@ -41,7 +41,12 @@ defmodule NeonFS.Client.Router do
 
   ## Operations
 
-    * `:put_chunk` — `args`: `[hash: h, volume_id: v, write_id: w, tier: t, data: d]`
+    * `:put_chunk` — `args`: `[hash: h, volume_id: v, write_id: w, tier: t, data: d]`.
+      The `:volume_id` arg historically carries the drive identifier (legacy
+      naming). Pass `:processing_volume_id` alongside it to request that the
+      receiving handler resolve the volume's compression / encryption
+      settings before storing the chunk — the interface-side chunking path
+      from the #408 design note.
     * `:get_chunk` — `args`: `[hash: h, volume_id: v]`
     * `:has_chunk` — `args`: `[hash: h]`
 
@@ -89,7 +94,20 @@ defmodule NeonFS.Client.Router do
   ## Private helpers — data_call
 
   defp build_data_message(:put_chunk, ref, args) do
-    {:put_chunk, ref, args[:hash], args[:volume_id], args[:write_id], args[:tier], args[:data]}
+    # `:volume_id` historically carries the drive identifier; callers that
+    # want the receiving handler to apply volume-level compression /
+    # encryption pass `:processing_volume_id` alongside it. Presence of
+    # that key switches the frame to the new 8-tuple shape understood by
+    # `NeonFS.Transport.Handler`.
+    case args[:processing_volume_id] do
+      nil ->
+        {:put_chunk, ref, args[:hash], args[:volume_id], args[:write_id], args[:tier],
+         args[:data]}
+
+      volume_id when is_binary(volume_id) ->
+        {:put_chunk, ref, args[:hash], volume_id, args[:volume_id], args[:write_id], args[:tier],
+         args[:data]}
+    end
   end
 
   defp build_data_message(:get_chunk, ref, args) do
