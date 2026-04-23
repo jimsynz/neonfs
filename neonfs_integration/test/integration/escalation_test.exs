@@ -198,9 +198,18 @@ defmodule NeonFS.Integration.EscalationTest do
     # Aggregate state gauge fires on node3 (where resolve was processed)
     # with a decremented pending count — the gauge ticks on the node that
     # handled the transition, not on every cluster member.
-    assert_receive {:telemetry_forwarded, ^node3_state_ref, [:neonfs, :escalation, :state],
-                    %{pending_count: pending_after_resolve}, _},
-                   5_000
+    #
+    # The Ra apply of the resolve on node3's local state machine is async
+    # relative to `resolve/2` returning `:ok` (the command commits via
+    # consensus, but the local apply runs from the normal log-apply loop).
+    # `emit_pending_metrics/0` uses a `local_query` and can therefore fire
+    # with stale counts until the local apply lands. Drain those stale
+    # events and wait for one that reflects the decremented state — a
+    # slight timing tolerance that matches how operators see the gauge
+    # anyway (eventually consistent with the underlying Ra state).
+    # See #434.
+    pending_after_resolve =
+      drain_until_pending_below(node3_state_ref, pending_after_raise, 10_000)
 
     assert pending_after_resolve < pending_after_raise
 
@@ -221,6 +230,37 @@ defmodule NeonFS.Integration.EscalationTest do
           _ -> false
         end
       end)
+    end
+  end
+
+  # Wait for a `[:neonfs, :escalation, :state]` telemetry event forwarded
+  # from the given node-ref whose `pending_count` is strictly less than the
+  # pre-resolve baseline. Stale events (with `pending_count >= threshold`,
+  # fired before the Ra apply landed on the local state machine) are
+  # dropped. Returns the post-resolve count; flunks on timeout.
+  defp drain_until_pending_below(state_ref, threshold, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    drain_loop(state_ref, threshold, deadline)
+  end
+
+  defp drain_loop(state_ref, threshold, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:telemetry_forwarded, ^state_ref, [:neonfs, :escalation, :state], %{pending_count: count},
+       _}
+      when count < threshold ->
+        count
+
+      {:telemetry_forwarded, ^state_ref, [:neonfs, :escalation, :state], %{pending_count: _stale},
+       _} ->
+        drain_loop(state_ref, threshold, deadline)
+    after
+      remaining ->
+        ExUnit.Assertions.flunk(
+          "Did not receive :escalation :state telemetry with pending_count < " <>
+            "#{threshold} within deadline"
+        )
     end
   end
 end
