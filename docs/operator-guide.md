@@ -502,7 +502,7 @@ Fix the capacity in `cluster.json` or use `neonfs drive remove` + `drive add` wi
 
 **Quorum loss.** Ra reports no leader; metadata writes hang.
 
-Inspect which nodes are up; if a majority is reachable, Ra will elect a new leader within seconds. If a minority is reachable, decide between waiting for the minority to come back or (risky, data-loss-capable) a manual reset. See the [Quorum-Loss runbook](runbooks/Quorum-Loss.md) (forthcoming) and the [operational runbooks index](runbooks/README.md) for other incident procedures.
+Inspect which nodes are up; if a majority is reachable, Ra will elect a new leader within seconds. If a minority is reachable, decide between waiting for the minority to come back or (risky, data-loss-capable) a manual reset. See the [Quorum-Loss runbook](runbooks/Quorum-Loss.md) and the [operational runbooks index](runbooks/README.md) for other incident procedures.
 
 **Single node down.** One node has stopped responding but the cluster otherwise has quorum.
 
