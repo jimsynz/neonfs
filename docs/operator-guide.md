@@ -395,6 +395,8 @@ This is the break-glass path. Prefer the CLI whenever it's available.
 
 NeonFS supports rolling upgrades within the same major version. Cross-major upgrades need the release notes — check `CHANGELOG.md` for breaking changes before starting.
 
+For change-window execution with pre-flight / verification / mid-upgrade handling / rollback decision tree, see the [Cluster-Upgrade runbook](runbooks/Cluster-Upgrade.md).
+
 ### Rolling upgrade (core nodes)
 
 1. **Pre-flight**: confirm `neonfs cluster status` shows all nodes healthy and Ra quorum is intact.
@@ -443,6 +445,8 @@ neonfs cluster ca rotate
 ```
 
 `ca rotate` generates a new CA and reissues every node's certificate. Each node must be healthy throughout — offline nodes will fail to rotate and must be rejoined from scratch after.
+
+For planned rotation pre-flight and post-expiry emergency recovery, see the [CA-Rotation runbook](runbooks/CA-Rotation.md).
 
 ## Troubleshooting
 
@@ -502,7 +506,7 @@ Fix the capacity in `cluster.json` or use `neonfs drive remove` + `drive add` wi
 
 **Quorum loss.** Ra reports no leader; metadata writes hang.
 
-Inspect which nodes are up; if a majority is reachable, Ra will elect a new leader within seconds. If a minority is reachable, decide between waiting for the minority to come back or (risky, data-loss-capable) a manual reset. See the [Quorum-Loss runbook](runbooks/Quorum-Loss.md) (forthcoming) and the [operational runbooks index](runbooks/README.md) for other incident procedures.
+Inspect which nodes are up; if a majority is reachable, Ra will elect a new leader within seconds. If a minority is reachable, decide between waiting for the minority to come back or (risky, data-loss-capable) a manual reset. See the [Quorum-Loss runbook](runbooks/Quorum-Loss.md) and the [operational runbooks index](runbooks/README.md) for other incident procedures.
 
 **Single node down.** One node has stopped responding but the cluster otherwise has quorum.
 

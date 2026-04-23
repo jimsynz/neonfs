@@ -13,10 +13,16 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 ## Incident response
 
 - [Node down](Node-Down.md) — diagnosing a stopped core or interface node, short-term recovery, decommission decision.
+- [Drive failure](Drive-Failure.md) — SMART / I/O-error diagnosis, evacuation, physical replacement, replication-based recovery when evacuation is not possible.
+- [Quorum loss](Quorum-Loss.md) — Ra quorum broken, no leader, metadata writes hang. Partition-vs-failure assessment, wait-it-out vs forced-reset paths, explicit data-loss call-outs.
+- [CA rotation](CA-Rotation.md) — cluster CA or node-cert expiry. Planned rotation ahead of time, and emergency rotation when expiry has already broken distribution.
+- [Capacity pressure](Capacity-Pressure.md) — drive, tier, or cluster running out of room. Immediate relief (GC, tier eviction, caching changes), permanent capacity growth, and the decisions not to make under pressure.
 
 ## Scheduled procedures
 
-_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): cluster upgrade, certificate rotation, capacity pressure response, key rotation, DR snapshot restore, post-mortem template.)_
+- [Cluster upgrade](Cluster-Upgrade.md) — rolling core + interface upgrade, mid-upgrade incident handling, and the rollback decision tree (safe vs unsafe against a state-machine version bump).
+
+_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): key rotation, DR snapshot restore, post-mortem template.)_
 
 ## When nothing fits
 
