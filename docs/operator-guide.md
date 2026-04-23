@@ -444,6 +444,8 @@ neonfs cluster ca rotate
 
 `ca rotate` generates a new CA and reissues every node's certificate. Each node must be healthy throughout — offline nodes will fail to rotate and must be rejoined from scratch after.
 
+For planned rotation pre-flight and post-expiry emergency recovery, see the [CA-Rotation runbook](runbooks/CA-Rotation.md).
+
 ## Troubleshooting
 
 ### Log locations
