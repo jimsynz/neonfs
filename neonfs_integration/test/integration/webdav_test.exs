@@ -121,9 +121,10 @@ defmodule NeonFS.Integration.WebDAVTest do
     test "lists files in a volume", %{port: port} do
       WebDAVCoreBridge.call(:create_volume, ["wdv-propfind-vol"])
 
-      WebDAVCoreBridge.call(:write_file, [
+      WebDAVCoreBridge.call(:write_file_at, [
         "wdv-propfind-vol",
         "/listed.txt",
+        0,
         "content",
         []
       ])

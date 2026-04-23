@@ -66,7 +66,7 @@ defmodule NeonFS.Integration.S3CoreBridge do
     # closure has access to its captured state, then send the assembled
     # binary over to the remote core node via the batch write API.
     body = stream |> Enum.to_list() |> IO.iodata_to_binary()
-    call(:write_file, [volume_name, path, body, opts])
+    call(:write_file_at, [volume_name, path, 0, body, opts])
   end
 
   def call(function, args) do

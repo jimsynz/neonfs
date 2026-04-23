@@ -55,67 +55,10 @@ defmodule NeonFS.Core.WriteOperation do
           compression: :none | :zstd
         }
 
-  # Encryption context resolved once per write_file call.
+  # Encryption context resolved once per write call.
   # nil for unencrypted volumes, map with key material for encrypted ones.
   @type encryption_ctx ::
           %{key: binary(), key_version: pos_integer()} | nil
-
-  @doc """
-  Writes file data to a volume with chunking and deduplication.
-
-  Branches on `volume.durability.type`:
-  - `:replicate` — existing replicated write path
-  - `:erasure` — stripe-based erasure-coded write path
-
-  ## Options
-    * `:chunk_strategy` - Override volume's default chunking strategy
-    * `:compression` - Override volume's compression settings
-    * `:block_on_lock` - When `true`, wait for conflicting locks to be
-      released instead of returning `{:error, :lock_conflict}` or
-      `{:error, :share_denied}` immediately (default: `false`)
-    * `:block_on_lock_timeout` - How long to wait in milliseconds when
-      `:block_on_lock` is `true` (default: 5_000)
-
-  ## Returns
-    * `{:ok, file_meta}` - File successfully written
-    * `{:error, reason}` - Write failed
-  """
-  @spec write_file(binary(), String.t(), binary(), keyword()) ::
-          {:ok, FileMeta.t()} | {:error, term()}
-  def write_file(volume_id, path, data, opts \\ []) do
-    Logger.metadata(component: :write, volume_id: volume_id, file_path: path)
-
-    write_id = generate_write_id()
-    start_time = System.monotonic_time()
-
-    :telemetry.execute(
-      [:neonfs, :write_operation, :start],
-      %{bytes: byte_size(data)},
-      %{volume_id: volume_id, path: path, write_id: write_id}
-    )
-
-    uid = Keyword.get(opts, :uid, 0)
-    gids = Keyword.get(opts, :gids, [])
-
-    client_ref = Keyword.get(opts, :client_ref)
-
-    result =
-      with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
-           :ok <- check_lock(volume_id, path, client_ref, {0, byte_size(data)}, opts) do
-        do_write(volume, path, data, write_id, opts)
-      end
-
-    # Evict resolved lookup cache on successful write to prevent serving stale data
-    case result do
-      {:ok, file_meta} -> evict_resolved_cache(file_meta.id)
-      _ -> :ok
-    end
-
-    duration = System.monotonic_time() - start_time
-    emit_completion_telemetry(result, duration, volume_id, path, write_id, data)
-    result
-  end
 
   @doc """
   Writes data at a specific byte offset within an existing file.
@@ -124,7 +67,10 @@ defmodule NeonFS.Core.WriteOperation do
   the write range are read, modified, and re-stored. Chunks outside the write
   range are carried forward by hash reference without any I/O.
 
-  Falls back to `write_file/4` when the file doesn't exist yet or has no chunks.
+  Creates the file (via the internal `do_write/5` pipeline) when it doesn't
+  exist yet. For a new file at offset 0 this replaces the file contents;
+  for an existing file only the chunks / stripes overlapping the write
+  range are rewritten.
 
   ## Parameters
 
@@ -132,7 +78,8 @@ defmodule NeonFS.Core.WriteOperation do
     * `path` - File path within the volume
     * `offset` - Byte offset to write at
     * `data` - Binary data to write
-    * `opts` - Options (same as `write_file/4`, including `:block_on_lock`)
+    * `opts` - Same options supported by `write_file_streamed/4`, including `:block_on_lock`,
+      `:chunk_strategy`, `:compression`, `:content_type`, `:client_ref`, `:uid`, `:gids`.
   """
   @spec write_file_at(binary(), String.t(), non_neg_integer(), binary(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
@@ -188,7 +135,7 @@ defmodule NeonFS.Core.WriteOperation do
   return `{:error, :streaming_writes_not_supported_for_erasure}` until
   streaming erasure encoding lands.
 
-  Options match `write_file/4`.
+  Options match `write_file_at/5`.
   """
   @spec write_file_streamed(binary(), String.t(), Enumerable.t(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}

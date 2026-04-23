@@ -157,30 +157,6 @@ defmodule NeonFS.Core do
   end
 
   @doc """
-  Writes content to a file in a volume.
-  """
-  @spec write_file(String.t(), String.t(), binary()) ::
-          {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
-  def write_file(volume_name, path, content) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
-      WriteOperation.write_file(volume.id, normalize_path(path), content)
-    end
-  end
-
-  @doc """
-  Writes content to a file in a volume with options.
-
-  Options may include `:content_type`, `:metadata`, etc.
-  """
-  @spec write_file(String.t(), String.t(), binary(), keyword()) ::
-          {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
-  def write_file(volume_name, path, content, opts) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
-      WriteOperation.write_file(volume.id, normalize_path(path), content, opts)
-    end
-  end
-
-  @doc """
   Streams content to a file, chunking and storing each chunk as it
   arrives instead of buffering the whole file in memory.
 
@@ -189,15 +165,31 @@ defmodule NeonFS.Core do
   files complete without OOMing the core node.
 
   Currently supports replicated volumes only; erasure-coded volumes
-  return `{:error, :streaming_writes_not_supported_for_erasure}`.
-
-  Options match `write_file/4`.
+  return `{:error, :streaming_writes_not_supported_for_erasure}` — for
+  erasure-coded whole-file writes, use `write_file_at/5` with offset 0.
   """
   @spec write_file_streamed(String.t(), String.t(), Enumerable.t(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
   def write_file_streamed(volume_name, path, stream, opts \\ []) do
     with {:ok, volume} <- resolve_volume(volume_name) do
       WriteOperation.write_file_streamed(volume.id, normalize_path(path), stream, opts)
+    end
+  end
+
+  @doc """
+  Writes `data` to a file at `offset`, creating the file if it does not exist.
+
+  For a new file at offset 0 this replaces the file contents. For an
+  existing file, only the chunks / stripes overlapping the write range are
+  rewritten. This is the whole-binary counterpart to `write_file_streamed/4`
+  and the only supported entry point for whole-file writes on erasure-coded
+  volumes until streaming erasure encoding lands (see #195).
+  """
+  @spec write_file_at(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
+  def write_file_at(volume_name, path, offset, data, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      WriteOperation.write_file_at(volume.id, normalize_path(path), offset, data, opts)
     end
   end
 

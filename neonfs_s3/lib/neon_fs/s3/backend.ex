@@ -124,7 +124,7 @@ defmodule NeonFS.S3.Backend do
     with :ok <- ensure_bucket_exists(bucket) do
       body_binary = IO.iodata_to_binary(body)
 
-      case call_core(:write_file, [bucket, key, body_binary, put_object_write_opts(opts)]) do
+      case call_core(:write_file_at, [bucket, key, 0, body_binary, put_object_write_opts(opts)]) do
         {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
         {:error, reason} -> {:error, internal_error(reason)}
       end
@@ -159,7 +159,7 @@ defmodule NeonFS.S3.Backend do
   defp put_object_drain_and_write(bucket, key, body, write_opts) do
     body_binary = body |> Enum.to_list() |> IO.iodata_to_binary()
 
-    case call_core(:write_file, [bucket, key, body_binary, write_opts]) do
+    case call_core(:write_file_at, [bucket, key, 0, body_binary, write_opts]) do
       {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
       {:error, reason} -> {:error, internal_error(reason)}
     end
@@ -280,7 +280,7 @@ defmodule NeonFS.S3.Backend do
       {:ok, upload} ->
         part_path = multipart_staging_path(upload.bucket, upload.key, upload_id, part_number)
 
-        case call_core(:write_file, [upload.bucket, part_path, body_binary]) do
+        case call_core(:write_file_at, [upload.bucket, part_path, 0, body_binary, []]) do
           {:ok, _meta} ->
             part = %{etag: etag, size: byte_size(body_binary), path: part_path}
             MultipartStore.put_part(upload_id, part_number, part)
@@ -323,7 +323,7 @@ defmodule NeonFS.S3.Backend do
         %{md5: md5, size: size} = finish.()
         body_binary = IO.iodata_to_binary(chunks)
 
-        case call_core(:write_file, [upload.bucket, part_path, body_binary]) do
+        case call_core(:write_file_at, [upload.bucket, part_path, 0, body_binary, []]) do
           {:ok, _meta} ->
             record_part(upload_id, part_number, part_path, md5, size)
 
@@ -408,7 +408,7 @@ defmodule NeonFS.S3.Backend do
           |> maybe_put_content_type(upload.content_type)
 
         with {:ok, combined} <- read_and_combine_parts(upload.bucket, sorted_parts),
-             {:ok, meta} <- call_core(:write_file, [bucket, key, combined, write_opts]) do
+             {:ok, meta} <- call_core(:write_file_at, [bucket, key, 0, combined, write_opts]) do
           cleanup_staging_parts(upload.bucket, sorted_parts)
           MultipartStore.delete(upload_id)
 
@@ -560,7 +560,7 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp write_object_content(bucket, key, content, write_opts) do
-    case call_core(:write_file, [bucket, key, content, write_opts]) do
+    case call_core(:write_file_at, [bucket, key, 0, content, write_opts]) do
       {:ok, meta} -> {:ok, meta}
       {:error, reason} -> {:error, internal_error(reason)}
     end

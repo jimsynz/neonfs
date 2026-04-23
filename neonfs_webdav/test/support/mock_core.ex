@@ -57,6 +57,12 @@ defmodule NeonFS.WebDAV.Test.MockCore do
 
   # File operations
 
+  @doc """
+  Test-helper write: creates or replaces the file at `path` with `content`.
+
+  Production now calls `write_file_at/5` or `write_file_streamed/4`; this
+  helper exists purely so backend tests can populate volumes in one line.
+  """
   @spec write_file(String.t(), String.t(), binary(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
   def write_file(volume_name, path, content, write_opts \\ []) do
@@ -87,6 +93,15 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   def write_file_streamed(volume_name, path, stream, write_opts \\ []) do
     body = stream |> Enum.to_list() |> IO.iodata_to_binary()
     write_file(volume_name, path, body, write_opts)
+  end
+
+  @spec write_file_at(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def write_file_at(volume_name, path, 0, content, write_opts) do
+    # Production callers only use offset: 0 for whole-file writes via the
+    # post-#365 WebDAV fallback path. The backend_test uses `write_file/4`
+    # directly as a test helper; both routes converge here.
+    write_file(volume_name, path, content, write_opts)
   end
 
   @spec read_file(String.t(), String.t(), keyword()) :: {:ok, binary()} | {:error, :not_found}

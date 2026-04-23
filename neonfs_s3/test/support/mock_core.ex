@@ -73,6 +73,11 @@ defmodule NeonFS.S3.Test.MockCore do
 
   # File operations
 
+  @doc """
+  Test-helper write: stores `content` at `path`. Production now calls
+  `write_file_at/5` or `write_file_streamed/4`; this helper just makes
+  populating the mock from tests a one-liner.
+  """
   @spec write_file(String.t(), String.t(), binary(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
   def write_file(volume_name, path, content, write_opts \\ []) do
@@ -95,6 +100,12 @@ defmodule NeonFS.S3.Test.MockCore do
     else
       {:error, :not_found}
     end
+  end
+
+  @spec write_file_at(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def write_file_at(volume_name, path, 0, content, write_opts) do
+    write_file(volume_name, path, content, write_opts)
   end
 
   @spec read_file(String.t(), String.t(), keyword()) :: {:ok, binary()} | {:error, :not_found}

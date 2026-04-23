@@ -170,7 +170,7 @@ defmodule NeonFS.WebDAV.Backend do
         # — same memory characteristics as the non-streaming code path.
         # audit:bounded cross-node fallback tracked in #299 (streaming write RPC)
         body = stream |> Enum.to_list() |> IO.iodata_to_binary()
-        call_core(:write_file, [volume_name, file_path, body, write_opts])
+        call_core(:write_file_at, [volume_name, file_path, 0, body, write_opts])
 
       other ->
         other
