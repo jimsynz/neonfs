@@ -244,6 +244,84 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
+  Runs the safety-gate pipeline for `neonfs cluster force-reset` and
+  records the operator-acknowledged data-loss intent in the audit log.
+
+  This is the first slice of the force-reset command (tracking issue
+  #458). The Ra minority-recovery mutation itself is deferred to #473;
+  when every safety gate passes this function writes a durable audit
+  entry and then returns an "Ra mutation not yet implemented" error.
+  Landing the gates and the audit entry on their own lets operators
+  exercise the CLI and discover misuse *before* the dangerous mutation
+  is available, and gives post-mortems a record of every accepted
+  attempt.
+
+  Safety gates (in order — fail fast, each returns a structured
+  `{:error, _}`):
+
+  1. `require_cluster/0`.
+  2. `--yes-i-accept-data-loss` must be truthy.
+  3. `keep` must be non-empty, and every name must resolve to a node
+     currently in the Ra membership (`:ra.members/2`).
+  4. Every `keep` node must be reachable and its `NeonFS.Client.HealthCheck`
+     report must be `:healthy`.
+  5. `keep` must be a **minority** of the current Ra membership — if it
+     is a majority (or exactly half) Ra will elect normally and
+     force-reset is not appropriate.
+  6. Every departed member (current members minus `keep`) must currently
+     fail `:net_adm.ping/1` and must have a `last_seen` timestamp in
+     cluster state older than `min_unreachable_seconds`. Missing
+     last-seen data is treated as "unknown duration" and refused — we
+     cannot prove the member is gone for good.
+
+  Gates that pass write nothing. Gates that fail write nothing. Only
+  an all-gates-pass run writes the audit entry (so the log is a clean
+  record of accepted intents, not a noise log of typos).
+
+  ## Parameters
+
+  - `opts` - String-keyed map:
+    - `"keep"` - list of surviving node name strings (required, non-empty).
+    - `"min_unreachable_seconds"` - grace window (default `1800`).
+    - `"yes_i_accept_data_loss"` - must be `true`.
+
+  ## Returns
+
+  - `{:error, %Unavailable{...}}` on every path. The specific message
+    identifies the gate that failed, or — on all-gates-pass — says the
+    Ra mutation is not yet implemented and points at the follow-up
+    issue.
+  """
+  @spec handle_force_reset(map()) :: {:error, Exception.t()}
+  def handle_force_reset(opts) when is_map(opts) do
+    set_cli_metadata()
+
+    keep_names = Map.get(opts, "keep", [])
+    min_unreachable_s = Map.get(opts, "min_unreachable_seconds", 1800)
+    accepted = Map.get(opts, "yes_i_accept_data_loss", false)
+
+    with :ok <- require_cluster(),
+         :ok <- require_data_loss_acknowledged(accepted),
+         {:ok, state} <- load_cluster_state(),
+         {:ok, members} <- current_ra_members(),
+         {:ok, keep_nodes} <- resolve_keep_nodes(keep_names, members),
+         :ok <- require_keep_reachable_and_healthy(keep_nodes),
+         :ok <- require_keep_is_minority(keep_nodes, members),
+         departed = members -- keep_nodes,
+         :ok <- require_departed_unreachable_long_enough(departed, state, min_unreachable_s) do
+      log_force_reset_attempt(state, members, keep_nodes, min_unreachable_s)
+
+      {:error,
+       Unavailable.exception(
+         message:
+           "Ra minority-recovery mutation not yet implemented — safety checks passed; see #473"
+       )}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
   Revokes a node's certificate by node name.
 
   Looks up the node in the issued certificates list and revokes its certificate.
@@ -3172,5 +3250,206 @@ defmodule NeonFS.CLI.Handler do
       {:ok, _} -> true
       {:error, _} -> false
     end
+  end
+
+  # handle_force_reset/1 helpers
+
+  defp require_data_loss_acknowledged(true), do: :ok
+
+  defp require_data_loss_acknowledged(_) do
+    {:error,
+     Unavailable.exception(
+       message:
+         "Refusing to force-reset without --yes-i-accept-data-loss. " <>
+           "Force-reset destroys Ra state on the surviving minority and can drop committed writes. " <>
+           "Re-run with the flag once you have accepted the data-loss risk."
+     )}
+  end
+
+  defp load_cluster_state do
+    case State.load() do
+      {:ok, state} ->
+        {:ok, state}
+
+      {:error, reason} ->
+        {:error, Unavailable.exception(message: "Cannot load cluster state: #{inspect(reason)}")}
+    end
+  end
+
+  defp current_ra_members do
+    case :ra.members(RaSupervisor.server_id(), 2_000) do
+      {:ok, members, _leader} ->
+        {:ok, Enum.map(members, fn {_cluster_name, node} -> node end)}
+
+      _other ->
+        {:error,
+         Unavailable.exception(
+           message:
+             "Cannot read Ra membership. Force-reset requires the local Ra server to be running."
+         )}
+    end
+  end
+
+  defp resolve_keep_nodes([], _members) do
+    {:error, Unavailable.exception(message: "--keep must name at least one surviving node.")}
+  end
+
+  defp resolve_keep_nodes(names, members) when is_list(names) do
+    Enum.reduce_while(names, {:ok, []}, fn name, {:ok, acc} ->
+      case find_node_in_members(name, members) do
+        {:ok, node} -> {:cont, {:ok, [node | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, nodes} -> {:ok, Enum.reverse(nodes)}
+      other -> other
+    end
+  end
+
+  defp find_node_in_members(name, members) do
+    match =
+      Enum.find(members, fn node ->
+        s = Atom.to_string(node)
+        s == name or host_part(s) == name or s == "neonfs_core@#{name}"
+      end)
+
+    case match do
+      nil ->
+        {:error,
+         NotFound.exception(
+           message:
+             "--keep node '#{name}' is not in the current Ra membership. " <>
+               "Use 'neonfs cluster status' to list current members."
+         )}
+
+      node ->
+        {:ok, node}
+    end
+  end
+
+  defp require_keep_reachable_and_healthy(nodes) do
+    Enum.reduce_while(nodes, :ok, fn node, :ok ->
+      case probe_keep_health(node) do
+        :healthy -> {:cont, :ok}
+        reason -> {:halt, {:error, keep_unhealthy_error(node, reason)}}
+      end
+    end)
+  end
+
+  defp probe_keep_health(node) do
+    case :erpc.call(node, ClientHealthCheck, :check, [], 5_000) do
+      %{status: :healthy} -> :healthy
+      %{status: status} -> {:unhealthy, status}
+      other -> {:unexpected, other}
+    end
+  rescue
+    _ -> :rpc_failed
+  catch
+    :exit, reason -> {:rpc_exit, reason}
+  end
+
+  defp keep_unhealthy_error(node, {:unhealthy, status}) do
+    Unavailable.exception(
+      message:
+        "--keep node '#{node}' is reachable but its health check reports #{status}. Refusing."
+    )
+  end
+
+  defp keep_unhealthy_error(node, _reason) do
+    Unavailable.exception(
+      message:
+        "--keep node '#{node}' is unreachable. All survivors must be healthy and reachable."
+    )
+  end
+
+  defp require_keep_is_minority(keep_nodes, members) do
+    if length(keep_nodes) * 2 >= length(members) do
+      {:error,
+       Unavailable.exception(
+         message:
+           "--keep has #{length(keep_nodes)} of #{length(members)} members. " <>
+             "That is not a minority, so Ra can elect a leader normally; " <>
+             "force-reset is not appropriate."
+       )}
+    else
+      :ok
+    end
+  end
+
+  defp require_departed_unreachable_long_enough(departed, state, min_unreachable_s) do
+    Enum.reduce_while(departed, :ok, fn node, :ok ->
+      case check_departed_node(node, state, min_unreachable_s) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp check_departed_node(node, state, min_unreachable_s) do
+    case :net_adm.ping(node) do
+      :pong ->
+        {:error,
+         Unavailable.exception(
+           message:
+             "Departed member '#{node}' is currently reachable. Refusing — " <>
+               "force-reset is for permanently unreachable members, not a healing partition."
+         )}
+
+      :pang ->
+        check_unreachable_duration(node, state, min_unreachable_s)
+    end
+  end
+
+  defp check_unreachable_duration(node, state, min_unreachable_s) do
+    case lookup_last_seen(state, node) do
+      nil ->
+        {:error,
+         Unavailable.exception(
+           message:
+             "No last-seen record for '#{node}'. " <>
+               "Cannot prove it has been unreachable for at least #{min_unreachable_s}s."
+         )}
+
+      datetime ->
+        elapsed_s = DateTime.diff(DateTime.utc_now(), datetime, :second)
+
+        if elapsed_s >= min_unreachable_s do
+          :ok
+        else
+          {:error,
+           Unavailable.exception(
+             message:
+               "'#{node}' last seen #{elapsed_s}s ago; require #{min_unreachable_s}s of unreachability. " <>
+                 "Raise --min-unreachable-seconds if you are certain it is not coming back."
+           )}
+        end
+    end
+  end
+
+  defp lookup_last_seen(state, node) do
+    case Enum.find(state.known_peers, &(&1.name == node)) do
+      nil -> nil
+      peer -> peer.last_seen
+    end
+  end
+
+  defp log_force_reset_attempt(state, members, keep_nodes, min_unreachable_s) do
+    AuditLog.log_event(
+      event_type: :cluster_force_reset_attempt,
+      actor_uid: 0,
+      resource: "cluster:#{state.cluster_id}",
+      details: %{
+        ra_cluster_members: Enum.map(members, &Atom.to_string/1),
+        member_last_seen:
+          Map.new(members, fn node ->
+            last_seen = lookup_last_seen(state, node)
+            {Atom.to_string(node), last_seen && DateTime.to_iso8601(last_seen)}
+          end),
+        keep: Enum.map(keep_nodes, &Atom.to_string/1),
+        min_unreachable_seconds: min_unreachable_s,
+        data_loss_acknowledged: true
+      }
+    )
   end
 end

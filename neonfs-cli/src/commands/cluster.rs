@@ -8,7 +8,7 @@ use crate::term::types::{
 };
 use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
-use eetf::{Binary, FixInteger, Map, Term};
+use eetf::{Atom, Binary, FixInteger, List, Map, Term};
 
 /// Cluster management subcommands
 #[derive(Debug, Subcommand)]
@@ -80,6 +80,35 @@ pub enum ClusterCommand {
         #[arg(long)]
         force: bool,
     },
+
+    /// Rebuild the Ra quorum from a surviving minority after catastrophic
+    /// membership loss.
+    ///
+    /// This is a dangerous, last-resort operation. Every safety gate is
+    /// evaluated before any mutation is attempted; a full audit entry is
+    /// written once all gates pass. The Ra state mutation itself lands
+    /// separately (see #473) — for now the command exits with a
+    /// "not yet implemented" error after the audit entry is recorded.
+    ForceReset {
+        /// Surviving node to keep in the rebuilt quorum. Repeatable and
+        /// comma-separated (`--keep a,b` or `--keep a --keep b`). At
+        /// least one value is required. Must name a node currently in
+        /// the Ra membership (e.g. `neonfs_core@host1` or `host1`).
+        #[arg(long, required = true, value_delimiter = ',')]
+        keep: Vec<String>,
+
+        /// Minimum time a departed member must have been unreachable
+        /// before force-reset will accept it as gone (default 1800 = 30m).
+        /// Lower values are intended for tests only — in production the
+        /// grace window is the safety wall against a healing partition.
+        #[arg(long, default_value = "1800")]
+        min_unreachable_seconds: u64,
+
+        /// Required acknowledgement that force-reset can drop committed
+        /// writes on the surviving minority. Refuses locally if absent.
+        #[arg(long = "yes-i-accept-data-loss")]
+        yes_i_accept_data_loss: bool,
+    },
 }
 
 /// Certificate authority subcommands
@@ -117,6 +146,16 @@ impl ClusterCommand {
             ClusterCommand::RebalanceStatus => self.rebalance_status(format),
             ClusterCommand::Status => self.status(format),
             ClusterCommand::RemoveNode { node, force } => self.remove_node(node, *force, format),
+            ClusterCommand::ForceReset {
+                keep,
+                min_unreachable_seconds,
+                yes_i_accept_data_loss,
+            } => self.force_reset(
+                keep,
+                *min_unreachable_seconds,
+                *yes_i_accept_data_loss,
+                format,
+            ),
         }
     }
 
@@ -520,6 +559,108 @@ impl ClusterCommand {
         }
         Ok(())
     }
+
+    fn force_reset(
+        &self,
+        keep: &[String],
+        min_unreachable_seconds: u64,
+        yes_i_accept_data_loss: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
+        if keep.is_empty() {
+            return Err(crate::error::CliError::InvalidArgument(
+                "--keep must name at least one surviving node".to_string(),
+            ));
+        }
+
+        if !yes_i_accept_data_loss {
+            return Err(crate::error::CliError::InvalidArgument(
+                "--yes-i-accept-data-loss is required. Force-reset can drop committed writes on the surviving minority.".to_string(),
+            ));
+        }
+
+        let keep_list = Term::List(List {
+            elements: keep
+                .iter()
+                .map(|name| {
+                    Term::Binary(Binary {
+                        bytes: name.as_bytes().to_vec(),
+                    })
+                })
+                .collect(),
+        });
+
+        let min_unreachable_term = Term::FixInteger(FixInteger {
+            value: min_unreachable_seconds as i32,
+        });
+
+        let opts = Term::Map(Map::from([
+            (
+                Term::Binary(Binary {
+                    bytes: b"keep".to_vec(),
+                }),
+                keep_list,
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"min_unreachable_seconds".to_vec(),
+                }),
+                min_unreachable_term,
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"yes_i_accept_data_loss".to_vec(),
+                }),
+                Term::Atom(Atom::from("true")),
+            ),
+        ]));
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_force_reset",
+                vec![opts],
+            )
+            .await
+        })?;
+
+        // `handle_force_reset/1` always returns `{:error, _}` in this
+        // slice — either a safety-gate refusal or the "Ra mutation not
+        // yet implemented" placeholder. Surface both via the standard
+        // error plumbing; the error message distinguishes them.
+        if let Some(err) = extract_error(&result) {
+            match format {
+                OutputFormat::Json => {
+                    let payload = serde_json::json!({
+                        "status": "refused",
+                        "message": err.error_message(),
+                    });
+                    eprintln!("{}", json::format(&payload)?);
+                }
+                OutputFormat::Table => {
+                    eprintln!("neonfs cluster force-reset refused: {}", err.error_message());
+                }
+            }
+            return Err(err);
+        }
+
+        // Should not happen in this slice, but be defensive — the Elixir
+        // handler shape may change when #473 lands the actual mutation.
+        match format {
+            OutputFormat::Json => {
+                let payload = serde_json::json!({
+                    "status": "accepted",
+                });
+                println!("{}", json::format(&payload)?);
+            }
+            OutputFormat::Table => {
+                println!("neonfs cluster force-reset: accepted");
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl CaCommand {
@@ -845,6 +986,114 @@ mod tests {
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             assert!(matches!(parsed.command, ClusterCommand::RebalanceStatus));
+        }
+    }
+
+    #[test]
+    fn test_force_reset_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: ClusterCommand,
+        }
+
+        // --keep is required
+        let missing_keep = TestCli::try_parse_from([
+            "test",
+            "force-reset",
+            "--yes-i-accept-data-loss",
+        ]);
+        assert!(missing_keep.is_err());
+
+        // Single --keep, default min-unreachable-seconds, with data-loss flag
+        let single = TestCli::try_parse_from([
+            "test",
+            "force-reset",
+            "--keep",
+            "host1",
+            "--yes-i-accept-data-loss",
+        ]);
+        assert!(single.is_ok());
+        if let Ok(parsed) = single {
+            match parsed.command {
+                ClusterCommand::ForceReset {
+                    keep,
+                    min_unreachable_seconds,
+                    yes_i_accept_data_loss,
+                } => {
+                    assert_eq!(keep, vec!["host1".to_string()]);
+                    assert_eq!(min_unreachable_seconds, 1800);
+                    assert!(yes_i_accept_data_loss);
+                }
+                _ => panic!("Expected ForceReset variant"),
+            }
+        }
+
+        // Multiple --keep values, custom min-unreachable-seconds
+        let multi = TestCli::try_parse_from([
+            "test",
+            "force-reset",
+            "--keep",
+            "host1",
+            "--keep",
+            "host2",
+            "--min-unreachable-seconds",
+            "600",
+            "--yes-i-accept-data-loss",
+        ]);
+        assert!(multi.is_ok());
+        if let Ok(parsed) = multi {
+            match parsed.command {
+                ClusterCommand::ForceReset {
+                    keep,
+                    min_unreachable_seconds,
+                    yes_i_accept_data_loss,
+                } => {
+                    assert_eq!(keep, vec!["host1".to_string(), "host2".to_string()]);
+                    assert_eq!(min_unreachable_seconds, 600);
+                    assert!(yes_i_accept_data_loss);
+                }
+                _ => panic!("Expected ForceReset variant"),
+            }
+        }
+
+        // Comma-separated --keep values
+        let comma = TestCli::try_parse_from([
+            "test",
+            "force-reset",
+            "--keep",
+            "host1,host2",
+            "--yes-i-accept-data-loss",
+        ]);
+        assert!(comma.is_ok());
+        if let Ok(parsed) = comma {
+            match parsed.command {
+                ClusterCommand::ForceReset { keep, .. } => {
+                    assert_eq!(keep, vec!["host1".to_string(), "host2".to_string()]);
+                }
+                _ => panic!("Expected ForceReset variant"),
+            }
+        }
+
+        // Without --yes-i-accept-data-loss, flag is false but parse succeeds.
+        // The local guard in force_reset() produces the refusal at runtime.
+        let no_flag = TestCli::try_parse_from([
+            "test",
+            "force-reset",
+            "--keep",
+            "host1",
+        ]);
+        assert!(no_flag.is_ok());
+        if let Ok(parsed) = no_flag {
+            match parsed.command {
+                ClusterCommand::ForceReset {
+                    yes_i_accept_data_loss,
+                    ..
+                } => assert!(!yes_i_accept_data_loss),
+                _ => panic!("Expected ForceReset variant"),
+            }
         }
     }
 }

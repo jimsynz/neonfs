@@ -1075,6 +1075,101 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "handle_force_reset/1 safety gates" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_ra()
+
+      # cluster_init/1 registers the local node in the Ra meta quorum so
+      # :ra.members/2 succeeds — ensure_cluster_state only writes the
+      # cluster.json file and leaves Ra with no membership.
+      {:ok, _} = Handler.cluster_init("force-reset-test")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "refuses when --yes-i-accept-data-loss is absent" do
+      assert {:error, %NeonFS.Error.Unavailable{message: msg}} =
+               Handler.handle_force_reset(%{"keep" => [Atom.to_string(node())]})
+
+      assert msg =~ "Refusing to force-reset without --yes-i-accept-data-loss"
+    end
+
+    test "refuses when --yes-i-accept-data-loss is explicitly false" do
+      assert {:error, %NeonFS.Error.Unavailable{message: msg}} =
+               Handler.handle_force_reset(%{
+                 "keep" => [Atom.to_string(node())],
+                 "yes_i_accept_data_loss" => false
+               })
+
+      assert msg =~ "Refusing to force-reset without --yes-i-accept-data-loss"
+    end
+
+    test "refuses when --keep is empty" do
+      assert {:error, %NeonFS.Error.Unavailable{message: msg}} =
+               Handler.handle_force_reset(%{
+                 "keep" => [],
+                 "yes_i_accept_data_loss" => true
+               })
+
+      assert msg =~ "--keep must name at least one surviving node"
+    end
+
+    test "refuses when --keep names a node not in the Ra membership" do
+      assert {:error, %NeonFS.Error.NotFound{message: msg}} =
+               Handler.handle_force_reset(%{
+                 "keep" => ["never-existed-node"],
+                 "yes_i_accept_data_loss" => true
+               })
+
+      assert msg =~ "not in the current Ra membership"
+    end
+
+    test "refuses when --keep is not a minority of the current membership" do
+      # Single-node test cluster: keep = [self] => 1 of 1 members, which is
+      # a majority (not a minority) so Ra would elect normally.
+      assert {:error, %NeonFS.Error.Unavailable{message: msg}} =
+               Handler.handle_force_reset(%{
+                 "keep" => [Atom.to_string(node())],
+                 "yes_i_accept_data_loss" => true
+               })
+
+      assert msg =~ "not a minority"
+    end
+  end
+
+  describe "handle_force_reset/1 without cluster state" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "refuses when the cluster is not initialised" do
+      assert {:error, %NeonFS.Error.NotFound{message: msg}} =
+               Handler.handle_force_reset(%{
+                 "keep" => [Atom.to_string(node())],
+                 "yes_i_accept_data_loss" => true
+               })
+
+      assert msg =~ "Cluster not initialised"
+    end
+  end
+
   describe "handle_remove_node/2 safety checks" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)

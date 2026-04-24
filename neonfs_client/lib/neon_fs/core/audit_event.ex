@@ -18,6 +18,7 @@ defmodule NeonFS.Core.AuditEvent do
           | :rotation_completed
           | :authorisation_denied
           | :admin_action
+          | :cluster_force_reset_attempt
 
   @type outcome :: :success | :denied
 
