@@ -207,9 +207,12 @@ defmodule NeonFS.Integration.EscalationTest do
     # events and wait for one that reflects the decremented state — a
     # slight timing tolerance that matches how operators see the gauge
     # anyway (eventually consistent with the underlying Ra state).
-    # See #434.
+    # See #434 (original fix) and #514 (deadline raised from 10s to 30s
+    # after recurrence under contended CI — the Ra log-apply loop can
+    # take longer than 10s on a cold peer-cluster with 20+ concurrent
+    # test-helper cluster bootstraps competing for scheduler time).
     pending_after_resolve =
-      drain_until_pending_below(node3_state_ref, pending_after_raise, 10_000)
+      drain_until_pending_below(node3_state_ref, pending_after_raise, 30_000)
 
     assert pending_after_resolve < pending_after_raise
 
