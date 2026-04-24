@@ -379,6 +379,35 @@ defmodule NeonFS.Integration.WebDAVTest do
     end
   end
 
+  describe "cross-node large upload" do
+    # Regression guard for #412 — the cross-node PUT fallback no
+    # longer drains the request body to a single binary before
+    # writing. Uploading a payload larger than the chunker's default
+    # chunk size forces multiple `ChunkWriter` chunks through the
+    # data plane and a metadata-only `commit_chunks/4` RPC to
+    # finalise. The `put_content_stream/4` streaming body input
+    # through Davy → Bandit is the production entry; driving it with
+    # an HTTP client here exercises the same path.
+    test "PUT round-trips a > 1 MiB payload through the cross-node fallback",
+         %{port: port} do
+      WebDAVCoreBridge.call(:create_volume, ["wdv-large"])
+
+      # 4 MiB — large enough to exceed the auto-strategy's 1 MiB
+      # boundary so the chunker picks fastcdc with a 256 KiB average,
+      # producing ~16 chunks. strong_rand_bytes is incompressible so
+      # compressed stored_size stays close to original_size.
+      size = 4 * 1024 * 1024
+      payload = :crypto.strong_rand_bytes(size)
+
+      put_resp = webdav_request(:put, "/wdv-large/large.bin", port, body: payload)
+      assert put_resp.status in [200, 201, 204]
+
+      get_resp = webdav_request(:get, "/wdv-large/large.bin", port)
+      assert get_resp.status == 200
+      assert get_resp.body == payload
+    end
+  end
+
   describe "overwrite semantics" do
     test "PUT overwrites existing file", %{port: port} do
       WebDAVCoreBridge.call(:create_volume, ["wdv-overwrite"])

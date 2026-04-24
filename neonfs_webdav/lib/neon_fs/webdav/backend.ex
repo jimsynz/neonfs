@@ -14,6 +14,7 @@ defmodule NeonFS.WebDAV.Backend do
   @behaviour Davy.Backend
 
   alias NeonFS.Client.ChunkReader
+  alias NeonFS.Client.ChunkWriter
   alias NeonFS.Client.Discovery
   alias NeonFS.Client.Router
   alias NeonFS.WebDAV.LockStore
@@ -165,16 +166,44 @@ defmodule NeonFS.WebDAV.Backend do
   defp streaming_write(volume_name, file_path, stream, write_opts) do
     case call_core_stream(:write_file_streamed, [volume_name, file_path, stream, write_opts]) do
       {:error, :not_available} ->
-        # Streams cannot cross Erlang distribution. When the core node is
-        # remote we drain the stream into a binary and use the batch API
-        # — same memory characteristics as the non-streaming code path.
-        # audit:bounded cross-node fallback tracked in #299 (streaming write RPC)
-        body = stream |> Enum.to_list() |> IO.iodata_to_binary()
-        call_core(:write_file_at, [volume_name, file_path, 0, body, write_opts])
+        # Cross-node path: chunk on this (WebDAV) node and ship each
+        # chunk to core over the TLS data plane, then finalise with
+        # a metadata-only `commit_chunks/4` RPC. No whole-file
+        # buffering — peak memory is bounded by the chunker's max
+        # chunk size, not the upload size. See #412.
+        write_via_chunk_writer(volume_name, file_path, stream, write_opts)
 
       other ->
         other
     end
+  end
+
+  defp write_via_chunk_writer(volume_name, file_path, stream, write_opts) do
+    with {:ok, refs} <- ChunkWriter.write_file_stream(volume_name, file_path, stream) do
+      commit_opts = build_commit_opts(refs, write_opts)
+
+      Router.call(NeonFS.Core, :commit_chunks, [
+        volume_name,
+        file_path,
+        commit_opts.hashes,
+        commit_opts.extra
+      ])
+    end
+  end
+
+  defp build_commit_opts(refs, write_opts) do
+    %{hashes: hashes, locations: locations, chunk_codecs: chunk_codecs, total_size: total_size} =
+      ChunkWriter.chunk_refs_to_commit_opts(refs)
+
+    extra =
+      [
+        total_size: total_size,
+        locations: locations,
+        chunk_codecs: chunk_codecs
+      ]
+      |> Keyword.merge(Keyword.take(write_opts, [:content_type, :metadata, :mode, :uid, :gids]))
+
+    %{hashes: hashes, extra: extra}
   end
 
   defp call_core_stream(function, args) do
