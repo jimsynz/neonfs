@@ -24,7 +24,7 @@
 use crate::error::{CliError, Result};
 use flate2::read::GzDecoder;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use tar::Archive;
@@ -43,6 +43,11 @@ pub struct BackupValidation {
     /// The CA subject follows the `/O=NeonFS/CN=<cluster_name> CA`
     /// convention set by `NeonFS.Transport.TLS.generate_ca/1`.
     pub cluster_name: String,
+    /// Extracted tarball members keyed by basename. Exactly the files
+    /// in [`REQUIRED_MEMBERS`] — other entries in the tarball are
+    /// ignored. Kept on the validation struct so callers (e.g. the
+    /// atomic-install step) do not have to re-parse the tarball.
+    pub entries: HashMap<String, Vec<u8>>,
 }
 
 /// Validate a CA backup tarball and extract the cluster name it belongs
@@ -59,7 +64,10 @@ pub fn validate_backup_tarball(path: &Path) -> Result<BackupValidation> {
         .expect("ensure_required_members covers ca.crt");
     let cluster_name = extract_cluster_name_from_ca_cert(ca_crt)?;
 
-    Ok(BackupValidation { cluster_name })
+    Ok(BackupValidation {
+        cluster_name,
+        entries,
+    })
 }
 
 /// Read the local cluster's name from `$NEONFS_DATA_DIR/meta/cluster.json`.
@@ -114,6 +122,73 @@ pub fn refuse_foreign_backup(
              `cluster.json` first and try again.",
             validation.cluster_name, local_name
         )))
+    }
+}
+
+/// Atomically install the validated CA material to `tls_dir`.
+///
+/// Each member is written to a hidden staging directory inside `tls_dir`,
+/// fsynced, and then renamed into place. `fs::rename` is atomic on POSIX
+/// for same-filesystem renames, so per-file the install is either
+/// fully-present or fully-absent. Across files the install is not atomic —
+/// if a rename fails partway, some members may land and others not. The
+/// operator can recover by re-running `emergency-bootstrap --from-backup`
+/// with the same tarball (install is idempotent).
+///
+/// The staging directory is cleaned up on function return via an RAII
+/// guard, whether the install succeeded or failed.
+pub fn install_ca_material(validation: &BackupValidation, tls_dir: &Path) -> Result<()> {
+    fs::create_dir_all(tls_dir).map_err(|e| io_err("create TLS directory", tls_dir, e))?;
+
+    let stage_dir = tls_dir.join(format!(".emergency-bootstrap-{}", std::process::id()));
+    fs::create_dir_all(&stage_dir)
+        .map_err(|e| io_err("create staging directory", &stage_dir, e))?;
+
+    let _guard = StageDirGuard(stage_dir.clone());
+
+    // Stage every required member — write + fsync. Fail fast if any
+    // entry is missing from `validation.entries` (shouldn't happen if
+    // `validate_backup_tarball` produced the value, but defensively
+    // check rather than `expect` in a public API path).
+    for member in REQUIRED_MEMBERS {
+        let data = validation.entries.get(*member).ok_or_else(|| {
+            CliError::InvalidArgument(format!(
+                "BackupValidation is missing required member `{member}` — \
+                 was it constructed by a path other than validate_backup_tarball/1?"
+            ))
+        })?;
+
+        let staged = stage_dir.join(member);
+        fs::write(&staged, data)
+            .map_err(|e| io_err(&format!("write staged `{}`", member), &staged, e))?;
+        File::open(&staged)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| io_err(&format!("fsync staged `{}`", member), &staged, e))?;
+    }
+
+    // Atomically rename each staged file into place. Per-file atomicity
+    // only; see function docs above.
+    for member in REQUIRED_MEMBERS {
+        let src = stage_dir.join(member);
+        let dst = tls_dir.join(member);
+        fs::rename(&src, &dst).map_err(|e| io_err(&format!("install `{}`", member), &dst, e))?;
+    }
+
+    // fsync the directory so the renames are durable across a crash.
+    File::open(tls_dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| io_err("fsync TLS directory", tls_dir, e))?;
+
+    Ok(())
+}
+
+/// RAII guard that removes the staging directory when dropped,
+/// whether the install succeeded or failed.
+struct StageDirGuard(PathBuf);
+
+impl Drop for StageDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -356,20 +431,31 @@ FGS64EIpGW9fvwIhALGssHz1WS2xFXKoUHPlzvIQqBOrfTFFY8jlHJT3X/ru
         assert_eq!(validation.cluster_name, "parity-test");
     }
 
+    fn make_validation(name: &str) -> BackupValidation {
+        BackupValidation {
+            cluster_name: name.to_string(),
+            entries: [
+                ("ca.crt", PARITY_CA_PEM.to_vec()),
+                ("ca.key", b"PRIVATE KEY STUB".to_vec()),
+                ("serial", b"42\n".to_vec()),
+                ("crl.pem", b"CRL STUB".to_vec()),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+        }
+    }
+
     #[test]
     fn refuse_foreign_backup_matches_local() {
-        let validation = BackupValidation {
-            cluster_name: "cluster-alpha".to_string(),
-        };
+        let validation = make_validation("cluster-alpha");
         let ok = refuse_foreign_backup(validation, "cluster-alpha").unwrap();
         assert_eq!(ok.cluster_name, "cluster-alpha");
     }
 
     #[test]
     fn refuse_foreign_backup_rejects_mismatch() {
-        let validation = BackupValidation {
-            cluster_name: "cluster-alpha".to_string(),
-        };
+        let validation = make_validation("cluster-alpha");
         let err = refuse_foreign_backup(validation, "cluster-beta").unwrap_err();
         match err {
             CliError::InvalidArgument(msg) => {
@@ -378,6 +464,100 @@ FGS64EIpGW9fvwIhALGssHz1WS2xFXKoUHPlzvIQqBOrfTFFY8jlHJT3X/ru
                 assert!(msg.contains("SAME cluster"));
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_writes_every_required_member() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+
+        let validation = make_validation("install-test");
+        install_ca_material(&validation, &tls_dir).unwrap();
+
+        for member in REQUIRED_MEMBERS {
+            let path = tls_dir.join(member);
+            assert!(path.exists(), "{member} not installed");
+
+            let on_disk = std::fs::read(&path).unwrap();
+            let expected = validation.entries.get(*member).unwrap();
+            assert_eq!(&on_disk, expected, "contents mismatch for {member}");
+        }
+    }
+
+    #[test]
+    fn install_overwrites_existing_members() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        std::fs::create_dir_all(&tls_dir).unwrap();
+
+        // Seed the tls_dir with stale material that should be replaced.
+        std::fs::write(tls_dir.join("ca.crt"), b"STALE CA").unwrap();
+        std::fs::write(tls_dir.join("ca.key"), b"STALE KEY").unwrap();
+        std::fs::write(tls_dir.join("serial"), b"1").unwrap();
+        std::fs::write(tls_dir.join("crl.pem"), b"STALE CRL").unwrap();
+
+        // Also seed non-member files that install should leave alone.
+        std::fs::write(tls_dir.join("local-ca.crt"), b"KEEP ME").unwrap();
+        std::fs::write(tls_dir.join("cli.crt"), b"KEEP ME TOO").unwrap();
+
+        let validation = make_validation("install-test");
+        install_ca_material(&validation, &tls_dir).unwrap();
+
+        // Replaced: contents match the validation payload.
+        assert_eq!(
+            std::fs::read(tls_dir.join("ca.crt")).unwrap(),
+            *validation.entries.get("ca.crt").unwrap()
+        );
+
+        // Preserved: unrelated files are untouched.
+        assert_eq!(
+            std::fs::read(tls_dir.join("local-ca.crt")).unwrap(),
+            b"KEEP ME"
+        );
+        assert_eq!(
+            std::fs::read(tls_dir.join("cli.crt")).unwrap(),
+            b"KEEP ME TOO"
+        );
+    }
+
+    #[test]
+    fn install_cleans_up_staging_directory() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+
+        let validation = make_validation("install-test");
+        install_ca_material(&validation, &tls_dir).unwrap();
+
+        // No `.emergency-bootstrap-*` staging directory left behind.
+        let leftover: Vec<_> = std::fs::read_dir(&tls_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".emergency-bootstrap-")
+            })
+            .collect();
+
+        assert!(
+            leftover.is_empty(),
+            "staging directory not cleaned up: {:?}",
+            leftover.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn install_creates_tls_dir_if_missing() {
+        let dir = TempDir::new().unwrap();
+        // tls_dir is two levels deep and does not yet exist.
+        let tls_dir = dir.path().join("nested").join("tls");
+
+        let validation = make_validation("install-test");
+        install_ca_material(&validation, &tls_dir).unwrap();
+
+        for member in REQUIRED_MEMBERS {
+            assert!(tls_dir.join(member).exists(), "{member} not installed");
         }
     }
 

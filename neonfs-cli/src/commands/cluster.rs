@@ -865,57 +865,70 @@ impl CaCommand {
         let source =
             validate_emergency_bootstrap_flags(from_backup, new_key, yes_i_accept_data_loss)?;
 
-        // Safety-gate layer: when `--from-backup` is given, validate the
-        // tarball (required files present, ca.crt parseable) and refuse
-        // if its embedded cluster name doesn't match this node's local
-        // cluster. Lands in #503 slice B.1; the actual on-disk install
-        // and node cert regeneration ship in slice B.2.
-        let validated_backup = match &source {
+        // Safety-gate + install layer: when `--from-backup` is given,
+        // validate the tarball (required files present, ca.crt parseable),
+        // refuse if its embedded cluster name doesn't match this node's
+        // local cluster, then atomically install the validated material
+        // to `$NEONFS_TLS_DIR/`. Node cert regeneration, `--new-key`
+        // fresh-CA generation, live-service refusal, and audit-log
+        // emission remain TODO — see slice B.2b.
+        let installed_cluster = match &source {
             EmergencyBootstrapSource::Backup(path) => {
                 let validation = crate::commands::ca_bootstrap::validate_backup_tarball(path)?;
                 let local_name = crate::commands::ca_bootstrap::local_cluster_name()?;
-                Some(crate::commands::ca_bootstrap::refuse_foreign_backup(
-                    validation,
-                    &local_name,
-                )?)
+                let validation =
+                    crate::commands::ca_bootstrap::refuse_foreign_backup(validation, &local_name)?;
+                crate::commands::ca_bootstrap::install_ca_material(
+                    &validation,
+                    &crate::tls::tls_dir(),
+                )?;
+                Some(validation.cluster_name)
             }
             EmergencyBootstrapSource::NewKey => None,
         };
 
-        // Stub body. Past the validation layer but the install step is
-        // not yet implemented. Slice B.2 replaces this `RpcError` with
-        // the actual CA install + node cert regeneration flow.
+        // Partial-implementation body: tarball path has landed (validate
+        // + install). Node cert regen, `--new-key`, live-service refusal
+        // and audit log are still TODO — once the daemon is back up, the
+        // operator can run `neonfs cluster ca rotate` to reissue node
+        // certs (that command is tracked in #501).
         let description = source.description();
-        let validation_note = match &validated_backup {
-            Some(v) => format!(" — validated cluster name `{}`", v.cluster_name),
+        let install_note = match &installed_cluster {
+            Some(name) => format!(
+                " — CA material installed under $NEONFS_TLS_DIR for cluster `{}`",
+                name
+            ),
             None => String::new(),
         };
         let message = format!(
-            "cluster ca emergency-bootstrap install is not yet implemented ({description}{validation_note}). \
-             Slice B.1 (tarball validation) has landed (#503); the atomic install, \
-             node cert regeneration, and audit-log emission ship in slice B.2."
+            "cluster ca emergency-bootstrap is partially implemented ({description}{install_note}). \
+             Slice B.1 (tarball validation) and slice B.2a (atomic install) have landed; \
+             node cert regeneration, `--new-key` fresh-CA, live-service refusal, and \
+             audit-log emission are still TODO — once the daemon is back up, run \
+             `neonfs cluster ca rotate` (when implemented, #501) to reissue node certs."
         );
 
         match format {
             OutputFormat::Json => {
                 let payload = serde_json::json!({
-                    "status": "not_implemented",
+                    "status": "partial",
                     "source": description,
-                    "validated_cluster": validated_backup.as_ref().map(|v| v.cluster_name.clone()),
+                    "installed_cluster": installed_cluster,
                     "message": message,
                 });
                 eprintln!("{}", json::format(&payload)?);
             }
             OutputFormat::Table => {
-                eprintln!("neonfs cluster ca emergency-bootstrap: validated but install not yet implemented");
+                eprintln!("neonfs cluster ca emergency-bootstrap: CA material installed (partial)");
                 eprintln!();
-                eprintln!("  source: {description}{validation_note}");
+                eprintln!("  source: {description}{install_note}");
                 eprintln!();
-                eprintln!("The tarball validation layer has landed (#503 slice B.1). The atomic");
+                eprintln!("Tarball validation + atomic install have landed. Node cert");
+                eprintln!("regeneration, `--new-key` fresh-CA, live-service refusal, and");
+                eprintln!("audit-log emission are still TODO. After restarting `neonfs-core`,");
                 eprintln!(
-                    "install to $NEONFS_TLS_DIR, local node cert regeneration, and audit-log"
+                    "run `neonfs cluster ca rotate` to reissue node certs (tracked in #501)."
                 );
-                eprintln!("emission ship in slice B.2.");
             }
         }
 
