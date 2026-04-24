@@ -27,7 +27,10 @@ defmodule NeonFS.Integration.ChunkerParityTest do
   alias NeonFS.Integration.PeerCluster
 
   @moduletag timeout: 300_000
-  @moduletag nodes: 3
+  # The whole test operates against node1 (core) and node2 (interface-side chunker);
+  # node3 was only involved in the `wait_for_data_plane` mesh check. Two nodes are
+  # enough to exercise the cross-node round-trip.
+  @moduletag nodes: 2
   @moduletag cluster_mode: :shared
 
   setup_all %{cluster: cluster} do
@@ -170,8 +173,10 @@ defmodule NeonFS.Integration.ChunkerParityTest do
   end
 
   defp wait_for_data_plane(cluster) do
+    node_names = Enum.map(cluster.nodes, & &1.name)
+
     assert_eventually timeout: 30_000 do
-      Enum.all?([:node1, :node2, :node3], fn node_name ->
+      Enum.all?(node_names, fn node_name ->
         node_has_all_peer_pools?(cluster, node_name)
       end)
     end
@@ -179,7 +184,8 @@ defmodule NeonFS.Integration.ChunkerParityTest do
 
   defp node_has_all_peer_pools?(cluster, node_name) do
     other_nodes =
-      [:node1, :node2, :node3]
+      cluster.nodes
+      |> Enum.map(& &1.name)
       |> List.delete(node_name)
       |> Enum.map(&PeerCluster.get_node!(cluster, &1).node)
 
