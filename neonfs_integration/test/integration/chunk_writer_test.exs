@@ -18,7 +18,7 @@ defmodule NeonFS.Integration.ChunkWriterTest do
 
   use NeonFS.Integration.ClusterCase, async: false
 
-  alias NeonFS.Client.{ChunkWriter, ServiceInfo}
+  alias NeonFS.Client.ChunkWriter
   alias NeonFS.Integration.PeerCluster
 
   @moduletag timeout: 300_000
@@ -60,7 +60,6 @@ defmodule NeonFS.Integration.ChunkWriterTest do
 
       node1_info = PeerCluster.get_node!(cluster, :node1)
       wait_for_pool(cluster, :node2, node1_info.node)
-      wait_for_discovery(cluster, :node2)
 
       chunk_size = 262_144
       payload = :crypto.strong_rand_bytes(6 * chunk_size)
@@ -158,30 +157,6 @@ defmodule NeonFS.Integration.ChunkWriterTest do
              target_node
            ]) do
         {:ok, _pool} -> true
-        _ -> false
-      end
-    end
-  end
-
-  defp wait_for_discovery(cluster, node_name) do
-    # ChunkWriter.write_file_stream/4 calls Router.call(NeonFS.Core,
-    # :get_volume, …) which routes through the client Router, which in
-    # turn relies on Discovery. In the peer-cluster harness the client
-    # Connection GenServer is started with no bootstrap_nodes, so it
-    # never picks up peer nodes as core-capable and Discovery's cache
-    # stays empty (see Codebase-Patterns.md §Testing).
-    #
-    # Seed Connection/Discovery state by hand: pull the authoritative
-    # service list from the local ServiceRegistry, sync it into the
-    # client Connection, then poke Discovery to refresh its ETS cache.
-    services = PeerCluster.rpc(cluster, node_name, NeonFS.Core.ServiceRegistry, :list, [])
-    infos = Enum.map(services, &ServiceInfo.from_map/1)
-    PeerCluster.rpc(cluster, node_name, NeonFS.Client.Connection, :sync_services, [infos])
-    PeerCluster.rpc(cluster, node_name, NeonFS.Client.Discovery, :refresh, [])
-
-    assert_eventually timeout: 30_000 do
-      case PeerCluster.rpc(cluster, node_name, NeonFS.Client.Discovery, :get_core_nodes, []) do
-        [_ | _] -> true
         _ -> false
       end
     end

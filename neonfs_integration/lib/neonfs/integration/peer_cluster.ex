@@ -206,10 +206,21 @@ defmodule NeonFS.Integration.PeerCluster do
             core_config
           end
 
+        # Seed the client Connection with every other peer as a
+        # bootstrap node so NeonFS.Client.Discovery's initial refresh
+        # can reach a core node and populate its ETS cache. Without
+        # this, tests that exercise client modules internally calling
+        # `Router.call` (e.g. `ChunkWriter.write_file_stream/4`) would
+        # short-circuit with `"All core nodes unreachable"` until a
+        # test-local seeding helper kicks in. See #482.
+        peer_bootstrap_nodes =
+          Enum.reject(all_peer_names, &(&1 == :"#{peer_name}@localhost"))
+
         client_config = [
           tls_dir: Path.join(data_dir, "tls"),
           partition_recovery_debounce_ms: 200,
-          service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
+          service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []},
+          bootstrap_nodes: peer_bootstrap_nodes
         ]
 
         app_config = [
