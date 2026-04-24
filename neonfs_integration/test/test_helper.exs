@@ -29,13 +29,17 @@ end
 # cannot work from within the BEAM VM (Erlang's SIGCHLD handling breaks
 # fusermount's fork/waitpid). See neonfs_fuse/native/neonfs_fuse/tests/mount_integration.rs
 
-# Exclude loopback device tests unless running as root with losetup available
-excludes =
+# Exclude loopback device tests unless running as root with losetup available.
+# Exclude `:profile` diagnostic tests by default (e.g. #507's app-start profiler)
+# — they print diagnostic output rather than assert. Run with `--include profile`.
+loopback_excludes =
   if NeonFS.Integration.LoopbackDevice.available?() do
     []
   else
     [:loopback]
   end
+
+excludes = loopback_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an
