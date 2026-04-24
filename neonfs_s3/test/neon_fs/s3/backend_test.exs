@@ -33,7 +33,7 @@ defmodule NeonFS.S3.BackendTest do
 
       ref = %{
         hash: hash,
-        location: %{node: node(), drive_id: "default", tier: :hot},
+        locations: [%{node: node(), drive_id: "default", tier: :hot}],
         size: byte_size(body_binary),
         codec: %{compression: :none, crypto: nil, original_size: byte_size(body_binary)}
       }

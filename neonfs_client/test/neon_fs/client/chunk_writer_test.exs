@@ -63,7 +63,7 @@ defmodule NeonFS.Client.ChunkWriterTest do
 
       assert ref.size == 256
       assert byte_size(ref.hash) == 32
-      assert ref.location == %{node: @target_node, drive_id: @drive_id, tier: :hot}
+      assert ref.locations == [%{node: @target_node, drive_id: @drive_id, tier: :hot}]
     end
 
     test "splits a multi-chunk stream into ordered put_chunk calls" do
@@ -144,7 +144,7 @@ defmodule NeonFS.Client.ChunkWriterTest do
                  strategy: "single"
                )
 
-      assert ref.location.node == pinned_node
+      assert [%{node: ^pinned_node}] = ref.locations
     end
 
     test "forwards the volume's tier by default but honours opts override" do
@@ -296,9 +296,9 @@ defmodule NeonFS.Client.ChunkWriterTest do
       location = %{node: @target_node, drive_id: @drive_id, tier: :hot}
 
       refs = [
-        %{hash: <<1::256>>, location: location, size: 100, codec: plain_codec(100)},
-        %{hash: <<2::256>>, location: location, size: 250, codec: plain_codec(250)},
-        %{hash: <<3::256>>, location: location, size: 50, codec: plain_codec(50)}
+        %{hash: <<1::256>>, locations: [location], size: 100, codec: plain_codec(100)},
+        %{hash: <<2::256>>, locations: [location], size: 250, codec: plain_codec(250)},
+        %{hash: <<3::256>>, locations: [location], size: 50, codec: plain_codec(50)}
       ]
 
       opts = ChunkWriter.chunk_refs_to_commit_opts(refs)
@@ -312,25 +312,165 @@ defmodule NeonFS.Client.ChunkWriterTest do
       assert opts.chunk_codecs[<<3::256>>] == plain_codec(50)
     end
 
-    test "deduplicates locations per hash when the same chunk appears twice" do
+    test "flattens every replica across refs for the same hash" do
       loc_a = %{node: :a@host, drive_id: "d1", tier: :hot}
       loc_b = %{node: :b@host, drive_id: "d1", tier: :hot}
+      loc_c = %{node: :c@host, drive_id: "d1", tier: :hot}
 
       refs = [
-        %{hash: <<1::256>>, location: loc_a, size: 100, codec: plain_codec(100)},
-        %{hash: <<1::256>>, location: loc_a, size: 100, codec: plain_codec(100)},
-        %{hash: <<1::256>>, location: loc_b, size: 100, codec: plain_codec(100)}
+        %{hash: <<1::256>>, locations: [loc_a, loc_b], size: 100, codec: plain_codec(100)},
+        %{hash: <<1::256>>, locations: [loc_a, loc_c], size: 100, codec: plain_codec(100)}
       ]
 
       opts = ChunkWriter.chunk_refs_to_commit_opts(refs)
 
-      assert opts.locations[<<1::256>>] == [loc_a, loc_b]
+      assert opts.locations[<<1::256>>] == [loc_a, loc_b, loc_c]
       assert opts.chunk_codecs[<<1::256>>] == plain_codec(100)
+    end
+
+    test "a single ref's multi-replica locations land intact" do
+      loc_a = %{node: :a@host, drive_id: "d1", tier: :hot}
+      loc_b = %{node: :b@host, drive_id: "d1", tier: :hot}
+      loc_c = %{node: :c@host, drive_id: "d1", tier: :hot}
+
+      refs = [
+        %{hash: <<7::256>>, locations: [loc_a, loc_b, loc_c], size: 42, codec: plain_codec(42)}
+      ]
+
+      opts = ChunkWriter.chunk_refs_to_commit_opts(refs)
+
+      assert opts.locations[<<7::256>>] == [loc_a, loc_b, loc_c]
+      assert opts.total_size == 42
     end
 
     test "handles the empty ref list" do
       assert %{hashes: [], locations: %{}, chunk_codecs: %{}, total_size: 0} =
                ChunkWriter.chunk_refs_to_commit_opts([])
+    end
+  end
+
+  describe "write_file_stream/4 — multi-replica fan-out (#478)" do
+    test "codec-info :locations list is carried through to the ref" do
+      volume =
+        volume_fixture(%{
+          durability: %{type: :replicate, factor: 3, min_copies: 2}
+        })
+
+      stub_volume_lookup(volume)
+      stub_discovery([@target_node])
+
+      replicas = [
+        %{node: @target_node, drive_id: @drive_id, tier: :hot},
+        %{node: :replica_b@host, drive_id: "d2", tier: :hot},
+        %{node: :replica_c@host, drive_id: "d3", tier: :hot}
+      ]
+
+      expect(Router, :data_call, fn @target_node, :put_chunk, _args, _opts ->
+        {:ok,
+         %{
+           compression: :none,
+           crypto: nil,
+           original_size: 128,
+           locations: replicas
+         }}
+      end)
+
+      assert {:ok, [ref]} =
+               ChunkWriter.write_file_stream("test-vol", "/fan.bin", [:binary.copy(<<1>>, 128)],
+                 drive_id: @drive_id,
+                 strategy: "single"
+               )
+
+      assert ref.locations == replicas
+      # The :locations key is stripped from the codec so ChunkMeta
+      # builders downstream see the original shape.
+      refute Map.has_key?(ref.codec, :locations)
+    end
+
+    test "partial replica acceptance surfaces as a shorter locations list" do
+      volume =
+        volume_fixture(%{
+          durability: %{type: :replicate, factor: 3, min_copies: 2}
+        })
+
+      stub_volume_lookup(volume)
+      stub_discovery([@target_node])
+
+      accepted = [
+        %{node: @target_node, drive_id: @drive_id, tier: :hot},
+        %{node: :replica_b@host, drive_id: "d2", tier: :hot}
+      ]
+
+      expect(Router, :data_call, fn @target_node, :put_chunk, _args, _opts ->
+        {:ok,
+         %{
+           compression: :none,
+           crypto: nil,
+           original_size: 64,
+           locations: accepted
+         }}
+      end)
+
+      assert {:ok, [ref]} =
+               ChunkWriter.write_file_stream("test-vol", "/partial.bin", [<<0::64*8>>],
+                 drive_id: @drive_id,
+                 strategy: "single"
+               )
+
+      assert ref.locations == accepted
+    end
+
+    test "every replica is aborted when a later chunk fails" do
+      volume =
+        volume_fixture(%{
+          durability: %{type: :replicate, factor: 3, min_copies: 2}
+        })
+
+      stub_volume_lookup(volume)
+      stub_discovery([@target_node])
+
+      replicas = [
+        %{node: @target_node, drive_id: @drive_id, tier: :hot},
+        %{node: :replica_b@host, drive_id: "d2", tier: :hot}
+      ]
+
+      test_pid = self()
+      call_counter = :counters.new(1, [])
+
+      stub(Router, :data_call, fn @target_node, :put_chunk, _args, _opts ->
+        case :counters.get(call_counter, 1) do
+          0 ->
+            :counters.add(call_counter, 1, 1)
+
+            {:ok,
+             %{
+               compression: :none,
+               crypto: nil,
+               original_size: 256,
+               locations: replicas
+             }}
+
+          _ ->
+            {:error, :later}
+        end
+      end)
+
+      abort_fn = fn target, hash -> send(test_pid, {:abort, target.node, hash}) end
+
+      payload = :binary.copy(<<0xAA>>, 256) <> :binary.copy(<<0xBB>>, 256)
+
+      assert {:error, {:put_chunk_failed, :later}} =
+               ChunkWriter.write_file_stream("test-vol", "/fail-multi.bin", [payload],
+                 drive_id: @drive_id,
+                 strategy: "fixed",
+                 strategy_param: 256,
+                 abort_fn: abort_fn
+               )
+
+      # One abort per (hash, replica_location) for the successful first chunk.
+      assert_receive {:abort, @target_node, _}
+      assert_receive {:abort, :replica_b@host, _}
+      refute_receive {:abort, _, _}, 10
     end
   end
 end

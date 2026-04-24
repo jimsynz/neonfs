@@ -35,22 +35,31 @@ defmodule NeonFS.Client.ChunkWriter do
 
   ## Replica fan-out
 
-  The first cut targets a single core node per chunk — the same shape
-  the #454 `commit_chunks` integration test exercises end-to-end.
-  Multi-replica fan-out (so the `locations` map carries more than one
-  entry per chunk) is tracked as a follow-up so the first landing stays
-  scoped; core-side `maybe_replicate_chunk/4` already fills the gap for
-  co-located writes, and interface-side durability is a separate
-  design question that should not gate the #411 / #412 migrations.
+  Each chunk is shipped to a single core node — the receiving
+  `put_chunk` handler kicks off the remaining `durability.factor - 1`
+  replicas via `NeonFS.Core.Replication.replicate_chunk/4` and returns
+  the full location list so the commit carries every replica that
+  acknowledged (#478). The interface never fans out directly; this
+  keeps a single data-plane hop from the interface per chunk and reuses
+  the core-side replication path the co-located writer already has.
+
+  Volumes with `durability.factor == 1` produce a single-location ref.
+  Partial acceptance — e.g. 2 of 3 replicas succeed on a `:quorum`
+  volume that only requires 2 — surfaces as a ref whose `:locations`
+  list has fewer than `durability.factor` entries but meets
+  `durability.min_copies`. Volumes that cannot reach `min_copies`
+  return `{:error, _}` from `put_chunk` and the writer aborts
+  every already-accepted replica.
 
   ## Abort
 
   The data-plane surface is put/get/has only — there is no delete. On
   error the writer falls back to a best-effort
   `:rpc.call(node, BlobStore, :delete_chunk, …)` against every node
-  that accepted a chunk. Failures are logged and swallowed; durable
-  orphan cleanup is core-side GC's job. Interface-side durable abort
-  tracking (`PendingWriteLog`) is explicitly deferred per #450.
+  that accepted a chunk — including each replica, not just the
+  primary. Failures are logged and swallowed; durable orphan cleanup
+  is core-side GC's job. Interface-side durable abort tracking
+  (`PendingWriteLog`) is explicitly deferred per #450.
   """
 
   require Logger
@@ -86,7 +95,7 @@ defmodule NeonFS.Client.ChunkWriter do
 
   @type chunk_ref :: %{
           required(:hash) => binary(),
-          required(:location) => location(),
+          required(:locations) => [location()],
           required(:size) => non_neg_integer(),
           required(:codec) => codec_info()
         }
@@ -170,8 +179,10 @@ defmodule NeonFS.Client.ChunkWriter do
 
     locations =
       refs
-      |> Enum.group_by(& &1.hash, & &1.location)
-      |> Map.new(fn {hash, locs} -> {hash, Enum.uniq(locs)} end)
+      |> Enum.group_by(& &1.hash, & &1.locations)
+      |> Map.new(fn {hash, location_lists} ->
+        {hash, location_lists |> List.flatten() |> Enum.uniq()}
+      end)
 
     # Multiple refs for the same hash can appear when a chunk is
     # replicated to several nodes. Every write of a given hash is
@@ -277,17 +288,17 @@ defmodule NeonFS.Client.ChunkWriter do
 
   defp process_emitted([{data, hash, _offset, size} | rest], volume, target, timeout, acc) do
     case put_chunk(data, hash, volume, target, timeout) do
-      {:ok, codec_info} ->
+      {:ok, codec_info, locations} ->
         ref = %{
           hash: hash,
-          location: target,
+          locations: locations,
           size: size,
           codec: codec_info
         }
 
         updated = %{
           refs: [ref | acc.refs],
-          written: [{hash, target} | acc.written]
+          written: [{hash, locations} | acc.written]
         }
 
         process_emitted(rest, volume, target, timeout, updated)
@@ -309,7 +320,8 @@ defmodule NeonFS.Client.ChunkWriter do
 
     case Router.data_call(target.node, :put_chunk, args, timeout: timeout) do
       {:ok, %{compression: _, crypto: _, original_size: _} = codec_info} ->
-        {:ok, codec_info}
+        {codec, locations} = extract_codec_and_locations(codec_info, target)
+        {:ok, codec, locations}
 
       :ok ->
         # Handler on older core nodes doesn't send codec info back.
@@ -317,29 +329,47 @@ defmodule NeonFS.Client.ChunkWriter do
         # crypto=nil) — still wrong for compressed/encrypted volumes
         # but at least forward-compatible once every node is
         # upgraded. `original_size` equals the plaintext length we
-        # just sent; there's no codec on the legacy path.
-        {:ok, %{compression: :none, crypto: nil, original_size: byte_size(data)}}
+        # just sent; there's no codec on the legacy path. Same
+        # forward-compat applies to `:locations` (absent from the
+        # pre-#478 response), which falls back to the single primary
+        # target the writer picked.
+        {:ok, %{compression: :none, crypto: nil, original_size: byte_size(data)}, [target]}
 
       {:error, _} = err ->
         err
     end
   end
 
+  # Extracts replica locations from the codec_info reply, falling back
+  # to the writer's primary `target` when the handler didn't include a
+  # `:locations` key (pre-#478 core nodes). The `:locations` key is
+  # stripped from the codec_info before it's handed back so the codec
+  # struct matches the shape downstream `ChunkMeta` builders expect.
+  defp extract_codec_and_locations(codec_info, target) do
+    case Map.pop(codec_info, :locations) do
+      {nil, codec} -> {codec, [target]}
+      {[], codec} -> {codec, [target]}
+      {locations, codec} when is_list(locations) -> {codec, locations}
+    end
+  end
+
   defp abort_written([], _abort_fn), do: :ok
 
   defp abort_written(written, abort_fn) do
-    Enum.each(written, fn {hash, target} ->
-      try do
-        abort_fn.(target, hash)
-      rescue
-        error ->
-          Logger.debug("Abort callback raised", reason: inspect(error))
-          :ok
-      catch
-        :exit, reason ->
-          Logger.debug("Abort callback exited", reason: inspect(reason))
-          :ok
-      end
+    Enum.each(written, fn {hash, locations} ->
+      Enum.each(locations, fn location ->
+        try do
+          abort_fn.(location, hash)
+        rescue
+          error ->
+            Logger.debug("Abort callback raised", reason: inspect(error))
+            :ok
+        catch
+          :exit, reason ->
+            Logger.debug("Abort callback exited", reason: inspect(reason))
+            :ok
+        end
+      end)
     end)
 
     :ok

@@ -90,7 +90,7 @@ defmodule NeonFS.Integration.ChunkWriterTest do
 
       Enum.each(refs, fn ref ->
         assert byte_size(ref.hash) == 32
-        assert ref.location == %{node: node1_info.node, drive_id: "default", tier: :hot}
+        assert ref.locations == [%{node: node1_info.node, drive_id: "default", tier: :hot}]
         assert ref.size == chunk_size
       end)
 

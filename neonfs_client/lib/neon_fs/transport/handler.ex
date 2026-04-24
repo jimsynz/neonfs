@@ -80,14 +80,24 @@ defmodule NeonFS.Transport.Handler do
   # atom + optional `ChunkCrypto`) so `CommitChunks.create_chunk_meta/3`
   # on the receiving core can stamp the matching `ChunkMeta` rather
   # than hard-coding `compression: :none, crypto: nil` (#481).
+  #
+  # After the local put succeeds the handler also kicks off replication
+  # for volumes with `durability.factor > 1` via the dispatch module's
+  # optional `replicate_after_put/5` callback (#478). The returned
+  # location list — local plus every successful replica — is stamped
+  # into the response so the interface-side `ChunkWriter` can record
+  # every replica in the eventual `commit_chunks` payload rather than
+  # waiting for background reconciliation to patch the locations in.
   defp dispatch(
-         {:put_chunk, ref, _hash, volume_id, drive_id, _write_id, tier, data},
+         {:put_chunk, ref, hash, volume_id, drive_id, _write_id, tier, data},
          state
        )
        when is_binary(volume_id) do
     with {:ok, opts} <- resolve_volume_opts(state.dispatch, volume_id),
-         {:ok, _hash, _info} <- state.dispatch.write_chunk(data, drive_id, tier, opts) do
-      {:ok, ref, codec_info_from_opts(opts, byte_size(data))}
+         {:ok, _hash, _info} <- state.dispatch.write_chunk(data, drive_id, tier, opts),
+         {:ok, locations} <-
+           replicate_if_supported(state.dispatch, hash, data, volume_id, drive_id, tier) do
+      {:ok, ref, codec_info_from_opts(opts, byte_size(data), locations)}
     else
       {:error, reason} -> {:error, ref, reason}
     end
@@ -133,6 +143,28 @@ defmodule NeonFS.Transport.Handler do
     end
   end
 
+  # Calls the dispatch module's `replicate_after_put/5` to fan out the
+  # just-written chunk to the `durability.factor - 1` additional
+  # replicas. Dispatches that don't expose this callback (older test
+  # mocks, single-responsibility blob-store shims) fall back to the
+  # single-location response the pre-#478 path produced.
+  defp replicate_if_supported(dispatch, hash, data, volume_id, drive_id, tier) do
+    tier_atom = tier_to_atom(tier)
+    local_location = %{node: Node.self(), drive_id: drive_id, tier: tier_atom}
+
+    if function_exported?(dispatch, :replicate_after_put, 5) do
+      dispatch.replicate_after_put(hash, data, volume_id, local_location, [])
+    else
+      {:ok, [local_location]}
+    end
+  end
+
+  defp tier_to_atom(tier) when is_atom(tier), do: tier
+  defp tier_to_atom("hot"), do: :hot
+  defp tier_to_atom("warm"), do: :warm
+  defp tier_to_atom("cold"), do: :cold
+  defp tier_to_atom(tier) when is_binary(tier), do: String.to_atom(tier)
+
   # Builds the codec descriptor returned to the interface node.
   # Mirrors the shape the co-located write path stamps on `ChunkMeta`
   # via `WriteOperation.build_chunk_crypto/2` so the two paths agree.
@@ -140,11 +172,17 @@ defmodule NeonFS.Transport.Handler do
   # receiving `CommitChunks.create_chunk_meta/3` can populate
   # `ChunkMeta.original_size` without trying to reverse-engineer it
   # from `has_chunk`'s on-disk byte count.
-  defp codec_info_from_opts(opts, original_size) do
+  #
+  # The `:locations` field carries the full replica location list from
+  # `replicate_after_put/5` so `ChunkWriter.chunk_refs_to_commit_opts/1`
+  # can emit an accurate multi-entry `:locations` map for the
+  # `commit_chunks` payload (#478).
+  defp codec_info_from_opts(opts, original_size, locations) do
     %{
       compression: compression_atom(Keyword.get(opts, :compression)),
       crypto: crypto_from_opts(opts),
-      original_size: original_size
+      original_size: original_size,
+      locations: locations
     }
   end
 

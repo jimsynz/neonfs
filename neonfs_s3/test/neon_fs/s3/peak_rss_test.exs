@@ -53,7 +53,7 @@ defmodule NeonFS.S3.PeakRSSTest do
 
       ref = %{
         hash: hash,
-        location: %{node: node(), drive_id: "default", tier: :hot},
+        locations: [%{node: node(), drive_id: "default", tier: :hot}],
         size: size,
         codec: %{compression: :none, crypto: nil, original_size: size}
       }

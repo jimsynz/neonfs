@@ -125,6 +125,29 @@ defmodule NeonFS.Transport.HandlerTest do
       :ssl.close(client)
     end
 
+    test "8-tuple response carries a :locations list for the replica fan-out (#478)", ctx do
+      # Dispatches that don't export replicate_after_put/5 (the stub
+      # falls in this category) yield a single-entry `:locations`
+      # list: the just-written local node. The handler always
+      # populates the key so the interface-side ChunkWriter can rely
+      # on it.
+      {client, _handler} = connect_and_start_handler(ctx)
+
+      ref = make_ref()
+
+      message =
+        {:put_chunk, ref, <<0::256>>, "vol-fallback", "drive-x", "write-1", :hot, "bytes"}
+
+      response = send_and_recv(client, message)
+
+      assert {:ok, ^ref, %{locations: [location]}} = response
+      assert location.node == Node.self()
+      assert location.drive_id == "drive-x"
+      assert location.tier == :hot
+
+      :ssl.close(client)
+    end
+
     test "8-tuple propagates {:error, _} from resolve_put_chunk_opts/1 without writing", ctx do
       # Encrypted volume whose KeyManager.get_current_key/1 would fail
       # surfaces `{:error, reason}` from resolve_put_chunk_opts/1 in

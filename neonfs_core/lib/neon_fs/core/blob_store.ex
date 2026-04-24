@@ -55,6 +55,7 @@ defmodule NeonFS.Core.BlobStore do
   alias NeonFS.Core.Blob.Native
   alias NeonFS.Core.DriveState
   alias NeonFS.Core.KeyManager
+  alias NeonFS.Core.Replication
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeRegistry
 
@@ -282,6 +283,91 @@ defmodule NeonFS.Core.BlobStore do
       _ ->
         []
     end
+  end
+
+  @doc """
+  Replicates a chunk to additional core nodes per the volume's
+  durability configuration, after the local put has already completed.
+
+  Called by `NeonFS.Transport.Handler`'s 8-tuple `put_chunk` path when
+  an interface-side `NeonFS.Client.ChunkWriter` has just shipped a
+  chunk to this node. The local copy is already on disk; this call
+  kicks off the `durability.factor - 1` additional replicas via
+  `NeonFS.Core.Replication.replicate_chunk/4` and returns the full
+  location list the interface node should stamp into the eventual
+  `commit_chunks` metadata.
+
+  Single-replica volumes (`durability.factor <= 1`), volumes that can't
+  be resolved, and clusters with no replica targets all return
+  `{:ok, [local_location]}` — a single-entry list — so callers get a
+  uniform shape and don't need to special-case the degenerate paths.
+
+  ## Arguments
+
+    * `hash` — 32-byte chunk hash (already written locally).
+    * `data` — the chunk bytes, required to ship to other replicas.
+    * `volume_id` — the volume whose durability config drives fan-out.
+    * `local_location` — `%{node, drive_id, tier}` where the chunk was
+      just written; always included in the returned list.
+    * `opts` — optional keyword list:
+        * `:exclude_nodes` — nodes to skip when picking replica targets
+          (default: `[Node.self()]`).
+
+  ## Returns
+
+    * `{:ok, [location]}` — locations where the chunk is now stored.
+      For `:local` write-ack volumes, only the local location is
+      returned immediately and additional replicas land in the
+      background. For `:quorum` / `:all` volumes, the list includes
+      every synchronous replica that acknowledged.
+    * `{:error, reason}` — a `:quorum` / `:all` volume could not reach
+      the required replica count. The local copy remains; core-side
+      GC reaps the orphan if the interface aborts.
+  """
+  @spec replicate_after_put(
+          binary(),
+          binary(),
+          binary(),
+          Replication.location(),
+          keyword()
+        ) :: {:ok, [Replication.location()]} | {:error, term()}
+  def replicate_after_put(hash, data, volume_id, local_location, opts \\ []) do
+    case VolumeRegistry.get(volume_id) do
+      {:ok, %Volume{} = volume} ->
+        do_replicate_after_put(hash, data, volume, local_location, opts)
+
+      _ ->
+        {:ok, [local_location]}
+    end
+  end
+
+  defp do_replicate_after_put(_hash, _data, %Volume{durability: %{factor: factor}}, local, _opts)
+       when factor <= 1,
+       do: {:ok, [local]}
+
+  defp do_replicate_after_put(hash, data, volume, local_location, opts) do
+    exclude = Keyword.get(opts, :exclude_nodes, [Node.self()])
+
+    case Replication.replicate_chunk(hash, data, volume,
+           tier: local_location.tier,
+           exclude_nodes: exclude
+         ) do
+      {:ok, locations} ->
+        {:ok, merge_local_location(locations, local_location)}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # `Replication.replicate_chunk/4` synthesises a local entry via
+  # `DriveRegistry.select_drive/1`, which may pick a different drive
+  # from the one the handler actually wrote to on a multi-drive node.
+  # Replace that synthesised entry with the caller's authoritative
+  # `local_location` so the commit metadata matches the on-disk state.
+  defp merge_local_location(locations, local_location) do
+    non_local = Enum.reject(locations, &(&1.node == local_location.node))
+    [local_location | non_local]
   end
 
   defp compression_opts(%Volume{compression: %{algorithm: :zstd, level: level}}) do
