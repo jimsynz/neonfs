@@ -55,6 +55,11 @@ defmodule NeonFS.Integration.S3CoreBridge do
       end
     end
 
+    case :ets.whereis(:s3_integration_chunk_stash) do
+      :undefined -> :ok
+      _ref -> :ets.delete(:s3_integration_chunk_stash)
+    end
+
     :ok
   end
 
@@ -72,6 +77,64 @@ defmodule NeonFS.Integration.S3CoreBridge do
   def call(function, args) do
     core_node = :persistent_term.get(:s3_integration_core_node)
     rpc(core_node, NeonFS.Core, function, args)
+  end
+
+  # `:ship_chunks_fn` hook for the S3 integration harness (#488).
+  # The test runner has no TLS pool to the peer core nodes so the
+  # real `ChunkWriter.write_file_stream/4` can't ship chunks. Drain
+  # the body into a single synthetic ref, stash the bytes in an ETS
+  # table keyed by sha256, return the ref to the caller. Paired with
+  # `commit_refs/4`.
+  @spec ship_chunks(String.t(), String.t(), term()) :: {:ok, [map()]}
+  def ship_chunks(_bucket, _key, body) do
+    body_binary = body_to_binary(body)
+    hash = :crypto.hash(:sha256, body_binary)
+    ensure_stash_table()
+    :ets.insert(:s3_integration_chunk_stash, {hash, body_binary})
+
+    ref = %{
+      hash: hash,
+      location: %{node: node(), drive_id: "default", tier: :hot},
+      size: byte_size(body_binary),
+      codec: %{compression: :none, crypto: nil, original_size: byte_size(body_binary)}
+    }
+
+    {:ok, [ref]}
+  end
+
+  # `:commit_refs_fn` hook. Pull each ref's stashed bytes out of ETS,
+  # concatenate in list order, and write the single assembled file on
+  # the remote core via `write_file_at`. Mirrors what production's
+  # `commit_chunks/4` RPC does — materialise a `FileIndex` entry —
+  # but against the bridge so the integration harness doesn't need
+  # TLS pools.
+  @spec commit_refs(String.t(), String.t(), [map()], keyword()) :: term()
+  def commit_refs(bucket, key, refs, write_opts) do
+    combined =
+      refs
+      |> Enum.map(fn ref ->
+        case :ets.lookup(:s3_integration_chunk_stash, ref.hash) do
+          [{_, bytes}] -> bytes
+          [] -> raise "unknown stashed chunk #{inspect(ref.hash)}"
+        end
+      end)
+      |> IO.iodata_to_binary()
+
+    call(:write_file_at, [bucket, key, 0, combined, write_opts])
+  end
+
+  defp body_to_binary(body) when is_binary(body), do: body
+  defp body_to_binary(body) when is_list(body), do: IO.iodata_to_binary(body)
+  defp body_to_binary(stream), do: stream |> Enum.to_list() |> IO.iodata_to_binary()
+
+  defp ensure_stash_table do
+    case :ets.whereis(:s3_integration_chunk_stash) do
+      :undefined ->
+        :ets.new(:s3_integration_chunk_stash, [:named_table, :public, :set])
+
+      _ref ->
+        :ok
+    end
   end
 
   defp rpc(node, module, function, args) do

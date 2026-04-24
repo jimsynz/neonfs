@@ -3,19 +3,23 @@ defmodule NeonFS.S3.MultipartStore do
   ETS-backed store for tracking in-progress multipart uploads.
 
   Each upload is identified by a unique upload ID and tracks the bucket, key,
-  content type, and uploaded parts. Part data is stored as blobs in the core
-  via the normal write path; this store only tracks the metadata needed to
-  assemble them on completion.
+  content type, and uploaded parts. Each part records the ordered chunk refs
+  its bytes were shipped to core as; `complete_multipart_upload` flattens
+  the refs across parts in part-number order and issues a single
+  `commit_chunks/4` RPC instead of reading/combining part files. Nothing on
+  this path creates a per-part `FileIndex` entry.
   """
 
   use GenServer
 
   @table __MODULE__
 
+  @type chunk_ref :: NeonFS.Client.ChunkWriter.chunk_ref()
+
   @type part_entry :: %{
-          etag: String.t(),
-          size: non_neg_integer(),
-          path: String.t()
+          required(:etag) => String.t(),
+          required(:size) => non_neg_integer(),
+          required(:chunk_refs) => [chunk_ref()]
         }
 
   @type upload_entry :: %{

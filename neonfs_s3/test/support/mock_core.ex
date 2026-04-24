@@ -15,7 +15,31 @@ defmodule NeonFS.S3.Test.MockCore do
     Process.put(:mock_volumes, %{})
     Process.put(:mock_files, %{})
     Process.put(:mock_credentials, %{})
+    Process.put(:mock_chunks, %{})
     :ok
+  end
+
+  @doc """
+  Stashes a chunk blob under a synthetic hash for multipart testing.
+
+  Production ships chunks through `NeonFS.Client.ChunkWriter` and
+  commits refs via `commit_chunks/4`; the mock short-circuits that
+  with `stash_chunk/2` + `fetch_chunk/1` so unit tests can exercise
+  the ship / commit split without a running cluster.
+  """
+  @spec stash_chunk(binary(), binary()) :: :ok
+  def stash_chunk(hash, content) when is_binary(hash) and is_binary(content) do
+    chunks = Process.get(:mock_chunks, %{})
+    Process.put(:mock_chunks, Map.put(chunks, hash, content))
+    :ok
+  end
+
+  @spec fetch_chunk(binary()) :: {:ok, binary()} | :error
+  def fetch_chunk(hash) do
+    case Process.get(:mock_chunks, %{}) |> Map.fetch(hash) do
+      {:ok, _} = ok -> ok
+      :error -> :error
+    end
   end
 
   # Volume operations

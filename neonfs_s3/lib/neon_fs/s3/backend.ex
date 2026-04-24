@@ -274,11 +274,11 @@ defmodule NeonFS.S3.Backend do
 
     case MultipartStore.get(upload_id) do
       {:ok, upload} ->
-        part_path = multipart_staging_path(upload.bucket, upload.key, upload_id, part_number)
+        log_label = multipart_log_label(upload_id, part_number)
 
-        case write_via_chunk_writer(upload.bucket, part_path, body_binary, []) do
-          {:ok, _meta} ->
-            part = %{etag: etag, size: byte_size(body_binary), path: part_path}
+        case ship_chunks(upload.bucket, log_label, body_binary) do
+          {:ok, refs} ->
+            part = %{etag: etag, size: byte_size(body_binary), chunk_refs: refs}
             MultipartStore.put_part(upload_id, part_number, part)
             {:ok, etag}
 
@@ -295,38 +295,21 @@ defmodule NeonFS.S3.Backend do
   def upload_part_stream(_ctx, _bucket, _key, upload_id, part_number, body) do
     case MultipartStore.get(upload_id) do
       {:ok, upload} ->
-        part_path = multipart_staging_path(upload.bucket, upload.key, upload_id, part_number)
-        do_upload_part_stream(upload, upload_id, part_path, part_number, body)
+        do_upload_part_stream(upload, upload_id, part_number, body)
 
       {:error, :not_found} ->
         {:error, %Firkin.Error{code: :no_such_upload}}
     end
   end
 
-  defp do_upload_part_stream(upload, upload_id, part_path, part_number, body) do
+  defp do_upload_part_stream(upload, upload_id, part_number, body) do
     {tracked, finish} = track_md5_and_size(body)
+    log_label = multipart_log_label(upload_id, part_number)
 
-    case call_core_stream(:write_file_streamed, [upload.bucket, part_path, tracked, []]) do
-      {:ok, _meta} ->
+    case ship_chunks(upload.bucket, log_label, tracked) do
+      {:ok, refs} ->
         %{md5: md5, size: size} = finish.()
-        record_part(upload_id, part_number, part_path, md5, size)
-
-      {:error, :not_available} ->
-        # Cross-node fallback: the tracked stream still accumulates
-        # md5 + size via `Stream.map/2` as `ChunkWriter` consumes it,
-        # so no explicit drain is needed. After the stream is fully
-        # consumed we finalise both the chunk commit and the md5
-        # digest; either failure still calls `finish.()` to free the
-        # tracker state.
-        case write_via_chunk_writer(upload.bucket, part_path, tracked, []) do
-          {:ok, _meta} ->
-            %{md5: md5, size: size} = finish.()
-            record_part(upload_id, part_number, part_path, md5, size)
-
-          {:error, reason} ->
-            _ = finish.()
-            {:error, internal_error(reason)}
-        end
+        record_part(upload_id, part_number, refs, md5, size)
 
       {:error, reason} ->
         _ = finish.()
@@ -334,9 +317,15 @@ defmodule NeonFS.S3.Backend do
     end
   end
 
-  defp record_part(upload_id, part_number, part_path, md5, size) do
+  defp record_part(upload_id, part_number, refs, md5, size) do
     etag = Base.encode16(md5, case: :lower)
-    MultipartStore.put_part(upload_id, part_number, %{etag: etag, size: size, path: part_path})
+
+    MultipartStore.put_part(upload_id, part_number, %{
+      etag: etag,
+      size: size,
+      chunk_refs: refs
+    })
+
     {:ok, etag}
   end
 
@@ -396,28 +385,27 @@ defmodule NeonFS.S3.Backend do
   def complete_multipart_upload(_ctx, bucket, key, upload_id, _parts) do
     case MultipartStore.get(upload_id) do
       {:ok, upload} ->
-        sorted_parts =
-          upload.parts
-          |> Enum.sort_by(&elem(&1, 0))
+        sorted_parts = Enum.sort_by(upload.parts, &elem(&1, 0))
+        flattened_refs = Enum.flat_map(sorted_parts, fn {_num, part} -> part.chunk_refs end)
 
         write_opts =
           []
           |> maybe_put_content_type(upload.content_type)
 
-        with {:ok, combined} <- read_and_combine_parts(upload.bucket, sorted_parts),
-             {:ok, meta} <- call_core(:write_file_at, [bucket, key, 0, combined, write_opts]) do
-          cleanup_staging_parts(upload.bucket, sorted_parts)
-          MultipartStore.delete(upload_id)
+        case commit_refs(bucket, key, flattened_refs, write_opts) do
+          {:ok, meta} ->
+            MultipartStore.delete(upload_id)
 
-          {:ok,
-           %Firkin.CompleteResult{
-             location: "/#{bucket}/#{key}",
-             bucket: bucket,
-             key: key,
-             etag: compute_etag_from_meta(meta)
-           }}
-        else
-          {:error, reason} -> {:error, internal_error(reason)}
+            {:ok,
+             %Firkin.CompleteResult{
+               location: "/#{bucket}/#{key}",
+               bucket: bucket,
+               key: key,
+               etag: compute_etag_from_meta(meta)
+             }}
+
+          {:error, reason} ->
+            {:error, internal_error(reason)}
         end
 
       {:error, :not_found} ->
@@ -427,10 +415,16 @@ defmodule NeonFS.S3.Backend do
 
   @impl true
   def abort_multipart_upload(_ctx, _bucket, _key, upload_id) do
+    # No per-part `FileIndex` entries are ever created on the new
+    # path, so there's nothing to delete — the shipped chunks are
+    # orphaned and will be reaped by the core-side GC the first time
+    # it runs. Best-effort `ChunkWriter` abort callbacks are not
+    # invoked here because the refs have already escaped to the
+    # `MultipartStore`; we'd need the writer's in-flight state to
+    # do that safely. The interface-side `PendingWriteLog` deferred
+    # in #450 is the long-term home for tracked aborts.
     case MultipartStore.get(upload_id) do
-      {:ok, upload} ->
-        sorted_parts = Enum.sort_by(upload.parts, &elem(&1, 0))
-        cleanup_staging_parts(upload.bucket, sorted_parts)
+      {:ok, _upload} ->
         MultipartStore.delete(upload_id)
         :ok
 
@@ -537,17 +531,53 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp do_write_via_chunk_writer(bucket, key, body, write_opts) do
-    stream = body_to_stream(body)
+    with {:ok, refs} <- ship_chunks(bucket, key, body) do
+      commit_refs(bucket, key, refs, write_opts)
+    end
+  end
 
-    with {:ok, refs} <- ChunkWriter.write_file_stream(bucket, key, stream) do
-      commit_opts = build_commit_opts(refs, write_opts)
+  # Chunks the body locally and ships each chunk to a core node over
+  # the TLS data plane, returning the per-chunk ref list. No
+  # `commit_chunks/4` RPC — callers that need a finalised file call
+  # `commit_refs/4` separately. Multipart upload parts use this
+  # directly so the chunk list can be stitched together in
+  # `complete_multipart_upload/5` without per-part `FileIndex` entries.
+  #
+  # Unit tests inject `:ship_chunks_fn` to stash synthetic refs
+  # without a running cluster — shape: `(bucket, key, body) ->
+  # {:ok, [chunk_ref]} | {:error, reason}`.
+  defp ship_chunks(bucket, key, body) do
+    case Application.get_env(:neonfs_s3, :ship_chunks_fn) do
+      nil ->
+        stream = body_to_stream(body)
+        ChunkWriter.write_file_stream(bucket, key, stream)
 
-      Router.call(NeonFS.Core, :commit_chunks, [
-        bucket,
-        key,
-        commit_opts.hashes,
-        commit_opts.extra
-      ])
+      fun when is_function(fun, 3) ->
+        fun.(bucket, key, body)
+    end
+  end
+
+  # Commits an ordered list of chunk refs as a file at `bucket/key`
+  # via the metadata-only `commit_chunks/4` RPC. Refs are typically
+  # the output of `ship_chunks/3`, either for a single object or
+  # flattened across multipart parts.
+  #
+  # Unit tests inject `:commit_refs_fn` — shape:
+  # `(bucket, key, refs, write_opts) -> {:ok, FileMeta} | {:error, reason}`.
+  defp commit_refs(bucket, key, refs, write_opts) do
+    case Application.get_env(:neonfs_s3, :commit_refs_fn) do
+      nil ->
+        commit_opts = build_commit_opts(refs, write_opts)
+
+        Router.call(NeonFS.Core, :commit_chunks, [
+          bucket,
+          key,
+          commit_opts.hashes,
+          commit_opts.extra
+        ])
+
+      fun when is_function(fun, 4) ->
+        fun.(bucket, key, refs, write_opts)
     end
   end
 
@@ -722,34 +752,11 @@ defmodule NeonFS.S3.Backend do
   defp strip_leading_slash("/" <> rest), do: rest
   defp strip_leading_slash(path), do: path
 
-  defp multipart_staging_path(bucket, key, upload_id, part_number) do
-    "/.neonfs-staging/#{bucket}/#{key}/#{upload_id}/part-#{part_number}"
-  end
-
-  defp read_and_combine_parts(bucket, sorted_parts) do
-    results =
-      Enum.map(sorted_parts, fn {_num, part} ->
-        call_core(:read_file, [bucket, part.path, []])
-      end)
-
-    case Enum.find(results, &match?({:error, _}, &1)) do
-      nil ->
-        combined =
-          results
-          |> Enum.map(fn {:ok, data} -> data end)
-          |> IO.iodata_to_binary()
-
-        {:ok, combined}
-
-      error ->
-        error
-    end
-  end
-
-  defp cleanup_staging_parts(bucket, sorted_parts) do
-    Enum.each(sorted_parts, fn {_num, part} ->
-      call_core(:delete_file, [bucket, part.path])
-    end)
+  # Label used for log metadata on `ship_chunks/3` for multipart
+  # parts — never a real file path since nothing writes a part file
+  # anymore.
+  defp multipart_log_label(upload_id, part_number) do
+    "/.neonfs-multipart/#{upload_id}/part-#{part_number}"
   end
 
   defp internal_error(reason) do

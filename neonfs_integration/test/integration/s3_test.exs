@@ -28,6 +28,14 @@ defmodule NeonFS.Integration.S3Test do
 
     Application.put_env(:neonfs_s3, :core_call_fn, &S3CoreBridge.call/2)
 
+    # The test runner has no TLS data-plane pool to the peer core
+    # nodes, so the real `ChunkWriter.write_file_stream/4` can't
+    # ship chunks. Stash the bytes in an ETS table keyed by sha256
+    # and concatenate on commit — same semantics as production's
+    # ship → commit split, executed locally.
+    Application.put_env(:neonfs_s3, :ship_chunks_fn, &S3CoreBridge.ship_chunks/3)
+    Application.put_env(:neonfs_s3, :commit_refs_fn, &S3CoreBridge.commit_refs/4)
+
     # Start client infrastructure on the test runner so NeonFS.Client.ChunkReader
     # can resolve a core node via Router → CostFunction for object GETs.
     start_supervised!({Connection, bootstrap_nodes: [node1.node]})
@@ -82,6 +90,8 @@ defmodule NeonFS.Integration.S3Test do
       if Process.alive?(multipart_store), do: GenServer.stop(multipart_store)
       Supervisor.stop(server)
       Application.delete_env(:neonfs_s3, :core_call_fn)
+      Application.delete_env(:neonfs_s3, :ship_chunks_fn)
+      Application.delete_env(:neonfs_s3, :commit_refs_fn)
       S3CoreBridge.cleanup()
     end)
 

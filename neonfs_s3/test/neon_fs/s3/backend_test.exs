@@ -20,19 +20,39 @@ defmodule NeonFS.S3.BackendTest do
       apply(MockCore, function, args)
     end)
 
-    # Route the ChunkWriter + `commit_chunks/4` write path through
-    # MockCore so unit tests don't need a running cluster. Accepts
-    # the same input shapes production does (binary, iodata,
-    # Enumerable of binary segments).
-    Application.put_env(:neonfs_s3, :write_via_chunk_writer_fn, fn bucket, key, body, opts ->
-      body_binary =
-        case body do
-          b when is_binary(b) -> b
-          l when is_list(l) -> IO.iodata_to_binary(l)
-          stream -> stream |> Enum.to_list() |> IO.iodata_to_binary()
-        end
+    # Route ship / commit through MockCore so unit tests don't need a
+    # running cluster. `ship_chunks_fn` drains the body and stashes
+    # the bytes under a sha256-keyed synthetic ref; `commit_refs_fn`
+    # fetches each ref's bytes and writes the concatenated file.
+    # Matches production where `ChunkWriter.write_file_stream/4` ships
+    # chunks and `commit_chunks/4` assembles them into one file.
+    Application.put_env(:neonfs_s3, :ship_chunks_fn, fn _bucket, _key, body ->
+      body_binary = mock_body_to_binary(body)
+      hash = :crypto.hash(:sha256, body_binary)
+      MockCore.stash_chunk(hash, body_binary)
 
-      MockCore.write_file(bucket, key, body_binary, opts)
+      ref = %{
+        hash: hash,
+        location: %{node: node(), drive_id: "default", tier: :hot},
+        size: byte_size(body_binary),
+        codec: %{compression: :none, crypto: nil, original_size: byte_size(body_binary)}
+      }
+
+      {:ok, [ref]}
+    end)
+
+    Application.put_env(:neonfs_s3, :commit_refs_fn, fn bucket, key, refs, write_opts ->
+      combined =
+        refs
+        |> Enum.map(fn ref ->
+          case MockCore.fetch_chunk(ref.hash) do
+            {:ok, bytes} -> bytes
+            :error -> raise "unknown mock chunk #{inspect(ref.hash)}"
+          end
+        end)
+        |> IO.iodata_to_binary()
+
+      MockCore.write_file(bucket, key, combined, write_opts)
     end)
 
     stub(ChunkReader, :read_file, fn volume_name, path, opts ->
@@ -47,7 +67,8 @@ defmodule NeonFS.S3.BackendTest do
 
     on_exit(fn ->
       Application.delete_env(:neonfs_s3, :core_call_fn)
-      Application.delete_env(:neonfs_s3, :write_via_chunk_writer_fn)
+      Application.delete_env(:neonfs_s3, :ship_chunks_fn)
+      Application.delete_env(:neonfs_s3, :commit_refs_fn)
     end)
 
     :ok
@@ -574,4 +595,8 @@ defmodule NeonFS.S3.BackendTest do
       assert Enum.into(object.body, <<>>) == "streaming"
     end
   end
+
+  defp mock_body_to_binary(body) when is_binary(body), do: body
+  defp mock_body_to_binary(body) when is_list(body), do: IO.iodata_to_binary(body)
+  defp mock_body_to_binary(stream), do: stream |> Enum.to_list() |> IO.iodata_to_binary()
 end
