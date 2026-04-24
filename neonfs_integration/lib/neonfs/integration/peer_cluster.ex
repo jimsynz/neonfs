@@ -21,7 +21,9 @@ defmodule NeonFS.Integration.PeerCluster do
           peer: pid(),
           node: node(),
           dist_port: non_neg_integer(),
-          metrics_port: non_neg_integer() | nil
+          metrics_port: non_neg_integer() | nil,
+          applications: [atom()],
+          interface_ports: %{optional(atom()) => non_neg_integer()}
         }
 
   @type cluster :: %{
@@ -98,6 +100,12 @@ defmodule NeonFS.Integration.PeerCluster do
   - `:metrics_port` - Base port for HTTP metrics/API server (Bandit). When set, each node
     gets `metrics_enabled: true` with sequential ports (node1 = base, node2 = base+1, etc.).
     The allocated port is stored in `node_info.metrics_port`.
+  - `:roles` - `%{node_name => [application]}` per-node applications override. Overrides
+    `:applications` for that peer; unnamed peers fall back to `:applications`. Lets a
+    single cluster mix core peers and interface peers (e.g. one `:neonfs_core`, one
+    `:neonfs_s3`, one `:neonfs_webdav`). Interface peers skip Ra bootstrap and do not
+    get core-specific config applied. Bandit listener ports are OS-allocated per
+    service and exposed via `node_info.interface_ports` (e.g. `%{s3: 9500}`).
 
   ## Ra Notes
 
@@ -114,6 +122,7 @@ defmodule NeonFS.Integration.PeerCluster do
     drives_fn = Keyword.get(opts, :drives, nil)
     formation_config = Keyword.get(opts, :formation, nil)
     metrics_base_port = Keyword.get(opts, :metrics_port, nil)
+    roles = Keyword.get(opts, :roles, %{})
 
     # Ensure controller is distributed
     ensure_distributed!()
@@ -142,6 +151,15 @@ defmodule NeonFS.Integration.PeerCluster do
       System.put_env("NEONFS_PEER_PORTS", all_peer_ports_env)
     end
 
+    # Pre-compute the core-capable peer name set so interface peers can
+    # bootstrap against core peers only — and so the Ra-waiter skips
+    # interface-only peers that will never be Ra members.
+    core_peer_names =
+      for i <- 1..node_count,
+          apps_for_peer(roles, :"node#{i}", applications) |> Enum.member?(:neonfs_core) do
+        :"node#{i}_#{cluster_id}@localhost"
+      end
+
     # Start nodes sequentially to avoid DETS name conflicts during Ra initialization
     nodes =
       Enum.reduce(1..node_count, [], fn i, acc ->
@@ -162,84 +180,77 @@ defmodule NeonFS.Integration.PeerCluster do
 
         {peer_opts, dist_port} = build_peer_opts(peer_name, cookie, data_dir, dist_port)
 
+        peer_apps = apps_for_peer(roles, alias_name, applications)
+        core_peer? = :neonfs_core in peer_apps
+
         # Configure neonfs_core to use the test data directories
         # IMPORTANT: Ra expects data_dir as a charlist, not a binary!
         # DETS in Erlang requires charlist file paths.
         node_metrics_port =
-          if metrics_base_port, do: metrics_base_port + i - 1
+          if core_peer? and metrics_base_port, do: metrics_base_port + i - 1
 
-        core_config = [
-          data_dir: data_dir,
-          meta_dir: meta_dir,
-          blob_store_base_dir: Path.join(data_dir, "blobs"),
-          metrics_enabled: metrics_base_port != nil,
-          ra_data_dir: to_charlist(ra_dir),
-          enable_ra: enable_ra,
-          quorum_timeout_ms: 15_000
-        ]
+        interface_ports = allocate_interface_ports(peer_apps)
 
-        core_config =
-          if node_metrics_port do
-            core_config ++ [metrics_port: node_metrics_port, metrics_bind: "127.0.0.1"]
+        client_bootstrap_nodes =
+          if core_peer? do
+            # Core peers bootstrap against every OTHER peer (core or
+            # interface — the existing behaviour from #482).
+            Enum.reject(all_peer_names, &(&1 == :"#{peer_name}@localhost"))
           else
-            core_config
+            # Interface peers bootstrap only against core peers —
+            # there is no point in them contacting each other.
+            Enum.reject(core_peer_names, &(&1 == :"#{peer_name}@localhost"))
           end
-
-        core_config =
-          if drives_fn do
-            Keyword.put(core_config, :drives, drives_fn.(alias_name, data_dir))
-          else
-            core_config
-          end
-
-        core_config =
-          if formation_config do
-            core_config ++
-              [
-                auto_bootstrap: true,
-                cluster_name: Keyword.get(formation_config, :cluster_name, cluster_id),
-                bootstrap_expect: Keyword.get(formation_config, :bootstrap_expect, node_count),
-                bootstrap_peers: all_peer_names,
-                bootstrap_timeout: Keyword.get(formation_config, :bootstrap_timeout, 120_000)
-              ]
-          else
-            core_config
-          end
-
-        # Seed the client Connection with every other peer as a
-        # bootstrap node so NeonFS.Client.Discovery's initial refresh
-        # can reach a core node and populate its ETS cache. Without
-        # this, tests that exercise client modules internally calling
-        # `Router.call` (e.g. `ChunkWriter.write_file_stream/4`) would
-        # short-circuit with `"All core nodes unreachable"` until a
-        # test-local seeding helper kicks in. See #482.
-        peer_bootstrap_nodes =
-          Enum.reject(all_peer_names, &(&1 == :"#{peer_name}@localhost"))
 
         client_config = [
           tls_dir: Path.join(data_dir, "tls"),
           partition_recovery_debounce_ms: 200,
           service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []},
-          bootstrap_nodes: peer_bootstrap_nodes
+          bootstrap_nodes: client_bootstrap_nodes
         ]
 
         app_config = [
           logger: [level: :warning],
           neonfs_client: client_config,
-          neonfs_core: core_config,
           ra: [data_dir: to_charlist(ra_dir)]
         ]
 
-        start_cluster_node(
-          alias_name,
-          peer_opts,
-          applications,
-          app_config,
-          enable_ra,
-          node_metrics_port,
-          dist_port,
-          acc
-        )
+        app_config =
+          if core_peer? do
+            core_config =
+              build_core_config(%{
+                alias_name: alias_name,
+                data_dir: data_dir,
+                meta_dir: meta_dir,
+                ra_dir: ra_dir,
+                node_metrics_port: node_metrics_port,
+                metrics_base_port: metrics_base_port,
+                enable_ra: enable_ra,
+                drives_fn: drives_fn,
+                formation_config: formation_config,
+                cluster_id: cluster_id,
+                node_count: node_count,
+                all_peer_names: all_peer_names
+              })
+
+            app_config ++ [neonfs_core: core_config]
+          else
+            app_config
+          end
+
+        app_config = add_interface_config(app_config, peer_apps, interface_ports)
+
+        start_cluster_node(%{
+          name: alias_name,
+          peer_opts: peer_opts,
+          applications: peer_apps,
+          app_config: app_config,
+          enable_ra: core_peer? and enable_ra,
+          metrics_port: node_metrics_port,
+          interface_ports: interface_ports,
+          dist_port: dist_port,
+          acc: acc
+        })
       end)
 
     %{
@@ -248,6 +259,80 @@ defmodule NeonFS.Integration.PeerCluster do
       nodes: nodes,
       data_dir: base_dir
     }
+  end
+
+  defp apps_for_peer(roles, alias_name, default_applications) do
+    Map.get(roles, alias_name, default_applications)
+  end
+
+  defp allocate_interface_ports(peer_apps) do
+    Map.new(
+      for {app, key} <- [{:neonfs_s3, :s3}, {:neonfs_webdav, :webdav}],
+          app in peer_apps do
+        {key, allocate_peer_port()}
+      end
+    )
+  end
+
+  defp build_core_config(ctx) do
+    core_config = [
+      data_dir: ctx.data_dir,
+      meta_dir: ctx.meta_dir,
+      blob_store_base_dir: Path.join(ctx.data_dir, "blobs"),
+      metrics_enabled: ctx.metrics_base_port != nil,
+      ra_data_dir: to_charlist(ctx.ra_dir),
+      enable_ra: ctx.enable_ra,
+      quorum_timeout_ms: 15_000
+    ]
+
+    core_config =
+      if ctx.node_metrics_port do
+        core_config ++ [metrics_port: ctx.node_metrics_port, metrics_bind: "127.0.0.1"]
+      else
+        core_config
+      end
+
+    core_config =
+      if ctx.drives_fn do
+        Keyword.put(core_config, :drives, ctx.drives_fn.(ctx.alias_name, ctx.data_dir))
+      else
+        core_config
+      end
+
+    if ctx.formation_config do
+      core_config ++
+        [
+          auto_bootstrap: true,
+          cluster_name: Keyword.get(ctx.formation_config, :cluster_name, ctx.cluster_id),
+          bootstrap_expect: Keyword.get(ctx.formation_config, :bootstrap_expect, ctx.node_count),
+          bootstrap_peers: ctx.all_peer_names,
+          bootstrap_timeout: Keyword.get(ctx.formation_config, :bootstrap_timeout, 120_000)
+        ]
+    else
+      core_config
+    end
+  end
+
+  defp add_interface_config(app_config, peer_apps, interface_ports) do
+    app_config
+    |> maybe_add_s3_config(peer_apps, interface_ports)
+    |> maybe_add_webdav_config(peer_apps, interface_ports)
+  end
+
+  defp maybe_add_s3_config(app_config, peer_apps, ports) do
+    if :neonfs_s3 in peer_apps and Map.has_key?(ports, :s3) do
+      app_config ++ [neonfs_s3: [s3_port: ports.s3, s3_bind: "127.0.0.1"]]
+    else
+      app_config
+    end
+  end
+
+  defp maybe_add_webdav_config(app_config, peer_apps, ports) do
+    if :neonfs_webdav in peer_apps and Map.has_key?(ports, :webdav) do
+      app_config ++ [neonfs_webdav: [webdav_port: ports.webdav, webdav_bind: "127.0.0.1"]]
+    else
+      app_config
+    end
   end
 
   @doc """
@@ -264,8 +349,15 @@ defmodule NeonFS.Integration.PeerCluster do
       end
 
       try do
-        # Stop all applications gracefully
-        :peer.call(node_info.peer, :application, :stop, [:neonfs_core])
+        # Stop every application that was started on this peer (incl.
+        # interface apps like :neonfs_s3 / :neonfs_webdav when the
+        # peer ran them). Stopping in reverse-start order lets
+        # supervisors tear Bandit listeners down before their
+        # dependencies shut down.
+        for app <- Enum.reverse(Map.get(node_info, :applications, [:neonfs_core])) do
+          :peer.call(node_info.peer, :application, :stop, [app])
+        end
+
         :peer.call(node_info.peer, :application, :stop, [:ra])
       catch
         _, _ -> :ok
@@ -516,33 +608,26 @@ defmodule NeonFS.Integration.PeerCluster do
 
   # Private helpers
 
-  defp start_cluster_node(
-         node_name,
-         peer_opts,
-         applications,
-         app_config,
-         enable_ra,
-         metrics_port,
-         dist_port,
-         acc
-       ) do
-    case start_peer(peer_opts, applications, app_config) do
+  defp start_cluster_node(ctx) do
+    case start_peer(ctx.peer_opts, ctx.applications, ctx.app_config) do
       {:ok, peer, node} ->
-        if enable_ra, do: span_wait_for_ra(peer, node)
+        if ctx.enable_ra, do: span_wait_for_ra(peer, node)
 
-        acc ++
+        ctx.acc ++
           [
             %{
-              name: node_name,
+              name: ctx.name,
               peer: peer,
               node: node,
-              dist_port: dist_port,
-              metrics_port: metrics_port
+              dist_port: ctx.dist_port,
+              metrics_port: ctx.metrics_port,
+              applications: ctx.applications,
+              interface_ports: ctx.interface_ports
             }
           ]
 
       {:error, reason} ->
-        raise "Failed to start peer node #{node_name}: #{inspect(reason)}"
+        raise "Failed to start peer node #{ctx.name}: #{inspect(reason)}"
     end
   end
 
