@@ -139,22 +139,21 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp do_put_object_stream(bucket, key, body, write_opts) do
+    case stream_write(bucket, key, body, write_opts) do
+      {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
+      {:error, reason} -> {:error, internal_error(reason)}
+    end
+  end
+
+  # Writes a byte stream to `bucket/key`. Prefers the co-located
+  # `write_file_streamed/4` fast path when it's reachable (via
+  # `call_core_stream/2`); falls back to chunking locally and pushing
+  # over the TLS data plane when the core node is remote. Peak memory
+  # is bounded by the chunker's max chunk size in either path.
+  defp stream_write(bucket, key, body, write_opts) do
     case call_core_stream(:write_file_streamed, [bucket, key, body, write_opts]) do
-      {:ok, meta} ->
-        {:ok, compute_etag_from_meta(meta)}
-
-      {:error, :not_available} ->
-        # Cross-node path: chunk locally and push each chunk to a core
-        # node over the TLS data plane, then finalise via the
-        # metadata-only `commit_chunks/4` RPC. Peak memory is bounded
-        # by the chunker's max chunk size rather than the upload size.
-        case write_via_chunk_writer(bucket, key, body, write_opts) do
-          {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
-          {:error, reason} -> {:error, internal_error(reason)}
-        end
-
-      {:error, reason} ->
-        {:error, internal_error(reason)}
+      {:error, :not_available} -> write_via_chunk_writer(bucket, key, body, write_opts)
+      other -> other
     end
   end
 
@@ -241,15 +240,19 @@ defmodule NeonFS.S3.Backend do
 
   def copy_object(_ctx, bucket, dest_key, bucket, source_key) do
     with :ok <- ensure_bucket_exists(bucket),
-         {:ok, content} <- read_object_content(bucket, source_key),
          {:ok, source_meta} <- fetch_object_meta(bucket, source_key),
+         {:ok, %{stream: source_stream}} <- try_stream_read(bucket, source_key, []),
          write_opts = content_type_write_opts(source_meta),
-         {:ok, dest_meta} <- write_object_content(bucket, dest_key, content, write_opts) do
+         {:ok, dest_meta} <- stream_write(bucket, dest_key, source_stream, write_opts) do
       {:ok,
        %Firkin.CopyResult{
          etag: compute_etag_from_meta(dest_meta),
          last_modified: DateTime.utc_now()
        }}
+    else
+      {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
+      {:error, %Firkin.Error{}} = err -> err
+      {:error, reason} -> {:error, internal_error(reason)}
     end
   end
 
@@ -584,14 +587,6 @@ defmodule NeonFS.S3.Backend do
     end
   end
 
-  defp read_object_content(bucket, key, read_opts \\ []) do
-    case ChunkReader.read_file(bucket, key, read_opts) do
-      {:ok, content} -> {:ok, content}
-      {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
-      {:error, reason} -> {:error, internal_error(reason)}
-    end
-  end
-
   defp range_to_read_opts(nil, _file_size), do: []
 
   defp range_to_read_opts({start_byte, end_byte}, file_size) do
@@ -603,13 +598,6 @@ defmodule NeonFS.S3.Backend do
     case call_core(:get_file_meta, [bucket, key]) do
       {:ok, meta} -> {:ok, meta}
       {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
-      {:error, reason} -> {:error, internal_error(reason)}
-    end
-  end
-
-  defp write_object_content(bucket, key, content, write_opts) do
-    case call_core(:write_file_at, [bucket, key, 0, content, write_opts]) do
-      {:ok, meta} -> {:ok, meta}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
