@@ -1,30 +1,60 @@
 defmodule NeonFS.Integration.PartitionTest do
+  @moduledoc """
+  Partition tests that leave the mesh in a recoverable state between
+  runs — majority / minority reads and writes, plus partition-healing
+  flows. All tests share a single 3-node cluster via
+  `cluster_mode: :shared`; `setup` heals any partition left behind by
+  the previous test so each assertion starts from a clean mesh.
+
+  Tests that mutate cluster state permanently (whole-node restarts,
+  rolling restarts) live in `partition_restart_test.exs` with
+  `cluster_mode: :per_test` — sharing would break their recovery
+  semantics.
+
+  Each test writes to a unique path derived from
+  `System.unique_integer/1` so state from an earlier test cannot
+  collide with a later assertion. The initial `/test.txt` written
+  during `setup_all` is the only shared fixture; tests treat it as
+  read-only.
+  """
+
   use NeonFS.Integration.ClusterCase, async: false
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3
+  @moduletag cluster_mode: :shared
   @moduletag :partition
 
-  setup %{cluster: cluster} do
+  setup_all %{cluster: cluster} do
     :ok = init_cluster_with_data(cluster)
-    %{cluster: cluster}
+    %{}
+  end
+
+  setup %{cluster: cluster} do
+    # Previous test may have left the mesh partitioned. `heal_partition`
+    # is idempotent; calling it on an already-healed mesh is a no-op.
+    :ok = PeerCluster.heal_partition(cluster)
+    :ok = wait_for_partition_healed(cluster, timeout: 30_000)
+    :ok
   end
 
   describe "majority partition" do
     test "majority (2 of 3) can still write data", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
+      path = unique_path("majority-write")
+
       result =
         PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
-          "/majority-write.txt",
+          path,
           "majority data"
         ])
 
       assert {:ok, _} = result
 
       assert_eventually timeout: 30_000 do
-        read_matches?(cluster, :node2, "/majority-write.txt", "majority data")
+        read_matches?(cluster, :node2, path, "majority data")
       end
     end
   end
@@ -41,7 +71,7 @@ defmodule NeonFS.Integration.PartitionTest do
           :node3,
           NeonFS.TestHelpers,
           :write_file_from_binary,
-          ["test-volume", "/should-fail.txt", "data"],
+          ["test-volume", unique_path("should-fail"), "data"],
           120_000
         )
 
@@ -62,65 +92,30 @@ defmodule NeonFS.Integration.PartitionTest do
     test "minority receives data written during partition", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
+      path = unique_path("during-partition")
+
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
-          "/during-partition.txt",
+          path,
           "partition data"
         ])
 
       heal_and_sync(cluster, [:node3])
 
       assert_eventually timeout: 60_000 do
-        read_matches?(cluster, :node3, "/during-partition.txt", "partition data")
+        read_matches?(cluster, :node3, path, "partition data")
       end
     end
 
     test "all nodes consistent after healing", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
-      write_numbered_files(cluster, :node1, 1..3)
+      paths = write_numbered_files(cluster, :node1, 1..3)
 
       heal_and_sync(cluster, [:node1, :node2, :node3])
 
-      assert_all_nodes_have_files(cluster, 1..3)
-    end
-  end
-
-  describe "rolling restart" do
-    test "data survives sequential restart of each node", %{cluster: cluster} do
-      cluster = restart_and_verify(cluster, :node1)
-      cluster = restart_and_verify(cluster, :node2)
-      _cluster = restart_and_verify(cluster, :node3)
-    end
-  end
-
-  describe "node restart recovery" do
-    test "restarted node catches up via anti-entropy", %{cluster: cluster} do
-      :ok = PeerCluster.stop_node(cluster, :node3)
-
-      # Wait for the remaining nodes to detect node3 is gone
-      node3_atom = PeerCluster.get_node!(cluster, :node3).node
-
-      assert_eventually timeout: 10_000 do
-        node3_atom not in PeerCluster.rpc(cluster, :node1, Node, :list, [])
-      end
-
-      {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
-          "test-volume",
-          "/written-while-down.txt",
-          "missed data"
-        ])
-
-      {:ok, cluster} = PeerCluster.restart_node(cluster, :node3)
-
-      stabilise_after_restart(cluster)
-      trigger_anti_entropy(cluster, [:node1, :node2, :node3])
-
-      assert_eventually timeout: 60_000 do
-        read_matches?(cluster, :node3, "/written-while-down.txt", "missed data")
-      end
+      assert_all_nodes_have_files(cluster, paths)
     end
   end
 
@@ -188,6 +183,10 @@ defmodule NeonFS.Integration.PartitionTest do
 
   # ─── Read/write helpers ─────────────────────────────────────────────
 
+  defp unique_path(tag) do
+    "/#{tag}-#{System.unique_integer([:positive])}.txt"
+  end
+
   defp read_matches?(cluster, node_name, path, expected_content) do
     case PeerCluster.rpc(cluster, node_name, NeonFS.TestHelpers, :read_file, [
            "test-volume",
@@ -203,76 +202,36 @@ defmodule NeonFS.Integration.PartitionTest do
   end
 
   defp write_numbered_files(cluster, node_name, range) do
+    # Return the concrete paths (and their expected content) written so
+    # callers can assert against them without re-deriving the suffix.
+    suffix = System.unique_integer([:positive])
+
     for i <- range do
+      path = "/consistency-#{suffix}-#{i}.txt"
+      content = "data-#{suffix}-#{i}"
+
       {:ok, _} =
         PeerCluster.rpc(cluster, node_name, NeonFS.TestHelpers, :write_file_from_binary, [
           "test-volume",
-          "/consistency-#{i}.txt",
-          "data-#{i}"
+          path,
+          content
         ])
-    end
 
-    :ok
+      {path, content}
+    end
   end
 
-  defp assert_all_nodes_have_files(cluster, range) do
+  defp assert_all_nodes_have_files(cluster, paths_and_contents) do
     for node_name <- [:node1, :node2, :node3] do
-      assert_node_has_files(cluster, node_name, range)
+      assert_node_has_files(cluster, node_name, paths_and_contents)
     end
   end
 
-  defp assert_node_has_files(cluster, node_name, range) do
+  defp assert_node_has_files(cluster, node_name, paths_and_contents) do
     assert_eventually timeout: 60_000 do
-      Enum.all?(range, fn i ->
-        read_matches?(cluster, node_name, "/consistency-#{i}.txt", "data-#{i}")
+      Enum.all?(paths_and_contents, fn {path, content} ->
+        read_matches?(cluster, node_name, path, content)
       end)
     end
-  end
-
-  # ─── Restart helpers ────────────────────────────────────────────────
-
-  defp restart_and_verify(cluster, node_name) do
-    {:ok, cluster} = PeerCluster.restart_node(cluster, node_name)
-
-    stabilise_after_restart(cluster)
-    trigger_anti_entropy(cluster, [:node1, :node2, :node3])
-
-    assert_eventually timeout: 90_000 do
-      read_matches?(cluster, node_name, "/test.txt", "test data")
-    end
-
-    cluster
-  end
-
-  defp stabilise_after_restart(cluster) do
-    wait_for_full_mesh(cluster)
-    wait_for_ra_quorum(cluster)
-    rebuild_quorum_rings(cluster)
-  end
-
-  defp wait_for_ra_quorum(cluster) do
-    # Use get_state (defined in RaSupervisor, loaded on all peers) instead
-    # of passing an anonymous function — funs defined in the test module
-    # aren't loadable on peer nodes and would crash the Ra leader with :undef.
-    for node_info <- cluster.nodes do
-      :ok =
-        wait_until(
-          fn ->
-            match?(
-              {:ok, _},
-              PeerCluster.rpc(
-                cluster,
-                node_info.name,
-                NeonFS.Core.RaSupervisor,
-                :get_state,
-                []
-              )
-            )
-          end,
-          timeout: 30_000
-        )
-    end
-
-    :ok
   end
 end
