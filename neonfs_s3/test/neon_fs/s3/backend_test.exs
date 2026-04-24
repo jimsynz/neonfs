@@ -20,6 +20,21 @@ defmodule NeonFS.S3.BackendTest do
       apply(MockCore, function, args)
     end)
 
+    # Route the ChunkWriter + `commit_chunks/4` write path through
+    # MockCore so unit tests don't need a running cluster. Accepts
+    # the same input shapes production does (binary, iodata,
+    # Enumerable of binary segments).
+    Application.put_env(:neonfs_s3, :write_via_chunk_writer_fn, fn bucket, key, body, opts ->
+      body_binary =
+        case body do
+          b when is_binary(b) -> b
+          l when is_list(l) -> IO.iodata_to_binary(l)
+          stream -> stream |> Enum.to_list() |> IO.iodata_to_binary()
+        end
+
+      MockCore.write_file(bucket, key, body_binary, opts)
+    end)
+
     stub(ChunkReader, :read_file, fn volume_name, path, opts ->
       MockCore.read_file(volume_name, path, opts)
     end)
@@ -32,6 +47,7 @@ defmodule NeonFS.S3.BackendTest do
 
     on_exit(fn ->
       Application.delete_env(:neonfs_s3, :core_call_fn)
+      Application.delete_env(:neonfs_s3, :write_via_chunk_writer_fn)
     end)
 
     :ok

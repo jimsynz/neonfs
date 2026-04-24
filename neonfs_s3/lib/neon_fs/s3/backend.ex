@@ -13,6 +13,7 @@ defmodule NeonFS.S3.Backend do
   @behaviour Firkin.Backend
 
   alias NeonFS.Client.ChunkReader
+  alias NeonFS.Client.ChunkWriter
   alias NeonFS.Client.Discovery
   alias NeonFS.Client.Router
   alias NeonFS.S3.MultipartStore
@@ -122,9 +123,7 @@ defmodule NeonFS.S3.Backend do
   @impl true
   def put_object(_ctx, bucket, key, body, opts) do
     with :ok <- ensure_bucket_exists(bucket) do
-      body_binary = IO.iodata_to_binary(body)
-
-      case call_core(:write_file_at, [bucket, key, 0, body_binary, put_object_write_opts(opts)]) do
+      case write_via_chunk_writer(bucket, key, body, put_object_write_opts(opts)) do
         {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
         {:error, reason} -> {:error, internal_error(reason)}
       end
@@ -145,23 +144,17 @@ defmodule NeonFS.S3.Backend do
         {:ok, compute_etag_from_meta(meta)}
 
       {:error, :not_available} ->
-        put_object_drain_and_write(bucket, key, body, write_opts)
+        # Cross-node path: chunk locally and push each chunk to a core
+        # node over the TLS data plane, then finalise via the
+        # metadata-only `commit_chunks/4` RPC. Peak memory is bounded
+        # by the chunker's max chunk size rather than the upload size.
+        case write_via_chunk_writer(bucket, key, body, write_opts) do
+          {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
+          {:error, reason} -> {:error, internal_error(reason)}
+        end
 
       {:error, reason} ->
         {:error, internal_error(reason)}
-    end
-  end
-
-  # Streams cannot cross Erlang distribution. When the core node is remote
-  # we drain the stream into a binary and use the batch API — same memory
-  # characteristics as the non-streaming code path.
-  # audit:bounded cross-node fallback tracked in #299 (streaming write RPC)
-  defp put_object_drain_and_write(bucket, key, body, write_opts) do
-    body_binary = body |> Enum.to_list() |> IO.iodata_to_binary()
-
-    case call_core(:write_file_at, [bucket, key, 0, body_binary, write_opts]) do
-      {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
-      {:error, reason} -> {:error, internal_error(reason)}
     end
   end
 
@@ -280,7 +273,7 @@ defmodule NeonFS.S3.Backend do
       {:ok, upload} ->
         part_path = multipart_staging_path(upload.bucket, upload.key, upload_id, part_number)
 
-        case call_core(:write_file_at, [upload.bucket, part_path, 0, body_binary, []]) do
+        case write_via_chunk_writer(upload.bucket, part_path, body_binary, []) do
           {:ok, _meta} ->
             part = %{etag: etag, size: byte_size(body_binary), path: part_path}
             MultipartStore.put_part(upload_id, part_number, part)
@@ -316,18 +309,19 @@ defmodule NeonFS.S3.Backend do
         record_part(upload_id, part_number, part_path, md5, size)
 
       {:error, :not_available} ->
-        # Drain to binary and route through the batch API. The md5 tracker
-        # has already accumulated state during the drain, which we complete
-        # before writing. audit:bounded cross-node fallback tracked in #299.
-        chunks = Enum.to_list(tracked)
-        %{md5: md5, size: size} = finish.()
-        body_binary = IO.iodata_to_binary(chunks)
-
-        case call_core(:write_file_at, [upload.bucket, part_path, 0, body_binary, []]) do
+        # Cross-node fallback: the tracked stream still accumulates
+        # md5 + size via `Stream.map/2` as `ChunkWriter` consumes it,
+        # so no explicit drain is needed. After the stream is fully
+        # consumed we finalise both the chunk commit and the md5
+        # digest; either failure still calls `finish.()` to free the
+        # tracker state.
+        case write_via_chunk_writer(upload.bucket, part_path, tracked, []) do
           {:ok, _meta} ->
+            %{md5: md5, size: size} = finish.()
             record_part(upload_id, part_number, part_path, md5, size)
 
           {:error, reason} ->
+            _ = finish.()
             {:error, internal_error(reason)}
         end
 
@@ -517,6 +511,60 @@ defmodule NeonFS.S3.Backend do
       nil -> Router.call(NeonFS.Core, function, args)
       fun when is_function(fun, 2) -> fun.(function, args)
     end
+  end
+
+  # Streaming write via `NeonFS.Client.ChunkWriter` + `commit_chunks/4`.
+  # Accepts a binary, iodata, or an Enumerable of binary segments. The
+  # input is chunked on this (S3) node and pushed over the TLS data
+  # plane, then finalised with a metadata-only `commit_chunks/4` RPC.
+  # Peak memory is bounded by the chunker's max chunk size, not the
+  # upload size.
+  #
+  # Returns the FileMeta on success, matching the shape of the
+  # `call_core(:write_file_at, …)` it replaced (#411).
+  #
+  # Unit tests inject `:write_via_chunk_writer_fn` to route around the
+  # real ChunkWriter / Router machinery — same shape as
+  # `:core_call_fn` for the rest of the backend.
+  defp write_via_chunk_writer(bucket, key, body, write_opts) do
+    case Application.get_env(:neonfs_s3, :write_via_chunk_writer_fn) do
+      nil -> do_write_via_chunk_writer(bucket, key, body, write_opts)
+      fun when is_function(fun, 4) -> fun.(bucket, key, body, write_opts)
+    end
+  end
+
+  defp do_write_via_chunk_writer(bucket, key, body, write_opts) do
+    stream = body_to_stream(body)
+
+    with {:ok, refs} <- ChunkWriter.write_file_stream(bucket, key, stream) do
+      commit_opts = build_commit_opts(refs, write_opts)
+
+      Router.call(NeonFS.Core, :commit_chunks, [
+        bucket,
+        key,
+        commit_opts.hashes,
+        commit_opts.extra
+      ])
+    end
+  end
+
+  defp body_to_stream(body) when is_binary(body), do: [body]
+  defp body_to_stream(body) when is_list(body), do: [IO.iodata_to_binary(body)]
+  defp body_to_stream(stream), do: stream
+
+  defp build_commit_opts(refs, write_opts) do
+    %{hashes: hashes, locations: locations, chunk_codecs: chunk_codecs, total_size: total_size} =
+      ChunkWriter.chunk_refs_to_commit_opts(refs)
+
+    extra =
+      [
+        total_size: total_size,
+        locations: locations,
+        chunk_codecs: chunk_codecs
+      ]
+      |> Keyword.merge(Keyword.take(write_opts, [:content_type, :metadata, :mode, :uid, :gids]))
+
+    %{hashes: hashes, extra: extra}
   end
 
   defp ensure_bucket_exists(bucket) do
