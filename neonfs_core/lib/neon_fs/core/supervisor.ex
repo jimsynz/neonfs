@@ -289,11 +289,44 @@ defmodule NeonFS.Core.Supervisor do
         maybe_formation_child()
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation
-    if enable_ra do
-      List.insert_at(base_children, 1, NeonFS.Core.RaSupervisor)
-    else
-      base_children
-    end
+    children_with_ra =
+      if enable_ra do
+        List.insert_at(base_children, 1, NeonFS.Core.RaSupervisor)
+      else
+        base_children
+      end
+
+    # Wrap every child so its start-time emits a telemetry span. Overhead
+    # when no handlers are attached is single-digit microseconds per
+    # child; worthwhile for operational visibility into supervisor-tree
+    # cold starts (#510). Handlers attached e.g. by
+    # `NeonFS.Integration.SupervisorStartTimer` in test builds capture
+    # per-child durations.
+    Enum.map(children_with_ra, &timed/1)
+  end
+
+  # Wraps a child spec so its `start` MFA is invoked through
+  # `timed_start/4`, which emits a `[:neonfs, :core, :supervisor, :child]`
+  # telemetry span with the child's id.
+  defp timed(child_spec) do
+    spec = Supervisor.child_spec(child_spec, [])
+    {mod, fun, args} = spec.start
+    %{spec | start: {__MODULE__, :timed_start, [spec.id, mod, fun, args]}}
+  end
+
+  @doc false
+  # Called by every wrapped child's start MFA. Emits a telemetry span so
+  # subscribers can attribute cold-start cost to specific supervisor
+  # children. Returns the wrapped function's result unchanged.
+  def timed_start(id, mod, fun, args) do
+    :telemetry.span(
+      [:neonfs, :core, :supervisor, :child],
+      %{id: id},
+      fn ->
+        result = apply(mod, fun, args)
+        {result, %{id: id}}
+      end
+    )
   end
 
   defp build_quorum_opts do
