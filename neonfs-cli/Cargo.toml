@@ -31,5 +31,10 @@ rustls-pemfile = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std"] }
 futures-rustls = "0.26"
 
+# CA emergency-bootstrap tarball validation (#503)
+tar = "0.4"
+flate2 = "1"
+x509-parser = "0.18"
+
 [dev-dependencies]
 tempfile = "3"

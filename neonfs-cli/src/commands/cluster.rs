@@ -865,17 +865,35 @@ impl CaCommand {
         let source =
             validate_emergency_bootstrap_flags(from_backup, new_key, yes_i_accept_data_loss)?;
 
-        // Stub body. Safety gates beyond flag shape (live-service check,
-        // tarball structural validation, foreign-CA refusal) and the
-        // actual CA install land in follow-up slices. Mirrors the
-        // `force-reset` slicing pattern from #472/#473 and the
-        // `ca rotate` stub that sits at the same layer.
+        // Safety-gate layer: when `--from-backup` is given, validate the
+        // tarball (required files present, ca.crt parseable) and refuse
+        // if its embedded cluster name doesn't match this node's local
+        // cluster. Lands in #503 slice B.1; the actual on-disk install
+        // and node cert regeneration ship in slice B.2.
+        let validated_backup = match &source {
+            EmergencyBootstrapSource::Backup(path) => {
+                let validation = crate::commands::ca_bootstrap::validate_backup_tarball(path)?;
+                let local_name = crate::commands::ca_bootstrap::local_cluster_name()?;
+                Some(crate::commands::ca_bootstrap::refuse_foreign_backup(
+                    validation,
+                    &local_name,
+                )?)
+            }
+            EmergencyBootstrapSource::NewKey => None,
+        };
+
+        // Stub body. Past the validation layer but the install step is
+        // not yet implemented. Slice B.2 replaces this `RpcError` with
+        // the actual CA install + node cert regeneration flow.
         let description = source.description();
+        let validation_note = match &validated_backup {
+            Some(v) => format!(" — validated cluster name `{}`", v.cluster_name),
+            None => String::new(),
+        };
         let message = format!(
-            "cluster ca emergency-bootstrap is not yet implemented ({description}). \
-             The CLI surface and flag-level safety gates have landed (#502); the \
-             live-service check, tarball validation, audit-log entry, and actual \
-             CA install / node cert regeneration ship in #503."
+            "cluster ca emergency-bootstrap install is not yet implemented ({description}{validation_note}). \
+             Slice B.1 (tarball validation) has landed (#503); the atomic install, \
+             node cert regeneration, and audit-log emission ship in slice B.2."
         );
 
         match format {
@@ -883,18 +901,21 @@ impl CaCommand {
                 let payload = serde_json::json!({
                     "status": "not_implemented",
                     "source": description,
+                    "validated_cluster": validated_backup.as_ref().map(|v| v.cluster_name.clone()),
                     "message": message,
                 });
                 eprintln!("{}", json::format(&payload)?);
             }
             OutputFormat::Table => {
-                eprintln!("neonfs cluster ca emergency-bootstrap: not yet implemented");
+                eprintln!("neonfs cluster ca emergency-bootstrap: validated but install not yet implemented");
                 eprintln!();
-                eprintln!("  source: {description}");
+                eprintln!("  source: {description}{validation_note}");
                 eprintln!();
-                eprintln!("The CLI surface plus flag-level safety gates have landed (#502).");
-                eprintln!("The actual CA install — tarball extraction, atomic write to");
-                eprintln!("$NEONFS_TLS_DIR, and local node cert regeneration — ships in #503.");
+                eprintln!("The tarball validation layer has landed (#503 slice B.1). The atomic");
+                eprintln!(
+                    "install to $NEONFS_TLS_DIR, local node cert regeneration, and audit-log"
+                );
+                eprintln!("emission ship in slice B.2.");
             }
         }
 
