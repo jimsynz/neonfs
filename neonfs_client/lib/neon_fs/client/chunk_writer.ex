@@ -70,10 +70,25 @@ defmodule NeonFS.Client.ChunkWriter do
           required(:tier) => Volume.tier()
         }
 
+  # `NeonFS.Core.ChunkMeta.compression/0` lives in neonfs_core and
+  # therefore can't be referenced from neonfs_client (pure type-only
+  # dependency inversion is the reason the PLT flagged this with
+  # `unknown_type`). Mirror the literal here — the receiving
+  # `CommitChunks.create_chunk_meta/3` maps it back onto
+  # `ChunkMeta.compression()`.
+  @type compression :: :none | :zstd
+
+  @type codec_info :: %{
+          required(:compression) => compression(),
+          required(:crypto) => NeonFS.Core.ChunkCrypto.t() | nil,
+          required(:original_size) => non_neg_integer()
+        }
+
   @type chunk_ref :: %{
           required(:hash) => binary(),
           required(:location) => location(),
-          required(:size) => non_neg_integer()
+          required(:size) => non_neg_integer(),
+          required(:codec) => codec_info()
         }
 
   @type abort_fn :: (location(), binary() -> any())
@@ -147,6 +162,7 @@ defmodule NeonFS.Client.ChunkWriter do
   @spec chunk_refs_to_commit_opts([chunk_ref()]) :: %{
           hashes: [binary()],
           locations: %{binary() => [location()]},
+          chunk_codecs: %{binary() => codec_info()},
           total_size: non_neg_integer()
         }
   def chunk_refs_to_commit_opts(refs) do
@@ -157,9 +173,21 @@ defmodule NeonFS.Client.ChunkWriter do
       |> Enum.group_by(& &1.hash, & &1.location)
       |> Map.new(fn {hash, locs} -> {hash, Enum.uniq(locs)} end)
 
+    # Multiple refs for the same hash can appear when a chunk is
+    # replicated to several nodes. Every write of a given hash is
+    # deterministic in compression (volume-derived) but random in
+    # nonce — any representative suffices since the on-disk codec
+    # fingerprint is constant for the hash within one volume.
+    chunk_codecs = Map.new(refs, fn ref -> {ref.hash, ref.codec} end)
+
     total_size = Enum.reduce(refs, 0, fn ref, acc -> acc + ref.size end)
 
-    %{hashes: hashes, locations: locations, total_size: total_size}
+    %{
+      hashes: hashes,
+      locations: locations,
+      chunk_codecs: chunk_codecs,
+      total_size: total_size
+    }
   end
 
   ## Internal
@@ -249,11 +277,12 @@ defmodule NeonFS.Client.ChunkWriter do
 
   defp process_emitted([{data, hash, _offset, size} | rest], volume, target, timeout, acc) do
     case put_chunk(data, hash, volume, target, timeout) do
-      :ok ->
+      {:ok, codec_info} ->
         ref = %{
           hash: hash,
           location: target,
-          size: size
+          size: size,
+          codec: codec_info
         }
 
         updated = %{
@@ -278,7 +307,22 @@ defmodule NeonFS.Client.ChunkWriter do
       data: data
     ]
 
-    Router.data_call(target.node, :put_chunk, args, timeout: timeout)
+    case Router.data_call(target.node, :put_chunk, args, timeout: timeout) do
+      {:ok, %{compression: _, crypto: _, original_size: _} = codec_info} ->
+        {:ok, codec_info}
+
+      :ok ->
+        # Handler on older core nodes doesn't send codec info back.
+        # Fall back to the pre-#481 assumption (compression=:none,
+        # crypto=nil) — still wrong for compressed/encrypted volumes
+        # but at least forward-compatible once every node is
+        # upgraded. `original_size` equals the plaintext length we
+        # just sent; there's no codec on the legacy path.
+        {:ok, %{compression: :none, crypto: nil, original_size: byte_size(data)}}
+
+      {:error, _} = err ->
+        err
+    end
   end
 
   defp abort_written([], _abort_fn), do: :ok

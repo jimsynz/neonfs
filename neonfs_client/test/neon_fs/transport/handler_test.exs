@@ -89,13 +89,17 @@ defmodule NeonFS.Transport.HandlerTest do
       {client, _handler} = connect_and_start_handler(ctx)
 
       ref = make_ref()
+      payload = "plaintext payload"
 
       message =
-        {:put_chunk, ref, <<0::256>>, "vol-1", "drive-1", "write-1", :hot, "plaintext payload"}
+        {:put_chunk, ref, <<0::256>>, "vol-1", "drive-1", "write-1", :hot, payload}
 
       response = send_and_recv(client, message)
 
-      assert {:ok, ^ref} = response
+      assert {:ok, ^ref, codec} = response
+      assert codec.compression == :zstd
+      assert codec.crypto == nil
+      assert codec.original_size == byte_size(payload)
 
       # The new path invokes write_chunk with the resolved volume opts.
       assert StubBlobStore.last_write_opts() == [compression: "zstd", compression_level: 5]
@@ -115,7 +119,7 @@ defmodule NeonFS.Transport.HandlerTest do
 
       response = send_and_recv(client, message)
 
-      assert {:ok, ^ref} = response
+      assert {:ok, ^ref, %{compression: :none, crypto: nil, original_size: 4}} = response
       assert StubBlobStore.last_write_opts() == []
 
       :ssl.close(client)
@@ -136,7 +140,7 @@ defmodule NeonFS.Transport.HandlerTest do
       StubBlobStore.put_volume_opts("vol-ok", marker: :pre_test)
       ref_ok = make_ref()
       ok_msg = {:put_chunk, ref_ok, <<0::256>>, "vol-ok", "drive-1", "write-ok", :hot, "ok data"}
-      assert {:ok, ^ref_ok} = send_and_recv(client, ok_msg)
+      assert {:ok, ^ref_ok, _codec} = send_and_recv(client, ok_msg)
       assert StubBlobStore.last_write_opts() == [marker: :pre_test]
 
       ref = make_ref()

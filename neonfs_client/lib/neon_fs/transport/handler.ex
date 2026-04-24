@@ -75,6 +75,11 @@ defmodule NeonFS.Transport.Handler do
   # That failure is surfaced directly to the interface node: storing
   # the chunk as plaintext on an encrypted volume would be a data-at-
   # rest leak, not a recoverable fallback.
+  #
+  # The reply carries the codec the handler actually used (compression
+  # atom + optional `ChunkCrypto`) so `CommitChunks.create_chunk_meta/3`
+  # on the receiving core can stamp the matching `ChunkMeta` rather
+  # than hard-coding `compression: :none, crypto: nil` (#481).
   defp dispatch(
          {:put_chunk, ref, _hash, volume_id, drive_id, _write_id, tier, data},
          state
@@ -82,7 +87,7 @@ defmodule NeonFS.Transport.Handler do
        when is_binary(volume_id) do
     with {:ok, opts} <- resolve_volume_opts(state.dispatch, volume_id),
          {:ok, _hash, _info} <- state.dispatch.write_chunk(data, drive_id, tier, opts) do
-      {:ok, ref}
+      {:ok, ref, codec_info_from_opts(opts, byte_size(data))}
     else
       {:error, reason} -> {:error, ref, reason}
     end
@@ -125,6 +130,45 @@ defmodule NeonFS.Transport.Handler do
       end
     else
       {:ok, []}
+    end
+  end
+
+  # Builds the codec descriptor returned to the interface node.
+  # Mirrors the shape the co-located write path stamps on `ChunkMeta`
+  # via `WriteOperation.build_chunk_crypto/2` so the two paths agree.
+  # The plaintext `original_size` travels alongside the codec so the
+  # receiving `CommitChunks.create_chunk_meta/3` can populate
+  # `ChunkMeta.original_size` without trying to reverse-engineer it
+  # from `has_chunk`'s on-disk byte count.
+  defp codec_info_from_opts(opts, original_size) do
+    %{
+      compression: compression_atom(Keyword.get(opts, :compression)),
+      crypto: crypto_from_opts(opts),
+      original_size: original_size
+    }
+  end
+
+  defp compression_atom("zstd"), do: :zstd
+  defp compression_atom(:zstd), do: :zstd
+  defp compression_atom(_), do: :none
+
+  defp crypto_from_opts(opts) do
+    key = Keyword.get(opts, :key, <<>>)
+    nonce = Keyword.get(opts, :nonce, <<>>)
+
+    case {key, nonce} do
+      {<<>>, _} ->
+        nil
+
+      {_, <<>>} ->
+        nil
+
+      {_, nonce} when is_binary(nonce) ->
+        %NeonFS.Core.ChunkCrypto{
+          algorithm: :aes_256_gcm,
+          nonce: nonce,
+          key_version: Keyword.fetch!(opts, :key_version)
+        }
     end
   end
 end

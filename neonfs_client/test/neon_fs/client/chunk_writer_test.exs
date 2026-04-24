@@ -290,13 +290,15 @@ defmodule NeonFS.Client.ChunkWriterTest do
   end
 
   describe "chunk_refs_to_commit_opts/1" do
+    defp plain_codec(size), do: %{compression: :none, crypto: nil, original_size: size}
+
     test "extracts hashes in order, builds the locations map, and sums sizes" do
       location = %{node: @target_node, drive_id: @drive_id, tier: :hot}
 
       refs = [
-        %{hash: <<1::256>>, location: location, size: 100},
-        %{hash: <<2::256>>, location: location, size: 250},
-        %{hash: <<3::256>>, location: location, size: 50}
+        %{hash: <<1::256>>, location: location, size: 100, codec: plain_codec(100)},
+        %{hash: <<2::256>>, location: location, size: 250, codec: plain_codec(250)},
+        %{hash: <<3::256>>, location: location, size: 50, codec: plain_codec(50)}
       ]
 
       opts = ChunkWriter.chunk_refs_to_commit_opts(refs)
@@ -306,6 +308,8 @@ defmodule NeonFS.Client.ChunkWriterTest do
       assert opts.locations[<<1::256>>] == [location]
       assert opts.locations[<<2::256>>] == [location]
       assert opts.locations[<<3::256>>] == [location]
+      assert opts.chunk_codecs[<<1::256>>] == plain_codec(100)
+      assert opts.chunk_codecs[<<3::256>>] == plain_codec(50)
     end
 
     test "deduplicates locations per hash when the same chunk appears twice" do
@@ -313,18 +317,19 @@ defmodule NeonFS.Client.ChunkWriterTest do
       loc_b = %{node: :b@host, drive_id: "d1", tier: :hot}
 
       refs = [
-        %{hash: <<1::256>>, location: loc_a, size: 100},
-        %{hash: <<1::256>>, location: loc_a, size: 100},
-        %{hash: <<1::256>>, location: loc_b, size: 100}
+        %{hash: <<1::256>>, location: loc_a, size: 100, codec: plain_codec(100)},
+        %{hash: <<1::256>>, location: loc_a, size: 100, codec: plain_codec(100)},
+        %{hash: <<1::256>>, location: loc_b, size: 100, codec: plain_codec(100)}
       ]
 
       opts = ChunkWriter.chunk_refs_to_commit_opts(refs)
 
       assert opts.locations[<<1::256>>] == [loc_a, loc_b]
+      assert opts.chunk_codecs[<<1::256>>] == plain_codec(100)
     end
 
     test "handles the empty ref list" do
-      assert %{hashes: [], locations: %{}, total_size: 0} =
+      assert %{hashes: [], locations: %{}, chunk_codecs: %{}, total_size: 0} =
                ChunkWriter.chunk_refs_to_commit_opts([])
     end
   end

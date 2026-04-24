@@ -46,9 +46,16 @@ defmodule NeonFS.Core.CommitChunks do
           required(:tier) => :hot | :warm | :cold
         }
 
+  @type codec_info :: %{
+          required(:compression) => NeonFS.Core.ChunkMeta.compression(),
+          required(:crypto) => NeonFS.Core.ChunkCrypto.t() | nil,
+          optional(:original_size) => non_neg_integer()
+        }
+
   @type opts :: [
           total_size: non_neg_integer(),
           locations: %{optional(binary()) => [location()]},
+          chunk_codecs: %{optional(binary()) => codec_info()},
           uid: non_neg_integer(),
           gids: [non_neg_integer()],
           client_ref: term(),
@@ -89,6 +96,7 @@ defmodule NeonFS.Core.CommitChunks do
     write_id = WriteOperation.generate_write_id()
     total_size = Keyword.fetch!(opts, :total_size)
     locations_map = Keyword.fetch!(opts, :locations)
+    chunk_codecs = Keyword.get(opts, :chunk_codecs, %{})
     uid = Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :gids, [])
     client_ref = Keyword.get(opts, :client_ref)
@@ -97,7 +105,8 @@ defmodule NeonFS.Core.CommitChunks do
       with {:ok, volume} <- get_volume(volume_id),
            :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
            :ok <- check_lock(volume_id, path, client_ref, opts),
-           chunk_metas <- reconcile_chunks(chunk_hashes, locations_map, write_id),
+           chunk_metas <-
+             reconcile_chunks(chunk_hashes, locations_map, chunk_codecs, write_id),
            {:ok, reconciled} <- collect_reconciled(chunk_metas),
            {:ok, file_meta} <-
              create_file_metadata(volume.id, path, chunk_hashes, total_size, opts),
@@ -142,23 +151,28 @@ defmodule NeonFS.Core.CommitChunks do
     end
   end
 
-  defp reconcile_chunks(chunk_hashes, locations_map, write_id) do
+  defp reconcile_chunks(chunk_hashes, locations_map, chunk_codecs, write_id) do
     Enum.map(chunk_hashes, fn hash ->
-      reconcile_chunk(hash, Map.get(locations_map, hash), write_id)
+      reconcile_chunk(
+        hash,
+        Map.get(locations_map, hash),
+        Map.get(chunk_codecs, hash, %{compression: :none, crypto: nil}),
+        write_id
+      )
     end)
   end
 
-  defp reconcile_chunk(hash, nil, _write_id) do
+  defp reconcile_chunk(hash, nil, _codec, _write_id) do
     {:error, {:unknown_chunk_location, hash}}
   end
 
-  defp reconcile_chunk(hash, locations, write_id) do
+  defp reconcile_chunk(hash, locations, codec, write_id) do
     case ChunkIndex.get(hash) do
       {:ok, existing} ->
         add_write_ref(existing, write_id, locations)
 
       {:error, :not_found} ->
-        create_chunk_meta(hash, locations, write_id)
+        create_chunk_meta(hash, locations, codec, write_id)
     end
   end
 
@@ -196,15 +210,15 @@ defmodule NeonFS.Core.CommitChunks do
     :ok
   end
 
-  defp create_chunk_meta(hash, locations, write_id) do
+  defp create_chunk_meta(hash, locations, codec, write_id) do
     case first_has_chunk(hash, locations) do
-      {:ok, size} ->
+      {:ok, stored_size} ->
         meta = %ChunkMeta{
           hash: hash,
-          original_size: size,
-          stored_size: size,
-          compression: :none,
-          crypto: nil,
+          original_size: Map.get(codec, :original_size, stored_size),
+          stored_size: stored_size,
+          compression: Map.get(codec, :compression, :none),
+          crypto: Map.get(codec, :crypto),
           locations: Enum.uniq(locations),
           target_replicas: max(length(locations), 1),
           commit_state: :uncommitted,

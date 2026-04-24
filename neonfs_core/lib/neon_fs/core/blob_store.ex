@@ -293,8 +293,8 @@ defmodule NeonFS.Core.BlobStore do
   defp encryption_opts(%Volume{} = volume) do
     if Volume.encrypted?(volume) do
       case KeyManager.get_current_key(volume.id) do
-        {:ok, {key, _version}} ->
-          {:ok, [key: key, nonce: :crypto.strong_rand_bytes(12)]}
+        {:ok, {key, version}} ->
+          {:ok, [key: key, nonce: :crypto.strong_rand_bytes(12), key_version: version]}
 
         {:error, _} = err ->
           err
