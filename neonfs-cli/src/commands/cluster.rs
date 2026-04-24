@@ -9,6 +9,7 @@ use crate::term::types::{
 use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Atom, Binary, FixInteger, List, Map, Term};
+use std::path::PathBuf;
 
 /// Cluster management subcommands
 #[derive(Debug, Subcommand)]
@@ -128,6 +129,39 @@ pub enum CaCommand {
 
     /// Rotate the cluster CA (reissues all node certificates)
     Rotate,
+
+    /// Restore CA material on a single node after the cluster CA has expired.
+    ///
+    /// Runs locally — the `neonfs-core` service on this host must be
+    /// stopped. Either restore from an off-cluster CA backup tarball
+    /// (`--from-backup`) or generate a fresh CA (`--new-key`, which
+    /// invalidates every cached cert signed by the outgoing CA).
+    ///
+    /// This slice (see issue #502) establishes the CLI surface plus the
+    /// flag-level safety gates — mutually exclusive source selection and
+    /// the `--yes-i-accept-data-loss` acknowledgement. The live-service
+    /// check, tarball structural validation, foreign-CA refusal, audit-log
+    /// entry, and actual CA install + node cert regeneration ship in
+    /// follow-ups (#503, #504).
+    EmergencyBootstrap {
+        /// Path to an off-cluster CA backup tarball. Mutually exclusive
+        /// with `--new-key`.
+        #[arg(long = "from-backup", value_name = "PATH")]
+        from_backup: Option<PathBuf>,
+
+        /// Generate a fresh cluster CA. Every existing node and client
+        /// cert becomes invalid — holders must re-trust the new CA.
+        /// Requires `--yes-i-accept-data-loss`. Mutually exclusive with
+        /// `--from-backup`.
+        #[arg(long = "new-key")]
+        new_key: bool,
+
+        /// Operator acknowledgement of the data-loss risk. Required when
+        /// `--new-key` is used. Accepted (but not required) when
+        /// `--from-backup` is used.
+        #[arg(long = "yes-i-accept-data-loss")]
+        yes_i_accept_data_loss: bool,
+    },
 }
 
 impl ClusterCommand {
@@ -639,7 +673,10 @@ impl ClusterCommand {
                     eprintln!("{}", json::format(&payload)?);
                 }
                 OutputFormat::Table => {
-                    eprintln!("neonfs cluster force-reset refused: {}", err.error_message());
+                    eprintln!(
+                        "neonfs cluster force-reset refused: {}",
+                        err.error_message()
+                    );
                 }
             }
             return Err(err);
@@ -671,6 +708,16 @@ impl CaCommand {
             CaCommand::List => self.list(format),
             CaCommand::Revoke { node } => self.revoke(node, format),
             CaCommand::Rotate => self.rotate(),
+            CaCommand::EmergencyBootstrap {
+                from_backup,
+                new_key,
+                yes_i_accept_data_loss,
+            } => self.emergency_bootstrap(
+                from_backup.as_deref(),
+                *new_key,
+                *yes_i_accept_data_loss,
+                format,
+            ),
         }
     }
 
@@ -806,6 +853,194 @@ impl CaCommand {
         Err(crate::error::CliError::RpcError(
             "CA rotation not yet implemented".to_string(),
         ))
+    }
+
+    fn emergency_bootstrap(
+        &self,
+        from_backup: Option<&std::path::Path>,
+        new_key: bool,
+        yes_i_accept_data_loss: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let source =
+            validate_emergency_bootstrap_flags(from_backup, new_key, yes_i_accept_data_loss)?;
+
+        // Stub body. Safety gates beyond flag shape (live-service check,
+        // tarball structural validation, foreign-CA refusal) and the
+        // actual CA install land in follow-up slices. Mirrors the
+        // `force-reset` slicing pattern from #472/#473 and the
+        // `ca rotate` stub that sits at the same layer.
+        let description = source.description();
+        let message = format!(
+            "cluster ca emergency-bootstrap is not yet implemented ({description}). \
+             The CLI surface and flag-level safety gates have landed (#502); the \
+             live-service check, tarball validation, audit-log entry, and actual \
+             CA install / node cert regeneration ship in #503."
+        );
+
+        match format {
+            OutputFormat::Json => {
+                let payload = serde_json::json!({
+                    "status": "not_implemented",
+                    "source": description,
+                    "message": message,
+                });
+                eprintln!("{}", json::format(&payload)?);
+            }
+            OutputFormat::Table => {
+                eprintln!("neonfs cluster ca emergency-bootstrap: not yet implemented");
+                eprintln!();
+                eprintln!("  source: {description}");
+                eprintln!();
+                eprintln!("The CLI surface plus flag-level safety gates have landed (#502).");
+                eprintln!("The actual CA install — tarball extraction, atomic write to");
+                eprintln!("$NEONFS_TLS_DIR, and local node cert regeneration — ships in #503.");
+            }
+        }
+
+        Err(crate::error::CliError::RpcError(message))
+    }
+}
+
+/// Source of CA material for emergency-bootstrap, resolved from the CLI flags.
+#[derive(Debug, PartialEq, Eq)]
+enum EmergencyBootstrapSource<'a> {
+    /// Restore from an off-cluster CA backup tarball at this path.
+    Backup(&'a std::path::Path),
+    /// Generate a fresh CA in place. Destroys the existing trust chain.
+    NewKey,
+}
+
+impl<'a> EmergencyBootstrapSource<'a> {
+    fn description(&self) -> String {
+        match self {
+            Self::Backup(path) => format!("backup tarball at {}", path.display()),
+            Self::NewKey => "fresh CA (--new-key)".to_string(),
+        }
+    }
+}
+
+/// Flag-shape safety gates for `cluster ca emergency-bootstrap`.
+///
+/// Enforces:
+///   1. Exactly one of `--from-backup` / `--new-key` is set.
+///   2. `--yes-i-accept-data-loss` is present when `--new-key` is used.
+///
+/// Returns the resolved source on success. Downstream checks (live
+/// daemon refusal, tarball validation, foreign-CA match) are intentionally
+/// out of scope for this slice — see #503.
+fn validate_emergency_bootstrap_flags(
+    from_backup: Option<&std::path::Path>,
+    new_key: bool,
+    yes_i_accept_data_loss: bool,
+) -> Result<EmergencyBootstrapSource<'_>> {
+    use crate::error::CliError;
+
+    match (from_backup, new_key) {
+        (None, false) => Err(CliError::InvalidArgument(
+            "one of --from-backup <path> or --new-key must be given. \
+             --from-backup restores the CA from an off-cluster backup tarball; \
+             --new-key generates a fresh CA (destroys the existing trust chain)."
+                .to_string(),
+        )),
+        (Some(_), true) => Err(CliError::InvalidArgument(
+            "--from-backup and --new-key are mutually exclusive. \
+             Pick one: restore from backup, or generate fresh CA material."
+                .to_string(),
+        )),
+        (None, true) if !yes_i_accept_data_loss => Err(CliError::InvalidArgument(
+            "--new-key requires --yes-i-accept-data-loss. Generating a fresh CA \
+             invalidates every cert signed by the outgoing CA — every peer and \
+             client holding a cached cert must re-trust the new CA. Re-run with \
+             the flag once you have accepted the trust-chain reset."
+                .to_string(),
+        )),
+        (None, true) => Ok(EmergencyBootstrapSource::NewKey),
+        (Some(path), false) => Ok(EmergencyBootstrapSource::Backup(path)),
+    }
+}
+
+#[cfg(test)]
+mod emergency_bootstrap_tests {
+    use super::{validate_emergency_bootstrap_flags, EmergencyBootstrapSource};
+    use crate::error::CliError;
+    use std::path::Path;
+
+    #[test]
+    fn rejects_no_source() {
+        let err = validate_emergency_bootstrap_flags(None, false, false).unwrap_err();
+        match err {
+            CliError::InvalidArgument(msg) => {
+                assert!(
+                    msg.contains("--from-backup") && msg.contains("--new-key"),
+                    "error should name both source options, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_both_sources() {
+        let err = validate_emergency_bootstrap_flags(Some(Path::new("/tmp/ca.tar.gz")), true, true)
+            .unwrap_err();
+        match err {
+            CliError::InvalidArgument(msg) => {
+                assert!(msg.contains("mutually exclusive"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_new_key_without_data_loss_ack() {
+        let err = validate_emergency_bootstrap_flags(None, true, false).unwrap_err();
+        match err {
+            CliError::InvalidArgument(msg) => {
+                assert!(msg.contains("--yes-i-accept-data-loss"));
+                assert!(msg.contains("--new-key"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_new_key_with_data_loss_ack() {
+        let source = validate_emergency_bootstrap_flags(None, true, true).unwrap();
+        assert_eq!(source, EmergencyBootstrapSource::NewKey);
+    }
+
+    #[test]
+    fn accepts_from_backup_without_ack() {
+        let path = Path::new("/tmp/ca-backup.tar.gz");
+        let source = validate_emergency_bootstrap_flags(Some(path), false, false).unwrap();
+        assert_eq!(source, EmergencyBootstrapSource::Backup(path));
+    }
+
+    #[test]
+    fn accepts_from_backup_with_ack() {
+        // The acknowledgement is allowed with --from-backup (belt-and-braces)
+        // even though it is not required — an operator can choose to always
+        // pass it to make the audit trail explicit.
+        let path = Path::new("/tmp/ca-backup.tar.gz");
+        let source = validate_emergency_bootstrap_flags(Some(path), false, true).unwrap();
+        assert_eq!(source, EmergencyBootstrapSource::Backup(path));
+    }
+
+    #[test]
+    fn description_identifies_backup_path() {
+        let path = Path::new("/var/lib/neonfs/ca-backup-2026.tar.gz");
+        let source = EmergencyBootstrapSource::Backup(path);
+        let desc = source.description();
+        assert!(desc.contains("backup tarball"));
+        assert!(desc.contains("ca-backup-2026.tar.gz"));
+    }
+
+    #[test]
+    fn description_identifies_new_key() {
+        let desc = EmergencyBootstrapSource::NewKey.description();
+        assert!(desc.contains("fresh CA"));
+        assert!(desc.contains("--new-key"));
     }
 }
 
@@ -1000,11 +1235,8 @@ mod tests {
         }
 
         // --keep is required
-        let missing_keep = TestCli::try_parse_from([
-            "test",
-            "force-reset",
-            "--yes-i-accept-data-loss",
-        ]);
+        let missing_keep =
+            TestCli::try_parse_from(["test", "force-reset", "--yes-i-accept-data-loss"]);
         assert!(missing_keep.is_err());
 
         // Single --keep, default min-unreachable-seconds, with data-loss flag
@@ -1079,12 +1311,7 @@ mod tests {
 
         // Without --yes-i-accept-data-loss, flag is false but parse succeeds.
         // The local guard in force_reset() produces the refusal at runtime.
-        let no_flag = TestCli::try_parse_from([
-            "test",
-            "force-reset",
-            "--keep",
-            "host1",
-        ]);
+        let no_flag = TestCli::try_parse_from(["test", "force-reset", "--keep", "host1"]);
         assert!(no_flag.is_ok());
         if let Ok(parsed) = no_flag {
             match parsed.command {

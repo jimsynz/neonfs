@@ -370,6 +370,57 @@ mod tests {
     }
 
     #[test]
+    fn test_cluster_ca_emergency_bootstrap_from_backup() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "cluster",
+            "ca",
+            "emergency-bootstrap",
+            "--from-backup",
+            "/tmp/ca-backup.tar.gz",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_emergency_bootstrap_new_key_with_ack() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "cluster",
+            "ca",
+            "emergency-bootstrap",
+            "--new-key",
+            "--yes-i-accept-data-loss",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_emergency_bootstrap_accepts_both_source_flags_at_clap_layer() {
+        // Clap doesn't enforce mutual exclusion on these flags; runtime
+        // validation in `emergency_bootstrap` does. Parsing both is
+        // expected to succeed — rejection happens downstream.
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "cluster",
+            "ca",
+            "emergency-bootstrap",
+            "--from-backup",
+            "/tmp/ca.tar.gz",
+            "--new-key",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_emergency_bootstrap_no_source_parses() {
+        // Same principle: clap accepts the bare subcommand; the runtime
+        // validator refuses because no source was given.
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "emergency-bootstrap"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
     fn test_s3_create_credential() {
         let cli = Cli::try_parse_from(["neonfs-cli", "s3", "create-credential", "--user", "alice"]);
         assert!(cli.is_ok());
