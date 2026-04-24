@@ -865,6 +865,13 @@ impl CaCommand {
         let source =
             validate_emergency_bootstrap_flags(from_backup, new_key, yes_i_accept_data_loss)?;
 
+        // Live-service refusal: emergency-bootstrap must run against a
+        // stopped service. If the local `neonfs-core` daemon is running,
+        // the install would race its in-memory CA material and the
+        // daemon would continue serving with the stale chain. Detects
+        // the daemon via a TCP probe on its distribution port.
+        crate::commands::ca_bootstrap::refuse_if_daemon_live()?;
+
         // Safety-gate + install layer: when `--from-backup` is given,
         // validate the tarball (required files present, ca.crt parseable),
         // refuse if its embedded cluster name doesn't match this node's

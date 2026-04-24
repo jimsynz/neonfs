@@ -1,25 +1,20 @@
 //! Emergency CA bootstrap helpers (#503).
 //!
-//! This slice (B.1) carries the tarball **validation** layer that gates
-//! the real install. Install itself + node cert regeneration land in a
-//! follow-up (slice B.2). The validation layer is:
+//! Slice ordering (for future edits to this module):
 //!
-//!   1. Open the backup tarball (gzipped tar) and enumerate entries.
-//!   2. Confirm every expected member is present (`ca.crt`, `ca.key`,
-//!      `serial`, `crl.pem`).
-//!   3. Parse the CA certificate's subject and extract the cluster name
-//!      (`/O=NeonFS/CN=<cluster_name> CA`).
-//!   4. Read the local `cluster.json` and compare the cluster name with
-//!      the tarball's CA subject. Refuse if they disagree — an operator
-//!      pointing the wrong backup at the wrong cluster would overwrite
-//!      the current CA material with foreign certs.
+//!   - **B.1** (#503) — Tarball validation: open backup, enumerate
+//!     entries, confirm required members present, parse CA subject,
+//!     compare against local `cluster.json`.
+//!   - **B.2a** (#516) — Atomic on-disk install of validated members
+//!     to `$NEONFS_TLS_DIR/` via stage + fsync + rename.
+//!   - **B.2b.1** (#518) — Live-service refusal: TCP probe on the
+//!     distribution port read from `/run/neonfs/dist_port`. Refuses
+//!     the bootstrap if the daemon appears to be running.
 //!
-//! Kept deliberately out of scope:
-//!   - Live-service refusal (handled by the Rust CLI at step 0 via the
-//!     daemon connection check — see slice B.2).
-//!   - Atomic install, node cert regeneration, audit-log emission —
-//!     slice B.2.
-//!   - `--new-key` fresh-CA generation — slice B.2.
+//! Still deferred to follow-ups under #518:
+//!   - Node cert regeneration (needs rcgen for keypair + CSR signing).
+//!   - `--new-key` fresh-CA generation.
+//!   - Audit-log emission (JSONL at `$NEONFS_DATA_DIR/audit/…`).
 
 use crate::error::{CliError, Result};
 use flate2::read::GzDecoder;
@@ -104,6 +99,67 @@ pub fn local_cluster_name() -> Result<String> {
                 cluster_json.display()
             ))
         })
+}
+
+/// Refuse emergency-bootstrap if the local `neonfs-core` daemon appears
+/// to be running.
+///
+/// Detects the daemon by reading the distribution port from
+/// `/run/neonfs/dist_port` (overridable via the `NEONFS_DIST_PORT_FILE`
+/// env var, mostly for tests) and attempting a TCP connect. If the file
+/// is absent or the port is not responding, we treat that as "daemon is
+/// stopped" and allow the bootstrap to proceed.
+///
+/// The signal is deliberately permissive-on-absence — the port file is
+/// written by the release wrapper but may not exist in every deployment
+/// shape (operator-built releases, CI environments). False negatives on
+/// a running daemon are the worst outcome, so prefer refusal when the
+/// probe succeeds.
+pub fn refuse_if_daemon_live() -> Result<()> {
+    refuse_if_daemon_live_with(&read_dist_port, &probe_local_port)
+}
+
+type DistPortReader = dyn Fn() -> Option<u16>;
+type PortProber = dyn Fn(u16) -> bool;
+
+/// Test-seam variant of [`refuse_if_daemon_live`]. The public
+/// [`refuse_if_daemon_live`] wires the real filesystem + TCP probes.
+fn refuse_if_daemon_live_with(read_port: &DistPortReader, probe: &PortProber) -> Result<()> {
+    let Some(port) = read_port() else {
+        // No port file → treat as "daemon is stopped".
+        return Ok(());
+    };
+
+    if probe(port) {
+        Err(CliError::InvalidArgument(format!(
+            "neonfs-core daemon appears to be running on distribution port {port}. \
+             Stop the service (`systemctl stop neonfs-core` or equivalent) before \
+             running emergency-bootstrap — otherwise the daemon would continue \
+             holding stale CA material in memory after the install, and clients \
+             connecting during the window would see trust-chain errors."
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn read_dist_port() -> Option<u16> {
+    let path = std::env::var("NEONFS_DIST_PORT_FILE")
+        .unwrap_or_else(|_| "/run/neonfs/dist_port".to_string());
+    // audit:bounded dist_port is a single line of ASCII digits.
+    let contents = std::fs::read_to_string(&path).ok()?;
+    contents.trim().parse().ok()
+}
+
+fn probe_local_port(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let Ok(addr) = format!("127.0.0.1:{port}").parse::<SocketAddr>() else {
+        return false;
+    };
+
+    TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 
 /// Reject the backup if its CA belongs to a different cluster than this
@@ -444,6 +500,62 @@ FGS64EIpGW9fvwIhALGssHz1WS2xFXKoUHPlzvIQqBOrfTFFY8jlHJT3X/ru
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect(),
         }
+    }
+
+    #[test]
+    fn refuse_if_daemon_live_allows_when_port_file_missing() {
+        let read_port: &DistPortReader = &|| None;
+        let probe: &PortProber = &|_| unreachable!("probe should not run when port is absent");
+
+        assert!(refuse_if_daemon_live_with(read_port, probe).is_ok());
+    }
+
+    #[test]
+    fn refuse_if_daemon_live_allows_when_probe_fails() {
+        let read_port: &DistPortReader = &|| Some(12_345);
+        let probe: &PortProber = &|port| {
+            assert_eq!(port, 12_345);
+            false
+        };
+
+        assert!(refuse_if_daemon_live_with(read_port, probe).is_ok());
+    }
+
+    #[test]
+    fn refuse_if_daemon_live_refuses_when_probe_succeeds() {
+        let read_port: &DistPortReader = &|| Some(12_345);
+        let probe: &PortProber = &|_port| true;
+
+        let err = refuse_if_daemon_live_with(read_port, probe).unwrap_err();
+        match err {
+            CliError::InvalidArgument(msg) => {
+                assert!(msg.contains("daemon appears to be running"));
+                assert!(msg.contains("12345"));
+                assert!(msg.contains("Stop the service"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_dist_port_from_env_override() {
+        let dir = TempDir::new().unwrap();
+        let port_file = dir.path().join("dist_port");
+        std::fs::write(&port_file, "9568\n").unwrap();
+
+        let old = std::env::var("NEONFS_DIST_PORT_FILE").ok();
+        unsafe {
+            std::env::set_var("NEONFS_DIST_PORT_FILE", &port_file);
+        }
+
+        let port = read_dist_port();
+
+        match old {
+            Some(v) => unsafe { std::env::set_var("NEONFS_DIST_PORT_FILE", v) },
+            None => unsafe { std::env::remove_var("NEONFS_DIST_PORT_FILE") },
+        }
+
+        assert_eq!(port, Some(9568));
     }
 
     #[test]
