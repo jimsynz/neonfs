@@ -534,8 +534,13 @@ jobs:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged --device /dev/fuse
     steps:
-      - name: Install FUSE and loopback dependencies
-        run: apt-get update && apt-get install -y --no-install-recommends libfuse3-dev fuse3 e2fsprogs mount && rm -rf /var/lib/apt/lists/*
+      - name: Install FUSE, loopback, and Docker dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libfuse3-dev fuse3 e2fsprogs mount \
+            docker.io iptables
+          rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v6
 
@@ -572,6 +577,25 @@ jobs:
           for i in $(seq 0 63); do
             [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
           done
+
+      - name: Start Docker daemon (dind for the VolumeDriver e2e test, #312)
+        run: |
+          dockerd --host=unix:///var/run/docker.sock \
+            --storage-driver=vfs \
+            --iptables=false --ip-masq=false --bridge=none \
+            >/tmp/dockerd.log 2>&1 &
+          # Wait up to 30s for the socket to come up
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "Docker daemon ready after ${i}s"
+              docker version
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Docker daemon failed to start. Tail of log:"
+          tail -100 /tmp/dockerd.log
+          exit 1
 
       - name: Check
         working-directory: neonfs_integration
