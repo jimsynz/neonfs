@@ -38,7 +38,9 @@ x509-parser = "0.18"
 
 # CA emergency-bootstrap node cert regeneration (#518)
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
-time = "0.3"  # For CRL this_update / next_update timestamps in --new-key path (#518)
+time = { version = "0.3", features = ["formatting"] }  # CRL timestamps + RFC3339 audit log (#518)
+sha2 = "0.10"  # CA fingerprints in emergency-bootstrap audit log (#518)
+libc = "0.2"   # getuid() for emergency-bootstrap audit log (#518)
 
 [dev-dependencies]
 tempfile = "3"

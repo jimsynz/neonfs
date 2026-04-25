@@ -25,14 +25,20 @@
 //!     install step and [`regenerate_node_cert`] for the post-install
 //!     node cert.
 //!
-//! Still deferred to follow-ups under #518:
-//!   - Audit-log emission (JSONL at `$NEONFS_DATA_DIR/audit/…`).
+//!   - **B.2b.4** (#518) — Audit-log emission: append a single
+//!     `cluster_ca_emergency_bootstrap_completed` JSONL line to
+//!     `$NEONFS_DATA_DIR/audit/emergency-bootstrap.log` after a
+//!     successful install. Captures cluster id, source, before/after
+//!     CA fingerprints, operator UID, RFC-3339 timestamp. The daemon
+//!     can ingest this file on next start (consumer side tracks
+//!     separately).
 
 use crate::error::{CliError, Result};
 use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Archive;
 
@@ -476,6 +482,175 @@ pub fn read_installed_serial(tls_dir: &Path) -> Option<u64> {
     // audit:bounded serial file is a single line of ASCII digits.
     let raw = std::fs::read_to_string(&path).ok()?;
     raw.trim().parse().ok()
+}
+
+/// Source of CA material for the audit-log entry. Mirrors the CLI flag
+/// shape, not the in-memory `EmergencyBootstrapSource` enum (which is
+/// `cluster.rs`-private and carries borrowed paths).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditSource {
+    /// `--from-backup <path>`. Path is recorded as a string so the
+    /// audit log entry stays serialisable across the function boundary.
+    Backup(String),
+    /// `--new-key`. No additional payload.
+    NewKey,
+}
+
+impl AuditSource {
+    fn as_audit_string(&self) -> String {
+        match self {
+            AuditSource::Backup(path) => format!("backup:{path}"),
+            AuditSource::NewKey => "new_key".to_string(),
+        }
+    }
+}
+
+/// Compute the SHA-256 fingerprint of the DER inside a PEM-encoded
+/// certificate. Returns the lowercase hex string — the same format
+/// `openssl x509 -fingerprint -sha256` emits (minus the `SHA256
+/// Fingerprint=` prefix and colons).
+///
+/// Returns `None` if the bytes are not parseable PEM.
+pub fn ca_fingerprint_from_pem(pem: &[u8]) -> Option<String> {
+    let (_, pem_obj) = x509_parser::pem::parse_x509_pem(pem).ok()?;
+    let digest = Sha256::digest(&pem_obj.contents);
+    Some(hex::encode(digest))
+}
+
+/// Read `$tls_dir/ca.crt` and compute its SHA-256 DER fingerprint, if
+/// the file exists and parses. Returns `None` for any failure mode.
+/// Callers use this to capture the OUTGOING fingerprint *before*
+/// `install_ca_material` overwrites the file.
+pub fn read_ca_fingerprint(tls_dir: &Path) -> Option<String> {
+    let path = tls_dir.join("ca.crt");
+    // audit:bounded ca.crt is a single PEM cert (tens of KB ceiling).
+    let pem = std::fs::read(&path).ok()?;
+    ca_fingerprint_from_pem(&pem)
+}
+
+/// Append a `cluster_ca_emergency_bootstrap_completed` JSON line to
+/// `$NEONFS_DATA_DIR/audit/emergency-bootstrap.log`.
+///
+/// The audit log is best-effort — the install + node-cert-regen have
+/// already landed on disk before this function runs, and we should not
+/// roll those back on a logging failure. Any `io_err` here is surfaced
+/// to the caller, which decides whether to treat it as fatal (current
+/// behaviour: warn but succeed, since the install is the operator's
+/// objective).
+///
+/// The file is created with parents-as-needed; subsequent runs append
+/// (no truncation). Each line is one self-contained JSON object —
+/// future ingestion tooling can `read_to_string` and `split('\n')`.
+pub fn write_audit_log_entry(
+    data_dir: &Path,
+    cluster_id: &str,
+    source: AuditSource,
+    old_ca_fingerprint: Option<&str>,
+    new_ca_fingerprint: &str,
+    operator_uid: u32,
+    timestamp_rfc3339: &str,
+) -> Result<()> {
+    let audit_dir = data_dir.join("audit");
+    fs::create_dir_all(&audit_dir).map_err(|e| io_err("create audit directory", &audit_dir, e))?;
+
+    let log_path = audit_dir.join("emergency-bootstrap.log");
+
+    let entry = serde_json::json!({
+        "event": "cluster_ca_emergency_bootstrap_completed",
+        "cluster_id": cluster_id,
+        "source": source.as_audit_string(),
+        "old_ca_fingerprint": old_ca_fingerprint,
+        "new_ca_fingerprint": new_ca_fingerprint,
+        "operator_uid": operator_uid,
+        "timestamp": timestamp_rfc3339,
+    });
+
+    let mut line = serde_json::to_string(&entry)
+        .map_err(|e| CliError::InvalidArgument(format!("failed to serialise audit entry: {e}")))?;
+    line.push('\n');
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| io_err("open audit log", &log_path, e))?;
+
+    file.write_all(line.as_bytes())
+        .map_err(|e| io_err("append audit log entry", &log_path, e))?;
+
+    file.sync_all()
+        .map_err(|e| io_err("fsync audit log", &log_path, e))?;
+
+    Ok(())
+}
+
+/// Read `cluster_id` from the local `cluster.json`. Mirrors
+/// [`local_cluster_name`] but extracts the `cluster_id` field, which
+/// is what the audit log entry pins.
+pub fn local_cluster_id() -> Result<String> {
+    let cluster_json = local_cluster_json_path();
+    // audit:bounded cluster.json is a NeonFS-written config (not user data).
+    let contents = std::fs::read_to_string(&cluster_json).map_err(|e| {
+        CliError::InvalidArgument(format!(
+            "cannot read local cluster state at {}: {e}.",
+            cluster_json.display()
+        ))
+    })?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&contents).map_err(|e| {
+        CliError::InvalidArgument(format!(
+            "local cluster state at {} is not valid JSON: {e}",
+            cluster_json.display()
+        ))
+    })?;
+
+    parsed
+        .get("cluster_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            CliError::InvalidArgument(format!(
+                "local cluster state at {} is missing the `cluster_id` field.",
+                cluster_json.display()
+            ))
+        })
+}
+
+/// Resolve `$NEONFS_DATA_DIR` (default `/var/lib/neonfs`) — re-exposed
+/// so `cluster.rs` can pass it to [`write_audit_log_entry`] without
+/// duplicating the env-fallback logic.
+pub fn data_dir() -> PathBuf {
+    PathBuf::from(std::env::var("NEONFS_DATA_DIR").unwrap_or_else(|_| DEFAULT_DATA_DIR.to_string()))
+}
+
+/// Return the current process's real user ID via `libc::getuid()`.
+/// Wrapped here so audit-log call sites do not embed an `unsafe`
+/// block of their own and so tests can replace the value via the
+/// `NEONFS_AUDIT_OPERATOR_UID` env override (set by the integration
+/// suite to make assertions deterministic).
+pub fn operator_uid() -> u32 {
+    if let Ok(raw) = std::env::var("NEONFS_AUDIT_OPERATOR_UID") {
+        if let Ok(parsed) = raw.parse::<u32>() {
+            return parsed;
+        }
+    }
+
+    // SAFETY: getuid() is documented as always-succeeds on Linux/POSIX.
+    // It does no allocation and has no side effects.
+    unsafe { libc::getuid() }
+}
+
+/// Format the current UTC time in RFC-3339. Pulled out so tests can
+/// override via the `NEONFS_AUDIT_TIMESTAMP` env var (set to a fixed
+/// value by integration / CLI tests so assertions are deterministic).
+pub fn audit_timestamp() -> String {
+    if let Ok(fixed) = std::env::var("NEONFS_AUDIT_TIMESTAMP") {
+        return fixed;
+    }
+
+    let now = time::OffsetDateTime::now_utc();
+    now.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| now.unix_timestamp().to_string())
 }
 
 /// Helper that writes a batch of files atomically per-file via stage +
@@ -1348,5 +1523,222 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
         // audit:bounded serial file is a single line of ASCII digits.
         let on_disk = std::fs::read_to_string(tls_dir.join("serial")).unwrap();
         assert_eq!(on_disk.trim(), "1002");
+    }
+
+    // ─── #518 B.2b.4: audit-log JSONL emission ─────────────────────
+
+    #[test]
+    fn ca_fingerprint_from_pem_returns_lowercase_hex_sha256() {
+        let fp = ca_fingerprint_from_pem(PARITY_CA_PEM).unwrap();
+        // 64 lowercase hex chars (SHA-256 = 32 bytes).
+        assert_eq!(fp.len(), 64);
+        assert!(
+            fp.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "fingerprint not lowercase hex: {fp}"
+        );
+
+        // Same bytes → same fingerprint (function is deterministic).
+        let fp2 = ca_fingerprint_from_pem(PARITY_CA_PEM).unwrap();
+        assert_eq!(fp, fp2);
+    }
+
+    #[test]
+    fn ca_fingerprint_from_pem_returns_none_for_garbage() {
+        assert!(ca_fingerprint_from_pem(b"not a pem").is_none());
+    }
+
+    #[test]
+    fn read_ca_fingerprint_returns_none_when_file_missing() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        std::fs::create_dir_all(&tls_dir).unwrap();
+        // No ca.crt written.
+        assert!(read_ca_fingerprint(&tls_dir).is_none());
+    }
+
+    #[test]
+    fn read_ca_fingerprint_matches_computed_fingerprint() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        std::fs::create_dir_all(&tls_dir).unwrap();
+        std::fs::write(tls_dir.join("ca.crt"), PARITY_CA_PEM).unwrap();
+
+        let on_disk = read_ca_fingerprint(&tls_dir).unwrap();
+        let computed = ca_fingerprint_from_pem(PARITY_CA_PEM).unwrap();
+        assert_eq!(on_disk, computed);
+    }
+
+    #[test]
+    fn audit_source_serialises_to_canonical_string() {
+        assert_eq!(AuditSource::NewKey.as_audit_string(), "new_key");
+        assert_eq!(
+            AuditSource::Backup("/var/backups/ca-2026-04-25.tar.gz".to_string()).as_audit_string(),
+            "backup:/var/backups/ca-2026-04-25.tar.gz"
+        );
+    }
+
+    #[test]
+    fn write_audit_log_entry_appends_jsonl_with_all_fields() {
+        let dir = TempDir::new().unwrap();
+
+        write_audit_log_entry(
+            dir.path(),
+            "cluster-abc",
+            AuditSource::NewKey,
+            Some("oldfp"),
+            "newfp",
+            1234,
+            "2026-04-25T13:00:00Z",
+        )
+        .unwrap();
+
+        let log_path = dir.path().join("audit").join("emergency-bootstrap.log");
+        // audit:bounded test-only; small JSONL written by this test.
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.ends_with('\n'), "missing trailing newline");
+
+        let line = contents.trim_end();
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed["event"], "cluster_ca_emergency_bootstrap_completed");
+        assert_eq!(parsed["cluster_id"], "cluster-abc");
+        assert_eq!(parsed["source"], "new_key");
+        assert_eq!(parsed["old_ca_fingerprint"], "oldfp");
+        assert_eq!(parsed["new_ca_fingerprint"], "newfp");
+        assert_eq!(parsed["operator_uid"], 1234);
+        assert_eq!(parsed["timestamp"], "2026-04-25T13:00:00Z");
+    }
+
+    #[test]
+    fn write_audit_log_entry_appends_without_truncating() {
+        let dir = TempDir::new().unwrap();
+
+        for i in 0..3 {
+            write_audit_log_entry(
+                dir.path(),
+                "cluster-abc",
+                AuditSource::NewKey,
+                None,
+                &format!("fp-{i}"),
+                0,
+                "2026-04-25T13:00:00Z",
+            )
+            .unwrap();
+        }
+
+        let log_path = dir.path().join("audit").join("emergency-bootstrap.log");
+        // audit:bounded test-only; small JSONL written by this test.
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = contents.trim_end().split('\n').collect();
+        assert_eq!(lines.len(), 3, "expected three appended lines");
+
+        for (i, line) in lines.iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(parsed["new_ca_fingerprint"], format!("fp-{i}"));
+        }
+    }
+
+    #[test]
+    fn write_audit_log_entry_emits_null_for_missing_old_fingerprint() {
+        let dir = TempDir::new().unwrap();
+
+        write_audit_log_entry(
+            dir.path(),
+            "c",
+            AuditSource::Backup("/tmp/x.tar.gz".to_string()),
+            None,
+            "newfp",
+            0,
+            "t",
+        )
+        .unwrap();
+
+        let log_path = dir.path().join("audit").join("emergency-bootstrap.log");
+        // audit:bounded test-only; single JSONL line.
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(contents.trim_end()).unwrap();
+        assert!(parsed["old_ca_fingerprint"].is_null());
+        assert_eq!(parsed["source"], "backup:/tmp/x.tar.gz");
+    }
+
+    #[test]
+    fn local_cluster_id_reads_field() {
+        let dir = TempDir::new().unwrap();
+        let meta_dir = dir.path().join("meta");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let cluster_json = meta_dir.join("cluster.json");
+
+        let mut f = File::create(&cluster_json).unwrap();
+        f.write_all(br#"{"cluster_name":"prod","cluster_id":"abc-123"}"#)
+            .unwrap();
+
+        let old = std::env::var("NEONFS_DATA_DIR").ok();
+        unsafe {
+            std::env::set_var("NEONFS_DATA_DIR", dir.path());
+        }
+
+        let id = local_cluster_id();
+
+        match old {
+            Some(v) => unsafe { std::env::set_var("NEONFS_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("NEONFS_DATA_DIR") },
+        }
+
+        assert_eq!(id.unwrap(), "abc-123");
+    }
+
+    #[test]
+    fn operator_uid_honours_env_override() {
+        let old = std::env::var("NEONFS_AUDIT_OPERATOR_UID").ok();
+        unsafe {
+            std::env::set_var("NEONFS_AUDIT_OPERATOR_UID", "9999");
+        }
+
+        let uid = operator_uid();
+
+        match old {
+            Some(v) => unsafe { std::env::set_var("NEONFS_AUDIT_OPERATOR_UID", v) },
+            None => unsafe { std::env::remove_var("NEONFS_AUDIT_OPERATOR_UID") },
+        }
+
+        assert_eq!(uid, 9999);
+    }
+
+    #[test]
+    fn audit_timestamp_honours_env_override() {
+        let old = std::env::var("NEONFS_AUDIT_TIMESTAMP").ok();
+        unsafe {
+            std::env::set_var("NEONFS_AUDIT_TIMESTAMP", "2026-04-25T00:00:00Z");
+        }
+
+        let ts = audit_timestamp();
+
+        match old {
+            Some(v) => unsafe { std::env::set_var("NEONFS_AUDIT_TIMESTAMP", v) },
+            None => unsafe { std::env::remove_var("NEONFS_AUDIT_TIMESTAMP") },
+        }
+
+        assert_eq!(ts, "2026-04-25T00:00:00Z");
+    }
+
+    #[test]
+    fn audit_timestamp_default_is_rfc3339_when_no_override() {
+        // No env override: should produce something parseable as RFC-3339.
+        let prior = std::env::var("NEONFS_AUDIT_TIMESTAMP").ok();
+        unsafe {
+            std::env::remove_var("NEONFS_AUDIT_TIMESTAMP");
+        }
+
+        let ts = audit_timestamp();
+
+        if let Some(v) = prior {
+            unsafe {
+                std::env::set_var("NEONFS_AUDIT_TIMESTAMP", v);
+            }
+        }
+
+        let parsed =
+            time::OffsetDateTime::parse(&ts, &time::format_description::well_known::Rfc3339);
+        assert!(parsed.is_ok(), "default timestamp `{ts}` is not RFC-3339");
     }
 }

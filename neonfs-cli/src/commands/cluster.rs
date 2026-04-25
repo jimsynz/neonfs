@@ -879,7 +879,13 @@ impl CaCommand {
         // pipeline.
         let tls_dir = crate::tls::tls_dir();
 
-        let installed_cluster = match &source {
+        // Capture the OUTGOING CA fingerprint *before* the install
+        // overwrites `$tls_dir/ca.crt`. `None` when the operator is
+        // bootstrapping from a tls_dir that has no prior CA on disk
+        // — that is a legitimate first-recovery state.
+        let old_ca_fingerprint = crate::commands::ca_bootstrap::read_ca_fingerprint(&tls_dir);
+
+        let (installed_cluster, audit_source) = match &source {
             EmergencyBootstrapSource::Backup(path) => {
                 let validation = crate::commands::ca_bootstrap::validate_backup_tarball(path)?;
                 let local_name = crate::commands::ca_bootstrap::local_cluster_name()?;
@@ -887,7 +893,9 @@ impl CaCommand {
                     crate::commands::ca_bootstrap::refuse_foreign_backup(validation, &local_name)?;
                 crate::commands::ca_bootstrap::install_ca_material(&validation, &tls_dir)?;
                 crate::commands::ca_bootstrap::regenerate_node_cert(&tls_dir)?;
-                validation.cluster_name
+                let audit_source =
+                    crate::commands::ca_bootstrap::AuditSource::Backup(path.display().to_string());
+                (validation.cluster_name, audit_source)
             }
             EmergencyBootstrapSource::NewKey => {
                 let local_name = crate::commands::ca_bootstrap::local_cluster_name()?;
@@ -899,9 +907,24 @@ impl CaCommand {
                 )?;
                 crate::commands::ca_bootstrap::install_ca_material(&validation, &tls_dir)?;
                 crate::commands::ca_bootstrap::regenerate_node_cert(&tls_dir)?;
-                validation.cluster_name
+                (
+                    validation.cluster_name,
+                    crate::commands::ca_bootstrap::AuditSource::NewKey,
+                )
             }
         };
+
+        // Emit the audit-log entry. Best-effort — install already
+        // succeeded; logging failure is reported but does not roll the
+        // install back. `cluster_id` and the new CA fingerprint are
+        // read from the freshly-installed material on disk.
+        if let Err(e) = emit_audit_log_entry(&tls_dir, &audit_source, old_ca_fingerprint.as_deref())
+        {
+            eprintln!(
+                "warning: cluster ca emergency-bootstrap install succeeded but audit-log write failed: {e}. \
+                 The CA + node cert are on disk; restart `neonfs-core` to pick up the new chain."
+            );
+        }
 
         let description = source.description();
         let message = format!(
@@ -931,6 +954,40 @@ impl CaCommand {
 
         Ok(())
     }
+}
+
+/// Glue between the install pipeline and the audit-log writer:
+/// reads the freshly-installed `ca.crt` to compute the new fingerprint,
+/// reads `cluster_id` from `cluster.json`, captures operator UID and
+/// timestamp, and appends a JSONL line via
+/// [`crate::commands::ca_bootstrap::write_audit_log_entry`].
+fn emit_audit_log_entry(
+    tls_dir: &std::path::Path,
+    audit_source: &crate::commands::ca_bootstrap::AuditSource,
+    old_ca_fingerprint: Option<&str>,
+) -> Result<()> {
+    let new_ca_fingerprint = crate::commands::ca_bootstrap::read_ca_fingerprint(tls_dir)
+        .ok_or_else(|| {
+            crate::error::CliError::InvalidArgument(format!(
+                "cannot compute fingerprint of newly-installed CA at {}",
+                tls_dir.join("ca.crt").display()
+            ))
+        })?;
+
+    let cluster_id = crate::commands::ca_bootstrap::local_cluster_id()?;
+    let data_dir = crate::commands::ca_bootstrap::data_dir();
+    let operator_uid = crate::commands::ca_bootstrap::operator_uid();
+    let timestamp = crate::commands::ca_bootstrap::audit_timestamp();
+
+    crate::commands::ca_bootstrap::write_audit_log_entry(
+        &data_dir,
+        &cluster_id,
+        audit_source.clone(),
+        old_ca_fingerprint,
+        &new_ca_fingerprint,
+        operator_uid,
+        &timestamp,
+    )
 }
 
 /// Source of CA material for emergency-bootstrap, resolved from the CLI flags.
