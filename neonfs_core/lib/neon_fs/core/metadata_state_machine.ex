@@ -73,8 +73,11 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:delete_s3_credential, access_key_id :: String.t()}
           | {:put_escalation, escalation_data :: map()}
           | {:delete_escalation, escalation_id :: String.t()}
-          | {:kv_put, key :: binary(), value :: term()}
-          | {:kv_delete, key :: binary()}
+          | {:kv_put, key :: term(), value :: term()}
+          | {:kv_put, key :: term(), value :: term(), overwrite? :: boolean()}
+          | {:kv_delete, key :: term()}
+          | {:kv_update, key :: term(), fun :: (term() -> term()),
+             default :: :none | {:some, term()}}
           | {:claim_namespace_path, path :: String.t(), scope :: namespace_scope(),
              holder :: term()}
           | {:claim_namespace_subtree, path :: String.t(), scope :: namespace_scope(),
@@ -169,7 +172,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           volume_acls: %{optional(binary()) => map()},
           s3_credentials: %{optional(String.t()) => map()},
           escalations: %{optional(String.t()) => map()},
-          kv: %{optional(binary()) => term()},
+          kv: %{optional(term()) => term()},
           namespace_claims: %{optional(String.t()) => namespace_claim()},
           namespace_claim_seq: non_neg_integer(),
           drives: %{optional(String.t()) => drive_entry()},
@@ -265,8 +268,20 @@ defmodule NeonFS.Core.MetadataStateMachine do
   machine. Used by `NeonFS.Core.KVStore` to serve reads through
   `:ra.local_query`.
   """
-  @spec get_kv(state()) :: %{optional(binary()) => term()}
+  @spec get_kv(state()) :: %{optional(term()) => term()}
   def get_kv(state), do: Map.get(state, :kv, %{})
+
+  @doc """
+  Returns every `{key, value}` pair from the generic KV table for
+  which `filter` returns a truthy value. Runs inside the Ra read so
+  the full table never crosses the wire.
+  """
+  @spec kv_query(state(), ({term(), term()} -> as_boolean(term()))) :: [{term(), term()}]
+  def kv_query(state, filter) when is_function(filter, 1) do
+    state
+    |> Map.get(:kv, %{})
+    |> Enum.filter(filter)
+  end
 
   @doc """
   Returns the bootstrap-layer drive table — `drive_id => drive_entry`.
@@ -1238,12 +1253,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  # Generic KV commands (new in v10) — replace the IAM-specific
-  # primitives added in v9 with a single flat binary-keyed map.
-  # Consumers that need namespacing pick key prefixes of their own
-  # (e.g. `"iam_user:<uuid>"`) and scan with `KVStore.list_prefix/1`.
+  # Generic KV commands. Keys are arbitrary terms — the state machine
+  # only requires them to be valid map keys (which all Erlang terms
+  # are). Consumers that need namespacing pick a convention of their
+  # own (e.g. `{User, id}`) and use `KVStore.query/2` to scan.
 
-  def apply(_meta, {:kv_put, key, value}, state) when is_binary(key) do
+  # Legacy 3-tuple form, retained so pre-overwrite-flag log entries and
+  # snapshots still apply cleanly. Equivalent to `overwrite?: true`.
+  def apply(meta, {:kv_put, key, value}, state) do
+    __MODULE__.apply(meta, {:kv_put, key, value, true}, state)
+  end
+
+  def apply(_meta, {:kv_put, key, value, true}, state) do
     state = ensure_kv(state)
     new_state = %{state | kv: Map.put(state.kv, key, value), version: state.version + 1}
 
@@ -1256,7 +1277,25 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  def apply(_meta, {:kv_delete, key}, state) when is_binary(key) do
+  def apply(_meta, {:kv_put, key, value, false}, state) do
+    state = ensure_kv(state)
+
+    if Map.has_key?(state.kv, key) do
+      {state, {:error, :key_exists}, []}
+    else
+      new_state = %{state | kv: Map.put(state.kv, key, value), version: state.version + 1}
+
+      :telemetry.execute(
+        [:neonfs, :ra, :command, :kv_put],
+        %{version: new_state.version},
+        %{key: key}
+      )
+
+      {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:kv_delete, key}, state) do
     state = ensure_kv(state)
     new_state = %{state | kv: Map.delete(state.kv, key), version: state.version + 1}
 
@@ -1267,6 +1306,24 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {new_state, :ok, []}
+  end
+
+  # The fun runs on every replica during apply, so it must be
+  # deterministic and free of side effects — non-determinism here will
+  # diverge state across the cluster.
+  def apply(_meta, {:kv_update, key, fun, default_marker}, state) when is_function(fun, 1) do
+    state = ensure_kv(state)
+
+    case {Map.fetch(state.kv, key), default_marker} do
+      {{:ok, current}, _} ->
+        kv_update_apply(state, key, fun, current)
+
+      {:error, {:some, default}} ->
+        kv_update_apply(state, key, fun, default)
+
+      {:error, :none} ->
+        {state, {:error, :not_found}, []}
+    end
   end
 
   # Namespace coordinator commands (new in v12, sub-issue #300 of #226)
@@ -2159,6 +2216,19 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   defp in_subtree?(path, root) do
     path == root or String.starts_with?(path, root <> "/")
+  end
+
+  defp kv_update_apply(state, key, fun, input) do
+    new_value = fun.(input)
+    new_state = %{state | kv: Map.put(state.kv, key, new_value), version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :kv_update],
+      %{version: new_state.version},
+      %{key: key}
+    )
+
+    {new_state, {:ok, new_value}, []}
   end
 
   defp upsert_acl_entry(entries, principal, new_entry) do

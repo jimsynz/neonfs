@@ -85,10 +85,15 @@ defmodule NeonFS.Client.Router do
 
   @doc """
   Routes a metadata call, preferring the Ra leader when possible.
+
+  ## Options
+
+    * `:timeout` — RPC timeout in ms (default: 10_000).
   """
-  @spec metadata_call(module(), atom(), [term()]) :: term()
-  def metadata_call(module, function, args) do
-    do_call(module, function, args, 10_000, @max_retries, prefer_leader: true)
+  @spec metadata_call(module(), atom(), [term()], keyword()) :: term()
+  def metadata_call(module, function, args, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 10_000)
+    do_call(module, function, args, timeout, @max_retries, prefer_leader: true)
   end
 
   ## Private helpers — data_call
