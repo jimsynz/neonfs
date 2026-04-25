@@ -17,6 +17,8 @@ defmodule NeonFS.Error do
     * `NeonFS.Error.VolumeNotFound`
     * `NeonFS.Error.FileNotFound`
     * `NeonFS.Error.ChunkNotFound`
+    * `NeonFS.Error.KeyNotFound`
+    * `NeonFS.Error.KeyExists`
     * `NeonFS.Error.QuorumUnavailable`
     * `NeonFS.Error.PermissionDenied`
     * `NeonFS.Error.InvalidPath`
