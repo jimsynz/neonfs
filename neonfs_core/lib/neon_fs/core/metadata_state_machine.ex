@@ -11,8 +11,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
   - Volume ACLs (UID/GID-based permission entries)
   - General key-value data (volume-level metadata)
   - Generic cluster-wide KV store (`NeonFS.Core.KVStore`, v10). Used by
-    orchestration-layer packages (e.g. `neonfs_iam`) that need durable
-    Ra-replicated storage without depending on `neonfs_core` directly.
+    orchestration-layer packages that need durable Ra-replicated storage
+    without depending on `neonfs_core` directly.
 
   Also retains chunk, file, and stripe metadata for backward compatibility.
   These will move to quorum-based BlobStore storage (Tier 2/3) in Phase 5

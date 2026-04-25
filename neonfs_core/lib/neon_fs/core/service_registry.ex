@@ -3,7 +3,7 @@ defmodule NeonFS.Core.ServiceRegistry do
   Registry for cluster service instances.
 
   Tracks which nodes are running which services (core, fuse, nfs, s3,
-  webdav, docker, iam).
+  webdav, docker).
   Backed entirely by Ra: reads go through `RaSupervisor.local_query/2`
   against the `MetadataStateMachine`; writes go through Raft consensus
   via `RaSupervisor.command/2`. There is no ETS cache — every query

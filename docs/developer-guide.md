@@ -14,7 +14,6 @@ NeonFS is a multi-package umbrella project. Each package is a separate Mix proje
 neonfs/
 ├── neonfs_client/          # Shared types, service discovery, transport pool, ChunkReader
 ├── neonfs_core/            # Storage engine, metadata, Ra consensus, cluster CA, policy
-├── neonfs_iam/             # Identity, groups, policies (in progress)
 ├── neonfs_fuse/            # FUSE filesystem daemon
 ├── neonfs_nfs/             # NFSv3 + NLM v4 server
 ├── neonfs_s3/              # S3-compatible HTTP gateway
@@ -34,7 +33,6 @@ neonfs/
 
 ```
 neonfs_client  ← neonfs_core
-neonfs_client  ← neonfs_iam
 neonfs_client  ← neonfs_fuse
 neonfs_client  ← neonfs_nfs
 neonfs_client  ← neonfs_s3
