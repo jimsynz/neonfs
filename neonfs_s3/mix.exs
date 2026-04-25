@@ -65,10 +65,10 @@ defmodule NeonFS.S3.MixProject do
   defp deps do
     [
       {:bandit, "~> 1.5"},
+      {:firkin, "~> 0.2.1"},
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
       {:plug, "~> 1.15"},
-      {:firkin, "~> 0.2.1"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test
