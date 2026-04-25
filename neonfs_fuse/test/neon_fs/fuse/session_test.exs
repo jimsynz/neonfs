@@ -574,6 +574,179 @@ defmodule NeonFS.FUSE.SessionTest do
 
   # ——— End mutation metadata opcodes —————————————————————————————
 
+  # ——— Data-path opcodes (#576) ————————————————————————————————————
+
+  describe "WRITE" do
+    setup do
+      ctx = setup_session_with_handler()
+      _ = handshake!(ctx)
+      send(ctx.handler, {:set_session, ctx.session})
+
+      :ok =
+        StubHandler.set_replies(ctx.handler, %{
+          "write" => fn {"write", params} ->
+            {"write_ok", %{"size" => byte_size(params["data"])}}
+          end
+        })
+
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "translates a single frame's payload into Handler params verbatim", ctx do
+      payload = :binary.copy("Z", 8)
+      header = build_in_header(opcode: opcode(:write), len: 40 + 40 + 8, unique: 91, nodeid: 7)
+
+      body = <<
+        # fh
+        0::little-64,
+        # offset
+        128::little-64,
+        # size
+        8::little-32,
+        # write_flags
+        0::little-32,
+        # lock_owner
+        0::little-64,
+        # flags
+        0::little-32,
+        # pad
+        0::little-32,
+        payload::binary
+      >>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, reply} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      assert out.unique == 91
+      # `fuse_write_out` is 8 bytes (size + padding).
+      assert byte_size(reply) == 8
+      assert <<8::little-32, 0::little-32>> = reply
+
+      [{"write", params}] = StubHandler.received_ops(ctx.handler)
+      assert params["ino"] == 7
+      assert params["offset"] == 128
+      assert params["data"] == payload
+    end
+
+    test "passes data straight through without buffering across frames", ctx do
+      # The streaming invariant the issue asks us to protect: a
+      # single frame is bounded by `max_write` (negotiated 64 KiB).
+      # If the session ever materialised the *whole file* in one
+      # buffer it would have to span multiple frames — so all we can
+      # check at this layer is that two sequential frames each only
+      # carry their own bytes through, never accumulated.
+      payload_a = :binary.copy("A", 32)
+      payload_b = :binary.copy("B", 32)
+
+      send_write = fn unique, offset, payload ->
+        header =
+          build_in_header(
+            opcode: opcode(:write),
+            len: 40 + 40 + byte_size(payload),
+            unique: unique,
+            nodeid: 7
+          )
+
+        body = <<
+          0::little-64,
+          offset::little-64,
+          byte_size(payload)::little-32,
+          0::little-32,
+          0::little-64,
+          0::little-32,
+          0::little-32,
+          payload::binary
+        >>
+
+        :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+      end
+
+      send_write.(101, 0, payload_a)
+      assert {:ok, _, _} = receive_response(ctx.kernel_fd)
+
+      send_write.(102, 32, payload_b)
+      assert {:ok, _, _} = receive_response(ctx.kernel_fd)
+
+      [{"write", first}, {"write", second}] = StubHandler.received_ops(ctx.handler)
+      assert first["data"] == payload_a
+      assert second["data"] == payload_b
+    end
+  end
+
+  describe "CREATE" do
+    setup do
+      ctx = setup_session_with_handler()
+      _ = handshake!(ctx)
+      send(ctx.handler, {:set_session, ctx.session})
+
+      :ok =
+        StubHandler.set_replies(ctx.handler, %{
+          "create" => fn {"create", params} ->
+            {"entry_ok",
+             %{
+               "ino" => 1234,
+               "size" => 0,
+               "kind" => "file",
+               "fh" => 1234,
+               "_received_mode" => params["mode"]
+             }}
+          end
+        })
+
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "applies umask and emits a combined fuse_create_out body", ctx do
+      header = build_in_header(opcode: opcode(:create), len: 40 + 20, unique: 121, nodeid: 1)
+
+      body = <<
+        # flags (O_CREAT | O_RDWR)
+        0o102::little-32,
+        # mode 0o777
+        0o777::little-32,
+        # umask 0o022
+        0o022::little-32,
+        # pad
+        0::little-32,
+        "new",
+        0
+      >>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, reply} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      assert out.unique == 121
+      # `fuse_entry_out` (128) + `fuse_open_out` (16) = 144 bytes.
+      assert byte_size(reply) == 144
+
+      [{"create", params}] = StubHandler.received_ops(ctx.handler)
+      assert params["parent"] == 1
+      assert params["name"] == "new"
+      # 0o777 & ~0o022 = 0o755
+      assert params["mode"] == 0o755
+    end
+
+    test "embedded fh in fuse_open_out matches the handler's fh", ctx do
+      header = build_in_header(opcode: opcode(:create), len: 40 + 20, unique: 122, nodeid: 1)
+
+      body =
+        <<0::little-32, 0o644::little-32, 0::little-32, 0::little-32, "new", 0>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+      assert {:ok, _, reply} = receive_response(ctx.kernel_fd)
+
+      <<_entry::binary-128, fh::little-64, _open_flags::little-32, _padding::little-32>> = reply
+      # StubHandler returns 1234 as the fh.
+      assert fh == 1234
+    end
+  end
+
+  # ——— End data-path opcodes ——————————————————————————————————————
+
   describe "error mapping" do
     setup do
       ctx = setup_session_with_handler()
