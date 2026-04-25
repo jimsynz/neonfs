@@ -1,0 +1,353 @@
+defmodule NFSServer.NFSv3.Handler do
+  @moduledoc """
+  ONC RPC handler for NFS v3 (program 100003, version 3) — see
+  [RFC 1813 §3](https://www.rfc-editor.org/rfc/rfc1813#section-3).
+
+  This slice (#529) implements the eight metadata procedures:
+
+  | Proc | Name      |
+  |------|-----------|
+  | 0    | NULL      |
+  | 1    | GETATTR   |
+  | 3    | LOOKUP    |
+  | 4    | ACCESS    |
+  | 5    | READLINK  |
+  | 18   | FSSTAT    |
+  | 19   | FSINFO    |
+  | 20   | PATHCONF  |
+
+  READ (proc 6, #530), READDIR / READDIRPLUS (proc 16/17, #531),
+  and the write-path procedures (proc 2, 7–15, #285) ship in their
+  own sub-issues.
+
+  Filesystem decisions are delegated to a `NFSServer.NFSv3.Backend`
+  module; the handler stays NeonFS-agnostic. Bind a backend via
+  `with_backend/1`:
+
+      programs = %{100_003 => %{3 => NFSServer.NFSv3.Handler.with_backend(MyBackend)}}
+
+  Same shape as `NFSServer.Mount.Handler.with_backend/1`. Tests can
+  alternatively pre-stamp `:nfs_v3_backend` onto the dispatcher's
+  `ctx` and invoke this module directly.
+
+  ## Procedure layout
+
+  Every procedure follows the same shape: XDR-decode the args via
+  helpers in `NFSServer.NFSv3.Types`, invoke the backend callback,
+  XDR-encode the reply. RFC 1813 reply unions all share the
+  `nfsstat3` discriminant on the wire — we encode the
+  status integer first, then the OK or FAIL arm.
+
+  Errors from the backend that don't include a `post_op_attr`
+  (e.g. `{:error, :stale}`) get `nil` in the post-op slot, which
+  encodes as the FALSE-flag arm of `post_op_attr`.
+
+  ## ACCESS3_* bit flags
+
+  ACCESS uses bitmasks per RFC 1813 §3.3.4. The constants are
+  exposed as module attributes so backends and tests can reference
+  them by name:
+
+  | Flag                | Mask     |
+  |---------------------|----------|
+  | `ACCESS3_READ`      | `0x0001` |
+  | `ACCESS3_LOOKUP`    | `0x0002` |
+  | `ACCESS3_MODIFY`    | `0x0004` |
+  | `ACCESS3_EXTEND`    | `0x0008` |
+  | `ACCESS3_DELETE`    | `0x0010` |
+  | `ACCESS3_EXECUTE`   | `0x0020` |
+  """
+
+  @behaviour NFSServer.RPC.Handler
+
+  alias NFSServer.NFSv3.Types
+  alias NFSServer.XDR
+
+  @program 100_003
+  @version 3
+
+  @proc_null 0
+  @proc_getattr 1
+  @proc_lookup 3
+  @proc_access 4
+  @proc_readlink 5
+  @proc_fsstat 18
+  @proc_fsinfo 19
+  @proc_pathconf 20
+
+  @doc "ACCESS3_READ — permission to read file data or list a directory."
+  @spec access3_read() :: 0x0001
+  def access3_read, do: 0x0001
+
+  @doc "ACCESS3_LOOKUP — permission to look up a name within a directory."
+  @spec access3_lookup() :: 0x0002
+  def access3_lookup, do: 0x0002
+
+  @doc "ACCESS3_MODIFY — permission to rewrite an existing file or directory."
+  @spec access3_modify() :: 0x0004
+  def access3_modify, do: 0x0004
+
+  @doc "ACCESS3_EXTEND — permission to grow a file or add an entry to a directory."
+  @spec access3_extend() :: 0x0008
+  def access3_extend, do: 0x0008
+
+  @doc "ACCESS3_DELETE — permission to remove an entry from a directory."
+  @spec access3_delete() :: 0x0010
+  def access3_delete, do: 0x0010
+
+  @doc "ACCESS3_EXECUTE — permission to execute a file (search a directory does not use this)."
+  @spec access3_execute() :: 0x0020
+  def access3_execute, do: 0x0020
+
+  @doc "NFS program number (always 100003)."
+  @spec program() :: 100_003
+  def program, do: @program
+
+  @doc "NFS version this handler implements (always 3)."
+  @spec version() :: 3
+  def version, do: @version
+
+  @doc """
+  Build a thin handler module that dispatches to `backend`. Same
+  shape as `NFSServer.Mount.Handler.with_backend/1`.
+  """
+  @spec with_backend(module()) :: module()
+  def with_backend(backend) when is_atom(backend) do
+    suffix = backend |> Module.split() |> Enum.join("_")
+    name = Module.concat([__MODULE__, "Bound", suffix])
+
+    case Code.ensure_loaded(name) do
+      {:module, _} ->
+        name
+
+      _ ->
+        contents =
+          quote do
+            @behaviour NFSServer.RPC.Handler
+            @backend unquote(backend)
+
+            @impl true
+            def handle_call(proc, args, auth, ctx) do
+              ctx = Map.put(ctx, :nfs_v3_backend, @backend)
+              NFSServer.NFSv3.Handler.handle_call(proc, args, auth, ctx)
+            end
+          end
+
+        {:module, ^name, _bin, _exports} =
+          Module.create(name, contents, Macro.Env.location(__ENV__))
+
+        name
+    end
+  end
+
+  @impl true
+  def handle_call(@proc_null, _args, _auth, _ctx), do: {:ok, <<>>}
+
+  def handle_call(@proc_getattr, args, auth, ctx) do
+    with_fhandle(args, &do_getattr(&1, auth, ctx))
+  end
+
+  def handle_call(@proc_lookup, args, auth, ctx) do
+    case Types.decode_diropargs3(args) do
+      {:ok, {dir, name}, _} -> do_lookup(dir, name, auth, ctx)
+      {:error, _} -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_access, args, auth, ctx) do
+    case decode_access_args(args) do
+      {:ok, fh, mask} -> do_access(fh, mask, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_readlink, args, auth, ctx) do
+    with_fhandle(args, &do_readlink(&1, auth, ctx))
+  end
+
+  def handle_call(@proc_fsstat, args, auth, ctx) do
+    with_fhandle(args, &do_fsstat(&1, auth, ctx))
+  end
+
+  def handle_call(@proc_fsinfo, args, auth, ctx) do
+    with_fhandle(args, &do_fsinfo(&1, auth, ctx))
+  end
+
+  def handle_call(@proc_pathconf, args, auth, ctx) do
+    with_fhandle(args, &do_pathconf(&1, auth, ctx))
+  end
+
+  def handle_call(_proc, _args, _auth, _ctx), do: :proc_unavail
+
+  # ——— Decode helpers ———————————————————————————————————————————
+
+  defp with_fhandle(args, fun) do
+    case Types.decode_fhandle3(args) do
+      {:ok, fh, _} -> fun.(fh)
+      {:error, _} -> :garbage_args
+    end
+  end
+
+  defp decode_access_args(args) do
+    with {:ok, fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, mask, _} <- XDR.decode_uint(rest) do
+      {:ok, fh, mask}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  # ——— Internal procedure handlers ———————————————————————————————
+
+  defp do_getattr(fh, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.getattr(fh, auth, ctx) do
+      {:ok, %Types.Fattr3{} = a} ->
+        {:ok, Types.encode_nfsstat3(:ok) <> Types.encode_fattr3(a)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status)}
+    end
+  end
+
+  defp do_lookup(dir, name, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.lookup(dir, name, auth, ctx) do
+      {:ok, fh, file_attr, dir_attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_fhandle3(fh) <>
+           Types.encode_post_op_attr(file_attr) <>
+           Types.encode_post_op_attr(dir_attr)}
+
+      {:error, status, dir_attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(dir_attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  defp do_access(fh, mask, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.access(fh, mask, auth, ctx) do
+      {:ok, granted, attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           XDR.encode_uint(granted)}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  defp do_readlink(fh, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.readlink(fh, auth, ctx) do
+      {:ok, path, attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_nfspath3(path)}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  defp do_fsstat(fh, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.fsstat(fh, auth, ctx) do
+      {:ok, reply, attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           XDR.encode_uhyper(reply.tbytes) <>
+           XDR.encode_uhyper(reply.fbytes) <>
+           XDR.encode_uhyper(reply.abytes) <>
+           XDR.encode_uhyper(reply.tfiles) <>
+           XDR.encode_uhyper(reply.ffiles) <>
+           XDR.encode_uhyper(reply.afiles) <>
+           XDR.encode_uint(reply.invarsec)}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  defp do_fsinfo(fh, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.fsinfo(fh, auth, ctx) do
+      {:ok, reply, attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           XDR.encode_uint(reply.rtmax) <>
+           XDR.encode_uint(reply.rtpref) <>
+           XDR.encode_uint(reply.rtmult) <>
+           XDR.encode_uint(reply.wtmax) <>
+           XDR.encode_uint(reply.wtpref) <>
+           XDR.encode_uint(reply.wtmult) <>
+           XDR.encode_uint(reply.dtpref) <>
+           XDR.encode_uhyper(reply.maxfilesize) <>
+           Types.encode_nfstime3(reply.time_delta) <>
+           XDR.encode_uint(reply.properties)}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  defp do_pathconf(fh, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.pathconf(fh, auth, ctx) do
+      {:ok, reply, attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           XDR.encode_uint(reply.linkmax) <>
+           XDR.encode_uint(reply.name_max) <>
+           XDR.encode_bool(reply.no_trunc) <>
+           XDR.encode_bool(reply.chown_restricted) <>
+           XDR.encode_bool(reply.case_insensitive) <>
+           XDR.encode_bool(reply.case_preserving)}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  defp fetch_backend!(ctx) do
+    case Map.fetch(ctx, :nfs_v3_backend) do
+      {:ok, backend} when is_atom(backend) ->
+        backend
+
+      _ ->
+        raise ArgumentError,
+              "NFSServer.NFSv3.Handler invoked without a backend in ctx; use `with_backend/1` to register"
+    end
+  end
+end
