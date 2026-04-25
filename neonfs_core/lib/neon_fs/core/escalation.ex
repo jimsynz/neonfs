@@ -183,7 +183,14 @@ defmodule NeonFS.Core.Escalation do
   @doc false
   @spec emit_pending_metrics() :: :ok
   def emit_pending_metrics do
-    pending = list(status: :pending)
+    # Use a consistent read so the emitted count reflects the latest
+    # committed Ra state, not whatever this node's local apply loop
+    # has caught up to. Without it, an emit fired immediately after a
+    # `resolve` / `create` / `delete` ra_command can race the local
+    # apply and report stale numbers — which broke `escalation_test`
+    # under contended CI (#565). The cost is one extra leader
+    # round-trip per emit; acceptable for an operator-facing metric.
+    pending = list_pending_consistent()
     pending_count = length(pending)
 
     by_category =
@@ -262,6 +269,27 @@ defmodule NeonFS.Core.Escalation do
     RaSupervisor.local_query(&MetadataStateMachine.get_escalations/1)
   catch
     :exit, _ -> {:error, :ra_not_available}
+  end
+
+  # Same as `read_escalations/0` but uses `RaSupervisor.query/1`
+  # (Ra `consistent_query`) — leader heartbeats majority then returns
+  # the leader's fully-applied state, so the read reflects every
+  # committed entry up to the call. Used by `emit_pending_metrics/0`
+  # so post-resolve / post-create metric emits don't race the local
+  # apply loop. See #565.
+  defp list_pending_consistent do
+    case RaSupervisor.query(&MetadataStateMachine.get_escalations/1) do
+      {:ok, escalations_map} when is_map(escalations_map) ->
+        escalations_map
+        |> Map.values()
+        |> Enum.map(&map_to_escalation/1)
+        |> Enum.filter(&(&1.status == :pending))
+
+      _ ->
+        []
+    end
+  catch
+    :exit, _ -> []
   end
 
   defp escalation_to_map(escalation) do
