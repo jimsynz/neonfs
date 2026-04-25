@@ -3,7 +3,7 @@ defmodule NeonFS.Client.Application do
   OTP Application for neonfs_client.
 
   Supervises shared infrastructure used by every node type that depends
-  on `neonfs_client` (core, fuse, nfs, s3, webdav, docker, iam):
+  on `neonfs_client` (core, fuse, nfs, s3, webdav, docker):
   client connectivity, event notification, transport pools, and partition
   recovery. Running these under a single application supervisor ensures
   each process is started exactly once per BEAM node — required for

@@ -3,11 +3,10 @@ defmodule NeonFS.Client.KV do
   Client-side access to the cluster-wide Ra-backed key/value store
   (`NeonFS.Core.KVStore`).
 
-  Intended for orchestration-layer packages (e.g. `neonfs_iam`) that
-  need to read and write durable cluster state from an interface node
-  without taking a direct dependency on `neonfs_core`. Calls are
-  routed through `NeonFS.Client.Router` to a core node that owns the
-  Ra replica.
+  Intended for orchestration-layer packages that need to read and
+  write durable cluster state from an interface node without taking a
+  direct dependency on `neonfs_core`. Calls are routed through
+  `NeonFS.Client.Router` to a core node that owns the Ra replica.
 
   Reads are served from the core node's ETS cache; writes are
   serialised through Ra consensus. Writes prefer the Ra leader to

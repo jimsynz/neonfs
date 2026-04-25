@@ -46,7 +46,6 @@ Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They 
 |---------|-------------|
 | [`neonfs_client`](neonfs_client/) | Shared types, service discovery, `Router`, `ChunkReader`, transport pooling |
 | [`neonfs_core`](neonfs_core/) | Storage engine, metadata, Ra consensus, cluster CA, policy |
-| [`neonfs_iam`](neonfs_iam/) | Identity and access management (users, groups, policies, identity mappings) |
 | [`neonfs_fuse`](neonfs_fuse/) | FUSE filesystem interface |
 | [`neonfs_nfs`](neonfs_nfs/) | NFSv3 server with NLM v4 advisory locking |
 | [`neonfs_s3`](neonfs_s3/) | S3-compatible HTTP server |
@@ -60,7 +59,6 @@ Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They 
 
 ```
 neonfs_client  ← neonfs_core
-neonfs_client  ← neonfs_iam
 neonfs_client  ← neonfs_fuse
 neonfs_client  ← neonfs_nfs
 neonfs_client  ← neonfs_s3       (firkin)
