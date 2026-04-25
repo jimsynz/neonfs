@@ -169,8 +169,19 @@ defmodule NeonFS.Transport.TLS do
   @spec decode_cert!(pem()) :: cert()
   def decode_cert!(pem), do: X509.Certificate.from_pem!(pem)
 
+  @doc """
+  Encode a private key as PEM in PKCS#8 (`PRIVATE KEY`) format.
+
+  Wrapping in PKCS#8 is required so external tooling that consumes the
+  same PEM (e.g. the Rust CLI's `cluster ca emergency-bootstrap`, which
+  signs a fresh node cert via rcgen — rcgen accepts PKCS#8 only) can
+  parse the key without an extra `openssl pkcs8 -topk8` step. SEC1
+  (`EC PRIVATE KEY`) was the historical default; both formats decode
+  fine via `decode_key!/1` so this change is backward-compatible on
+  the read side.
+  """
   @spec encode_key(key()) :: pem()
-  def encode_key(key), do: X509.PrivateKey.to_pem(key)
+  def encode_key(key), do: X509.PrivateKey.to_pem(key, wrap: true)
 
   @spec decode_key!(pem()) :: key()
   def decode_key!(pem), do: X509.PrivateKey.from_pem!(pem)

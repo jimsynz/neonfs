@@ -28,7 +28,10 @@ defmodule NeonFS.Transport.TLSTest do
     test "returns an ECDSA P-256 key" do
       key = TLS.generate_node_key()
       pem = TLS.encode_key(key)
-      assert pem =~ "BEGIN EC PRIVATE KEY"
+      # Wrapped in PKCS#8 (`PRIVATE KEY`) since #521 — see
+      # `TLS.encode_key/1` for the rationale.
+      assert pem =~ "BEGIN PRIVATE KEY"
+      refute pem =~ "BEGIN EC PRIVATE KEY"
     end
   end
 
@@ -173,7 +176,10 @@ defmodule NeonFS.Transport.TLSTest do
       key = TLS.generate_node_key()
 
       pem = TLS.encode_key(key)
-      assert pem =~ "BEGIN EC PRIVATE KEY"
+      # Wrapped in PKCS#8 (`PRIVATE KEY`) since #521 — see
+      # `TLS.encode_key/1` for the rationale.
+      assert pem =~ "BEGIN PRIVATE KEY"
+      refute pem =~ "BEGIN EC PRIVATE KEY"
 
       decoded = TLS.decode_key!(pem)
       assert TLS.encode_key(decoded) == pem
