@@ -96,6 +96,64 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     GenServer.call(server, {:claim, :subtree, path, scope, self()})
   end
 
+  @typedoc """
+  A rename claim is a *pair* of `:exclusive` `:path` claims allocated
+  atomically and held by the same holder pid — one for the source path
+  and one for the destination. The opaque return type carries both
+  ids; callers pass it back to `release_rename/2` to release the pair
+  atomically.
+  """
+  @type rename_claim_id :: {claim_id(), claim_id()}
+
+  @doc """
+  Atomically pin both paths of a cross-directory rename. The two paths
+  are claimed `:exclusive :path` in a single Ra command, so a competing
+  rename or claim on either side either both succeeds or fails up
+  front — there is no window where one path is reserved without the
+  other.
+
+  Renames whose destination sits inside the source's subtree (e.g.
+  `mv /a /a/b/c`) return `{:error, :einval}` — a cycle the filesystem
+  cannot represent.
+
+  See sub-issue #304.
+  """
+  @spec claim_rename(GenServer.server(), String.t(), String.t()) ::
+          {:ok, rename_claim_id()}
+          | {:error, :conflict, claim_id()}
+          | {:error, :einval}
+          | {:error, term()}
+  def claim_rename(server \\ __MODULE__, src, dst) when is_binary(src) and is_binary(dst) do
+    claim_rename_for(server, src, dst, self())
+  end
+
+  @doc """
+  Same as `claim_rename/3` but lets the caller specify an explicit
+  holder pid. See `claim_path_for/4` for the cross-node motivation.
+  """
+  @spec claim_rename_for(GenServer.server(), String.t(), String.t(), pid()) ::
+          {:ok, rename_claim_id()}
+          | {:error, :conflict, claim_id()}
+          | {:error, :einval}
+          | {:error, term()}
+  def claim_rename_for(server \\ __MODULE__, src, dst, holder)
+      when is_binary(src) and is_binary(dst) and is_pid(holder) do
+    GenServer.call(server, {:claim_rename, src, dst, holder})
+  end
+
+  @doc """
+  Release a rename claim allocated by `claim_rename/3`. Releases both
+  paths atomically. Idempotent: releasing a pair where one or both ids
+  have already been released returns `:ok`.
+  """
+  @spec release_rename(GenServer.server(), rename_claim_id()) :: :ok | {:error, term()}
+  def release_rename(server \\ __MODULE__, {src_id, dst_id})
+      when is_binary(src_id) and is_binary(dst_id) do
+    with :ok <- release(server, src_id) do
+      release(server, dst_id)
+    end
+  end
+
   @doc """
   Release a claim by id. Idempotent — releasing a non-existent or
   already-released claim returns `:ok`.
@@ -139,6 +197,24 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     case ra_command(cmd) do
       {:ok, claim_id} ->
         {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :conflict, conflicting_id} ->
+        {:reply, {:error, :conflict, conflicting_id}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:claim_rename, src, dst, holder}, _from, state) do
+    case ra_command({:claim_namespace_rename, src, dst, holder}) do
+      {:ok, {src_id, dst_id}} ->
+        state = track_claim(state, holder, src_id)
+        state = track_claim(state, holder, dst_id)
+        {:reply, {:ok, {src_id, dst_id}}, state}
+
+      {:error, :einval} ->
+        {:reply, {:error, :einval}, state}
 
       {:error, :conflict, conflicting_id} ->
         {:reply, {:error, :conflict, conflicting_id}, state}

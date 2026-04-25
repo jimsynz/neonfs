@@ -10,6 +10,7 @@ defmodule NeonFS.Core do
 
   alias NeonFS.Core.CommitChunks
   alias NeonFS.Core.FileIndex
+  alias NeonFS.Core.NamespaceCoordinator
   alias NeonFS.Core.ReadOperation
   alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
@@ -327,11 +328,63 @@ defmodule NeonFS.Core do
   @spec rename_file(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def rename_file(volume_name, src_path, dest_path) do
     with {:ok, volume} <- resolve_volume(volume_name) do
-      do_rename(volume.id, normalize_path(src_path), normalize_path(dest_path))
+      src = normalize_path(src_path)
+      dst = normalize_path(dest_path)
+
+      with_rename_claim(volume.id, src, dst, fn -> do_rename(volume.id, src, dst) end)
     end
   end
 
   # --- Private helpers ---
+
+  # Wraps a rename's `FileIndex` work in a coordinator-issued
+  # `claim_rename` pair so concurrent cross-directory renames (across
+  # interface nodes — WebDAV, NFS, FUSE) serialise cleanly. Claim is
+  # always released, whether the inner work succeeds or errors. See
+  # sub-issue #304.
+  defp with_rename_claim(volume_id, src, dst, fun) do
+    src_key = volume_scoped_path(volume_id, src)
+    dst_key = volume_scoped_path(volume_id, dst)
+
+    case safe_claim_rename(src_key, dst_key) do
+      {:ok, claim} ->
+        try do
+          fun.()
+        after
+          safe_release_rename(claim)
+        end
+
+      {:error, :einval} ->
+        {:error, :einval}
+
+      {:error, :conflict, _conflict_id} ->
+        {:error, :conflict}
+
+      {:error, _reason} ->
+        # Coordinator unavailable (no Ra cluster, network split, etc.).
+        # Fall back to the historical single-core-node serialisation
+        # property. Cross-node correctness regresses to "best-effort"
+        # while the coordinator is down — same posture WebDAV took in
+        # sub-issue #301.
+        fun.()
+    end
+  end
+
+  defp safe_claim_rename(src_key, dst_key) do
+    NamespaceCoordinator.claim_rename(src_key, dst_key)
+  catch
+    :exit, _ -> {:error, :coordinator_unavailable}
+  end
+
+  defp safe_release_rename(claim) do
+    NamespaceCoordinator.release_rename(claim)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp volume_scoped_path(volume_id, path) when is_binary(volume_id) and is_binary(path) do
+    "vol:" <> volume_id <> ":" <> path
+  end
 
   defp do_rename(volume_id, src_path, dest_path) do
     src_dir = Path.dirname(src_path)
