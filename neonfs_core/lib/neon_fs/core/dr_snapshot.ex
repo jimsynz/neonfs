@@ -50,7 +50,14 @@ defmodule NeonFS.Core.DRSnapshot do
     * Restore — separate runbook + restore command (`#446`-equivalent).
   """
 
-  alias NeonFS.Core.{RaSupervisor, SystemVolume, VolumeRegistry, WriteOperation}
+  alias NeonFS.Core.{
+    FileIndex,
+    RaSupervisor,
+    ReadOperation,
+    SystemVolume,
+    VolumeRegistry,
+    WriteOperation
+  }
 
   require Logger
 
@@ -121,6 +128,46 @@ defmodule NeonFS.Core.DRSnapshot do
     end
   end
 
+  @doc """
+  List every snapshot in the `_system` volume's `/dr` directory,
+  newest first, with each entry's manifest already deserialised.
+
+  Returns `[%{id: timestamp, path: dir, manifest: manifest()}]`.
+  Used by the operator-facing `neonfs dr snapshot list` CLI surface
+  (#324).
+  """
+  @spec list() ::
+          {:ok, [%{id: String.t(), path: String.t(), manifest: manifest()}]}
+          | {:error, term()}
+  def list do
+    with {:ok, volume} <- get_system_volume(),
+         {:ok, children} <- list_dir(volume.id, @snapshot_root) do
+      entries =
+        children
+        |> Enum.filter(fn {_name, %{type: type}} -> type == :dir end)
+        |> Enum.map(fn {name, _info} -> name end)
+        |> Enum.flat_map(&load_one_for_list(volume.id, &1))
+        |> Enum.sort_by(& &1.manifest[:created_at], :desc)
+
+      {:ok, entries}
+    end
+  end
+
+  @doc """
+  Fetch a single snapshot by id (the directory name under `/dr`,
+  i.e. the timestamp). Returns `{:error, :not_found}` if the id
+  doesn't resolve to a snapshot directory or its manifest can't be
+  read.
+  """
+  @spec get(String.t()) ::
+          {:ok, %{id: String.t(), path: String.t(), manifest: manifest()}}
+          | {:error, :not_found | term()}
+  def get(id) when is_binary(id) do
+    with {:ok, volume} <- get_system_volume() do
+      load_one(volume.id, id)
+    end
+  end
+
   ## Private
 
   defp default_timestamp do
@@ -135,6 +182,71 @@ defmodule NeonFS.Core.DRSnapshot do
       :error -> RaSupervisor.local_query(fn state -> state end)
     end
   end
+
+  defp list_dir(volume_id, path) do
+    FileIndex.list_dir(volume_id, path)
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  defp load_one_for_list(volume_id, name) do
+    case load_one(volume_id, name) do
+      {:ok, entry} -> [entry]
+      {:error, _} -> []
+    end
+  end
+
+  defp load_one(volume_id, id) do
+    snapshot_dir = Path.join(@snapshot_root, id)
+    manifest_path = Path.join(snapshot_dir, "manifest.json")
+
+    with {:ok, json} <- read_manifest_file(volume_id, manifest_path),
+         {:ok, decoded} <- Jason.decode(json) do
+      {:ok,
+       %{
+         id: id,
+         path: snapshot_dir,
+         manifest: atomise_manifest(decoded)
+       }}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  defp read_manifest_file(volume_id, path) do
+    case ReadOperation.read_file(volume_id, path, []) do
+      {:ok, body} -> {:ok, body}
+      err -> err
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  defp atomise_manifest(%{} = m) do
+    %{
+      version: Map.get(m, "version"),
+      created_at: Map.get(m, "created_at"),
+      state_version: Map.get(m, "state_version"),
+      files: Enum.map(Map.get(m, "files", []), &atomise_file_entry/1)
+    }
+  end
+
+  defp atomise_file_entry(%{} = f) do
+    %{
+      path: Map.get(f, "path"),
+      bytes: Map.get(f, "bytes"),
+      sha256: Map.get(f, "sha256"),
+      kind: Map.get(f, "kind") |> to_kind_atom()
+    }
+  end
+
+  defp to_kind_atom("index"), do: :index
+  defp to_kind_atom("ca"), do: :ca
+  defp to_kind_atom(_), do: nil
 
   defp get_system_volume do
     case VolumeRegistry.get_by_name("_system") do

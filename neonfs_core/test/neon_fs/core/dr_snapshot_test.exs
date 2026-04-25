@@ -265,4 +265,77 @@ defmodule NeonFS.Core.DRSnapshotTest do
                )
     end
   end
+
+  describe "list/0 + get/1 against a real Ra state machine" do
+    @describetag :integration_ra
+
+    setup %{tmp_dir: tmp_dir} do
+      ensure_node_named()
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_ra()
+
+      case RaServer.init_cluster() do
+        :ok -> :ok
+        {:error, :already_exists} -> :ok
+        other -> raise "init_cluster failed: #{inspect(other)}"
+      end
+
+      case VolumeRegistry.create_system_volume() do
+        {:ok, _vol} -> :ok
+        {:error, :already_exists} -> :ok
+        other -> raise "create_system_volume failed: #{inspect(other)}"
+      end
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "list returns every snapshot newest-first with manifest already decoded" do
+      {:ok, _} = DRSnapshot.create(timestamp: "20260101T000000Z")
+      {:ok, _} = DRSnapshot.create(timestamp: "20260201T000000Z")
+
+      assert {:ok, snapshots} = DRSnapshot.list()
+
+      ids = Enum.map(snapshots, & &1.id)
+      assert ids == ["20260201T000000Z", "20260101T000000Z"]
+
+      Enum.each(snapshots, fn s ->
+        assert s.path =~ "/dr/" <> s.id
+        assert is_map(s.manifest)
+        assert s.manifest.version == 1
+        assert is_list(s.manifest.files)
+        assert Enum.all?(s.manifest.files, fn f -> f.kind in [:index, :ca] end)
+      end)
+    end
+
+    test "get returns a single snapshot by id with the same manifest shape as list" do
+      {:ok, _} = DRSnapshot.create(timestamp: "20260301T120000Z")
+
+      assert {:ok, snapshot} = DRSnapshot.get("20260301T120000Z")
+      assert snapshot.id == "20260301T120000Z"
+      assert snapshot.manifest.version == 1
+      assert is_integer(snapshot.manifest.state_version)
+      refute snapshot.manifest.files == []
+    end
+
+    test "get returns :not_found for an unknown id" do
+      assert {:error, :not_found} = DRSnapshot.get("00000000T000000Z")
+    end
+  end
 end
