@@ -82,7 +82,23 @@ defmodule NeonFS.Core.NamespaceCoordinator do
           {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
   def claim_path(server \\ __MODULE__, path, scope)
       when is_binary(path) and scope in [:exclusive, :shared] do
-    GenServer.call(server, {:claim, :path, path, scope, self()})
+    claim_path_for(server, path, scope, self())
+  end
+
+  @doc """
+  Same as `claim_path/3` but lets the caller specify an explicit holder
+  pid. Useful when the call originates on a remote node via
+  `NeonFS.Client.Router.call/4` — the RPC handler `self()` would
+  otherwise be a short-lived process that dies the moment the call
+  returns, dropping the claim. Pass a long-lived pid on the calling
+  node (e.g. a per-node holder GenServer) so the coordinator monitors
+  something stable.
+  """
+  @spec claim_path_for(GenServer.server(), String.t(), scope(), pid()) ::
+          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+  def claim_path_for(server \\ __MODULE__, path, scope, holder)
+      when is_binary(path) and scope in [:exclusive, :shared] and is_pid(holder) do
+    GenServer.call(server, {:claim, :path, path, scope, holder})
   end
 
   @doc """
@@ -93,7 +109,18 @@ defmodule NeonFS.Core.NamespaceCoordinator do
           {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
   def claim_subtree(server \\ __MODULE__, path, scope)
       when is_binary(path) and scope in [:exclusive, :shared] do
-    GenServer.call(server, {:claim, :subtree, path, scope, self()})
+    claim_subtree_for(server, path, scope, self())
+  end
+
+  @doc """
+  Same as `claim_subtree/3` but lets the caller specify an explicit
+  holder pid. See `claim_path_for/4` for the cross-node motivation.
+  """
+  @spec claim_subtree_for(GenServer.server(), String.t(), scope(), pid()) ::
+          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+  def claim_subtree_for(server \\ __MODULE__, path, scope, holder)
+      when is_binary(path) and scope in [:exclusive, :shared] and is_pid(holder) do
+    GenServer.call(server, {:claim, :subtree, path, scope, holder})
   end
 
   @doc """

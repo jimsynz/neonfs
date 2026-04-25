@@ -206,4 +206,56 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/multi/a", :exclusive)
     end
   end
+
+  # `claim_*_for/4` exists for cross-node callers (e.g. WebDAV via
+  # `NeonFS.Client.Router.call/4`): the RPC handler `self()` would die
+  # the moment the call returns and take every claim with it. Explicit
+  # holder lets callers pass a long-lived pid on their own node so the
+  # coordinator monitors something stable. See sub-issue #301.
+  describe "claim_path_for/4 / claim_subtree_for/4" do
+    test "monitors the explicit holder pid, not the caller", %{server: server} do
+      parent = self()
+
+      {holder, monitor_ref} =
+        spawn_monitor(fn ->
+          send(parent, :ready)
+
+          receive do
+            :exit -> :ok
+          end
+        end)
+
+      assert_receive :ready, 1_000
+
+      {:ok, claim_id} =
+        NamespaceCoordinator.claim_subtree_for(server, "/explicit", :exclusive, holder)
+
+      # The caller (this test process) is alive but irrelevant — the
+      # coordinator monitors `holder`.
+      assert {:error, :conflict, ^claim_id} =
+               NamespaceCoordinator.claim_path(server, "/explicit/x", :exclusive)
+
+      send(holder, :exit)
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      :sys.get_state(server)
+
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/explicit/x", :exclusive)
+    end
+
+    test "claim_path_for/4 takes the same path-vs-path semantics", %{server: server} do
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_path_for(server, "/p", :exclusive, holder)
+
+      assert {:error, :conflict, _} =
+               NamespaceCoordinator.claim_path_for(server, "/p", :exclusive, holder)
+    end
+
+    test "rejects non-pid holders", %{server: server} do
+      assert_raise FunctionClauseError, fn ->
+        NamespaceCoordinator.claim_subtree_for(server, "/x", :exclusive, :not_a_pid)
+      end
+    end
+  end
 end
