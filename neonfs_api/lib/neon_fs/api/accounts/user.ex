@@ -2,7 +2,8 @@ defmodule NeonFS.Api.Accounts.User do
   use Ash.Resource,
     otp_app: :neonfs_api,
     domain: NeonFS.Api.Accounts,
-    extensions: [AshAuthentication]
+    extensions: [AshAuthentication],
+    data_layer: NeonFS.Api.DataLayer
 
   actions do
     update :change_password do
@@ -205,6 +206,11 @@ defmodule NeonFS.Api.Accounts.User do
       end
 
       remember_me(:remember_me)
+    end
+
+    tokens do
+      enabled?(true)
+      token_resource(NeonFS.Api.Accounts.Token)
     end
   end
 

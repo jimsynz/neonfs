@@ -5,7 +5,7 @@ defmodule NeonfsApi.MixProject do
   Ash-based management API.
   """
   @version "0.1.0"
-  
+
   def project do
     [
       aliases: aliases(),
@@ -56,13 +56,14 @@ defmodule NeonfsApi.MixProject do
   defp deps do
     [
       {:argon2_elixir, "~> 4.0"},
-      {:ash_authentication, "~> 5.0-rc"},
       {:ash, "~> 3.0"},
+      {:ash_authentication, "~> 5.0-rc"},
       {:ash_graphql, "~> 1.0"},
       {:bandit, "~> 1.5"},
       {:neonfs_client, path: "../neonfs_client"},
+      {:picosat_elixir, "~> 0.2"},
       {:plug, "~> 1.15"},
-      {:telemetry_metric_prometheus_core, "~> 1.2"},
+      {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test
       {:sourceror, "~> 1.8", only: [:dev, :test]},
