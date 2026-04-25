@@ -49,7 +49,20 @@ fuse_excludes =
     [:fuse]
   end
 
-excludes = loopback_excludes ++ fuse_excludes ++ [:profile]
+# Exclude `:docker` tests on hosts where the `docker` CLI is missing or the
+# daemon isn't responding. The Docker VolumeDriver integration test in
+# `docker_volume_driver_test.exs` requires both. CI runners that should run
+# this test must install `docker` (or symlink rootless `podman` as `docker`)
+# and ensure the daemon is reachable from the container.
+docker_excludes =
+  with docker when not is_nil(docker) <- System.find_executable("docker"),
+       {_, 0} <- System.cmd(docker, ["info"], stderr_to_stdout: true) do
+    []
+  else
+    _ -> [:docker]
+  end
+
+excludes = loopback_excludes ++ fuse_excludes ++ docker_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an
