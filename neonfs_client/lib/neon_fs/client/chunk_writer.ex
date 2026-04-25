@@ -60,6 +60,23 @@ defmodule NeonFS.Client.ChunkWriter do
   primary. Failures are logged and swallowed; durable orphan cleanup
   is core-side GC's job. Interface-side durable abort tracking
   (`PendingWriteLog`) is explicitly deferred per #450.
+
+  ## Process-heap footprint
+
+  The writer's own accumulator scales O(chunk_count): one `chunk_ref`
+  per chunk (~250 bytes; hash + locations + size + codec). For a
+  1 GiB upload at the default ~256 KiB average chunk, that's ≈ 4 K
+  refs ≈ 1 MiB on the calling process's heap — bounded and fine.
+
+  The **dominant memory term** during a cross-node upload lives
+  outside this module: OTP's TLS connection process
+  (`:ssl_gen_statem`) inside `NeonFS.Transport.ConnPool` accumulates
+  pending plaintext / encrypted records while the pipeline is in
+  flight. Empirically that's ≈ 3–5% of the upload size for the
+  duration of the upload window. See `#534` for the profile and the
+  reasoning behind the `#499` peak-RSS bound being set at 25% of
+  upload size — which accommodates the TLS overhead without papering
+  over a real regression.
   """
 
   require Logger
@@ -252,7 +269,10 @@ defmodule NeonFS.Client.ChunkWriter do
   defp do_stream(stream, chunker, volume, target, opts) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     abort_fn = Keyword.get(opts, :abort_fn, &default_abort/2)
-    initial = %{refs: [], written: []}
+    # The accumulator only holds `refs` — the abort path derives the
+    # `[{hash, locations}]` list it needs from `refs` rather than
+    # tracking it in parallel. See `do_abort_from_refs/2`.
+    initial = %{refs: []}
 
     feed_result =
       Enum.reduce_while(stream, {:ok, initial}, fn segment, {:ok, acc} ->
@@ -265,7 +285,7 @@ defmodule NeonFS.Client.ChunkWriter do
       {:ok, Enum.reverse(acc.refs)}
     else
       {:error, reason, acc} ->
-        abort_written(acc.written, abort_fn)
+        do_abort_from_refs(acc.refs, abort_fn)
         {:error, reason}
     end
   end
@@ -296,12 +316,7 @@ defmodule NeonFS.Client.ChunkWriter do
           codec: codec_info
         }
 
-        updated = %{
-          refs: [ref | acc.refs],
-          written: [{hash, locations} | acc.written]
-        }
-
-        process_emitted(rest, volume, target, timeout, updated)
+        process_emitted(rest, volume, target, timeout, %{acc | refs: [ref | acc.refs]})
 
       {:error, reason} ->
         {:error, {:put_chunk_failed, reason}, acc}
@@ -353,13 +368,13 @@ defmodule NeonFS.Client.ChunkWriter do
     end
   end
 
-  defp abort_written([], _abort_fn), do: :ok
+  defp do_abort_from_refs([], _abort_fn), do: :ok
 
-  defp abort_written(written, abort_fn) do
-    Enum.each(written, fn {hash, locations} ->
-      Enum.each(locations, fn location ->
+  defp do_abort_from_refs(refs, abort_fn) do
+    Enum.each(refs, fn ref ->
+      Enum.each(ref.locations, fn location ->
         try do
-          abort_fn.(location, hash)
+          abort_fn.(location, ref.hash)
         rescue
           error ->
             Logger.debug("Abort callback raised", reason: inspect(error))
