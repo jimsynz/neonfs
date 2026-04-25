@@ -162,6 +162,28 @@ defmodule FuseServer.Protocol.Response do
     @type t :: %__MODULE__{entries: [Dirent.t()]}
   end
 
+  defmodule DirentPlus do
+    @moduledoc """
+    A single READDIRPLUS entry — `fuse_direntplus` on the wire. The
+    record is a 128-byte `fuse_entry_out` followed by the same 24-byte
+    dirent header as `Dirent`, the name bytes (no NUL), and 0–7 zero
+    bytes of padding so each record ends on an 8-byte boundary.
+
+    Inline attributes let the kernel populate its dentry + inode cache
+    without a follow-up `LOOKUP` round-trip — the major perf win that
+    motivates READDIRPLUS over READDIR.
+    """
+    defstruct entry: %Entry{}, dirent: %Dirent{}
+
+    @type t :: %__MODULE__{entry: Entry.t(), dirent: Dirent.t()}
+  end
+
+  defmodule ReaddirPlus do
+    @moduledoc "READDIRPLUS reply — an ordered list of `DirentPlus` records."
+    defstruct entries: []
+    @type t :: %__MODULE__{entries: [DirentPlus.t()]}
+  end
+
   @type t ::
           Empty.t()
           | Init.t()
@@ -173,6 +195,7 @@ defmodule FuseServer.Protocol.Response do
           | Read.t()
           | Statfs.t()
           | Readdir.t()
+          | ReaddirPlus.t()
 
   @doc "Encode the response body (excluding `fuse_out_header`)."
   @spec encode(t()) :: iodata()
@@ -237,6 +260,9 @@ defmodule FuseServer.Protocol.Response do
   def encode(%Readdir{entries: entries}),
     do: Enum.map(entries, &encode_dirent/1)
 
+  def encode(%ReaddirPlus{entries: entries}),
+    do: Enum.map(entries, &encode_direntplus/1)
+
   # ——— Private helpers ————————————————————————————————————————————
 
   defp encode_entry(%Entry{} = e) do
@@ -266,6 +292,24 @@ defmodule FuseServer.Protocol.Response do
     >>
   end
 
+  defp encode_direntplus(%DirentPlus{entry: entry, dirent: dirent}) do
+    name_bytes = dirent.name
+    namelen = byte_size(name_bytes)
+    pad = rem(8 - rem(24 + namelen, 8), 8)
+
+    [
+      encode_entry(entry),
+      <<
+        dirent.ino::little-64,
+        dirent.off::little-64,
+        namelen::little-32,
+        dirent.type::little-32,
+        name_bytes::binary,
+        0::size(pad * 8)
+      >>
+    ]
+  end
+
   @doc """
   Decode a stream of `fuse_dirent` records. Primarily a test helper
   that round-trips against `encode/1` for `Readdir` responses.
@@ -291,4 +335,66 @@ defmodule FuseServer.Protocol.Response do
   end
 
   defp do_decode_dirents(_, _), do: {:error, :malformed_body}
+
+  @doc """
+  Decode a stream of `fuse_direntplus` records. Test helper that
+  round-trips against `encode/1` for `ReaddirPlus` responses.
+  """
+  @spec decode_direntpluses(binary()) :: {:ok, [DirentPlus.t()]} | {:error, :malformed_body}
+  def decode_direntpluses(binary) when is_binary(binary), do: do_decode_direntpluses(binary, [])
+
+  defp do_decode_direntpluses(<<>>, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp do_decode_direntpluses(
+         <<entry_bytes::binary-size(128), rest::binary>>,
+         acc
+       ) do
+    with {:ok, entry} <- decode_entry(entry_bytes),
+         {:ok, dirent, tail} <- decode_one_dirent(rest) do
+      do_decode_direntpluses(tail, [%DirentPlus{entry: entry, dirent: dirent} | acc])
+    end
+  end
+
+  defp do_decode_direntpluses(_, _), do: {:error, :malformed_body}
+
+  defp decode_entry(<<
+         nodeid::little-64,
+         generation::little-64,
+         entry_valid::little-64,
+         attr_valid::little-64,
+         entry_valid_nsec::little-32,
+         attr_valid_nsec::little-32,
+         attr_bytes::binary-size(88)
+       >>) do
+    with {:ok, attr, <<>>} <- Attr.decode(attr_bytes) do
+      {:ok,
+       %Entry{
+         nodeid: nodeid,
+         generation: generation,
+         entry_valid: entry_valid,
+         attr_valid: attr_valid,
+         entry_valid_nsec: entry_valid_nsec,
+         attr_valid_nsec: attr_valid_nsec,
+         attr: attr
+       }}
+    end
+  end
+
+  defp decode_entry(_), do: {:error, :malformed_body}
+
+  defp decode_one_dirent(
+         <<ino::little-64, off::little-64, namelen::little-32, type::little-32, rest::binary>>
+       ) do
+    pad = rem(8 - rem(24 + namelen, 8), 8)
+
+    case rest do
+      <<name::binary-size(namelen), _pad::size(pad * 8), tail::binary>> ->
+        {:ok, %Dirent{ino: ino, off: off, type: type, name: name}, tail}
+
+      _ ->
+        {:error, :malformed_body}
+    end
+  end
+
+  defp decode_one_dirent(_), do: {:error, :malformed_body}
 end

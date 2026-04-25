@@ -63,10 +63,13 @@ defmodule FuseServer.Protocol do
           | :fsync
           | :flush
           | :init
+          | :opendir
           | :readdir
+          | :releasedir
           | :create
           | :destroy
           | :batch_forget
+          | :readdirplus
           | :rename2
 
   @typedoc "Decoded request tagged with its opcode atom."
@@ -99,10 +102,13 @@ defmodule FuseServer.Protocol do
     20 => :fsync,
     25 => :flush,
     26 => :init,
+    27 => :opendir,
     28 => :readdir,
+    29 => :releasedir,
     35 => :create,
     38 => :destroy,
     42 => :batch_forget,
+    44 => :readdirplus,
     45 => :rename2
   }
 

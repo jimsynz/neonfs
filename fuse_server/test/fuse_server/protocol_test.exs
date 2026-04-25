@@ -185,6 +185,12 @@ defmodule FuseServer.ProtocolTest do
       end
     end
 
+    property "readdirplus" do
+      check all(req <- request(:readdirplus)) do
+        assert_round_trip(:readdirplus, req)
+      end
+    end
+
     property "write" do
       check all(req <- request(:write)) do
         assert_round_trip(:write, req)
@@ -268,6 +274,20 @@ defmodule FuseServer.ProtocolTest do
         assert rem(byte_size(encoded), 8) == 0
 
         assert {:ok, decoded} = Response.decode_dirents(encoded)
+        assert decoded == entries
+      end
+    end
+  end
+
+  describe "ReaddirPlus direntplus packing" do
+    property "each record is fuse_entry_out + fuse_dirent and round-trips" do
+      check all(entries <- list_of(direntplus(), max_length: 6)) do
+        reply = %Response.ReaddirPlus{entries: entries}
+        encoded = :erlang.iolist_to_binary(Response.encode(reply))
+
+        assert rem(byte_size(encoded), 8) == 0
+
+        assert {:ok, decoded} = Response.decode_direntpluses(encoded)
         assert decoded == entries
       end
     end
@@ -424,6 +444,7 @@ defmodule FuseServer.ProtocolTest do
 
   defp encode_request(:read, %Request.Read{} = r), do: encode_read_like(r)
   defp encode_request(:readdir, %Request.Readdir{} = r), do: encode_read_like(r)
+  defp encode_request(:readdirplus, %Request.ReaddirPlus{} = r), do: encode_read_like(r)
 
   defp encode_request(:write, %Request.Write{} = r) do
     <<
@@ -528,6 +549,12 @@ defmodule FuseServer.ProtocolTest do
     end
   end
 
+  defp direntplus do
+    gen all(entry <- response(:entry), de <- dirent()) do
+      %Response.DirentPlus{entry: entry, dirent: de}
+    end
+  end
+
   defp request(:init), do: gen_init()
   defp request(:lookup), do: gen_map(&%Request.Lookup{name: &1}, name_gen())
   defp request(:forget), do: gen_map(&%Request.Forget{nlookup: &1}, u64())
@@ -543,6 +570,7 @@ defmodule FuseServer.ProtocolTest do
   defp request(:release), do: gen_release()
   defp request(:read), do: gen_read_like(Request.Read)
   defp request(:readdir), do: gen_read_like(Request.Readdir)
+  defp request(:readdirplus), do: gen_read_like(Request.ReaddirPlus)
   defp request(:write), do: gen_write()
   defp request(:flush), do: gen_flush()
   defp request(:fsync), do: gen_fsync()

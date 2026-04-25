@@ -56,6 +56,7 @@ defmodule NeonFS.FUSE.MixProject do
   defp deps do
     [
       {:bandit, "~> 1.5"},
+      {:fuse_server, path: "../fuse_server"},
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
       {:plug, "~> 1.15"},

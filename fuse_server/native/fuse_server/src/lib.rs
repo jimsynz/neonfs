@@ -255,6 +255,37 @@ pub fn pipe_pair(env: Env) -> NifResult<Term> {
     Ok((atom::ok(), (read_term, write_term)).encode(env))
 }
 
+/// Allocate a `socketpair(AF_UNIX, SOCK_STREAM, ...)` pair with
+/// `O_NONBLOCK | O_CLOEXEC` on both ends. Each end is wrapped in the
+/// same resource type as `pipe_pair`. Both ends are bidirectional —
+/// suitable for testing the full kernel-side ↔ Session protocol
+/// against a single `Session` fd. Returns `{:ok, {a, b}}`.
+#[rustler::nif]
+pub fn socketpair_stream(env: Env) -> NifResult<Term> {
+    let mut fds: [c_int; 2] = [-1, -1];
+    let rc = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(err_term(errno_to_atom(last_errno())));
+    }
+
+    let a_term = match make_resource(env, fds[0]) {
+        Ok(t) => t,
+        Err(e) => {
+            unsafe { libc::close(fds[1]) };
+            return Err(e);
+        }
+    };
+    let b_term = make_resource(env, fds[1])?;
+    Ok((atom::ok(), (a_term, b_term)).encode(env))
+}
+
 #[rustler::nif]
 pub fn select_read<'a>(env: Env<'a>, resource: Term<'a>) -> NifResult<Atom> {
     let (obj, dev) = get_resource_raw(env, resource)?;

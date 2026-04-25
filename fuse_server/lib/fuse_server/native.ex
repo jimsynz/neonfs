@@ -85,6 +85,17 @@ defmodule FuseServer.Native do
   def pipe_pair, do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Allocate a non-blocking `socketpair(AF_UNIX, SOCK_STREAM)` pair —
+  bidirectional ends suitable for end-to-end testing of the kernel ↔
+  Session FUSE protocol from BEAM (one end fed synthetic kernel
+  frames, the other passed to a `NeonFS.FUSE.Session`).
+
+  Returns `{:ok, {a, b}}` where each end can be both read and written.
+  """
+  @spec socketpair_stream() :: {:ok, {handle(), handle()}} | {:error, error()}
+  def socketpair_stream, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Arm a single read-readiness notification for `handle`. The calling
   process receives `{:select, handle, :undefined, :ready_input}` when
   the fd becomes readable. The registration is consumed on delivery and

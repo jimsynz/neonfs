@@ -39,7 +39,17 @@ loopback_excludes =
     [:loopback]
   end
 
-excludes = loopback_excludes ++ [:profile]
+# Exclude `:fuse` tests on hosts without `/dev/fuse` and `fusermount3`. The
+# Session integration test mounts a real FUSE filesystem; CI hosts without
+# the helper would surface install errors rather than a meaningful failure.
+fuse_excludes =
+  if File.exists?("/dev/fuse") and System.find_executable("fusermount3") != nil do
+    []
+  else
+    [:fuse]
+  end
+
+excludes = loopback_excludes ++ fuse_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an

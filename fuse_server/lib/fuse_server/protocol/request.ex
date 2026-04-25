@@ -195,6 +195,24 @@ defmodule FuseServer.Protocol.Request do
           }
   end
 
+  defmodule ReaddirPlus do
+    @moduledoc """
+    FUSE_READDIRPLUS — same wire layout as `Readdir` (`fuse_read_in`,
+    40 bytes). The reply layout differs (each entry carries inline
+    attributes via `fuse_direntplus`).
+    """
+    defstruct [:fh, :offset, :size, :read_flags, :lock_owner, :flags]
+
+    @type t :: %__MODULE__{
+            fh: non_neg_integer(),
+            offset: non_neg_integer(),
+            size: non_neg_integer(),
+            read_flags: non_neg_integer(),
+            lock_owner: non_neg_integer(),
+            flags: non_neg_integer()
+          }
+  end
+
   defmodule Write do
     @moduledoc """
     FUSE_WRITE — `fuse_write_in` (40 bytes) plus `size` bytes of
@@ -268,6 +286,7 @@ defmodule FuseServer.Protocol.Request do
           | Release.t()
           | Read.t()
           | Readdir.t()
+          | ReaddirPlus.t()
           | Write.t()
           | Statfs.t()
           | Flush.t()
@@ -280,8 +299,17 @@ defmodule FuseServer.Protocol.Request do
   layout.
   """
   @spec decode(atom(), binary()) :: {:ok, t()} | {:error, :malformed_body}
-  def decode(:init, <<major::little-32, minor::little-32, mra::little-32, flags::little-32>>),
-    do: {:ok, %Init{major: major, minor: minor, max_readahead: mra, flags: flags}}
+  # The kernel sends a `fuse_init_in` body sized for ITS protocol
+  # version, which may be larger than the v7.31 we decode against
+  # (modern kernels send 64 bytes for v7.36+). Accept any size ≥ 16
+  # and ignore the trailing bytes — we only act on the four named
+  # fields here, and the v7.31 INIT reply we send back signals the
+  # negotiated minor version.
+  def decode(
+        :init,
+        <<major::little-32, minor::little-32, mra::little-32, flags::little-32, _rest::binary>>
+      ),
+      do: {:ok, %Init{major: major, minor: minor, max_readahead: mra, flags: flags}}
 
   def decode(:destroy, <<>>), do: {:ok, %Destroy{}}
 
@@ -374,6 +402,10 @@ defmodule FuseServer.Protocol.Request do
   def decode(:open, <<flags::little-32, _unused::little-32>>),
     do: {:ok, %Open{flags: flags}}
 
+  # OPENDIR uses the same `fuse_open_in` layout as OPEN — share the
+  # decoder and the result struct.
+  def decode(:opendir, body), do: decode(:open, body)
+
   def decode(:release, <<
         fh::little-64,
         flags::little-32,
@@ -383,8 +415,12 @@ defmodule FuseServer.Protocol.Request do
     {:ok, %Release{fh: fh, flags: flags, release_flags: release_flags, lock_owner: lock_owner}}
   end
 
+  # RELEASEDIR uses the same `fuse_release_in` layout as RELEASE.
+  def decode(:releasedir, body), do: decode(:release, body)
+
   def decode(:read, body), do: decode_read_like(body, Read)
   def decode(:readdir, body), do: decode_read_like(body, Readdir)
+  def decode(:readdirplus, body), do: decode_read_like(body, ReaddirPlus)
 
   def decode(:write, <<
         fh::little-64,

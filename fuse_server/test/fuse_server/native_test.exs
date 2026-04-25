@@ -58,6 +58,24 @@ defmodule FuseServer.NativeTest do
     end
   end
 
+  describe "socketpair_stream" do
+    test "returns two bidirectional handles that exchange frames either direction" do
+      assert {:ok, {a, b}} = Native.socketpair_stream()
+      assert is_reference(a)
+      assert is_reference(b)
+
+      assert :ok = Native.select_read(a)
+      assert :ok = Native.write_frame(b, "from-b")
+      assert_receive {:select, ^a, :undefined, :ready_input}, 1_000
+      assert {:ok, "from-b"} = Native.read_frame(a)
+
+      assert :ok = Native.select_read(b)
+      assert :ok = Native.write_frame(a, "from-a")
+      assert_receive {:select, ^b, :undefined, :ready_input}, 1_000
+      assert {:ok, "from-a"} = Native.read_frame(b)
+    end
+  end
+
   describe "open_dev_fuse" do
     test "returns a handle on FUSE-capable hosts or a known error atom otherwise" do
       case Native.open_dev_fuse() do
