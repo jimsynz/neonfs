@@ -52,25 +52,35 @@ defmodule NFSServer.RPC.RecordMarking do
 
   @doc """
   Wrap `body` as a single final fragment.
+
+  Accepts iodata so streaming replies (e.g. NFSv3 READ chunks pulled
+  from a backend `Enumerable`) can flow through the encode path
+  without flattening to a single binary. The 4-byte marker is built
+  from `:erlang.iolist_size/1` and prepended; `:gen_tcp.send/2`
+  accepts iolist directly.
   """
-  @spec encode(binary()) :: binary()
-  def encode(body) when is_binary(body) do
+  @spec encode(iodata()) :: iodata()
+  def encode(body) do
     encode_fragment(body, true)
   end
 
   @doc """
   Encode `body` as a single fragment with the given `last?` flag.
+
+  Accepts iodata; returns iodata. The fragment marker is computed
+  from `:erlang.iolist_size/1` so the caller does not need to
+  pre-flatten.
   """
-  @spec encode_fragment(binary(), boolean()) :: binary()
-  def encode_fragment(body, last?) when is_binary(body) and is_boolean(last?) do
-    length = byte_size(body)
+  @spec encode_fragment(iodata(), boolean()) :: iodata()
+  def encode_fragment(body, last?) when is_boolean(last?) do
+    length = :erlang.iolist_size(body)
 
     if length > @max_fragment_size do
       raise ArgumentError, "fragment length #{length} exceeds RFC 5531 maximum"
     end
 
     last_bit = if last?, do: 1, else: 0
-    <<last_bit::1, length::31, body::binary>>
+    [<<last_bit::1, length::31>>, body]
   end
 
   @doc """
@@ -92,12 +102,13 @@ defmodule NFSServer.RPC.RecordMarking do
   end
 
   defp do_encode_fragments(body, max, acc) when byte_size(body) <= max do
-    Enum.reverse([encode_fragment(body, true) | acc])
+    Enum.reverse([:erlang.iolist_to_binary(encode_fragment(body, true)) | acc])
   end
 
   defp do_encode_fragments(body, max, acc) do
     <<chunk::binary-size(max), rest::binary>> = body
-    do_encode_fragments(rest, max, [encode_fragment(chunk, false) | acc])
+
+    do_encode_fragments(rest, max, [:erlang.iolist_to_binary(encode_fragment(chunk, false)) | acc])
   end
 
   @doc """

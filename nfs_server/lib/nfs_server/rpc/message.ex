@@ -62,6 +62,11 @@ defmodule NFSServer.RPC.Message do
     procedure's encoded result for `:success`, or the relevant
     payload (e.g. `{:prog_mismatch, low, high}`) for the error
     cases.
+
+    `body` is `iodata` so streaming-aware procedures (e.g. NFSv3
+    READ) can hand back a chunk-shaped iolist without flattening to
+    a single binary. The encoder feeds it straight into
+    `:gen_tcp.send/2`, which accepts iolist.
     """
     defstruct [:xid, :verf, :stat, :body]
 
@@ -77,7 +82,7 @@ defmodule NFSServer.RPC.Message do
             xid: non_neg_integer(),
             verf: NFSServer.RPC.Auth.credential(),
             stat: stat(),
-            body: binary()
+            body: iodata()
           }
   end
 
@@ -146,36 +151,41 @@ defmodule NFSServer.RPC.Message do
   # ——— Encode (replies) ————————————————————————————————————————
 
   @doc """
-  Encode a reply (accepted or denied) to wire bytes. The result is
-  the body — pass through `RPC.RecordMarking.encode/1` before
-  writing to the socket.
+  Encode a reply (accepted or denied) to wire bytes.
+
+  Returns iodata so a streaming procedure body (e.g. NFSv3 READ
+  chunks) can flow through to `:gen_tcp.send/2` without flattening.
+  Pass through `RPC.RecordMarking.encode/1` before writing to the
+  socket.
   """
-  @spec encode_reply(reply()) :: binary()
+  @spec encode_reply(reply()) :: iodata()
   def encode_reply(%AcceptedReply{} = reply) do
-    XDR.encode_uint(reply.xid) <>
-      XDR.encode_int(@msg_reply) <>
-      XDR.encode_int(@reply_accepted) <>
-      Auth.encode_opaque_auth(reply.verf) <>
+    [
+      XDR.encode_uint(reply.xid),
+      XDR.encode_int(@msg_reply),
+      XDR.encode_int(@reply_accepted),
+      Auth.encode_opaque_auth(reply.verf),
       encode_accept_stat(reply.stat, reply.body)
+    ]
   end
 
   def encode_reply(%DeniedReply{xid: xid, reason: reason}) do
-    XDR.encode_uint(xid) <>
-      XDR.encode_int(@msg_reply) <>
-      XDR.encode_int(@reply_denied) <>
+    [
+      XDR.encode_uint(xid),
+      XDR.encode_int(@msg_reply),
+      XDR.encode_int(@reply_denied),
       encode_reject(reason)
+    ]
   end
 
   defp encode_accept_stat(:success, body),
-    do: XDR.encode_int(@accept_success) <> body
+    do: [XDR.encode_int(@accept_success), body]
 
   defp encode_accept_stat(:prog_unavail, _body),
     do: XDR.encode_int(@accept_prog_unavail)
 
   defp encode_accept_stat({:prog_mismatch, low, high}, _body) do
-    XDR.encode_int(@accept_prog_mismatch) <>
-      XDR.encode_uint(low) <>
-      XDR.encode_uint(high)
+    [XDR.encode_int(@accept_prog_mismatch), XDR.encode_uint(low), XDR.encode_uint(high)]
   end
 
   defp encode_accept_stat(:proc_unavail, _body),

@@ -99,7 +99,7 @@ defmodule NFSServer.RPC.DispatcherTest do
         body: XDR.encode_uint(123)
       }
 
-      bytes = Message.encode_reply(reply)
+      bytes = reply |> Message.encode_reply() |> IO.iodata_to_binary()
 
       assert <<7::32, 1::32, 0::32, 0::32, 0::32, 0::32, 123::32>> = bytes
     end

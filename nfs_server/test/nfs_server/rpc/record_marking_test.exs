@@ -8,11 +8,18 @@ defmodule NFSServer.RPC.RecordMarkingTest do
 
   describe "encode/1" do
     test "wraps a body in a single final fragment" do
-      assert <<1::1, 5::31, "hello">> == RecordMarking.encode("hello")
+      assert <<1::1, 5::31, "hello">> ==
+               IO.iodata_to_binary(RecordMarking.encode("hello"))
     end
 
     test "wraps an empty body" do
-      assert <<1::1, 0::31>> == RecordMarking.encode(<<>>)
+      assert <<1::1, 0::31>> == IO.iodata_to_binary(RecordMarking.encode(<<>>))
+    end
+
+    test "accepts iodata so streaming bodies pass through unflattened" do
+      iodata = ["he", ["llo"], <<>>]
+      encoded = RecordMarking.encode(iodata)
+      assert <<1::1, 5::31, "hello">> == IO.iodata_to_binary(encoded)
     end
   end
 
@@ -39,8 +46,10 @@ defmodule NFSServer.RPC.RecordMarkingTest do
   describe "decode_message/1 (multi-fragment reassembly)" do
     test "joins two fragments into a single message" do
       bytes =
-        RecordMarking.encode_fragment("foo", false) <>
+        IO.iodata_to_binary([
+          RecordMarking.encode_fragment("foo", false),
           RecordMarking.encode_fragment("bar", true)
+        ])
 
       assert {:ok, "foobar", <<>>} = RecordMarking.decode_message(bytes)
     end
@@ -54,20 +63,22 @@ defmodule NFSServer.RPC.RecordMarkingTest do
 
     test "leaves trailing bytes for the next message" do
       bytes =
-        RecordMarking.encode("first") <>
+        IO.iodata_to_binary([
+          RecordMarking.encode("first"),
           RecordMarking.encode("second")
+        ])
 
       assert {:ok, "first", rest} = RecordMarking.decode_message(bytes)
       assert {:ok, "second", <<>>} = RecordMarking.decode_message(rest)
     end
 
     test "returns :incomplete when no terminating fragment yet" do
-      bytes = RecordMarking.encode_fragment("partial", false)
+      bytes = RecordMarking.encode_fragment("partial", false) |> IO.iodata_to_binary()
       assert :incomplete = RecordMarking.decode_message(bytes)
     end
 
     test "returns :incomplete when a header is split mid-frame" do
-      bytes = RecordMarking.encode("hello")
+      bytes = RecordMarking.encode("hello") |> IO.iodata_to_binary()
       <<head::binary-size(7), _::binary>> = bytes
       assert :incomplete = RecordMarking.decode_message(head)
     end
@@ -76,7 +87,7 @@ defmodule NFSServer.RPC.RecordMarkingTest do
   describe "property: encode then decode round-trips" do
     property "any body up to 16 KiB round-trips through one fragment" do
       check all(body <- binary(max_length: 16 * 1024)) do
-        encoded = RecordMarking.encode(body)
+        encoded = body |> RecordMarking.encode() |> IO.iodata_to_binary()
         assert {:ok, ^body, <<>>} = RecordMarking.decode_message(encoded)
       end
     end

@@ -3,7 +3,7 @@ defmodule NFSServer.NFSv3.Handler do
   ONC RPC handler for NFS v3 (program 100003, version 3) — see
   [RFC 1813 §3](https://www.rfc-editor.org/rfc/rfc1813#section-3).
 
-  This slice (#529) implements the eight metadata procedures:
+  This handler implements:
 
   | Proc | Name      |
   |------|-----------|
@@ -12,13 +12,24 @@ defmodule NFSServer.NFSv3.Handler do
   | 3    | LOOKUP    |
   | 4    | ACCESS    |
   | 5    | READLINK  |
+  | 6    | READ      |
   | 18   | FSSTAT    |
   | 19   | FSINFO    |
   | 20   | PATHCONF  |
 
-  READ (proc 6, #530), READDIR / READDIRPLUS (proc 16/17, #531),
-  and the write-path procedures (proc 2, 7–15, #285) ship in their
-  own sub-issues.
+  READDIR / READDIRPLUS (proc 16/17, #531) and the write-path
+  procedures (proc 2, 7–15, #285) ship in their own sub-issues.
+
+  ## READ streaming
+
+  READ (proc 6) returns an iolist body — `Backend.read/5` hands back
+  a lazy `Enumerable.t()` of binary chunks plus an EOF flag. The
+  handler accumulates chunks up to the kernel's `count` cap (typically
+  ≤ 1 MiB, never the whole file), builds the reply body as nested
+  iolist (`status | post_op_attr | count | eof | xdr-opaque chunks`),
+  and lets `RPC.RecordMarking.encode/1` propagate the iolist all the
+  way to `:gen_tcp.send/2`. Per `CLAUDE.md`, we never materialise an
+  unbounded file into a single binary.
 
   Filesystem decisions are delegated to a `NFSServer.NFSv3.Backend`
   module; the handler stays NeonFS-agnostic. Bind a backend via
@@ -71,6 +82,7 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_lookup 3
   @proc_access 4
   @proc_readlink 5
+  @proc_read 6
   @proc_fsstat 18
   @proc_fsinfo 19
   @proc_pathconf 20
@@ -165,6 +177,13 @@ defmodule NFSServer.NFSv3.Handler do
     with_fhandle(args, &do_readlink(&1, auth, ctx))
   end
 
+  def handle_call(@proc_read, args, auth, ctx) do
+    case decode_read_args(args) do
+      {:ok, fh, offset, count} -> do_read(fh, offset, count, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
   def handle_call(@proc_fsstat, args, auth, ctx) do
     with_fhandle(args, &do_fsstat(&1, auth, ctx))
   end
@@ -192,6 +211,16 @@ defmodule NFSServer.NFSv3.Handler do
     with {:ok, fh, rest} <- Types.decode_fhandle3(args),
          {:ok, mask, _} <- XDR.decode_uint(rest) do
       {:ok, fh, mask}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  defp decode_read_args(args) do
+    with {:ok, fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, offset, rest} <- XDR.decode_uhyper(rest),
+         {:ok, count, _} <- XDR.decode_uint(rest) do
+      {:ok, fh, offset, count}
     else
       {:error, _} -> :error
     end
@@ -264,6 +293,64 @@ defmodule NFSServer.NFSv3.Handler do
       {:error, status} ->
         {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
     end
+  end
+
+  defp do_read(fh, offset, count, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.read(fh, offset, count, auth, ctx) do
+      {:ok, %{data: data, eof: eof} = reply} ->
+        post_op = Map.get(reply, :post_op)
+        {chunks, bytes} = take_bytes(data, count)
+        pad = rem(4 - rem(bytes, 4), 4)
+
+        body = [
+          Types.encode_nfsstat3(:ok),
+          Types.encode_post_op_attr(post_op),
+          XDR.encode_uint(bytes),
+          XDR.encode_bool(eof),
+          XDR.encode_uint(bytes),
+          chunks,
+          <<0::size(pad * 8)>>
+        ]
+
+        {:ok, body}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  # Pull binary chunks from an `Enumerable.t()` until either it
+  # exhausts or we have accumulated `cap` bytes. The reducer trims
+  # the trailing chunk to make `cap` an exact upper bound. Returns
+  # the chunks (in order, as iodata) and the total byte count.
+  #
+  # The accumulator is bounded by `cap` (typically ≤ 1 MiB — the
+  # kernel-side per-read limit), not by the file size.
+  defp take_bytes(stream, cap) when is_integer(cap) and cap >= 0 do
+    {acc, total} =
+      Enum.reduce_while(stream, {[], 0}, fn chunk, {acc, total} ->
+        chunk_size = byte_size(chunk)
+        remaining = cap - total
+
+        cond do
+          remaining <= 0 ->
+            {:halt, {acc, total}}
+
+          chunk_size <= remaining ->
+            {:cont, {[chunk | acc], total + chunk_size}}
+
+          true ->
+            <<head::binary-size(remaining), _::binary>> = chunk
+            {:halt, {[head | acc], total + remaining}}
+        end
+      end)
+
+    {Enum.reverse(acc), total}
   end
 
   defp do_fsstat(fh, auth, ctx) do

@@ -16,7 +16,11 @@ defmodule NFSServer.RPC.Handler do
   ## Return values
 
     * `{:ok, encoded_body}` — successful reply, `encoded_body` is the
-      already-XDR-encoded result body.
+      already-XDR-encoded result body. May be a binary or iodata —
+      streaming-aware procedures (NFSv3 READ) return chunked iodata
+      so a multi-MiB read body never has to be flattened in memory.
+      The dispatcher and `RPC.RecordMarking` propagate iodata through
+      to `:gen_tcp.send/2`.
     * `:proc_unavail` — the procedure number isn't implemented; the
       dispatcher returns `PROC_UNAVAIL`.
     * `:garbage_args` — `args_binary` couldn't be decoded; the
@@ -33,7 +37,7 @@ defmodule NFSServer.RPC.Handler do
 
   @typedoc "The reply body — handler-encoded XDR or a structured error."
   @type result ::
-          {:ok, body :: binary()}
+          {:ok, body :: iodata()}
           | :proc_unavail
           | :garbage_args
           | :system_err

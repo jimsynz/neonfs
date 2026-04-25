@@ -160,6 +160,157 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  describe "READ (proc 6)" do
+    test "encodes status + post_op_attr + count + eof + opaque<> data on success" do
+      fh = "fh-read"
+      attr = MockBackend.sample_fattr3()
+
+      MockBackend.put(
+        {:read, {fh, 0, 16}},
+        {:ok, %{data: ["hello, ", "world!"], eof: true, post_op: attr}}
+      )
+
+      args = read_args(fh, 0, 16)
+      {:ok, body} = Handler.handle_call(6, args, @auth, @ctx_base)
+      flat = IO.iodata_to_binary(body)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(flat)
+      assert {:ok, ^attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, 13, rest} = XDR.decode_uint(rest)
+      assert {:ok, true, rest} = XDR.decode_bool(rest)
+      assert {:ok, "hello, world!", <<>>} = XDR.decode_var_opaque(rest)
+    end
+
+    test "trims the stream when its bytes exceed the kernel's count cap" do
+      fh = "fh-trim"
+
+      MockBackend.put(
+        {:read, {fh, 0, 8}},
+        {:ok,
+         %{
+           data: [String.duplicate("x", 4), String.duplicate("y", 8)],
+           eof: false,
+           post_op: nil
+         }}
+      )
+
+      args = read_args(fh, 0, 8)
+      {:ok, body} = Handler.handle_call(6, args, @auth, @ctx_base)
+      flat = IO.iodata_to_binary(body)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(flat)
+      assert {:ok, nil, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, 8, rest} = XDR.decode_uint(rest)
+      assert {:ok, false, rest} = XDR.decode_bool(rest)
+      assert {:ok, "xxxxyyyy", <<>>} = XDR.decode_var_opaque(rest)
+    end
+
+    test "pads opaque data to a 4-byte boundary" do
+      fh = "fh-pad"
+
+      MockBackend.put(
+        {:read, {fh, 0, 100}},
+        {:ok, %{data: ["abc"], eof: true, post_op: nil}}
+      )
+
+      args = read_args(fh, 0, 100)
+      {:ok, body} = Handler.handle_call(6, args, @auth, @ctx_base)
+      flat = IO.iodata_to_binary(body)
+
+      # status (4) + post_op_attr (4) + count (4) + eof (4) + length (4) +
+      # data (3) + 1 byte padding = 24 bytes total.
+      assert byte_size(flat) == 24
+      assert {:ok, "abc", <<>>} = flat |> read_to_data() |> XDR.decode_var_opaque()
+    end
+
+    test "lazy stream: per-chunk iolist size is bounded by count, not file size" do
+      fh = "fh-lazy"
+      requested = 64
+      # Backend returns a stream that would yield far more than `requested`
+      # bytes if drained. We assert peak iolist size stays ≤ requested.
+      huge = Stream.repeatedly(fn -> :binary.copy("Z", 32) end)
+
+      MockBackend.put(
+        {:read, {fh, 0, requested}},
+        {:ok, %{data: huge, eof: false, post_op: nil}}
+      )
+
+      args = read_args(fh, 0, requested)
+      {:ok, body} = Handler.handle_call(6, args, @auth, @ctx_base)
+
+      # The body iolist's payload-data segment must fit inside `requested` —
+      # we measure total iolist size and subtract the fixed-size header
+      # (status 4 + post_op_attr 4 + count 4 + eof 4 + length 4 = 20).
+      total = :erlang.iolist_size(body)
+      assert total <= 20 + requested + 3
+    end
+
+    test "maps a streaming :ok with explicit eof: false to the on-wire false bit" do
+      fh = "fh-noeof"
+
+      MockBackend.put(
+        {:read, {fh, 0, 4}},
+        {:ok, %{data: ["abcd"], eof: false, post_op: nil}}
+      )
+
+      args = read_args(fh, 0, 4)
+      {:ok, body} = Handler.handle_call(6, args, @auth, @ctx_base)
+      flat = IO.iodata_to_binary(body)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(flat)
+      assert {:ok, nil, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, 4, rest} = XDR.decode_uint(rest)
+      assert {:ok, false, _} = XDR.decode_bool(rest)
+    end
+
+    for {label, status} <- [
+          {"NFS3ERR_NOENT", :noent},
+          {"NFS3ERR_PERM", :perm},
+          {"NFS3ERR_ISDIR", :isdir},
+          {"NFS3ERR_IO", :io},
+          {"NFS3ERR_NXIO", :nxio},
+          {"NFS3ERR_INVAL", :inval}
+        ] do
+      test "maps backend #{inspect(status)} to #{label} on the wire" do
+        fh = "fh-err-#{unquote(Atom.to_string(status))}"
+        MockBackend.put({:read, {fh, 0, 4}}, {:error, unquote(status), nil})
+
+        args = read_args(fh, 0, 4)
+        {:ok, body} = Handler.handle_call(6, args, @auth, @ctx_base)
+        flat = IO.iodata_to_binary(body)
+
+        assert {:ok, unquote(status), rest} = Types.decode_nfsstat3(flat)
+        assert {:ok, nil, <<>>} = Types.decode_post_op_attr(rest)
+      end
+    end
+
+    test "passes the post-op attr through on error replies" do
+      fh = "fh-err-attrs"
+      attr = MockBackend.sample_fattr3()
+      MockBackend.put({:read, {fh, 0, 4}}, {:error, :io, attr})
+
+      {:ok, body} = Handler.handle_call(6, read_args(fh, 0, 4), @auth, @ctx_base)
+      flat = IO.iodata_to_binary(body)
+
+      assert {:ok, :io, rest} = Types.decode_nfsstat3(flat)
+      assert {:ok, ^attr, <<>>} = Types.decode_post_op_attr(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(6, <<0xFF>>, @auth, @ctx_base)
+    end
+
+    test "returns :garbage_args when args truncate before count3" do
+      assert :garbage_args =
+               Handler.handle_call(
+                 6,
+                 Types.encode_fhandle3("fh") <> XDR.encode_uhyper(0),
+                 @auth,
+                 @ctx_base
+               )
+    end
+  end
+
   describe "FSSTAT (proc 18)" do
     test "encodes the full reply on success" do
       fh = "fh-vol"
@@ -274,4 +425,14 @@ defmodule NFSServer.NFSv3.HandlerTest do
       end
     end
   end
+
+  ## Helpers
+
+  defp read_args(fh, offset, count) do
+    Types.encode_fhandle3(fh) <> XDR.encode_uhyper(offset) <> XDR.encode_uint(count)
+  end
+
+  # Skip past status (4) + post_op_attr-empty (4) + count (4) + eof (4)
+  # to land on the opaque<>'s length prefix. Used by the padding test.
+  defp read_to_data(<<_::binary-size(16), rest::binary>>), do: rest
 end
