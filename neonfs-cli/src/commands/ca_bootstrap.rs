@@ -17,8 +17,15 @@
 //!     installed CA key via rcgen, atomically write `node.crt` +
 //!     `node.key` + bumped `serial` to `$NEONFS_TLS_DIR/`.
 //!
+//!   - **B.2b.3** (#518) — `--new-key` fresh-CA generation: when the
+//!     operator has no usable backup, mint a brand new CA keypair +
+//!     self-signed CA cert + empty CRL via rcgen, advance the serial
+//!     counter past any value the previous CA might have issued, and
+//!     install atomically. Reuses [`install_ca_material`] for the
+//!     install step and [`regenerate_node_cert`] for the post-install
+//!     node cert.
+//!
 //! Still deferred to follow-ups under #518:
-//!   - `--new-key` fresh-CA generation.
 //!   - Audit-log emission (JSONL at `$NEONFS_DATA_DIR/audit/…`).
 
 use crate::error::{CliError, Result};
@@ -364,6 +371,111 @@ fn regenerate_node_cert_with(tls_dir: &Path, resolve: &HostnameResolver) -> Resu
     )?;
 
     Ok(())
+}
+
+/// Generate fresh CA material in memory (CA cert + key + initial serial +
+/// empty CRL) for the `--new-key` emergency-bootstrap path.
+///
+/// Produces a [`BackupValidation`] with the same shape as
+/// [`validate_backup_tarball`], so callers can feed the result straight
+/// into [`install_ca_material`] and reuse the existing atomic install +
+/// node-cert-regen pipeline.
+///
+/// ## Inputs
+///
+/// - `cluster_name` — identifies the new CA via the subject CN
+///   (`/O=NeonFS/CN=<cluster_name> CA`). Read from the local
+///   `cluster.json` by the caller; this function does not touch disk.
+/// - `existing_serial` — last serial number known to have been issued
+///   by the OUTGOING CA, if recoverable. The new CA's serial counter
+///   starts at `max(existing_serial, 1000) + 1` so freshly-issued
+///   certs never collide with anything the previous CA signed.
+///
+/// ## Outputs
+///
+/// `BackupValidation.entries` carries the four [`REQUIRED_MEMBERS`] —
+/// `ca.crt` (PEM), `ca.key` (PKCS#8 PEM), `serial` (ASCII integer +
+/// trailing newline), `crl.pem` (empty CRL signed by the new CA key).
+/// Validity matches the existing Elixir defaults: 10-year CA cert,
+/// 1-year CRL `next_update`.
+pub fn generate_new_ca_material(
+    cluster_name: &str,
+    existing_serial: u64,
+) -> Result<BackupValidation> {
+    let next_serial = existing_serial.max(MIN_NEW_CA_SERIAL) + 1;
+
+    let ca_keypair = rcgen::KeyPair::generate()
+        .map_err(|e| CliError::InvalidArgument(format!("failed to generate CA keypair: {e:?}")))?;
+    let ca_key_pem = ca_keypair.serialize_pem();
+
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(|e| {
+        CliError::InvalidArgument(format!("rcgen rejected empty CA SAN list: {e:?}"))
+    })?;
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "NeonFS");
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, format!("{cluster_name} CA"));
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    let now = time::OffsetDateTime::now_utc();
+    ca_params.not_before = now;
+    ca_params.not_after = now + time::Duration::days(CA_VALIDITY_DAYS);
+
+    let certified = rcgen::CertifiedIssuer::self_signed(ca_params, ca_keypair).map_err(|e| {
+        CliError::InvalidArgument(format!("failed to self-sign new CA cert: {e:?}"))
+    })?;
+    let ca_cert_pem = certified.pem();
+
+    let crl_params = rcgen::CertificateRevocationListParams {
+        this_update: now,
+        next_update: now + time::Duration::days(CRL_NEXT_UPDATE_DAYS),
+        crl_number: rcgen::SerialNumber::from(1u64),
+        issuing_distribution_point: None,
+        revoked_certs: Vec::new(),
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    };
+    let crl = crl_params.signed_by(&certified).map_err(|e| {
+        CliError::InvalidArgument(format!("failed to sign empty CRL with new CA key: {e:?}"))
+    })?;
+    let crl_pem = crl
+        .pem()
+        .map_err(|e| CliError::InvalidArgument(format!("failed to PEM-encode new CRL: {e:?}")))?;
+
+    let mut entries: HashMap<String, Vec<u8>> = HashMap::new();
+    entries.insert("ca.crt".to_string(), ca_cert_pem.into_bytes());
+    entries.insert("ca.key".to_string(), ca_key_pem.into_bytes());
+    entries.insert(
+        "serial".to_string(),
+        format!("{next_serial}\n").into_bytes(),
+    );
+    entries.insert("crl.pem".to_string(), crl_pem.into_bytes());
+
+    Ok(BackupValidation {
+        cluster_name: cluster_name.to_string(),
+        entries,
+    })
+}
+
+const CA_VALIDITY_DAYS: i64 = 3650;
+const CRL_NEXT_UPDATE_DAYS: i64 = 365;
+const MIN_NEW_CA_SERIAL: u64 = 1000;
+
+/// Read `$tls_dir/serial` and return its parsed value if present and
+/// well-formed. Returns `None` for any failure mode (file missing,
+/// unreadable, not an integer) — callers in the `--new-key` path treat
+/// "no recoverable serial" as zero and let
+/// [`generate_new_ca_material`] floor at [`MIN_NEW_CA_SERIAL`].
+pub fn read_installed_serial(tls_dir: &Path) -> Option<u64> {
+    let path = tls_dir.join("serial");
+    // audit:bounded serial file is a single line of ASCII digits.
+    let raw = std::fs::read_to_string(&path).ok()?;
+    raw.trim().parse().ok()
 }
 
 /// Helper that writes a batch of files atomically per-file via stage +
@@ -1067,5 +1179,174 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
         }
 
         assert_eq!(name.unwrap(), "prod-west-1");
+    }
+
+    // ─── #518 B.2b.3: --new-key fresh-CA generation ────────────────
+
+    #[test]
+    fn read_installed_serial_returns_none_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        std::fs::create_dir_all(&tls_dir).unwrap();
+        // No serial file written.
+        assert_eq!(read_installed_serial(&tls_dir), None);
+    }
+
+    #[test]
+    fn read_installed_serial_parses_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        std::fs::create_dir_all(&tls_dir).unwrap();
+        std::fs::write(tls_dir.join("serial"), "42\n").unwrap();
+        assert_eq!(read_installed_serial(&tls_dir), Some(42));
+    }
+
+    #[test]
+    fn read_installed_serial_returns_none_for_garbage() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        std::fs::create_dir_all(&tls_dir).unwrap();
+        std::fs::write(tls_dir.join("serial"), "not-a-number\n").unwrap();
+        assert_eq!(read_installed_serial(&tls_dir), None);
+    }
+
+    #[test]
+    fn generate_new_ca_material_carries_required_members_and_cluster_name() {
+        let validation = generate_new_ca_material("prod-west-1", 0).unwrap();
+        assert_eq!(validation.cluster_name, "prod-west-1");
+
+        for member in REQUIRED_MEMBERS {
+            assert!(
+                validation.entries.contains_key(*member),
+                "missing required member `{member}` in fresh CA validation"
+            );
+            let bytes = validation.entries.get(*member).unwrap();
+            assert!(!bytes.is_empty(), "`{member}` has zero bytes");
+        }
+    }
+
+    #[test]
+    fn generate_new_ca_material_produces_pkcs8_ca_key() {
+        let validation = generate_new_ca_material("k", 0).unwrap();
+        let key_pem = std::str::from_utf8(validation.entries.get("ca.key").unwrap()).unwrap();
+        // rcgen's serialize_pem emits PKCS#8 (`-----BEGIN PRIVATE KEY-----`),
+        // which the regenerate_node_cert path can consume directly.
+        assert!(
+            key_pem.contains("-----BEGIN PRIVATE KEY-----"),
+            "expected PKCS#8 envelope, got:\n{key_pem}"
+        );
+        assert!(!key_pem.contains("BEGIN EC PRIVATE KEY"));
+    }
+
+    #[test]
+    fn generate_new_ca_material_self_signs_ca_with_expected_subject() {
+        let validation = generate_new_ca_material("acme-prod", 0).unwrap();
+        let ca_pem = validation.entries.get("ca.crt").unwrap();
+
+        let (_, pem_obj) = x509_parser::pem::parse_x509_pem(ca_pem).unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(&pem_obj.contents).unwrap();
+
+        let cn = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(cn, "acme-prod CA");
+
+        let org = cert
+            .subject()
+            .iter_organization()
+            .next()
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(org, "NeonFS");
+
+        // Self-signed: subject == issuer.
+        assert_eq!(cert.subject().to_string(), cert.issuer().to_string());
+
+        // CA: BasicConstraints must mark this as a CA.
+        let bc = cert
+            .basic_constraints()
+            .ok()
+            .flatten()
+            .expect("CA cert must carry BasicConstraints");
+        assert!(
+            bc.value.ca,
+            "BasicConstraints.ca must be true on the new CA"
+        );
+    }
+
+    #[test]
+    fn generate_new_ca_material_emits_parseable_empty_crl() {
+        let validation = generate_new_ca_material("k", 0).unwrap();
+        let crl_pem = validation.entries.get("crl.pem").unwrap();
+
+        let (_, pem_obj) = x509_parser::pem::parse_x509_pem(crl_pem).unwrap();
+        let (_, crl) = x509_parser::parse_x509_crl(&pem_obj.contents).unwrap();
+        assert_eq!(crl.iter_revoked_certificates().count(), 0);
+    }
+
+    #[test]
+    fn generate_new_ca_material_serial_floors_at_min_new_ca_serial() {
+        // Existing serial 0 → next = max(0, 1000) + 1 = 1001.
+        let validation = generate_new_ca_material("k", 0).unwrap();
+        let serial = std::str::from_utf8(validation.entries.get("serial").unwrap()).unwrap();
+        assert_eq!(serial.trim(), "1001");
+    }
+
+    #[test]
+    fn generate_new_ca_material_serial_advances_past_existing() {
+        // Existing serial 5000 → next = max(5000, 1000) + 1 = 5001.
+        let validation = generate_new_ca_material("k", 5000).unwrap();
+        let serial = std::str::from_utf8(validation.entries.get("serial").unwrap()).unwrap();
+        assert_eq!(serial.trim(), "5001");
+    }
+
+    #[test]
+    fn fresh_ca_round_trips_through_install_and_regenerate_node_cert() {
+        // Full slice happy-path: generate fresh CA → install → regen
+        // node cert → assert node cert validates against the new CA.
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+
+        let validation = generate_new_ca_material("ring-zero", 100).unwrap();
+        install_ca_material(&validation, &tls_dir).unwrap();
+
+        let resolve: &HostnameResolver = &|| Ok("ring-zero-host".to_string());
+        regenerate_node_cert_with(&tls_dir, resolve).unwrap();
+
+        // Node cert is signed by the issuing CA — assert subject CN +
+        // the Issuer DN matches the CA we just installed.
+        let node_pem = std::fs::read(tls_dir.join("node.crt")).unwrap();
+        let (_, node_pem_obj) = x509_parser::pem::parse_x509_pem(&node_pem).unwrap();
+        let (_, node_cert) = x509_parser::parse_x509_certificate(&node_pem_obj.contents).unwrap();
+
+        let ca_pem = std::fs::read(tls_dir.join("ca.crt")).unwrap();
+        let (_, ca_pem_obj) = x509_parser::pem::parse_x509_pem(&ca_pem).unwrap();
+        let (_, ca_cert) = x509_parser::parse_x509_certificate(&ca_pem_obj.contents).unwrap();
+
+        assert_eq!(
+            node_cert.issuer().to_string(),
+            ca_cert.subject().to_string()
+        );
+
+        let node_cn = node_cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(node_cn, "neonfs_core@ring-zero-host");
+
+        // generate_new_ca_material(_, 100) floors at MIN_NEW_CA_SERIAL = 1000,
+        // so the installed serial is 1001. regenerate_node_cert reads it,
+        // bumps to 1002, and writes the bumped value back.
+        // audit:bounded serial file is a single line of ASCII digits.
+        let on_disk = std::fs::read_to_string(tls_dir.join("serial")).unwrap();
+        assert_eq!(on_disk.trim(), "1002");
     }
 }

@@ -872,91 +872,64 @@ impl CaCommand {
         // the daemon via a TCP probe on its distribution port.
         crate::commands::ca_bootstrap::refuse_if_daemon_live()?;
 
-        // Safety-gate + install + node-cert-regen layer for the
-        // `--from-backup` path: validate the tarball, refuse foreign
-        // CAs, install atomically, then regenerate the local node
-        // cert against the freshly installed CA. `--new-key` + audit
-        // log remain TODO.
+        // Safety-gate + install + node-cert-regen layer. Both paths
+        // produce a `BackupValidation` (real tarball for `--from-backup`,
+        // freshly-minted in-memory CA for `--new-key`) and feed it
+        // through the same `install_ca_material` + `regenerate_node_cert`
+        // pipeline.
+        let tls_dir = crate::tls::tls_dir();
+
         let installed_cluster = match &source {
             EmergencyBootstrapSource::Backup(path) => {
                 let validation = crate::commands::ca_bootstrap::validate_backup_tarball(path)?;
                 let local_name = crate::commands::ca_bootstrap::local_cluster_name()?;
                 let validation =
                     crate::commands::ca_bootstrap::refuse_foreign_backup(validation, &local_name)?;
-                let tls_dir = crate::tls::tls_dir();
                 crate::commands::ca_bootstrap::install_ca_material(&validation, &tls_dir)?;
                 crate::commands::ca_bootstrap::regenerate_node_cert(&tls_dir)?;
-                Some(validation.cluster_name)
+                validation.cluster_name
             }
-            EmergencyBootstrapSource::NewKey => None,
+            EmergencyBootstrapSource::NewKey => {
+                let local_name = crate::commands::ca_bootstrap::local_cluster_name()?;
+                let existing_serial =
+                    crate::commands::ca_bootstrap::read_installed_serial(&tls_dir).unwrap_or(0);
+                let validation = crate::commands::ca_bootstrap::generate_new_ca_material(
+                    &local_name,
+                    existing_serial,
+                )?;
+                crate::commands::ca_bootstrap::install_ca_material(&validation, &tls_dir)?;
+                crate::commands::ca_bootstrap::regenerate_node_cert(&tls_dir)?;
+                validation.cluster_name
+            }
         };
 
-        // With `--from-backup` the full happy path is now on disk:
-        // new CA material + freshly-signed node cert. `--new-key` and
-        // the audit-log write are still TODO.
         let description = source.description();
-        let install_note = match &installed_cluster {
-            Some(name) => format!(
-                " — CA material + new node cert installed under $NEONFS_TLS_DIR for cluster `{}`",
-                name
-            ),
-            None => String::new(),
-        };
-        let (status, message) = match &installed_cluster {
-            Some(_) => (
-                "installed",
-                format!(
-                    "cluster ca emergency-bootstrap: CA material installed and node cert regenerated ({description}{install_note}). \
-                     Next step: restart `neonfs-core` to pick up the new chain."
-                ),
-            ),
-            None => (
-                "not_implemented",
-                format!(
-                    "cluster ca emergency-bootstrap: `--new-key` path is not yet implemented ({description}). \
-                     Use `--from-backup <tarball>` instead until slice B.2b.3 lands."
-                ),
-            ),
-        };
+        let message = format!(
+            "cluster ca emergency-bootstrap: CA material installed and node cert regenerated ({description} — \
+             cluster `{installed_cluster}`). Next step: restart `neonfs-core` to pick up the new chain."
+        );
 
         match format {
             OutputFormat::Json => {
                 let payload = serde_json::json!({
-                    "status": status,
+                    "status": "installed",
                     "source": description,
                     "installed_cluster": installed_cluster,
                     "message": message,
                 });
                 eprintln!("{}", json::format(&payload)?);
             }
-            OutputFormat::Table => match installed_cluster.as_ref() {
-                Some(name) => {
-                    eprintln!("neonfs cluster ca emergency-bootstrap: CA + node cert installed");
-                    eprintln!();
-                    eprintln!("  cluster: {name}");
-                    eprintln!("  source:  {description}");
-                    eprintln!();
-                    eprintln!("Next step: restart `neonfs-core` to pick up the new chain.");
-                }
-                None => {
-                    eprintln!(
-                        "neonfs cluster ca emergency-bootstrap: `--new-key` not yet implemented"
-                    );
-                    eprintln!();
-                    eprintln!("  source: {description}");
-                    eprintln!();
-                    eprintln!("Use `--from-backup <tarball>` instead until slice B.2b.3 lands.");
-                }
-            },
+            OutputFormat::Table => {
+                eprintln!("neonfs cluster ca emergency-bootstrap: CA + node cert installed");
+                eprintln!();
+                eprintln!("  cluster: {installed_cluster}");
+                eprintln!("  source:  {description}");
+                eprintln!();
+                eprintln!("Next step: restart `neonfs-core` to pick up the new chain.");
+            }
         }
 
-        // Success exit when the install went through; error exit when
-        // `--new-key` was asked for (still not implemented).
-        if installed_cluster.is_some() {
-            return Ok(());
-        }
-
-        Err(crate::error::CliError::RpcError(message))
+        Ok(())
     }
 }
 
