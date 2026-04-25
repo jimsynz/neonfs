@@ -47,6 +47,23 @@ In that case:
 
 Only do this when the breakdown is genuinely needed. A single focused issue should still be implemented in one iteration.
 
+## Don't open design-proposal PRs
+
+If the issue you've picked is genuinely a design call — open architectural questions, multiple plausible directions, "needs decision on X" in the body — **do not** draft a markdown proposal and open it as a `docs/` PR. James does the design work; ralph's job is implementation.
+
+Instead:
+
+- Open a new issue capturing the design question, with the `maintainer-only` label so the loop skips it on future iterations. Link it from the original issue.
+- Move on to a different issue this iteration.
+
+Concrete signals an issue needs a design call rather than implementation:
+
+- "Open questions to resolve before implementing"-type sections.
+- Acceptance criteria reference modules / functions / config flags that don't exist yet.
+- Behaviour depends on a wider architectural decision (e.g. eviction strategy, retention policy, scope semantics).
+
+Already-decided issues — concrete acceptance criteria, named modules, named functions, named config flags — are still in scope to implement directly.
+
 ## Starting Work
 
 Once you've picked issue `#N`:
