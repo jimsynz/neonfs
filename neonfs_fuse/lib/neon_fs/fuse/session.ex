@@ -544,10 +544,52 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End data-path opcodes ——————————————————————————————————————
 
+  # ——— Cache flushers + FALLOCATE (#577) ————————————————————————————
+
+  # `FLUSH` is a close-time advisory the kernel emits after every
+  # `close(2)`. NeonFS commits writes synchronously at the chunk-write
+  # boundary, so there's nothing buffered to flush — reply success
+  # immediately without involving Handler.
+  defp handle_opcode(:flush, header, %Request.Flush{}, state) do
+    write_reply(state.fd, header.unique, %Response.Empty{}, 0)
+    emit_opcode_telemetry(:flush, :ok, state)
+    state
+  end
+
+  # `FSYNC` (op 20) and `FSYNCDIR` (op 30) carry the same wire layout
+  # and the same answer here: every committed write is already
+  # persistent (Ra-replicated metadata + chunk replicas), so there's
+  # no per-fd buffer to fsync. Reply success.
+  defp handle_opcode(:fsync, header, %Request.Fsync{}, state) do
+    reply_empty_ok(state, header.unique, :fsync)
+  end
+
+  defp handle_opcode(:fsyncdir, header, %Request.FsyncDir{}, state) do
+    reply_empty_ok(state, header.unique, :fsyncdir)
+  end
+
+  # `FALLOCATE` is optional per RFC. NeonFS chunks-on-write so sparse
+  # pre-allocation is a niche optimisation we haven't implemented;
+  # returning `-ENOSYS` (38) is the kernel-friendly answer — the
+  # kernel falls back to zero-filled writes when it sees this.
+  defp handle_opcode(:fallocate, header, %Request.Fallocate{}, state) do
+    write_frame(state.fd, Protocol.encode_error(header.unique, -38))
+    emit_opcode_telemetry(:fallocate, :error, state)
+    state
+  end
+
+  # ——— End cache flushers + FALLOCATE ——————————————————————————————
+
   # Catch-all for opcodes we accept in the codec but don't route here
-  # (write-path, xattrs, etc. — out of scope for #277).
+  # (xattrs, locks, etc. — not yet handled by this session).
   defp handle_opcode(_other, header, _req, state) do
     write_frame(state.fd, Protocol.encode_error(header.unique, -38))
+    state
+  end
+
+  defp reply_empty_ok(state, kernel_unique, opcode) do
+    write_reply(state.fd, kernel_unique, %Response.Empty{}, 0)
+    emit_opcode_telemetry(opcode, :ok, state)
     state
   end
 

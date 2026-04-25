@@ -747,6 +747,77 @@ defmodule NeonFS.FUSE.SessionTest do
 
   # ——— End data-path opcodes ——————————————————————————————————————
 
+  # ——— Cache flushers + FALLOCATE (#577) ————————————————————————————
+
+  describe "FLUSH / FSYNC / FSYNCDIR (no-op success)" do
+    setup do
+      ctx = setup_session()
+      _ = handshake!(ctx)
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "FLUSH replies success without invoking the handler", ctx do
+      # `fuse_flush_in`: fh (8) + unused (4) + padding (4) + lock_owner (8) = 24
+      header = build_in_header(opcode: opcode(:flush), len: 40 + 24, unique: 201, nodeid: 7)
+      body = <<0::little-64, 0::little-32, 0::little-32, 0::little-64>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      assert out.unique == 201
+    end
+
+    test "FSYNC replies success", ctx do
+      # `fuse_fsync_in`: fh (8) + flags (4) + pad (4) = 16
+      header = build_in_header(opcode: opcode(:fsync), len: 40 + 16, unique: 202, nodeid: 7)
+      body = <<0::little-64, 0::little-32, 0::little-32>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      assert out.unique == 202
+    end
+
+    test "FSYNCDIR replies success", ctx do
+      header = build_in_header(opcode: opcode(:fsyncdir), len: 40 + 16, unique: 203, nodeid: 7)
+      body = <<0::little-64, 0::little-32, 0::little-32>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      assert out.unique == 203
+    end
+  end
+
+  describe "FALLOCATE" do
+    setup do
+      ctx = setup_session()
+      _ = handshake!(ctx)
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "replies -ENOSYS so the kernel falls back to zero-filled writes", ctx do
+      # `fuse_fallocate_in`: fh (8) + offset (8) + length (8) + mode (4) + pad (4) = 32
+      header = build_in_header(opcode: opcode(:fallocate), len: 40 + 32, unique: 204, nodeid: 7)
+
+      body =
+        <<0::little-64, 0::little-64, 4096::little-64, 0::little-32, 0::little-32>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == -38
+      assert out.unique == 204
+    end
+  end
+
+  # ——— End cache flushers + FALLOCATE ——————————————————————————————
+
   describe "error mapping" do
     setup do
       ctx = setup_session_with_handler()
