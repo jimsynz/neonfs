@@ -366,6 +366,214 @@ defmodule NeonFS.FUSE.SessionTest do
     end
   end
 
+  # ——— Mutation metadata opcodes (#575) ——————————————————————————
+
+  describe "SETATTR" do
+    setup do
+      ctx = setup_session_with_handler()
+      _ = handshake!(ctx)
+      send(ctx.handler, {:set_session, ctx.session})
+
+      :ok =
+        StubHandler.set_replies(ctx.handler, %{
+          "setattr" => fn {"setattr", params} ->
+            send(self(), {:setattr_called, params})
+
+            {"attr_ok",
+             %{
+               "ino" => params["ino"],
+               "size" => params["size"] || 12,
+               "kind" => "file"
+             }}
+          end
+        })
+
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "translates `valid` bitmask into Handler params (mode, size only)", ctx do
+      header = build_in_header(opcode: opcode(:setattr), len: 40 + 88, unique: 51, nodeid: 7)
+      body = encode_setattr(valid: 0x09, mode: 0o755, size: 1024)
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out_header, _} = receive_response(ctx.kernel_fd)
+      assert out_header.error == 0
+      assert out_header.unique == 51
+
+      [{"setattr", params}] = StubHandler.received_ops(ctx.handler)
+      assert params["ino"] == 7
+      assert params["mode"] == 0o755
+      assert params["size"] == 1024
+      # FATTR_UID / FATTR_GID / FATTR_ATIME / FATTR_MTIME bits not set →
+      # those entries decode to nil so Handler skips them.
+      assert is_nil(params["uid"])
+      assert is_nil(params["atime"])
+    end
+
+    test "FATTR_ATIME_NOW substitutes server time", ctx do
+      header = build_in_header(opcode: opcode(:setattr), len: 40 + 88, unique: 52, nodeid: 7)
+      # Bit 0x80 = FATTR_ATIME_NOW. atime field itself is ignored.
+      body = encode_setattr(valid: 0x80, atime: 0, atimensec: 0)
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+      assert {:ok, _out, _} = receive_response(ctx.kernel_fd)
+
+      [{"setattr", params}] = StubHandler.received_ops(ctx.handler)
+      assert {sec, nsec} = params["atime"]
+      assert sec > 0
+      assert is_integer(nsec)
+    end
+
+    test "ATTR reply on a valid-bitmask of zero (no-op setattr)", ctx do
+      header = build_in_header(opcode: opcode(:setattr), len: 40 + 88, unique: 53, nodeid: 7)
+      body = encode_setattr(valid: 0)
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+      assert {:ok, out, attr_body} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      # `fuse_attr_out`: 8 (attr_valid) + 4 (attr_valid_nsec) + 4 (dummy) + 88 (fuse_attr).
+      assert byte_size(attr_body) == 104
+    end
+  end
+
+  describe "MKDIR" do
+    setup do
+      ctx = setup_session_with_handler()
+      _ = handshake!(ctx)
+      send(ctx.handler, {:set_session, ctx.session})
+
+      :ok =
+        StubHandler.set_replies(ctx.handler, %{
+          "mkdir" => fn {"mkdir", params} ->
+            {"entry_ok",
+             %{
+               "ino" => 99,
+               "size" => 0,
+               "kind" => "directory",
+               "fh" => 0,
+               "_received_mode" => params["mode"]
+             }}
+          end
+        })
+
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "applies umask before forwarding to Handler", ctx do
+      # mode 0o777 & ~0o022 = 0o755
+      header = build_in_header(opcode: opcode(:mkdir), len: 40 + 12, unique: 60, nodeid: 1)
+      body = <<0o777::little-32, 0o022::little-32, "sub", 0>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, entry_body} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      # 128 bytes of fuse_entry_out: 40 header + 88 attr.
+      assert byte_size(entry_body) == 128
+
+      [{"mkdir", params}] = StubHandler.received_ops(ctx.handler)
+      assert params["parent"] == 1
+      assert params["name"] == "sub"
+      assert params["mode"] == 0o755
+    end
+  end
+
+  describe "UNLINK / RMDIR" do
+    setup do
+      ctx = setup_session_with_handler()
+      _ = handshake!(ctx)
+      send(ctx.handler, {:set_session, ctx.session})
+
+      :ok =
+        StubHandler.set_replies(ctx.handler, %{
+          "unlink" => {"ok", %{}},
+          "rmdir" => {"ok", %{}}
+        })
+
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "UNLINK replies with empty success", ctx do
+      header = build_in_header(opcode: opcode(:unlink), len: 40 + 4, unique: 70, nodeid: 1)
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> <<"old", 0>>)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      assert out.unique == 70
+
+      [{"unlink", %{"parent" => 1, "name" => "old"}}] = StubHandler.received_ops(ctx.handler)
+    end
+
+    test "RMDIR replies with empty success", ctx do
+      header = build_in_header(opcode: opcode(:rmdir), len: 40 + 4, unique: 71, nodeid: 1)
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> <<"sub", 0>>)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      [{"rmdir", %{"parent" => 1, "name" => "sub"}}] = StubHandler.received_ops(ctx.handler)
+    end
+  end
+
+  describe "RENAME / RENAME2" do
+    setup do
+      ctx = setup_session_with_handler()
+      _ = handshake!(ctx)
+      send(ctx.handler, {:set_session, ctx.session})
+
+      :ok =
+        StubHandler.set_replies(ctx.handler, %{
+          "rename" => {"ok", %{}}
+        })
+
+      on_exit(fn -> teardown_session(ctx) end)
+      ctx
+    end
+
+    test "RENAME translates oldname/newname/newdir into Handler params", ctx do
+      header = build_in_header(opcode: opcode(:rename), len: 40 + 16, unique: 80, nodeid: 1)
+      body = <<2::little-64, "old", 0, "new", 0>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+
+      [
+        {"rename",
+         %{"old_parent" => 1, "new_parent" => 2, "old_name" => "old", "new_name" => "new"}}
+      ] = StubHandler.received_ops(ctx.handler)
+    end
+
+    test "RENAME2 with flags=0 dispatches as a regular rename", ctx do
+      header = build_in_header(opcode: opcode(:rename2), len: 40 + 24, unique: 81, nodeid: 1)
+      body = <<2::little-64, 0::little-32, 0::little-32, "old", 0, "new", 0>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == 0
+      assert [{"rename", _}] = StubHandler.received_ops(ctx.handler)
+    end
+
+    test "RENAME2 with RENAME_EXCHANGE returns -EINVAL without invoking Handler", ctx do
+      # 0x02 = RENAME_EXCHANGE
+      header = build_in_header(opcode: opcode(:rename2), len: 40 + 24, unique: 82, nodeid: 1)
+      body = <<2::little-64, 0x02::little-32, 0::little-32, "old", 0, "new", 0>>
+
+      :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
+
+      assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
+      assert out.error == -22
+      assert StubHandler.received_ops(ctx.handler) == []
+    end
+  end
+
+  # ——— End mutation metadata opcodes —————————————————————————————
+
   describe "error mapping" do
     setup do
       ctx = setup_session_with_handler()
@@ -485,6 +693,44 @@ defmodule NeonFS.FUSE.SessionTest do
   end
 
   defp opcode(atom), do: Protocol.atom_to_opcode(atom)
+
+  # Encode an 88-byte `fuse_setattr_in` for tests. All optional kw
+  # fields default to zero so callers only set what the `valid` bits
+  # they care about reference.
+  defp encode_setattr(opts) do
+    valid = Keyword.fetch!(opts, :valid)
+    fh = Keyword.get(opts, :fh, 0)
+    size = Keyword.get(opts, :size, 0)
+    lock_owner = Keyword.get(opts, :lock_owner, 0)
+    atime = Keyword.get(opts, :atime, 0)
+    mtime = Keyword.get(opts, :mtime, 0)
+    ctime = Keyword.get(opts, :ctime, 0)
+    atimensec = Keyword.get(opts, :atimensec, 0)
+    mtimensec = Keyword.get(opts, :mtimensec, 0)
+    ctimensec = Keyword.get(opts, :ctimensec, 0)
+    mode = Keyword.get(opts, :mode, 0)
+    uid = Keyword.get(opts, :uid, 0)
+    gid = Keyword.get(opts, :gid, 0)
+
+    <<
+      valid::little-32,
+      0::little-32,
+      fh::little-64,
+      size::little-64,
+      lock_owner::little-64,
+      atime::little-64,
+      mtime::little-64,
+      ctime::little-64,
+      atimensec::little-32,
+      mtimensec::little-32,
+      ctimensec::little-32,
+      mode::little-32,
+      0::little-32,
+      uid::little-32,
+      gid::little-32,
+      0::little-32
+    >>
+  end
 
   defp dirent_pad(namelen) do
     rem(8 - rem(24 + namelen, 8), 8) + namelen
