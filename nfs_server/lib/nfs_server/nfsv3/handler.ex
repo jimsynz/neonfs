@@ -5,20 +5,22 @@ defmodule NFSServer.NFSv3.Handler do
 
   This handler implements:
 
-  | Proc | Name      |
-  |------|-----------|
-  | 0    | NULL      |
-  | 1    | GETATTR   |
-  | 3    | LOOKUP    |
-  | 4    | ACCESS    |
-  | 5    | READLINK  |
-  | 6    | READ      |
-  | 18   | FSSTAT    |
-  | 19   | FSINFO    |
-  | 20   | PATHCONF  |
+  | Proc | Name        |
+  |------|-------------|
+  | 0    | NULL        |
+  | 1    | GETATTR     |
+  | 3    | LOOKUP      |
+  | 4    | ACCESS      |
+  | 5    | READLINK    |
+  | 6    | READ        |
+  | 16   | READDIR     |
+  | 17   | READDIRPLUS |
+  | 18   | FSSTAT      |
+  | 19   | FSINFO      |
+  | 20   | PATHCONF    |
 
-  READDIR / READDIRPLUS (proc 16/17, #531) and the write-path
-  procedures (proc 2, 7–15, #285) ship in their own sub-issues.
+  The write-path procedures (proc 2, 7–15, #285) ship in a separate
+  sub-issue.
 
   ## READ streaming
 
@@ -30,6 +32,20 @@ defmodule NFSServer.NFSv3.Handler do
   and lets `RPC.RecordMarking.encode/1` propagate the iolist all the
   way to `:gen_tcp.send/2`. Per `CLAUDE.md`, we never materialise an
   unbounded file into a single binary.
+
+  ## Cookie pagination (READDIR / READDIRPLUS)
+
+  Both directory-iteration procs use the same scheme: the client
+  passes a `cookie` (initially zero) plus an opaque `cookieverf3`
+  back to the server, which returns a slice of entries plus a new
+  cookie for the next call. The handler treats cookies as opaque —
+  the backend chooses the encoding (offset, name, inode, …). The
+  `cookieverf3` is typically the directory's mtime so a writer
+  invalidates outstanding paginations on the next mtime bump.
+
+  When the backend's verifier disagrees with the client's, the
+  handler maps that to `NFS3ERR_BAD_COOKIE` (10003) so the client
+  knows to restart pagination from cookie 0.
 
   Filesystem decisions are delegated to a `NFSServer.NFSv3.Backend`
   module; the handler stays NeonFS-agnostic. Bind a backend via
@@ -83,6 +99,8 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_access 4
   @proc_readlink 5
   @proc_read 6
+  @proc_readdir 16
+  @proc_readdirplus 17
   @proc_fsstat 18
   @proc_fsinfo 19
   @proc_pathconf 20
@@ -184,6 +202,23 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  def handle_call(@proc_readdir, args, auth, ctx) do
+    case decode_readdir_args(args) do
+      {:ok, fh, cookie, verf, count} -> do_readdir(fh, cookie, verf, count, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_readdirplus, args, auth, ctx) do
+    case decode_readdirplus_args(args) do
+      {:ok, fh, cookie, verf, dircount, maxcount} ->
+        do_readdirplus(fh, cookie, verf, dircount, maxcount, auth, ctx)
+
+      :error ->
+        :garbage_args
+    end
+  end
+
   def handle_call(@proc_fsstat, args, auth, ctx) do
     with_fhandle(args, &do_fsstat(&1, auth, ctx))
   end
@@ -221,6 +256,29 @@ defmodule NFSServer.NFSv3.Handler do
          {:ok, offset, rest} <- XDR.decode_uhyper(rest),
          {:ok, count, _} <- XDR.decode_uint(rest) do
       {:ok, fh, offset, count}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  defp decode_readdir_args(args) do
+    with {:ok, fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, cookie, rest} <- XDR.decode_uhyper(rest),
+         {:ok, verf, rest} <- Types.decode_cookieverf3(rest),
+         {:ok, count, _} <- XDR.decode_uint(rest) do
+      {:ok, fh, cookie, verf, count}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  defp decode_readdirplus_args(args) do
+    with {:ok, fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, cookie, rest} <- XDR.decode_uhyper(rest),
+         {:ok, verf, rest} <- Types.decode_cookieverf3(rest),
+         {:ok, dircount, rest} <- XDR.decode_uint(rest),
+         {:ok, maxcount, _} <- XDR.decode_uint(rest) do
+      {:ok, fh, cookie, verf, dircount, maxcount}
     else
       {:error, _} -> :error
     end
@@ -324,6 +382,46 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  defp do_readdir(fh, cookie, verf, count, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.readdir(fh, cookie, verf, count, auth, ctx) do
+      {:ok, entries, new_verf, eof, attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_cookieverf3(new_verf) <>
+           encode_readdir_entries(entries) <>
+           XDR.encode_bool(eof)}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
+  defp do_readdirplus(fh, cookie, verf, dircount, maxcount, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.readdirplus(fh, cookie, verf, dircount, maxcount, auth, ctx) do
+      {:ok, entries, new_verf, eof, attr} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_cookieverf3(new_verf) <>
+           encode_readdirplus_entries(entries) <>
+           XDR.encode_bool(eof)}
+
+      {:error, status, attr} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
+
+      {:error, status} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(nil)}
+    end
+  end
+
   # Pull binary chunks from an `Enumerable.t()` until either it
   # exhausts or we have accumulated `cap` bytes. The reducer trims
   # the trailing chunk to make `cap` an exact upper bound. Returns
@@ -351,6 +449,43 @@ defmodule NFSServer.NFSv3.Handler do
       end)
 
     {Enum.reverse(acc), total}
+  end
+
+  # XDR linked-list encoding for `entry3` (RFC 1813 §3.3.16): each
+  # entry is preceded by `bool TRUE` (the "next pointer is non-null"
+  # flag); a trailing `bool FALSE` terminates the list. An empty list
+  # encodes to a single `bool FALSE`.
+  defp encode_readdir_entries([]), do: XDR.encode_bool(false)
+
+  defp encode_readdir_entries(entries) when is_list(entries) do
+    body =
+      for {fileid, name, cookie} <- entries, into: <<>> do
+        XDR.encode_bool(true) <>
+          XDR.encode_uhyper(fileid) <>
+          Types.encode_filename3(name) <>
+          XDR.encode_uhyper(cookie)
+      end
+
+    body <> XDR.encode_bool(false)
+  end
+
+  # Same linked-list pattern as `entry3`, but `entryplus3` adds
+  # `name_attributes` (post_op_attr) and `name_handle` (post_op_fh3)
+  # right before the next-pointer flag. RFC 1813 §3.3.17.
+  defp encode_readdirplus_entries([]), do: XDR.encode_bool(false)
+
+  defp encode_readdirplus_entries(entries) when is_list(entries) do
+    body =
+      for {fileid, name, cookie, attr, fh} <- entries, into: <<>> do
+        XDR.encode_bool(true) <>
+          XDR.encode_uhyper(fileid) <>
+          Types.encode_filename3(name) <>
+          XDR.encode_uhyper(cookie) <>
+          Types.encode_post_op_attr(attr) <>
+          Types.encode_post_op_fh3(fh)
+      end
+
+    body <> XDR.encode_bool(false)
   end
 
   defp do_fsstat(fh, auth, ctx) do
