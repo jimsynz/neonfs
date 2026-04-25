@@ -35,9 +35,12 @@ defmodule NeonFS.CSI.Supervisor do
   def init(_opts) do
     register? = Application.get_env(:neonfs_csi, :register_service, true)
 
-    # Controller publish state (#314) lives in a public ETS table the
-    # ControllerServer reads/writes from gRPC handler processes.
+    # Controller publish state (#314) and Node staged/published state
+    # (#315) live in public ETS tables their gRPC handler processes
+    # read/write directly. Initialise both regardless of mode so the
+    # tables exist before the gRPC layer accepts the first request.
     NeonFS.CSI.ControllerServer.init_publish_table()
+    NeonFS.CSI.NodeServer.init_state_tables()
 
     children =
       [endpoint_child_spec()]
