@@ -269,6 +269,39 @@ defmodule NeonFS.Docker.PlugTest do
       conn = post("/VolumeDriver.Mount", %{}, store: store, tracker: tracker)
       assert %{"Err" => "missing or invalid Name"} = decode(conn)
     end
+
+    test "returns a clear Err message when MountTracker refuses :mount_pool_full",
+         %{store: store} do
+      capped_tracker = :"capped_tracker_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        MountTracker.start_link(
+          name: capped_tracker,
+          mount_fn: fn name -> {:ok, {{:mount_id, name}, "/tmp/" <> name}} end,
+          unmount_fn: fn _ -> :ok end,
+          max_mounts: 0
+        )
+
+      Process.unlink(pid)
+
+      on_exit(fn ->
+        try do
+          if Process.alive?(pid), do: GenServer.stop(pid, :shutdown, 1_000)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      conn =
+        post("/VolumeDriver.Mount", %{"Name" => "vol-overflow"},
+          store: store,
+          tracker: capped_tracker
+        )
+
+      assert %{"Err" => err} = decode(conn)
+      assert err =~ "mount pool full"
+      assert err =~ ":max_mounts"
+    end
   end
 
   describe "POST /VolumeDriver.Unmount" do

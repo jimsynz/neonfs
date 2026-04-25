@@ -164,4 +164,93 @@ defmodule NeonFS.Docker.MountTrackerTest do
       assert_received {:unmount_called, {:mount_id, "vol-b"}}
     end
   end
+
+  describe ":max_mounts cap" do
+    test "no cap configured — every new mount succeeds" do
+      parent = self()
+
+      %{name: tracker} =
+        start_tracker(mount_fn: recording_mount_fn(parent), unmount_fn: fn _ -> :ok end)
+
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-a")
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-b")
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-c")
+
+      assert MountTracker.capacity(tracker) == %{used: 3, max: nil}
+    end
+
+    test "refuses new mounts past the cap with :mount_pool_full" do
+      parent = self()
+
+      %{name: tracker} =
+        start_tracker(
+          mount_fn: recording_mount_fn(parent),
+          unmount_fn: fn _ -> :ok end,
+          max_mounts: 2
+        )
+
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-a")
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-b")
+      assert {:error, :mount_pool_full} = MountTracker.mount(tracker, "vol-c")
+
+      # The refusal didn't allocate — the cap reflects the live count.
+      assert MountTracker.capacity(tracker) == %{used: 2, max: 2}
+    end
+
+    test "ref-count bumps on an already-mounted volume don't count against the cap" do
+      parent = self()
+
+      %{name: tracker} =
+        start_tracker(
+          mount_fn: recording_mount_fn(parent),
+          unmount_fn: fn _ -> :ok end,
+          max_mounts: 1
+        )
+
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-a")
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-a")
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-a")
+
+      # One unique volume, three references — under the cap of 1.
+      assert MountTracker.capacity(tracker) == %{used: 1, max: 1}
+      assert [{"vol-a", %{ref_count: 3}}] = MountTracker.list(tracker)
+    end
+
+    test "unmounting frees a slot for a different volume" do
+      parent = self()
+
+      %{name: tracker} =
+        start_tracker(
+          mount_fn: recording_mount_fn(parent),
+          unmount_fn: fn _ -> :ok end,
+          max_mounts: 1
+        )
+
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-a")
+      assert {:error, :mount_pool_full} = MountTracker.mount(tracker, "vol-b")
+
+      assert :ok = MountTracker.unmount(tracker, "vol-a")
+      assert {:ok, _} = MountTracker.mount(tracker, "vol-b")
+    end
+
+    test "capacity/1 reports {used, max} both with and without a cap" do
+      parent = self()
+
+      %{name: capped} =
+        start_tracker(
+          mount_fn: recording_mount_fn(parent),
+          unmount_fn: fn _ -> :ok end,
+          max_mounts: 4
+        )
+
+      %{name: uncapped} =
+        start_tracker(mount_fn: recording_mount_fn(parent), unmount_fn: fn _ -> :ok end)
+
+      assert MountTracker.capacity(capped) == %{used: 0, max: 4}
+      assert MountTracker.capacity(uncapped) == %{used: 0, max: nil}
+
+      {:ok, _} = MountTracker.mount(capped, "vol-a")
+      assert MountTracker.capacity(capped) == %{used: 1, max: 4}
+    end
+  end
 end

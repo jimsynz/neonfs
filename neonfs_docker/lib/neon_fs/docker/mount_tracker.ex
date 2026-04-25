@@ -88,6 +88,20 @@ defmodule NeonFS.Docker.MountTracker do
     GenServer.call(server, :list)
   end
 
+  @doc """
+  Return the current mount-pool capacity as `{used, max}` where `max`
+  is `nil` when no cap is configured. Used by the `:mount_capacity`
+  health check to surface "pool full" without poking GenServer state
+  directly.
+  """
+  @spec capacity(GenServer.server()) :: %{
+          required(:used) => non_neg_integer(),
+          required(:max) => non_neg_integer() | nil
+        }
+  def capacity(server \\ __MODULE__) do
+    GenServer.call(server, :capacity)
+  end
+
   ## Server Callbacks
 
   @impl true
@@ -98,7 +112,8 @@ defmodule NeonFS.Docker.MountTracker do
      %{
        mounts: %{},
        mount_fn: Keyword.get(opts, :mount_fn, &default_mount_fn/1),
-       unmount_fn: Keyword.get(opts, :unmount_fn, &default_unmount_fn/1)
+       unmount_fn: Keyword.get(opts, :unmount_fn, &default_unmount_fn/1),
+       max_mounts: Keyword.get_lazy(opts, :max_mounts, &configured_max_mounts/0)
      }}
   end
 
@@ -106,21 +121,18 @@ defmodule NeonFS.Docker.MountTracker do
   def handle_call({:mount, volume_name}, _from, state) do
     case Map.fetch(state.mounts, volume_name) do
       {:ok, record} ->
+        # Already mounted — refcount bumps don't count against the
+        # cap because they don't allocate a new FUSE mount.
         updated = %{record | ref_count: record.ref_count + 1}
 
         {:reply, {:ok, record.mount_point},
          %{state | mounts: Map.put(state.mounts, volume_name, updated)}}
 
       :error ->
-        case state.mount_fn.(volume_name) do
-          {:ok, {mount_id, mount_point}} ->
-            record = %{mount_id: mount_id, mount_point: mount_point, ref_count: 1}
-
-            {:reply, {:ok, mount_point},
-             %{state | mounts: Map.put(state.mounts, volume_name, record)}}
-
-          {:error, _} = err ->
-            {:reply, err, state}
+        if at_capacity?(state) do
+          {:reply, {:error, :mount_pool_full}, state}
+        else
+          do_first_mount(volume_name, state)
         end
     end
   end
@@ -157,6 +169,30 @@ defmodule NeonFS.Docker.MountTracker do
 
   def handle_call(:list, _from, state) do
     {:reply, Map.to_list(state.mounts), state}
+  end
+
+  def handle_call(:capacity, _from, state) do
+    {:reply, %{used: map_size(state.mounts), max: state.max_mounts}, state}
+  end
+
+  defp do_first_mount(volume_name, state) do
+    case state.mount_fn.(volume_name) do
+      {:ok, {mount_id, mount_point}} ->
+        record = %{mount_id: mount_id, mount_point: mount_point, ref_count: 1}
+
+        {:reply, {:ok, mount_point},
+         %{state | mounts: Map.put(state.mounts, volume_name, record)}}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  defp at_capacity?(%{max_mounts: nil}), do: false
+  defp at_capacity?(%{max_mounts: max, mounts: mounts}), do: map_size(mounts) >= max
+
+  defp configured_max_mounts do
+    Application.get_env(:neonfs_docker, :max_mounts, nil)
   end
 
   @impl true

@@ -9,9 +9,14 @@ defmodule NeonFS.Docker.HealthCheck do
 
   Registered checks:
 
-    * `:cluster` — degraded when no core nodes are discoverable
+    * `:cluster` — unhealthy when no core nodes are discoverable
       (quorum unreachable from this plugin's perspective). Mirrors
       the pattern in `NeonFS.S3.HealthCheck.cluster_status/0`.
+    * `:mount_capacity` — degraded when the configured
+      `:neonfs_docker, :max_mounts` cap on concurrent FUSE mounts has
+      been reached. Healthy with capacity metadata when below the
+      cap; healthy with `max: nil` when no cap is configured (the
+      default).
     * `:registrar` — unhealthy when this plugin's `Registrar` isn't
       registered with the cluster's service registry yet.
     * `:volume_store` — unhealthy when the local volume store
@@ -30,6 +35,7 @@ defmodule NeonFS.Docker.HealthCheck do
   def register_checks do
     HealthCheck.register(:docker,
       cluster: &check_cluster/0,
+      mount_capacity: &check_mount_capacity/0,
       registrar: &check_registrar/0,
       volume_store: &check_volume_store/0,
       mount_tracker: &check_mount_tracker/0
@@ -150,5 +156,27 @@ defmodule NeonFS.Docker.HealthCheck do
     end
   rescue
     _ -> %{status: :unhealthy, reason: :not_available}
+  end
+
+  defp check_mount_capacity do
+    if Process.whereis(MountTracker) do
+      mount_capacity_status(MountTracker.capacity())
+    else
+      %{status: :unhealthy, reason: :not_running}
+    end
+  rescue
+    _ -> %{status: :unhealthy, reason: :not_available}
+  end
+
+  defp mount_capacity_status(%{used: used, max: nil}) do
+    %{status: :healthy, used: used, max: nil}
+  end
+
+  defp mount_capacity_status(%{used: used, max: max}) when used >= max do
+    %{status: :degraded, reason: :mount_pool_full, used: used, max: max}
+  end
+
+  defp mount_capacity_status(%{used: used, max: max}) do
+    %{status: :healthy, used: used, max: max}
   end
 end

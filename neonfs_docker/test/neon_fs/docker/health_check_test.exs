@@ -3,6 +3,7 @@ defmodule NeonFS.Docker.HealthCheckTest do
 
   alias NeonFS.Client.HealthCheck
   alias NeonFS.Docker.HealthCheck, as: DockerHealthCheck
+  alias NeonFS.Docker.MountTracker
 
   setup do
     HealthCheck.reset()
@@ -18,17 +19,18 @@ defmodule NeonFS.Docker.HealthCheckTest do
   end
 
   describe "register_checks/0" do
-    test "registers all four Docker checks" do
+    test "registers all five Docker checks" do
       DockerHealthCheck.register_checks()
 
       report = HealthCheck.check(timeout_ms: 100)
       check_names = report.checks |> Map.keys() |> Enum.sort()
 
       assert :docker_cluster in check_names
+      assert :docker_mount_capacity in check_names
       assert :docker_mount_tracker in check_names
       assert :docker_registrar in check_names
       assert :docker_volume_store in check_names
-      assert length(check_names) == 4
+      assert length(check_names) == 5
     end
 
     test "every check returns :unhealthy when subsystems aren't running and no core nodes are reachable" do
@@ -85,6 +87,92 @@ defmodule NeonFS.Docker.HealthCheckTest do
       cluster = Map.fetch!(report.checks, :docker_cluster)
 
       assert cluster.status == :healthy
+    end
+  end
+
+  describe ":mount_capacity check" do
+    setup do
+      # Register the global MountTracker name on a fresh GenServer so
+      # the health check's `Process.whereis(MountTracker)` lookup
+      # finds something. Tests that span the registered name need
+      # `async: false` (already set at the module level).
+      pid = start_mount_tracker(max_mounts: 2)
+      on_exit(fn -> ensure_stopped(pid) end)
+
+      {:ok, tracker: pid}
+    end
+
+    test "is :healthy with capacity metadata when below the cap" do
+      DockerHealthCheck.register_checks()
+
+      report = HealthCheck.check(timeout_ms: 100)
+      check = Map.fetch!(report.checks, :docker_mount_capacity)
+
+      assert check.status == :healthy
+      assert check.used == 0
+      assert check.max == 2
+    end
+
+    test "is :degraded with reason: :mount_pool_full at the cap" do
+      {:ok, _} = MountTracker.mount("vol-a")
+      {:ok, _} = MountTracker.mount("vol-b")
+
+      DockerHealthCheck.register_checks()
+
+      report = HealthCheck.check(timeout_ms: 100)
+      check = Map.fetch!(report.checks, :docker_mount_capacity)
+
+      assert check.status == :degraded
+      assert check.reason == :mount_pool_full
+      assert check.used == 2
+      assert check.max == 2
+    end
+
+    test "is :healthy with max: nil when no cap is configured" do
+      pid = start_mount_tracker([])
+      on_exit(fn -> ensure_stopped(pid) end)
+
+      DockerHealthCheck.register_checks()
+
+      report = HealthCheck.check(timeout_ms: 100)
+      check = Map.fetch!(report.checks, :docker_mount_capacity)
+
+      assert check.status == :healthy
+      assert check.max == nil
+    end
+  end
+
+  defp start_mount_tracker(opts) do
+    # The tracker registers under the global `MountTracker` atom
+    # because the health check's `Process.whereis/1` lookup relies on
+    # it. Stop any prior instance first to keep tests deterministic.
+    case Process.whereis(MountTracker) do
+      nil -> :ok
+      pid -> ensure_stopped(pid)
+    end
+
+    full_opts =
+      Keyword.merge(
+        [
+          name: MountTracker,
+          mount_fn: fn name -> {:ok, {{:mount_id, name}, "/tmp/#{name}"}} end,
+          unmount_fn: fn _ -> :ok end
+        ],
+        opts
+      )
+
+    {:ok, pid} = MountTracker.start_link(full_opts)
+    Process.unlink(pid)
+    pid
+  end
+
+  defp ensure_stopped(pid) do
+    if Process.alive?(pid) do
+      try do
+        GenServer.stop(pid, :shutdown, 1_000)
+      catch
+        :exit, _ -> :ok
+      end
     end
   end
 end

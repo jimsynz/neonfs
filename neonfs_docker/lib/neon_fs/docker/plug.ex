@@ -141,6 +141,12 @@ defmodule NeonFS.Docker.Plug do
       {:error, message} when is_binary(message) ->
         reply(conn, 200, %{"Err" => message})
 
+      {:error, :mount_pool_full} ->
+        reply(conn, 200, %{
+          "Err" =>
+            "mount pool full — refuse to allocate a new FUSE mount past the configured `:max_mounts`"
+        })
+
       {:error, reason} ->
         reply(conn, 200, %{"Err" => "mount failed: #{inspect(reason)}"})
     end
