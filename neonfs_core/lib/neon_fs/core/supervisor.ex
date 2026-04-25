@@ -254,6 +254,14 @@ defmodule NeonFS.Core.Supervisor do
           # ServiceRegistry depends on Ra being available
           ServiceRegistry,
 
+          # NamespaceCoordinator owns the namespace claim primitives
+          # (claim_path / claim_subtree / release / list_claims). The
+          # GenServer monitors holder pids so a dead interface node
+          # doesn't leak claims; the underlying state is Ra-backed
+          # via the MetadataStateMachine. Depends on Ra being
+          # available.
+          NeonFS.Core.NamespaceCoordinator,
+
           # TieringManager evaluates chunks for promotion/demotion
           NeonFS.Core.TieringManager,
 

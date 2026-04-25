@@ -75,10 +75,38 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:delete_escalation, escalation_id :: String.t()}
           | {:kv_put, key :: binary(), value :: term()}
           | {:kv_delete, key :: binary()}
+          | {:claim_namespace_path, path :: String.t(), scope :: namespace_scope(),
+             holder :: term()}
+          | {:claim_namespace_subtree, path :: String.t(), scope :: namespace_scope(),
+             holder :: term()}
+          | {:release_namespace_claim, claim_id :: String.t()}
+          | {:release_namespace_claims_for_holder, holder :: term()}
 
   @type segment_assignment :: %{
           replica_set: [node()],
           version: non_neg_integer()
+        }
+
+  @typedoc """
+  Lock scope for namespace claims (RFC 4918 collection-lock semantics).
+  An `:exclusive` claim conflicts with any other claim covering the
+  same path / subtree; `:shared` claims coexist with each other but
+  still conflict with `:exclusive` claims.
+  """
+  @type namespace_scope :: :exclusive | :shared
+
+  @typedoc """
+  A namespace claim — either a `:path` claim covering a single path or
+  a `:subtree` claim covering a path and all its descendants.
+  Holders are opaque terms (typically a pid in production; arbitrary
+  test fixtures otherwise) — the state machine treats them as black
+  boxes.
+  """
+  @type namespace_claim :: %{
+          path: String.t(),
+          scope: namespace_scope(),
+          type: :path | :subtree,
+          holder: term()
         }
 
   @type state :: %{
@@ -98,6 +126,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           s3_credentials: %{optional(String.t()) => map()},
           escalations: %{optional(String.t()) => map()},
           kv: %{optional(binary()) => term()},
+          namespace_claims: %{optional(String.t()) => namespace_claim()},
+          namespace_claim_seq: non_neg_integer(),
           version: non_neg_integer()
         }
 
@@ -209,6 +239,44 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @spec get_s3_credentials(state()) :: %{optional(String.t()) => map()}
   def get_s3_credentials(state), do: Map.get(state, :s3_credentials, %{})
 
+  @doc """
+  Returns the namespace claim with the given id, or `nil` when none
+  exists. Used by `NeonFS.Core.NamespaceCoordinator` for release
+  validation and for operator probes.
+  """
+  @spec get_namespace_claim(state(), String.t()) :: namespace_claim() | nil
+  def get_namespace_claim(state, claim_id) do
+    state
+    |> Map.get(:namespace_claims, %{})
+    |> Map.get(claim_id)
+  end
+
+  @doc """
+  Returns every namespace claim whose `:path` starts with `prefix`.
+  Pass `""` to list every claim. Sorted by claim id (so iteration
+  order is stable across calls).
+  """
+  @spec list_namespace_claims(state(), String.t()) :: [{String.t(), namespace_claim()}]
+  def list_namespace_claims(state, prefix \\ "") when is_binary(prefix) do
+    state
+    |> Map.get(:namespace_claims, %{})
+    |> Enum.filter(fn {_id, %{path: p}} -> String.starts_with?(p, prefix) end)
+    |> Enum.sort_by(fn {id, _claim} -> id end)
+  end
+
+  @doc """
+  Returns every namespace claim held by `holder`. The
+  `NamespaceCoordinator` GenServer uses this on `:DOWN` to verify
+  which claims it owns before sending the bulk release command.
+  """
+  @spec list_namespace_claims_for_holder(state(), term()) :: [{String.t(), namespace_claim()}]
+  def list_namespace_claims_for_holder(state, holder) do
+    state
+    |> Map.get(:namespace_claims, %{})
+    |> Enum.filter(fn {_id, %{holder: h}} -> h == holder end)
+    |> Enum.sort_by(fn {id, _claim} -> id end)
+  end
+
   # Ra machine callbacks
 
   @doc """
@@ -231,6 +299,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
       s3_credentials: %{},
       escalations: %{},
       kv: %{},
+      namespace_claims: %{},
+      namespace_claim_seq: 0,
       version: 0
     }
   end
@@ -423,6 +493,23 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 11, 12}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 11,
+      to: 12,
+      change: "add namespace coordinator (claims by path / subtree)"
+    )
+
+    new_state =
+      state
+      |> Map.put_new(:namespace_claims, %{})
+      |> Map.put_new(:namespace_claim_seq, 0)
+
+    {new_state, :ok, []}
   end
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
@@ -1024,6 +1111,61 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  # Namespace coordinator commands (new in v12, sub-issue #300 of #226)
+  #
+  # `:claim_namespace_path` and `:claim_namespace_subtree` allocate a
+  # new claim under a sequenced id (`"ns-claim-<n>"`). Conflict
+  # detection scans the existing claim map — O(N) but N is bounded by
+  # active interface workloads (collection locks, atomic creates,
+  # rename windows), and reads happen on followers via local query.
+
+  def apply(_meta, {:claim_namespace_path, path, scope, holder}, state)
+      when is_binary(path) and scope in [:exclusive, :shared] do
+    apply_namespace_claim(:path, path, scope, holder, state)
+  end
+
+  def apply(_meta, {:claim_namespace_subtree, path, scope, holder}, state)
+      when is_binary(path) and scope in [:exclusive, :shared] do
+    apply_namespace_claim(:subtree, path, scope, holder, state)
+  end
+
+  def apply(_meta, {:release_namespace_claim, claim_id}, state) when is_binary(claim_id) do
+    state = ensure_namespace(state)
+    {released, claims} = Map.pop(state.namespace_claims, claim_id)
+    new_state = %{state | namespace_claims: claims, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :release_namespace_claim],
+      %{version: new_state.version, released: if(released, do: 1, else: 0)},
+      %{claim_id: claim_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:release_namespace_claims_for_holder, holder}, state) do
+    state = ensure_namespace(state)
+
+    {kept, released_count} =
+      Enum.reduce(state.namespace_claims, {%{}, 0}, fn {id, claim}, {acc, count} ->
+        if claim.holder == holder do
+          {acc, count + 1}
+        else
+          {Map.put(acc, id, claim), count}
+        end
+      end)
+
+    new_state = %{state | namespace_claims: kept, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :release_namespace_claims_for_holder],
+      %{version: new_state.version, released: released_count},
+      %{}
+    )
+
+    {new_state, {:ok, released_count}, []}
+  end
+
   # Segment assignment commands (new in v5)
 
   def apply(_meta, {:assign_segment, segment_id, replica_set}, state) do
@@ -1381,6 +1523,93 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # nothing ever wrote production data through them).
   defp ensure_kv(%{kv: _} = state), do: state
   defp ensure_kv(state), do: Map.put(state, :kv, %{})
+
+  # Defensive init for pre-v12 snapshots (before namespace claims).
+  defp ensure_namespace(%{namespace_claims: _, namespace_claim_seq: _} = state), do: state
+
+  defp ensure_namespace(state) do
+    state
+    |> Map.put_new(:namespace_claims, %{})
+    |> Map.put_new(:namespace_claim_seq, 0)
+  end
+
+  defp apply_namespace_claim(type, path, scope, holder, state) do
+    state = ensure_namespace(state)
+
+    case detect_namespace_conflict(type, path, scope, state.namespace_claims) do
+      :ok ->
+        seq = state.namespace_claim_seq + 1
+        claim_id = "ns-claim-" <> Integer.to_string(seq)
+        claim = %{path: path, scope: scope, type: type, holder: holder}
+
+        new_state = %{
+          state
+          | namespace_claims: Map.put(state.namespace_claims, claim_id, claim),
+            namespace_claim_seq: seq,
+            version: state.version + 1
+        }
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :claim_namespace],
+          %{version: new_state.version},
+          %{type: type, scope: scope}
+        )
+
+        {new_state, {:ok, claim_id}, []}
+
+      {:error, conflict_id} ->
+        {state, {:error, :conflict, conflict_id}, []}
+    end
+  end
+
+  # Conflict detection — RFC 4918 §10.4 collection-lock semantics:
+  #
+  #   exclusive vs *           = conflict
+  #   shared    vs shared      = ok (compatible)
+  #   shared    vs exclusive   = conflict
+  #
+  # Multi-granularity:
+  #   subtree(/a)              conflicts with any *-claim on /a/x.
+  #   path(/a/x)               conflicts with subtree(/a) (or any ancestor
+  #                            subtree).
+  #   subtree(/a)              conflicts with subtree(/a/b) and vice
+  #                            versa (overlapping subtrees).
+  defp detect_namespace_conflict(new_type, new_path, new_scope, claims) do
+    Enum.find_value(claims, :ok, fn {claim_id, existing} ->
+      if claims_conflict?(new_type, new_path, new_scope, existing) do
+        {:error, claim_id}
+      end
+    end)
+  end
+
+  defp claims_conflict?(new_type, new_path, new_scope, %{
+         type: existing_type,
+         path: existing_path,
+         scope: existing_scope
+       }) do
+    overlaps?(new_type, new_path, existing_type, existing_path) and
+      scopes_conflict?(new_scope, existing_scope)
+  end
+
+  defp overlaps?(:path, a, :path, b), do: a == b
+  defp overlaps?(:path, p, :subtree, root), do: in_subtree?(p, root)
+  defp overlaps?(:subtree, root, :path, p), do: in_subtree?(p, root)
+
+  defp overlaps?(:subtree, root_a, :subtree, root_b),
+    do: in_subtree?(root_a, root_b) or in_subtree?(root_b, root_a)
+
+  defp scopes_conflict?(:exclusive, _), do: true
+  defp scopes_conflict?(_, :exclusive), do: true
+  defp scopes_conflict?(:shared, :shared), do: false
+
+  # `path` is in the subtree rooted at `root` when it equals `root` or
+  # sits under `root` separated by `/`. Special-case `"/"` so a
+  # whole-volume claim covers everything.
+  defp in_subtree?(_path, "/"), do: true
+
+  defp in_subtree?(path, root) do
+    path == root or String.starts_with?(path, root <> "/")
+  end
 
   defp upsert_acl_entry(entries, principal, new_entry) do
     case Enum.find_index(entries, &(&1.principal == principal)) do

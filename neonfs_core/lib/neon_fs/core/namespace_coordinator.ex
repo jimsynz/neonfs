@@ -1,0 +1,248 @@
+defmodule NeonFS.Core.NamespaceCoordinator do
+  @moduledoc """
+  Distributed namespace-aware lock coordinator (sub-issue #300 of #226).
+
+  Coordinates **claims over regions of the namespace** — separate from
+  the DLM's content-level coordination. Where the DLM answers "who can
+  touch this file's bytes", the namespace coordinator answers "who owns
+  this name (or this directory subtree)".
+
+  Operations that need this primitive:
+
+    * WebDAV `Depth: infinity` collection locks (subtree claims).
+    * Atomic `O_EXCL | O_CREAT` / `If-None-Match: *` (path claims with
+      `:exclusive` scope on a name that doesn't yet exist).
+    * Atomic cross-directory rename (paired claims on src + dst — see
+      sub-issue #304).
+    * `mkdir` / `rmdir` race resolution (path claims — see #305).
+    * Lock-null resources (RFC 4918 §7.3 — replaces the synthetic-id
+      DLM workaround per #302).
+
+  ## Storage
+
+  Backed by Ra: claims live in `MetadataStateMachine.namespace_claims`,
+  replicated across every core node and queried locally. The
+  GenServer below is a thin BEAM-side wrapper that adds two things
+  Ra alone doesn't provide:
+
+    * **Process-tied lifetime** — every `claim_path/2` /
+      `claim_subtree/2` call records the holder pid, monitors it, and
+      releases its claims on `:DOWN`. A dead interface node doesn't
+      leak locks.
+    * **Caller convenience** — claim ids are returned as opaque
+      strings so callers don't depend on the internal sequencing.
+
+  ## Conflict semantics (RFC 4918 §10.4 collection locks)
+
+      exclusive vs *           = conflict
+      shared    vs shared      = ok (compatible)
+      shared    vs exclusive   = conflict
+
+  Plus multi-granularity:
+
+      subtree(/a)   conflicts with any *-claim on /a/x.
+      path(/a/x)    conflicts with subtree(/a) (or any ancestor subtree).
+      subtree(/a)   conflicts with subtree(/a/b)  (overlapping subtrees).
+
+  See `NeonFS.Core.MetadataStateMachine` for the wire-level command
+  shape.
+  """
+
+  use GenServer
+  require Logger
+
+  alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
+
+  @typedoc "Opaque claim id returned by the coordinator on success."
+  @type claim_id :: String.t()
+
+  @typedoc "Lock scope — RFC 4918 §10.4."
+  @type scope :: :exclusive | :shared
+
+  ## Client API
+
+  @doc """
+  Starts the coordinator. Registered under the module name. Tests
+  that need an isolated instance can pass `:name` to override.
+  """
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts \\ []) do
+    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
+    GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  Claim a single path. The current process is registered as the
+  holder; if it dies before `release/2` is called, the coordinator
+  releases the claim automatically. Returns `{:ok, claim_id}` or
+  `{:error, :conflict, conflicting_claim_id}` when an existing claim
+  collides.
+  """
+  @spec claim_path(GenServer.server(), String.t(), scope()) ::
+          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+  def claim_path(server \\ __MODULE__, path, scope)
+      when is_binary(path) and scope in [:exclusive, :shared] do
+    GenServer.call(server, {:claim, :path, path, scope, self()})
+  end
+
+  @doc """
+  Claim a path and every descendant. Same lifetime / return shape as
+  `claim_path/3`.
+  """
+  @spec claim_subtree(GenServer.server(), String.t(), scope()) ::
+          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+  def claim_subtree(server \\ __MODULE__, path, scope)
+      when is_binary(path) and scope in [:exclusive, :shared] do
+    GenServer.call(server, {:claim, :subtree, path, scope, self()})
+  end
+
+  @doc """
+  Release a claim by id. Idempotent — releasing a non-existent or
+  already-released claim returns `:ok`.
+  """
+  @spec release(GenServer.server(), claim_id()) :: :ok | {:error, term()}
+  def release(server \\ __MODULE__, claim_id) when is_binary(claim_id) do
+    GenServer.call(server, {:release, claim_id})
+  end
+
+  @doc """
+  List every claim whose path starts with `prefix`. Pass `""` to list
+  all. Reads are served locally from the Ra follower's state, so this
+  is cheap.
+  """
+  @spec list_claims(GenServer.server(), String.t()) ::
+          {:ok, [{claim_id(), MetadataStateMachine.namespace_claim()}]} | {:error, term()}
+  def list_claims(server \\ __MODULE__, prefix \\ "") when is_binary(prefix) do
+    GenServer.call(server, {:list_claims, prefix})
+  end
+
+  ## Server callbacks
+
+  @impl true
+  def init(_opts) do
+    Process.flag(:trap_exit, true)
+    # `holders` maps `pid -> %{ref: monitor_ref, claim_ids: MapSet.t()}`.
+    # The MapSet is purely optimistic; the Ra side is the authority,
+    # but tracking ids locally lets us short-circuit the bulk-release
+    # command when a holder never claimed anything.
+    {:ok, %{holders: %{}}}
+  end
+
+  @impl true
+  def handle_call({:claim, type, path, scope, holder}, _from, state) do
+    cmd =
+      case type do
+        :path -> {:claim_namespace_path, path, scope, holder}
+        :subtree -> {:claim_namespace_subtree, path, scope, holder}
+      end
+
+    case ra_command(cmd) do
+      {:ok, claim_id} ->
+        {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :conflict, conflicting_id} ->
+        {:reply, {:error, :conflict, conflicting_id}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:release, claim_id}, _from, state) do
+    case ra_command({:release_namespace_claim, claim_id}) do
+      :ok -> {:reply, :ok, untrack_claim(state, claim_id)}
+      {:error, _} = err -> {:reply, err, state}
+    end
+  end
+
+  def handle_call({:list_claims, prefix}, _from, state) do
+    result =
+      try do
+        case RaSupervisor.local_query(&MetadataStateMachine.list_namespace_claims(&1, prefix)) do
+          {:ok, claims} -> {:ok, claims}
+          {:error, _} = err -> err
+        end
+      catch
+        :exit, _ -> {:error, :ra_not_available}
+      end
+
+    {:reply, result, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    case Map.pop(state.holders, pid) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {%{claim_ids: ids}, holders} when ids == %MapSet{} ->
+        {:noreply, %{state | holders: holders}}
+
+      {_holder_state, holders} ->
+        case ra_command({:release_namespace_claims_for_holder, pid}) do
+          {:ok, count} ->
+            Logger.debug("Released claims for dead holder",
+              holder: inspect(pid),
+              count: count
+            )
+
+          {:error, reason} ->
+            Logger.warning("Failed to release claims for dead holder",
+              holder: inspect(pid),
+              reason: inspect(reason)
+            )
+        end
+
+        {:noreply, %{state | holders: holders}}
+    end
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
+  ## Internal
+
+  defp track_claim(state, holder, claim_id) do
+    {ref, claim_ids} =
+      case Map.get(state.holders, holder) do
+        nil ->
+          {Process.monitor(holder), MapSet.new()}
+
+        %{ref: ref, claim_ids: ids} ->
+          {ref, ids}
+      end
+
+    new_holder = %{ref: ref, claim_ids: MapSet.put(claim_ids, claim_id)}
+    %{state | holders: Map.put(state.holders, holder, new_holder)}
+  end
+
+  defp untrack_claim(state, claim_id) do
+    holders =
+      Enum.reduce(state.holders, %{}, fn {holder, %{ref: ref, claim_ids: ids}}, acc ->
+        new_ids = MapSet.delete(ids, claim_id)
+
+        if MapSet.size(new_ids) == 0 do
+          Process.demonitor(ref, [:flush])
+          acc
+        else
+          Map.put(acc, holder, %{ref: ref, claim_ids: new_ids})
+        end
+      end)
+
+    %{state | holders: holders}
+  end
+
+  defp ra_command(cmd) do
+    case RaSupervisor.command(cmd) do
+      {:ok, :ok, _leader} -> :ok
+      {:ok, {:ok, value}, _leader} -> {:ok, value}
+      {:ok, {:error, :conflict, conflicting_id}, _leader} -> {:error, :conflict, conflicting_id}
+      {:ok, {:error, reason}, _leader} -> {:error, reason}
+      {:ok, other, _leader} -> {:error, {:unexpected_reply, other}}
+      {:error, :noproc} -> {:error, :ra_not_available}
+      {:error, reason} -> {:error, reason}
+      {:timeout, _node} -> {:error, :timeout}
+    end
+  catch
+    :exit, _ -> {:error, :ra_not_available}
+  end
+end
