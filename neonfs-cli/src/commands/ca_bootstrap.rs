@@ -10,9 +10,14 @@
 //!   - **B.2b.1** (#518) — Live-service refusal: TCP probe on the
 //!     distribution port read from `/run/neonfs/dist_port`. Refuses
 //!     the bootstrap if the daemon appears to be running.
+//!   - **B.2b.2** (#518) — Node cert regeneration: after install,
+//!     generate a fresh ECDSA P-256 keypair, build a cert with
+//!     subject `/O=NeonFS/CN=neonfs_core@<host>` + SAN `[hostname]` +
+//!     extended key usage `ServerAuth + ClientAuth`, sign with the
+//!     installed CA key via rcgen, atomically write `node.crt` +
+//!     `node.key` + bumped `serial` to `$NEONFS_TLS_DIR/`.
 //!
 //! Still deferred to follow-ups under #518:
-//!   - Node cert regeneration (needs rcgen for keypair + CSR signing).
 //!   - `--new-key` fresh-CA generation.
 //!   - Audit-log emission (JSONL at `$NEONFS_DATA_DIR/audit/…`).
 
@@ -248,6 +253,233 @@ impl Drop for StageDirGuard {
     }
 }
 
+/// Regenerate the local node's cert and key against the freshly
+/// installed CA. Required because the outgoing `node.crt` was signed
+/// by the CA that emergency-bootstrap just replaced — it no longer
+/// validates against the newly-installed `ca.crt`.
+///
+/// Shape matches `NeonFS.Transport.TLS.sign_csr/5`:
+///   - Subject: `/O=NeonFS/CN=neonfs_core@<hostname>`.
+///   - SubjectAlternativeName: `[hostname]` (DNS).
+///   - ExtendedKeyUsage: `ServerAuth + ClientAuth`.
+///   - Signing algorithm: ECDSA P-256 SHA-256 (rcgen `generate()` default).
+///
+/// Also advances `$tls_dir/serial` by one so the fresh node cert does
+/// not collide with the backed-up CA's previously-issued serials.
+///
+/// Writes are atomic per-file via the same stage + fsync + rename
+/// pattern used by [`install_ca_material`], but NOT atomic across
+/// files. If a rename fails partway, `node.crt` and `node.key` can
+/// diverge from `serial`. Recovery: re-run `emergency-bootstrap`
+/// (idempotent).
+pub fn regenerate_node_cert(tls_dir: &Path) -> Result<()> {
+    regenerate_node_cert_with(tls_dir, &resolve_hostname)
+}
+
+type HostnameResolver = dyn Fn() -> Result<String>;
+
+fn regenerate_node_cert_with(tls_dir: &Path, resolve: &HostnameResolver) -> Result<()> {
+    let hostname = resolve()?;
+    let node_name = format!("neonfs_core@{hostname}");
+
+    // Read the CA material we just installed.
+    let ca_cert_path = tls_dir.join("ca.crt");
+    let ca_key_path = tls_dir.join("ca.key");
+    let serial_path = tls_dir.join("serial");
+
+    // audit:bounded CA PEMs (tens of KB ceiling).
+    let ca_cert_pem = std::fs::read_to_string(&ca_cert_path)
+        .map_err(|e| io_err("read installed ca.crt", &ca_cert_path, e))?;
+    // audit:bounded CA key PEM (tens of KB ceiling).
+    let ca_key_pem = std::fs::read_to_string(&ca_key_path)
+        .map_err(|e| io_err("read installed ca.key", &ca_key_path, e))?;
+    // audit:bounded serial is a single line of ASCII digits.
+    let serial_raw = std::fs::read_to_string(&serial_path)
+        .map_err(|e| io_err("read installed serial", &serial_path, e))?;
+
+    // Parse + bump the serial counter so the fresh node cert doesn't
+    // collide with a serial the backed-up CA previously issued.
+    let current_serial: u64 = serial_raw.trim().parse().map_err(|e| {
+        CliError::InvalidArgument(format!(
+            "installed `serial` file at {} is not a positive integer: {e}",
+            serial_path.display()
+        ))
+    })?;
+    let next_serial = current_serial + 1;
+
+    // Reconstitute the CA from the installed PEMs. rcgen's `from_pem`
+    // only accepts PKCS#8; NeonFS's Elixir X509 lib produces SEC1 by
+    // default (`EC PRIVATE KEY` header). Detect SEC1 and rewrap as
+    // PKCS#8 so both formats work.
+    let ca_key = parse_ca_key_pem(&ca_key_pem)?;
+    let issuer = rcgen::Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key).map_err(|e| {
+        CliError::InvalidArgument(format!(
+            "installed ca.crt cannot be used as an rcgen issuer: {e:?}"
+        ))
+    })?;
+
+    // Build node cert params. DN CN is the Erlang node name (matches
+    // `NeonFS.Transport.TLS.create_csr/2` convention); SAN is the
+    // hostname; ext key usage is ServerAuth + ClientAuth (matches
+    // `NeonFS.Transport.TLS.sign_csr/5`).
+    let mut params = rcgen::CertificateParams::new(vec![hostname.clone()]).map_err(|e| {
+        CliError::InvalidArgument(format!(
+            "rcgen rejected hostname `{hostname}` as a SAN: {e:?}"
+        ))
+    })?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "NeonFS");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, &node_name);
+    params.serial_number = Some(rcgen::SerialNumber::from_slice(&next_serial.to_be_bytes()));
+    params
+        .extended_key_usages
+        .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+    params
+        .extended_key_usages
+        .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
+
+    // Generate node keypair (ECDSA P-256 SHA-256, rcgen default).
+    let node_key = rcgen::KeyPair::generate().map_err(|e| {
+        CliError::InvalidArgument(format!("failed to generate node keypair: {e:?}"))
+    })?;
+
+    // Sign with the installed CA key.
+    let node_cert = params.signed_by(&node_key, &issuer).map_err(|e| {
+        CliError::InvalidArgument(format!("failed to sign node cert for `{node_name}`: {e:?}"))
+    })?;
+
+    // Atomically write node.crt + node.key + bumped serial. Uses the
+    // same stage + rename pattern as install_ca_material (per-file
+    // atomicity; re-run on partial failure).
+    atomic_write_files(
+        tls_dir,
+        &[
+            ("node.crt", node_cert.pem().into_bytes()),
+            ("node.key", node_key.serialize_pem().into_bytes()),
+            ("serial", format!("{next_serial}\n").into_bytes()),
+        ],
+    )?;
+
+    Ok(())
+}
+
+/// Helper that writes a batch of files atomically per-file via stage +
+/// fsync + rename. Same machinery as [`install_ca_material`] but
+/// parameterised over the payload list.
+fn atomic_write_files(tls_dir: &Path, files: &[(&str, Vec<u8>)]) -> Result<()> {
+    fs::create_dir_all(tls_dir).map_err(|e| io_err("create TLS directory", tls_dir, e))?;
+
+    let stage_dir = tls_dir.join(format!(".emergency-bootstrap-cert-{}", std::process::id()));
+    fs::create_dir_all(&stage_dir)
+        .map_err(|e| io_err("create staging directory", &stage_dir, e))?;
+
+    let _guard = StageDirGuard(stage_dir.clone());
+
+    for (name, data) in files {
+        let staged = stage_dir.join(name);
+        fs::write(&staged, data)
+            .map_err(|e| io_err(&format!("write staged `{}`", name), &staged, e))?;
+        File::open(&staged)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| io_err(&format!("fsync staged `{}`", name), &staged, e))?;
+    }
+
+    for (name, _) in files {
+        let src = stage_dir.join(name);
+        let dst = tls_dir.join(name);
+        fs::rename(&src, &dst).map_err(|e| io_err(&format!("install `{}`", name), &dst, e))?;
+    }
+
+    File::open(tls_dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| io_err("fsync TLS directory", tls_dir, e))?;
+
+    Ok(())
+}
+
+/// Parse a CA EC private key from PEM.
+///
+/// **Only PKCS#8 (`-----BEGIN PRIVATE KEY-----`) is supported in this
+/// slice.** NeonFS's Elixir X509 lib emits SEC1 (`-----BEGIN EC PRIVATE
+/// KEY-----`) by default, which rcgen does not accept directly;
+/// supporting SEC1 requires either an upstream conversion helper or
+/// DER-level rewrapping and is tracked as a separate follow-up issue.
+///
+/// Operators whose backup tarballs contain a SEC1 CA key can convert
+/// before restoring:
+///
+/// ```sh
+/// openssl pkcs8 -topk8 -nocrypt -in ca.key -out ca.key.pkcs8
+/// mv ca.key.pkcs8 ca.key
+/// # then re-tar the backup
+/// ```
+fn parse_ca_key_pem(pem: &str) -> Result<rcgen::KeyPair> {
+    rcgen::KeyPair::from_pem(pem).map_err(|e| {
+        if pem.contains("BEGIN EC PRIVATE KEY") {
+            CliError::InvalidArgument(format!(
+                "installed ca.key is in SEC1 format (`EC PRIVATE KEY`), which this slice \
+                 does not yet support. Convert to PKCS#8 with \
+                 `openssl pkcs8 -topk8 -nocrypt -in ca.key -out ca.key.pkcs8`. \
+                 rcgen error: {e:?}"
+            ))
+        } else {
+            CliError::InvalidArgument(format!(
+                "installed ca.key is not a parseable PKCS#8 keypair: {e:?}"
+            ))
+        }
+    })
+}
+
+/// Resolve the local hostname for the new node cert's SAN + CN.
+///
+/// Tries, in order:
+///   1. `NEONFS_NODE_NAME` env var (the release wrapper sets this to
+///      `neonfs_core@<host>`). Splits on `@` and returns the right
+///      half.
+///   2. `/run/neonfs/core_node_name` (written by the daemon wrapper).
+///      Same shape as above.
+///   3. `hostname(1)` via `uname -n` in a plain subprocess call.
+///
+/// Returns a clear error if all three fail — the operator can set
+/// `NEONFS_NODE_NAME` manually.
+fn resolve_hostname() -> Result<String> {
+    if let Ok(node_name) = std::env::var("NEONFS_NODE_NAME") {
+        if let Some(host) = node_name.split_once('@').map(|(_, h)| h) {
+            if !host.is_empty() {
+                return Ok(host.to_string());
+            }
+        }
+    }
+
+    // audit:bounded core_node_name is a single line of ASCII.
+    if let Ok(contents) = std::fs::read_to_string("/run/neonfs/core_node_name") {
+        if let Some(host) = contents.trim().split_once('@').map(|(_, h)| h) {
+            if !host.is_empty() {
+                return Ok(host.to_string());
+            }
+        }
+    }
+
+    // Last resort: `uname -n`. Plain subprocess; no shell involvement.
+    if let Ok(output) = std::process::Command::new("uname").arg("-n").output() {
+        if output.status.success() {
+            let host = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !host.is_empty() {
+                return Ok(host);
+            }
+        }
+    }
+
+    Err(CliError::InvalidArgument(
+        "cannot resolve local hostname for new node cert. \
+         Set `NEONFS_NODE_NAME=neonfs_core@<hostname>` explicitly and re-run."
+            .to_string(),
+    ))
+}
+
 // ─── Internals ───────────────────────────────────────────────────────
 
 fn local_cluster_json_path() -> PathBuf {
@@ -390,26 +622,37 @@ mod tests {
         path
     }
 
-    // Self-signed ECDSA P-256 CA with subject `/O=NeonFS/CN=parity-test CA`,
-    // generated once with `openssl req -new -x509 -key … -subj …` and pinned
-    // here so the test is deterministic and does not depend on runtime key
-    // generation. Validity: 2026-04-24 → 2036-04-21. If this starts failing
-    // because the cert expired, regenerate with:
+    // Self-signed ECDSA P-256 CA with subject `/O=NeonFS/CN=parity-test CA`
+    // and its matching private key. Generated once with:
     //
     //     openssl ecparam -name prime256v1 -genkey -noout -out ca.key
     //     openssl req -new -x509 -key ca.key \
     //       -subj "/O=NeonFS/CN=parity-test CA" -days 3650 -out ca.crt
+    //
+    // Validity: 2026-04-24 → 2036-04-21. Both PEMs are pinned so the
+    // tests are deterministic and don't depend on runtime key gen.
     const PARITY_CA_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----
-MIIBqTCCAU+gAwIBAgIUU9IrMrpKYbrsbkDmN5ovsLqm9y4wCgYIKoZIzj0EAwIw
+MIIBqjCCAU+gAwIBAgIUeyGOIzhUa1Xlwg0XUejUs84Lz7AwCgYIKoZIzj0EAwIw
 KjEPMA0GA1UECgwGTmVvbkZTMRcwFQYDVQQDDA5wYXJpdHktdGVzdCBDQTAeFw0y
-NjA0MjQyMTA0MjBaFw0zNjA0MjEyMTA0MjBaMCoxDzANBgNVBAoMBk5lb25GUzEX
+NjA0MjQyMzQ2NTBaFw0zNjA0MjEyMzQ2NTBaMCoxDzANBgNVBAoMBk5lb25GUzEX
 MBUGA1UEAwwOcGFyaXR5LXRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC
-AAT7lgtd6feBcsaqyZTxnts/IeDhYwOzakz3SNodfuTtFh8MWizuUIL1GgmFAaNQ
-1h3f6GjY+0PnoOipo0Z9qMWio1MwUTAdBgNVHQ4EFgQUDJdYOEfffSxCcBuBgd1c
-rLxWiSMwHwYDVR0jBBgwFoAUDJdYOEfffSxCcBuBgd1crLxWiSMwDwYDVR0TAQH/
-BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiACTei1FcxUGVhalh/7CJPM5Jsedhwg
-FGS64EIpGW9fvwIhALGssHz1WS2xFXKoUHPlzvIQqBOrfTFFY8jlHJT3X/ru
+AAQFq0d9vDUx+XU1aJATTsLof2hFfQBNZrbuAQ2ClscminzzA+15JSfToEHJkGdO
+btg8bJUpnjDQ0dhQ/MOeQoezo1MwUTAdBgNVHQ4EFgQUJ/e7ws2hg7tS+TLBC29F
+i+ny8lUwHwYDVR0jBBgwFoAUJ/e7ws2hg7tS+TLBC29Fi+ny8lUwDwYDVR0TAQH/
+BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEAiHUtcY1DLqe30XAklGF1tbA2uHvq
+3gefZmfleMvFywACIQCQpNg6OPBmWamx/eO77ISJvJXX9RdEtbRKDKeHKWqZag==
 -----END CERTIFICATE-----
+";
+
+    // Matching PKCS#8 private key for `PARITY_CA_PEM`. Produced from
+    // the SEC1 output via:
+    //
+    //     openssl pkcs8 -topk8 -nocrypt -in ca.key -out ca.key.pkcs8
+    const PARITY_CA_KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgP3kBkvyNhXC5sMuG
+g/4xCMbfMQlK3JPFoNcx+220ts6hRANCAAQFq0d9vDUx+XU1aJATTsLof2hFfQBN
+ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
+-----END PRIVATE KEY-----
 ";
 
     #[test]
@@ -670,6 +913,102 @@ FGS64EIpGW9fvwIhALGssHz1WS2xFXKoUHPlzvIQqBOrfTFFY8jlHJT3X/ru
 
         for member in REQUIRED_MEMBERS {
             assert!(tls_dir.join(member).exists(), "{member} not installed");
+        }
+    }
+
+    fn seed_installed_ca(tls_dir: &Path, serial: &str) {
+        std::fs::create_dir_all(tls_dir).unwrap();
+        std::fs::write(tls_dir.join("ca.crt"), PARITY_CA_PEM).unwrap();
+        std::fs::write(tls_dir.join("ca.key"), PARITY_CA_KEY_PEM).unwrap();
+        std::fs::write(tls_dir.join("serial"), serial).unwrap();
+        std::fs::write(tls_dir.join("crl.pem"), b"UNUSED").unwrap();
+    }
+
+    #[test]
+    fn regenerate_node_cert_writes_cert_key_and_serial() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        seed_installed_ca(&tls_dir, "42\n");
+
+        let resolve: &HostnameResolver = &|| Ok("testhost".to_string());
+        regenerate_node_cert_with(&tls_dir, resolve).unwrap();
+
+        assert!(tls_dir.join("node.crt").exists());
+        assert!(tls_dir.join("node.key").exists());
+
+        // audit:bounded test-only; serial file is a few ASCII bytes.
+        let bumped = std::fs::read_to_string(tls_dir.join("serial")).unwrap();
+        assert_eq!(bumped.trim(), "43");
+    }
+
+    #[test]
+    fn regenerate_node_cert_issues_pem_that_parses_as_x509() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        seed_installed_ca(&tls_dir, "100\n");
+
+        let resolve: &HostnameResolver = &|| Ok("node-alpha".to_string());
+        regenerate_node_cert_with(&tls_dir, resolve).unwrap();
+
+        let node_pem = std::fs::read(tls_dir.join("node.crt")).unwrap();
+        let (_, pem_obj) = x509_parser::pem::parse_x509_pem(&node_pem).unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(&pem_obj.contents).unwrap();
+
+        // Subject CN follows `neonfs_core@<hostname>` convention.
+        let cn = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(cn, "neonfs_core@node-alpha");
+
+        // Organisation is NeonFS.
+        let org = cert
+            .subject()
+            .iter_organization()
+            .next()
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(org, "NeonFS");
+    }
+
+    #[test]
+    fn regenerate_node_cert_refuses_non_integer_serial() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        seed_installed_ca(&tls_dir, "not-a-number\n");
+
+        let resolve: &HostnameResolver = &|| Ok("testhost".to_string());
+        let err = regenerate_node_cert_with(&tls_dir, resolve).unwrap_err();
+
+        match err {
+            CliError::InvalidArgument(msg) => {
+                assert!(msg.contains("not a positive integer"));
+                assert!(msg.contains("serial"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regenerate_node_cert_propagates_hostname_resolution_error() {
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        seed_installed_ca(&tls_dir, "1\n");
+
+        let resolve: &HostnameResolver = &|| {
+            Err(CliError::InvalidArgument(
+                "hostname unknown in test".to_string(),
+            ))
+        };
+        let err = regenerate_node_cert_with(&tls_dir, resolve).unwrap_err();
+
+        match err {
+            CliError::InvalidArgument(msg) => assert!(msg.contains("hostname unknown in test")),
+            other => panic!("expected InvalidArgument, got {other:?}"),
         }
     }
 

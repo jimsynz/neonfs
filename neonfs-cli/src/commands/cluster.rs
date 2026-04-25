@@ -872,71 +872,88 @@ impl CaCommand {
         // the daemon via a TCP probe on its distribution port.
         crate::commands::ca_bootstrap::refuse_if_daemon_live()?;
 
-        // Safety-gate + install layer: when `--from-backup` is given,
-        // validate the tarball (required files present, ca.crt parseable),
-        // refuse if its embedded cluster name doesn't match this node's
-        // local cluster, then atomically install the validated material
-        // to `$NEONFS_TLS_DIR/`. Node cert regeneration, `--new-key`
-        // fresh-CA generation, live-service refusal, and audit-log
-        // emission remain TODO — see slice B.2b.
+        // Safety-gate + install + node-cert-regen layer for the
+        // `--from-backup` path: validate the tarball, refuse foreign
+        // CAs, install atomically, then regenerate the local node
+        // cert against the freshly installed CA. `--new-key` + audit
+        // log remain TODO.
         let installed_cluster = match &source {
             EmergencyBootstrapSource::Backup(path) => {
                 let validation = crate::commands::ca_bootstrap::validate_backup_tarball(path)?;
                 let local_name = crate::commands::ca_bootstrap::local_cluster_name()?;
                 let validation =
                     crate::commands::ca_bootstrap::refuse_foreign_backup(validation, &local_name)?;
-                crate::commands::ca_bootstrap::install_ca_material(
-                    &validation,
-                    &crate::tls::tls_dir(),
-                )?;
+                let tls_dir = crate::tls::tls_dir();
+                crate::commands::ca_bootstrap::install_ca_material(&validation, &tls_dir)?;
+                crate::commands::ca_bootstrap::regenerate_node_cert(&tls_dir)?;
                 Some(validation.cluster_name)
             }
             EmergencyBootstrapSource::NewKey => None,
         };
 
-        // Partial-implementation body: tarball path has landed (validate
-        // + install). Node cert regen, `--new-key`, live-service refusal
-        // and audit log are still TODO — once the daemon is back up, the
-        // operator can run `neonfs cluster ca rotate` to reissue node
-        // certs (that command is tracked in #501).
+        // With `--from-backup` the full happy path is now on disk:
+        // new CA material + freshly-signed node cert. `--new-key` and
+        // the audit-log write are still TODO.
         let description = source.description();
         let install_note = match &installed_cluster {
             Some(name) => format!(
-                " — CA material installed under $NEONFS_TLS_DIR for cluster `{}`",
+                " — CA material + new node cert installed under $NEONFS_TLS_DIR for cluster `{}`",
                 name
             ),
             None => String::new(),
         };
-        let message = format!(
-            "cluster ca emergency-bootstrap is partially implemented ({description}{install_note}). \
-             Slice B.1 (tarball validation) and slice B.2a (atomic install) have landed; \
-             node cert regeneration, `--new-key` fresh-CA, live-service refusal, and \
-             audit-log emission are still TODO — once the daemon is back up, run \
-             `neonfs cluster ca rotate` (when implemented, #501) to reissue node certs."
-        );
+        let (status, message) = match &installed_cluster {
+            Some(_) => (
+                "installed",
+                format!(
+                    "cluster ca emergency-bootstrap: CA material installed and node cert regenerated ({description}{install_note}). \
+                     Next step: restart `neonfs-core` to pick up the new chain."
+                ),
+            ),
+            None => (
+                "not_implemented",
+                format!(
+                    "cluster ca emergency-bootstrap: `--new-key` path is not yet implemented ({description}). \
+                     Use `--from-backup <tarball>` instead until slice B.2b.3 lands."
+                ),
+            ),
+        };
 
         match format {
             OutputFormat::Json => {
                 let payload = serde_json::json!({
-                    "status": "partial",
+                    "status": status,
                     "source": description,
                     "installed_cluster": installed_cluster,
                     "message": message,
                 });
                 eprintln!("{}", json::format(&payload)?);
             }
-            OutputFormat::Table => {
-                eprintln!("neonfs cluster ca emergency-bootstrap: CA material installed (partial)");
-                eprintln!();
-                eprintln!("  source: {description}{install_note}");
-                eprintln!();
-                eprintln!("Tarball validation + atomic install have landed. Node cert");
-                eprintln!("regeneration, `--new-key` fresh-CA, live-service refusal, and");
-                eprintln!("audit-log emission are still TODO. After restarting `neonfs-core`,");
-                eprintln!(
-                    "run `neonfs cluster ca rotate` to reissue node certs (tracked in #501)."
-                );
-            }
+            OutputFormat::Table => match installed_cluster.as_ref() {
+                Some(name) => {
+                    eprintln!("neonfs cluster ca emergency-bootstrap: CA + node cert installed");
+                    eprintln!();
+                    eprintln!("  cluster: {name}");
+                    eprintln!("  source:  {description}");
+                    eprintln!();
+                    eprintln!("Next step: restart `neonfs-core` to pick up the new chain.");
+                }
+                None => {
+                    eprintln!(
+                        "neonfs cluster ca emergency-bootstrap: `--new-key` not yet implemented"
+                    );
+                    eprintln!();
+                    eprintln!("  source: {description}");
+                    eprintln!();
+                    eprintln!("Use `--from-backup <tarball>` instead until slice B.2b.3 lands.");
+                }
+            },
+        }
+
+        // Success exit when the install went through; error exit when
+        // `--new-key` was asked for (still not implemented).
+        if installed_cluster.is_some() {
+            return Ok(());
         }
 
         Err(crate::error::CliError::RpcError(message))
