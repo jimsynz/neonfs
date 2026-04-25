@@ -1,5 +1,6 @@
 defmodule NFSServer.NFSv3.HandlerTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import Bitwise
 
@@ -311,6 +312,232 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  describe "READDIR (proc 16)" do
+    test "encodes status + post-op attrs + cookieverf + entry chain + eof" do
+      fh = "fh-dir"
+      verf = <<0::64>>
+      new_verf = <<1::64>>
+      attr = MockBackend.sample_fattr3()
+
+      entries = [
+        {10, ".", 1},
+        {11, "..", 2},
+        {12, "a.txt", 3},
+        {13, "b.txt", 4}
+      ]
+
+      MockBackend.put({:readdir, {fh, 0, verf, 8192}}, {:ok, entries, new_verf, true, attr})
+
+      args = readdir_args(fh, 0, verf, 8192)
+      {:ok, body} = Handler.handle_call(16, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^new_verf, rest} = Types.decode_cookieverf3(rest)
+      assert {:ok, decoded_entries, rest} = decode_readdir_chain(rest)
+      assert decoded_entries == entries
+      assert {:ok, true, <<>>} = XDR.decode_bool(rest)
+    end
+
+    test "an empty directory still encodes a list-terminator + eof" do
+      fh = "fh-empty"
+      verf = <<0::64>>
+      new_verf = <<2::64>>
+
+      MockBackend.put({:readdir, {fh, 0, verf, 1024}}, {:ok, [], new_verf, true, nil})
+
+      args = readdir_args(fh, 0, verf, 1024)
+      {:ok, body} = Handler.handle_call(16, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, nil, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^new_verf, rest} = Types.decode_cookieverf3(rest)
+      assert {:ok, [], rest} = decode_readdir_chain(rest)
+      assert {:ok, true, <<>>} = XDR.decode_bool(rest)
+    end
+
+    test "multi-page pagination round-trips the cookie" do
+      fh = "fh-paged"
+      verf = <<0::64>>
+
+      page1 = [{10, ".", 1}, {11, "..", 2}, {12, "a.txt", 3}]
+      page2 = [{13, "b.txt", 4}, {14, "c.txt", 5}]
+
+      MockBackend.put({:readdir, {fh, 0, verf, 1024}}, {:ok, page1, verf, false, nil})
+      MockBackend.put({:readdir, {fh, 3, verf, 1024}}, {:ok, page2, verf, true, nil})
+
+      {:ok, body1} = Handler.handle_call(16, readdir_args(fh, 0, verf, 1024), @auth, @ctx_base)
+      {:ok, :ok, rest} = Types.decode_nfsstat3(body1)
+      {:ok, _attr, rest} = Types.decode_post_op_attr(rest)
+      {:ok, _verf1, rest} = Types.decode_cookieverf3(rest)
+      {:ok, decoded1, rest} = decode_readdir_chain(rest)
+      {:ok, eof1, <<>>} = XDR.decode_bool(rest)
+
+      assert decoded1 == page1
+      refute eof1
+
+      # Last cookie returned is the resume token for page 2.
+      {_, _, last_cookie} = List.last(decoded1)
+      assert last_cookie == 3
+
+      {:ok, body2} =
+        Handler.handle_call(16, readdir_args(fh, last_cookie, verf, 1024), @auth, @ctx_base)
+
+      {:ok, :ok, rest} = Types.decode_nfsstat3(body2)
+      {:ok, _attr, rest} = Types.decode_post_op_attr(rest)
+      {:ok, _verf2, rest} = Types.decode_cookieverf3(rest)
+      {:ok, decoded2, rest} = decode_readdir_chain(rest)
+      {:ok, eof2, <<>>} = XDR.decode_bool(rest)
+
+      assert decoded2 == page2
+      assert eof2
+    end
+
+    test "maps backend :bad_cookie to NFS3ERR_BAD_COOKIE" do
+      fh = "fh-stale"
+      stale_verf = <<99::64>>
+
+      MockBackend.put({:readdir, {fh, 5, stale_verf, 1024}}, {:error, :bad_cookie, nil})
+
+      args = readdir_args(fh, 5, stale_verf, 1024)
+      {:ok, body} = Handler.handle_call(16, args, @auth, @ctx_base)
+
+      assert {:ok, :bad_cookie, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, nil, <<>>} = Types.decode_post_op_attr(rest)
+    end
+
+    for {label, status} <- [
+          {"NFS3ERR_NOENT", :noent},
+          {"NFS3ERR_ACCES", :acces},
+          {"NFS3ERR_NOTDIR", :notdir},
+          {"NFS3ERR_TOOSMALL", :too_small},
+          {"NFS3ERR_IO", :io}
+        ] do
+      test "maps backend #{inspect(status)} to #{label} on the wire" do
+        fh = "fh-err"
+        verf = <<0::64>>
+        MockBackend.put({:readdir, {fh, 0, verf, 4096}}, {:error, unquote(status), nil})
+
+        args = readdir_args(fh, 0, verf, 4096)
+        {:ok, body} = Handler.handle_call(16, args, @auth, @ctx_base)
+
+        assert {:ok, unquote(status), rest} = Types.decode_nfsstat3(body)
+        assert {:ok, nil, <<>>} = Types.decode_post_op_attr(rest)
+      end
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(16, <<0xFF>>, @auth, @ctx_base)
+    end
+
+    test "returns :garbage_args when args truncate before count" do
+      args = Types.encode_fhandle3("fh") <> XDR.encode_uhyper(0) <> <<0::64>>
+      assert :garbage_args = Handler.handle_call(16, args, @auth, @ctx_base)
+    end
+
+    property "encode/decode round-trips a generated directory of 0–256 entries" do
+      check all(entries <- list_of(readdir_entry(), max_length: 256)) do
+        fh = "fh-prop"
+        verf = <<0::64>>
+        new_verf = <<7::64>>
+        MockBackend.put({:readdir, {fh, 0, verf, 65_536}}, {:ok, entries, new_verf, true, nil})
+
+        args = readdir_args(fh, 0, verf, 65_536)
+        {:ok, body} = Handler.handle_call(16, args, @auth, @ctx_base)
+
+        {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+        {:ok, nil, rest} = Types.decode_post_op_attr(rest)
+        {:ok, ^new_verf, rest} = Types.decode_cookieverf3(rest)
+        {:ok, decoded, rest} = decode_readdir_chain(rest)
+        {:ok, true, <<>>} = XDR.decode_bool(rest)
+
+        assert decoded == entries
+      end
+    end
+  end
+
+  describe "READDIRPLUS (proc 17)" do
+    test "encodes inline post-op attrs + post-op fh3 per entry" do
+      fh = "fh-dirp"
+      verf = <<0::64>>
+      new_verf = <<1::64>>
+      dir_attr = MockBackend.sample_fattr3()
+      child_attr = %{dir_attr | type: :reg, fileid: 7}
+
+      entries = [
+        {10, ".", 1, dir_attr, "fh-dot"},
+        {11, "..", 2, dir_attr, "fh-dotdot"},
+        {12, "a.txt", 3, child_attr, "fh-a"},
+        {13, "missing", 4, nil, nil}
+      ]
+
+      MockBackend.put(
+        {:readdirplus, {fh, 0, verf, 1024, 8192}},
+        {:ok, entries, new_verf, true, dir_attr}
+      )
+
+      args = readdirplus_args(fh, 0, verf, 1024, 8192)
+      {:ok, body} = Handler.handle_call(17, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^dir_attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^new_verf, rest} = Types.decode_cookieverf3(rest)
+      assert {:ok, decoded, rest} = decode_readdirplus_chain(rest)
+      assert decoded == entries
+      assert {:ok, true, <<>>} = XDR.decode_bool(rest)
+    end
+
+    test "empty directory + eof" do
+      fh = "fh-emptyp"
+      verf = <<0::64>>
+      new_verf = <<1::64>>
+
+      MockBackend.put(
+        {:readdirplus, {fh, 0, verf, 512, 4096}},
+        {:ok, [], new_verf, true, nil}
+      )
+
+      args = readdirplus_args(fh, 0, verf, 512, 4096)
+      {:ok, body} = Handler.handle_call(17, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, nil, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^new_verf, rest} = Types.decode_cookieverf3(rest)
+      assert {:ok, [], rest} = decode_readdirplus_chain(rest)
+      assert {:ok, true, <<>>} = XDR.decode_bool(rest)
+    end
+
+    test "maps :bad_cookie to NFS3ERR_BAD_COOKIE" do
+      fh = "fh-stalep"
+      verf = <<99::64>>
+
+      MockBackend.put(
+        {:readdirplus, {fh, 7, verf, 512, 4096}},
+        {:error, :bad_cookie, nil}
+      )
+
+      args = readdirplus_args(fh, 7, verf, 512, 4096)
+      {:ok, body} = Handler.handle_call(17, args, @auth, @ctx_base)
+
+      assert {:ok, :bad_cookie, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, nil, <<>>} = Types.decode_post_op_attr(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(17, <<0xFF>>, @auth, @ctx_base)
+    end
+
+    test "returns :garbage_args when args truncate before maxcount" do
+      args =
+        Types.encode_fhandle3("fh") <>
+          XDR.encode_uhyper(0) <>
+          <<0::64>> <>
+          XDR.encode_uint(512)
+
+      assert :garbage_args = Handler.handle_call(17, args, @auth, @ctx_base)
+    end
+  end
+
   describe "FSSTAT (proc 18)" do
     test "encodes the full reply on success" do
       fh = "fh-vol"
@@ -435,4 +662,67 @@ defmodule NFSServer.NFSv3.HandlerTest do
   # Skip past status (4) + post_op_attr-empty (4) + count (4) + eof (4)
   # to land on the opaque<>'s length prefix. Used by the padding test.
   defp read_to_data(<<_::binary-size(16), rest::binary>>), do: rest
+
+  defp readdir_entry do
+    gen all(
+          fileid <- integer(0..0xFFFFFFFF_FFFFFFFF),
+          name <-
+            binary(min_length: 1, max_length: 32) |> filter(&(not String.contains?(&1, <<0>>))),
+          cookie <- integer(0..0xFFFFFFFF_FFFFFFFF)
+        ) do
+      {fileid, name, cookie}
+    end
+  end
+
+  defp readdir_args(fh, cookie, verf, count) do
+    Types.encode_fhandle3(fh) <>
+      XDR.encode_uhyper(cookie) <>
+      Types.encode_cookieverf3(verf) <>
+      XDR.encode_uint(count)
+  end
+
+  defp readdirplus_args(fh, cookie, verf, dircount, maxcount) do
+    Types.encode_fhandle3(fh) <>
+      XDR.encode_uhyper(cookie) <>
+      Types.encode_cookieverf3(verf) <>
+      XDR.encode_uint(dircount) <>
+      XDR.encode_uint(maxcount)
+  end
+
+  # Walk the linked-list-style entry chain in a READDIR reply: each
+  # entry is preceded by a `bool` "next-pointer" flag. Returns the
+  # entries in order plus the trailing bytes (which start with the
+  # `eof` bool of the dirlist3).
+  defp decode_readdir_chain(binary), do: do_decode_readdir(binary, [])
+
+  defp do_decode_readdir(binary, acc) do
+    with {:ok, true, rest} <- XDR.decode_bool(binary),
+         {:ok, fileid, rest} <- XDR.decode_uhyper(rest),
+         {:ok, name, rest} <- Types.decode_filename3(rest),
+         {:ok, cookie, rest} <- XDR.decode_uhyper(rest) do
+      do_decode_readdir(rest, [{fileid, name, cookie} | acc])
+    else
+      {:ok, false, rest} -> {:ok, Enum.reverse(acc), rest}
+      err -> err
+    end
+  end
+
+  # Same shape as `decode_readdir_chain/1` but each entry's body
+  # carries a `post_op_attr` (Fattr3 or nil) and a `post_op_fh3`
+  # (binary or nil).
+  defp decode_readdirplus_chain(binary), do: do_decode_readdirplus(binary, [])
+
+  defp do_decode_readdirplus(binary, acc) do
+    with {:ok, true, rest} <- XDR.decode_bool(binary),
+         {:ok, fileid, rest} <- XDR.decode_uhyper(rest),
+         {:ok, name, rest} <- Types.decode_filename3(rest),
+         {:ok, cookie, rest} <- XDR.decode_uhyper(rest),
+         {:ok, attr, rest} <- Types.decode_post_op_attr(rest),
+         {:ok, fh, rest} <- Types.decode_post_op_fh3(rest) do
+      do_decode_readdirplus(rest, [{fileid, name, cookie, attr, fh} | acc])
+    else
+      {:ok, false, rest} -> {:ok, Enum.reverse(acc), rest}
+      err -> err
+    end
+  end
 end
