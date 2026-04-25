@@ -4,7 +4,7 @@ defmodule FuseServer.Native do
 
   This module wraps a raw non-blocking file descriptor (either `/dev/fuse`
   in production or one end of a `pipe(2)` pair in tests) in a Rustler
-  resource. Four operations are exposed:
+  resource. The following operations are exposed:
 
     * `open_dev_fuse/0` — open `/dev/fuse`.
     * `pipe_pair/0` — allocate a pipe pair for testing against hosts
@@ -16,6 +16,10 @@ defmodule FuseServer.Native do
     * `read_frame/1` / `write_frame/2` — non-blocking `read(2)` /
       `write(2)` of a bounded frame (up to 128 KiB — the FUSE kernel
       `max_write`).
+    * `fusermount3_mount/2` — invoke the `fusermount3` helper to mount a
+      FUSE filesystem and return the resulting `/dev/fuse` fd as a
+      handle. Higher-level callers should use `FuseServer.Fusermount`,
+      which also covers unmount.
 
   The fd is owned by the resource and closed when the last Erlang
   reference is released. Errors surface as `{:error, atom}` tuples using
@@ -40,6 +44,12 @@ defmodule FuseServer.Native do
   Error atoms returned by the transport NIFs. `:eagain` means the fd is
   not currently ready — re-arm via `select_read/1` and wait for the
   `{:select, handle, :undefined, :ready_input}` message.
+
+  `:fusermount_no_fd` means the `fusermount3` helper exited without
+  sending a `/dev/fuse` fd back over the SCM_RIGHTS socket (typically
+  because the mount point does not exist or the kernel rejected the
+  options); `:fusermount_failed` means the helper sent something
+  unexpected on the control channel.
   """
   @type error ::
           :eagain
@@ -47,9 +57,12 @@ defmodule FuseServer.Native do
           | :einval
           | :enodev
           | :enoent
+          | :enomem
           | :enosys
           | :eperm
           | :epipe
+          | :fusermount_failed
+          | :fusermount_no_fd
           | :select_already_closed
           | :select_failed
           | :select_not_supported
@@ -98,4 +111,31 @@ defmodule FuseServer.Native do
   """
   @spec write_frame(handle(), binary()) :: :ok | {:error, error()}
   def write_frame(_handle, _frame), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Spawn `fusermount3 -o <options> -- <mount_point>`, receive the
+  resulting `/dev/fuse` fd over the helper's `SCM_RIGHTS` socket, and
+  return it wrapped in a handle.
+
+  `options` is the comma-joined argument expected by `fusermount3 -o`
+  (for example `"allow_other,max_read=131072"`). Pass an empty string
+  for no options. The caller is responsible for joining individual
+  options — this NIF performs no parsing.
+
+  Spawning happens via `posix_spawn(3)` rather than an Erlang `Port` so
+  that one end of a parent-allocated `socketpair(2)` can be inherited
+  in the child as fd 3 (where `fusermount3` looks for it via the
+  `_FUSE_COMMFD` environment variable). Erlang `Port`-based spawn
+  cannot pass arbitrary file descriptors to a child.
+
+  The helper is short-lived: it opens `/dev/fuse`, sends the fd back
+  via `SCM_RIGHTS`, and exits. The BEAM auto-reaps the child via its
+  `SIGCHLD = SIG_IGN` disposition, so this function does not call
+  `waitpid(2)`. A `fusermount3` failure surfaces as
+  `{:error, :fusermount_no_fd}` (the helper closed the control socket
+  without sending anything).
+  """
+  @spec fusermount3_mount(mount_point :: String.t(), options :: String.t()) ::
+          {:ok, handle()} | {:error, error()}
+  def fusermount3_mount(_mount_point, _options), do: :erlang.nif_error(:nif_not_loaded)
 end

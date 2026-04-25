@@ -1,8 +1,8 @@
 //! FUSE transport NIF.
 //!
 //! This crate owns a raw file descriptor (either `/dev/fuse` in production or
-//! one end of a `pipe(2)` pair in tests) and exposes four operations to
-//! Elixir via `FuseServer.Native`:
+//! one end of a `pipe(2)` pair in tests) and exposes the following operations
+//! to Elixir via `FuseServer.Native`:
 //!
 //! * `open_dev_fuse/0` — open `/dev/fuse`.
 //! * `pipe_pair/0` — allocate a pipe pair (test aid so the CI image does not
@@ -15,6 +15,14 @@
 //!   `max_write`), so a single syscall always returns a complete
 //!   request/response — matching the protocol-bounded case described in
 //!   `CLAUDE.md` (not a whole-file-buffering violation).
+//! * `fusermount3_mount/2` — invoke the `fusermount3` helper to mount a FUSE
+//!   filesystem at `mount_point` with `options`, receive the resulting
+//!   `/dev/fuse` fd over a `SCM_RIGHTS` Unix socket, and wrap it as a
+//!   `FuseFd` resource. Spawning happens via `posix_spawn(3)` so the
+//!   socketpair is inherited as fd 3 in the child — Erlang `Port`-based
+//!   spawn cannot pass arbitrary fds to a child. The child is reaped
+//!   automatically by the BEAM's `SIGCHLD = SIG_IGN` disposition; success is
+//!   signalled by receipt of the fd, failure by EOF on the socket.
 //!
 //! Rustler 0.37 does not wrap `enif_select`, and the safe `Resource` trait
 //! does not let us install a stop callback. Without a stop callback we cannot
@@ -31,7 +39,8 @@ use rustler::sys::{
 };
 use rustler::types::atom::{self, Atom};
 use rustler::{Binary, Encoder, Env, Error as NifError, NewBinary, NifResult, Term};
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
+use std::mem;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
@@ -43,9 +52,12 @@ mod atoms {
         einval,
         enodev,
         enoent,
+        enomem,
         enosys,
         eperm,
         epipe,
+        fusermount_failed,
+        fusermount_no_fd,
         select_already_closed,
         select_failed,
         select_not_supported,
@@ -329,6 +341,246 @@ pub fn write_frame<'a>(env: Env<'a>, resource: Term<'a>, frame: Binary<'a>) -> N
         return Err(err_term(atoms::eagain()));
     }
     Ok(atom::ok())
+}
+
+/// Receive a `/dev/fuse` fd over a `SCM_RIGHTS` Unix socket from `fusermount3`.
+///
+/// `fusermount3` sends a single byte alongside the cmsg (per `unix(7)` —
+/// passing fds requires at least one byte of payload). EOF on the socket
+/// (return value 0) means the helper exited without sending the fd, i.e. it
+/// failed before the mount succeeded — typically because the mount point was
+/// invalid or the kernel rejected the options.
+fn recv_fuse_fd(sock: c_int) -> Result<c_int, Atom> {
+    let mut payload = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: payload.as_mut_ptr() as *mut c_void,
+        iov_len: payload.len(),
+    };
+
+    // CMSG_SPACE(sizeof(int)) is comfortably under 64 bytes on every Linux
+    // ABI we run on.
+    let mut cmsg_buf = [0u8; 64];
+    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut c_void;
+    msg.msg_controllen = cmsg_buf.len() as _;
+
+    let n = loop {
+        let r = unsafe { libc::recvmsg(sock, &mut msg, 0) };
+        if r < 0 && last_errno() == libc::EINTR {
+            continue;
+        }
+        break r;
+    };
+
+    if n < 0 {
+        return Err(errno_to_atom(last_errno()));
+    }
+    if n == 0 {
+        return Err(atoms::fusermount_no_fd());
+    }
+
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    if cmsg.is_null() {
+        return Err(atoms::fusermount_failed());
+    }
+    let cmsg_ref = unsafe { &*cmsg };
+    if cmsg_ref.cmsg_level != libc::SOL_SOCKET || cmsg_ref.cmsg_type != libc::SCM_RIGHTS {
+        return Err(atoms::fusermount_failed());
+    }
+
+    let fd_ptr = unsafe { libc::CMSG_DATA(cmsg) } as *const c_int;
+    let fd = unsafe { ptr::read_unaligned(fd_ptr) };
+    Ok(fd)
+}
+
+/// Build the env passed to `fusermount3`: the parent's current environment
+/// (snapshot via `std::env::vars_os`) with any pre-existing `_FUSE_COMMFD=`
+/// stripped, plus `_FUSE_COMMFD=<commfd>` appended. The returned `CString`s
+/// back the pointers passed to `posix_spawnp` and must outlive the call.
+fn build_fusermount_env(commfd: c_int) -> Vec<CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut out: Vec<CString> = Vec::new();
+    for (key, value) in std::env::vars_os() {
+        if key.as_bytes() == b"_FUSE_COMMFD" {
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(key.len() + 1 + value.len());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.push(b'=');
+        bytes.extend_from_slice(value.as_bytes());
+        if let Ok(s) = CString::new(bytes) {
+            out.push(s);
+        }
+    }
+    if let Ok(s) = CString::new(format!("_FUSE_COMMFD={}", commfd)) {
+        out.push(s);
+    }
+    out
+}
+
+/// Spawn `fusermount3 -o <options> -- <mount_point>`, receive the resulting
+/// `/dev/fuse` fd via `SCM_RIGHTS` on a socketpair inherited as fd 3 in the
+/// child, and wrap the fd in a `FuseFd` resource.
+///
+/// `options` is the comma-joined argument to `-o` (the format `fusermount3`
+/// itself expects); the caller is responsible for joining individual options.
+/// An empty `options` is allowed — `-o` takes an empty string.
+#[rustler::nif]
+pub fn fusermount3_mount<'a>(
+    env: Env<'a>,
+    mount_point: String,
+    options: String,
+) -> NifResult<Term<'a>> {
+    let mount_point_c = CString::new(mount_point).map_err(|_| err_term(atoms::einval()))?;
+    let options_c = CString::new(options).map_err(|_| err_term(atoms::einval()))?;
+
+    // Socketpair: AF_UNIX SOCK_STREAM with O_CLOEXEC on both ends. The dup2
+    // file action clears O_CLOEXEC on the duplicated fd in the child, so the
+    // child sees the socket at fd 3 only. The parent end stays CLOEXEC, so a
+    // parallel port-spawn elsewhere in the BEAM cannot inherit it.
+    //
+    // SOCK_STREAM is preferred over SOCK_DGRAM for this protocol: when the
+    // peer (the helper) exits without sending the fd, a stream socket
+    // returns 0 (EOF) from `recvmsg`, while a datagram socket would block
+    // indefinitely. Both socket types support `SCM_RIGHTS` fd passing —
+    // fusermount3 itself just calls `sendmsg(2)`, so the socket type is the
+    // parent's choice.
+    let mut sockets: [c_int; 2] = [-1, -1];
+    let rc = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+            0,
+            sockets.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(err_term(errno_to_atom(last_errno())));
+    }
+    let parent_fd = sockets[0];
+    let child_fd = sockets[1];
+
+    // posix_spawn file actions: dup the child's socket end onto fd 3, where
+    // fusermount3 looks for it via the `_FUSE_COMMFD` env var.
+    let mut actions: libc::posix_spawn_file_actions_t = unsafe { mem::zeroed() };
+    if unsafe { libc::posix_spawn_file_actions_init(&mut actions) } != 0 {
+        unsafe {
+            libc::close(parent_fd);
+            libc::close(child_fd);
+        }
+        return Err(err_term(atoms::enomem()));
+    }
+
+    let cleanup_actions = |actions: &mut libc::posix_spawn_file_actions_t| unsafe {
+        libc::posix_spawn_file_actions_destroy(actions);
+    };
+
+    if unsafe { libc::posix_spawn_file_actions_adddup2(&mut actions, child_fd, 3) } != 0 {
+        cleanup_actions(&mut actions);
+        unsafe {
+            libc::close(parent_fd);
+            libc::close(child_fd);
+        }
+        return Err(err_term(atoms::einval()));
+    }
+
+    // posix_spawn attributes: reset SIGCHLD (and a few other ignorable
+    // signals) to SIG_DFL in the child. The BEAM runs with
+    // `signal(SIGCHLD, SIG_IGN)`, which is inherited across exec — under
+    // SIG_IGN, the kernel auto-reaps children, which makes
+    // `fusermount3`'s own `waitpid(2)` against its mount.fuse helper fail
+    // with ECHILD ("waitpid: No child processes"). Restoring the default
+    // disposition gives the helper a normal POSIX environment.
+    let mut attr: libc::posix_spawnattr_t = unsafe { mem::zeroed() };
+    if unsafe { libc::posix_spawnattr_init(&mut attr) } != 0 {
+        cleanup_actions(&mut actions);
+        unsafe {
+            libc::close(parent_fd);
+            libc::close(child_fd);
+        }
+        return Err(err_term(atoms::enomem()));
+    }
+
+    let cleanup_attr = |attr: &mut libc::posix_spawnattr_t| unsafe {
+        libc::posix_spawnattr_destroy(attr);
+    };
+
+    let mut sigdef: libc::sigset_t = unsafe { mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut sigdef);
+        libc::sigaddset(&mut sigdef, libc::SIGCHLD);
+        libc::sigaddset(&mut sigdef, libc::SIGPIPE);
+    }
+
+    if unsafe { libc::posix_spawnattr_setsigdefault(&mut attr, &sigdef) } != 0
+        || unsafe { libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETSIGDEF as i16) }
+            != 0
+    {
+        cleanup_attr(&mut attr);
+        cleanup_actions(&mut actions);
+        unsafe {
+            libc::close(parent_fd);
+            libc::close(child_fd);
+        }
+        return Err(err_term(atoms::einval()));
+    }
+
+    let prog = c"fusermount3";
+    let arg_dash_o = c"-o";
+    let arg_dashdash = c"--";
+    let mut argv: [*mut c_char; 6] = [
+        prog.as_ptr() as *mut c_char,
+        arg_dash_o.as_ptr() as *mut c_char,
+        options_c.as_ptr() as *mut c_char,
+        arg_dashdash.as_ptr() as *mut c_char,
+        mount_point_c.as_ptr() as *mut c_char,
+        ptr::null_mut(),
+    ];
+
+    let env_strings = build_fusermount_env(3);
+    let mut envp: Vec<*mut c_char> = env_strings
+        .iter()
+        .map(|s| s.as_ptr() as *mut c_char)
+        .collect();
+    envp.push(ptr::null_mut());
+
+    let mut pid: libc::pid_t = 0;
+    let spawn_rc = unsafe {
+        libc::posix_spawnp(
+            &mut pid,
+            prog.as_ptr(),
+            &actions,
+            &attr,
+            argv.as_mut_ptr(),
+            envp.as_mut_ptr(),
+        )
+    };
+
+    cleanup_attr(&mut attr);
+    cleanup_actions(&mut actions);
+    // The parent never reads or writes the child's socket end.
+    unsafe { libc::close(child_fd) };
+
+    if spawn_rc != 0 {
+        unsafe { libc::close(parent_fd) };
+        return Err(err_term(errno_to_atom(spawn_rc)));
+    }
+
+    // The child is auto-reaped by the BEAM (SIGCHLD = SIG_IGN). We rely on
+    // EOF over the socket, not waitpid, to detect a fusermount3 failure.
+    let recv_result = recv_fuse_fd(parent_fd);
+    unsafe { libc::close(parent_fd) };
+
+    match recv_result {
+        Ok(fuse_fd) => {
+            let term = make_resource(env, fuse_fd)?;
+            Ok((atom::ok(), term).encode(env))
+        }
+        Err(a) => Err(err_term(a)),
+    }
 }
 
 rustler::init!("Elixir.FuseServer.Native", load = on_load);
