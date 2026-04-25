@@ -185,15 +185,4 @@ defmodule NeonFS.Integration.CommitChunksTest do
       )
     end)
   end
-
-  defp wait_for_pool(cluster, from_node, target_node) do
-    assert_eventually timeout: 30_000 do
-      case PeerCluster.rpc(cluster, from_node, NeonFS.Transport.PoolManager, :get_pool, [
-             target_node
-           ]) do
-        {:ok, _pool} -> true
-        _ -> false
-      end
-    end
-  end
 end

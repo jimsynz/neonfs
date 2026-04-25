@@ -548,6 +548,184 @@ defmodule NeonFS.Integration.ClusterCase do
   end
 
   @doc """
+  Initialise a mixed-role cluster: one core peer plus zero or more interface
+  peers (`:neonfs_s3`, `:neonfs_webdav`, `:neonfs_fuse`, `:neonfs_nfs`).
+
+  The core peer (the first `:neonfs_core` peer in `cluster.nodes`) runs
+  `cluster_init`; each interface peer joins via
+  `NeonFS.Cluster.Join.join_cluster_rpc/3` with the matching `ServiceType`
+  atom so the join flow installs CA + node TLS material on disk. After
+  joins complete, `Transport.PoolManager.ensure_pool/2` is invoked
+  explicitly on each interface peer with the core peer's listener
+  endpoint — interface peers do not run the data-plane `Listener`, so the
+  join flow's `activate_data_plane` does not create the outbound pool on
+  its own. Without that explicit `ensure_pool/2`, `Router.data_call/4`
+  from an interface peer returns `{:error, :no_data_endpoint}` because
+  no `PoolManager` ETS row exists for the core target.
+
+  Returns `:ok`. Raises if no core peer is present, or if any join /
+  pool establishment step fails.
+
+  ## Options
+  - `:name` — cluster name (default: `"test"`)
+  - `:volumes` — list of `{name, opts}` tuples to create on the core
+    peer after the data plane is up (default: `[]`)
+
+  ## Example
+
+      cluster =
+        PeerCluster.start_cluster!(2,
+          roles: %{node1: [:neonfs_core], node2: [:neonfs_s3]}
+        )
+
+      PeerCluster.connect_nodes(cluster)
+      :ok = init_mixed_role_cluster(cluster, name: "smoke")
+  """
+  @spec init_mixed_role_cluster(map(), keyword()) :: :ok
+  def init_mixed_role_cluster(cluster, opts \\ []) do
+    cluster_name = Keyword.get(opts, :name, "test")
+    volumes = Keyword.get(opts, :volumes, [])
+
+    {core_peer, interface_peers} = split_core_and_interface_peers(cluster)
+
+    {:ok, _} =
+      PeerCluster.rpc(cluster, core_peer.name, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
+
+    :ok = wait_for_cluster_stable_on(cluster, core_peer.name)
+
+    {:ok, %{"token" => token}} =
+      PeerCluster.rpc(cluster, core_peer.name, NeonFS.CLI.Handler, :create_invite, [3600])
+
+    for peer <- interface_peers do
+      type = service_type_for_apps(peer.applications)
+
+      {:ok, _} =
+        PeerCluster.rpc(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
+          token,
+          core_peer.node,
+          type
+        ])
+    end
+
+    core_endpoint = fetch_core_endpoint(cluster, core_peer)
+
+    for peer <- interface_peers do
+      {:ok, _pid} =
+        PeerCluster.rpc(cluster, peer.name, NeonFS.Transport.PoolManager, :ensure_pool, [
+          core_peer.node,
+          core_endpoint
+        ])
+    end
+
+    for peer <- interface_peers do
+      :ok = wait_for_pool(cluster, peer.name, core_peer.node)
+      :ok = wait_for_discovery(cluster, peer.name, core_peer.node)
+    end
+
+    for {name, vol_opts} <- volumes do
+      {:ok, _} =
+        PeerCluster.rpc(cluster, core_peer.name, NeonFS.CLI.Handler, :create_volume, [
+          name,
+          vol_opts
+        ])
+    end
+
+    :ok
+  end
+
+  defp split_core_and_interface_peers(cluster) do
+    case Enum.split_with(cluster.nodes, &(:neonfs_core in &1.applications)) do
+      {[], _} ->
+        raise ArgumentError,
+              "init_mixed_role_cluster requires at least one peer running :neonfs_core"
+
+      {[core | _], interfaces} ->
+        {core, interfaces}
+    end
+  end
+
+  defp service_type_for_apps(apps) do
+    cond do
+      :neonfs_s3 in apps -> :s3
+      :neonfs_webdav in apps -> :webdav
+      :neonfs_nfs in apps -> :nfs
+      :neonfs_fuse in apps -> :fuse
+      true -> raise ArgumentError, "no recognised interface app in #{inspect(apps)}"
+    end
+  end
+
+  defp fetch_core_endpoint(cluster, core_peer) do
+    port = PeerCluster.rpc(cluster, core_peer.name, NeonFS.Transport.Listener, :get_port, [])
+
+    if not is_integer(port) or port <= 0 do
+      raise "core peer #{core_peer.name} has no data-plane listener bound (port=#{inspect(port)})"
+    end
+
+    {~c"127.0.0.1", port}
+  end
+
+  defp wait_for_cluster_stable_on(cluster, node_name) do
+    :ok =
+      wait_until(
+        fn ->
+          case PeerCluster.rpc(cluster, node_name, NeonFS.CLI.Handler, :cluster_status, []) do
+            {:ok, _status} -> true
+            _ -> false
+          end
+        end,
+        timeout: 10_000
+      )
+  end
+
+  @doc """
+  Wait until `NeonFS.Client.Discovery.get_core_nodes/0` on `from_node` includes
+  `target_node`. Forces a refresh on each iteration so the test does not have
+  to sit through the cache's default `:peer_sync_interval`. Default timeout 15s.
+  """
+  @spec wait_for_discovery(map(), atom(), node(), keyword()) :: :ok
+  def wait_for_discovery(cluster, from_node, target_node, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 15_000)
+
+    :ok =
+      wait_until(
+        fn ->
+          PeerCluster.rpc(cluster, from_node, NeonFS.Client.Discovery, :refresh, [])
+
+          target_node in PeerCluster.rpc(
+            cluster,
+            from_node,
+            NeonFS.Client.Discovery,
+            :get_core_nodes,
+            []
+          )
+        end,
+        timeout: timeout
+      )
+  end
+
+  @doc """
+  Wait until `NeonFS.Transport.PoolManager.get_pool/1` on `from_node` returns
+  `{:ok, _pid}` for `target_node`. Default timeout 30s.
+  """
+  @spec wait_for_pool(map(), atom(), node(), keyword()) :: :ok
+  def wait_for_pool(cluster, from_node, target_node, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 30_000)
+
+    :ok =
+      wait_until(
+        fn ->
+          case PeerCluster.rpc(cluster, from_node, NeonFS.Transport.PoolManager, :get_pool, [
+                 target_node
+               ]) do
+            {:ok, _pool} -> true
+            _ -> false
+          end
+        end,
+        timeout: timeout
+      )
+  end
+
+  @doc """
   Initialise a single-node cluster and optionally create volumes.
 
   ## Options

@@ -235,7 +235,12 @@ defmodule NeonFS.Integration.PeerCluster do
 
             app_config ++ [neonfs_core: core_config]
           else
-            app_config
+            # Interface peers don't run :neonfs_core, but `Cluster.Join.join_cluster_rpc/3`
+            # still calls `Cluster.State.save/1` to persist `cluster.json`, which reads
+            # `:neonfs_core, :meta_dir` for its target directory. Without this override
+            # the join falls back to `/var/lib/neonfs/meta` and fails with `:eacces` on
+            # the test runner.
+            app_config ++ [neonfs_core: [meta_dir: meta_dir]]
           end
 
         app_config = add_interface_config(app_config, peer_apps, interface_ports)
