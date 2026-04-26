@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.FuseSessionTest do
+defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
   @moduledoc """
   End-to-end integration test for `NeonFS.FUSE.Session` against a real
   FUSE mount served by a remote core node (issue #277).
@@ -11,7 +11,7 @@ defmodule NeonFS.Integration.FuseSessionTest do
   Tagged `@moduletag :fuse` so the test only runs on hosts with
   `/dev/fuse` and `fusermount3` available.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 120_000
   @moduletag nodes: 1

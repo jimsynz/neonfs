@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.FuseWritePathTest do
+defmodule NeonFS.FUSE.IntegrationTest.WritePathTest do
   @moduledoc """
   End-to-end integration test for the native-BEAM FUSE write path
   (#278 / #575 / #576 / #577) against a real FUSE mount served by a
@@ -12,7 +12,7 @@ defmodule NeonFS.Integration.FuseWritePathTest do
   Tagged `@moduletag :fuse` so the suite only runs on hosts with
   `/dev/fuse` + `fusermount3` available — the CI image has both.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 120_000
   @moduletag nodes: 1

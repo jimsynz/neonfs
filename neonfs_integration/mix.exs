@@ -27,7 +27,6 @@ defmodule NeonFS.Integration.MixProject do
         :neonfs_client,
         :neonfs_core,
         :neonfs_docker,
-        :neonfs_fuse,
         :neonfs_s3,
         :neonfs_test_support,
         :neonfs_webdav,
@@ -52,7 +51,6 @@ defmodule NeonFS.Integration.MixProject do
       # Path dependencies for testing (runtime: false since only used in tests)
       {:neonfs_core, path: "../neonfs_core", runtime: false},
       {:neonfs_docker, path: "../neonfs_docker", runtime: false},
-      {:neonfs_fuse, path: "../neonfs_fuse", runtime: false},
       {:neonfs_s3, path: "../neonfs_s3", runtime: false},
       {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},
       {:neonfs_webdav, path: "../neonfs_webdav", runtime: false},
