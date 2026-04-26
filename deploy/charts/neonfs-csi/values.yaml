@@ -1,0 +1,135 @@
+# Default values for neonfs-csi.
+# Override with `helm install ... -f my-values.yaml`.
+
+# CSI driver name advertised to the kubelet.
+driverName: neonfs.csi.harton.dev
+
+# NeonFS CSI plugin image. Built by #318; until then operators must set
+# their own image reference.
+image:
+  repository: harton.dev/project-neon/neonfs-csi
+  tag: ""           # empty → falls back to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Sidecar images. Pinned to upstream Kubernetes-CSI sidecar versions
+# known to support CSI v1.10 + VOLUME_CONDITION (#316).
+sidecars:
+  provisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+    pullPolicy: IfNotPresent
+    extraArgs: []
+  attacher:
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+    pullPolicy: IfNotPresent
+    extraArgs: []
+  resizer:
+    image: registry.k8s.io/sig-storage/csi-resizer:v1.12.0
+    pullPolicy: IfNotPresent
+    extraArgs: []
+  livenessProbe:
+    image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+    pullPolicy: IfNotPresent
+  nodeDriverRegistrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+    pullPolicy: IfNotPresent
+
+# Bootstrap token used by the plugin to join the NeonFS cluster.
+# `existingSecret` takes precedence; otherwise the chart creates a Secret
+# from `value` (operators should override at install time, not commit
+# the value).
+bootstrap:
+  existingSecret: ""
+  secretKey: token
+  value: ""
+
+# Controller plugin (Deployment).
+controller:
+  replicaCount: 2
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  nodeSelector: {}
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+    - effect: NoSchedule
+      key: node-role.kubernetes.io/control-plane
+      operator: Exists
+  affinity: {}
+  podLabels: {}
+  podAnnotations: {}
+  socketPath: /var/lib/csi/sockets/pluginproxy/csi.sock
+  livenessProbe:
+    healthPort: 29652
+  hostNetwork: false
+
+# Node plugin (DaemonSet).
+node:
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  affinity: {}
+  podLabels: {}
+  podAnnotations: {}
+  kubeletDir: /var/lib/kubelet
+  socketPath: /var/lib/kubelet/plugins/neonfs.csi.harton.dev/csi.sock
+  registrationSocketPath: /var/lib/kubelet/plugins_registry/neonfs.csi.harton.dev-reg.sock
+  livenessProbe:
+    healthPort: 29653
+  # `priorityClassName: system-node-critical` keeps the Node plugin
+  # alive during evictions; override to "" if your cluster doesn't
+  # honour it.
+  priorityClassName: system-node-critical
+
+# `CSIDriver` object characteristics. Refer to
+# https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/
+# for semantics.
+csiDriver:
+  attachRequired: false
+  podInfoOnMount: true
+  # `Persistent` is the right answer for filesystem volumes;
+  # `Ephemeral` would mean kubelet creates and tears them down inline
+  # — not the NeonFS model.
+  volumeLifecycleModes:
+    - Persistent
+  fsGroupPolicy: File
+  storageCapacity: false
+  seLinuxMount: false
+
+# StorageClass installed alongside the chart. Set
+# `storageClass.create: false` to manage StorageClass objects out of
+# band.
+storageClass:
+  create: true
+  name: neonfs
+  isDefault: false
+  reclaimPolicy: Delete
+  volumeBindingMode: Immediate
+  allowVolumeExpansion: true
+  parameters:
+    replication_factor: "3"
+    tier: hot
+  mountOptions: []
+
+# RBAC.
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  controllerName: ""
+  nodeName: ""
+  annotations: {}

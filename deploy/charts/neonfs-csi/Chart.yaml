@@ -1,0 +1,20 @@
+apiVersion: v2
+name: neonfs-csi
+description: NeonFS CSI driver — Controller Deployment + Node DaemonSet for Kubernetes
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0"
+icon: https://harton.dev/project-neon/neonfs/raw/branch/main/docs/logo.png
+home: https://harton.dev/project-neon/neonfs
+sources:
+  - https://harton.dev/project-neon/neonfs
+keywords:
+  - csi
+  - storage
+  - filesystem
+  - distributed
+maintainers:
+  - name: James Harton
+    email: james@harton.nz
+    url: https://harton.dev/james

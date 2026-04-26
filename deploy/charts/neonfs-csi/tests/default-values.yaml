@@ -1,0 +1,468 @@
+---
+# Source: neonfs-csi/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: release-neonfs-csi-controller
+  namespace: neonfs-csi
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: controller
+---
+# Source: neonfs-csi/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: release-neonfs-csi-node
+  namespace: neonfs-csi
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: node
+---
+# Source: neonfs-csi/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: release-neonfs-csi-bootstrap
+  namespace: neonfs-csi
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+type: Opaque
+stringData:
+  token: "test-bootstrap-token-redacted"
+---
+# Source: neonfs-csi/templates/storageclass.yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: neonfs
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+provisioner: neonfs.csi.harton.dev
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+parameters:
+  replication_factor: "3"
+  tier: "hot"
+---
+# Source: neonfs-csi/templates/rbac.yaml
+# Controller-side RBAC: scoped to what the external sidecars need to
+# call from cluster-wide context (PVCs, PVs, StorageClasses, VolumeAttachments,
+# Events, CSINodes for topology, leases for sidecar leader election).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: release-neonfs-csi-controller
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# Source: neonfs-csi/templates/rbac.yaml
+# Node-side RBAC: minimal — only needs to see CSINode + Node objects.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: release-neonfs-csi-node
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: node
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# Source: neonfs-csi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: release-neonfs-csi-controller
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: release-neonfs-csi-controller
+subjects:
+  - kind: ServiceAccount
+    name: release-neonfs-csi-controller
+    namespace: neonfs-csi
+---
+# Source: neonfs-csi/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: release-neonfs-csi-node
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: release-neonfs-csi-node
+subjects:
+  - kind: ServiceAccount
+    name: release-neonfs-csi-node
+    namespace: neonfs-csi
+---
+# Source: neonfs-csi/templates/node-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: release-neonfs-csi-node
+  namespace: neonfs-csi
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neonfs-csi
+      app.kubernetes.io/instance: release
+      app.kubernetes.io/component: node
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neonfs-csi
+        app.kubernetes.io/instance: release
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/version: "0.1.0"
+        helm.sh/chart: neonfs-csi-0.1.0
+        app.kubernetes.io/name: neonfs-csi
+        app.kubernetes.io/instance: release
+        app.kubernetes.io/component: node
+    spec:
+      serviceAccountName: release-neonfs-csi-node
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=$(ADDRESS)
+            - --kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)
+            - --v=2
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+            - name: DRIVER_REG_SOCK_PATH
+              value: /var/lib/kubelet/plugins/neonfs.csi.harton.dev/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=/csi/csi.sock
+            - --health-port=29653
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+        - name: neonfs-csi
+          image: harton.dev/project-neon/neonfs-csi:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - node
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: NEONFS_CSI_MODE
+              value: node
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NEONFS_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: release-neonfs-csi-bootstrap
+                  key: token
+                  optional: true
+          ports:
+            - containerPort: 29653
+              name: healthz
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: fuse-device
+              mountPath: /dev/fuse
+      volumes:
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry/
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/neonfs.csi.harton.dev/
+            type: DirectoryOrCreate
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: fuse-device
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice
+---
+# Source: neonfs-csi/templates/controller-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: release-neonfs-csi-controller
+  namespace: neonfs-csi
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neonfs-csi
+      app.kubernetes.io/instance: release
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neonfs-csi
+        app.kubernetes.io/instance: release
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/version: "0.1.0"
+        helm.sh/chart: neonfs-csi-0.1.0
+        app.kubernetes.io/name: neonfs-csi
+        app.kubernetes.io/instance: release
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: release-neonfs-csi-controller
+      hostNetwork: false
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoSchedule
+          key: node-role.kubernetes.io/control-plane
+          operator: Exists
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=$(ADDRESS)
+            - --leader-election=true
+            - --feature-gates=Topology=true
+            - --extra-create-metadata=true
+            - --v=2
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=$(ADDRESS)
+            - --leader-election=true
+            - --v=2
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.12.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=$(ADDRESS)
+            - --leader-election=true
+            - --v=2
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=$(ADDRESS)
+            - --health-port=29652
+          env:
+            - name: ADDRESS
+              value: /var/lib/csi/sockets/pluginproxy/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy
+        - name: neonfs-csi
+          image: harton.dev/project-neon/neonfs-csi:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - controller
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///var/lib/csi/sockets/pluginproxy/csi.sock
+            - name: NEONFS_CSI_MODE
+              value: controller
+            - name: NEONFS_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: release-neonfs-csi-bootstrap
+                  key: token
+                  optional: true
+          ports:
+            - containerPort: 29652
+              name: healthz
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /var/lib/csi/sockets/pluginproxy
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+---
+# Source: neonfs-csi/templates/csidriver.yaml
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: neonfs.csi.harton.dev
+  labels:
+    app.kubernetes.io/name: neonfs-csi
+    app.kubernetes.io/instance: release
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.1.0"
+    helm.sh/chart: neonfs-csi-0.1.0
+spec:
+  attachRequired: false
+  podInfoOnMount: true
+  fsGroupPolicy: File
+  storageCapacity: false
+  seLinuxMount: false
+  volumeLifecycleModes:
+    - Persistent
