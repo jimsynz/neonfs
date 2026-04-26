@@ -4,6 +4,7 @@ pub mod acl;
 pub mod audit;
 pub mod ca_bootstrap;
 pub mod cluster;
+pub mod dr;
 pub mod drive;
 pub mod escalation;
 pub mod fuse;

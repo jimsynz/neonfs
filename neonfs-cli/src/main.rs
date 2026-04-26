@@ -9,10 +9,10 @@ mod tls;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, drive::DriveCommand,
-    escalation::EscalationCommand, fuse::FuseCommand, gc::GcCommand, job::JobCommand,
-    nfs::NfsCommand, node::NodeCommand, s3::S3Command, scrub::ScrubCommand, volume::VolumeCommand,
-    worker::WorkerCommand,
+    acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, dr::DrCommand,
+    drive::DriveCommand, escalation::EscalationCommand, fuse::FuseCommand, gc::GcCommand,
+    job::JobCommand, nfs::NfsCommand, node::NodeCommand, s3::S3Command, scrub::ScrubCommand,
+    volume::VolumeCommand, worker::WorkerCommand,
 };
 use output::OutputFormat;
 
@@ -53,6 +53,12 @@ enum Commands {
     Cluster {
         #[command(subcommand)]
         command: ClusterCommand,
+    },
+
+    /// Disaster-recovery snapshot management
+    Dr {
+        #[command(subcommand)]
+        command: DrCommand,
     },
 
     /// Drive management
@@ -141,6 +147,7 @@ fn main() {
         Commands::Acl { command } => command.execute(format),
         Commands::Audit { command } => command.execute(format),
         Commands::Cluster { command } => command.execute(format),
+        Commands::Dr { command } => command.execute(format),
         Commands::Drive { command } => command.execute(format),
         Commands::Escalation { command } => command.execute(format),
         Commands::Gc { command } => command.execute(format),
