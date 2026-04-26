@@ -508,6 +508,42 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End mutation metadata opcodes —————————————————————————————
 
+  # ——— Data-path opcodes (#576) ————————————————————————————————————
+
+  # `WRITE` is single-frame-bounded: the kernel splits longer writes
+  # into multiple frames each capped at the negotiated `max_write`
+  # (64 KiB here, see `@max_write`). Per `CLAUDE.md` no-whole-file-
+  # buffering: hand `req.data` straight to `Handler.write`, never
+  # accumulate multiple frames into one buffer.
+  defp handle_opcode(:write, header, %Request.Write{} = req, state) do
+    op =
+      {"write",
+       %{
+         "ino" => header.nodeid,
+         "offset" => req.offset,
+         "data" => req.data
+       }}
+
+    enqueue(:write, header.unique, op, state)
+  end
+
+  # `CREATE` is atomic open+create. Apply `umask` before forwarding
+  # (POSIX `creat(2)` semantics) and reply with the combined
+  # `fuse_create_out` shape (entry + open).
+  defp handle_opcode(:create, header, %Request.Create{} = req, state) do
+    op =
+      {"create",
+       %{
+         "parent" => header.nodeid,
+         "name" => req.name,
+         "mode" => Bitwise.band(req.mode, Bitwise.bnot(req.umask))
+       }}
+
+    enqueue(:create, header.unique, op, state)
+  end
+
+  # ——— End data-path opcodes ——————————————————————————————————————
+
   # Catch-all for opcodes we accept in the codec but don't route here
   # (write-path, xattrs, etc. — out of scope for #277).
   defp handle_opcode(_other, header, _req, state) do
@@ -608,6 +644,30 @@ defmodule NeonFS.FUSE.Session do
   end
 
   # ——— End mutation metadata reply translations —————————————————
+
+  # ——— Data-path reply translations (#576) ————————————————————————
+
+  defp handle_handler_reply(:write, kernel_unique, {"write_ok", %{"size" => size}}, state) do
+    write_reply(state.fd, kernel_unique, %Response.Write{size: size}, 0)
+    emit_opcode_telemetry(:write, :ok, state)
+    state
+  end
+
+  # `CREATE` reply is the wire-level `fuse_create_out` — `Entry`
+  # body followed by an `Open` body. The Handler returns
+  # `entry_ok` with `fh`; we synthesise the combined reply here.
+  defp handle_handler_reply(:create, kernel_unique, {"entry_ok", payload}, state) do
+    reply = %Response.CreateReply{
+      entry: build_entry(payload),
+      open: %Response.Open{fh: payload["fh"] || payload["ino"] || 0, open_flags: 0}
+    }
+
+    write_reply(state.fd, kernel_unique, reply, 0)
+    emit_opcode_telemetry(:create, :ok, state)
+    state
+  end
+
+  # ——— End data-path reply translations ———————————————————————————
 
   defp handle_handler_reply(kind, kernel_unique, {"error", %{"errno" => errno}}, state) do
     write_frame(state.fd, Protocol.encode_error(kernel_unique, -errno))
