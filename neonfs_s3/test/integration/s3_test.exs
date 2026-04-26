@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.S3Test do
+defmodule NeonFS.S3.IntegrationTest do
   @moduledoc """
   Integration tests for the S3 API against a real multi-node NeonFS cluster.
 
@@ -9,10 +9,10 @@ defmodule NeonFS.Integration.S3Test do
   Credential lookups go through real NeonFS.Core.S3CredentialManager on the
   core nodes via RPC.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
-  alias NeonFS.Integration.S3CoreBridge
+  alias NeonFS.S3.IntegrationTest.CoreBridge, as: S3CoreBridge
   alias NeonFS.S3.MultipartStore
 
   @moduletag timeout: 180_000

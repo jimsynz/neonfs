@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.S3CoreBridge do
+defmodule NeonFS.S3.IntegrationTest.CoreBridge do
   @moduledoc false
 
   # Bridges S3 Backend `call_core` calls to real core nodes via RPC.
