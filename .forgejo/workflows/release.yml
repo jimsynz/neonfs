@@ -41,14 +41,14 @@ jobs:
       - name: Build all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-amd64
-          for target in base cli core fuse nfs s3 webdav docker omnibus; do
+          for target in base cli core fuse nfs s3 webdav docker csi omnibus; do
             PLATFORMS=linux/amd64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
           done
 
       - name: Push all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-amd64
-          for image in core fuse nfs s3 webdav docker omnibus cli; do
+          for image in core fuse nfs s3 webdav docker csi omnibus cli; do
             docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
             docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
           done
@@ -89,14 +89,14 @@ jobs:
       - name: Build all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-arm64
-          for target in base cli core fuse nfs s3 webdav docker omnibus; do
+          for target in base cli core fuse nfs s3 webdav docker csi omnibus; do
             PLATFORMS=linux/arm64 TAG=$TAG ./containers/bake.sh --pull --load "$target"
           done
 
       - name: Push all targets
         run: |
           TAG=${GITHUB_REF_NAME#v}-arm64
-          for image in core fuse nfs s3 webdav docker omnibus cli; do
+          for image in core fuse nfs s3 webdav docker csi omnibus cli; do
             docker push "forgejo.dmz/project-neon/neonfs/${image}:${TAG}"
             docker push "ghcr.io/jimsynz/neonfs/${image}:${TAG}"
           done
@@ -133,7 +133,7 @@ jobs:
       - name: Create multi-arch manifests
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          IMAGES="core fuse nfs s3 webdav docker omnibus cli"
+          IMAGES="core fuse nfs s3 webdav docker csi omnibus cli"
 
           for image in $IMAGES; do
             docker buildx imagetools create \

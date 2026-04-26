@@ -554,6 +554,55 @@ erlangCookie:
 
 The chart template would derive `NEONFS_BOOTSTRAP_PEERS` and `NEONFS_BOOTSTRAP_EXPECT` from `.Values.core.replicas`.
 
+### CSI driver — exposing NeonFS volumes as PersistentVolumes
+
+The `neonfs-csi` Helm chart at `deploy/charts/neonfs-csi/` installs a
+Kubernetes CSI v1 driver so PVCs against a `StorageClass` provisioned
+by `neonfs.csi.harton.dev` are backed by NeonFS volumes. The chart
+ships:
+
+- a Controller `Deployment` (default 2 replicas) running the CSI
+  plugin alongside the upstream `external-provisioner`,
+  `external-attacher`, and `external-resizer` sidecars;
+- a Node `DaemonSet` running the plugin alongside the
+  `node-driver-registrar` sidecar so kubelet can discover the
+  per-node socket;
+- a `CSIDriver` object declaring the driver's capabilities;
+- a sample `StorageClass` keyed on `replication_factor` and `tier`.
+
+Container image: `ghcr.io/jimsynz/neonfs/csi:<tag>` (also published
+to the project's Forgejo registry).
+
+```bash
+helm install neonfs-csi ./deploy/charts/neonfs-csi \
+  --namespace kube-system \
+  --set bootstrap.value="$(cat /etc/neonfs/bootstrap-token)"
+```
+
+The cluster's NeonFS bootstrap token can be supplied either via
+`bootstrap.value` (the chart creates the Secret) or
+`bootstrap.existingSecret=<name>` to reference one created out of
+band. Once installed:
+
+```bash
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-data
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: neonfs
+YAML
+```
+
+See `deploy/charts/neonfs-csi/README.md` for the full values
+reference and `tests/render.sh check` to verify the rendered
+manifests against the snapshot.
+
 ## Operational notes
 
 ### Formation idempotency
