@@ -101,9 +101,17 @@ defmodule NeonFS.Integration.PartitionTest do
           "partition data"
         ])
 
-      heal_and_sync(cluster, [:node3])
+      :ok = PeerCluster.heal_partition(cluster)
+      :ok = wait_for_partition_healed(cluster, timeout: 30_000)
 
+      # `AntiEntropy.sync_now` only syncs `segments_per_cycle` segments
+      # per call (default 100); a single pass also doesn't account for
+      # races between `wait_for_partition_healed` returning and the RPC
+      # layer's connection state actually catching up. Re-trigger sync
+      # on every poll iteration so a missed pass doesn't fail the
+      # whole test (#564).
       assert_eventually timeout: 60_000 do
+        trigger_anti_entropy(cluster, [:node3])
         read_matches?(cluster, :node3, path, "partition data")
       end
     end
@@ -113,7 +121,8 @@ defmodule NeonFS.Integration.PartitionTest do
 
       paths = write_numbered_files(cluster, :node1, 1..3)
 
-      heal_and_sync(cluster, [:node1, :node2, :node3])
+      :ok = PeerCluster.heal_partition(cluster)
+      :ok = wait_for_partition_healed(cluster, timeout: 30_000)
 
       assert_all_nodes_have_files(cluster, paths)
     end
@@ -165,12 +174,6 @@ defmodule NeonFS.Integration.PartitionTest do
   defp partition_majority_minority(cluster) do
     :ok = PeerCluster.partition_cluster(cluster, [[:node1, :node2], [:node3]])
     assert_partitioned(cluster, [:node1, :node2], [:node3], timeout: 60_000)
-  end
-
-  defp heal_and_sync(cluster, sync_nodes) do
-    :ok = PeerCluster.heal_partition(cluster)
-    :ok = wait_for_partition_healed(cluster, timeout: 30_000)
-    trigger_anti_entropy(cluster, sync_nodes)
   end
 
   defp trigger_anti_entropy(cluster, node_names) do
@@ -228,7 +231,12 @@ defmodule NeonFS.Integration.PartitionTest do
   end
 
   defp assert_node_has_files(cluster, node_name, paths_and_contents) do
+    # Same re-trigger-on-poll pattern as the single-file test: a
+    # single `sync_now` pass isn't always enough after partition
+    # heal (#564).
     assert_eventually timeout: 60_000 do
+      trigger_anti_entropy(cluster, [node_name])
+
       Enum.all?(paths_and_contents, fn {path, content} ->
         read_matches?(cluster, node_name, path, content)
       end)
