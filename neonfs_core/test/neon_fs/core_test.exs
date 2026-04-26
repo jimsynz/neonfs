@@ -3,7 +3,7 @@ defmodule NeonFS.CoreTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core
-  alias NeonFS.Core.{RaServer, VolumeRegistry}
+  alias NeonFS.Core.{NamespaceCoordinator, RaServer, VolumeRegistry}
 
   @moduletag :tmp_dir
 
@@ -229,6 +229,87 @@ defmodule NeonFS.CoreTest do
 
     test "returns error for nonexistent volume" do
       assert {:error, :not_found} = Core.mkdir("no-such-volume", "/dir")
+    end
+  end
+
+  # `mkdir` and `delete_file` (for directories) are wrapped in
+  # `NamespaceCoordinator` claims — sub-issue #305. The default test
+  # setup stops Ra, so this describe block re-enables it to exercise
+  # the coordinator-integration path that the unit tests above can't
+  # reach.
+  describe "namespace coordinator integration (mkdir/delete_file)" do
+    setup %{volume: volume} do
+      ensure_node_named()
+      start_ra()
+      :ok = RaServer.init_cluster()
+      {:ok, _} = NamespaceCoordinator.start_link()
+
+      on_exit(fn ->
+        case Process.whereis(NamespaceCoordinator) do
+          nil -> :ok
+          pid -> GenServer.stop(pid, :shutdown, 1_000)
+        end
+      end)
+
+      {:ok, volume_id: volume.id}
+    end
+
+    test "mkdir refuses with :busy when the coordinator already pins the path",
+         %{volume_name: vol_name, volume_id: volume_id} do
+      key = "vol:" <> volume_id <> ":/contended"
+
+      {:ok, _claim} =
+        NamespaceCoordinator.claim_path(
+          NamespaceCoordinator,
+          key,
+          :exclusive
+        )
+
+      assert {:error, :busy} = Core.mkdir(vol_name, "/contended")
+    end
+
+    test "mkdir releases the claim on success", %{volume_name: vol_name, volume_id: volume_id} do
+      assert {:ok, _} = Core.mkdir(vol_name, "/released")
+
+      # The pre-claim succeeds only because mkdir's claim was released
+      # in the `after` clause.
+      key = "vol:" <> volume_id <> ":/released"
+
+      assert {:ok, _claim} =
+               NamespaceCoordinator.claim_path(
+                 NamespaceCoordinator,
+                 key,
+                 :exclusive
+               )
+    end
+
+    test "delete_file takes a subtree claim — refuses while a descendant is held",
+         %{volume_name: vol_name, volume_id: volume_id} do
+      {:ok, _} = Core.mkdir(vol_name, "/contended-dir")
+      {:ok, _} = Core.write_file_streamed(vol_name, "/contended-dir/file.txt", ["data"])
+
+      # `delete_file` will try `claim_subtree`, which conflicts with
+      # any descendant path claim. Pre-take that descendant claim.
+      key = "vol:" <> volume_id <> ":/contended-dir/file.txt"
+
+      {:ok, _claim} =
+        NamespaceCoordinator.claim_path(
+          NamespaceCoordinator,
+          key,
+          :exclusive
+        )
+
+      assert {:error, :busy} = Core.delete_file(vol_name, "/contended-dir")
+    end
+
+    test "delete_file releases the subtree claim on success", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/cleanup.txt", ["data"])
+
+      assert :ok = Core.delete_file(vol_name, "/cleanup.txt")
+
+      # The subtree claim on /cleanup.txt is released, so a fresh
+      # mkdir on the same path can take its own path claim.
+      assert {:ok, _} = Core.mkdir(vol_name, "/cleanup.txt")
     end
   end
 

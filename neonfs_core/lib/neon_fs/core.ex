@@ -228,12 +228,28 @@ defmodule NeonFS.Core do
   end
 
   @doc """
-  Deletes a file from a volume by path.
+  Deletes a file or directory from a volume by path.
+
+  Acquires a `NeonFS.Core.NamespaceCoordinator` subtree claim on the
+  target so concurrent `mkdir` / `delete_file` / `rename_file` on the
+  same path (or any descendant — important for the rmdir
+  empty-directory check, which would otherwise race against creates
+  inside the target) serialise across interface nodes. See sub-issue
+  #305.
   """
   @spec delete_file(String.t(), String.t()) :: :ok | {:error, term()}
   def delete_file(volume_name, path) do
-    with {:ok, volume} <- resolve_volume(volume_name),
-         {:ok, file} <- FileIndex.get_by_path(volume.id, normalize_path(path)) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      normalized = normalize_path(path)
+
+      with_namespace_claim(:subtree, volume.id, normalized, fn ->
+        do_delete(volume.id, normalized)
+      end)
+    end
+  end
+
+  defp do_delete(volume_id, path) do
+    with {:ok, file} <- FileIndex.get_by_path(volume_id, path) do
       FileIndex.delete(file.id)
     end
   end
@@ -310,12 +326,23 @@ defmodule NeonFS.Core do
 
   @doc """
   Creates a directory within a volume.
+
+  Acquires a `NeonFS.Core.NamespaceCoordinator` path claim on the new
+  directory's path before inserting into `FileIndex`, so concurrent
+  `mkdir` / `delete_file` / `rename_file` on the same name (from
+  different interface nodes) serialise cleanly — one `mkdir` wins, the
+  rest see `FileIndex` already holds the entry and surface `:eexist`,
+  rather than racing through quorum-write resolution. Sub-issue #305.
   """
   @spec mkdir(String.t(), String.t()) ::
           {:ok, NeonFS.Core.DirectoryEntry.t()} | {:error, term()}
   def mkdir(volume_name, path) do
     with {:ok, volume} <- resolve_volume(volume_name) do
-      FileIndex.mkdir(volume.id, normalize_path(path))
+      normalized = normalize_path(path)
+
+      with_namespace_claim(:path, volume.id, normalized, fn ->
+        FileIndex.mkdir(volume.id, normalized)
+      end)
     end
   end
 
@@ -336,6 +363,35 @@ defmodule NeonFS.Core do
   end
 
   # --- Private helpers ---
+
+  # Wraps a single-path namespace operation in a coordinator claim so
+  # concurrent operations on the same path (across interface nodes)
+  # serialise cleanly. `claim_kind` is `:path` for point operations
+  # (`mkdir`) and `:subtree` for ones that must fence concurrent
+  # creations under the target (`rmdir` / directory `delete_file`).
+  # Releases on completion (success or failure). When the coordinator
+  # is unreachable (no Ra cluster, network split) we fall back to the
+  # historical single-core-node serialisation — same posture WebDAV
+  # took in #301 and rename in #304.
+  defp with_namespace_claim(claim_kind, volume_id, path, fun)
+       when claim_kind in [:path, :subtree] do
+    key = volume_scoped_path(volume_id, path)
+
+    case safe_claim(claim_kind, key) do
+      {:ok, claim_id} ->
+        try do
+          fun.()
+        after
+          safe_release(claim_id)
+        end
+
+      {:error, :conflict, _conflict_id} ->
+        {:error, :busy}
+
+      {:error, _reason} ->
+        fun.()
+    end
+  end
 
   # Wraps a rename's `FileIndex` work in a coordinator-issued
   # `claim_rename` pair so concurrent cross-directory renames (across
@@ -370,10 +426,28 @@ defmodule NeonFS.Core do
     end
   end
 
+  defp safe_claim(:path, key) do
+    NamespaceCoordinator.claim_path(key, :exclusive)
+  catch
+    :exit, _ -> {:error, :coordinator_unavailable}
+  end
+
+  defp safe_claim(:subtree, key) do
+    NamespaceCoordinator.claim_subtree(key, :exclusive)
+  catch
+    :exit, _ -> {:error, :coordinator_unavailable}
+  end
+
   defp safe_claim_rename(src_key, dst_key) do
     NamespaceCoordinator.claim_rename(src_key, dst_key)
   catch
     :exit, _ -> {:error, :coordinator_unavailable}
+  end
+
+  defp safe_release(claim_id) do
+    NamespaceCoordinator.release(claim_id)
+  catch
+    :exit, _ -> :ok
   end
 
   defp safe_release_rename(claim) do

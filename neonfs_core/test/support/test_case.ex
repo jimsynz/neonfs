@@ -493,7 +493,19 @@ defmodule NeonFS.TestCase do
     await_down(supervisor_ref)
     cleanup_ra_from_default_system()
     cleanup_ra_directories()
+    bounce_ra_application()
     :ok
+  end
+
+  # Stops and restarts the `:ra` application so its global ETS tables
+  # (`:ra_log_open_mem_tables`, `:ra_log_closed_mem_tables`,
+  # `:ra_log_snapshot_state`, etc.) are wiped between tests. These
+  # tables key entries by the per-node UID, which is identical across
+  # tests, so `:ra.force_delete_server/2` alone leaves stale log
+  # entries behind that the next `init_cluster` then inherits.
+  defp bounce_ra_application do
+    Application.stop(:ra)
+    Application.ensure_all_started(:ra)
   end
 
   defp reset_ra_server_if_running do
@@ -525,22 +537,29 @@ defmodule NeonFS.TestCase do
     delete_ra_data_directory()
   end
 
-  # Deletes Ra's actual data directory which is based on the node name.
-  # Ra's :default system uses CWD/node_name as its data directory,
-  # which is where WAL and segment files are stored.
-  # This is critical for test isolation - cluster membership changes
-  # are persisted in the WAL and recovered on restart.
+  # Deletes Ra's actual on-disk data directory for this node.
   #
-  # IMPORTANT: We must delete the ENTIRE directory, including the WAL file,
-  # because the WAL contains cluster membership changes that are shared
-  # across all servers in the Ra system.
+  # Ra's `:default` system reads its data_dir from `Application.get_env(:ra,
+  # :data_dir)` (set in `config/config.exs` for the test env), NOT from
+  # `:neonfs_core, :ra_data_dir` and NOT from CWD. Cleaning the wrong path
+  # leaves WAL / segment / metadata-state-machine state behind, which
+  # `:ra.force_delete_server` does not reliably remove once the prior
+  # test's process tree has been torn down — so claim state from one test
+  # surfaces in the next as ghost conflicts.
   defp delete_ra_data_directory do
-    node_name = Node.self() |> Atom.to_string()
-    ra_node_dir = Path.join(File.cwd!(), node_name)
+    File.rm_rf!(ra_node_data_dir())
+  end
 
-    # Delete the entire Ra data directory (including WAL, segments, and server data)
-    # This ensures a completely clean state for the next test
-    File.rm_rf!(ra_node_dir)
+  defp ra_node_data_dir do
+    Path.join(ra_data_dir(), Atom.to_string(Node.self()))
+  end
+
+  defp ra_data_dir do
+    case Application.get_env(:ra, :data_dir) do
+      nil -> File.cwd!()
+      dir when is_list(dir) -> List.to_string(dir)
+      dir when is_binary(dir) -> dir
+    end
   end
 
   @doc """
