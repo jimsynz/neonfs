@@ -102,6 +102,23 @@ defmodule NeonFS.FUSE.InodeTableTest do
     end
   end
 
+  describe "rename_path/3" do
+    test "preserves the inode and updates both mapping halves" do
+      {:ok, inode} = InodeTable.allocate_inode("vol1", "/src.txt")
+
+      assert {:ok, ^inode} = InodeTable.rename_path("vol1", "/src.txt", "/dst.txt")
+
+      assert {:ok, {"vol1", "/dst.txt"}} = InodeTable.get_path(inode)
+      assert {:ok, ^inode} = InodeTable.get_inode("vol1", "/dst.txt")
+      assert {:error, :not_found} = InodeTable.get_inode("vol1", "/src.txt")
+    end
+
+    test "returns :not_found when the source path is unknown" do
+      assert {:error, :not_found} =
+               InodeTable.rename_path("vol1", "/never.txt", "/somewhere.txt")
+    end
+  end
+
   describe "clear/0" do
     test "clears all mappings except root" do
       InodeTable.allocate_inode("vol1", "/file1.txt")

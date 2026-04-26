@@ -105,9 +105,11 @@ defmodule FuseServer.Protocol do
     27 => :opendir,
     28 => :readdir,
     29 => :releasedir,
+    30 => :fsyncdir,
     35 => :create,
     38 => :destroy,
     42 => :batch_forget,
+    43 => :fallocate,
     44 => :readdirplus,
     45 => :rename2
   }

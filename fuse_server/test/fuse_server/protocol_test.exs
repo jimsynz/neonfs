@@ -47,10 +47,10 @@ defmodule FuseServer.ProtocolTest do
 
   describe "decode_request/1 dispatch" do
     test "returns :unknown_opcode for opcodes outside the codec's scope" do
-      # Opcode 30 (FSYNCDIR) is not currently supported.
-      header = build_header(opcode: 30, len: 40 + 16)
+      # Opcode 22 (LISTXATTR) is not currently supported (xattrs out of scope, #280).
+      header = build_header(opcode: 22, len: 40 + 16)
       body = <<0::little-64, 0::little-32, 0::little-32>>
-      assert {:error, {:unknown_opcode, 30}} = Protocol.decode_request(header <> body)
+      assert {:error, {:unknown_opcode, 22}} = Protocol.decode_request(header <> body)
     end
 
     test "returns {:ok, opcode, header, request} on a valid INIT frame" do

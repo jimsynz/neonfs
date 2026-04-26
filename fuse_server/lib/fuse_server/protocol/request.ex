@@ -257,6 +257,37 @@ defmodule FuseServer.Protocol.Request do
           }
   end
 
+  defmodule FsyncDir do
+    @moduledoc """
+    FUSE_FSYNCDIR — same wire layout as `Fsync` (`fuse_fsync_in`,
+    16 bytes); semantics differ (it flushes the directory's
+    metadata rather than the file's data).
+    """
+    defstruct [:fh, :fsync_flags]
+
+    @type t :: %__MODULE__{
+            fh: non_neg_integer(),
+            fsync_flags: non_neg_integer()
+          }
+  end
+
+  defmodule Fallocate do
+    @moduledoc """
+    FUSE_FALLOCATE — `fuse_fallocate_in` (32 bytes). NeonFS doesn't
+    support sparse pre-allocation, so the session will reply
+    `-ENOSYS` regardless of the fields; we still parse the body so
+    decode-time validation works.
+    """
+    defstruct [:fh, :offset, :length, :mode]
+
+    @type t :: %__MODULE__{
+            fh: non_neg_integer(),
+            offset: non_neg_integer(),
+            length: non_neg_integer(),
+            mode: non_neg_integer()
+          }
+  end
+
   defmodule Create do
     @moduledoc "FUSE_CREATE — `fuse_create_in` (16 bytes) + name + NUL."
     defstruct [:flags, :mode, :umask, :name]
@@ -455,6 +486,24 @@ defmodule FuseServer.Protocol.Request do
 
   def decode(:fsync, <<fh::little-64, fsync_flags::little-32, _pad::little-32>>),
     do: {:ok, %Fsync{fh: fh, fsync_flags: fsync_flags}}
+
+  def decode(
+        :flush,
+        <<fh::little-64, _unused::little-32, _pad::little-32, lock_owner::little-64>>
+      ),
+      do: {:ok, %Flush{fh: fh, lock_owner: lock_owner}}
+
+  def decode(:fsyncdir, <<fh::little-64, fsync_flags::little-32, _pad::little-32>>),
+    do: {:ok, %FsyncDir{fh: fh, fsync_flags: fsync_flags}}
+
+  def decode(:fallocate, <<
+        fh::little-64,
+        offset::little-64,
+        length::little-64,
+        mode::little-32,
+        _pad::little-32
+      >>),
+      do: {:ok, %Fallocate{fh: fh, offset: offset, length: length, mode: mode}}
 
   def decode(:create, <<
         flags::little-32,

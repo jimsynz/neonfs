@@ -120,6 +120,25 @@ defmodule NeonFS.FUSE.InodeTable do
   end
 
   @doc """
+  Re-point an existing inode at a new path.
+
+  The kernel keeps the inode after a successful FUSE rename
+  (`d_move/2`), so we MUST preserve the inode number — re-allocating
+  hands the kernel a fresh inode it has never heard of and breaks
+  every subsequent `getattr`. Both ETS halves are updated atomically
+  under the GenServer mailbox.
+
+  Returns `{:error, :not_found}` if the source path is not in the
+  table (e.g. it was never `lookup`'d) — caller should fall back to
+  `allocate_inode/2`.
+  """
+  @spec rename_path(String.t() | nil, String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, :not_found}
+  def rename_path(volume_id, old_path, new_path) do
+    GenServer.call(__MODULE__, {:rename_path, volume_id, old_path, new_path})
+  end
+
+  @doc """
   Get the root inode number (always 1).
   """
   @spec root_inode() :: non_neg_integer()
@@ -175,6 +194,20 @@ defmodule NeonFS.FUSE.InodeTable do
         :ets.insert(:path_to_inode, {{volume_id, path}, inode})
 
         {:reply, {:ok, inode}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:rename_path, volume_id, old_path, new_path}, _from, state) do
+    case :ets.lookup(:path_to_inode, {volume_id, old_path}) do
+      [{{^volume_id, ^old_path}, inode}] ->
+        :ets.delete(:path_to_inode, {volume_id, old_path})
+        :ets.insert(:inode_to_path, {inode, volume_id, new_path})
+        :ets.insert(:path_to_inode, {{volume_id, new_path}, inode})
+        {:reply, {:ok, inode}, state}
+
+      [] ->
+        {:reply, {:error, :not_found}, state}
     end
   end
 

@@ -445,10 +445,26 @@ defmodule NeonFS.FUSE.Handler do
          old_path <- build_child_path(old_parent_path, old_name),
          new_path <- build_child_path(new_parent_path, new_name),
          {:ok, file} <- file_index_get_by_path(volume_id, old_path),
-         {:ok, old_inode} <- InodeTable.get_inode(volume_id, old_path),
-         {:ok, _updated_file} <- file_index_update(file.id, path: new_path),
-         :ok <- InodeTable.release_inode(old_inode),
-         {:ok, _new_inode} <- InodeTable.allocate_inode(volume_id, new_path) do
+         :ok <-
+           file_index_rename(
+             volume_id,
+             old_parent_path,
+             old_name,
+             new_parent_path,
+             new_name
+           ),
+         {:ok, _updated_file} <- file_index_update(file.id, path: new_path) do
+      # FUSE renames must preserve the inode number — `d_move/2` in the
+      # kernel keeps the dentry pointing at the same inode, and any
+      # subsequent `getattr` arrives with that inode. Re-pointing the
+      # existing entry keeps `InodeTable.get_path/1` returning the new
+      # path; `allocate_inode/2` would hand the kernel an inode it has
+      # never seen.
+      case InodeTable.rename_path(volume_id, old_path, new_path) do
+        {:ok, _inode} -> :ok
+        {:error, :not_found} -> InodeTable.allocate_inode(volume_id, new_path)
+      end
+
       {"ok", %{}}
     else
       {:error, :cross_volume} ->
@@ -824,6 +840,27 @@ defmodule NeonFS.FUSE.Handler do
 
   defp file_index_update(file_id, updates) do
     core_call(NeonFS.Core.FileIndex, :update, [file_id, updates])
+  end
+
+  # Rename/move dispatching the same way `NeonFS.Core.do_rename/3` does:
+  # same parent → `FileIndex.rename`; same name across dirs → `FileIndex.move`;
+  # different parent and name → move + rename. Both calls update the
+  # `DirectoryEntry` quorum-replicated state, which is what path-based
+  # lookups consult — `FileIndex.update(:path)` does not.
+  defp file_index_rename(volume_id, old_parent, old_name, new_parent, new_name)
+       when old_parent == new_parent do
+    core_call(NeonFS.Core.FileIndex, :rename, [volume_id, old_parent, old_name, new_name])
+  end
+
+  defp file_index_rename(volume_id, old_parent, name, new_parent, name) do
+    core_call(NeonFS.Core.FileIndex, :move, [volume_id, old_parent, new_parent, name])
+  end
+
+  defp file_index_rename(volume_id, old_parent, old_name, new_parent, new_name) do
+    with :ok <-
+           core_call(NeonFS.Core.FileIndex, :move, [volume_id, old_parent, new_parent, old_name]) do
+      core_call(NeonFS.Core.FileIndex, :rename, [volume_id, new_parent, old_name, new_name])
+    end
   end
 
   defp file_index_truncate(file_id, new_size, additional_updates) do
