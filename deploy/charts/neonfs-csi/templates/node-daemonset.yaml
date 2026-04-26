@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "neonfs-csi.nodeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "neonfs-csi.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      {{- include "neonfs-csi.nodeSelectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "neonfs-csi.commonLabels" . | nindent 8 }}
+        {{- include "neonfs-csi.nodeSelectorLabels" . | nindent 8 }}
+        {{- with .Values.node.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.node.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "neonfs-csi.nodeServiceAccount" . }}
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.node.priorityClassName }}
+      priorityClassName: {{ .Values.node.priorityClassName }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: node-driver-registrar
+          image: {{ .Values.sidecars.nodeDriverRegistrar.image }}
+          imagePullPolicy: {{ .Values.sidecars.nodeDriverRegistrar.pullPolicy }}
+          args:
+            - --csi-address=$(ADDRESS)
+            - --kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)
+            - --v=2
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+            - name: DRIVER_REG_SOCK_PATH
+              value: {{ printf "%s/plugins/%s/csi.sock" .Values.node.kubeletDir .Values.driverName }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: liveness-probe
+          image: {{ .Values.sidecars.livenessProbe.image }}
+          imagePullPolicy: {{ .Values.sidecars.livenessProbe.pullPolicy }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --health-port={{ .Values.node.livenessProbe.healthPort }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+        - name: neonfs-csi
+          image: {{ include "neonfs-csi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - node
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+          env:
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: NEONFS_CSI_MODE
+              value: node
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NEONFS_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "neonfs-csi.bootstrapSecretName" . }}
+                  key: {{ .Values.bootstrap.secretKey }}
+                  optional: true
+          ports:
+            - containerPort: {{ .Values.node.livenessProbe.healthPort }}
+              name: healthz
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 30
+            timeoutSeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+          {{- with .Values.node.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-mount-dir
+              mountPath: {{ printf "%s/pods" .Values.node.kubeletDir }}
+              mountPropagation: Bidirectional
+            - name: fuse-device
+              mountPath: /dev/fuse
+      volumes:
+        - name: registration-dir
+          hostPath:
+            path: {{ printf "%s/plugins_registry/" .Values.node.kubeletDir }}
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: {{ printf "%s/plugins/%s/" .Values.node.kubeletDir .Values.driverName }}
+            type: DirectoryOrCreate
+        - name: pods-mount-dir
+          hostPath:
+            path: {{ printf "%s/pods" .Values.node.kubeletDir }}
+            type: Directory
+        - name: fuse-device
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice

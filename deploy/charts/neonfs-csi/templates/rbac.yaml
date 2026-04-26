@@ -1,0 +1,91 @@
+{{- if .Values.rbac.create -}}
+# Controller-side RBAC: scoped to what the external sidecars need to
+# call from cluster-wide context (PVCs, PVs, StorageClasses, VolumeAttachments,
+# Events, CSINodes for topology, leases for sidecar leader election).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "neonfs-csi.controllerName" . }}
+  labels:
+    {{- include "neonfs-csi.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "neonfs-csi.controllerName" . }}
+  labels:
+    {{- include "neonfs-csi.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "neonfs-csi.controllerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "neonfs-csi.controllerServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Node-side RBAC: minimal — only needs to see CSINode + Node objects.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "neonfs-csi.nodeName" . }}
+  labels:
+    {{- include "neonfs-csi.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "neonfs-csi.nodeName" . }}
+  labels:
+    {{- include "neonfs-csi.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "neonfs-csi.nodeName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "neonfs-csi.nodeServiceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
