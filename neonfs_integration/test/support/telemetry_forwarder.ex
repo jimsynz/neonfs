@@ -74,5 +74,27 @@ defmodule NeonFS.Integration.TelemetryForwarder do
     end)
   end
 
+  @doc """
+  Test seam for `NeonFS.Core.DRSnapshotScheduler`'s `:create_fn` config.
+  Lives on the peer's code path (this module compiles into
+  `_build/test/lib/neonfs_integration/ebin/`) so the scheduler can call
+  it across nodes without resolving a closure from the test module.
+
+  Returns the same shape as `NeonFS.Core.DRSnapshot.create/1` —
+  `{:ok, %{path: String.t()}}` — without writing anything to the
+  `_system` volume, so the scheduler's `[:neonfs, :dr_snapshot_scheduler,
+  :tick]` telemetry fires once per leader tick at the configured cadence.
+  Used by the peer-cluster scheduling test (#570).
+  """
+  @spec dr_snapshot_create_fn(keyword()) :: {:ok, %{path: String.t()}}
+  def dr_snapshot_create_fn(_opts \\ []) do
+    ts =
+      DateTime.utc_now()
+      |> DateTime.to_unix(:microsecond)
+      |> Integer.to_string()
+
+    {:ok, %{path: "/dr/test-#{ts}"}}
+  end
+
   defp handler_id(ref), do: {__MODULE__, ref}
 end
