@@ -60,7 +60,6 @@ defmodule NeonFS.Integration.MixProject do
       {:neonfs_s3, path: "../neonfs_s3", runtime: false},
       {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},
       {:neonfs_webdav, path: "../neonfs_webdav", runtime: false},
-
       {:jason, "~> 1.0"},
 
       # WebDAV integration test client
