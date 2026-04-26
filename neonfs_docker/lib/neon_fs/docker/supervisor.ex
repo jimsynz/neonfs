@@ -49,13 +49,7 @@ defmodule NeonFS.Docker.Supervisor do
         socket_path |> Path.dirname() |> File.mkdir_p!()
         File.rm(socket_path)
 
-        {Bandit,
-         plug: Plug,
-         scheme: :http,
-         thousand_island_options: [
-           transport_module: ThousandIsland.Transports.Unix,
-           transport_options: [path: socket_path]
-         ]}
+        {Bandit, plug: Plug, scheme: :http, port: 0, ip: {:local, socket_path}}
 
       {:tcp, port} ->
         {Bandit, plug: Plug, scheme: :http, port: port, ip: :loopback}

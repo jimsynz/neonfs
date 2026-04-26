@@ -47,15 +47,16 @@ defmodule NeonFS.CIFS.Listener do
   @spec child_spec(keyword()) :: {module(), keyword()}
   def child_spec(opts) do
     handler = Keyword.get(opts, :handler, ConnectionHandler)
-    transport_module = transport_module(opts)
-    transport_options = transport_options(opts)
+    {port, transport_options} = listen_config(opts)
 
     {
       ThousandIsland,
       # `packet: 4` is set both on the listening socket and on each
       # accepted socket so 4-byte length-prefixed frames are
       # auto-assembled by the kernel before our handler sees them.
-      transport_module: transport_module,
+      # Unix-domain sockets are configured by passing `port: 0` and
+      # `ip: {:local, path}` to ThousandIsland's TCP transport.
+      port: port,
       transport_options: transport_options,
       handler_module: handler,
       read_timeout: :infinity
@@ -85,28 +86,20 @@ defmodule NeonFS.CIFS.Listener do
     ArgumentError -> {:error, :badetf}
   end
 
-  defp transport_module(opts) do
-    cond do
-      Keyword.has_key?(opts, :socket_path) -> ThousandIsland.Transports.Unix
-      Keyword.has_key?(opts, :tcp_port) -> ThousandIsland.Transports.TCP
-      true -> ThousandIsland.Transports.Unix
-    end
-  end
-
-  defp transport_options(opts) do
+  defp listen_config(opts) do
     base = [packet: 4]
 
     cond do
       path = Keyword.get(opts, :socket_path) ->
         path |> Path.dirname() |> File.mkdir_p!()
         File.rm(path)
-        base ++ [path: path]
+        {0, base ++ [ip: {:local, path}]}
 
       port = Keyword.get(opts, :tcp_port) ->
-        base ++ [port: port, ip: {127, 0, 0, 1}]
+        {port, base ++ [ip: {127, 0, 0, 1}]}
 
       true ->
-        base
+        {0, base}
     end
   end
 end

@@ -534,8 +534,19 @@ jobs:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged --device /dev/fuse
     steps:
-      - name: Install FUSE and loopback dependencies
-        run: apt-get update && apt-get install -y --no-install-recommends libfuse3-dev fuse3 e2fsprogs mount && rm -rf /var/lib/apt/lists/*
+      - name: Install FUSE, loopback, and Docker dependencies
+        run: |
+          # Debian Trixie split docker.io: the daemon (`dockerd`) ships
+          # in `docker.io`, but the `docker` CLI binary moved to a
+          # separate `docker-cli` package which is only pulled in via
+          # Recommends. With `--no-install-recommends` we have to ask
+          # for it explicitly or the e2e test sees `dockerd` running
+          # but no `docker` on PATH.
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libfuse3-dev fuse3 e2fsprogs mount \
+            docker.io docker-cli iptables
+          rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v6
 
@@ -572,6 +583,36 @@ jobs:
           for i in $(seq 0 63); do
             [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
           done
+
+      - name: Start Docker daemon (dind for the VolumeDriver e2e test, #312)
+        env:
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          dockerd --host=unix:///var/run/docker.sock \
+            --storage-driver=vfs \
+            --iptables=false --ip-masq=false --bridge=none \
+            >/tmp/dockerd.log 2>&1 &
+          # Poll the daemon's HTTP `/_ping` endpoint directly via curl
+          # over the unix socket. `docker info` was intermittently
+          # unreliable here — it inherits ambient DOCKER_HOST / config
+          # state and can hang for its full API timeout. `/_ping` is
+          # the cheapest health check and gives an immediate answer.
+          for i in $(seq 1 60); do
+            if [ -S /var/run/docker.sock ] && \
+               curl -fsS --max-time 2 --unix-socket /var/run/docker.sock \
+                    http://localhost/_ping >/dev/null 2>&1; then
+              echo "Docker daemon ready after ${i}s"
+              docker version
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Docker daemon failed to start. Tail of log:"
+          tail -100 /tmp/dockerd.log
+          echo ""
+          echo "Last docker info attempt output:"
+          docker info 2>&1 || true
+          exit 1
 
       - name: Check
         working-directory: neonfs_integration

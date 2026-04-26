@@ -27,6 +27,13 @@ defmodule NeonFS.Docker.Plug do
   alias NeonFS.Client.HealthCheck
   alias NeonFS.Docker.{MountTracker, VolumeStore}
 
+  # The dockerd plugin client (`moby/pkg/plugins`) sends `Accept` but
+  # not `Content-Type`, so Plug.Parsers can't pick a parser and
+  # `body_params` stays empty — every request that needs a `Name` then
+  # fails with `"missing or invalid Name"`. Default the header to JSON
+  # before parsing; the protocol is JSON-only anyway.
+  plug(:assume_json_body)
+
   plug(Plug.Parsers,
     parsers: [:json],
     pass: ["application/json", "application/vnd.docker.plugins.v1.2+json"],
@@ -173,6 +180,13 @@ defmodule NeonFS.Docker.Plug do
 
   ## Helpers
 
+  defp assume_json_body(conn, _opts) do
+    case Plug.Conn.get_req_header(conn, "content-type") do
+      [] -> Plug.Conn.put_req_header(conn, "content-type", "application/json")
+      _ -> conn
+    end
+  end
+
   defp fetch_name(body) do
     case Map.get(body, "Name") do
       name when is_binary(name) and byte_size(name) > 0 -> {:ok, name}
@@ -199,8 +213,15 @@ defmodule NeonFS.Docker.Plug do
     end
   end
 
-  defp default_core_create(name, opts) do
-    case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name, opts]) do
+  # Drop docker `-o` opts at the core boundary for now. They arrive as
+  # a JSON-decoded map of stringly-typed values, but `Volume.new/2`
+  # wants a typed keyword list — passing the map straight through
+  # crashes `VolumeRegistry` in `Keyword.get/3`. The raw opts stay in
+  # the local `VolumeStore` so `docker volume inspect` still
+  # round-trips them. Proper docker→NeonFS option mapping is tracked
+  # in #583.
+  defp default_core_create(name, _opts) do
+    case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name]) do
       {:ok, _volume} -> :ok
       {:error, %{class: :already_exists}} -> :ok
       {:error, :already_exists} -> :ok
