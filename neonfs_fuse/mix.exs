@@ -64,6 +64,7 @@ defmodule NeonFS.FUSE.MixProject do
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test
+      {:neonfs_test_support, path: "../neonfs_test_support", only: :test, runtime: false},
       {:mimic, "~> 2.0", only: [:test]},
       {:stream_data, "~> 1.0", only: [:test]},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

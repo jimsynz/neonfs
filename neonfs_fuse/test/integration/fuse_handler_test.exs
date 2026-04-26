@@ -1,11 +1,11 @@
-defmodule NeonFS.Integration.FuseHandlerTest do
+defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   @moduledoc """
   Integration tests for the FUSE handler operating against a remote core node.
 
   These tests verify that FUSE operations work correctly when the handler
   routes calls to a core node via the NeonFS.Client infrastructure.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 120_000
   @moduletag nodes: 1
