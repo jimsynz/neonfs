@@ -60,6 +60,15 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end)
   end
 
+  defp setup_namespace_coordinator(reply_fn) do
+    test_pid = self()
+
+    Application.put_env(:neonfs_webdav, :namespace_coordinator_call_fn, fn function, args ->
+      send(test_pid, {:namespace_coordinator, function, args})
+      reply_fn.(function, args)
+    end)
+  end
+
   describe "lock/6 with DLM" do
     setup do
       setup_mock_core()
@@ -347,43 +356,19 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     end
   end
 
-  describe "lock-null resources" do
+  describe "lock-null resources (coordinator unavailable fallback)" do
     setup do
       setup_core_not_found()
       setup_mock_lock_manager()
       :ok
     end
 
-    test "locks non-existent file via DLM with path-based ID" do
+    test "locks non-existent file without calling the DLM" do
       assert {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
       assert is_binary(token)
 
-      assert_received {:lock_manager, :lock, [path_id, ^token, {0, _}, :exclusive, opts]}
-      assert String.starts_with?(path_id, "lock-null:")
-      assert Keyword.get(opts, :ttl) == 300_000
-    end
-
-    test "generates deterministic path-based IDs" do
-      {:ok, token1} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
-      assert_received {:lock_manager, :lock, [id1, ^token1, _, _, _]}
-
-      LockStore.reset()
-
-      {:ok, token2} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-b", 300)
-      assert_received {:lock_manager, :lock, [id2, ^token2, _, _, _]}
-
-      assert id1 == id2
-    end
-
-    test "different paths generate different IDs" do
-      {:ok, token1} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
-      assert_received {:lock_manager, :lock, [id1, ^token1, _, _, _]}
-
-      other_path = ["my-volume", "other", "file.txt"]
-      {:ok, token2} = LockStore.lock(other_path, :exclusive, :write, 0, "user-b", 300)
-      assert_received {:lock_manager, :lock, [id2, ^token2, _, _, _]}
-
-      refute id1 == id2
+      refute_received {:lock_manager, :lock, _}
+      assert LockStore.lock_null?(@file_path)
     end
 
     test "is_lock_null? returns true for lock-null path" do
@@ -443,45 +428,129 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       assert LockStore.get_lock_null_paths(["my-volume", "docs"]) == []
     end
 
-    test "unlock releases DLM lock for lock-null resource" do
+    test "unlock removes lock-null entry without DLM call" do
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
-      assert_received {:lock_manager, :lock, [path_id, ^token, _, _, _]}
 
       assert :ok = LockStore.unlock(token)
-      assert_received {:lock_manager, :unlock, [^path_id, ^token, {0, _}]}
+      refute_received {:lock_manager, :unlock, _}
 
       refute LockStore.lock_null?(@file_path)
     end
 
-    test "refresh renews DLM lock for lock-null resource" do
+    test "refresh updates timeout for lock-null without DLM call" do
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
-      assert_received {:lock_manager, :lock, [path_id, ^token, _, _, _]}
 
       assert {:ok, updated} = LockStore.refresh(token, 600)
       assert updated.timeout == 600
 
-      assert_received {:lock_manager, :renew, [^path_id, ^token, opts]}
-      assert Keyword.get(opts, :ttl) == 600_000
+      refute_received {:lock_manager, :renew, _}
+    end
+  end
+
+  describe "lock-null resources via the namespace coordinator" do
+    setup do
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+      Application.put_env(:neonfs_webdav, :namespace_holder_pid_fn, fn -> holder end)
+      setup_core_not_found()
+      setup_mock_lock_manager()
+      {:ok, holder: holder}
+    end
+
+    test "depth=0 LOCK on a non-existent path takes a `claim_path` claim", %{holder: holder} do
+      setup_namespace_coordinator(fn :claim_path_for, _ -> {:ok, "ns-lock-null-1"} end)
+
+      assert {:ok, _token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
+
+      assert_received {:namespace_coordinator, :claim_path_for,
+                       ["/my-volume/docs/file.txt", :exclusive, ^holder]}
+
+      refute_received {:lock_manager, :lock, _}
+      assert LockStore.lock_null?(@file_path)
+    end
+
+    test "coordinator-reported conflict refuses the lock" do
+      setup_namespace_coordinator(fn :claim_path_for, _ ->
+        {:error, :conflict, "ns-claim-other"}
+      end)
+
+      assert {:error, :conflict} =
+               LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
+
+      refute LockStore.lock_null?(@file_path)
+    end
+
+    test "UNLOCK releases the coordinator claim" do
+      setup_namespace_coordinator(fn
+        :claim_path_for, _ -> {:ok, "ns-lock-null-7"}
+        :release, _ -> :ok
+      end)
+
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
+
+      assert :ok = LockStore.unlock(token)
+
+      assert_received {:namespace_coordinator, :release, ["ns-lock-null-7"]}
+      refute_received {:lock_manager, :unlock, _}
+    end
+
+    test "depth=:infinity LOCK on a non-existent path still uses `claim_subtree`", %{
+      holder: holder
+    } do
+      setup_namespace_coordinator(fn :claim_subtree_for, _ -> {:ok, "ns-subtree-1"} end)
+
+      assert {:ok, _token} =
+               LockStore.lock(@file_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert_received {:namespace_coordinator, :claim_subtree_for,
+                       ["/my-volume/docs/file.txt", :exclusive, ^holder]}
     end
   end
 
   describe "promote_lock_null/2" do
     setup do
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+      Application.put_env(:neonfs_webdav, :namespace_holder_pid_fn, fn -> holder end)
       setup_core_not_found()
       setup_mock_lock_manager()
       :ok
     end
 
-    test "promotes lock-null to real file lock" do
+    test "releases namespace claim and acquires DLM lock on the real file id" do
+      test_pid = self()
+
+      Application.put_env(:neonfs_webdav, :namespace_coordinator_call_fn, fn function, args ->
+        send(test_pid, {:namespace_coordinator, function, args})
+
+        case function do
+          :claim_path_for -> {:ok, "ns-lock-null-promote"}
+          :release -> :ok
+        end
+      end)
+
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
-      assert_received {:lock_manager, :lock, [path_id, ^token, _, _, _]}
+      assert_received {:namespace_coordinator, :claim_path_for, _}
       assert LockStore.lock_null?(@file_path)
 
       real_file_id = "real-file-id-001"
       assert :ok = LockStore.promote_lock_null(@file_path, real_file_id)
 
       assert_received {:lock_manager, :lock, [^real_file_id, ^token, {0, _}, :exclusive, _]}
-      assert_received {:lock_manager, :unlock, [^path_id, ^token, {0, _}]}
+      assert_received {:namespace_coordinator, :release, ["ns-lock-null-promote"]}
+      refute_received {:lock_manager, :unlock, _}
+
+      refute LockStore.lock_null?(@file_path)
+      assert [lock] = LockStore.get_locks(@file_path)
+      assert lock.token == token
+    end
+
+    test "promotes lock-null taken via fallback (no namespace claim) to real file lock" do
+      {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 300)
+      assert LockStore.lock_null?(@file_path)
+
+      real_file_id = "real-file-id-002"
+      assert :ok = LockStore.promote_lock_null(@file_path, real_file_id)
+
+      assert_received {:lock_manager, :lock, [^real_file_id, ^token, {0, _}, :exclusive, _]}
 
       refute LockStore.lock_null?(@file_path)
       assert [lock] = LockStore.get_locks(@file_path)
@@ -715,15 +784,6 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       Application.put_env(:neonfs_webdav, :namespace_holder_pid_fn, fn -> holder end)
       setup_core_unavailable()
       {:ok, holder: holder}
-    end
-
-    defp setup_namespace_coordinator(reply_fn) do
-      test_pid = self()
-
-      Application.put_env(:neonfs_webdav, :namespace_coordinator_call_fn, fn function, args ->
-        send(test_pid, {:namespace_coordinator, function, args})
-        reply_fn.(function, args)
-      end)
     end
 
     test "Depth: infinity acquires a subtree claim from the coordinator", %{holder: holder} do

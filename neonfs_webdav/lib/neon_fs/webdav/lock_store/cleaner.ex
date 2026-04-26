@@ -7,6 +7,13 @@ defmodule NeonFS.WebDAV.LockStore.Cleaner do
   in ETS until something queries that path. This GenServer periodically removes
   expired entries so the table stays bounded.
 
+  Entries that hold a `NeonFS.Core.NamespaceCoordinator` claim
+  (`Depth: infinity` collection locks and lock-null reservations per
+  #302) have the claim released on the coordinator before the ETS row
+  is deleted, so the claim doesn't outlive the WebDAV-side TTL. The
+  coordinator's holder-pid `:DOWN` cleanup is the durable backstop;
+  this sweep is the cooperative path.
+
   ## Telemetry
 
     * `[:neonfs, :webdav, :lock_store, :cleanup]` — emitted after each sweep
@@ -67,13 +74,22 @@ defmodule NeonFS.WebDAV.LockStore.Cleaner do
 
     expired =
       :ets.select(table, [
-        {{:"$1", %{expires_at: :"$2"}}, [{:<, :"$2", now}], [:"$1"]}
+        {{:"$1", :"$2"}, [{:<, {:map_get, :expires_at, :"$2"}, now}], [{{:"$1", :"$2"}}]}
       ])
 
-    Enum.each(expired, &:ets.delete(table, &1))
+    Enum.each(expired, fn {token, info} ->
+      release_namespace_claim_for(info)
+      :ets.delete(table, token)
+    end)
 
     length(expired)
   end
+
+  defp release_namespace_claim_for(%{namespace_claim_id: claim_id}) when is_binary(claim_id) do
+    NeonFS.WebDAV.LockStore.release_namespace_claim(claim_id)
+  end
+
+  defp release_namespace_claim_for(_info), do: :ok
 
   defp schedule_sweep(interval_ms) do
     Process.send_after(self(), :sweep, interval_ms)
