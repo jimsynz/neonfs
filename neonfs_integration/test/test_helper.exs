@@ -33,7 +33,7 @@ end
 # Exclude `:profile` diagnostic tests by default (e.g. #507's app-start profiler)
 # — they print diagnostic output rather than assert. Run with `--include profile`.
 loopback_excludes =
-  if NeonFS.Integration.LoopbackDevice.available?() do
+  if NeonFS.TestSupport.LoopbackDevice.available?() do
     []
   else
     [:loopback]

@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.LoopbackDevice do
+defmodule NeonFS.TestSupport.LoopbackDevice do
   @moduledoc """
   Test helpers for creating and tearing down loopback block devices.
 

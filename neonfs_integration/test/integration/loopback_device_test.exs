@@ -1,7 +1,7 @@
-defmodule NeonFS.Integration.LoopbackDeviceTest do
+defmodule NeonFS.TestSupport.LoopbackDeviceTest do
   use ExUnit.Case, async: false
 
-  alias NeonFS.Integration.LoopbackDevice
+  alias NeonFS.TestSupport.LoopbackDevice
 
   @moduletag :loopback
   @moduletag :requires_root
