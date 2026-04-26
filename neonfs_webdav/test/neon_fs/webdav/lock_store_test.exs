@@ -13,6 +13,8 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     on_exit(fn ->
       Application.delete_env(:neonfs_webdav, :core_call_fn)
       Application.delete_env(:neonfs_webdav, :lock_manager_call_fn)
+      Application.delete_env(:neonfs_webdav, :namespace_coordinator_call_fn)
+      Application.delete_env(:neonfs_webdav, :namespace_holder_pid_fn)
       LockStore.reset()
     end)
 
@@ -699,6 +701,119 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       [lock] = LockStore.get_descendant_locks(@collection_path)
       refute Map.has_key?(lock, :file_id)
       refute Map.has_key?(lock, :lock_null)
+      refute Map.has_key?(lock, :namespace_claim_id)
+    end
+  end
+
+  describe "Depth: infinity LOCK against the namespace coordinator" do
+    @collection_path ["my-volume", "docs"]
+    @child_path ["my-volume", "docs", "file.txt"]
+
+    setup do
+      # An always-alive holder pid for the coordinator to "monitor".
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+      Application.put_env(:neonfs_webdav, :namespace_holder_pid_fn, fn -> holder end)
+      setup_core_unavailable()
+      {:ok, holder: holder}
+    end
+
+    defp setup_namespace_coordinator(reply_fn) do
+      test_pid = self()
+
+      Application.put_env(:neonfs_webdav, :namespace_coordinator_call_fn, fn function, args ->
+        send(test_pid, {:namespace_coordinator, function, args})
+        reply_fn.(function, args)
+      end)
+    end
+
+    test "Depth: infinity acquires a subtree claim from the coordinator", %{holder: holder} do
+      setup_namespace_coordinator(fn :claim_subtree_for, _ -> {:ok, "ns-claim-1"} end)
+
+      assert {:ok, _token} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert_received {:namespace_coordinator, :claim_subtree_for,
+                       ["/my-volume/docs", :exclusive, ^holder]}
+    end
+
+    test "Depth: 0 takes no namespace claim" do
+      setup_namespace_coordinator(fn _, _ ->
+        flunk("coordinator must not be called for depth=0")
+      end)
+
+      assert {:ok, _token} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
+    end
+
+    test "coordinator-reported conflict refuses the lock" do
+      setup_namespace_coordinator(fn :claim_subtree_for, _ ->
+        {:error, :conflict, "ns-claim-99"}
+      end)
+
+      assert {:error, :conflict} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+    end
+
+    test "coordinator unavailability falls back to single-node ETS detection" do
+      setup_namespace_coordinator(fn _, _ -> {:error, :unavailable} end)
+
+      assert {:ok, _} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      # Single-node hierarchical detection still kicks in for the second
+      # claim from the same node.
+      assert {:error, :conflict} =
+               LockStore.lock(@child_path, :exclusive, :write, 0, "user-b", 300)
+    end
+
+    test "UNLOCK releases the coordinator claim" do
+      setup_namespace_coordinator(fn
+        :claim_subtree_for, _ -> {:ok, "ns-claim-7"}
+        :release, _ -> :ok
+      end)
+
+      {:ok, token} =
+        LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert :ok = LockStore.unlock(token)
+
+      assert_received {:namespace_coordinator, :release, ["ns-claim-7"]}
+    end
+
+    test "claim is released when DLM acquisition fails after the claim succeeds" do
+      setup_mock_core()
+
+      # DLM rejects → we must release the namespace claim we just took.
+      Application.put_env(:neonfs_webdav, :lock_manager_call_fn, fn :lock, _ ->
+        {:error, :timeout}
+      end)
+
+      setup_namespace_coordinator(fn
+        :claim_subtree_for, _ -> {:ok, "ns-claim-13"}
+        :release, _ -> :ok
+      end)
+
+      assert {:error, :conflict} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 300)
+
+      assert_received {:namespace_coordinator, :release, ["ns-claim-13"]}
+    end
+
+    test "claim is released when local pre-check rejects after coordinator grants" do
+      # Pre-load a conflicting local lock so local_conflict?/3 returns true
+      # *after* the coordinator has already granted the claim. The store
+      # must release the just-taken claim in that case.
+      {:ok, _existing} =
+        LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 300)
+
+      setup_namespace_coordinator(fn
+        :claim_subtree_for, _ -> {:ok, "ns-claim-21"}
+        :release, _ -> :ok
+      end)
+
+      assert {:error, :conflict} =
+               LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-b", 300)
+
+      assert_received {:namespace_coordinator, :release, ["ns-claim-21"]}
     end
   end
 end

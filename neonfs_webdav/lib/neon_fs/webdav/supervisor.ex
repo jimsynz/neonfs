@@ -12,7 +12,7 @@ defmodule NeonFS.WebDAV.Supervisor do
 
   alias NeonFS.Client.Registrar
   alias NeonFS.WebDAV.{Backend, HealthCheck, HealthPlug, LockStore}
-  alias NeonFS.WebDAV.LockStore.Cleaner
+  alias NeonFS.WebDAV.LockStore.{Cleaner, NamespaceHolder}
 
   @doc "Starts the WebDAV supervisor."
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -29,6 +29,7 @@ defmodule NeonFS.WebDAV.Supervisor do
     LockStore.init()
 
     children = [
+      NamespaceHolder,
       Cleaner,
       {Registrar,
        metadata: registration_metadata(), type: :webdav, name: NeonFS.Client.Registrar.WebDAV},
