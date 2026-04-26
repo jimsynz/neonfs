@@ -145,12 +145,18 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
+            neonfs_core/target
+            neonfs_core/priv/native
+            fuse_server/target
+            fuse_server/priv/native
             neonfs_fuse/deps
             neonfs_fuse/_build
             neonfs_fuse/target
             neonfs_fuse/priv/native
-          key: v3-build-neonfs_fuse-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_fuse-${{ runner.arch }}-
+          key: v4-build-neonfs_fuse-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock', 'neonfs_core/Cargo.lock', 'fuse_server/Cargo.lock') }}
+          restore-keys: v4-build-neonfs_fuse-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_fuse
@@ -398,10 +404,12 @@ jobs:
             neonfs_client/_build
             neonfs_client/native/neonfs_chunker/target
             neonfs_client/priv/native
+            neonfs_core/target
+            neonfs_core/priv/native
             neonfs_s3/deps
             neonfs_s3/_build
-          key: v3-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_s3-${{ runner.arch }}-
+          key: v4-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
+          restore-keys: v4-build-neonfs_s3-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_s3
