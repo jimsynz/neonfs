@@ -58,6 +58,7 @@ defmodule NeonFS.NFS.MixProject do
       {:bandit, "~> 1.5"},
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
+      {:nfs_server, path: "../nfs_server"},
       {:plug, "~> 1.15"},
       {:rustler, "~> 0.37", runtime: false},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
