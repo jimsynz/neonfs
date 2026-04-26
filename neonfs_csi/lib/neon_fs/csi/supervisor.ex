@@ -41,6 +41,7 @@ defmodule NeonFS.CSI.Supervisor do
     # tables exist before the gRPC layer accepts the first request.
     NeonFS.CSI.ControllerServer.init_publish_table()
     NeonFS.CSI.NodeServer.init_state_tables()
+    NeonFS.CSI.VolumeHealth.init_table()
 
     children =
       [endpoint_child_spec()]

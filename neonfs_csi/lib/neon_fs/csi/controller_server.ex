@@ -28,11 +28,15 @@ defmodule NeonFS.CSI.ControllerServer do
     * `ControllerPublishVolume` / `ControllerUnpublishVolume` — track
       `(volume_id, node_id)` publish state in a local ETS table that
       the Node plugin consults during Stage.
+    * `ControllerGetVolume` — returns the per-volume `Volume` plus a
+      `VolumeStatus` containing the current published-node ids and
+      a `VolumeCondition` rolled up from `NeonFS.Core.StorageMetrics`,
+      `NeonFS.Core.ServiceRegistry`, and `NeonFS.Core.Escalation` via
+      `NeonFS.CSI.VolumeHealth`.
 
-  Out of scope for this slice (snapshot RPCs, `ControllerGetVolume`,
-  `ControllerExpandVolume`, `ControllerModifyVolume`) — those gain
-  capability-flag entries here when their respective sub-issues
-  land.
+  Out of scope for this slice (snapshot RPCs, `ControllerExpandVolume`,
+  `ControllerModifyVolume`) — those gain capability-flag entries here
+  when their respective sub-issues land.
 
   ## Test injection
 
@@ -47,6 +51,8 @@ defmodule NeonFS.CSI.ControllerServer do
   alias Csi.V1.{
     ControllerGetCapabilitiesRequest,
     ControllerGetCapabilitiesResponse,
+    ControllerGetVolumeRequest,
+    ControllerGetVolumeResponse,
     ControllerPublishVolumeRequest,
     ControllerPublishVolumeResponse,
     ControllerServiceCapability,
@@ -62,10 +68,12 @@ defmodule NeonFS.CSI.ControllerServer do
     ListVolumesResponse,
     ValidateVolumeCapabilitiesRequest,
     ValidateVolumeCapabilitiesResponse,
-    Volume
+    Volume,
+    VolumeCondition
   }
 
   alias NeonFS.Client.Router
+  alias NeonFS.CSI.VolumeHealth
 
   import Bitwise, only: [<<<: 2]
 
@@ -101,7 +109,14 @@ defmodule NeonFS.CSI.ControllerServer do
     %ControllerGetCapabilitiesResponse{
       capabilities:
         Enum.map(
-          [:CREATE_DELETE_VOLUME, :PUBLISH_UNPUBLISH_VOLUME, :LIST_VOLUMES, :GET_CAPACITY],
+          [
+            :CREATE_DELETE_VOLUME,
+            :PUBLISH_UNPUBLISH_VOLUME,
+            :LIST_VOLUMES,
+            :GET_CAPACITY,
+            :GET_VOLUME,
+            :VOLUME_CONDITION
+          ],
           &capability/1
         )
     }
@@ -326,6 +341,43 @@ defmodule NeonFS.CSI.ControllerServer do
     %ControllerUnpublishVolumeResponse{}
   end
 
+  @doc """
+  CSI `Controller.ControllerGetVolume` — returns the volume plus a
+  `VolumeStatus` carrying the current published-node ids and a
+  cluster-wide `VolumeCondition` derived from `NeonFS.CSI.VolumeHealth`.
+
+  Raises `NOT_FOUND` if the volume is gone.
+  """
+  @spec controller_get_volume(ControllerGetVolumeRequest.t(), term()) ::
+          ControllerGetVolumeResponse.t()
+  def controller_get_volume(%ControllerGetVolumeRequest{volume_id: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_id is required"
+  end
+
+  def controller_get_volume(%ControllerGetVolumeRequest{volume_id: vol_id}, _stream) do
+    init_publish_table()
+
+    with {:ok, volume} <- core_call(NeonFS.Core, :get_volume, [vol_id]),
+         {:ok, condition} <- VolumeHealth.controller_condition(vol_id) do
+      %ControllerGetVolumeResponse{
+        volume: csi_volume_from(volume, 0),
+        status: %ControllerGetVolumeResponse.VolumeStatus{
+          published_node_ids: published_node_ids(vol_id),
+          volume_condition: %VolumeCondition{
+            abnormal: condition.abnormal,
+            message: condition.message
+          }
+        }
+      }
+    else
+      {:error, :not_found} ->
+        raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
+
+      {:error, reason} ->
+        raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
+    end
+  end
+
   ## Helpers
 
   defp capability(rpc_type) do
@@ -366,6 +418,12 @@ defmodule NeonFS.CSI.ControllerServer do
       volume_id: volume.name,
       volume_context: %{"volume_id" => volume.id}
     }
+  end
+
+  defp published_node_ids(vol_id) do
+    @table
+    |> :ets.match({{vol_id, :"$1"}, :_})
+    |> List.flatten()
   end
 
   # Supported access modes mirror the NeonFS data plane: a single

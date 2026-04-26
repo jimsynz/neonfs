@@ -4,6 +4,7 @@ defmodule NeonFS.CSI.NodeServerTest do
   alias Csi.V1.{
     NodeGetCapabilitiesRequest,
     NodeGetInfoRequest,
+    NodeGetVolumeStatsRequest,
     NodePublishVolumeRequest,
     NodeServiceCapability,
     NodeStageVolumeRequest,
@@ -12,7 +13,8 @@ defmodule NeonFS.CSI.NodeServerTest do
     VolumeCapability
   }
 
-  alias NeonFS.CSI.NodeServer
+  alias NeonFS.Core.Volume
+  alias NeonFS.CSI.{NodeServer, VolumeHealth}
 
   @rw_capability %VolumeCapability{
     access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}
@@ -24,6 +26,7 @@ defmodule NeonFS.CSI.NodeServerTest do
 
   setup do
     NodeServer.reset_state_tables()
+    VolumeHealth.reset_table()
 
     test_pid = self()
 
@@ -53,7 +56,9 @@ defmodule NeonFS.CSI.NodeServerTest do
       Application.delete_env(:neonfs_csi, :bind_mount_fn)
       Application.delete_env(:neonfs_csi, :bind_unmount_fn)
       Application.delete_env(:neonfs_csi, :node_id)
+      Application.delete_env(:neonfs_csi, :core_call_fn)
       NodeServer.reset_state_tables()
+      VolumeHealth.reset_table()
     end)
 
     staging_root =
@@ -65,13 +70,15 @@ defmodule NeonFS.CSI.NodeServerTest do
   end
 
   describe "NodeGetCapabilities" do
-    test "advertises STAGE_UNSTAGE_VOLUME" do
+    test "advertises STAGE_UNSTAGE_VOLUME, GET_VOLUME_STATS, VOLUME_CONDITION" do
       reply = NodeServer.node_get_capabilities(%NodeGetCapabilitiesRequest{}, nil)
 
       types =
         Enum.map(reply.capabilities, fn %NodeServiceCapability{type: {:rpc, rpc}} -> rpc.type end)
 
       assert :STAGE_UNSTAGE_VOLUME in types
+      assert :GET_VOLUME_STATS in types
+      assert :VOLUME_CONDITION in types
     end
   end
 
@@ -494,6 +501,85 @@ defmodule NeonFS.CSI.NodeServerTest do
 
       assert %_{} = reply
       assert_received {:fuse_unmount, _}
+    end
+  end
+
+  describe "NodeGetVolumeStats" do
+    setup %{staging_root: root} do
+      staging = Path.join(root, "stage-stats")
+      target = Path.join(root, "publish-stats")
+      File.mkdir_p!(staging)
+      File.mkdir_p!(target)
+
+      NodeServer.node_stage_volume(
+        %NodeStageVolumeRequest{
+          volume_id: "stats-vol",
+          staging_target_path: staging,
+          volume_capability: @rw_capability
+        },
+        nil
+      )
+
+      Application.put_env(:neonfs_csi, :core_call_fn, fn
+        NeonFS.Core, :get_volume, ["stats-vol"] ->
+          {:ok,
+           %Volume{
+             id: "vid-stats",
+             name: "stats-vol",
+             durability: %{type: :replicate, factor: 1, min_copies: 1},
+             logical_size: 1_024,
+             physical_size: 1_024,
+             chunk_count: 0,
+             created_at: DateTime.from_unix!(0),
+             updated_at: DateTime.from_unix!(0)
+           }}
+      end)
+
+      {:ok, staging: staging, target: target}
+    end
+
+    test "rejects empty volume_id" do
+      assert_raise GRPC.RPCError, ~r/required/, fn ->
+        NodeServer.node_get_volume_stats(
+          %NodeGetVolumeStatsRequest{volume_id: "", volume_path: "/p"},
+          nil
+        )
+      end
+    end
+
+    test "rejects empty volume_path" do
+      assert_raise GRPC.RPCError, ~r/required/, fn ->
+        NodeServer.node_get_volume_stats(
+          %NodeGetVolumeStatsRequest{volume_id: "stats-vol", volume_path: ""},
+          nil
+        )
+      end
+    end
+
+    test "reports usage and abnormal=false for a healthy mount", %{target: target} do
+      reply =
+        NodeServer.node_get_volume_stats(
+          %NodeGetVolumeStatsRequest{volume_id: "stats-vol", volume_path: target},
+          nil
+        )
+
+      assert reply.volume_condition.abnormal == false
+
+      assert [%Csi.V1.VolumeUsage{used: 1_024, total: 1_024, available: 0, unit: :BYTES}] =
+               reply.usage
+    end
+
+    test "reports abnormal=true when the probe path doesn't exist", %{target: target} do
+      missing = Path.join(target, "definitely-not-here")
+
+      reply =
+        NodeServer.node_get_volume_stats(
+          %NodeGetVolumeStatsRequest{volume_id: "stats-vol", volume_path: missing},
+          nil
+        )
+
+      assert reply.volume_condition.abnormal == true
+      assert reply.volume_condition.message =~ "FUSE mount probe"
     end
   end
 end

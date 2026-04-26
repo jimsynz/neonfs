@@ -6,6 +6,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
   alias Csi.V1.{
     CapacityRange,
     ControllerGetCapabilitiesRequest,
+    ControllerGetVolumeRequest,
     ControllerPublishVolumeRequest,
     ControllerServiceCapability,
     ControllerUnpublishVolumeRequest,
@@ -18,14 +19,16 @@ defmodule NeonFS.CSI.ControllerServerTest do
   }
 
   alias NeonFS.Core.Volume
-  alias NeonFS.CSI.ControllerServer
+  alias NeonFS.CSI.{ControllerServer, VolumeHealth}
 
   setup do
     ControllerServer.reset_publish_table()
+    VolumeHealth.reset_table()
 
     on_exit(fn ->
       Application.delete_env(:neonfs_csi, :core_call_fn)
       ControllerServer.reset_publish_table()
+      VolumeHealth.reset_table()
     end)
 
     :ok
@@ -362,6 +365,140 @@ defmodule NeonFS.CSI.ControllerServerTest do
                  %ControllerUnpublishVolumeRequest{volume_id: "ghost", node_id: "node-x"},
                  nil
                )
+    end
+  end
+
+  describe "ControllerGetCapabilities advertises volume-condition capabilities" do
+    test "includes GET_VOLUME and VOLUME_CONDITION" do
+      reply =
+        ControllerServer.controller_get_capabilities(%ControllerGetCapabilitiesRequest{}, nil)
+
+      types =
+        Enum.map(reply.capabilities, fn %ControllerServiceCapability{type: {:rpc, rpc}} ->
+          rpc.type
+        end)
+
+      assert :GET_VOLUME in types
+      assert :VOLUME_CONDITION in types
+    end
+  end
+
+  describe "ControllerGetVolume" do
+    test "returns volume + status with abnormal=false for a healthy cluster" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["healthy"] ->
+          {:ok,
+           sample_volume("healthy", %{durability: %{type: :replicate, factor: 1, min_copies: 1}})}
+
+        NeonFS.Core.StorageMetrics, :cluster_capacity, [] ->
+          %{drives: [%{state: :active}], total_capacity: 100, total_used: 10}
+
+        NeonFS.Core.ServiceRegistry, :list_by_type, [:core] ->
+          [%{node: :n1}, %{node: :n2}, %{node: :n3}]
+
+        NeonFS.Core.Escalation, :list, [[status: :pending]] ->
+          []
+      end)
+
+      reply =
+        ControllerServer.controller_get_volume(
+          %ControllerGetVolumeRequest{volume_id: "healthy"},
+          nil
+        )
+
+      assert reply.volume.volume_id == "healthy"
+      assert reply.status.volume_condition.abnormal == false
+      assert reply.status.volume_condition.message == ""
+    end
+
+    test "reports abnormal when replication factor exceeds core nodes" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["over"] ->
+          {:ok,
+           sample_volume("over", %{durability: %{type: :replicate, factor: 5, min_copies: 1}})}
+
+        NeonFS.Core.StorageMetrics, :cluster_capacity, [] ->
+          %{drives: [%{state: :active}], total_capacity: 100, total_used: 10}
+
+        NeonFS.Core.ServiceRegistry, :list_by_type, [:core] ->
+          [%{node: :n1}, %{node: :n2}]
+
+        NeonFS.Core.Escalation, :list, _ ->
+          []
+      end)
+
+      reply =
+        ControllerServer.controller_get_volume(
+          %ControllerGetVolumeRequest{volume_id: "over"},
+          nil
+        )
+
+      assert reply.status.volume_condition.abnormal == true
+      assert reply.status.volume_condition.message =~ "replication factor 5"
+    end
+
+    test "reports abnormal on a pending critical escalation" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["v"] ->
+          {:ok, sample_volume("v", %{durability: %{type: :replicate, factor: 1, min_copies: 1}})}
+
+        NeonFS.Core.StorageMetrics, :cluster_capacity, [] ->
+          %{drives: [%{state: :active}], total_capacity: 100, total_used: 10}
+
+        NeonFS.Core.ServiceRegistry, :list_by_type, [:core] ->
+          [%{node: :n1}]
+
+        NeonFS.Core.Escalation, :list, _ ->
+          [%{severity: :critical, category: "drive_failure"}]
+      end)
+
+      reply =
+        ControllerServer.controller_get_volume(%ControllerGetVolumeRequest{volume_id: "v"}, nil)
+
+      assert reply.status.volume_condition.abnormal == true
+      assert reply.status.volume_condition.message =~ "critical escalations"
+    end
+
+    test "returns published_node_ids from the publish table" do
+      :ets.insert(:csi_published_volumes, {{"pvc", "node-a"}, %{}})
+      :ets.insert(:csi_published_volumes, {{"pvc", "node-b"}, %{}})
+
+      put_core(fn
+        NeonFS.Core, :get_volume, ["pvc"] ->
+          {:ok,
+           sample_volume("pvc", %{durability: %{type: :replicate, factor: 1, min_copies: 1}})}
+
+        NeonFS.Core.StorageMetrics, :cluster_capacity, [] ->
+          %{drives: [%{state: :active}], total_capacity: 100, total_used: 10}
+
+        NeonFS.Core.ServiceRegistry, :list_by_type, [:core] ->
+          [%{node: :n1}]
+
+        NeonFS.Core.Escalation, :list, _ ->
+          []
+      end)
+
+      reply =
+        ControllerServer.controller_get_volume(%ControllerGetVolumeRequest{volume_id: "pvc"}, nil)
+
+      assert Enum.sort(reply.status.published_node_ids) == ["node-a", "node-b"]
+    end
+
+    test "raises NOT_FOUND when the volume is gone" do
+      put_core(fn NeonFS.Core, :get_volume, _ -> {:error, :not_found} end)
+
+      assert_raise GRPC.RPCError, ~r/not found/, fn ->
+        ControllerServer.controller_get_volume(
+          %ControllerGetVolumeRequest{volume_id: "ghost"},
+          nil
+        )
+      end
+    end
+
+    test "rejects empty volume_id with INVALID_ARGUMENT" do
+      assert_raise GRPC.RPCError, ~r/required/, fn ->
+        ControllerServer.controller_get_volume(%ControllerGetVolumeRequest{volume_id: ""}, nil)
+      end
     end
   end
 end
