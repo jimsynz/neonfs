@@ -207,6 +207,120 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
+  # `claim_rename/3` is the namespace-coordinator primitive for atomic
+  # cross-directory rename — sub-issue #304. The two paths must be
+  # pinned together (no half-claimed window) and the destination must
+  # not sit inside the source's own subtree.
+  describe "claim_rename/3" do
+    test "pins src + dst as a paired claim", %{server: server} do
+      assert {:ok, {src_id, dst_id}} =
+               NamespaceCoordinator.claim_rename(server, "/from", "/to")
+
+      assert is_binary(src_id) and is_binary(dst_id)
+      assert src_id != dst_id
+
+      # Both paths are blocked while the rename claim is held.
+      assert {:error, :conflict, ^src_id} =
+               NamespaceCoordinator.claim_path(server, "/from", :exclusive)
+
+      assert {:error, :conflict, ^dst_id} =
+               NamespaceCoordinator.claim_path(server, "/to", :exclusive)
+    end
+
+    test "rejects rename into the source's own subtree (cycle)", %{server: server} do
+      # /a -> /a/b/c is a cycle — destination sits under the source.
+      assert {:error, :einval} =
+               NamespaceCoordinator.claim_rename(server, "/a", "/a/b/c")
+
+      # Self-rename is also a cycle by the same rule (dst == src).
+      assert {:error, :einval} = NamespaceCoordinator.claim_rename(server, "/a", "/a")
+    end
+
+    test "non-cycle cross-directory renames succeed", %{server: server} do
+      # Sibling directory move — not a cycle.
+      assert {:ok, _} = NamespaceCoordinator.claim_rename(server, "/dir-a", "/dir-b")
+    end
+
+    test "fails atomically when the source path is already claimed", %{server: server} do
+      {:ok, src_claim} = NamespaceCoordinator.claim_path(server, "/locked-src", :exclusive)
+
+      assert {:error, :conflict, ^src_claim} =
+               NamespaceCoordinator.claim_rename(server, "/locked-src", "/free-dst")
+
+      # The destination must NOT have been pinned — atomic failure.
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/free-dst", :exclusive)
+    end
+
+    test "fails atomically when the destination path is already claimed", %{server: server} do
+      {:ok, dst_claim} = NamespaceCoordinator.claim_path(server, "/locked-dst", :exclusive)
+
+      assert {:error, :conflict, ^dst_claim} =
+               NamespaceCoordinator.claim_rename(server, "/free-src", "/locked-dst")
+
+      # The source must NOT have been pinned.
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/free-src", :exclusive)
+    end
+
+    test "fails when dst is inside an existing subtree claim", %{server: server} do
+      {:ok, sub_claim} = NamespaceCoordinator.claim_subtree(server, "/protected", :exclusive)
+
+      assert {:error, :conflict, ^sub_claim} =
+               NamespaceCoordinator.claim_rename(server, "/free-src", "/protected/x")
+    end
+
+    test "release_rename releases both claims", %{server: server} do
+      {:ok, claim} = NamespaceCoordinator.claim_rename(server, "/r1-src", "/r1-dst")
+
+      assert :ok = NamespaceCoordinator.release_rename(server, claim)
+
+      # Both paths free again.
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/r1-src", :exclusive)
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/r1-dst", :exclusive)
+    end
+
+    test "release_rename is idempotent", %{server: server} do
+      {:ok, claim} = NamespaceCoordinator.claim_rename(server, "/r2-src", "/r2-dst")
+      assert :ok = NamespaceCoordinator.release_rename(server, claim)
+      assert :ok = NamespaceCoordinator.release_rename(server, claim)
+    end
+
+    test "claims released when the holder process dies", %{server: server} do
+      parent = self()
+
+      {holder, monitor_ref} =
+        spawn_monitor(fn ->
+          {:ok, claim} = NamespaceCoordinator.claim_rename(server, "/h-src", "/h-dst")
+          send(parent, {:claimed, claim})
+
+          receive do
+            :exit -> :ok
+          end
+        end)
+
+      assert_receive {:claimed, _}, 1_000
+
+      assert {:error, :conflict, _} =
+               NamespaceCoordinator.claim_path(server, "/h-src", :exclusive)
+
+      send(holder, :exit)
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      :sys.get_state(server)
+
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/h-src", :exclusive)
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/h-dst", :exclusive)
+    end
+
+    test "claim_rename_for/4 honours the explicit holder", %{server: server} do
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+
+      {:ok, {src_id, _dst_id}} =
+        NamespaceCoordinator.claim_rename_for(server, "/explicit-src", "/explicit-dst", holder)
+
+      assert {:error, :conflict, ^src_id} =
+               NamespaceCoordinator.claim_path(server, "/explicit-src", :exclusive)
+    end
+  end
+
   # `claim_*_for/4` exists for cross-node callers (e.g. WebDAV via
   # `NeonFS.Client.Router.call/4`): the RPC handler `self()` would die
   # the moment the call returns and take every claim with it. Explicit

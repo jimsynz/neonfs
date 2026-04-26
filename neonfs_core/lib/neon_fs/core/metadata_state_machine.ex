@@ -79,6 +79,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
              holder :: term()}
           | {:claim_namespace_subtree, path :: String.t(), scope :: namespace_scope(),
              holder :: term()}
+          | {:claim_namespace_rename, src :: String.t(), dst :: String.t(), holder :: term()}
           | {:release_namespace_claim, claim_id :: String.t()}
           | {:release_namespace_claims_for_holder, holder :: term()}
 
@@ -1129,6 +1130,37 @@ defmodule NeonFS.Core.MetadataStateMachine do
     apply_namespace_claim(:subtree, path, scope, holder, state)
   end
 
+  # Atomic paired claim used by cross-directory rename. Pins both `src`
+  # and `dst` as `:exclusive :path` claims allocated under sequential
+  # ids, so the caller can release them as a pair. Rejects renames into
+  # the source's own subtree (a cycle the filesystem layer can't
+  # represent). #304.
+  def apply(_meta, {:claim_namespace_rename, src, dst, holder}, state)
+      when is_binary(src) and is_binary(dst) do
+    state = ensure_namespace(state)
+
+    if rename_cycle?(src, dst) do
+      {state, {:error, :einval}, []}
+    else
+      case detect_rename_conflicts(src, dst, state.namespace_claims) do
+        :ok ->
+          {state2, src_id} = allocate_claim(state, :path, src, :exclusive, holder)
+          {state3, dst_id} = allocate_claim(state2, :path, dst, :exclusive, holder)
+
+          :telemetry.execute(
+            [:neonfs, :ra, :command, :claim_namespace_rename],
+            %{version: state3.version},
+            %{}
+          )
+
+          {state3, {:ok, {src_id, dst_id}}, []}
+
+        {:error, conflict_id} ->
+          {state, {:error, :conflict, conflict_id}, []}
+      end
+    end
+  end
+
   def apply(_meta, {:release_namespace_claim, claim_id}, state) when is_binary(claim_id) do
     state = ensure_namespace(state)
     {released, claims} = Map.pop(state.namespace_claims, claim_id)
@@ -1538,16 +1570,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
     case detect_namespace_conflict(type, path, scope, state.namespace_claims) do
       :ok ->
-        seq = state.namespace_claim_seq + 1
-        claim_id = "ns-claim-" <> Integer.to_string(seq)
-        claim = %{path: path, scope: scope, type: type, holder: holder}
-
-        new_state = %{
-          state
-          | namespace_claims: Map.put(state.namespace_claims, claim_id, claim),
-            namespace_claim_seq: seq,
-            version: state.version + 1
-        }
+        {new_state, claim_id} = allocate_claim(state, type, path, scope, holder)
 
         :telemetry.execute(
           [:neonfs, :ra, :command, :claim_namespace],
@@ -1559,6 +1582,42 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
       {:error, conflict_id} ->
         {state, {:error, :conflict, conflict_id}, []}
+    end
+  end
+
+  defp allocate_claim(state, type, path, scope, holder) do
+    seq = state.namespace_claim_seq + 1
+    claim_id = "ns-claim-" <> Integer.to_string(seq)
+    claim = %{path: path, scope: scope, type: type, holder: holder}
+
+    new_state = %{
+      state
+      | namespace_claims: Map.put(state.namespace_claims, claim_id, claim),
+        namespace_claim_seq: seq,
+        version: state.version + 1
+    }
+
+    {new_state, claim_id}
+  end
+
+  # `dst` is in `src`'s subtree when it equals `src` or sits under it
+  # separated by `/`. Renaming a directory into its own subtree is the
+  # classic POSIX `EINVAL` case (`mv /a /a/b`) — there's no place to
+  # put the source after the move because the destination requires the
+  # source to already exist there.
+  defp rename_cycle?(src, dst) do
+    in_subtree?(dst, src)
+  end
+
+  # Reject the rename if either path conflicts with an existing claim,
+  # using the same conflict matrix as `claim_path` / `claim_subtree`
+  # (both paths are claimed `:exclusive`, so any overlapping claim
+  # collides). Returns the first conflicting claim_id we find — order
+  # is map-iteration order, which is deterministic per Ra's BEAM
+  # determinism guarantees.
+  defp detect_rename_conflicts(src, dst, claims) do
+    with :ok <- detect_namespace_conflict(:path, src, :exclusive, claims) do
+      detect_namespace_conflict(:path, dst, :exclusive, claims)
     end
   end
 
