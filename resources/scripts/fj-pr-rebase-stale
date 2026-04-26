@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Rebase every open PR (optionally filtered by author) whose head branch
+# is no longer up to date with origin/main.
+#
+# Usage: fj-pr-rebase-stale [author]
+#
+# For each candidate PR:
+#   - Fetch origin/main and the PR branch.
+#   - Attempt git rebase origin/main.
+#   - On clean rebase: force-push (with --force-with-lease).
+#   - On conflict: abort and emit a machine-parseable line
+#       CONFLICT<TAB><pr-number><TAB><head-branch>
+#     to stdout so the caller can pick up the conflicted PRs and
+#     attempt manual resolution. No comment is posted — this script
+#     is the "easy half"; conflict resolution is up to the caller.
+#
+# Must be run inside a clone of the target repo. Leaves the working tree
+# on the branch you started on.
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+author="${1:-}"
+
+git rev-parse --is-inside-work-tree > /dev/null 2>&1 \
+  || fj_die "must run inside a git working tree"
+
+origin_repo=$(git remote get-url origin | sed -E 's|.*[:/]([^/]+/[^/]+)\.git$|\1|')
+[ "$origin_repo" = "$FJ_REPO" ] \
+  || fj_die "git origin ($origin_repo) does not match FJ_REPO ($FJ_REPO)"
+
+start_branch=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse HEAD)
+restore() { git checkout --quiet "$start_branch" 2>/dev/null || true; }
+trap restore EXIT
+
+git fetch --quiet origin
+
+# List open PRs, filter by author if requested.
+prs_json=$(fj_curl GET "/pulls?state=open&limit=50")
+if [ -n "$author" ]; then
+  prs_json=$(echo "$prs_json" | jq --arg a "$author" '[.[] | select(.user.login == $a)]')
+fi
+
+main_sha=$(git rev-parse origin/main)
+
+echo "$prs_json" | jq -c '.[] | {number, head: .head.ref, base: .base.ref}' \
+  | while read -r row; do
+      n=$(echo "$row" | jq -r .number)
+      head=$(echo "$row" | jq -r .head)
+      base=$(echo "$row" | jq -r .base)
+
+      if [ "$base" != "main" ]; then
+        echo "skip #$n: base is $base, not main"
+        continue
+      fi
+
+      git fetch --quiet origin "$head:refs/remotes/origin/$head" 2>/dev/null \
+        || { echo "skip #$n: could not fetch $head"; continue; }
+
+      branch_sha=$(git rev-parse "origin/$head")
+      merge_base=$(git merge-base "$branch_sha" "$main_sha")
+
+      if [ "$merge_base" = "$main_sha" ]; then
+        echo "skip #$n: already up to date with main"
+        continue
+      fi
+
+      echo "rebasing #$n ($head)..."
+      git checkout --quiet -B "$head" "origin/$head"
+
+      if git rebase --quiet origin/main; then
+        if git push --force-with-lease "https://oauth2:${FJ_TOKEN}@$FJ_HOST/$FJ_REPO.git" "$head" \
+             > /dev/null 2>&1; then
+          echo "  rebased and pushed"
+        else
+          echo "  rebase ok but push failed — leaving local branch alone"
+        fi
+      else
+        git rebase --abort 2>/dev/null || true
+        echo "  conflicts — caller must resolve"
+        printf 'CONFLICT\t%s\t%s\n' "$n" "$head"
+      fi
+    done

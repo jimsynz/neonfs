@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Download the log for a single CI job to stdout.
+#
+# Usage:
+#   fj-job-logs <run-index> <job-index> [attempt]
+#   fj-job-logs <target-url>          # /project-neon/neonfs/actions/runs/1881/jobs/15
+#
+# `run-index` is the per-repo run number (the integer in the public URL
+# /actions/runs/<N>), NOT the global API id. `job-index` is 0-based.
+# `attempt` defaults to 1.
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+if [ "$#" -eq 1 ]; then
+  # Parse a target_url like "/project-neon/neonfs/actions/runs/1881/jobs/15"
+  if [[ "$1" =~ /actions/runs/([0-9]+)/jobs/([0-9]+) ]]; then
+    run="${BASH_REMATCH[1]}"
+    job="${BASH_REMATCH[2]}"
+    attempt=1
+  else
+    fj_die "could not parse run/job from: $1"
+  fi
+elif [ "$#" -ge 2 ]; then
+  run="$1"
+  job="$2"
+  attempt="${3:-1}"
+else
+  fj_die "usage: fj-job-logs <run-index> <job-index> [attempt]  |  fj-job-logs <target-url>"
+fi
+
+curl -sS --fail \
+  -H "Authorization: token $FJ_TOKEN" \
+  "https://$FJ_HOST/$FJ_REPO/actions/runs/$run/jobs/$job/attempt/$attempt/logs"

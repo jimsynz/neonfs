@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Print the Forgejo API token. Useful for one-off curl: TOKEN=$(fj-token).
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+echo "$FJ_TOKEN"

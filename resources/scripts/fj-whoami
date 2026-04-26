@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Print the authenticated user's login.
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+fj_curl GET "https://$FJ_HOST/api/v1/user" | jq -r '.login'

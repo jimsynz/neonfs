@@ -266,79 +266,47 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 
 ## Forgejo
 
-This repository is hosted on a Forgejo instance at `harton.dev`. Use the `fj` CLI (not `gh`) for pull requests, issues, and other forge operations:
+This repository is hosted on a Forgejo instance at `harton.dev`. Use the `fj` CLI (not `gh`) for the simple read operations it handles well:
 ```bash
-fj pr create --base main "PR title"    # Create a pull request
-fj pr search --state open              # List open pull requests
 fj issue search --state open           # List open issues
 fj issue view 123                      # View issue details
 fj pr view 123                         # View PR details
+fj pr search --state open              # List open pull requests
 ```
 
-### API Access
-
-For API operations that `fj` doesn't support well (CI status, issue comments, PR creation with body), use the Forgejo REST API with the `fj` CLI's stored token:
+For everything else — CI status, job logs, comments, PR creation with body, self-assignment, automated rebase/merge — use the helper scripts in [`resources/scripts/`](resources/scripts/) rather than hand-rolled `curl` commands. Add that directory to `$PATH` for the session, or invoke directly:
 
 ```bash
-FJ_TOKEN=$(jq -r '.hosts["harton.dev"].token' ~/.local/share/forgejo-cli/keys.json)
+export PATH="$PWD/resources/scripts:$PATH"
 ```
 
-The git credential token (`git credential fill`) has limited scopes and cannot read/write issues or comments. Always use the `fj` CLI token for API calls.
+Each script handles auth, error reporting, and JSON parsing; they read the token from `~/.local/share/forgejo-cli/keys.json` (the `fj` CLI's store — the git credential token does not have the scopes for issues/PRs).
 
-**Add a comment to an issue:**
+| Script | Purpose |
+| --- | --- |
+| `fj-token` | Print the API token (for one-off `curl` if needed). |
+| `fj-whoami` | Print the authenticated login. |
+| `fj-pr-status <pr#-or-sha>` | Latest CI status per context, TSV. |
+| `fj-pr-failing <pr#-or-sha>` | Only the failing contexts, with `target_url` for log retrieval. |
+| `fj-job-logs <run-index> <job-index> [attempt]` | Download a single job's log. Also accepts a `target_url` from `fj-pr-failing`. |
+| `fj-job-logs-failing <pr#-or-sha> [--tail N]` | Dump every failing job's log, one section per job. |
+| `fj-issue-assign-self <n>` | Self-assign an issue. |
+| `fj-issue-create <title> <body\|-> [label-id...]` | Open an issue (body `-` reads from stdin). Common labels: `128` enhancement, `126` bug. |
+| `fj-pr-create <head> <title> <body\|-> [base]` | Open a PR. |
+| `fj-pr-rebase-stale [author]` | For each open PR (optionally by author), rebase on `main` and force-push if conflict-free; comment + skip on conflict. |
+| `fj-pr-merge-when-green <pr#> [--timeout S] [--poll S] [--no-merge]` | Poll until CI is green, then squash-merge. Exit codes encode outcome: 0 merged, 2 needs rebase, 3 failure, 4 timeout, 5 already closed. |
+
+Two debug knobs the scripts honour: `FJ_HOST` (default `harton.dev`) and `FJ_REPO` (default `project-neon/neonfs`).
+
+### Reading failing-job logs
+
+Forgejo does not expose job logs via the public REST API, but the web download endpoint (`/<repo>/actions/runs/<N>/jobs/<i>/attempt/<a>/logs`) accepts an `Authorization: token` header. `fj-job-logs` and `fj-job-logs-failing` use that endpoint, so you no longer need to reproduce CI failures locally just to see the log:
+
 ```bash
-curl -s -X POST \
-  -H "Authorization: token $FJ_TOKEN" \
-  -H "Content-Type: application/json" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/issues/123/comments" \
-  -d '{"body": "Comment text here"}'
+fj-job-logs-failing 581 --tail 200    # last 200 lines of every failing job
 ```
 
-**Create a pull request with body:**
-```bash
-curl -s -X POST \
-  -H "Authorization: token $FJ_TOKEN" \
-  -H "Content-Type: application/json" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/pulls" \
-  -d '{"title": "PR title", "body": "PR body", "head": "branch-name", "base": "main"}'
-```
-
-### Retrieving CI Status and Logs
-
-The `fj pr status` command is broken on this Forgejo version. Use the API with `FJ_TOKEN` (see above).
-
-**Check CI status for a commit:**
-```bash
-COMMIT=$(git rev-parse HEAD)
-curl -s -H "Authorization: token $FJ_TOKEN" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$COMMIT/statuses" \
-  | jq '.[] | {context, status, description}'
-```
-
-**Show only failures:**
-```bash
-curl -s -H "Authorization: token $FJ_TOKEN" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$COMMIT/statuses" \
-  | jq '.[] | select(.status == "failure") | {context, description}'
-```
-
-**List workflow runs for the current branch (with job-level detail):**
-```bash
-SHA=$(git rev-parse HEAD)
-curl -s -H "Authorization: token $FJ_TOKEN" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/actions/tasks?limit=20" \
-  | jq ".workflow_runs[] | select(.head_sha == \"$SHA\") | {id, name, status, event}"
-```
-
-**Compare against main to identify pre-existing failures:**
-```bash
-MAIN_SHA=$(git rev-parse origin/main)
-curl -s -H "Authorization: token $FJ_TOKEN" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/commits/$MAIN_SHA/statuses" \
-  | jq '.[] | select(.status == "failure") | {context, description}'
-```
-
-**Note:** Forgejo does not expose job logs via the API. If you need to see the actual log output of a failing CI job, reproduce the failure locally by running the same commands from the workflow file (`.forgejo/workflows/ci.yml`). Each CI job runs `mix check` or `cargo test`/`cargo clippy` in the relevant package directory.
+If a particular failing job needs deeper inspection, get the `target_url` from `fj-pr-failing` and pass it to `fj-job-logs` directly.
 
 ## Container Building
 

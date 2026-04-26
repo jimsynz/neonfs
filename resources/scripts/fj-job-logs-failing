@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Dump logs for every failing job on a PR (or SHA), one section per job.
+#
+# Usage: fj-job-logs-failing <pr-number-or-sha> [--tail N]
+#
+# Each job's log is preceded by a "===== <context> =====" header so the
+# output stays grep-able. With --tail N, only the last N lines of each
+# job's log are emitted (useful when the suite is huge).
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+ref="${1:-}"
+[ -n "$ref" ] || fj_die "usage: fj-job-logs-failing <pr-number-or-sha> [--tail N]"
+shift
+
+tail_lines=""
+if [ "${1:-}" = "--tail" ]; then
+  tail_lines="${2:-}"
+  [ -n "$tail_lines" ] || fj_die "--tail requires a line count"
+  shift 2
+fi
+
+if [[ "$ref" =~ ^[0-9]+$ ]]; then
+  sha=$(fj_pr_head_sha "$ref")
+else
+  sha="$ref"
+fi
+
+self_dir="$(dirname "$(readlink -f "$0")")"
+
+fj_statuses "$sha" \
+  | jq -r '.[] | select(.status == "failure" or .status == "error")
+                | [.context, .target_url] | @tsv' \
+  | while IFS=$'\t' read -r context target_url; do
+      echo "===== $context ====="
+      if [ -n "$tail_lines" ]; then
+        "$self_dir/fj-job-logs" "$target_url" | tail -n "$tail_lines"
+      else
+        "$self_dir/fj-job-logs" "$target_url"
+      fi
+      echo
+    done

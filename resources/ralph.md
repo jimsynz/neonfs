@@ -4,14 +4,17 @@ You are an autonomous coding agent working on NeonFS. Each iteration picks one i
 
 ## Your Task
 
-1. Read the [Codebase Patterns wiki page](https://harton.dev/project-neon/neonfs/wiki/Codebase-Patterns) — this is institutional memory. Skim the whole thing; apply what's relevant.
-2. List open issues: `fj issue search --state open`.
-3. Pick **one** issue to work on (see selection rules below).
-4. Self-assign the issue and create a feature branch from `main`.
-5. Implement the issue. One issue per iteration — don't scope-creep into adjacent work.
-6. Run quality checks from the repo root: `mix check --no-retry`. All subprojects must pass.
-7. If you discovered a reusable pattern, update the Codebase Patterns wiki page (see below).
-8. Commit, push, and open a pull request that closes the issue.
+1. Add `resources/scripts` to `$PATH` so the `fj-*` helpers are available: `export PATH="$PWD/resources/scripts:$PATH"`.
+2. Read the [Codebase Patterns wiki page](https://harton.dev/project-neon/neonfs/wiki/Codebase-Patterns) — this is institutional memory. Skim the whole thing; apply what's relevant.
+3. Rebase any of your own still-open PRs that have fallen behind `main`: `fj-pr-rebase-stale "$(fj-whoami)"`. The script handles clean rebases automatically; PRs that hit conflicts are reported as `CONFLICT<TAB><pr#><TAB><branch>` lines on stdout — for each, attempt manual resolution per "Resolving rebase conflicts" below before moving on.
+4. List open issues: `fj issue search --state open`.
+5. Pick **one** issue to work on (see selection rules below).
+6. Self-assign the issue and create a feature branch from `main`.
+7. Implement the issue. One issue per iteration — don't scope-creep into adjacent work.
+8. Run quality checks from the repo root: `mix check --no-retry`. All subprojects must pass.
+9. If you discovered a reusable pattern, update the Codebase Patterns wiki page (see below).
+10. Commit, push, and open a pull request that closes the issue.
+11. **Drive the PR to merge in this iteration** — wait for CI, fix failures inline, squash-merge when green. Don't move on to the next iteration with a non-merged PR. See "Driving the PR to Merge" below.
 
 ## Issue Selection
 
@@ -66,15 +69,16 @@ Already-decided issues — concrete acceptance criteria, named modules, named fu
 
 ## Starting Work
 
-Once you've picked issue `#N`:
+Add the helper scripts to `$PATH` once at the top of every iteration — they replace every `curl` against the Forgejo API in this prompt:
 
 ```bash
-# Self-assign via API (fj doesn't do assignment well).
-FJ_TOKEN=$(jq -r '.hosts["harton.dev"].token' ~/.local/share/forgejo-cli/keys.json)
-ME=$(curl -s -H "Authorization: token $FJ_TOKEN" https://harton.dev/api/v1/user | jq -r .login)
-curl -s -X POST -H "Authorization: token $FJ_TOKEN" -H "Content-Type: application/json" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/issues/$N/assignees" \
-  -d "{\"assignees\":[\"$ME\"]}"
+export PATH="$PWD/resources/scripts:$PATH"
+```
+
+Then pick issue `#N`:
+
+```bash
+fj-issue-assign-self "$N"
 
 # Create a branch. Use type/N-short-slug, matching the commit type you intend to use.
 git checkout -b feat/N-short-slug main     # or fix/ improve/ docs/ chore/ etc.
@@ -129,15 +133,14 @@ Rules:
 
 ## Commit and PR
 
-Push the branch and open a PR via the Forgejo API (the `fj` CLI's PR creation is limited):
+Push the branch and open a PR with `fj-pr-create`. Pipe the body in on stdin so multi-line markdown survives without shell escaping:
 
 ```bash
-curl -s -X POST -H "Authorization: token $FJ_TOKEN" -H "Content-Type: application/json" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/pulls" \
-  -d "$(jq -n --arg title "<conventional-commit-style title>" \
-        --arg body "Closes #<N>\n\n<short summary of what changed and why>" \
-        --arg head "<branch>" \
-        '{title: $title, body: $body, head: $head, base: "main"}')"
+fj-pr-create "<branch>" "<conventional-commit-style title>" - <<EOF
+Closes #<N>
+
+<short summary of what changed and why>
+EOF
 ```
 
 The PR body **must** include `Closes #<N>` so Forgejo auto-closes the issue on merge.
@@ -182,13 +185,14 @@ If the "follow-up" is actually a direct blocker — you genuinely can't finish t
 Creating an issue:
 
 ```bash
-curl -s -X POST -H "Authorization: token $FJ_TOKEN" -H "Content-Type: application/json" \
-  "https://harton.dev/api/v1/repos/project-neon/neonfs/issues" \
-  -d "$(jq -n --arg title "..." --arg body "Found while working on #<N>. ..." \
-        '{title: $title, body: $body, labels: [128]}')"
+fj-issue-create "<title>" - 128 <<EOF      # 128 = enhancement, 126 = bug
+Found while working on #<N>.
+
+<what you found, why it matters, what "done" looks like>
+EOF
 ```
 
-Label IDs: `128` = enhancement, `126` = bug. For others: `curl -s -H "Authorization: token $FJ_TOKEN" "https://harton.dev/api/v1/repos/project-neon/neonfs/labels" | jq -r '.[] | "\(.id) \(.name)"'`.
+For other label IDs: `fj-token` then `curl -H "Authorization: token $(fj-token)" https://harton.dev/api/v1/repos/project-neon/neonfs/labels | jq -r '.[] | "\(.id) \(.name)"'`.
 
 ## Quality Requirements
 
@@ -245,6 +249,79 @@ Use a package when it genuinely covers the requirements. Build custom when the r
 
 If you find a promising package, note the comparison in the PR description so reviewers don't re-evaluate the same options.
 
+## Driving the PR to Merge
+
+Opening a PR is not the end of the iteration. The iteration is complete when the PR is merged into `main` (or when CI failure forces you to ask for help). Skipping this step is what creates a backlog of broken / conflicting PRs for the human maintainer to clean up — exactly what this loop is designed to avoid.
+
+After `fj-pr-create` returns a PR number, drive it to merge:
+
+```bash
+fj-pr-merge-when-green "$PR" --poll 60 --timeout 3600
+```
+
+The exit code tells you what happened:
+
+- **0** — merged. Iteration complete.
+- **2** — `mergeable` flipped to false (a sibling PR landed and your branch needs a rebase). Rebase per "Resolving rebase conflicts" below, force-push, then re-invoke `fj-pr-merge-when-green`.
+- **3** — one or more CI contexts failed. **Fix the failure in this same iteration** — `fj-pr-failing $PR` lists the failing contexts and `fj-job-logs-failing $PR --tail 200` dumps the logs. Push the fix to the same branch, then re-invoke `fj-pr-merge-when-green`. Do NOT open a new PR for the fix.
+- **4** — timed out. Bump `--timeout` and retry (the integration job alone takes ~6 min, full suite often 30+).
+- **5** — already closed/merged. No-op.
+
+Rules while driving CI to green:
+
+- **No new PRs for fixes.** A failing CI run is part of the original PR. Push fixes to the same branch.
+- **No `--no-verify`, no skipping tests, no `@tag :skip` to make CI pass.** If a test legitimately needs to be removed or modified, that is a code change worth its own commit message; if it's masking a real bug, fix the bug.
+- **Read the actual log before guessing.** `fj-job-logs-failing` makes this cheap. Don't reproduce locally first unless the log is genuinely insufficient.
+- **If the failure is environmental** (CI runner flake, registry timeout, infrastructure outage) and not reproducible from the diff, comment on the PR explaining and re-invoke `fj-pr-merge-when-green`. Repeated environmental failures of the same kind should result in a follow-up issue.
+- **If you genuinely cannot diagnose the failure** after reading the log, stop and leave a comment on the PR describing what you tried. Do not declare the iteration complete with a red PR.
+
+The merge itself is a squash-merge — `git_ops` parses the squash commit subject (which is the PR title) for changelog generation, so make sure that title still follows Conventional Commits when you merge.
+
+## Resolving Rebase Conflicts
+
+`fj-pr-rebase-stale` only handles trivially-clean rebases. When it reports a `CONFLICT` line, or when `fj-pr-merge-when-green` returns exit 2, **attempt the rebase yourself before giving up** — most "conflicts" between sibling PRs are mechanical (both touched the same file in different places) and trivially resolvable. The cleanup work that this loop is supposed to absorb is exactly this kind of conflict.
+
+The procedure:
+
+```bash
+git checkout <head-branch>
+git fetch origin
+git rebase origin/main
+```
+
+For each conflicted file `git status` reports:
+
+1. **Read the file.** Both `<<<<<<<` and `>>>>>>>` markers, plus the surrounding context. Don't pattern-match the markers — read the actual code on both sides.
+2. **Understand both intents.** What was main trying to do? What was your branch trying to do? `git log -p origin/main -- <file>` and `git log -p HEAD -- <file>` show the relevant history.
+3. **Combine, don't pick a side.** A typical conflict is "main added function X to module M, your branch added function Y to module M, both in the same place" — the resolution is to keep both. `--theirs` / `--ours` are last resorts and almost never the right answer here.
+4. **Edit the file** to a clean state (no markers, both intents preserved), then `git add <file>`.
+5. **Continue:** `git rebase --continue`.
+6. **Repeat** for each commit in the rebase.
+
+Once the rebase finishes:
+
+```bash
+mix check --no-retry      # verify the resolution actually compiles + tests pass
+git push --force-with-lease
+```
+
+Then re-invoke `fj-pr-merge-when-green "$PR"`.
+
+When to stop and ask for help instead of resolving:
+
+- The conflict spans more than ~3 files OR more than ~50 lines per file. That's not "two sibling PRs touched the same place" — it's a structural collision and a human should look at it.
+- Both sides changed the same logic in semantically incompatible ways (e.g. one renamed the function, the other changed the signature) and you can't tell which intent should win.
+- After resolving, `mix check --no-retry` fails in a way the diff doesn't explain. Don't push a "fix" you don't understand.
+- The conflict is in `mix.lock`, `Cargo.lock`, or other generated files — regenerate them by running `mix deps.get` / `cargo update` rather than hand-editing.
+
+In any of those cases: `git rebase --abort`, post a PR comment describing what you tried, and leave the PR for human attention. That's still a useful outcome — you've narrowed the problem, even if you didn't solve it.
+
+What NOT to do:
+
+- Do NOT resolve by deleting half the conflicting code "to make it compile". Conflict markers exist because both sides care about that line; removing one side silently drops a feature.
+- Do NOT amend conflict resolution into earlier commits. Resolve in place, let the rebase produce its natural commit chain.
+- Do NOT skip a commit with `git rebase --skip` to bypass conflicts — that drops the change entirely.
+
 ## Browser Testing (Frontend Changes)
 
 For any issue that changes UI, you MUST verify it works in the browser:
@@ -258,7 +335,12 @@ A frontend issue is NOT complete until browser verification passes.
 
 ## Stop Condition
 
-After opening your PR, check the issue list:
+The iteration is finished when **either**:
+
+- Your PR has been squash-merged into `main` (the normal happy path), **or**
+- CI has failed and you have left a diagnostic comment on the PR explaining what you tried, leaving it for human attention.
+
+After that, check whether there's any pickable work left:
 
 ```bash
 fj issue search --state open
@@ -269,6 +351,8 @@ If every remaining open issue is blocked, assigned to someone else, or depends o
 <promise>COMPLETE</promise>
 
 Otherwise end your response normally — the next iteration will pick up another issue.
+
+Do NOT declare the iteration complete with a still-open green PR. Either drive it to merge or explain why you couldn't.
 
 ## Reference
 

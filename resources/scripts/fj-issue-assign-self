@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Assign an issue to the authenticated user.
+#
+# Usage: fj-issue-assign-self <issue-number>
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+n="${1:-}"
+[ -n "$n" ] || fj_die "usage: fj-issue-assign-self <issue-number>"
+
+me=$(fj_curl GET "https://$FJ_HOST/api/v1/user" | jq -r '.login')
+[ -n "$me" ] && [ "$me" != "null" ] || fj_die "could not resolve authenticated user"
+
+jq -nc --arg me "$me" '{assignees: [$me]}' \
+  | fj_curl POST "/issues/$n/assignees" --data-binary @- > /dev/null
+
+echo "assigned #$n to $me"

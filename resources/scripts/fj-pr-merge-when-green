@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Poll a PR's CI until every required context succeeds, then squash-merge.
+#
+# Usage:
+#   fj-pr-merge-when-green <pr-number> [--timeout SECONDS] [--poll SECONDS]
+#                                       [--no-merge]
+#
+#   --timeout  Give up after N seconds (default 3600).
+#   --poll     Poll interval in seconds (default 60).
+#   --no-merge Stop at "all green", don't actually merge. Useful for the
+#              loop's "wait, then human reviews" mode.
+#
+# Exit codes:
+#   0  merged (or all-green if --no-merge)
+#   2  PR not mergeable (conflicts) — needs rebase
+#   3  one or more contexts failed
+#   4  timed out waiting for results
+#   5  PR is closed / merged already
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+n="${1:-}"
+[ -n "$n" ] || fj_die "usage: fj-pr-merge-when-green <pr-number> [--timeout S] [--poll S] [--no-merge]"
+shift
+
+timeout=3600
+poll=60
+do_merge=1
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --timeout) timeout="$2"; shift 2 ;;
+    --poll)    poll="$2";    shift 2 ;;
+    --no-merge) do_merge=0;  shift   ;;
+    *) fj_die "unknown flag: $1" ;;
+  esac
+done
+
+deadline=$(( $(date +%s) + timeout ))
+
+while :; do
+  pr=$(fj_curl GET "/pulls/$n")
+  state=$(echo "$pr" | jq -r '.state')
+  merged=$(echo "$pr" | jq -r '.merged')
+  mergeable=$(echo "$pr" | jq -r '.mergeable')
+  sha=$(echo "$pr" | jq -r '.head.sha')
+
+  if [ "$state" != "open" ] || [ "$merged" = "true" ]; then
+    echo "PR #$n is $state (merged=$merged) — nothing to do"
+    exit 5
+  fi
+
+  if [ "$mergeable" != "true" ]; then
+    echo "PR #$n is not mergeable (conflicts) — rebase needed"
+    exit 2
+  fi
+
+  statuses=$(fj_statuses "$sha")
+  total=$(echo "$statuses" | jq 'length')
+  pending=$(echo "$statuses" \
+    | jq '[.[] | select(.status == "pending")] | length')
+  failing=$(echo "$statuses" \
+    | jq '[.[] | select(.status == "failure" or .status == "error")] | length')
+  success=$(echo "$statuses" \
+    | jq '[.[] | select(.status == "success")] | length')
+
+  echo "PR #$n: $success/$total green, $pending pending, $failing failing"
+
+  if [ "$failing" -gt 0 ]; then
+    echo "$statuses" \
+      | jq -r '.[] | select(.status == "failure" or .status == "error")
+                    | "  ✗ " + .context + " — " + .description'
+    exit 3
+  fi
+
+  if [ "$pending" -eq 0 ] && [ "$total" -gt 0 ]; then
+    echo "all green"
+    if [ "$do_merge" = "1" ]; then
+      jq -nc '{Do: "squash"}' \
+        | fj_curl POST "/pulls/$n/merge" --data-binary @- > /dev/null
+      echo "merged #$n"
+    fi
+    exit 0
+  fi
+
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "timed out after ${timeout}s with $pending pending, $failing failing"
+    exit 4
+  fi
+
+  sleep "$poll"
+done

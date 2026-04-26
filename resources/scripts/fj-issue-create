@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Create an issue.
+#
+# Usage:
+#   fj-issue-create <title> <body> [label-id...]
+#
+# Body may be "-" to read from stdin (preferred for multi-line markdown —
+# avoids shell-escape pain). Label IDs are integers; common ones in this
+# repo: 128 = enhancement, 126 = bug. Run `fj-labels` to list.
+#
+# Prints the new issue number on success.
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+title="${1:-}"
+body_arg="${2:-}"
+[ -n "$title" ] && [ -n "$body_arg" ] || \
+  fj_die "usage: fj-issue-create <title> <body|-> [label-id...]"
+shift 2
+
+if [ "$body_arg" = "-" ]; then
+  body=$(cat)
+else
+  body="$body_arg"
+fi
+
+labels="[]"
+if [ "$#" -gt 0 ]; then
+  labels=$(printf '%s\n' "$@" | jq -Rn '[inputs | tonumber]')
+fi
+
+payload=$(jq -nc \
+  --arg title "$title" \
+  --arg body  "$body" \
+  --argjson labels "$labels" \
+  '{title: $title, body: $body, labels: $labels}')
+
+response=$(fj_curl POST "/issues" --data-binary "$payload")
+echo "$response" | jq -r '.number'

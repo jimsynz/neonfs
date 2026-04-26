@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Print latest CI status per context for a PR (or a raw SHA).
+#
+# Usage: fj-pr-status <pr-number-or-sha>
+#
+# Output: TAB-separated columns: status<TAB>context<TAB>description
+# Sorted by context. One line per context (latest status only).
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+ref="${1:-}"
+[ -n "$ref" ] || fj_die "usage: fj-pr-status <pr-number-or-sha>"
+
+if [[ "$ref" =~ ^[0-9]+$ ]]; then
+  sha=$(fj_pr_head_sha "$ref")
+else
+  sha="$ref"
+fi
+
+fj_statuses "$sha" \
+  | jq -r '.[] | [.status, .context, .description] | @tsv'
