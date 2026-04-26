@@ -26,6 +26,10 @@ defmodule NeonFS.CSI.NodeServer do
       pod-specific target path with the requested access mode
       (rw / ro).
     * `NodeUnpublishVolume` — unmounts the bind mount.
+    * `NodeGetVolumeStats` — reports per-mount usage (from the
+      controller-side volume stats) and a `VolumeCondition` derived
+      from a host-local probe of the staging path. A wedged FUSE mount
+      surfaces as `abnormal = true` so kubelet can reschedule pods.
 
   ## Test injection
 
@@ -65,6 +69,8 @@ defmodule NeonFS.CSI.NodeServer do
     NodeGetCapabilitiesResponse,
     NodeGetInfoRequest,
     NodeGetInfoResponse,
+    NodeGetVolumeStatsRequest,
+    NodeGetVolumeStatsResponse,
     NodePublishVolumeRequest,
     NodePublishVolumeResponse,
     NodeServiceCapability,
@@ -73,8 +79,12 @@ defmodule NeonFS.CSI.NodeServer do
     NodeUnpublishVolumeRequest,
     NodeUnpublishVolumeResponse,
     NodeUnstageVolumeRequest,
-    NodeUnstageVolumeResponse
+    NodeUnstageVolumeResponse,
+    VolumeCondition,
+    VolumeUsage
   }
+
+  alias NeonFS.CSI.VolumeHealth
 
   @staged_table :csi_node_staged
   @published_table :csi_node_published
@@ -114,7 +124,11 @@ defmodule NeonFS.CSI.NodeServer do
           NodeGetCapabilitiesResponse.t()
   def node_get_capabilities(%NodeGetCapabilitiesRequest{}, _stream) do
     %NodeGetCapabilitiesResponse{
-      capabilities: [capability(:STAGE_UNSTAGE_VOLUME)]
+      capabilities:
+        Enum.map(
+          [:STAGE_UNSTAGE_VOLUME, :GET_VOLUME_STATS, :VOLUME_CONDITION],
+          &capability/1
+        )
     }
   end
 
@@ -321,7 +335,92 @@ defmodule NeonFS.CSI.NodeServer do
     end
   end
 
+  @doc """
+  CSI `Node.NodeGetVolumeStats` — reports per-mount usage and a
+  `VolumeCondition`. The condition is derived from a host-local
+  staging-path probe via `NeonFS.CSI.VolumeHealth.node_condition/3`;
+  usage is read from the controller-side volume stats.
+
+  The CSI spec lets either `volume_path` or `staging_target_path` be
+  the probe target — kubelet usually sends the publish target. We
+  prefer it; otherwise we fall back to the staged mount path on this
+  node so unit/integration tests that exercise just the stage step
+  still get a meaningful reply.
+  """
+  @spec node_get_volume_stats(NodeGetVolumeStatsRequest.t(), term()) ::
+          NodeGetVolumeStatsResponse.t()
+  def node_get_volume_stats(%NodeGetVolumeStatsRequest{volume_id: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_id is required"
+  end
+
+  def node_get_volume_stats(%NodeGetVolumeStatsRequest{volume_path: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_path is required"
+  end
+
+  def node_get_volume_stats(
+        %NodeGetVolumeStatsRequest{
+          volume_id: vol_id,
+          volume_path: volume_path,
+          staging_target_path: staging_path
+        },
+        _stream
+      ) do
+    init_state_tables()
+
+    probe_path = preferred_probe_path(vol_id, volume_path, staging_path)
+    condition = VolumeHealth.node_condition(vol_id, probe_path)
+    usage = volume_usage(vol_id)
+
+    %NodeGetVolumeStatsResponse{
+      usage: usage,
+      volume_condition: %VolumeCondition{
+        abnormal: condition.abnormal,
+        message: condition.message
+      }
+    }
+  end
+
   ## Helpers
+
+  defp preferred_probe_path(_vol_id, volume_path, _staging) when volume_path != "",
+    do: volume_path
+
+  defp preferred_probe_path(vol_id, _volume_path, staging) do
+    case :ets.lookup(@staged_table, vol_id) do
+      [{^vol_id, %{staging_path: path}}] -> path
+      _ -> staging
+    end
+  end
+
+  defp volume_usage(vol_id) do
+    case core_call(NeonFS.Core, :get_volume, [vol_id]) do
+      {:ok, volume} ->
+        used = Map.get(volume, :logical_size, 0) || 0
+        # NeonFS volumes are not pre-sized; treat unknown total as
+        # `used` so kubelet's "available = total - used" arithmetic
+        # gives 0 rather than a misleading negative number.
+        total = used
+
+        [
+          %VolumeUsage{
+            available: max(total - used, 0),
+            total: total,
+            used: used,
+            unit: :BYTES
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp core_call(module, function, args) do
+    case Application.get_env(:neonfs_csi, :core_call_fn) do
+      nil -> NeonFS.Client.Router.call(module, function, args)
+      fun when is_function(fun, 3) -> fun.(module, function, args)
+    end
+  end
 
   defp do_stage(vol_id, staging_path) do
     with :ok <- File.mkdir_p(staging_path),
