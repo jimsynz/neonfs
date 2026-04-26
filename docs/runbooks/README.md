@@ -23,7 +23,9 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 - [Cluster upgrade](Cluster-Upgrade.md) — rolling core + interface upgrade, mid-upgrade incident handling, and the rollback decision tree (safe vs unsafe against a state-machine version bump).
 - [Key rotation](Key-Rotation.md) — scheduled-cadence and suspected-compromise key rotation for encrypted volumes, with backup-lifecycle guidance for ciphertext encrypted under the old key.
 
-_(Forthcoming — tracked in [#253](https://harton.dev/project-neon/neonfs/issues/253): DR snapshot restore.)_
+## Recovery procedures
+
+- [DR snapshot restore](DR-Snapshot-Restore.md) — rolling cluster metadata back to a known-good DR snapshot after a catastrophic metadata event. Cluster-wide and partial-restore paths, with the engineering-applied step explicitly called out where first-class tooling is missing.
 
 ## When nothing fits
 

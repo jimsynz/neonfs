@@ -525,6 +525,8 @@ Every core node's `/var/lib/neonfs` is worth backing up. Minimally:
 
 Backup strategy varies by cluster size. Small homelab clusters: stop a core node, `tar czf` its data directory, start it again. Production: arrange LVM or ZFS snapshots so the daemon never stops.
 
+For metadata-only recovery (catastrophic operator error, Ra log corruption, accidental `volume delete`), NeonFS captures periodic point-in-time DR snapshots of cluster metadata + CA material to the `_system` volume — see `neonfs dr snapshot list / show` and the [DR-Snapshot-Restore runbook](runbooks/DR-Snapshot-Restore.md). DR snapshots are not a substitute for blob-storage replication; they cover the metadata indexes, not chunk bytes.
+
 Proper incremental per-volume backups are a work-in-progress feature — see the [backup/restore issue](https://harton.dev/project-neon/neonfs/issues/248).
 
 ## Further reading
