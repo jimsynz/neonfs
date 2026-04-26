@@ -7,8 +7,16 @@ defmodule NeonFS.FUSE.MetadataCacheTest do
   @volume_id "test-volume-id"
 
   setup do
-    # Start event infrastructure needed by MetadataCache
-    start_supervised!(%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}})
+    # Start event infrastructure needed by MetadataCache. The `:pg`
+    # scope `:neonfs_events` is process-tree-global; `cluster_case`-
+    # using integration tests in `test/integration/` start it via
+    # `:pg.start/1` (no link, so it persists for the BEAM lifetime).
+    # If we're running after one of those, the scope is already up —
+    # skip the `start_supervised!` to avoid `{:already_started, _}`.
+    unless Process.whereis(:neonfs_events) do
+      start_supervised!(%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}})
+    end
+
     start_supervised!({Registry, keys: :duplicate, name: NeonFS.Events.Registry})
     start_supervised!(NeonFS.Events.Relay)
 
