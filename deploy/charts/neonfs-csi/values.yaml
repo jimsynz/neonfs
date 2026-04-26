@@ -4,10 +4,11 @@
 # CSI driver name advertised to the kubelet.
 driverName: neonfs.csi.harton.dev
 
-# NeonFS CSI plugin image. Built by #318; until then operators must set
-# their own image reference.
+# NeonFS CSI plugin image. Released via the same pipeline as the other
+# interface containers; published to ghcr.io and the project's Forgejo
+# registry on every tag.
 image:
-  repository: harton.dev/project-neon/neonfs-csi
+  repository: ghcr.io/jimsynz/neonfs/csi
   tag: ""           # empty → falls back to Chart.appVersion
   pullPolicy: IfNotPresent
 
