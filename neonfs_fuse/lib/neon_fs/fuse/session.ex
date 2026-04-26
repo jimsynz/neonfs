@@ -439,6 +439,75 @@ defmodule NeonFS.FUSE.Session do
     enqueue({:readdirplus, r.offset, r.size}, header.unique, op, state)
   end
 
+  # ——— Mutation metadata opcodes (#575) —————————————————————————————
+
+  defp handle_opcode(:setattr, header, %Request.SetAttr{} = req, state) do
+    op = {"setattr", build_setattr_params(header.nodeid, req)}
+    enqueue(:setattr, header.unique, op, state)
+  end
+
+  defp handle_opcode(:mkdir, header, %Request.Mkdir{} = req, state) do
+    op =
+      {"mkdir",
+       %{
+         "parent" => header.nodeid,
+         "name" => req.name,
+         "mode" => Bitwise.band(req.mode, Bitwise.bnot(req.umask))
+       }}
+
+    enqueue(:mkdir, header.unique, op, state)
+  end
+
+  defp handle_opcode(:unlink, header, %Request.Unlink{name: name}, state) do
+    op = {"unlink", %{"parent" => header.nodeid, "name" => name}}
+    enqueue(:unlink, header.unique, op, state)
+  end
+
+  defp handle_opcode(:rmdir, header, %Request.Rmdir{name: name}, state) do
+    op = {"rmdir", %{"parent" => header.nodeid, "name" => name}}
+    enqueue(:rmdir, header.unique, op, state)
+  end
+
+  defp handle_opcode(:rename, header, %Request.Rename{} = req, state) do
+    op =
+      {"rename",
+       %{
+         "old_parent" => header.nodeid,
+         "old_name" => req.oldname,
+         "new_parent" => req.newdir,
+         "new_name" => req.newname
+       }}
+
+    enqueue(:rename, header.unique, op, state)
+  end
+
+  # `RENAME2` (op 45) carries a `flags` field; only zero / `NOREPLACE`
+  # land on the regular rename path. NeonFS's `FileIndex` rename is
+  # already non-overwriting, so `NOREPLACE` matches the default
+  # behaviour. Anything else (`RENAME_EXCHANGE`, `WHITEOUT`,
+  # unrecognised) is `EINVAL` until the core layer grows atomic-swap
+  # support.
+  defp handle_opcode(:rename2, header, %Request.Rename2{} = req, state) do
+    if rename2_flags_supported?(req.flags) do
+      op =
+        {"rename",
+         %{
+           "old_parent" => header.nodeid,
+           "old_name" => req.oldname,
+           "new_parent" => req.newdir,
+           "new_name" => req.newname
+         }}
+
+      enqueue(:rename, header.unique, op, state)
+    else
+      write_frame(state.fd, Protocol.encode_error(header.unique, -22))
+      emit_opcode_telemetry(:rename2, :error, state)
+      state
+    end
+  end
+
+  # ——— End mutation metadata opcodes —————————————————————————————
+
   # Catch-all for opcodes we accept in the codec but don't route here
   # (write-path, xattrs, etc. — out of scope for #277).
   defp handle_opcode(_other, header, _req, state) do
@@ -511,6 +580,35 @@ defmodule NeonFS.FUSE.Session do
     state
   end
 
+  # ——— Mutation metadata reply translations (#575) —————————————————
+
+  defp handle_handler_reply(:setattr, kernel_unique, {"attr_ok", payload}, state) do
+    reply = %Response.AttrReply{
+      attr_valid: 1,
+      attr_valid_nsec: 0,
+      attr: build_attr(payload)
+    }
+
+    write_reply(state.fd, kernel_unique, reply, 0)
+    emit_opcode_telemetry(:setattr, :ok, state)
+    state
+  end
+
+  defp handle_handler_reply(:mkdir, kernel_unique, {"entry_ok", payload}, state) do
+    write_reply(state.fd, kernel_unique, build_entry(payload), 0)
+    emit_opcode_telemetry(:mkdir, :ok, state)
+    state
+  end
+
+  defp handle_handler_reply(kind, kernel_unique, {"ok", _}, state)
+       when kind in [:unlink, :rmdir, :rename] do
+    write_reply(state.fd, kernel_unique, %Response.Empty{}, 0)
+    emit_opcode_telemetry(kind, :ok, state)
+    state
+  end
+
+  # ——— End mutation metadata reply translations —————————————————
+
   defp handle_handler_reply(kind, kernel_unique, {"error", %{"errno" => errno}}, state) do
     write_frame(state.fd, Protocol.encode_error(kernel_unique, -errno))
     emit_opcode_telemetry(opcode_for_kind(kind), :error, state)
@@ -532,6 +630,62 @@ defmodule NeonFS.FUSE.Session do
   defp opcode_for_kind({:readdir, _, _}), do: :readdir
   defp opcode_for_kind({:readdirplus, _, _}), do: :readdirplus
   defp opcode_for_kind(atom) when is_atom(atom), do: atom
+
+  # FUSE `fuse_setattr_in.valid` bitmask — see Linux's `fuse.h`. We
+  # only translate fields the existing `Handler.setattr` knows about
+  # (`mode`, `uid`, `gid`, `size`, `atime`, `mtime`); ctime / lockowner
+  # are accepted on the wire but not currently propagated to core.
+  @fattr_mode 0x01
+  @fattr_uid 0x02
+  @fattr_gid 0x04
+  @fattr_size 0x08
+  @fattr_atime 0x10
+  @fattr_mtime 0x20
+  @fattr_atime_now 0x80
+  @fattr_mtime_now 0x100
+
+  defp build_setattr_params(ino, %Request.SetAttr{} = req) do
+    %{
+      "ino" => ino,
+      "mode" => maybe_field(req.valid, @fattr_mode, req.mode),
+      "uid" => maybe_field(req.valid, @fattr_uid, req.uid),
+      "gid" => maybe_field(req.valid, @fattr_gid, req.gid),
+      "size" => maybe_field(req.valid, @fattr_size, req.size),
+      "atime" => maybe_time(req.valid, @fattr_atime, @fattr_atime_now, req.atime, req.atimensec),
+      "mtime" => maybe_time(req.valid, @fattr_mtime, @fattr_mtime_now, req.mtime, req.mtimensec)
+    }
+  end
+
+  defp maybe_field(valid, bit, value) do
+    if Bitwise.band(valid, bit) != 0, do: value
+  end
+
+  defp maybe_time(valid, set_bit, now_bit, sec, nsec) do
+    cond do
+      Bitwise.band(valid, now_bit) != 0 ->
+        # The kernel asks us to use server time. Approximate with
+        # `System.os_time/1` so the timestamp matches what other
+        # NeonFS callers would write.
+        os_now = System.os_time(:nanosecond)
+        {div(os_now, 1_000_000_000), rem(os_now, 1_000_000_000)}
+
+      Bitwise.band(valid, set_bit) != 0 ->
+        {sec, nsec}
+
+      true ->
+        nil
+    end
+  end
+
+  # Linux `renameat2(2)` flag bits. We accept zero and `NOREPLACE`
+  # (the default rename behaviour); `EXCHANGE` / `WHITEOUT` / any
+  # unknown flags fall through to `EINVAL` until the core layer
+  # grows atomic-swap support.
+  @rename_noreplace 0x01
+
+  defp rename2_flags_supported?(0), do: true
+  defp rename2_flags_supported?(@rename_noreplace), do: true
+  defp rename2_flags_supported?(_), do: false
 
   defp emit_opcode_telemetry(opcode, status, state) do
     :telemetry.execute(
