@@ -18,6 +18,7 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
   defp insert_lock(table, token, opts \\ []) do
     expires_at = Keyword.get(opts, :expires_at, System.system_time(:second) + 300)
     lock_null = Keyword.get(opts, :lock_null, false)
+    namespace_claim_id = Keyword.get(opts, :namespace_claim_id)
 
     lock_info = %{
       token: token,
@@ -28,7 +29,8 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
       timeout: 300,
       expires_at: expires_at,
       file_id: "file-#{token}",
-      lock_null: lock_null
+      lock_null: lock_null,
+      namespace_claim_id: namespace_claim_id
     }
 
     :ets.insert(table, {token, lock_info})
@@ -112,6 +114,48 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
 
       assert :ets.info(@table, :size) == 1
       assert :ets.lookup(@table, "lock-null-active") != []
+    end
+
+    test "releases namespace coordinator claims on expired entries" do
+      test_pid = self()
+
+      Application.put_env(:neonfs_webdav, :namespace_coordinator_call_fn, fn function, args ->
+        send(test_pid, {:namespace_coordinator, function, args})
+        :ok
+      end)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_webdav, :namespace_coordinator_call_fn)
+      end)
+
+      insert_lock(@table, "expired-with-claim",
+        expires_at: System.system_time(:second) - 30,
+        namespace_claim_id: "ns-claim-expired"
+      )
+
+      insert_lock(@table, "active-with-claim",
+        expires_at: System.system_time(:second) + 300,
+        namespace_claim_id: "ns-claim-active"
+      )
+
+      insert_lock(@table, "expired-no-claim", expires_at: System.system_time(:second) - 30)
+
+      {:ok, pid} =
+        Cleaner.start_link(
+          name: :cleaner_claim_release_test,
+          table: @table,
+          interval_ms: 50
+        )
+
+      send(pid, :sweep)
+      :sys.get_state(pid)
+
+      assert_received {:namespace_coordinator, :release, ["ns-claim-expired"]}
+      refute_received {:namespace_coordinator, :release, ["ns-claim-active"]}
+
+      assert :ets.lookup(@table, "expired-with-claim") == []
+      assert :ets.lookup(@table, "expired-no-claim") == []
+      assert :ets.lookup(@table, "active-with-claim") != []
     end
   end
 
