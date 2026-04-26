@@ -10,7 +10,8 @@ defmodule NeonFS.Integration.DriveSpaceTest do
 
   use ExUnit.Case, async: false
 
-  alias NeonFS.Integration.{LoopbackDevice, PeerCluster}
+  alias NeonFS.Integration.PeerCluster
+  alias NeonFS.TestSupport.LoopbackDevice
 
   import NeonFS.Integration.ClusterCase
 

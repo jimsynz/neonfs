@@ -29,6 +29,7 @@ defmodule NeonFS.Integration.MixProject do
         :neonfs_docker,
         :neonfs_fuse,
         :neonfs_s3,
+        :neonfs_test_support,
         :neonfs_webdav,
         :thousand_island
       ]
@@ -53,6 +54,7 @@ defmodule NeonFS.Integration.MixProject do
       {:neonfs_docker, path: "../neonfs_docker", runtime: false},
       {:neonfs_fuse, path: "../neonfs_fuse", runtime: false},
       {:neonfs_s3, path: "../neonfs_s3", runtime: false},
+      {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},
       {:neonfs_webdav, path: "../neonfs_webdav", runtime: false},
 
       # S3 integration test client
