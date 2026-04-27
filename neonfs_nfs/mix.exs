@@ -13,6 +13,7 @@ defmodule NeonFS.NFS.MixProject do
       consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       description: @moduledoc,
+      dialyzer: dialyzer(),
       docs: docs(),
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -20,6 +21,17 @@ defmodule NeonFS.NFS.MixProject do
       releases: releases(),
       start_permanent: Mix.env() == :prod,
       version: @version
+    ]
+  end
+
+  defp dialyzer do
+    [
+      # `:neonfs_core` is a test-only transitive dep (via
+      # `:neonfs_test_support`) used by the BEAM NFSv3 read-path
+      # smoke test (#587). PLT it explicitly so dialyzer can see
+      # `NeonFS.Core.read_file_stream/3` referenced by
+      # `test/support/beam_read_test_hooks.ex`.
+      plt_add_apps: [:neonfs_core]
     ]
   end
 

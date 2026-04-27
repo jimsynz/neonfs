@@ -32,6 +32,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.NFS.{Filehandle, InodeTable}
+  alias NeonFS.NFS.IntegrationTest.BeamReadTestHooks
   alias NeonFS.TestSupport.PeerCluster
   alias NFSServer.NFSv3.{Handler, Types}
   alias NFSServer.RPC.Auth
@@ -93,7 +94,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
       PeerCluster.rpc(cluster, :node1, Application, :put_env, [
         :neonfs_nfs,
         :read_file_stream_fn,
-        &NeonFS.NFS.IntegrationTest.BeamReadTestHooks.local_read_file_stream/4
+        &BeamReadTestHooks.local_read_file_stream/4
       ])
 
     on_exit(fn ->
