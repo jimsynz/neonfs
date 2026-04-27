@@ -396,8 +396,19 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   defp read_file_stream(vol_name, path, offset, count) do
     case Application.get_env(:neonfs_nfs, :read_file_stream_fn) do
-      nil -> ChunkReader.read_file_stream(vol_name, path, offset: offset, length: count)
-      fun when is_function(fun, 4) -> fun.(vol_name, path, offset, count)
+      nil ->
+        # `ChunkReader.read_file_stream/3` returns
+        # `{:ok, %{stream: ..., file_size: ...}}`. The handler's
+        # `take_bytes/2` wants the raw `Enumerable.t()`, so unwrap.
+        # Errors propagate through unchanged so `read/5`'s caller
+        # can map them. (#588.)
+        case ChunkReader.read_file_stream(vol_name, path, offset: offset, length: count) do
+          {:ok, %{stream: stream}} -> stream
+          {:error, _} = err -> err
+        end
+
+      fun when is_function(fun, 4) ->
+        fun.(vol_name, path, offset, count)
     end
   end
 
