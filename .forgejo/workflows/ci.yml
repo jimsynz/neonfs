@@ -443,12 +443,14 @@ jobs:
             neonfs_client/_build
             neonfs_client/native/neonfs_chunker/target
             neonfs_client/priv/native
+            neonfs_core/target
+            neonfs_core/priv/native
             webdav_server/deps
             webdav_server/_build
             neonfs_webdav/deps
             neonfs_webdav/_build
-          key: v3-build-neonfs_webdav-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_webdav/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_webdav-${{ runner.arch }}-
+          key: v4-build-neonfs_webdav-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_webdav/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
+          restore-keys: v4-build-neonfs_webdav-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_webdav

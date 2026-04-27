@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.WebDAVCoreBridge do
+defmodule NeonFS.WebDAV.IntegrationTest.CoreBridge do
   @moduledoc false
 
   # Bridges WebDAV Backend `call_core` calls to real core nodes via RPC.

@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.WebDAVTest do
+defmodule NeonFS.WebDAV.IntegrationTest do
   @moduledoc """
   Integration tests for the WebDAV API against a real multi-node NeonFS cluster.
 
@@ -6,10 +6,10 @@ defmodule NeonFS.Integration.WebDAVTest do
   server running the WebDAV plug on the test runner. Uses Req as an HTTP client
   to verify end-to-end WebDAV protocol compatibility.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
-  alias NeonFS.Integration.WebDAVCoreBridge
+  alias NeonFS.WebDAV.IntegrationTest.CoreBridge, as: WebDAVCoreBridge
 
   @moduletag timeout: 180_000
   @moduletag nodes: 3
