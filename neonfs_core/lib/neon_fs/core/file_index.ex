@@ -174,6 +174,25 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  Marks a file as detached and removes its directory entry, while
+  keeping the FileMeta reachable by `file_id`.
+
+  Used by `Core.delete_file/2` when the path has live `:pinned`
+  namespace claims (open file handles). The FileMeta moves into a
+  tombstone state — `detached: true`, `pinned_claim_ids: [...]` —
+  that survives until the last pin releases. The matching directory
+  entry is removed in the same IntentLog transaction so subsequent
+  `LOOKUP` returns `:not_found`.
+
+  Idempotent: a second call on an already-detached FileMeta returns
+  the existing record without changes (#643 sub-issue of #638).
+  """
+  @spec mark_detached(file_id(), [String.t()]) :: {:ok, FileMeta.t()} | {:error, term()}
+  def mark_detached(file_id, pinned_claim_ids) when is_list(pinned_claim_ids) do
+    GenServer.call(__MODULE__, {:mark_detached, file_id, pinned_claim_ids}, 15_000)
+  end
+
+  @doc """
   Lists directory contents.
 
   Quorum reads the DirectoryEntry for the given path and returns
@@ -392,6 +411,12 @@ defmodule NeonFS.Core.FileIndex do
   @impl true
   def handle_call({:delete, file_id}, _from, state) do
     reply = do_delete(file_id, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:mark_detached, file_id, pinned_claim_ids}, _from, state) do
+    reply = do_mark_detached(file_id, pinned_claim_ids, quorum_opts())
     {:reply, reply, state}
   end
 
@@ -659,6 +684,51 @@ defmodule NeonFS.Core.FileIndex do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  ## Private — Mark detached (POSIX unlink-while-open, #643 of #638)
+
+  defp do_mark_detached(_file_id, _pinned_claim_ids, nil), do: {:error, :no_quorum}
+
+  defp do_mark_detached(file_id, pinned_claim_ids, quorum_opts) do
+    case fetch_file(file_id, quorum_opts) do
+      {:ok, %FileMeta{detached: true} = existing} ->
+        {:ok, existing}
+
+      {:ok, file} ->
+        detach_file(file, pinned_claim_ids, quorum_opts)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp detach_file(file, pinned_claim_ids, quorum_opts) do
+    {parent_path, name} = split_path(file.path)
+    detached_file = FileMeta.update(file, detached: true, pinned_claim_ids: pinned_claim_ids)
+
+    intent =
+      Intent.new(
+        id: UUIDv7.generate(),
+        operation: :file_detach,
+        conflict_key: {:file, file.id},
+        params: %{file_id: file.id, volume_id: file.volume_id, path: file.path}
+      )
+
+    with {:ok, intent_id} <- try_acquire_intent(intent),
+         :ok <- quorum_write_file(detached_file, quorum_opts),
+         :ok <- quorum_remove_dir_child(file.volume_id, parent_path, name, quorum_opts) do
+      complete_intent(intent_id)
+      :ets.insert(:file_index_by_id, {file.id, detached_file})
+
+      safe_broadcast(file.volume_id, %FileDeleted{
+        volume_id: file.volume_id,
+        file_id: file.id,
+        path: file.path
+      })
+
+      {:ok, detached_file}
     end
   end
 
@@ -1106,7 +1176,9 @@ defmodule NeonFS.Core.FileIndex do
       changed_at: file.changed_at,
       version: file.version,
       previous_version_id: file.previous_version_id,
-      hlc_timestamp: file.hlc_timestamp
+      hlc_timestamp: file.hlc_timestamp,
+      detached: file.detached,
+      pinned_claim_ids: file.pinned_claim_ids
     }
   end
 
@@ -1132,7 +1204,9 @@ defmodule NeonFS.Core.FileIndex do
       changed_at: decode_datetime(get_field(map, :changed_at)),
       version: get_field(map, :version, 1),
       previous_version_id: get_field(map, :previous_version_id),
-      hlc_timestamp: get_field(map, :hlc_timestamp)
+      hlc_timestamp: get_field(map, :hlc_timestamp),
+      detached: get_field(map, :detached, false),
+      pinned_claim_ids: get_field(map, :pinned_claim_ids, [])
     }
   end
 

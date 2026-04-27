@@ -303,6 +303,65 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
+  describe "mark_detached/2" do
+    test "marks the FileMeta as detached and records pinned_claim_ids" do
+      file = FileMeta.new("vol1", "/pinned.txt")
+      {:ok, created} = FileIndex.create(file)
+
+      pin_ids = ["ns-claim-1", "ns-claim-2"]
+
+      assert {:ok, detached} = FileIndex.mark_detached(created.id, pin_ids)
+      assert detached.detached == true
+      assert detached.pinned_claim_ids == pin_ids
+      assert detached.id == created.id
+      assert detached.version == created.version + 1
+    end
+
+    test "removes the directory entry child so path lookup goes 404",
+         %{store: store} do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/p.txt"))
+
+      dir_key = "dir:vol1:/"
+      [{^dir_key, dir_data}] = :ets.lookup(store, dir_key)
+      assert Map.has_key?(dir_data[:children], "p.txt")
+
+      {:ok, _} = FileIndex.mark_detached(created.id, ["ns-claim-1"])
+
+      [{^dir_key, updated_dir}] = :ets.lookup(store, dir_key)
+      refute Map.has_key?(updated_dir[:children], "p.txt")
+
+      # Path-based access goes 404.
+      assert {:error, :not_found} = FileIndex.get_by_path("vol1", "/p.txt")
+    end
+
+    test "file_id-based access still works on a detached file" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/keep.txt"))
+      {:ok, _} = FileIndex.mark_detached(created.id, ["ns-claim-1"])
+
+      assert {:ok, %FileMeta{detached: true, id: id}} = FileIndex.get(created.id)
+      assert id == created.id
+    end
+
+    test "is idempotent — second call returns the existing detached record" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/idem.txt"))
+
+      {:ok, first} = FileIndex.mark_detached(created.id, ["ns-claim-1"])
+      {:ok, second} = FileIndex.mark_detached(created.id, ["ns-claim-2"])
+
+      # The second call doesn't overwrite — it returns the existing
+      # detached record (caller would have to pass through purge then
+      # re-detach to change the pin id snapshot, which doesn't happen
+      # in practice).
+      assert second.id == first.id
+      assert second.version == first.version
+      assert second.pinned_claim_ids == ["ns-claim-1"]
+    end
+
+    test "returns error if file not found" do
+      assert {:error, :not_found} = FileIndex.mark_detached("nonexistent-id", [])
+    end
+  end
+
   describe "list_dir/2" do
     test "returns children of a directory" do
       {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/file1.txt"))

@@ -19,6 +19,8 @@ defmodule NeonFS.Core.FileMetaTest do
       assert meta.gid == 0
       assert meta.version == 1
       assert meta.previous_version_id == nil
+      assert meta.detached == false
+      assert meta.pinned_claim_ids == []
       assert %DateTime{} = meta.created_at
       assert %DateTime{} = meta.modified_at
       assert %DateTime{} = meta.accessed_at

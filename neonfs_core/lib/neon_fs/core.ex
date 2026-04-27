@@ -10,11 +10,14 @@ defmodule NeonFS.Core do
 
   alias NeonFS.Core.CommitChunks
   alias NeonFS.Core.FileIndex
+  alias NeonFS.Core.FileMeta
   alias NeonFS.Core.NamespaceCoordinator
   alias NeonFS.Core.ReadOperation
   alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
+
+  import Bitwise, only: [&&&: 2]
 
   # --- Credential operations ---
 
@@ -241,10 +244,54 @@ defmodule NeonFS.Core do
   def delete_file(volume_name, path) do
     with {:ok, volume} <- resolve_volume(volume_name) do
       normalized = normalize_path(path)
+      do_delete_dispatch(volume.id, normalized)
+    end
+  end
 
-      with_namespace_claim(:subtree, volume.id, normalized, fn ->
-        do_delete(volume.id, normalized)
-      end)
+  # Files take a `:shared :path` claim so an open handle's `:pinned`
+  # claim doesn't block delete — the file unlinks but keeps its
+  # chunks reachable by `file_id` until the last pin releases (POSIX
+  # unlink-while-open, #643 of #638). Concurrent renames / mkdir /
+  # rmdir on the same path still serialise because they hold
+  # `:exclusive :*`. Directories keep the historical
+  # `:exclusive :subtree` claim — no pin support for dirs.
+  #
+  # Missing paths short-circuit to `:not_found` without acquiring any
+  # claim. That keeps the historical surface intact and, importantly,
+  # doesn't block on a stranded `:pinned` claim left over from a
+  # detached file at the same path (which would otherwise turn a
+  # repeat delete into a `:busy`).
+  defp do_delete_dispatch(volume_id, path) do
+    case peek_path_type(volume_id, path) do
+      :file ->
+        with_namespace_claim(:path, :shared, volume_id, path, fn ->
+          do_delete_file(volume_id, path)
+        end)
+
+      :dir ->
+        with_namespace_claim(:subtree, volume_id, path, fn ->
+          do_delete(volume_id, path)
+        end)
+
+      :not_found ->
+        {:error, :not_found}
+    end
+  end
+
+  defp do_delete_file(volume_id, path) do
+    with {:ok, file} <- FileIndex.get_by_path(volume_id, path) do
+      delete_file_by_pin_state(file, pinned_claim_ids(volume_id, path))
+    end
+  end
+
+  defp delete_file_by_pin_state(file, []) do
+    FileIndex.delete(file.id)
+  end
+
+  defp delete_file_by_pin_state(file, [_ | _] = pin_ids) do
+    case FileIndex.mark_detached(file.id, pin_ids) do
+      {:ok, _detached} -> :ok
+      {:error, _} = err -> err
     end
   end
 
@@ -252,6 +299,27 @@ defmodule NeonFS.Core do
     with {:ok, file} <- FileIndex.get_by_path(volume_id, path) do
       FileIndex.delete(file.id)
     end
+  end
+
+  defp peek_path_type(volume_id, path) do
+    case FileIndex.get_by_path(volume_id, path) do
+      {:ok, %FileMeta{mode: mode}} ->
+        if (mode &&& 0o040000) == 0o040000, do: :dir, else: :file
+
+      _ ->
+        :not_found
+    end
+  end
+
+  defp pinned_claim_ids(volume_id, path) do
+    key = volume_scoped_path(volume_id, path)
+
+    case NamespaceCoordinator.claims_for_path(key) do
+      {:ok, claims} -> Enum.map(claims, &elem(&1, 0))
+      _ -> []
+    end
+  catch
+    :exit, _ -> []
   end
 
   @doc """
@@ -394,9 +462,21 @@ defmodule NeonFS.Core do
   # took in #301 and rename in #304.
   defp with_namespace_claim(claim_kind, volume_id, path, fun)
        when claim_kind in [:path, :subtree] do
+    with_namespace_claim(claim_kind, :exclusive, volume_id, path, fun)
+  end
+
+  # Variant taking an explicit `scope`. The file delete path uses
+  # `:shared :path` so it coexists with `:pinned` claims (open file
+  # handles) — the unlink-while-open story (#643 of #638) treats a
+  # delete on a pinned file as a tombstone-mark rather than a
+  # blocking conflict. Concurrent renames / mkdir / rmdir keep
+  # serialising because they hold `:exclusive :*`, which still
+  # conflicts with `:shared :path` on the same path.
+  defp with_namespace_claim(claim_kind, scope, volume_id, path, fun)
+       when claim_kind in [:path, :subtree] and scope in [:exclusive, :shared] do
     key = volume_scoped_path(volume_id, path)
 
-    case safe_claim(claim_kind, key) do
+    case safe_claim(claim_kind, scope, key) do
       {:ok, claim_id} ->
         try do
           fun.()
@@ -445,14 +525,14 @@ defmodule NeonFS.Core do
     end
   end
 
-  defp safe_claim(:path, key) do
-    NamespaceCoordinator.claim_path(key, :exclusive)
+  defp safe_claim(:path, scope, key) do
+    NamespaceCoordinator.claim_path(key, scope)
   catch
     :exit, _ -> {:error, :coordinator_unavailable}
   end
 
-  defp safe_claim(:subtree, key) do
-    NamespaceCoordinator.claim_subtree(key, :exclusive)
+  defp safe_claim(:subtree, scope, key) do
+    NamespaceCoordinator.claim_subtree(key, scope)
   catch
     :exit, _ -> {:error, :coordinator_unavailable}
   end

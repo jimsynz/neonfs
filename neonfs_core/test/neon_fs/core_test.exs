@@ -3,7 +3,7 @@ defmodule NeonFS.CoreTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core
-  alias NeonFS.Core.{NamespaceCoordinator, RaServer, VolumeRegistry}
+  alias NeonFS.Core.{FileIndex, NamespaceCoordinator, RaServer, VolumeRegistry}
 
   @moduletag :tmp_dir
 
@@ -310,6 +310,83 @@ defmodule NeonFS.CoreTest do
       # The subtree claim on /cleanup.txt is released, so a fresh
       # mkdir on the same path can take its own path claim.
       assert {:ok, _} = Core.mkdir(vol_name, "/cleanup.txt")
+    end
+
+    # File delete (POSIX unlink-while-open, #643 of #638) takes a
+    # `:shared :path` claim so a live `:pinned` claim on the same
+    # path doesn't block delete — instead, delete tombstones the
+    # FileMeta in-place so open handles keep working until they
+    # close.
+    test "file delete with no pins runs the full-delete path",
+         %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/full-delete.txt", ["data"])
+
+      assert :ok = Core.delete_file(vol_name, "/full-delete.txt")
+
+      assert {:error, :not_found} = Core.get_file_meta(vol_name, "/full-delete.txt")
+      assert {:error, :not_found} = FileIndex.get(id)
+    end
+
+    test "file delete with a live pin tombstones the FileMeta in place",
+         %{volume_name: vol_name, volume_id: volume_id} do
+      {:ok, %{id: file_id}} =
+        Core.write_file_streamed(vol_name, "/pinned.txt", ["data"])
+
+      key = "vol:" <> volume_id <> ":/pinned.txt"
+
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+
+      {:ok, pin_id} =
+        NamespaceCoordinator.claim_pinned_for(NamespaceCoordinator, key, holder)
+
+      try do
+        assert :ok = Core.delete_file(vol_name, "/pinned.txt")
+
+        # Path-based access goes 404.
+        assert {:error, :not_found} = Core.get_file_meta(vol_name, "/pinned.txt")
+
+        # File-id-based access still works — the FileMeta is detached.
+        assert {:ok, %{detached: true, pinned_claim_ids: pin_ids}} =
+                 FileIndex.get(file_id)
+
+        assert pin_id in pin_ids
+      after
+        # Releasing the pin doesn't auto-GC yet (#644). Manual cleanup.
+        :ok = NamespaceCoordinator.release(NamespaceCoordinator, pin_id)
+        Agent.stop(holder, :normal, 1_000)
+      end
+    end
+
+    test "file delete is idempotent on an already-detached file",
+         %{volume_name: vol_name, volume_id: volume_id} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/dup-delete.txt", ["data"])
+
+      key = "vol:" <> volume_id <> ":/dup-delete.txt"
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+      {:ok, pin_id} = NamespaceCoordinator.claim_pinned_for(NamespaceCoordinator, key, holder)
+
+      try do
+        assert :ok = Core.delete_file(vol_name, "/dup-delete.txt")
+        assert {:error, :not_found} = Core.delete_file(vol_name, "/dup-delete.txt")
+      after
+        :ok = NamespaceCoordinator.release(NamespaceCoordinator, pin_id)
+        Agent.stop(holder, :normal, 1_000)
+      end
+    end
+
+    test "concurrent exclusive path claim still blocks file delete (rename guard)",
+         %{volume_name: vol_name, volume_id: volume_id} do
+      # `:shared :path` for delete coexists with `:pinned` but still
+      # conflicts with a rename's `:exclusive :path` on the same
+      # path — the same matrix protects against partial-rename races.
+      {:ok, _} = Core.write_file_streamed(vol_name, "/guarded.txt", ["data"])
+
+      key = "vol:" <> volume_id <> ":/guarded.txt"
+
+      {:ok, _claim} =
+        NamespaceCoordinator.claim_path(NamespaceCoordinator, key, :exclusive)
+
+      assert {:error, :busy} = Core.delete_file(vol_name, "/guarded.txt")
     end
   end
 
