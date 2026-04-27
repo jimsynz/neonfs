@@ -281,6 +281,25 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Truncates a file to `new_size` and optionally applies additional
+  metadata updates in the same write. Trims chunks / stripes when
+  shrinking; sparse-extends when growing (no zero-filled chunks
+  allocated). See `NeonFS.Core.FileIndex.truncate/3`.
+
+  Used by NFSv3 SETATTR (#621) when the `size` field is set —
+  combining truncate with mode/uid/gid/atime/mtime updates lets the
+  whole sattr3 mutation land in a single FileIndex write.
+  """
+  @spec truncate_file(String.t(), String.t(), non_neg_integer(), keyword()) ::
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, :not_found | term()}
+  def truncate_file(volume_name, path, new_size, additional_updates \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, file} <- FileIndex.get_by_path(volume.id, normalize_path(path)) do
+      FileIndex.truncate(file.id, new_size, additional_updates)
+    end
+  end
+
+  @doc """
   Lists all descendant files under a directory prefix within a volume.
 
   Returns all `FileMeta` records whose paths start with `dir_path`,

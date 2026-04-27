@@ -9,6 +9,7 @@ defmodule NFSServer.NFSv3.Handler do
   |------|-------------|
   | 0    | NULL        |
   | 1    | GETATTR     |
+  | 2    | SETATTR     |
   | 3    | LOOKUP      |
   | 4    | ACCESS      |
   | 5    | READLINK    |
@@ -19,8 +20,8 @@ defmodule NFSServer.NFSv3.Handler do
   | 19   | FSINFO      |
   | 20   | PATHCONF    |
 
-  The write-path procedures (proc 2, 7–15, #285) ship in a separate
-  sub-issue.
+  The remaining write-path procedures (procs 7–15, 21) ship in
+  separate sub-issues under the #285 tracking issue.
 
   ## READ streaming
 
@@ -95,6 +96,7 @@ defmodule NFSServer.NFSv3.Handler do
 
   @proc_null 0
   @proc_getattr 1
+  @proc_setattr 2
   @proc_lookup 3
   @proc_access 4
   @proc_readlink 5
@@ -175,6 +177,13 @@ defmodule NFSServer.NFSv3.Handler do
 
   def handle_call(@proc_getattr, args, auth, ctx) do
     with_fhandle(args, &do_getattr(&1, auth, ctx))
+  end
+
+  def handle_call(@proc_setattr, args, auth, ctx) do
+    case decode_setattr_args(args) do
+      {:ok, fh, sattr, guard} -> do_setattr(fh, sattr, guard, auth, ctx)
+      :error -> :garbage_args
+    end
   end
 
   def handle_call(@proc_lookup, args, auth, ctx) do
@@ -261,6 +270,19 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  # SETATTR args: `fhandle3 + sattr3 + sattrguard3`. `sattrguard3` is
+  # an XDR-optional `nfstime3` — RFC 1813 §3.3.2's "guarded SETATTR"
+  # check pre-op `ctime` matches `obj_ctime`.
+  defp decode_setattr_args(args) do
+    with {:ok, fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, sattr, rest} <- Types.decode_sattr3(rest),
+         {:ok, guard, _rest} <- XDR.decode_optional(rest, &Types.decode_nfstime3/1) do
+      {:ok, fh, sattr, guard}
+    else
+      {:error, _} -> :error
+    end
+  end
+
   defp decode_readdir_args(args) do
     with {:ok, fh, rest} <- Types.decode_fhandle3(args),
          {:ok, cookie, rest} <- XDR.decode_uhyper(rest),
@@ -295,6 +317,22 @@ defmodule NFSServer.NFSv3.Handler do
 
       {:error, status} ->
         {:ok, Types.encode_nfsstat3(status)}
+    end
+  end
+
+  defp do_setattr(fh, sattr, guard, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.setattr(fh, sattr, guard, auth, ctx) do
+      {:ok, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(:ok) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
     end
   end
 

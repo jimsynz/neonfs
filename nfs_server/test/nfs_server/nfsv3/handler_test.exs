@@ -67,6 +67,77 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  # SETATTR is the foundation slice of #285 (#621). It exercises the
+  # `wcc_data` envelope every other mutation procedure shares — the
+  # handler dispatches based on the `sattrguard3` precondition, the
+  # backend returns either `{:ok, wcc_data}` or `{:error, status,
+  # wcc_data}`, and both arms encode `wcc_data` on the wire.
+  describe "SETATTR (proc 2)" do
+    test "returns NFS3_OK + wcc_data on success" do
+      fh = "fh-setattr"
+      sattr = %Types.Sattr3{mode: 0o600}
+
+      pre = %Types.WccAttr{
+        size: 100,
+        mtime: %Nfstime3{seconds: 1, nseconds: 0},
+        ctime: %Nfstime3{seconds: 2, nseconds: 0}
+      }
+
+      post = MockBackend.sample_fattr3()
+      wcc = %Types.WccData{before: pre, after: post}
+
+      MockBackend.put({:setattr, {fh, sattr, nil}}, {:ok, wcc})
+
+      args = setattr_args(fh, sattr, nil)
+      {:ok, body} = Handler.handle_call(2, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns NFS3ERR_NOT_SYNC + wcc_data when guard ctime mismatches" do
+      fh = "fh-guarded"
+      sattr = %Types.Sattr3{mode: 0o644}
+      guard = %Nfstime3{seconds: 7, nseconds: 0}
+
+      pre = %Types.WccAttr{
+        size: 0,
+        mtime: %Nfstime3{seconds: 1, nseconds: 0},
+        ctime: %Nfstime3{seconds: 9, nseconds: 0}
+      }
+
+      post = MockBackend.sample_fattr3()
+      wcc = %Types.WccData{before: pre, after: post}
+
+      MockBackend.put({:setattr, {fh, sattr, guard}}, {:error, :not_sync, wcc})
+
+      args = setattr_args(fh, sattr, guard)
+      {:ok, body} = Handler.handle_call(2, args, @auth, @ctx_base)
+
+      assert {:ok, :not_sync, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns NFS3ERR_STALE + empty wcc_data when the backend can't resolve" do
+      fh = "missing"
+      sattr = %Types.Sattr3{}
+
+      MockBackend.put({:setattr, {fh, sattr, nil}}, {:error, :stale})
+
+      args = setattr_args(fh, sattr, nil)
+      {:ok, body} = Handler.handle_call(2, args, @auth, @ctx_base)
+
+      assert {:ok, :stale, rest} = Types.decode_nfsstat3(body)
+
+      empty = %Types.WccData{before: nil, after: nil}
+      assert {:ok, ^empty, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(2, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
   describe "LOOKUP (proc 3)" do
     test "returns the file handle plus both post-op attrs on success" do
       dir = "dir"
@@ -657,6 +728,12 @@ defmodule NFSServer.NFSv3.HandlerTest do
 
   defp read_args(fh, offset, count) do
     Types.encode_fhandle3(fh) <> XDR.encode_uhyper(offset) <> XDR.encode_uint(count)
+  end
+
+  defp setattr_args(fh, sattr, guard_ctime) do
+    Types.encode_fhandle3(fh) <>
+      Types.encode_sattr3(sattr) <>
+      XDR.encode_optional(guard_ctime, &Types.encode_nfstime3/1)
   end
 
   # Skip past status (4) + post_op_attr-empty (4) + count (4) + eof (4)

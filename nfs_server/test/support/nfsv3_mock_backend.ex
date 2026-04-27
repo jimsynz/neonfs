@@ -52,6 +52,9 @@ defmodule NFSServer.NFSv3.MockBackend do
   @impl true
   def pathconf(fh, _auth, _ctx), do: fetch({:pathconf, fh})
 
+  @impl true
+  def setattr(fh, sattr, guard, _auth, _ctx), do: fetch({:setattr, {fh, sattr, guard}})
+
   @doc "A simple `Fattr3` fixture for tests that don't care about the values."
   def sample_fattr3 do
     %Types.Fattr3{

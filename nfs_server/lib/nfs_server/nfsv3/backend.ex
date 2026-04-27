@@ -17,13 +17,12 @@ defmodule NFSServer.NFSv3.Backend do
   backend can return `{:error, nfsstat3, post_op_attr}` for a richer
   error reply (see individual callbacks).
 
-  ## Read-path-only
+  ## Mutation callbacks land incrementally
 
-  This sub-issue (#529) defines callbacks for the read-path
-  procedures. Mutation procedures (CREATE, MKDIR, REMOVE, RENAME,
-  WRITE, COMMIT, …) live in #285 and a future write-path Backend
-  extension. Splitting the contracts now would force the read-path
-  PR to invent shapes for callbacks it can't validate.
+  Read-path callbacks landed in #529. Mutation procedures (#285)
+  ship as separate slices and extend this behaviour one at a time —
+  starting with `c:setattr/5` (#621). Subsequent slices add CREATE,
+  MKDIR, REMOVE, RENAME, WRITE, COMMIT, etc.
 
   ## ctx
 
@@ -222,4 +221,32 @@ defmodule NFSServer.NFSv3.Backend do
   @callback pathconf(Types.fhandle3(), Auth.credential(), ctx()) ::
               {:ok, pathconf_reply(), Types.Fattr3.t() | nil}
               | {:error, Types.nfsstat3(), Types.Fattr3.t() | nil}
+
+  # ——— Mutation callbacks ————————————————————————————————————
+
+  @doc """
+  SETATTR — RFC 1813 §3.3.2. Apply the requested `sattr3` fields
+  (any field set to `nil` means "leave unchanged"; `:atime` /
+  `:mtime` carry RFC 1813's `time_set` semantics —
+  `:set_to_server_time` or `{:client, %Nfstime3{}}`).
+
+  When `guard_ctime` is non-nil, the backend MUST compare it to the
+  file's current `ctime` and return `{:error, :not_sync, wcc}` if
+  they differ — RFC 1813 §3.3.2's "guarded SETATTR" precondition.
+
+  Reply carries `wcc_data` (`pre_op` `wcc_attr` + `post_op` `fattr3`)
+  on both success and failure so the client can refresh its
+  close-to-open cache. Backends that cannot supply pre- or post-op
+  attrs may pass `nil` for either side.
+  """
+  @callback setattr(
+              Types.fhandle3(),
+              Types.Sattr3.t(),
+              guard_ctime :: Types.Nfstime3.t() | nil,
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
 end
