@@ -566,6 +566,8 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
             neonfs_integration/deps
             neonfs_integration/_build
             neonfs_integration/target
@@ -574,8 +576,8 @@ jobs:
             neonfs_core/priv/native
             neonfs_fuse/target
             neonfs_fuse/priv/native
-          key: v3-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_fuse/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_integration-${{ runner.arch }}-
+          key: v4-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_fuse/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
+          restore-keys: v4-build-neonfs_integration-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_integration
