@@ -74,6 +74,10 @@ defmodule NFSServer.NFSv3.MockBackend do
   @impl true
   def commit(fh, offset, count, _auth, _ctx), do: fetch({:commit, {fh, offset, count}})
 
+  @impl true
+  def rename(from_dir, from_name, to_dir, to_name, _auth, _ctx),
+    do: fetch({:rename, {from_dir, from_name, to_dir, to_name}})
+
   @doc "A simple `Fattr3` fixture for tests that don't care about the values."
   def sample_fattr3 do
     %Types.Fattr3{

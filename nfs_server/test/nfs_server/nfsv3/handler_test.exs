@@ -483,6 +483,77 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  # RENAME (proc 14) carries dual `wcc_data` — one for each parent
+  # directory — so clients can refresh both caches. The
+  # NeonFS-side cycle / cross-node atomicity story lives in the
+  # backend (#304's `claim_rename`).
+  describe "RENAME (proc 14)" do
+    test "returns NFS3_OK + dual wcc_data on success" do
+      from_dir = "from-dir"
+      from_name = "old.txt"
+      to_dir = "to-dir"
+      to_name = "new.txt"
+
+      from_wcc = %Types.WccData{before: nil, after: nil}
+      to_wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put(
+        {:rename, {from_dir, from_name, to_dir, to_name}},
+        {:ok, from_wcc, to_wcc}
+      )
+
+      args =
+        Types.encode_diropargs3({from_dir, from_name}) <>
+          Types.encode_diropargs3({to_dir, to_name})
+
+      {:ok, body} = Handler.handle_call(14, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^from_wcc, rest} = Types.decode_wcc_data(rest)
+      assert {:ok, ^to_wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns NFS3ERR_INVAL + dual wcc_data on cycle" do
+      # Backend rejected the rename for cycle reasons (rename(/a, /a/b)).
+      from_wcc = %Types.WccData{before: nil, after: nil}
+      to_wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put(
+        {:rename, {"a", "a", "a", "b"}},
+        {:error, :inval, from_wcc, to_wcc}
+      )
+
+      args =
+        Types.encode_diropargs3({"a", "a"}) <>
+          Types.encode_diropargs3({"a", "b"})
+
+      {:ok, body} = Handler.handle_call(14, args, @auth, @ctx_base)
+
+      assert {:ok, :inval, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^from_wcc, rest} = Types.decode_wcc_data(rest)
+      assert {:ok, ^to_wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns NFS3ERR_NOENT + empty dual wcc when source doesn't exist" do
+      MockBackend.put({:rename, {"d", "missing", "d", "new"}}, {:error, :noent})
+
+      args =
+        Types.encode_diropargs3({"d", "missing"}) <>
+          Types.encode_diropargs3({"d", "new"})
+
+      {:ok, body} = Handler.handle_call(14, args, @auth, @ctx_base)
+
+      assert {:ok, :noent, rest} = Types.decode_nfsstat3(body)
+      empty = %Types.WccData{before: nil, after: nil}
+      assert {:ok, ^empty, rest} = Types.decode_wcc_data(rest)
+      assert {:ok, ^empty, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(14, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
   describe "LOOKUP (proc 3)" do
     test "returns the file handle plus both post-op attrs on success" do
       dir = "dir"

@@ -356,6 +356,29 @@ defmodule NFSServer.NFSv3.Backend do
               | {:error, Types.nfsstat3()}
 
   @doc """
+  RENAME — RFC 1813 §3.3.14. Cross-directory rename. The reply
+  carries `wcc_data` for **both** parent directories (`fromdir_wcc`
+  and `todir_wcc`) so the client can refresh the parent caches on
+  either side.
+
+  Backends that fence cross-node renames atomically (NeonFS does so
+  via `NeonFS.Core.NamespaceCoordinator.claim_rename/3`, #304)
+  return `NFS3ERR_INVAL` for cycles like `rename(/a, /a/b)` and
+  `NFS3ERR_NOTEMPTY` if the destination is a non-empty directory.
+  """
+  @callback rename(
+              from_dir :: Types.fhandle3(),
+              from_name :: Types.filename3(),
+              to_dir :: Types.fhandle3(),
+              to_name :: Types.filename3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.WccData.t(), Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
+
+  @doc """
   COMMIT — RFC 1813 §3.3.21. Flush any unstable writes covering
   `[offset, offset+count)` to stable storage. Returns the
   parent file's `wcc_data` plus the per-instance `writeverf3` —

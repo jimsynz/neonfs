@@ -19,6 +19,7 @@ defmodule NFSServer.NFSv3.Handler do
   | 9    | MKDIR       |
   | 12   | REMOVE      |
   | 13   | RMDIR       |
+  | 14   | RENAME      |
   | 16   | READDIR     |
   | 17   | READDIRPLUS |
   | 18   | FSSTAT      |
@@ -26,8 +27,8 @@ defmodule NFSServer.NFSv3.Handler do
   | 20   | PATHCONF    |
   | 21   | COMMIT      |
 
-  The remaining write-path procedures (procs 10, 11, 14, 15) ship
-  in separate sub-issues under the #285 tracking issue.
+  The remaining write-path procedures (procs 10, 11, 15) ship in
+  separate sub-issues under the #285 tracking issue.
 
   ## READ streaming
 
@@ -112,6 +113,7 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_mkdir 9
   @proc_remove 12
   @proc_rmdir 13
+  @proc_rename 14
   @proc_readdir 16
   @proc_readdirplus 17
   @proc_fsstat 18
@@ -251,6 +253,16 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  def handle_call(@proc_rename, args, auth, ctx) do
+    case decode_rename_args(args) do
+      {:ok, from_dir, from_name, to_dir, to_name} ->
+        do_rename(from_dir, from_name, to_dir, to_name, auth, ctx)
+
+      :error ->
+        :garbage_args
+    end
+  end
+
   def handle_call(@proc_write, args, auth, ctx) do
     case decode_write_args(args) do
       {:ok, fh, offset, data, stable} -> do_write(fh, offset, data, stable, auth, ctx)
@@ -357,6 +369,16 @@ defmodule NFSServer.NFSv3.Handler do
          {:ok, offset, rest} <- XDR.decode_uhyper(rest),
          {:ok, count, _rest} <- XDR.decode_uint(rest) do
       {:ok, fh, offset, count}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  # RENAME args: `diropargs3 + diropargs3` (RFC 1813 §3.3.14).
+  defp decode_rename_args(args) do
+    with {:ok, {from_dir, from_name}, rest} <- Types.decode_diropargs3(args),
+         {:ok, {to_dir, to_name}, _rest} <- Types.decode_diropargs3(rest) do
+      {:ok, from_dir, from_name, to_dir, to_name}
     else
       {:error, _} -> :error
     end
@@ -479,6 +501,32 @@ defmodule NFSServer.NFSv3.Handler do
       {:error, status} ->
         empty = %Types.WccData{before: nil, after: nil}
         {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
+    end
+  end
+
+  defp do_rename(from_dir, from_name, to_dir, to_name, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.rename(from_dir, from_name, to_dir, to_name, auth, ctx) do
+      {:ok, %Types.WccData{} = from_wcc, %Types.WccData{} = to_wcc} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_wcc_data(from_wcc) <>
+           Types.encode_wcc_data(to_wcc)}
+
+      {:error, status, %Types.WccData{} = from_wcc, %Types.WccData{} = to_wcc} ->
+        {:ok,
+         Types.encode_nfsstat3(status) <>
+           Types.encode_wcc_data(from_wcc) <>
+           Types.encode_wcc_data(to_wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+
+        {:ok,
+         Types.encode_nfsstat3(status) <>
+           Types.encode_wcc_data(empty) <>
+           Types.encode_wcc_data(empty)}
     end
   end
 
