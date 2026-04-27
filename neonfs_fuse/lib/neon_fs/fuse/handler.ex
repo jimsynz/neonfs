@@ -289,16 +289,25 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # Handle create operation: create a new file
+  # Handle create operation: create a new file.
+  #
+  # FUSE's `create()` is invoked for both `O_CREAT` and `O_CREAT |
+  # O_EXCL`. The `O_EXCL` bit means "fail if the target already exists"
+  # and must be atomic across nodes — sub-issue #594 of #303 routes
+  # this through `WriteOperation`'s `create_only: true` (#592), which
+  # in turn uses the namespace coordinator's `claim_create` primitive
+  # (#591).
   defp handle_operation({"create", params}, state) do
     parent = params["parent"]
     name = params["name"]
     file_mode = create_mode(params["mode"], @s_ifreg, @default_mode)
+    flags = Map.get(params, "flags", 0)
+    write_opts = create_write_opts(file_mode, flags)
 
     with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
          :ok <- check_file_permission(volume_id, parent_path, :write, state),
          child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <- create_empty_file(volume_id, child_path, mode: file_mode),
+         {:ok, _file} <- create_empty_file(volume_id, child_path, write_opts),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       # Allocate file handle (for now, just use inode as handle)
       fh = inode
@@ -310,6 +319,9 @@ defmodule NeonFS.FUSE.Handler do
 
       {:error, %{class: :forbidden}} ->
         {"error", %{"errno" => errno(:eacces)}}
+
+      {:error, :exists} ->
+        {"error", %{"errno" => errno(:eexist)}}
 
       {:error, reason} ->
         Logger.warning("Create failed", reason: inspect(reason))
@@ -879,6 +891,25 @@ defmodule NeonFS.FUSE.Handler do
     core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume_id, path, 0, <<>>, opts])
   end
 
+  # Linux `O_EXCL` — same value across glibc / musl / kernel headers.
+  @o_excl 0x80
+
+  # Translate the FUSE-level mode + open flags into the keyword opts
+  # `WriteOperation.write_file_at/5` expects. `O_EXCL` (always paired
+  # with `O_CREAT` on the FUSE create() path) routes through
+  # `claim_create` for cross-node atomicity.
+  defp create_write_opts(file_mode, flags) when is_integer(flags) do
+    base = [mode: file_mode]
+
+    if band(flags, @o_excl) != 0 do
+      [{:create_only, true} | base]
+    else
+      base
+    end
+  end
+
+  defp create_write_opts(file_mode, _flags), do: [mode: file_mode]
+
   # Convert a DateTime to a POSIX timestamp (seconds since epoch)
   defp datetime_to_unix(%DateTime{} = dt), do: DateTime.to_unix(dt)
   defp datetime_to_unix(_), do: 0
@@ -888,6 +919,7 @@ defmodule NeonFS.FUSE.Handler do
   defp errno(:enoent), do: 2
   defp errno(:eio), do: 5
   defp errno(:eacces), do: 13
+  defp errno(:eexist), do: 17
   defp errno(:exdev), do: 18
   defp errno(:enotempty), do: 39
   defp errno(:enosys), do: 38
