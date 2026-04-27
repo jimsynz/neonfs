@@ -66,7 +66,7 @@ defmodule NeonFS.Docker.PlugTest do
   describe "POST /VolumeDriver.Create" do
     test "records the volume locally and returns empty Err", %{store: store, tracker: tracker} do
       conn =
-        post("/VolumeDriver.Create", %{"Name" => "vol-a", "Opts" => %{"replication" => "2"}},
+        post("/VolumeDriver.Create", %{"Name" => "vol-a", "Opts" => %{"durability" => "2"}},
           store: store,
           tracker: tracker
         )
@@ -74,11 +74,13 @@ defmodule NeonFS.Docker.PlugTest do
       assert conn.status == 200
       assert decode(conn) == %{"Err" => ""}
 
-      assert {:ok, %{name: "vol-a", opts: %{"replication" => "2"}}} =
+      # The local store keeps the raw `-o` map verbatim so
+      # `docker volume inspect` round-trips it.
+      assert {:ok, %{name: "vol-a", opts: %{"durability" => "2"}}} =
                VolumeStore.get(store, "vol-a")
     end
 
-    test "propagates to core via core_create_fn", %{store: store, tracker: tracker} do
+    test "propagates a parsed kw list to core_create_fn", %{store: store, tracker: tracker} do
       parent = self()
 
       fun = fn name, opts ->
@@ -87,15 +89,78 @@ defmodule NeonFS.Docker.PlugTest do
       end
 
       conn =
-        post("/VolumeDriver.Create", %{"Name" => "vol-b", "Opts" => %{"k" => "v"}},
+        post(
+          "/VolumeDriver.Create",
+          %{
+            "Name" => "vol-b",
+            "Opts" => %{"owner" => "alice", "atime_mode" => "relatime"}
+          },
           store: store,
           tracker: tracker,
           core_create_fn: fun
         )
 
       assert conn.status == 200
-      assert_received {:core_create_called, "vol-b", %{"k" => "v"}}
       assert decode(conn) == %{"Err" => ""}
+
+      # `core_create_fn` now receives the typed kw list — strings have
+      # been coerced (atime_mode → atom). #583.
+      assert_received {:core_create_called, "vol-b", parsed}
+      assert Keyword.get(parsed, :owner) == "alice"
+      assert Keyword.get(parsed, :atime_mode) == :relatime
+    end
+
+    test "rejects unknown opts with an Err", %{store: store, tracker: tracker} do
+      conn =
+        post("/VolumeDriver.Create", %{"Name" => "vol-x", "Opts" => %{"bogus" => "1"}},
+          store: store,
+          tracker: tracker
+        )
+
+      assert conn.status == 200
+      assert %{"Err" => err} = decode(conn)
+      assert err =~ "unknown docker volume opt: bogus"
+
+      # Volume must NOT have been recorded locally.
+      assert {:error, :not_found} = VolumeStore.get(store, "vol-x")
+    end
+
+    test "rejects malformed values with an Err", %{store: store, tracker: tracker} do
+      conn =
+        post(
+          "/VolumeDriver.Create",
+          %{"Name" => "vol-y", "Opts" => %{"io_weight" => "not-an-int"}},
+          store: store,
+          tracker: tracker
+        )
+
+      assert conn.status == 200
+      assert %{"Err" => err} = decode(conn)
+      assert err =~ "io_weight must be a positive integer"
+      assert {:error, :not_found} = VolumeStore.get(store, "vol-y")
+    end
+
+    test "durability=N translates to a replicated config map", %{store: store, tracker: tracker} do
+      parent = self()
+
+      fun = fn _name, opts ->
+        send(parent, {:opts, opts})
+        :ok
+      end
+
+      conn =
+        post("/VolumeDriver.Create", %{"Name" => "vol-z", "Opts" => %{"durability" => "5"}},
+          store: store,
+          tracker: tracker,
+          core_create_fn: fun
+        )
+
+      assert conn.status == 200
+      assert decode(conn) == %{"Err" => ""}
+
+      assert_received {:opts, opts}
+      # ⌈5/2⌉ = 3 → majority quorum.
+      assert Keyword.get(opts, :durability) == %{type: :replicate, factor: 5, min_copies: 3}
     end
 
     test "reports core create failure in Err", %{store: store, tracker: tracker} do
