@@ -81,6 +81,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
              holder :: term()}
           | {:claim_namespace_rename, src :: String.t(), dst :: String.t(), holder :: term()}
           | {:claim_namespace_create, path :: String.t(), holder :: term()}
+          | {:claim_namespace_pinned, path :: String.t(), holder :: term()}
           | {:release_namespace_claim, claim_id :: String.t()}
           | {:release_namespace_claims_for_holder, holder :: term()}
 
@@ -98,7 +99,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @type namespace_scope :: :exclusive | :shared
 
   @typedoc """
-  A namespace claim. Three claim types are supported:
+  A namespace claim. Four claim types are supported:
 
     * `:path` — covers a single path.
     * `:subtree` — covers a path and all its descendants.
@@ -108,6 +109,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
       path return `{:error, :exists}` (rather than the generic
       `:conflict`) so callers can map directly to `EEXIST` /
       `PreconditionFailed` / `AlreadyExists` at the protocol layer.
+    * `:pinned` — shared "this path has open handles" marker for
+      handle-pinned files (sub-issue #637 of #306). Multiple pins on
+      the same path coexist (each open `fd` is a separate pin); a pin
+      conflicts with any covering `:exclusive` claim the same way
+      `:shared` does. Holder lifetime ties pin lifetime: when the
+      holder pid dies the coordinator's `:DOWN` handler releases the
+      pin via the standard bulk-release path.
 
   Holders are opaque terms (typically a pid in production; arbitrary
   test fixtures otherwise) — the state machine treats them as black
@@ -116,7 +124,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @type namespace_claim :: %{
           path: String.t(),
           scope: namespace_scope(),
-          type: :path | :subtree | :create,
+          type: :path | :subtree | :create | :pinned,
           holder: term()
         }
 
@@ -272,6 +280,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
     state
     |> Map.get(:namespace_claims, %{})
     |> Enum.filter(fn {_id, %{path: p}} -> String.starts_with?(p, prefix) end)
+    |> Enum.sort_by(fn {id, _claim} -> id end)
+  end
+
+  @doc """
+  Returns every namespace claim at exactly `path` whose type matches
+  `type`. Used by the unlink-while-open path (#306) to ask "is this
+  file pinned by any open handle anywhere in the cluster?". Sorted by
+  claim id so iteration order is stable across calls.
+  """
+  @spec list_namespace_claims_at(state(), String.t(), :path | :subtree | :create | :pinned) ::
+          [{String.t(), namespace_claim()}]
+  def list_namespace_claims_at(state, path, type)
+      when is_binary(path) and type in [:path, :subtree, :create, :pinned] do
+    state
+    |> Map.get(:namespace_claims, %{})
+    |> Enum.filter(fn {_id, %{path: p, type: t}} -> p == path and t == type end)
     |> Enum.sort_by(fn {id, _claim} -> id end)
   end
 
@@ -1206,6 +1230,17 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  # Foundation primitive for handle-pinned files (sub-issue #637 of
+  # #306). Allocates a `:shared :pinned` claim. Multiple pins on the
+  # same path coexist — each open `fd` is a separate pin. A pin only
+  # fails when a covering `:exclusive` claim already exists (e.g. an
+  # in-flight rename on the same path or a `Depth: infinity`
+  # collection lock).
+  def apply(_meta, {:claim_namespace_pinned, path, holder}, state) when is_binary(path) do
+    state = ensure_namespace(state)
+    apply_namespace_claim(:pinned, path, :shared, holder, state)
+  end
+
   def apply(_meta, {:release_namespace_claim, claim_id}, state) when is_binary(claim_id) do
     state = ensure_namespace(state)
     {released, claims} = Map.pop(state.namespace_claims, claim_id)
@@ -1731,6 +1766,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp overlaps?(:path, a, :create, b), do: a == b
   defp overlaps?(:create, p, :subtree, root), do: in_subtree?(p, root)
   defp overlaps?(:subtree, root, :create, p), do: in_subtree?(p, root)
+
+  # `:pinned` claims occupy a single path, identical to `:path` for
+  # purposes of overlap detection. The conflict matrix relies on
+  # `scopes_conflict?/2` — pins are `:shared` so two pins coexist, but
+  # any covering `:exclusive` claim conflicts.
+  defp overlaps?(:pinned, a, :pinned, b), do: a == b
+  defp overlaps?(:pinned, a, :path, b), do: a == b
+  defp overlaps?(:path, a, :pinned, b), do: a == b
+  defp overlaps?(:pinned, a, :create, b), do: a == b
+  defp overlaps?(:create, a, :pinned, b), do: a == b
+  defp overlaps?(:pinned, p, :subtree, root), do: in_subtree?(p, root)
+  defp overlaps?(:subtree, root, :pinned, p), do: in_subtree?(p, root)
 
   defp scopes_conflict?(:exclusive, _), do: true
   defp scopes_conflict?(_, :exclusive), do: true

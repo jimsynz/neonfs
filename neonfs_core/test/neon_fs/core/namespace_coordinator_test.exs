@@ -307,6 +307,134 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
+  # `claim_pinned/2` is the namespace-coordinator primitive for handle-
+  # pinned files — sub-issue #637 of #306 (POSIX unlink-while-open).
+  # Multiple pins on the same path coexist (each open `fd` is a
+  # separate pin); a pin only conflicts with a covering `:exclusive`
+  # claim. Holder lifetime ties pin lifetime, so a crashed FUSE peer
+  # can't leak pins and block subsequent metadata reclamation.
+  describe "claim_pinned/2" do
+    test "returns a claim id on first pin", %{server: server} do
+      assert {:ok, "ns-claim-" <> _} = NamespaceCoordinator.claim_pinned(server, "/open")
+    end
+
+    test "two pins on the same path coexist", %{server: server} do
+      {:ok, holder_a} = Agent.start_link(fn -> nil end)
+      {:ok, holder_b} = Agent.start_link(fn -> nil end)
+
+      assert {:ok, id_a} = NamespaceCoordinator.claim_pinned_for(server, "/coexist", holder_a)
+      assert {:ok, id_b} = NamespaceCoordinator.claim_pinned_for(server, "/coexist", holder_b)
+      assert id_a != id_b
+
+      assert {:ok, claims} = NamespaceCoordinator.claims_for_path(server, "/coexist")
+      assert length(claims) == 2
+    end
+
+    test "pin conflicts with a covering exclusive subtree claim",
+         %{server: server} do
+      assert {:ok, sub} = NamespaceCoordinator.claim_subtree(server, "/locked", :exclusive)
+
+      assert {:error, :conflict, ^sub} =
+               NamespaceCoordinator.claim_pinned(server, "/locked/file")
+    end
+
+    test "pin conflicts with an exclusive path claim on the same path",
+         %{server: server} do
+      assert {:ok, blocker} = NamespaceCoordinator.claim_path(server, "/blocked", :exclusive)
+
+      assert {:error, :conflict, ^blocker} =
+               NamespaceCoordinator.claim_pinned(server, "/blocked")
+    end
+
+    test "pin coexists with a shared path claim on the same path",
+         %{server: server} do
+      assert {:ok, _shared} = NamespaceCoordinator.claim_path(server, "/shared-pin", :shared)
+      assert {:ok, _pin} = NamespaceCoordinator.claim_pinned(server, "/shared-pin")
+    end
+
+    test "claims_for_path returns only :pinned claims at exact path",
+         %{server: server} do
+      # Distinct holder pids are required because the coordinator's
+      # holder bookkeeping de-duplicates by holder pid; using `self()`
+      # for both calls would let only one pin survive in the local
+      # tracking map. The Ra side records both either way, but real
+      # callers always pass distinct holders (one per open fd) so the
+      # test mirrors the production shape.
+      {:ok, holder_a} = Agent.start_link(fn -> nil end)
+      {:ok, holder_b} = Agent.start_link(fn -> nil end)
+
+      {:ok, _} = NamespaceCoordinator.claim_pinned_for(server, "/q/file", holder_a)
+      {:ok, _} = NamespaceCoordinator.claim_pinned_for(server, "/q/file", holder_b)
+      {:ok, _} = NamespaceCoordinator.claim_pinned(server, "/q/other")
+
+      # Sibling under same prefix isn't returned — exact-path filter.
+      {:ok, _} = NamespaceCoordinator.claim_path(server, "/q/file", :shared)
+
+      assert {:ok, claims} = NamespaceCoordinator.claims_for_path(server, "/q/file")
+      assert length(claims) == 2
+
+      assert Enum.all?(claims, fn {_id, %{type: t, path: p}} ->
+               t == :pinned and p == "/q/file"
+             end)
+    end
+
+    test "claims_for_path returns empty list when no pins exist",
+         %{server: server} do
+      assert {:ok, []} = NamespaceCoordinator.claims_for_path(server, "/never-pinned")
+    end
+
+    test "pin released when the holder process dies", %{server: server} do
+      parent = self()
+
+      {holder, monitor_ref} =
+        spawn_monitor(fn ->
+          {:ok, claim} = NamespaceCoordinator.claim_pinned(server, "/dying-pin")
+          send(parent, {:claimed, claim})
+
+          receive do
+            :exit -> :ok
+          end
+        end)
+
+      assert_receive {:claimed, _}, 1_000
+
+      # Pin visible while holder is alive.
+      assert {:ok, [_]} = NamespaceCoordinator.claims_for_path(server, "/dying-pin")
+
+      send(holder, :exit)
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      :sys.get_state(server)
+
+      assert {:ok, []} = NamespaceCoordinator.claims_for_path(server, "/dying-pin")
+    end
+
+    test "explicit release removes the pin", %{server: server} do
+      assert {:ok, claim} = NamespaceCoordinator.claim_pinned(server, "/explicit-release")
+      assert {:ok, [_]} = NamespaceCoordinator.claims_for_path(server, "/explicit-release")
+
+      :ok = NamespaceCoordinator.release(server, claim)
+      assert {:ok, []} = NamespaceCoordinator.claims_for_path(server, "/explicit-release")
+    end
+
+    test "claim_pinned_for/3 honours the explicit holder", %{server: server} do
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+
+      assert {:ok, claim_id} =
+               NamespaceCoordinator.claim_pinned_for(server, "/explicit-pin", holder)
+
+      assert is_binary(claim_id)
+
+      assert {:ok, [{^claim_id, %{holder: ^holder}}]} =
+               NamespaceCoordinator.claims_for_path(server, "/explicit-pin")
+    end
+
+    test "rejects non-pid holders", %{server: server} do
+      assert_raise FunctionClauseError, fn ->
+        NamespaceCoordinator.claim_pinned_for(server, "/bad-holder", :not_a_pid)
+      end
+    end
+  end
+
   # `claim_rename/3` is the namespace-coordinator primitive for atomic
   # cross-directory rename — sub-issue #304. The two paths must be
   # pinned together (no half-claimed window) and the destination must
