@@ -254,12 +254,10 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp do_setattr(vol_name, path, pre_meta, %Sattr3{} = sattr, guard_ctime) do
     pre_wcc = wcc_attr_from_meta(pre_meta)
 
-    cond do
-      guard_failed?(pre_meta, guard_ctime) ->
-        {:error, :not_sync, %WccData{before: pre_wcc, after: fattr_from_meta(pre_meta)}}
-
-      true ->
-        apply_sattr(vol_name, path, pre_wcc, sattr)
+    if guard_failed?(pre_meta, guard_ctime) do
+      {:error, :not_sync, %WccData{before: pre_wcc, after: fattr_from_meta(pre_meta)}}
+    else
+      apply_sattr(vol_name, path, pre_wcc, sattr)
     end
   end
 

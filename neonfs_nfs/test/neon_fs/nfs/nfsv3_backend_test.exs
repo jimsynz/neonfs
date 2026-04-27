@@ -321,7 +321,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       guard = %NFSServer.NFSv3.Types.Nfstime3{seconds: 99, nseconds: 0}
       sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600}
 
-      assert {:error, :not_sync, %NFSServer.NFSv3.Types.WccData{before: pre_wcc, after: %Fattr3{}}} =
+      assert {:error, :not_sync,
+              %NFSServer.NFSv3.Types.WccData{before: pre_wcc, after: %Fattr3{}}} =
                NFSv3Backend.setattr(valid_fh(), sattr, guard, :auth, %{})
 
       assert pre_wcc.ctime.seconds == 4
