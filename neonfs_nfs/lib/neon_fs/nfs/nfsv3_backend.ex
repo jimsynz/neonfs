@@ -240,6 +240,140 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
+  # The createverf3 (8 bytes) lives under this key in the file's
+  # `metadata` map, so a retried EXCLUSIVE CREATE with the same verf
+  # observes the existing file rather than failing with EEXIST.
+  @createverf_meta_key "nfs3_createverf"
+
+  @impl true
+  def create(dir_fh, name, mode, _auth, _ctx) do
+    case resolve_dir(dir_fh) do
+      {:ok, vol_name, dir_path} ->
+        do_create(vol_name, dir_path, name, mode)
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  defp do_create(vol_name, dir_path, name, mode) do
+    child_path = Path.join(dir_path, name)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+
+    case mode do
+      {:unchecked, %Sattr3{} = sattr} ->
+        write_new_file(vol_name, dir_path, child_path, sattr, pre_dir_wcc, opts: [])
+
+      {:guarded, %Sattr3{} = sattr} ->
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
+          {:ok, _existing} ->
+            {:error, :exist,
+             %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+          {:error, _} ->
+            write_new_file(vol_name, dir_path, child_path, sattr, pre_dir_wcc, opts: [])
+        end
+
+      {:exclusive, verf} when is_binary(verf) and byte_size(verf) == 8 ->
+        exclusive_create(vol_name, dir_path, child_path, verf, pre_dir_wcc)
+    end
+  end
+
+  defp exclusive_create(vol_name, dir_path, child_path, verf, pre_dir_wcc) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
+      {:ok, %FileMeta{metadata: %{@createverf_meta_key => ^verf}} = existing} ->
+        # Idempotent retry — same verf, return existing file.
+        ok_create_reply(existing, vol_name, dir_path, pre_dir_wcc)
+
+      {:ok, _other} ->
+        # File exists with a different (or no) verf → EEXIST.
+        {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, _} ->
+        write_new_file(vol_name, dir_path, child_path, %Sattr3{}, pre_dir_wcc,
+          opts: [
+            create_only: true,
+            metadata: %{@createverf_meta_key => verf}
+          ]
+        )
+    end
+  end
+
+  # Common path: hand off to `WriteOperation.write_file_at/5` to
+  # create the empty file with the requested mode/uid/gid + any
+  # extra opts (e.g. `create_only: true` for EXCLUSIVE). Re-fetches
+  # the metadata for the post-op view; failures map to a parent-only
+  # wcc reply.
+  defp write_new_file(vol_name, dir_path, child_path, %Sattr3{} = sattr, pre_dir_wcc, opts) do
+    write_opts =
+      opts
+      |> Keyword.get(:opts, [])
+      |> Keyword.merge(opts)
+      |> Keyword.delete(:opts)
+      |> sattr_to_write_opts(sattr)
+
+    case core_call(NeonFS.Core, :write_file_at, [vol_name, child_path, 0, <<>>, write_opts]) do
+      {:ok, %FileMeta{} = meta} ->
+        ok_create_reply(meta, vol_name, dir_path, pre_dir_wcc)
+
+      {:error, :exists} ->
+        {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, status} when is_atom(status) ->
+        {:error, map_create_error(status),
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, _} ->
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  defp ok_create_reply(%FileMeta{} = meta, vol_name, dir_path, pre_dir_wcc) do
+    case volume_uuid_to_binary(meta.volume_id) do
+      {:ok, vol_id_bin} ->
+        {:ok, fileid} = allocate_inode(vol_name, meta.path)
+        child_fh = Filehandle.encode(vol_id_bin, fileid)
+
+        wcc = %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}
+        {:ok, child_fh, fattr_from_meta(meta), wcc}
+
+      _ ->
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  defp sattr_to_write_opts(opts, %Sattr3{} = sattr) do
+    opts
+    |> maybe_put_opt(:mode, sattr.mode)
+    |> maybe_put_opt(:uid, sattr.uid)
+    |> maybe_put_opt(:gid, sattr.gid)
+  end
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp pre_dir_wcc(vol_name, dir_path) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path]) do
+      {:ok, %FileMeta{} = meta} -> wcc_attr_from_meta(meta)
+      _ -> nil
+    end
+  end
+
+  defp post_dir_attr(vol_name, dir_path) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path]) do
+      {:ok, %FileMeta{} = meta} -> fattr_from_meta(meta)
+      _ -> nil
+    end
+  end
+
+  defp map_create_error(:not_found), do: :noent
+  defp map_create_error(:noent), do: :noent
+  defp map_create_error(:perm), do: :perm
+  defp map_create_error(:acces), do: :acces
+  defp map_create_error(:invalid_argument), do: :inval
+  defp map_create_error(:inval), do: :inval
+  defp map_create_error(_), do: :io
+
   @impl true
   def setattr(fh, %Sattr3{} = sattr, guard_ctime, _auth, _ctx) do
     case resolve_meta(fh) do

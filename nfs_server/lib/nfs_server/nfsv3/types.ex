@@ -578,6 +578,57 @@ defmodule NFSServer.NFSv3.Types do
     end
   end
 
+  # ——— createhow3 ————————————————————————————————————————————
+
+  @typedoc """
+  Discriminated union from RFC 1813 §3.3.8 CREATE arguments.
+
+    * `{:unchecked, %Sattr3{}}` — overwrite if exists.
+    * `{:guarded, %Sattr3{}}` — fail with `NFS3ERR_EXIST` if exists.
+    * `{:exclusive, createverf3}` — atomic create-if-not-exists keyed
+      by the 8-byte verifier.
+  """
+  @type createhow3 ::
+          {:unchecked, Sattr3.t()}
+          | {:guarded, Sattr3.t()}
+          | {:exclusive, createverf3()}
+
+  @doc "Encode a `createhow3` discriminated union."
+  @spec encode_createhow3(createhow3()) :: binary()
+  def encode_createhow3({:unchecked, %Sattr3{} = s}),
+    do: XDR.encode_uint(0) <> encode_sattr3(s)
+
+  def encode_createhow3({:guarded, %Sattr3{} = s}),
+    do: XDR.encode_uint(1) <> encode_sattr3(s)
+
+  def encode_createhow3({:exclusive, verf}) when is_binary(verf) and byte_size(verf) == 8,
+    do: XDR.encode_uint(2) <> encode_createverf3(verf)
+
+  @doc "Decode a `createhow3` discriminated union."
+  @spec decode_createhow3(binary()) :: {:ok, createhow3(), binary()} | {:error, term()}
+  def decode_createhow3(binary) do
+    with {:ok, mode, rest} <- XDR.decode_uint(binary) do
+      case mode do
+        0 -> wrap_create_attrs(rest, :unchecked)
+        1 -> wrap_create_attrs(rest, :guarded)
+        2 -> wrap_create_verf(rest)
+        n -> {:error, {:bad_createmode, n}}
+      end
+    end
+  end
+
+  defp wrap_create_attrs(binary, tag) do
+    with {:ok, sattr, rest} <- decode_sattr3(binary) do
+      {:ok, {tag, sattr}, rest}
+    end
+  end
+
+  defp wrap_create_verf(binary) do
+    with {:ok, verf, rest} <- decode_createverf3(binary) do
+      {:ok, {:exclusive, verf}, rest}
+    end
+  end
+
   # ——— diropargs3 ————————————————————————————————————————————
 
   @typedoc "Directory + file-name pair for LOOKUP / CREATE / etc."

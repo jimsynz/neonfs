@@ -39,7 +39,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
   defp allocate_inode_for(table, vol, path) do
     key = {vol, path}
-    inode = find_inode(table, key) || :erlang.phash2(key, 1 <<< 60)
+    # `:erlang.phash2/2`'s upper bound is `2^32 - 1`. Test fixtures
+    # don't care about the actual value — we just need a stable
+    # 32-bit pseudo-allocation when the inode isn't pre-registered.
+    inode = find_inode(table, key) || :erlang.phash2(key, 1 <<< 32)
     {:ok, inode}
   end
 
@@ -239,6 +242,190 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     test "pathconf returns NAME_MAX 255" do
       assert {:ok, reply, %Fattr3{}} = NFSv3Backend.pathconf(valid_fh(), :auth, %{})
       assert reply.name_max == 255
+    end
+  end
+
+  ## create (#622)
+
+  describe "create/5 — UNCHECKED" do
+    setup do
+      put_inode_table(%{0xDEAD_DEAD_DEAD_DEAD => {@volume_name, "/docs"}})
+      :ok
+    end
+
+    test "writes a new empty file and returns fhandle + attrs + wcc" do
+      child_path = "/docs/new.txt"
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      child = file_meta(%{path: child_path, mode: 0o100_644, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, _opts] -> {:ok, child}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xDEAD_DEAD_DEAD_DEAD)
+
+      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o644}
+
+      assert {:ok, child_fh, %Fattr3{type: :reg}, %NFSServer.NFSv3.Types.WccData{before: pre_wcc}} =
+               NFSv3Backend.create(dir_fh, "new.txt", {:unchecked, sattr}, :auth, %{})
+
+      assert byte_size(child_fh) == Filehandle.size()
+      assert pre_wcc.size == 0
+    end
+
+    test "forwards mode/uid/gid from sattr3 to write_file_at" do
+      child_path = "/docs/owned.txt"
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      child = file_meta(%{path: child_path, uid: 42, gid: 100, mode: 0o100_600})
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, opts] ->
+          send(test_pid, {:opts, opts})
+          {:ok, child}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xDEAD_DEAD_DEAD_DEAD)
+
+      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600, uid: 42, gid: 100}
+
+      assert {:ok, _, _, _} =
+               NFSv3Backend.create(dir_fh, "owned.txt", {:unchecked, sattr}, :auth, %{})
+
+      assert_receive {:opts, opts}
+      assert Keyword.get(opts, :mode) == 0o600
+      assert Keyword.get(opts, :uid) == 42
+      assert Keyword.get(opts, :gid) == 100
+      refute Keyword.get(opts, :create_only)
+    end
+  end
+
+  describe "create/5 — GUARDED" do
+    setup do
+      put_inode_table(%{0xCAFE_CAFE_CAFE_CAFE => {@volume_name, "/docs"}})
+      :ok
+    end
+
+    test "fails with :exist when target already exists" do
+      child_path = "/docs/already.txt"
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      existing = file_meta(%{path: child_path})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, existing}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :write_file_at, _ -> flunk("should not be called when GUARDED + exists")
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xCAFE_CAFE_CAFE_CAFE)
+
+      assert {:error, :exist, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.create(
+                 dir_fh,
+                 "already.txt",
+                 {:guarded, %NFSServer.NFSv3.Types.Sattr3{}},
+                 :auth,
+                 %{}
+               )
+    end
+
+    test "creates if target doesn't exist" do
+      child_path = "/docs/fresh.txt"
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      fresh = file_meta(%{path: child_path})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:error, :not_found}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, _opts] -> {:ok, fresh}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xCAFE_CAFE_CAFE_CAFE)
+
+      assert {:ok, _fh, %Fattr3{type: :reg}, _wcc} =
+               NFSv3Backend.create(
+                 dir_fh,
+                 "fresh.txt",
+                 {:guarded, %NFSServer.NFSv3.Types.Sattr3{}},
+                 :auth,
+                 %{}
+               )
+    end
+  end
+
+  describe "create/5 — EXCLUSIVE (idempotent retry)" do
+    setup do
+      put_inode_table(%{0xBEEF_BEEF_BEEF_BEEF => {@volume_name, "/docs"}})
+      :ok
+    end
+
+    test "first call writes the file with the verf in metadata + create_only" do
+      child_path = "/docs/excl.txt"
+      verf = <<1, 2, 3, 4, 5, 6, 7, 8>>
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      created = file_meta(%{path: child_path, metadata: %{"nfs3_createverf" => verf}})
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] ->
+          {:error, :not_found}
+
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, opts] ->
+          send(test_pid, {:opts, opts})
+          {:ok, created}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xBEEF_BEEF_BEEF_BEEF)
+
+      assert {:ok, _fh, _attr, _wcc} =
+               NFSv3Backend.create(dir_fh, "excl.txt", {:exclusive, verf}, :auth, %{})
+
+      assert_receive {:opts, opts}
+      assert Keyword.get(opts, :create_only) == true
+      assert Keyword.fetch!(opts, :metadata)["nfs3_createverf"] == verf
+    end
+
+    test "retry with the same verf observes the existing file (no second write)" do
+      child_path = "/docs/excl.txt"
+      verf = <<1, 2, 3, 4, 5, 6, 7, 8>>
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      existing = file_meta(%{path: child_path, metadata: %{"nfs3_createverf" => verf}})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, existing}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :write_file_at, _ -> flunk("retry must not write")
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xBEEF_BEEF_BEEF_BEEF)
+
+      assert {:ok, _fh, %Fattr3{type: :reg}, _wcc} =
+               NFSv3Backend.create(dir_fh, "excl.txt", {:exclusive, verf}, :auth, %{})
+    end
+
+    test "different verf on an existing file returns :exist" do
+      child_path = "/docs/excl.txt"
+      original_verf = <<1, 2, 3, 4, 5, 6, 7, 8>>
+      retry_verf = <<9, 9, 9, 9, 9, 9, 9, 9>>
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      existing = file_meta(%{path: child_path, metadata: %{"nfs3_createverf" => original_verf}})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, existing}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xBEEF_BEEF_BEEF_BEEF)
+
+      assert {:error, :exist, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.create(dir_fh, "excl.txt", {:exclusive, retry_verf}, :auth, %{})
     end
   end
 

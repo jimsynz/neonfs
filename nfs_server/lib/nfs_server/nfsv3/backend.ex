@@ -249,4 +249,31 @@ defmodule NFSServer.NFSv3.Backend do
               {:ok, Types.WccData.t()}
               | {:error, Types.nfsstat3(), Types.WccData.t()}
               | {:error, Types.nfsstat3()}
+
+  @doc """
+  CREATE — RFC 1813 §3.3.8. Create a regular file under `dir_fh /
+  name`. The `mode` discriminated union (`createhow3`) selects:
+
+    * `{:unchecked, %Sattr3{}}` — overwrite if exists.
+    * `{:guarded, %Sattr3{}}` — fail with `NFS3ERR_EXIST` if exists.
+    * `{:exclusive, createverf3}` — atomic create-if-not-exists keyed
+      by the 8-byte verifier. Retried CREATE with the same verf must
+      be idempotent: the second call observes the same file rather
+      than `NFS3ERR_EXIST`.
+
+  On success returns the new file's optional `post_op_fh3` plus its
+  `post_op_attr`, plus the parent directory's `wcc_data`. On failure
+  returns the parent's `wcc_data` so the client can refresh its
+  cache.
+  """
+  @callback create(
+              dir_fh :: Types.fhandle3(),
+              name :: Types.filename3(),
+              mode :: Types.createhow3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.fhandle3() | nil, Types.Fattr3.t() | nil, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
 end
