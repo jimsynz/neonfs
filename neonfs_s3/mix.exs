@@ -72,6 +72,7 @@ defmodule NeonFS.S3.MixProject do
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
 
       # test
+      {:neonfs_test_support, path: "../neonfs_test_support", only: :test, runtime: false},
       {:ex_aws, "~> 2.6", only: :test},
       {:ex_aws_s3, "~> 2.5", only: :test},
       {:hackney, "~> 1.9", only: :test},

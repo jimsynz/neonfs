@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.S3CredentialTest do
+defmodule NeonFS.S3.IntegrationTest.CredentialTest do
   @moduledoc """
   Integration tests for S3 credential management across a real multi-node cluster.
 
@@ -6,10 +6,10 @@ defmodule NeonFS.Integration.S3CredentialTest do
   nodes, survive the credential manager's ETS+Ra backing, and that the S3
   authentication flow works end-to-end with real credentials.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
-  alias NeonFS.Integration.S3CoreBridge
+  alias NeonFS.S3.IntegrationTest.CoreBridge, as: S3CoreBridge
   alias NeonFS.S3.MultipartStore
 
   @moduletag timeout: 180_000

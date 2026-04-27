@@ -51,16 +51,16 @@ defmodule NeonFS.Integration.MixProject do
       # Path dependencies for testing (runtime: false since only used in tests)
       {:neonfs_core, path: "../neonfs_core", runtime: false},
       {:neonfs_docker, path: "../neonfs_docker", runtime: false},
+      # `:neonfs_s3` is still needed because `streaming_test_helpers.ex`
+      # (a cross-protocol streaming-write helper) and the consuming
+      # `streaming_upload_peak_rss_test.exs` reference
+      # `NeonFS.S3.Backend` and `Firkin.PutOpts`. Removing the dep
+      # cleanly is tracked under #604, alongside the equivalent
+      # WebDAV concern.
       {:neonfs_s3, path: "../neonfs_s3", runtime: false},
       {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},
       {:neonfs_webdav, path: "../neonfs_webdav", runtime: false},
-
-      # S3 integration test client
-      {:ex_aws, "~> 2.6", only: :test},
-      {:ex_aws_s3, "~> 2.5", only: :test},
-      {:hackney, "~> 1.9", only: :test},
       {:jason, "~> 1.0"},
-      {:sweet_xml, "~> 0.7", only: :test},
 
       # WebDAV integration test client
       {:req, "~> 0.5", only: [:dev, :test]},
