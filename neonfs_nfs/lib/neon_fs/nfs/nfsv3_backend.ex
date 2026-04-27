@@ -372,6 +372,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp map_create_error(:acces), do: :acces
   defp map_create_error(:invalid_argument), do: :inval
   defp map_create_error(:inval), do: :inval
+  defp map_create_error(:nospc), do: :nospc
+  defp map_create_error(:dquot), do: :dquot
+  defp map_create_error(:fbig), do: :fbig
   defp map_create_error(_), do: :io
 
   @impl true
@@ -514,6 +517,87 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
       {:error, _} ->
         {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  # Per-instance write verifier (RFC 1813 §3.3.7 / §3.3.21). The
+  # 8-byte value lives in `:persistent_term` keyed by this module
+  # so it stays stable across calls but rotates whenever the BEAM
+  # restarts — which is what NFS clients use to detect that any
+  # unstable writes need to be resent.
+  @writeverf_pt_key {__MODULE__, :writeverf}
+
+  @impl true
+  def write(fh, offset, data, stable, _auth, _ctx) when is_binary(data) do
+    case resolve_meta(fh) do
+      {:ok, vol_name, path, pre_meta} ->
+        do_write(vol_name, path, pre_meta, offset, data, stable)
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  defp do_write(vol_name, path, pre_meta, offset, data, requested_stable) do
+    pre_wcc = wcc_attr_from_meta(pre_meta)
+
+    case core_call(NeonFS.Core, :write_file_at, [vol_name, path, offset, data, []]) do
+      {:ok, %FileMeta{} = post_meta} ->
+        # NeonFS' `write_file_at` is FileIndex-quorum-replicated and
+        # synchronous — every committed write is durable, so we
+        # always report `:file_sync` regardless of the client's
+        # `requested_stable` hint. RFC 1813 permits stronger
+        # guarantees than asked.
+        _ = requested_stable
+
+        {:ok,
+         %{
+           wcc: %WccData{before: pre_wcc, after: fattr_from_meta(post_meta)},
+           count: byte_size(data),
+           committed: :file_sync,
+           verf: writeverf()
+         }}
+
+      {:error, status} when is_atom(status) ->
+        {:error, map_create_error(status), %WccData{before: pre_wcc, after: nil}}
+
+      {:error, _} ->
+        {:error, :io, %WccData{before: pre_wcc, after: nil}}
+    end
+  end
+
+  @impl true
+  def commit(fh, _offset, _count, _auth, _ctx) do
+    case resolve_meta(fh) do
+      {:ok, _vol_name, _path, meta} ->
+        # FileIndex quorum-writes are already on stable storage
+        # before WRITE returns (see `c:write/6` above), so COMMIT is
+        # a metadata-only flush. Return the per-instance writeverf3.
+        {:ok,
+         %{
+           wcc: %WccData{before: wcc_attr_from_meta(meta), after: fattr_from_meta(meta)},
+           verf: writeverf()
+         }}
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  # Lazily-initialised per-VM writeverf3. First reader generates and
+  # stashes; later readers fetch. `:persistent_term` is the right
+  # tool — read-only after the initial put, no garbage-collection
+  # pressure, and it survives every supervisor restart short of a
+  # full VM restart (which is exactly when we want a fresh verf).
+  defp writeverf do
+    case :persistent_term.get(@writeverf_pt_key, :undefined) do
+      :undefined ->
+        verf = :crypto.strong_rand_bytes(8)
+        :persistent_term.put(@writeverf_pt_key, verf)
+        verf
+
+      verf when is_binary(verf) ->
+        verf
     end
   end
 

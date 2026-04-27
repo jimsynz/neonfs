@@ -357,6 +357,132 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  # WRITE / COMMIT (procs 7, 21) form the NFSv3 write loop. WRITE
+  # carries data + a stability hint; COMMIT flushes any unstable
+  # writes and returns a `writeverf3` that changes across server
+  # restarts so clients can detect lost-unstable-writes and resend.
+  describe "WRITE (proc 7)" do
+    test "returns NFS3_OK + wcc + count + committed + verf on success" do
+      fh = "fh-write"
+      offset = 0
+      data = "hello-write"
+      stable = :file_sync
+      verf = <<1, 2, 3, 4, 5, 6, 7, 8>>
+
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put(
+        {:write, {fh, offset, data, stable}},
+        {:ok, %{wcc: wcc, count: byte_size(data), committed: :file_sync, verf: verf}}
+      )
+
+      args =
+        Types.encode_fhandle3(fh) <>
+          XDR.encode_uhyper(offset) <>
+          XDR.encode_uint(byte_size(data)) <>
+          Types.encode_stable_how(stable) <>
+          XDR.encode_var_opaque(data)
+
+      {:ok, body} = Handler.handle_call(7, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, rest} = Types.decode_wcc_data(rest)
+      written = byte_size(data)
+      assert {:ok, ^written, rest} = XDR.decode_uint(rest)
+      assert {:ok, :file_sync, rest} = Types.decode_stable_how(rest)
+      assert {:ok, ^verf, <<>>} = Types.decode_writeverf3(rest)
+    end
+
+    test "trims data to the request count before invoking the backend" do
+      fh = "fh-trim"
+      offset = 100
+      data = "fivebytes"
+      stable = :unstable
+      verf = <<0::64>>
+
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      # Backend expects the trimmed binary (5 bytes).
+      MockBackend.put(
+        {:write, {fh, offset, "fiveb", stable}},
+        {:ok, %{wcc: wcc, count: 5, committed: :unstable, verf: verf}}
+      )
+
+      args =
+        Types.encode_fhandle3(fh) <>
+          XDR.encode_uhyper(offset) <>
+          XDR.encode_uint(5) <>
+          Types.encode_stable_how(stable) <>
+          XDR.encode_var_opaque(data)
+
+      {:ok, body} = Handler.handle_call(7, args, @auth, @ctx_base)
+      assert {:ok, :ok, _} = Types.decode_nfsstat3(body)
+    end
+
+    test "returns NFS3ERR_NOSPC + wcc on backend error" do
+      fh = "fh-nospc"
+      offset = 0
+      data = "x"
+      stable = :file_sync
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:write, {fh, offset, data, stable}}, {:error, :nospc, wcc})
+
+      args =
+        Types.encode_fhandle3(fh) <>
+          XDR.encode_uhyper(offset) <>
+          XDR.encode_uint(1) <>
+          Types.encode_stable_how(stable) <>
+          XDR.encode_var_opaque(data)
+
+      {:ok, body} = Handler.handle_call(7, args, @auth, @ctx_base)
+      assert {:ok, :nospc, _} = Types.decode_nfsstat3(body)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(7, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
+  describe "COMMIT (proc 21)" do
+    test "returns NFS3_OK + wcc + verf on success" do
+      fh = "fh-commit"
+      offset = 0
+      count = 1024
+      verf = <<9, 9, 9, 9, 9, 9, 9, 9>>
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:commit, {fh, offset, count}}, {:ok, %{wcc: wcc, verf: verf}})
+
+      args =
+        Types.encode_fhandle3(fh) <>
+          XDR.encode_uhyper(offset) <>
+          XDR.encode_uint(count)
+
+      {:ok, body} = Handler.handle_call(21, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, rest} = Types.decode_wcc_data(rest)
+      assert {:ok, ^verf, <<>>} = Types.decode_writeverf3(rest)
+    end
+
+    test "returns NFS3ERR_STALE + empty wcc when fhandle is stale" do
+      MockBackend.put({:commit, {"missing", 0, 0}}, {:error, :stale})
+
+      args =
+        Types.encode_fhandle3("missing") <>
+          XDR.encode_uhyper(0) <>
+          XDR.encode_uint(0)
+
+      {:ok, body} = Handler.handle_call(21, args, @auth, @ctx_base)
+      assert {:ok, :stale, _} = Types.decode_nfsstat3(body)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(21, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
   describe "LOOKUP (proc 3)" do
     test "returns the file handle plus both post-op attrs on success" do
       dir = "dir"

@@ -14,6 +14,7 @@ defmodule NFSServer.NFSv3.Handler do
   | 4    | ACCESS      |
   | 5    | READLINK    |
   | 6    | READ        |
+  | 7    | WRITE       |
   | 8    | CREATE      |
   | 9    | MKDIR       |
   | 12   | REMOVE      |
@@ -23,9 +24,10 @@ defmodule NFSServer.NFSv3.Handler do
   | 18   | FSSTAT      |
   | 19   | FSINFO      |
   | 20   | PATHCONF    |
+  | 21   | COMMIT      |
 
-  The remaining write-path procedures (procs 7, 10, 11, 14, 15, 21)
-  ship in separate sub-issues under the #285 tracking issue.
+  The remaining write-path procedures (procs 10, 11, 14, 15) ship
+  in separate sub-issues under the #285 tracking issue.
 
   ## READ streaming
 
@@ -105,6 +107,7 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_access 4
   @proc_readlink 5
   @proc_read 6
+  @proc_write 7
   @proc_create 8
   @proc_mkdir 9
   @proc_remove 12
@@ -114,6 +117,7 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_fsstat 18
   @proc_fsinfo 19
   @proc_pathconf 20
+  @proc_commit 21
 
   @doc "ACCESS3_READ — permission to read file data or list a directory."
   @spec access3_read() :: 0x0001
@@ -247,6 +251,20 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  def handle_call(@proc_write, args, auth, ctx) do
+    case decode_write_args(args) do
+      {:ok, fh, offset, data, stable} -> do_write(fh, offset, data, stable, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_commit, args, auth, ctx) do
+    case decode_commit_args(args) do
+      {:ok, fh, offset, count} -> do_commit(fh, offset, count, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
   def handle_call(@proc_readdir, args, auth, ctx) do
     case decode_readdir_args(args) do
       {:ok, fh, cookie, verf, count} -> do_readdir(fh, cookie, verf, count, auth, ctx)
@@ -311,6 +329,34 @@ defmodule NFSServer.NFSv3.Handler do
     with {:ok, {dir, name}, rest} <- Types.decode_diropargs3(args),
          {:ok, mode, _rest} <- Types.decode_createhow3(rest) do
       {:ok, dir, name, mode}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  # WRITE args: `fhandle3 + offset + count + stable + opaque<>` (RFC
+  # 1813 §3.3.7). The `count` field on the wire bounds `data`'s
+  # length; trim before passing to the backend so the backend can
+  # rely on `byte_size(data) <= count`.
+  defp decode_write_args(args) do
+    with {:ok, fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, offset, rest} <- XDR.decode_uhyper(rest),
+         {:ok, count, rest} <- XDR.decode_uint(rest),
+         {:ok, stable, rest} <- Types.decode_stable_how(rest),
+         {:ok, data, _rest} <- XDR.decode_var_opaque(rest) do
+      trimmed = if byte_size(data) > count, do: binary_part(data, 0, count), else: data
+      {:ok, fh, offset, trimmed, stable}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  # COMMIT args: `fhandle3 + offset + count` (RFC 1813 §3.3.21).
+  defp decode_commit_args(args) do
+    with {:ok, fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, offset, rest} <- XDR.decode_uhyper(rest),
+         {:ok, count, _rest} <- XDR.decode_uint(rest) do
+      {:ok, fh, offset, count}
     else
       {:error, _} -> :error
     end
@@ -386,6 +432,46 @@ defmodule NFSServer.NFSv3.Handler do
            Types.encode_post_op_fh3(fh) <>
            Types.encode_post_op_attr(attr) <>
            Types.encode_wcc_data(wcc)}
+
+      {:error, status, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
+    end
+  end
+
+  defp do_write(fh, offset, data, stable, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.write(fh, offset, data, stable, auth, ctx) do
+      {:ok, %{wcc: wcc, count: count, committed: committed, verf: verf}} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_wcc_data(wcc) <>
+           XDR.encode_uint(count) <>
+           Types.encode_stable_how(committed) <>
+           Types.encode_writeverf3(verf)}
+
+      {:error, status, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
+    end
+  end
+
+  defp do_commit(fh, offset, count, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.commit(fh, offset, count, auth, ctx) do
+      {:ok, %{wcc: wcc, verf: verf}} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_wcc_data(wcc) <>
+           Types.encode_writeverf3(verf)}
 
       {:error, status, %Types.WccData{} = wcc} ->
         {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
