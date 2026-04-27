@@ -73,7 +73,8 @@ defmodule NeonFS.Docker.MixProject do
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.7", only: [:dev, :test]},
       {:mimic, "~> 2.0", only: [:test]},
-      {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false}
+      {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
+      {:neonfs_test_support, path: "../neonfs_test_support", only: :test, runtime: false}
     ]
   end
 end

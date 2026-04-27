@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.DockerVolumeDriverTest do
+defmodule NeonFS.Docker.IntegrationTest do
   @moduledoc """
   End-to-end test for the Docker / Podman VolumeDriver plugin.
 
@@ -33,7 +33,7 @@ defmodule NeonFS.Integration.DockerVolumeDriverTest do
   This lets the test pin the socket to a per-run temp path so two
   concurrent test workers don't collide on `/run/docker/plugins/`.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 240_000
   @moduletag nodes: 1

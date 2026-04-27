@@ -26,7 +26,6 @@ defmodule NeonFS.Integration.MixProject do
         :bandit,
         :neonfs_client,
         :neonfs_core,
-        :neonfs_docker,
         :neonfs_s3,
         :neonfs_test_support,
         :neonfs_webdav,
@@ -50,7 +49,6 @@ defmodule NeonFS.Integration.MixProject do
     [
       # Path dependencies for testing (runtime: false since only used in tests)
       {:neonfs_core, path: "../neonfs_core", runtime: false},
-      {:neonfs_docker, path: "../neonfs_docker", runtime: false},
       # `:neonfs_s3` and `:neonfs_webdav` are still needed because
       # `streaming_test_helpers.ex` (a cross-protocol streaming-write
       # helper) and the consuming `streaming_upload_peak_rss_test.exs`
