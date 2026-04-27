@@ -30,6 +30,7 @@ defmodule NeonFS.Core.WriteOperation do
     FileMeta,
     KeyManager,
     LockManager,
+    NamespaceCoordinator,
     PendingWriteLog,
     Replication,
     ResolvedLookupCache,
@@ -79,7 +80,16 @@ defmodule NeonFS.Core.WriteOperation do
     * `offset` - Byte offset to write at
     * `data` - Binary data to write
     * `opts` - Same options supported by `write_file_streamed/4`, including `:block_on_lock`,
-      `:chunk_strategy`, `:compression`, `:content_type`, `:client_ref`, `:uid`, `:gids`.
+      `:chunk_strategy`, `:compression`, `:content_type`, `:client_ref`, `:uid`, `:gids`,
+      `:create_only`.
+
+  When `create_only: true` is set, the write fails with `{:error, :exists}` if a
+  file already exists at `path` (or another `create_only` write is in flight on
+  the same path) — atomic create-if-not-exist semantics for `O_EXCL`,
+  `If-None-Match: *`, S3 `If-None-Match: *`, etc. Coordination is via
+  `NamespaceCoordinator.claim_create/2` (#591); `{:error, :conflict}` may also
+  surface when an unrelated namespace claim (e.g. a `Depth: infinity`
+  collection lock) covers the path.
   """
   @spec write_file_at(binary(), String.t(), non_neg_integer(), binary(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
@@ -103,13 +113,7 @@ defmodule NeonFS.Core.WriteOperation do
       with {:ok, volume} <- get_volume(volume_id),
            :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
            :ok <- check_lock(volume_id, path, client_ref, {offset, byte_size(data)}, opts) do
-        case FileIndex.get_by_path(volume_id, path) do
-          {:ok, file_meta} ->
-            do_write_at(volume, file_meta, offset, data, write_id, opts)
-
-          {:error, :not_found} ->
-            write_new_file_at_offset(volume, path, offset, data, write_id, opts)
-        end
+        do_write_file_at(volume, volume_id, path, offset, data, write_id, opts)
       end
 
     case result do
@@ -135,7 +139,8 @@ defmodule NeonFS.Core.WriteOperation do
   return `{:error, :streaming_writes_not_supported_for_erasure}` until
   streaming erasure encoding lands.
 
-  Options match `write_file_at/5`.
+  Options match `write_file_at/5`, including `:create_only` for atomic
+  create-if-not-exist semantics.
   """
   @spec write_file_streamed(binary(), String.t(), Enumerable.t(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
@@ -164,7 +169,7 @@ defmodule NeonFS.Core.WriteOperation do
            # Callers that need range-precise locking must use
            # `write_file_at/5` per chunk.
            :ok <- check_lock(volume_id, path, client_ref, streamed_lock_range(), opts) do
-        do_write_streamed(volume, path, stream, write_id, opts)
+        do_write_file_streamed(volume, volume_id, path, stream, write_id, opts)
       end
 
     case result do
@@ -186,6 +191,106 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   # Private Functions
+
+  # Dispatches between the standard write-or-overwrite path and the
+  # `create_only`-gated path for `write_file_at/5`. Overwriting an
+  # existing file is the common case; `create_only: true` adds an
+  # `EEXIST`-shaped pre-check + namespace-coordinator claim around the
+  # new-file path. See sub-issue #592 of #303.
+  defp do_write_file_at(volume, volume_id, path, offset, data, write_id, opts) do
+    if Keyword.get(opts, :create_only, false) do
+      with_create_claim(volume_id, path, fn ->
+        write_new_file_at_offset(volume, path, offset, data, write_id, opts)
+      end)
+    else
+      case FileIndex.get_by_path(volume_id, path) do
+        {:ok, file_meta} ->
+          do_write_at(volume, file_meta, offset, data, write_id, opts)
+
+        {:error, :not_found} ->
+          write_new_file_at_offset(volume, path, offset, data, write_id, opts)
+      end
+    end
+  end
+
+  defp do_write_file_streamed(volume, volume_id, path, stream, write_id, opts) do
+    if Keyword.get(opts, :create_only, false) do
+      with_create_claim(volume_id, path, fn ->
+        do_write_streamed(volume, path, stream, write_id, opts)
+      end)
+    else
+      do_write_streamed(volume, path, stream, write_id, opts)
+    end
+  end
+
+  # Wraps a create-only write in a `claim_create` namespace coordinator
+  # claim so concurrent creates of the same new file (across interface
+  # nodes) serialise cleanly: exactly one wins, the others see
+  # `{:error, :exists}`. Pre-checks `FileIndex` to fail fast, acquires
+  # the claim, re-checks `FileIndex` inside the claim window (covers
+  # the race between pre-check and claim grant), runs the inner write,
+  # and always releases the claim. When the coordinator is unreachable
+  # (no Ra cluster, etc.) we fall back to a single-node FileIndex check
+  # — same posture `Core.with_namespace_claim/4` takes.
+  defp with_create_claim(volume_id, path, fun) do
+    case FileIndex.get_by_path(volume_id, path) do
+      {:ok, _} -> {:error, :exists}
+      {:error, :not_found} -> claim_then_create(volume_id, path, fun)
+    end
+  end
+
+  defp claim_then_create(volume_id, path, fun) do
+    key = volume_scoped_path(volume_id, path)
+
+    case safe_claim_create(key) do
+      {:ok, claim_id} ->
+        try do
+          recheck_then_create(volume_id, path, fun)
+        after
+          safe_release_namespace_claim(claim_id)
+        end
+
+      {:error, :exists} ->
+        {:error, :exists}
+
+      {:error, :conflict, _conflict_id} ->
+        {:error, :conflict}
+
+      {:error, _reason} ->
+        # Coordinator unreachable — fall back to single-node correctness
+        # (FileIndex pre-check is the only fence against concurrent
+        # creates on the same node).
+        fun.()
+    end
+  end
+
+  # Re-check FileIndex inside the granted claim window — closes the
+  # race between the outer pre-check and claim grant. The claim itself
+  # only fences other `claim_create`s; an in-flight unbounded write or
+  # a write committed *between* the pre-check and the claim grant must
+  # be caught here.
+  defp recheck_then_create(volume_id, path, fun) do
+    case FileIndex.get_by_path(volume_id, path) do
+      {:ok, _} -> {:error, :exists}
+      {:error, :not_found} -> fun.()
+    end
+  end
+
+  defp safe_claim_create(key) do
+    NamespaceCoordinator.claim_create(key)
+  catch
+    :exit, _ -> {:error, :coordinator_unavailable}
+  end
+
+  defp safe_release_namespace_claim(claim_id) do
+    NamespaceCoordinator.release(claim_id)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp volume_scoped_path(volume_id, path) when is_binary(volume_id) and is_binary(path) do
+    "vol:" <> volume_id <> ":" <> path
+  end
 
   defp write_new_file_at_offset(volume, path, 0, data, write_id, opts) do
     do_write(volume, path, data, write_id, opts)
