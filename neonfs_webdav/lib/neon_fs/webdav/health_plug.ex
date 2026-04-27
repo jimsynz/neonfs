@@ -6,6 +6,16 @@ defmodule NeonFS.WebDAV.HealthPlug do
   requests, checks cluster status and either blocks write operations with
   `503 Service Unavailable` when the cluster is degraded/unavailable, or
   adds `X-NeonFS-Status` headers and delegates to the inner WebDAV plug.
+
+  ## `If-None-Match: *` capture
+
+  RFC 7232 conditional creates need to thread through to
+  `WriteOperation.write_file_streamed/4` as `create_only: true`, but
+  `Davy.Plug` only forwards `:content_type` to the backend's
+  `put_content_stream/4`. We capture the `If-None-Match` request
+  header here (each Bandit request runs in its own process, so the
+  process dictionary is request-scoped) and `Backend.put_content_stream/4`
+  reads it back when assembling write_opts. See sub-issue #593.
   """
 
   @behaviour Plug
@@ -13,6 +23,16 @@ defmodule NeonFS.WebDAV.HealthPlug do
   alias NeonFS.WebDAV.HealthCheck
 
   @write_methods ~w(PUT DELETE MKCOL COPY MOVE PROPPATCH LOCK UNLOCK)
+  @if_none_match_key :webdav_if_none_match_star
+
+  @doc """
+  Process-dict key the request pipeline uses to forward
+  `If-None-Match: *` to `Backend.put_content_stream/4`. Backend reads
+  this key; tests poke it directly to drive the create_only branch
+  without spinning up the full Plug pipeline.
+  """
+  @spec if_none_match_star_key() :: atom()
+  def if_none_match_star_key, do: @if_none_match_key
 
   @impl Plug
   @spec init(keyword()) :: map()
@@ -33,6 +53,7 @@ defmodule NeonFS.WebDAV.HealthPlug do
   end
 
   def call(conn, opts) do
+    capture_if_none_match(conn)
     status = cluster_status(opts)
 
     case status.status do
@@ -51,6 +72,14 @@ defmodule NeonFS.WebDAV.HealthPlug do
         conn
         |> Plug.Conn.put_resp_header("x-neonfs-status", status.reason || "degraded")
         |> Davy.Plug.call(opts.inner)
+    end
+  end
+
+  defp capture_if_none_match(conn) do
+    if Plug.Conn.get_req_header(conn, "if-none-match") == ["*"] do
+      Process.put(@if_none_match_key, true)
+    else
+      Process.delete(@if_none_match_key)
     end
   end
 

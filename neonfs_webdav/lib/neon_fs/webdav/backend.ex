@@ -144,7 +144,7 @@ defmodule NeonFS.WebDAV.Backend do
   @impl true
   def put_content_stream(_auth, [volume_name | rest] = path, stream, opts) do
     file_path = "/" <> Enum.join(rest, "/")
-    write_opts = put_content_opts(opts)
+    write_opts = put_content_opts(opts) |> maybe_create_only()
 
     with {:ok, volume} <- resolve_volume(volume_name),
          {:ok, meta} <- streaming_write(volume_name, file_path, stream, write_opts) do
@@ -153,6 +153,16 @@ defmodule NeonFS.WebDAV.Backend do
     else
       {:error, :not_found} ->
         {:error, %Davy.Error{code: :conflict, message: "Volume not found"}}
+
+      # `:exists` from `WriteOperation` with `create_only: true` is the
+      # RFC 7232 `If-None-Match: *` precondition failure (sub-issue #593
+      # of #303). Davy maps `:precondition_failed` to HTTP 412.
+      {:error, :exists} ->
+        {:error,
+         %Davy.Error{
+           code: :precondition_failed,
+           message: "If-None-Match: * precondition failed: target already exists"
+         }}
 
       {:error, _reason} ->
         {:error, internal_error()}
@@ -233,6 +243,20 @@ defmodule NeonFS.WebDAV.Backend do
       nil -> []
       "application/octet-stream" -> []
       ct -> [content_type: ct]
+    end
+  end
+
+  # Pulls the `If-None-Match: *` flag captured by `HealthPlug` (the
+  # request-scoped wrapper around Davy.Plug) into the WriteOperation
+  # opts as `create_only: true`. Davy's backend protocol doesn't pass
+  # the conn through to `put_content_stream/4`, so the process dict is
+  # the request-scoped channel between the two. Bandit gives each
+  # request its own process, so there's no cross-request contamination.
+  defp maybe_create_only(write_opts) do
+    if Process.get(NeonFS.WebDAV.HealthPlug.if_none_match_star_key()) do
+      Keyword.put(write_opts, :create_only, true)
+    else
+      write_opts
     end
   end
 

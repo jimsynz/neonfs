@@ -117,6 +117,73 @@ defmodule NeonFS.WebDAV.HealthPlugTest do
     end
   end
 
+  # `If-None-Match: *` is the RFC 7232 precondition for atomic create.
+  # Davy.Plug doesn't pass conn through to the backend's
+  # `put_content_stream/4`, so HealthPlug captures the header into the
+  # process dictionary before delegating, and `Backend` reads the
+  # captured flag back when assembling write_opts. See sub-issue #593.
+  describe "If-None-Match: * capture" do
+    setup do
+      key = HealthPlug.if_none_match_star_key()
+      Process.delete(key)
+      on_exit(fn -> Process.delete(key) end)
+      {:ok, key: key}
+    end
+
+    test "captures the flag when If-None-Match: * is set", %{key: key} do
+      opts =
+        HealthPlug.init(
+          backend: NeonFS.WebDAV.HealthPlugTest.StubBackend,
+          core_nodes_fn: healthy_fn()
+        )
+
+      _conn =
+        :put
+        |> conn("/docs/new.txt", "data")
+        |> Plug.Conn.put_req_header("if-none-match", "*")
+        |> HealthPlug.call(opts)
+
+      assert Process.get(key) == true
+    end
+
+    test "clears the flag when If-None-Match is not set", %{key: key} do
+      Process.put(key, true)
+
+      opts =
+        HealthPlug.init(
+          backend: NeonFS.WebDAV.HealthPlugTest.StubBackend,
+          core_nodes_fn: healthy_fn()
+        )
+
+      _conn =
+        :put
+        |> conn("/docs/new.txt", "data")
+        |> HealthPlug.call(opts)
+
+      assert Process.get(key) == nil
+    end
+
+    test "clears the flag when If-None-Match has a non-`*` value (etag)", %{key: key} do
+      Process.put(key, true)
+
+      opts =
+        HealthPlug.init(
+          backend: NeonFS.WebDAV.HealthPlugTest.StubBackend,
+          core_nodes_fn: healthy_fn()
+        )
+
+      _conn =
+        :put
+        |> conn("/docs/new.txt", "data")
+        |> Plug.Conn.put_req_header("if-none-match", "\"some-etag\"")
+        |> HealthPlug.call(opts)
+
+      # `If-None-Match: <etag>` is a separate precondition (no overwrite if etag matches).
+      # That is not the create-only flag, so the capture must clear.
+      assert Process.get(key) == nil
+    end
+  end
+
   defp get_resp_header(conn, key) do
     case Enum.find(conn.resp_headers, fn {k, _} -> k == key end) do
       {_, value} -> value
