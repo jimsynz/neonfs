@@ -23,6 +23,8 @@ defmodule NeonFS.WebDAV.LockStore.Cleaner do
 
   use GenServer
 
+  alias NeonFS.WebDAV.LockStore
+
   @default_interval_ms 180_000
 
   @doc """
@@ -86,7 +88,7 @@ defmodule NeonFS.WebDAV.LockStore.Cleaner do
   end
 
   defp release_namespace_claim_for(%{namespace_claim_id: claim_id}) when is_binary(claim_id) do
-    NeonFS.WebDAV.LockStore.release_namespace_claim(claim_id)
+    LockStore.release_namespace_claim(claim_id)
   end
 
   defp release_namespace_claim_for(_info), do: :ok
