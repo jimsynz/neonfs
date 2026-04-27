@@ -339,7 +339,7 @@ impl Filesystem for NeonFilesystem {
         name: &OsStr,
         mode: u32,
         _umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: fuser::ReplyCreate,
     ) {
         let name_str = name.to_string_lossy().to_string();
@@ -348,6 +348,7 @@ impl Filesystem for NeonFilesystem {
             parent: parent.0,
             name: name_str,
             mode,
+            flags,
         };
 
         match self.call_elixir(operation) {

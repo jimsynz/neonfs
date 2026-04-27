@@ -28,6 +28,11 @@ pub enum FuseOperation {
         parent: u64,
         name: String,
         mode: u32,
+        /// `open(2)` flags from the kernel — Elixir checks `O_EXCL`
+        /// to opt into atomic create-if-not-exist via
+        /// `WriteOperation`'s `create_only: true` option.
+        /// See sub-issue #594 of #303.
+        flags: i32,
     },
     /// Remove a file
     Unlink { parent: u64, name: String },
@@ -98,11 +103,17 @@ impl FuseOperation {
                 map.insert("offset", offset.encode(env));
                 ("readdir", map).encode(env)
             }
-            FuseOperation::Create { parent, name, mode } => {
+            FuseOperation::Create {
+                parent,
+                name,
+                mode,
+                flags,
+            } => {
                 let mut map = HashMap::new();
                 map.insert("parent", parent.encode(env));
                 map.insert("name", name.encode(env));
                 map.insert("mode", mode.encode(env));
+                map.insert("flags", flags.encode(env));
                 ("create", map).encode(env)
             }
             FuseOperation::Unlink { parent, name } => {

@@ -19,5 +19,6 @@ Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 # real kernel mount.
 
 Mimic.copy(NeonFS.Client.ChunkReader)
+Mimic.copy(NeonFS.Client)
 
 ExUnit.start(capture_log: true)
