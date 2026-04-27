@@ -250,16 +250,59 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   # Returns `{:ok, volume_name, path, FileMeta}` or `{:error, status}`.
+  #
+  # Root path "/" is synthesised — `FileIndex.get_by_path/2` doesn't
+  # carry a row for the volume root (the row sits implicitly inside
+  # the volume), so a naive `get_file_meta` lookup on "/" returns
+  # `:not_found`. Handler-level callers expect root resolution to
+  # succeed with a directory FileMeta so GETATTR / READDIRPLUS on the
+  # mount root work without the client having to pre-mkdir the root.
   defp resolve_meta(fh) do
-    with {:ok, _decoded, vol_name, path} <- resolve_handle(fh),
-         {:ok, meta} <- core_call(NeonFS.Core, :get_file_meta, [vol_name, path]) do
-      {:ok, vol_name, path, meta}
-    else
-      {:error, :not_found} -> {:error, :noent}
-      {:error, :stale} -> {:error, :stale}
-      {:error, status} when is_atom(status) -> {:error, status}
-      _ -> {:error, :stale}
+    case resolve_handle(fh) do
+      {:ok, decoded, vol_name, "/"} ->
+        {:ok, vol_name, "/", root_file_meta(decoded.volume_id, vol_name)}
+
+      {:ok, _decoded, vol_name, path} ->
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, path]) do
+          {:ok, meta} -> {:ok, vol_name, path, meta}
+          {:error, :not_found} -> {:error, :noent}
+          {:error, :stale} -> {:error, :stale}
+          {:error, status} when is_atom(status) -> {:error, status}
+          _ -> {:error, :stale}
+        end
+
+      {:error, status} ->
+        {:error, status}
     end
+  end
+
+  # Synthetic `FileMeta` for the volume root. POSIX-mode-bit 0o040755
+  # marks it as a directory; ownership defaults to `0:0` until the
+  # volume's owner field gets surfaced through this layer.
+  defp root_file_meta(volume_id_bin, _vol_name) do
+    now = DateTime.utc_now()
+    volume_id_str = Filehandle.volume_uuid_from_binary(volume_id_bin)
+
+    %FileMeta{
+      id: nil,
+      volume_id: volume_id_str,
+      path: "/",
+      chunks: [],
+      stripes: nil,
+      size: 0,
+      content_type: "inode/directory",
+      mode: 0o040755,
+      uid: 0,
+      gid: 0,
+      acl_entries: [],
+      default_acl: nil,
+      created_at: now,
+      modified_at: now,
+      accessed_at: now,
+      changed_at: now,
+      version: 1,
+      previous_version_id: nil
+    }
   end
 
   defp resolve_handle(fh) do
