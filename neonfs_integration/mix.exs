@@ -2,7 +2,13 @@ defmodule NeonFS.Integration.MixProject do
   use Mix.Project
 
   @moduledoc """
-  Multi-node integration test suite for NeonFS.
+  Multi-node integration test suite for NeonFS — narrowed to
+  cluster-formation, replication, partition / quorum / failure
+  recovery, and the cross-node correctness suites that genuinely
+  need a peer cluster spanning multiple core nodes. Per-interface
+  tests live with their owning packages and pull peer-cluster
+  scaffolding in via `:neonfs_test_support`. See #582 for the
+  migration that landed this shape.
   """
   @version "0.1.11"
 
@@ -23,13 +29,9 @@ defmodule NeonFS.Integration.MixProject do
     [
       ignore_warnings: ".dialyzer_ignore.exs",
       plt_add_apps: [
-        :bandit,
         :neonfs_client,
         :neonfs_core,
-        :neonfs_s3,
-        :neonfs_test_support,
-        :neonfs_webdav,
-        :thousand_island
+        :neonfs_test_support
       ]
     ]
   end
@@ -49,16 +51,7 @@ defmodule NeonFS.Integration.MixProject do
     [
       # Path dependencies for testing (runtime: false since only used in tests)
       {:neonfs_core, path: "../neonfs_core", runtime: false},
-      # `:neonfs_s3` and `:neonfs_webdav` are still needed because
-      # `streaming_test_helpers.ex` (a cross-protocol streaming-write
-      # helper) and the consuming `streaming_upload_peak_rss_test.exs`
-      # reference `NeonFS.S3.Backend` / `NeonFS.WebDAV.Backend` /
-      # `Firkin.PutOpts`. Removing both cleanly — by splitting that
-      # helper across packages or moving the test elsewhere — is
-      # tracked under #604.
-      {:neonfs_s3, path: "../neonfs_s3", runtime: false},
       {:neonfs_test_support, path: "../neonfs_test_support", runtime: false},
-      {:neonfs_webdav, path: "../neonfs_webdav", runtime: false},
       {:jason, "~> 1.0"},
 
       # dev/test

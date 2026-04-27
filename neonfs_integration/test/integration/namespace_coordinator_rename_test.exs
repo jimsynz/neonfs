@@ -26,7 +26,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
       can be re-claimed from any node.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
 

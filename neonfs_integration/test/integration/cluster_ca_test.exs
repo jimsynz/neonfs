@@ -1,7 +1,7 @@
 defmodule NeonFS.Integration.ClusterCATest do
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
-  alias NeonFS.Integration.PeerCluster
+  alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3

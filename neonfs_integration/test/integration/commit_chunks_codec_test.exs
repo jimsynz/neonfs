@@ -21,10 +21,10 @@ defmodule NeonFS.Integration.CommitChunksCodecTest do
   produces byte-identical output.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Client.{ChunkWriter, ServiceInfo}
-  alias NeonFS.Integration.PeerCluster
+  alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 300_000
   # Two nodes are enough: node1 is the core that accepts put_chunk + commit_chunks,

@@ -1,5 +1,5 @@
 defmodule NeonFS.Integration.FormationTest do
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 180_000
 

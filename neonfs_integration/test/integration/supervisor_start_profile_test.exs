@@ -10,11 +10,11 @@ defmodule NeonFS.Integration.SupervisorStartProfileTest do
 
   The test spawns a configured peer with `applications: []` so the
   `:neonfs_core` supervision tree starts cold, attaches
-  `NeonFS.Integration.SupervisorStartTimer` on the peer before boot,
+  `NeonFS.TestSupport.SupervisorStartTimer` on the peer before boot,
   then starts `:neonfs_core` and reads the per-child timings back.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Integration.{PeerCluster, SupervisorStartTimer}
 

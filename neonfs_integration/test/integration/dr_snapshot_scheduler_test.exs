@@ -18,16 +18,16 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   `start_link` would take the scheduler down with it.
 
   Telemetry from `[:neonfs, :dr_snapshot_scheduler, :tick]` is captured
-  on each peer via `NeonFS.Integration.TelemetryForwarder`, with one
+  on each peer via `NeonFS.TestSupport.TelemetryForwarder`, with one
   ref per node so the test process can attribute events back to their
   source.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.DRSnapshotScheduler
   alias NeonFS.Core.RaSupervisor
-  alias NeonFS.Integration.TelemetryForwarder
+  alias NeonFS.TestSupport.TelemetryForwarder
 
   @moduletag timeout: 180_000
   @moduletag :integration

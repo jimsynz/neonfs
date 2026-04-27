@@ -73,6 +73,14 @@ defmodule NeonFS.S3.MixProject do
 
       # test
       {:neonfs_test_support, path: "../neonfs_test_support", only: :test, runtime: false},
+      # `:neonfs_webdav` is needed by `streaming_upload_peak_rss_test.exs`
+      # (and its helper `streaming_test_helpers.ex`) to verify
+      # cross-protocol byte identity — the test writes through S3
+      # and reads back through WebDAV. The test moved here from
+      # `neonfs_integration` under #604; if a more idiomatic home
+      # for cross-protocol assertions emerges, this dep is the
+      # natural follow-up to revisit.
+      {:neonfs_webdav, path: "../neonfs_webdav", only: :test, runtime: false},
       {:ex_aws, "~> 2.6", only: :test},
       {:ex_aws_s3, "~> 2.5", only: :test},
       {:hackney, "~> 1.9", only: :test},

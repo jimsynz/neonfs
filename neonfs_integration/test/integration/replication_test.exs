@@ -1,5 +1,5 @@
 defmodule NeonFS.Integration.ReplicationTest do
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 300_000
   # Phase 5 quorum-replicated metadata enables multi-node read/write

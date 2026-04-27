@@ -9,7 +9,7 @@ defmodule NeonFS.Integration.EncryptionTest do
   - Encrypted erasure-coded volume (encrypt + EC compose correctly)
   - CLI handler volume creation with encryption flag
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.KeyManager
   alias NeonFS.Core.VolumeEncryption

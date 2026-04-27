@@ -8,7 +8,7 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   partition healing) share a single cluster in
   `partition_test.exs` with `cluster_mode: :shared` (#506).
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3

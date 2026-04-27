@@ -21,10 +21,10 @@ defmodule NeonFS.Integration.ChunkerParityTest do
   computed by the chunker on plaintext bytes regardless.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Client.{ChunkWriter, ServiceInfo}
-  alias NeonFS.Integration.PeerCluster
+  alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 300_000
   # The whole test operates against node1 (core) and node2 (interface-side chunker);

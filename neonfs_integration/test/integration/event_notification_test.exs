@@ -10,10 +10,10 @@ defmodule NeonFS.Integration.EventNotificationTest do
   Uses `cluster: :shared` to spin up a single 3-node cluster for the entire
   module rather than per-test, saving ~19s of cluster setup per test.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Events.Envelope
-  alias NeonFS.Integration.EventCollector
+  alias NeonFS.TestSupport.EventCollector
 
   @moduletag timeout: 300_000
   @moduletag :integration

@@ -25,7 +25,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorTest do
   per-node holders.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
 

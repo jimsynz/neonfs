@@ -13,9 +13,9 @@ defmodule NeonFS.Integration.RemoveNodeTest do
   tests total keeps the module under 30 s.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
-  alias NeonFS.Integration.PeerCluster
+  alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3

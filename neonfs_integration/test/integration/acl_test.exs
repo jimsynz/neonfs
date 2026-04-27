@@ -12,7 +12,7 @@ defmodule NeonFS.Integration.ACLTest do
   - File ACL: extended ACL entry for specific UID
   - Directory default ACL inheritance
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 180_000
   @moduletag :integration

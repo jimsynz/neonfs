@@ -9,7 +9,7 @@ defmodule NeonFS.Integration.Phase3Test do
   - Drive selection distributes writes across drives in a tier
   - Tier migration moves chunks between tiers
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 180_000
   @moduletag :integration

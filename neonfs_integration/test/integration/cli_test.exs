@@ -1,5 +1,5 @@
 defmodule NeonFS.Integration.CLITest do
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 60_000
   @moduletag nodes: 1

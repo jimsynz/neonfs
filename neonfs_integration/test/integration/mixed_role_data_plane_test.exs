@@ -1,6 +1,6 @@
 defmodule NeonFS.Integration.MixedRoleDataPlaneTest do
   @moduledoc """
-  Smoke test for `NeonFS.Integration.ClusterCase.init_mixed_role_cluster/2`
+  Smoke test for `NeonFS.TestSupport.ClusterCase.init_mixed_role_cluster/2`
   (#524).
 
   Spawns a 2-peer cluster — one `:neonfs_core`, one `:neonfs_s3` —

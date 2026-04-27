@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.ProcessMemoryProfile do
+defmodule NeonFS.S3.IntegrationTest.ProcessMemoryProfile do
   @moduledoc """
   Per-process memory snapshot helper used by the streaming-upload
   process-heap profile (#534).

@@ -3,7 +3,7 @@ defmodule NeonFS.Integration.ClusterFormationTest do
   # so cluster lifecycle stays `:per_test` (the default). The read-only
   # multi-node distribution smoke tests live in
   # `cluster_formation_multi_node_test.exs` with `cluster_mode: :shared`.
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 60_000
   @moduletag :tmp_dir
