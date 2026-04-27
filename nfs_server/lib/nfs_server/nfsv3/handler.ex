@@ -14,13 +14,14 @@ defmodule NFSServer.NFSv3.Handler do
   | 4    | ACCESS      |
   | 5    | READLINK    |
   | 6    | READ        |
+  | 8    | CREATE      |
   | 16   | READDIR     |
   | 17   | READDIRPLUS |
   | 18   | FSSTAT      |
   | 19   | FSINFO      |
   | 20   | PATHCONF    |
 
-  The remaining write-path procedures (procs 7–15, 21) ship in
+  The remaining write-path procedures (procs 7, 9–15, 21) ship in
   separate sub-issues under the #285 tracking issue.
 
   ## READ streaming
@@ -101,6 +102,7 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_access 4
   @proc_readlink 5
   @proc_read 6
+  @proc_create 8
   @proc_readdir 16
   @proc_readdirplus 17
   @proc_fsstat 18
@@ -211,6 +213,13 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  def handle_call(@proc_create, args, auth, ctx) do
+    case decode_create_args(args) do
+      {:ok, dir, name, mode} -> do_create(dir, name, mode, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
   def handle_call(@proc_readdir, args, auth, ctx) do
     case decode_readdir_args(args) do
       {:ok, fh, cookie, verf, count} -> do_readdir(fh, cookie, verf, count, auth, ctx)
@@ -270,6 +279,16 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  # CREATE args: `diropargs3 + createhow3` (RFC 1813 §3.3.8).
+  defp decode_create_args(args) do
+    with {:ok, {dir, name}, rest} <- Types.decode_diropargs3(args),
+         {:ok, mode, _rest} <- Types.decode_createhow3(rest) do
+      {:ok, dir, name, mode}
+    else
+      {:error, _} -> :error
+    end
+  end
+
   # SETATTR args: `fhandle3 + sattr3 + sattrguard3`. `sattrguard3` is
   # an XDR-optional `nfstime3` — RFC 1813 §3.3.2's "guarded SETATTR"
   # check pre-op `ctime` matches `obj_ctime`.
@@ -317,6 +336,26 @@ defmodule NFSServer.NFSv3.Handler do
 
       {:error, status} ->
         {:ok, Types.encode_nfsstat3(status)}
+    end
+  end
+
+  defp do_create(dir, name, mode, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.create(dir, name, mode, auth, ctx) do
+      {:ok, fh, attr, %Types.WccData{} = wcc} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_fh3(fh) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_wcc_data(wcc)}
+
+      {:error, status, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
     end
   end
 

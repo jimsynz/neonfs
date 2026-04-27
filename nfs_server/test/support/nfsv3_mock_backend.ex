@@ -55,6 +55,9 @@ defmodule NFSServer.NFSv3.MockBackend do
   @impl true
   def setattr(fh, sattr, guard, _auth, _ctx), do: fetch({:setattr, {fh, sattr, guard}})
 
+  @impl true
+  def create(dir, name, mode, _auth, _ctx), do: fetch({:create, {dir, name, mode}})
+
   @doc "A simple `Fattr3` fixture for tests that don't care about the values."
   def sample_fattr3 do
     %Types.Fattr3{

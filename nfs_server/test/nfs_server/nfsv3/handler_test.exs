@@ -138,6 +138,89 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  # CREATE (proc 8) covers three modes (UNCHECKED / GUARDED /
+  # EXCLUSIVE) per RFC 1813 §3.3.8. The handler dispatches the
+  # `createhow3` discriminated union to the backend; the backend
+  # decides what each mode means semantically. Idempotency for
+  # EXCLUSIVE retries is the backend's responsibility — this layer
+  # just round-trips the wire shape.
+  describe "CREATE (proc 8)" do
+    test "UNCHECKED mode forwards sattr3 + returns fhandle, attr, wcc on success" do
+      dir = "dir-create"
+      name = "new.txt"
+      sattr = %Types.Sattr3{mode: 0o644}
+      mode = {:unchecked, sattr}
+
+      child_fh = "fh-new"
+      child_attr = MockBackend.sample_fattr3()
+      pre_dir_wcc = %Types.WccAttr{
+        size: 0,
+        mtime: %Nfstime3{seconds: 1, nseconds: 0},
+        ctime: %Nfstime3{seconds: 1, nseconds: 0}
+      }
+      dir_attr = %{child_attr | type: :dir, fileid: 99}
+      wcc = %Types.WccData{before: pre_dir_wcc, after: dir_attr}
+
+      MockBackend.put(
+        {:create, {dir, name, mode}},
+        {:ok, child_fh, child_attr, wcc}
+      )
+
+      args = Types.encode_diropargs3({dir, name}) <> Types.encode_createhow3(mode)
+      {:ok, body} = Handler.handle_call(8, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^child_fh, rest} = Types.decode_post_op_fh3(rest)
+      assert {:ok, ^child_attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "GUARDED mode against an existing target returns NFS3ERR_EXIST + wcc" do
+      dir = "dir-guarded"
+      name = "exists.txt"
+      sattr = %Types.Sattr3{mode: 0o600}
+      mode = {:guarded, sattr}
+
+      pre_wcc = %Types.WccAttr{size: 0, mtime: %Nfstime3{seconds: 1, nseconds: 0},
+                               ctime: %Nfstime3{seconds: 1, nseconds: 0}}
+      dir_attr = %{MockBackend.sample_fattr3() | type: :dir}
+      wcc = %Types.WccData{before: pre_wcc, after: dir_attr}
+
+      MockBackend.put({:create, {dir, name, mode}}, {:error, :exist, wcc})
+
+      args = Types.encode_diropargs3({dir, name}) <> Types.encode_createhow3(mode)
+      {:ok, body} = Handler.handle_call(8, args, @auth, @ctx_base)
+
+      assert {:ok, :exist, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "EXCLUSIVE mode forwards createverf3 to the backend" do
+      dir = "dir-exclusive"
+      name = "atomic.txt"
+      verf = <<1, 2, 3, 4, 5, 6, 7, 8>>
+      mode = {:exclusive, verf}
+
+      child_fh = "fh-exclusive"
+      child_attr = MockBackend.sample_fattr3()
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:create, {dir, name, mode}}, {:ok, child_fh, child_attr, wcc})
+
+      args = Types.encode_diropargs3({dir, name}) <> Types.encode_createhow3(mode)
+      {:ok, body} = Handler.handle_call(8, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^child_fh, rest} = Types.decode_post_op_fh3(rest)
+      assert {:ok, ^child_attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(8, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
   describe "LOOKUP (proc 3)" do
     test "returns the file handle plus both post-op attrs on success" do
       dir = "dir"
