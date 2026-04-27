@@ -429,6 +429,101 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
+  ## rename (#625)
+
+  describe "rename/6" do
+    setup do
+      put_inode_table(%{
+        0xD00D_D00D_D00D_D00D => {@volume_name, "/from"},
+        0xE00E_E00E_E00E_E00E => {@volume_name, "/to"}
+      })
+
+      :ok
+    end
+
+    test "same-directory rename succeeds with dual wcc_data" do
+      pre_from = file_meta(%{path: "/from", mode: 0o040_755, size: 0})
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/from"] ->
+          {:ok, pre_from}
+
+        NeonFS.Core, :rename_file, [@volume_name, "/from/old.txt", "/from/new.txt"] ->
+          send(test_pid, :rename_called)
+          :ok
+      end)
+
+      from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)
+
+      assert {:ok, %NFSServer.NFSv3.Types.WccData{}, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.rename(from_fh, "old.txt", from_fh, "new.txt", :auth, %{})
+
+      assert_received :rename_called
+    end
+
+    test "cross-directory rename calls Core.rename_file with the right paths" do
+      pre_from = file_meta(%{path: "/from", mode: 0o040_755, size: 0})
+      pre_to = file_meta(%{path: "/to", mode: 0o040_755, size: 0})
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/from"] ->
+          {:ok, pre_from}
+
+        NeonFS.Core, :get_file_meta, [@volume_name, "/to"] ->
+          {:ok, pre_to}
+
+        NeonFS.Core, :rename_file, [@volume_name, "/from/x.txt", "/to/y.txt"] ->
+          send(test_pid, :rename_called)
+          :ok
+      end)
+
+      from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)
+      to_fh = Filehandle.encode(@volume_id_bin, 0xE00E_E00E_E00E_E00E)
+
+      assert {:ok, _, _} = NFSv3Backend.rename(from_fh, "x.txt", to_fh, "y.txt", :auth, %{})
+      assert_received :rename_called
+    end
+
+    test "cycle (`/a` → `/a/b`) maps `:einval` to NFS3ERR_INVAL" do
+      pre_from = file_meta(%{path: "/from", mode: 0o040_755, size: 0})
+      pre_to = file_meta(%{path: "/from", mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, _ -> {:ok, pre_from}
+        # `Core.rename_file` returns `{:error, :einval}` for cycles per
+        # the namespace coordinator's `claim_rename` check (#304).
+        NeonFS.Core, :rename_file, _ -> {:error, :einval}
+        _, _, _ -> {:ok, pre_to}
+      end)
+
+      from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)
+
+      assert {:error, :inval, %NFSServer.NFSv3.Types.WccData{}, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.rename(from_fh, "a", from_fh, "a/b", :auth, %{})
+    end
+
+    test "missing source returns NFS3ERR_NOENT + dual wcc_data" do
+      pre_from = file_meta(%{path: "/from", mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, _ -> {:ok, pre_from}
+        NeonFS.Core, :rename_file, _ -> {:error, :not_found}
+      end)
+
+      from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)
+
+      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{}, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.rename(from_fh, "missing.txt", from_fh, "new.txt", :auth, %{})
+    end
+
+    test "stale fhandle returns :stale" do
+      assert {:error, :stale} =
+               NFSv3Backend.rename(<<0::8>>, "x", <<0::8>>, "y", :auth, %{})
+    end
+  end
+
   ## write / commit (#624)
 
   describe "write/6" do

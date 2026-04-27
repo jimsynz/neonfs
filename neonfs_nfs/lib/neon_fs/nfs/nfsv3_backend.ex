@@ -520,6 +520,58 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
+  @impl true
+  def rename(from_dir_fh, from_name, to_dir_fh, to_name, _auth, _ctx) do
+    case {resolve_dir(from_dir_fh), resolve_dir(to_dir_fh)} do
+      {{:ok, from_vol, from_dir_path}, {:ok, to_vol, to_dir_path}} ->
+        do_rename(from_vol, from_dir_path, from_name, to_vol, to_dir_path, to_name)
+
+      _ ->
+        {:error, :stale}
+    end
+  end
+
+  defp do_rename(from_vol, from_dir, from_name, to_vol, to_dir, to_name) do
+    if from_vol != to_vol do
+      # Cross-volume renames aren't a thing in NeonFS — the volume
+      # is the namespace boundary. RFC 1813 lets us return EXDEV
+      # ("cross-device link") which `:exdev` covers.
+      {:error, :xdev,
+       %WccData{
+         before: pre_dir_wcc(from_vol, from_dir),
+         after: post_dir_attr(from_vol, from_dir)
+       }, %WccData{before: pre_dir_wcc(to_vol, to_dir), after: post_dir_attr(to_vol, to_dir)}}
+    else
+      from_path = Path.join(from_dir, from_name)
+      to_path = Path.join(to_dir, to_name)
+      from_pre = pre_dir_wcc(from_vol, from_dir)
+      to_pre = pre_dir_wcc(to_vol, to_dir)
+
+      case core_call(NeonFS.Core, :rename_file, [from_vol, from_path, to_path]) do
+        :ok ->
+          {:ok, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+
+        {:error, :einval} ->
+          {:error, :inval, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+
+        {:error, :not_found} ->
+          {:error, :noent, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+
+        {:error, status} when is_atom(status) ->
+          {:error, map_create_error(status),
+           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+
+        _ ->
+          {:error, :io, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+      end
+    end
+  end
+
   # Per-instance write verifier (RFC 1813 §3.3.7 / §3.3.21). The
   # 8-byte value lives in `:persistent_term` keyed by this module
   # so it stays stable across calls but rotates whenever the BEAM
