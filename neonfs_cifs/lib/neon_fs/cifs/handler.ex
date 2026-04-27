@@ -321,28 +321,32 @@ defmodule NeonFS.CIFS.Handler do
   # `O_CREAT` → create if missing. Anything else is open-existing
   # (the Samba shim's `vfs_open` issues these flags from its own
   # POSIX-style open call).
+  #
+  # Exclusive create routes through `WriteOperation`'s `create_only:
+  # true` (sub-issue #595 of #303) so two CIFS interface nodes that
+  # both observe `:not_found` can't both win the create — the
+  # namespace coordinator's `claim_create` primitive (#591) lets
+  # exactly one through and surfaces `{:error, :exists}` to the
+  # other, which we map back to `:eexist`.
   defp open_or_create(volume, path, flags, mode) do
     o_creat = Bitwise.band(flags, 0o100) != 0
     o_excl = Bitwise.band(flags, 0o200) != 0
 
-    case {core_call(NeonFS.Core.FileIndex, :get_by_path, [volume, path]), o_creat, o_excl} do
-      {{:ok, _file}, _, true} ->
-        {:error, :eexist}
+    case core_call(NeonFS.Core.FileIndex, :get_by_path, [volume, path]) do
+      {:ok, _file} when o_excl -> {:error, :eexist}
+      {:ok, file} -> {:ok, file}
+      {:error, :not_found} when o_creat -> create_file(volume, path, mode, o_excl)
+      {:error, _} = err -> err
+    end
+  end
 
-      {{:ok, file}, _, _} ->
-        {:ok, file}
+  defp create_file(volume, path, mode, exclusive?) do
+    base_opts = [mode: mode]
+    opts = if exclusive?, do: [{:create_only, true} | base_opts], else: base_opts
 
-      {{:error, :not_found}, true, _} ->
-        core_call(NeonFS.Core.WriteOperation, :write_file_at, [
-          volume,
-          path,
-          0,
-          <<>>,
-          [mode: mode]
-        ])
-
-      {{:error, _} = err, _, _} ->
-        err
+    case core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume, path, 0, <<>>, opts]) do
+      {:error, :exists} -> {:error, :eexist}
+      other -> other
     end
   end
 
