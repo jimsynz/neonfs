@@ -654,8 +654,11 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   defp start_application_on_peer(peer, node, app) do
     # Under heavy load (e.g. full integration suite), application startup can
-    # exceed the default 5s :peer.call timeout. Use 30s to be safe.
-    case :peer.call(peer, :application, :ensure_all_started, [app], 30_000) do
+    # exceed the default 5s `:peer.call` timeout. 30s used to be enough, but
+    # the shared CI runner now consistently exceeds it on the BEAM NFSv3
+    # peer-cluster tests (#647). Bumped to 60s so a slow cold-start doesn't
+    # masquerade as a real failure.
+    case :peer.call(peer, :application, :ensure_all_started, [app], 60_000) do
       {:ok, _} -> :ok
       {:error, reason} -> Logger.warning("Failed to start #{app} on #{node}: #{inspect(reason)}")
     end
