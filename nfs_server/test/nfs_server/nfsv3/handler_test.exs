@@ -153,11 +153,13 @@ defmodule NFSServer.NFSv3.HandlerTest do
 
       child_fh = "fh-new"
       child_attr = MockBackend.sample_fattr3()
+
       pre_dir_wcc = %Types.WccAttr{
         size: 0,
         mtime: %Nfstime3{seconds: 1, nseconds: 0},
         ctime: %Nfstime3{seconds: 1, nseconds: 0}
       }
+
       dir_attr = %{child_attr | type: :dir, fileid: 99}
       wcc = %Types.WccData{before: pre_dir_wcc, after: dir_attr}
 
@@ -181,8 +183,12 @@ defmodule NFSServer.NFSv3.HandlerTest do
       sattr = %Types.Sattr3{mode: 0o600}
       mode = {:guarded, sattr}
 
-      pre_wcc = %Types.WccAttr{size: 0, mtime: %Nfstime3{seconds: 1, nseconds: 0},
-                               ctime: %Nfstime3{seconds: 1, nseconds: 0}}
+      pre_wcc = %Types.WccAttr{
+        size: 0,
+        mtime: %Nfstime3{seconds: 1, nseconds: 0},
+        ctime: %Nfstime3{seconds: 1, nseconds: 0}
+      }
+
       dir_attr = %{MockBackend.sample_fattr3() | type: :dir}
       wcc = %Types.WccData{before: pre_wcc, after: dir_attr}
 

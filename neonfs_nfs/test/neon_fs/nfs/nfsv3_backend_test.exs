@@ -281,7 +281,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] ->
+          {:ok, pre_dir}
 
         NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, opts] ->
           send(test_pid, {:opts, opts})
@@ -370,8 +371,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:error, :not_found}
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] ->
+          {:error, :not_found}
+
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] ->
+          {:ok, pre_dir}
 
         NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, opts] ->
           send(test_pid, {:opts, opts})

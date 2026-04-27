@@ -267,7 +267,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
       {:guarded, %Sattr3{} = sattr} ->
         case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
           {:ok, _existing} ->
-            {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+            {:error, :exist,
+             %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
           {:error, _} ->
             write_new_file(vol_name, dir_path, child_path, sattr, pre_dir_wcc, opts: [])
@@ -286,8 +287,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
       {:ok, _other} ->
         # File exists with a different (or no) verf → EEXIST.
-        {:error, :exist,
-         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, _} ->
         write_new_file(vol_name, dir_path, child_path, %Sattr3{}, pre_dir_wcc,
@@ -324,8 +324,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
          %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, _} ->
-        {:error, :io,
-         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
     end
   end
 
@@ -339,8 +338,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, child_fh, fattr_from_meta(meta), wcc}
 
       _ ->
-        {:error, :io,
-         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
     end
   end
 
