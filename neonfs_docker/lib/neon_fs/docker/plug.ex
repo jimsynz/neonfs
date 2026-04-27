@@ -25,7 +25,7 @@ defmodule NeonFS.Docker.Plug do
   use Plug.Router
 
   alias NeonFS.Client.HealthCheck
-  alias NeonFS.Docker.{MountTracker, VolumeStore}
+  alias NeonFS.Docker.{MountTracker, OptsParser, VolumeStore}
 
   # The dockerd plugin client (`moby/pkg/plugins`) sends `Accept` but
   # not `Content-Type`, so Plug.Parsers can't pick a parser and
@@ -74,10 +74,15 @@ defmodule NeonFS.Docker.Plug do
   ## Create
 
   post "/VolumeDriver.Create" do
+    raw_opts = Map.get(conn.body_params, "Opts", %{}) || %{}
+
     with {:ok, name} <- fetch_name(conn.body_params),
-         opts <- Map.get(conn.body_params, "Opts", %{}) || %{},
-         :ok <- propagate_to_core(conn, name, opts) do
-      VolumeStore.put(volume_store(conn), name, opts)
+         {:ok, parsed_opts} <- OptsParser.parse(raw_opts),
+         :ok <- propagate_to_core(conn, name, parsed_opts) do
+      # Local store keeps the raw `-o` map verbatim so
+      # `docker volume inspect` round-trips it; the typed kw list is
+      # the one that crosses the core boundary.
+      VolumeStore.put(volume_store(conn), name, raw_opts)
       reply(conn, 200, %{"Err" => ""})
     else
       {:error, message} -> reply(conn, 200, %{"Err" => message})
@@ -213,15 +218,11 @@ defmodule NeonFS.Docker.Plug do
     end
   end
 
-  # Drop docker `-o` opts at the core boundary for now. They arrive as
-  # a JSON-decoded map of stringly-typed values, but `Volume.new/2`
-  # wants a typed keyword list — passing the map straight through
-  # crashes `VolumeRegistry` in `Keyword.get/3`. The raw opts stay in
-  # the local `VolumeStore` so `docker volume inspect` still
-  # round-trips them. Proper docker→NeonFS option mapping is tracked
-  # in #583.
-  defp default_core_create(name, _opts) do
-    case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name]) do
+  # `opts` here is the parsed keyword list from `OptsParser.parse/1`
+  # — empty when docker omitted `-o`, otherwise a typed kw list
+  # `Volume.new/2` accepts (see #583).
+  defp default_core_create(name, opts) do
+    case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name, opts]) do
       {:ok, _volume} -> :ok
       {:error, %{class: :already_exists}} -> :ok
       {:error, :already_exists} -> :ok
