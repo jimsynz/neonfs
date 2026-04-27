@@ -92,7 +92,18 @@ defmodule NeonFS.WebDAV.Test.MockCore do
           {:ok, FileMeta.t()} | {:error, term()}
   def write_file_streamed(volume_name, path, stream, write_opts \\ []) do
     body = stream |> Enum.to_list() |> IO.iodata_to_binary()
-    write_file(volume_name, path, body, write_opts)
+
+    if Keyword.get(write_opts, :create_only, false) do
+      files = Process.get(:mock_files, %{})
+      key = {volume_name, normalise_path(path)}
+
+      case Map.get(files, key) do
+        nil -> write_file(volume_name, path, body, write_opts)
+        _ -> {:error, :exists}
+      end
+    else
+      write_file(volume_name, path, body, write_opts)
+    end
   end
 
   @spec write_file_at(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::

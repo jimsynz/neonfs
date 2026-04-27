@@ -544,6 +544,58 @@ defmodule NeonFS.WebDAV.BackendTest do
     end
   end
 
+  # `If-None-Match: *` is the RFC 7232 conditional-create precondition
+  # used by browsers, `curl --etag-save`, and most WebDAV clients to
+  # express "create only if the target doesn't exist". `HealthPlug`
+  # (the Davy.Plug wrapper) captures the header into the process
+  # dictionary; `Backend.put_content_stream/4` reads it and forwards
+  # `create_only: true` to `WriteOperation`. `{:error, :exists}` from
+  # core comes back as `412 Precondition Failed`.
+  #
+  # See sub-issue #593 of #303.
+  describe "put_content_stream/4 — If-None-Match: * (create_only)" do
+    setup do
+      key = NeonFS.WebDAV.HealthPlug.if_none_match_star_key()
+      Process.put(key, true)
+      on_exit(fn -> Process.delete(key) end)
+      :ok
+    end
+
+    test "creates a new file when none exists" do
+      MockCore.create_volume("docs")
+
+      assert {:ok, resource} =
+               Backend.put_content_stream(@auth, ["docs", "fresh.txt"], ["hi"], %{})
+
+      assert resource.content_length == 2
+    end
+
+    test "returns 412 Precondition Failed when target already exists" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/already.txt", "seed")
+
+      assert {:error, %Davy.Error{code: :precondition_failed, message: msg}} =
+               Backend.put_content_stream(@auth, ["docs", "already.txt"], ["overwrite"], %{})
+
+      assert msg =~ "If-None-Match"
+
+      # The original bytes must not have been overwritten.
+      assert {:ok, "seed"} = MockCore.read_file("docs", "/already.txt")
+    end
+
+    test "without the captured flag, the same write overwrites silently" do
+      Process.delete(NeonFS.WebDAV.HealthPlug.if_none_match_star_key())
+
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/silent.txt", "v1")
+
+      assert {:ok, _} =
+               Backend.put_content_stream(@auth, ["docs", "silent.txt"], ["v2"], %{})
+
+      assert {:ok, "v2"} = MockCore.read_file("docs", "/silent.txt")
+    end
+  end
+
   describe "delete/2" do
     test "deletes a file" do
       MockCore.create_volume("docs")
