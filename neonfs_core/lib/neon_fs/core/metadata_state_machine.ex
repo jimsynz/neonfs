@@ -1249,7 +1249,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
     :telemetry.execute(
       [:neonfs, :ra, :command, :release_namespace_claim],
       %{version: new_state.version, released: if(released, do: 1, else: 0)},
-      %{claim_id: claim_id}
+      release_event_metadata(claim_id, released)
     )
 
     {new_state, :ok, []}
@@ -1258,12 +1258,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def apply(_meta, {:release_namespace_claims_for_holder, holder}, state) do
     state = ensure_namespace(state)
 
-    {kept, released_count} =
-      Enum.reduce(state.namespace_claims, {%{}, 0}, fn {id, claim}, {acc, count} ->
+    {kept, released_ids} =
+      Enum.reduce(state.namespace_claims, {%{}, []}, fn {id, claim}, {acc, ids} ->
         if claim.holder == holder do
-          {acc, count + 1}
+          {acc, [id | ids]}
         else
-          {Map.put(acc, id, claim), count}
+          {Map.put(acc, id, claim), ids}
         end
       end)
 
@@ -1271,11 +1271,11 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :release_namespace_claims_for_holder],
-      %{version: new_state.version, released: released_count},
-      %{}
+      %{version: new_state.version, released: length(released_ids)},
+      %{released_claim_ids: released_ids, holder: holder}
     )
 
-    {new_state, {:ok, released_count}, []}
+    {new_state, {:ok, length(released_ids)}, []}
   end
 
   # Segment assignment commands (new in v5)
@@ -1778,6 +1778,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp overlaps?(:create, a, :pinned, b), do: a == b
   defp overlaps?(:pinned, p, :subtree, root), do: in_subtree?(p, root)
   defp overlaps?(:subtree, root, :pinned, p), do: in_subtree?(p, root)
+
+  # Build the metadata map for `:release_namespace_claim` telemetry.
+  # Always includes `:claim_id`. Includes `:claim_path`, `:claim_type`
+  # and `:claim_holder` taken from the claim *as it existed before
+  # release* — subscribers (e.g. the unlink-while-open detached-file
+  # GC, #644) need these to identify which tombstones a release
+  # affects without having to query the state again. Fields default to
+  # `nil` when the claim wasn't present (idempotent release of an
+  # already-released or never-existed id).
+  defp release_event_metadata(claim_id, nil) do
+    %{claim_id: claim_id, claim_path: nil, claim_type: nil, claim_holder: nil}
+  end
+
+  defp release_event_metadata(claim_id, %{path: path, type: type, holder: holder}) do
+    %{claim_id: claim_id, claim_path: path, claim_type: type, claim_holder: holder}
+  end
 
   defp scopes_conflict?(:exclusive, _), do: true
   defp scopes_conflict?(_, :exclusive), do: true
