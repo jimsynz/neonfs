@@ -429,6 +429,96 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
+  ## write / commit (#624)
+
+  describe "write/6" do
+    setup do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      :ok
+    end
+
+    test "writes the bytes and reports :file_sync regardless of the requested hint" do
+      pre = file_meta(%{size: 0})
+      post = file_meta(%{size: 11})
+      data = "hello-write"
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+          {:ok, pre}
+
+        NeonFS.Core, :write_file_at, [@volume_name, @file_path, 0, ^data, _opts] ->
+          send(test_pid, :write_called)
+          {:ok, post}
+      end)
+
+      assert {:ok, %{wcc: wcc, count: 11, committed: :file_sync, verf: verf}} =
+               NFSv3Backend.write(valid_fh(), 0, data, :unstable, :auth, %{})
+
+      assert byte_size(verf) == 8
+      assert %NFSServer.NFSv3.Types.WccData{before: %_{size: 0}, after: %Fattr3{size: 11}} = wcc
+      assert_received :write_called
+    end
+
+    test "returns NFS3ERR_NOSPC + parent wcc when core surfaces it" do
+      pre = file_meta(%{size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] -> {:ok, pre}
+        NeonFS.Core, :write_file_at, _ -> {:error, :nospc}
+      end)
+
+      assert {:error, :nospc, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+               NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
+    end
+
+    test "stale fhandle returns :stale + empty wcc" do
+      put_core(fn _, :get_file_meta, _ -> {:error, :not_found} end)
+
+      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+               NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
+    end
+  end
+
+  describe "commit/4" do
+    setup do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      :ok
+    end
+
+    test "returns wcc + per-instance verf without re-writing data" do
+      meta = file_meta()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] -> {:ok, meta}
+        NeonFS.Core, :write_file_at, _ -> flunk("commit must not write")
+      end)
+
+      assert {:ok, %{wcc: %NFSServer.NFSv3.Types.WccData{}, verf: verf}} =
+               NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
+
+      assert byte_size(verf) == 8
+    end
+
+    test "verf is stable across calls within the same VM" do
+      meta = file_meta()
+
+      put_core(fn _, :get_file_meta, _ -> {:ok, meta} end)
+
+      {:ok, %{verf: v1}} = NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
+      {:ok, %{verf: v2}} = NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
+
+      assert v1 == v2
+    end
+
+    test "stale fhandle returns :stale + empty wcc" do
+      put_core(fn _, :get_file_meta, _ -> {:error, :not_found} end)
+
+      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+               NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
+    end
+  end
+
   ## mkdir / remove / rmdir (#623)
 
   describe "mkdir/5" do

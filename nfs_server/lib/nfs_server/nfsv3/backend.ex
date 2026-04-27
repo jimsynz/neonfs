@@ -322,4 +322,56 @@ defmodule NFSServer.NFSv3.Backend do
               {:ok, Types.WccData.t()}
               | {:error, Types.nfsstat3(), Types.WccData.t()}
               | {:error, Types.nfsstat3()}
+
+  @doc """
+  WRITE — RFC 1813 §3.3.7. Write `data` at `offset` with the
+  requested `stable` hint. The server returns the actual count
+  written (may be less than the request), the stability level it
+  achieved (must be `>= stable` requested), and the per-instance
+  `writeverf3`. Backends that always commit synchronously may
+  return `:file_sync` regardless of the requested stability — the
+  client gets stronger guarantees than asked for, which RFC 1813
+  permits.
+
+  The handler trims `data` against the per-write `count` cap before
+  this callback fires, so backends can rely on `byte_size(data) ==
+  count`.
+  """
+  @callback write(
+              fh :: Types.fhandle3(),
+              offset :: Types.offset3(),
+              data :: binary(),
+              stable :: Types.stable_how(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok,
+               %{
+                 required(:wcc) => Types.WccData.t(),
+                 required(:count) => non_neg_integer(),
+                 required(:committed) => Types.stable_how(),
+                 required(:verf) => Types.writeverf3()
+               }}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
+
+  @doc """
+  COMMIT — RFC 1813 §3.3.21. Flush any unstable writes covering
+  `[offset, offset+count)` to stable storage. Returns the
+  parent file's `wcc_data` plus the per-instance `writeverf3` —
+  clients use the verf to detect a server restart and resend lost
+  unstable writes.
+
+  `count == 0` means "commit through end-of-file", per RFC 1813.
+  """
+  @callback commit(
+              fh :: Types.fhandle3(),
+              offset :: Types.offset3(),
+              count :: Types.count3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, %{required(:wcc) => Types.WccData.t(), required(:verf) => Types.writeverf3()}}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
 end

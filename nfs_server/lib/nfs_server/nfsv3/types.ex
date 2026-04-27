@@ -578,6 +578,37 @@ defmodule NFSServer.NFSv3.Types do
     end
   end
 
+  # ——— stable_how ————————————————————————————————————————————
+
+  @typedoc """
+  WRITE / COMMIT stability hints from RFC 1813 §3.3.7. Determines
+  whether the server may lose the write before COMMIT.
+
+    * `:unstable` — volatile cache, client must COMMIT.
+    * `:data_sync` — data persistent, metadata may not be.
+    * `:file_sync` — data + metadata persistent.
+  """
+  @type stable_how :: :unstable | :data_sync | :file_sync
+
+  @doc "Encode a `stable_how` atom to its wire integer."
+  @spec encode_stable_how(stable_how()) :: binary()
+  def encode_stable_how(:unstable), do: XDR.encode_uint(0)
+  def encode_stable_how(:data_sync), do: XDR.encode_uint(1)
+  def encode_stable_how(:file_sync), do: XDR.encode_uint(2)
+
+  @doc "Decode a `stable_how` from the wire integer."
+  @spec decode_stable_how(binary()) :: {:ok, stable_how(), binary()} | {:error, term()}
+  def decode_stable_how(binary) do
+    with {:ok, n, rest} <- XDR.decode_uint(binary) do
+      case n do
+        0 -> {:ok, :unstable, rest}
+        1 -> {:ok, :data_sync, rest}
+        2 -> {:ok, :file_sync, rest}
+        other -> {:error, {:bad_stable_how, other}}
+      end
+    end
+  end
+
   # ——— createhow3 ————————————————————————————————————————————
 
   @typedoc """
