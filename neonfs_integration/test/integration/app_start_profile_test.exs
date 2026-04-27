@@ -14,7 +14,7 @@ defmodule NeonFS.Integration.AppStartProfileTest do
   phase observed in the peer-cluster harness.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Integration.{AppProfiler, PeerCluster}
 

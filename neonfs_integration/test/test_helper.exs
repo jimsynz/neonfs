@@ -9,7 +9,8 @@ end
 # already started by the time config.exs runs.
 Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
-# Build CLI (cargo skips if unchanged)
+# Build CLI (cargo skips if unchanged) — `cli_test.exs` exercises the
+# Rust binary against a peer cluster.
 cli_dir = Path.expand("../../neonfs-cli", __DIR__)
 
 case System.cmd("cargo", ["build", "--release"],
@@ -25,10 +26,6 @@ case System.cmd("cargo", ["build", "--release"],
     System.halt(1)
 end
 
-# Note: FUSE integration tests have been moved to Rust because FUSE mounting
-# cannot work from within the BEAM VM (Erlang's SIGCHLD handling breaks
-# fusermount's fork/waitpid). See neonfs_fuse/native/neonfs_fuse/tests/mount_integration.rs
-
 # Exclude loopback device tests unless running as root with losetup available.
 # Exclude `:profile` diagnostic tests by default (e.g. #507's app-start profiler)
 # — they print diagnostic output rather than assert. Run with `--include profile`.
@@ -39,39 +36,16 @@ loopback_excludes =
     [:loopback]
   end
 
-# Exclude `:fuse` tests on hosts without `/dev/fuse` and `fusermount3`. The
-# Session integration test mounts a real FUSE filesystem; CI hosts without
-# the helper would surface install errors rather than a meaningful failure.
-fuse_excludes =
-  if File.exists?("/dev/fuse") and System.find_executable("fusermount3") != nil do
-    []
-  else
-    [:fuse]
-  end
-
-# Exclude `:docker` tests on hosts where the `docker` CLI is missing or the
-# daemon isn't responding. The Docker VolumeDriver integration test in
-# `docker_volume_driver_test.exs` requires both. CI runners that should run
-# this test must install `docker` (or symlink rootless `podman` as `docker`)
-# and ensure the daemon is reachable from the container.
-docker_excludes =
-  with docker when not is_nil(docker) <- System.find_executable("docker"),
-       {_, 0} <- System.cmd(docker, ["info"], stderr_to_stdout: true) do
-    []
-  else
-    _ -> [:docker]
-  end
-
-excludes = loopback_excludes ++ fuse_excludes ++ docker_excludes ++ [:profile]
+excludes = loopback_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an
 # `ExUnit.after_suite` callback so it runs after all tests finish but
 # while the GenServer is still alive. See #423.
-{:ok, _telemetry_pid} = NeonFS.Integration.PeerClusterTelemetry.start_link()
+{:ok, _telemetry_pid} = NeonFS.TestSupport.PeerClusterTelemetry.start_link()
 
 ExUnit.after_suite(fn _results ->
-  NeonFS.Integration.PeerClusterTelemetry.print_summary()
+  NeonFS.TestSupport.PeerClusterTelemetry.print_summary()
 end)
 
 ExUnit.start(capture_log: true, exclude: excludes, slowest: 10)

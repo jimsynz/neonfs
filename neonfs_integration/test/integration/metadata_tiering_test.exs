@@ -6,7 +6,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   clock skew detection, concurrent writer detection, and mixed volume
   type scenarios on a multi-node cluster.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.Intent
 

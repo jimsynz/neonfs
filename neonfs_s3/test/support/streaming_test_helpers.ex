@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.StreamingTestHelpers do
+defmodule NeonFS.S3.IntegrationTest.StreamingHelpers do
   @moduledoc """
   Helpers for the streaming-upload peak-RSS integration test (#499).
 

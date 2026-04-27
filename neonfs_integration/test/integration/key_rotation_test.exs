@@ -7,7 +7,7 @@ defmodule NeonFS.Integration.KeyRotationTest do
   - Rotation status reporting
   - Complete rotation — all chunks at new version
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.KeyManager
   alias NeonFS.Core.VolumeEncryption

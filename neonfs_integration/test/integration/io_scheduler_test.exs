@@ -6,7 +6,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
   file operations end-to-end, WFQ fairness between volumes, drive
   worker crash recovery, and high-concurrency workloads.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag :io_scheduler
   @moduletag timeout: 180_000

@@ -454,8 +454,8 @@ jobs:
             neonfs_core/priv/native
             neonfs_s3/deps
             neonfs_s3/_build
-          key: v4-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_s3-${{ runner.arch }}-
+          key: v5-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
+          restore-keys: v5-build-neonfs_s3-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_s3
@@ -588,13 +588,13 @@ jobs:
     runs-on: docker
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-      options: --privileged --device /dev/fuse
+      options: --privileged
     steps:
-      - name: Install FUSE and loopback dependencies
+      - name: Install loopback dependencies
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            libfuse3-dev fuse3 e2fsprogs mount
+            e2fsprogs mount
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v6
@@ -613,10 +613,8 @@ jobs:
             neonfs_integration/priv/native
             neonfs_core/target
             neonfs_core/priv/native
-            neonfs_fuse/target
-            neonfs_fuse/priv/native
-          key: v4-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_fuse/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_integration-${{ runner.arch }}-
+          key: v5-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
+          restore-keys: v5-build-neonfs_integration-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_integration

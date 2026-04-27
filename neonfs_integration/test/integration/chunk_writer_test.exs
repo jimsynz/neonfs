@@ -16,10 +16,10 @@ defmodule NeonFS.Integration.ChunkWriterTest do
   `Router.data_call`.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Client.ChunkWriter
-  alias NeonFS.Integration.PeerCluster
+  alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 300_000
   # Two nodes are enough: node1 is the core that accepts put_chunk + commit_chunks,

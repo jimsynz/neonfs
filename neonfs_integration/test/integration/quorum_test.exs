@@ -8,7 +8,7 @@ defmodule NeonFS.Integration.QuorumTest do
   - Read repair of stale replicas
   - Full write/read/delete cycle on multi-node cluster
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.MetadataRing
 

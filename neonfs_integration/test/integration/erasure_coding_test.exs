@@ -12,7 +12,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   - Mixed cluster with both replicated and erasure-coded volumes
   - CLI handler volume creation with erasure durability
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 180_000
   @moduletag :integration

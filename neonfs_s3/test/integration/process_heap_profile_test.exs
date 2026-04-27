@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.ProcessHeapProfileTest do
+defmodule NeonFS.S3.IntegrationTest.ProcessHeapProfileTest do
   @moduledoc """
   Diagnostic profile for the streaming-write process-heap growth
   surfaced in #534.
@@ -14,7 +14,8 @@ defmodule NeonFS.Integration.ProcessHeapProfileTest do
 
   use ExUnit.Case, async: false
 
-  alias NeonFS.Integration.{ClusterCase, PeerCluster, ProcessMemoryProfile}
+  alias NeonFS.S3.IntegrationTest.ProcessMemoryProfile
+  alias NeonFS.TestSupport.{ClusterCase, PeerCluster}
 
   @moduletag timeout: 300_000
   @moduletag :profile

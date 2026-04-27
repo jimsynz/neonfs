@@ -16,7 +16,7 @@ defmodule NeonFS.Integration.EscalationTest do
   Unit tests cover the CRUD/telemetry plumbing in isolation; this test
   proves the *cluster-wide* behaviour operators actually rely on.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 180_000
   @moduletag nodes: 3
@@ -98,21 +98,21 @@ defmodule NeonFS.Integration.EscalationTest do
     node3_state_ref = make_ref()
 
     :ok =
-      PeerCluster.rpc(cluster, :node1, NeonFS.Integration.TelemetryForwarder, :attach, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.TestSupport.TelemetryForwarder, :attach, [
         test_pid,
         node1_state_ref,
         [:neonfs, :escalation, :state]
       ])
 
     :ok =
-      PeerCluster.rpc(cluster, :node1, NeonFS.Integration.TelemetryForwarder, :attach, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.TestSupport.TelemetryForwarder, :attach, [
         test_pid,
         node1_per_category_ref,
         [:neonfs, :escalation, :pending_by_category]
       ])
 
     :ok =
-      PeerCluster.rpc(cluster, :node3, NeonFS.Integration.TelemetryForwarder, :attach, [
+      PeerCluster.rpc(cluster, :node3, NeonFS.TestSupport.TelemetryForwarder, :attach, [
         test_pid,
         node3_state_ref,
         [:neonfs, :escalation, :state]
@@ -126,7 +126,7 @@ defmodule NeonFS.Integration.EscalationTest do
           ] do
         case PeerCluster.get_node(cluster, node) do
           {:ok, _} ->
-            PeerCluster.rpc(cluster, node, NeonFS.Integration.TelemetryForwarder, :detach, [ref])
+            PeerCluster.rpc(cluster, node, NeonFS.TestSupport.TelemetryForwarder, :detach, [ref])
 
           _ ->
             :ok
@@ -225,7 +225,7 @@ defmodule NeonFS.Integration.EscalationTest do
         case PeerCluster.rpc(
                cluster,
                node_name,
-               NeonFS.Integration.TelemetryForwarder,
+               NeonFS.TestSupport.TelemetryForwarder,
                :query_escalation,
                [escalation.id]
              ) do

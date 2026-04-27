@@ -17,7 +17,7 @@ defmodule NeonFS.Integration.ServiceRegistryTest do
   whole #341 bug class — other manager slices (ACL, S3 credentials,
   Escalation) follow the same pattern.
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Client.ServiceInfo
   alias NeonFS.Core.ServiceRegistry

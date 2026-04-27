@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.StreamingUploadPeakRSSTest do
+defmodule NeonFS.S3.IntegrationTest.StreamingUploadPeakRSSTest do
   @moduledoc """
   Peak-RSS integration test for the cross-node streaming-write
   pipeline (#499).
@@ -53,7 +53,8 @@ defmodule NeonFS.Integration.StreamingUploadPeakRSSTest do
 
   use ExUnit.Case, async: false
 
-  alias NeonFS.Integration.{ClusterCase, PeerCluster, StreamingTestHelpers}
+  alias NeonFS.S3.IntegrationTest.StreamingHelpers, as: StreamingTestHelpers
+  alias NeonFS.TestSupport.{ClusterCase, PeerCluster}
 
   @moduletag timeout: 300_000
   @moduletag :peak_rss

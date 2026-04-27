@@ -5,7 +5,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
   Tests both the HTTP-based join path (production flow) and the RPC-based
   join path (used by other integration tests).
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Cluster.InviteRedemption
   alias NeonFS.Transport.TLS

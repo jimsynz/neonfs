@@ -11,7 +11,7 @@ defmodule NeonFS.Integration.SingleNodeTest do
   - Volume statistics
   - DETS persistence across restarts
   """
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 120_000
   @moduletag nodes: 1

@@ -3,7 +3,7 @@ defmodule NeonFS.Integration.ClusterFormationMultiNodeTest do
   # split out of ClusterFormationTest so it can use cluster_mode: :shared —
   # the three tests mutate nothing, so paying for three cluster bootstraps
   # was pure overhead (#421).
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 60_000
   @moduletag cluster_mode: :shared

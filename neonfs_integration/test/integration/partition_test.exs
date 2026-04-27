@@ -18,7 +18,7 @@ defmodule NeonFS.Integration.PartitionTest do
   read-only.
   """
 
-  use NeonFS.Integration.ClusterCase, async: false
+  use NeonFS.TestSupport.ClusterCase, async: false
 
   @moduletag timeout: 300_000
   @moduletag nodes: 3

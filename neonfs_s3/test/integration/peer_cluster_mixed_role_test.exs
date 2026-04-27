@@ -1,6 +1,6 @@
-defmodule NeonFS.Integration.PeerClusterMixedRoleTest do
+defmodule NeonFS.S3.IntegrationTest.PeerClusterMixedRoleTest do
   @moduledoc """
-  Smoke tests for `NeonFS.Integration.PeerCluster.start_cluster!/2`'s
+  Smoke tests for `NeonFS.TestSupport.PeerCluster.start_cluster!/2`'s
   mixed-role peer spawning (#498).
 
   Starts a three-peer cluster where one peer runs `:neonfs_core`, one
@@ -22,7 +22,7 @@ defmodule NeonFS.Integration.PeerClusterMixedRoleTest do
 
   use ExUnit.Case, async: false
 
-  alias NeonFS.Integration.PeerCluster
+  alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 120_000
 
