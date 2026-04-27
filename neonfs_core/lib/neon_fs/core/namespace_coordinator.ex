@@ -173,6 +173,51 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   @doc """
+  Pin a path as held by an open file handle (sub-issue #637 of #306).
+  Multiple pins on the same path coexist — each open `fd` is a separate
+  pin. Returns `{:ok, claim_id}` on success or `{:error, :conflict,
+  conflicting_id}` when the path is covered by an `:exclusive` claim
+  (e.g. an in-flight rename or a `Depth: infinity` collection lock).
+
+  Pin lifetime is tied to the calling process: when the holder pid
+  dies the coordinator's `:DOWN` handler releases the pin via the
+  standard bulk-release path. That cleanup is what the unlink-while-
+  open story (#306) relies on — a crashed FUSE peer doesn't leak pins.
+  """
+  @spec claim_pinned(GenServer.server(), String.t()) ::
+          {:ok, claim_id()}
+          | {:error, :conflict, claim_id()}
+          | {:error, term()}
+  def claim_pinned(server \\ __MODULE__, path) when is_binary(path) do
+    claim_pinned_for(server, path, self())
+  end
+
+  @doc """
+  Same as `claim_pinned/2` but lets the caller specify an explicit
+  holder pid. See `claim_path_for/4` for the cross-node motivation.
+  """
+  @spec claim_pinned_for(GenServer.server(), String.t(), pid()) ::
+          {:ok, claim_id()}
+          | {:error, :conflict, claim_id()}
+          | {:error, term()}
+  def claim_pinned_for(server \\ __MODULE__, path, holder)
+      when is_binary(path) and is_pid(holder) do
+    GenServer.call(server, {:claim_pinned, path, holder})
+  end
+
+  @doc """
+  Return every `:pinned` claim at exactly `path`. Used by the unlink-
+  while-open path (#306) to ask "is this file held open anywhere in
+  the cluster?". Reads are served locally from the Ra follower's
+  state, so this is cheap.
+  """
+  @spec claims_for_path(GenServer.server(), String.t()) ::
+          {:ok, [{claim_id(), MetadataStateMachine.namespace_claim()}]} | {:error, term()}
+  def claims_for_path(server \\ __MODULE__, path) when is_binary(path) do
+    GenServer.call(server, {:claims_for_path, path, :pinned})
+  end
+
+  @doc """
   Atomically pin both paths of a cross-directory rename. The two paths
   are claimed `:exclusive :path` in a single Ra command, so a competing
   rename or claim on either side either both succeeds or fails up
@@ -287,6 +332,35 @@ defmodule NeonFS.Core.NamespaceCoordinator do
       {:error, _} = err ->
         {:reply, err, state}
     end
+  end
+
+  def handle_call({:claim_pinned, path, holder}, _from, state) do
+    case ra_command({:claim_namespace_pinned, path, holder}) do
+      {:ok, claim_id} ->
+        {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :conflict, conflicting_id} ->
+        {:reply, {:error, :conflict, conflicting_id}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:claims_for_path, path, type}, _from, state) do
+    result =
+      try do
+        case RaSupervisor.local_query(
+               &MetadataStateMachine.list_namespace_claims_at(&1, path, type)
+             ) do
+          {:ok, claims} -> {:ok, claims}
+          {:error, _} = err -> err
+        end
+      catch
+        :exit, _ -> {:error, :ra_not_available}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:claim_rename, src, dst, holder}, _from, state) do
