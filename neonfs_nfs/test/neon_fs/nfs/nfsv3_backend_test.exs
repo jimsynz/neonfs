@@ -429,6 +429,100 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
+  ## symlink / mknod / link (#626)
+
+  describe "symlink/6" do
+    setup do
+      put_inode_table(%{0xFEED_FEED_FEED_FEED => {@volume_name, "/parent"}})
+      :ok
+    end
+
+    test "stores the target string as file content with S_IFLNK mode bits" do
+      child_path = "/parent/link.txt"
+      target = "../target"
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+      post = file_meta(%{path: child_path, mode: 0o120_777, size: byte_size(target)})
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, ^target, opts] ->
+          send(test_pid, {:write_called, opts})
+          {:ok, post}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xFEED_FEED_FEED_FEED)
+
+      assert {:ok, _fh, %Fattr3{type: :lnk}, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.symlink(
+                 dir_fh,
+                 "link.txt",
+                 %NFSServer.NFSv3.Types.Sattr3{mode: 0o777},
+                 target,
+                 :auth,
+                 %{}
+               )
+
+      assert_receive {:write_called, opts}
+      assert Bitwise.band(Keyword.fetch!(opts, :mode), 0o170_000) == 0o120_000
+    end
+  end
+
+  describe "mknod/4" do
+    setup do
+      put_inode_table(%{0xFEED_FEED_FEED_FEED => {@volume_name, "/parent"}})
+      :ok
+    end
+
+    test "returns NFS3ERR_NOTSUPP + parent wcc_data" do
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xFEED_FEED_FEED_FEED)
+
+      assert {:error, :notsupp, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+               NFSv3Backend.mknod(dir_fh, "fifo", :auth, %{})
+    end
+
+    test "stale fhandle returns :stale + empty wcc_data" do
+      assert {:error, :stale, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+               NFSv3Backend.mknod(<<0::8>>, "x", :auth, %{})
+    end
+  end
+
+  describe "link/5" do
+    setup do
+      put_inode_table(%{0xFEED_FEED_FEED_FEED => {@volume_name, "/parent"}})
+      :ok
+    end
+
+    test "returns NFS3ERR_NOTSUPP + nil post_op + parent wcc_data" do
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+      end)
+
+      file_fh = Filehandle.encode(@volume_id_bin, @file_inode)
+      link_dir_fh = Filehandle.encode(@volume_id_bin, 0xFEED_FEED_FEED_FEED)
+
+      assert {:error, :notsupp, nil, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+               NFSv3Backend.link(file_fh, link_dir_fh, "alias", :auth, %{})
+    end
+
+    test "stale link-dir fhandle returns :stale" do
+      file_fh = Filehandle.encode(@volume_id_bin, @file_inode)
+
+      assert {:error, :stale} =
+               NFSv3Backend.link(file_fh, <<0::8>>, "alias", :auth, %{})
+    end
+  end
+
   ## rename (#625)
 
   describe "rename/6" do

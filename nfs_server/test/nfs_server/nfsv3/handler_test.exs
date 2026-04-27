@@ -554,6 +554,89 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  # SYMLINK / MKNOD / LINK (procs 10, 11, 15). SYMLINK has a real
+  # implementation in the BEAM backend; MKNOD / LINK return
+  # `NFS3ERR_NOTSUPP` per RFC 1813's allowance for servers that
+  # don't support special files / hardlinks.
+  describe "SYMLINK (proc 10)" do
+    test "round-trips fhandle + attrs + wcc on success" do
+      dir = "dir-symlink"
+      name = "link.txt"
+      sattr = %Types.Sattr3{mode: 0o777}
+      target = "../target"
+      child_fh = "fh-symlink"
+      child_attr = %{MockBackend.sample_fattr3() | type: :lnk, mode: 0o777}
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:symlink, {dir, name, sattr, target}}, {:ok, child_fh, child_attr, wcc})
+
+      args =
+        Types.encode_diropargs3({dir, name}) <>
+          Types.encode_sattr3(sattr) <>
+          Types.encode_nfspath3(target)
+
+      {:ok, body} = Handler.handle_call(10, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^child_fh, rest} = Types.decode_post_op_fh3(rest)
+      assert {:ok, ^child_attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(10, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
+  describe "MKNOD (proc 11)" do
+    test "returns NFS3ERR_NOTSUPP + wcc on the stub backend" do
+      dir = "dir-mknod"
+      name = "fifo"
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:mknod, {dir, name}}, {:error, :notsupp, wcc})
+
+      # mknoddata3 body for FIFO is just the discriminator (3) — no
+      # devicedata payload — but we don't decode it on the server
+      # side anyway. Pad with the discriminator to keep the args
+      # well-formed.
+      args = Types.encode_diropargs3({dir, name}) <> XDR.encode_uint(3)
+
+      {:ok, body} = Handler.handle_call(11, args, @auth, @ctx_base)
+
+      assert {:ok, :notsupp, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, _} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(11, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
+  describe "LINK (proc 15)" do
+    test "returns NFS3ERR_NOTSUPP + post_op_attr + wcc on the stub backend" do
+      file_fh = "fh-target"
+      link_dir = "dir-link"
+      link_name = "alias"
+      attr = MockBackend.sample_fattr3()
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:link, {file_fh, link_dir, link_name}}, {:error, :notsupp, attr, wcc})
+
+      args = Types.encode_fhandle3(file_fh) <> Types.encode_diropargs3({link_dir, link_name})
+
+      {:ok, body} = Handler.handle_call(15, args, @auth, @ctx_base)
+
+      assert {:ok, :notsupp, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(15, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
   describe "LOOKUP (proc 3)" do
     test "returns the file handle plus both post-op attrs on success" do
       dir = "dir"
