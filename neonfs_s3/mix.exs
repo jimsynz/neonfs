@@ -13,6 +13,7 @@ defmodule NeonFS.S3.MixProject do
       consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       description: @moduledoc,
+      dialyzer: dialyzer(),
       docs: docs(),
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -20,6 +21,16 @@ defmodule NeonFS.S3.MixProject do
       releases: releases(),
       start_permanent: Mix.env() == :prod,
       version: @version
+    ]
+  end
+
+  defp dialyzer do
+    [
+      # `:neonfs_webdav` is a test-only path dep used by
+      # `streaming_upload_peak_rss_test.exs` to verify cross-protocol
+      # byte-identity. PLT it explicitly so dialyzer can see
+      # `NeonFS.WebDAV.Backend.{put_content_stream,resolve,get_content}/*`.
+      plt_add_apps: [:neonfs_webdav]
     ]
   end
 
