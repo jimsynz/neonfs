@@ -324,6 +324,68 @@ defmodule NeonFS.Core.WriteOperationTest do
     end
   end
 
+  # `create_only: true` (sub-issue #592 of #303) is the atomic
+  # create-if-not-exist option used by `O_EXCL`,
+  # WebDAV `If-None-Match: *`, S3 `If-None-Match: *`, etc. The
+  # cross-node coordination story is exercised in the peer-cluster
+  # integration suite; these unit tests cover the FileIndex / fast-path
+  # checks and the coordinator-unavailable fallback (single-node
+  # correctness when Ra is down, which is the default for this test
+  # module).
+  describe "create_only/2" do
+    test "creates a new streamed file when none exists", %{volume: volume} do
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_streamed(volume.id, "/create-only-new.txt", ["hello"],
+                 create_only: true
+               )
+
+      assert file_meta.path == "/create-only-new.txt"
+      assert file_meta.size == 5
+    end
+
+    test "returns :exists when the streamed target already exists", %{volume: volume} do
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/already.txt", ["seed"])
+
+      assert {:error, :exists} =
+               WriteOperation.write_file_streamed(volume.id, "/already.txt", ["overwrite"],
+                 create_only: true
+               )
+
+      # Existing content unchanged.
+      assert {:ok, existing} = FileIndex.get_by_path(volume.id, "/already.txt")
+      assert existing.size == 4
+    end
+
+    test "creates a new file via write_file_at when none exists", %{volume: volume} do
+      assert {:ok, file_meta} =
+               WriteOperation.write_file_at(volume.id, "/at-create.txt", 0, "data",
+                 create_only: true
+               )
+
+      assert file_meta.path == "/at-create.txt"
+    end
+
+    test "write_file_at with create_only returns :exists when target already exists",
+         %{volume: volume} do
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/at-exists.txt", ["seed"])
+
+      assert {:error, :exists} =
+               WriteOperation.write_file_at(volume.id, "/at-exists.txt", 0, "data",
+                 create_only: true
+               )
+    end
+
+    test "create_only: false (default) still overwrites", %{volume: volume} do
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/overwrite.txt", ["v1"])
+
+      assert {:ok, _} =
+               WriteOperation.write_file_streamed(volume.id, "/overwrite.txt", ["version-2"])
+
+      assert {:ok, latest} = FileIndex.get_by_path(volume.id, "/overwrite.txt")
+      assert latest.size == 9
+    end
+  end
+
   describe "generate_write_id/0" do
     test "generates unique IDs" do
       id1 = WriteOperation.generate_write_id()
