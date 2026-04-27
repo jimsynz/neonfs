@@ -133,6 +133,46 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   @type rename_claim_id :: {claim_id(), claim_id()}
 
   @doc """
+  Claim a path as the placeholder for a new file (atomic
+  create-if-not-exist). Returns `{:ok, claim_id}` on success,
+  `{:error, :exists}` when another in-flight `claim_create` already
+  covers the path, and `{:error, :conflict, conflict_id}` when the
+  path is covered by an unrelated claim (e.g. a `Depth: infinity`
+  collection lock).
+
+  The check against an *already-existing* file at `path` lives in the
+  caller (e.g. `WriteOperation` per #592) — the coordinator treats path
+  strings as opaque coordination tokens and only ensures no two
+  `claim_create` calls win for the same path. Callers should perform a
+  `FileIndex.get_by_path/2` precheck and only invoke this primitive
+  when no entry is found.
+
+  Sub-issue #591 of #303.
+  """
+  @spec claim_create(GenServer.server(), String.t()) ::
+          {:ok, claim_id()}
+          | {:error, :exists}
+          | {:error, :conflict, claim_id()}
+          | {:error, term()}
+  def claim_create(server \\ __MODULE__, path) when is_binary(path) do
+    claim_create_for(server, path, self())
+  end
+
+  @doc """
+  Same as `claim_create/2` but lets the caller specify an explicit
+  holder pid. See `claim_path_for/4` for the cross-node motivation.
+  """
+  @spec claim_create_for(GenServer.server(), String.t(), pid()) ::
+          {:ok, claim_id()}
+          | {:error, :exists}
+          | {:error, :conflict, claim_id()}
+          | {:error, term()}
+  def claim_create_for(server \\ __MODULE__, path, holder)
+      when is_binary(path) and is_pid(holder) do
+    GenServer.call(server, {:claim_create, path, holder})
+  end
+
+  @doc """
   Atomically pin both paths of a cross-directory rename. The two paths
   are claimed `:exclusive :path` in a single Ra command, so a competing
   rename or claim on either side either both succeeds or fails up
@@ -224,6 +264,22 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     case ra_command(cmd) do
       {:ok, claim_id} ->
         {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :conflict, conflicting_id} ->
+        {:reply, {:error, :conflict, conflicting_id}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:claim_create, path, holder}, _from, state) do
+    case ra_command({:claim_namespace_create, path, holder}) do
+      {:ok, claim_id} ->
+        {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :exists} ->
+        {:reply, {:error, :exists}, state}
 
       {:error, :conflict, conflicting_id} ->
         {:reply, {:error, :conflict, conflicting_id}, state}

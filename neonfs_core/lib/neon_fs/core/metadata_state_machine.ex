@@ -80,6 +80,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:claim_namespace_subtree, path :: String.t(), scope :: namespace_scope(),
              holder :: term()}
           | {:claim_namespace_rename, src :: String.t(), dst :: String.t(), holder :: term()}
+          | {:claim_namespace_create, path :: String.t(), holder :: term()}
           | {:release_namespace_claim, claim_id :: String.t()}
           | {:release_namespace_claims_for_holder, holder :: term()}
 
@@ -97,8 +98,17 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @type namespace_scope :: :exclusive | :shared
 
   @typedoc """
-  A namespace claim — either a `:path` claim covering a single path or
-  a `:subtree` claim covering a path and all its descendants.
+  A namespace claim. Three claim types are supported:
+
+    * `:path` — covers a single path.
+    * `:subtree` — covers a path and all its descendants.
+    * `:create` — exclusive placeholder for an atomic create-if-not-exist
+      operation (sub-issue #303). Behaves like an `:exclusive :path`
+      claim against other types, but two `:create` claims on the same
+      path return `{:error, :exists}` (rather than the generic
+      `:conflict`) so callers can map directly to `EEXIST` /
+      `PreconditionFailed` / `AlreadyExists` at the protocol layer.
+
   Holders are opaque terms (typically a pid in production; arbitrary
   test fixtures otherwise) — the state machine treats them as black
   boxes.
@@ -106,7 +116,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   @type namespace_claim :: %{
           path: String.t(),
           scope: namespace_scope(),
-          type: :path | :subtree,
+          type: :path | :subtree | :create,
           holder: term()
         }
 
@@ -1161,6 +1171,41 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  # Foundation primitive for atomic create-if-not-exist (sub-issue #591
+  # of #303). Allocates an `:exclusive :create` claim if and only if no
+  # other `:create` claim already covers `path`. Two `:create` claims
+  # on the same path return `{:error, :exists}` so callers can
+  # distinguish "someone else is mid-create" from generic claim conflict
+  # and surface the right protocol-level error (`EEXIST` /
+  # `PreconditionFailed` / `AlreadyExists`).
+  #
+  # The check against an *existing* file at `path` is the caller's
+  # responsibility (lives in `WriteOperation` per #592) — the namespace
+  # coordinator treats path strings as opaque coordination tokens, the
+  # same way `:claim_namespace_path` and `:claim_namespace_subtree` do.
+  def apply(_meta, {:claim_namespace_create, path, holder}, state) when is_binary(path) do
+    state = ensure_namespace(state)
+
+    case detect_create_conflict(path, state.namespace_claims) do
+      :ok ->
+        {new_state, claim_id} = allocate_claim(state, :create, path, :exclusive, holder)
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :claim_namespace_create],
+          %{version: new_state.version},
+          %{path: path}
+        )
+
+        {new_state, {:ok, claim_id}, []}
+
+      {:exists, _existing_id} ->
+        {state, {:error, :exists}, []}
+
+      {:conflict, conflict_id} ->
+        {state, {:error, :conflict, conflict_id}, []}
+    end
+  end
+
   def apply(_meta, {:release_namespace_claim, claim_id}, state) when is_binary(claim_id) do
     state = ensure_namespace(state)
     {released, claims} = Map.pop(state.namespace_claims, claim_id)
@@ -1641,6 +1686,28 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end)
   end
 
+  # Conflict detection for `:claim_namespace_create`. Same matrix as
+  # `:exclusive :path`, with one wrinkle: a collision against another
+  # `:create` claim on the *same path* is the "someone else is creating"
+  # case and surfaces as `{:exists, id}` so the caller can map it to
+  # `EEXIST` rather than the generic `:conflict`. Any other overlap
+  # (`:exclusive :path`, `:exclusive :subtree`, etc.) returns
+  # `{:conflict, id}` and reuses the standard conflict translation.
+  defp detect_create_conflict(path, claims) do
+    Enum.reduce_while(claims, :ok, fn {claim_id, existing}, _acc ->
+      cond do
+        existing.type == :create and existing.path == path ->
+          {:halt, {:exists, claim_id}}
+
+        claims_conflict?(:create, path, :exclusive, existing) ->
+          {:halt, {:conflict, claim_id}}
+
+        true ->
+          {:cont, :ok}
+      end
+    end)
+  end
+
   defp claims_conflict?(new_type, new_path, new_scope, %{
          type: existing_type,
          path: existing_path,
@@ -1656,6 +1723,14 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   defp overlaps?(:subtree, root_a, :subtree, root_b),
     do: in_subtree?(root_a, root_b) or in_subtree?(root_b, root_a)
+
+  # `:create` claims occupy a single path, identical to `:path` for
+  # purposes of overlap detection.
+  defp overlaps?(:create, a, :create, b), do: a == b
+  defp overlaps?(:create, a, :path, b), do: a == b
+  defp overlaps?(:path, a, :create, b), do: a == b
+  defp overlaps?(:create, p, :subtree, root), do: in_subtree?(p, root)
+  defp overlaps?(:subtree, root, :create, p), do: in_subtree?(p, root)
 
   defp scopes_conflict?(:exclusive, _), do: true
   defp scopes_conflict?(_, :exclusive), do: true

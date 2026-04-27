@@ -207,6 +207,106 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
+  # `claim_create/2` is the namespace-coordinator primitive for
+  # atomic create-if-not-exist (sub-issue #591 of #303). It pins the
+  # path as `:exclusive :create`, reports `{:error, :exists}` when
+  # another `claim_create` already holds the same path (so callers can
+  # map directly to `EEXIST` / `PreconditionFailed` / `AlreadyExists`),
+  # and falls back to the standard `{:error, :conflict, _}` shape when
+  # a non-create claim covers the path (e.g. a `Depth: infinity`
+  # collection lock).
+  describe "claim_create/2" do
+    test "returns a claim id on first claim", %{server: server} do
+      assert {:ok, "ns-claim-" <> _} = NamespaceCoordinator.claim_create(server, "/new")
+    end
+
+    test "second claim_create on the same path returns :exists", %{server: server} do
+      assert {:ok, _claim} = NamespaceCoordinator.claim_create(server, "/race")
+
+      # Distinct from the generic `:conflict` reply — callers map this
+      # to `EEXIST` rather than `:busy`.
+      assert {:error, :exists} = NamespaceCoordinator.claim_create(server, "/race")
+    end
+
+    test "after release, a claim_create on the same path succeeds", %{server: server} do
+      {:ok, claim} = NamespaceCoordinator.claim_create(server, "/release-create")
+      :ok = NamespaceCoordinator.release(server, claim)
+
+      assert {:ok, _new} = NamespaceCoordinator.claim_create(server, "/release-create")
+    end
+
+    test "claim_create vs an existing exclusive path-claim returns :conflict",
+         %{server: server} do
+      assert {:ok, blocker} = NamespaceCoordinator.claim_path(server, "/blocked", :exclusive)
+
+      assert {:error, :conflict, ^blocker} =
+               NamespaceCoordinator.claim_create(server, "/blocked")
+    end
+
+    test "claim_create vs a covering exclusive subtree-claim returns :conflict",
+         %{server: server} do
+      assert {:ok, sub} = NamespaceCoordinator.claim_subtree(server, "/locked", :exclusive)
+
+      assert {:error, :conflict, ^sub} =
+               NamespaceCoordinator.claim_create(server, "/locked/new-file")
+    end
+
+    test "claim_create blocks a subsequent exclusive path-claim on the same path",
+         %{server: server} do
+      assert {:ok, create_id} = NamespaceCoordinator.claim_create(server, "/two-way")
+
+      assert {:error, :conflict, ^create_id} =
+               NamespaceCoordinator.claim_path(server, "/two-way", :exclusive)
+    end
+
+    test "claim_create on a path inside an unrelated subtree is fine", %{server: server} do
+      assert {:ok, _} = NamespaceCoordinator.claim_subtree(server, "/dir-a", :exclusive)
+      assert {:ok, _} = NamespaceCoordinator.claim_create(server, "/dir-b/new")
+    end
+
+    test "claims released when the holder process dies", %{server: server} do
+      parent = self()
+
+      {holder, monitor_ref} =
+        spawn_monitor(fn ->
+          {:ok, claim} = NamespaceCoordinator.claim_create(server, "/dying-create")
+          send(parent, {:claimed, claim})
+
+          receive do
+            :exit -> :ok
+          end
+        end)
+
+      assert_receive {:claimed, _}, 1_000
+
+      # While the holder is alive, the path is pinned.
+      assert {:error, :exists} = NamespaceCoordinator.claim_create(server, "/dying-create")
+
+      send(holder, :exit)
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      :sys.get_state(server)
+
+      assert {:ok, _} = NamespaceCoordinator.claim_create(server, "/dying-create")
+    end
+
+    test "claim_create_for/3 honours the explicit holder", %{server: server} do
+      {:ok, holder} = Agent.start_link(fn -> nil end)
+
+      {:ok, claim_id} = NamespaceCoordinator.claim_create_for(server, "/explicit-create", holder)
+
+      assert is_binary(claim_id)
+
+      assert {:error, :exists} =
+               NamespaceCoordinator.claim_create(server, "/explicit-create")
+    end
+
+    test "rejects non-pid holders", %{server: server} do
+      assert_raise FunctionClauseError, fn ->
+        NamespaceCoordinator.claim_create_for(server, "/bad-holder", :not_a_pid)
+      end
+    end
+  end
+
   # `claim_rename/3` is the namespace-coordinator primitive for atomic
   # cross-directory rename — sub-issue #304. The two paths must be
   # pinned together (no half-claimed window) and the destination must
