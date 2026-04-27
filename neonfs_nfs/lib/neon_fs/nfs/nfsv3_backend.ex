@@ -45,7 +45,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   alias NeonFS.Client.{ChunkReader, Router}
   alias NeonFS.Core.FileMeta
   alias NeonFS.NFS.{Filehandle, InodeTable}
-  alias NFSServer.NFSv3.Types.{Fattr3, Nfstime3, Specdata3}
+  alias NFSServer.NFSv3.Types.{Fattr3, Nfstime3, Sattr3, Specdata3, WccAttr, WccData}
 
   import Bitwise, only: [<<<: 2, band: 2]
 
@@ -239,6 +239,105 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:error, status, nil}
     end
   end
+
+  @impl true
+  def setattr(fh, %Sattr3{} = sattr, guard_ctime, _auth, _ctx) do
+    case resolve_meta(fh) do
+      {:ok, vol_name, path, pre_meta} ->
+        do_setattr(vol_name, path, pre_meta, sattr, guard_ctime)
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  defp do_setattr(vol_name, path, pre_meta, %Sattr3{} = sattr, guard_ctime) do
+    pre_wcc = wcc_attr_from_meta(pre_meta)
+
+    cond do
+      guard_failed?(pre_meta, guard_ctime) ->
+        {:error, :not_sync, %WccData{before: pre_wcc, after: fattr_from_meta(pre_meta)}}
+
+      true ->
+        apply_sattr(vol_name, path, pre_wcc, sattr)
+    end
+  end
+
+  defp apply_sattr(vol_name, path, pre_wcc, %Sattr3{} = sattr) do
+    updates = build_attr_updates(sattr)
+
+    result =
+      if is_integer(sattr.size) do
+        core_call(NeonFS.Core, :truncate_file, [vol_name, path, sattr.size, updates])
+      else
+        if updates == [] do
+          # No-op SETATTR — RFC 1813 permits this; just refresh post-op.
+          core_call(NeonFS.Core, :get_file_meta, [vol_name, path])
+        else
+          core_call(NeonFS.Core, :update_file_meta, [vol_name, path, updates])
+        end
+      end
+
+    case result do
+      {:ok, %FileMeta{} = post_meta} ->
+        {:ok, %WccData{before: pre_wcc, after: fattr_from_meta(post_meta)}}
+
+      {:error, status} when is_atom(status) ->
+        {:error, map_setattr_error(status), %WccData{before: pre_wcc, after: nil}}
+
+      {:error, _} ->
+        {:error, :io, %WccData{before: pre_wcc, after: nil}}
+    end
+  end
+
+  defp build_attr_updates(%Sattr3{} = sattr) do
+    []
+    |> maybe_put(:mode, sattr.mode)
+    |> maybe_put(:uid, sattr.uid)
+    |> maybe_put(:gid, sattr.gid)
+    |> maybe_put(:accessed_at, time_set_to_datetime(sattr.atime))
+    |> maybe_put(:modified_at, time_set_to_datetime(sattr.mtime))
+  end
+
+  defp maybe_put(kw, _key, nil), do: kw
+  defp maybe_put(kw, key, value), do: [{key, value} | kw]
+
+  defp time_set_to_datetime(nil), do: nil
+  defp time_set_to_datetime(:set_to_server_time), do: DateTime.utc_now()
+
+  defp time_set_to_datetime({:client, %Nfstime3{seconds: s, nseconds: n}}) do
+    DateTime.from_unix!(s * 1_000_000_000 + n, :nanosecond)
+  end
+
+  defp guard_failed?(_pre_meta, nil), do: false
+
+  defp guard_failed?(%FileMeta{changed_at: %DateTime{} = ctime}, %Nfstime3{
+         seconds: gs,
+         nseconds: gn
+       }) do
+    actual = time_to_nfstime(ctime)
+    actual.seconds != gs or actual.nseconds != gn
+  end
+
+  defp guard_failed?(_pre_meta, %Nfstime3{}), do: true
+
+  defp wcc_attr_from_meta(%FileMeta{} = meta) do
+    %WccAttr{
+      size: meta.size,
+      mtime: time_to_nfstime(meta.modified_at),
+      ctime: time_to_nfstime(meta.changed_at)
+    }
+  end
+
+  # RFC 1813 §3.3.2 doesn't define a 1:1 mapping for arbitrary core
+  # errors; the common ones come up below. Fallthrough is `:io`.
+  defp map_setattr_error(:not_found), do: :stale
+  defp map_setattr_error(:noent), do: :noent
+  defp map_setattr_error(:perm), do: :perm
+  defp map_setattr_error(:acces), do: :acces
+  defp map_setattr_error(:invalid_argument), do: :inval
+  defp map_setattr_error(:inval), do: :inval
+  defp map_setattr_error(_), do: :io
 
   ## Internal — resolution
 

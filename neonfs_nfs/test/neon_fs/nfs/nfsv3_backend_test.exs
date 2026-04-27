@@ -241,4 +241,152 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       assert reply.name_max == 255
     end
   end
+
+  ## setattr (#621)
+
+  describe "setattr/5" do
+    setup do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      :ok
+    end
+
+    test "applies attribute updates and returns wcc_data on success" do
+      pre = file_meta()
+      post = %{pre | mode: 0o100_600, version: 2}
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+          {:ok, pre}
+
+        NeonFS.Core, :update_file_meta, [@volume_name, @file_path, updates] ->
+          send(test_pid, {:update_called, updates})
+          {:ok, post}
+      end)
+
+      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600}
+
+      assert {:ok, %NFSServer.NFSv3.Types.WccData{before: pre_wcc, after: post_attr}} =
+               NFSv3Backend.setattr(valid_fh(), sattr, nil, :auth, %{})
+
+      assert pre_wcc.size == 12
+      assert pre_wcc.mtime.seconds == 2
+      assert pre_wcc.ctime.seconds == 4
+      assert post_attr.mode == 0o600
+
+      assert_receive {:update_called, updates}
+      assert Keyword.get(updates, :mode) == 0o600
+      refute Keyword.has_key?(updates, :uid)
+    end
+
+    test "size triggers truncate_file with the rest of the updates folded in" do
+      pre = file_meta(%{size: 1000})
+      post = %{pre | size: 100, mode: 0o100_640, version: 2}
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+          {:ok, pre}
+
+        NeonFS.Core, :truncate_file, [@volume_name, @file_path, new_size, additional] ->
+          send(test_pid, {:truncate_called, new_size, additional})
+          {:ok, post}
+      end)
+
+      sattr = %NFSServer.NFSv3.Types.Sattr3{size: 100, mode: 0o640}
+
+      assert {:ok, %NFSServer.NFSv3.Types.WccData{after: post_attr}} =
+               NFSv3Backend.setattr(valid_fh(), sattr, nil, :auth, %{})
+
+      assert post_attr.size == 100
+      assert_receive {:truncate_called, 100, additional}
+      assert Keyword.get(additional, :mode) == 0o640
+    end
+
+    test "non-matching guard ctime returns NFS3ERR_NOT_SYNC + wcc_data; no update fires" do
+      pre = file_meta()
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+          {:ok, pre}
+
+        NeonFS.Core, :update_file_meta, _ ->
+          send(test_pid, :update_called)
+          {:ok, pre}
+      end)
+
+      # `pre.changed_at` is unix-second 4; supply a guard ctime of
+      # second 99 so it definitely doesn't match.
+      guard = %NFSServer.NFSv3.Types.Nfstime3{seconds: 99, nseconds: 0}
+      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600}
+
+      assert {:error, :not_sync, %NFSServer.NFSv3.Types.WccData{before: pre_wcc, after: %Fattr3{}}} =
+               NFSv3Backend.setattr(valid_fh(), sattr, guard, :auth, %{})
+
+      assert pre_wcc.ctime.seconds == 4
+      refute_receive :update_called, 50
+    end
+
+    test "matching guard ctime allows the update to proceed" do
+      pre = file_meta()
+      post = %{pre | mode: 0o100_700, version: 2}
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] -> {:ok, pre}
+        NeonFS.Core, :update_file_meta, _ -> {:ok, post}
+      end)
+
+      # pre.changed_at = unix(4), so guard {4, 0} matches.
+      guard = %NFSServer.NFSv3.Types.Nfstime3{seconds: 4, nseconds: 0}
+      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o700}
+
+      assert {:ok, %NFSServer.NFSv3.Types.WccData{after: post_attr}} =
+               NFSv3Backend.setattr(valid_fh(), sattr, guard, :auth, %{})
+
+      assert post_attr.mode == 0o700
+    end
+
+    test "stale filehandle returns :stale + empty wcc_data" do
+      put_core(fn
+        NeonFS.Core, :get_file_meta, _ -> {:error, :not_found}
+      end)
+
+      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600}
+
+      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+               NFSv3Backend.setattr(valid_fh(), sattr, nil, :auth, %{})
+    end
+
+    test "no fields set + no size = no-op SETATTR refreshes post-op only" do
+      pre = file_meta()
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+          send(test_pid, :get_called)
+          {:ok, pre}
+
+        NeonFS.Core, :update_file_meta, _ ->
+          flunk("update_file_meta should not be called for no-op SETATTR")
+
+        NeonFS.Core, :truncate_file, _ ->
+          flunk("truncate_file should not be called for no-op SETATTR")
+      end)
+
+      assert {:ok, %NFSServer.NFSv3.Types.WccData{before: %_{}, after: %Fattr3{}}} =
+               NFSv3Backend.setattr(
+                 valid_fh(),
+                 %NFSServer.NFSv3.Types.Sattr3{},
+                 nil,
+                 :auth,
+                 %{}
+               )
+
+      # `resolve_meta/1` calls get_file_meta once, then we re-fetch
+      # for the post-op view — two calls total.
+      assert_receive :get_called
+      assert_receive :get_called
+    end
+  end
 end
