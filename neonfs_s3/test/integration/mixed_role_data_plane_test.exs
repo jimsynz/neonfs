@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.MixedRoleDataPlaneTest do
+defmodule NeonFS.S3.IntegrationTest.MixedRoleDataPlaneTest do
   @moduledoc """
   Smoke test for `NeonFS.TestSupport.ClusterCase.init_mixed_role_cluster/2`
   (#524).
@@ -30,7 +30,7 @@ defmodule NeonFS.Integration.MixedRoleDataPlaneTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.Client.ChunkWriter
-  alias NeonFS.Integration.{ClusterCase, PeerCluster}
+  alias NeonFS.TestSupport.{ClusterCase, PeerCluster}
 
   @moduletag timeout: 180_000
 

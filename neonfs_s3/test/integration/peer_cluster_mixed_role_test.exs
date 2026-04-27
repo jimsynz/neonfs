@@ -1,4 +1,4 @@
-defmodule NeonFS.Integration.PeerClusterMixedRoleTest do
+defmodule NeonFS.S3.IntegrationTest.PeerClusterMixedRoleTest do
   @moduledoc """
   Smoke tests for `NeonFS.TestSupport.PeerCluster.start_cluster!/2`'s
   mixed-role peer spawning (#498).
