@@ -225,16 +225,10 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
              "(reassembled=#{byte_size(reassembled)}B, payload=#{byte_size(payload)}B, " <>
              "first_diff=#{inspect(first_diff)})"
 
-    # ——— Step 5: SETATTR (chmod 0o600) ——————————————————————————
-    #
-    # Verify that SETATTR's wcc_data envelope is well-formed and
-    # that the post-op attrs reflect the change. We exercise mode
-    # rather than mtime: `FileMeta.update/2` unconditionally
-    # rewrites `modified_at` to `DateTime.utc_now()` on every
-    # update, which clobbers `set_to_client_time` semantics —
-    # a separate bug outside #627's scope.
+    # ——— Step 5: SETATTR (set mtime via set_to_client_time) ————
 
-    sattr = %Types.Sattr3{mode: 0o600}
+    new_mtime = %NFSServer.NFSv3.Types.Nfstime3{seconds: 1_700_000_000, nseconds: 0}
+    sattr = %Types.Sattr3{mtime: {:client, new_mtime}}
 
     setattr_args =
       Types.encode_fhandle3(file_fh) <>
@@ -248,8 +242,8 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     assert %Types.WccAttr{} = pre,
            "SETATTR success reply must carry pre-op `wcc_attr`"
 
-    assert %Types.Fattr3{mode: 0o600} = post,
-           "post-op attrs must reflect the SETATTR-updated mode"
+    assert %Types.Fattr3{mtime: ^new_mtime} = post,
+           "post-op attrs must reflect the SETATTR-updated mtime"
 
     # ——— Step 6: RENAME ——————————————————————————————————————————
 

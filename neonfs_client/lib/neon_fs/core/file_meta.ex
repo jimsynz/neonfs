@@ -116,7 +116,17 @@ defmodule NeonFS.Core.FileMeta do
   @doc """
   Updates file metadata with new values.
 
-  Returns a new FileMeta struct with the updated fields and incremented version.
+  Returns a new FileMeta struct with the updated fields and an
+  incremented version. Callers that don't supply `:modified_at` /
+  `:changed_at` get the server's current time auto-stamped (the
+  common write-path case); callers that *do* supply explicit
+  values keep them — that's what the NFSv3 SETATTR
+  `set_to_client_time` semantic (RFC 1813 §3.3.2) and `utimensat(2)`
+  over an NFS mount need (#634).
+
+  `:version` is always rewritten — caller-supplied versions would
+  break the monotonic-version invariant the version field exists
+  for.
 
   ## Parameters
   - `file`: The original FileMeta struct
@@ -129,18 +139,14 @@ defmodule NeonFS.Core.FileMeta do
   """
   @spec update(t(), keyword()) :: t()
   def update(%__MODULE__{} = file, updates) do
-    # Increment version on any update
     updated_version = file.version + 1
-
-    # Update modified timestamp
     now = DateTime.utc_now()
 
-    # Merge updates with version and timestamp changes
     updates_with_meta =
       updates
+      |> Keyword.put_new(:modified_at, now)
+      |> Keyword.put_new(:changed_at, now)
       |> Keyword.put(:version, updated_version)
-      |> Keyword.put(:modified_at, now)
-      |> Keyword.put(:changed_at, now)
 
     struct(file, updates_with_meta)
   end
