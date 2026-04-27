@@ -521,6 +521,79 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
+  def symlink(dir_fh, name, %Sattr3{} = sattr, target, _auth, _ctx) when is_binary(target) do
+    case resolve_dir(dir_fh) do
+      {:ok, vol_name, dir_path} ->
+        do_symlink(vol_name, dir_path, name, sattr, target)
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  defp do_symlink(vol_name, dir_path, name, %Sattr3{} = sattr, target) do
+    child_path = Path.join(dir_path, name)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+
+    # NeonFS stores a symlink as a regular file with `mode | S_IFLNK`
+    # and the target string as the file's content. Per POSIX, the
+    # symlink mode bits are conventionally `0o777` so the kernel
+    # masks based on the underlying file's permissions when
+    # following the link.
+    requested_mode = sattr.mode || 0o777
+    mode = Bitwise.bor(requested_mode, @s_iflnk)
+    write_opts = [mode: mode]
+
+    case core_call(NeonFS.Core, :write_file_at, [vol_name, child_path, 0, target, write_opts]) do
+      {:ok, %FileMeta{} = post_meta} ->
+        ok_create_reply(post_meta, vol_name, dir_path, pre_dir_wcc)
+
+      {:error, status} when is_atom(status) ->
+        {:error, map_create_error(status),
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      _ ->
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  @impl true
+  def mknod(dir_fh, _name, _auth, _ctx) do
+    case resolve_dir(dir_fh) do
+      {:ok, vol_name, dir_path} ->
+        # NeonFS doesn't model special files (block / char devices,
+        # FIFOs, sockets) — RFC 1813 §3.3.11 explicitly permits
+        # `NFS3ERR_NOTSUPP` for servers that don't support them.
+        {:error, :notsupp,
+         %WccData{
+           before: pre_dir_wcc(vol_name, dir_path),
+           after: post_dir_attr(vol_name, dir_path)
+         }}
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  @impl true
+  def link(_file_fh, link_dir_fh, _name, _auth, _ctx) do
+    # Hard links would need NeonFS to support multi-name → single
+    # FileMeta resolution, which it doesn't today. RFC 1813 §3.3.15
+    # permits `NFS3ERR_NOTSUPP` for this case.
+    case resolve_dir(link_dir_fh) do
+      {:ok, vol_name, dir_path} ->
+        {:error, :notsupp, nil,
+         %WccData{
+           before: pre_dir_wcc(vol_name, dir_path),
+           after: post_dir_attr(vol_name, dir_path)
+         }}
+
+      {:error, status} ->
+        {:error, status}
+    end
+  end
+
+  @impl true
   def rename(from_dir_fh, from_name, to_dir_fh, to_name, _auth, _ctx) do
     case {resolve_dir(from_dir_fh), resolve_dir(to_dir_fh)} do
       {{:ok, from_vol, from_dir_path}, {:ok, to_vol, to_dir_path}} ->

@@ -17,9 +17,12 @@ defmodule NFSServer.NFSv3.Handler do
   | 7    | WRITE       |
   | 8    | CREATE      |
   | 9    | MKDIR       |
+  | 10   | SYMLINK     |
+  | 11   | MKNOD       |
   | 12   | REMOVE      |
   | 13   | RMDIR       |
   | 14   | RENAME      |
+  | 15   | LINK        |
   | 16   | READDIR     |
   | 17   | READDIRPLUS |
   | 18   | FSSTAT      |
@@ -27,8 +30,9 @@ defmodule NFSServer.NFSv3.Handler do
   | 20   | PATHCONF    |
   | 21   | COMMIT      |
 
-  The remaining write-path procedures (procs 10, 11, 15) ship in
-  separate sub-issues under the #285 tracking issue.
+  Locking procedures (NLM) and the remaining read/write opcodes
+  (NFSv3 has no other procedures past 21) are out of scope here —
+  this handler covers the full NFSv3 procedure set.
 
   ## READ streaming
 
@@ -111,9 +115,12 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_write 7
   @proc_create 8
   @proc_mkdir 9
+  @proc_symlink 10
+  @proc_mknod 11
   @proc_remove 12
   @proc_rmdir 13
   @proc_rename 14
+  @proc_link 15
   @proc_readdir 16
   @proc_readdirplus 17
   @proc_fsstat 18
@@ -263,6 +270,27 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  def handle_call(@proc_symlink, args, auth, ctx) do
+    case decode_symlink_args(args) do
+      {:ok, dir, name, sattr, target} -> do_symlink(dir, name, sattr, target, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_mknod, args, auth, ctx) do
+    case decode_mknod_dir_only(args) do
+      {:ok, dir, name} -> do_mknod(dir, name, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_link, args, auth, ctx) do
+    case decode_link_args(args) do
+      {:ok, file_fh, link_dir, link_name} -> do_link(file_fh, link_dir, link_name, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
   def handle_call(@proc_write, args, auth, ctx) do
     case decode_write_args(args) do
       {:ok, fh, offset, data, stable} -> do_write(fh, offset, data, stable, auth, ctx)
@@ -369,6 +397,39 @@ defmodule NFSServer.NFSv3.Handler do
          {:ok, offset, rest} <- XDR.decode_uhyper(rest),
          {:ok, count, _rest} <- XDR.decode_uint(rest) do
       {:ok, fh, offset, count}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  # SYMLINK args: `diropargs3 + symlinkdata3` where `symlinkdata3`
+  # is `sattr3 + nfspath3` (RFC 1813 §3.3.10).
+  defp decode_symlink_args(args) do
+    with {:ok, {dir, name}, rest} <- Types.decode_diropargs3(args),
+         {:ok, sattr, rest} <- Types.decode_sattr3(rest),
+         {:ok, target, _rest} <- Types.decode_nfspath3(rest) do
+      {:ok, dir, name, sattr, target}
+    else
+      {:error, _} -> :error
+    end
+  end
+
+  # MKNOD args: `diropargs3 + mknoddata3` (RFC 1813 §3.3.11). The
+  # mknoddata3 is an ftype3-discriminated union — we don't support
+  # special files, so the body is irrelevant. Decode just the
+  # `diropargs3` to fetch the parent for wcc_data.
+  defp decode_mknod_dir_only(args) do
+    case Types.decode_diropargs3(args) do
+      {:ok, {dir, name}, _rest} -> {:ok, dir, name}
+      {:error, _} -> :error
+    end
+  end
+
+  # LINK args: `fhandle3 + diropargs3` (RFC 1813 §3.3.15).
+  defp decode_link_args(args) do
+    with {:ok, file_fh, rest} <- Types.decode_fhandle3(args),
+         {:ok, {link_dir, link_name}, _rest} <- Types.decode_diropargs3(rest) do
+      {:ok, file_fh, link_dir, link_name}
     else
       {:error, _} -> :error
     end
@@ -501,6 +562,63 @@ defmodule NFSServer.NFSv3.Handler do
       {:error, status} ->
         empty = %Types.WccData{before: nil, after: nil}
         {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
+    end
+  end
+
+  defp do_symlink(dir, name, sattr, target, auth, ctx) do
+    backend = fetch_backend!(ctx)
+    do_create_like(backend.symlink(dir, name, sattr, target, auth, ctx))
+  end
+
+  defp do_mknod(dir, name, auth, ctx) do
+    backend = fetch_backend!(ctx)
+    do_create_like(backend.mknod(dir, name, auth, ctx))
+  end
+
+  # SYMLINK and MKNOD share their reply shape with CREATE / MKDIR:
+  # `post_op_fh3 + post_op_attr + wcc_data` on OK, `wcc_data` on
+  # FAIL. Centralise the reply codec.
+  defp do_create_like(backend_result) do
+    case backend_result do
+      {:ok, fh, attr, %Types.WccData{} = wcc} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_fh3(fh) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_wcc_data(wcc)}
+
+      {:error, status, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
+    end
+  end
+
+  defp do_link(file_fh, link_dir, link_name, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.link(file_fh, link_dir, link_name, auth, ctx) do
+      {:ok, attr, %Types.WccData{} = wcc} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_wcc_data(wcc)}
+
+      {:error, status, attr, %Types.WccData{} = wcc} ->
+        {:ok,
+         Types.encode_nfsstat3(status) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+
+        {:ok,
+         Types.encode_nfsstat3(status) <>
+           Types.encode_post_op_attr(nil) <>
+           Types.encode_wcc_data(empty)}
     end
   end
 

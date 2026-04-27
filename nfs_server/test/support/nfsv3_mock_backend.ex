@@ -78,6 +78,17 @@ defmodule NFSServer.NFSv3.MockBackend do
   def rename(from_dir, from_name, to_dir, to_name, _auth, _ctx),
     do: fetch({:rename, {from_dir, from_name, to_dir, to_name}})
 
+  @impl true
+  def symlink(dir, name, attrs, target, _auth, _ctx),
+    do: fetch({:symlink, {dir, name, attrs, target}})
+
+  @impl true
+  def mknod(dir, name, _auth, _ctx), do: fetch({:mknod, {dir, name}})
+
+  @impl true
+  def link(file_fh, link_dir, link_name, _auth, _ctx),
+    do: fetch({:link, {file_fh, link_dir, link_name}})
+
   @doc "A simple `Fattr3` fixture for tests that don't care about the values."
   def sample_fattr3 do
     %Types.Fattr3{

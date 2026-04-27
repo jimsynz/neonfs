@@ -356,6 +356,57 @@ defmodule NFSServer.NFSv3.Backend do
               | {:error, Types.nfsstat3()}
 
   @doc """
+  SYMLINK — RFC 1813 §3.3.10. Create a symbolic link at
+  `dir_fh / name` pointing at `target` (an opaque NFS path string —
+  resolution is the client's responsibility, the server just stores
+  bytes). Reply carries the new symlink's optional `post_op_fh3`,
+  optional `post_op_attr`, and the parent's `wcc_data`.
+  """
+  @callback symlink(
+              dir_fh :: Types.fhandle3(),
+              name :: Types.filename3(),
+              attrs :: Types.Sattr3.t(),
+              target :: Types.nfspath3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.fhandle3() | nil, Types.Fattr3.t() | nil, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
+
+  @doc """
+  MKNOD — RFC 1813 §3.3.11. Create a special file (block / char
+  device, FIFO, or socket). RFC 1813 explicitly allows servers
+  that don't support special files to return `NFS3ERR_NOTSUPP`;
+  most non-POSIX-stack servers do exactly that.
+  """
+  @callback mknod(
+              dir_fh :: Types.fhandle3(),
+              name :: Types.filename3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.fhandle3() | nil, Types.Fattr3.t() | nil, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
+
+  @doc """
+  LINK — RFC 1813 §3.3.15. Create a hard link from
+  `link_dir_fh / name` to `file_fh`. Servers without hard-link
+  support return `NFS3ERR_NOTSUPP` per RFC 1813.
+  """
+  @callback link(
+              file_fh :: Types.fhandle3(),
+              link_dir_fh :: Types.fhandle3(),
+              name :: Types.filename3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.Fattr3.t() | nil, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.Fattr3.t() | nil, Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
+
+  @doc """
   RENAME — RFC 1813 §3.3.14. Cross-directory rename. The reply
   carries `wcc_data` for **both** parent directories (`fromdir_wcc`
   and `todir_wcc`) so the client can refresh the parent caches on
