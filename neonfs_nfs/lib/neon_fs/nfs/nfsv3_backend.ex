@@ -375,6 +375,149 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp map_create_error(_), do: :io
 
   @impl true
+  def mkdir(dir_fh, name, %Sattr3{} = sattr, _auth, _ctx) do
+    case resolve_dir(dir_fh) do
+      {:ok, vol_name, dir_path} ->
+        do_mkdir(vol_name, dir_path, name, sattr)
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  defp do_mkdir(vol_name, dir_path, name, %Sattr3{} = _sattr) do
+    child_path = Path.join(dir_path, name)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+
+    case core_call(NeonFS.Core, :mkdir, [vol_name, child_path]) do
+      {:ok, _dir_entry} ->
+        # `mkdir` creates the directory entry but doesn't return a
+        # `FileMeta`; synthesise the directory's attrs by re-reading
+        # via `get_file_meta` (root-style synthesis lives in
+        # `resolve_meta`'s `"/"` branch — for non-root dirs FileIndex
+        # synthesises directory FileMetas through `get_by_path`).
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
+          {:ok, %FileMeta{} = child_meta} ->
+            ok_create_reply(child_meta, vol_name, dir_path, pre_dir_wcc)
+
+          _ ->
+            {:ok, nil, nil,
+             %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        end
+
+      {:error, :eexist} ->
+        {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, status} when is_atom(status) ->
+        {:error, map_create_error(status),
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, _} ->
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  @impl true
+  def remove(dir_fh, name, _auth, _ctx) do
+    case resolve_dir(dir_fh) do
+      {:ok, vol_name, dir_path} ->
+        do_remove(vol_name, dir_path, name)
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  defp do_remove(vol_name, dir_path, name) do
+    child_path = Path.join(dir_path, name)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+
+    case core_call(NeonFS.Core, :delete_file, [vol_name, child_path]) do
+      :ok ->
+        {:ok, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, :not_found} ->
+        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, status} when is_atom(status) ->
+        {:error, map_create_error(status),
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, _} ->
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  @impl true
+  def rmdir(dir_fh, name, _auth, _ctx) do
+    case resolve_dir(dir_fh) do
+      {:ok, vol_name, dir_path} ->
+        do_rmdir(vol_name, dir_path, name)
+
+      {:error, status} ->
+        {:error, status, %WccData{before: nil, after: nil}}
+    end
+  end
+
+  defp do_rmdir(vol_name, dir_path, name) do
+    child_path = Path.join(dir_path, name)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+
+    with :ok <- check_rmdir_target(vol_name, child_path, pre_dir_wcc, dir_path),
+         :ok <- check_rmdir_empty(vol_name, child_path, pre_dir_wcc, dir_path) do
+      do_rmdir_delete(vol_name, dir_path, child_path, pre_dir_wcc)
+    end
+  end
+
+  defp check_rmdir_target(vol_name, child_path, pre_dir_wcc, dir_path) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
+      {:ok, %FileMeta{mode: mode}} ->
+        if Bitwise.band(mode, @s_ifmt) == @s_ifdir do
+          :ok
+        else
+          {:error, :notdir,
+           %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        end
+
+      {:error, :not_found} ->
+        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      _ ->
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  defp check_rmdir_empty(vol_name, child_path, pre_dir_wcc, dir_path) do
+    case core_call(NeonFS.Core, :list_dir, [vol_name, child_path]) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, [_ | _]} ->
+        {:error, :notempty,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      _ ->
+        # Treat list-dir failure as a non-empty signal — refuse to
+        # delete blindly. The caller still gets `wcc_data`.
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  defp do_rmdir_delete(vol_name, dir_path, child_path, pre_dir_wcc) do
+    case core_call(NeonFS.Core, :delete_file, [vol_name, child_path]) do
+      :ok ->
+        {:ok, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, status} when is_atom(status) ->
+        {:error, map_create_error(status),
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, _} ->
+        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+    end
+  end
+
+  @impl true
   def setattr(fh, %Sattr3{} = sattr, guard_ctime, _auth, _ctx) do
     case resolve_meta(fh) do
       {:ok, vol_name, path, pre_meta} ->

@@ -276,4 +276,50 @@ defmodule NFSServer.NFSv3.Backend do
               {:ok, Types.fhandle3() | nil, Types.Fattr3.t() | nil, Types.WccData.t()}
               | {:error, Types.nfsstat3(), Types.WccData.t()}
               | {:error, Types.nfsstat3()}
+
+  @doc """
+  MKDIR — RFC 1813 §3.3.9. Create a directory at `dir_fh / name`.
+  Reply carries the new dir's optional `post_op_fh3`, optional
+  `post_op_attr`, and the parent's `wcc_data`.
+  """
+  @callback mkdir(
+              dir_fh :: Types.fhandle3(),
+              name :: Types.filename3(),
+              attrs :: Types.Sattr3.t(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.fhandle3() | nil, Types.Fattr3.t() | nil, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
+
+  @doc """
+  REMOVE — RFC 1813 §3.3.12. Unlink a file by `(dir_fh, name)`.
+  Reply carries the parent's `wcc_data`.
+  """
+  @callback remove(
+              dir_fh :: Types.fhandle3(),
+              name :: Types.filename3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
+
+  @doc """
+  RMDIR — RFC 1813 §3.3.13. Remove an empty directory by
+  `(dir_fh, name)`. Returns `NFS3ERR_NOTEMPTY` if the directory is
+  non-empty and `NFS3ERR_NOTDIR` if the target is not a directory.
+  Reply carries the parent's `wcc_data`.
+  """
+  @callback rmdir(
+              dir_fh :: Types.fhandle3(),
+              name :: Types.filename3(),
+              Auth.credential(),
+              ctx()
+            ) ::
+              {:ok, Types.WccData.t()}
+              | {:error, Types.nfsstat3(), Types.WccData.t()}
+              | {:error, Types.nfsstat3()}
 end
