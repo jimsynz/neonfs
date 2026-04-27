@@ -429,6 +429,163 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
+  ## mkdir / remove / rmdir (#623)
+
+  describe "mkdir/5" do
+    setup do
+      put_inode_table(%{0xA000_A000_A000_A000 => {@volume_name, "/parent"}})
+      :ok
+    end
+
+    test "creates a new directory and returns fhandle + attrs + wcc" do
+      child_path = "/parent/newdir"
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+      child_dir = file_meta(%{path: child_path, mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :mkdir, [@volume_name, ^child_path] -> {:ok, %{path: child_path}}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, child_dir}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xA000_A000_A000_A000)
+
+      assert {:ok, child_fh, %Fattr3{type: :dir}, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.mkdir(
+                 dir_fh,
+                 "newdir",
+                 %NFSServer.NFSv3.Types.Sattr3{mode: 0o755},
+                 :auth,
+                 %{}
+               )
+
+      assert byte_size(child_fh) == Filehandle.size()
+    end
+
+    test "returns NFS3ERR_EXIST when target already exists" do
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :mkdir, [@volume_name, "/parent/exists"] -> {:error, :eexist}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xA000_A000_A000_A000)
+
+      assert {:error, :exist, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.mkdir(
+                 dir_fh,
+                 "exists",
+                 %NFSServer.NFSv3.Types.Sattr3{},
+                 :auth,
+                 %{}
+               )
+    end
+  end
+
+  describe "remove/4" do
+    setup do
+      put_inode_table(%{0xB000_B000_B000_B000 => {@volume_name, "/parent"}})
+      :ok
+    end
+
+    test "deletes the file and returns wcc_data" do
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :delete_file, [@volume_name, "/parent/doomed.txt"] -> :ok
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xB000_B000_B000_B000)
+
+      assert {:ok, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.remove(dir_fh, "doomed.txt", :auth, %{})
+    end
+
+    test "returns NFS3ERR_NOENT when target doesn't exist" do
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :delete_file, [@volume_name, "/parent/missing.txt"] -> {:error, :not_found}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xB000_B000_B000_B000)
+
+      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.remove(dir_fh, "missing.txt", :auth, %{})
+    end
+  end
+
+  describe "rmdir/4" do
+    setup do
+      put_inode_table(%{0xC000_C000_C000_C000 => {@volume_name, "/parent"}})
+      :ok
+    end
+
+    test "removes an empty directory" do
+      child_path = "/parent/emptydir"
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+      target = file_meta(%{path: child_path, mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, target}
+        NeonFS.Core, :list_dir, [@volume_name, ^child_path] -> {:ok, []}
+        NeonFS.Core, :delete_file, [@volume_name, ^child_path] -> :ok
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xC000_C000_C000_C000)
+
+      assert {:ok, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.rmdir(dir_fh, "emptydir", :auth, %{})
+    end
+
+    test "returns NFS3ERR_NOTEMPTY when target has children" do
+      child_path = "/parent/full"
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+      target = file_meta(%{path: child_path, mode: 0o040_755, size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] ->
+          {:ok, target}
+
+        NeonFS.Core, :list_dir, [@volume_name, ^child_path] ->
+          {:ok, [%{path: child_path <> "/file.txt"}]}
+
+        NeonFS.Core, :delete_file, _ ->
+          flunk("delete_file must not be called when the dir is non-empty")
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xC000_C000_C000_C000)
+
+      assert {:error, :notempty, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.rmdir(dir_fh, "full", :auth, %{})
+    end
+
+    test "returns NFS3ERR_NOTDIR when target is a regular file" do
+      child_path = "/parent/regular.txt"
+      pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
+      target = file_meta(%{path: child_path, mode: 0o100_644, size: 12})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, target}
+        NeonFS.Core, :list_dir, _ -> flunk("list_dir must not be called for non-dir")
+        NeonFS.Core, :delete_file, _ -> flunk("delete_file must not be called for non-dir")
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xC000_C000_C000_C000)
+
+      assert {:error, :notdir, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.rmdir(dir_fh, "regular.txt", :auth, %{})
+    end
+  end
+
   ## setattr (#621)
 
   describe "setattr/5" do

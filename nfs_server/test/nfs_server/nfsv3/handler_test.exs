@@ -227,6 +227,136 @@ defmodule NFSServer.NFSv3.HandlerTest do
     end
   end
 
+  # MKDIR / REMOVE / RMDIR (procs 9, 12, 13) all carry `wcc_data`
+  # for the parent directory. MKDIR additionally returns the new
+  # dir's optional fhandle + post-op attrs.
+  describe "MKDIR (proc 9)" do
+    test "returns NFS3_OK + new fhandle + attrs + wcc_data on success" do
+      dir = "parent"
+      name = "newdir"
+      sattr = %Types.Sattr3{mode: 0o755}
+      child_fh = "fh-newdir"
+      child_attr = %{MockBackend.sample_fattr3() | type: :dir, mode: 0o755}
+
+      pre_dir_wcc = %Types.WccAttr{
+        size: 0,
+        mtime: %Nfstime3{seconds: 1, nseconds: 0},
+        ctime: %Nfstime3{seconds: 1, nseconds: 0}
+      }
+
+      dir_attr = %{child_attr | fileid: 99}
+      wcc = %Types.WccData{before: pre_dir_wcc, after: dir_attr}
+
+      MockBackend.put({:mkdir, {dir, name, sattr}}, {:ok, child_fh, child_attr, wcc})
+
+      args = Types.encode_diropargs3({dir, name}) <> Types.encode_sattr3(sattr)
+      {:ok, body} = Handler.handle_call(9, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^child_fh, rest} = Types.decode_post_op_fh3(rest)
+      assert {:ok, ^child_attr, rest} = Types.decode_post_op_attr(rest)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns NFS3ERR_EXIST + wcc_data when target already exists" do
+      dir = "parent"
+      name = "exists"
+      sattr = %Types.Sattr3{}
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:mkdir, {dir, name, sattr}}, {:error, :exist, wcc})
+
+      args = Types.encode_diropargs3({dir, name}) <> Types.encode_sattr3(sattr)
+      {:ok, body} = Handler.handle_call(9, args, @auth, @ctx_base)
+
+      assert {:ok, :exist, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(9, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
+  describe "REMOVE (proc 12)" do
+    test "returns NFS3_OK + wcc_data on success" do
+      dir = "parent"
+      name = "doomed.txt"
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:remove, {dir, name}}, {:ok, wcc})
+
+      args = Types.encode_diropargs3({dir, name})
+      {:ok, body} = Handler.handle_call(12, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns NFS3ERR_NOENT + wcc_data when file doesn't exist" do
+      dir = "parent"
+      name = "missing.txt"
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:remove, {dir, name}}, {:error, :noent, wcc})
+
+      args = Types.encode_diropargs3({dir, name})
+      {:ok, body} = Handler.handle_call(12, args, @auth, @ctx_base)
+
+      assert {:ok, :noent, _} = Types.decode_nfsstat3(body)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(12, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
+  describe "RMDIR (proc 13)" do
+    test "returns NFS3_OK + wcc_data on success" do
+      dir = "parent"
+      name = "emptydir"
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:rmdir, {dir, name}}, {:ok, wcc})
+
+      args = Types.encode_diropargs3({dir, name})
+      {:ok, body} = Handler.handle_call(13, args, @auth, @ctx_base)
+
+      assert {:ok, :ok, rest} = Types.decode_nfsstat3(body)
+      assert {:ok, ^wcc, <<>>} = Types.decode_wcc_data(rest)
+    end
+
+    test "returns NFS3ERR_NOTEMPTY + wcc_data when target has children" do
+      dir = "parent"
+      name = "fulldir"
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:rmdir, {dir, name}}, {:error, :notempty, wcc})
+
+      args = Types.encode_diropargs3({dir, name})
+      {:ok, body} = Handler.handle_call(13, args, @auth, @ctx_base)
+
+      assert {:ok, :notempty, _} = Types.decode_nfsstat3(body)
+    end
+
+    test "returns NFS3ERR_NOTDIR + wcc_data when target is a regular file" do
+      dir = "parent"
+      name = "regular.txt"
+      wcc = %Types.WccData{before: nil, after: nil}
+
+      MockBackend.put({:rmdir, {dir, name}}, {:error, :notdir, wcc})
+
+      args = Types.encode_diropargs3({dir, name})
+      {:ok, body} = Handler.handle_call(13, args, @auth, @ctx_base)
+
+      assert {:ok, :notdir, _} = Types.decode_nfsstat3(body)
+    end
+
+    test "returns :garbage_args on undecodable args" do
+      assert :garbage_args = Handler.handle_call(13, <<0xFF>>, @auth, @ctx_base)
+    end
+  end
+
   describe "LOOKUP (proc 3)" do
     test "returns the file handle plus both post-op attrs on success" do
       dir = "dir"

@@ -15,14 +15,17 @@ defmodule NFSServer.NFSv3.Handler do
   | 5    | READLINK    |
   | 6    | READ        |
   | 8    | CREATE      |
+  | 9    | MKDIR       |
+  | 12   | REMOVE      |
+  | 13   | RMDIR       |
   | 16   | READDIR     |
   | 17   | READDIRPLUS |
   | 18   | FSSTAT      |
   | 19   | FSINFO      |
   | 20   | PATHCONF    |
 
-  The remaining write-path procedures (procs 7, 9–15, 21) ship in
-  separate sub-issues under the #285 tracking issue.
+  The remaining write-path procedures (procs 7, 10, 11, 14, 15, 21)
+  ship in separate sub-issues under the #285 tracking issue.
 
   ## READ streaming
 
@@ -103,6 +106,9 @@ defmodule NFSServer.NFSv3.Handler do
   @proc_readlink 5
   @proc_read 6
   @proc_create 8
+  @proc_mkdir 9
+  @proc_remove 12
+  @proc_rmdir 13
   @proc_readdir 16
   @proc_readdirplus 17
   @proc_fsstat 18
@@ -220,6 +226,27 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  def handle_call(@proc_mkdir, args, auth, ctx) do
+    case decode_mkdir_args(args) do
+      {:ok, dir, name, sattr} -> do_mkdir(dir, name, sattr, auth, ctx)
+      :error -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_remove, args, auth, ctx) do
+    case Types.decode_diropargs3(args) do
+      {:ok, {dir, name}, _} -> do_remove(dir, name, auth, ctx)
+      {:error, _} -> :garbage_args
+    end
+  end
+
+  def handle_call(@proc_rmdir, args, auth, ctx) do
+    case Types.decode_diropargs3(args) do
+      {:ok, {dir, name}, _} -> do_rmdir(dir, name, auth, ctx)
+      {:error, _} -> :garbage_args
+    end
+  end
+
   def handle_call(@proc_readdir, args, auth, ctx) do
     case decode_readdir_args(args) do
       {:ok, fh, cookie, verf, count} -> do_readdir(fh, cookie, verf, count, auth, ctx)
@@ -289,6 +316,16 @@ defmodule NFSServer.NFSv3.Handler do
     end
   end
 
+  # MKDIR args: `diropargs3 + sattr3` (RFC 1813 §3.3.9).
+  defp decode_mkdir_args(args) do
+    with {:ok, {dir, name}, rest} <- Types.decode_diropargs3(args),
+         {:ok, sattr, _rest} <- Types.decode_sattr3(rest) do
+      {:ok, dir, name, sattr}
+    else
+      {:error, _} -> :error
+    end
+  end
+
   # SETATTR args: `fhandle3 + sattr3 + sattrguard3`. `sattrguard3` is
   # an XDR-optional `nfstime3` — RFC 1813 §3.3.2's "guarded SETATTR"
   # check pre-op `ctime` matches `obj_ctime`.
@@ -349,6 +386,53 @@ defmodule NFSServer.NFSv3.Handler do
            Types.encode_post_op_fh3(fh) <>
            Types.encode_post_op_attr(attr) <>
            Types.encode_wcc_data(wcc)}
+
+      {:error, status, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
+    end
+  end
+
+  defp do_mkdir(dir, name, sattr, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case backend.mkdir(dir, name, sattr, auth, ctx) do
+      {:ok, fh, attr, %Types.WccData{} = wcc} ->
+        {:ok,
+         Types.encode_nfsstat3(:ok) <>
+           Types.encode_post_op_fh3(fh) <>
+           Types.encode_post_op_attr(attr) <>
+           Types.encode_wcc_data(wcc)}
+
+      {:error, status, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
+
+      {:error, status} ->
+        empty = %Types.WccData{before: nil, after: nil}
+        {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(empty)}
+    end
+  end
+
+  defp do_remove(dir, name, auth, ctx) do
+    do_dir_unlink(:remove, dir, name, auth, ctx)
+  end
+
+  defp do_rmdir(dir, name, auth, ctx) do
+    do_dir_unlink(:rmdir, dir, name, auth, ctx)
+  end
+
+  # REMOVE and RMDIR share the wire shape (`diropargs3` in,
+  # `wcc_data` out) and the reply codec — only the backend callback
+  # differs. Dispatch via the callback name.
+  defp do_dir_unlink(callback, dir, name, auth, ctx) do
+    backend = fetch_backend!(ctx)
+
+    case apply(backend, callback, [dir, name, auth, ctx]) do
+      {:ok, %Types.WccData{} = wcc} ->
+        {:ok, Types.encode_nfsstat3(:ok) <> Types.encode_wcc_data(wcc)}
 
       {:error, status, %Types.WccData{} = wcc} ->
         {:ok, Types.encode_nfsstat3(status) <> Types.encode_wcc_data(wcc)}
