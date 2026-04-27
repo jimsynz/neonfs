@@ -179,6 +179,82 @@ defmodule NeonFS.CIFS.HandlerTest do
       assert {:error, :eexist} == reply
     end
 
+    # `O_EXCL | O_CREAT` (0o300) routes through `WriteOperation` with
+    # `create_only: true` (sub-issue #595 of #303). The interface-side
+    # FileIndex precheck only catches the trivial case where the file
+    # is already on disk; concurrent creates on different CIFS nodes
+    # are fenced by the `claim_create` primitive on the core node, and
+    # the loser sees `{:error, :exists}` which this handler maps to
+    # `:eexist`.
+    test "openat with O_EXCL | O_CREAT on missing file forwards create_only: true" do
+      test_pid = self()
+
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/atomic"] ->
+          {:error, :not_found}
+
+        NeonFS.Core.WriteOperation, :write_file_at, ["vol-a", "/atomic", 0, <<>>, opts] ->
+          send(test_pid, {:write_opts, opts})
+          {:ok, %{path: "/atomic"}}
+      end)
+
+      {reply, state} =
+        Handler.handle(
+          {:openat, %{"path" => "/atomic", "flags" => 0o300, "mode" => 0o644}},
+          connected()
+        )
+
+      assert {:ok, %{handle: 1}} = reply
+      assert Map.has_key?(state.files, 1)
+      assert_receive {:write_opts, opts}, 500
+      assert Keyword.get(opts, :create_only) == true
+    end
+
+    test "openat with O_EXCL | O_CREAT maps :exists from core to :eexist" do
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/raced"] ->
+          {:error, :not_found}
+
+        NeonFS.Core.WriteOperation, :write_file_at, ["vol-a", "/raced", 0, <<>>, opts] ->
+          # The peer-cluster integration test for the underlying
+          # primitive lives in #592; here we just verify the
+          # interface-level translation.
+          assert Keyword.get(opts, :create_only) == true
+          {:error, :exists}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:openat, %{"path" => "/raced", "flags" => 0o300, "mode" => 0o644}},
+          connected()
+        )
+
+      assert {:error, :eexist} == reply
+    end
+
+    test "openat with O_CREAT only (no O_EXCL) does not set create_only" do
+      test_pid = self()
+
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/plain"] ->
+          {:error, :not_found}
+
+        NeonFS.Core.WriteOperation, :write_file_at, ["vol-a", "/plain", 0, <<>>, opts] ->
+          send(test_pid, {:write_opts, opts})
+          {:ok, %{path: "/plain"}}
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:openat, %{"path" => "/plain", "flags" => 0o100, "mode" => 0o644}},
+          connected()
+        )
+
+      assert {:ok, %{handle: 1}} = reply
+      assert_receive {:write_opts, opts}, 500
+      refute Keyword.get(opts, :create_only)
+    end
+
     test "close releases the handle" do
       {handle, state} = open_file(connected(), "/p")
       {reply, state2} = Handler.handle({:close, %{"handle" => handle}}, state)
