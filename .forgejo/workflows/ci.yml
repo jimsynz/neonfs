@@ -345,12 +345,16 @@ jobs:
           path: |
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
+            neonfs_core/target
+            neonfs_core/priv/native
             neonfs_nfs/deps
             neonfs_nfs/_build
             neonfs_nfs/target
             neonfs_nfs/priv/native
-          key: v3-build-neonfs_nfs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_nfs/mix.lock', 'neonfs_nfs/native/neonfs_nfs/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_nfs-${{ runner.arch }}-
+          key: v4-build-neonfs_nfs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_nfs/mix.lock', 'neonfs_nfs/native/neonfs_nfs/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
+          restore-keys: v4-build-neonfs_nfs-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_nfs

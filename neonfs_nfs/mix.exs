@@ -13,6 +13,7 @@ defmodule NeonFS.NFS.MixProject do
       consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       description: @moduledoc,
+      dialyzer: dialyzer(),
       docs: docs(),
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -20,6 +21,17 @@ defmodule NeonFS.NFS.MixProject do
       releases: releases(),
       start_permanent: Mix.env() == :prod,
       version: @version
+    ]
+  end
+
+  defp dialyzer do
+    [
+      # `:neonfs_core` is a test-only transitive dep (via
+      # `:neonfs_test_support`) used by the BEAM NFSv3 read-path
+      # smoke test (#587). PLT it explicitly so dialyzer can see
+      # `NeonFS.Core.read_file_stream/3` referenced by
+      # `test/support/beam_read_test_hooks.ex`.
+      plt_add_apps: [:neonfs_core]
     ]
   end
 
@@ -66,6 +78,11 @@ defmodule NeonFS.NFS.MixProject do
       # dev/test
       {:mimic, "~> 2.0", only: [:test]},
       {:stream_data, "~> 1.0", only: [:test]},
+      # `:neonfs_test_support` pulls `:neonfs_core` transitively for
+      # `ClusterCase` / `PeerCluster`. Used by the BEAM NFSv3 read-path
+      # smoke test (#587) which boots a 3-peer cluster and drives
+      # `Handler.handle_call/4` against a live `NFSv3Backend`.
+      {:neonfs_test_support, path: "../neonfs_test_support", only: :test, runtime: false},
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},
