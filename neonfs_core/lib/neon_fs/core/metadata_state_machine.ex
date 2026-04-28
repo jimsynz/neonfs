@@ -336,10 +336,27 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Ra machine callbacks
 
   @doc """
-  Initialise the state machine with a clean v10 state.
+  Initialise the state machine.
+
+  Normal startup returns a clean state. The `force-reset` recovery
+  path (#473) passes `:initial_state` so the new single-node cluster
+  starts with the survivor's last-applied state instead of an empty
+  map — this is how operator-invoked quorum recovery preserves the
+  cluster's metadata (volumes, ACLs, encryption keys, etc.) across
+  the membership reset.
   """
   @impl :ra_machine
-  def init(_config) do
+  def init(config) do
+    case Map.get(config_as_map(config), :initial_state) do
+      nil -> empty_state()
+      state when is_map(state) -> state
+    end
+  end
+
+  defp config_as_map(config) when is_map(config), do: config
+  defp config_as_map(_), do: %{}
+
+  defp empty_state do
     %{
       data: %{},
       chunks: %{},

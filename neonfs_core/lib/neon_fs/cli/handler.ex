@@ -27,6 +27,7 @@ defmodule NeonFS.CLI.Handler do
     JobTracker,
     KeyManager,
     KeyRotation,
+    RaServer,
     RaSupervisor,
     S3CredentialManager,
     ServiceRegistry,
@@ -293,7 +294,7 @@ defmodule NeonFS.CLI.Handler do
     Ra mutation is not yet implemented and points at the follow-up
     issue.
   """
-  @spec handle_force_reset(map()) :: {:error, Exception.t()}
+  @spec handle_force_reset(map()) :: {:ok, map()} | {:error, Exception.t()}
   def handle_force_reset(opts) when is_map(opts) do
     set_cli_metadata()
 
@@ -312,13 +313,40 @@ defmodule NeonFS.CLI.Handler do
          :ok <- require_departed_unreachable_long_enough(departed, state, min_unreachable_s) do
       log_force_reset_attempt(state, members, keep_nodes, min_unreachable_s)
 
-      {:error,
-       Unavailable.exception(
-         message:
-           "Ra minority-recovery mutation not yet implemented — safety checks passed; see #473"
-       )}
+      perform_force_reset(state, members, keep_nodes, departed)
     else
       {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  # The actual Ra minority-recovery mutation (#473). The safety
+  # gates above gave us a green light; the survivor's local Ra
+  # replica gets snapshot-extracted, the Ra server destroyed, and a
+  # fresh single-node cluster bootstrapped with the extracted state
+  # injected via `MetadataStateMachine.init/1`'s `:initial_state`.
+  defp perform_force_reset(state, members, keep_nodes, departed) do
+    case RaServer.force_reset_to_self() do
+      {:ok, snapshot_path} ->
+        log_force_reset_completion(
+          state,
+          members,
+          keep_nodes,
+          departed,
+          snapshot_path
+        )
+
+        {:ok,
+         %{
+           survivors: keep_nodes,
+           departed: departed,
+           snapshot_path: snapshot_path
+         }}
+
+      {:error, reason} ->
+        log_force_reset_failure(state, members, keep_nodes, departed, reason)
+
+        {:error,
+         Unavailable.exception(message: "Force-reset mutation failed: #{inspect(reason)}")}
     end
   end
 
@@ -3549,6 +3577,34 @@ defmodule NeonFS.CLI.Handler do
         keep: Enum.map(keep_nodes, &Atom.to_string/1),
         min_unreachable_seconds: min_unreachable_s,
         data_loss_acknowledged: true
+      }
+    )
+  end
+
+  defp log_force_reset_completion(state, members, keep_nodes, departed, snapshot_path) do
+    AuditLog.log_event(
+      event_type: :cluster_force_reset_completed,
+      actor_uid: 0,
+      resource: "cluster:#{state.cluster_id}",
+      details: %{
+        ra_cluster_members: Enum.map(members, &Atom.to_string/1),
+        keep: Enum.map(keep_nodes, &Atom.to_string/1),
+        departed: Enum.map(departed, &Atom.to_string/1),
+        snapshot_path: snapshot_path
+      }
+    )
+  end
+
+  defp log_force_reset_failure(state, members, keep_nodes, departed, reason) do
+    AuditLog.log_event(
+      event_type: :cluster_force_reset_failed,
+      actor_uid: 0,
+      resource: "cluster:#{state.cluster_id}",
+      details: %{
+        ra_cluster_members: Enum.map(members, &Atom.to_string/1),
+        keep: Enum.map(keep_nodes, &Atom.to_string/1),
+        departed: Enum.map(departed, &Atom.to_string/1),
+        reason: inspect(reason)
       }
     )
   end

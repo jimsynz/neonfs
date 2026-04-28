@@ -100,35 +100,58 @@ During the wait, **do not** run any recovery command on the minority side. Any a
 >
 > **Do not run the forced reset while the departed majority might still come back.** Split-brain is the worst outcome — two cluster halves, each thinking it is authoritative, diverging state with no automated reconciliation.
 
-The forced-reset procedure is **not a single CLI command today**. The tools involved are:
+The forced-reset procedure is now a single CLI command (`neonfs cluster force-reset`, available since #473). The implementation:
 
-- `:ra.force_delete_server/2` — low-level Ra API that removes a server entry from the local Ra state. Already used during `drive remove` for cluster membership maintenance (see `NeonFS.Core.RaServer`); invoking it to reshape the cluster membership from the minority side is not an operator-facing operation.
-- Manual edits to `$NEONFS_DATA_DIR/meta/cluster.json` on each surviving node, followed by a coordinated restart with the trimmed member list.
+1. Snapshot-extracts the survivor's local Ra state via `:ra.local_query/3` (no quorum required — that's what makes it usable post-quorum-loss).
+2. Persists the snapshot to `$NEONFS_DATA_DIR/ra/force-reset-snapshots/<node>-<ts>.bin` so an operator can inspect it post-hoc.
+3. Calls `:ra.force_delete_server/2` to destroy the survivor's Ra log and state.
+4. Bootstraps a fresh single-node Ra cluster with the extracted state injected via `MetadataStateMachine.init/1`'s `:initial_state` option.
 
-Both options require engineering assistance. Capture the pre-reset state (step 7 below) and **[escalate](#escalation-path)** — do not run Ra force-operations from the runbook alone unless you have done one in this cluster before.
+The new cluster has the **old metadata preserved** (volumes, ACLs, encryption keys, S3 credentials, service registry, segment assignments, KV) but a **fresh log + fresh membership** — every membership trace of the dropped majority is gone. State that's inherently in-flight (intent log, escalations, namespace claim locks) is dropped; operators retry those.
 
-If you have engineering support and are proceeding with a forced reset:
+Procedure:
 
 ```bash
-# 1. Stop NeonFS on every surviving node simultaneously to avoid election
-#    storms during the reset.
-for host in <survivor1> <survivor2>; do ssh "$host" sudo systemctl stop neonfs-core; done
+# 1. Stop NeonFS on every survivor that is NOT the chosen reset target.
+#    Only one survivor should run the force-reset; the others rejoin
+#    fresh after step 4.
+for host in <survivor2> <survivor3>; do ssh "$host" sudo systemctl stop neonfs-core; done
 
-# 2. (engineering-provided) Trim each survivor's cluster.json to list only
-#    the surviving nodes, and use :ra.force_delete_server to remove the
-#    departed members from the local Ra state on each survivor.
+# 2. Run force-reset on the chosen survivor. The CLI's safety gates
+#    refuse anything that doesn't look like a real quorum-loss
+#    scenario — see `neonfs cluster force-reset --help` for the
+#    full list. `--yes-i-accept-data-loss` is required.
+ssh <survivor1> \
+  neonfs cluster force-reset \
+    --keep <survivor1> \
+    --min-unreachable-seconds 1800 \
+    --yes-i-accept-data-loss
 
-# 3. Bring one survivor up first as a single-member quorum.
-ssh <survivor1> sudo systemctl start neonfs-core
+# 3. The CLI returns the snapshot path on success. Copy it
+#    somewhere off-cluster as a paranoia backup before continuing.
+ssh <survivor1> sudo cat /var/lib/neonfs/ra/force-reset-snapshots/<...>.bin \
+  | scp - <off-cluster-host>:force-reset-snapshot.bin
+
+# 4. Verify the survivor is now a single-node cluster.
 ssh <survivor1> neonfs cluster status
 
-# 4. Bring the remaining survivors up.
-for host in <survivor2> ...; do ssh "$host" sudo systemctl start neonfs-core; done
+# 5. Rejoin the other survivors (NOT the dead majority) as fresh
+#    members. They have stale Ra state from the old cluster — wipe
+#    it before rejoining.
+for host in <survivor2> <survivor3>; do
+  ssh "$host" sudo rm -rf /var/lib/neonfs/ra/<...>/
+  ssh "$host" sudo systemctl start neonfs-core
+  ssh "$host" neonfs cluster join <survivor1>
+done
 
-# 5. Verify. See step 7.
+# 6. Trigger eager re-replication of chunks that lost replicas to
+#    the departed majority (#687).
+ssh <survivor1> neonfs cluster repair start
+
+# 7. Verify. See step 7.
 ```
 
-The first survivor to start becomes the effective leader. Its local Ra state is the canonical truth for the rebuilt cluster; anything any departed node had committed but not replicated to this one is lost.
+The first survivor to start becomes the effective leader. Its local Ra state at the time of `force-reset` is the canonical truth for the rebuilt cluster; anything any departed node had committed but not replicated to this one is lost.
 
 ### 7. Post-recovery verification
 
