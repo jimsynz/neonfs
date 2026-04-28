@@ -39,6 +39,7 @@ defmodule NeonFS.Core.FileMeta do
           acl_entries: [acl_entry()],
           default_acl: [acl_entry()] | nil,
           metadata: %{optional(String.t()) => term()},
+          xattrs: %{optional(binary()) => binary()},
           created_at: DateTime.t(),
           modified_at: DateTime.t(),
           accessed_at: DateTime.t(),
@@ -71,6 +72,7 @@ defmodule NeonFS.Core.FileMeta do
     acl_entries: [],
     default_acl: nil,
     metadata: %{},
+    xattrs: %{},
     detached: false,
     pinned_claim_ids: []
   ]
@@ -118,6 +120,7 @@ defmodule NeonFS.Core.FileMeta do
       acl_entries: Keyword.get(opts, :acl_entries, []),
       default_acl: Keyword.get(opts, :default_acl),
       metadata: Keyword.get(opts, :metadata, %{}),
+      xattrs: Keyword.get(opts, :xattrs, %{}),
       created_at: now,
       modified_at: now,
       accessed_at: now,

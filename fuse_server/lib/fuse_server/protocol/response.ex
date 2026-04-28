@@ -184,6 +184,30 @@ defmodule FuseServer.Protocol.Response do
     @type t :: %__MODULE__{entries: [DirentPlus.t()]}
   end
 
+  defmodule XattrSize do
+    @moduledoc """
+    Reply to a size-probe `GETXATTR` / `LISTXATTR` (the request's
+    `size` field was 0). The kernel uses the returned `size` to
+    allocate a buffer and re-issue the request. Encoded as
+    `fuse_getxattr_out` (8 bytes).
+    """
+    defstruct size: 0
+    @type t :: %__MODULE__{size: non_neg_integer()}
+  end
+
+  defmodule XattrData do
+    @moduledoc """
+    Reply to a real-fetch `GETXATTR` (request `size` > 0): the value
+    bytes; or to `LISTXATTR`: the NUL-separated, NUL-terminated list
+    of attribute names. The kernel rejects this reply with `ERANGE`
+    if the data exceeds the buffer it allocated based on its prior
+    probe — handlers are responsible for ensuring `byte_size(data)`
+    fits within the request's `size` budget.
+    """
+    defstruct data: <<>>
+    @type t :: %__MODULE__{data: binary()}
+  end
+
   @type t ::
           Empty.t()
           | Init.t()
@@ -196,6 +220,8 @@ defmodule FuseServer.Protocol.Response do
           | Statfs.t()
           | Readdir.t()
           | ReaddirPlus.t()
+          | XattrSize.t()
+          | XattrData.t()
 
   @doc "Encode the response body (excluding `fuse_out_header`)."
   @spec encode(t()) :: iodata()
@@ -262,6 +288,11 @@ defmodule FuseServer.Protocol.Response do
 
   def encode(%ReaddirPlus{entries: entries}),
     do: Enum.map(entries, &encode_direntplus/1)
+
+  def encode(%XattrSize{size: size}),
+    do: <<size::little-32, 0::little-32>>
+
+  def encode(%XattrData{data: data}) when is_binary(data), do: data
 
   # ——— Private helpers ————————————————————————————————————————————
 

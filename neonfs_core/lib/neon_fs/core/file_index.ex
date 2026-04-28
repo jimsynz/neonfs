@@ -1284,6 +1284,7 @@ defmodule NeonFS.Core.FileIndex do
       gid: file.gid,
       acl_entries: file.acl_entries,
       default_acl: file.default_acl,
+      xattrs: file.xattrs,
       created_at: file.created_at,
       modified_at: file.modified_at,
       accessed_at: file.accessed_at,
@@ -1312,6 +1313,7 @@ defmodule NeonFS.Core.FileIndex do
       gid: get_field(map, :gid, 0),
       acl_entries: decode_acl_entries(get_field(map, :acl_entries, [])),
       default_acl: decode_default_acl(get_field(map, :default_acl)),
+      xattrs: decode_xattrs(get_field(map, :xattrs, %{})),
       created_at: decode_datetime(get_field(map, :created_at)),
       modified_at: decode_datetime(get_field(map, :modified_at)),
       accessed_at: decode_datetime(get_field(map, :accessed_at)),
@@ -1365,6 +1367,17 @@ defmodule NeonFS.Core.FileIndex do
 
   defp decode_acl_entries(entries) when is_list(entries),
     do: Enum.map(entries, &decode_acl_entry/1)
+
+  defp decode_xattrs(nil), do: %{}
+
+  defp decode_xattrs(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {to_binary(k), to_binary(v)} end)
+  end
+
+  defp decode_xattrs(_), do: %{}
+
+  defp to_binary(b) when is_binary(b), do: b
+  defp to_binary(other), do: :erlang.iolist_to_binary([other])
 
   defp decode_default_acl(nil), do: nil
 

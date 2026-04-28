@@ -47,10 +47,12 @@ defmodule FuseServer.ProtocolTest do
 
   describe "decode_request/1 dispatch" do
     test "returns :unknown_opcode for opcodes outside the codec's scope" do
-      # Opcode 22 (LISTXATTR) is not currently supported (xattrs out of scope, #280).
-      header = build_header(opcode: 22, len: 40 + 16)
+      # Opcode 31 (FUSE_LK / SETLK) is not currently supported — locks
+      # are out of scope of #671 (the xattrs slice) and tracked under
+      # the remaining sub-issues of #280.
+      header = build_header(opcode: 31, len: 40 + 16)
       body = <<0::little-64, 0::little-32, 0::little-32>>
-      assert {:error, {:unknown_opcode, 22}} = Protocol.decode_request(header <> body)
+      assert {:error, {:unknown_opcode, 31}} = Protocol.decode_request(header <> body)
     end
 
     test "returns {:ok, opcode, header, request} on a valid INIT frame" do
@@ -348,6 +350,61 @@ defmodule FuseServer.ProtocolTest do
 
       assert {:ok, %Request.BatchForget{items: [{10, 1}, {20, 2}]}} =
                Request.decode(:batch_forget, body)
+    end
+
+    test "setxattr decodes the size+flags header, NUL-terminated name, and value" do
+      value = "bar"
+      body = <<byte_size(value)::little-32, 1::little-32, "user.foo", 0, value::binary>>
+
+      assert {:ok, %Request.SetXattr{size: 3, flags: 1, name: "user.foo", value: "bar"}} =
+               Request.decode(:setxattr, body)
+    end
+
+    test "setxattr rejects a body whose declared size mismatches the trailing value" do
+      body = <<5::little-32, 0::little-32, "user.x", 0, "bar"::binary>>
+      assert {:error, :malformed_body} = Request.decode(:setxattr, body)
+    end
+
+    test "getxattr decodes the size header and NUL-terminated name" do
+      body = <<128::little-32, 0::little-32, "user.foo", 0>>
+
+      assert {:ok, %Request.GetXattr{size: 128, name: "user.foo"}} =
+               Request.decode(:getxattr, body)
+    end
+
+    test "listxattr decodes the size header (no name)" do
+      body = <<256::little-32, 0::little-32>>
+      assert {:ok, %Request.ListXattr{size: 256}} = Request.decode(:listxattr, body)
+    end
+
+    test "removexattr decodes the NUL-terminated name only" do
+      body = <<"user.foo", 0>>
+      assert {:ok, %Request.RemoveXattr{name: "user.foo"}} = Request.decode(:removexattr, body)
+    end
+
+    test "xattr opcode numbers match Linux fuse.h v7.31" do
+      assert FuseServer.Protocol.atom_to_opcode(:setxattr) == 21
+      assert FuseServer.Protocol.atom_to_opcode(:getxattr) == 22
+      assert FuseServer.Protocol.atom_to_opcode(:listxattr) == 23
+      assert FuseServer.Protocol.atom_to_opcode(:removexattr) == 24
+    end
+  end
+
+  describe "xattr response encoders (#671)" do
+    test "XattrSize encodes as fuse_getxattr_out (8 bytes: size + padding)" do
+      assert <<42::little-32, 0::little-32>> ==
+               Response.encode(%Response.XattrSize{size: 42})
+    end
+
+    test "XattrData encodes as raw bytes" do
+      assert "user.a\0user.b\0" ==
+               :erlang.iolist_to_binary(
+                 Response.encode(%Response.XattrData{data: "user.a\0user.b\0"})
+               )
+    end
+
+    test "Empty body encodes a zero-byte payload (used by SETXATTR / REMOVEXATTR)" do
+      assert [] == Response.encode(%Response.Empty{})
     end
   end
 

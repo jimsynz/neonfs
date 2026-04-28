@@ -587,8 +587,41 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End cache flushers + FALLOCATE ——————————————————————————————
 
+  # ——— xattr opcodes (#671) ———————————————————————————————————————
+
+  defp handle_opcode(:setxattr, header, %Request.SetXattr{} = r, state) do
+    op =
+      {"setxattr",
+       %{
+         "ino" => header.nodeid,
+         "name" => r.name,
+         "value" => r.value,
+         "flags" => r.flags
+       }}
+
+    enqueue(:setxattr, header.unique, op, state)
+  end
+
+  defp handle_opcode(:getxattr, header, %Request.GetXattr{} = r, state) do
+    op = {"getxattr", %{"ino" => header.nodeid, "name" => r.name, "size" => r.size}}
+    enqueue(:getxattr, header.unique, op, state)
+  end
+
+  defp handle_opcode(:listxattr, header, %Request.ListXattr{} = r, state) do
+    op = {"listxattr", %{"ino" => header.nodeid, "size" => r.size}}
+    enqueue(:listxattr, header.unique, op, state)
+  end
+
+  defp handle_opcode(:removexattr, header, %Request.RemoveXattr{} = r, state) do
+    op = {"removexattr", %{"ino" => header.nodeid, "name" => r.name}}
+    enqueue(:removexattr, header.unique, op, state)
+  end
+
+  # ——— End xattr opcodes ——————————————————————————————————————————
+
   # Catch-all for opcodes we accept in the codec but don't route here
-  # (xattrs, locks, etc. — not yet handled by this session).
+  # (locks, INTERRUPT — not yet handled by this session, tracked under
+  # the remaining sub-issues of #280).
   defp handle_opcode(_other, header, _req, state) do
     write_frame(state.fd, Protocol.encode_error(header.unique, -38))
     state
@@ -686,13 +719,57 @@ defmodule NeonFS.FUSE.Session do
   end
 
   defp handle_handler_reply(kind, kernel_unique, {"ok", _}, state)
-       when kind in [:unlink, :rmdir, :rename] do
+       when kind in [:unlink, :rmdir, :rename, :setxattr, :removexattr] do
     write_reply(state.fd, kernel_unique, %Response.Empty{}, 0)
     emit_opcode_telemetry(kind, :ok, state)
     state
   end
 
   # ——— End mutation metadata reply translations —————————————————
+
+  # ——— xattr reply translations (#671) ————————————————————————————
+  #
+  # GETXATTR / LISTXATTR follow the size-probe convention: the
+  # request's `size == 0` asks for the buffer-size we'd need; `size > 0`
+  # is a real fetch. The Handler returns one of two reply tags
+  # depending on which case applied — `_size` for the probe and
+  # `_data` for the real fetch.
+
+  defp handle_handler_reply(:getxattr, kernel_unique, {"xattr_size", %{"size" => size}}, state) do
+    write_reply(state.fd, kernel_unique, %Response.XattrSize{size: size}, 0)
+    emit_opcode_telemetry(:getxattr, :ok, state)
+    state
+  end
+
+  defp handle_handler_reply(:getxattr, kernel_unique, {"xattr_data", %{"data" => data}}, state) do
+    write_reply(state.fd, kernel_unique, %Response.XattrData{data: data}, 0)
+    emit_opcode_telemetry(:getxattr, :ok, state)
+    state
+  end
+
+  defp handle_handler_reply(
+         :listxattr,
+         kernel_unique,
+         {"xattr_list_size", %{"size" => size}},
+         state
+       ) do
+    write_reply(state.fd, kernel_unique, %Response.XattrSize{size: size}, 0)
+    emit_opcode_telemetry(:listxattr, :ok, state)
+    state
+  end
+
+  defp handle_handler_reply(
+         :listxattr,
+         kernel_unique,
+         {"xattr_list_data", %{"data" => data}},
+         state
+       ) do
+    write_reply(state.fd, kernel_unique, %Response.XattrData{data: data}, 0)
+    emit_opcode_telemetry(:listxattr, :ok, state)
+    state
+  end
+
+  # ——— End xattr reply translations ——————————————————————————————
 
   # ——— Data-path reply translations (#576) ————————————————————————
 

@@ -693,10 +693,176 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # ─── xattr ops (#671) ─────────────────────────────────────────────
+  #
+  # The `user.*` namespace is the only one we currently permit.
+  # `system.*` and `security.*` carry POSIX ACL / capability semantics
+  # that aren't modelled in NeonFS yet — refusing them with EPERM is
+  # the documented "not supported" reply (see #280's xattr slice).
+  # `trusted.*` is also rejected — it'd require CAP_SYS_ADMIN
+  # enforcement we don't have a hook for. Everything outside those
+  # namespaces (no dot, or unknown prefix) is rejected to keep the
+  # surface area minimal until a real consumer needs it.
+
+  defp handle_operation({"setxattr", params}, state) do
+    ino = params["ino"]
+    name = params["name"]
+    value = params["value"]
+    flags = params["flags"] || 0
+
+    with :ok <- validate_xattr_namespace(name),
+         {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         {:ok, file} <- file_index_get_by_path(volume_id, path),
+         :ok <- check_xattr_flags(file.xattrs, name, flags),
+         {:ok, updated} <- file_index_update(file.id, xattrs: Map.put(file.xattrs, name, value)) do
+      refresh_attrs_cache(state.cache_table, volume_id, updated)
+      {"ok", %{}}
+    else
+      {:error, errno_atom} when is_atom(errno_atom) ->
+        {"error", %{"errno" => errno(errno_atom)}}
+
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, reason} ->
+        Logger.warning("Setxattr failed", reason: inspect(reason))
+        {"error", %{"errno" => errno(:eio)}}
+    end
+  end
+
+  defp handle_operation({"getxattr", params}, state) do
+    ino = params["ino"]
+    name = params["name"]
+    size = params["size"] || 0
+
+    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         {:ok, file} <- file_index_get_by_path(volume_id, path),
+         {:ok, value} <- fetch_xattr(file.xattrs, name) do
+      reply_with_size_probe(value, size, "xattr")
+    else
+      {:error, :not_found} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, :enodata} ->
+        {"error", %{"errno" => errno(:enodata)}}
+
+      {:error, reason} ->
+        Logger.warning("Getxattr failed", reason: inspect(reason))
+        {"error", %{"errno" => errno(:eio)}}
+    end
+  end
+
+  defp handle_operation({"listxattr", params}, state) do
+    ino = params["ino"]
+    size = params["size"] || 0
+
+    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         {:ok, file} <- file_index_get_by_path(volume_id, path) do
+      list_bytes = encode_xattr_names(Map.keys(file.xattrs))
+      reply_with_size_probe(list_bytes, size, "xattr_list")
+    else
+      {:error, :not_found} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, reason} ->
+        Logger.warning("Listxattr failed", reason: inspect(reason))
+        {"error", %{"errno" => errno(:eio)}}
+    end
+  end
+
+  defp handle_operation({"removexattr", params}, state) do
+    ino = params["ino"]
+    name = params["name"]
+
+    with :ok <- validate_xattr_namespace(name),
+         {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         {:ok, file} <- file_index_get_by_path(volume_id, path),
+         true <- Map.has_key?(file.xattrs, name) || {:error, :enodata},
+         {:ok, updated} <-
+           file_index_update(file.id, xattrs: Map.delete(file.xattrs, name)) do
+      refresh_attrs_cache(state.cache_table, volume_id, updated)
+      {"ok", %{}}
+    else
+      {:error, errno_atom} when is_atom(errno_atom) ->
+        {"error", %{"errno" => errno(errno_atom)}}
+
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, reason} ->
+        Logger.warning("Removexattr failed", reason: inspect(reason))
+        {"error", %{"errno" => errno(:eio)}}
+    end
+  end
+
   # Handle unknown operations
   defp handle_operation({operation, _params}, _state) do
     Logger.warning("Unknown FUSE operation", operation: operation)
     {"error", %{"errno" => errno(:enosys)}}
+  end
+
+  defp validate_xattr_namespace(<<"user.", _::binary>>), do: :ok
+  defp validate_xattr_namespace(_), do: {:error, :eperm}
+
+  defp check_xattr_flags(xattrs, name, flags) do
+    create? = Bitwise.band(flags, 0x1) != 0
+    replace? = Bitwise.band(flags, 0x2) != 0
+    present? = Map.has_key?(xattrs, name)
+
+    cond do
+      create? and present? -> {:error, :eexist}
+      replace? and not present? -> {:error, :enodata}
+      true -> :ok
+    end
+  end
+
+  defp fetch_xattr(xattrs, name) do
+    case Map.fetch(xattrs, name) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, :enodata}
+    end
+  end
+
+  # POSIX listxattr replies with a NUL-separated and NUL-terminated
+  # list of names, e.g. `"user.foo\0user.bar\0"`. An empty xattrs map
+  # yields the empty binary, which the kernel treats as "no
+  # attributes".
+  defp encode_xattr_names(names) do
+    names
+    |> Enum.sort()
+    |> Enum.map_join("", fn name -> name <> <<0>> end)
+  end
+
+  # Both GETXATTR and LISTXATTR follow the same size-probe convention:
+  # `size == 0` is the kernel asking how big a buffer to allocate;
+  # `size > 0` is the real fetch. Reply tags differ so Session can
+  # encode the right Response struct.
+  defp reply_with_size_probe(bytes, size, tag) do
+    actual = byte_size(bytes)
+
+    cond do
+      size == 0 ->
+        {tag <> "_size", %{"size" => actual}}
+
+      size < actual ->
+        {"error", %{"errno" => errno(:erange)}}
+
+      true ->
+        {tag <> "_data", %{"data" => bytes}}
+    end
+  end
+
+  defp refresh_attrs_cache(nil, _volume_id, _file), do: :ok
+
+  defp refresh_attrs_cache(cache_table, volume_id, file) do
+    MetadataCache.put_attrs(cache_table, volume_id, file.path, file)
+    :ok
   end
 
   # Cache-aware lookup: check cache first, fall through to RPC on miss
@@ -1104,12 +1270,15 @@ defmodule NeonFS.FUSE.Handler do
 
   # Convert error reason to errno code
   @dialyzer {:nowarn_function, errno: 1}
+  defp errno(:eperm), do: 1
   defp errno(:enoent), do: 2
   defp errno(:eio), do: 5
   defp errno(:eacces), do: 13
   defp errno(:eexist), do: 17
   defp errno(:exdev), do: 18
-  defp errno(:enotempty), do: 39
+  defp errno(:erange), do: 34
   defp errno(:enosys), do: 38
+  defp errno(:enotempty), do: 39
+  defp errno(:enodata), do: 61
   defp errno(_), do: 5
 end
