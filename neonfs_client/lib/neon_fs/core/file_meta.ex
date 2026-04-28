@@ -7,6 +7,16 @@ defmodule NeonFS.Core.FileMeta do
 
   For Phase 1, only replicated volumes are supported (chunks field).
   Stripe references for erasure coding come in Phase 4.
+
+  ## Detached state (POSIX unlink-while-open)
+
+  When `detached: true`, the file has been unlinked from its
+  directory entry but is still reachable by `id` because at least one
+  open handle (recorded in `pinned_claim_ids` as `:pinned` namespace
+  claim ids) is keeping it alive. Path-based callbacks return
+  `:not_found` for detached files; `id`-based callbacks continue to
+  work. When the last `pinned_claim_id` is released, the file is
+  fully GC'd. See sub-issue #638 of #306.
   """
 
   @type acl_entry :: %{
@@ -35,7 +45,9 @@ defmodule NeonFS.Core.FileMeta do
           changed_at: DateTime.t(),
           version: non_neg_integer(),
           previous_version_id: String.t() | nil,
-          hlc_timestamp: term()
+          hlc_timestamp: term(),
+          detached: boolean(),
+          pinned_claim_ids: [String.t()]
         }
 
   defstruct [
@@ -58,7 +70,9 @@ defmodule NeonFS.Core.FileMeta do
     :hlc_timestamp,
     acl_entries: [],
     default_acl: nil,
-    metadata: %{}
+    metadata: %{},
+    detached: false,
+    pinned_claim_ids: []
   ]
 
   @doc """
