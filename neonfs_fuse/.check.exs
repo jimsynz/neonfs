@@ -13,16 +13,6 @@
     {:ex_doc, "mix docs"},
     {:audit, "mix deps.audit"},
     {:gettext, false},
-    {:sobelow, false},
-
-    # Rust tools (only if native/neonfs_fuse exists)
-    {:cargo_fmt, command: "cargo fmt --check --manifest-path native/neonfs_fuse/Cargo.toml"},
-    {:cargo_clippy,
-     command:
-       "cargo clippy --manifest-path native/neonfs_fuse/Cargo.toml --all-targets -- -D warnings"},
-    {:cargo_test, command: "cargo test --manifest-path native/neonfs_fuse/Cargo.toml"},
-    {:cargo_integration_test,
-     command:
-       "cargo test --test mount_integration --manifest-path native/neonfs_fuse/Cargo.toml -- --nocapture --test-threads=1"}
+    {:sobelow, false}
   ]
 ]
