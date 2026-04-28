@@ -131,6 +131,100 @@ defmodule NeonFS.CoreTest do
     end
   end
 
+  # `_by_id` variants resolve through `FileIndex.get/1` instead of the
+  # path-based dir-entry walk, so they keep working when a path has
+  # been detached by another peer's `delete_file`. The unlink-while-
+  # open story (#638 / #644) needs this so FUSE / NFSv4 fd holders
+  # can drain their cached handle even after another peer unlinks the
+  # path.
+  describe "read_file_by_id/3" do
+    test "reads file content keyed by file_id", %{volume_name: vol_name} do
+      {:ok, %{id: id}} =
+        Core.write_file_streamed(vol_name, "/by-id.txt", ["abcdef"])
+
+      assert {:ok, "abcdef"} = Core.read_file_by_id(vol_name, id)
+    end
+
+    test "honours offset and length", %{volume_name: vol_name} do
+      {:ok, %{id: id}} =
+        Core.write_file_streamed(vol_name, "/by-id-range.txt", ["0123456789"])
+
+      assert {:ok, "345"} = Core.read_file_by_id(vol_name, id, offset: 3, length: 3)
+    end
+
+    test "still resolves a detached file", %{volume_name: vol_name} do
+      {:ok, %{id: id}} =
+        Core.write_file_streamed(vol_name, "/detached-read.txt", ["payload"])
+
+      :ok = mark_detached_directly(id)
+
+      # Path-based read goes 404, but file_id read still works — that's
+      # the unlink-while-open invariant.
+      assert {:error, _} = Core.read_file(vol_name, "/detached-read.txt")
+      assert {:ok, "payload"} = Core.read_file_by_id(vol_name, id)
+    end
+
+    test "returns :wrong_volume for a file_id from another volume",
+         %{volume_name: vol_name} do
+      other = "other-vol-#{:rand.uniform(999_999)}"
+      {:ok, _} = VolumeRegistry.create(other, [])
+      {:ok, %{id: id}} = Core.write_file_streamed(other, "/elsewhere.txt", ["x"])
+
+      assert {:error, :wrong_volume} = Core.read_file_by_id(vol_name, id)
+    end
+
+    test "returns error for an unknown file_id", %{volume_name: vol_name} do
+      assert {:error, _} = Core.read_file_by_id(vol_name, "nonexistent-id")
+    end
+
+    test "returns error for a nonexistent volume" do
+      assert {:error, :not_found} = Core.read_file_by_id("no-such-volume", "any-id")
+    end
+  end
+
+  describe "read_file_refs_by_id/3" do
+    test "returns file refs keyed by file_id", %{volume_name: vol_name} do
+      {:ok, %{id: id}} =
+        Core.write_file_streamed(vol_name, "/refs-by-id.txt", ["bytes"])
+
+      assert {:ok, %{file_size: 5, chunks: chunks}} =
+               Core.read_file_refs_by_id(vol_name, id)
+
+      assert is_list(chunks)
+    end
+  end
+
+  describe "write_file_at_by_id/5" do
+    test "writes bytes at offset against an existing file_id",
+         %{volume_name: vol_name} do
+      {:ok, %{id: id}} =
+        Core.write_file_streamed(vol_name, "/wb-id.txt", ["aaaaaaaa"])
+
+      assert {:ok, _} = Core.write_file_at_by_id(vol_name, id, 2, "BB")
+      assert {:ok, "aaBBaaaa"} = Core.read_file_by_id(vol_name, id)
+    end
+
+    test "rejects writes against a file_id from another volume",
+         %{volume_name: vol_name} do
+      other = "other-vol-write-#{:rand.uniform(999_999)}"
+      {:ok, _} = VolumeRegistry.create(other, [])
+      {:ok, %{id: id}} = Core.write_file_streamed(other, "/sister.txt", ["x"])
+
+      assert {:error, :wrong_volume} = Core.write_file_at_by_id(vol_name, id, 0, "y")
+    end
+
+    test "returns :not_found for an unknown file_id", %{volume_name: vol_name} do
+      assert {:error, :not_found} = Core.write_file_at_by_id(vol_name, "nonexistent-id", 0, "x")
+    end
+  end
+
+  defp mark_detached_directly(file_id) do
+    case FileIndex.mark_detached(file_id, ["sentinel-pin"]) do
+      {:ok, _} -> :ok
+      other -> flunk("mark_detached failed: #{inspect(other)}")
+    end
+  end
+
   describe "delete_file/2" do
     test "deletes a file", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/to-delete.txt", ["data"])

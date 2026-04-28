@@ -199,6 +199,62 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Reads a file's content by `file_id` rather than path.
+
+  Counterpart to `read_file/3` for callers holding a long-lived
+  handle (FUSE / NFSv4 fd) that may have been resolved before an
+  unlink. Works against `:detached` FileMetas — the unlink-while-open
+  story (#638 / #644) keeps chunks reachable by `file_id` until the
+  last `:pinned` claim releases.
+  """
+  @spec read_file_by_id(String.t(), binary(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def read_file_by_id(volume_name, file_id, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      ReadOperation.read_file_by_id(volume.id, file_id, opts)
+    end
+  end
+
+  @doc """
+  Lazy-stream counterpart to `read_file_by_id/3`. Same caveats as
+  `read_file_stream/3` apply (no distribution-safe serialisation).
+  """
+  @spec read_file_stream_by_id(String.t(), binary(), keyword()) ::
+          {:ok, %{stream: Enumerable.t(), file_size: non_neg_integer()}} | {:error, term()}
+  def read_file_stream_by_id(volume_name, file_id, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      ReadOperation.read_file_stream_by_id(volume.id, file_id, opts)
+    end
+  end
+
+  @doc """
+  Refs counterpart to `read_file_by_id/3` — `file_id`-keyed metadata-
+  only fetch for interface nodes that pull bulk data over the TLS
+  data plane.
+  """
+  @spec read_file_refs_by_id(String.t(), binary(), keyword()) ::
+          {:ok, %{file_size: non_neg_integer(), chunks: [map()]}} | {:error, term()}
+  def read_file_refs_by_id(volume_name, file_id, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      ReadOperation.read_file_refs_by_id(volume.id, file_id, opts)
+    end
+  end
+
+  @doc """
+  Counterpart to `write_file_at/5` keyed by `file_id`. Targets an
+  already-existing file resolved by id rather than path — used by
+  FUSE / NFSv4 fd holders writing through a cached handle to a file
+  that may have been detached by another peer (#638). Does not
+  support `:create_only`.
+  """
+  @spec write_file_at_by_id(String.t(), binary(), non_neg_integer(), binary(), keyword()) ::
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
+  def write_file_at_by_id(volume_name, file_id, offset, data, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      WriteOperation.write_file_at_by_id(volume.id, file_id, offset, data, opts)
+    end
+  end
+
+  @doc """
   Commits a file whose chunk bytes have already been written to their
   replicas — the write-side counterpart to `read_file_refs/3`.
 

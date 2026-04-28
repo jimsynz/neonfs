@@ -101,6 +101,50 @@ defmodule NeonFS.Core.ReadOperation do
   end
 
   @doc """
+  Counterpart to `read_file/3` that resolves the file by `file_id`
+  instead of `path`.
+
+  The unlink-while-open story (#638) keeps a deleted file's chunks
+  reachable by `file_id` for as long as some `:pinned` claim holds.
+  Callers that opened the file before the unlink (FUSE / NFSv4 fd
+  holders) cache the `file_id` and read through here so the
+  detached-but-pinned state is observable end-to-end.
+
+  Honours the same `:offset` / `:length` / `:uid` / `:gids` opts.
+  Returns `{:error, :wrong_volume}` when the resolved FileMeta lives
+  in a different volume than `volume_id` — defence-in-depth against a
+  caller passing a stale `file_id` into the wrong volume.
+  """
+  @spec read_file_by_id(binary(), binary(), keyword()) :: read_result()
+  def read_file_by_id(volume_id, file_id, opts \\ []) do
+    Logger.metadata(component: :read, volume_id: volume_id, file_id: file_id)
+
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, :all)
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    start_time = System.monotonic_time()
+
+    :telemetry.execute(
+      [:neonfs, :read_operation, :start],
+      %{offset: offset},
+      %{volume_id: volume_id, file_id: file_id, length: length, by_id: true}
+    )
+
+    result =
+      with {:ok, volume} <- get_volume(volume_id),
+           :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
+           {:ok, file_meta} <- get_file_by_id(volume_id, file_id) do
+        read_with_cache_lookup(file_meta, volume, offset, length)
+      end
+
+    duration = System.monotonic_time() - start_time
+    emit_read_telemetry(result, duration, volume_id, "<file_id:#{file_id}>")
+    result
+  end
+
+  @doc """
   Returns a lazy stream of chunk data for a file's byte range.
 
   Performs authorisation, volume lookup, and file metadata resolution eagerly
@@ -146,6 +190,38 @@ defmodule NeonFS.Core.ReadOperation do
         [:neonfs, :read_stream, :start],
         %{offset: offset, file_size: file_meta.size},
         %{volume_id: volume_id, path: path, length: length}
+      )
+
+      populate_resolved_cache(file_meta)
+      stream = build_stream(file_meta, volume, offset, length)
+
+      {:ok, %{stream: stream, file_size: file_meta.size}}
+    end
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `read_file_stream/3`. Same semantics
+  as `read_file_by_id/3` plus the streaming-pipeline note that applies
+  to `read_file_stream/3`: streams cannot be serialised across Erlang
+  distribution. See `read_file_by_id/3` for the unlink-while-open
+  motivation.
+  """
+  @spec read_file_stream_by_id(binary(), binary(), keyword()) :: stream_result()
+  def read_file_stream_by_id(volume_id, file_id, opts \\ []) do
+    Logger.metadata(component: :read_stream, volume_id: volume_id, file_id: file_id)
+
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, :all)
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, volume} <- get_volume(volume_id),
+         :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
+         {:ok, file_meta} <- get_file_by_id(volume_id, file_id) do
+      :telemetry.execute(
+        [:neonfs, :read_stream, :start],
+        %{offset: offset, file_size: file_meta.size},
+        %{volume_id: volume_id, file_id: file_id, length: length, by_id: true}
       )
 
       populate_resolved_cache(file_meta)
@@ -203,6 +279,26 @@ defmodule NeonFS.Core.ReadOperation do
     with {:ok, _volume} <- get_volume(volume_id),
          :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
          {:ok, file_meta} <- get_file(volume_id, path) do
+      build_refs_result(file_meta, offset, length)
+    end
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `read_file_refs/3`. See
+  `read_file_by_id/3` for the unlink-while-open motivation.
+  """
+  @spec read_file_refs_by_id(binary(), binary(), keyword()) :: refs_result()
+  def read_file_refs_by_id(volume_id, file_id, opts \\ []) do
+    Logger.metadata(component: :read_refs, volume_id: volume_id, file_id: file_id)
+
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, :all)
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, _volume} <- get_volume(volume_id),
+         :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
+         {:ok, file_meta} <- get_file_by_id(volume_id, file_id) do
       build_refs_result(file_meta, offset, length)
     end
   end
@@ -876,6 +972,25 @@ defmodule NeonFS.Core.ReadOperation do
 
       {:error, :not_found} ->
         {:error, FileNotFoundError.exception(file_path: path, volume_id: volume_id)}
+    end
+  end
+
+  # Counterpart to `get_file/2` keyed by `file_id`. Resolves through
+  # `FileIndex.get/1` which works for both live and `:detached` files
+  # — that's the whole point of the unlink-while-open story (#638).
+  # Verifies the resolved FileMeta belongs to the requested volume so
+  # a stale `file_id` from another volume can't slip through.
+  defp get_file_by_id(volume_id, file_id) do
+    case FileIndex.get(file_id) do
+      {:ok, %{volume_id: ^volume_id} = file_meta} ->
+        {:ok, file_meta}
+
+      {:ok, _other_volume_meta} ->
+        {:error, :wrong_volume}
+
+      {:error, :not_found} ->
+        {:error,
+         FileNotFoundError.exception(file_path: "<file_id:#{file_id}>", volume_id: volume_id)}
     end
   end
 

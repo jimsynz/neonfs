@@ -127,6 +127,57 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   @doc """
+  `file_id`-keyed counterpart to `write_file_at/5`.
+
+  Resolves the target file via `FileIndex.get/1` so writes succeed
+  even when the path is detached (`#638`). Used by FUSE / NFSv4 fd
+  holders that opened the file before an unlink and continue writing
+  through the cached `file_id`. Existing chunks are rewritten as with
+  `write_file_at/5`.
+
+  Does **not** support `:create_only` — by-id writes target an
+  already-existing file, so the create-if-not-exist path doesn't
+  apply. Returns `{:error, :wrong_volume}` if the resolved FileMeta
+  belongs to a different volume than `volume_id`.
+  """
+  @spec write_file_at_by_id(binary(), binary(), non_neg_integer(), binary(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def write_file_at_by_id(volume_id, file_id, offset, data, opts \\ []) do
+    Logger.metadata(component: :write, volume_id: volume_id, file_id: file_id)
+
+    write_id = generate_write_id()
+    start_time = System.monotonic_time()
+
+    :telemetry.execute(
+      [:neonfs, :write_operation, :start],
+      %{bytes: byte_size(data)},
+      %{volume_id: volume_id, file_id: file_id, write_id: write_id, offset: offset, by_id: true}
+    )
+
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+    client_ref = Keyword.get(opts, :client_ref)
+
+    result =
+      with {:ok, volume} <- get_volume(volume_id),
+           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
+           {:ok, file_meta} <- get_file_by_id(volume_id, file_id),
+           :ok <-
+             check_lock(volume_id, file_meta.path, client_ref, {offset, byte_size(data)}, opts) do
+        do_write_at(volume, file_meta, offset, data, write_id, opts)
+      end
+
+    case result do
+      {:ok, file_meta} -> evict_resolved_cache(file_meta.id)
+      _ -> :ok
+    end
+
+    duration = System.monotonic_time() - start_time
+    emit_completion_telemetry(result, duration, volume_id, "<file_id:#{file_id}>", write_id, data)
+    result
+  end
+
+  @doc """
   Streams file data to a volume, chunking and storing each chunk as it
   arrives instead of buffering the whole binary in memory.
 
@@ -426,6 +477,19 @@ defmodule NeonFS.Core.WriteOperation do
     case VolumeRegistry.get(volume_id) do
       {:ok, volume} -> {:ok, volume}
       {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
+    end
+  end
+
+  # Resolves a FileMeta by `file_id`, mirroring the volume-id check in
+  # `ReadOperation`. Returns `:not_found` for an unknown id and
+  # `:wrong_volume` when the resolved FileMeta belongs to a different
+  # volume than `volume_id` (defence-in-depth against a stale id from
+  # another volume).
+  defp get_file_by_id(volume_id, file_id) do
+    case FileIndex.get(file_id) do
+      {:ok, %{volume_id: ^volume_id} = file_meta} -> {:ok, file_meta}
+      {:ok, _other_volume_meta} -> {:error, :wrong_volume}
+      {:error, :not_found} -> {:error, :not_found}
     end
   end
 
