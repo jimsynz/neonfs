@@ -227,7 +227,14 @@ defmodule NeonFS.NFS.ExportManager do
   defp start_beam_stack(bind_address, state) do
     {ip, port} = parse_bind_address(bind_address)
 
-    programs = %{100_003 => %{3 => NFSApp.bound_nfsv3_handler()}}
+    # 100_003 = NFSv3, 100_005 = MOUNT3. Portmapper auto-registers
+    # inside `RPCServer.init/1`. The MOUNT backend is `MountBackend`
+    # (sub-issue #656 of #286); the NFSv3 handler is the
+    # backend-bound shim from `Application.bound_nfsv3_handler/0`.
+    programs = %{
+      100_003 => %{3 => NFSApp.bound_nfsv3_handler()},
+      100_005 => %{3 => NFSServer.Mount.Handler.with_backend(NeonFS.NFS.MountBackend)}
+    }
 
     case RPCServer.start_link(
            bind: ip_to_binary(ip),

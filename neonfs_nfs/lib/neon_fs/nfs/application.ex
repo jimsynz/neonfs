@@ -6,17 +6,19 @@ defmodule NeonFS.NFS.Application do
 
   ## Handler stack selection
 
-  `:handler_stack` (default `:nif`) selects which NFSv3 implementation
+  `:handler_stack` (default `:beam`) selects which NFSv3 implementation
   the application uses:
 
-    * `:nif` — the in-tree Rust `nfs3_server` NIF + `NeonFS.NFS.Handler`
-      shim. The current production stack.
     * `:beam` — the native-BEAM stack: `NFSServer.NFSv3.Handler` bound
-      to `NeonFS.NFS.NFSv3Backend` (sub-issue #532). Lands alongside
-      the NIF stack so the two coexist until the cutover in #286.
+      to `NeonFS.NFS.NFSv3Backend` plus `NFSServer.Mount.Handler` bound
+      to `NeonFS.NFS.MountBackend`. The default since the cutover
+      (#656 of #286).
+    * `:nif` — the legacy Rust `nfs3_server` NIF + `NeonFS.NFS.Handler`
+      shim. Transitional fallback; slated for deletion in #657.
 
-  Set via `config :neonfs_nfs, handler_stack: :beam` or the
-  `NEONFS_NFS_HANDLER_STACK` environment variable in releases.
+  Set via `config :neonfs_nfs, handler_stack: :nif` or the
+  `NEONFS_NFS_HANDLER_STACK` environment variable in releases to opt
+  into the legacy stack.
   """
 
   use Application
@@ -26,13 +28,13 @@ defmodule NeonFS.NFS.Application do
   alias NFSServer.NFSv3.Handler, as: NFSv3Handler
 
   @doc """
-  Returns the active handler stack — `:nif` (default) or `:beam`.
+  Returns the active handler stack — `:beam` (default) or `:nif`.
   """
   @spec handler_stack() :: :nif | :beam
   def handler_stack do
-    case Application.get_env(:neonfs_nfs, :handler_stack, :nif) do
-      :beam -> :beam
-      _ -> :nif
+    case Application.get_env(:neonfs_nfs, :handler_stack, :beam) do
+      :nif -> :nif
+      _ -> :beam
     end
   end
 
