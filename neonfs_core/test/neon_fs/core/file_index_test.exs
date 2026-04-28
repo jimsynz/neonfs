@@ -362,6 +362,73 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
+  describe "decrement_pin/2" do
+    test "rewrites pinned_claim_ids when claims remain" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/multi-pin.txt"))
+      {:ok, _} = FileIndex.mark_detached(created.id, ["c1", "c2", "c3"])
+
+      assert :ok = FileIndex.decrement_pin(created.id, "c2")
+
+      assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ids}} =
+               FileIndex.get(created.id)
+
+      assert Enum.sort(ids) == ["c1", "c3"]
+    end
+
+    test "purges the file when the last pin releases" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/last-pin.txt"))
+      {:ok, _} = FileIndex.mark_detached(created.id, ["only-pin"])
+
+      assert :ok = FileIndex.decrement_pin(created.id, "only-pin")
+      assert {:error, :not_found} = FileIndex.get(created.id)
+    end
+
+    test "is a no-op for an unknown claim id (already-released)" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/stale.txt"))
+      {:ok, _} = FileIndex.mark_detached(created.id, ["c1", "c2"])
+
+      assert :ok = FileIndex.decrement_pin(created.id, "never-existed")
+
+      assert {:ok, %FileMeta{pinned_claim_ids: ids}} = FileIndex.get(created.id)
+      assert Enum.sort(ids) == ["c1", "c2"]
+    end
+
+    test "is a no-op when the file is not detached" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/live.txt"))
+
+      assert :ok = FileIndex.decrement_pin(created.id, "irrelevant")
+
+      assert {:ok, %FileMeta{detached: false}} = FileIndex.get(created.id)
+    end
+
+    test "is a no-op for a non-existent file_id" do
+      assert :ok = FileIndex.decrement_pin("nonexistent-id", "c1")
+    end
+  end
+
+  describe "purge_detached/1" do
+    test "deletes a detached FileMeta from quorum" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/purge-me.txt"))
+      {:ok, _} = FileIndex.mark_detached(created.id, ["c1"])
+
+      assert :ok = FileIndex.purge_detached(created.id)
+      assert {:error, :not_found} = FileIndex.get(created.id)
+    end
+
+    test "refuses to purge a non-detached file" do
+      {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/still-live.txt"))
+
+      assert {:error, :not_detached} = FileIndex.purge_detached(created.id)
+
+      # Live file still reachable.
+      assert {:ok, %FileMeta{detached: false}} = FileIndex.get(created.id)
+    end
+
+    test "is idempotent for an already-purged or non-existent file" do
+      assert :ok = FileIndex.purge_detached("nonexistent-id")
+    end
+  end
+
   describe "list_dir/2" do
     test "returns children of a directory" do
       {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/file1.txt"))

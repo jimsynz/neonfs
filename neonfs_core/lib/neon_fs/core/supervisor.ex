@@ -262,6 +262,13 @@ defmodule NeonFS.Core.Supervisor do
           # available.
           NeonFS.Core.NamespaceCoordinator,
 
+          # DetachedFileGC reclaims POSIX unlink-while-open tombstones
+          # when their last `:pinned` claim releases (#644 of #638).
+          # Subscribes to namespace-claim release telemetry; depends
+          # on FileIndex (for decrement_pin / purge_detached) and
+          # NamespaceCoordinator (which is what emits the telemetry).
+          NeonFS.Core.DetachedFileGC,
+
           # TieringManager evaluates chunks for promotion/demotion
           NeonFS.Core.TieringManager,
 

@@ -193,6 +193,35 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  Removes a single `claim_id` from a detached file's `pinned_claim_ids`
+  list. When the resulting list is empty the file is purged via
+  `purge_detached/1` so chunk GC can reclaim its blobs.
+
+  Idempotent in two directions: passing a `claim_id` not in the list
+  is a no-op, and passing a `file_id` for a non-detached or
+  already-purged file returns `:ok`. The unlink-while-open GC handler
+  (#644 of #638) calls this once per pin-release telemetry event;
+  duplicate or stale notifications must not error.
+  """
+  @spec decrement_pin(file_id(), String.t()) :: :ok | {:error, term()}
+  def decrement_pin(file_id, claim_id) when is_binary(file_id) and is_binary(claim_id) do
+    GenServer.call(__MODULE__, {:decrement_pin, file_id, claim_id}, 15_000)
+  end
+
+  @doc """
+  Final purge of a detached FileMeta. Quorum-deletes the record so
+  the orphaned-chunk GC can reclaim its blobs on the next sweep.
+  Refuses (`{:error, :not_detached}`) if the file is *not* in the
+  detached state — the caller is expected to mark it detached first
+  via `mark_detached/2`. Idempotent for files that are already gone
+  (returns `:ok`).
+  """
+  @spec purge_detached(file_id()) :: :ok | {:error, term()}
+  def purge_detached(file_id) when is_binary(file_id) do
+    GenServer.call(__MODULE__, {:purge_detached, file_id}, 15_000)
+  end
+
+  @doc """
   Lists directory contents.
 
   Quorum reads the DirectoryEntry for the given path and returns
@@ -417,6 +446,18 @@ defmodule NeonFS.Core.FileIndex do
   @impl true
   def handle_call({:mark_detached, file_id, pinned_claim_ids}, _from, state) do
     reply = do_mark_detached(file_id, pinned_claim_ids, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:decrement_pin, file_id, claim_id}, _from, state) do
+    reply = do_decrement_pin(file_id, claim_id, quorum_opts())
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:purge_detached, file_id}, _from, state) do
+    reply = do_purge_detached(file_id, quorum_opts())
     {:reply, reply, state}
   end
 
@@ -729,6 +770,79 @@ defmodule NeonFS.Core.FileIndex do
       })
 
       {:ok, detached_file}
+    end
+  end
+
+  ## Private — Decrement pin (POSIX unlink-while-open, #644 of #638)
+
+  defp do_decrement_pin(_file_id, _claim_id, nil), do: {:error, :no_quorum}
+
+  defp do_decrement_pin(file_id, claim_id, quorum_opts) do
+    case fetch_file(file_id, quorum_opts) do
+      {:ok, %FileMeta{detached: true, pinned_claim_ids: ids} = file} ->
+        decrement_pinned_claim_ids(file, claim_id, ids, quorum_opts)
+
+      {:ok, _file} ->
+        # Not detached — treat as no-op so duplicate / stale telemetry
+        # events don't surface as errors to the GC handler.
+        :ok
+
+      {:error, :not_found} ->
+        :ok
+    end
+  end
+
+  defp decrement_pinned_claim_ids(file, claim_id, ids, quorum_opts) do
+    case List.delete(ids, claim_id) do
+      ^ids ->
+        :ok
+
+      [] ->
+        purge_detached_record(file, quorum_opts)
+
+      remaining ->
+        rewrite_pinned_claim_ids(file, remaining, quorum_opts)
+    end
+  end
+
+  defp rewrite_pinned_claim_ids(file, remaining, quorum_opts) do
+    updated = FileMeta.update(file, pinned_claim_ids: remaining)
+
+    case quorum_write_file(updated, quorum_opts) do
+      :ok ->
+        :ets.insert(:file_index_by_id, {file.id, updated})
+        :ok
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  ## Private — Purge detached (POSIX unlink-while-open, #644 of #638)
+
+  defp do_purge_detached(_file_id, nil), do: {:error, :no_quorum}
+
+  defp do_purge_detached(file_id, quorum_opts) do
+    case fetch_file(file_id, quorum_opts) do
+      {:ok, %FileMeta{detached: true} = file} ->
+        purge_detached_record(file, quorum_opts)
+
+      {:ok, _file} ->
+        {:error, :not_detached}
+
+      {:error, :not_found} ->
+        :ok
+    end
+  end
+
+  defp purge_detached_record(file, quorum_opts) do
+    case quorum_delete_file(file.id, quorum_opts) do
+      :ok ->
+        delete_file_from_ets(file.id, file)
+        :ok
+
+      {:error, _} = err ->
+        err
     end
   end
 
