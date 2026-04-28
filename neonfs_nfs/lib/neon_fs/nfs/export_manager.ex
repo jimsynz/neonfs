@@ -3,44 +3,43 @@ defmodule NeonFS.NFS.ExportManager do
   Manages NFS server lifecycle and volume exports.
 
   Coordinates:
-  - Starting/stopping the NFS TCP listener (via Rust NIF)
-  - Starting the Handler GenServer under ExportSupervisor
+  - Starting/stopping the native-BEAM NFS TCP listener
   - Tracking which volumes are exported (available via NFS)
   - Auto-exporting configured volumes on startup
 
   ## Server Lifecycle
 
   1. ExportManager starts, reads bind address from config
-  2. Starts Handler GenServer under ExportSupervisor
-  3. Calls `Native.start_nfs_server/2` with handler PID
-  4. Auto-exports configured volumes
-  5. On shutdown, stops NFS server and handler
+  2. Starts an `NFSServer.RPC.Server` listener bound to the BEAM
+     NFSv3 + Mount handler programs.
+  3. Auto-exports configured volumes
+  4. On shutdown, stops the listener
 
   ## Export Model
 
   NFS uses a virtual root that lists all exported volumes as top-level
-  directories. Exporting a volume registers it in the handler's volume
-  mapping so clients can access it. Unexporting removes the mapping.
+  directories. Exporting a volume registers it in
+  `NeonFS.NFS.MountBackend`'s view (via `list_exports/0`) so clients
+  can access it. Unexporting removes the mapping.
   """
 
   use GenServer
   require Logger
 
   alias NeonFS.NFS.Application, as: NFSApp
-  alias NeonFS.NFS.{ExportInfo, ExportSupervisor, Handler, MetadataCache, Native}
+  alias NeonFS.NFS.{ExportInfo, MetadataCache}
+  alias NFSServer.Mount.Handler, as: MountHandler
   alias NFSServer.RPC.Server, as: RPCServer
 
   defmodule State do
     @moduledoc false
     defstruct [
       :nfs_server,
-      :handler_pid,
       exports: %{}
     ]
 
     @type t :: %__MODULE__{
-            nfs_server: reference() | pid() | nil,
-            handler_pid: pid() | nil,
+            nfs_server: pid() | nil,
             exports: %{String.t() => ExportInfo.t()}
           }
   end
@@ -76,14 +75,6 @@ defmodule NeonFS.NFS.ExportManager do
   @spec list_exports() :: [ExportInfo.t()]
   def list_exports do
     GenServer.call(__MODULE__, :list_exports)
-  end
-
-  @doc """
-  Get the handler PID (for testing/debugging).
-  """
-  @spec handler_pid() :: pid() | nil
-  def handler_pid do
-    GenServer.call(__MODULE__, :handler_pid)
   end
 
   ## GenServer Callbacks
@@ -162,92 +153,38 @@ defmodule NeonFS.NFS.ExportManager do
   end
 
   @impl true
-  def handle_call(:handler_pid, _from, state) do
-    {:reply, state.handler_pid, state}
-  end
-
-  @impl true
-  def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
-    if pid == state.handler_pid do
-      Logger.warning("NFS handler crashed, restarting", reason: inspect(reason))
-
-      case restart_handler(state) do
-        {:ok, new_state} ->
-          {:noreply, new_state}
-
-        {:error, _reason} ->
-          {:noreply, %{state | handler_pid: nil}}
-      end
-    else
-      {:noreply, state}
-    end
-  end
+  def handle_info(_msg, state), do: {:noreply, state}
 
   ## Private Helpers
 
+  # Start the native-BEAM NFSv3 + Mount listener (`NFSServer.RPC.Server`).
+  # Each TCP connection gets its own accept-loop process; the handler
+  # modules dispatch statelessly from there. No per-connection
+  # GenServer to monitor.
   defp start_nfs_server(state) do
-    bind_address = nfs_bind_address()
-    generation_number = derive_generation_number()
-
-    case NFSApp.handler_stack() do
-      :nif -> start_nif_stack(bind_address, generation_number, state)
-      :beam -> start_beam_stack(bind_address, state)
-    end
-  end
-
-  # The legacy `nfs3_server` NIF stack: a `Handler` GenServer feeds
-  # the Rust listener via `Native.set_nfs_server/2`. Bridges remote
-  # connections to Elixir over the NIF message boundary. Slated for
-  # deletion in #657.
-  defp start_nif_stack(bind_address, generation_number, state) do
-    with {:ok, handler_pid} <- ExportSupervisor.start_handler([]),
-         _ <- Process.monitor(handler_pid),
-         {:ok, nfs_server} <- start_native_server(bind_address, handler_pid, generation_number),
-         :ok <- Handler.set_nfs_server(handler_pid, nfs_server) do
-      Logger.info("NFS server started", bind_address: bind_address, stack: :nif)
-
-      {:ok, %{state | nfs_server: nfs_server, handler_pid: handler_pid}}
-    else
-      {:error, reason} ->
-        Logger.error("Failed to start NFS server", reason: inspect(reason))
-        {:error, reason}
-    end
-  end
-
-  # The native-BEAM stack (sub-issue #655 of #286): start an
-  # `NFSServer.RPC.Server` listener bound to the BEAM-side NFSv3
-  # handler that delegates to `NFSv3Backend`. No `Handler` GenServer
-  # under `ExportSupervisor` — the listener spawns one accept-loop
-  # process per connection, and the NFSv3 handler module dispatches
-  # statelessly from there. The `handler_pid` slot stays `nil` so the
-  # `:DOWN` rewatch in `handle_info/2` simply no-ops on the BEAM
-  # path; an analogous monitor on the listener pid would be a better
-  # primitive but requires test coverage that #655 keeps out of
-  # scope.
-  defp start_beam_stack(bind_address, state) do
-    {ip, port} = parse_bind_address(bind_address)
+    {ip, port} = parse_bind_address(nfs_bind_address())
 
     # 100_003 = NFSv3, 100_005 = MOUNT3. Portmapper auto-registers
-    # inside `RPCServer.init/1`. The MOUNT backend is `MountBackend`
-    # (sub-issue #656 of #286); the NFSv3 handler is the
-    # backend-bound shim from `Application.bound_nfsv3_handler/0`.
+    # inside `RPCServer.init/1`. The MOUNT backend is
+    # `NeonFS.NFS.MountBackend`; the NFSv3 handler is the
+    # backend-bound shim from `NFSApp.bound_nfsv3_handler/0`.
     programs = %{
       100_003 => %{3 => NFSApp.bound_nfsv3_handler()},
-      100_005 => %{3 => NFSServer.Mount.Handler.with_backend(NeonFS.NFS.MountBackend)}
+      100_005 => %{3 => MountHandler.with_backend(NeonFS.NFS.MountBackend)}
     }
 
     case RPCServer.start_link(
-           bind: ip_to_binary(ip),
+           bind: ip,
            port: port,
            programs: programs,
            name: NeonFS.NFS.RPCServer
          ) do
       {:ok, pid} ->
-        Logger.info("NFS server started", bind_address: bind_address, stack: :beam)
-        {:ok, %{state | nfs_server: pid, handler_pid: nil}}
+        Logger.info("NFS server started", bind_address: nfs_bind_address())
+        {:ok, %{state | nfs_server: pid}}
 
       {:error, reason} ->
-        Logger.error("Failed to start BEAM NFS server", reason: inspect(reason))
+        Logger.error("Failed to start NFS server", reason: inspect(reason))
         {:error, {:nfs_bind_failed, reason}}
     end
   end
@@ -255,38 +192,6 @@ defmodule NeonFS.NFS.ExportManager do
   defp parse_bind_address(bind_address) do
     [host, port_str] = String.split(bind_address, ":", parts: 2)
     {host, String.to_integer(port_str)}
-  end
-
-  defp ip_to_binary(host), do: host
-
-  defp start_native_server(bind_address, handler_pid, generation_number) do
-    case Native.start_nfs_server(bind_address, handler_pid, generation_number) do
-      {:ok, server} -> {:ok, server}
-      {:error, reason} -> {:error, {:nfs_bind_failed, reason}}
-    end
-  rescue
-    e in ArgumentError ->
-      {:error, {:nfs_nif_error, Exception.message(e)}}
-  catch
-    :error, :nif_not_loaded ->
-      {:error, :nif_not_loaded}
-  end
-
-  defp restart_handler(state) do
-    case ExportSupervisor.start_handler([]) do
-      {:ok, handler_pid} ->
-        Process.monitor(handler_pid)
-
-        if state.nfs_server do
-          Handler.set_nfs_server(handler_pid, state.nfs_server)
-        end
-
-        {:ok, %{state | handler_pid: handler_pid}}
-
-      {:error, reason} ->
-        Logger.error("Failed to restart NFS handler", reason: inspect(reason))
-        {:error, reason}
-    end
   end
 
   defp auto_export_volumes(_state) do
@@ -321,12 +226,6 @@ defmodule NeonFS.NFS.ExportManager do
     _ -> :ok
   catch
     :exit, _ -> :ok
-  end
-
-  defp derive_generation_number do
-    cookie = :erlang.get_cookie()
-    <<generation_number::unsigned-64, _::binary>> = :crypto.hash(:sha256, Atom.to_string(cookie))
-    generation_number
   end
 
   defp nfs_bind_address do

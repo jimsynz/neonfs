@@ -6,7 +6,6 @@ defmodule NeonFS.NFS.Supervisor do
   - Client connectivity (Connection, Discovery, CostFunction)
   - Event notification infrastructure (:pg, Registry, Relay)
   - InodeTable: Manages inode-to-path mappings
-  - ExportSupervisor: DynamicSupervisor for handler processes
   - ExportManager: Coordinates NFS server and volume export lifecycle
   - NLM.Server: Network Lock Manager (program 100021) for advisory locking
   """
@@ -26,13 +25,11 @@ defmodule NeonFS.NFS.Supervisor do
        metadata: registration_metadata(), type: :nfs, name: NeonFS.Client.Registrar.NFS},
       # Write throttle limits concurrent write pressure across all handlers
       NeonFS.NFS.WriteThrottle,
-      # Inode table must start before handlers
+      # Inode table must start before the listener
       NeonFS.NFS.InodeTable,
       # Metadata cache for reducing RPC round-trips
       NeonFS.NFS.MetadataCache,
-      # DynamicSupervisor for handler processes
-      NeonFS.NFS.ExportSupervisor,
-      # ExportManager starts NFS server and manages volume exports
+      # ExportManager starts the NFS listener and manages volume exports
       NeonFS.NFS.ExportManager,
       # NLM (Network Lock Manager) server for NFSv3 advisory locking
       NeonFS.NFS.NLM.Server

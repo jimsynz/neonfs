@@ -123,7 +123,7 @@ Stored per-resource in a sidecar ETS-backed store per interface node (`NeonFS.We
 
 ## NFSv3 + NLM v4
 
-Package: [`neonfs_nfs`](../neonfs_nfs/). Native-BEAM NFSv3 stack landing under the #113 epic; the current path uses a Rust NIF (`nfs3_server`) until the cutover lands.
+Package: [`neonfs_nfs`](../neonfs_nfs/). Native-BEAM NFSv3 stack — pure Elixir, no out-of-tree Rust. The cutover from the legacy `nfs3_server` NIF landed under the #113 epic.
 
 ### Protocol
 
