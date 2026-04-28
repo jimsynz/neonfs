@@ -82,6 +82,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:claim_namespace_rename, src :: String.t(), dst :: String.t(), holder :: term()}
           | {:claim_namespace_create, path :: String.t(), holder :: term()}
           | {:claim_namespace_pinned, path :: String.t(), holder :: term()}
+          | {:claim_namespace_byte_range, path :: String.t(), range :: byte_range(),
+             scope :: namespace_scope(), holder :: term()}
           | {:release_namespace_claim, claim_id :: String.t()}
           | {:release_namespace_claims_for_holder, holder :: term()}
 
@@ -97,6 +99,14 @@ defmodule NeonFS.Core.MetadataStateMachine do
   still conflict with `:exclusive` claims.
   """
   @type namespace_scope :: :exclusive | :shared
+
+  @typedoc """
+  POSIX byte-range bounds for `:byte_range` claims (#673).
+  `{offset, length}` — `length == 0` is the POSIX convention for
+  "to end of file". Two ranges overlap when `start_a < end_b` and
+  `start_b < end_a` (with the to-EOF sentinel treated as +∞).
+  """
+  @type byte_range :: {non_neg_integer(), non_neg_integer()}
 
   @typedoc """
   A namespace claim. Four claim types are supported:
@@ -116,16 +126,24 @@ defmodule NeonFS.Core.MetadataStateMachine do
       `:shared` does. Holder lifetime ties pin lifetime: when the
       holder pid dies the coordinator's `:DOWN` handler releases the
       pin via the standard bulk-release path.
+    * `:byte_range` — POSIX byte-range advisory lock (#673). Carries
+      a `range: {offset, length}` field (length 0 = to-EOF). Two
+      `:byte_range` claims on the same path conflict only when their
+      ranges overlap and at least one is `:exclusive`. `:byte_range`
+      claims do not interact with the other claim types — they live
+      in a separate logical namespace until a real consumer needs
+      cross-type semantics.
 
   Holders are opaque terms (typically a pid in production; arbitrary
   test fixtures otherwise) — the state machine treats them as black
   boxes.
   """
   @type namespace_claim :: %{
-          path: String.t(),
-          scope: namespace_scope(),
-          type: :path | :subtree | :create | :pinned,
-          holder: term()
+          required(:path) => String.t(),
+          required(:scope) => namespace_scope(),
+          required(:type) => :path | :subtree | :create | :pinned | :byte_range,
+          required(:holder) => term(),
+          optional(:range) => byte_range()
         }
 
   @type state :: %{
@@ -289,10 +307,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   file pinned by any open handle anywhere in the cluster?". Sorted by
   claim id so iteration order is stable across calls.
   """
-  @spec list_namespace_claims_at(state(), String.t(), :path | :subtree | :create | :pinned) ::
-          [{String.t(), namespace_claim()}]
+  @spec list_namespace_claims_at(
+          state(),
+          String.t(),
+          :path | :subtree | :create | :pinned | :byte_range
+        ) :: [{String.t(), namespace_claim()}]
   def list_namespace_claims_at(state, path, type)
-      when is_binary(path) and type in [:path, :subtree, :create, :pinned] do
+      when is_binary(path) and type in [:path, :subtree, :create, :pinned, :byte_range] do
     state
     |> Map.get(:namespace_claims, %{})
     |> Enum.filter(fn {_id, %{path: p, type: t}} -> p == path and t == type end)
@@ -1241,6 +1262,35 @@ defmodule NeonFS.Core.MetadataStateMachine do
     apply_namespace_claim(:pinned, path, :shared, holder, state)
   end
 
+  # Foundation primitive for POSIX byte-range advisory locks (#673).
+  # Allocates a `:byte_range` claim with the supplied `range` (offset
+  # and length, where length 0 means "to end of file" per POSIX).
+  # Conflict detection is range-aware: two byte-range claims on the
+  # same path collide only when their ranges overlap and at least one
+  # is `:exclusive`. Byte-range claims live in a separate logical
+  # namespace from `:path`/`:subtree`/`:create`/`:pinned` — no
+  # cross-type conflicts (revisit if a real consumer needs them).
+  def apply(_meta, {:claim_namespace_byte_range, path, range, scope, holder}, state)
+      when is_binary(path) and scope in [:exclusive, :shared] do
+    state = ensure_namespace(state)
+
+    case detect_byte_range_conflict(path, range, scope, state.namespace_claims) do
+      :ok ->
+        {new_state, claim_id} = allocate_byte_range_claim(state, path, range, scope, holder)
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :claim_namespace_byte_range],
+          %{version: new_state.version},
+          %{path: path, scope: scope}
+        )
+
+        {new_state, {:ok, claim_id}, []}
+
+      {:error, conflict_id} ->
+        {state, {:error, :conflict, conflict_id}, []}
+    end
+  end
+
   def apply(_meta, {:release_namespace_claim, claim_id}, state) when is_binary(claim_id) do
     state = ensure_namespace(state)
     {released, claims} = Map.pop(state.namespace_claims, claim_id)
@@ -1680,6 +1730,66 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, claim_id}
   end
 
+  defp allocate_byte_range_claim(state, path, range, scope, holder) do
+    seq = state.namespace_claim_seq + 1
+    claim_id = "ns-claim-" <> Integer.to_string(seq)
+
+    claim = %{
+      path: path,
+      scope: scope,
+      type: :byte_range,
+      holder: holder,
+      range: range
+    }
+
+    new_state = %{
+      state
+      | namespace_claims: Map.put(state.namespace_claims, claim_id, claim),
+        namespace_claim_seq: seq,
+        version: state.version + 1
+    }
+
+    {new_state, claim_id}
+  end
+
+  # Byte-range conflict detection. Only collides with other
+  # `:byte_range` claims — by design, byte-range claims live in a
+  # separate logical namespace from `:path` / `:subtree` / etc.
+  # (#673's "out of scope" call). A new claim conflicts with any
+  # existing `:byte_range` claim on the same path whose range
+  # overlaps and whose scope combination is incompatible.
+  defp detect_byte_range_conflict(new_path, new_range, new_scope, claims) do
+    Enum.find_value(claims, :ok, fn
+      {claim_id,
+       %{type: :byte_range, path: ^new_path, scope: existing_scope, range: existing_range}} ->
+        if scopes_conflict?(new_scope, existing_scope) and
+             ranges_overlap?(new_range, existing_range) do
+          {:error, claim_id}
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  # `range_a` and `range_b` are `{offset, length}` pairs. POSIX
+  # convention: `length == 0` means "to EOF" — represented here by
+  # treating the end as `:infinity`. Two ranges overlap when each
+  # one's start is strictly before the other's end. Adjacent but
+  # non-overlapping ranges (`a..b`, `b..c`) do not conflict.
+  defp ranges_overlap?({start_a, len_a}, {start_b, len_b}) do
+    end_a = range_end(start_a, len_a)
+    end_b = range_end(start_b, len_b)
+    range_lt?(start_a, end_b) and range_lt?(start_b, end_a)
+  end
+
+  defp range_end(_start, 0), do: :infinity
+  defp range_end(start, len), do: start + len
+
+  defp range_lt?(_a, :infinity), do: true
+  defp range_lt?(:infinity, _b), do: false
+  defp range_lt?(a, b), do: a < b
+
   # `dst` is in `src`'s subtree when it equals `src` or sits under it
   # separated by `/`. Renaming a directory into its own subtree is the
   # classic POSIX `EINVAL` case (`mv /a /a/b`) — there's no place to
@@ -1751,6 +1861,16 @@ defmodule NeonFS.Core.MetadataStateMachine do
     overlaps?(new_type, new_path, existing_type, existing_path) and
       scopes_conflict?(new_scope, existing_scope)
   end
+
+  # `:byte_range` claims live in their own logical namespace — see
+  # `detect_byte_range_conflict/4` for the byte-range-vs-byte-range
+  # matrix. This catch-all keeps the path / subtree / create / pinned
+  # conflict detectors from crashing when they iterate a claims map
+  # containing byte-range claims. The reverse direction (byte_range
+  # as the *new* claim) is filtered upstream — `apply_namespace_claim`
+  # is never called with `:byte_range` because byte-range claims have
+  # their own apply path.
+  defp overlaps?(_, _, :byte_range, _), do: false
 
   defp overlaps?(:path, a, :path, b), do: a == b
   defp overlaps?(:path, p, :subtree, root), do: in_subtree?(p, root)
