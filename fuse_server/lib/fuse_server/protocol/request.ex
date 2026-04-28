@@ -407,6 +407,24 @@ defmodule FuseServer.Protocol.Request do
           }
   end
 
+  defmodule Interrupt do
+    @moduledoc """
+    FUSE_INTERRUPT — `fuse_interrupt_in` (8 bytes). Carries the
+    `unique` of a previously-issued in-flight request that the
+    kernel wants to cancel (e.g. because userspace received a
+    signal during a blocking SETLKW).
+
+    INTERRUPT itself has no reply on the wire — the original
+    request is what the kernel waits for, typically with `EINTR`.
+    Handlers that don't recognise the target unique should silently
+    drop the message (the original may have already replied or
+    might never have been blockable).
+    """
+    defstruct [:unique]
+
+    @type t :: %__MODULE__{unique: non_neg_integer()}
+  end
+
   @type t ::
           Init.t()
           | Destroy.t()
@@ -436,6 +454,7 @@ defmodule FuseServer.Protocol.Request do
           | RemoveXattr.t()
           | GetLk.t()
           | SetLk.t()
+          | Interrupt.t()
 
   @doc """
   Decode a body for the given opcode. Returns the populated struct or
@@ -663,6 +682,8 @@ defmodule FuseServer.Protocol.Request do
   def decode(:getlk, body), do: decode_lk(body, GetLk)
   def decode(:setlk, body), do: decode_lk(body, SetLk)
   def decode(:setlkw, body), do: decode_lk(body, SetLk)
+
+  def decode(:interrupt, <<unique::little-64>>), do: {:ok, %Interrupt{unique: unique}}
 
   def decode(_, _), do: {:error, :malformed_body}
 

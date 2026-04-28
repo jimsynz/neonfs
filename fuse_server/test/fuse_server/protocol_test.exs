@@ -47,11 +47,10 @@ defmodule FuseServer.ProtocolTest do
 
   describe "decode_request/1 dispatch" do
     test "returns :unknown_opcode for opcodes outside the codec's scope" do
-      # Opcode 36 (FUSE_INTERRUPT) is not currently supported —
-      # tracked under #675.
-      header = build_header(opcode: 36, len: 40 + 8)
+      # Opcode 39 (FUSE_IOCTL) is not currently supported.
+      header = build_header(opcode: 39, len: 40 + 8)
       body = <<0::little-64>>
-      assert {:error, {:unknown_opcode, 36}} = Protocol.decode_request(header <> body)
+      assert {:error, {:unknown_opcode, 39}} = Protocol.decode_request(header <> body)
     end
 
     test "returns {:ok, opcode, header, request} on a valid INIT frame" do
@@ -462,6 +461,22 @@ defmodule FuseServer.ProtocolTest do
     test "lock decoder rejects bodies that aren't 48 bytes" do
       assert {:error, :malformed_body} = Request.decode(:setlk, <<>>)
       assert {:error, :malformed_body} = Request.decode(:setlk, <<0::little-64>>)
+    end
+
+    test "interrupt opcode number matches Linux fuse.h v7.31" do
+      assert FuseServer.Protocol.atom_to_opcode(:interrupt) == 36
+    end
+
+    test "interrupt decodes the 8-byte target unique" do
+      body = <<0xCAFE_F00D_DEAD_BEEF::little-64>>
+
+      assert {:ok, %Request.Interrupt{unique: 0xCAFE_F00D_DEAD_BEEF}} =
+               Request.decode(:interrupt, body)
+    end
+
+    test "interrupt rejects malformed bodies" do
+      assert {:error, :malformed_body} = Request.decode(:interrupt, <<>>)
+      assert {:error, :malformed_body} = Request.decode(:interrupt, <<0::little-32>>)
     end
   end
 

@@ -42,10 +42,10 @@ defmodule FuseServer.Protocol do
   Extended opcodes for xattrs (SETXATTR / GETXATTR / LISTXATTR /
   REMOVEXATTR) are supported as of #671. The lock opcodes
   (GETLK / SETLK / SETLKW) are decoded as of #672 — handlers route
-  them by `lk_flags & FUSE_LK_FLOCK` to either the FLOCK whole-file
-  logic (this slice, non-blocking only) or the byte-range path
-  (deferred to #674). The remaining extended opcodes (INTERRUPT,
-  IOCTL, POLL) are tracked in #675 / out of scope.
+  them by `lk_flags & FUSE_LK_FLOCK` to either FLOCK whole-file
+  logic (#672, #677) or byte-range fcntl (#674, #681). INTERRUPT
+  (cancellation of a queued SETLKW) is supported as of #675. The
+  remaining extended opcodes (IOCTL, POLL) are out of scope.
   """
 
   alias FuseServer.Protocol.{InHeader, Request, Response}
@@ -73,6 +73,7 @@ defmodule FuseServer.Protocol do
           | :getlk
           | :setlk
           | :setlkw
+          | :interrupt
           | :flush
           | :init
           | :opendir
@@ -126,6 +127,7 @@ defmodule FuseServer.Protocol do
     32 => :setlk,
     33 => :setlkw,
     35 => :create,
+    36 => :interrupt,
     38 => :destroy,
     42 => :batch_forget,
     43 => :fallocate,

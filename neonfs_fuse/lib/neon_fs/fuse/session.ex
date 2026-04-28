@@ -667,6 +667,27 @@ defmodule NeonFS.FUSE.Session do
     end
   end
 
+  # FUSE INTERRUPT (#675). The kernel sent us a unique it wants
+  # cancelled — most commonly a queued SETLKW that userspace gave
+  # up on. Look the unique up in our `pending` map; if found, ask
+  # the Handler to cancel via `cast`. INTERRUPT itself has no
+  # reply, so we never call `write_reply` for it.
+  defp handle_opcode(:interrupt, _header, %Request.Interrupt{unique: target_unique}, state) do
+    case Enum.find(state.pending, fn {_id, {ku, _kind}} -> ku == target_unique end) do
+      nil ->
+        # Unknown unique: original may have already replied or
+        # wasn't enqueued (e.g. ENOSYS reply path). FUSE protocol
+        # treats this as a no-op.
+        emit_opcode_telemetry(:interrupt, :ok, state)
+        state
+
+      {internal_id, _} ->
+        GenServer.cast(state.handler, {:fuse_interrupt, internal_id})
+        emit_opcode_telemetry(:interrupt, :ok, state)
+        state
+    end
+  end
+
   defp handle_opcode(:getlk, header, %Request.GetLk{} = r, state) do
     op =
       {"byte_range_query",
