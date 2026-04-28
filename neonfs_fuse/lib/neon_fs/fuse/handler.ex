@@ -105,6 +105,17 @@ defmodule NeonFS.FUSE.Handler do
        gids: gids,
        cache_table: cache_table,
        atime_mode: atime_mode,
+       # POSIX unlink-while-open: maps an FD-side `fh` to the
+       # `file_id` and the `:pinned` namespace claim that keeps
+       # the file alive while the handle is open. See sub-issue
+       # #651 of #639. On peer crash the namespace coordinator's
+       # holder-DOWN bulk release handles cleanup, so no terminate
+       # callback is needed here — the safety net lives at the
+       # claim layer.
+       fh_table: %{},
+       next_fh: 1,
+       coordinator_module:
+         Keyword.get(opts, :coordinator_module, NeonFS.Core.NamespaceCoordinator),
        test_notify: Keyword.get(opts, :test_notify)
      }}
   end
@@ -115,7 +126,7 @@ defmodule NeonFS.FUSE.Handler do
 
     Logger.debug("Received FUSE operation", operation: inspect(operation))
 
-    {reply, duration} = timed_handle_operation(operation, state)
+    {reply, new_state, duration} = timed_handle_operation(operation, state)
 
     emit_fuse_telemetry(operation, reply, duration, state.volume)
 
@@ -127,17 +138,195 @@ defmodule NeonFS.FUSE.Handler do
       send(state.test_notify, {:fuse_op_complete, request_id, reply})
     end
 
-    {:noreply, state}
+    {:noreply, new_state}
   end
 
   ## Private Helpers
 
   defp timed_handle_operation(operation, state) do
     start_time = System.monotonic_time()
-    reply = handle_operation(operation, state)
+    {reply, new_state} = dispatch_operation(operation, state)
     duration = System.monotonic_time() - start_time
-    {reply, duration}
+    {reply, new_state, duration}
   end
+
+  # Wraps `handle_operation/2` so the few state-mutating ops
+  # (`open`, `create`, `release` — the unlink-while-open pin
+  # lifecycle, #651) can return `{reply, new_state}` while every
+  # other handler keeps its single-return shape. Read-only ops fall
+  # through to the unchanged `handle_operation/2` definition.
+  defp dispatch_operation({"open", _params} = op, state), do: handle_stateful(op, state)
+  defp dispatch_operation({"create", _params} = op, state), do: handle_stateful(op, state)
+  defp dispatch_operation({"release", _params} = op, state), do: handle_stateful(op, state)
+
+  defp dispatch_operation(operation, state) do
+    {handle_operation(operation, state), state}
+  end
+
+  # Open lifecycle (POSIX unlink-while-open, sub-issue #651 of #639).
+  #
+  # `open`: resolve inode → path → file_id, claim a `:pinned`
+  # namespace claim with this GenServer's pid as holder, allocate a
+  # monotonic `fh`, and remember `{file_id, claim_id, path}` so
+  # later `read` / `write` can route through the file_id (which
+  # works for detached files — #638) and so `release` can drop the
+  # claim. The Genserver pid is the holder, which means the
+  # coordinator's existing holder-DOWN bulk release is the safety
+  # net for FUSE-peer crashes.
+  defp handle_stateful({"open", params}, state) do
+    ino = params["ino"]
+
+    with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
+         :ok <- check_file_permission(volume_id, path, :read, state),
+         {:ok, file_meta} <- fetch_file_or_root(volume_id, path) do
+      open_dispatch(file_meta, volume_id, path, state)
+    else
+      {:error, :forbidden} -> {{"error", %{"errno" => errno(:eacces)}}, state}
+      {:error, %{class: :forbidden}} -> {{"error", %{"errno" => errno(:eacces)}}, state}
+      {:error, :not_found} -> {{"error", %{"errno" => errno(:enoent)}}, state}
+      {:error, %{class: :not_found}} -> {{"error", %{"errno" => errno(:enoent)}}, state}
+      {:error, _reason} -> {{"error", %{"errno" => errno(:eio)}}, state}
+    end
+  end
+
+  # FUSE's `create()` is invoked for both `O_CREAT` and `O_CREAT |
+  # O_EXCL`. The `O_EXCL` bit means "fail if the target already
+  # exists" and must be atomic across nodes — sub-issue #594 of
+  # #303 routes this through `WriteOperation`'s `create_only: true`
+  # (#592), which in turn uses the namespace coordinator's
+  # `claim_create` primitive (#591). After creation we additionally
+  # claim a `:pinned` claim against the new path so the open-handle
+  # half of the unlink-while-open story (#651) holds.
+  defp handle_stateful({"create", params}, state) do
+    parent = params["parent"]
+    name = params["name"]
+    file_mode = create_mode(params["mode"], @s_ifreg, @default_mode)
+    flags = Map.get(params, "flags", 0)
+    write_opts = create_write_opts(file_mode, flags)
+
+    with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
+         :ok <- check_file_permission(volume_id, parent_path, :write, state),
+         child_path <- build_child_path(parent_path, name),
+         {:ok, file_meta} <- create_empty_file(volume_id, child_path, write_opts),
+         {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
+      claim_id =
+        case claim_pinned_for_path(volume_id, child_path, state) do
+          {:ok, id} -> id
+          {:error, _} -> nil
+        end
+
+      create_ok(file_meta, claim_id, child_path, inode, state)
+    else
+      {:error, :forbidden} -> {{"error", %{"errno" => errno(:eacces)}}, state}
+      {:error, %{class: :forbidden}} -> {{"error", %{"errno" => errno(:eacces)}}, state}
+      {:error, :exists} -> {{"error", %{"errno" => errno(:eexist)}}, state}
+      {:error, :conflict, _} -> {{"error", %{"errno" => errno(:eagain)}}, state}
+      {:error, reason} -> log_create_failure_and_eio(reason, state)
+    end
+  end
+
+  # `release` is the FUSE opcode that fires when the last fd for an
+  # open file_handle closes. Drop our entry and release the pin so
+  # the namespace coordinator's view converges. Idempotent against
+  # an unknown `fh` — late-arriving `release` after a crash recovery
+  # is plausible and shouldn't be an error.
+  defp handle_stateful({"release", params}, state) do
+    fh = params["fh"]
+
+    case Map.pop(state.fh_table, fh) do
+      {nil, _table} ->
+        # Unknown / synthesised fh (directory opens use fh=0
+        # without an entry). No-op.
+        {{"ok", %{}}, state}
+
+      {%{claim_id: nil}, table} ->
+        # Open succeeded without a pin (coordinator was unreachable)
+        # — nothing to release.
+        {{"ok", %{}}, %{state | fh_table: table}}
+
+      {%{claim_id: claim_id}, table} ->
+        release_pin_quietly(state.coordinator_module, claim_id)
+        {{"ok", %{}}, %{state | fh_table: table}}
+    end
+  end
+
+  # Directories don't need a `:pinned` claim — there is no
+  # unlink-while-open semantics for them (rmdir on a non-empty dir
+  # already errors, and the FUSE layer returns the `ino` directly as
+  # `fh` rather than a tracked entry). Regular files go through the
+  # claim-and-track path; pin failures are non-fatal so the open
+  # still succeeds (the unlink-while-open guarantee is then absent
+  # for that single fd, but every other operation works).
+  defp open_dispatch(%{mode: mode}, _volume_id, _path, state)
+       when (mode &&& @s_ifdir) == @s_ifdir do
+    {{"open_ok", %{"fh" => 0}}, state}
+  end
+
+  defp open_dispatch(%{id: file_id}, volume_id, path, state) do
+    case claim_pinned_for_path(volume_id, path, state) do
+      {:ok, claim_id} -> open_ok(file_id, claim_id, path, state)
+      {:error, _reason} -> open_ok(file_id, nil, path, state)
+    end
+  end
+
+  defp open_ok(file_id, claim_id, path, state) do
+    fh = state.next_fh
+
+    new_state = %{
+      state
+      | next_fh: fh + 1,
+        fh_table: Map.put(state.fh_table, fh, %{file_id: file_id, claim_id: claim_id, path: path})
+    }
+
+    {{"open_ok", %{"fh" => fh}}, new_state}
+  end
+
+  defp create_ok(%{id: file_id, size: size}, claim_id, path, inode, state) do
+    fh = state.next_fh
+
+    new_state = %{
+      state
+      | next_fh: fh + 1,
+        fh_table: Map.put(state.fh_table, fh, %{file_id: file_id, claim_id: claim_id, path: path})
+    }
+
+    {{"entry_ok", %{"ino" => inode, "size" => size, "kind" => "file", "fh" => fh}}, new_state}
+  end
+
+  defp log_create_failure_and_eio(reason, state) do
+    Logger.warning("Create failed", reason: inspect(reason))
+    {{"error", %{"errno" => errno(:eio)}}, state}
+  end
+
+  # Calls into the namespace coordinator on a core node. Returns the
+  # claim id on success. On any failure (coordinator unreachable,
+  # claim conflict, etc.) we surface the error to the caller so they
+  # can map it to an errno.
+  defp claim_pinned_for_path(volume_id, path, state) do
+    key = volume_scoped_path(volume_id, path)
+
+    core_call(state.coordinator_module, :claim_pinned_for, [
+      state.coordinator_module,
+      key,
+      self()
+    ])
+  catch
+    :exit, _ -> {:error, :coordinator_unavailable}
+  end
+
+  defp release_pin_quietly(coordinator, claim_id) do
+    case core_call(coordinator, :release, [coordinator, claim_id]) do
+      :ok ->
+        :ok
+
+      other ->
+        Logger.warning("Pin release failed", claim_id: claim_id, reason: inspect(other))
+    end
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp volume_scoped_path(volume_id, path), do: "vol:" <> volume_id <> ":" <> path
 
   defp emit_fuse_telemetry({op_name, _params}, reply, duration, volume) do
     result = if match?({"error", _}, reply), do: :error, else: :ok
@@ -209,15 +398,23 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # Handle read operation: read file data
+  # Handle read operation: read file data.
+  #
+  # When the FUSE-side `fh` is one we allocated at `open` /
+  # `create` (#651), route through `Core.read_file_by_id` so the
+  # cached `file_id` keeps working even if another peer has
+  # detached the path (#638). Falls back to the path-based
+  # `ChunkReader` flow for legacy callers that read without an
+  # explicit open (e.g. some readdir-then-read sequences).
   defp handle_operation({"read", params}, state) do
     ino = params["ino"]
     offset = params["offset"]
     size = params["size"]
+    fh = params["fh"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          :ok <- check_file_permission(volume_id, path, :read, state),
-         {:ok, data} <- read_file(state.volume_name, path, offset: offset, length: size) do
+         {:ok, data} <- read_via_fh_or_path(volume_id, path, fh, offset, size, state) do
       maybe_update_atime(volume_id, path, state.atime_mode)
       {"read_ok", %{"data" => data}}
     else
@@ -239,16 +436,19 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # Handle write operation: write file data
+  # Handle write operation: write file data. Mirrors `read` —
+  # registered `fh` → `Core.write_file_at_by_id`, else path-based
+  # fallback. See `read` docstring for the unlink-while-open
+  # rationale (#651).
   defp handle_operation({"write", params}, state) do
     ino = params["ino"]
     offset = params["offset"]
     data = params["data"]
+    fh = params["fh"]
 
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          :ok <- check_file_permission(volume_id, path, :write, state),
-         {:ok, _file} <-
-           core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume_id, path, offset, data]) do
+         {:ok, _file} <- write_via_fh_or_path(volume_id, path, fh, offset, data, state) do
       {"write_ok", %{"size" => byte_size(data)}}
     else
       {:error, :forbidden} ->
@@ -289,45 +489,9 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # Handle create operation: create a new file.
-  #
-  # FUSE's `create()` is invoked for both `O_CREAT` and `O_CREAT |
-  # O_EXCL`. The `O_EXCL` bit means "fail if the target already exists"
-  # and must be atomic across nodes — sub-issue #594 of #303 routes
-  # this through `WriteOperation`'s `create_only: true` (#592), which
-  # in turn uses the namespace coordinator's `claim_create` primitive
-  # (#591).
-  defp handle_operation({"create", params}, state) do
-    parent = params["parent"]
-    name = params["name"]
-    file_mode = create_mode(params["mode"], @s_ifreg, @default_mode)
-    flags = Map.get(params, "flags", 0)
-    write_opts = create_write_opts(file_mode, flags)
-
-    with {:ok, {volume_id, parent_path}} <- resolve_inode(parent, state),
-         :ok <- check_file_permission(volume_id, parent_path, :write, state),
-         child_path <- build_child_path(parent_path, name),
-         {:ok, _file} <- create_empty_file(volume_id, child_path, write_opts),
-         {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
-      # Allocate file handle (for now, just use inode as handle)
-      fh = inode
-
-      {"entry_ok", %{"ino" => inode, "size" => 0, "kind" => "file", "fh" => fh}}
-    else
-      {:error, :forbidden} ->
-        {"error", %{"errno" => errno(:eacces)}}
-
-      {:error, %{class: :forbidden}} ->
-        {"error", %{"errno" => errno(:eacces)}}
-
-      {:error, :exists} ->
-        {"error", %{"errno" => errno(:eexist)}}
-
-      {:error, reason} ->
-        Logger.warning("Create failed", reason: inspect(reason))
-        {"error", %{"errno" => errno(:eio)}}
-    end
-  end
+  # `create` is stateful — it allocates a file handle and pins the
+  # path so the unlink-while-open story (#651) works. Lives in
+  # `handle_stateful/2` alongside `open` / `release`.
 
   # Handle mkdir operation: create a new directory
   defp handle_operation({"mkdir", params}, state) do
@@ -429,18 +593,9 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # Handle open operation: open a file for reading/writing
-  defp handle_operation({"open", params}, _state) do
-    ino = params["ino"]
-    # For Phase 1, just return the inode as the file handle
-    {"open_ok", %{"fh" => ino}}
-  end
-
-  # Handle release operation: close a file
-  defp handle_operation({"release", _params}, _state) do
-    # For Phase 1, no cleanup needed
-    {"ok", %{}}
-  end
+  # `open` / `release` are stateful — see `handle_stateful/2` and
+  # `dispatch_operation/2`. They live outside `handle_operation/2`
+  # because they mutate `state.fh_table` and `state.next_fh`.
 
   # Handle rename operation: rename/move a file or directory
   defp handle_operation({"rename", params}, state) do
@@ -881,6 +1036,41 @@ defmodule NeonFS.FUSE.Handler do
 
   defp read_file(volume_id, path, opts) do
     ChunkReader.read_file(volume_id, path, opts)
+  end
+
+  # Read / write dispatch helpers for the unlink-while-open story
+  # (#651): if the FUSE-side `fh` is one we allocated at `open` /
+  # `create` and tracked in `state.fh_table`, route through
+  # `Core.read_file_by_id` / `write_file_at_by_id` — which work
+  # against detached files. Otherwise fall back to the path-based
+  # form so legacy callers (no explicit open) keep working.
+  defp read_via_fh_or_path(_volume_id, path, fh, offset, size, state) do
+    case Map.get(state.fh_table, fh) do
+      %{file_id: file_id} ->
+        core_call(NeonFS.Core, :read_file_by_id, [
+          state.volume_name,
+          file_id,
+          [offset: offset, length: size]
+        ])
+
+      nil ->
+        read_file(state.volume_name, path, offset: offset, length: size)
+    end
+  end
+
+  defp write_via_fh_or_path(volume_id, path, fh, offset, data, state) do
+    case Map.get(state.fh_table, fh) do
+      %{file_id: file_id} ->
+        core_call(NeonFS.Core, :write_file_at_by_id, [
+          state.volume_name,
+          file_id,
+          offset,
+          data
+        ])
+
+      nil ->
+        core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume_id, path, offset, data])
+    end
   end
 
   # Create an empty file or directory entry. FUSE `create`/`mkdir` both
