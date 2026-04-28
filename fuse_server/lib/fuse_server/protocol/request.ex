@@ -300,6 +300,58 @@ defmodule FuseServer.Protocol.Request do
           }
   end
 
+  defmodule SetXattr do
+    @moduledoc """
+    FUSE_SETXATTR — `fuse_setxattr_in` (8 bytes for v7.31) + name + NUL + value.
+
+    `flags` is the POSIX `XATTR_CREATE` / `XATTR_REPLACE` bitmask. The
+    extended `setxattr_flags` field added in v7.33 is not parsed —
+    callers wanting that behaviour must negotiate `FUSE_SETXATTR_EXT`,
+    which we don't yet advertise.
+    """
+    defstruct [:size, :flags, :name, :value]
+
+    @type t :: %__MODULE__{
+            size: non_neg_integer(),
+            flags: non_neg_integer(),
+            name: binary(),
+            value: binary()
+          }
+  end
+
+  defmodule GetXattr do
+    @moduledoc """
+    FUSE_GETXATTR — `fuse_getxattr_in` (8 bytes) + name + NUL.
+
+    `size = 0` is the size-probe convention: the kernel asks us how
+    big the value is so it can allocate a buffer; `size > 0` is the
+    real fetch with a buffer that can hold up to that many bytes.
+    """
+    defstruct [:size, :name]
+
+    @type t :: %__MODULE__{size: non_neg_integer(), name: binary()}
+  end
+
+  defmodule ListXattr do
+    @moduledoc """
+    FUSE_LISTXATTR — `fuse_getxattr_in` (8 bytes), no name. The
+    nodeid in the request header identifies the file. Same size-probe
+    convention as `GetXattr`.
+    """
+    defstruct [:size]
+
+    @type t :: %__MODULE__{size: non_neg_integer()}
+  end
+
+  defmodule RemoveXattr do
+    @moduledoc """
+    FUSE_REMOVEXATTR — name + NUL. Nodeid in header.
+    """
+    defstruct [:name]
+
+    @type t :: %__MODULE__{name: binary()}
+  end
+
   @type t ::
           Init.t()
           | Destroy.t()
@@ -323,6 +375,10 @@ defmodule FuseServer.Protocol.Request do
           | Flush.t()
           | Fsync.t()
           | Create.t()
+          | SetXattr.t()
+          | GetXattr.t()
+          | ListXattr.t()
+          | RemoveXattr.t()
 
   @doc """
   Decode a body for the given opcode. Returns the populated struct or
@@ -518,6 +574,32 @@ defmodule FuseServer.Protocol.Request do
 
       _ ->
         {:error, :malformed_body}
+    end
+  end
+
+  def decode(:setxattr, <<size::little-32, flags::little-32, rest::binary>>) do
+    with {:ok, name, value} <- strip_cstring(rest),
+         true <- byte_size(value) == size do
+      {:ok, %SetXattr{size: size, flags: flags, name: name, value: value}}
+    else
+      _ -> {:error, :malformed_body}
+    end
+  end
+
+  def decode(:getxattr, <<size::little-32, _pad::little-32, rest::binary>>) do
+    case strip_cstring(rest) do
+      {:ok, name, <<>>} -> {:ok, %GetXattr{size: size, name: name}}
+      _ -> {:error, :malformed_body}
+    end
+  end
+
+  def decode(:listxattr, <<size::little-32, _pad::little-32>>),
+    do: {:ok, %ListXattr{size: size}}
+
+  def decode(:removexattr, body) when is_binary(body) do
+    case strip_cstring(body) do
+      {:ok, name, <<>>} -> {:ok, %RemoveXattr{name: name}}
+      _ -> {:error, :malformed_body}
     end
   end
 

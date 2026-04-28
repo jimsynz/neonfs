@@ -135,4 +135,48 @@ defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
       assert output =~ "world.txt"
     end
   end
+
+  describe "real-FUSE xattr round-trip (#671)" do
+    # Tagged so `test_helper.exs` can exclude these on hosts where
+    # the `attr` package's `setfattr` / `getfattr` aren't installed.
+    @describetag :xattr_tools
+
+    test "setfattr stores user.foo, getfattr reads it back", %{mount_point: mp} do
+      target = Path.join(mp, "hello.txt")
+
+      {_, 0} = System.cmd("setfattr", ["-n", "user.foo", "-v", "bar", target])
+
+      {output, 0} =
+        System.cmd("getfattr", ["-n", "user.foo", "--only-values", target],
+          stderr_to_stdout: true
+        )
+
+      assert output == "bar"
+    end
+
+    test "getfattr -d lists every user.* attribute on the file", %{mount_point: mp} do
+      target = Path.join(mp, "world.txt")
+
+      {_, 0} = System.cmd("setfattr", ["-n", "user.alpha", "-v", "1", target])
+      {_, 0} = System.cmd("setfattr", ["-n", "user.beta", "-v", "2", target])
+
+      {output, 0} = System.cmd("getfattr", ["-d", target], stderr_to_stdout: true)
+
+      assert output =~ ~s(user.alpha="1")
+      assert output =~ ~s(user.beta="2")
+    end
+
+    test "setfattr -x removes the attribute", %{mount_point: mp} do
+      target = Path.join(mp, "hello.txt")
+
+      {_, 0} = System.cmd("setfattr", ["-n", "user.tmp", "-v", "x", target])
+      {_, 0} = System.cmd("setfattr", ["-x", "user.tmp", target])
+
+      {output, status} =
+        System.cmd("getfattr", ["-n", "user.tmp", target], stderr_to_stdout: true)
+
+      assert status != 0
+      assert output =~ ~r/No data available|No such attribute/
+    end
+  end
 end

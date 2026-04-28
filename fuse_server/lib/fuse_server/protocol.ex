@@ -39,8 +39,10 @@ defmodule FuseServer.Protocol do
   WRITE, OPEN, RELEASE, CREATE, MKDIR, UNLINK, RMDIR, RENAME, STATFS,
   FLUSH, FSYNC, FORGET, BATCH_FORGET, DESTROY).
 
-  Extended opcodes (xattrs, flock/fcntl, ioctl, poll) are out of scope
-  and tracked in #280.
+  Extended opcodes for xattrs (SETXATTR / GETXATTR / LISTXATTR /
+  REMOVEXATTR) are supported as of #671. Other extended opcodes
+  (flock/fcntl, ioctl, poll, INTERRUPT) are out of scope and tracked
+  in the remaining sub-issues of #280.
   """
 
   alias FuseServer.Protocol.{InHeader, Request, Response}
@@ -61,6 +63,10 @@ defmodule FuseServer.Protocol do
           | :statfs
           | :release
           | :fsync
+          | :setxattr
+          | :getxattr
+          | :listxattr
+          | :removexattr
           | :flush
           | :init
           | :opendir
@@ -100,6 +106,10 @@ defmodule FuseServer.Protocol do
     17 => :statfs,
     18 => :release,
     20 => :fsync,
+    21 => :setxattr,
+    22 => :getxattr,
+    23 => :listxattr,
+    24 => :removexattr,
     25 => :flush,
     26 => :init,
     27 => :opendir,

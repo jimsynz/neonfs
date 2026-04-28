@@ -772,4 +772,196 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert Process.alive?(handler)
     end
   end
+
+  describe "xattr operations (#671)" do
+    # Each xattr test gets its own file so that state from one test
+    # (e.g. attributes set by an earlier `setxattr`) cannot leak into
+    # a sibling test under `cluster_mode: :shared`.
+    setup %{handler: handler, volume_id: volume_id, cluster: cluster} do
+      name = "xattr-#{System.unique_integer([:positive])}.txt"
+      path = "/" <> name
+
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+        volume_id,
+        path,
+        0,
+        "x"
+      ])
+
+      send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
+
+      {:ok, inode} = InodeTable.get_inode(volume_id, path)
+      {:ok, inode: inode}
+    end
+
+    test "setxattr stores a value, getxattr fetches it", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr", %{"ino" => ino, "name" => "user.foo", "value" => "bar", "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"getxattr", %{"ino" => ino, "name" => "user.foo", "size" => 100}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"xattr_data", %{"data" => "bar"}}}, 5_000
+    end
+
+    test "getxattr with size=0 returns the size for the kernel's buffer probe",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr", %{"ino" => ino, "name" => "user.size", "value" => "12345", "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"getxattr", %{"ino" => ino, "name" => "user.size", "size" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"xattr_size", %{"size" => 5}}}, 5_000
+    end
+
+    test "getxattr with size smaller than value returns ERANGE",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr", %{"ino" => ino, "name" => "user.big", "value" => "abcdef", "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"getxattr", %{"ino" => ino, "name" => "user.big", "size" => 3}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 34}}}, 5_000
+    end
+
+    test "getxattr on missing name returns ENODATA", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"getxattr", %{"ino" => ino, "name" => "user.missing", "size" => 100}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, 5_000
+    end
+
+    test "setxattr with XATTR_CREATE on existing returns EEXIST",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr", %{"ino" => ino, "name" => "user.flag", "value" => "1", "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"setxattr", %{"ino" => ino, "name" => "user.flag", "value" => "2", "flags" => 1}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 17}}}, 5_000
+    end
+
+    test "setxattr with XATTR_REPLACE on missing returns ENODATA",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr", %{"ino" => ino, "name" => "user.replace", "value" => "x", "flags" => 2}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, 5_000
+    end
+
+    test "non-user.* namespace returns EPERM", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr",
+          %{"ino" => ino, "name" => "system.posix_acl_access", "value" => "x", "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 1}}}, 5_000
+    end
+
+    test "listxattr returns sorted, NUL-separated names",
+         %{handler: handler, inode: ino} do
+      for {req_id, name, val} <- [
+            {1, "user.gamma", "g"},
+            {2, "user.alpha", "a"},
+            {3, "user.beta", "b"}
+          ] do
+        send(
+          handler,
+          {:fuse_op, req_id,
+           {"setxattr", %{"ino" => ino, "name" => name, "value" => val, "flags" => 0}}}
+        )
+
+        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, 5_000
+      end
+
+      send(handler, {:fuse_op, 10, {"listxattr", %{"ino" => ino, "size" => 1024}}})
+
+      assert_receive {:fuse_op_complete, 10, {"xattr_list_data", %{"data" => list_bytes}}}, 5_000
+
+      assert list_bytes == "user.alpha\0user.beta\0user.gamma\0"
+    end
+
+    test "listxattr size-probe returns the encoded byte count",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr", %{"ino" => ino, "name" => "user.probe", "value" => "x", "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(handler, {:fuse_op, 2, {"listxattr", %{"ino" => ino, "size" => 0}}})
+
+      # "user.probe\0" = 11 bytes
+      assert_receive {:fuse_op_complete, 2, {"xattr_list_size", %{"size" => 11}}}, 5_000
+    end
+
+    test "removexattr deletes the attribute and subsequent getxattr returns ENODATA",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"setxattr", %{"ino" => ino, "name" => "user.delete", "value" => "x", "flags" => 0}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(handler, {:fuse_op, 2, {"removexattr", %{"ino" => ino, "name" => "user.delete"}}})
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 3, {"getxattr", %{"ino" => ino, "name" => "user.delete", "size" => 100}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"error", %{"errno" => 61}}}, 5_000
+    end
+
+    test "removexattr on missing name returns ENODATA",
+         %{handler: handler, inode: ino} do
+      send(handler, {:fuse_op, 1, {"removexattr", %{"ino" => ino, "name" => "user.gone"}}})
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, 5_000
+    end
+  end
 end

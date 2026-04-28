@@ -21,4 +21,15 @@ Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 Mimic.copy(NeonFS.Client.ChunkReader)
 Mimic.copy(NeonFS.Client)
 
-ExUnit.start(capture_log: true)
+# `:xattr_tools` tests need the `attr` package's `setfattr`/`getfattr`
+# CLIs (used by the real-mount xattr round-trip in #671). Skip when
+# either binary is missing rather than fail — keeps the suite green
+# on hosts that don't ship `attr` by default.
+xattr_tools_exclusion =
+  if System.find_executable("setfattr") && System.find_executable("getfattr") do
+    []
+  else
+    [exclude: [:xattr_tools]]
+  end
+
+ExUnit.start([capture_log: true] ++ xattr_tools_exclusion)
