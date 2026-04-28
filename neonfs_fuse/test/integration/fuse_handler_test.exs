@@ -1130,4 +1130,274 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
     end
   end
+
+  describe "byte-range fcntl operations (#674)" do
+    setup %{handler: handler, volume_id: volume_id, cluster: cluster} do
+      name = "fcntl-#{System.unique_integer([:positive])}.txt"
+      path = "/" <> name
+
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+        volume_id,
+        path,
+        0,
+        "x"
+      ])
+
+      send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
+
+      {:ok, inode} = InodeTable.get_inode(volume_id, path)
+      {:ok, inode: inode}
+    end
+
+    test "F_RDLCK acquires a shared byte-range lock", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 0,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+    end
+
+    test "F_WRLCK acquires an exclusive byte-range lock", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+    end
+
+    test "two F_WRLCK from different owners on overlapping ranges conflict",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 2,
+            "type" => 1,
+            "start" => 50,
+            "end" => 199,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+    end
+
+    test "non-overlapping ranges from different owners coexist",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 2,
+            "type" => 1,
+            "start" => 200,
+            "end" => 299,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+    end
+
+    test "F_UNLCK releases the matching exact-range lock",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 2,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 3,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 2,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+    end
+
+    test "blocking SETLKW byte-range returns EAGAIN until #681 lands",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 2,
+            "type" => 1,
+            "start" => 50,
+            "end" => 199,
+            "blocking" => true
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+    end
+
+    test "GETLK on a free range returns F_UNLCK", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range_query",
+          %{
+            "ino" => ino,
+            "fh" => 0,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "pid" => 1234
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"getlk_unlocked", %{"start" => 0, "end" => 99}}},
+                     5_000
+    end
+
+    test "GETLK on a held range reports the conflict",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 100,
+            "end" => 199,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"byte_range_query",
+          %{
+            "ino" => ino,
+            "fh" => 0,
+            "owner" => 2,
+            "type" => 1,
+            "start" => 150,
+            "end" => 250,
+            "pid" => 5678
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 2,
+                      {"getlk_conflict", %{"start" => 100, "end" => 199, "type" => 1}}},
+                     5_000
+    end
+  end
 end
