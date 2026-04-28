@@ -29,7 +29,7 @@ defmodule NeonFS.FUSE.Handler do
   require Logger
 
   alias NeonFS.Client.ChunkReader
-  alias NeonFS.FUSE.{InodeTable, MetadataCache, Native}
+  alias NeonFS.FUSE.{InodeTable, MetadataCache}
 
   @default_volume "default"
 
@@ -86,7 +86,6 @@ defmodule NeonFS.FUSE.Handler do
     volume = Keyword.get(opts, :volume, @default_volume)
     volume_name = Keyword.get(opts, :volume_name, volume)
     Logger.metadata(component: :fuse, volume_id: volume)
-    fuse_server = Keyword.get(opts, :fuse_server)
     uid = Keyword.get(opts, :uid, 0)
     gid = Keyword.get(opts, :gid, 0)
     gids = Keyword.get(opts, :gids, [])
@@ -97,7 +96,6 @@ defmodule NeonFS.FUSE.Handler do
 
     {:ok,
      %{
-       fuse_server: fuse_server,
        volume: volume,
        volume_name: volume_name,
        uid: uid,
@@ -130,10 +128,10 @@ defmodule NeonFS.FUSE.Handler do
 
     emit_fuse_telemetry(operation, reply, duration, state.volume)
 
-    if state.fuse_server do
-      Native.reply_fuse_operation(state.fuse_server, request_id, reply)
-    end
-
+    # Reply path: the Session GenServer subscribes via `:test_notify`
+    # and writes the encoded reply back to the FUSE fd. The legacy
+    # NIF stack (#279, deleted in #662) used `Native.reply_fuse_operation`
+    # via `state.fuse_server`; that field is gone now.
     if state.test_notify do
       send(state.test_notify, {:fuse_op_complete, request_id, reply})
     end

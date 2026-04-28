@@ -60,7 +60,6 @@ defmodule NeonFS.FUSE.MixProject do
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
       {:plug, "~> 1.15"},
-      {:rustler, "~> 0.37", runtime: false},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
       # dev/test

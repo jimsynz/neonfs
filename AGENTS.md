@@ -73,8 +73,9 @@ neonfs_core/          # Elixir control plane (depends on neonfs_client)
 neonfs_fuse/          # FUSE filesystem package (depends on neonfs_client only)
 ├── lib/neon_fs/fuse/
 │   ├── application.ex
-│   └── fuse.ex
-├── native/
+│   ├── handler.ex        # FUSE op → core RPC translation
+│   ├── session.ex        # owns the FUSE fd; dispatches frames to handler
+│   └── mount_manager.ex  # mount/unmount lifecycle (Fusermount + Session)
 └── test/
 
 neonfs_nfs/           # NFSv3 server package (depends on neonfs_client only)

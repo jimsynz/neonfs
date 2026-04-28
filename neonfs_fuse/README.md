@@ -9,30 +9,36 @@ distribution, routed through `NeonFS.Client.Router`.
 
 ## How It Works
 
-The FUSE node mounts volumes as local directories using the `fuser` Rust crate
-(via Rustler NIFs). Filesystem operations (read, write, mkdir, etc.) are
-translated into RPC calls to core nodes through the client's service discovery
-and routing infrastructure.
+The FUSE node mounts volumes as local directories via a pure-BEAM
+implementation built on top of `FuseServer.Fusermount` (which uses the
+`fusermount3` userspace helper to obtain a `/dev/fuse` fd) and a
+`NeonFS.FUSE.Session` GenServer that owns the fd and dispatches incoming
+frames. Filesystem operations are translated into RPC calls to core nodes
+through `neonfs_client`'s service discovery and routing.
 
 ### Key Modules
 
 - `NeonFS.FUSE.Handler` — translates FUSE operations into core RPC calls
+- `NeonFS.FUSE.Session` — owns the FUSE fd and dispatches frames
 - `NeonFS.FUSE.MountManager` — manages mount/unmount lifecycle per volume
 - `NeonFS.FUSE.Application` — OTP application and supervision tree
 
 ## Prerequisites
 
 - FUSE support: `libfuse3-dev` (Debian/Ubuntu) or equivalent
+- `fusermount3` available on `$PATH`
 - A running NeonFS core cluster to connect to
 
 ## Building
 
 ```bash
 mix deps.get
-mix compile    # compiles Elixir and Rust NIFs
+mix compile
 ```
 
-Rust toolchain (1.93+) is required for the NIF crate in `native/`.
+The fuser-NIF Rust crate that this package used to ship was removed in
+the cutover (#107). The minimal syscall NIF lives in the
+`fuse_server` package now.
 
 ## Testing
 
