@@ -3,27 +3,37 @@ defmodule NeonFS.FUSE.MountManager do
   Manages FUSE mount lifecycle.
 
   Coordinates mounting and unmounting volumes, tracking active mounts,
-  and managing handler processes for each mount.
+  and managing handler / session processes for each mount.
 
   ## Mount Lifecycle
 
   1. Validate mount point (exists, is directory, not already mounted)
-  2. Verify volume exists in VolumeRegistry
-  3. Start Handler GenServer for this mount
-  4. Call Native.mount/3 with handler PID
-  5. Track mount info in state
-  6. Monitor handler process for crashes
+  2. Verify volume exists in `VolumeRegistry`
+  3. Start `MetadataCache` and `Handler` GenServers under the
+     dynamic supervisor.
+  4. Open the FUSE fd via `FuseServer.Fusermount.mount/2` (the
+     `fusermount3` userspace helper) and start a
+     `NeonFS.FUSE.Session` GenServer that owns the fd and dispatches
+     incoming frames to the `Handler`.
+  5. Track the mount metadata + the three pids (cache, handler,
+     session) in state.
+  6. Monitor the session process for crashes.
+
+  Sub-issue #661 of #279 cut over from the legacy `fuser` NIF
+  (`Native.mount/3`) to this BEAM-native stack.
 
   ## Crash Handling
 
-  If a handler process crashes, the mount is automatically cleaned up
-  and removed from the active mounts list.
+  If the Session process crashes, the mount is cleaned up and removed
+  from the active mounts list. The Handler is linked to the Session
+  internally; both go down together when the Session terminates.
   """
 
   use GenServer
   require Logger
 
-  alias NeonFS.FUSE.{MetadataCache, MountInfo, MountSupervisor, Native}
+  alias FuseServer.Fusermount
+  alias NeonFS.FUSE.{MetadataCache, MountInfo, MountSupervisor, Session}
 
   @type mount_id :: String.t()
 
@@ -178,20 +188,19 @@ defmodule NeonFS.FUSE.MountManager do
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, reason}, state) do
-    # Handler process crashed, clean up the mount
-    case find_mount_by_handler(state, pid) do
+    # Session process exited (clean unmount or crash). Clean up the
+    # mount entry and ensure `fusermount3 -u` runs so the kernel
+    # mountpoint goes away even on crashes.
+    case find_mount_by_session(state, pid) do
       {:ok, mount_id, mount_info} ->
-        Logger.warning("Handler for mount crashed",
+        Logger.warning("Session for mount exited",
           mount_id: mount_id,
           volume_name: mount_info.volume_name,
           reason: inspect(reason)
         )
 
-        # Try to unmount the filesystem (ignore result since handler already crashed)
-        fusermount_cmd = Application.get_env(:neonfs_fuse, :fusermount_cmd, "fusermount3")
-        _ = Native.unmount(mount_info.mount_session, fusermount_cmd)
+        _ = Fusermount.unmount(mount_info.mount_point, lazy: true)
 
-        # Stop the cache (if still alive)
         if mount_info.cache_pid && Process.alive?(mount_info.cache_pid) do
           MountSupervisor.stop_cache(mount_info.cache_pid)
         end
@@ -200,7 +209,6 @@ defmodule NeonFS.FUSE.MountManager do
         {:noreply, new_state}
 
       :error ->
-        # Unknown handler crashed, ignore
         {:noreply, state}
     end
   end
@@ -260,85 +268,73 @@ defmodule NeonFS.FUSE.MountManager do
     normalized_path = Path.expand(mount_point)
     mount_id = generate_mount_id()
 
-    # Start MetadataCache for this mount
     cache_opts = [volume_id: volume_id]
 
     with {:ok, cache_pid} <- MountSupervisor.start_cache(cache_opts),
-         cache_table <- MetadataCache.table(cache_pid, timeout: :infinity) do
-      # Start the handler process for this mount under the DynamicSupervisor
-      handler_opts = [
-        volume: volume_id,
-        volume_name: volume_name,
-        mount_id: mount_id,
-        cache_table: cache_table
-      ]
+         cache_table <- MetadataCache.table(cache_pid, timeout: :infinity),
+         fusermount_opts <- build_mount_options(opts),
+         {:ok, fd} <- mount_via_fusermount(normalized_path, fusermount_opts),
+         {:ok, session_pid} <-
+           start_session(fd, volume_id, volume_name, cache_table, opts) do
+      Process.monitor(session_pid)
 
-      case MountSupervisor.start_handler(handler_opts) do
-        {:ok, handler_pid} ->
-          # Monitor the handler process
-          Process.monitor(handler_pid)
+      mount_info =
+        create_mount_info(
+          mount_id,
+          volume_name,
+          normalized_path,
+          fd,
+          session_pid,
+          cache_pid
+        )
 
-          # Mount the filesystem via NIF
-          mount_opts = build_mount_options(opts)
-
-          try do
-            case Native.mount(normalized_path, handler_pid, mount_opts) do
-              {:ok, mount_session} ->
-                mount_info =
-                  create_mount_info(
-                    mount_id,
-                    volume_name,
-                    normalized_path,
-                    mount_session,
-                    handler_pid,
-                    cache_pid
-                  )
-
-                new_state = add_mount(state, mount_info)
-                {:reply, {:ok, mount_id}, new_state}
-
-              {:error, reason} ->
-                # Mount failed, stop the handler and cache via supervisor
-                MountSupervisor.stop_handler(handler_pid)
-                MountSupervisor.stop_cache(cache_pid)
-                {:reply, {:error, {:mount_failed, reason}}, state}
-            end
-          catch
-            :error, :nif_not_loaded ->
-              # FUSE NIF not available (not compiled or system libraries missing)
-              MountSupervisor.stop_handler(handler_pid)
-              MountSupervisor.stop_cache(cache_pid)
-              {:reply, {:error, {:mount_failed, "FUSE NIF not loaded"}}, state}
-          end
-
-        {:error, reason} ->
-          MountSupervisor.stop_cache(cache_pid)
-          {:reply, {:error, {:handler_start_failed, reason}}, state}
-      end
+      {:reply, {:ok, mount_id}, add_mount(state, mount_info)}
     else
       {:error, reason} ->
-        {:reply, {:error, {:cache_start_failed, reason}}, state}
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp mount_via_fusermount(path, fusermount_opts) do
+    case Fusermount.mount(path, fusermount_opts) do
+      {:ok, fd} -> {:ok, fd}
+      {:error, reason} -> {:error, {:mount_failed, reason}}
+    end
+  end
+
+  defp start_session(fd, volume_id, volume_name, cache_table, opts) do
+    session_opts = [
+      fd: fd,
+      volume: volume_id,
+      volume_name: volume_name,
+      cache_table: cache_table,
+      atime_mode: Keyword.get(opts, :atime_mode, :noatime)
+    ]
+
+    case Session.start_link(session_opts) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, reason} -> {:error, {:session_start_failed, reason}}
     end
   end
 
   defp unmount_filesystem(mount_info) do
-    # Get the fusermount command from config
-    fusermount_cmd = Application.get_env(:neonfs_fuse, :fusermount_cmd, "fusermount3")
+    # Stop the Session first — it owns the fd, which closes on
+    # termination. The linked Handler exits with it. After the fd is
+    # closed, ask `fusermount3 -u` to drop the kernel mount.
+    if mount_info.session_pid && Process.alive?(mount_info.session_pid) do
+      try do
+        GenServer.stop(mount_info.session_pid, :shutdown, 5_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
 
-    # Unmount the filesystem first
-    # Native.unmount returns {:ok, :ok} or {:error, reason} due to Rustler Result type
     result =
-      case Native.unmount(mount_info.mount_session, fusermount_cmd) do
-        {:ok, :ok} -> :ok
+      case Fusermount.unmount(mount_info.mount_point) do
+        :ok -> :ok
         {:error, _} = error -> error
       end
 
-    # Stop the handler via supervisor (if still alive)
-    if Process.alive?(mount_info.handler_pid) do
-      MountSupervisor.stop_handler(mount_info.handler_pid)
-    end
-
-    # Stop the cache via supervisor (if still alive)
     if mount_info.cache_pid && Process.alive?(mount_info.cache_pid) do
       MountSupervisor.stop_cache(mount_info.cache_pid)
     end
@@ -388,8 +384,8 @@ defmodule NeonFS.FUSE.MountManager do
          mount_id,
          volume_name,
          mount_point,
-         mount_session,
-         handler_pid,
+         fd,
+         session_pid,
          cache_pid
        ) do
     MountInfo.new(
@@ -397,8 +393,9 @@ defmodule NeonFS.FUSE.MountManager do
       volume_name: volume_name,
       mount_point: mount_point,
       started_at: DateTime.utc_now(),
-      mount_session: mount_session,
-      handler_pid: handler_pid,
+      mount_session: fd,
+      handler_pid: nil,
+      session_pid: session_pid,
       cache_pid: cache_pid
     )
   end
@@ -423,9 +420,9 @@ defmodule NeonFS.FUSE.MountManager do
     end
   end
 
-  defp find_mount_by_handler(state, handler_pid) do
+  defp find_mount_by_session(state, session_pid) do
     Enum.find_value(state.mounts, :error, fn {mount_id, mount_info} ->
-      if mount_info.handler_pid == handler_pid do
+      if mount_info.session_pid == session_pid do
         {:ok, mount_id, mount_info}
       else
         false

@@ -5,7 +5,7 @@ defmodule NeonFS.FUSE.MountInfo do
   Tracks the lifecycle and resources associated with a mounted volume.
   """
 
-  @enforce_keys [:id, :volume_name, :mount_point, :started_at, :mount_session, :handler_pid]
+  @enforce_keys [:id, :volume_name, :mount_point, :started_at, :mount_session]
   defstruct [
     :id,
     :volume_name,
@@ -13,6 +13,7 @@ defmodule NeonFS.FUSE.MountInfo do
     :started_at,
     :mount_session,
     :handler_pid,
+    :session_pid,
     :cache_pid
   ]
 
@@ -22,7 +23,8 @@ defmodule NeonFS.FUSE.MountInfo do
           mount_point: String.t(),
           started_at: DateTime.t(),
           mount_session: reference(),
-          handler_pid: pid(),
+          handler_pid: pid() | nil,
+          session_pid: pid() | nil,
           cache_pid: pid() | nil
         }
 
