@@ -26,7 +26,9 @@ defmodule NeonFS.NFS.ExportManager do
   use GenServer
   require Logger
 
+  alias NeonFS.NFS.Application, as: NFSApp
   alias NeonFS.NFS.{ExportInfo, ExportSupervisor, Handler, MetadataCache, Native}
+  alias NFSServer.RPC.Server, as: RPCServer
 
   defmodule State do
     @moduledoc false
@@ -37,7 +39,7 @@ defmodule NeonFS.NFS.ExportManager do
     ]
 
     @type t :: %__MODULE__{
-            nfs_server: reference() | nil,
+            nfs_server: reference() | pid() | nil,
             handler_pid: pid() | nil,
             exports: %{String.t() => ExportInfo.t()}
           }
@@ -187,11 +189,22 @@ defmodule NeonFS.NFS.ExportManager do
     bind_address = nfs_bind_address()
     generation_number = derive_generation_number()
 
+    case NFSApp.handler_stack() do
+      :nif -> start_nif_stack(bind_address, generation_number, state)
+      :beam -> start_beam_stack(bind_address, state)
+    end
+  end
+
+  # The legacy `nfs3_server` NIF stack: a `Handler` GenServer feeds
+  # the Rust listener via `Native.set_nfs_server/2`. Bridges remote
+  # connections to Elixir over the NIF message boundary. Slated for
+  # deletion in #657.
+  defp start_nif_stack(bind_address, generation_number, state) do
     with {:ok, handler_pid} <- ExportSupervisor.start_handler([]),
          _ <- Process.monitor(handler_pid),
          {:ok, nfs_server} <- start_native_server(bind_address, handler_pid, generation_number),
          :ok <- Handler.set_nfs_server(handler_pid, nfs_server) do
-      Logger.info("NFS server started", bind_address: bind_address)
+      Logger.info("NFS server started", bind_address: bind_address, stack: :nif)
 
       {:ok, %{state | nfs_server: nfs_server, handler_pid: handler_pid}}
     else
@@ -200,6 +213,44 @@ defmodule NeonFS.NFS.ExportManager do
         {:error, reason}
     end
   end
+
+  # The native-BEAM stack (sub-issue #655 of #286): start an
+  # `NFSServer.RPC.Server` listener bound to the BEAM-side NFSv3
+  # handler that delegates to `NFSv3Backend`. No `Handler` GenServer
+  # under `ExportSupervisor` — the listener spawns one accept-loop
+  # process per connection, and the NFSv3 handler module dispatches
+  # statelessly from there. The `handler_pid` slot stays `nil` so the
+  # `:DOWN` rewatch in `handle_info/2` simply no-ops on the BEAM
+  # path; an analogous monitor on the listener pid would be a better
+  # primitive but requires test coverage that #655 keeps out of
+  # scope.
+  defp start_beam_stack(bind_address, state) do
+    {ip, port} = parse_bind_address(bind_address)
+
+    programs = %{100_003 => %{3 => NFSApp.bound_nfsv3_handler()}}
+
+    case RPCServer.start_link(
+           bind: ip_to_binary(ip),
+           port: port,
+           programs: programs,
+           name: NeonFS.NFS.RPCServer
+         ) do
+      {:ok, pid} ->
+        Logger.info("NFS server started", bind_address: bind_address, stack: :beam)
+        {:ok, %{state | nfs_server: pid, handler_pid: nil}}
+
+      {:error, reason} ->
+        Logger.error("Failed to start BEAM NFS server", reason: inspect(reason))
+        {:error, {:nfs_bind_failed, reason}}
+    end
+  end
+
+  defp parse_bind_address(bind_address) do
+    [host, port_str] = String.split(bind_address, ":", parts: 2)
+    {host, String.to_integer(port_str)}
+  end
+
+  defp ip_to_binary(host), do: host
 
   defp start_native_server(bind_address, handler_pid, generation_number) do
     case Native.start_nfs_server(bind_address, handler_pid, generation_number) do
