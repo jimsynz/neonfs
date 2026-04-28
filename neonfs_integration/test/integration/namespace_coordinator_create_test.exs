@@ -90,14 +90,23 @@ defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
       {:ok, claim_id} = claim_create_for(cluster, :node1, path, holder)
 
       try do
-        assert {:ok, claims} =
-                 PeerCluster.rpc(cluster, :node2, NamespaceCoordinator, :list_claims, [
-                   NamespaceCoordinator,
-                   path
-                 ])
-
-        ids = Enum.map(claims, &elem(&1, 0))
-        assert claim_id in ids
+        # `NamespaceCoordinator.list_claims/2` reads from the local
+        # follower's Ra state via `:ra.local_query`. There's a small
+        # window between the leader committing the
+        # `:claim_namespace_create` command and node2's follower
+        # applying it locally during which the local read returns an
+        # empty result. `wait_until` covers that lag without
+        # spuriously failing — see #666 for the original race.
+        assert :ok =
+                 wait_until(fn ->
+                   case PeerCluster.rpc(cluster, :node2, NamespaceCoordinator, :list_claims, [
+                          NamespaceCoordinator,
+                          path
+                        ]) do
+                     {:ok, claims} -> claim_id in Enum.map(claims, &elem(&1, 0))
+                     _ -> false
+                   end
+                 end)
       after
         release_claim(cluster, :node1, claim_id)
         Agent.stop(holder, :normal, 1_000)

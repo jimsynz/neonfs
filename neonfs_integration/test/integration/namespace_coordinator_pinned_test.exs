@@ -35,11 +35,23 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
       {:ok, claim_id} = claim_pinned_for(cluster, :node1, path, holder)
 
       try do
-        assert {:ok, claims} = claims_for_path(cluster, :node2, path)
-        ids = Enum.map(claims, &elem(&1, 0))
-        assert claim_id in ids
+        # See the wait_until rationale at the top of the file: cross-
+        # node visibility races between leader-commit and follower-
+        # apply otherwise show up here as the assertion seeing an
+        # empty list. (#666)
+        assert :ok =
+                 wait_until(fn ->
+                   case claims_for_path(cluster, :node2, path) do
+                     {:ok, claims} ->
+                       ids = Enum.map(claims, &elem(&1, 0))
 
-        assert Enum.all?(claims, fn {_id, %{type: t}} -> t == :pinned end)
+                       claim_id in ids and
+                         Enum.all?(claims, fn {_id, %{type: t}} -> t == :pinned end)
+
+                     _ ->
+                       false
+                   end
+                 end)
       after
         release_claim(cluster, :node1, claim_id)
         Agent.stop(holder, :normal, 1_000)
@@ -58,13 +70,20 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
 
         assert id1 != id2
 
-        # Every node should see both pins.
+        # Every node should see both pins — `wait_until` per #666.
         for node <- [:node1, :node2, :node3] do
-          assert {:ok, claims} = claims_for_path(cluster, node, path)
-          ids = Enum.map(claims, &elem(&1, 0))
+          assert :ok =
+                   wait_until(fn ->
+                     case claims_for_path(cluster, node, path) do
+                       {:ok, claims} ->
+                         ids = Enum.map(claims, &elem(&1, 0))
+                         id1 in ids and id2 in ids
 
-          assert id1 in ids and id2 in ids,
-                 "node #{inspect(node)} did not see both pins: #{inspect(claims)}"
+                       _ ->
+                         false
+                     end
+                   end),
+                 "node #{inspect(node)} never saw both pins"
         end
 
         release_claim(cluster, :node1, id1)
@@ -82,8 +101,13 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
 
       {:ok, _claim_id} = claim_pinned_for(cluster, :node1, path, holder)
 
-      # Sanity: node2 sees the pin while the holder lives.
-      assert {:ok, [_]} = claims_for_path(cluster, :node2, path)
+      # Sanity: node2 eventually sees the pin while the holder
+      # lives. `wait_until` covers the leader-commit → follower-apply
+      # window, same as the visibility test above (#666).
+      assert :ok =
+               wait_until(fn ->
+                 match?({:ok, [_]}, claims_for_path(cluster, :node2, path))
+               end)
 
       # Crash the holder. Its `:DOWN` fires on node1's coordinator,
       # which submits a `release_namespace_claims_for_holder` Ra
