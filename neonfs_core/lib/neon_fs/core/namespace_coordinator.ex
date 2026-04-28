@@ -279,6 +279,76 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     GenServer.call(server, {:query_byte_range, path, range, scope})
   end
 
+  @typedoc """
+  Opaque token returned by `claim_byte_range_wait/5` when the call
+  blocks. Pass it to `cancel_wait/2` to remove the queued waiter.
+  """
+  @type wait_token :: reference()
+
+  @doc """
+  Blocking variant of `claim_byte_range/4` (#679). Same arguments;
+  three possible return shapes:
+
+    * `{:ok, claim_id}` — no conflict; claim acquired immediately.
+    * `{:wait, wait_token}` — conflict detected; the calling
+      process is registered as a waiter against the conflicting
+      claim. When the conflict clears (the conflicting claim is
+      released, or its holder dies and the bulk-release runs), the
+      coordinator retries the claim on the waiter's behalf and
+      sends `{:byte_range_acquired, wait_token, claim_id}` to the
+      `holder` pid. If a fresh conflict is encountered against a
+      different claim during the retry the waiter is re-queued; the
+      same `wait_token` remains valid.
+
+  The waiter pid (the `holder` argument, since the holder is what
+  the coordinator monitors) is registered locally on this node's
+  GenServer — wait queues do not cross nodes. Cross-node signalling
+  works because release events fire telemetry on every Ra replica,
+  and each node's coordinator processes its own queue when its local
+  apply hits.
+  """
+  @spec claim_byte_range_wait(GenServer.server(), String.t(), byte_range(), scope()) ::
+          {:ok, claim_id()}
+          | {:wait, wait_token()}
+          | {:error, term()}
+  def claim_byte_range_wait(server \\ __MODULE__, path, range, scope)
+      when is_binary(path) and scope in [:exclusive, :shared] and
+             is_tuple(range) and tuple_size(range) == 2 do
+    claim_byte_range_wait_for(server, path, range, scope, self())
+  end
+
+  @doc """
+  Same as `claim_byte_range_wait/4` but lets the caller specify the
+  holder pid — see `claim_path_for/4` for the cross-node motivation.
+  The holder is also the pid the coordinator notifies when the wait
+  fires.
+  """
+  @spec claim_byte_range_wait_for(
+          GenServer.server(),
+          String.t(),
+          byte_range(),
+          scope(),
+          pid()
+        ) :: {:ok, claim_id()} | {:wait, wait_token()} | {:error, term()}
+  def claim_byte_range_wait_for(server \\ __MODULE__, path, range, scope, holder)
+      when is_binary(path) and scope in [:exclusive, :shared] and is_pid(holder) and
+             is_tuple(range) and tuple_size(range) == 2 do
+    GenServer.call(server, {:claim_byte_range_wait, path, range, scope, holder})
+  end
+
+  @doc """
+  Cancel a pending wait. Idempotent — cancelling a token that was
+  never registered, already fired, or already cancelled returns
+  `:ok`.
+
+  Used by FUSE INTERRUPT (#675) to unblock a queued SETLKW when
+  userspace interrupts the syscall.
+  """
+  @spec cancel_wait(GenServer.server(), wait_token()) :: :ok
+  def cancel_wait(server \\ __MODULE__, wait_token) when is_reference(wait_token) do
+    GenServer.call(server, {:cancel_wait, wait_token})
+  end
+
   @doc """
   Atomically pin both paths of a cross-directory rename. The two paths
   are claimed `:exclusive :path` in a single Ra command, so a competing
@@ -353,11 +423,32 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   @impl true
   def init(_opts) do
     Process.flag(:trap_exit, true)
+    # Subscribe to release-event telemetry so cross-node releases
+    # (replicated via Ra apply on every replica) wake any local
+    # waiters whose conflict has cleared. The handler dispatches
+    # back to the coordinator GenServer via cast so the queue work
+    # happens in this process's context (#679).
+    attach_release_telemetry(self())
+
     # `holders` maps `pid -> %{ref: monitor_ref, claim_ids: MapSet.t()}`.
     # The MapSet is purely optimistic; the Ra side is the authority,
     # but tracking ids locally lets us short-circuit the bulk-release
     # command when a holder never claimed anything.
-    {:ok, %{holders: %{}}}
+    #
+    # `wait_queue` maps `conflicting_claim_id -> [waiter_entry]` in
+    # registration order (FIFO when signalled). Each waiter entry
+    # carries everything needed to retry the claim and identify the
+    # caller for cancellation / cleanup. `wait_index` maps the
+    # public `wait_token -> conflicting_claim_id` for O(1) cancel
+    # lookup. `waiter_monitors` maps `pid -> [wait_token]` so a
+    # waiter-DOWN can find every wait the dying pid owns.
+    {:ok,
+     %{
+       holders: %{},
+       wait_queue: %{},
+       wait_index: %{},
+       waiter_monitors: %{}
+     }}
   end
 
   @impl true
@@ -457,6 +548,14 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     {:reply, result, state}
   end
 
+  def handle_call({:claim_byte_range_wait, path, range, scope, holder}, _from, state) do
+    do_claim_byte_range_wait(path, range, scope, holder, state)
+  end
+
+  def handle_call({:cancel_wait, wait_token}, _from, state) do
+    {:reply, :ok, do_cancel_wait(wait_token, state)}
+  end
+
   def handle_call({:claim_rename, src, dst, holder}, _from, state) do
     case ra_command({:claim_namespace_rename, src, dst, holder}) do
       {:ok, {src_id, dst_id}} ->
@@ -498,6 +597,11 @@ defmodule NeonFS.Core.NamespaceCoordinator do
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    # A dying pid can be both a holder (had at least one claim) and
+    # a waiter (was queued on another claim) — drop both, in either
+    # order. The waiter cleanup is local; the holder cleanup hits Ra.
+    state = drop_waits_for_pid(pid, state)
+
     case Map.pop(state.holders, pid) do
       {nil, _} ->
         {:noreply, state}
@@ -522,6 +626,15 @@ defmodule NeonFS.Core.NamespaceCoordinator do
 
         {:noreply, %{state | holders: holders}}
     end
+  end
+
+  # Wake-up signal from the release telemetry handler attached in
+  # `init/1`. Carries the `claim_id` that just released — every
+  # waiter queued against it gets a retry attempt. Same shape for
+  # bulk releases (the telemetry handler sends one message per
+  # released id).
+  def handle_info({:released_claim_id, claim_id}, state) do
+    {:noreply, wake_waiters_for_claim(claim_id, state)}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -570,6 +683,315 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   defp range_lt?(_a, :infinity), do: true
   defp range_lt?(:infinity, _b), do: false
   defp range_lt?(a, b), do: a < b
+
+  ## Wait-queue helpers (#679)
+
+  # Try to claim; on no-conflict, behave exactly like
+  # `claim_byte_range_for/5`. On conflict, register the calling
+  # holder as a waiter against the conflicting claim and return
+  # `{:wait, wait_token}`. The same token survives re-queues against
+  # different claims during the retry path — the caller's wait is
+  # only "complete" when they receive `{:byte_range_acquired, ...}`
+  # or call `cancel_wait/2`.
+  defp do_claim_byte_range_wait(path, range, scope, holder, state) do
+    case ra_command({:claim_namespace_byte_range, path, range, scope, holder}) do
+      {:ok, claim_id} ->
+        {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :conflict, conflicting_id} ->
+        {token, state} = enqueue_waiter(state, holder, conflicting_id, path, range, scope)
+        {:reply, {:wait, token}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  # Register a waiter against `conflicting_id`. Returns the public
+  # `wait_token` plus the updated state. Monitors the holder pid if
+  # we don't already have a monitor for it (sharing the existing
+  # monitor with `track_claim`'s book-keeping when the same pid both
+  # holds and waits — see `drop_waits_for_pid/2` for the symmetric
+  # cleanup).
+  defp enqueue_waiter(state, holder, conflicting_id, path, range, scope) do
+    token = make_ref()
+    state = ensure_waiter_monitor(state, holder)
+
+    entry = %{
+      token: token,
+      holder: holder,
+      path: path,
+      range: range,
+      scope: scope
+    }
+
+    queue = Map.get(state.wait_queue, conflicting_id, [])
+
+    state = %{
+      state
+      | wait_queue: Map.put(state.wait_queue, conflicting_id, queue ++ [entry]),
+        wait_index: Map.put(state.wait_index, token, conflicting_id),
+        waiter_monitors:
+          Map.update(
+            state.waiter_monitors,
+            holder,
+            [token],
+            fn tokens -> [token | tokens] end
+          )
+    }
+
+    {token, state}
+  end
+
+  # Make sure we monitor `holder`. If it's already in `holders`
+  # (because the same pid holds claims) we're already monitoring; in
+  # that case the `track_claim` path's `:ref` is reused and we don't
+  # need to create a second monitor. The `holders` book-keeping owns
+  # the lifecycle of that ref.
+  defp ensure_waiter_monitor(state, holder) do
+    cond do
+      Map.has_key?(state.waiter_monitors, holder) -> state
+      Map.has_key?(state.holders, holder) -> state
+      true -> %{state | holders: state.holders, waiter_monitors: state.waiter_monitors}
+    end
+    |> ensure_holder_monitor(holder)
+  end
+
+  # Add a holder entry with no claims (just so we monitor the pid).
+  # If the pid already has an entry, no-op. The MapSet stays empty
+  # until `track_claim` adds the first claim_id.
+  defp ensure_holder_monitor(state, holder) do
+    case Map.get(state.holders, holder) do
+      nil ->
+        ref = Process.monitor(holder)
+        new_holder = %{ref: ref, claim_ids: MapSet.new()}
+        %{state | holders: Map.put(state.holders, holder, new_holder)}
+
+      _ ->
+        state
+    end
+  end
+
+  # Remove a wait entry by token. Idempotent — unknown / already-
+  # consumed tokens are no-ops.
+  defp do_cancel_wait(token, state) do
+    case Map.pop(state.wait_index, token) do
+      {nil, _} ->
+        state
+
+      {conflicting_id, wait_index} ->
+        queue =
+          state.wait_queue
+          |> Map.get(conflicting_id, [])
+          |> Enum.reject(fn entry -> entry.token == token end)
+
+        wait_queue =
+          if queue == [] do
+            Map.delete(state.wait_queue, conflicting_id)
+          else
+            Map.put(state.wait_queue, conflicting_id, queue)
+          end
+
+        %{state | wait_queue: wait_queue, wait_index: wait_index}
+        |> drop_waiter_monitor_for_token(token)
+    end
+  end
+
+  # Pop the token from `waiter_monitors[pid]`. If the pid has no
+  # remaining waits AND no remaining claims, demonitor and drop.
+  defp drop_waiter_monitor_for_token(state, token) do
+    case find_waiter_pid(state.waiter_monitors, token) do
+      nil ->
+        state
+
+      pid ->
+        remaining = state.waiter_monitors |> Map.get(pid, []) |> List.delete(token)
+
+        waiter_monitors =
+          if remaining == [] do
+            Map.delete(state.waiter_monitors, pid)
+          else
+            Map.put(state.waiter_monitors, pid, remaining)
+          end
+
+        state = %{state | waiter_monitors: waiter_monitors}
+        maybe_demonitor_pure_waiter(state, pid, remaining)
+    end
+  end
+
+  defp find_waiter_pid(monitors, token) do
+    Enum.find_value(monitors, fn {pid, tokens} ->
+      if token in tokens, do: pid
+    end)
+  end
+
+  # If the pid has no remaining waits AND its `holders` entry is
+  # empty (no claims), demonitor and drop. Pids that hold claims keep
+  # their monitor alive for the holder-DOWN bulk-release path.
+  defp maybe_demonitor_pure_waiter(state, pid, []) do
+    case Map.get(state.holders, pid) do
+      %{claim_ids: ids, ref: ref} ->
+        if MapSet.size(ids) == 0 do
+          Process.demonitor(ref, [:flush])
+          %{state | holders: Map.delete(state.holders, pid)}
+        else
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp maybe_demonitor_pure_waiter(state, _pid, _remaining), do: state
+
+  # Drop every wait entry owned by `pid`. Called from the DOWN
+  # handler — the waiter is gone, no point retrying their claims.
+  defp drop_waits_for_pid(pid, state) do
+    case Map.pop(state.waiter_monitors, pid) do
+      {nil, _} ->
+        state
+
+      {tokens, waiter_monitors} ->
+        {wait_queue, wait_index} =
+          Enum.reduce(tokens, {state.wait_queue, state.wait_index}, &drop_token/2)
+
+        %{
+          state
+          | wait_queue: wait_queue,
+            wait_index: wait_index,
+            waiter_monitors: waiter_monitors
+        }
+    end
+  end
+
+  defp drop_token(token, {wait_queue, wait_index}) do
+    case Map.pop(wait_index, token) do
+      {nil, wait_index} ->
+        {wait_queue, wait_index}
+
+      {conflicting_id, wait_index} ->
+        {drop_token_from_queue(wait_queue, conflicting_id, token), wait_index}
+    end
+  end
+
+  defp drop_token_from_queue(wait_queue, conflicting_id, token) do
+    queue =
+      wait_queue
+      |> Map.get(conflicting_id, [])
+      |> Enum.reject(fn entry -> entry.token == token end)
+
+    if queue == [] do
+      Map.delete(wait_queue, conflicting_id)
+    else
+      Map.put(wait_queue, conflicting_id, queue)
+    end
+  end
+
+  # Release fired for `claim_id` — retry every waiter that was queued
+  # against it, in registration order. Successful retries notify the
+  # waiter and stop; conflicts re-queue against the new conflicting
+  # claim under the same token.
+  defp wake_waiters_for_claim(claim_id, state) do
+    case Map.pop(state.wait_queue, claim_id) do
+      {nil, _} ->
+        state
+
+      {entries, wait_queue} ->
+        state = %{state | wait_queue: wait_queue}
+        Enum.reduce(entries, state, &retry_waiter/2)
+    end
+  end
+
+  defp retry_waiter(entry, state) do
+    case ra_command(
+           {:claim_namespace_byte_range, entry.path, entry.range, entry.scope, entry.holder}
+         ) do
+      {:ok, new_claim_id} ->
+        send(entry.holder, {:byte_range_acquired, entry.token, new_claim_id})
+        state = consume_wait_index(state, entry.token, entry.holder)
+        track_claim(state, entry.holder, new_claim_id)
+
+      {:error, :conflict, new_conflicting_id} ->
+        # Re-queue under the same token against the fresh conflict.
+        new_queue = Map.get(state.wait_queue, new_conflicting_id, [])
+
+        %{
+          state
+          | wait_queue: Map.put(state.wait_queue, new_conflicting_id, new_queue ++ [entry]),
+            wait_index: Map.put(state.wait_index, entry.token, new_conflicting_id)
+        }
+
+      {:error, reason} ->
+        Logger.warning(
+          "Wait-queue retry failed token=#{inspect(entry.token)} reason=#{inspect(reason)}"
+        )
+
+        send(entry.holder, {:byte_range_wait_error, entry.token, reason})
+        consume_wait_index(state, entry.token, entry.holder)
+    end
+  end
+
+  # Drop the entry from `wait_index` + `waiter_monitors` after a
+  # successful acquire or a permanent error. Mirror of
+  # `drop_waiter_monitor_for_token/2` but takes the holder pid
+  # directly to skip the lookup.
+  defp consume_wait_index(state, token, pid) do
+    state = %{state | wait_index: Map.delete(state.wait_index, token)}
+    remaining = state.waiter_monitors |> Map.get(pid, []) |> List.delete(token)
+
+    waiter_monitors =
+      if remaining == [] do
+        Map.delete(state.waiter_monitors, pid)
+      else
+        Map.put(state.waiter_monitors, pid, remaining)
+      end
+
+    state = %{state | waiter_monitors: waiter_monitors}
+    maybe_demonitor_pure_waiter(state, pid, remaining)
+  end
+
+  # Telemetry attachment fires on every Ra apply of a release event,
+  # which means every replica's coordinator gets the wake signal —
+  # cross-node release propagation comes for free. The handler casts
+  # back to the coordinator pid so queue work happens in this
+  # process's context (no concurrent state mutation from a telemetry
+  # callback). Bulk-release (`release_namespace_claims_for_holder`)
+  # broadcasts one message per released id.
+  defp attach_release_telemetry(coordinator_pid) do
+    handler_id = "namespace-coordinator-wait-queue-#{:erlang.pid_to_list(coordinator_pid)}"
+
+    :telemetry.attach_many(
+      handler_id,
+      [
+        [:neonfs, :ra, :command, :release_namespace_claim],
+        [:neonfs, :ra, :command, :release_namespace_claims_for_holder]
+      ],
+      &__MODULE__.__release_telemetry_handler__/4,
+      coordinator_pid
+    )
+  end
+
+  @doc false
+  def __release_telemetry_handler__(
+        [:neonfs, :ra, :command, :release_namespace_claim],
+        _measurements,
+        %{claim_id: claim_id},
+        coordinator_pid
+      ) do
+    send(coordinator_pid, {:released_claim_id, claim_id})
+  end
+
+  def __release_telemetry_handler__(
+        [:neonfs, :ra, :command, :release_namespace_claims_for_holder],
+        _measurements,
+        %{released_claim_ids: ids},
+        coordinator_pid
+      ) do
+    for id <- ids, do: send(coordinator_pid, {:released_claim_id, id})
+  end
+
+  def __release_telemetry_handler__(_, _, _, _), do: :ok
 
   defp track_claim(state, holder, claim_id) do
     {ref, claim_ids} =

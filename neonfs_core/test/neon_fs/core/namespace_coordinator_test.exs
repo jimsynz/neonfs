@@ -899,6 +899,262 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     end
   end
 
+  describe "claim_byte_range_wait/4 (#679)" do
+    test "no conflict: returns {:ok, claim_id} like the non-blocking variant",
+         %{server: server} do
+      assert {:ok, "ns-claim-" <> _} =
+               NamespaceCoordinator.claim_byte_range_wait(server, "/file", {0, 100}, :exclusive)
+    end
+
+    test "conflict: returns {:wait, token} and signals on holder release",
+         %{server: server} do
+      parent = self()
+
+      holder_a =
+        spawn(fn ->
+          {:ok, id} =
+            NamespaceCoordinator.claim_byte_range_for(
+              server,
+              "/file",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          send(parent, {:held, id})
+
+          receive do
+            :release ->
+              :ok = NamespaceCoordinator.release(server, id)
+          end
+        end)
+
+      assert_receive {:held, held_id}, 1_000
+
+      # Waiter is the test process — it'll receive the signal.
+      assert {:wait, token} =
+               NamespaceCoordinator.claim_byte_range_wait_for(
+                 server,
+                 "/file",
+                 {50, 100},
+                 :exclusive,
+                 self()
+               )
+
+      send(holder_a, :release)
+
+      assert_receive {:byte_range_acquired, ^token, claim_id}, 1_000
+      refute claim_id == held_id
+
+      :ok = NamespaceCoordinator.release(server, claim_id)
+    end
+
+    test "FIFO ordering: first waiter wakes first", %{server: server} do
+      parent = self()
+
+      holder =
+        spawn(fn ->
+          {:ok, id} =
+            NamespaceCoordinator.claim_byte_range_for(
+              server,
+              "/fifo",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          send(parent, :held)
+
+          receive do
+            :release ->
+              :ok = NamespaceCoordinator.release(server, id)
+          end
+        end)
+
+      assert_receive :held, 1_000
+
+      # Two waiters — A then B. The first to register should win
+      # the retry race when the holder releases.
+      task_a =
+        Task.async(fn ->
+          {:wait, token} =
+            NamespaceCoordinator.claim_byte_range_wait_for(
+              server,
+              "/fifo",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          receive do
+            {:byte_range_acquired, ^token, claim_id} ->
+              {:a_won, claim_id}
+          after
+            2_000 -> :a_timed_out
+          end
+        end)
+
+      Process.sleep(50)
+
+      task_b =
+        Task.async(fn ->
+          {:wait, token} =
+            NamespaceCoordinator.claim_byte_range_wait_for(
+              server,
+              "/fifo",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          receive do
+            {:byte_range_acquired, ^token, claim_id} ->
+              {:b_won, claim_id}
+          after
+            2_000 -> :b_timed_out
+          end
+        end)
+
+      Process.sleep(50)
+      send(holder, :release)
+
+      result_a = Task.await(task_a, 3_000)
+      assert match?({:a_won, _}, result_a)
+
+      # Release A's lock so B can proceed.
+      {:a_won, a_claim} = result_a
+      :ok = NamespaceCoordinator.release(server, a_claim)
+
+      result_b = Task.await(task_b, 3_000)
+      assert match?({:b_won, _}, result_b)
+
+      {:b_won, b_claim} = result_b
+      :ok = NamespaceCoordinator.release(server, b_claim)
+    end
+  end
+
+  describe "cancel_wait/2 (#679)" do
+    test "cancelling a queued waiter prevents the signal from firing",
+         %{server: server} do
+      parent = self()
+
+      holder =
+        spawn(fn ->
+          {:ok, id} =
+            NamespaceCoordinator.claim_byte_range_for(
+              server,
+              "/cancel",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          send(parent, :held)
+
+          receive do
+            :release ->
+              :ok = NamespaceCoordinator.release(server, id)
+          end
+        end)
+
+      assert_receive :held, 1_000
+
+      assert {:wait, token} =
+               NamespaceCoordinator.claim_byte_range_wait_for(
+                 server,
+                 "/cancel",
+                 {0, 100},
+                 :exclusive,
+                 self()
+               )
+
+      :ok = NamespaceCoordinator.cancel_wait(server, token)
+      send(holder, :release)
+
+      refute_receive {:byte_range_acquired, ^token, _}, 200
+    end
+
+    test "cancelling an unknown / already-fired token is a no-op",
+         %{server: server} do
+      assert :ok = NamespaceCoordinator.cancel_wait(server, make_ref())
+    end
+  end
+
+  describe "wait queue and waiter death (#679)" do
+    test "waiter pid death drops the wait entry without firing a signal",
+         %{server: server} do
+      parent = self()
+
+      holder =
+        spawn(fn ->
+          {:ok, id} =
+            NamespaceCoordinator.claim_byte_range_for(
+              server,
+              "/dead-waiter",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          send(parent, :held)
+
+          receive do
+            :release ->
+              :ok = NamespaceCoordinator.release(server, id)
+          end
+        end)
+
+      assert_receive :held, 1_000
+
+      waiter =
+        spawn(fn ->
+          {:wait, _token} =
+            NamespaceCoordinator.claim_byte_range_wait_for(
+              server,
+              "/dead-waiter",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          send(parent, :waiter_queued)
+
+          receive do
+            :exit -> :ok
+          end
+        end)
+
+      assert_receive :waiter_queued, 1_000
+
+      ref = Process.monitor(waiter)
+      send(waiter, :exit)
+      assert_receive {:DOWN, ^ref, :process, ^waiter, _}, 1_000
+
+      # Coordinator processes the DOWN asynchronously; give it a tick.
+      :sys.get_state(server)
+
+      send(holder, :release)
+
+      # A new waiter on the same path should now succeed immediately.
+      assert :ok =
+               wait_until(fn ->
+                 case NamespaceCoordinator.claim_byte_range(
+                        server,
+                        "/dead-waiter",
+                        {0, 100},
+                        :exclusive
+                      ) do
+                   {:ok, claim_id} ->
+                     NamespaceCoordinator.release(server, claim_id)
+                     true
+
+                   _ ->
+                     false
+                 end
+               end)
+    end
+  end
+
   defp wait_until(fun, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 2_000)
     deadline = System.monotonic_time(:millisecond) + timeout
