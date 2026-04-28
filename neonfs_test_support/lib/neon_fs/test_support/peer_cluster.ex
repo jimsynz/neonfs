@@ -658,10 +658,72 @@ defmodule NeonFS.TestSupport.PeerCluster do
     # the shared CI runner now consistently exceeds it on the BEAM NFSv3
     # peer-cluster tests (#647). Bumped to 60s so a slow cold-start doesn't
     # masquerade as a real failure.
-    case :peer.call(peer, :application, :ensure_all_started, [app], 60_000) do
-      {:ok, _} -> :ok
-      {:error, reason} -> Logger.warning("Failed to start #{app} on #{node}: #{inspect(reason)}")
+    started_at = System.monotonic_time(:millisecond)
+
+    try do
+      case :peer.call(peer, :application, :ensure_all_started, [app], 60_000) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to start #{app} on #{node}: #{inspect(reason)}")
+      end
+    catch
+      kind, reason ->
+        # `:inet_async, :timeout` and similar distribution-layer exits
+        # are the canonical CI flake (#606 / #647). Capture diagnostic
+        # state on the *controller* before re-raising so the test log
+        # leaves a forensic trail — the next failure can be root-caused
+        # without needing a fresh repro. Cheap to capture; only fires
+        # on the failure path.
+        elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+        diagnostics = %{
+          peer_node: node,
+          app: app,
+          elapsed_ms: elapsed_ms,
+          kind: kind,
+          reason: inspect(reason),
+          controller_port_count: :erlang.system_info(:port_count),
+          controller_process_count: :erlang.system_info(:process_count),
+          controller_ets_count: length(:ets.all()),
+          controller_dist_buf_busy_limit: dist_buf_busy_limit(),
+          peer_node_alive: probe_peer(peer)
+        }
+
+        :telemetry.execute(
+          [:neonfs, :peer_cluster, :node, :start_failed],
+          %{elapsed_ms: elapsed_ms},
+          diagnostics
+        )
+
+        Logger.warning("Peer-cluster app start failed: #{inspect(diagnostics, pretty: true)}")
+
+        :erlang.raise(kind, reason, __STACKTRACE__)
     end
+  end
+
+  # Distribution-layer breadcrumb for the `:inet_async, :timeout`
+  # diagnostic dump — slow distribution buffers are one suspect for the
+  # peer-cluster startup flakes.
+  defp dist_buf_busy_limit do
+    case :erlang.system_info(:dist_buf_busy_limit) do
+      n when is_integer(n) -> n
+      _ -> :unknown
+    end
+  end
+
+  defp probe_peer(peer) do
+    # 200 ms cap — if the peer is healthy this returns instantly; if
+    # the controller-to-peer distribution channel is jammed (the
+    # `:inet_async` family of flakes), we want to record the fact
+    # rather than block the diagnostic dump itself.
+    case :peer.call(peer, :erlang, :system_info, [:port_count], 200) do
+      n when is_integer(n) -> %{reachable: true, port_count: n}
+      other -> %{reachable: true, response: inspect(other)}
+    end
+  catch
+    kind, reason -> %{reachable: false, error: inspect({kind, reason})}
   end
 
   defp build_peer_opts(node_name, cookie, data_dir, dist_port) do
