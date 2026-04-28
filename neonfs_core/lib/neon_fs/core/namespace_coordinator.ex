@@ -217,6 +217,68 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     GenServer.call(server, {:claims_for_path, path, :pinned})
   end
 
+  @typedoc """
+  POSIX byte-range: `{offset, length}`. `length == 0` is the POSIX
+  convention for "to end of file". Used by `claim_byte_range/4` and
+  `query_byte_range/4` (#673).
+  """
+  @type byte_range :: {non_neg_integer(), non_neg_integer()}
+
+  @doc """
+  Claim a POSIX byte-range advisory lock (#673). `range` is
+  `{offset, length}` (length 0 = to-EOF). `scope` is `:exclusive`
+  (write lock) or `:shared` (read lock).
+
+  Two byte-range claims on the same path conflict only when their
+  ranges overlap and at least one is `:exclusive`. Different paths
+  never conflict regardless of range. Byte-range claims do not
+  interact with `:path` / `:subtree` / `:create` / `:pinned` claims —
+  they live in a separate logical namespace.
+
+  Returns `{:ok, claim_id}` on success or `{:error, :conflict,
+  conflicting_claim_id}` when an overlapping incompatible claim
+  already exists. The blocking `SETLKW` variant is tracked in #679.
+  """
+  @spec claim_byte_range(GenServer.server(), String.t(), byte_range(), scope()) ::
+          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+  def claim_byte_range(server \\ __MODULE__, path, range, scope)
+      when is_binary(path) and scope in [:exclusive, :shared] do
+    claim_byte_range_for(server, path, range, scope, self())
+  end
+
+  @doc """
+  Same as `claim_byte_range/4` but lets the caller specify an
+  explicit holder pid. See `claim_path_for/4` for the cross-node
+  motivation.
+  """
+  @spec claim_byte_range_for(GenServer.server(), String.t(), byte_range(), scope(), pid()) ::
+          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+  def claim_byte_range_for(server \\ __MODULE__, path, range, scope, holder)
+      when is_binary(path) and scope in [:exclusive, :shared] and
+             is_pid(holder) and is_tuple(range) and tuple_size(range) == 2 do
+    GenServer.call(server, {:claim_byte_range, path, range, scope, holder})
+  end
+
+  @doc """
+  Non-blocking conflict probe for `GETLK` (#673). Returns
+  `{:ok, :unlocked}` when no conflicting byte-range claim covers
+  `range` at `scope`, or `{:ok, {:locked, holder, conflicting_range,
+  conflicting_scope}}` describing the first conflict found.
+
+  Reads are served locally from the Ra follower's state, so this is
+  cheap. Useful for `GETLK` which doesn't actually acquire a lock —
+  it just asks whether one *would* acquire if attempted.
+  """
+  @spec query_byte_range(GenServer.server(), String.t(), byte_range(), scope()) ::
+          {:ok, :unlocked}
+          | {:ok, {:locked, term(), byte_range(), scope()}}
+          | {:error, term()}
+  def query_byte_range(server \\ __MODULE__, path, range, scope)
+      when is_binary(path) and scope in [:exclusive, :shared] and
+             is_tuple(range) and tuple_size(range) == 2 do
+    GenServer.call(server, {:query_byte_range, path, range, scope})
+  end
+
   @doc """
   Atomically pin both paths of a cross-directory rename. The two paths
   are claimed `:exclusive :path` in a single Ra command, so a competing
@@ -363,6 +425,38 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     {:reply, result, state}
   end
 
+  def handle_call({:claim_byte_range, path, range, scope, holder}, _from, state) do
+    case ra_command({:claim_namespace_byte_range, path, range, scope, holder}) do
+      {:ok, claim_id} ->
+        {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :conflict, conflicting_id} ->
+        {:reply, {:error, :conflict, conflicting_id}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  def handle_call({:query_byte_range, path, range, scope}, _from, state) do
+    result =
+      try do
+        case RaSupervisor.local_query(
+               &MetadataStateMachine.list_namespace_claims_at(&1, path, :byte_range)
+             ) do
+          {:ok, claims} ->
+            {:ok, find_byte_range_conflict(claims, range, scope)}
+
+          {:error, _} = err ->
+            err
+        end
+      catch
+        :exit, _ -> {:error, :ra_not_available}
+      end
+
+    {:reply, result, state}
+  end
+
   def handle_call({:claim_rename, src, dst, holder}, _from, state) do
     case ra_command({:claim_namespace_rename, src, dst, holder}) do
       {:ok, {src_id, dst_id}} ->
@@ -433,6 +527,49 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   def handle_info(_msg, state), do: {:noreply, state}
 
   ## Internal
+
+  # Walk the byte-range claims at a path and find the first one that
+  # would conflict with `range` at `scope`. Returns `:unlocked` when
+  # nothing collides, or a `{:locked, holder, range, scope}` tuple
+  # describing the conflict — useful for `GETLK` replies that name
+  # the blocking lock.
+  defp find_byte_range_conflict(claims, range, scope) do
+    Enum.find_value(claims, :unlocked, fn
+      {_id,
+       %{
+         type: :byte_range,
+         range: existing_range,
+         scope: existing_scope,
+         holder: holder
+       }} ->
+        if scopes_conflict?(scope, existing_scope) and
+             ranges_overlap?(range, existing_range) do
+          {:locked, holder, existing_range, existing_scope}
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp scopes_conflict?(:exclusive, _), do: true
+  defp scopes_conflict?(_, :exclusive), do: true
+  defp scopes_conflict?(:shared, :shared), do: false
+
+  # `range_a` and `range_b` are `{offset, length}` pairs. POSIX
+  # convention: `length == 0` means "to EOF" — represented here by
+  # `:infinity`. Two ranges overlap when each one's start is strictly
+  # before the other's end. Adjacent but non-overlapping ranges (a..b,
+  # b..c) do not conflict.
+  defp ranges_overlap?({start_a, len_a}, {start_b, len_b}) do
+    end_a = if len_a == 0, do: :infinity, else: start_a + len_a
+    end_b = if len_b == 0, do: :infinity, else: start_b + len_b
+    range_lt?(start_a, end_b) and range_lt?(start_b, end_a)
+  end
+
+  defp range_lt?(_a, :infinity), do: true
+  defp range_lt?(:infinity, _b), do: false
+  defp range_lt?(a, b), do: a < b
 
   defp track_claim(state, holder, claim_id) do
     {ref, claim_ids} =

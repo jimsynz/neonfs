@@ -721,4 +721,200 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
                      200
     end
   end
+
+  describe "claim_byte_range/4 (#673)" do
+    test "returns a claim id on first claim", %{server: server} do
+      assert {:ok, "ns-claim-" <> _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+    end
+
+    test "two shared overlapping ranges coexist", %{server: server} do
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :shared)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {50, 100}, :shared)
+    end
+
+    test "exclusive blocks an overlapping exclusive on the same path",
+         %{server: server} do
+      assert {:ok, id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+
+      assert {:error, :conflict, ^id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {50, 100}, :exclusive)
+    end
+
+    test "exclusive blocks an overlapping shared", %{server: server} do
+      assert {:ok, id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+
+      assert {:error, :conflict, ^id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {50, 100}, :shared)
+    end
+
+    test "shared blocks an overlapping exclusive", %{server: server} do
+      assert {:ok, id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :shared)
+
+      assert {:error, :conflict, ^id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {50, 100}, :exclusive)
+    end
+
+    test "non-overlapping ranges never conflict", %{server: server} do
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {200, 100}, :exclusive)
+    end
+
+    test "adjacent ranges (touching but not overlapping) don't conflict",
+         %{server: server} do
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {100, 100}, :exclusive)
+    end
+
+    test "to-EOF (length=0) overlaps any range starting at or after offset",
+         %{server: server} do
+      assert {:ok, id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {100, 0}, :exclusive)
+
+      assert {:error, :conflict, ^id_a} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {200, 50}, :exclusive)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 50}, :exclusive)
+    end
+
+    test "different paths never conflict", %{server: server} do
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/a", {0, 100}, :exclusive)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/b", {0, 100}, :exclusive)
+    end
+
+    test "byte-range claim doesn't conflict with covering :path or :subtree",
+         %{server: server} do
+      assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/file", :exclusive)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+
+      assert {:ok, _} = NamespaceCoordinator.claim_subtree(server, "/dir", :exclusive)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(
+                 server,
+                 "/dir/file",
+                 {0, 100},
+                 :exclusive
+               )
+    end
+
+    test "release/2 frees a held byte-range claim", %{server: server} do
+      assert {:ok, id} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+
+      :ok = NamespaceCoordinator.release(server, id)
+
+      assert {:ok, _} =
+               NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+    end
+
+    test "claims are bulk-released when the holder dies", %{server: server} do
+      parent = self()
+
+      holder =
+        spawn(fn ->
+          {:ok, _id} =
+            NamespaceCoordinator.claim_byte_range_for(
+              server,
+              "/file",
+              {0, 100},
+              :exclusive,
+              self()
+            )
+
+          send(parent, :claimed)
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive :claimed, 1_000
+      ref = Process.monitor(holder)
+      send(holder, :stop)
+      assert_receive {:DOWN, ^ref, :process, ^holder, _}, 1_000
+
+      # Coordinator processes the DOWN asynchronously; poll briefly
+      # until the bulk release replicates.
+      :ok =
+        wait_until(fn ->
+          match?(
+            {:ok, _id},
+            NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+          )
+        end)
+    end
+  end
+
+  describe "query_byte_range/4 (#673)" do
+    test "returns :unlocked when no byte-range claim covers the range",
+         %{server: server} do
+      assert {:ok, :unlocked} =
+               NamespaceCoordinator.query_byte_range(server, "/file", {0, 100}, :exclusive)
+    end
+
+    test "returns the conflicting holder, range, and scope on collision",
+         %{server: server} do
+      {:ok, _id} =
+        NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
+
+      assert {:ok, {:locked, _holder, {0, 100}, :exclusive}} =
+               NamespaceCoordinator.query_byte_range(server, "/file", {50, 100}, :exclusive)
+    end
+
+    test "shared probe against a held shared claim returns :unlocked",
+         %{server: server} do
+      {:ok, _id} =
+        NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :shared)
+
+      assert {:ok, :unlocked} =
+               NamespaceCoordinator.query_byte_range(server, "/file", {50, 100}, :shared)
+    end
+
+    test "exclusive probe against a held shared returns the conflict",
+         %{server: server} do
+      {:ok, _id} =
+        NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :shared)
+
+      assert {:ok, {:locked, _holder, {0, 100}, :shared}} =
+               NamespaceCoordinator.query_byte_range(server, "/file", {50, 100}, :exclusive)
+    end
+  end
+
+  defp wait_until(fun, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 2_000)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_until(fun, deadline)
+  end
+
+  defp do_wait_until(fun, deadline) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) > deadline do
+        :timeout
+      else
+        Process.sleep(20)
+        do_wait_until(fun, deadline)
+      end
+    end
+  end
 end
