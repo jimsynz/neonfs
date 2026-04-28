@@ -352,6 +352,61 @@ defmodule FuseServer.Protocol.Request do
     @type t :: %__MODULE__{name: binary()}
   end
 
+  defmodule FileLock do
+    @moduledoc """
+    `fuse_file_lock` (24 bytes) — embedded in `GetLk` / `SetLk`
+    requests and the matching `GetLkReply`. `start` / `end` are
+    byte-range bounds (ignored for FLOCK semantics). `type` is one
+    of 0 (`F_RDLCK`) / 1 (`F_WRLCK`) / 2 (`F_UNLCK`). `pid` is the
+    requesting process id (kernel fills it for us; we echo it in
+    GetLk replies).
+    """
+    defstruct start: 0, end: 0, type: 0, pid: 0
+
+    @type t :: %__MODULE__{
+            start: non_neg_integer(),
+            end: non_neg_integer(),
+            type: non_neg_integer(),
+            pid: non_neg_integer()
+          }
+  end
+
+  defmodule GetLk do
+    @moduledoc """
+    FUSE_GETLK — `fuse_lk_in` (48 bytes). Probes for a conflicting
+    byte-range lock. `lk_flags & FUSE_LK_FLOCK` (= 1) is meaningless
+    for GETLK in POSIX terms — the kernel doesn't issue GETLK for
+    flock when `FUSE_FLOCK_LOCKS` is advertised; handlers fall back
+    to F_UNLCK if it ever does.
+    """
+    defstruct [:fh, :owner, :lk, :lk_flags]
+
+    @type t :: %__MODULE__{
+            fh: non_neg_integer(),
+            owner: non_neg_integer(),
+            lk: FileLock.t(),
+            lk_flags: non_neg_integer()
+          }
+  end
+
+  defmodule SetLk do
+    @moduledoc """
+    FUSE_SETLK / FUSE_SETLKW — `fuse_lk_in` (48 bytes). The
+    `lk_flags & FUSE_LK_FLOCK` (= 1) bit distinguishes whole-file
+    `flock(2)` semantics from POSIX byte-range `fcntl(F_SETLK)`
+    semantics. The same struct decodes both opcodes; the request
+    atom (`:setlk` vs `:setlkw`) tells the handler whether to block.
+    """
+    defstruct [:fh, :owner, :lk, :lk_flags]
+
+    @type t :: %__MODULE__{
+            fh: non_neg_integer(),
+            owner: non_neg_integer(),
+            lk: FileLock.t(),
+            lk_flags: non_neg_integer()
+          }
+  end
+
   @type t ::
           Init.t()
           | Destroy.t()
@@ -379,6 +434,8 @@ defmodule FuseServer.Protocol.Request do
           | GetXattr.t()
           | ListXattr.t()
           | RemoveXattr.t()
+          | GetLk.t()
+          | SetLk.t()
 
   @doc """
   Decode a body for the given opcode. Returns the populated struct or
@@ -603,7 +660,35 @@ defmodule FuseServer.Protocol.Request do
     end
   end
 
+  def decode(:getlk, body), do: decode_lk(body, GetLk)
+  def decode(:setlk, body), do: decode_lk(body, SetLk)
+  def decode(:setlkw, body), do: decode_lk(body, SetLk)
+
   def decode(_, _), do: {:error, :malformed_body}
+
+  defp decode_lk(
+         <<
+           fh::little-64,
+           owner::little-64,
+           start::little-64,
+           lk_end::little-64,
+           type::little-32,
+           pid::little-32,
+           lk_flags::little-32,
+           _padding::little-32
+         >>,
+         mod
+       ) do
+    {:ok,
+     struct(mod,
+       fh: fh,
+       owner: owner,
+       lk: %FileLock{start: start, end: lk_end, type: type, pid: pid},
+       lk_flags: lk_flags
+     )}
+  end
+
+  defp decode_lk(_, _), do: {:error, :malformed_body}
 
   # ——— Private helpers ————————————————————————————————————————————
 

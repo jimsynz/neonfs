@@ -72,13 +72,23 @@ defmodule NeonFS.FUSE.Session do
   @fuse_async_read 0x00000001
   @fuse_atomic_o_trunc 0x00000010
   @fuse_big_writes 0x00000020
+  # FUSE_FLOCK_LOCKS (1 << 10): kernel routes `flock(2)` system
+  # calls to us via SETLK / SETLKW with `lk_flags & FUSE_LK_FLOCK`.
+  # Without this bit advertised the kernel handles flock locally,
+  # which doesn't propagate to other FUSE peers — defeating the
+  # whole point of the DLM (#672). FUSE_POSIX_LOCKS (1 << 9) for
+  # byte-range fcntl locks stays off until #674.
+  @fuse_flock_locks 0x00000400
   @fuse_do_readdirplus 0x00002000
 
   @init_flags Bitwise.bor(
                 @fuse_async_read,
                 Bitwise.bor(
                   @fuse_atomic_o_trunc,
-                  Bitwise.bor(@fuse_big_writes, @fuse_do_readdirplus)
+                  Bitwise.bor(
+                    @fuse_big_writes,
+                    Bitwise.bor(@fuse_flock_locks, @fuse_do_readdirplus)
+                  )
                 )
               )
 
@@ -619,12 +629,63 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— End xattr opcodes ——————————————————————————————————————————
 
+  # ——— Lock opcodes (#672) ————————————————————————————————————————
+  #
+  # SETLK / SETLKW carry `fuse_lk_in` with `lk_flags & FUSE_LK_FLOCK`
+  # = 1 distinguishing flock from byte-range fcntl. We route by that
+  # bit:
+  #   - FLOCK set → forward to Handler's `flock` op (#672).
+  #   - FLOCK clear (byte-range fcntl) → reply ENOSYS until #674.
+  # GETLK is byte-range only (the kernel never sends GETLK with FLOCK
+  # set when FUSE_FLOCK_LOCKS is advertised) — reply ENOSYS for now.
+
+  defp handle_opcode(:setlk, header, %Request.SetLk{} = r, state) do
+    if Bitwise.band(r.lk_flags, 1) == 1 do
+      op = build_flock_op(header.nodeid, r, blocking: false)
+      enqueue(:setlk, header.unique, op, state)
+    else
+      write_frame(state.fd, Protocol.encode_error(header.unique, -38))
+      emit_opcode_telemetry(:setlk, :error, state)
+      state
+    end
+  end
+
+  defp handle_opcode(:setlkw, header, %Request.SetLk{} = r, state) do
+    if Bitwise.band(r.lk_flags, 1) == 1 do
+      op = build_flock_op(header.nodeid, r, blocking: true)
+      enqueue(:setlkw, header.unique, op, state)
+    else
+      write_frame(state.fd, Protocol.encode_error(header.unique, -38))
+      emit_opcode_telemetry(:setlkw, :error, state)
+      state
+    end
+  end
+
+  defp handle_opcode(:getlk, header, %Request.GetLk{}, state) do
+    write_frame(state.fd, Protocol.encode_error(header.unique, -38))
+    emit_opcode_telemetry(:getlk, :error, state)
+    state
+  end
+
+  # ——— End lock opcodes ———————————————————————————————————————————
+
   # Catch-all for opcodes we accept in the codec but don't route here
-  # (locks, INTERRUPT — not yet handled by this session, tracked under
+  # (INTERRUPT — not yet handled by this session, tracked under
   # the remaining sub-issues of #280).
   defp handle_opcode(_other, header, _req, state) do
     write_frame(state.fd, Protocol.encode_error(header.unique, -38))
     state
+  end
+
+  defp build_flock_op(nodeid, %Request.SetLk{} = r, opts) do
+    {"flock",
+     %{
+       "ino" => nodeid,
+       "fh" => r.fh,
+       "owner" => r.owner,
+       "type" => r.lk.type,
+       "blocking" => Keyword.fetch!(opts, :blocking)
+     }}
   end
 
   defp reply_empty_ok(state, kernel_unique, opcode) do
@@ -719,7 +780,7 @@ defmodule NeonFS.FUSE.Session do
   end
 
   defp handle_handler_reply(kind, kernel_unique, {"ok", _}, state)
-       when kind in [:unlink, :rmdir, :rename, :setxattr, :removexattr] do
+       when kind in [:unlink, :rmdir, :rename, :setxattr, :removexattr, :setlk, :setlkw] do
     write_reply(state.fd, kernel_unique, %Response.Empty{}, 0)
     emit_opcode_telemetry(kind, :ok, state)
     state
