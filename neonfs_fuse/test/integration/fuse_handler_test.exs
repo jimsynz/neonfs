@@ -1365,7 +1365,62 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
     end
 
-    test "blocking SETLKW byte-range returns EAGAIN until #681 lands",
+    test "blocking SETLKW byte-range waits until the conflicting holder releases (#681)",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 1,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      # Conflicting blocking F_WRLCK from a different owner — should
+      # park in the wait queue, not return immediately.
+      send(
+        handler,
+        {:fuse_op, 2,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 2,
+            "type" => 1,
+            "start" => 50,
+            "end" => 199,
+            "blocking" => true
+          }}}
+      )
+
+      refute_receive {:fuse_op_complete, 2, _}, 200
+
+      # Release owner 1's lock; the queued waiter wakes and acquires.
+      send(
+        handler,
+        {:fuse_op, 3,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 2,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+    end
+
+    test "INTERRUPT cancels a blocked byte-range SETLKW; caller receives EINTR (#681)",
          %{handler: handler, inode: ino} do
       send(
         handler,
@@ -1397,7 +1452,28 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+      refute_receive {:fuse_op_complete, 2, _}, 200
+
+      GenServer.cast(handler, {:fuse_interrupt, 2})
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 4}}}, 5_000
+
+      # Releasing owner 1 doesn't wake any further waiter.
+      send(
+        handler,
+        {:fuse_op, 3,
+         {"byte_range",
+          %{
+            "ino" => ino,
+            "owner" => 1,
+            "type" => 2,
+            "start" => 0,
+            "end" => 99,
+            "blocking" => false
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      refute_receive {:fuse_op_complete, 2, _}, 200
     end
 
     test "GETLK on a free range returns F_UNLCK", %{handler: handler, inode: ino} do

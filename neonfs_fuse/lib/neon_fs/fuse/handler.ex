@@ -134,6 +134,11 @@ defmodule NeonFS.FUSE.Handler do
        # flock key for `flock_table` book-keeping on success, and
        # the requested scope.
        pending_flocks: %{},
+       # Pending blocking byte-range fcntl waits (#681). Same shape
+       # as `pending_flocks` but the `:key` is the four-tuple used
+       # by `byte_range_table` (`{lock_owner, ino, start, end}`)
+       # and on acquire we write back to that table instead.
+       pending_byte_range: %{},
        coordinator_module:
          Keyword.get(opts, :coordinator_module, NeonFS.Core.NamespaceCoordinator),
        test_notify: Keyword.get(opts, :test_notify)
@@ -212,19 +217,57 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  # FUSE INTERRUPT cancellation (#675). Session has resolved the
-  # kernel's `target_unique` to our `request_id`. Find the matching
-  # parked request, drop the wait-queue entry on the coordinator,
-  # and reply `EINTR` to the original caller. If nothing matches
-  # (the request already replied, or wasn't blockable to begin
-  # with) this is a silent no-op per the FUSE protocol.
+  # Wake-up from `claim_byte_range_wait_for/5` (#681). Mirror of
+  # `:path_acquired` but writes to `byte_range_table` instead of
+  # `flock_table`.
+  def handle_info({:byte_range_acquired, wait_token, claim_id}, state) do
+    case Map.pop(state.pending_byte_range, wait_token) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {%{request_id: request_id, key: key}, pending_byte_range} ->
+        new_table = Map.put(state.byte_range_table, key, claim_id)
+
+        if state.test_notify do
+          send(state.test_notify, {:fuse_op_complete, request_id, {"ok", %{}}})
+        end
+
+        {:noreply, %{state | pending_byte_range: pending_byte_range, byte_range_table: new_table}}
+    end
+  end
+
+  def handle_info({:byte_range_wait_error, wait_token, reason}, state) do
+    case Map.pop(state.pending_byte_range, wait_token) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {%{request_id: request_id}, pending_byte_range} ->
+        Logger.warning("Blocking byte-range fcntl retry failed reason=#{inspect(reason)}")
+
+        if state.test_notify do
+          send(
+            state.test_notify,
+            {:fuse_op_complete, request_id, {"error", %{"errno" => errno(:eio)}}}
+          )
+        end
+
+        {:noreply, %{state | pending_byte_range: pending_byte_range}}
+    end
+  end
+
+  # FUSE INTERRUPT cancellation (#675, extended #681). Session has
+  # resolved the kernel's `target_unique` to our `request_id`. Look
+  # for a parked request in either `pending_flocks` (#677) or
+  # `pending_byte_range` (#681); cancel the wait-queue entry on the
+  # coordinator, reply `EINTR`, drop the local entry. Unknown
+  # targets are silent no-ops per the FUSE protocol.
   @impl true
   def handle_cast({:fuse_interrupt, target_request_id}, state) do
-    case find_pending_flock(state.pending_flocks, target_request_id) do
+    case find_pending_lock(state, target_request_id) do
       nil ->
         {:noreply, state}
 
-      {wait_token, %{request_id: request_id}} ->
+      {kind, wait_token, %{request_id: request_id}} ->
         _ =
           core_call(state.coordinator_module, :cancel_wait, [
             state.coordinator_module,
@@ -238,13 +281,32 @@ defmodule NeonFS.FUSE.Handler do
           )
         end
 
-        {:noreply, %{state | pending_flocks: Map.delete(state.pending_flocks, wait_token)}}
+        {:noreply, drop_pending(state, kind, wait_token)}
     end
   end
 
-  defp find_pending_flock(pending_flocks, target_request_id) do
-    Enum.find(pending_flocks, fn {_token, %{request_id: rid}} -> rid == target_request_id end)
+  defp find_pending_lock(state, target_request_id) do
+    case find_pending_in(state.pending_flocks, target_request_id) do
+      nil ->
+        case find_pending_in(state.pending_byte_range, target_request_id) do
+          nil -> nil
+          {token, entry} -> {:byte_range, token, entry}
+        end
+
+      {token, entry} ->
+        {:flock, token, entry}
+    end
   end
+
+  defp find_pending_in(pending, target_request_id) do
+    Enum.find(pending, fn {_token, %{request_id: rid}} -> rid == target_request_id end)
+  end
+
+  defp drop_pending(state, :flock, token),
+    do: %{state | pending_flocks: Map.delete(state.pending_flocks, token)}
+
+  defp drop_pending(state, :byte_range, token),
+    do: %{state | pending_byte_range: Map.delete(state.pending_byte_range, token)}
 
   ## Private Helpers
 
@@ -425,6 +487,7 @@ defmodule NeonFS.FUSE.Handler do
     start_offset = params["start"]
     end_offset = params["end"]
     blocking = params["blocking"] || false
+    request_id = params["request_id"]
     key = {owner, ino, start_offset, end_offset}
 
     case {type, Map.fetch(state.byte_range_table, key)} do
@@ -449,6 +512,7 @@ defmodule NeonFS.FUSE.Handler do
           start_offset,
           end_offset,
           blocking,
+          request_id,
           %{state | byte_range_table: cleared_table}
         )
 
@@ -460,6 +524,7 @@ defmodule NeonFS.FUSE.Handler do
           start_offset,
           end_offset,
           blocking,
+          request_id,
           state
         )
 
@@ -548,32 +613,81 @@ defmodule NeonFS.FUSE.Handler do
   # other coordination primitives.
   defp flock_path_for(path), do: "flock:" <> path
 
-  defp try_acquire_byte_range(ino, key, scope, start_offset, end_offset, _blocking, state) do
+  # Non-blocking SETLK: try once, return EAGAIN on conflict.
+  # Blocking SETLKW: register a wait via `claim_byte_range_wait_for`
+  # — `{:ok, claim_id}` finishes like the non-blocking path,
+  # `{:wait, wait_token}` parks the request in `pending_byte_range`
+  # and returns `:deferred`. Mirror of `try_acquire_flock/6` — see
+  # there for the deferred-reply pattern's broader context.
+  defp try_acquire_byte_range(
+         ino,
+         key,
+         scope,
+         start_offset,
+         end_offset,
+         blocking,
+         request_id,
+         state
+       ) do
     case resolve_inode(ino, state) do
       {:ok, {_volume_id, path}} ->
         fcntl_path = byte_range_path_for(path)
         range = wire_range_to_coordinator_range(start_offset, end_offset)
 
-        case core_call(state.coordinator_module, :claim_byte_range_for, [
-               state.coordinator_module,
-               fcntl_path,
-               range,
-               scope,
-               self()
-             ]) do
-          {:ok, claim_id} ->
-            new_table = Map.put(state.byte_range_table, key, claim_id)
-            {{"ok", %{}}, %{state | byte_range_table: new_table}}
-
-          {:error, :conflict, _} ->
-            {{"error", %{"errno" => errno(:eagain)}}, state}
-
-          _ ->
-            {{"error", %{"errno" => errno(:eio)}}, state}
+        if blocking do
+          try_acquire_byte_range_blocking(fcntl_path, range, key, scope, request_id, state)
+        else
+          try_acquire_byte_range_nonblocking(fcntl_path, range, key, scope, state)
         end
 
       {:error, _} ->
         {{"error", %{"errno" => errno(:enoent)}}, state}
+    end
+  end
+
+  defp try_acquire_byte_range_nonblocking(fcntl_path, range, key, scope, state) do
+    case core_call(state.coordinator_module, :claim_byte_range_for, [
+           state.coordinator_module,
+           fcntl_path,
+           range,
+           scope,
+           self()
+         ]) do
+      {:ok, claim_id} ->
+        new_table = Map.put(state.byte_range_table, key, claim_id)
+        {{"ok", %{}}, %{state | byte_range_table: new_table}}
+
+      {:error, :conflict, _} ->
+        {{"error", %{"errno" => errno(:eagain)}}, state}
+
+      _ ->
+        {{"error", %{"errno" => errno(:eio)}}, state}
+    end
+  end
+
+  defp try_acquire_byte_range_blocking(fcntl_path, range, key, scope, request_id, state) do
+    case core_call(state.coordinator_module, :claim_byte_range_wait_for, [
+           state.coordinator_module,
+           fcntl_path,
+           range,
+           scope,
+           self()
+         ]) do
+      {:ok, claim_id} ->
+        new_table = Map.put(state.byte_range_table, key, claim_id)
+        {{"ok", %{}}, %{state | byte_range_table: new_table}}
+
+      {:wait, wait_token} ->
+        pending =
+          Map.put(state.pending_byte_range, wait_token, %{
+            request_id: request_id,
+            key: key
+          })
+
+        {:deferred, %{state | pending_byte_range: pending}}
+
+      _ ->
+        {{"error", %{"errno" => errno(:eio)}}, state}
     end
   end
 
