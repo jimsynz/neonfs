@@ -112,6 +112,13 @@ defmodule NeonFS.FUSE.Handler do
        # claim layer.
        fh_table: %{},
        next_fh: 1,
+       # FLOCK lock state (#672). Maps `{lock_owner, ino}` to the
+       # `claim_id` this Handler holds in the namespace coordinator.
+       # Each entry represents one acquired flock; removed on
+       # `LOCK_UN` or RELEASE. Cross-mount enforcement comes for
+       # free — the underlying `claim_path` claim is Ra-replicated
+       # and visible to every peer's coordinator.
+       flock_table: %{},
        coordinator_module:
          Keyword.get(opts, :coordinator_module, NeonFS.Core.NamespaceCoordinator),
        test_notify: Keyword.get(opts, :test_notify)
@@ -156,6 +163,7 @@ defmodule NeonFS.FUSE.Handler do
   defp dispatch_operation({"open", _params} = op, state), do: handle_stateful(op, state)
   defp dispatch_operation({"create", _params} = op, state), do: handle_stateful(op, state)
   defp dispatch_operation({"release", _params} = op, state), do: handle_stateful(op, state)
+  defp dispatch_operation({"flock", _params} = op, state), do: handle_stateful(op, state)
 
   defp dispatch_operation(operation, state) do
     {handle_operation(operation, state), state}
@@ -247,6 +255,97 @@ defmodule NeonFS.FUSE.Handler do
         {{"ok", %{}}, %{state | fh_table: table}}
     end
   end
+
+  # FLOCK whole-file advisory lock dispatch (#672). Routed here from
+  # `dispatch_operation` because each acquire/release mutates
+  # `state.flock_table`. Cross-mount enforcement is provided by
+  # `claim_path` — every peer's coordinator sees the same Ra-replicated
+  # claim set, so two FUSE peers contending for `LOCK_EX` on the same
+  # path serialise correctly.
+  #
+  # Blocking SETLKW (without `LOCK_NB`) returns `EAGAIN` in this
+  # slice — the wait/wake primitive lives in the byte-range work
+  # tracked under #673 and is wired through to flock by #677. The
+  # POSIX rule is: a flock acquired via `flock(2)` is released either
+  # by `LOCK_UN` or by the kernel when the last fd referring to the
+  # file's open-file-description closes. Both paths come through us
+  # as a `LOCK_UN` here. If userspace exits without a matching
+  # LOCK_UN, the namespace coordinator's holder-DOWN bulk release
+  # handles cleanup when the Handler GenServer (this pid) dies —
+  # the same safety net the `:pinned` path relies on.
+  defp handle_stateful({"flock", params}, state) do
+    ino = params["ino"]
+    owner = params["owner"]
+    type = params["type"]
+    blocking = params["blocking"] || false
+    key = {owner, ino}
+
+    case {type, Map.fetch(state.flock_table, key)} do
+      {2, :error} ->
+        {{"ok", %{}}, state}
+
+      {2, {:ok, {claim_id, _scope}}} ->
+        release_pin_quietly(state.coordinator_module, claim_id)
+        {{"ok", %{}}, %{state | flock_table: Map.delete(state.flock_table, key)}}
+
+      {t, {:ok, {old_claim_id, held_scope}}} when t in [0, 1] ->
+        requested = flock_scope(t)
+
+        if requested == held_scope do
+          {{"ok", %{}}, state}
+        else
+          release_pin_quietly(state.coordinator_module, old_claim_id)
+          cleared = %{state | flock_table: Map.delete(state.flock_table, key)}
+          try_acquire_flock(ino, key, requested, blocking, cleared)
+        end
+
+      {t, :error} when t in [0, 1] ->
+        try_acquire_flock(ino, key, flock_scope(t), blocking, state)
+
+      _ ->
+        {{"error", %{"errno" => errno(:eio)}}, state}
+    end
+  end
+
+  # Try to acquire a flock claim. On conflict return EAGAIN — that
+  # covers both the non-blocking SETLK case (correct) and the
+  # blocking SETLKW case (interim, will become a deferred reply
+  # once #677's wait queue lands). EAGAIN is what `flock -n` tests
+  # for, so the non-blocking acceptance criteria are met.
+  defp try_acquire_flock(ino, {_owner, _ino} = key, scope, _blocking, state) do
+    case resolve_inode(ino, state) do
+      {:ok, {_volume_id, path}} ->
+        flock_path = flock_path_for(path)
+
+        case core_call(state.coordinator_module, :claim_path_for, [
+               state.coordinator_module,
+               flock_path,
+               scope,
+               self()
+             ]) do
+          {:ok, claim_id} ->
+            new_table = Map.put(state.flock_table, key, {claim_id, scope})
+            {{"ok", %{}}, %{state | flock_table: new_table}}
+
+          {:error, :conflict, _conflicting_id} ->
+            {{"error", %{"errno" => errno(:eagain)}}, state}
+
+          _other ->
+            {{"error", %{"errno" => errno(:eio)}}, state}
+        end
+
+      {:error, _} ->
+        {{"error", %{"errno" => errno(:enoent)}}, state}
+    end
+  end
+
+  defp flock_scope(0), do: :shared
+  defp flock_scope(1), do: :exclusive
+
+  # FLOCK is whole-file granularity. Prefix the path so flock claims
+  # never collide with the path/subtree/pinned namespaces used by
+  # other coordination primitives.
+  defp flock_path_for(path), do: "flock:" <> path
 
   # Directories don't need a `:pinned` claim — there is no
   # unlink-while-open semantics for them (rmdir on a non-empty dir
@@ -1273,6 +1372,7 @@ defmodule NeonFS.FUSE.Handler do
   defp errno(:eperm), do: 1
   defp errno(:enoent), do: 2
   defp errno(:eio), do: 5
+  defp errno(:eagain), do: 11
   defp errno(:eacces), do: 13
   defp errno(:eexist), do: 17
   defp errno(:exdev), do: 18

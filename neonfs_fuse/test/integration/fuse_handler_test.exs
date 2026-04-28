@@ -964,4 +964,170 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, 5_000
     end
   end
+
+  describe "flock operations (#672)" do
+    setup %{handler: handler, volume_id: volume_id, cluster: cluster} do
+      name = "flock-#{System.unique_integer([:positive])}.txt"
+      path = "/" <> name
+
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+        volume_id,
+        path,
+        0,
+        "x"
+      ])
+
+      send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
+
+      {:ok, inode} = InodeTable.get_inode(volume_id, path)
+      {:ok, inode: inode}
+    end
+
+    test "LOCK_SH (type=0) acquires a shared flock", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 0, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+    end
+
+    test "LOCK_EX (type=1) acquires an exclusive flock", %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+    end
+
+    test "two LOCK_EX from different lock_owners conflict — second returns EAGAIN",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+    end
+
+    test "two LOCK_SH from different lock_owners coexist (POSIX shared)",
+         %{handler: handler, inode: ino} do
+      for {req_id, owner} <- [{1, 1}, {2, 2}] do
+        send(
+          handler,
+          {:fuse_op, req_id,
+           {"flock", %{"ino" => ino, "owner" => owner, "type" => 0, "blocking" => false}}}
+        )
+
+        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, 5_000
+      end
+    end
+
+    test "LOCK_EX while LOCK_SH held by a different owner returns EAGAIN",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 0, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+    end
+
+    test "LOCK_UN releases an acquired lock and the next LOCK_EX succeeds",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 3, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+    end
+
+    test "LOCK_UN with no held lock is an idempotent no-op",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+    end
+
+    test "re-acquiring same scope is idempotent",
+         %{handler: handler, inode: ino} do
+      for req_id <- [1, 2] do
+        send(
+          handler,
+          {:fuse_op, req_id,
+           {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
+        )
+
+        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, 5_000
+      end
+    end
+
+    test "LOCK_SH → LOCK_EX upgrade by same owner succeeds",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 0, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+    end
+
+    test "blocking SETLKW returns EAGAIN until #677 lands the wait queue",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => true}}}
+      )
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+    end
+  end
 end

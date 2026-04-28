@@ -208,6 +208,24 @@ defmodule FuseServer.Protocol.Response do
     @type t :: %__MODULE__{data: binary()}
   end
 
+  defmodule GetLkReply do
+    @moduledoc """
+    `fuse_lk_out` (24 bytes) — reply to GETLK. Carries a
+    `fuse_file_lock` describing either the conflicting lock that
+    would have been blocked, or `F_UNLCK` (type=2) when the range
+    is free. SETLK / SETLKW success replies use `Empty` instead
+    (header-only).
+    """
+    defstruct start: 0, end: 0, type: 2, pid: 0
+
+    @type t :: %__MODULE__{
+            start: non_neg_integer(),
+            end: non_neg_integer(),
+            type: non_neg_integer(),
+            pid: non_neg_integer()
+          }
+  end
+
   @type t ::
           Empty.t()
           | Init.t()
@@ -222,6 +240,7 @@ defmodule FuseServer.Protocol.Response do
           | ReaddirPlus.t()
           | XattrSize.t()
           | XattrData.t()
+          | GetLkReply.t()
 
   @doc "Encode the response body (excluding `fuse_out_header`)."
   @spec encode(t()) :: iodata()
@@ -293,6 +312,10 @@ defmodule FuseServer.Protocol.Response do
     do: <<size::little-32, 0::little-32>>
 
   def encode(%XattrData{data: data}) when is_binary(data), do: data
+
+  def encode(%GetLkReply{} = lk) do
+    <<lk.start::little-64, lk.end::little-64, lk.type::little-32, lk.pid::little-32>>
+  end
 
   # ——— Private helpers ————————————————————————————————————————————
 

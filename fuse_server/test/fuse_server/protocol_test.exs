@@ -47,12 +47,11 @@ defmodule FuseServer.ProtocolTest do
 
   describe "decode_request/1 dispatch" do
     test "returns :unknown_opcode for opcodes outside the codec's scope" do
-      # Opcode 31 (FUSE_LK / SETLK) is not currently supported — locks
-      # are out of scope of #671 (the xattrs slice) and tracked under
-      # the remaining sub-issues of #280.
-      header = build_header(opcode: 31, len: 40 + 16)
-      body = <<0::little-64, 0::little-32, 0::little-32>>
-      assert {:error, {:unknown_opcode, 31}} = Protocol.decode_request(header <> body)
+      # Opcode 36 (FUSE_INTERRUPT) is not currently supported —
+      # tracked under #675.
+      header = build_header(opcode: 36, len: 40 + 8)
+      body = <<0::little-64>>
+      assert {:error, {:unknown_opcode, 36}} = Protocol.decode_request(header <> body)
     end
 
     test "returns {:ok, opcode, header, request} on a valid INIT frame" do
@@ -387,6 +386,91 @@ defmodule FuseServer.ProtocolTest do
       assert FuseServer.Protocol.atom_to_opcode(:getxattr) == 22
       assert FuseServer.Protocol.atom_to_opcode(:listxattr) == 23
       assert FuseServer.Protocol.atom_to_opcode(:removexattr) == 24
+    end
+
+    test "lock opcode numbers match Linux fuse.h v7.31" do
+      assert FuseServer.Protocol.atom_to_opcode(:getlk) == 31
+      assert FuseServer.Protocol.atom_to_opcode(:setlk) == 32
+      assert FuseServer.Protocol.atom_to_opcode(:setlkw) == 33
+    end
+
+    test "setlk decodes fuse_lk_in (48 bytes) with FLOCK lk_flags" do
+      body = <<
+        # fh
+        7::little-64,
+        # owner
+        0xDEAD_BEEF::little-64,
+        # lk.start
+        0::little-64,
+        # lk.end
+        0::little-64,
+        # lk.type — F_WRLCK
+        1::little-32,
+        # lk.pid
+        4321::little-32,
+        # lk_flags — FUSE_LK_FLOCK
+        1::little-32,
+        # padding
+        0::little-32
+      >>
+
+      assert {:ok,
+              %Request.SetLk{
+                fh: 7,
+                owner: 0xDEAD_BEEF,
+                lk: %Request.FileLock{start: 0, end: 0, type: 1, pid: 4321},
+                lk_flags: 1
+              }} = Request.decode(:setlk, body)
+    end
+
+    test "setlkw shares the SetLk struct shape" do
+      body = <<
+        7::little-64,
+        0::little-64,
+        0::little-64,
+        0::little-64,
+        0::little-32,
+        1::little-32,
+        1::little-32,
+        0::little-32
+      >>
+
+      assert {:ok, %Request.SetLk{lk_flags: 1, lk: %Request.FileLock{type: 0}}} =
+               Request.decode(:setlkw, body)
+    end
+
+    test "getlk decodes the same wire layout into GetLk" do
+      body = <<
+        9::little-64,
+        0::little-64,
+        100::little-64,
+        200::little-64,
+        1::little-32,
+        9999::little-32,
+        0::little-32,
+        0::little-32
+      >>
+
+      assert {:ok,
+              %Request.GetLk{
+                fh: 9,
+                lk: %Request.FileLock{start: 100, end: 200, type: 1, pid: 9999},
+                lk_flags: 0
+              }} = Request.decode(:getlk, body)
+    end
+
+    test "lock decoder rejects bodies that aren't 48 bytes" do
+      assert {:error, :malformed_body} = Request.decode(:setlk, <<>>)
+      assert {:error, :malformed_body} = Request.decode(:setlk, <<0::little-64>>)
+    end
+  end
+
+  describe "GetLkReply encoder (#672)" do
+    test "encodes fuse_lk_out as 24 bytes (start + end + type + pid)" do
+      reply = %Response.GetLkReply{start: 100, end: 200, type: 2, pid: 4321}
+
+      assert <<100::little-64, 200::little-64, 2::little-32, 4321::little-32>> ==
+               :erlang.iolist_to_binary(Response.encode(reply))
     end
   end
 
