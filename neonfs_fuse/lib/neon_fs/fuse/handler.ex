@@ -212,6 +212,40 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # FUSE INTERRUPT cancellation (#675). Session has resolved the
+  # kernel's `target_unique` to our `request_id`. Find the matching
+  # parked request, drop the wait-queue entry on the coordinator,
+  # and reply `EINTR` to the original caller. If nothing matches
+  # (the request already replied, or wasn't blockable to begin
+  # with) this is a silent no-op per the FUSE protocol.
+  @impl true
+  def handle_cast({:fuse_interrupt, target_request_id}, state) do
+    case find_pending_flock(state.pending_flocks, target_request_id) do
+      nil ->
+        {:noreply, state}
+
+      {wait_token, %{request_id: request_id}} ->
+        _ =
+          core_call(state.coordinator_module, :cancel_wait, [
+            state.coordinator_module,
+            wait_token
+          ])
+
+        if state.test_notify do
+          send(
+            state.test_notify,
+            {:fuse_op_complete, request_id, {"error", %{"errno" => errno(:eintr)}}}
+          )
+        end
+
+        {:noreply, %{state | pending_flocks: Map.delete(state.pending_flocks, wait_token)}}
+    end
+  end
+
+  defp find_pending_flock(pending_flocks, target_request_id) do
+    Enum.find(pending_flocks, fn {_token, %{request_id: rid}} -> rid == target_request_id end)
+  end
+
   ## Private Helpers
 
   defp timed_handle_operation(operation, state) do
@@ -1651,6 +1685,7 @@ defmodule NeonFS.FUSE.Handler do
   @dialyzer {:nowarn_function, errno: 1}
   defp errno(:eperm), do: 1
   defp errno(:enoent), do: 2
+  defp errno(:eintr), do: 4
   defp errno(:eio), do: 5
   defp errno(:eagain), do: 11
   defp errno(:eacces), do: 13

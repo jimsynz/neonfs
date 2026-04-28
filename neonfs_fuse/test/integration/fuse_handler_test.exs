@@ -1142,6 +1142,51 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
       assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
     end
+
+    test "INTERRUPT cancels a blocked SETLKW; original caller receives EINTR (#675)",
+         %{handler: handler, inode: ino} do
+      send(
+        handler,
+        {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+
+      # Block on conflicting LOCK_EX. Confirm it parks (no immediate
+      # reply) before the interrupt fires.
+      send(
+        handler,
+        {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => true}}}
+      )
+
+      refute_receive {:fuse_op_complete, 2, _}, 200
+
+      # Session would normally resolve the kernel target_unique to
+      # request_id 2 and cast `{:fuse_interrupt, 2}` to the
+      # Handler. Drive the cast directly.
+      GenServer.cast(handler, {:fuse_interrupt, 2})
+
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 4}}}, 5_000
+
+      # Releasing owner 1's lock should not wake any further
+      # waiters — the cancelled wait was the only queued one.
+      send(
+        handler,
+        {:fuse_op, 3, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      refute_receive {:fuse_op_complete, 2, _}, 200
+    end
+
+    test "INTERRUPT for an unknown request_id is a silent no-op (#675)",
+         %{handler: handler} do
+      # No pending flock — INTERRUPT should drop silently and the
+      # Handler should remain alive.
+      GenServer.cast(handler, {:fuse_interrupt, 99_999})
+      :sys.get_state(handler)
+      assert Process.alive?(handler)
+    end
   end
 
   describe "byte-range fcntl operations (#674)" do
