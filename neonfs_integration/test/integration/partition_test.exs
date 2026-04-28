@@ -109,8 +109,12 @@ defmodule NeonFS.Integration.PartitionTest do
       # races between `wait_for_partition_healed` returning and the RPC
       # layer's connection state actually catching up. Re-trigger sync
       # on every poll iteration so a missed pass doesn't fail the
-      # whole test (#564).
-      assert_eventually timeout: 60_000 do
+      # whole test (#564). The 120s budget covers the case where the
+      # first post-heal `sync_now` call walks the full ring with one or
+      # two segments stalling on the per-RPC 10s timeout while the dist
+      # channel restabilises — the GenServer is single-threaded, so
+      # subsequent triggers queue behind it (#606).
+      assert_eventually timeout: 120_000 do
         trigger_anti_entropy(cluster, [:node3])
         read_matches?(cluster, :node3, path, "partition data")
       end
@@ -233,8 +237,8 @@ defmodule NeonFS.Integration.PartitionTest do
   defp assert_node_has_files(cluster, node_name, paths_and_contents) do
     # Same re-trigger-on-poll pattern as the single-file test: a
     # single `sync_now` pass isn't always enough after partition
-    # heal (#564).
-    assert_eventually timeout: 60_000 do
+    # heal (#564). Same 120s budget as the single-file path (#606).
+    assert_eventually timeout: 120_000 do
       trigger_anti_entropy(cluster, [node_name])
 
       Enum.all?(paths_and_contents, fn {path, content} ->
