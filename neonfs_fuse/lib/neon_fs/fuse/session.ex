@@ -72,12 +72,17 @@ defmodule NeonFS.FUSE.Session do
   @fuse_async_read 0x00000001
   @fuse_atomic_o_trunc 0x00000010
   @fuse_big_writes 0x00000020
+  # FUSE_POSIX_LOCKS (1 << 9): kernel routes `fcntl(2)` byte-range
+  # locks to us via SETLK / SETLKW / GETLK with
+  # `lk_flags & FUSE_LK_FLOCK == 0`. Without this advertised the
+  # kernel handles fcntl locks locally per-mount, defeating the
+  # cross-mount DLM enforcement (#674).
+  @fuse_posix_locks 0x00000200
   # FUSE_FLOCK_LOCKS (1 << 10): kernel routes `flock(2)` system
   # calls to us via SETLK / SETLKW with `lk_flags & FUSE_LK_FLOCK`.
   # Without this bit advertised the kernel handles flock locally,
   # which doesn't propagate to other FUSE peers — defeating the
-  # whole point of the DLM (#672). FUSE_POSIX_LOCKS (1 << 9) for
-  # byte-range fcntl locks stays off until #674.
+  # whole point of the DLM (#672).
   @fuse_flock_locks 0x00000400
   @fuse_do_readdirplus 0x00002000
 
@@ -87,7 +92,10 @@ defmodule NeonFS.FUSE.Session do
                   @fuse_atomic_o_trunc,
                   Bitwise.bor(
                     @fuse_big_writes,
-                    Bitwise.bor(@fuse_flock_locks, @fuse_do_readdirplus)
+                    Bitwise.bor(
+                      @fuse_posix_locks,
+                      Bitwise.bor(@fuse_flock_locks, @fuse_do_readdirplus)
+                    )
                   )
                 )
               )
@@ -644,9 +652,8 @@ defmodule NeonFS.FUSE.Session do
       op = build_flock_op(header.nodeid, r, blocking: false)
       enqueue(:setlk, header.unique, op, state)
     else
-      write_frame(state.fd, Protocol.encode_error(header.unique, -38))
-      emit_opcode_telemetry(:setlk, :error, state)
-      state
+      op = build_byte_range_op(header.nodeid, r, blocking: false)
+      enqueue(:setlk, header.unique, op, state)
     end
   end
 
@@ -655,16 +662,25 @@ defmodule NeonFS.FUSE.Session do
       op = build_flock_op(header.nodeid, r, blocking: true)
       enqueue(:setlkw, header.unique, op, state)
     else
-      write_frame(state.fd, Protocol.encode_error(header.unique, -38))
-      emit_opcode_telemetry(:setlkw, :error, state)
-      state
+      op = build_byte_range_op(header.nodeid, r, blocking: true)
+      enqueue(:setlkw, header.unique, op, state)
     end
   end
 
-  defp handle_opcode(:getlk, header, %Request.GetLk{}, state) do
-    write_frame(state.fd, Protocol.encode_error(header.unique, -38))
-    emit_opcode_telemetry(:getlk, :error, state)
-    state
+  defp handle_opcode(:getlk, header, %Request.GetLk{} = r, state) do
+    op =
+      {"byte_range_query",
+       %{
+         "ino" => header.nodeid,
+         "fh" => r.fh,
+         "owner" => r.owner,
+         "type" => r.lk.type,
+         "start" => r.lk.start,
+         "end" => r.lk.end,
+         "pid" => r.lk.pid
+       }}
+
+    enqueue(:getlk, header.unique, op, state)
   end
 
   # ——— End lock opcodes ———————————————————————————————————————————
@@ -684,6 +700,19 @@ defmodule NeonFS.FUSE.Session do
        "fh" => r.fh,
        "owner" => r.owner,
        "type" => r.lk.type,
+       "blocking" => Keyword.fetch!(opts, :blocking)
+     }}
+  end
+
+  defp build_byte_range_op(nodeid, %Request.SetLk{} = r, opts) do
+    {"byte_range",
+     %{
+       "ino" => nodeid,
+       "fh" => r.fh,
+       "owner" => r.owner,
+       "type" => r.lk.type,
+       "start" => r.lk.start,
+       "end" => r.lk.end,
        "blocking" => Keyword.fetch!(opts, :blocking)
      }}
   end
@@ -783,6 +812,35 @@ defmodule NeonFS.FUSE.Session do
        when kind in [:unlink, :rmdir, :rename, :setxattr, :removexattr, :setlk, :setlkw] do
     write_reply(state.fd, kernel_unique, %Response.Empty{}, 0)
     emit_opcode_telemetry(kind, :ok, state)
+    state
+  end
+
+  # GETLK reply (#674). The Handler returns either a `getlk_unlocked`
+  # tag (no conflict — kernel sees F_UNLCK) or a `getlk_conflict` tag
+  # carrying the conflict's range and scope.
+  defp handle_handler_reply(:getlk, kernel_unique, {"getlk_unlocked", payload}, state) do
+    reply = %Response.GetLkReply{
+      start: payload["start"] || 0,
+      end: payload["end"] || 0,
+      type: 2,
+      pid: payload["pid"] || 0
+    }
+
+    write_reply(state.fd, kernel_unique, reply, 0)
+    emit_opcode_telemetry(:getlk, :ok, state)
+    state
+  end
+
+  defp handle_handler_reply(:getlk, kernel_unique, {"getlk_conflict", payload}, state) do
+    reply = %Response.GetLkReply{
+      start: payload["start"],
+      end: payload["end"],
+      type: payload["type"],
+      pid: payload["pid"] || 0
+    }
+
+    write_reply(state.fd, kernel_unique, reply, 0)
+    emit_opcode_telemetry(:getlk, :ok, state)
     state
   end
 

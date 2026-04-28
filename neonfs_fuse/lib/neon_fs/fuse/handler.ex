@@ -119,6 +119,14 @@ defmodule NeonFS.FUSE.Handler do
        # free — the underlying `claim_path` claim is Ra-replicated
        # and visible to every peer's coordinator.
        flock_table: %{},
+       # POSIX byte-range lock state (#674). Maps
+       # `{lock_owner, ino, start, end}` to the byte-range `claim_id`
+       # held in the namespace coordinator. Range bounds are taken
+       # straight from the FUSE wire request — `end == 0` means
+       # "to EOF" per POSIX. Range-splitting on partial F_UNLCK is
+       # out of scope for this slice; UNLCK only matches an exact
+       # lock.
+       byte_range_table: %{},
        coordinator_module:
          Keyword.get(opts, :coordinator_module, NeonFS.Core.NamespaceCoordinator),
        test_notify: Keyword.get(opts, :test_notify)
@@ -164,6 +172,7 @@ defmodule NeonFS.FUSE.Handler do
   defp dispatch_operation({"create", _params} = op, state), do: handle_stateful(op, state)
   defp dispatch_operation({"release", _params} = op, state), do: handle_stateful(op, state)
   defp dispatch_operation({"flock", _params} = op, state), do: handle_stateful(op, state)
+  defp dispatch_operation({"byte_range", _params} = op, state), do: handle_stateful(op, state)
 
   defp dispatch_operation(operation, state) do
     {handle_operation(operation, state), state}
@@ -307,6 +316,65 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # POSIX byte-range fcntl lock dispatch (#674). Routed here from
+  # `dispatch_operation` because each acquire/release mutates
+  # `state.byte_range_table`. Cross-mount enforcement is provided by
+  # `claim_byte_range` — every peer's coordinator sees the same
+  # Ra-replicated claim set.
+  #
+  # Blocking SETLKW (`LOCK_NB` cleared, `blocking == true`) returns
+  # `EAGAIN` in this slice — the wait/wake primitive is built in
+  # #679 and wired through to byte-range fcntl by #681.
+  defp handle_stateful({"byte_range", params}, state) do
+    ino = params["ino"]
+    owner = params["owner"]
+    type = params["type"]
+    start_offset = params["start"]
+    end_offset = params["end"]
+    blocking = params["blocking"] || false
+    key = {owner, ino, start_offset, end_offset}
+
+    case {type, Map.fetch(state.byte_range_table, key)} do
+      {2, :error} ->
+        {{"ok", %{}}, state}
+
+      {2, {:ok, claim_id}} ->
+        release_pin_quietly(state.coordinator_module, claim_id)
+        {{"ok", %{}}, %{state | byte_range_table: Map.delete(state.byte_range_table, key)}}
+
+      {t, {:ok, _claim_id}} when t in [0, 1] ->
+        # Existing lock at the same exact range — POSIX says the new
+        # call replaces the old. Release and re-acquire with the new
+        # type. (Range-splitting / coalescing is out of scope.)
+        {old_id, cleared_table} = Map.pop(state.byte_range_table, key)
+        release_pin_quietly(state.coordinator_module, old_id)
+
+        try_acquire_byte_range(
+          ino,
+          key,
+          byte_range_scope(t),
+          start_offset,
+          end_offset,
+          blocking,
+          %{state | byte_range_table: cleared_table}
+        )
+
+      {t, :error} when t in [0, 1] ->
+        try_acquire_byte_range(
+          ino,
+          key,
+          byte_range_scope(t),
+          start_offset,
+          end_offset,
+          blocking,
+          state
+        )
+
+      _ ->
+        {{"error", %{"errno" => errno(:eio)}}, state}
+    end
+  end
+
   # Try to acquire a flock claim. On conflict return EAGAIN — that
   # covers both the non-blocking SETLK case (correct) and the
   # blocking SETLKW case (interim, will become a deferred reply
@@ -346,6 +414,56 @@ defmodule NeonFS.FUSE.Handler do
   # never collide with the path/subtree/pinned namespaces used by
   # other coordination primitives.
   defp flock_path_for(path), do: "flock:" <> path
+
+  defp try_acquire_byte_range(ino, key, scope, start_offset, end_offset, _blocking, state) do
+    case resolve_inode(ino, state) do
+      {:ok, {_volume_id, path}} ->
+        fcntl_path = byte_range_path_for(path)
+        range = wire_range_to_coordinator_range(start_offset, end_offset)
+
+        case core_call(state.coordinator_module, :claim_byte_range_for, [
+               state.coordinator_module,
+               fcntl_path,
+               range,
+               scope,
+               self()
+             ]) do
+          {:ok, claim_id} ->
+            new_table = Map.put(state.byte_range_table, key, claim_id)
+            {{"ok", %{}}, %{state | byte_range_table: new_table}}
+
+          {:error, :conflict, _} ->
+            {{"error", %{"errno" => errno(:eagain)}}, state}
+
+          _ ->
+            {{"error", %{"errno" => errno(:eio)}}, state}
+        end
+
+      {:error, _} ->
+        {{"error", %{"errno" => errno(:enoent)}}, state}
+    end
+  end
+
+  defp byte_range_scope(0), do: :shared
+  defp byte_range_scope(1), do: :exclusive
+
+  # POSIX byte-range claims live under their own path namespace so
+  # they never collide with the FLOCK or path/subtree/pinned
+  # namespaces.
+  defp byte_range_path_for(path), do: "fcntl:" <> path
+
+  # FUSE's `fuse_file_lock.end` is the inclusive last byte; "to EOF"
+  # is signalled by `end = 0xFFFF_FFFF_FFFF_FFFF`. The coordinator
+  # uses `{offset, length}` with length 0 = to-EOF. Translate.
+  defp wire_range_to_coordinator_range(start_offset, end_offset)
+       when end_offset == 0xFFFF_FFFF_FFFF_FFFF or end_offset == -1 do
+    {start_offset, 0}
+  end
+
+  defp wire_range_to_coordinator_range(start_offset, end_offset) do
+    # `end` is inclusive on the wire; convert to exclusive length.
+    {start_offset, end_offset - start_offset + 1}
+  end
 
   # Directories don't need a `:pinned` claim — there is no
   # unlink-while-open semantics for them (rmdir on a non-empty dir
@@ -900,11 +1018,74 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # POSIX `GETLK` byte-range probe (#674). Read-only — calls
+  # `query_byte_range/4` and formats the reply for Session.
+  # Returns either `getlk_unlocked` (no conflict) or `getlk_conflict`
+  # carrying the conflicting range / scope / holder pid info that
+  # the kernel marshals back to userspace.
+  defp handle_operation({"byte_range_query", params}, state) do
+    ino = params["ino"]
+    type = params["type"]
+    start_offset = params["start"]
+    end_offset = params["end"]
+
+    with {:ok, {_volume_id, path}} <- resolve_inode(ino, state),
+         scope when is_atom(scope) <- byte_range_query_scope(type),
+         range <- wire_range_to_coordinator_range(start_offset, end_offset),
+         {:ok, query_result} <-
+           core_call(state.coordinator_module, :query_byte_range, [
+             state.coordinator_module,
+             byte_range_path_for(path),
+             range,
+             scope
+           ]) do
+      build_getlk_reply(query_result, start_offset, end_offset)
+    else
+      {:error, :not_found} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, %{class: :not_found}} ->
+        {"error", %{"errno" => errno(:enoent)}}
+
+      _ ->
+        {"error", %{"errno" => errno(:eio)}}
+    end
+  end
+
   # Handle unknown operations
   defp handle_operation({operation, _params}, _state) do
     Logger.warning("Unknown FUSE operation", operation: operation)
     {"error", %{"errno" => errno(:enosys)}}
   end
+
+  # `GETLK`'s `lk.type` is the type the caller WOULD acquire — the
+  # query asks "would this acquire conflict?". F_RDLCK probes for
+  # writers; F_WRLCK probes for any holder.
+  defp byte_range_query_scope(0), do: :shared
+  defp byte_range_query_scope(1), do: :exclusive
+  defp byte_range_query_scope(_), do: :error
+
+  # Translate the coordinator's `query_byte_range` result back into
+  # the wire-format pieces Session needs to encode `fuse_lk_out`.
+  defp build_getlk_reply(:unlocked, req_start, req_end) do
+    {"getlk_unlocked", %{"start" => req_start, "end" => req_end, "pid" => 0}}
+  end
+
+  defp build_getlk_reply({:locked, _holder, {start_offset, length}, scope}, _req_start, _req_end) do
+    end_offset =
+      if length == 0, do: 0xFFFF_FFFF_FFFF_FFFF, else: start_offset + length - 1
+
+    {"getlk_conflict",
+     %{
+       "start" => start_offset,
+       "end" => end_offset,
+       "type" => scope_to_lk_type(scope),
+       "pid" => 0
+     }}
+  end
+
+  defp scope_to_lk_type(:shared), do: 0
+  defp scope_to_lk_type(:exclusive), do: 1
 
   defp validate_xattr_namespace(<<"user.", _::binary>>), do: :ok
   defp validate_xattr_namespace(_), do: {:error, :eperm}
