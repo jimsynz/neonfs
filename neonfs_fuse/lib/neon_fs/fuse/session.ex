@@ -175,12 +175,16 @@ defmodule NeonFS.FUSE.Session do
     {handler, started?} =
       case Keyword.get(opts, :handler) do
         nil ->
-          {:ok, pid} =
-            Handler.start_link(
+          handler_opts =
+            [
               volume: volume,
               volume_name: Keyword.get(opts, :volume_name, volume),
               test_notify: self()
-            )
+            ]
+            |> maybe_put(:cache_table, Keyword.get(opts, :cache_table))
+            |> maybe_put(:atime_mode, Keyword.get(opts, :atime_mode))
+
+          {:ok, pid} = Handler.start_link(handler_opts)
 
           Process.link(pid)
           {pid, true}
@@ -284,6 +288,9 @@ defmodule NeonFS.FUSE.Session do
   end
 
   ## Frame dispatch
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp dispatch_frame(frame, state) do
     case Protocol.decode_request(frame) do
