@@ -18,5 +18,6 @@ Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 # moved their integration tests in via the same pattern under #582.
 
 Mimic.copy(NeonFS.Client.ChunkReader)
+Mimic.copy(NeonFS.Client.Router)
 
 ExUnit.start(capture_log: true)
