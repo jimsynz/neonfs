@@ -127,6 +127,13 @@ defmodule NeonFS.FUSE.Handler do
        # out of scope for this slice; UNLCK only matches an exact
        # lock.
        byte_range_table: %{},
+       # Pending blocking-flock waits (#677). Maps the
+       # `NamespaceCoordinator` `wait_token` to the deferred-reply
+       # context: the FUSE Session's `request_id` (so we can route
+       # the eventual `{:fuse_op_complete, ...}` back), the original
+       # flock key for `flock_table` book-keeping on success, and
+       # the requested scope.
+       pending_flocks: %{},
        coordinator_module:
          Keyword.get(opts, :coordinator_module, NeonFS.Core.NamespaceCoordinator),
        test_notify: Keyword.get(opts, :test_notify)
@@ -134,24 +141,75 @@ defmodule NeonFS.FUSE.Handler do
   end
 
   @impl true
-  def handle_info({:fuse_op, request_id, operation}, state) do
+  def handle_info({:fuse_op, request_id, {op_name, params}}, state) do
     Logger.metadata(request_id: :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
 
-    Logger.debug("Received FUSE operation", operation: inspect(operation))
+    Logger.debug("Received FUSE operation", operation: op_name)
 
+    operation = {op_name, Map.put(params, "request_id", request_id)}
     {reply, new_state, duration} = timed_handle_operation(operation, state)
 
     emit_fuse_telemetry(operation, reply, duration, state.volume)
 
-    # Reply path: the Session GenServer subscribes via `:test_notify`
-    # and writes the encoded reply back to the FUSE fd. The legacy
-    # NIF stack (#279, deleted in #662) used `Native.reply_fuse_operation`
-    # via `state.fuse_server`; that field is gone now.
-    if state.test_notify do
-      send(state.test_notify, {:fuse_op_complete, request_id, reply})
-    end
+    case reply do
+      :deferred ->
+        # Op (e.g. blocking flock SETLKW) parked the request in
+        # `pending_flocks`; the eventual wait-queue ack will trigger
+        # the reply via `handle_info({:path_acquired, ...})`. Skip
+        # the normal auto-send here.
+        {:noreply, new_state}
 
-    {:noreply, new_state}
+      _ ->
+        # Reply path: the Session GenServer subscribes via
+        # `:test_notify` and writes the encoded reply back to the
+        # FUSE fd.
+        if state.test_notify do
+          send(state.test_notify, {:fuse_op_complete, request_id, reply})
+        end
+
+        {:noreply, new_state}
+    end
+  end
+
+  # Wake-up from `NamespaceCoordinator.claim_path_wait_for/4` — the
+  # conflicting flock holder released and our queued claim now holds
+  # the lock. Send the deferred FUSE reply and update local
+  # `flock_table` to reflect the acquisition.
+  def handle_info({:path_acquired, wait_token, claim_id}, state) do
+    case Map.pop(state.pending_flocks, wait_token) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {%{request_id: request_id, key: key, scope: scope}, pending_flocks} ->
+        new_table = Map.put(state.flock_table, key, {claim_id, scope})
+
+        if state.test_notify do
+          send(state.test_notify, {:fuse_op_complete, request_id, {"ok", %{}}})
+        end
+
+        {:noreply, %{state | pending_flocks: pending_flocks, flock_table: new_table}}
+    end
+  end
+
+  # Wake-up error from the wait queue — Ra unreachable or similar.
+  # Reply EIO so the kernel surfaces the failure rather than hanging.
+  def handle_info({:path_wait_error, wait_token, reason}, state) do
+    case Map.pop(state.pending_flocks, wait_token) do
+      {nil, _} ->
+        {:noreply, state}
+
+      {%{request_id: request_id}, pending_flocks} ->
+        Logger.warning("Blocking flock retry failed reason=#{inspect(reason)}")
+
+        if state.test_notify do
+          send(
+            state.test_notify,
+            {:fuse_op_complete, request_id, {"error", %{"errno" => errno(:eio)}}}
+          )
+        end
+
+        {:noreply, %{state | pending_flocks: pending_flocks}}
+    end
   end
 
   ## Private Helpers
@@ -287,6 +345,7 @@ defmodule NeonFS.FUSE.Handler do
     owner = params["owner"]
     type = params["type"]
     blocking = params["blocking"] || false
+    request_id = params["request_id"]
     key = {owner, ino}
 
     case {type, Map.fetch(state.flock_table, key)} do
@@ -305,11 +364,11 @@ defmodule NeonFS.FUSE.Handler do
         else
           release_pin_quietly(state.coordinator_module, old_claim_id)
           cleared = %{state | flock_table: Map.delete(state.flock_table, key)}
-          try_acquire_flock(ino, key, requested, blocking, cleared)
+          try_acquire_flock(ino, key, requested, blocking, request_id, cleared)
         end
 
       {t, :error} when t in [0, 1] ->
-        try_acquire_flock(ino, key, flock_scope(t), blocking, state)
+        try_acquire_flock(ino, key, flock_scope(t), blocking, request_id, state)
 
       _ ->
         {{"error", %{"errno" => errno(:eio)}}, state}
@@ -380,30 +439,70 @@ defmodule NeonFS.FUSE.Handler do
   # blocking SETLKW case (interim, will become a deferred reply
   # once #677's wait queue lands). EAGAIN is what `flock -n` tests
   # for, so the non-blocking acceptance criteria are met.
-  defp try_acquire_flock(ino, {_owner, _ino} = key, scope, _blocking, state) do
+  # Non-blocking SETLK: try once, return EAGAIN on conflict.
+  # Blocking SETLKW: register a wait via `claim_path_wait_for` —
+  # on `{:ok, claim_id}` finish synchronously like the non-blocking
+  # path; on `{:wait, wait_token}` park the request in
+  # `pending_flocks` and return `:deferred` so the FUSE reply is
+  # delayed until the wait queue signals.
+  defp try_acquire_flock(ino, {_owner, _ino} = key, scope, blocking, request_id, state) do
     case resolve_inode(ino, state) do
       {:ok, {_volume_id, path}} ->
         flock_path = flock_path_for(path)
 
-        case core_call(state.coordinator_module, :claim_path_for, [
-               state.coordinator_module,
-               flock_path,
-               scope,
-               self()
-             ]) do
-          {:ok, claim_id} ->
-            new_table = Map.put(state.flock_table, key, {claim_id, scope})
-            {{"ok", %{}}, %{state | flock_table: new_table}}
-
-          {:error, :conflict, _conflicting_id} ->
-            {{"error", %{"errno" => errno(:eagain)}}, state}
-
-          _other ->
-            {{"error", %{"errno" => errno(:eio)}}, state}
+        if blocking do
+          try_acquire_flock_blocking(flock_path, key, scope, request_id, state)
+        else
+          try_acquire_flock_nonblocking(flock_path, key, scope, state)
         end
 
       {:error, _} ->
         {{"error", %{"errno" => errno(:enoent)}}, state}
+    end
+  end
+
+  defp try_acquire_flock_nonblocking(flock_path, key, scope, state) do
+    case core_call(state.coordinator_module, :claim_path_for, [
+           state.coordinator_module,
+           flock_path,
+           scope,
+           self()
+         ]) do
+      {:ok, claim_id} ->
+        new_table = Map.put(state.flock_table, key, {claim_id, scope})
+        {{"ok", %{}}, %{state | flock_table: new_table}}
+
+      {:error, :conflict, _conflicting_id} ->
+        {{"error", %{"errno" => errno(:eagain)}}, state}
+
+      _other ->
+        {{"error", %{"errno" => errno(:eio)}}, state}
+    end
+  end
+
+  defp try_acquire_flock_blocking(flock_path, key, scope, request_id, state) do
+    case core_call(state.coordinator_module, :claim_path_wait_for, [
+           state.coordinator_module,
+           flock_path,
+           scope,
+           self()
+         ]) do
+      {:ok, claim_id} ->
+        new_table = Map.put(state.flock_table, key, {claim_id, scope})
+        {{"ok", %{}}, %{state | flock_table: new_table}}
+
+      {:wait, wait_token} ->
+        pending =
+          Map.put(state.pending_flocks, wait_token, %{
+            request_id: request_id,
+            key: key,
+            scope: scope
+          })
+
+        {:deferred, %{state | pending_flocks: pending}}
+
+      _other ->
+        {{"error", %{"errno" => errno(:eio)}}, state}
     end
   end
 
