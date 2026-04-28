@@ -1113,7 +1113,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
     end
 
-    test "blocking SETLKW returns EAGAIN until #677 lands the wait queue",
+    test "blocking SETLKW waits until the conflicting holder releases (#677)",
          %{handler: handler, inode: ino} do
       send(
         handler,
@@ -1122,12 +1122,25 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
 
       assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
 
+      # Blocking flock from a different owner — should not return
+      # immediately because the wait queue from #679 parks the
+      # request until the conflict clears.
       send(
         handler,
         {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => true}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+      refute_receive {:fuse_op_complete, 2, _}, 200
+
+      # Release the first lock — the queued waiter wakes and
+      # acquires.
+      send(
+        handler,
+        {:fuse_op, 3, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
+      )
+
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
     end
   end
 

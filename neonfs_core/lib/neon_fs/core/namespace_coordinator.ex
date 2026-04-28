@@ -350,6 +350,36 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   @doc """
+  Blocking variant of `claim_path/3` (#677). Same arguments as
+  `claim_path/3`; the return shape mirrors `claim_byte_range_wait/4`.
+
+  On wakeup the holder receives `{:path_acquired, wait_token,
+  claim_id}` (or `{:path_wait_error, wait_token, reason}` on a
+  permanent Ra failure).
+
+  Used by blocking `flock(2)` in `NeonFS.FUSE.Handler` so SETLKW
+  with `LOCK_NB` cleared waits for the conflicting holder to release
+  instead of returning `EAGAIN`.
+  """
+  @spec claim_path_wait(GenServer.server(), String.t(), scope()) ::
+          {:ok, claim_id()} | {:wait, wait_token()} | {:error, term()}
+  def claim_path_wait(server \\ __MODULE__, path, scope)
+      when is_binary(path) and scope in [:exclusive, :shared] do
+    claim_path_wait_for(server, path, scope, self())
+  end
+
+  @doc """
+  Same as `claim_path_wait/3` but lets the caller specify the
+  holder pid. See `claim_path_for/4` for the cross-node motivation.
+  """
+  @spec claim_path_wait_for(GenServer.server(), String.t(), scope(), pid()) ::
+          {:ok, claim_id()} | {:wait, wait_token()} | {:error, term()}
+  def claim_path_wait_for(server \\ __MODULE__, path, scope, holder)
+      when is_binary(path) and scope in [:exclusive, :shared] and is_pid(holder) do
+    GenServer.call(server, {:claim_path_wait, path, scope, holder})
+  end
+
+  @doc """
   Atomically pin both paths of a cross-directory rename. The two paths
   are claimed `:exclusive :path` in a single Ra command, so a competing
   rename or claim on either side either both succeeds or fails up
@@ -552,6 +582,10 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     do_claim_byte_range_wait(path, range, scope, holder, state)
   end
 
+  def handle_call({:claim_path_wait, path, scope, holder}, _from, state) do
+    do_claim_path_wait(path, scope, holder, state)
+  end
+
   def handle_call({:cancel_wait, wait_token}, _from, state) do
     {:reply, :ok, do_cancel_wait(wait_token, state)}
   end
@@ -699,7 +733,34 @@ defmodule NeonFS.Core.NamespaceCoordinator do
         {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
 
       {:error, :conflict, conflicting_id} ->
-        {token, state} = enqueue_waiter(state, holder, conflicting_id, path, range, scope)
+        entry = %{
+          claim_type: :byte_range,
+          path: path,
+          range: range,
+          scope: scope
+        }
+
+        {token, state} = enqueue_waiter(state, holder, conflicting_id, entry)
+        {:reply, {:wait, token}, state}
+
+      {:error, _} = err ->
+        {:reply, err, state}
+    end
+  end
+
+  defp do_claim_path_wait(path, scope, holder, state) do
+    case ra_command({:claim_namespace_path, path, scope, holder}) do
+      {:ok, claim_id} ->
+        {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
+
+      {:error, :conflict, conflicting_id} ->
+        entry = %{
+          claim_type: :path,
+          path: path,
+          scope: scope
+        }
+
+        {token, state} = enqueue_waiter(state, holder, conflicting_id, entry)
         {:reply, {:wait, token}, state}
 
       {:error, _} = err ->
@@ -708,22 +769,18 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   # Register a waiter against `conflicting_id`. Returns the public
-  # `wait_token` plus the updated state. Monitors the holder pid if
-  # we don't already have a monitor for it (sharing the existing
-  # monitor with `track_claim`'s book-keeping when the same pid both
-  # holds and waits — see `drop_waits_for_pid/2` for the symmetric
-  # cleanup).
-  defp enqueue_waiter(state, holder, conflicting_id, path, range, scope) do
+  # `wait_token` plus the updated state. The `entry_attrs` map carries
+  # everything `retry_waiter/2` needs to reattempt the claim — its
+  # `claim_type` field selects between `claim_byte_range` and
+  # `claim_path` retries (#677). Monitors the holder pid if we don't
+  # already have a monitor for it (sharing the existing monitor with
+  # `track_claim`'s book-keeping when the same pid both holds and
+  # waits — see `drop_waits_for_pid/2` for the symmetric cleanup).
+  defp enqueue_waiter(state, holder, conflicting_id, entry_attrs) do
     token = make_ref()
     state = ensure_waiter_monitor(state, holder)
 
-    entry = %{
-      token: token,
-      holder: holder,
-      path: path,
-      range: range,
-      scope: scope
-    }
+    entry = Map.merge(%{token: token, holder: holder}, entry_attrs)
 
     queue = Map.get(state.wait_queue, conflicting_id, [])
 
@@ -904,11 +961,9 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   end
 
   defp retry_waiter(entry, state) do
-    case ra_command(
-           {:claim_namespace_byte_range, entry.path, entry.range, entry.scope, entry.holder}
-         ) do
+    case retry_claim_for(entry) do
       {:ok, new_claim_id} ->
-        send(entry.holder, {:byte_range_acquired, entry.token, new_claim_id})
+        send(entry.holder, {acquired_message(entry.claim_type), entry.token, new_claim_id})
         state = consume_wait_index(state, entry.token, entry.holder)
         track_claim(state, entry.holder, new_claim_id)
 
@@ -927,10 +982,24 @@ defmodule NeonFS.Core.NamespaceCoordinator do
           "Wait-queue retry failed token=#{inspect(entry.token)} reason=#{inspect(reason)}"
         )
 
-        send(entry.holder, {:byte_range_wait_error, entry.token, reason})
+        send(entry.holder, {error_message(entry.claim_type), entry.token, reason})
         consume_wait_index(state, entry.token, entry.holder)
     end
   end
+
+  defp retry_claim_for(%{claim_type: :byte_range} = entry) do
+    ra_command({:claim_namespace_byte_range, entry.path, entry.range, entry.scope, entry.holder})
+  end
+
+  defp retry_claim_for(%{claim_type: :path} = entry) do
+    ra_command({:claim_namespace_path, entry.path, entry.scope, entry.holder})
+  end
+
+  defp acquired_message(:byte_range), do: :byte_range_acquired
+  defp acquired_message(:path), do: :path_acquired
+
+  defp error_message(:byte_range), do: :byte_range_wait_error
+  defp error_message(:path), do: :path_wait_error
 
   # Drop the entry from `wait_index` + `waiter_monitors` after a
   # successful acquire or a permanent error. Mirror of
