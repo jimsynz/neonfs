@@ -79,11 +79,10 @@ neonfs_fuse/          # FUSE filesystem package (depends on neonfs_client only)
 
 neonfs_nfs/           # NFSv3 server package (depends on neonfs_client only)
 ├── lib/neon_fs/nfs/
-│   ├── handler.ex       # NFS operation → core RPC translation
-│   ├── export_manager.ex # Volume export lifecycle
+│   ├── nfsv3_backend.ex  # NFSServer.NFSv3.Backend impl against neonfs_client
+│   ├── mount_backend.ex  # NFSServer.Mount.Backend impl against ExportManager
+│   ├── export_manager.ex # Volume export lifecycle + NFS listener
 │   └── metadata_cache.ex # ETS-backed metadata cache
-├── native/
-│   └── neonfs_nfs/      # Rust NIF (nfs3_server + nfs3_client)
 └── test/
 
 neonfs_integration/   # Peer-based integration tests

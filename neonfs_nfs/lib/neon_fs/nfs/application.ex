@@ -4,21 +4,10 @@ defmodule NeonFS.NFS.Application do
 
   Starts the NFS supervision tree and handles graceful shutdown.
 
-  ## Handler stack selection
-
-  `:handler_stack` (default `:beam`) selects which NFSv3 implementation
-  the application uses:
-
-    * `:beam` — the native-BEAM stack: `NFSServer.NFSv3.Handler` bound
-      to `NeonFS.NFS.NFSv3Backend` plus `NFSServer.Mount.Handler` bound
-      to `NeonFS.NFS.MountBackend`. The default since the cutover
-      (#656 of #286).
-    * `:nif` — the legacy Rust `nfs3_server` NIF + `NeonFS.NFS.Handler`
-      shim. Transitional fallback; slated for deletion in #657.
-
-  Set via `config :neonfs_nfs, handler_stack: :nif` or the
-  `NEONFS_NFS_HANDLER_STACK` environment variable in releases to opt
-  into the legacy stack.
+  The NFSv3 stack is the native-BEAM `NFSServer.NFSv3.Handler` bound
+  to `NeonFS.NFS.NFSv3Backend` plus `NFSServer.Mount.Handler` bound
+  to `NeonFS.NFS.MountBackend`. The legacy `nfs3_server` NIF was
+  removed in sub-issue #657 of #286.
   """
 
   use Application
@@ -28,32 +17,12 @@ defmodule NeonFS.NFS.Application do
   alias NFSServer.NFSv3.Handler, as: NFSv3Handler
 
   @doc """
-  Returns the active handler stack — `:beam` (default) or `:nif`.
-  """
-  @spec handler_stack() :: :nif | :beam
-  def handler_stack do
-    case Application.get_env(:neonfs_nfs, :handler_stack, :beam) do
-      :nif -> :nif
-      _ -> :beam
-    end
-  end
-
-  @doc """
-  Build the handler module for the active stack.
-
-  For `:beam`, returns the result of
-  `NFSServer.NFSv3.Handler.with_backend(NeonFS.NFS.NFSv3Backend)` —
-  the same shape `RPC.Dispatcher` expects in its program map. For
-  `:nif`, raises `:not_applicable` because the NIF stack uses
-  `NeonFS.NFS.Handler` directly without going through the BEAM
-  dispatcher.
+  Build the bound NFSv3 handler module for the BEAM stack — the same
+  shape `RPC.Dispatcher` expects in its program map.
   """
   @spec bound_nfsv3_handler() :: module()
   def bound_nfsv3_handler do
-    case handler_stack() do
-      :beam -> NFSv3Handler.with_backend(NFSv3Backend)
-      :nif -> raise ArgumentError, ":nif stack does not bind through NFSServer.NFSv3.Handler"
-    end
+    NFSv3Handler.with_backend(NFSv3Backend)
   end
 
   @impl true

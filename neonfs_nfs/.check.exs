@@ -13,13 +13,6 @@
     {:ex_doc, "mix docs"},
     {:audit, "mix deps.audit"},
     {:gettext, false},
-    {:sobelow, false},
-
-    # Rust tools (only if native/neonfs_nfs exists)
-    {:cargo_fmt, command: "cargo fmt --check --manifest-path native/neonfs_nfs/Cargo.toml"},
-    {:cargo_clippy,
-     command:
-       "cargo clippy --manifest-path native/neonfs_nfs/Cargo.toml --all-targets -- -D warnings"},
-    {:cargo_test, command: "cargo test --manifest-path native/neonfs_nfs/Cargo.toml"}
+    {:sobelow, false}
   ]
 ]

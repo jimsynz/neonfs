@@ -1,13 +1,22 @@
 defmodule NeonFS.NFS.ExportManagerTest do
   use ExUnit.Case, async: false
 
-  alias NeonFS.NFS.{ExportManager, ExportSupervisor, InodeTable}
+  alias NeonFS.NFS.{ExportManager, InodeTable}
 
   setup do
     start_supervised!(InodeTable)
-    start_supervised!(ExportSupervisor)
-    # Start ExportManager without auto-starting the NFS server
-    # (NIF may not be available or port may be in use)
+
+    # Use port 0 so the kernel picks an ephemeral port — avoids
+    # collisions across concurrent test runs and against any
+    # already-bound 2049.
+    Application.put_env(:neonfs_nfs, :bind_address, "127.0.0.1")
+    Application.put_env(:neonfs_nfs, :port, 0)
+
+    on_exit(fn ->
+      Application.delete_env(:neonfs_nfs, :bind_address)
+      Application.delete_env(:neonfs_nfs, :port)
+    end)
+
     {:ok, manager} = start_supervised({ExportManager, []})
     # Wait for the :start_server continue to complete
     :sys.get_state(manager)
@@ -53,50 +62,11 @@ defmodule NeonFS.NFS.ExportManagerTest do
     assert %DateTime{} = export.exported_at
   end
 
-  # POSIX cutover ramp-up (sub-issue #655 of #286). The legacy NIF
-  # path is exercised by every other test in this file via the
-  # NIF-not-loaded fallback; this describe block boots the BEAM
-  # stack instead and verifies a real listener is bound.
-  describe ":beam handler_stack dispatch" do
-    setup do
-      previous_stack = Application.get_env(:neonfs_nfs, :handler_stack)
-      previous_port = Application.get_env(:neonfs_nfs, :port)
-      previous_bind = Application.get_env(:neonfs_nfs, :bind_address)
-
-      Application.put_env(:neonfs_nfs, :handler_stack, :beam)
-      Application.put_env(:neonfs_nfs, :bind_address, "127.0.0.1")
-      # Port 0 → kernel picks ephemeral; avoids collisions across
-      # concurrent test runs.
-      Application.put_env(:neonfs_nfs, :port, 0)
-
-      on_exit(fn ->
-        restore_env(:handler_stack, previous_stack)
-        restore_env(:bind_address, previous_bind)
-        restore_env(:port, previous_port)
-      end)
-
-      :ok
-    end
-
-    test "starts an NFSServer.RPC.Server listener instead of the NIF" do
-      # The default `setup` stops `ExportManager` between cases via
-      # `start_supervised`'s on_exit; we restart it here under the
-      # `:beam` stack settings stamped by this describe's setup.
-      stop_supervised(ExportManager)
-      {:ok, manager} = start_supervised({ExportManager, []})
-      :sys.get_state(manager)
-
-      state = :sys.get_state(manager)
-      # `:beam` path stores the listener pid in `nfs_server` and
-      # leaves `handler_pid` nil (no per-handler GenServer; the
-      # `NFSServer.RPC.Server` accept loop spawns one process per
-      # connection).
-      assert is_pid(state.nfs_server)
-      assert Process.alive?(state.nfs_server)
-      assert state.handler_pid == nil
-    end
+  # The native-BEAM stack starts an `NFSServer.RPC.Server` listener
+  # under `ExportManager`. (NIF cutover landed in #657 of #286.)
+  test "starts an NFSServer.RPC.Server listener" do
+    state = :sys.get_state(ExportManager)
+    assert is_pid(state.nfs_server)
+    assert Process.alive?(state.nfs_server)
   end
-
-  defp restore_env(key, nil), do: Application.delete_env(:neonfs_nfs, key)
-  defp restore_env(key, value), do: Application.put_env(:neonfs_nfs, key, value)
 end

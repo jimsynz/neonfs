@@ -3,14 +3,22 @@ defmodule NeonFS.NFS.MountBackendTest do
 
   use Mimic
 
-  alias NeonFS.NFS.{ExportManager, ExportSupervisor, Filehandle, InodeTable, MountBackend}
+  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable, MountBackend}
   alias NFSServer.Mount.Types.ExportNode
 
   setup :verify_on_exit!
 
   setup do
     start_supervised!(InodeTable)
-    start_supervised!(ExportSupervisor)
+
+    Application.put_env(:neonfs_nfs, :bind_address, "127.0.0.1")
+    Application.put_env(:neonfs_nfs, :port, 0)
+
+    on_exit(fn ->
+      Application.delete_env(:neonfs_nfs, :bind_address)
+      Application.delete_env(:neonfs_nfs, :port)
+    end)
+
     {:ok, manager} = start_supervised({ExportManager, []})
     :sys.get_state(manager)
     Mimic.allow(NeonFS.Client.Router, self(), manager)

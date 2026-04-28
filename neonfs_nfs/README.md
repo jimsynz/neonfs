@@ -9,10 +9,10 @@ distribution, routed through `NeonFS.Client.Router`.
 
 ## How It Works
 
-The NFS node exports volumes as NFSv3 shares using the
-[`nfs3_server`](https://crates.io/crates/nfs3_server) Rust crate (via Rustler
-NIFs). NFS operations (read, write, mkdir, etc.) are translated into RPC calls
-to core nodes through the client's service discovery and routing infrastructure.
+The NFS node exports volumes as NFSv3 shares using a pure-Elixir NFSv3
+server implementation (the `nfs_server` package — no out-of-tree Rust).
+NFS operations are translated into RPC calls to core nodes through the
+client's service discovery and routing infrastructure.
 
 A single TCP listener on port 2049 serves all exported volumes through a
 virtual root:
@@ -29,8 +29,12 @@ mount the root to browse available exports.
 
 ### Key Modules
 
-- `NeonFS.NFS.Handler` -- translates NFS operations into core RPC calls
-- `NeonFS.NFS.ExportManager` -- manages volume export lifecycle and NFS server
+- `NeonFS.NFS.NFSv3Backend` -- implements the `NFSServer.NFSv3.Backend`
+  callbacks against `NeonFS.Client`
+- `NeonFS.NFS.MountBackend` -- implements the `NFSServer.Mount.Backend`
+  callbacks against `ExportManager`
+- `NeonFS.NFS.ExportManager` -- starts the NFS listener and manages volume
+  export lifecycle
 - `NeonFS.NFS.MetadataCache` -- ETS-backed cache with event-driven invalidation
 - `NeonFS.NFS.InodeTable` -- bidirectional inode-to-path mapping
 - `NeonFS.NFS.Application` -- OTP application and supervision tree
@@ -44,10 +48,10 @@ mount the root to browse available exports.
 
 ```bash
 mix deps.get
-mix compile    # compiles Elixir and Rust NIFs
+mix compile
 ```
 
-Rust toolchain (1.93+) is required for the NIF crate in `native/`.
+No native code — the NFSv3 server is pure Elixir.
 
 ## Testing
 
