@@ -43,6 +43,12 @@ defmodule NeonFS.Core.AntiEntropy do
 
   @default_sync_interval_ms 6 * 60 * 60 * 1_000
   @default_segments_per_cycle 100
+  @sync_concurrency 8
+  # Per-segment cap for the parallel sync pass: covers up to ~3 remote
+  # `compare_merkle_trees` RPCs at the default 10s timeout each, plus
+  # reconciliation headroom. A segment that exceeds this is killed and
+  # accounted as `skipped: true` rather than blocking the pass (#668).
+  @sync_segment_timeout_ms 60_000
 
   ## Client API
 
@@ -190,9 +196,26 @@ defmodule NeonFS.Core.AntiEntropy do
       |> Enum.filter(fn {_seg_id, replicas} -> local_node in replicas end)
       |> Enum.take(state.segments_per_cycle)
 
+    # Process segments in parallel so a single slow / stalled remote RPC
+    # cannot serialise the whole pass. Each segment has its own RPC
+    # budget inside `do_sync_segment`; `Task.async_stream` gives the
+    # outer pass a hard wall-clock cap independent of segment count
+    # (#668). Tasks that time out are accounted as skipped rather than
+    # bringing down the GenServer.
     results =
-      Enum.map(local_segments, fn {segment_id, _replicas} ->
-        do_sync_segment(segment_id, ring: ring, local_node: local_node)
+      local_segments
+      |> Task.async_stream(
+        fn {segment_id, _replicas} ->
+          do_sync_segment(segment_id, ring: ring, local_node: local_node)
+        end,
+        max_concurrency: @sync_concurrency,
+        timeout: @sync_segment_timeout_ms,
+        on_timeout: :kill_task,
+        ordered: false
+      )
+      |> Enum.map(fn
+        {:ok, result} -> result
+        {:exit, _reason} -> %{keys_repaired: 0, tombstones_cleaned: 0, skipped: true}
       end)
 
     %{
