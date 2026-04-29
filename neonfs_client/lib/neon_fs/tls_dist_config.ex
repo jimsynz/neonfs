@@ -115,6 +115,48 @@ defmodule NeonFS.TLSDistConfig do
   end
 
   @doc """
+  Atomically installs a new node cert + key into the local TLS dir.
+
+  Used by the `cluster ca rotate` orchestrator (#692) during the
+  rolling reissue: each node's existing cluster cert is replaced with
+  one signed by the staged incoming CA. Writes both files via
+  temp-file + rename so a crash mid-write leaves the existing
+  `node.crt` / `node.key` intact.
+
+  The cert is written 0644, the key 0600 (the daemon must read both;
+  only the daemon should be able to read the key).
+
+  Emits `[:neonfs, :tls, :node_cert_installed]` telemetry on success.
+
+  The running daemon's TLS distribution listener doesn't pick up the
+  new cert until the listener restarts — `:ssl_dist` caches its
+  `certs_keys` config at startup the same way it caches `cacertfile`.
+  The orchestrator drives that restart per-node.
+  """
+  @spec install_node_cert(TLS.pem(), TLS.pem(), String.t()) :: :ok | {:error, term()}
+  def install_node_cert(node_cert_pem, node_key_pem, tls_dir \\ TLS.tls_dir()) do
+    cert_path = Path.join(tls_dir, "node.crt")
+    key_path = Path.join(tls_dir, "node.key")
+    cert_tmp = cert_path <> ".tmp"
+    key_tmp = key_path <> ".tmp"
+
+    with :ok <- File.write(cert_tmp, node_cert_pem),
+         :ok <- File.chmod(cert_tmp, 0o644),
+         :ok <- File.write(key_tmp, node_key_pem),
+         :ok <- File.chmod(key_tmp, 0o600),
+         :ok <- File.rename(cert_tmp, cert_path),
+         :ok <- File.rename(key_tmp, key_path) do
+      :telemetry.execute(
+        [:neonfs, :tls, :node_cert_installed],
+        %{},
+        %{tls_dir: tls_dir}
+      )
+
+      :ok
+    end
+  end
+
+  @doc """
   Picks up trust-store changes for distribution TLS.
 
   Called by the `cluster ca rotate` orchestrator after staging an

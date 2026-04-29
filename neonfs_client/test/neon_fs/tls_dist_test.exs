@@ -221,6 +221,53 @@ defmodule NeonFS.TLSDistConfigTest do
     end
   end
 
+  describe "install_node_cert/3" do
+    test "writes node.crt 0644 and node.key 0600", %{tmp_dir: tmp_dir} do
+      :ok = TLSDistConfig.install_node_cert("cert-pem", "key-pem", tmp_dir)
+
+      cert_path = Path.join(tmp_dir, "node.crt")
+      key_path = Path.join(tmp_dir, "node.key")
+
+      assert File.read!(cert_path) == "cert-pem"
+      assert File.read!(key_path) == "key-pem"
+
+      cert_mode = File.stat!(cert_path).mode |> Bitwise.band(0o777)
+      key_mode = File.stat!(key_path).mode |> Bitwise.band(0o777)
+
+      assert cert_mode == 0o644
+      assert key_mode == 0o600
+    end
+
+    test "overwrites existing node.crt and node.key", %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "node.crt"), "old-cert")
+      File.write!(Path.join(tmp_dir, "node.key"), "old-key")
+
+      :ok = TLSDistConfig.install_node_cert("new-cert", "new-key", tmp_dir)
+
+      assert File.read!(Path.join(tmp_dir, "node.crt")) == "new-cert"
+      assert File.read!(Path.join(tmp_dir, "node.key")) == "new-key"
+    end
+
+    test "leaves no .tmp turds behind", %{tmp_dir: tmp_dir} do
+      :ok = TLSDistConfig.install_node_cert("cert", "key", tmp_dir)
+
+      refute File.exists?(Path.join(tmp_dir, "node.crt.tmp"))
+      refute File.exists?(Path.join(tmp_dir, "node.key.tmp"))
+    end
+
+    test "emits telemetry on success", %{tmp_dir: tmp_dir} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :tls, :node_cert_installed]
+        ])
+
+      :ok = TLSDistConfig.install_node_cert("cert", "key", tmp_dir)
+
+      assert_receive {[:neonfs, :tls, :node_cert_installed], ^ref, %{}, %{tls_dir: ^tmp_dir}},
+                     1_000
+    end
+  end
+
   describe "reload_listener/1" do
     test "regenerates the bundle and emits telemetry", %{tmp_dir: tmp_dir} do
       ref =
