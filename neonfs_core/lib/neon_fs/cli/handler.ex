@@ -397,6 +397,7 @@ defmodule NeonFS.CLI.Handler do
       Map.get(opts, "abort", false) -> handle_ca_rotate_abort()
       Map.get(opts, "stage", false) -> handle_ca_rotate_stage()
       Map.get(opts, "finalize", false) -> handle_ca_rotate_finalize()
+      Map.get(opts, "status", false) -> handle_ca_rotate_status()
       true -> handle_ca_rotate_default()
     end
   end
@@ -404,6 +405,40 @@ defmodule NeonFS.CLI.Handler do
   defp handle_ca_rotate_default do
     with :ok <- require_cluster() do
       {:error, Unavailable.exception(message: "CA rotation not yet implemented")}
+    end
+  end
+
+  defp handle_ca_rotate_status do
+    with :ok <- require_cluster() do
+      active =
+        case CertificateAuthority.ca_info() do
+          {:ok, info} ->
+            %{
+              subject: info.subject,
+              valid_from: info.valid_from,
+              valid_to: info.valid_to,
+              fingerprint: current_active_ca_fingerprint()
+            }
+
+          {:error, _} ->
+            nil
+        end
+
+      incoming =
+        case CertificateAuthority.incoming_ca_info() do
+          {:ok, info} ->
+            %{
+              subject: info.subject,
+              valid_from: info.valid_from,
+              valid_to: info.valid_to,
+              fingerprint: current_incoming_ca_fingerprint()
+            }
+
+          {:error, _} ->
+            nil
+        end
+
+      {:ok, %{rotation_in_progress: not is_nil(incoming), active: active, incoming: incoming}}
     end
   end
 
@@ -494,7 +529,15 @@ defmodule NeonFS.CLI.Handler do
   end
 
   defp current_active_ca_fingerprint do
-    case SystemVolume.read("/tls/ca.crt") do
+    read_ca_fingerprint("/tls/ca.crt")
+  end
+
+  defp current_incoming_ca_fingerprint do
+    read_ca_fingerprint("/tls/incoming/ca.crt")
+  end
+
+  defp read_ca_fingerprint(path) do
+    case SystemVolume.read(path) do
       {:ok, ca_pem} ->
         ca_pem |> TLS.decode_cert!() |> ca_fingerprint()
 

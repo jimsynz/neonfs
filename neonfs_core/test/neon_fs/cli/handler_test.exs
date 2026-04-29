@@ -1394,6 +1394,61 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "handle_ca_rotate/1 — status mode" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_audit_log()
+      start_ra()
+
+      {:ok, _} = Handler.cluster_init("ca-rotate-status-test")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "without a staged rotation, reports rotation_in_progress: false" do
+      assert {:ok, %{rotation_in_progress: false, active: active, incoming: nil}} =
+               Handler.handle_ca_rotate(%{"status" => true})
+
+      assert is_binary(active.fingerprint)
+      assert byte_size(active.fingerprint) == 64
+      assert is_binary(active.subject)
+    end
+
+    test "after stage, reports rotation_in_progress: true with both fingerprints" do
+      assert {:ok, %{staged: true, fingerprint: incoming_fp}} =
+               Handler.handle_ca_rotate(%{"stage" => true})
+
+      assert {:ok, %{rotation_in_progress: true, active: active, incoming: incoming}} =
+               Handler.handle_ca_rotate(%{"status" => true})
+
+      assert active.fingerprint != incoming_fp
+      assert incoming.fingerprint == incoming_fp
+      assert is_binary(active.subject)
+      assert is_binary(incoming.subject)
+    end
+
+    test "after finalize, reports rotation_in_progress: false again" do
+      assert {:ok, _} = Handler.handle_ca_rotate(%{"stage" => true})
+      assert {:ok, _} = Handler.handle_ca_rotate(%{"finalize" => true})
+
+      assert {:ok, %{rotation_in_progress: false, incoming: nil}} =
+               Handler.handle_ca_rotate(%{"status" => true})
+    end
+  end
+
   describe "handle_ca_rotate/1 without cluster state" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
