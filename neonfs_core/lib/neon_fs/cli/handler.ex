@@ -387,12 +387,33 @@ defmodule NeonFS.CLI.Handler do
 
   Not yet implemented — returns a structured error.
   """
-  @spec handle_ca_rotate() :: {:error, Exception.t()}
-  def handle_ca_rotate do
+  @spec handle_ca_rotate(map()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_ca_rotate(opts \\ %{}) when is_map(opts) do
     set_cli_metadata()
 
+    if Map.get(opts, "abort", false) do
+      handle_ca_rotate_abort()
+    else
+      with :ok <- require_cluster() do
+        {:error, Unavailable.exception(message: "CA rotation not yet implemented")}
+      end
+    end
+  end
+
+  defp handle_ca_rotate_abort do
     with :ok <- require_cluster() do
-      {:error, Unavailable.exception(message: "CA rotation not yet implemented")}
+      case CertificateAuthority.incoming_ca_info() do
+        {:error, :no_incoming_ca} ->
+          {:error, Invalid.exception(message: "No CA rotation in progress to abort")}
+
+        {:ok, _info} ->
+          :ok = CertificateAuthority.abort_rotation()
+          log_ca_rotate_aborted()
+          {:ok, %{aborted: true}}
+
+        {:error, reason} ->
+          {:error, wrap_error(reason)}
+      end
     end
   end
 
@@ -3607,5 +3628,21 @@ defmodule NeonFS.CLI.Handler do
         reason: inspect(reason)
       }
     )
+  end
+
+  defp log_ca_rotate_aborted do
+    AuditLog.log_event(
+      event_type: :cluster_ca_rotate_aborted,
+      actor_uid: 0,
+      resource: cluster_resource(),
+      details: %{}
+    )
+  end
+
+  defp cluster_resource do
+    case load_cluster_state() do
+      {:ok, %{cluster_id: id}} -> "cluster:#{id}"
+      _ -> "cluster:unknown"
+    end
   end
 end
