@@ -1274,6 +1274,68 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "handle_ca_rotate/1 — stage mode" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_audit_log()
+      start_ra()
+
+      {:ok, _} = Handler.cluster_init("ca-rotate-stage-test")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "stages an incoming CA, emits audit event, and returns its fingerprint" do
+      assert {:ok, %{staged: true} = result} =
+               Handler.handle_ca_rotate(%{"stage" => true})
+
+      assert is_binary(result.fingerprint)
+      assert byte_size(result.fingerprint) == 64
+      assert result.subject =~ "ca-rotate-stage-test"
+      assert %DateTime{} = result.not_before
+      assert %DateTime{} = result.not_after
+
+      assert {:ok, info} = CertificateAuthority.incoming_ca_info()
+      assert info.subject == result.subject
+
+      :ok = AuditLog.flush()
+      events = AuditLog.recent(20)
+
+      assert Enum.any?(events, fn e ->
+               e.event_type == :cluster_ca_rotate_started and
+                 e.details[:incoming_ca_fingerprint] == result.fingerprint
+             end)
+    end
+
+    test "refuses when an incoming CA is already staged" do
+      assert {:ok, _first} = Handler.handle_ca_rotate(%{"stage" => true})
+
+      assert {:error, %NeonFS.Error.Invalid{message: msg}} =
+               Handler.handle_ca_rotate(%{"stage" => true})
+
+      assert msg =~ "already in progress"
+    end
+
+    test "after stage, abort discards the staged CA" do
+      assert {:ok, _} = Handler.handle_ca_rotate(%{"stage" => true})
+      assert {:ok, %{aborted: true}} = Handler.handle_ca_rotate(%{"abort" => true})
+      assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+    end
+  end
+
   describe "handle_ca_rotate/1 without cluster state" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
@@ -1285,6 +1347,13 @@ defmodule NeonFS.CLI.HandlerTest do
     test "abort refuses when the cluster is not initialised" do
       assert {:error, %NeonFS.Error.NotFound{message: msg}} =
                Handler.handle_ca_rotate(%{"abort" => true})
+
+      assert msg =~ "Cluster not initialised"
+    end
+
+    test "stage refuses when the cluster is not initialised" do
+      assert {:error, %NeonFS.Error.NotFound{message: msg}} =
+               Handler.handle_ca_rotate(%{"stage" => true})
 
       assert msg =~ "Cluster not initialised"
     end
