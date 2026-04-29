@@ -1336,6 +1336,64 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "handle_ca_rotate/1 — finalize mode" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_audit_log()
+      start_ra()
+
+      {:ok, _} = Handler.cluster_init("ca-rotate-finalize-test")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "refuses when no incoming CA is staged" do
+      assert {:error, %NeonFS.Error.Invalid{message: msg}} =
+               Handler.handle_ca_rotate(%{"finalize" => true})
+
+      assert msg =~ "No CA rotation in progress"
+    end
+
+    test "promotes the staged CA to active and emits an audit event" do
+      assert {:ok, %{staged: true, fingerprint: incoming_fp}} =
+               Handler.handle_ca_rotate(%{"stage" => true})
+
+      assert {:ok, %{finalized: true, old_fingerprint: old_fp, fingerprint: new_fp}} =
+               Handler.handle_ca_rotate(%{"finalize" => true})
+
+      # Incoming CA's fingerprint becomes the new active fingerprint.
+      assert new_fp == incoming_fp
+      # Old fingerprint differs from new (different ECDSA key, different cert).
+      assert is_binary(old_fp)
+      assert old_fp != new_fp
+
+      # No more incoming CA staged.
+      assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+
+      :ok = AuditLog.flush()
+      events = AuditLog.recent(20)
+
+      assert Enum.any?(events, fn e ->
+               e.event_type == :cluster_ca_rotate_finalized and
+                 e.details[:old_ca_fingerprint] == old_fp and
+                 e.details[:new_ca_fingerprint] == new_fp
+             end)
+    end
+  end
+
   describe "handle_ca_rotate/1 without cluster state" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)

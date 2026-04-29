@@ -32,6 +32,7 @@ defmodule NeonFS.CLI.Handler do
     S3CredentialManager,
     ServiceRegistry,
     StorageMetrics,
+    SystemVolume,
     Volume,
     VolumeACL,
     VolumeEncryption,
@@ -395,6 +396,7 @@ defmodule NeonFS.CLI.Handler do
     cond do
       Map.get(opts, "abort", false) -> handle_ca_rotate_abort()
       Map.get(opts, "stage", false) -> handle_ca_rotate_stage()
+      Map.get(opts, "finalize", false) -> handle_ca_rotate_finalize()
       true -> handle_ca_rotate_default()
     end
   end
@@ -419,6 +421,40 @@ defmodule NeonFS.CLI.Handler do
         {:error, reason} ->
           {:error, wrap_error(reason)}
       end
+    end
+  end
+
+  defp handle_ca_rotate_finalize do
+    with :ok <- require_cluster() do
+      case CertificateAuthority.incoming_ca_info() do
+        {:error, :no_incoming_ca} ->
+          {:error,
+           Invalid.exception(
+             message: "No CA rotation in progress to finalize; stage one with --stage first"
+           )}
+
+        {:ok, _incoming_info} ->
+          do_finalize_rotation()
+
+        {:error, reason} ->
+          {:error, wrap_error(reason)}
+      end
+    end
+  end
+
+  defp do_finalize_rotation do
+    old_fingerprint = current_active_ca_fingerprint()
+
+    case CertificateAuthority.finalize_rotation() do
+      :ok ->
+        new_fingerprint = current_active_ca_fingerprint()
+        log_ca_rotate_finalized(old_fingerprint, new_fingerprint)
+
+        {:ok, %{finalized: true, old_fingerprint: old_fingerprint, fingerprint: new_fingerprint}}
+
+      {:error, reason} ->
+        {:error,
+         Unavailable.exception(message: "Failed to finalize CA rotation: #{inspect(reason)}")}
     end
   end
 
@@ -455,6 +491,16 @@ defmodule NeonFS.CLI.Handler do
   defp ca_fingerprint(ca_cert) do
     der = ca_cert |> X509.Certificate.to_der()
     :crypto.hash(:sha256, der) |> Base.encode16(case: :lower)
+  end
+
+  defp current_active_ca_fingerprint do
+    case SystemVolume.read("/tls/ca.crt") do
+      {:ok, ca_pem} ->
+        ca_pem |> TLS.decode_cert!() |> ca_fingerprint()
+
+      {:error, _} ->
+        nil
+    end
   end
 
   @doc """
@@ -3689,6 +3735,18 @@ defmodule NeonFS.CLI.Handler do
         subject: info.subject,
         not_before: DateTime.to_iso8601(info.not_before),
         not_after: DateTime.to_iso8601(info.not_after)
+      }
+    )
+  end
+
+  defp log_ca_rotate_finalized(old_fingerprint, new_fingerprint) do
+    AuditLog.log_event(
+      event_type: :cluster_ca_rotate_finalized,
+      actor_uid: 0,
+      resource: cluster_resource(),
+      details: %{
+        old_ca_fingerprint: old_fingerprint,
+        new_ca_fingerprint: new_fingerprint
       }
     )
   end
