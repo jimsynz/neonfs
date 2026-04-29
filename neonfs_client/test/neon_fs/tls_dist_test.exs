@@ -124,6 +124,130 @@ defmodule NeonFS.TLSDistConfigTest do
       assert String.contains?(bundle, cluster_ca_pem)
       assert byte_size(bundle) > byte_size(local_ca)
     end
+
+    test "creates a three-cert bundle when an incoming CA is staged", %{tmp_dir: tmp_dir} do
+      cluster_ca_key = X509.PrivateKey.new_ec(:secp256r1)
+
+      cluster_ca_cert =
+        X509.Certificate.self_signed(cluster_ca_key, "/O=NeonFS/CN=test-cluster CA",
+          template: :root_ca,
+          validity: 365
+        )
+
+      cluster_ca_pem = X509.Certificate.to_pem(cluster_ca_cert)
+      File.write!(Path.join(tmp_dir, "ca.crt"), cluster_ca_pem)
+
+      incoming_ca_key = X509.PrivateKey.new_ec(:secp256r1)
+
+      incoming_ca_cert =
+        X509.Certificate.self_signed(incoming_ca_key, "/O=NeonFS/CN=test-cluster CA (rotated)",
+          template: :root_ca,
+          validity: 365
+        )
+
+      incoming_ca_pem = X509.Certificate.to_pem(incoming_ca_cert)
+      File.write!(Path.join(tmp_dir, "incoming-ca.crt"), incoming_ca_pem)
+
+      :ok = TLSDistConfig.regenerate_ca_bundle(tmp_dir)
+
+      bundle = File.read!(Path.join(tmp_dir, "ca_bundle.crt"))
+      local_ca = File.read!(Path.join(tmp_dir, "local-ca.crt"))
+
+      assert String.contains?(bundle, local_ca)
+      assert String.contains?(bundle, incoming_ca_pem)
+      assert String.contains?(bundle, cluster_ca_pem)
+
+      # Order: local-ca, incoming-ca, ca — bundle order doesn't affect
+      # X.509 verification, but it documents the rotation's "preferred"
+      # CA hierarchy.
+      local_pos = :binary.match(bundle, local_ca) |> elem(0)
+      incoming_pos = :binary.match(bundle, incoming_ca_pem) |> elem(0)
+      cluster_pos = :binary.match(bundle, cluster_ca_pem) |> elem(0)
+
+      assert local_pos < incoming_pos
+      assert incoming_pos < cluster_pos
+    end
+
+    test "round-trip: each cert in the bundle is decodable", %{tmp_dir: tmp_dir} do
+      cluster_ca_key = X509.PrivateKey.new_ec(:secp256r1)
+
+      cluster_ca_cert =
+        X509.Certificate.self_signed(cluster_ca_key, "/O=NeonFS/CN=test-cluster CA",
+          template: :root_ca,
+          validity: 365
+        )
+
+      File.write!(
+        Path.join(tmp_dir, "ca.crt"),
+        X509.Certificate.to_pem(cluster_ca_cert)
+      )
+
+      incoming_ca_key = X509.PrivateKey.new_ec(:secp256r1)
+
+      incoming_ca_cert =
+        X509.Certificate.self_signed(incoming_ca_key, "/O=NeonFS/CN=test-cluster CA (rotated)",
+          template: :root_ca,
+          validity: 365
+        )
+
+      File.write!(
+        Path.join(tmp_dir, "incoming-ca.crt"),
+        X509.Certificate.to_pem(incoming_ca_cert)
+      )
+
+      :ok = TLSDistConfig.regenerate_ca_bundle(tmp_dir)
+
+      bundle = File.read!(Path.join(tmp_dir, "ca_bundle.crt"))
+
+      decoded =
+        bundle
+        |> :public_key.pem_decode()
+        |> Enum.filter(fn {type, _, _} -> type == :Certificate end)
+        |> Enum.map(fn {_type, der, _} ->
+          X509.Certificate.from_der!(der)
+        end)
+
+      assert length(decoded) == 3
+
+      subjects =
+        decoded
+        |> Enum.map(fn cert ->
+          cert |> X509.Certificate.subject() |> X509.RDNSequence.to_string()
+        end)
+
+      assert Enum.any?(subjects, &(&1 =~ "local CA"))
+      assert Enum.any?(subjects, &(&1 =~ "test-cluster CA (rotated)"))
+      assert Enum.any?(subjects, &(&1 =~ "test-cluster CA"))
+    end
+  end
+
+  describe "reload_listener/1" do
+    test "regenerates the bundle and emits telemetry", %{tmp_dir: tmp_dir} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :tls, :bundle_reloaded]
+        ])
+
+      incoming_ca_key = X509.PrivateKey.new_ec(:secp256r1)
+
+      incoming_ca_cert =
+        X509.Certificate.self_signed(incoming_ca_key, "/O=NeonFS/CN=incoming CA",
+          template: :root_ca,
+          validity: 365
+        )
+
+      File.write!(
+        Path.join(tmp_dir, "incoming-ca.crt"),
+        X509.Certificate.to_pem(incoming_ca_cert)
+      )
+
+      :ok = TLSDistConfig.reload_listener(tmp_dir)
+
+      bundle = File.read!(Path.join(tmp_dir, "ca_bundle.crt"))
+      assert String.contains?(bundle, X509.Certificate.to_pem(incoming_ca_cert))
+
+      assert_receive {[:neonfs, :tls, :bundle_reloaded], ^ref, %{}, %{tls_dir: ^tmp_dir}}, 1_000
+    end
   end
 
   describe "regenerate_config/1" do
