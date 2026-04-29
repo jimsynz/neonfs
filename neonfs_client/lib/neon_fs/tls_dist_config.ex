@@ -17,6 +17,7 @@ defmodule NeonFS.TLSDistConfig do
       ├── cli.crt             # CLI client cert
       ├── cli.key             # CLI client key
       ├── ca.crt              # Cluster CA cert (after init/join)
+      ├── incoming-ca.crt     # Staged cluster CA (during `cluster ca rotate`)
       ├── node.crt            # Cluster-signed node cert (after init/join)
       ├── node.key            # Cluster node key (after init/join)
       ├── ca_bundle.crt       # Trust anchors — managed by this module
@@ -29,17 +30,22 @@ defmodule NeonFS.TLSDistConfig do
   @doc """
   Regenerates `ca_bundle.crt` from available CA certificates.
 
-  The bundle always contains `local-ca.crt`. If the cluster CA cert
-  (`ca.crt`) is present, it is appended to the bundle.
+  The bundle always contains `local-ca.crt` first (boot-time daemon CA).
+  When a `cluster ca rotate` is in progress, `incoming-ca.crt` is
+  appended next so the node trusts certs signed by the staged CA. The
+  active cluster CA (`ca.crt`) is appended last.
+
+  Bundle order doesn't affect X.509 verification — any anchor in the
+  bundle that signs the chain works — but listing incoming before
+  active matches the rotation's "preferred" semantics.
   """
   @spec regenerate_ca_bundle(String.t()) :: :ok
   def regenerate_ca_bundle(tls_dir \\ TLS.tls_dir()) do
     bundle_path = Path.join(tls_dir, "ca_bundle.crt")
-    local_ca_path = Path.join(tls_dir, "local-ca.crt")
-    cluster_ca_path = Path.join(tls_dir, "ca.crt")
 
     parts =
-      [local_ca_path, cluster_ca_path]
+      tls_dir
+      |> bundle_sources()
       |> Enum.flat_map(fn path ->
         case File.read(path) do
           {:ok, pem} -> [pem]
@@ -106,6 +112,43 @@ defmodule NeonFS.TLSDistConfig do
     :ok = regenerate_ca_bundle(tls_dir)
     :ok = regenerate_config(tls_dir)
     :ok
+  end
+
+  @doc """
+  Picks up trust-store changes for distribution TLS.
+
+  Called by the `cluster ca rotate` orchestrator after staging an
+  incoming CA on every node. Regenerates the bundle on disk and emits a
+  `[:neonfs, :tls, :bundle_reloaded]` telemetry event.
+
+  Erlang's distribution TLS does not support hot-reloading the trust
+  store — `:ssl_dist` reads `cacertfile` once at listener startup. This
+  function therefore takes the **lazy** approach: the on-disk bundle is
+  refreshed, and full effect requires a node-by-node listener restart
+  (driven by the orchestrator, documented in the rotation runbook).
+
+  Existing inter-node connections keep going under their old trust
+  store; a node only adopts the new bundle on its next listener start.
+  """
+  @spec reload_listener(String.t()) :: :ok
+  def reload_listener(tls_dir \\ TLS.tls_dir()) do
+    :ok = regenerate_ca_bundle(tls_dir)
+
+    :telemetry.execute(
+      [:neonfs, :tls, :bundle_reloaded],
+      %{},
+      %{tls_dir: tls_dir}
+    )
+
+    :ok
+  end
+
+  defp bundle_sources(tls_dir) do
+    [
+      Path.join(tls_dir, "local-ca.crt"),
+      Path.join(tls_dir, "incoming-ca.crt"),
+      Path.join(tls_dir, "ca.crt")
+    ]
   end
 
   defp build_certs_keys(tls_dir) do
