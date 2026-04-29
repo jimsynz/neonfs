@@ -39,6 +39,7 @@ defmodule NeonFS.CLI.Handler do
   }
 
   alias NeonFS.Core.Job
+  alias NeonFS.Transport.TLS
 
   alias NeonFS.Error.{
     Internal,
@@ -391,12 +392,16 @@ defmodule NeonFS.CLI.Handler do
   def handle_ca_rotate(opts \\ %{}) when is_map(opts) do
     set_cli_metadata()
 
-    if Map.get(opts, "abort", false) do
-      handle_ca_rotate_abort()
-    else
-      with :ok <- require_cluster() do
-        {:error, Unavailable.exception(message: "CA rotation not yet implemented")}
-      end
+    cond do
+      Map.get(opts, "abort", false) -> handle_ca_rotate_abort()
+      Map.get(opts, "stage", false) -> handle_ca_rotate_stage()
+      true -> handle_ca_rotate_default()
+    end
+  end
+
+  defp handle_ca_rotate_default do
+    with :ok <- require_cluster() do
+      {:error, Unavailable.exception(message: "CA rotation not yet implemented")}
     end
   end
 
@@ -415,6 +420,41 @@ defmodule NeonFS.CLI.Handler do
           {:error, wrap_error(reason)}
       end
     end
+  end
+
+  defp handle_ca_rotate_stage do
+    with :ok <- require_cluster(),
+         {:ok, state} <- load_cluster_state() do
+      case CertificateAuthority.init_incoming_ca(state.cluster_name) do
+        {:ok, ca_cert, _ca_key} ->
+          info = TLS.certificate_info(ca_cert)
+          fingerprint = ca_fingerprint(ca_cert)
+          log_ca_rotate_started(fingerprint, info)
+
+          {:ok,
+           %{
+             staged: true,
+             subject: info.subject,
+             not_before: info.not_before,
+             not_after: info.not_after,
+             fingerprint: fingerprint
+           }}
+
+        {:error, :incoming_ca_already_staged} ->
+          {:error,
+           Invalid.exception(
+             message: "CA rotation already in progress; abort it first with --abort"
+           )}
+
+        {:error, reason} ->
+          {:error, wrap_error(reason)}
+      end
+    end
+  end
+
+  defp ca_fingerprint(ca_cert) do
+    der = ca_cert |> X509.Certificate.to_der()
+    :crypto.hash(:sha256, der) |> Base.encode16(case: :lower)
   end
 
   @doc """
@@ -3636,6 +3676,20 @@ defmodule NeonFS.CLI.Handler do
       actor_uid: 0,
       resource: cluster_resource(),
       details: %{}
+    )
+  end
+
+  defp log_ca_rotate_started(fingerprint, info) do
+    AuditLog.log_event(
+      event_type: :cluster_ca_rotate_started,
+      actor_uid: 0,
+      resource: cluster_resource(),
+      details: %{
+        incoming_ca_fingerprint: fingerprint,
+        subject: info.subject,
+        not_before: DateTime.to_iso8601(info.not_before),
+        not_after: DateTime.to_iso8601(info.not_after)
+      }
     )
   end
 
