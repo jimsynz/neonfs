@@ -4,7 +4,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
   alias NeonFS.CLI.Handler
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{CertificateAuthority, RaServer, VolumeRegistry}
+  alias NeonFS.Core.{AuditLog, CertificateAuthority, RaServer, VolumeRegistry}
   alias NeonFS.Transport.TLS
 
   @moduletag :tmp_dir
@@ -1215,6 +1215,78 @@ defmodule NeonFS.CLI.HandlerTest do
       # so the NotFound surfaces from node resolution rather than drives.
       assert {:error, %NeonFS.Error.NotFound{}} =
                Handler.handle_remove_node("still-nonexistent", %{"force" => true})
+    end
+  end
+
+  describe "handle_ca_rotate/1 — abort mode" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_audit_log()
+      start_ra()
+
+      {:ok, _} = Handler.cluster_init("ca-rotate-abort-test")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "refuses when no incoming CA is staged" do
+      assert {:error, %NeonFS.Error.Invalid{message: msg}} =
+               Handler.handle_ca_rotate(%{"abort" => true})
+
+      assert msg =~ "No CA rotation in progress"
+    end
+
+    test "discards the staged incoming CA and emits an audit event" do
+      # Stage an incoming CA so abort has something to clear.
+      {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_incoming_ca("rotated-cluster")
+      assert {:ok, _info} = CertificateAuthority.incoming_ca_info()
+
+      assert {:ok, %{aborted: true}} = Handler.handle_ca_rotate(%{"abort" => true})
+
+      assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+
+      :ok = AuditLog.flush()
+      events = AuditLog.recent(10)
+
+      assert Enum.any?(events, fn e ->
+               e.event_type == :cluster_ca_rotate_aborted
+             end)
+    end
+
+    test "default mode (no flags) still returns the not-implemented stub" do
+      assert {:error, %NeonFS.Error.Unavailable{message: msg}} =
+               Handler.handle_ca_rotate()
+
+      assert msg =~ "not yet implemented"
+    end
+  end
+
+  describe "handle_ca_rotate/1 without cluster state" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "abort refuses when the cluster is not initialised" do
+      assert {:error, %NeonFS.Error.NotFound{message: msg}} =
+               Handler.handle_ca_rotate(%{"abort" => true})
+
+      assert msg =~ "Cluster not initialised"
     end
   end
 end
