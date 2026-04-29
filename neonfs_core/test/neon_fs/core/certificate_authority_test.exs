@@ -298,4 +298,227 @@ defmodule NeonFS.Core.CertificateAuthorityTest do
       assert {:error, _reason} = CertificateAuthority.get_crl()
     end
   end
+
+  describe "init_incoming_ca/1" do
+    setup do
+      {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_ca("active-cluster")
+      :ok
+    end
+
+    test "writes incoming CA materials under /tls/incoming/" do
+      assert {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_incoming_ca("rotated-cluster")
+
+      assert {:ok, ca_cert_pem} = SystemVolume.read("/tls/incoming/ca.crt")
+      assert {:ok, ca_key_pem} = SystemVolume.read("/tls/incoming/ca.key")
+      assert {:ok, "1"} = SystemVolume.read("/tls/incoming/serial")
+      assert {:ok, crl_pem} = SystemVolume.read("/tls/incoming/crl.pem")
+
+      info = TLS.certificate_info(ca_cert_pem)
+      assert info.subject =~ "rotated-cluster CA"
+      assert info.issuer == info.subject
+      _key = TLS.decode_key!(ca_key_pem)
+      _entries = TLS.parse_crl_entries(crl_pem)
+    end
+
+    test "leaves the active CA untouched" do
+      {:ok, active_cert_pem_before} = SystemVolume.read("/tls/ca.crt")
+      {:ok, active_serial_before} = SystemVolume.read("/tls/serial")
+
+      assert {:ok, _, _} = CertificateAuthority.init_incoming_ca("rotated-cluster")
+
+      assert {:ok, ^active_cert_pem_before} = SystemVolume.read("/tls/ca.crt")
+      assert {:ok, ^active_serial_before} = SystemVolume.read("/tls/serial")
+    end
+
+    test "refuses when an incoming CA is already staged" do
+      assert {:ok, _, _} = CertificateAuthority.init_incoming_ca("first-rotation")
+
+      assert {:error, :incoming_ca_already_staged} =
+               CertificateAuthority.init_incoming_ca("second-rotation")
+    end
+  end
+
+  describe "incoming_ca_info/0" do
+    test "returns :no_incoming_ca when nothing is staged" do
+      {:ok, _, _} = CertificateAuthority.init_ca("active-cluster")
+      assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+    end
+
+    test "returns the staged CA's metadata" do
+      {:ok, _, _} = CertificateAuthority.init_ca("active-cluster")
+      {:ok, _, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+
+      assert {:ok, info} = CertificateAuthority.incoming_ca_info()
+      assert info.subject =~ "incoming-cluster CA"
+      assert info.algorithm == "ECDSA P-256"
+      assert info.current_serial == 0
+      assert info.nodes_issued == 0
+    end
+  end
+
+  describe "sign_node_csr_with_incoming/2" do
+    setup do
+      {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_ca("active-cluster")
+      :ok
+    end
+
+    test "returns :no_incoming_ca when nothing is staged" do
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "rotated-node")
+
+      assert {:error, :no_incoming_ca} =
+               CertificateAuthority.sign_node_csr_with_incoming(csr, "rotated-node")
+    end
+
+    test "signs against the incoming CA, not the active CA" do
+      {:ok, incoming_ca_cert, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "rotated-node")
+
+      assert {:ok, node_cert, returned_ca_cert} =
+               CertificateAuthority.sign_node_csr_with_incoming(csr, "rotated-node")
+
+      node_info = TLS.certificate_info(node_cert)
+      incoming_info = TLS.certificate_info(incoming_ca_cert)
+
+      assert node_info.issuer == incoming_info.subject
+      assert TLS.encode_cert(returned_ca_cert) == TLS.encode_cert(incoming_ca_cert)
+    end
+
+    test "uses the incoming serial counter independently of the active CA" do
+      {:ok, _, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+
+      # Burn a serial on the active CA
+      key1 = TLS.generate_node_key()
+      csr1 = TLS.create_csr(key1, "active-node")
+      {:ok, _, _} = CertificateAuthority.sign_node_csr(csr1, "active-node")
+
+      key2 = TLS.generate_node_key()
+      csr2 = TLS.create_csr(key2, "rotated-node")
+
+      {:ok, node_cert, _} =
+        CertificateAuthority.sign_node_csr_with_incoming(csr2, "rotated-node")
+
+      # Incoming starts at 1, independent of active counter.
+      assert TLS.certificate_info(node_cert).serial == 1
+      assert {:ok, "2"} = SystemVolume.read("/tls/incoming/serial")
+      # Active counter advanced by one earlier signing only.
+      assert {:ok, "2"} = SystemVolume.read("/tls/serial")
+    end
+  end
+
+  describe "finalize_rotation/0" do
+    setup do
+      {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_ca("active-cluster")
+      :ok
+    end
+
+    test "returns :no_incoming_ca when nothing is staged" do
+      assert {:error, :no_incoming_ca} = CertificateAuthority.finalize_rotation()
+    end
+
+    test "promotes incoming CA materials into the active slots" do
+      {:ok, incoming_ca_cert, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+
+      assert :ok = CertificateAuthority.finalize_rotation()
+
+      {:ok, info} = CertificateAuthority.ca_info()
+      assert info.subject == TLS.certificate_info(incoming_ca_cert).subject
+
+      # Incoming tree is gone.
+      assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+      refute SystemVolume.exists?("/tls/incoming/ca.crt")
+      refute SystemVolume.exists?("/tls/incoming/ca.key")
+      refute SystemVolume.exists?("/tls/incoming/serial")
+      refute SystemVolume.exists?("/tls/incoming/crl.pem")
+    end
+
+    test "post-finalize, sign_node_csr signs against the new active CA" do
+      {:ok, incoming_ca_cert, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+      :ok = CertificateAuthority.finalize_rotation()
+
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "post-rotate-node")
+
+      {:ok, node_cert, _} = CertificateAuthority.sign_node_csr(csr, "post-rotate-node")
+
+      assert TLS.certificate_info(node_cert).issuer ==
+               TLS.certificate_info(incoming_ca_cert).subject
+    end
+
+    test "round-trip: stage, sign with incoming, finalize, list_issued reflects the new cert" do
+      {:ok, _, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "rotated-node")
+
+      {:ok, node_cert, _} =
+        CertificateAuthority.sign_node_csr_with_incoming(csr, "rotated-node.example.com")
+
+      serial = TLS.certificate_info(node_cert).serial
+
+      assert :ok = CertificateAuthority.finalize_rotation()
+
+      {:ok, issued} = CertificateAuthority.list_issued()
+      assert Enum.any?(issued, fn entry -> entry.serial == serial end)
+    end
+
+    test "discards the previous active CA's issued metadata" do
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "old-node")
+      {:ok, _, _} = CertificateAuthority.sign_node_csr(csr, "old-node.example.com")
+
+      {:ok, _, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+      :ok = CertificateAuthority.finalize_rotation()
+
+      {:ok, issued} = CertificateAuthority.list_issued()
+      assert issued == []
+    end
+  end
+
+  describe "abort_rotation/0" do
+    test "is a no-op when nothing is staged" do
+      {:ok, _, _} = CertificateAuthority.init_ca("active-cluster")
+      assert :ok = CertificateAuthority.abort_rotation()
+    end
+
+    test "removes the staged incoming CA tree" do
+      {:ok, _, _} = CertificateAuthority.init_ca("active-cluster")
+      {:ok, _, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "rotated-node")
+      {:ok, _, _} = CertificateAuthority.sign_node_csr_with_incoming(csr, "rotated-node")
+
+      assert :ok = CertificateAuthority.abort_rotation()
+
+      assert {:error, :no_incoming_ca} = CertificateAuthority.incoming_ca_info()
+      refute SystemVolume.exists?("/tls/incoming/ca.crt")
+      refute SystemVolume.exists?("/tls/incoming/ca.key")
+      refute SystemVolume.exists?("/tls/incoming/serial")
+      refute SystemVolume.exists?("/tls/incoming/crl.pem")
+    end
+
+    test "leaves the active CA untouched" do
+      {:ok, _, _} = CertificateAuthority.init_ca("active-cluster")
+
+      {:ok, active_cert_pem_before} = SystemVolume.read("/tls/ca.crt")
+      {:ok, active_serial_before} = SystemVolume.read("/tls/serial")
+
+      {:ok, _, _} = CertificateAuthority.init_incoming_ca("incoming-cluster")
+      :ok = CertificateAuthority.abort_rotation()
+
+      assert {:ok, ^active_cert_pem_before} = SystemVolume.read("/tls/ca.crt")
+      assert {:ok, ^active_serial_before} = SystemVolume.read("/tls/serial")
+    end
+
+    test "allows starting a fresh rotation after abort" do
+      {:ok, _, _} = CertificateAuthority.init_ca("active-cluster")
+      {:ok, _, _} = CertificateAuthority.init_incoming_ca("first-rotation")
+      :ok = CertificateAuthority.abort_rotation()
+
+      assert {:ok, _, _} = CertificateAuthority.init_incoming_ca("second-rotation")
+    end
+  end
 end
