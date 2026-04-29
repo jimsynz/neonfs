@@ -127,8 +127,37 @@ pub enum CaCommand {
         node: String,
     },
 
-    /// Rotate the cluster CA (reissues all node certificates)
-    Rotate,
+    /// Drive the cluster CA rotation lifecycle.
+    ///
+    /// One of the four mode flags must be passed; they are mutually
+    /// exclusive and map onto the underlying primitives:
+    ///
+    /// - `--status`   inspect rotation state (read-only).
+    /// - `--stage`    init a fresh incoming CA into `_system/tls/incoming/`.
+    /// - `--abort`    discard the staged incoming CA.
+    /// - `--finalize` promote staged → active, drop the previous active CA.
+    ///
+    /// The full automated flow (init + walk every node + reissue + grace
+    /// window + finalize) lands in a follow-up — for now operators drive
+    /// the rotation lifecycle one mode at a time.
+    Rotate {
+        /// Inspect the current rotation state.
+        #[arg(long, conflicts_with_all = ["stage", "abort", "finalize"])]
+        status: bool,
+
+        /// Stage a new incoming CA without touching the active CA.
+        #[arg(long, conflicts_with_all = ["status", "abort", "finalize"])]
+        stage: bool,
+
+        /// Discard a staged incoming CA.
+        #[arg(long, conflicts_with_all = ["status", "stage", "finalize"])]
+        abort: bool,
+
+        /// Promote the staged incoming CA to active. Drops the previous
+        /// active CA and invalidates every cert it signed.
+        #[arg(long, conflicts_with_all = ["status", "stage", "abort"])]
+        finalize: bool,
+    },
 
     /// Restore CA material on a single node after the cluster CA has expired.
     ///
@@ -707,7 +736,12 @@ impl CaCommand {
             CaCommand::Info => self.info(format),
             CaCommand::List => self.list(format),
             CaCommand::Revoke { node } => self.revoke(node, format),
-            CaCommand::Rotate => self.rotate(),
+            CaCommand::Rotate {
+                status,
+                stage,
+                abort,
+                finalize,
+            } => self.rotate(*status, *stage, *abort, *finalize, format),
             CaCommand::EmergencyBootstrap {
                 from_backup,
                 new_key,
@@ -842,17 +876,63 @@ impl CaCommand {
         Ok(())
     }
 
-    fn rotate(&self) -> Result<()> {
-        eprintln!("CA rotation is not yet implemented.");
-        eprintln!();
-        eprintln!("CA rotation is a rare, disruptive operation that reissues all node");
-        eprintln!("certificates. It requires a dual-CA transition period and rolling");
-        eprintln!("reissuance across the cluster.");
-        eprintln!();
-        eprintln!("This will be implemented in a future release.");
-        Err(crate::error::CliError::RpcError(
-            "CA rotation not yet implemented".to_string(),
-        ))
+    fn rotate(
+        &self,
+        status: bool,
+        stage: bool,
+        abort: bool,
+        finalize: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let mode_key = match (status, stage, abort, finalize) {
+            (true, false, false, false) => "status",
+            (false, true, false, false) => "stage",
+            (false, false, true, false) => "abort",
+            (false, false, false, true) => "finalize",
+            (false, false, false, false) => {
+                return Err(crate::error::CliError::InvalidArgument(
+                    "specify exactly one of --status, --stage, --abort, --finalize".to_string(),
+                ));
+            }
+            // clap's `conflicts_with_all` rejects combinations at parse time.
+            _ => unreachable!("clap should have rejected combined mode flags"),
+        };
+
+        let opts = Term::Map(Map::from([(
+            Term::Binary(Binary {
+                bytes: mode_key.as_bytes().to_vec(),
+            }),
+            Term::Atom(Atom::from("true")),
+        )]));
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "handle_ca_rotate", vec![opts])
+                .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            match format {
+                OutputFormat::Json => {
+                    let payload = serde_json::json!({
+                        "status": "error",
+                        "mode": mode_key,
+                        "message": err.error_message(),
+                    });
+                    eprintln!("{}", json::format(&payload)?);
+                }
+                OutputFormat::Table => {
+                    eprintln!(
+                        "neonfs cluster ca rotate --{}: {}",
+                        mode_key,
+                        err.error_message()
+                    );
+                }
+            }
+            return Err(err);
+        }
+
+        format_rotate_success(mode_key, &result, format)
     }
 
     fn emergency_bootstrap(
@@ -1220,6 +1300,129 @@ fn extract_integer(term: &Term) -> Option<i64> {
             big.to_i64()
         }
         _ => None,
+    }
+}
+
+fn format_rotate_success(mode_key: &str, result: &Term, format: OutputFormat) -> Result<()> {
+    let data = unwrap_ok_tuple(result.clone())?;
+    let map = term_to_map(&data)?;
+
+    match format {
+        OutputFormat::Json => {
+            let json_value = rotate_response_to_json(&map);
+            println!("{}", json::format(&json_value)?);
+        }
+        OutputFormat::Table => {
+            print_rotate_table(mode_key, &map);
+        }
+    }
+
+    Ok(())
+}
+
+fn rotate_response_to_json(map: &std::collections::HashMap<String, Term>) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+
+    for (key, term) in map {
+        if let Some(value) = term_to_json_value(term) {
+            obj.insert(key.clone(), value);
+        }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
+fn term_to_json_value(term: &Term) -> Option<serde_json::Value> {
+    match term {
+        Term::Atom(atom) => match atom.name.as_str() {
+            "true" => Some(serde_json::Value::Bool(true)),
+            "false" => Some(serde_json::Value::Bool(false)),
+            "nil" => Some(serde_json::Value::Null),
+            other => Some(serde_json::Value::String(other.to_string())),
+        },
+        Term::Binary(_) => term_to_string(term).ok().map(serde_json::Value::String),
+        Term::FixInteger(n) => Some(serde_json::Value::from(n.value)),
+        Term::Map(_) => {
+            let nested = term_to_map(term).ok()?;
+            Some(rotate_response_to_json(&nested))
+        }
+        _ => None,
+    }
+}
+
+fn print_rotate_table(mode_key: &str, map: &std::collections::HashMap<String, Term>) {
+    match mode_key {
+        "stage" => {
+            println!("✓ Staged incoming CA");
+            print_field(map, "subject", "Subject");
+            print_field(map, "fingerprint", "Fingerprint");
+            print_field(map, "not_before", "Valid from");
+            print_field(map, "not_after", "Valid to");
+            println!();
+            println!("Inspect with: neonfs cluster ca rotate --status");
+            println!("Cancel with:  neonfs cluster ca rotate --abort");
+            println!("Commit with:  neonfs cluster ca rotate --finalize");
+        }
+        "abort" => {
+            println!("✓ Aborted CA rotation; staged incoming CA discarded");
+        }
+        "finalize" => {
+            println!("✓ Finalised CA rotation");
+            print_field(map, "old_fingerprint", "Previous CA");
+            print_field(map, "fingerprint", "New active CA");
+        }
+        "status" => {
+            let in_progress = map
+                .get("rotation_in_progress")
+                .and_then(|t| match t {
+                    Term::Atom(a) => Some(a.name == "true"),
+                    _ => None,
+                })
+                .unwrap_or(false);
+
+            if in_progress {
+                println!("✓ Rotation in progress");
+            } else {
+                println!("◯ No rotation in progress");
+            }
+
+            if let Some(active_term) = map.get("active") {
+                if let Ok(active) = term_to_map(active_term) {
+                    println!();
+                    println!("Active CA");
+                    print_field(&active, "subject", "  Subject");
+                    print_field(&active, "fingerprint", "  Fingerprint");
+                    print_field(&active, "valid_from", "  Valid from");
+                    print_field(&active, "valid_to", "  Valid to");
+                }
+            }
+
+            if let Some(incoming_term) = map.get("incoming") {
+                if let Ok(incoming) = term_to_map(incoming_term) {
+                    println!();
+                    println!("Incoming CA");
+                    print_field(&incoming, "subject", "  Subject");
+                    print_field(&incoming, "fingerprint", "  Fingerprint");
+                    print_field(&incoming, "valid_from", "  Valid from");
+                    print_field(&incoming, "valid_to", "  Valid to");
+                }
+            }
+        }
+        _ => {
+            // Fall through; should be unreachable.
+        }
+    }
+}
+
+fn print_field(map: &std::collections::HashMap<String, Term>, key: &str, label: &str) {
+    if let Some(term) = map.get(key) {
+        if let Some(value) = term_to_json_value(term) {
+            let rendered = match value {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            println!("  {}: {}", label, rendered);
+        }
     }
 }
 

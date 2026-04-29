@@ -371,9 +371,40 @@ mod tests {
     }
 
     #[test]
-    fn test_cluster_ca_rotate() {
-        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "rotate"]);
+    fn test_cluster_ca_rotate_status() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "rotate", "--status"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_rotate_stage() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "rotate", "--stage"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_rotate_abort() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "rotate", "--abort"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_rotate_finalize() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "cluster", "ca", "rotate", "--finalize"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_cluster_ca_rotate_modes_are_mutually_exclusive() {
+        let cli = Cli::try_parse_from([
+            "neonfs-cli",
+            "cluster",
+            "ca",
+            "rotate",
+            "--stage",
+            "--abort",
+        ]);
+        assert!(cli.is_err());
     }
 
     #[test]
