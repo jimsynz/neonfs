@@ -72,6 +72,34 @@ defmodule NeonFS.Core.RaServer do
     GenServer.call(__MODULE__, {:join_cluster, existing_members}, 60_000)
   end
 
+  @doc """
+  Operator-invoked quorum recovery from a surviving minority (#473).
+
+  Snapshot-extracts the local Ra replica's state, force-deletes the
+  Ra server (and its log), and rebootstraps a fresh single-node
+  cluster with the extracted state injected via
+  `MetadataStateMachine.init/1`'s `:initial_state` option. After this
+  call returns, the survivor is a 1-node cluster with the cluster
+  metadata preserved but every membership trace of the dropped
+  nodes erased.
+
+  The path is destructive: every command the dropped majority
+  committed but never replicated to the survivor is lost. The
+  caller (`NeonFS.CLI.Handler.handle_force_reset/1`) is responsible
+  for the operator safety gates that surface the data-loss
+  acknowledgement before this is invoked.
+
+  Returns `{:ok, snapshot_path}` on success — the path of the
+  on-disk backup of the extracted state, kept under
+  `$NEONFS_DATA_DIR/ra/force-reset-snapshot-<timestamp>.bin` for
+  paranoia (operators can inspect it post-hoc if the new cluster
+  comes up wrong).
+  """
+  @spec force_reset_to_self() :: {:ok, Path.t()} | {:error, term()}
+  def force_reset_to_self do
+    GenServer.call(__MODULE__, :force_reset_to_self, 60_000)
+  end
+
   @impl true
   def init(opts) do
     # Use handle_continue to ensure Ra application is ready, but don't start the server
@@ -218,6 +246,48 @@ defmodule NeonFS.Core.RaServer do
   @impl true
   def handle_call({:join_cluster, existing_members}, _from, state) do
     do_join_cluster(existing_members, state)
+  end
+
+  @impl true
+  def handle_call(:force_reset_to_self, _from, %{status: status} = state)
+      when status not in [:running, :joined] do
+    {:reply,
+     {:error,
+      "Ra server is not in a running state (status=#{inspect(status)}); " <>
+        "force-reset requires a live local replica to extract state from"}, state}
+  end
+
+  @impl true
+  def handle_call(:force_reset_to_self, _from, state) do
+    node_name = Node.self()
+    server_id = {@cluster_name, node_name}
+    sanitized_node = node_name |> to_string() |> String.replace(~r/[@\.]/, "_")
+
+    Logger.warning("Force-reset: extracting local Ra state and rebootstrapping",
+      cluster_name: inspect(@cluster_name),
+      node: inspect(node_name)
+    )
+
+    with {:ok, snapshot_state} <- extract_local_ra_state(server_id),
+         _ = Logger.debug("Force-reset: state extracted"),
+         {:ok, snapshot_path} <- write_force_reset_snapshot(snapshot_state, sanitized_node),
+         _ = Logger.debug("Force-reset: snapshot written"),
+         :ok <- stop_and_delete_local_server(server_id),
+         _ = Logger.debug("Force-reset: old server deleted"),
+         :ok <- wait_for_ra_cleanup(server_id),
+         _ = Logger.debug("Force-reset: cleanup done; starting fresh cluster"),
+         {:ok, _pid_or_atom} <-
+           start_force_reset_cluster(server_id, sanitized_node, snapshot_state) do
+      Logger.warning(
+        "Force-reset succeeded; survivor #{inspect(node_name)} is a fresh single-node cluster (snapshot=#{snapshot_path})"
+      )
+
+      {:reply, {:ok, snapshot_path}, %{state | status: :running}}
+    else
+      {:error, reason} ->
+        Logger.error("Force-reset failed", reason: inspect(reason))
+        {:reply, {:error, reason}, state}
+    end
   end
 
   defp do_join_cluster(existing_members, state) do
@@ -563,5 +633,85 @@ defmodule NeonFS.Core.RaServer do
       :ok -> {:ok, :started}
       {:error, reason} -> {:error, {:fresh_start_failed, reason}}
     end
+  end
+
+  # ─── Force-reset helpers (#473) ────────────────────────────────────
+
+  # Snapshot-extract the local replica's state. `local_query` doesn't
+  # require quorum — exactly the property we need when the cluster
+  # has lost majority. The query function is a `{m,f,a}` per Ra's
+  # cross-cluster query convention; the `apply_query/2` helper in
+  # `RaSupervisor` deserialises it.
+  defp extract_local_ra_state(server_id) do
+    query_mfa = {NeonFS.Core.RaSupervisor, :apply_query, [&Function.identity/1]}
+
+    case :ra.local_query(server_id, query_mfa, 5_000) do
+      {:ok, {_idxterm, state}, _local_server} ->
+        {:ok, state}
+
+      {:error, reason} ->
+        {:error, {:local_query_failed, reason}}
+
+      {:timeout, _} ->
+        {:error, {:local_query_failed, :timeout}}
+    end
+  end
+
+  # Persist the extracted state to disk before destroying anything,
+  # so an operator can recover by hand if the rebootstrap fails.
+  defp write_force_reset_snapshot(state, sanitized_node) do
+    data_dir = ra_data_dir()
+    snapshot_dir = Path.join(data_dir, "force-reset-snapshots")
+    File.mkdir_p!(snapshot_dir)
+
+    timestamp = System.system_time(:second)
+
+    snapshot_path =
+      Path.join(snapshot_dir, "#{sanitized_node}-#{timestamp}.bin")
+
+    bin = :erlang.term_to_binary(state)
+    File.write!(snapshot_path, bin)
+
+    {:ok, snapshot_path}
+  end
+
+  defp stop_and_delete_local_server(server_id) do
+    _ = :ra.stop_server(:default, server_id)
+
+    case :ra.force_delete_server(:default, server_id) do
+      :ok -> :ok
+      {:error, :name_not_registered} -> :ok
+      {:error, reason} -> {:error, {:force_delete_failed, reason}}
+    end
+  end
+
+  defp start_force_reset_cluster(server_id, sanitized_node, initial_state) do
+    machine_config = {:module, MetadataStateMachine, %{initial_state: initial_state}}
+
+    ra_config = %{
+      id: server_id,
+      uid: "neonfs_meta_#{sanitized_node}",
+      cluster_name: @cluster_name,
+      machine: machine_config,
+      log_init_args: %{uid: "neonfs_meta_#{sanitized_node}"},
+      initial_members: [server_id]
+    }
+
+    case :ra.start_server(:default, ra_config) do
+      {:ok, pid} ->
+        trigger_and_wait_for_election(server_id)
+        {:ok, pid}
+
+      :ok ->
+        trigger_and_wait_for_election(server_id)
+        {:ok, :started}
+
+      {:error, reason} ->
+        {:error, {:start_force_reset_cluster_failed, reason}}
+    end
+  end
+
+  defp ra_data_dir do
+    Application.get_env(:neonfs_core, :ra_data_dir, "/var/lib/neonfs/ra")
   end
 end
