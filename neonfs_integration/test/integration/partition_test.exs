@@ -53,7 +53,14 @@ defmodule NeonFS.Integration.PartitionTest do
 
       assert {:ok, _} = result
 
-      assert_eventually timeout: 30_000 do
+      # Background replication of the chunk to node2 races with the
+      # parallel RPC to the partitioned node3 — the latter eats up to
+      # 10 s on the dist-RPC timeout, and the chunk-index update that
+      # makes the chunk visible on node2 only fires after both targets
+      # report back. Under CI load this regularly trips a tight 30 s
+      # budget (#606). 60 s mirrors the other intra-partition reads
+      # in this file.
+      assert_eventually timeout: 60_000 do
         read_matches?(cluster, :node2, path, "majority data")
       end
     end
