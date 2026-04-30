@@ -1,5 +1,6 @@
 //! Cluster management commands
 
+use crate::commands::repair::RepairCommand;
 use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
@@ -62,6 +63,12 @@ pub enum ClusterCommand {
 
     /// Show status of an active rebalance operation
     RebalanceStatus,
+
+    /// Replica-count repair (#687)
+    Repair {
+        #[command(subcommand)]
+        command: RepairCommand,
+    },
 
     /// Show cluster status
     Status,
@@ -207,6 +214,7 @@ impl ClusterCommand {
                 batch_size,
             } => self.rebalance(tier.as_deref(), threshold, batch_size, format),
             ClusterCommand::RebalanceStatus => self.rebalance_status(format),
+            ClusterCommand::Repair { command } => command.execute(format),
             ClusterCommand::Status => self.status(format),
             ClusterCommand::RemoveNode { node, force } => self.remove_node(node, *force, format),
             ClusterCommand::ForceReset {

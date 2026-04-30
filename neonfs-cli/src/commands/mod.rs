@@ -12,6 +12,7 @@ pub mod gc;
 pub mod job;
 pub mod nfs;
 pub mod node;
+pub mod repair;
 pub mod s3;
 pub mod scrub;
 pub mod volume;
