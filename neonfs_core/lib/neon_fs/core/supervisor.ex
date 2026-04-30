@@ -278,6 +278,9 @@ defmodule NeonFS.Core.Supervisor do
           # ScrubScheduler creates periodic scrub jobs per volume
           {NeonFS.Core.ScrubScheduler, scrub_scheduler_opts()},
 
+          # ReplicaRepairScheduler creates periodic replica-repair jobs per volume
+          {NeonFS.Core.ReplicaRepairScheduler, replica_repair_scheduler_opts()},
+
           # AntiEntropy periodically syncs metadata segments via Merkle tree comparison
           NeonFS.Core.AntiEntropy,
 
@@ -402,6 +405,15 @@ defmodule NeonFS.Core.Supervisor do
   defp scrub_scheduler_opts do
     [
       check_interval_ms: Application.get_env(:neonfs_core, :scrub_check_interval_ms, 3_600_000)
+    ]
+  end
+
+  defp replica_repair_scheduler_opts do
+    [
+      check_interval_ms:
+        Application.get_env(:neonfs_core, :replica_repair_check_interval_ms, 3_600_000),
+      volume_interval_seconds:
+        Application.get_env(:neonfs_core, :replica_repair_volume_interval_seconds, 86_400)
     ]
   end
 
