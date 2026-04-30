@@ -329,6 +329,46 @@ jobs:
         run: mix check
 
   # =========================================================================
+  # neonfs_containerd - containerd content store plugin (Elixir-only; gRPC
+  # over UDS via the `grpc` + `protobuf` hex packages). The
+  # `containerd.services.content.v1` and `grpc.health.v1` protobuf bindings
+  # under `lib/containerd/` are checked in (regenerate locally via
+  # `protoc-gen-elixir`).
+  # =========================================================================
+  neonfs_containerd:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
+            neonfs_containerd/deps
+            neonfs_containerd/_build
+          key: v3-build-neonfs_containerd-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_containerd/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
+          restore-keys: v3-build-neonfs_containerd-${{ runner.arch }}-
+
+      - name: Build
+        working-directory: neonfs_containerd
+        run: |
+          mix local.hex --force && mix local.rebar --force
+          mix deps.get
+          mix deps.compile
+          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+
+      - name: Check
+        working-directory: neonfs_containerd
+        run: mix check
+
+  # =========================================================================
   # neonfs_nfs - Elixir + Rustler NIFs (NFSv3 server)
   # =========================================================================
   neonfs_nfs:
