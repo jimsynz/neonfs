@@ -104,6 +104,24 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     {:ok, vol_struct} =
       PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [volume])
 
+    # WRITE picks a drive via `DriveRegistry.select_drive(initial_tier)` on
+    # the core peer — if no drive is registered yet, `:no_drives_in_tier`
+    # bubbles up as `{:error, %Unavailable{}}` and the BEAM NFS backend's
+    # catch-all maps it to `NFS3ERR_IO`, which is what #704 caught. The
+    # volume registering does not imply a drive is selectable; wait for it
+    # explicitly. Default tier is `:hot`.
+    assert_eventually(
+      fn ->
+        match?(
+          {:ok, _},
+          PeerCluster.rpc(cluster, :node1, NeonFS.Core.DriveRegistry, :select_drive, [
+            vol_struct.tiering.initial_tier
+          ])
+        )
+      end,
+      timeout: 10_000
+    )
+
     case PeerCluster.rpc(cluster, :node2, GenServer, :start, [
            InodeTable,
            [],
