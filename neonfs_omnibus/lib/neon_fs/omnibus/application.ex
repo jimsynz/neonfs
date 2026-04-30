@@ -2,9 +2,9 @@ defmodule NeonFS.Omnibus.Application do
   @moduledoc """
   Application callback for NeonFS Omnibus.
 
-  Starts the FUSE, NFS, S3, WebDAV, and Docker services after the core
-  application is already running (core is a runtime dependency, so OTP
-  starts it before us).
+  Starts the FUSE, NFS, S3, WebDAV, Docker, and containerd services after
+  the core application is already running (core is a runtime dependency,
+  so OTP starts it before us).
   """
 
   use Application
@@ -26,7 +26,9 @@ defmodule NeonFS.Omnibus.Application do
          {:ok, _} <- Application.ensure_all_started(:neonfs_webdav),
          :ok <- Logger.info("NeonFS WebDAV started"),
          {:ok, _} <- Application.ensure_all_started(:neonfs_docker),
-         :ok <- Logger.info("NeonFS Docker started") do
+         :ok <- Logger.info("NeonFS Docker started"),
+         {:ok, _} <- Application.ensure_all_started(:neonfs_containerd),
+         :ok <- Logger.info("NeonFS containerd started") do
       NeonFS.Systemd.notify_ready()
       {:ok, pid}
     end
