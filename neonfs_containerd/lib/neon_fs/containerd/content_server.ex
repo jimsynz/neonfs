@@ -34,8 +34,10 @@ defmodule NeonFS.Containerd.ContentServer do
     UpdateRequest
   }
 
+  alias Containerd.Services.Content.V1.WriteContentRequest
+  alias Containerd.Services.Content.V1.WriteContentResponse
   alias GRPC.RPCError
-  alias NeonFS.Containerd.Digest
+  alias NeonFS.Containerd.{Digest, WriteSession, WriteSupervisor}
 
   # ─── Status / ListStatuses (real impls — return empty) ─────────────
 
@@ -196,9 +198,148 @@ defmodule NeonFS.Containerd.ContentServer do
       message: "malformed digest"
   end
 
-  @doc "Stub for `Write` bidi-streaming RPC — lands in #550."
-  @spec write(Enumerable.t(), GRPC.Server.Stream.t()) :: no_return()
-  def write(_request_stream, _stream), do: raise_unimplemented("Write", 550)
+  @doc """
+  `Write` bidi-streaming RPC. Each `WriteContentRequest` carries an
+  action (`STAT` / `WRITE` / `COMMIT`), the in-progress write `ref`
+  (opaque, caller-supplied), an optional `expected` digest, an
+  optional `total` size, and (for `WRITE`) a `data` payload.
+
+  The server tracks each `ref`'s state in a `WriteSession`
+  GenServer registered via `WriteRegistry` so partial writes survive
+  bidi-stream disconnects (containerd reuses the same ref to
+  resume). On `COMMIT` the session verifies the running SHA-256
+  hash equals `expected` and atomically lands the chunks at the
+  canonical `sha256/<ab>/<cd>/<rest>` path (the layout decision in
+  #547). A digest mismatch surfaces as `INVALID_ARGUMENT` and the
+  partial chunks orphan to core-side GC.
+
+  This handler does **not** support the `Abort` action — that's a
+  separate `Abort` RPC under #552.
+  """
+  @spec write(Enumerable.t(), GRPC.Server.Stream.t()) :: any()
+  def write(request_stream, stream) do
+    _final_state =
+      Enum.reduce(request_stream, %{}, fn request, state ->
+        dispatch_write_frame(request, state, stream)
+      end)
+
+    :ok
+  end
+
+  defp dispatch_write_frame(%WriteContentRequest{action: action} = req, state, stream) do
+    case action do
+      :STAT ->
+        handle_stat(req, state, stream)
+
+      :WRITE ->
+        handle_write_frame(req, state, stream)
+
+      :COMMIT ->
+        handle_commit_frame(req, state, stream)
+
+      other ->
+        raise RPCError, status: :invalid_argument, message: "unknown action #{inspect(other)}"
+    end
+  end
+
+  defp handle_stat(%WriteContentRequest{ref: ref}, state, stream) do
+    pid = ensure_session(ref)
+    snapshot = WriteSession.stat(pid)
+
+    GRPC.Server.send_reply(stream, %WriteContentResponse{
+      action: :STAT,
+      started_at: to_timestamp(snapshot.started_at),
+      updated_at: to_timestamp(snapshot.updated_at),
+      offset: snapshot.offset,
+      total: snapshot.total
+    })
+
+    Map.put(state, ref, pid)
+  end
+
+  defp handle_write_frame(%WriteContentRequest{} = req, state, _stream) do
+    pid = ensure_session(req.ref, req)
+
+    if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
+    if req.total > 0, do: WriteSession.set_total(pid, req.total)
+
+    case WriteSession.feed(pid, req.data, normalise_offset(req.offset)) do
+      {:ok, _} ->
+        Map.put(state, req.ref, pid)
+
+      {:error, :offset_mismatch} ->
+        raise RPCError,
+          status: :out_of_range,
+          message:
+            "offset mismatch: containerd asked to resume from #{req.offset} but " <>
+              "session is at #{WriteSession.stat(pid).offset}"
+    end
+  end
+
+  defp handle_commit_frame(%WriteContentRequest{} = req, state, stream) do
+    pid = ensure_session(req.ref, req)
+
+    if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
+    if req.total > 0, do: WriteSession.set_total(pid, req.total)
+
+    case WriteSession.commit(pid, req.expected) do
+      {:ok, %{digest: digest, offset: offset, total: total}} ->
+        GRPC.Server.send_reply(stream, %WriteContentResponse{
+          action: :COMMIT,
+          digest: digest,
+          offset: offset,
+          total: total,
+          started_at: nil,
+          updated_at: to_timestamp(DateTime.utc_now())
+        })
+
+        Map.delete(state, req.ref)
+
+      {:error, :digest_mismatch} ->
+        raise RPCError,
+          status: :invalid_argument,
+          message: "digest mismatch: expected #{req.expected}"
+
+      {:error, reason} ->
+        raise RPCError,
+          status: :internal,
+          message: "commit failed: #{inspect(reason)}"
+    end
+  end
+
+  defp ensure_session(ref, req \\ nil) do
+    case WriteSupervisor.start_session(ref, session_opts(req)) do
+      {:ok, pid} ->
+        pid
+
+      {:error, reason} ->
+        raise RPCError,
+          status: :internal,
+          message: "could not start write session for #{inspect(ref)}: #{inspect(reason)}"
+    end
+  end
+
+  defp session_opts(nil), do: []
+
+  defp session_opts(%WriteContentRequest{} = req) do
+    []
+    |> maybe_put_opt(:total, positive_integer(req.total))
+    |> maybe_put_opt(:expected, non_empty_string(req.expected))
+  end
+
+  defp non_empty_string(""), do: nil
+  defp non_empty_string(s) when is_binary(s), do: s
+  defp non_empty_string(_), do: nil
+
+  defp normalise_offset(0), do: nil
+  defp normalise_offset(n) when is_integer(n) and n > 0, do: n
+  defp normalise_offset(_), do: nil
+
+  defp to_timestamp(%DateTime{} = dt) do
+    seconds = DateTime.to_unix(dt, :second)
+    nanos = (DateTime.to_unix(dt, :microsecond) - seconds * 1_000_000) * 1_000
+    %Google.Protobuf.Timestamp{seconds: seconds, nanos: nanos}
+  end
 
   @doc "Stub for `Abort` RPC — lands in #552."
   @spec abort(AbortRequest.t(), GRPC.Server.Stream.t()) :: no_return()
