@@ -19,7 +19,7 @@ defmodule NeonFS.Containerd.Supervisor do
   use Supervisor
 
   alias NeonFS.Client.Registrar
-  alias NeonFS.Containerd.HealthCheck
+  alias NeonFS.Containerd.{HealthCheck, WriteRegistry, WriteSupervisor}
 
   @default_socket_path "/run/containerd/proxy-plugins/neonfs.sock"
 
@@ -41,7 +41,11 @@ defmodule NeonFS.Containerd.Supervisor do
     HealthCheck.register_checks()
 
     children =
-      [endpoint_child_spec()]
+      [
+        WriteRegistry,
+        WriteSupervisor,
+        endpoint_child_spec()
+      ]
       |> maybe_add_registrar(register?)
 
     Supervisor.init(children, strategy: :one_for_one)
