@@ -8,13 +8,10 @@ defmodule NeonFS.Containerd.WriteSessionTest do
 
   use ExUnit.Case, async: false
 
-  alias NeonFS.Containerd.{StubChunkWriter, WriteRegistry, WriteSession, WriteSupervisor}
+  alias NeonFS.Containerd.{StubChunkWriter, WriteSession, WriteSupervisor}
 
   setup do
     StubChunkWriter.start({:ok, []})
-    ensure_registry()
-    ensure_supervisor()
-
     parent = self()
 
     Application.put_env(:neonfs_containerd, :volume, "containerd-test")
@@ -31,20 +28,6 @@ defmodule NeonFS.Containerd.WriteSessionTest do
     end)
 
     :ok
-  end
-
-  defp ensure_registry do
-    case Process.whereis(WriteRegistry) do
-      nil -> {:ok, _} = Registry.start_link(keys: :unique, name: WriteRegistry)
-      _ -> :ok
-    end
-  end
-
-  defp ensure_supervisor do
-    case Process.whereis(WriteSupervisor) do
-      nil -> {:ok, _} = WriteSupervisor.start_link([])
-      _ -> :ok
-    end
   end
 
   defp start_session(ref, opts \\ []) do

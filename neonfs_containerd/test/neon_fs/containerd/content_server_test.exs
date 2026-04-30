@@ -15,16 +15,7 @@ defmodule NeonFS.Containerd.ContentServerTest do
   }
 
   alias GRPC.RPCError
-  alias NeonFS.Containerd.{ContentServer, WriteRegistry}
-
-  setup do
-    case Process.whereis(WriteRegistry) do
-      nil -> {:ok, _} = Registry.start_link(keys: :unique, name: WriteRegistry)
-      _ -> :ok
-    end
-
-    :ok
-  end
+  alias NeonFS.Containerd.ContentServer
 
   describe "Status" do
     test "returns NOT_FOUND when no in-progress write exists for the ref" do

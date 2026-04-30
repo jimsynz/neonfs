@@ -60,15 +60,34 @@ defmodule NeonFS.Containerd.StubChunkWriter do
   ChunkWriter-shaped `write_file_stream/4`. Captures args and drains
   the data stream synchronously before returning the stashed
   response.
+
+  If the agent has been stopped between the call starting and the
+  stream draining (test on_exit racing the `WriteSession`'s Task),
+  silently returns `{:ok, []}` so the Task exits clean rather than
+  crashing the WriteSession via its link. The test's assertion has
+  already happened by that point — we just need to not poison the
+  supervisor's restart counter.
   """
   @spec write_file_stream(String.t(), String.t(), Enumerable.t(), keyword()) :: term()
   def write_file_stream(volume, path, stream, opts) do
-    Agent.update(@name, &Map.put(&1, :args, {volume, path, opts}))
+    safe_update(fn s -> Map.put(s, :args, {volume, path, opts}) end)
 
     Enum.each(stream, fn segment ->
-      Agent.update(@name, fn s -> %{s | segments: s.segments ++ [segment]} end)
+      safe_update(fn s -> %{s | segments: s.segments ++ [segment]} end)
     end)
 
-    Agent.get(@name, & &1.response)
+    safe_get(& &1.response, {:ok, []})
+  end
+
+  defp safe_update(fun) do
+    Agent.update(@name, fun)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp safe_get(fun, fallback) do
+    Agent.get(@name, fun)
+  catch
+    :exit, _ -> fallback
   end
 end
