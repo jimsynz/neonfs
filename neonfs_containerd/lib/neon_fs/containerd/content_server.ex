@@ -35,32 +35,88 @@ defmodule NeonFS.Containerd.ContentServer do
   }
 
   alias Containerd.Services.Content.V1.{Info, InfoResponse, ListContentResponse, UpdateResponse}
-  alias Containerd.Services.Content.V1.WriteContentRequest
-  alias Containerd.Services.Content.V1.WriteContentResponse
+  alias Containerd.Services.Content.V1.{Status, WriteContentRequest, WriteContentResponse}
   alias GRPC.RPCError
   alias NeonFS.Client.Router
-  alias NeonFS.Containerd.{Digest, Metadata, WriteSession, WriteSupervisor}
+  alias NeonFS.Containerd.{Digest, Metadata, WriteRegistry, WriteSession, WriteSupervisor}
 
   # ─── Status / ListStatuses (real impls — return empty) ─────────────
 
   @doc """
-  In-progress write status. Returns the empty `StatusResponse`
-  shape (`status: nil`) — once #552 lands this looks up the actual
-  write in the in-progress tracker.
+  In-progress write status. Looks up the `WriteSession` for `ref`
+  in `WriteRegistry` and returns its current snapshot (cumulative
+  bytes, expected total, recorded digest, last-update timestamp).
+  Returns `NOT_FOUND` if no session is registered for the ref.
   """
   @spec status(StatusRequest.t(), GRPC.Server.Stream.t()) :: StatusResponse.t()
-  def status(_request, _stream) do
-    %StatusResponse{status: nil}
+  def status(%StatusRequest{ref: ref}, _stream) do
+    case WriteRegistry.lookup(ref) do
+      {:ok, pid} ->
+        try do
+          %StatusResponse{status: build_status(ref, pid)}
+        catch
+          :exit, _ ->
+            raise RPCError,
+              status: :not_found,
+              message: "no in-progress write for #{inspect(ref)}"
+        end
+
+      :error ->
+        raise RPCError, status: :not_found, message: "no in-progress write for #{inspect(ref)}"
+    end
   end
 
   @doc """
-  Lists currently in-progress writes. Empty until #552 lands.
+  Lists every active in-progress write. Containerd's filter syntax
+  on `ListStatusesRequest.filters` is rich; this slice supports a
+  single `"ref==<prefix>"` filter for ref-prefix matching, which is
+  what `ctr content active` uses. Anything else goes through as an
+  unfiltered list.
   """
   @spec list_statuses(ListStatusesRequest.t(), GRPC.Server.Stream.t()) ::
           ListStatusesResponse.t()
-  def list_statuses(_request, _stream) do
-    %ListStatusesResponse{statuses: []}
+  def list_statuses(%ListStatusesRequest{filters: filters}, _stream) do
+    prefix = ref_prefix_from_filters(filters)
+
+    statuses =
+      WriteRegistry.list_all()
+      |> Enum.filter(fn {ref, _pid} -> matches_prefix?(ref, prefix) end)
+      |> Enum.flat_map(fn {ref, pid} ->
+        try do
+          [build_status(ref, pid)]
+        catch
+          :exit, _ -> []
+        end
+      end)
+
+    %ListStatusesResponse{statuses: statuses}
   end
+
+  defp build_status(ref, pid) do
+    snapshot = WriteSession.stat(pid)
+
+    %Status{
+      ref: ref,
+      offset: snapshot.offset,
+      total: snapshot.total,
+      started_at: to_timestamp(snapshot.started_at),
+      updated_at: to_timestamp(snapshot.updated_at),
+      expected: ""
+    }
+  end
+
+  defp ref_prefix_from_filters([]), do: nil
+  defp ref_prefix_from_filters(nil), do: nil
+
+  defp ref_prefix_from_filters(filters) when is_list(filters) do
+    Enum.find_value(filters, fn
+      "ref==" <> prefix -> prefix
+      _ -> nil
+    end)
+  end
+
+  defp matches_prefix?(_ref, nil), do: true
+  defp matches_prefix?(ref, prefix), do: String.starts_with?(ref, prefix)
 
   # ─── Skeleton RPCs (return UNIMPLEMENTED) ──────────────────────────
 
@@ -475,13 +531,21 @@ defmodule NeonFS.Containerd.ContentServer do
     %Google.Protobuf.Timestamp{seconds: seconds, nanos: nanos}
   end
 
-  @doc "Stub for `Abort` RPC — lands in #552."
-  @spec abort(AbortRequest.t(), GRPC.Server.Stream.t()) :: no_return()
-  def abort(_request, _stream), do: raise_unimplemented("Abort", 552)
+  @doc """
+  `Abort` RPC. Same semantics as `WriteContentRequest{action: ABORT}`
+  from #550, exposed as a separate RPC so a client that has already
+  closed its bidi-stream can still cancel. Returns `Empty` on
+  success, `NOT_FOUND` if no session is registered for the ref.
+  """
+  @spec abort(AbortRequest.t(), GRPC.Server.Stream.t()) :: Google.Protobuf.Empty.t()
+  def abort(%AbortRequest{ref: ref}, _stream) do
+    case WriteRegistry.lookup(ref) do
+      {:ok, pid} ->
+        :ok = WriteSession.abort(pid)
+        %Google.Protobuf.Empty{}
 
-  defp raise_unimplemented(rpc_name, issue) do
-    raise RPCError,
-      status: :unimplemented,
-      message: "#{rpc_name} not implemented in scaffold; lands in ##{issue}"
+      :error ->
+        raise RPCError, status: :not_found, message: "no in-progress write for #{inspect(ref)}"
+    end
   end
 end

@@ -151,6 +151,33 @@ defmodule NeonFS.Containerd.WriteSession do
     GenServer.call(pid, :abort, :infinity)
   end
 
+  @doc """
+  Abort every session whose `updated_at` is older than `max_age_seconds`
+  (default 24 hours). Returns the list of refs that were aborted —
+  callers can log / telemetry-emit them. Sessions still actively
+  receiving data are left alone.
+  """
+  @spec abort_stale(pos_integer()) :: [String.t()]
+  def abort_stale(max_age_seconds \\ 86_400) do
+    cutoff = DateTime.add(DateTime.utc_now(), -max_age_seconds, :second)
+
+    WriteRegistry.list_all()
+    |> Enum.flat_map(fn {ref, pid} ->
+      try do
+        snapshot = stat(pid)
+
+        if DateTime.compare(snapshot.updated_at, cutoff) == :lt do
+          _ = abort(pid)
+          [ref]
+        else
+          []
+        end
+      catch
+        :exit, _ -> []
+      end
+    end)
+  end
+
   ## GenServer callbacks
 
   @impl true
