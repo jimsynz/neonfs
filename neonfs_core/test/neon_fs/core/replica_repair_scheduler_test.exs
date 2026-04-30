@@ -6,7 +6,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
   from real `JobTracker` / `VolumeRegistry` state.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias NeonFS.Core.Job
   alias NeonFS.Core.Job.Runners.ReplicaRepair, as: Runner
@@ -221,9 +221,53 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
           name: name
         )
 
-      assert {:ok, job} = GenServer.call(name, {:trigger_now, "v1"})
+      assert {:ok, [job]} = GenServer.call(name, {:trigger_now, "v1"})
       assert job.type == Runner
       assert job.params == %{volume_id: "v1"}
+    end
+
+    test ":all scope queues a job for every registered volume" do
+      MockJobTracker.start_link()
+
+      MockVolumeRegistry.start_link(
+        volumes: [make_volume("a"), make_volume("b"), make_volume("c")]
+      )
+
+      name = :"rr_sched_trigger_all_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          name: name
+        )
+
+      assert {:ok, jobs} = GenServer.call(name, {:trigger_now, :all})
+      assert length(jobs) == 3
+      assert Enum.map(jobs, & &1.params[:volume_id]) |> Enum.sort() == ["a", "b", "c"]
+    end
+
+    test "list scope queues only the listed volumes" do
+      MockJobTracker.start_link()
+
+      MockVolumeRegistry.start_link(
+        volumes: [make_volume("a"), make_volume("b"), make_volume("c")]
+      )
+
+      name = :"rr_sched_trigger_list_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          name: name
+        )
+
+      assert {:ok, jobs} = GenServer.call(name, {:trigger_now, ["a", "c"]})
+      assert Enum.map(jobs, & &1.params[:volume_id]) |> Enum.sort() == ["a", "c"]
     end
 
     test "skips when a job is already running for the volume" do
@@ -254,6 +298,109 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
         )
 
       assert {:skipped, :already_running} = GenServer.call(name, {:trigger_now, "v1"})
+    end
+  end
+
+  describe "membership-change auto-trigger (#708)" do
+    test "fires `:all` when a `:core` service deregister telemetry event arrives" do
+      MockJobTracker.start_link()
+      MockVolumeRegistry.start_link(volumes: [make_volume("v1"), make_volume("v2")])
+
+      ref = attach_telemetry([[:neonfs, :replica_repair_scheduler, :triggered]])
+
+      {:ok, pid} =
+        ReplicaRepairScheduler.start_link(
+          # long ticks so we don't conflate with the periodic path
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          membership_rate_limit_ms: 0,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          name: :"rr_sched_member_#{System.unique_integer([:positive])}"
+        )
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n2@host, type: :core}
+      )
+
+      # Drain the scheduler's mailbox so the cast queued by the
+      # telemetry handler is processed before the assert.
+      _ = :sys.get_state(pid)
+
+      # Two `:triggered` events expected — one per volume.
+      assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
+                      %{volume_id: _}},
+                     1_000
+
+      assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
+                      %{volume_id: _}},
+                     1_000
+    end
+
+    test "ignores deregister events for non-core services (e.g. :nfs)" do
+      MockJobTracker.start_link()
+      MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
+
+      ref = attach_telemetry([[:neonfs, :replica_repair_scheduler, :triggered]])
+
+      {:ok, pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          membership_rate_limit_ms: 0,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          name: :"rr_sched_nonmember_#{System.unique_integer([:positive])}"
+        )
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n2@host, type: :nfs}
+      )
+
+      _ = :sys.get_state(pid)
+      refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
+    end
+
+    test "rate-limits repeated membership events within the configured window" do
+      MockJobTracker.start_link()
+      MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
+
+      ref = attach_telemetry([[:neonfs, :replica_repair_scheduler, :membership_rate_limited]])
+
+      {:ok, pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          # 1 minute rate-limit — second event should hit the limiter
+          membership_rate_limit_ms: 60_000,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          name: :"rr_sched_ratelimit_#{System.unique_integer([:positive])}"
+        )
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n2@host, type: :core}
+      )
+
+      _ = :sys.get_state(pid)
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n3@host, type: :core}
+      )
+
+      _ = :sys.get_state(pid)
+
+      assert_receive {[:neonfs, :replica_repair_scheduler, :membership_rate_limited], ^ref, %{},
+                      %{}},
+                     1_000
     end
   end
 

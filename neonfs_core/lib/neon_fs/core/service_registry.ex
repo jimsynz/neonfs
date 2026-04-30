@@ -359,6 +359,16 @@ defmodule NeonFS.Core.ServiceRegistry do
       {:error, reason} -> Logger.warning("Ra deregister_service failed", reason: reason)
     end
 
+    # Membership-change observers (e.g. `ReplicaRepairScheduler` from
+    # #708) attach to this telemetry event to react to nodes leaving
+    # the cluster without taking a hard dependency on
+    # `ServiceRegistry`.
+    :telemetry.execute(
+      [:neonfs, :service_registry, :service_deregistered],
+      %{},
+      %{node: node, type: type}
+    )
+
     # Only drop the node-monitor when no other services remain registered
     # for this node — a fuse-only node stays monitored for future nodedowns.
     keep_monitor? = list_by_node(node) != []
