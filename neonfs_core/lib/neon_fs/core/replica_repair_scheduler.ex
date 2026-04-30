@@ -43,6 +43,9 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
 
   @default_check_interval_ms 3_600_000
   @default_volume_interval_seconds 86_400
+  @default_membership_rate_limit_ms 60_000
+
+  @telemetry_handler_id_prefix "neonfs-replica-repair-scheduler-membership"
 
   @doc """
   Start the scheduler.
@@ -63,38 +66,61 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
   end
 
   @doc """
-  Trigger an immediate repair pass for `volume_id`. Used by the
-  membership-change auto-trigger (sub-issue #708) and the operator
-  CLI (sub-issue #709).
+  Trigger an immediate repair pass for `scope`.
 
-  Idempotent: if a repair job is already running for the volume,
-  the trigger is skipped.
+  `scope` can be:
+
+    * a `volume_id` string — queue one job for that volume.
+    * a `[volume_id, ...]` list — queue one job per listed volume.
+    * `:all` — queue one job per volume in the registry.
+
+  Idempotent: if a repair job is already running for a target
+  volume, that volume is skipped (running-job dedupe). Calls
+  arriving within the membership rate-limit window collapse
+  to one effective trigger per scope so a flapping membership
+  storm doesn't churn repair jobs (see #708).
   """
-  @spec trigger_now(String.t()) :: {:ok, map()} | {:skipped, :already_running}
-  def trigger_now(volume_id) do
-    GenServer.call(__MODULE__, {:trigger_now, volume_id})
+  @spec trigger_now(String.t() | [String.t()] | :all) ::
+          {:ok, [map()]} | {:skipped, :rate_limited | :already_running}
+  def trigger_now(scope \\ :all) do
+    GenServer.call(__MODULE__, {:trigger_now, scope})
   end
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
+    name = Keyword.get(opts, :name, __MODULE__)
+
     state = %{
+      name: name,
       check_interval_ms: Keyword.get(opts, :check_interval_ms, @default_check_interval_ms),
       volume_interval_seconds:
         Keyword.get(opts, :volume_interval_seconds, @default_volume_interval_seconds),
+      membership_rate_limit_ms:
+        Keyword.get(opts, :membership_rate_limit_ms, @default_membership_rate_limit_ms),
       job_tracker_mod: Keyword.get(opts, :job_tracker_mod, JobTracker),
       volume_registry_mod: Keyword.get(opts, :volume_registry_mod, VolumeRegistry),
-      volume_repair_times: %{}
+      volume_repair_times: %{},
+      last_membership_trigger_at: nil
     }
 
     state = initialise_repair_times(state)
     schedule_tick(state)
+    attach_membership_telemetry(name)
 
     Logger.info(
       "ReplicaRepairScheduler started: check_interval_ms=#{state.check_interval_ms} " <>
-        "volume_interval_seconds=#{state.volume_interval_seconds}"
+        "volume_interval_seconds=#{state.volume_interval_seconds} " <>
+        "membership_rate_limit_ms=#{state.membership_rate_limit_ms}"
     )
 
     {:ok, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    detach_membership_telemetry(state.name)
+    :ok
   end
 
   @impl true
@@ -108,14 +134,60 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
     {:reply, reply, state}
   end
 
-  def handle_call({:trigger_now, volume_id}, _from, state) do
+  def handle_call({:trigger_now, scope}, _from, state) do
+    target_ids = resolve_scope(state, scope)
+
+    {results, state} =
+      Enum.reduce(target_ids, {[], state}, fn vid, {acc, st} ->
+        process_trigger_volume(st, vid, acc)
+      end)
+
+    case Enum.reverse(results) do
+      [] -> {:reply, {:skipped, :already_running}, state}
+      jobs -> {:reply, {:ok, jobs}, state}
+    end
+  end
+
+  defp process_trigger_volume(state, volume_id, acc) do
     if running?(state, volume_id) do
       emit_skipped(volume_id)
-      {:reply, {:skipped, :already_running}, state}
+      {acc, state}
     else
       case create_job(state, volume_id) do
-        {:ok, job, state} -> {:reply, {:ok, job}, state}
-        {:error, state} -> {:reply, {:skipped, :already_running}, state}
+        {:ok, job, st2} -> {[job | acc], st2}
+        {:error, st2} -> {acc, st2}
+      end
+    end
+  end
+
+  @impl true
+  def handle_cast({:membership_event, _metadata}, state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    if rate_limited?(state, now_ms) do
+      :telemetry.execute(
+        [:neonfs, :replica_repair_scheduler, :membership_rate_limited],
+        %{},
+        %{}
+      )
+
+      {:noreply, state}
+    else
+      target_ids = resolve_scope(state, :all)
+
+      state = Enum.reduce(target_ids, state, &process_membership_volume(&2, &1))
+      {:noreply, %{state | last_membership_trigger_at: now_ms}}
+    end
+  end
+
+  defp process_membership_volume(state, volume_id) do
+    if running?(state, volume_id) do
+      emit_skipped(volume_id)
+      state
+    else
+      case create_job(state, volume_id) do
+        {:ok, _job, st2} -> st2
+        {:error, st2} -> st2
       end
     end
   end
@@ -253,5 +325,49 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
 
   defp schedule_tick(state) do
     Process.send_after(self(), :tick, state.check_interval_ms)
+  end
+
+  defp resolve_scope(_state, vid) when is_binary(vid), do: [vid]
+  defp resolve_scope(_state, vids) when is_list(vids), do: vids
+
+  defp resolve_scope(state, :all) do
+    state.volume_registry_mod.list()
+    |> Enum.map(& &1.id)
+  end
+
+  defp rate_limited?(%{last_membership_trigger_at: nil}, _now_ms), do: false
+
+  defp rate_limited?(state, now_ms) do
+    now_ms - state.last_membership_trigger_at < state.membership_rate_limit_ms
+  end
+
+  defp telemetry_handler_id(name) do
+    "#{@telemetry_handler_id_prefix}-#{inspect(name)}"
+  end
+
+  defp attach_membership_telemetry(name) do
+    pid = self()
+
+    :telemetry.attach(
+      telemetry_handler_id(name),
+      [:neonfs, :service_registry, :service_deregistered],
+      fn _event, _measurements, metadata, _config ->
+        # Only react to a core service leaving — fuse / nfs / etc.
+        # don't change the chunk-replica picture.
+        if metadata[:type] in [:core, nil] do
+          GenServer.cast(pid, {:membership_event, metadata})
+        end
+      end,
+      nil
+    )
+
+    :ok
+  end
+
+  defp detach_membership_telemetry(name) do
+    :telemetry.detach(telemetry_handler_id(name))
+    :ok
+  rescue
+    _ -> :ok
   end
 end
