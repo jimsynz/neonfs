@@ -1,42 +1,43 @@
 defmodule NeonFS.Containerd.ContentServerTest do
   @moduledoc """
-  Smoke tests for the scaffold ContentServer's still-stub RPCs.
-  `Info` / `Update` / `List` / `Delete` land in #551 (covered in
-  `ContentServerMetadataTest`); `Read` / `Write` land in #549 / #550
-  (covered separately). `Abort` is left for #552.
+  Smoke checks for `Status` / `ListStatuses` against an empty
+  registry — every other RPC has its own dedicated test module
+  (`ContentServerReadTest`, `ContentServerMetadataTest`,
+  `WriteSessionTest`, `ContentServerStatusTest`).
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Containerd.Services.Content.V1.{
-    AbortRequest,
     ListStatusesRequest,
     ListStatusesResponse,
-    StatusRequest,
-    StatusResponse
+    StatusRequest
   }
 
-  alias NeonFS.Containerd.ContentServer
+  alias GRPC.RPCError
+  alias NeonFS.Containerd.{ContentServer, WriteRegistry}
 
-  describe "Status (real impl)" do
-    test "returns an empty StatusResponse" do
-      assert %StatusResponse{status: nil} =
-               ContentServer.status(%StatusRequest{ref: "anything"}, nil)
+  setup do
+    case Process.whereis(WriteRegistry) do
+      nil -> {:ok, _} = Registry.start_link(keys: :unique, name: WriteRegistry)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  describe "Status" do
+    test "returns NOT_FOUND when no in-progress write exists for the ref" do
+      assert_raise RPCError, ~r/no in-progress write/, fn ->
+        ContentServer.status(%StatusRequest{ref: "no-such-ref"}, nil)
+      end
     end
   end
 
-  describe "ListStatuses (real impl)" do
-    test "returns an empty list" do
+  describe "ListStatuses" do
+    test "returns an empty list when no writes are in progress" do
       assert %ListStatusesResponse{statuses: []} =
                ContentServer.list_statuses(%ListStatusesRequest{filters: []}, nil)
-    end
-  end
-
-  describe "skeleton RPCs raise UNIMPLEMENTED" do
-    test "Abort" do
-      assert_raise GRPC.RPCError, ~r/Abort not implemented/, fn ->
-        ContentServer.abort(%AbortRequest{ref: ""}, nil)
-      end
     end
   end
 end

@@ -29,4 +29,13 @@ defmodule NeonFS.Containerd.WriteRegistry do
   """
   @spec via(String.t()) :: {:via, Registry, {module(), String.t()}}
   def via(ref), do: {:via, Registry, {__MODULE__, ref}}
+
+  @doc """
+  List every registered `{ref, pid}` pair. Powers
+  `ListStatuses` and the stale-partial sweep.
+  """
+  @spec list_all() :: [{String.t(), pid()}]
+  def list_all do
+    Registry.select(__MODULE__, [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+  end
 end
