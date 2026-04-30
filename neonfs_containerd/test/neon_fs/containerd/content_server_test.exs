@@ -15,7 +15,6 @@ defmodule NeonFS.Containerd.ContentServerTest do
     ListContentRequest,
     ListStatusesRequest,
     ListStatusesResponse,
-    ReadContentRequest,
     StatusRequest,
     StatusResponse,
     UpdateRequest
@@ -59,12 +58,6 @@ defmodule NeonFS.Containerd.ContentServerTest do
     test "Delete" do
       assert_raise GRPC.RPCError, ~r/Delete not implemented/, fn ->
         ContentServer.delete(%DeleteContentRequest{digest: ""}, nil)
-      end
-    end
-
-    test "Read" do
-      assert_raise GRPC.RPCError, ~r/Read not implemented/, fn ->
-        ContentServer.read(%ReadContentRequest{digest: ""}, nil)
       end
     end
 
