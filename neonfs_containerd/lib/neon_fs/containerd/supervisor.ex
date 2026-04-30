@@ -65,15 +65,11 @@ defmodule NeonFS.Containerd.Supervisor do
         File.rm(socket_path)
 
         {GRPC.Server.Supervisor,
-         endpoint: NeonFS.Containerd.Endpoint,
-         port: 0,
-         adapter_opts: [ip: {:local, socket_path}]}
+         endpoint: NeonFS.Containerd.Endpoint, port: 0, adapter_opts: [ip: {:local, socket_path}]}
 
       {:tcp, port} ->
         {GRPC.Server.Supervisor,
-         endpoint: NeonFS.Containerd.Endpoint,
-         port: port,
-         adapter_opts: [ip: {127, 0, 0, 1}]}
+         endpoint: NeonFS.Containerd.Endpoint, port: port, adapter_opts: [ip: {127, 0, 0, 1}]}
     end
   end
 
