@@ -1,5 +1,5 @@
 group "default" {
-  targets = ["core", "fuse", "nfs", "s3", "webdav", "docker", "csi", "omnibus", "cli"]
+  targets = ["core", "fuse", "nfs", "s3", "webdav", "docker", "csi", "containerd", "omnibus", "cli"]
 }
 
 variable "TAG" {
@@ -155,6 +155,23 @@ target "csi" {
   cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/csi:${TAG},mode=max,ignore-error=true"]
 }
 
+target "containerd" {
+  dockerfile = "containers/Containerfile.containerd"
+  platforms  = split(",", PLATFORMS)
+  tags       = [
+    "forgejo.dmz/project-neon/neonfs/containerd:${TAG}",
+    "ghcr.io/jimsynz/neonfs/containerd:${TAG}"
+  ]
+  contexts = {
+    "client": "./neonfs_client"
+    "src": "./neonfs_containerd"
+    "base": "target:base"
+    "cli": "target:cli"
+  }
+  cache-from = ["type=registry,ref=forgejo.dmz/cache/neonfs/containerd:${TAG}","type=registry,ref=forgejo.dmz/cache/neonfs/containerd:main"]
+  cache-to   = ["type=registry,ref=forgejo.dmz/cache/neonfs/containerd:${TAG},mode=max,ignore-error=true"]
+}
+
 target "omnibus" {
   dockerfile = "containers/Containerfile.omnibus"
   platforms  = split(",", PLATFORMS)
@@ -170,6 +187,7 @@ target "omnibus" {
     "s3": "./neonfs_s3"
     "webdav": "./neonfs_webdav"
     "docker": "./neonfs_docker"
+    "containerd": "./neonfs_containerd"
     "src": "./neonfs_omnibus"
     "base": "target:base"
     "cli": "target:cli"

@@ -22,16 +22,12 @@ defmodule NeonFS.Containerd.ContentServerStatusTest do
   alias NeonFS.Containerd.{
     ContentServer,
     StubChunkWriter,
-    WriteRegistry,
     WriteSession,
     WriteSupervisor
   }
 
   setup do
     StubChunkWriter.start({:ok, []})
-    ensure_registry()
-    ensure_supervisor()
-
     Application.put_env(:neonfs_containerd, :volume, "containerd-test")
 
     on_exit(fn ->
@@ -40,20 +36,6 @@ defmodule NeonFS.Containerd.ContentServerStatusTest do
     end)
 
     :ok
-  end
-
-  defp ensure_registry do
-    case Process.whereis(WriteRegistry) do
-      nil -> {:ok, _} = Registry.start_link(keys: :unique, name: WriteRegistry)
-      _ -> :ok
-    end
-  end
-
-  defp ensure_supervisor do
-    case Process.whereis(WriteSupervisor) do
-      nil -> {:ok, _} = WriteSupervisor.start_link([])
-      _ -> :ok
-    end
   end
 
   defp start_session(ref, opts \\ []) do
