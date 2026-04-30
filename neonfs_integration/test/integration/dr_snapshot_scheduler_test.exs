@@ -37,6 +37,14 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   @tick_event [:neonfs, :dr_snapshot_scheduler, :tick]
   @interval_ms 500
 
+  # The leader-change wait used to flunk after 5s, but each
+  # `current_leader_node/1` poll already reserves up to 15s under CI
+  # load (see comment there), so a single slow `:ra.members` round-trip
+  # could exhaust the budget before any progress was made (#606). 30s
+  # leaves room for at least one slow round-trip plus a handful of
+  # 50ms-spaced retries.
+  @leader_change_deadline_ms 30_000
+
   setup %{cluster: cluster} do
     :ok = init_multi_node_cluster(cluster, name: "dr-sched-test")
     :ok
@@ -171,8 +179,11 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   defp current_leader_node(cluster) do
     server_id = PeerCluster.rpc(cluster, :node1, RaSupervisor, :server_id, [])
 
+    # 15s mirrors the sync-segment cap in AntiEntropy; under CI load the
+    # default 5s `:ra.members` budget fires `{:inet_async, :timeout}` from
+    # the dist channel rather than the Ra timer (#606).
     {:ok, _members, {_cluster_name, leader_node}} =
-      PeerCluster.rpc(cluster, :node1, :ra, :members, [server_id, 5_000])
+      PeerCluster.rpc(cluster, :node1, :ra, :members, [server_id, 15_000])
 
     leader_node
   end
@@ -203,7 +214,7 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   end
 
   defp wait_for_leader_change(cluster, previous_leader_node) do
-    deadline = System.monotonic_time(:millisecond) + 5_000
+    deadline = System.monotonic_time(:millisecond) + @leader_change_deadline_ms
     do_wait_for_leader_change(cluster, previous_leader_node, deadline)
   end
 
@@ -212,7 +223,10 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
       :ok
     else
       if System.monotonic_time(:millisecond) > deadline do
-        flunk("leader did not change away from #{inspect(previous_leader_node)} within 5s")
+        flunk(
+          "leader did not change away from #{inspect(previous_leader_node)} within " <>
+            "#{@leader_change_deadline_ms}ms"
+        )
       else
         Process.sleep(50)
         do_wait_for_leader_change(cluster, previous_leader_node, deadline)
