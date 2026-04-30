@@ -34,10 +34,12 @@ defmodule NeonFS.Containerd.ContentServer do
     UpdateRequest
   }
 
+  alias Containerd.Services.Content.V1.{Info, InfoResponse, ListContentResponse, UpdateResponse}
   alias Containerd.Services.Content.V1.WriteContentRequest
   alias Containerd.Services.Content.V1.WriteContentResponse
   alias GRPC.RPCError
-  alias NeonFS.Containerd.{Digest, WriteSession, WriteSupervisor}
+  alias NeonFS.Client.Router
+  alias NeonFS.Containerd.{Digest, Metadata, WriteSession, WriteSupervisor}
 
   # ─── Status / ListStatuses (real impls — return empty) ─────────────
 
@@ -62,21 +64,153 @@ defmodule NeonFS.Containerd.ContentServer do
 
   # ─── Skeleton RPCs (return UNIMPLEMENTED) ──────────────────────────
 
-  @doc "Stub for `Info` RPC — lands in #551."
-  @spec info(InfoRequest.t(), GRPC.Server.Stream.t()) :: no_return()
-  def info(_request, _stream), do: raise_unimplemented("Info", 551)
+  @doc """
+  `Info` RPC. Resolves the digest, looks up the FileMeta, and
+  returns the containerd `Info` view (size, timestamps, labels
+  extracted from xattrs per the design call in #547).
+  """
+  @spec info(InfoRequest.t(), GRPC.Server.Stream.t()) :: InfoResponse.t()
+  def info(%InfoRequest{digest: digest}, _stream) do
+    with {:ok, path} <- Metadata.digest_to_path(digest),
+         {:ok, meta} <- core_call(:get_file_meta, [volume_name(), path]),
+         {:ok, info_struct} <- Metadata.info_from_file_meta(meta) do
+      %InfoResponse{info: info_struct}
+    else
+      {:error, :not_found} ->
+        raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
 
-  @doc "Stub for `Update` RPC — lands in #551."
-  @spec update(UpdateRequest.t(), GRPC.Server.Stream.t()) :: no_return()
-  def update(_request, _stream), do: raise_unimplemented("Update", 551)
+      {:error, reason} when reason in [:invalid_digest, :unsupported_algorithm] ->
+        raise_invalid_digest(reason)
 
-  @doc "Stub for `List` RPC — lands in #551."
-  @spec list(ListContentRequest.t(), GRPC.Server.Stream.t()) :: no_return()
-  def list(_request, _stream), do: raise_unimplemented("List", 551)
+      :error ->
+        raise RPCError, status: :internal, message: "blob path doesn't reverse-map to a digest"
 
-  @doc "Stub for `Delete` RPC — lands in #551."
-  @spec delete(DeleteContentRequest.t(), GRPC.Server.Stream.t()) :: no_return()
-  def delete(_request, _stream), do: raise_unimplemented("Delete", 551)
+      {:error, reason} ->
+        raise RPCError, status: :internal, message: "info lookup failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  `Update` RPC. Honours the `Google.Protobuf.FieldMask` semantics
+  containerd's content store expects:
+
+    * empty mask or `"labels"` → replace the entire label map.
+    * `"labels.<key>"` → set or clear (empty value) one label.
+    * Other mask paths are ignored.
+
+  Reads the current xattrs, applies the mask, writes back via
+  `update_file_meta/3` with the merged xattrs map.
+  """
+  @spec update(UpdateRequest.t(), GRPC.Server.Stream.t()) :: UpdateResponse.t()
+  def update(%UpdateRequest{info: nil}, _stream) do
+    raise RPCError, status: :invalid_argument, message: "Update requires an Info payload"
+  end
+
+  def update(
+        %UpdateRequest{info: %Info{digest: digest, labels: req_labels}, update_mask: mask},
+        _stream
+      ) do
+    mask_paths = mask_paths(mask)
+
+    with {:ok, path} <- Metadata.digest_to_path(digest),
+         {:ok, meta} <- core_call(:get_file_meta, [volume_name(), path]),
+         current_labels = Metadata.extract_labels(Map.get(meta, :xattrs, %{})),
+         new_labels = Metadata.apply_label_mask(current_labels, req_labels, mask_paths),
+         new_xattrs = Metadata.merge_labels_into_xattrs(Map.get(meta, :xattrs, %{}), new_labels),
+         {:ok, updated} <-
+           core_call(:update_file_meta, [volume_name(), path, [xattrs: new_xattrs]]),
+         {:ok, info_struct} <- Metadata.info_from_file_meta(updated) do
+      %UpdateResponse{info: info_struct}
+    else
+      {:error, :not_found} ->
+        raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
+
+      {:error, reason} when reason in [:invalid_digest, :unsupported_algorithm] ->
+        raise_invalid_digest(reason)
+
+      :error ->
+        raise RPCError, status: :internal, message: "blob path doesn't reverse-map to a digest"
+
+      {:error, reason} ->
+        raise RPCError, status: :internal, message: "update failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  `List` server-streaming RPC. Walks every blob under `sha256/` in
+  the configured volume and emits one `ListContentResponse` per
+  batch.
+
+  Containerd's filter syntax is rich (a list of strings like
+  `labels."key"==value`); this slice supports the no-filter case.
+  Filtered listing is a follow-up if it turns out to be load-bearing
+  for any real client — `ctr` and BuildKit don't issue label
+  filters against the content store in normal flows.
+  """
+  @spec list(ListContentRequest.t(), GRPC.Server.Stream.t()) :: any()
+  def list(%ListContentRequest{filters: filters}, stream) do
+    if filters not in [nil, []] do
+      raise RPCError,
+        status: :unimplemented,
+        message: "label filters not yet supported on List"
+    end
+
+    case core_call(:list_files_recursive, [volume_name(), "sha256/"]) do
+      {:ok, files} ->
+        infos =
+          files
+          |> Enum.map(&Metadata.info_from_file_meta/1)
+          |> Enum.flat_map(fn
+            {:ok, info} -> [info]
+            :error -> []
+          end)
+
+        # One response per batch keeps the framing simple. Real
+        # containerd accepts either pattern; per-info or batched.
+        GRPC.Server.send_reply(stream, %ListContentResponse{info: infos})
+
+      {:error, reason} ->
+        raise RPCError, status: :internal, message: "list failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  `Delete` RPC. Resolves the digest and deletes the file via
+  core's `delete_file/2`. Returns `Google.Protobuf.Empty` on
+  success.
+  """
+  @spec delete(DeleteContentRequest.t(), GRPC.Server.Stream.t()) :: Google.Protobuf.Empty.t()
+  def delete(%DeleteContentRequest{digest: digest}, _stream) do
+    with {:ok, path} <- Metadata.digest_to_path(digest),
+         :ok <- core_call(:delete_file, [volume_name(), path]) do
+      %Google.Protobuf.Empty{}
+    else
+      {:ok, _} ->
+        # Some core paths return `{:ok, _}` instead of `:ok`. Either
+        # way, the file was removed.
+        %Google.Protobuf.Empty{}
+
+      {:error, :not_found} ->
+        raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
+
+      {:error, reason} when reason in [:invalid_digest, :unsupported_algorithm] ->
+        raise_invalid_digest(reason)
+
+      {:error, reason} ->
+        raise RPCError, status: :internal, message: "delete failed: #{inspect(reason)}"
+    end
+  end
+
+  defp mask_paths(nil), do: []
+  defp mask_paths(%Google.Protobuf.FieldMask{paths: paths}) when is_list(paths), do: paths
+  defp mask_paths(_), do: []
+
+  defp core_call(function, args) do
+    case Application.get_env(:neonfs_containerd, :core_call_fn) do
+      nil -> Router.call(NeonFS.Core, function, args)
+      fun when is_function(fun, 2) -> fun.(function, args)
+    end
+  end
 
   @doc """
   `Read` server-streaming RPC. Resolves the digest to a path under
