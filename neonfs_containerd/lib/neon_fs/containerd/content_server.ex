@@ -408,35 +408,46 @@ defmodule NeonFS.Containerd.ContentServer do
   """
   @spec write(Enumerable.t(), GRPC.Server.Stream.t()) :: any()
   def write(request_stream, stream) do
+    process_write_stream(request_stream, &GRPC.Server.send_reply(stream, &1))
+  end
+
+  @doc """
+  Test entry point that mirrors `write/2` but takes a `send_fn`
+  instead of a `GRPC.Server.Stream`. Used by
+  `ContentServerWriteTest` to exercise the dispatch state machine
+  without a real gRPC stream.
+  """
+  @spec process_write_stream(Enumerable.t(), (WriteContentResponse.t() -> any())) :: :ok
+  def process_write_stream(request_stream, send_fn) when is_function(send_fn, 1) do
     _final_state =
       Enum.reduce(request_stream, %{}, fn request, state ->
-        dispatch_write_frame(request, state, stream)
+        dispatch_write_frame(request, state, send_fn)
       end)
 
     :ok
   end
 
-  defp dispatch_write_frame(%WriteContentRequest{action: action} = req, state, stream) do
+  defp dispatch_write_frame(%WriteContentRequest{action: action} = req, state, send_fn) do
     case action do
       :STAT ->
-        handle_stat(req, state, stream)
+        handle_stat(req, state, send_fn)
 
       :WRITE ->
-        handle_write_frame(req, state, stream)
+        handle_write_frame(req, state, send_fn)
 
       :COMMIT ->
-        handle_commit_frame(req, state, stream)
+        handle_commit_frame(req, state, send_fn)
 
       other ->
         raise RPCError, status: :invalid_argument, message: "unknown action #{inspect(other)}"
     end
   end
 
-  defp handle_stat(%WriteContentRequest{ref: ref}, state, stream) do
+  defp handle_stat(%WriteContentRequest{ref: ref}, state, send_fn) do
     pid = ensure_session(ref)
     snapshot = WriteSession.stat(pid)
 
-    GRPC.Server.send_reply(stream, %WriteContentResponse{
+    send_fn.(%WriteContentResponse{
       action: :STAT,
       started_at: to_timestamp(snapshot.started_at),
       updated_at: to_timestamp(snapshot.updated_at),
@@ -447,7 +458,7 @@ defmodule NeonFS.Containerd.ContentServer do
     Map.put(state, ref, pid)
   end
 
-  defp handle_write_frame(%WriteContentRequest{} = req, state, _stream) do
+  defp handle_write_frame(%WriteContentRequest{} = req, state, send_fn) do
     pid = ensure_session(req.ref, req)
 
     if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
@@ -455,6 +466,16 @@ defmodule NeonFS.Containerd.ContentServer do
 
     case WriteSession.feed(pid, req.data, normalise_offset(req.offset)) do
       {:ok, _} ->
+        snapshot = WriteSession.stat(pid)
+
+        send_fn.(%WriteContentResponse{
+          action: :WRITE,
+          offset: snapshot.offset,
+          total: snapshot.total,
+          started_at: to_timestamp(snapshot.started_at),
+          updated_at: to_timestamp(snapshot.updated_at)
+        })
+
         Map.put(state, req.ref, pid)
 
       {:error, :offset_mismatch} ->
@@ -466,7 +487,7 @@ defmodule NeonFS.Containerd.ContentServer do
     end
   end
 
-  defp handle_commit_frame(%WriteContentRequest{} = req, state, stream) do
+  defp handle_commit_frame(%WriteContentRequest{} = req, state, send_fn) do
     pid = ensure_session(req.ref, req)
 
     if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
@@ -474,7 +495,7 @@ defmodule NeonFS.Containerd.ContentServer do
 
     case WriteSession.commit(pid, req.expected) do
       {:ok, %{digest: digest, offset: offset, total: total}} ->
-        GRPC.Server.send_reply(stream, %WriteContentResponse{
+        send_fn.(%WriteContentResponse{
           action: :COMMIT,
           digest: digest,
           offset: offset,
@@ -509,12 +530,19 @@ defmodule NeonFS.Containerd.ContentServer do
     end
   end
 
-  defp session_opts(nil), do: []
+  defp session_opts(nil), do: base_session_opts()
 
   defp session_opts(%WriteContentRequest{} = req) do
-    []
+    base_session_opts()
     |> maybe_put_opt(:total, positive_integer(req.total))
     |> maybe_put_opt(:expected, non_empty_string(req.expected))
+  end
+
+  defp base_session_opts do
+    case Application.get_env(:neonfs_containerd, :chunk_writer_module) do
+      nil -> []
+      module -> [chunk_writer_module: module]
+    end
   end
 
   defp non_empty_string(""), do: nil
