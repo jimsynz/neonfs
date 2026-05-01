@@ -160,10 +160,26 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
+  # Synchronous cleanup so the next test (or ContentServerTest, which
+  # asserts an empty registry) sees a clean WriteRegistry. `Process.exit`
+  # is async; the registry's auto-unregister fires off the EXIT signal
+  # and races the next setup. Monitor-and-await deflakes the suite.
   defp cleanup_session(ref) do
     case WriteRegistry.lookup(ref) do
-      {:ok, pid} -> if Process.alive?(pid), do: Process.exit(pid, :normal)
-      :error -> :ok
+      {:ok, pid} when is_pid(pid) ->
+        if Process.alive?(pid) do
+          mref = Process.monitor(pid)
+          Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^mref, :process, ^pid, _} -> :ok
+          after
+            1_000 -> :ok
+          end
+        end
+
+      :error ->
+        :ok
     end
   end
 end
