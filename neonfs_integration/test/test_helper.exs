@@ -36,7 +36,16 @@ loopback_excludes =
     [:loopback]
   end
 
-excludes = loopback_excludes ++ [:profile]
+# Exclude containerd-dependent tests unless `containerd` and `ctr` are on PATH.
+# Prep work for #554 (containerd content store integration tests).
+containerd_excludes =
+  if System.find_executable("containerd") && System.find_executable("ctr") do
+    []
+  else
+    [:requires_containerd]
+  end
+
+excludes = loopback_excludes ++ containerd_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an

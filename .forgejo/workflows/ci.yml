@@ -638,7 +638,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            e2fsprogs mount
+            e2fsprogs mount containerd
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v6
@@ -676,6 +676,10 @@ jobs:
           for i in $(seq 0 63); do
             [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i
           done
+
+      - name: Containerd smoke test (#554 prep)
+        working-directory: neonfs_integration
+        run: mix test --include requires_containerd test/integration/containerd_smoke_test.exs
 
       - name: Check
         working-directory: neonfs_integration
