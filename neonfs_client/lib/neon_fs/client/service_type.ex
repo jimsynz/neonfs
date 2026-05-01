@@ -7,9 +7,10 @@ defmodule NeonFS.Client.ServiceType do
   cluster operations.
   """
 
-  @type t :: :core | :fuse | :nfs | :s3 | :webdav | :docker | :csi | :cifs
+  @type t ::
+          :core | :fuse | :nfs | :s3 | :webdav | :docker | :csi | :cifs | :containerd
 
-  @service_types [:cifs, :core, :csi, :docker, :fuse, :nfs, :s3, :webdav]
+  @service_types [:cifs, :containerd, :core, :csi, :docker, :fuse, :nfs, :s3, :webdav]
 
   @doc """
   Guard that checks if a value is a valid service type.

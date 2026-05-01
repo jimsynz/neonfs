@@ -361,7 +361,7 @@ defmodule NeonFS.Transport.PoolManager do
         apply(mod, fun, args)
 
       nil ->
-        for type <- [:core, :fuse, :s3, :docker, :cifs],
+        for type <- [:cifs, :containerd, :core, :docker, :fuse, :s3],
             service <- Discovery.list_by_type(type) do
           service
         end
