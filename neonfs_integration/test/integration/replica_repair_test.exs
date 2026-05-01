@@ -23,7 +23,7 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
 
   use NeonFS.TestSupport.ClusterCase, async: false
 
-  alias NeonFS.Core.{ChunkIndex, ReplicaRepair, ReplicaRepairScheduler}
+  alias NeonFS.Core.{ChunkIndex, ReplicaRepair, ReplicaRepairScheduler, VolumeRegistry}
   alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 300_000
@@ -69,6 +69,8 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
 
       wait_for_replication_factor(cluster, hashes, 2)
 
+      volume_id = volume_id_for(cluster, @volume_name)
+
       # Stop node3 — chunks whose locations included node3 lose one
       # replica. Survivors keep two-of-three replicas; chunks on
       # node1+node3 or node2+node3 drop to one replica each.
@@ -82,7 +84,7 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
         ])
 
       {:ok, _jobs} =
-        PeerCluster.rpc(cluster, :node1, ReplicaRepairScheduler, :trigger_now, [@volume_name])
+        PeerCluster.rpc(cluster, :node1, ReplicaRepairScheduler, :trigger_now, [volume_id])
 
       # The repair runs asynchronously through JobTracker. Either
       # `:chunk_repaired` events arrive (preferred) or the chunk
@@ -132,8 +134,10 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
           chunk_meta.locations ++ [synth_location]
         ])
 
+      volume_id = volume_id_for(cluster, @volume_name)
+
       {:ok, %{removed: removed}} =
-        PeerCluster.rpc(cluster, :node1, ReplicaRepair, :repair_volume, [@volume_name])
+        PeerCluster.rpc(cluster, :node1, ReplicaRepair, :repair_volume, [volume_id])
 
       # The synthetic remote-rpc delete will fail (the node doesn't
       # exist), but the catalog update happens locally regardless.
@@ -149,6 +153,11 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   end
 
   ## Helpers
+
+  defp volume_id_for(cluster, name) do
+    {:ok, volume} = PeerCluster.rpc(cluster, :node1, VolumeRegistry, :get_by_name, [name])
+    volume.id
+  end
 
   defp wait_for_chunk_hashes(cluster, path) do
     wait_until(fn ->
