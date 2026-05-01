@@ -56,6 +56,9 @@ defmodule NeonFS.Containerd.Supervisor do
     # `:endpoint, :servers, :start_server, :port, :adapter_opts,
     # :exception_log_filter` at the top level — anything else
     # (including the `:ip` binding) lives under `:adapter_opts`.
+    # `:start_server` defaults to `false`, which loads the
+    # supervisor but never opens the listener — so it has to be
+    # set explicitly here for the gRPC endpoint to be reachable.
     case Application.get_env(:neonfs_containerd, :listener, :socket) do
       :socket ->
         socket_path =
@@ -65,11 +68,17 @@ defmodule NeonFS.Containerd.Supervisor do
         File.rm(socket_path)
 
         {GRPC.Server.Supervisor,
-         endpoint: NeonFS.Containerd.Endpoint, port: 0, adapter_opts: [ip: {:local, socket_path}]}
+         endpoint: NeonFS.Containerd.Endpoint,
+         port: 0,
+         start_server: true,
+         adapter_opts: [ip: {:local, socket_path}]}
 
       {:tcp, port} ->
         {GRPC.Server.Supervisor,
-         endpoint: NeonFS.Containerd.Endpoint, port: port, adapter_opts: [ip: {127, 0, 0, 1}]}
+         endpoint: NeonFS.Containerd.Endpoint,
+         port: port,
+         start_server: true,
+         adapter_opts: [ip: {127, 0, 0, 1}]}
     end
   end
 
