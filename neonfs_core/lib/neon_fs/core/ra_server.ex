@@ -272,12 +272,14 @@ defmodule NeonFS.Core.RaServer do
          _ = Logger.debug("Force-reset: state extracted"),
          {:ok, snapshot_path} <- write_force_reset_snapshot(snapshot_state, sanitized_node),
          _ = Logger.debug("Force-reset: snapshot written"),
+         sanitised_state = sanitise_initial_state(snapshot_state, node_name),
+         _ = Logger.debug("Force-reset: state sanitised, departed-node entries purged"),
          :ok <- stop_and_delete_local_server(server_id),
          _ = Logger.debug("Force-reset: old server deleted"),
          :ok <- wait_for_ra_cleanup(server_id),
          _ = Logger.debug("Force-reset: cleanup done; starting fresh cluster"),
          {:ok, _pid_or_atom} <-
-           start_force_reset_cluster(server_id, sanitized_node, snapshot_state) do
+           start_force_reset_cluster(server_id, sanitized_node, sanitised_state) do
       Logger.warning(
         "Force-reset succeeded; survivor #{inspect(node_name)} is a fresh single-node cluster (snapshot=#{snapshot_path})"
       )
@@ -636,6 +638,59 @@ defmodule NeonFS.Core.RaServer do
   end
 
   # ─── Force-reset helpers (#473) ────────────────────────────────────
+
+  @doc """
+  Strip every reference to a departed node out of an extracted Ra
+  state before re-injecting it into the new single-node cluster.
+
+  After force-reset, the survivor is the only valid host for any
+  cluster-wide map keyed by node — `services` (the cluster service
+  registry) and `segment_assignments` (per-segment replica sets) in
+  particular. Carrying entries from departed nodes through the
+  rebootstrap leaves the new cluster trying to query / replicate
+  to nodes that no longer exist, surfacing as #688's symptom: Ra
+  starts but the gen_statem can't reach a stable state because
+  every observer probe fails.
+
+  Public for testing — `survivor_node` defaults to `node()` in
+  production callers.
+  """
+  @spec sanitise_initial_state(map(), node()) :: map()
+  def sanitise_initial_state(state, survivor_node) when is_map(state) do
+    state
+    |> sanitise_services(survivor_node)
+    |> sanitise_segment_assignments(survivor_node)
+  end
+
+  def sanitise_initial_state(state, _survivor_node), do: state
+
+  defp sanitise_services(%{services: services} = state, survivor_node)
+       when is_map(services) do
+    purged =
+      :maps.filter(
+        fn
+          {node, _type}, _info -> node == survivor_node
+          _, _ -> true
+        end,
+        services
+      )
+
+    %{state | services: purged}
+  end
+
+  defp sanitise_services(state, _survivor_node), do: state
+
+  defp sanitise_segment_assignments(%{segment_assignments: assignments} = state, survivor_node)
+       when is_map(assignments) do
+    purged =
+      Map.new(assignments, fn {segment_id, %{replica_set: rs} = assignment} ->
+        {segment_id, %{assignment | replica_set: Enum.filter(rs, &(&1 == survivor_node))}}
+      end)
+
+    %{state | segment_assignments: purged}
+  end
+
+  defp sanitise_segment_assignments(state, _survivor_node), do: state
 
   # Snapshot-extract the local replica's state. `local_query` doesn't
   # require quorum — exactly the property we need when the cluster
