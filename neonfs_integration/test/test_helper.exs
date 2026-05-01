@@ -45,7 +45,22 @@ containerd_excludes =
     [:requires_containerd]
   end
 
-excludes = loopback_excludes ++ containerd_excludes ++ [:profile]
+# Exclude tests that need the OCI test-registry sidecar
+# (`registry:5000/neonfs-test-image:v1`) unless we can resolve and
+# dial it. Set up by the `neonfs_integration` CI job's `services:`
+# block (#728); locally, run `registry:2` on port 5000 with the
+# `test/fixtures/test-image.tar` fixture pushed in.
+test_registry_excludes =
+  case :gen_tcp.connect(~c"registry", 5000, [:binary, active: false], 500) do
+    {:ok, sock} ->
+      :gen_tcp.close(sock)
+      []
+
+    _ ->
+      [:requires_test_registry]
+  end
+
+excludes = loopback_excludes ++ containerd_excludes ++ test_registry_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an

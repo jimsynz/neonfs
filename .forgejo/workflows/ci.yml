@@ -633,12 +633,20 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
+    services:
+      # Local registry for `containerd_image_pull_test.exs` (#728).
+      # Pre-seeded by the "Pre-seed registry sidecar" step below
+      # via `crane`, so the test never reaches docker.io.
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
     steps:
       - name: Install loopback dependencies
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            e2fsprogs mount containerd
+            e2fsprogs mount containerd skopeo
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v6
@@ -680,6 +688,19 @@ jobs:
       - name: Containerd smoke test (#554 prep)
         working-directory: neonfs_integration
         run: mix test --include requires_containerd test/integration/containerd_smoke_test.exs
+
+      - name: Pre-seed registry sidecar
+        working-directory: neonfs_integration
+        run: |
+          # Push the committed OCI fixture into the `registry:2`
+          # sidecar so `containerd_image_pull_test.exs` can pull
+          # via `localhost:5000` without reaching docker.io.
+          # `--dest-tls-verify=false` because the sidecar speaks
+          # plain HTTP on the service network.
+          skopeo copy \
+            --dest-tls-verify=false \
+            oci-archive:test/fixtures/test-image.tar \
+            docker://registry:5000/neonfs-test-image:v1
 
       - name: Check
         working-directory: neonfs_integration
