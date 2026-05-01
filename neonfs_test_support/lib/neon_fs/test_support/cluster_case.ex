@@ -650,6 +650,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
       :neonfs_webdav in apps -> :webdav
       :neonfs_nfs in apps -> :nfs
       :neonfs_fuse in apps -> :fuse
+      :neonfs_containerd in apps -> :containerd
       true -> raise ArgumentError, "no recognised interface app in #{inspect(apps)}"
     end
   end
