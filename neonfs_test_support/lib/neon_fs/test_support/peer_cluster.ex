@@ -23,7 +23,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
           dist_port: non_neg_integer(),
           metrics_port: non_neg_integer() | nil,
           applications: [atom()],
-          interface_ports: %{optional(atom()) => non_neg_integer()}
+          interface_ports: %{optional(atom()) => non_neg_integer() | String.t()}
         }
 
   @type cluster :: %{
@@ -189,7 +189,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         node_metrics_port =
           if core_peer? and metrics_base_port, do: metrics_base_port + i - 1
 
-        interface_ports = allocate_interface_ports(peer_apps)
+        interface_ports = allocate_interface_ports(peer_apps, data_dir)
 
         client_bootstrap_nodes =
           if core_peer? do
@@ -270,13 +270,21 @@ defmodule NeonFS.TestSupport.PeerCluster do
     Map.get(roles, alias_name, default_applications)
   end
 
-  defp allocate_interface_ports(peer_apps) do
-    Map.new(
+  defp allocate_interface_ports(peer_apps, data_dir) do
+    port_allocations =
       for {app, key} <- [{:neonfs_s3, :s3}, {:neonfs_webdav, :webdav}],
           app in peer_apps do
         {key, allocate_peer_port()}
       end
-    )
+
+    socket_allocations =
+      if :neonfs_containerd in peer_apps do
+        [{:containerd, Path.join(data_dir, "containerd.sock")}]
+      else
+        []
+      end
+
+    Map.new(port_allocations ++ socket_allocations)
   end
 
   defp build_core_config(ctx) do
@@ -322,6 +330,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     app_config
     |> maybe_add_s3_config(peer_apps, interface_ports)
     |> maybe_add_webdav_config(peer_apps, interface_ports)
+    |> maybe_add_containerd_config(peer_apps, interface_ports)
   end
 
   defp maybe_add_s3_config(app_config, peer_apps, ports) do
@@ -335,6 +344,27 @@ defmodule NeonFS.TestSupport.PeerCluster do
   defp maybe_add_webdav_config(app_config, peer_apps, ports) do
     if :neonfs_webdav in peer_apps and Map.has_key?(ports, :webdav) do
       app_config ++ [neonfs_webdav: [webdav_port: ports.webdav, webdav_bind: "127.0.0.1"]]
+    else
+      app_config
+    end
+  end
+
+  # `:neonfs_containerd` listens on a UDS rather than a TCP port. The
+  # `:start_supervisor` override is needed because the omnibus test
+  # config defaults it to `false` to avoid contention with the host's
+  # `/run/containerd/proxy-plugins/neonfs.sock` — the integration
+  # tests that exercise the proxy plugin must override back to
+  # `true` and bind to a per-peer socket inside the test's data dir.
+  defp maybe_add_containerd_config(app_config, peer_apps, ports) do
+    if :neonfs_containerd in peer_apps and Map.has_key?(ports, :containerd) do
+      app_config ++
+        [
+          neonfs_containerd: [
+            socket_path: ports.containerd,
+            start_supervisor: true,
+            register_service: true
+          ]
+        ]
     else
       app_config
     end
