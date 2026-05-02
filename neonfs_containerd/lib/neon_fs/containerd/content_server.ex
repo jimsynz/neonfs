@@ -445,7 +445,7 @@ defmodule NeonFS.Containerd.ContentServer do
 
   defp handle_stat(%WriteContentRequest{ref: ref}, state, send_fn) do
     pid = ensure_session(ref)
-    snapshot = WriteSession.stat(pid)
+    snapshot = call_session(pid, ref, &WriteSession.stat/1)
 
     send_fn.(%WriteContentResponse{
       action: :STAT,
@@ -461,12 +461,17 @@ defmodule NeonFS.Containerd.ContentServer do
   defp handle_write_frame(%WriteContentRequest{} = req, state, send_fn) do
     pid = ensure_session(req.ref, req)
 
-    if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
-    if req.total > 0, do: WriteSession.set_total(pid, req.total)
+    feed_result =
+      call_session(pid, req.ref, fn pid ->
+        if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
+        if req.total > 0, do: WriteSession.set_total(pid, req.total)
 
-    case WriteSession.feed(pid, req.data, normalise_offset(req.offset)) do
+        WriteSession.feed(pid, req.data, normalise_offset(req.offset))
+      end)
+
+    case feed_result do
       {:ok, _} ->
-        snapshot = WriteSession.stat(pid)
+        snapshot = call_session(pid, req.ref, &WriteSession.stat/1)
 
         send_fn.(%WriteContentResponse{
           action: :WRITE,
@@ -483,17 +488,22 @@ defmodule NeonFS.Containerd.ContentServer do
           status: :out_of_range,
           message:
             "offset mismatch: containerd asked to resume from #{req.offset} but " <>
-              "session is at #{WriteSession.stat(pid).offset}"
+              "session is at #{call_session(pid, req.ref, &WriteSession.stat/1).offset}"
     end
   end
 
   defp handle_commit_frame(%WriteContentRequest{} = req, state, send_fn) do
     pid = ensure_session(req.ref, req)
 
-    if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
-    if req.total > 0, do: WriteSession.set_total(pid, req.total)
+    commit_result =
+      call_session(pid, req.ref, fn pid ->
+        if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
+        if req.total > 0, do: WriteSession.set_total(pid, req.total)
 
-    case WriteSession.commit(pid, req.expected) do
+        WriteSession.commit(pid, req.expected)
+      end)
+
+    case commit_result do
       {:ok, %{digest: digest, offset: offset, total: total}} ->
         send_fn.(%WriteContentResponse{
           action: :COMMIT,
@@ -528,6 +538,22 @@ defmodule NeonFS.Containerd.ContentServer do
           status: :internal,
           message: "could not start write session for #{inspect(ref)}: #{inspect(reason)}"
     end
+  end
+
+  # Translates a `WriteSession` `:exit` from a freshly-terminated
+  # session pid (typical race after `commit/2` while the
+  # registry's `:DOWN` hasn't propagated yet) into a clean gRPC
+  # `failed_precondition` error. Containerd retries the whole
+  # `Write` stream when it sees this, which spins up a fresh
+  # session — semantically equivalent to "the writer is gone,
+  # start over" without us guessing what state to recreate.
+  defp call_session(pid, ref, fun) do
+    fun.(pid)
+  catch
+    :exit, {reason, _mfa} when reason in [:normal, :noproc, :shutdown] ->
+      raise RPCError,
+        status: :failed_precondition,
+        message: "write session for #{inspect(ref)} terminated; containerd should retry"
   end
 
   defp session_opts(nil), do: base_session_opts()
