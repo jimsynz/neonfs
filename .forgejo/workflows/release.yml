@@ -5,6 +5,31 @@ on:
     tags: ["v*"]
 
 jobs:
+  # =========================================================================
+  # Resolve tool versions from .tool-versions so all jobs use the same
+  # workflows CI images (same pattern as .forgejo/workflows/ci.yml).
+  # =========================================================================
+  resolve-versions:
+    runs-on: docker
+    container:
+      image: harton.dev/james/workflows/ci-base:latest
+    outputs:
+      elixir: ${{ steps.parse.outputs.elixir }}
+      erlang: ${{ steps.parse.outputs.erlang }}
+      rust: ${{ steps.parse.outputs.rust }}
+      elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: parse
+        run: |
+          ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
+          ERLANG=$(awk '/^erlang/ {print $2}' .tool-versions)
+          RUST=$(awk '/^rust/ {print $2}' .tool-versions)
+          echo "elixir=${ELIXIR}" >> "$GITHUB_OUTPUT"
+          echo "erlang=${ERLANG}" >> "$GITHUB_OUTPUT"
+          echo "rust=${RUST}" >> "$GITHUB_OUTPUT"
+          echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
+
   containers-amd64:
     runs-on: amd64
     container:
@@ -162,33 +187,21 @@ jobs:
   # Build each architecture on its own native runner, then upload to Forgejo.
   # =========================================================================
   debs-amd64:
+    needs: resolve-versions
     runs-on: amd64
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-            .cargo
-          key: toolchain-amd64-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
+      - name: Install build dependencies
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libfuse3-dev gettext-base
+          rm -rf /var/lib/apt/lists/*
 
       - name: Install nfpm
         run: |
@@ -197,13 +210,38 @@ jobs:
           curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz" \
             | tar xz -C /usr/local/bin nfpm
 
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            neonfs-cli/target
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_core/deps
+            neonfs_core/_build
+            neonfs_core/target
+            neonfs_fuse/deps
+            neonfs_fuse/_build
+            neonfs_fuse/target
+            neonfs_nfs/deps
+            neonfs_nfs/_build
+            neonfs_nfs/target
+            neonfs_s3/deps
+            neonfs_s3/_build
+            neonfs_webdav/deps
+            neonfs_webdav/_build
+            neonfs_docker/deps
+            neonfs_docker/_build
+            neonfs_omnibus/deps
+            neonfs_omnibus/_build
+          key: v1-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
+          restore-keys: v1-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
+
       - name: Build releases
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix local.hex --force && mix local.rebar --force
 
           # Build CLI
           cd neonfs-cli && cargo build --release && cd ..
@@ -211,7 +249,6 @@ jobs:
           # Build Elixir releases
           for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
             cd "$component"
-            mix local.hex --force && mix local.rebar --force
             mix deps.get --only prod
             MIX_ENV=prod mix compile
             MIX_ENV=prod mix release --overwrite
@@ -238,33 +275,21 @@ jobs:
           path: dist/*.deb
 
   debs-arm64:
+    needs: resolve-versions
     runs-on: arm64
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Restore toolchain cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            .asdf
-            .hex
-            .mix
-            .cargo
-          key: toolchain-arm64-${{ hashFiles('.tool-versions') }}
-
-      - name: Install ASDF tools
+      - name: Install build dependencies
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
-          asdf_install
-          asdf reshim
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            libfuse3-dev gettext-base
+          rm -rf /var/lib/apt/lists/*
 
       - name: Install nfpm
         run: |
@@ -273,13 +298,38 @@ jobs:
           curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_arm64.tar.gz" \
             | tar xz -C /usr/local/bin nfpm
 
+      - name: Restore build cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            neonfs-cli/target
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            neonfs_client/deps
+            neonfs_client/_build
+            neonfs_core/deps
+            neonfs_core/_build
+            neonfs_core/target
+            neonfs_fuse/deps
+            neonfs_fuse/_build
+            neonfs_fuse/target
+            neonfs_nfs/deps
+            neonfs_nfs/_build
+            neonfs_nfs/target
+            neonfs_s3/deps
+            neonfs_s3/_build
+            neonfs_webdav/deps
+            neonfs_webdav/_build
+            neonfs_docker/deps
+            neonfs_docker/_build
+            neonfs_omnibus/deps
+            neonfs_omnibus/_build
+          key: v1-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
+          restore-keys: v1-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
+
       - name: Build releases
         run: |
-          export ASDF_DATA_DIR="$FORGEJO_WORKSPACE/.asdf"
-          export HEX_HOME="$FORGEJO_WORKSPACE/.hex"
-          export MIX_HOME="$FORGEJO_WORKSPACE/.mix"
-          export CARGO_HOME="$FORGEJO_WORKSPACE/.cargo"
-          export PATH="$ASDF_DATA_DIR/shims:$PATH"
+          mix local.hex --force && mix local.rebar --force
 
           # Build CLI
           cd neonfs-cli && cargo build --release && cd ..
@@ -287,7 +337,6 @@ jobs:
           # Build Elixir releases
           for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
             cd "$component"
-            mix local.hex --force && mix local.rebar --force
             mix deps.get --only prod
             MIX_ENV=prod mix compile
             MIX_ENV=prod mix release --overwrite
@@ -317,7 +366,7 @@ jobs:
     runs-on: docker
     needs: [debs-amd64, debs-arm64]
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: harton.dev/james/workflows/ci-base:latest
 
     steps:
       - name: Download amd64 .deb artifacts
@@ -346,7 +395,7 @@ jobs:
     runs-on: docker
     needs: [containers-manifest, debs-upload]
     container:
-      image: harton.dev/james/asdf_container:latest
+      image: harton.dev/james/workflows/ci-base:latest
 
     steps:
       - uses: actions/checkout@v6

@@ -1,8 +1,8 @@
 ARG RUST_VERSION
-FROM rust:${RUST_VERSION}-slim-trixie AS deps
+FROM harton.dev/james/workflows/rust:${RUST_VERSION} AS deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /workdir

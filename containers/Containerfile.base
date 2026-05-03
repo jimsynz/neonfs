@@ -1,9 +1,7 @@
 ARG ELIXIR_VERSION
 ARG ERLANG_VERSION
 ARG RUST_VERSION
-FROM hexpm/elixir:${ELIXIR_VERSION}-erlang-${ERLANG_VERSION}-debian-trixie-20260316-slim
-
-ARG RUST_VERSION
+FROM harton.dev/james/workflows/elixir-rust:${ELIXIR_VERSION}-erlang-${ERLANG_VERSION}-rust-${RUST_VERSION}
 
 LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
@@ -12,18 +10,9 @@ LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.description="Base build image for NeonFS containers"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     libfuse3-dev \
     fuse3 \
-    pkg-config \
-    curl \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain "${RUST_VERSION}"
-
-ENV PATH="/root/.cargo/bin:$PATH"
 
 RUN mix local.hex --force && mix local.rebar --force
 
