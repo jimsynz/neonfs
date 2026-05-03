@@ -8,7 +8,7 @@ defmodule NeonFS.CSI.MixProject do
   Kubernetes kubelet (Node mode) or external-provisioner sidecar
   (Controller mode) can manage NeonFS volumes for pod storage.
   """
-  @version "0.2.1"
+  @version "0.2.2"
 
   def project do
     [

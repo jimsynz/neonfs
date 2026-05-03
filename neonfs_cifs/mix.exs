@@ -9,7 +9,7 @@ defmodule NeonFS.CIFS.MixProject do
   process-per-connection worker (`smbd`). Routes each VFS op through
   `neonfs_client` to the cluster.
   """
-  @version "0.2.1"
+  @version "0.2.2"
 
   def project do
     [

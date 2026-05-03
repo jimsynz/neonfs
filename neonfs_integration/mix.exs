@@ -10,7 +10,7 @@ defmodule NeonFS.Integration.MixProject do
   scaffolding in via `:neonfs_test_support`. See #582 for the
   migration that landed this shape.
   """
-  @version "0.2.1"
+  @version "0.2.2"
 
   def project do
     [

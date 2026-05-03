@@ -5,6 +5,17 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.2](https://harton.dev/project-neon/neonfs/compare/v0.2.1...v0.2.2) (2026-05-03)
+
+
+
+
+### Bug Fixes:
+
+* ci: cache `neonfs_chunker` NIF artefacts in `neonfs_core` job by James Harton
+
+* s3: resolve `:region` at runtime instead of compile time by James Harton
+
 ## [v0.2.1](https://harton.dev/project-neon/neonfs/compare/v0.2.0...v0.2.1) (2026-05-03)
 
 
