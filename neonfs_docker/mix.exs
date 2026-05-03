@@ -7,7 +7,7 @@ defmodule NeonFS.Docker.MixProject do
   Exposes the Docker Volume Plugin HTTP protocol over a Unix socket,
   mapping plugin volumes onto NeonFS volumes via `NeonFS.Client.Router`.
   """
-  @version "0.1.0"
+  @version "0.2.0"
 
   def project do
     [
