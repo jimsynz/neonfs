@@ -13,7 +13,7 @@ defmodule NeonFS.Containerd.MixProject do
   Update / Delete RPCs in #551 — see the `#196` tracking issue for
   the full breakdown.
   """
-  @version "0.2.0"
+  @version "0.2.1"
 
   def project do
     [

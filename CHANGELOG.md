@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.1](https://harton.dev/project-neon/neonfs/compare/v0.2.0...v0.2.1) (2026-05-03)
+
+
+
+
+### Bug Fixes:
+
+* containers: wire missing path-dep build contexts by James Harton
+
 ## [v0.2.0](https://harton.dev/project-neon/neonfs/compare/v0.1.11...v0.2.0) (2026-05-03)
 ### Breaking Changes:
 
