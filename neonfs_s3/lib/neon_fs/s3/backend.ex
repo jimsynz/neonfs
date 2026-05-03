@@ -20,8 +20,6 @@ defmodule NeonFS.S3.Backend do
 
   require Logger
 
-  @region Application.compile_env(:neonfs_s3, :region, "neonfs")
-
   # Credential lookup
 
   @impl true
@@ -91,7 +89,7 @@ defmodule NeonFS.S3.Backend do
   @impl true
   def get_bucket_location(_ctx, bucket) do
     case ensure_bucket_exists(bucket) do
-      :ok -> {:ok, @region}
+      :ok -> {:ok, Application.get_env(:neonfs_s3, :region, "neonfs")}
       error -> error
     end
   end
