@@ -4,10 +4,13 @@ FROM base AS deps
 COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
 COPY --from=core mix.exs mix.lock /workdir/neonfs_core/
 COPY --from=fuse mix.exs mix.lock /workdir/neonfs_fuse/
+COPY --from=fuse_server mix.exs mix.lock /workdir/fuse_server/
 COPY --from=nfs mix.exs mix.lock /workdir/neonfs_nfs/
+COPY --from=nfs_server mix.exs mix.lock /workdir/nfs_server/
 COPY --from=s3 mix.exs mix.lock /workdir/neonfs_s3/
 COPY --from=webdav mix.exs mix.lock /workdir/neonfs_webdav/
 COPY --from=docker mix.exs mix.lock /workdir/neonfs_docker/
+COPY --from=containerd mix.exs mix.lock /workdir/neonfs_containerd/
 COPY --from=src mix.exs mix.lock /workdir/neonfs_omnibus/
 
 WORKDIR /workdir/neonfs_omnibus
@@ -20,10 +23,13 @@ ENV MIX_ENV=prod
 COPY --from=client . /workdir/neonfs_client
 COPY --from=core . /workdir/neonfs_core
 COPY --from=fuse . /workdir/neonfs_fuse
+COPY --from=fuse_server . /workdir/fuse_server
 COPY --from=nfs . /workdir/neonfs_nfs
+COPY --from=nfs_server . /workdir/nfs_server
 COPY --from=s3 . /workdir/neonfs_s3
 COPY --from=webdav . /workdir/neonfs_webdav
 COPY --from=docker . /workdir/neonfs_docker
+COPY --from=containerd . /workdir/neonfs_containerd
 COPY --from=src . /workdir/neonfs_omnibus
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \

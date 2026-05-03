@@ -2,6 +2,7 @@ FROM base AS deps
 
 # Copy only lockfiles and project config to cache the deps.get layer
 COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
+COPY --from=nfs_server mix.exs mix.lock /workdir/nfs_server/
 COPY --from=src mix.exs mix.lock /workdir/neonfs_nfs/
 
 WORKDIR /workdir/neonfs_nfs
@@ -12,6 +13,7 @@ ENV MIX_ENV=prod
 
 # Now copy the full source for compilation
 COPY --from=client . /workdir/neonfs_client
+COPY --from=nfs_server . /workdir/nfs_server
 COPY --from=src . /workdir/neonfs_nfs
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
