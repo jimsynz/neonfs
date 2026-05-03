@@ -8,8 +8,7 @@ end
 config :git_ops,
   mix_project: Mix.Project.get!(),
   changelog_file: "CHANGELOG.md",
-  github_handle_lookup?: true,
-  github_api_base_url: "https://api.github.com",
+  github_handle_lookup?: false,
   repository_url: "https://harton.dev/project-neon/neonfs",
   version_tag_prefix: "v",
   managed_files: "*/{mix.exs,README.md,Cargo.toml}"
