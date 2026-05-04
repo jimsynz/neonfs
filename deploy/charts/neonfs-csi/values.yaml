@@ -18,22 +18,22 @@ imagePullSecrets: []
 # known to support CSI v1.10 + VOLUME_CONDITION (#316).
 sidecars:
   provisioner:
-    image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+    image: registry.k8s.io/sig-storage/csi-provisioner:v6.2.0
     pullPolicy: IfNotPresent
     extraArgs: []
   attacher:
-    image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.11.0
     pullPolicy: IfNotPresent
     extraArgs: []
   resizer:
-    image: registry.k8s.io/sig-storage/csi-resizer:v1.12.0
+    image: registry.k8s.io/sig-storage/csi-resizer:v2.1.0
     pullPolicy: IfNotPresent
     extraArgs: []
   livenessProbe:
-    image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+    image: registry.k8s.io/sig-storage/livenessprobe:v2.18.0
     pullPolicy: IfNotPresent
   nodeDriverRegistrar:
-    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.16.0
     pullPolicy: IfNotPresent
 
 # Bootstrap token used by the plugin to join the NeonFS cluster.

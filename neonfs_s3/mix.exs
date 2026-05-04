@@ -94,7 +94,7 @@ defmodule NeonFS.S3.MixProject do
       {:neonfs_webdav, path: "../neonfs_webdav", only: :test, runtime: false},
       {:ex_aws, "~> 2.6", only: :test},
       {:ex_aws_s3, "~> 2.5", only: :test},
-      {:hackney, "~> 1.9", only: :test},
+      {:hackney, "~> 1.16", only: :test},
       # `:only` dropped because `rustler` — pulled in transitively via
       # neonfs_client's chunker NIF (#449) — declares jason as a
       # runtime dep. Narrower `:only` bounds here fail the mix.exs

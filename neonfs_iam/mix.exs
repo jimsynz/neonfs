@@ -66,7 +66,7 @@ defmodule NeonFS.IAM.MixProject do
       {:mimic, "~> 2.0", only: [:test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.0"},
-      {:usage_rules, "~> 0.1", only: [:dev]}
+      {:usage_rules, "~> 1.0", only: [:dev]}
     ]
   end
 end

@@ -14,5 +14,19 @@
         "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\n\\s*\\w+=(?<currentValue>v\\S+)"
       ]
     }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["eetf"],
+      "allowedVersions": "<0.12",
+      "description": "Pin to 0.11.x — erl_dist 0.8 (latest) still requires eetf 0.11. Lift this when sile/erl_dist releases a version on eetf 0.12."
+    },
+    {
+      "matchManagers": ["mix"],
+      "matchPackageNames": ["hackney"],
+      "allowedVersions": "~> 1.16",
+      "description": "Pin to 1.x — ex_aws 2.6.1 (latest) still requires hackney ~> 1.16. Lift this when ex_aws supports hackney 2+."
+    }
   ]
 }
