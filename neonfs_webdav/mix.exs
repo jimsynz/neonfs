@@ -4,7 +4,7 @@ defmodule NeonFS.WebDAV.MixProject do
   @moduledoc """
   WebDAV interface for NeonFS.
   """
-  @version "0.2.2"
+  @version "0.2.3"
 
   def project do
     [

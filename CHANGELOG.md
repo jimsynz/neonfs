@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.3](https://harton.dev/project-neon/neonfs/compare/v0.2.2...v0.2.3) (2026-05-04)
+
+
+
+
+### Bug Fixes:
+
+* deps: update all dependencies (#745) by Renovate Bot
+
 ## [v0.2.2](https://harton.dev/project-neon/neonfs/compare/v0.2.1...v0.2.2) (2026-05-03)
 
 

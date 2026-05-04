@@ -4,7 +4,7 @@ defmodule NFSServer.MixProject do
   @moduledoc """
   ONC RPC and NFSv3 server as a standalone Elixir library.
   """
-  @version "0.2.2"
+  @version "0.2.3"
 
   def project do
     [
