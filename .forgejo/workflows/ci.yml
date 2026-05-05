@@ -638,11 +638,15 @@ jobs:
     services:
       # Local registry for `containerd_image_pull_test.exs` (#728).
       # Pre-seeded by the "Pre-seed registry sidecar" step below
-      # via `crane`, so the test never reaches docker.io.
+      # via `crane`, so the test never reaches docker.io. The test
+      # and the pre-seed step both reach this sidecar at
+      # `registry:5000` over the workflow's service network — the
+      # host port is never used, so we don't map it. Mapping
+      # `5000:5000` collides with anything else holding the host
+      # port (stuck containers from previous jobs, a docker daemon
+      # registry mirror, etc.) and breaks the whole job (#765).
       registry:
         image: registry:3
-        ports:
-          - 5000:5000
     steps:
       - name: Install loopback dependencies
         run: |
