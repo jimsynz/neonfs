@@ -31,5 +31,13 @@ ProtectHome=true
 # at /run/neonfs/containerd.sock via /etc/containerd/config.toml.
 ReadWritePaths=/var/lib/neonfs
 
+# This unit creates host-visible mounts on containerd's behalf
+# (snapshotter overlays, content fetches). The default mount-namespace
+# propagation under PrivateTmp/ProtectSystem/ProtectHome is slave, so
+# mounts created inside the unit don't escape to the host namespace
+# where containerd's tasks can pick them up. `shared` propagates the
+# unit's mounts outwards. (#758)
+MountFlags=shared
+
 [Install]
 WantedBy=multi-user.target

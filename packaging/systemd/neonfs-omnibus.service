@@ -28,5 +28,13 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/neonfs /mnt
 
+# This unit creates host-visible filesystem mounts (FUSE + NFS). The
+# default mount-namespace propagation under PrivateTmp/ProtectSystem/
+# ProtectHome is slave, so mounts created inside the unit don't escape
+# back to the host namespace. `shared` makes the unit's mounts
+# propagate outwards, at the cost of also seeing host-side mount
+# changes — fine for a filesystem-providing service. (#758)
+MountFlags=shared
+
 [Install]
 WantedBy=multi-user.target
