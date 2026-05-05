@@ -8,6 +8,13 @@ defmodule NeonFS.Transport.CertRenewalTest do
   # Short interval for tests (50ms)
   @test_check_interval 50
 
+  # Budget for `assert_receive` on telemetry events. 5s is comfortable
+  # locally (renewal completes in <100ms there) and tolerates the
+  # scheduling pauses we see on busy CI runners between
+  # "initiating renewal" and the success event reaching the test
+  # mailbox. The previous 2s budget flaked on slow runners (#763).
+  @receive_timeout_ms 5_000
+
   setup %{tmp_dir: tmp_dir} do
     File.mkdir_p!(tmp_dir)
     Application.put_env(:neonfs_client, :tls_dir, tmp_dir)
@@ -60,7 +67,7 @@ defmodule NeonFS.Transport.CertRenewalTest do
       assert Process.alive?(pid)
 
       # Wait for at least one check cycle to complete without crash
-      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, _}, 2_000
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, _}, @receive_timeout_ms
       assert Process.alive?(pid)
     end
   end
@@ -85,7 +92,7 @@ defmodule NeonFS.Transport.CertRenewalTest do
 
       assert_receive {[:neonfs, :cert_renewal, :check], ^ref, %{days_remaining: _},
                       %{action: :renewal_triggered}},
-                     2_000
+                     @receive_timeout_ms
     end
 
     test "writes new cert to local filesystem after renewal", %{tmp_dir: tmp_dir} do
@@ -108,7 +115,7 @@ defmodule NeonFS.Transport.CertRenewalTest do
       # Wait for the success telemetry event (emitted after write_local_tls)
       assert_receive {[:neonfs, :cert_renewal, :success], ^ref, %{},
                       %{old_serial: _, new_serial: 999}},
-                     2_000
+                     @receive_timeout_ms
 
       # Verify the cert on disk matches
       {:ok, new_cert} = TLS.read_local_cert()
@@ -138,7 +145,9 @@ defmodule NeonFS.Transport.CertRenewalTest do
       )
 
       # Should get a :not_due check event, never a :success
-      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :not_due}}, 2_000
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :not_due}},
+                     @receive_timeout_ms
+
       refute_received {[:neonfs, :cert_renewal, :success], ^ref, _, _}
     end
   end
@@ -168,7 +177,7 @@ defmodule NeonFS.Transport.CertRenewalTest do
       # First attempt should emit a failure event
       assert_receive {[:neonfs, :cert_renewal, :failure], ^ref, %{},
                       %{reason: :test_failure, attempt: 1}},
-                     2_000
+                     @receive_timeout_ms
 
       assert Process.alive?(pid)
 
@@ -220,7 +229,7 @@ defmodule NeonFS.Transport.CertRenewalTest do
       )
 
       # Should receive the success event within a reasonable time
-      assert_receive {[:neonfs, :cert_renewal, :success], ^ref, %{}, _}, 2_000
+      assert_receive {[:neonfs, :cert_renewal, :success], ^ref, %{}, _}, @receive_timeout_ms
     end
 
     test "respects renewal_threshold_days from application env", %{tmp_dir: tmp_dir} do
@@ -244,7 +253,7 @@ defmodule NeonFS.Transport.CertRenewalTest do
       )
 
       assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :renewal_triggered}},
-                     2_000
+                     @receive_timeout_ms
     end
 
     test "does not renew 60-day cert with default 30-day threshold", %{tmp_dir: tmp_dir} do
@@ -264,7 +273,9 @@ defmodule NeonFS.Transport.CertRenewalTest do
          renew_fun: make_renew_fun(ca_cert, ca_key, 500)}
       )
 
-      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :not_due}}, 2_000
+      assert_receive {[:neonfs, :cert_renewal, :check], ^ref, _, %{action: :not_due}},
+                     @receive_timeout_ms
+
       refute_received {[:neonfs, :cert_renewal, :success], ^ref, _, _}
     end
   end
