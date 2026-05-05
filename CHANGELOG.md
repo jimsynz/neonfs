@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.5](https://harton.dev/project-neon/neonfs/compare/v0.2.4...v0.2.5) (2026-05-05)
+
+
+
+
+### Bug Fixes:
+
+* docker: bind volume plugin socket in daemon-owned RuntimeDirectory by James Harton
+
 ## [v0.2.4](https://harton.dev/project-neon/neonfs/compare/v0.2.3...v0.2.4) (2026-05-05)
 
 

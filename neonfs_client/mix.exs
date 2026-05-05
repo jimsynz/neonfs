@@ -4,7 +4,7 @@ defmodule NeonFS.Client.MixProject do
   @moduledoc """
   Shared types and service discovery client for NeonFS cluster members.
   """
-  @version "0.2.4"
+  @version "0.2.5"
 
   def project do
     [
