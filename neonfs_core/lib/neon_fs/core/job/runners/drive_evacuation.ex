@@ -28,6 +28,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   alias NeonFS.Core.DriveEvacuation
 
   @default_batch_size 100
+  @stale_batch_threshold 3
 
   @impl NeonFS.Core.Job.Runner
   def label, do: "drive-evacuation"
@@ -70,14 +71,17 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
     successes = Enum.count(results, &match?(:ok, &1))
     failures = Enum.count(results, &match?({:error, _}, &1))
+    last_error = find_last_error(results)
 
     completed = job.progress.completed + successes
     total = max(job.progress.total, completed + length(remaining) - successes)
+    stale_batches = update_stale_count(job.state, successes, failures)
 
     if failures > 0 do
       Logger.warning("Evacuation batch had failures, will retry",
         drive_id: job.params.drive_id,
-        failure_count: failures
+        failure_count: failures,
+        last_error: inspect(last_error)
       )
     end
 
@@ -86,19 +90,87 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
       | progress: %{
           total: total,
           completed: completed,
-          description: "Evacuating chunks (#{completed}/#{total})"
+          description: build_description(completed, total, last_error)
         },
-        state: Map.put(job.state, :last_batch_at, DateTime.utc_now())
+        state:
+          job.state
+          |> Map.put(:last_batch_at, DateTime.utc_now())
+          |> Map.put(:stale_batches, stale_batches)
+          |> Map.put(:last_error, last_error)
     }
 
     :telemetry.execute(
       [:neonfs, :evacuation, :progress],
       %{evacuated: completed, total: total, batch_failures: failures},
-      %{drive_id: job.params.drive_id, node: job.params.node}
+      %{
+        drive_id: job.params.drive_id,
+        node: job.params.node,
+        stale_batches: stale_batches
+      }
     )
 
-    {:continue, updated}
+    if stale_batches >= @stale_batch_threshold do
+      Logger.warning(
+        "Evacuation made no progress for #{stale_batches} consecutive batches, failing job",
+        drive_id: job.params.drive_id,
+        last_error: inspect(last_error)
+      )
+
+      {:error, {:no_progress, last_error}, updated}
+    else
+      {:continue, updated}
+    end
   end
+
+  defp update_stale_count(state, 0 = _successes, failures) when failures > 0 do
+    Map.get(state, :stale_batches, 0) + 1
+  end
+
+  defp update_stale_count(_state, _successes, _failures), do: 0
+
+  defp find_last_error(results) do
+    results
+    |> Enum.reverse()
+    |> Enum.find_value(fn
+      {:error, reason} -> reason
+      _ -> nil
+    end)
+  end
+
+  defp build_description(completed, total, nil),
+    do: "Evacuating chunks (#{completed}/#{total})"
+
+  defp build_description(completed, total, last_error) do
+    "Evacuating chunks (#{completed}/#{total}) — last error: #{normalise_evac_reason(last_error)}"
+  end
+
+  @doc false
+  @spec normalise_evac_reason(term()) :: String.t()
+  def normalise_evac_reason({:migration_failed, reason, target_drive}),
+    do: "#{normalise_evac_reason(reason)} on #{target_drive}"
+
+  def normalise_evac_reason(:no_target_drives), do: "no eligible target drives"
+  def normalise_evac_reason(:chunk_not_found), do: "chunk not found"
+  def normalise_evac_reason(:no_progress), do: "no progress"
+  def normalise_evac_reason({:no_progress, inner}), do: normalise_evac_reason(inner)
+  def normalise_evac_reason({:rpc_error, _}), do: "rpc error"
+  def normalise_evac_reason({:verification_failed, _}), do: "chunk verification failed"
+  def normalise_evac_reason({:write_failed, posix}), do: "write failed: #{describe_posix(posix)}"
+  def normalise_evac_reason({:read_failed, posix}), do: "read failed: #{describe_posix(posix)}"
+  def normalise_evac_reason(:eacces), do: "permission denied"
+  def normalise_evac_reason(:enospc), do: "no space on target drive"
+  def normalise_evac_reason(:erofs), do: "target drive is read-only"
+  def normalise_evac_reason(:enoent), do: "file not found"
+  def normalise_evac_reason(nil), do: "unknown error"
+  def normalise_evac_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  def normalise_evac_reason(reason), do: inspect(reason)
+
+  defp describe_posix(:eacces), do: "permission denied"
+  defp describe_posix(:enospc), do: "no space"
+  defp describe_posix(:erofs), do: "read-only filesystem"
+  defp describe_posix(:enoent), do: "file not found"
+  defp describe_posix(p) when is_atom(p), do: Atom.to_string(p)
+  defp describe_posix(p), do: inspect(p)
 
   defp process_chunk(params, chunk, any_tier) do
     node = params.node
@@ -191,7 +263,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
         case TierMigration.run_migration(migration_params) do
           {:ok, _} -> :ok
-          {:error, reason} -> {:error, reason}
+          {:error, reason} -> {:error, {:migration_failed, reason, target.id}}
         end
 
       {:error, reason} ->
