@@ -39,10 +39,19 @@ defmodule NeonFS.Core.RaServer do
   Check if the Ra server has been initialized (either as founder or by joining).
 
   Returns false if the RaServer process is not running (e.g., Ra disabled).
+
+  The reply itself is a constant-time state read, so the call has no
+  inherent work bound. The default 5s GenServer call timeout was
+  flaking under runner contention (#766) when an `:init_cluster` /
+  `:join_cluster` call (each up to 60s) was already in the mailbox —
+  callers like `ServiceRegistry.maybe_ra_command/2` would crash and
+  invalidate every test in `setup_all`. `:infinity` lets the
+  readiness check wait for those legitimate predecessors to drain;
+  ExUnit's per-test timeout still bounds total wall time.
   """
   @spec initialized?() :: boolean()
   def initialized? do
-    GenServer.call(__MODULE__, :initialized?)
+    GenServer.call(__MODULE__, :initialized?, :infinity)
   catch
     :exit, {:noproc, _} -> false
   end
