@@ -1356,19 +1356,18 @@ defmodule NeonFS.Core.BlobStore do
 
   defp dir_contains_any_file?(path) do
     case File.ls(path) do
-      {:ok, entries} ->
-        Enum.any?(entries, fn entry ->
-          entry_path = Path.join(path, entry)
+      {:ok, entries} -> Enum.any?(entries, &entry_indicates_data?(path, &1))
+      {:error, _} -> false
+    end
+  end
 
-          case File.stat(entry_path) do
-            {:ok, %{type: :directory}} -> dir_contains_any_file?(entry_path)
-            {:ok, _} -> true
-            {:error, _} -> false
-          end
-        end)
+  defp entry_indicates_data?(parent, entry) do
+    entry_path = Path.join(parent, entry)
 
-      {:error, _} ->
-        false
+    case File.stat(entry_path) do
+      {:ok, %{type: :directory}} -> dir_contains_any_file?(entry_path)
+      {:ok, _} -> true
+      {:error, _} -> false
     end
   end
 
