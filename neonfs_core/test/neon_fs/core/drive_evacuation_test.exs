@@ -188,6 +188,89 @@ defmodule NeonFS.Core.DriveEvacuationTest do
 
       assert {:complete, _updated} = result
     end
+
+    test "surfaces last error in progress description when batch fails" do
+      job = job_with_unmigratable_chunk()
+
+      {:continue, updated} = EvacuationRunner.step(job)
+
+      assert updated.progress.description =~ "Evacuating chunks"
+      assert updated.progress.description =~ "last error: no eligible target drives"
+      assert updated.state.last_error == :no_target_drives
+      assert updated.state.stale_batches == 1
+    end
+
+    test "stale_batches resets after a batch with successes" do
+      job = job_with_unmigratable_chunk()
+
+      # First batch: 1 chunk, no targets → stale_batches = 1
+      {:continue, after_fail} = EvacuationRunner.step(job)
+      assert after_fail.state.stale_batches == 1
+
+      # Add drive2 back as a target by re-activating it
+      DriveRegistry.update_state("drive2", :active)
+
+      {:continue, after_success} = EvacuationRunner.step(after_fail)
+
+      assert after_success.state.stale_batches == 0
+      assert after_success.state.last_error == nil
+      assert after_success.progress.completed == 1
+      refute after_success.progress.description =~ "last error"
+    end
+
+    test "fails the job after threshold consecutive no-progress batches" do
+      job = job_with_unmigratable_chunk()
+
+      {:continue, j1} = EvacuationRunner.step(job)
+      assert j1.state.stale_batches == 1
+
+      {:continue, j2} = EvacuationRunner.step(j1)
+      assert j2.state.stale_batches == 2
+
+      assert {:error, {:no_progress, :no_target_drives}, failed} = EvacuationRunner.step(j2)
+      assert failed.state.stale_batches == 3
+      assert failed.state.last_error == :no_target_drives
+    end
+
+    test "normalise_evac_reason handles common error shapes" do
+      assert EvacuationRunner.normalise_evac_reason(:no_target_drives) ==
+               "no eligible target drives"
+
+      assert EvacuationRunner.normalise_evac_reason(:eacces) == "permission denied"
+
+      assert EvacuationRunner.normalise_evac_reason({:write_failed, :eacces}) ==
+               "write failed: permission denied"
+
+      assert EvacuationRunner.normalise_evac_reason({:migration_failed, :eacces, "disk1"}) ==
+               "permission denied on disk1"
+
+      assert EvacuationRunner.normalise_evac_reason({:rpc_error, :nodedown}) == "rpc error"
+      assert EvacuationRunner.normalise_evac_reason(nil) == "unknown error"
+    end
+  end
+
+  defp job_with_unmigratable_chunk do
+    data = "evacuation chunk needing migration"
+    {:ok, hash, _info} = BlobStore.write_chunk(data, "drive1", "hot")
+
+    chunk =
+      ChunkMeta.new(hash, byte_size(data), byte_size(data))
+      |> ChunkMeta.add_location(%{node: node(), drive_id: "drive1", tier: :hot})
+
+    ChunkIndex.put(chunk)
+
+    # Drain drive2 so target selection has nowhere to go
+    DriveRegistry.update_state("drive2", :draining)
+
+    job =
+      Job.new(EvacuationRunner, %{
+        node: node(),
+        drive_id: "drive1",
+        any_tier: false,
+        total_chunks: 1
+      })
+
+    %{job | status: :running}
   end
 
   describe "on_cancel/1" do
