@@ -297,8 +297,59 @@ defmodule NeonFS.FUSE.MountManager do
 
   defp mount_via_fusermount(path, fusermount_opts) do
     case Fusermount.mount(path, fusermount_opts) do
-      {:ok, fd} -> {:ok, fd}
-      {:error, reason} -> {:error, {:mount_failed, reason}}
+      {:ok, fd} ->
+        {:ok, fd}
+
+      {:error, :fusermount_no_fd} ->
+        {:error, {:mount_failed, diagnose_fusermount_no_fd(path, current_uid())}}
+
+      {:error, reason} ->
+        {:error, {:mount_failed, reason}}
+    end
+  end
+
+  # `:fusermount_no_fd` collapses several distinct causes (mount point
+  # missing / not a directory / wrong owner / kernel-rejected option)
+  # into one undifferentiated label. Stat the mount point to surface
+  # which one fired so the operator gets an actionable error rather
+  # than `{:mount_failed, :fusermount_no_fd}`. Issue #756.
+  @doc false
+  @spec diagnose_fusermount_no_fd(String.t(), non_neg_integer() | nil) ::
+          {:fusermount_no_fd, String.t()}
+  def diagnose_fusermount_no_fd(path, daemon_uid \\ current_uid()) do
+    case File.stat(path) do
+      {:error, :enoent} ->
+        {:fusermount_no_fd, "Mount point does not exist: #{path}"}
+
+      {:error, reason} ->
+        {:fusermount_no_fd, "Cannot stat mount point #{path}: #{inspect(reason)}"}
+
+      {:ok, %File.Stat{type: type}} when type != :directory ->
+        {:fusermount_no_fd, "Mount point is not a directory (#{type}): #{path}"}
+
+      {:ok, %File.Stat{uid: stat_uid}} ->
+        case daemon_uid do
+          uid when is_integer(uid) and uid != 0 and uid != stat_uid ->
+            {:fusermount_no_fd,
+             "Mount point must be owned by the daemon user " <>
+               "(currently uid=#{stat_uid}, daemon uid=#{uid}); " <>
+               "run: chown neonfs:neonfs #{path}"}
+
+          _ ->
+            {:fusermount_no_fd,
+             "fusermount3 rejected the mount of #{path} — " <>
+               "check daemon logs (journalctl -u neonfs-fuse) for stderr from the helper"}
+        end
+    end
+  end
+
+  # Linux: `/proc/self` is owned by the calling process's effective uid.
+  # Returns `nil` if the proc filesystem isn't available (non-Linux,
+  # restricted container) — callers fall back to the generic message.
+  defp current_uid do
+    case File.stat("/proc/self") do
+      {:ok, %File.Stat{uid: uid}} -> uid
+      _ -> nil
     end
   end
 
