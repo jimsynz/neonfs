@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.2.4](https://harton.dev/project-neon/neonfs/compare/v0.2.3...v0.2.4) (2026-05-05)
+
+
+
+
+### Bug Fixes:
+
+* packaging: include `neonfs_blob` NIF in omnibus deb (#747) by James Harton
+
 ## [v0.2.3](https://harton.dev/project-neon/neonfs/compare/v0.2.2...v0.2.3) (2026-05-04)
 
 
