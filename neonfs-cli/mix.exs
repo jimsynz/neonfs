@@ -2,7 +2,7 @@ defmodule NeonFS.CLI.MixProject do
   use Mix.Project
   @moduledoc false
 
-  @version "0.2.5"
+  @version "0.2.6"
 
   def project,
     do: [

@@ -4,7 +4,7 @@ defmodule NeonFS.Core.MixProject do
   @moduledoc """
   Storage engine, metadata management, and cluster coordination for NeonFS.
   """
-  @version "0.2.5"
+  @version "0.2.6"
 
   def project do
     [
