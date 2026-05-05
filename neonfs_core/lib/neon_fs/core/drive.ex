@@ -46,7 +46,7 @@ defmodule NeonFS.Core.Drive do
     %__MODULE__{
       id: to_string(config[:id] || config["id"]),
       node: node,
-      path: to_string(config[:path] || config["path"]),
+      path: normalize_path(to_string(config[:path] || config["path"])),
       tier: normalize_tier(config[:tier] || config["tier"]),
       capacity_bytes: config[:capacity] || config["capacity"] || config[:capacity_bytes] || 0,
       used_bytes: 0,
@@ -55,6 +55,21 @@ defmodule NeonFS.Core.Drive do
       idle_timeout: config[:idle_timeout] || 1800
     }
   end
+
+  @doc """
+  Normalises a drive path: collapses consecutive slashes, strips a
+  trailing slash (except `/`), expands `.`/`..` segments, and resolves
+  `~`. The empty string passes through unchanged so callers can run
+  their own `"Path is required"` validation rather than have
+  `Path.expand/1` substitute the daemon's CWD.
+
+  Existing on-disk paths in `cluster.json` self-heal on next daemon
+  start because every config goes through this call. No migration
+  needed.
+  """
+  @spec normalize_path(String.t()) :: String.t()
+  def normalize_path(""), do: ""
+  def normalize_path(path) when is_binary(path), do: Path.expand(path)
 
   @doc """
   Returns the usage ratio for this drive (0.0 to 1.0).

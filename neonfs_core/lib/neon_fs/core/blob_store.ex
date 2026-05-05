@@ -53,6 +53,7 @@ defmodule NeonFS.Core.BlobStore do
   require Logger
 
   alias NeonFS.Core.Blob.Native
+  alias NeonFS.Core.Drive
   alias NeonFS.Core.DriveState
   alias NeonFS.Core.KeyManager
   alias NeonFS.Core.Replication
@@ -1068,7 +1069,7 @@ defmodule NeonFS.Core.BlobStore do
   defp normalize_drive_config(drive) when is_map(drive) do
     %{
       id: to_string(drive[:id] || drive["id"]),
-      path: to_string(drive[:path] || drive["path"]),
+      path: Drive.normalize_path(to_string(drive[:path] || drive["path"])),
       tier: normalize_tier(drive[:tier] || drive["tier"] || :hot),
       capacity: drive[:capacity] || drive["capacity"] || 0
     }
