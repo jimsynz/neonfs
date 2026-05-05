@@ -9,19 +9,36 @@ defmodule NeonFS.Containerd.Supervisor do
 
   ## Configuration
 
-    * `:socket_path` — UDS path. Default `/run/containerd/proxy-plugins/neonfs.sock`
-      (the path containerd's `[proxy_plugins]` config dials).
+    * `:socket_path` — UDS path. Default `/run/neonfs/containerd.sock`
+      (the daemon owns its own `RuntimeDirectory`; containerd's
+      `[proxy_plugins.neonfs] address` should point here).
     * `:listener` — `:socket` (default) or `{:tcp, port}` for tests.
     * `:register_service` — `true` (default) registers as `:containerd` in
       the cluster service registry. Tests usually disable.
   """
 
   use Supervisor
+  require Logger
 
   alias NeonFS.Client.Registrar
   alias NeonFS.Containerd.{HealthCheck, WriteRegistry, WriteSupervisor}
 
-  @default_socket_path "/run/containerd/proxy-plugins/neonfs.sock"
+  # The plugin owns its socket inside its own RuntimeDirectory; operators
+  # point containerd's `[proxy_plugins.neonfs] address` at it via
+  # `/etc/containerd/config.toml`. Putting the socket under
+  # `/run/containerd/proxy-plugins` would require write access to a
+  # path that containerd creates as root:root, which the daemon's
+  # unprivileged user can't satisfy.
+  @default_socket_path "/run/neonfs/containerd.sock"
+
+  # Errors that mean "the host can't host the plugin socket" rather
+  # than a misconfiguration we should crash on. The daemon owns its
+  # RuntimeDirectory by default so these are unusual, but they can
+  # surface if `:socket_path` is overridden to a path the daemon
+  # can't reach (ProtectSystem=strict without a matching
+  # ReadWritePaths, a missing parent, a read-only mount, or something
+  # else holding the path).
+  @skip_errors [:eacces, :enoent, :enotdir, :erofs]
 
   @doc """
   Starts the containerd-plugin supervision tree. Honoured options
@@ -41,12 +58,15 @@ defmodule NeonFS.Containerd.Supervisor do
     HealthCheck.register_checks()
 
     children =
-      [
-        WriteRegistry,
-        WriteSupervisor,
-        endpoint_child_spec()
-      ]
-      |> maybe_add_registrar(register?)
+      case endpoint_child_spec() do
+        {:ok, endpoint} ->
+          [WriteRegistry, WriteSupervisor, endpoint]
+          |> maybe_add_registrar(register?)
+
+        {:skip, message} ->
+          Logger.warning("containerd content store plugin disabled: #{message}")
+          []
+      end
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -64,21 +84,36 @@ defmodule NeonFS.Containerd.Supervisor do
         socket_path =
           Application.get_env(:neonfs_containerd, :socket_path, @default_socket_path)
 
-        socket_path |> Path.dirname() |> File.mkdir_p!()
-        File.rm(socket_path)
-
-        {GRPC.Server.Supervisor,
-         endpoint: NeonFS.Containerd.Endpoint,
-         port: 0,
-         start_server: true,
-         adapter_opts: [ip: {:local, socket_path}]}
+        prepare_socket(socket_path)
 
       {:tcp, port} ->
-        {GRPC.Server.Supervisor,
-         endpoint: NeonFS.Containerd.Endpoint,
-         port: port,
-         start_server: true,
-         adapter_opts: [ip: {127, 0, 0, 1}]}
+        {:ok,
+         {GRPC.Server.Supervisor,
+          endpoint: NeonFS.Containerd.Endpoint,
+          port: port,
+          start_server: true,
+          adapter_opts: [ip: {127, 0, 0, 1}]}}
+    end
+  end
+
+  defp prepare_socket(socket_path) do
+    socket_dir = Path.dirname(socket_path)
+
+    case File.mkdir_p(socket_dir) do
+      :ok ->
+        File.rm(socket_path)
+
+        {:ok,
+         {GRPC.Server.Supervisor,
+          endpoint: NeonFS.Containerd.Endpoint,
+          port: 0,
+          start_server: true,
+          adapter_opts: [ip: {:local, socket_path}]}}
+
+      {:error, reason} when reason in @skip_errors ->
+        {:skip,
+         "cannot prepare socket directory #{inspect(socket_dir)} (#{reason}). " <>
+           "Check `:socket_path` and the daemon's filesystem permissions."}
     end
   end
 

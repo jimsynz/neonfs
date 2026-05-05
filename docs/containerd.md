@@ -23,7 +23,7 @@ Once the plugin daemon is running and bound to its UDS, append a
 [proxy_plugins]
   [proxy_plugins.neonfs]
     type    = "content"
-    address = "/run/containerd/proxy-plugins/neonfs.sock"
+    address = "/run/neonfs/containerd.sock"
 ```
 
 Reload containerd (`systemctl restart containerd`) and verify the
@@ -51,13 +51,13 @@ docker pull ghcr.io/jimsynz/neonfs/containerd:latest
 
 The image includes the systemd-aware release plus the `neonfs` CLI.
 Run it alongside the core daemon (host networking + bind-mount of
-`/run/containerd/proxy-plugins`):
+`/run/neonfs` so containerd on the host can reach the socket):
 
 ```console
 docker run -d --name neonfs-containerd \
   --network host \
   -v /var/lib/neonfs:/var/lib/neonfs \
-  -v /run/containerd/proxy-plugins:/run/containerd/proxy-plugins \
+  -v /run/neonfs:/run/neonfs \
   -e NEONFS_CORE_NODE=neonfs_core@core-host \
   ghcr.io/jimsynz/neonfs/containerd:latest
 ```
@@ -77,9 +77,9 @@ The package depends on `neonfs-common` (cookie / TLS material) and
 package ships the plugin already).
 
 The systemd unit lives at `/usr/lib/systemd/system/neonfs-containerd.service`
-and orders itself after `containerd.service` so the
-`/run/containerd/proxy-plugins` directory exists by the time the
-plugin tries to bind.
+and binds its socket inside the daemon's own `RuntimeDirectory`
+(`/run/neonfs/containerd.sock`), so the listener doesn't depend on
+containerd having been started first.
 
 ### Omnibus
 
@@ -93,17 +93,16 @@ Application env (`:neonfs_containerd`):
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `:socket_path` | `/run/containerd/proxy-plugins/neonfs.sock` | Path containerd's `[proxy_plugins]` config dials. Override per-host if your containerd config writes to a different proxy-plugins root. |
+| `:socket_path` | `/run/neonfs/containerd.sock` | Path containerd's `[proxy_plugins]` config dials. The daemon's `RuntimeDirectory=neonfs` makes this writable without privilege escalation; if you override, make sure containerd can read+connect to the new path. |
 | `:listener` | `:socket` | `:socket` for production UDS, `{:tcp, port}` for tests / debugging. |
 | `:volume` | `"containerd"` | NeonFS volume that holds the content-addressable blobs. Create it once with `neonfs cluster volume create containerd` before pointing containerd at the plugin. |
 | `:register_service` | `true` | Register as `:containerd` in the cluster service registry. Disable for transient debugging. |
 
 ## Troubleshooting
 
-- **`ctr image pull` hangs** — check the plugin can read / write its
-  socket directory: `ls -la /run/containerd/proxy-plugins/`. The
-  systemd unit grants `ReadWritePaths` to that path; if you've
-  customised, add it back.
+- **`ctr image pull` hangs** — check the plugin's socket exists and
+  containerd can dial it: `ls -la /run/neonfs/containerd.sock` and
+  confirm the address in `containerd config dump` matches.
 - **`ctr content active` returns nothing during a slow pull** —
   containerd emits writes per layer with a stable `ref`. The
   in-progress write tracker is the `WriteSession` per ref; check

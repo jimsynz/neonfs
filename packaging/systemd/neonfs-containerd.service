@@ -25,10 +25,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# /run/containerd/proxy-plugins must be writable so containerd can dial the
-# plugin socket; /var/lib/neonfs holds the cookie + TLS material shared
-# with the core daemon.
-ReadWritePaths=/var/lib/neonfs /run/containerd/proxy-plugins
+# /var/lib/neonfs holds the cookie + TLS material shared with the core daemon.
+# The plugin socket lives under /run/neonfs (covered by RuntimeDirectory
+# above); operators point containerd's `[proxy_plugins.neonfs] address`
+# at /run/neonfs/containerd.sock via /etc/containerd/config.toml.
+ReadWritePaths=/var/lib/neonfs
 
 [Install]
 WantedBy=multi-user.target

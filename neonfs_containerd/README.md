@@ -31,7 +31,7 @@ Application env (`:neonfs_containerd`):
 |-----|---------|-------|
 | `:start_supervisor` | `true` | Disable for tests that spin up an isolated listener. |
 | `:listener` | `:socket` | `:socket` for production UDS, `{:tcp, port}` for tests. |
-| `:socket_path` | `/run/containerd/proxy-plugins/neonfs.sock` | Path containerd's `[proxy_plugins]` config dials. |
+| `:socket_path` | `/run/neonfs/containerd.sock` | Path containerd's `[proxy_plugins]` config dials. |
 | `:register_service` | `true` | Register as `:containerd` in the cluster service registry. |
 
 ## Wiring containerd
@@ -43,7 +43,7 @@ plugin via `/etc/containerd/config.toml`:
 [proxy_plugins]
   [proxy_plugins.neonfs]
     type = "content"
-    address = "/run/containerd/proxy-plugins/neonfs.sock"
+    address = "/run/neonfs/containerd.sock"
 ```
 
 containerd will dial that socket and use NeonFS as a content store
