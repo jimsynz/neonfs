@@ -20,8 +20,6 @@ depends:
   - ca-certificates
   - libfuse3-4
   - fuse3
-
-recommends:
   - nfs-common
 
 conflicts:
