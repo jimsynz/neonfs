@@ -193,6 +193,7 @@ defmodule NeonFS.Core.DriveManager do
   defp do_add_drive(config, command_module) do
     with {:ok, parsed} <- validate_drive_config(config),
          :ok <- check_path_exists(parsed.path),
+         :ok <- check_path_writable(parsed.path),
          :ok <- check_id_unique(parsed.id),
          {:ok, _drive_id} <- BlobStore.open_store(parsed, timeout: :infinity),
          drive = parsed |> Drive.from_config(Node.self()) |> DriveConfig.detect_capacity(),
@@ -239,6 +240,39 @@ defmodule NeonFS.Core.DriveManager do
       {:ok, _} -> {:error, "Path exists but is not a directory: #{path}"}
       {:error, :enoent} -> {:error, "Path does not exist: #{path}"}
       {:error, reason} -> {:error, "Cannot access path #{path}: #{reason}"}
+    end
+  end
+
+  defp check_path_writable(path) do
+    probe = Path.join(path, ".neonfs-probe-#{System.unique_integer([:positive])}")
+    result = probe_write(probe)
+    _ = File.rm(probe)
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         "Path #{path} is not writable by the daemon (#{:file.format_error(reason)}); " <>
+           "try `chown neonfs:neonfs #{path}`"}
+    end
+  end
+
+  defp probe_write(probe) do
+    case :file.open(probe, [:write, :raw]) do
+      {:ok, fd} ->
+        write_result =
+          case :file.write(fd, "neonfs-probe") do
+            :ok -> :file.sync(fd)
+            err -> err
+          end
+
+        _ = :file.close(fd)
+        write_result
+
+      {:error, _reason} = err ->
+        err
     end
   end
 
