@@ -20,11 +20,19 @@ defmodule NeonFS.CSI.Supervisor do
   """
 
   use Supervisor
+  require Logger
 
   alias NeonFS.Client.Registrar
 
   @controller_socket "/var/lib/csi/sockets/pluginproxy/csi.sock"
   @node_socket "/var/lib/kubelet/plugins/neonfs.csi.harton.dev/csi.sock"
+
+  # Errors that mean "the host can't host the plugin socket" rather
+  # than a misconfiguration we should crash on. The canonical CSI
+  # deployment runs this daemon as a privileged sidecar with the
+  # kubelet plugin path hostPath-mounted, so these only trip when
+  # someone runs the daemon outside that context.
+  @skip_errors [:eacces, :enoent, :enotdir, :erofs]
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -44,8 +52,14 @@ defmodule NeonFS.CSI.Supervisor do
     NeonFS.CSI.VolumeHealth.init_table()
 
     children =
-      [endpoint_child_spec()]
-      |> maybe_add_registrar(register?)
+      case endpoint_child_spec() do
+        {:ok, endpoint} ->
+          [endpoint] |> maybe_add_registrar(register?)
+
+        {:skip, message} ->
+          Logger.warning("CSI plugin disabled: #{message}")
+          []
+      end
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -56,13 +70,27 @@ defmodule NeonFS.CSI.Supervisor do
         socket_path =
           Application.get_env(:neonfs_csi, :socket_path, default_socket_path())
 
-        socket_path |> Path.dirname() |> File.mkdir_p!()
-        File.rm(socket_path)
-
-        {GRPC.Server.Supervisor, endpoint: NeonFS.CSI.Endpoint, ip: {:local, socket_path}}
+        prepare_socket(socket_path)
 
       {:tcp, port} ->
-        {GRPC.Server.Supervisor, endpoint: NeonFS.CSI.Endpoint, port: port, ip: {127, 0, 0, 1}}
+        {:ok,
+         {GRPC.Server.Supervisor, endpoint: NeonFS.CSI.Endpoint, port: port, ip: {127, 0, 0, 1}}}
+    end
+  end
+
+  defp prepare_socket(socket_path) do
+    socket_dir = Path.dirname(socket_path)
+
+    case File.mkdir_p(socket_dir) do
+      :ok ->
+        File.rm(socket_path)
+
+        {:ok, {GRPC.Server.Supervisor, endpoint: NeonFS.CSI.Endpoint, ip: {:local, socket_path}}}
+
+      {:error, reason} when reason in @skip_errors ->
+        {:skip,
+         "cannot prepare socket directory #{inspect(socket_dir)} (#{reason}). " <>
+           "Check `:socket_path` and the daemon's filesystem permissions."}
     end
   end
 
