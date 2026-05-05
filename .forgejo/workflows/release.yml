@@ -213,21 +213,34 @@ jobs:
       - name: Restore build cache
         uses: actions/cache@v5
         with:
+          # `priv/native/` is where Rustler copies the freshly-built `.so`.
+          # If we cache `_build/` without it, a partial cache restore can
+          # leave the consumer's `_build/prod/lib/<dep>/.mix/compile.*`
+          # marking the dep as compiled while the source `priv/native/.so`
+          # is gone — `mix compile` then skips the rustler step and
+          # `mix release` copies an empty `priv/` into the rel tree (#746).
           path: |
             neonfs-cli/target
             /usr/local/cargo/registry
             /usr/local/cargo/git
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
             neonfs_core/deps
             neonfs_core/_build
             neonfs_core/target
+            neonfs_core/priv/native
+            fuse_server/target
+            fuse_server/priv/native
             neonfs_fuse/deps
             neonfs_fuse/_build
             neonfs_fuse/target
+            neonfs_fuse/priv/native
             neonfs_nfs/deps
             neonfs_nfs/_build
             neonfs_nfs/target
+            neonfs_nfs/priv/native
             neonfs_s3/deps
             neonfs_s3/_build
             neonfs_webdav/deps
@@ -236,8 +249,8 @@ jobs:
             neonfs_docker/_build
             neonfs_omnibus/deps
             neonfs_omnibus/_build
-          key: v1-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
-          restore-keys: v1-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
+          key: v2-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
+          restore-keys: v2-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
 
       - name: Build releases
         run: |
@@ -246,11 +259,20 @@ jobs:
           # Build CLI
           cd neonfs-cli && cargo build --release && cd ..
 
-          # Build Elixir releases
+          # Build Elixir releases.
+          #
+          # `mix release --overwrite` overwrites individual files but does
+          # NOT delete pre-existing `lib/<app>-<old_vsn>/` directories.
+          # With a restored cache, that means stale app-version dirs
+          # accumulate, and in some cases the new `lib/<app>-<new_vsn>/priv/`
+          # is left empty (which is how `neonfs_blob.so` ended up missing
+          # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
+          # Wipe `_build/prod/rel/` before every release.
           for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
             cd "$component"
             mix deps.get --only prod
             MIX_ENV=prod mix compile
+            rm -rf _build/prod/rel
             MIX_ENV=prod mix release --overwrite
             cd ..
           done
@@ -301,21 +323,34 @@ jobs:
       - name: Restore build cache
         uses: actions/cache@v5
         with:
+          # `priv/native/` is where Rustler copies the freshly-built `.so`.
+          # If we cache `_build/` without it, a partial cache restore can
+          # leave the consumer's `_build/prod/lib/<dep>/.mix/compile.*`
+          # marking the dep as compiled while the source `priv/native/.so`
+          # is gone — `mix compile` then skips the rustler step and
+          # `mix release` copies an empty `priv/` into the rel tree (#746).
           path: |
             neonfs-cli/target
             /usr/local/cargo/registry
             /usr/local/cargo/git
             neonfs_client/deps
             neonfs_client/_build
+            neonfs_client/native/neonfs_chunker/target
+            neonfs_client/priv/native
             neonfs_core/deps
             neonfs_core/_build
             neonfs_core/target
+            neonfs_core/priv/native
+            fuse_server/target
+            fuse_server/priv/native
             neonfs_fuse/deps
             neonfs_fuse/_build
             neonfs_fuse/target
+            neonfs_fuse/priv/native
             neonfs_nfs/deps
             neonfs_nfs/_build
             neonfs_nfs/target
+            neonfs_nfs/priv/native
             neonfs_s3/deps
             neonfs_s3/_build
             neonfs_webdav/deps
@@ -324,8 +359,8 @@ jobs:
             neonfs_docker/_build
             neonfs_omnibus/deps
             neonfs_omnibus/_build
-          key: v1-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
-          restore-keys: v1-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
+          key: v2-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
+          restore-keys: v2-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
 
       - name: Build releases
         run: |
@@ -334,11 +369,20 @@ jobs:
           # Build CLI
           cd neonfs-cli && cargo build --release && cd ..
 
-          # Build Elixir releases
+          # Build Elixir releases.
+          #
+          # `mix release --overwrite` overwrites individual files but does
+          # NOT delete pre-existing `lib/<app>-<old_vsn>/` directories.
+          # With a restored cache, that means stale app-version dirs
+          # accumulate, and in some cases the new `lib/<app>-<new_vsn>/priv/`
+          # is left empty (which is how `neonfs_blob.so` ended up missing
+          # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
+          # Wipe `_build/prod/rel/` before every release.
           for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
             cd "$component"
             mix deps.get --only prod
             MIX_ENV=prod mix compile
+            rm -rf _build/prod/rel
             MIX_ENV=prod mix release --overwrite
             cd ..
           done

@@ -104,10 +104,21 @@ cd "${REPO_ROOT}/neonfs-cli"
 cargo build --release
 
 # Step 2: Build Elixir releases
+#
+# `mix release --overwrite` only overwrites individual files; it does NOT
+# delete pre-existing app-version subdirectories under
+# `_build/prod/rel/<release>/lib/`. When the release tree is reused across
+# version bumps (e.g. via a CI cache), old `lib/<app>-<old_vsn>/` directories
+# accumulate alongside the new ones, and in some cases the new
+# `lib/<app>-<new_vsn>/priv/` is left empty because `priv/` was already
+# materialised under the old vsn. That's how `neonfs_blob.so` ended up
+# missing from `neonfs_core-0.2.3/priv/native/` in the omnibus deb (#746).
+# Wipe `_build/prod/rel/` before every release so each build starts clean.
 for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
     echo "==> Building ${component} release..."
     cd "${REPO_ROOT}/${component}"
     MIX_ENV=prod mix deps.get --only prod
+    rm -rf _build/prod/rel
     MIX_ENV=prod mix release --overwrite
 done
 
