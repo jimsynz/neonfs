@@ -206,7 +206,8 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   defp validate_drive_config(config) do
-    path = to_string(config[:path] || config["path"] || "")
+    raw_path = to_string(config[:path] || config["path"] || "")
+    path = Drive.normalize_path(raw_path)
     tier_raw = config[:tier] || config["tier"] || "hot"
     capacity_raw = config[:capacity] || config["capacity"] || "0"
     id = to_string(config[:id] || config["id"] || generate_drive_id(path))
