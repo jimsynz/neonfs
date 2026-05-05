@@ -125,6 +125,46 @@ defmodule NeonFS.Core.DriveManagerTest do
                DriveManager.add_drive(%{path: "/nonexistent/path", tier: "hot"})
     end
 
+    test "rejects path that is not writable by the daemon", %{tmp_dir: tmp_dir} do
+      readonly_path = Path.join(tmp_dir, "readonly_drive")
+      File.mkdir_p!(readonly_path)
+      File.chmod!(readonly_path, 0o500)
+
+      on_exit(fn ->
+        File.chmod(readonly_path, 0o700)
+        File.rm_rf(readonly_path)
+      end)
+
+      if write_probe_works?(readonly_path) do
+        # Running as root or on a filesystem that ignores chmod — chmod cannot
+        # produce an unwritable directory here, so the probe behaviour cannot
+        # be exercised; treat as inconclusive rather than a false pass.
+        :ok
+      else
+        assert {:error, message} =
+                 DriveManager.add_drive(%{path: readonly_path, tier: "hot"})
+
+        assert message =~ "is not writable by the daemon"
+        assert message =~ readonly_path
+        assert message =~ "chown neonfs:neonfs"
+
+        refute Enum.any?(DriveManager.list_drives(), &(&1.path == readonly_path))
+
+        leftover =
+          File.ls!(readonly_path) |> Enum.filter(&String.starts_with?(&1, ".neonfs-probe-"))
+
+        assert leftover == []
+      end
+    end
+
+    test "rejects path that is not a directory but a file", %{tmp_dir: tmp_dir} do
+      file_path = Path.join(tmp_dir, "regular_file")
+      File.write!(file_path, "not a dir")
+
+      assert {:error, message} = DriveManager.add_drive(%{path: file_path, tier: "hot"})
+      assert message =~ "Path exists but is not a directory"
+    end
+
     test "rejects invalid tier", %{tmp_dir: tmp_dir} do
       new_path = Path.join(tmp_dir, "invalid_tier")
       File.mkdir_p!(new_path)
@@ -209,6 +249,19 @@ defmodule NeonFS.Core.DriveManagerTest do
 
       {:ok, state_after} = State.load()
       refute Enum.any?(state_after.drives, fn d -> d["id"] == "to_persist_remove" end)
+    end
+  end
+
+  defp write_probe_works?(path) do
+    probe = Path.join(path, ".write-probe-#{System.unique_integer([:positive])}")
+
+    case File.write(probe, "x") do
+      :ok ->
+        _ = File.rm(probe)
+        true
+
+      {:error, _} ->
+        false
     end
   end
 end
