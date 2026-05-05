@@ -26,5 +26,12 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/neonfs
 
+# This unit serves NFS exports that may be mounted on the same host.
+# The default mount-namespace propagation under PrivateTmp/ProtectSystem/
+# ProtectHome is slave, so any host mounts that resolve via this unit
+# need bidirectional propagation. `shared` makes the unit's mount view
+# escape to the host namespace. (#758)
+MountFlags=shared
+
 [Install]
 WantedBy=multi-user.target

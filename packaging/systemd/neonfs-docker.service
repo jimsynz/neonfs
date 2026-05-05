@@ -30,5 +30,12 @@ ProtectHome=true
 # above); dockerd discovers it via /etc/docker/plugins/neonfs.spec.
 ReadWritePaths=/var/lib/neonfs
 
+# This unit creates host-visible volume mounts on dockerd's behalf. The
+# default mount-namespace propagation under PrivateTmp/ProtectSystem/
+# ProtectHome is slave, so mounts created inside the unit don't escape
+# to the host namespace where dockerd's containers can pick them up.
+# `shared` propagates the unit's mounts outwards. (#758)
+MountFlags=shared
+
 [Install]
 WantedBy=multi-user.target
