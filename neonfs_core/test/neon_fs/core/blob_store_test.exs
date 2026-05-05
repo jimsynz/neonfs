@@ -174,6 +174,28 @@ defmodule NeonFS.Core.BlobStoreTest do
       assert {:error, _} =
                BlobStore.read_chunk(hash, "default", tier: "warm", server: test_server())
     end
+
+    test "leaves no empty prefix dirs after deleting the last chunk in a prefix",
+         %{tmp_dir: tmp_dir} do
+      data = "single tenant"
+
+      assert {:ok, hash, _info} =
+               BlobStore.write_chunk(data, "default", "hot", server: test_server())
+
+      # Drive has data on disk before delete.
+      assert {:ok, true} = BlobStore.drive_has_data?("default", server: test_server())
+
+      assert {:ok, _bytes_freed} = BlobStore.delete_chunk(hash, "default", server: test_server())
+
+      # After delete, drive must report empty — empty prefix dirs left
+      # behind by `delete_chunk` would otherwise mask the empty state
+      # and trip `check_drive_has_data` (#753).
+      assert {:ok, false} = BlobStore.drive_has_data?("default", server: test_server())
+
+      # Belt-and-braces: nothing should remain under blobs/hot besides
+      # the tier dir itself.
+      assert {:ok, []} = File.ls(Path.join([tmp_dir, "blobs", "hot"]))
+    end
   end
 
   describe "migrate_chunk/4" do

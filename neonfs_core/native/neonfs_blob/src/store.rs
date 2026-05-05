@@ -163,6 +163,17 @@ impl BlobStore {
         chunk_path(&self.base_dir, hash, tier, self.config.prefix_depth, suffix)
     }
 
+    /// Returns the directory that holds every chunk file for a tier:
+    /// `{base_dir}/blobs/{tier}`. Used as the floor for prefix-dir pruning
+    /// after a delete — we never remove the tier dir itself, only the
+    /// prefix directories above the leaf file.
+    fn tier_root(&self, tier: Tier) -> PathBuf {
+        let mut path = self.base_dir.clone();
+        path.push("blobs");
+        path.push(tier.as_str());
+        path
+    }
+
     /// Returns on-disk paths for every codec variant of a chunk at a tier.
     fn list_variants(&self, hash: &Hash, tier: Tier) -> Result<Vec<PathBuf>, StoreError> {
         list_chunk_variants(&self.base_dir, hash, tier, self.config.prefix_depth)
@@ -358,7 +369,8 @@ impl BlobStore {
             .map_err(|e| StoreError::io_error(&path, e))?
             .len();
 
-        fs::remove_file(&path).map_err(|e| StoreError::io_error(&path, e))?;
+        let tier_root = self.tier_root(tier);
+        remove_file_pruning_empty_parents(&path, &tier_root)?;
 
         Ok(file_size)
     }
@@ -371,11 +383,12 @@ impl BlobStore {
             return Err(StoreError::ChunkNotFound(hash.to_hex()));
         }
 
+        let tier_root = self.tier_root(tier);
         let mut bytes_freed = 0u64;
         for path in variants {
             let meta = fs::metadata(&path).map_err(|e| StoreError::io_error(&path, e))?;
             bytes_freed += meta.len();
-            fs::remove_file(&path).map_err(|e| StoreError::io_error(&path, e))?;
+            remove_file_pruning_empty_parents(&path, &tier_root)?;
         }
         Ok(bytes_freed)
     }
@@ -463,7 +476,8 @@ impl BlobStore {
             }
         }
 
-        fs::remove_file(&src_path).map_err(|e| StoreError::io_error(&src_path, e))?;
+        let src_tier_root = self.tier_root(from_tier);
+        remove_file_pruning_empty_parents(&src_path, &src_tier_root)?;
         Ok(())
     }
 
@@ -584,7 +598,8 @@ impl BlobStore {
             return Err(StoreError::MetadataNotFound(key_hash.to_hex()));
         }
 
-        fs::remove_file(&path).map_err(|e| StoreError::io_error(&path, e))
+        let segment_root = self.base_dir.join("meta").join(segment_id_hex);
+        remove_file_pruning_empty_parents(&path, &segment_root)
     }
 
     /// Lists all metadata keys in a segment.
@@ -671,6 +686,54 @@ impl BlobStore {
     }
 }
 
+/// Remove `path`, then walk up the parent chain removing each empty
+/// ancestor directory until we reach (but don't remove) `floor`.
+///
+/// Stops walking up at the first non-empty directory or at `floor`.
+/// Concurrent removes are tolerated: if a directory has already been
+/// removed by another caller we treat that as success and stop. Other
+/// I/O errors during cleanup propagate to the caller.
+///
+/// Without this, the prefix directories above a deleted chunk persist
+/// as empty dirs and leak into `check_drive_has_data?`-style emptiness
+/// checks (see issue #753).
+fn remove_file_pruning_empty_parents(path: &Path, floor: &Path) -> Result<(), StoreError> {
+    fs::remove_file(path).map_err(|e| StoreError::io_error(path, e))?;
+
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == floor {
+            break;
+        }
+        // Defence in depth: don't walk past the floor even if the path
+        // wasn't a descendant of it for some reason.
+        if !dir.starts_with(floor) {
+            break;
+        }
+        match fs::remove_dir(dir) {
+            Ok(()) => {
+                current = dir.parent();
+            }
+            Err(e) => {
+                // ENOTEMPTY: a sibling chunk still lives under this
+                // prefix; we're done climbing.
+                // NotFound: already pruned by a concurrent delete.
+                let kind = e.kind();
+                let raw = e.raw_os_error();
+                if kind == std::io::ErrorKind::NotFound
+                    || matches!(kind, std::io::ErrorKind::DirectoryNotEmpty)
+                    || raw == Some(libc::ENOTEMPTY)
+                {
+                    break;
+                }
+                return Err(StoreError::io_error(dir, e));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,6 +792,68 @@ mod tests {
 
         store.delete_chunk(&hash, Tier::Hot, None, None).unwrap();
         assert!(!store.chunk_exists(&hash, Tier::Hot, None, None));
+    }
+
+    #[test]
+    fn test_delete_removes_empty_prefix_dirs() {
+        let (store, temp) = create_test_store();
+        let data = b"to be deleted";
+        let hash = sha256(data);
+        let chunk_dir = crate::path::chunk_dir(temp.path(), &hash, Tier::Hot, 2);
+
+        store.write_chunk(&hash, data, Tier::Hot).unwrap();
+        assert!(chunk_dir.is_dir());
+
+        store.delete_chunk(&hash, Tier::Hot, None, None).unwrap();
+
+        // Innermost prefix dir is gone after the only chunk in it is removed.
+        assert!(!chunk_dir.exists(), "leaf prefix dir should be pruned");
+
+        let outer_prefix = chunk_dir.parent().unwrap();
+        assert!(
+            !outer_prefix.exists(),
+            "outer prefix dir should also be pruned when empty"
+        );
+
+        // Tier root must remain — pruning stops at the tier directory.
+        let tier_root = temp.path().join("blobs").join("hot");
+        assert!(tier_root.is_dir(), "tier root must survive prune");
+    }
+
+    #[test]
+    fn test_delete_keeps_prefix_dir_with_sibling_chunks() {
+        let (store, temp) = create_test_store();
+
+        // Hash whose first byte is 0xab, with two siblings sharing the
+        // same prefix-depth=2 prefix.
+        let mut prefix_bytes = [0u8; 32];
+        prefix_bytes[0] = 0xab;
+        prefix_bytes[1] = 0xcd;
+        let hash_a = Hash::from_bytes(prefix_bytes);
+
+        let mut other_bytes = prefix_bytes;
+        other_bytes[2] = 0x01;
+        let hash_b = Hash::from_bytes(other_bytes);
+
+        store.write_chunk(&hash_a, b"a", Tier::Hot).unwrap();
+        store.write_chunk(&hash_b, b"b", Tier::Hot).unwrap();
+
+        // Both chunks live under the same `ab/cd/` prefix dir.
+        let shared_dir = crate::path::chunk_dir(temp.path(), &hash_a, Tier::Hot, 2);
+        assert_eq!(
+            shared_dir,
+            crate::path::chunk_dir(temp.path(), &hash_b, Tier::Hot, 2),
+            "test invariant: hashes must share prefix dir"
+        );
+
+        store.delete_chunk(&hash_a, Tier::Hot, None, None).unwrap();
+
+        // Sibling still in place → prefix dir must remain.
+        assert!(
+            shared_dir.is_dir(),
+            "prefix dir must stay while a sibling chunk lives in it"
+        );
+        assert!(store.chunk_exists(&hash_b, Tier::Hot, None, None));
     }
 
     #[test]

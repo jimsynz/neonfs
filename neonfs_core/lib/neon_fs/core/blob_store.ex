@@ -1343,32 +1343,32 @@ defmodule NeonFS.Core.BlobStore do
   ## Private: Drive data check
 
   defp check_drive_has_data(drive_path) do
-    # The NIF stores data under {drive_path}/blobs/{tier}/{prefix}/{hash}
-    blobs_path = Path.join(drive_path, "blobs")
-
-    Enum.any?(@tiers, fn tier ->
-      tier_path = Path.join(blobs_path, tier)
-
-      case File.ls(tier_path) do
-        {:ok, entries} -> Enum.any?(entries, &prefix_dir_has_files?(tier_path, &1))
-        {:error, _} -> false
-      end
+    # Chunks live under {drive_path}/blobs/{tier}/{prefix}/.../{hash} and
+    # metadata segments under {drive_path}/meta/{segment_id}/{prefix}/...
+    # We must report empty as soon as no actual files remain — empty
+    # prefix directories left behind by deleted chunks/metadata must not
+    # count as data (issue #753), and a metadata-only drive must not be
+    # mistaken for empty (issue #750).
+    Enum.any?(["blobs", "meta"], fn dir ->
+      drive_path |> Path.join(dir) |> dir_contains_any_file?()
     end)
   end
 
-  defp prefix_dir_has_files?(parent, entry) do
-    path = Path.join(parent, entry)
+  defp dir_contains_any_file?(path) do
+    case File.ls(path) do
+      {:ok, entries} ->
+        Enum.any?(entries, fn entry ->
+          entry_path = Path.join(path, entry)
 
-    case File.stat(path) do
-      {:ok, %{type: :directory}} ->
-        case File.ls(path) do
-          {:ok, [_ | _]} -> true
-          _ -> false
-        end
+          case File.stat(entry_path) do
+            {:ok, %{type: :directory}} -> dir_contains_any_file?(entry_path)
+            {:ok, _} -> true
+            {:error, _} -> false
+          end
+        end)
 
-      _ ->
-        # A file directly in the tier dir also counts as data
-        true
+      {:error, _} ->
+        false
     end
   end
 
