@@ -118,6 +118,28 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       assert {:error, :noent} = NFSv3Backend.getattr(valid_fh(), :auth, %{})
     end
+
+    test "normalises unmapped core error atoms to :io (issue #760)" do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      # `:totally_unknown` is not a NFSv3 wire-status atom; without the
+      # normaliser the dispatcher's `Map.fetch!(@stat_codes, status)`
+      # would raise a KeyError and crash the RPC handler mid-response.
+      put_core(fn _, :get_file_meta, _ -> {:error, :totally_unknown} end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :io} = NFSv3Backend.getattr(valid_fh(), :auth, %{})
+        end)
+
+      assert log =~ "unmapped error atom"
+    end
+
+    test "translates :permission_denied to :acces" do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      put_core(fn _, :get_file_meta, _ -> {:error, :permission_denied} end)
+
+      assert {:error, :acces} = NFSv3Backend.getattr(valid_fh(), :auth, %{})
+    end
   end
 
   ## access

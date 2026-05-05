@@ -73,7 +73,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, requested_mask, fattr_from_meta(meta)}
 
       {:error, status} ->
-        {:error, status, nil}
+        {:error, to_nfs_status(status), nil}
     end
   end
 
@@ -97,7 +97,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
     else
       {:error, :not_found} -> lookup_not_found(dir_fh)
       {:error, :invalid} -> {:error, :stale, nil}
-      {:error, status} when is_atom(status) -> {:error, status, nil}
+      {:error, status} when is_atom(status) -> {:error, to_nfs_status(status), nil}
       err -> err
     end
   end
@@ -106,7 +106,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   def readlink(fh, _auth, _ctx) do
     case resolve_meta(fh) do
       {:ok, vol_name, path, meta} -> do_readlink(vol_name, path, meta)
-      {:error, status} -> {:error, status, nil}
+      {:error, status} -> {:error, to_nfs_status(status), nil}
     end
   end
 
@@ -123,7 +123,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp readlink_target(vol_name, path, attr) do
     case core_call(NeonFS.Core, :read_file, [vol_name, path]) do
       {:ok, target} -> {:ok, target, attr}
-      {:error, status} -> {:error, status, attr}
+      {:error, status} -> {:error, to_nfs_status(status), attr}
     end
   end
 
@@ -137,7 +137,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, %{data: stream, eof: eof, post_op: fattr_from_meta(meta)}}
 
       {:error, status} ->
-        {:error, status, nil}
+        {:error, to_nfs_status(status), nil}
     end
   end
 
@@ -160,7 +160,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
       eof = length(readdir_entries) + cookie >= length(entries)
       {:ok, readdir_entries, <<0::64>>, eof, fattr_from_meta(dir_meta)}
     else
-      {:error, status} -> {:error, status, nil}
+      {:error, status} -> {:error, to_nfs_status(status), nil}
     end
   end
 
@@ -214,7 +214,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, reply, fattr_from_meta(meta)}
 
       {:error, status} ->
-        {:error, status, nil}
+        {:error, to_nfs_status(status), nil}
     end
   end
 
@@ -225,7 +225,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, fsinfo_reply(), fattr_from_meta(meta)}
 
       {:error, status} ->
-        {:error, status, nil}
+        {:error, to_nfs_status(status), nil}
     end
   end
 
@@ -236,7 +236,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, pathconf_reply(), fattr_from_meta(meta)}
 
       {:error, status} ->
-        {:error, status, nil}
+        {:error, to_nfs_status(status), nil}
     end
   end
 
@@ -252,7 +252,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         do_create(vol_name, dir_path, name, mode)
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -320,7 +320,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->
-        {:error, map_create_error(status),
+        {:error, to_nfs_status(status),
          %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, _} ->
@@ -366,16 +366,43 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
-  defp map_create_error(:not_found), do: :noent
-  defp map_create_error(:noent), do: :noent
-  defp map_create_error(:perm), do: :perm
-  defp map_create_error(:acces), do: :acces
-  defp map_create_error(:invalid_argument), do: :inval
-  defp map_create_error(:inval), do: :inval
-  defp map_create_error(:nospc), do: :nospc
-  defp map_create_error(:dquot), do: :dquot
-  defp map_create_error(:fbig), do: :fbig
-  defp map_create_error(_), do: :io
+  # NFSv3 wire-status atoms — the keys of `@stat_codes` in
+  # `nfs_server/lib/nfs_server/nfsv3/types.ex`. Any error atom returned
+  # from this backend MUST belong to this set or the dispatcher's
+  # `Map.fetch!` will crash mid-response (issue #760).
+  @nfsstat3_atoms ~w[
+    ok perm noent io nxio acces exist xdev nodev notdir isdir inval
+    fbig nospc rofs mlink nametoolong notempty dquot stale remote
+    badhandle not_sync bad_cookie notsupp too_small server_fault
+    bad_type jukebox
+  ]a
+
+  # Normalise an arbitrary error term into a valid NFSv3 wire-status
+  # atom. Recognised core-side atoms are translated to their NFSv3
+  # equivalents; anything else falls back to `:io` and emits a
+  # `Logger.warning` so an unmapped atom turns silent breakage into a
+  # noisy diagnostic at the right layer.
+  @spec to_nfs_status(term()) :: atom()
+  defp to_nfs_status(:not_found), do: :noent
+  defp to_nfs_status(:exists), do: :exist
+  defp to_nfs_status(:permission_denied), do: :acces
+  defp to_nfs_status(:invalid_argument), do: :inval
+  defp to_nfs_status(:no_space), do: :nospc
+  defp to_nfs_status(:not_a_directory), do: :notdir
+  defp to_nfs_status(:is_directory), do: :isdir
+  defp to_nfs_status(:not_supported), do: :notsupp
+  defp to_nfs_status(:read_only), do: :rofs
+  defp to_nfs_status(:name_too_long), do: :nametoolong
+  defp to_nfs_status(:not_empty), do: :notempty
+  defp to_nfs_status(:cross_device), do: :xdev
+  defp to_nfs_status(status) when status in @nfsstat3_atoms, do: status
+
+  defp to_nfs_status(other) when is_atom(other) do
+    Logger.warning("NFS backend received unmapped error atom", reason: other)
+    :io
+  end
+
+  defp to_nfs_status(_other), do: :io
 
   @impl true
   def mkdir(dir_fh, name, %Sattr3{} = sattr, _auth, _ctx) do
@@ -384,7 +411,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         do_mkdir(vol_name, dir_path, name, sattr)
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -412,7 +439,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->
-        {:error, map_create_error(status),
+        {:error, to_nfs_status(status),
          %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, _} ->
@@ -427,7 +454,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         do_remove(vol_name, dir_path, name)
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -443,7 +470,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->
-        {:error, map_create_error(status),
+        {:error, to_nfs_status(status),
          %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, _} ->
@@ -458,7 +485,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         do_rmdir(vol_name, dir_path, name)
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -512,7 +539,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->
-        {:error, map_create_error(status),
+        {:error, to_nfs_status(status),
          %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, _} ->
@@ -527,7 +554,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         do_symlink(vol_name, dir_path, name, sattr, target)
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -549,7 +576,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         ok_create_reply(post_meta, vol_name, dir_path, pre_dir_wcc)
 
       {:error, status} when is_atom(status) ->
-        {:error, map_create_error(status),
+        {:error, to_nfs_status(status),
          %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       _ ->
@@ -571,7 +598,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
          }}
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -589,7 +616,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
          }}
 
       {:error, status} ->
-        {:error, status}
+        {:error, to_nfs_status(status)}
     end
   end
 
@@ -634,7 +661,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
            %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
 
         {:error, status} when is_atom(status) ->
-          {:error, map_create_error(status),
+          {:error, to_nfs_status(status),
            %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
            %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
 
@@ -659,7 +686,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         do_write(vol_name, path, pre_meta, offset, data, stable)
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -684,7 +711,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
          }}
 
       {:error, status} when is_atom(status) ->
-        {:error, map_create_error(status), %WccData{before: pre_wcc, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: pre_wcc, after: nil}}
 
       {:error, _} ->
         {:error, :io, %WccData{before: pre_wcc, after: nil}}
@@ -705,7 +732,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
          }}
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -733,7 +760,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         do_setattr(vol_name, path, pre_meta, sattr, guard_ctime)
 
       {:error, status} ->
-        {:error, status, %WccData{before: nil, after: nil}}
+        {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
@@ -813,15 +840,12 @@ defmodule NeonFS.NFS.NFSv3Backend do
     }
   end
 
-  # RFC 1813 §3.3.2 doesn't define a 1:1 mapping for arbitrary core
-  # errors; the common ones come up below. Fallthrough is `:io`.
+  # SETATTR's RFC 1813 §3.3.2 mapping for `:not_found` differs from
+  # the generic one — a missing file at SETATTR time is typically a
+  # stale handle from the kernel's cache, not a fresh ENOENT. All
+  # other atoms route through the shared normaliser for consistency.
   defp map_setattr_error(:not_found), do: :stale
-  defp map_setattr_error(:noent), do: :noent
-  defp map_setattr_error(:perm), do: :perm
-  defp map_setattr_error(:acces), do: :acces
-  defp map_setattr_error(:invalid_argument), do: :inval
-  defp map_setattr_error(:inval), do: :inval
-  defp map_setattr_error(_), do: :io
+  defp map_setattr_error(other), do: to_nfs_status(other)
 
   ## Internal — resolution
 
@@ -850,12 +874,12 @@ defmodule NeonFS.NFS.NFSv3Backend do
           {:ok, meta} -> {:ok, vol_name, path, meta}
           {:error, :not_found} -> {:error, :noent}
           {:error, :stale} -> {:error, :stale}
-          {:error, status} when is_atom(status) -> {:error, status}
+          {:error, status} when is_atom(status) -> {:error, to_nfs_status(status)}
           _ -> {:error, :stale}
         end
 
       {:error, status} ->
-        {:error, status}
+        {:error, to_nfs_status(status)}
     end
   end
 
