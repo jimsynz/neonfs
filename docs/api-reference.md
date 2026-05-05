@@ -193,7 +193,7 @@ Mount happens via `fusermount3`. Standard FUSE options apply; NeonFS-specific be
 
 ## Docker VolumeDriver
 
-Package: [`neonfs_docker`](../neonfs_docker/). HTTP over a Unix socket (`/run/docker/plugins/neonfs.sock` by default) speaking the Docker Volume Plugin protocol v1.
+Package: [`neonfs_docker`](../neonfs_docker/). HTTP over a Unix socket (`/run/neonfs/docker.sock` by default; dockerd discovers it via `/etc/docker/plugins/neonfs.spec`) speaking the Docker Volume Plugin protocol v1.
 
 ### Endpoints (Docker side calls these)
 

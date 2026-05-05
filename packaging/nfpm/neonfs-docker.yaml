@@ -38,6 +38,16 @@ contents:
     file_info:
       mode: 0755
 
+  - dst: /etc/docker/plugins
+    type: dir
+    file_info:
+      mode: 0755
+
+  - src: ../docker/neonfs.spec
+    dst: /etc/docker/plugins/neonfs.spec
+    file_info:
+      mode: 0644
+
 scripts:
   postinstall: ../scripts/post-install.sh
   preremove: ../scripts/pre-remove.sh

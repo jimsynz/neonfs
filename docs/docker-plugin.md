@@ -1,6 +1,6 @@
 # Docker VolumeDriver Plugin
 
-The `neonfs_docker` package implements the Docker Volume Plugin v1 protocol so containers can mount NeonFS volumes directly with `docker volume create -d neonfs ...` / `docker run -v <name>:<path>`. The plugin runs as a host-local daemon that listens on a Unix socket under `/run/docker/plugins/`, dockerd discovers it on startup, and each `Mount` request lands a real FUSE mount against the corresponding NeonFS volume.
+The `neonfs_docker` package implements the Docker Volume Plugin v1 protocol so containers can mount NeonFS volumes directly with `docker volume create -d neonfs ...` / `docker run -v <name>:<path>`. The plugin runs as a host-local daemon that listens on a Unix socket at `/run/neonfs/docker.sock`. dockerd discovers it via a spec file at `/etc/docker/plugins/neonfs.spec` (installed by the .deb), and each `Mount` request lands a real FUSE mount against the corresponding NeonFS volume.
 
 ## Architecture
 
@@ -8,7 +8,10 @@ The `neonfs_docker` package implements the Docker Volume Plugin v1 protocol so c
 docker run -v myvol:/data ...
         │
         ▼
-   dockerd  ──► /run/docker/plugins/neonfs.sock  (HTTP over UDS)
+   dockerd  ──► /etc/docker/plugins/neonfs.spec
+                              │  (resolves to)
+                              ▼
+                  /run/neonfs/docker.sock  (HTTP over UDS)
                               │
                               ▼
                   neonfs_docker (per-host)
@@ -44,7 +47,8 @@ sudo systemctl enable --now neonfs-docker.service
 docker run -d --name neonfs-docker \
   --restart unless-stopped \
   --network host \
-  -v /run/docker/plugins:/run/docker/plugins \
+  -v /run/neonfs:/run/neonfs \
+  -v /etc/docker/plugins:/etc/docker/plugins \
   -v /var/lib/neonfs:/var/lib/neonfs \
   -e NEONFS_CORE_NODE=neonfs_core@neonfs-core.example \
   -e RELEASE_COOKIE=$(cat /var/lib/neonfs/.erlang.cookie) \
@@ -65,7 +69,7 @@ The defaults try to pick reasonable values from `/var/lib/neonfs/`. Override per
 | `RELEASE_COOKIE_PATH` | `/var/lib/neonfs/.erlang.cookie` | Where to read the shared cookie. |
 | Application env `:neonfs_docker, :fuse_node` | `Node.self()` | Erlang node hosting `NeonFS.FUSE.MountManager`. Override when neonfs_docker and neonfs_fuse run as separate BEAMs on the same host. |
 | Application env `:neonfs_docker, :mount_root` | `/var/lib/neonfs-docker/mounts` | Directory under which per-volume mount points are created. |
-| Application env `:neonfs_docker, :socket_path` | `/run/docker/plugins/neonfs.sock` | Path of the plugin's Unix socket. |
+| Application env `:neonfs_docker, :socket_path` | `/run/neonfs/docker.sock` | Path of the plugin's Unix socket. The packaged `/etc/docker/plugins/neonfs.spec` points here; if you change this, update the spec file too. |
 | Application env `:neonfs_docker, :listener` | `:socket` | Set to `{:tcp, port}` for testing. |
 
 ## Usage
@@ -102,13 +106,16 @@ Useful for orchestrator-side liveness checks against the plugin process even tho
 
 ### `docker volume create` returns "plugin not found"
 
-dockerd discovers plugins by enumerating `/run/docker/plugins/*.sock` at startup. After installing the Debian package or restarting the container:
+dockerd discovers plugins by reading `*.spec` / `*.json` / `*.sock` files in `/run/docker/plugins/`, `/etc/docker/plugins/`, and `/usr/lib/docker/plugins/`. The .deb drops `/etc/docker/plugins/neonfs.spec` pointing at the daemon's socket. After installing or restarting:
 
 ```bash
 sudo systemctl restart neonfs-docker.service
-sudo systemctl restart docker      # optional, dockerd polls but a restart is faster
-ls /run/docker/plugins/             # neonfs.sock should exist
+sudo systemctl restart docker             # optional, dockerd polls but a restart is faster
+cat /etc/docker/plugins/neonfs.spec       # should contain unix:///run/neonfs/docker.sock
+ls -l /run/neonfs/docker.sock             # the socket must exist and be readable by docker
 ```
+
+If the socket exists but dockerd still can't reach it, check that the daemon's user (`neonfs`) and dockerd can both access `/run/neonfs/`. By default `RuntimeDirectory=neonfs` creates it as `neonfs:neonfs 0755`, which is readable by docker (root); if you've tightened that, dockerd needs read-execute on the directory and read-write on the socket.
 
 ### `Mount` returns `mount failed: ...`
 

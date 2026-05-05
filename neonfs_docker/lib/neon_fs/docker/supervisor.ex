@@ -9,11 +9,26 @@ defmodule NeonFS.Docker.Supervisor do
   """
 
   use Supervisor
+  require Logger
 
   alias NeonFS.Client.Registrar
   alias NeonFS.Docker.{MountTracker, Plug, VolumeStore}
 
-  @default_socket_path "/run/docker/plugins/neonfs.sock"
+  # The plugin owns its socket inside its own RuntimeDirectory; Docker
+  # discovers it via `/etc/docker/plugins/neonfs.spec`. Putting the
+  # socket under `/run/docker/plugins` would require write access to a
+  # path that Docker creates as root:root 0700, which the daemon's
+  # unprivileged user can't satisfy.
+  @default_socket_path "/run/neonfs/docker.sock"
+
+  # Errors that mean "the host can't host the plugin socket" rather
+  # than a misconfiguration we should crash on. The daemon owns its
+  # RuntimeDirectory by default so these are unusual, but they can
+  # surface if `:socket_path` is overridden to a path the daemon
+  # can't reach (ProtectSystem=strict without a matching
+  # ReadWritePaths, a missing parent, a read-only mount, or something
+  # else holding the path).
+  @skip_errors [:eacces, :enoent, :enotdir, :erofs]
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -25,9 +40,16 @@ defmodule NeonFS.Docker.Supervisor do
     register? = Application.get_env(:neonfs_docker, :register_service, true)
 
     children =
-      [VolumeStore, MountTracker]
-      |> maybe_add_registrar(register?)
-      |> Kernel.++([bandit_child_spec()])
+      case bandit_child_spec() do
+        {:ok, listener} ->
+          [VolumeStore, MountTracker]
+          |> maybe_add_registrar(register?)
+          |> Kernel.++([listener])
+
+        {:skip, message} ->
+          Logger.warning("Docker volume plugin disabled: #{message}")
+          []
+      end
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -46,13 +68,25 @@ defmodule NeonFS.Docker.Supervisor do
     case Application.get_env(:neonfs_docker, :listener, :socket) do
       :socket ->
         socket_path = Application.get_env(:neonfs_docker, :socket_path, @default_socket_path)
-        socket_path |> Path.dirname() |> File.mkdir_p!()
-        File.rm(socket_path)
-
-        {Bandit, plug: Plug, scheme: :http, port: 0, ip: {:local, socket_path}}
+        prepare_socket(socket_path)
 
       {:tcp, port} ->
-        {Bandit, plug: Plug, scheme: :http, port: port, ip: :loopback}
+        {:ok, {Bandit, plug: Plug, scheme: :http, port: port, ip: :loopback}}
+    end
+  end
+
+  defp prepare_socket(socket_path) do
+    socket_dir = Path.dirname(socket_path)
+
+    case File.mkdir_p(socket_dir) do
+      :ok ->
+        File.rm(socket_path)
+        {:ok, {Bandit, plug: Plug, scheme: :http, port: 0, ip: {:local, socket_path}}}
+
+      {:error, reason} when reason in @skip_errors ->
+        {:skip,
+         "cannot prepare socket directory #{inspect(socket_dir)} (#{reason}). " <>
+           "Check `:socket_path` and the daemon's filesystem permissions."}
     end
   end
 

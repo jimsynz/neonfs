@@ -25,9 +25,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-# /run/docker/plugins must be writable so dockerd can discover the plugin socket;
 # /var/lib/neonfs holds the cookie + TLS material shared with the core daemon.
-ReadWritePaths=/var/lib/neonfs /run/docker/plugins
+# The volume plugin socket lives in /run/neonfs (covered by RuntimeDirectory
+# above); dockerd discovers it via /etc/docker/plugins/neonfs.spec.
+ReadWritePaths=/var/lib/neonfs
 
 [Install]
 WantedBy=multi-user.target

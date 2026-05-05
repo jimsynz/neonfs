@@ -11,6 +11,8 @@ defmodule NeonFS.Docker.SupervisorTest do
   """
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   setup do
     # AF_UNIX `sun_path` is capped at ~108 bytes, so we can't use
     # ExUnit's `:tmp_dir` (which nests under the test module name).
@@ -63,6 +65,35 @@ defmodule NeonFS.Docker.SupervisorTest do
     decoded = Jason.decode!(body)
     refute decoded["Err"] == "missing or invalid Name", "body parser dropped the Name field"
     assert decoded["Err"] == "volume not found"
+  end
+
+  test "starts with no listener when the socket directory can't be prepared" do
+    # Pin the socket path's parent at a regular file so `mkdir_p` returns
+    # `:enotdir`. This is the deterministic stand-in for the real-world
+    # cases (Docker not installed → ENOENT, ProtectSystem=strict →
+    # EACCES) that triggered the omnibus boot crash.
+    blocking_file =
+      Path.join(
+        System.tmp_dir!(),
+        "neonfs_docker_supervisor_blocker_#{System.unique_integer([:positive])}"
+      )
+
+    File.write!(blocking_file, "")
+    socket_path = Path.join([blocking_file, "plugins", "neonfs.sock"])
+    Application.put_env(:neonfs_docker, :socket_path, socket_path)
+    on_exit(fn -> File.rm(blocking_file) end)
+
+    log =
+      capture_log(fn ->
+        start_supervised!({NeonFS.Docker.Supervisor, []})
+      end)
+
+    assert log =~ "Docker volume plugin disabled"
+    assert log =~ "enotdir"
+    refute File.exists?(socket_path)
+
+    children = Supervisor.which_children(NeonFS.Docker.Supervisor)
+    assert children == []
   end
 
   test "parses request bodies even when dockerd omits Content-Type",
