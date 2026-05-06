@@ -15,6 +15,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   alias NeonFS.Core.RaServer
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
+  alias NeonFS.Core.Volume.Deprovisioner
   alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Error.Invalid, as: InvalidError
   alias NeonFS.Events
@@ -388,8 +389,30 @@ defmodule NeonFS.Core.VolumeRegistry do
          :ok <- check_not_system_volume(volume),
          :ok <- check_volume_empty(volume),
          :ok <- delete_volume_persisted(id, volume) do
+      deprovision_bootstrap_entry(id)
       safe_broadcast(id, %VolumeDeleted{volume_id: id})
       :ok
+    end
+  end
+
+  # Tells the bootstrap layer (#779) to forget the volume's root
+  # pointer. The Ra `:unregister_volume_root` command is idempotent,
+  # so this is safe even on volumes whose `create` predates the
+  # provisioner wiring (#810). On Ra failure we log and continue —
+  # the volume is already gone from the registry, and a stale
+  # bootstrap entry is recoverable but not blocking.
+  defp deprovision_bootstrap_entry(id) do
+    case Deprovisioner.deprovision(id) do
+      {:ok, :unregistered} ->
+        :ok
+
+      {:error, {:bootstrap_unregister_failed, reason}} ->
+        Logger.warning("Failed to unregister volume root from bootstrap layer",
+          volume_id: id,
+          reason: inspect(reason)
+        )
+
+        :ok
     end
   end
 
