@@ -1377,6 +1377,62 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
+  describe "cas_update_volume_root command (CAS for #830)" do
+    test "applies the update when expected_previous_hash matches" do
+      entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<1>>,
+        drive_locations: [],
+        durability_cache: %{},
+        updated_at: DateTime.utc_now()
+      }
+
+      state = %{base_state() | volume_roots: %{"vol-1" => entry}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_root, "vol-1", <<1>>, %{root_chunk_hash: <<2>>}},
+          state
+        )
+
+      assert state.volume_roots["vol-1"].root_chunk_hash == <<2>>
+      assert state.version == 1
+    end
+
+    test "rejects with :stale_pointer when expected_previous_hash mismatches" do
+      entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99>>,
+        drive_locations: [],
+        durability_cache: %{},
+        updated_at: DateTime.utc_now()
+      }
+
+      state = %{base_state() | volume_roots: %{"vol-1" => entry}}
+
+      {state_after, {:error, {:stale_pointer, expected: <<1>>, actual: <<99>>}}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_root, "vol-1", <<1>>, %{root_chunk_hash: <<2>>}},
+          state
+        )
+
+      # State unchanged on rejection.
+      assert state_after.volume_roots["vol-1"].root_chunk_hash == <<99>>
+      assert state_after.version == 0
+    end
+
+    test "returns :not_found for an unknown volume_id" do
+      {_state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_root, "missing", <<1>>, %{root_chunk_hash: <<2>>}},
+          base_state()
+        )
+    end
+  end
+
   describe "machine version migration 12 -> 13 (bootstrap layer)" do
     test "adds drives and volume_roots tables to existing state" do
       old_state = %{
