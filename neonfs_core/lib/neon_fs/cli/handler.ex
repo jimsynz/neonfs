@@ -40,7 +40,11 @@ defmodule NeonFS.CLI.Handler do
     VolumeRegistry
   }
 
+  alias NeonFS.Core.Drive.Identity
   alias NeonFS.Core.Job
+  alias NeonFS.Core.MetadataStateMachine
+  alias NeonFS.Core.Volume.Reconstruction
+  alias NeonFS.Core.Volume.Reconstruction.OnDisk
   alias NeonFS.Transport.TLS
 
   alias NeonFS.Error.{
@@ -351,6 +355,166 @@ defmodule NeonFS.CLI.Handler do
         {:error,
          Unavailable.exception(message: "Force-reset mutation failed: #{inspect(reason)}")}
     end
+  end
+
+  @doc """
+  Disaster-recovery reconstruction: walks every configured drive's
+  on-disk root segments and rebuilds the bootstrap-layer Ra state.
+
+  Use this when Ra logs are unrecoverable but the underlying volume
+  data is intact. Drive identity files (#778) and root segment
+  chunks (#780) are the source of truth; this handler discovers
+  them via `Reconstruction.OnDisk` (#844) and submits the Ra
+  commands `Reconstruction.reconstruct/2` (#841) emits.
+
+  ## Opts (map keys)
+
+  - `"yes"` — must be `true`. Refuses without explicit confirmation.
+  - `"overwrite_ra_state"` — allow when bootstrap-layer
+    `volume_roots` is non-empty. Without this, refuses if the
+    cluster already has registered volumes (so a misfire on a
+    healthy cluster is bounded).
+  - `"dry_run"` — return the discovered drives + commands but skip
+    submission. Doesn't require `"yes"`.
+
+  ## Returns
+
+  - `{:ok, %{drives:, volumes:, commands:, commands_submitted:,
+    commands_failed:, warnings:}}`.
+  - `{:error, exception}` when refused or when a hard failure
+    aborts the run.
+  """
+  @spec handle_cluster_reconstruct_from_disk(map()) :: {:ok, map()} | {:error, term()}
+  def handle_cluster_reconstruct_from_disk(opts) when is_map(opts) do
+    set_cli_metadata()
+
+    yes? = Map.get(opts, "yes", false)
+    overwrite? = Map.get(opts, "overwrite_ra_state", false)
+    dry_run? = Map.get(opts, "dry_run", false)
+
+    with :ok <- require_yes_for_reconstruct(yes?, dry_run?),
+         {:ok, state} <- load_cluster_state(),
+         :ok <- require_empty_volume_roots_or_overwrite(overwrite?, dry_run?),
+         drive_paths = configured_drive_paths(),
+         result = run_reconstruction(drive_paths, state, dry_run?),
+         {:ok, submitted, failed_subs} <- submit_commands(result.commands, dry_run?) do
+      log_reconstruction_summary(state, result, submitted, failed_subs, dry_run?)
+
+      {:ok,
+       %{
+         drives: length(result.drives),
+         volumes: map_size(result.volumes),
+         commands: length(result.commands),
+         commands_submitted: submitted,
+         commands_failed: failed_subs,
+         warnings: format_warnings(result.warnings),
+         dry_run: dry_run?
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp require_yes_for_reconstruct(_yes, true = _dry_run), do: :ok
+  defp require_yes_for_reconstruct(true, _dry_run), do: :ok
+
+  defp require_yes_for_reconstruct(_, _) do
+    {:error,
+     Unavailable.exception(
+       message:
+         "Refusing to reconstruct-from-disk without --yes. " <>
+           "Reconstruction overwrites the bootstrap layer's Ra state from on-disk " <>
+           "volume data; re-run with the flag once you have confirmed this is the " <>
+           "right move (or pass --dry-run to preview)."
+     )}
+  end
+
+  defp require_empty_volume_roots_or_overwrite(true, _dry_run), do: :ok
+  defp require_empty_volume_roots_or_overwrite(_, true = _dry_run), do: :ok
+
+  defp require_empty_volume_roots_or_overwrite(_, _) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_roots/1) do
+      {:ok, roots} when is_map(roots) and map_size(roots) == 0 ->
+        :ok
+
+      {:ok, roots} when is_map(roots) ->
+        {:error,
+         Unavailable.exception(
+           message:
+             "Refusing to reconstruct-from-disk: bootstrap layer already has " <>
+               "#{map_size(roots)} volume(s) registered. Pass --overwrite-ra-state to " <>
+               "force, or --dry-run to preview without submitting."
+         )}
+
+      {:error, reason} ->
+        {:error,
+         Unavailable.exception(message: "Cannot query bootstrap-layer state: #{inspect(reason)}")}
+    end
+  end
+
+  defp configured_drive_paths do
+    :neonfs_core
+    |> Application.get_env(:drives, [])
+    |> Enum.map(&(Map.get(&1, :path) || Map.get(&1, "path")))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp run_reconstruction(drive_paths, state, dry_run?) do
+    Reconstruction.reconstruct(drive_paths,
+      expected_cluster_id: state.cluster_id,
+      node: Node.self(),
+      dry_run?: dry_run?,
+      identity_reader: &Identity.read/1,
+      chunk_lister: &OnDisk.list_candidate_hashes/1,
+      chunk_reader: &OnDisk.read_chunk/2
+    )
+  end
+
+  defp submit_commands(_commands, true = _dry_run), do: {:ok, 0, []}
+
+  defp submit_commands(commands, false) do
+    {submitted, failed} =
+      Enum.reduce(commands, {0, []}, fn command, {ok_count, failures} ->
+        case RaSupervisor.command(command) do
+          {:ok, _result, _leader} ->
+            {ok_count + 1, failures}
+
+          {:error, reason} ->
+            {ok_count,
+             [%{command: summarise_command(command), reason: inspect(reason)} | failures]}
+
+          other ->
+            {ok_count,
+             [%{command: summarise_command(command), reason: inspect(other)} | failures]}
+        end
+      end)
+
+    {:ok, submitted, Enum.reverse(failed)}
+  end
+
+  defp summarise_command({:register_drive, %{drive_id: id}}),
+    do: "register_drive #{id}"
+
+  defp summarise_command({:register_volume_root, %{volume_id: id}}),
+    do: "register_volume_root #{id}"
+
+  defp summarise_command(other), do: inspect(other)
+
+  defp format_warnings(warnings) do
+    Enum.map(warnings, fn {tag, message, _ctx} ->
+      %{tag: tag, message: message}
+    end)
+  end
+
+  defp log_reconstruction_summary(state, result, submitted, failed_subs, dry_run?) do
+    Logger.info(
+      "Cluster reconstruct-from-disk run: " <>
+        "drives=#{length(result.drives)} volumes=#{map_size(result.volumes)} " <>
+        "commands=#{length(result.commands)} submitted=#{submitted} " <>
+        "failed=#{length(failed_subs)} warnings=#{length(result.warnings)}",
+      cluster_id: state.cluster_id,
+      dry_run: dry_run?
+    )
   end
 
   @doc """
