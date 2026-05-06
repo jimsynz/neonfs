@@ -14,6 +14,8 @@ use crate::chunking::{auto_strategy, chunk_data, ChunkResult, ChunkStrategy, Inc
 use crate::compression::Compression;
 use crate::encryption::EncryptionParams;
 use crate::hash::Hash;
+use crate::index_tree::{IndexTree, TreeConfig};
+use crate::index_tree_blob_store::BlobStoreChunkStore;
 use crate::path::Tier;
 use crate::store::{BlobStore, ReadOptions, StoreConfig, WriteOptions};
 use rustler::{Binary, Env, NewBinary, Resource, ResourceArc};
@@ -901,6 +903,91 @@ fn filesystem_info(path: String) -> Result<(u64, u64, u64), String> {
     let used_bytes = total_bytes.saturating_sub(stat.f_bfree * block_size);
 
     Ok((total_bytes, available_bytes, used_bytes))
+}
+
+/// Look up a key in an index tree (#781) backed by the volume's
+/// BlobStore (#813). `root_hash` is a 32-byte chunk hash, or an
+/// empty binary for a tree that has never been written. `tier` is
+/// the storage tier the tree's nodes live in (typically "hot").
+///
+/// Returns `{:ok, value}` (with `value` either a binary or `nil`)
+/// or `{:error, reason}`. `nil` means the key is absent or
+/// tombstoned.
+#[rustler::nif]
+fn index_tree_get<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    root_hash: Binary,
+    tier: String,
+    key: Binary,
+) -> Result<Option<Binary<'a>>, String> {
+    let parsed_tier = parse_tier(&tier)?;
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+
+    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let tree = IndexTree::new(adapter, TreeConfig::default());
+
+    let root = parse_optional_root(&root_hash)?;
+
+    match tree
+        .get(root.as_ref(), key.as_slice())
+        .map_err(|e| e.to_string())?
+    {
+        None => Ok(None),
+        Some(value) => Ok(Some(vec_to_binary(env, &value))),
+    }
+}
+
+/// Range query in an index tree (#781). `start_key` / `end_key`
+/// are inclusive-start, exclusive-end; an empty binary on either
+/// side means "open-ended" in that direction. Tombstones are
+/// filtered out.
+///
+/// Returns `{:ok, [{key, value}, ...]}` in ascending key order, or
+/// `{:error, reason}`.
+#[rustler::nif]
+fn index_tree_range<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    root_hash: Binary,
+    tier: String,
+    start_key: Binary,
+    end_key: Binary,
+) -> Result<Vec<(Binary<'a>, Binary<'a>)>, String> {
+    let parsed_tier = parse_tier(&tier)?;
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+
+    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let tree = IndexTree::new(adapter, TreeConfig::default());
+
+    let root = parse_optional_root(&root_hash)?;
+
+    let entries = tree
+        .range(root.as_ref(), start_key.as_slice(), end_key.as_slice())
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        out.push((vec_to_binary(env, &k), vec_to_binary(env, &v)));
+    }
+    Ok(out)
+}
+
+/// Parses a 0-byte or 32-byte binary into `Option<Hash>`. The
+/// 0-byte form represents a never-written tree (the IndexTree's
+/// `None` root).
+fn parse_optional_root(root_hash: &Binary) -> Result<Option<Hash>, String> {
+    if root_hash.is_empty() {
+        Ok(None)
+    } else {
+        parse_hash(root_hash).map(Some)
+    }
+}
+
+fn vec_to_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Binary<'a> {
+    let mut out = NewBinary::new(env, bytes.len());
+    out.copy_from_slice(bytes);
+    out.into()
 }
 
 rustler::init!("Elixir.NeonFS.Core.Blob.Native");
