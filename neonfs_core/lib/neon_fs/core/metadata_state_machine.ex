@@ -90,6 +90,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:deregister_drive, drive_id :: String.t()}
           | {:register_volume_root, entry :: volume_root_entry()}
           | {:update_volume_root, volume_id :: binary(), updates :: map()}
+          | {:cas_update_volume_root, volume_id :: binary(), expected_previous_hash :: binary(),
+             updates :: map()}
           | {:unregister_volume_root, volume_id :: binary()}
 
   @type segment_assignment :: %{
@@ -1498,6 +1500,41 @@ defmodule NeonFS.Core.MetadataStateMachine do
         )
 
         {new_state, :ok, []}
+    end
+  end
+
+  def apply(
+        _meta,
+        {:cas_update_volume_root, volume_id, expected_previous_hash, updates},
+        state
+      ) do
+    state = ensure_bootstrap(state)
+
+    case Map.fetch(state.volume_roots, volume_id) do
+      :error ->
+        {state, {:error, :not_found}, []}
+
+      {:ok, %{root_chunk_hash: ^expected_previous_hash} = existing} ->
+        merged = Map.merge(existing, Map.put(updates, :updated_at, DateTime.utc_now()))
+        new_roots = Map.put(state.volume_roots, volume_id, merged)
+        new_state = %{state | volume_roots: new_roots, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :update_volume_root],
+          %{version: new_state.version},
+          %{volume_id: volume_id, cas: true}
+        )
+
+        {new_state, :ok, []}
+
+      {:ok, %{root_chunk_hash: actual}} ->
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :cas_update_volume_root_stale],
+          %{version: state.version},
+          %{volume_id: volume_id}
+        )
+
+        {state, {:error, {:stale_pointer, expected: expected_previous_hash, actual: actual}}, []}
     end
   end
 

@@ -28,7 +28,8 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       assert segment.index_roots.file_index == "new-tree-root"
 
       assert [{:bootstrap, command}] = :ets.lookup(capture.bootstrap_calls, :bootstrap)
-      {:update_volume_root, "vol-1", payload} = command
+      {:cas_update_volume_root, "vol-1", expected_prev, payload} = command
+      assert is_binary(expected_prev)
       assert payload.root_chunk_hash == "new-root-hash"
       assert payload.durability_cache == segment.durability
     end
@@ -162,6 +163,63 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
 
       assert {:error, {:bootstrap_update_failed, :ra_timeout}} =
                MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+    end
+  end
+
+  describe "CAS retry on :stale_pointer" do
+    test "retries the whole flow on stale pointer and succeeds when the second CAS wins" do
+      capture = build_capture()
+      counter = :counters.new(1, [])
+
+      flaky_registrar = fn command ->
+        :ets.insert(capture.bootstrap_calls, {:bootstrap, command})
+        :counters.add(counter, 1, 1)
+        n = :counters.get(counter, 1)
+
+        case n do
+          1 ->
+            {:error, {:stale_pointer, expected: "old", actual: "newer"}}
+
+          _ ->
+            {:ok, :updated}
+        end
+      end
+
+      opts = build_opts(capture: capture, bootstrap_registrar: flaky_registrar)
+
+      assert {:ok, "new-root-hash"} =
+               MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+
+      # Two bootstrap commands submitted: the first stale, the second
+      # successful. Each was a CAS variant.
+      bootstrap_calls = :ets.lookup(capture.bootstrap_calls, :bootstrap)
+      assert length(bootstrap_calls) == 2
+
+      Enum.each(bootstrap_calls, fn {_, cmd} ->
+        assert match?({:cas_update_volume_root, "vol-1", _, _}, cmd)
+      end)
+    end
+
+    test "exhausts retries and returns cas_retries_exhausted" do
+      capture = build_capture()
+
+      always_stale = fn command ->
+        :ets.insert(capture.bootstrap_calls, {:bootstrap, command})
+        {:error, {:stale_pointer, expected: "x", actual: "y"}}
+      end
+
+      opts =
+        build_opts(
+          capture: capture,
+          bootstrap_registrar: always_stale,
+          cas_retries: 1
+        )
+
+      assert {:error, {:cas_retries_exhausted, _}} =
+               MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+
+      # Initial attempt + 1 retry = 2 bootstrap submissions.
+      assert length(:ets.lookup(capture.bootstrap_calls, :bootstrap)) == 2
     end
   end
 

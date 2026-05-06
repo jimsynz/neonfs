@@ -23,12 +23,15 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   commits, so the next read goes through the full walk and picks
   up the new state.
 
-  Per-volume serialisation (CAS on `:update_volume_root` to detect
-  concurrent writers) lands in #830 — for now two concurrent
-  writers can lose updates against each other on the same volume.
-  Single-writer-per-volume orchestration above this layer (e.g.
-  the namespace coordinator) avoids this in practice; the explicit
-  CAS gives correctness without external help.
+  Per-volume serialisation is provided by the CAS variant of the Ra
+  command (`:cas_update_volume_root`, #830). The writer threads the
+  current root chunk hash as `expected_previous_hash`; if a
+  concurrent writer has flipped the bootstrap pointer in the
+  meantime, Ra rejects the update with
+  `{:stale_pointer, expected:, actual:}` and the writer retries
+  end-to-end (re-reading the now-newer segment, re-applying the
+  tree op, replicating the new chunk, and CAS-ing again). The
+  retry budget is configurable via `:cas_retries` (default 5).
 
   Each external dependency is injectable via opts so unit tests
   drive the function with deterministic stubs (same pattern as
@@ -99,11 +102,25 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   ## Internals
 
+  @default_cas_retries 5
+
   # Walks the read path to resolve the current segment, applies the
-  # caller's `tree_op` to produce a new tree root hash, and then
-  # commits the change end-to-end (build new segment, replicate,
-  # update bootstrap pointer).
+  # caller's `tree_op` to produce a new tree root hash, then commits
+  # the change end-to-end (build new segment, replicate, CAS the
+  # bootstrap pointer). On a CAS conflict (`:stale_pointer`) the
+  # whole flow retries — a concurrent writer flipped the pointer,
+  # so we re-read and re-apply our op against their root.
   defp apply_index_op(volume_id, index_kind, opts, tree_op) do
+    retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
+    do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left)
+  end
+
+  defp do_apply_index_op(_volume_id, _index_kind, _opts, _tree_op, retries_left)
+       when retries_left < 0 do
+    {:error, {:cas_retries_exhausted, %{}}}
+  end
+
+  defp do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left) do
     with {:ok, segment, root_entry} <-
            MetadataReader.resolve_segment_for_write(volume_id, opts),
          current_tree_root = Map.fetch!(segment.index_roots, index_kind),
@@ -113,9 +130,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
          encoded = RootSegment.encode(advanced_segment),
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
          {:ok, new_root_chunk_hash} <-
-           replicate_segment(encoded, replica_drives, advanced_segment.durability, opts),
-         {:ok, _} <-
-           update_bootstrap(
+           replicate_segment(encoded, replica_drives, advanced_segment.durability, opts) do
+      case update_bootstrap(
              volume_id,
              root_entry.root_chunk_hash,
              new_root_chunk_hash,
@@ -123,7 +139,15 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
              advanced_segment,
              opts
            ) do
-      {:ok, new_root_chunk_hash}
+        {:ok, _} ->
+          {:ok, new_root_chunk_hash}
+
+        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+          do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left - 1)
+
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -218,7 +242,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   defp update_bootstrap(
          volume_id,
-         _expected_previous_hash,
+         expected_previous_hash,
          new_root_chunk_hash,
          replica_drives,
          segment,
@@ -232,7 +256,10 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       durability_cache: segment.durability
     }
 
-    case bootstrap_registrar.({:update_volume_root, volume_id, update_payload}) do
+    command =
+      {:cas_update_volume_root, volume_id, expected_previous_hash, update_payload}
+
+    case bootstrap_registrar.(command) do
       :ok -> {:ok, :updated}
       {:ok, _} = ok -> ok
       {:error, reason} -> {:error, {:bootstrap_update_failed, reason}}
