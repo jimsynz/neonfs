@@ -35,12 +35,23 @@ defmodule NeonFS.Containerd.StubChunkWriter do
 
   defp initial(response), do: %{response: response, segments: [], args: nil}
 
-  @doc "Stop the stub agent."
+  @doc """
+  Stop the stub agent. Safe to call from `on_exit` even if the agent
+  has already exited (it can race with the `WriteSession` Task that
+  drains the stream — see the moduledoc).
+  """
   @spec stop() :: :ok
   def stop do
     case :global.whereis_name(__MODULE__) do
-      :undefined -> :ok
-      _pid -> Agent.stop(@name)
+      :undefined ->
+        :ok
+
+      _pid ->
+        try do
+          Agent.stop(@name)
+        catch
+          :exit, _ -> :ok
+        end
     end
   end
 
