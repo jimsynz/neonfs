@@ -201,7 +201,7 @@ defmodule NeonFS.Core.HLCPropertyTest do
                   max_length: 15
                 )
             ) do
-        state = HLC.new(node, max_clock_skew_ms: 20_000_000)
+        state = HLC.new(node)
 
         {timestamps, _} =
           Enum.reduce(ops, {[], state}, fn op, {acc, s} ->

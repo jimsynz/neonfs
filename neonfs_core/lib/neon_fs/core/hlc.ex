@@ -84,17 +84,24 @@ defmodule NeonFS.Core.HLC do
   @spec now(t(), non_neg_integer()) :: {timestamp(), t()}
   def now(%__MODULE__{} = state, wall_ms) do
     max_wall = wall_ms + state.max_clock_skew_ms
-    effective_wall = min(max(wall_ms, state.last_wall), max_wall)
 
-    {counter, wall} =
-      if effective_wall > state.last_wall do
-        {0, effective_wall}
+    # Floor at `state.last_wall`: even if `wall_ms` is far in the
+    # past (clock-step backward), the new wall must not regress past
+    # what we've already issued. The `min(_, max_wall)` clamp above
+    # guards the *forward* direction; the `max(_, state.last_wall)`
+    # guards the *backward* direction (#801).
+    clamped = min(max(wall_ms, state.last_wall), max_wall)
+    new_wall = max(clamped, state.last_wall)
+
+    new_counter =
+      if new_wall > state.last_wall do
+        0
       else
-        {state.last_counter + 1, state.last_wall}
+        state.last_counter + 1
       end
 
-    timestamp = {wall, counter, state.node_id}
-    new_state = %{state | last_wall: wall, last_counter: counter}
+    timestamp = {new_wall, new_counter, state.node_id}
+    new_state = %{state | last_wall: new_wall, last_counter: new_counter}
 
     {timestamp, new_state}
   end
@@ -130,7 +137,14 @@ defmodule NeonFS.Core.HLC do
       {:error, :clock_skew_detected, skew}
     else
       max_wall = wall_ms + state.max_clock_skew_ms
-      new_wall = min(max(wall_ms, max(state.last_wall, remote_wall)), max_wall)
+      clamped = min(max(wall_ms, max(state.last_wall, remote_wall)), max_wall)
+
+      # Floor at `state.last_wall`: same monotonicity guard as in
+      # `now/2`. Without this, a `wall_ms` value below
+      # `state.last_wall - max_clock_skew_ms` would clamp the new
+      # wall down past `last_wall` and break the invariant the
+      # state machine relies on (#801).
+      new_wall = max(clamped, state.last_wall)
 
       new_counter =
         cond do
