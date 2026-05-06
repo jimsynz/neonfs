@@ -748,4 +748,45 @@ defmodule NeonFS.Core.Blob.Native do
   @spec metadata_list_segment(store(), String.t()) :: {:ok, [hash()]} | {:error, String.t()}
   def metadata_list_segment(_store, _segment_id_hex),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Looks up a key in an in-volume index tree (#781) backed by the
+  given `BlobStore`.
+
+  ## Parameters
+    - `store` - Reference to the blob store hosting the tree's chunks
+    - `root_hash` - 32-byte chunk hash of the tree's root, or an
+      empty binary `<<>>` for a tree that has never been written
+      (returns `{:ok, nil}` immediately)
+    - `tier` - Storage tier the tree's nodes live in (`"hot"`,
+      `"warm"`, or `"cold"`)
+    - `key` - Opaque key bytes (the caller decides the encoding)
+
+  ## Returns
+    - `{:ok, value}` where `value` is a binary or `nil`. `nil`
+      means the key is absent or has been tombstoned.
+    - `{:error, reason}` for malformed input or chunk-store I/O
+      failures.
+  """
+  @spec index_tree_get(store(), binary(), tier(), binary()) ::
+          {:ok, binary() | nil} | {:error, String.t()}
+  def index_tree_get(_store, _root_hash, _tier, _key),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Range query against an in-volume index tree (#781).
+
+  `start_key` is inclusive, `end_key` is exclusive; an empty binary
+  on either side means "open-ended" in that direction. Tombstones
+  are filtered out. Entries come back in ascending key order.
+
+  ## Returns
+    - `{:ok, [{key, value}, …]}` on success.
+    - `{:error, reason}` for malformed input or chunk-store
+      I/O failures.
+  """
+  @spec index_tree_range(store(), binary(), tier(), binary(), binary()) ::
+          {:ok, [{binary(), binary()}]} | {:error, String.t()}
+  def index_tree_range(_store, _root_hash, _tier, _start_key, _end_key),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
