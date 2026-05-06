@@ -86,6 +86,11 @@ defmodule NeonFS.Core.MetadataStateMachine do
              scope :: namespace_scope(), holder :: term()}
           | {:release_namespace_claim, claim_id :: String.t()}
           | {:release_namespace_claims_for_holder, holder :: term()}
+          | {:register_drive, entry :: drive_entry()}
+          | {:deregister_drive, drive_id :: String.t()}
+          | {:register_volume_root, entry :: volume_root_entry()}
+          | {:update_volume_root, volume_id :: binary(), updates :: map()}
+          | {:unregister_volume_root, volume_id :: binary()}
 
   @type segment_assignment :: %{
           replica_set: [node()],
@@ -165,7 +170,40 @@ defmodule NeonFS.Core.MetadataStateMachine do
           kv: %{optional(binary()) => term()},
           namespace_claims: %{optional(String.t()) => namespace_claim()},
           namespace_claim_seq: non_neg_integer(),
+          drives: %{optional(String.t()) => drive_entry()},
+          volume_roots: %{optional(binary()) => volume_root_entry()},
           version: non_neg_integer()
+        }
+
+  @typedoc """
+  Bootstrap-layer entry for a drive. Cached from the drive's
+  `<drive>/.neonfs-drive.json` identity file (#778). The Ra entry is
+  reconstructible from the on-disk identity at any time — it's a fast-
+  access cache, not a source of truth. (#779, #750)
+  """
+  @type drive_entry :: %{
+          drive_id: String.t(),
+          node: node(),
+          cluster_id: String.t(),
+          on_disk_format_version: pos_integer(),
+          registered_at: DateTime.t()
+        }
+
+  @typedoc """
+  Bootstrap-layer entry for a volume's root chunk pointer. The root
+  chunk hash points at the volume's current root segment (#780); the
+  drive locations + durability cache let the metadata write path
+  resolve the required replica count without a root-segment read.
+
+  Reconstructible by walking drives → finding the volume's root chunk
+  by content hash → reading the root segment. (#779, #750)
+  """
+  @type volume_root_entry :: %{
+          volume_id: binary(),
+          root_chunk_hash: binary(),
+          drive_locations: [%{node: node(), drive_id: String.t()}],
+          durability_cache: map(),
+          updated_at: DateTime.t()
         }
 
   # Public query functions
@@ -227,6 +265,32 @@ defmodule NeonFS.Core.MetadataStateMachine do
   """
   @spec get_kv(state()) :: %{optional(binary()) => term()}
   def get_kv(state), do: Map.get(state, :kv, %{})
+
+  @doc """
+  Returns the bootstrap-layer drive table — `drive_id => drive_entry`.
+  Empty map for pre-v13 states.
+  """
+  @spec get_drives(state()) :: %{optional(String.t()) => drive_entry()}
+  def get_drives(state), do: Map.get(state, :drives, %{})
+
+  @doc """
+  Returns a single bootstrap-layer drive entry by id, or `nil`.
+  """
+  @spec get_drive(state(), String.t()) :: drive_entry() | nil
+  def get_drive(state, drive_id), do: Map.get(get_drives(state), drive_id)
+
+  @doc """
+  Returns the bootstrap-layer volume-root table — `volume_id =>
+  volume_root_entry`. Empty map for pre-v13 states.
+  """
+  @spec get_volume_roots(state()) :: %{optional(binary()) => volume_root_entry()}
+  def get_volume_roots(state), do: Map.get(state, :volume_roots, %{})
+
+  @doc """
+  Returns a single bootstrap-layer volume-root entry by id, or `nil`.
+  """
+  @spec get_volume_root(state(), binary()) :: volume_root_entry() | nil
+  def get_volume_root(state, volume_id), do: Map.get(get_volume_roots(state), volume_id)
 
   @doc """
   Returns the escalation with the given ID, or nil.
@@ -374,6 +438,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
       kv: %{},
       namespace_claims: %{},
       namespace_claim_seq: 0,
+      drives: %{},
+      volume_roots: %{},
       version: 0
     }
   end
@@ -581,6 +647,23 @@ defmodule NeonFS.Core.MetadataStateMachine do
       state
       |> Map.put_new(:namespace_claims, %{})
       |> Map.put_new(:namespace_claim_seq, 0)
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 12, 13}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 12,
+      to: 13,
+      change: "add bootstrap layer (drives + volume_roots) for #779 / epic #750"
+    )
+
+    new_state =
+      state
+      |> Map.put_new(:drives, %{})
+      |> Map.put_new(:volume_roots, %{})
 
     {new_state, :ok, []}
   end
@@ -1345,6 +1428,93 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, {:ok, length(released_ids)}, []}
   end
 
+  # Bootstrap-layer commands (new in v13, #779).
+  #
+  # The bootstrap layer is a Ra-replicated *cache* of state that is
+  # ultimately reconstructible from on-disk volume data. Every command
+  # here is allowed to no-op or rebuild on missing tables (existing
+  # state may pre-date v13's empty_state expansion).
+
+  def apply(_meta, {:register_drive, entry}, state) do
+    state = ensure_bootstrap(state)
+    drive_id = Map.fetch!(entry, :drive_id)
+    new_drives = Map.put(state.drives, drive_id, entry)
+    new_state = %{state | drives: new_drives, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :register_drive],
+      %{version: new_state.version},
+      %{drive_id: drive_id, node: entry.node, cluster_id: entry.cluster_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:deregister_drive, drive_id}, state) do
+    state = ensure_bootstrap(state)
+    new_drives = Map.delete(state.drives, drive_id)
+    new_state = %{state | drives: new_drives, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :deregister_drive],
+      %{version: new_state.version},
+      %{drive_id: drive_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:register_volume_root, entry}, state) do
+    state = ensure_bootstrap(state)
+    volume_id = Map.fetch!(entry, :volume_id)
+    new_roots = Map.put(state.volume_roots, volume_id, entry)
+    new_state = %{state | volume_roots: new_roots, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :register_volume_root],
+      %{version: new_state.version},
+      %{volume_id: volume_id, root_chunk_hash_size: byte_size(entry.root_chunk_hash)}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:update_volume_root, volume_id, updates}, state) do
+    state = ensure_bootstrap(state)
+
+    case Map.fetch(state.volume_roots, volume_id) do
+      :error ->
+        {state, {:error, :not_found}, []}
+
+      {:ok, existing} ->
+        merged = Map.merge(existing, Map.put(updates, :updated_at, DateTime.utc_now()))
+        new_roots = Map.put(state.volume_roots, volume_id, merged)
+        new_state = %{state | volume_roots: new_roots, version: state.version + 1}
+
+        :telemetry.execute(
+          [:neonfs, :ra, :command, :update_volume_root],
+          %{version: new_state.version},
+          %{volume_id: volume_id}
+        )
+
+        {new_state, :ok, []}
+    end
+  end
+
+  def apply(_meta, {:unregister_volume_root, volume_id}, state) do
+    state = ensure_bootstrap(state)
+    new_roots = Map.delete(state.volume_roots, volume_id)
+    new_state = %{state | volume_roots: new_roots, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :unregister_volume_root],
+      %{version: new_state.version},
+      %{volume_id: volume_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
   # Segment assignment commands (new in v5)
 
   def apply(_meta, {:assign_segment, segment_id, replica_set}, state) do
@@ -1579,7 +1749,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 11
+  def version, do: 13
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -1710,6 +1880,15 @@ defmodule NeonFS.Core.MetadataStateMachine do
     state
     |> Map.put_new(:namespace_claims, %{})
     |> Map.put_new(:namespace_claim_seq, 0)
+  end
+
+  # Defensive init for pre-v13 snapshots (before bootstrap layer).
+  defp ensure_bootstrap(%{drives: _, volume_roots: _} = state), do: state
+
+  defp ensure_bootstrap(state) do
+    state
+    |> Map.put_new(:drives, %{})
+    |> Map.put_new(:volume_roots, %{})
   end
 
   defp apply_namespace_claim(type, path, scope, holder, state) do
