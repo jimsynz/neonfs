@@ -5,7 +5,7 @@ authors = []
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rustler = "0.37.2"
@@ -13,6 +13,7 @@ sha2 = "0.11"
 hex = "0.4"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
+bincode = { version = "2.0", features = ["serde"] }
 rand = "0.10"
 zstd = "0.13"
 fastcdc = "4.0"
