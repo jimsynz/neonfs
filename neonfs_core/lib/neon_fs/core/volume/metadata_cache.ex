@@ -1,7 +1,6 @@
 defmodule NeonFS.Core.Volume.MetadataCache do
   @moduledoc """
-  ETS-backed cache for per-volume metadata reads (#822 / first slice
-  of #816).
+  ETS-backed cache for per-volume metadata reads (#816).
 
   Caches the values that `NeonFS.Core.Volume.MetadataReader` (#820,
   #821) returns from `get/4` and `range/5`. Keyed by
@@ -15,9 +14,10 @@ defmodule NeonFS.Core.Volume.MetadataCache do
     survive an eviction are correct-by-construction; they just
     take memory until cleaned up.
 
-  This slice ships only the cache module + telemetry. The bootstrap
-  event subscription (#823) and the read-through wiring in
-  `MetadataReader` (#824) follow.
+  Subscribes to bootstrap-layer telemetry events from
+  `MetadataStateMachine.apply/3` (#779) and evicts a volume's
+  entries on `:update_volume_root` / `:unregister_volume_root`. The
+  read-through wiring in `MetadataReader` is the follow-up #824.
 
   No LRU bound for now: the cache is unbounded until we have
   telemetry data showing real-world working sets.
@@ -111,6 +111,25 @@ defmodule NeonFS.Core.Volume.MetadataCache do
     :ets.info(@table, :size) || 0
   end
 
+  @doc false
+  # Telemetry handler for bootstrap-layer events that change a
+  # volume's root pointer. Driven by the events `MetadataStateMachine`
+  # emits from `:update_volume_root` and `:unregister_volume_root`
+  # apply clauses (#779). Attached from `init/1` and detached from
+  # `terminate/2`; the handler dispatches to `evict_volume/1` so the
+  # next read for that volume goes through the full bootstrap → root
+  # segment → index tree walk.
+  #
+  # `:register_volume_root` is intentionally not handled — there's
+  # nothing to evict for a brand-new volume.
+  def handle_bootstrap_event(_event, _measurements, %{volume_id: volume_id}, _config)
+      when is_binary(volume_id) do
+    evict_volume(volume_id)
+    :ok
+  end
+
+  def handle_bootstrap_event(_event, _measurements, _metadata, _config), do: :ok
+
   ## GenServer Callbacks
 
   @impl true
@@ -123,10 +142,34 @@ defmodule NeonFS.Core.Volume.MetadataCache do
       write_concurrency: true
     ])
 
-    {:ok, %{}}
+    handler_id = handler_id()
+
+    :telemetry.attach_many(
+      handler_id,
+      [
+        [:neonfs, :ra, :command, :update_volume_root],
+        [:neonfs, :ra, :command, :unregister_volume_root]
+      ],
+      &__MODULE__.handle_bootstrap_event/4,
+      nil
+    )
+
+    {:ok, %{handler_id: handler_id}}
   end
 
+  @impl true
+  def terminate(_reason, %{handler_id: handler_id}) do
+    :telemetry.detach(handler_id)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
   ## Internals
+
+  defp handler_id do
+    "metadata-cache-#{:erlang.phash2(self())}"
+  end
 
   defp emit(event, measurements, metadata) do
     :telemetry.execute(

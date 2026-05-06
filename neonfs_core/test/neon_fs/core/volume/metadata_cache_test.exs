@@ -117,6 +117,63 @@ defmodule NeonFS.Core.Volume.MetadataCacheTest do
     end
   end
 
+  describe "bootstrap event subscription" do
+    test "evicts the named volume on :update_volume_root" do
+      :ok = MetadataCache.put("vol-1", <<1>>, "k", :v)
+      :ok = MetadataCache.put("vol-2", <<1>>, "k", :other)
+
+      :telemetry.execute(
+        [:neonfs, :ra, :command, :update_volume_root],
+        %{version: 5},
+        %{volume_id: "vol-1"}
+      )
+
+      assert :miss = MetadataCache.get("vol-1", <<1>>, "k")
+      # other volumes untouched
+      assert {:ok, :other} = MetadataCache.get("vol-2", <<1>>, "k")
+    end
+
+    test "evicts on :unregister_volume_root" do
+      :ok = MetadataCache.put("vol-1", <<1>>, "k", :v)
+
+      :telemetry.execute(
+        [:neonfs, :ra, :command, :unregister_volume_root],
+        %{version: 6},
+        %{volume_id: "vol-1"}
+      )
+
+      assert :miss = MetadataCache.get("vol-1", <<1>>, "k")
+    end
+
+    test "ignores :register_volume_root (no entries to evict for a fresh volume)" do
+      :ok = MetadataCache.put("vol-1", <<1>>, "k", :v)
+
+      :telemetry.execute(
+        [:neonfs, :ra, :command, :register_volume_root],
+        %{version: 1},
+        %{volume_id: "vol-1", root_chunk_hash_size: 32}
+      )
+
+      # Cache entry survived — register isn't a trigger.
+      assert {:ok, :v} = MetadataCache.get("vol-1", <<1>>, "k")
+    end
+
+    test "tolerates an event without a volume_id key" do
+      # Some other event with the same path-prefix shouldn't crash
+      # the handler. We rebroadcast the actual event names but with
+      # missing metadata.
+      :ok = MetadataCache.put("vol-1", <<1>>, "k", :v)
+
+      :telemetry.execute(
+        [:neonfs, :ra, :command, :update_volume_root],
+        %{},
+        %{}
+      )
+
+      assert {:ok, :v} = MetadataCache.get("vol-1", <<1>>, "k")
+    end
+  end
+
   describe "size/0" do
     test "reflects the current entry count" do
       assert MetadataCache.size() == 0
