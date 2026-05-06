@@ -26,6 +26,7 @@ Runbooks reference the operator guide, CLI reference, and spec pages rather than
 ## Recovery procedures
 
 - [DR snapshot restore](DR-Snapshot-Restore.md) — rolling cluster metadata back to a known-good DR snapshot after a catastrophic metadata event. Cluster-wide and partial-restore paths, with the engineering-applied step explicitly called out where first-class tooling is missing.
+- [Disaster recovery (reconstruct-from-disk)](Disaster-Recovery.md) — rebuild the bootstrap-layer Ra state from on-disk volume data when Ra logs are unrecoverable. Last-resort path when no snapshot is usable; preserves drives + volume registry, not encryption keys / ACLs / IAM state.
 
 ## When nothing fits
 
