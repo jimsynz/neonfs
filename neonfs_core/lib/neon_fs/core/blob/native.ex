@@ -789,4 +789,59 @@ defmodule NeonFS.Core.Blob.Native do
           {:ok, [{binary(), binary()}]} | {:error, String.t()}
   def index_tree_range(_store, _root_hash, _tier, _start_key, _end_key),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Insert or replace `key`'s value in an index tree (#781). Returns
+  the new `root_hash` — the tree is copy-on-write, so every put
+  produces a fresh root chunk.
+
+  Pass `<<>>` as `root_hash` to create a fresh tree with a single
+  entry.
+
+  ## Returns
+
+    * `{:ok, new_root_hash}` — 32-byte binary of the new root chunk.
+    * `{:error, reason}` — for malformed input or chunk-store I/O
+      failures.
+  """
+  @spec index_tree_put(store(), binary(), tier(), binary(), binary()) ::
+          {:ok, binary()} | {:error, String.t()}
+  def index_tree_put(_store, _root_hash, _tier, _key, _value),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Tombstone `key` in an index tree. Even on a never-written tree
+  (`root_hash == <<>>`) this writes a tombstone so anti-entropy
+  replicates the delete.
+
+  ## Returns
+
+    * `{:ok, new_root_hash}` — 32-byte binary of the new root chunk.
+    * `{:error, reason}` — for malformed input or chunk-store I/O
+      failures.
+  """
+  @spec index_tree_delete(store(), binary(), tier(), binary()) ::
+          {:ok, binary()} | {:error, String.t()}
+  def index_tree_delete(_store, _root_hash, _tier, _key),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Reap tombstones whose `deleted_at` is older than
+  `before_unix_nanos`. Walks every leaf and rewrites those that
+  changed. Returns the new root hash (equal to the input if
+  nothing was reaped).
+
+  Errors if `root_hash` is `<<>>` — there's nothing to purge from a
+  tree that was never written.
+
+  ## Returns
+
+    * `{:ok, new_root_hash}` — 32-byte binary of the (possibly
+      unchanged) root chunk.
+    * `{:error, reason}`.
+  """
+  @spec index_tree_purge_tombstones(store(), binary(), tier(), non_neg_integer()) ::
+          {:ok, binary()} | {:error, String.t()}
+  def index_tree_purge_tombstones(_store, _root_hash, _tier, _before_unix_nanos),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
