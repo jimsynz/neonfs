@@ -18,7 +18,7 @@ defmodule NeonFS.Core.DriveManager do
   require Logger
 
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{BlobStore, Drive, DriveConfig, DriveRegistry, DriveState}
+  alias NeonFS.Core.{BlobStore, Drive, DriveConfig, DriveRegistry, DriveState, RaSupervisor}
   alias NeonFS.Core.Drive.Identity
   alias NeonFS.Events.{Broadcaster, DriveAdded, DriveRemoved}
 
@@ -202,8 +202,62 @@ defmodule NeonFS.Core.DriveManager do
          :ok <- DriveRegistry.register_drive(drive, timeout: :infinity),
          :ok <- start_single_drive_state(parsed, command_module),
          :ok <- validate_capacity(drive) do
+      register_drive_in_bootstrap_layer(drive)
       warn_on_persistence_failure(save_drives_to_cluster_state(), "add", drive.id)
       {:ok, drive}
+    end
+  end
+
+  # Mirrors the ETS register_drive into the Ra-replicated bootstrap
+  # layer (#779). Best-effort: the ETS write is the source of truth
+  # for backwards compatibility, so a Ra failure doesn't block the
+  # operator. Anti-entropy / a future #809 follow-up reconciles.
+  defp register_drive_in_bootstrap_layer(%Drive{} = drive) do
+    case current_cluster_id() do
+      {:ok, cluster_id} ->
+        entry = %{
+          drive_id: drive.id,
+          node: drive.node,
+          cluster_id: cluster_id,
+          on_disk_format_version: 1,
+          registered_at: DateTime.utc_now()
+        }
+
+        case RaSupervisor.command({:register_drive, entry}) do
+          {:ok, _result, _leader} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning("Failed to register drive in bootstrap layer",
+              drive_id: drive.id,
+              reason: inspect(reason)
+            )
+
+            :ok
+        end
+
+      {:error, reason} ->
+        Logger.warning("Skipping bootstrap-layer drive registration (no cluster id)",
+          drive_id: drive.id,
+          reason: inspect(reason)
+        )
+
+        :ok
+    end
+  end
+
+  defp deregister_drive_in_bootstrap_layer(drive_id) do
+    case RaSupervisor.command({:deregister_drive, drive_id}) do
+      {:ok, _result, _leader} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to deregister drive from bootstrap layer",
+          drive_id: drive_id,
+          reason: inspect(reason)
+        )
+
+        :ok
     end
   end
 
@@ -342,6 +396,7 @@ defmodule NeonFS.Core.DriveManager do
          :ok <- BlobStore.close_store(drive_id, timeout: :infinity),
          :ok <- DriveRegistry.deregister_drive(drive_id, timeout: :infinity),
          :ok <- stop_drive_state(drive_id) do
+      deregister_drive_in_bootstrap_layer(drive_id)
       warn_on_persistence_failure(save_drives_to_cluster_state(), "remove", drive_id)
       :ok
     end

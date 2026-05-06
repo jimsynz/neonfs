@@ -11,11 +11,13 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.FileIndex
+  alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.Persistence
   alias NeonFS.Core.RaServer
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
   alias NeonFS.Core.Volume.Deprovisioner
+  alias NeonFS.Core.Volume.Provisioner
   alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Error.Invalid, as: InvalidError
   alias NeonFS.Events
@@ -369,8 +371,19 @@ defmodule NeonFS.Core.VolumeRegistry do
          volume = Volume.new(name, opts),
          :ok <- Volume.validate(volume),
          :ok <- persist_volume(volume) do
-      safe_broadcast(volume.id, %VolumeCreated{volume_id: volume.id})
-      {:ok, volume}
+      case provision_metadata(volume, opts) do
+        :ok ->
+          safe_broadcast(volume.id, %VolumeCreated{volume_id: volume.id})
+          {:ok, volume}
+
+        {:error, reason} ->
+          # Provisioning failed (insufficient drives / replicas / Ra
+          # error). Roll back the volume registration so we don't
+          # leave a half-provisioned state — the volume's chunks (if
+          # any landed) become unreferenced and GC reaps them.
+          _ = delete_volume_persisted(volume.id, volume)
+          {:error, reason}
+      end
     else
       {:ok, _} ->
         {:error,
@@ -381,6 +394,42 @@ defmodule NeonFS.Core.VolumeRegistry do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # Builds a fresh `RootSegment` for the volume, writes the chunk to
+  # replica drives, and registers the bootstrap-layer entry (#779).
+  #
+  # Skipped when the bootstrap layer's drives table is empty — that
+  # means the cluster predates the per-volume metadata wiring (no
+  # drive has been registered via the new `:register_drive` Ra path
+  # yet, e.g. on a fresh test node) — and the root segment will be
+  # allocated lazily on the first metadata write through #785.
+  #
+  # Tests can pass `:provisioner` opt to override the default
+  # `Volume.Provisioner` for stubbing.
+  defp provision_metadata(volume, opts) do
+    cond do
+      Keyword.get(opts, :skip_provisioning?, false) -> :ok
+      not bootstrap_drives_present?() -> :ok
+      true -> run_provisioner(volume, opts)
+    end
+  end
+
+  defp run_provisioner(volume, opts) do
+    provisioner = Keyword.get(opts, :provisioner, Provisioner)
+
+    case provisioner.provision(volume) do
+      {:ok, _root_chunk_hash} -> :ok
+      {:error, _reason} = err -> err
+      {:error, _, _} = err -> err
+    end
+  end
+
+  defp bootstrap_drives_present? do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_drives/1) do
+      {:ok, drives_map} when is_map(drives_map) and map_size(drives_map) > 0 -> true
+      _ -> false
     end
   end
 
