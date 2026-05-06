@@ -5,6 +5,7 @@ pub mod encryption;
 pub mod erasure;
 pub mod error;
 pub mod hash;
+pub mod index_tree;
 pub mod path;
 pub mod store;
 
