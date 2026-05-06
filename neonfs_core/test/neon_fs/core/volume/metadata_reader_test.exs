@@ -241,6 +241,110 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
   end
 
+  describe "cache integration" do
+    test "cache hit short-circuits the bootstrap → segment → tree walk" do
+      # Stub cache that pretends to have the value cached. The inner
+      # `index_tree_get` should NOT be called.
+      table = :ets.new(:hits, [:public, :duplicate_bag])
+
+      hit_cache = %{
+        get: fn _v, _r, _k ->
+          :ets.insert(table, {:hit_returned, true})
+          {:ok, "cached-value"}
+        end,
+        put: fn _v, _r, _k, _val -> :ok end
+      }
+
+      walked = :ets.new(:walked, [:public, :duplicate_bag])
+
+      opts =
+        build_opts(
+          cache_module: stub_cache(hit_cache),
+          index_tree_get: fn _, _, _, _ ->
+            :ets.insert(walked, {:walked, true})
+            {:ok, "walked-value"}
+          end
+        )
+
+      assert {:ok, "cached-value"} = MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert :ets.tab2list(table) != []
+      # The walk must have been short-circuited.
+      assert :ets.tab2list(walked) == []
+    end
+
+    test "cache miss populates the cache after walking" do
+      table = :ets.new(:puts, [:public, :duplicate_bag])
+
+      miss_cache = %{
+        get: fn _v, _r, _k -> :miss end,
+        put: fn v, r, k, val ->
+          :ets.insert(table, {:put, v, r, k, val})
+          :ok
+        end
+      }
+
+      opts =
+        build_opts(
+          cache_module: stub_cache(miss_cache),
+          index_tree_get: fn _, _, _, _ -> {:ok, "fresh-value"} end
+        )
+
+      assert {:ok, "fresh-value"} = MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert [{:put, "vol-1", _root_hash, {:file_index, :get, "k"}, "fresh-value"}] =
+               :ets.tab2list(table)
+    end
+
+    test "cache miss does NOT populate on :not_found" do
+      table = :ets.new(:puts2, [:public, :duplicate_bag])
+
+      miss_cache = %{
+        get: fn _v, _r, _k -> :miss end,
+        put: fn v, r, k, val ->
+          :ets.insert(table, {:put, v, r, k, val})
+          :ok
+        end
+      }
+
+      opts =
+        build_opts(
+          cache_module: stub_cache(miss_cache),
+          index_tree_get: fn _, _, _, _ -> {:ok, nil} end
+        )
+
+      assert {:error, :not_found} =
+               MetadataReader.get("vol-1", :file_index, "missing", opts)
+
+      assert :ets.tab2list(table) == []
+    end
+
+    test "range/5 also goes through the cache with a {:range, start, end} key" do
+      entries = [{<<"a">>, <<"1">>}, {<<"b">>, <<"2">>}]
+      table = :ets.new(:range_puts, [:public, :duplicate_bag])
+
+      miss_cache = %{
+        get: fn _v, _r, _k -> :miss end,
+        put: fn v, r, k, val ->
+          :ets.insert(table, {:put, v, r, k, val})
+          :ok
+        end
+      }
+
+      opts =
+        build_opts(
+          cache_module: stub_cache(miss_cache),
+          index_tree_range: fn _, _, _, _, _ -> {:ok, entries} end
+        )
+
+      assert {:ok, ^entries} =
+               MetadataReader.range("vol-1", :file_index, "a", "z", opts)
+
+      assert [{:put, "vol-1", _root, {:file_index, :range, "a", "z"}, ^entries}] =
+               :ets.tab2list(table)
+    end
+  end
+
   ## Helpers
 
   defp sample_segment(overrides \\ []) do
@@ -292,9 +396,48 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
       root_chunk_reader: const_chunk_reader(sample_segment()),
       store_handle: :stub_store_handle,
       index_tree_get: fn _store, _root, _tier, _key -> {:ok, "value-bytes"} end,
-      index_tree_range: fn _store, _root, _tier, _start, _end -> {:ok, []} end
+      index_tree_range: fn _store, _root, _tier, _start, _end -> {:ok, []} end,
+      cache_module: __MODULE__.NoopCache
     ]
 
     Keyword.merge(defaults, extra)
+  end
+
+  defmodule NoopCache do
+    @moduledoc false
+    def get(_v, _r, _k), do: :miss
+    def put(_v, _r, _k, _val), do: :ok
+  end
+
+  # Build a stub module that delegates to per-test fns held in
+  # :persistent_term so we can pass closures cleanly without runtime
+  # macros. Re-uses one module per test by hashing the get fn.
+  defp stub_cache(%{get: get_fn, put: put_fn}) do
+    name =
+      String.to_atom(
+        "Elixir.NeonFS.Core.Volume.MetadataReaderTest.StubCache#{:erlang.unique_integer([:positive])}"
+      )
+
+    pt_key = {name, :fns}
+    :persistent_term.put(pt_key, {get_fn, put_fn})
+
+    Module.create(
+      name,
+      quote do
+        @pt_key unquote(Macro.escape(pt_key))
+        def get(v, r, k) do
+          {gf, _} = :persistent_term.get(@pt_key)
+          gf.(v, r, k)
+        end
+
+        def put(v, r, k, val) do
+          {_, pf} = :persistent_term.get(@pt_key)
+          pf.(v, r, k, val)
+        end
+      end,
+      Macro.Env.location(__ENV__)
+    )
+
+    name
   end
 end

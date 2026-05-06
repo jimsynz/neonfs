@@ -36,6 +36,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   alias NeonFS.Core.BlobStore
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.RaSupervisor
+  alias NeonFS.Core.Volume.MetadataCache
   alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.Volume.RootSegment
 
@@ -64,7 +65,11 @@ defmodule NeonFS.Core.Volume.MetadataReader do
       when is_binary(volume_id) and is_atom(index_kind) and is_binary(key) do
     with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts) do
       tree_root = Map.fetch!(segment.index_roots, index_kind)
-      do_index_tree_get(root_entry, tree_root, key, opts)
+      cache_key = {index_kind, :get, key}
+
+      cached_call(volume_id, root_entry.root_chunk_hash, cache_key, opts, fn ->
+        do_index_tree_get(root_entry, tree_root, key, opts)
+      end)
     end
   end
 
@@ -87,7 +92,11 @@ defmodule NeonFS.Core.Volume.MetadataReader do
              is_binary(start_key) and is_binary(end_key) do
     with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts) do
       tree_root = Map.fetch!(segment.index_roots, index_kind)
-      do_index_tree_range(root_entry, tree_root, start_key, end_key, opts)
+      cache_key = {index_kind, :range, start_key, end_key}
+
+      cached_call(volume_id, root_entry.root_chunk_hash, cache_key, opts, fn ->
+        do_index_tree_range(root_entry, tree_root, start_key, end_key, opts)
+      end)
     end
   end
 
@@ -143,6 +152,31 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   end
 
   ## Internals
+
+  # Wraps a cache miss + populate around the actual read function.
+  # Callers stay clean — `get/4` and `range/5` just supply the key
+  # tuple and a closure over the work. `:cache_module` opt lets
+  # tests inject a stub.
+  defp cached_call(volume_id, root_chunk_hash, cache_key, opts, fun) do
+    cache_module = Keyword.get(opts, :cache_module, MetadataCache)
+
+    case cache_module.get(volume_id, root_chunk_hash, cache_key) do
+      {:ok, value} ->
+        {:ok, value}
+
+      :miss ->
+        case fun.() do
+          {:ok, value} ->
+            cache_module.put(volume_id, root_chunk_hash, cache_key, value)
+            {:ok, value}
+
+          # `:not_found` and other errors are not cached — they may
+          # legitimately become hits on the next read after a write.
+          other ->
+            other
+        end
+    end
+  end
 
   defp typed_get(volume_id, kind, key, opts) do
     with {:ok, bytes} <- get(volume_id, kind, key, opts) do
