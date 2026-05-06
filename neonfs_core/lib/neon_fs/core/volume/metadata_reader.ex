@@ -223,6 +223,22 @@ defmodule NeonFS.Core.Volume.MetadataReader do
 
   ## Resolve helpers (shared by get/range)
 
+  @doc """
+  Public `resolve_segment` helper for the write path
+  (`Volume.MetadataWriter`, #785). Returns
+  `{:ok, segment, root_entry}` so the writer can both inspect the
+  current segment and use the root entry's `drive_locations` to
+  pick replicas for the new chunk.
+
+  Same contract as the internal helper used by `get/4` and
+  `range/5` — see those for the failure modes.
+  """
+  @spec resolve_segment_for_write(volume_id :: binary(), keyword()) ::
+          {:ok, RootSegment.t(), MetadataStateMachine.volume_root_entry()} | read_error()
+  def resolve_segment_for_write(volume_id, opts) when is_binary(volume_id) do
+    resolve_segment(volume_id, opts)
+  end
+
   defp resolve_segment(volume_id, opts) do
     cluster_state_loader = Keyword.get(opts, :cluster_state_loader, &default_cluster_loader/0)
     bootstrap_lookup = Keyword.get(opts, :bootstrap_lookup, &default_bootstrap_lookup/1)
