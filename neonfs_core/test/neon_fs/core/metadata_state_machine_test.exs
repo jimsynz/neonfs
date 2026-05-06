@@ -16,6 +16,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       active_intents_by_conflict_key: %{},
       encryption_keys: %{},
       volume_acls: %{},
+      drives: %{},
+      volume_roots: %{},
       version: 0
     }
   end
@@ -43,8 +45,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 11" do
-      assert MetadataStateMachine.version() == 11
+    test "returns 13" do
+      assert MetadataStateMachine.version() == 13
     end
   end
 
@@ -71,6 +73,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert state.active_intents_by_conflict_key == %{}
       assert state.encryption_keys == %{}
       assert state.volume_acls == %{}
+      assert state.drives == %{}
+      assert state.volume_roots == %{}
       assert state.version == 0
     end
   end
@@ -1213,6 +1217,266 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       active_list = MetadataStateMachine.list_active_intents(state)
       assert length(active_list) == 1
       assert hd(active_list).id == "active"
+    end
+  end
+
+  describe "bootstrap-layer commands (v13)" do
+    test "register_drive stores entry by drive_id and bumps version" do
+      entry = %{
+        drive_id: "drv-1",
+        node: :node1@host,
+        cluster_id: "clust-1",
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:register_drive, entry}, base_state())
+
+      assert state.drives == %{"drv-1" => entry}
+      assert state.version == 1
+    end
+
+    test "register_drive overwrites an existing entry for the same drive_id" do
+      old = %{
+        drive_id: "drv-1",
+        node: :node1@host,
+        cluster_id: "clust-1",
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      new = %{old | on_disk_format_version: 2}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:register_drive, new},
+          %{base_state() | drives: %{"drv-1" => old}}
+        )
+
+      assert state.drives["drv-1"] == new
+    end
+
+    test "deregister_drive removes the entry and bumps version" do
+      entry = %{
+        drive_id: "drv-1",
+        node: :node1@host,
+        cluster_id: "clust-1",
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      state = %{base_state() | drives: %{"drv-1" => entry}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:deregister_drive, "drv-1"}, state)
+
+      assert state.drives == %{}
+      assert state.version == 1
+    end
+
+    test "deregister_drive on a missing drive_id is a no-op (still bumps version)" do
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:deregister_drive, "nope"}, base_state())
+
+      assert state.drives == %{}
+      assert state.version == 1
+    end
+
+    test "register_volume_root stores entry by volume_id and bumps version" do
+      entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<1, 2, 3>>,
+        drive_locations: [%{node: :node1@host, drive_id: "drv-1"}],
+        durability_cache: %{type: :replicate, factor: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:register_volume_root, entry}, base_state())
+
+      assert state.volume_roots == %{"vol-1" => entry}
+      assert state.version == 1
+    end
+
+    test "update_volume_root merges updates and refreshes :updated_at" do
+      original_updated_at = DateTime.add(DateTime.utc_now(), -60, :second)
+
+      existing = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<1, 2, 3>>,
+        drive_locations: [%{node: :node1@host, drive_id: "drv-1"}],
+        durability_cache: %{type: :replicate, factor: 1},
+        updated_at: original_updated_at
+      }
+
+      state = %{base_state() | volume_roots: %{"vol-1" => existing}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:update_volume_root, "vol-1", %{root_chunk_hash: <<9, 9, 9>>}},
+          state
+        )
+
+      updated = state.volume_roots["vol-1"]
+      assert updated.root_chunk_hash == <<9, 9, 9>>
+      assert updated.drive_locations == [%{node: :node1@host, drive_id: "drv-1"}]
+      assert updated.durability_cache == %{type: :replicate, factor: 1}
+      assert DateTime.compare(updated.updated_at, original_updated_at) == :gt
+      assert state.version == 1
+    end
+
+    test "update_volume_root returns :not_found for missing volume_id" do
+      {state, {:error, :not_found}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:update_volume_root, "missing", %{root_chunk_hash: <<>>}},
+          base_state()
+        )
+
+      assert state.volume_roots == %{}
+      assert state.version == 0
+    end
+
+    test "unregister_volume_root removes the entry and bumps version" do
+      entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<1>>,
+        drive_locations: [],
+        durability_cache: %{},
+        updated_at: DateTime.utc_now()
+      }
+
+      state = %{base_state() | volume_roots: %{"vol-1" => entry}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:unregister_volume_root, "vol-1"}, state)
+
+      assert state.volume_roots == %{}
+      assert state.version == 1
+    end
+
+    test "register_drive on pre-v13 state (without :drives) self-heals via ensure_bootstrap" do
+      pre_v13 = base_state() |> Map.delete(:drives) |> Map.delete(:volume_roots)
+
+      entry = %{
+        drive_id: "drv-1",
+        node: :node1@host,
+        cluster_id: "clust-1",
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:register_drive, entry}, pre_v13)
+
+      assert state.drives == %{"drv-1" => entry}
+      assert state.volume_roots == %{}
+    end
+  end
+
+  describe "machine version migration 12 -> 13 (bootstrap layer)" do
+    test "adds drives and volume_roots tables to existing state" do
+      old_state = %{
+        data: %{},
+        chunks: %{"hash1" => %{hash: "hash1"}},
+        files: %{},
+        services: %{},
+        volumes: %{"vol1" => %{id: "vol1"}},
+        stripes: %{},
+        segment_assignments: %{},
+        intents: %{},
+        active_intents_by_conflict_key: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        version: 500
+      }
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:machine_version, 12, 13}, old_state)
+
+      assert new_state.drives == %{}
+      assert new_state.volume_roots == %{}
+
+      assert new_state.chunks == %{"hash1" => %{hash: "hash1"}}
+      assert new_state.volumes == %{"vol1" => %{id: "vol1"}}
+      assert new_state.version == 500
+    end
+
+    test "preserves existing :drives and :volume_roots if already populated" do
+      drive = %{
+        drive_id: "drv-1",
+        node: :node1@host,
+        cluster_id: "c",
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      root = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<1>>,
+        drive_locations: [%{node: :node1@host, drive_id: "drv-1"}],
+        durability_cache: %{},
+        updated_at: DateTime.utc_now()
+      }
+
+      old_state = %{
+        base_state()
+        | drives: %{"drv-1" => drive},
+          volume_roots: %{"vol-1" => root}
+      }
+
+      {new_state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:machine_version, 12, 13}, old_state)
+
+      assert new_state.drives == %{"drv-1" => drive}
+      assert new_state.volume_roots == %{"vol-1" => root}
+    end
+  end
+
+  describe "bootstrap query helpers" do
+    test "get_drives/1 and get_drive/2" do
+      drive = %{
+        drive_id: "drv-1",
+        node: :node1@host,
+        cluster_id: "c",
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      state = %{base_state() | drives: %{"drv-1" => drive}}
+
+      assert MetadataStateMachine.get_drives(state) == %{"drv-1" => drive}
+      assert MetadataStateMachine.get_drive(state, "drv-1") == drive
+      assert MetadataStateMachine.get_drive(state, "missing") == nil
+    end
+
+    test "get_volume_roots/1 and get_volume_root/2" do
+      root = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<1>>,
+        drive_locations: [],
+        durability_cache: %{},
+        updated_at: DateTime.utc_now()
+      }
+
+      state = %{base_state() | volume_roots: %{"vol-1" => root}}
+
+      assert MetadataStateMachine.get_volume_roots(state) == %{"vol-1" => root}
+      assert MetadataStateMachine.get_volume_root(state, "vol-1") == root
+      assert MetadataStateMachine.get_volume_root(state, "missing") == nil
+    end
+
+    test "get_drives/1 returns empty map on pre-v13 state" do
+      pre_v13 = base_state() |> Map.delete(:drives)
+      assert MetadataStateMachine.get_drives(pre_v13) == %{}
+    end
+
+    test "get_volume_roots/1 returns empty map on pre-v13 state" do
+      pre_v13 = base_state() |> Map.delete(:volume_roots)
+      assert MetadataStateMachine.get_volume_roots(pre_v13) == %{}
     end
   end
 end
