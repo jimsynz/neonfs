@@ -19,6 +19,7 @@ defmodule NeonFS.Core.DriveManager do
 
   alias NeonFS.Cluster.State
   alias NeonFS.Core.{BlobStore, Drive, DriveConfig, DriveRegistry, DriveState}
+  alias NeonFS.Core.Drive.Identity
   alias NeonFS.Events.{Broadcaster, DriveAdded, DriveRemoved}
 
   @valid_tiers [:hot, :warm, :cold]
@@ -194,6 +195,7 @@ defmodule NeonFS.Core.DriveManager do
     with {:ok, parsed} <- validate_drive_config(config),
          :ok <- check_path_exists(parsed.path),
          :ok <- check_path_writable(parsed.path),
+         :ok <- ensure_drive_identity(parsed),
          :ok <- check_id_unique(parsed.id),
          {:ok, _drive_id} <- BlobStore.open_store(parsed, timeout: :infinity),
          drive = parsed |> Drive.from_config(Node.self()) |> DriveConfig.detect_capacity(),
@@ -202,6 +204,41 @@ defmodule NeonFS.Core.DriveManager do
          :ok <- validate_capacity(drive) do
       warn_on_persistence_failure(save_drives_to_cluster_state(), "add", drive.id)
       {:ok, drive}
+    end
+  end
+
+  defp ensure_drive_identity(parsed) do
+    case current_cluster_id() do
+      {:ok, cluster_id} ->
+        case Identity.ensure(parsed.path, cluster_id, parsed.id) do
+          :ok ->
+            :ok
+
+          {:error, {:foreign_cluster, expected: expected, actual: actual}} ->
+            {:error,
+             "Drive at #{parsed.path} belongs to a different cluster " <>
+               "(found cluster_id=#{actual}, this cluster is #{expected}). " <>
+               "Refusing to add."}
+
+          {:error, {:drive_id_mismatch, expected: expected, actual: actual}} ->
+            {:error,
+             "Drive at #{parsed.path} was previously registered as drive_id=#{actual}; " <>
+               "refusing to re-register as #{expected}. Remove and re-add with the " <>
+               "original id, or use a different drive."}
+
+          {:error, reason} ->
+            {:error, "Cannot validate drive identity at #{parsed.path}: #{inspect(reason)}"}
+        end
+
+      {:error, reason} ->
+        {:error, "Cannot determine local cluster_id: #{inspect(reason)}"}
+    end
+  end
+
+  defp current_cluster_id do
+    case State.load() do
+      {:ok, %State{cluster_id: cluster_id}} -> {:ok, cluster_id}
+      {:error, _} = error -> error
     end
   end
 

@@ -3,6 +3,7 @@ defmodule NeonFS.Core.DriveManagerTest do
 
   alias NeonFS.Cluster.State
   alias NeonFS.Core.{BlobStore, DriveManager, DriveRegistry}
+  alias NeonFS.Core.Drive.Identity
 
   @moduletag :tmp_dir
 
@@ -163,6 +164,43 @@ defmodule NeonFS.Core.DriveManagerTest do
 
       assert {:error, message} = DriveManager.add_drive(%{path: file_path, tier: "hot"})
       assert message =~ "Path exists but is not a directory"
+    end
+
+    test "writes \`.neonfs-drive.json\` identity file (#778)", %{tmp_dir: tmp_dir} do
+      new_path = Path.join(tmp_dir, "new_with_identity")
+      File.mkdir_p!(new_path)
+
+      assert {:ok, _drive} =
+               DriveManager.add_drive(%{id: "new_with_id", path: new_path, tier: "hot"})
+
+      identity_file = Path.join(new_path, ".neonfs-drive.json")
+      assert File.exists?(identity_file)
+
+      {:ok, identity} = Identity.read(new_path)
+      assert identity.drive_id == "new_with_id"
+      assert identity.cluster_id == "clust_test"
+      assert identity.schema_version == 1
+      assert identity.on_disk_format_version == 1
+    end
+
+    test "refuses to add a drive whose identity names a foreign cluster (#778)",
+         %{tmp_dir: tmp_dir} do
+      foreign_path = Path.join(tmp_dir, "foreign_drive")
+      File.mkdir_p!(foreign_path)
+
+      # Plant an identity file claiming the directory belongs to another cluster.
+      :ok =
+        Identity.write(
+          foreign_path,
+          Identity.new("foreign_disk", "clust_other")
+        )
+
+      assert {:error, message} =
+               DriveManager.add_drive(%{id: "any_id", path: foreign_path, tier: "hot"})
+
+      assert message =~ "belongs to a different cluster"
+      assert message =~ "clust_other"
+      assert message =~ "clust_test"
     end
 
     test "rejects invalid tier", %{tmp_dir: tmp_dir} do
