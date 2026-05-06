@@ -67,11 +67,25 @@ defmodule NeonFS.Containerd.HealthServerTest do
 
     Process.register(agent, NeonFS.Client.Registrar.Containerd)
 
-    on_exit(fn ->
-      if pid = Process.whereis(NeonFS.Client.Registrar.Containerd) do
-        Process.unregister(NeonFS.Client.Registrar.Containerd)
-        Process.exit(pid, :normal)
-      end
-    end)
+    on_exit(&cleanup_stub_registrar/0)
+  end
+
+  # Race: the agent process can exit between `Process.whereis` and
+  # `Process.unregister`, freeing the name. `unregister` then
+  # raises ArgumentError. Tolerate that explicitly.
+  defp cleanup_stub_registrar do
+    pid = Process.whereis(NeonFS.Client.Registrar.Containerd)
+    if pid, do: safe_unregister_and_stop(pid)
+    :ok
+  end
+
+  defp safe_unregister_and_stop(pid) do
+    try do
+      Process.unregister(NeonFS.Client.Registrar.Containerd)
+    rescue
+      ArgumentError -> :ok
+    end
+
+    if Process.alive?(pid), do: Process.exit(pid, :normal)
   end
 end
