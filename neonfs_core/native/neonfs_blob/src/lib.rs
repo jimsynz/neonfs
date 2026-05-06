@@ -6,6 +6,7 @@ pub mod erasure;
 pub mod error;
 pub mod hash;
 pub mod index_tree;
+pub mod index_tree_blob_store;
 pub mod path;
 pub mod store;
 
