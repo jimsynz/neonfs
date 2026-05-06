@@ -237,8 +237,7 @@ defmodule NeonFS.Core.DriveManager do
 
   defp current_cluster_id do
     case State.load() do
-      {:ok, %State{cluster_id: cluster_id}} when is_binary(cluster_id) -> {:ok, cluster_id}
-      {:ok, _} -> {:error, :no_cluster_id}
+      {:ok, %State{cluster_id: cluster_id}} -> {:ok, cluster_id}
       {:error, _} = error -> error
     end
   end
