@@ -75,20 +75,9 @@ defmodule NeonFS.Core.Volume.HLCTest do
   end
 
   describe "monotonicity (property)" do
-    # The HLC clamps `new_wall` to `wall_ms + max_clock_skew_ms`, which
-    # breaks monotonicity if a deterministic test passes a `wall_ms`
-    # smaller than the previous `last_wall` by more than the skew. Real
-    # clocks don't jump backward like that; deterministic tests dodge
-    # the clamp by using a skew larger than any generated wall —
-    # matching `NeonFS.Core.HLCPropertyTest`.
-    @huge_skew 20_000_000
-
     property "any sequence of now/2 calls produces strictly increasing timestamps" do
       check all(walls <- list_of(integer(0..10_000), min_length: 1, max_length: 50)) do
-        segment = %{
-          sample_segment()
-          | hlc: ClusterHLC.new(node(), max_clock_skew_ms: @huge_skew)
-        }
+        segment = %{sample_segment() | hlc: ClusterHLC.new(node())}
 
         {timestamps, _final} =
           Enum.reduce(walls, {[], segment}, fn wall_ms, {acc, seg} ->
@@ -111,10 +100,7 @@ defmodule NeonFS.Core.Volume.HLCTest do
       step = step_gen()
 
       check all(steps <- list_of(step, min_length: 1, max_length: 50)) do
-        segment = %{
-          sample_segment()
-          | hlc: ClusterHLC.new(node(), max_clock_skew_ms: @huge_skew)
-        }
+        segment = %{sample_segment() | hlc: ClusterHLC.new(node())}
 
         {timestamps, _final} =
           Enum.reduce(steps, {[], segment}, fn
