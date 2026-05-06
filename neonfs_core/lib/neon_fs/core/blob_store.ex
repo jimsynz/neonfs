@@ -239,6 +239,28 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @doc """
+  Returns the underlying NIF store handle for a drive.
+
+  The handle is the `BlobStoreResource` Rustler reference held by
+  the GenServer's state. Callers use it to invoke NIFs that need
+  the store directly — e.g. `Native.index_tree_get/4` (#814) which
+  drives the chunk-backed B-tree (#781) and would otherwise need to
+  re-open the store on each call.
+
+  ## Returns
+
+    * `{:ok, handle}` — opaque resource the caller passes back to
+      NIFs that take a `BlobStoreResource`.
+    * `{:error, :not_found}` — `drive_id` is not registered in this
+      `BlobStore`.
+  """
+  @spec get_store_handle(drive_id(), keyword()) :: {:ok, reference()} | {:error, :not_found}
+  def get_store_handle(drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:get_store_handle, drive_id})
+  end
+
+  @doc """
   Resolves volume-level write options for a put_chunk invocation.
 
   Called by `NeonFS.Transport.Handler` when an interface node sends
@@ -807,6 +829,14 @@ defmodule NeonFS.Core.BlobStore do
   def handle_call({:chunk_info, hash}, _from, state) do
     result = do_chunk_info(state.stores, hash)
     {:reply, result, state}
+  end
+
+  @impl true
+  def handle_call({:get_store_handle, drive_id}, _from, state) do
+    case Map.fetch(state.stores, drive_id) do
+      {:ok, handle} -> {:reply, {:ok, handle}, state}
+      :error -> {:reply, {:error, :not_found}, state}
+    end
   end
 
   @impl true
