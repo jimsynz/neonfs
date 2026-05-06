@@ -36,6 +36,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   alias NeonFS.Core.BlobStore
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.RaSupervisor
+  alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.Volume.RootSegment
 
   @type index_kind :: :file_index | :chunk_index | :stripe_index
@@ -90,7 +91,103 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     end
   end
 
+  @doc """
+  Look up a `FileMeta` by `file_id` in the volume's `:file_index`.
+
+  Returns the decoded struct, `{:error, :not_found}`, or any other
+  error from `get/4` plus `{:malformed_value, _}` if the stored
+  bytes don't decode as ETF.
+  """
+  @spec get_file_meta(volume_id :: binary(), file_id :: binary(), keyword()) ::
+          {:ok, term()} | read_error() | MetadataValue.decode_error()
+  def get_file_meta(volume_id, file_id, opts \\ []) do
+    typed_get(volume_id, :file_index, file_id, opts)
+  end
+
+  @doc """
+  Look up a `ChunkMeta` by content hash in the volume's
+  `:chunk_index`.
+  """
+  @spec get_chunk_meta(volume_id :: binary(), chunk_hash :: binary(), keyword()) ::
+          {:ok, term()} | read_error() | MetadataValue.decode_error()
+  def get_chunk_meta(volume_id, chunk_hash, opts \\ []) do
+    typed_get(volume_id, :chunk_index, chunk_hash, opts)
+  end
+
+  @doc """
+  Look up a `Stripe` (per-file erasure-coded stripe metadata) by
+  stripe id in the volume's `:stripe_index`.
+  """
+  @spec get_stripe(volume_id :: binary(), stripe_id :: binary(), keyword()) ::
+          {:ok, term()} | read_error() | MetadataValue.decode_error()
+  def get_stripe(volume_id, stripe_id, opts \\ []) do
+    typed_get(volume_id, :stripe_index, stripe_id, opts)
+  end
+
+  @doc """
+  Walk the directory entries under `parent_path` from the volume's
+  `:file_index`. Encodes the path as a key prefix and uses
+  `range/5` to enumerate entries in sort order.
+
+  Decoded values come back as a list of `{key, value}` pairs where
+  each value has been ETF-decoded.
+  """
+  @spec list_dir(volume_id :: binary(), parent_path :: binary(), keyword()) ::
+          {:ok, [{binary(), term()}]} | read_error() | MetadataValue.decode_error()
+  def list_dir(volume_id, parent_path, opts \\ []) when is_binary(parent_path) do
+    {start_key, end_key} = dir_range_keys(parent_path)
+
+    with {:ok, raw_entries} <- range(volume_id, :file_index, start_key, end_key, opts) do
+      decode_entries(raw_entries)
+    end
+  end
+
   ## Internals
+
+  defp typed_get(volume_id, kind, key, opts) do
+    with {:ok, bytes} <- get(volume_id, kind, key, opts) do
+      MetadataValue.decode(bytes)
+    end
+  end
+
+  defp decode_entries(raw_entries) do
+    Enum.reduce_while(raw_entries, {:ok, []}, fn {key, bytes}, {:ok, acc} ->
+      case MetadataValue.decode(bytes) do
+        {:ok, value} -> {:cont, {:ok, [{key, value} | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Directory key prefix: parent_path with a trailing separator.
+  # Range is `[parent_path/, parent_path0)` — the `0` byte is the
+  # smallest byte greater than `/`, capturing every key prefixed by
+  # `parent_path/`. Empty parent_path means "root", which uses an
+  # empty prefix → full range.
+  defp dir_range_keys(""), do: {<<>>, <<>>}
+
+  defp dir_range_keys(parent_path) do
+    prefix = ensure_trailing_slash(parent_path)
+    {prefix, byte_after_prefix(prefix)}
+  end
+
+  defp ensure_trailing_slash(path) do
+    if String.ends_with?(path, "/"), do: path, else: path <> "/"
+  end
+
+  defp byte_after_prefix(prefix) do
+    # `/` is 0x2F. The smallest byte > `/` is `0` (0x30) — append it
+    # to make a key strictly greater than every key starting with
+    # `prefix`.
+    base = String.trim_trailing(prefix, "/")
+    base <> "0"
+  end
+
+  ## Resolve helpers (shared by get/range)
 
   defp resolve_segment(volume_id, opts) do
     cluster_state_loader = Keyword.get(opts, :cluster_state_loader, &default_cluster_loader/0)

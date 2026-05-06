@@ -3,6 +3,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
   alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.Volume.MetadataReader
+  alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.Volume.RootSegment
 
   describe "get/4" do
@@ -150,6 +151,96 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
   end
 
+  describe "typed wrappers" do
+    test "get_file_meta/3 decodes an ETF-encoded value" do
+      sample = %{path: "/a/b", size: 42, owner_uid: 1000}
+      opts = build_opts_returning(sample)
+
+      assert {:ok, ^sample} = MetadataReader.get_file_meta("vol-1", "file-id", opts)
+    end
+
+    test "get_chunk_meta/3 decodes an ETF-encoded value" do
+      sample = %{hash: <<1, 2, 3>>, size: 1024, codec: %{compression: :none}}
+      opts = build_opts_returning(sample)
+
+      assert {:ok, ^sample} = MetadataReader.get_chunk_meta("vol-1", <<1, 2, 3>>, opts)
+    end
+
+    test "get_stripe/3 decodes an ETF-encoded value" do
+      sample = %{stripe_id: "s-1", file_id: "f-1", chunks: [<<1>>, <<2>>]}
+      opts = build_opts_returning(sample)
+
+      assert {:ok, ^sample} = MetadataReader.get_stripe("vol-1", "s-1", opts)
+    end
+
+    test "typed wrappers surface :not_found from the underlying generic get" do
+      opts = build_opts(index_tree_get: fn _, _, _, _ -> {:ok, nil} end)
+
+      assert {:error, :not_found} = MetadataReader.get_file_meta("vol-1", "missing", opts)
+    end
+
+    test "typed wrappers surface :malformed_value when the bytes don't decode" do
+      opts =
+        build_opts(index_tree_get: fn _, _, _, _ -> {:ok, <<0, 1, 2, 3>>} end)
+
+      assert {:error, {:malformed_value, _}} =
+               MetadataReader.get_file_meta("vol-1", "f-1", opts)
+    end
+  end
+
+  describe "list_dir/3" do
+    test "uses a path-prefix range and decodes each entry" do
+      entries = [
+        {"/dir/alpha", MetadataValue.encode(%{name: "alpha", size: 10})},
+        {"/dir/beta", MetadataValue.encode(%{name: "beta", size: 20})}
+      ]
+
+      table = :ets.new(:nif_calls, [:public, :duplicate_bag])
+
+      capture_range = fn _store, _root, _tier, start_key, end_key ->
+        :ets.insert(table, {:bounds, start_key, end_key})
+        {:ok, entries}
+      end
+
+      opts = build_opts(index_tree_range: capture_range)
+
+      assert {:ok, decoded} = MetadataReader.list_dir("vol-1", "/dir", opts)
+
+      assert decoded == [
+               {"/dir/alpha", %{name: "alpha", size: 10}},
+               {"/dir/beta", %{name: "beta", size: 20}}
+             ]
+
+      # Range bounds are `[/dir/, /dir0)` — the `0` is the byte after `/`.
+      assert [{:bounds, "/dir/", "/dir0"}] = :ets.lookup(table, :bounds)
+    end
+
+    test "empty parent_path means full range" do
+      table = :ets.new(:nif_calls, [:public, :duplicate_bag])
+
+      capture_range = fn _store, _root, _tier, start_key, end_key ->
+        :ets.insert(table, {:bounds, start_key, end_key})
+        {:ok, []}
+      end
+
+      opts = build_opts(index_tree_range: capture_range)
+      assert {:ok, []} = MetadataReader.list_dir("vol-1", "", opts)
+      assert [{:bounds, <<>>, <<>>}] = :ets.lookup(table, :bounds)
+    end
+
+    test "stops at the first malformed entry" do
+      entries = [
+        {"/dir/ok", MetadataValue.encode(%{ok: true})},
+        {"/dir/bad", <<0, 1, 2, 3>>}
+      ]
+
+      opts =
+        build_opts(index_tree_range: fn _, _, _, _, _ -> {:ok, entries} end)
+
+      assert {:error, {:malformed_value, _}} = MetadataReader.list_dir("vol-1", "/dir", opts)
+    end
+  end
+
   ## Helpers
 
   defp sample_segment(overrides \\ []) do
@@ -187,6 +278,11 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
   defp const_chunk_reader(segment) do
     fn _entry, _opts -> {:ok, RootSegment.encode(segment)} end
+  end
+
+  defp build_opts_returning(value) do
+    bytes = MetadataValue.encode(value)
+    build_opts(index_tree_get: fn _, _, _, _ -> {:ok, bytes} end)
   end
 
   defp build_opts(extra \\ []) do
