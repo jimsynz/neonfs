@@ -7,7 +7,9 @@ use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
     CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus, RemoveNodeResult,
 };
-use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
+use crate::term::{
+    extract_error, term_to_i64, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple,
+};
 use clap::Subcommand;
 use eetf::{Atom, Binary, FixInteger, List, Map, Term};
 use std::path::PathBuf;
@@ -117,6 +119,36 @@ pub enum ClusterCommand {
         #[arg(long = "yes-i-accept-data-loss")]
         yes_i_accept_data_loss: bool,
     },
+
+    /// Rebuild the bootstrap-layer Ra state from on-disk volume data
+    /// (per-volume metadata epic, #788).
+    ///
+    /// Use this when Ra logs are unrecoverable but the underlying
+    /// volume data (drive identity files + root segment chunks) is
+    /// intact. Walks every configured drive's `blobs/` tree, decodes
+    /// candidate chunks as root segments, and submits the matching
+    /// `:register_drive` / `:register_volume_root` Ra commands.
+    ///
+    /// Last-resort operation. Refuses without `--yes` and refuses if
+    /// the bootstrap layer already has volumes registered (use
+    /// `--overwrite-ra-state` to force, or `--dry-run` to preview).
+    ReconstructFromDisk {
+        /// Required acknowledgement that this is the right call.
+        /// Refuses locally if absent. Bypassed by `--dry-run`.
+        #[arg(long)]
+        yes: bool,
+
+        /// Allow reconstruction when the bootstrap layer's
+        /// `volume_roots` table is non-empty. Without this flag, a
+        /// reconstruction misfire on a healthy cluster is bounded.
+        #[arg(long = "overwrite-ra-state")]
+        overwrite_ra_state: bool,
+
+        /// Preview the discovered drives + commands without
+        /// submitting anything to Ra. Doesn't require `--yes`.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
 }
 
 /// Certificate authority subcommands
@@ -217,6 +249,11 @@ impl ClusterCommand {
             ClusterCommand::Repair { command } => command.execute(format),
             ClusterCommand::Status => self.status(format),
             ClusterCommand::RemoveNode { node, force } => self.remove_node(node, *force, format),
+            ClusterCommand::ReconstructFromDisk {
+                yes,
+                overwrite_ra_state,
+                dry_run,
+            } => self.reconstruct_from_disk(*yes, *overwrite_ra_state, *dry_run, format),
             ClusterCommand::ForceReset {
                 keep,
                 min_unreachable_seconds,
@@ -730,6 +767,142 @@ impl ClusterCommand {
             }
             OutputFormat::Table => {
                 println!("neonfs cluster force-reset: accepted");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn reconstruct_from_disk(
+        &self,
+        yes: bool,
+        overwrite_ra_state: bool,
+        dry_run: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
+        if !yes && !dry_run {
+            return Err(crate::error::CliError::InvalidArgument(
+                "--yes is required (or --dry-run to preview). \
+                 Reconstruction overwrites the bootstrap layer's Ra state \
+                 from on-disk volume data."
+                    .to_string(),
+            ));
+        }
+
+        let opts = Term::Map(Map::from([
+            (
+                Term::Binary(Binary {
+                    bytes: b"yes".to_vec(),
+                }),
+                Term::Atom(Atom::from(if yes { "true" } else { "false" })),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"overwrite_ra_state".to_vec(),
+                }),
+                Term::Atom(Atom::from(if overwrite_ra_state {
+                    "true"
+                } else {
+                    "false"
+                })),
+            ),
+            (
+                Term::Binary(Binary {
+                    bytes: b"dry_run".to_vec(),
+                }),
+                Term::Atom(Atom::from(if dry_run { "true" } else { "false" })),
+            ),
+        ]));
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_cluster_reconstruct_from_disk",
+                vec![opts],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            match format {
+                OutputFormat::Json => {
+                    let payload = serde_json::json!({
+                        "status": "refused",
+                        "message": err.error_message(),
+                    });
+                    eprintln!("{}", json::format(&payload)?);
+                }
+                OutputFormat::Table => {
+                    eprintln!(
+                        "neonfs cluster reconstruct-from-disk refused: {}",
+                        err.error_message()
+                    );
+                }
+            }
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let summary = term_to_map(&data)?;
+
+        let drives = summary
+            .get("drives")
+            .and_then(|t| term_to_i64(t).ok())
+            .unwrap_or(0);
+        let volumes = summary
+            .get("volumes")
+            .and_then(|t| term_to_i64(t).ok())
+            .unwrap_or(0);
+        let commands = summary
+            .get("commands")
+            .and_then(|t| term_to_i64(t).ok())
+            .unwrap_or(0);
+        let submitted = summary
+            .get("commands_submitted")
+            .and_then(|t| term_to_i64(t).ok())
+            .unwrap_or(0);
+        let failed = summary
+            .get("commands_failed")
+            .and_then(|t| term_to_list(t).ok())
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
+        let warnings = summary
+            .get("warnings")
+            .and_then(|t| term_to_list(t).ok())
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
+
+        match format {
+            OutputFormat::Json => {
+                let payload = serde_json::json!({
+                    "status": if dry_run { "preview" } else { "applied" },
+                    "drives": drives,
+                    "volumes": volumes,
+                    "commands": commands,
+                    "commands_submitted": submitted,
+                    "commands_failed": failed,
+                    "warnings": warnings,
+                    "dry_run": dry_run,
+                });
+                println!("{}", json::format(&payload)?);
+            }
+            OutputFormat::Table => {
+                let status_label = if dry_run { "preview" } else { "applied" };
+                println!("neonfs cluster reconstruct-from-disk: {}", status_label);
+                println!();
+                println!("  Drives discovered:     {}", drives);
+                println!("  Volumes recovered:     {}", volumes);
+                println!("  Ra commands generated: {}", commands);
+
+                if !dry_run {
+                    println!("  Commands submitted:    {}", submitted);
+                    println!("  Commands failed:       {}", failed);
+                }
+
+                if warnings > 0 {
+                    println!("  Warnings:              {}", warnings);
+                }
             }
         }
 
@@ -1620,6 +1793,58 @@ mod tests {
                 } => assert!(!yes_i_accept_data_loss),
                 _ => panic!("Expected ForceReset variant"),
             }
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_from_disk_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: ClusterCommand,
+        }
+
+        // No flags → all defaults to false. Parses fine; the
+        // safety gate in the handler refuses without --yes (or
+        // --dry-run).
+        let bare = TestCli::try_parse_from(["test", "reconstruct-from-disk"]).expect("parses");
+
+        match bare.command {
+            ClusterCommand::ReconstructFromDisk {
+                yes,
+                overwrite_ra_state,
+                dry_run,
+            } => {
+                assert!(!yes);
+                assert!(!overwrite_ra_state);
+                assert!(!dry_run);
+            }
+            _ => panic!("Expected ReconstructFromDisk variant"),
+        }
+
+        // All three flags set.
+        let full = TestCli::try_parse_from([
+            "test",
+            "reconstruct-from-disk",
+            "--yes",
+            "--overwrite-ra-state",
+            "--dry-run",
+        ])
+        .expect("parses");
+
+        match full.command {
+            ClusterCommand::ReconstructFromDisk {
+                yes,
+                overwrite_ra_state,
+                dry_run,
+            } => {
+                assert!(yes);
+                assert!(overwrite_ra_state);
+                assert!(dry_run);
+            }
+            _ => panic!("Expected ReconstructFromDisk variant"),
         }
     }
 }
