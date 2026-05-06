@@ -973,6 +973,100 @@ fn index_tree_range<'a>(
     Ok(out)
 }
 
+/// Insert or replace `key`'s value in an index tree (#781) backed
+/// by the volume's BlobStore (#813). Empty `root_hash` creates a
+/// new tree. Returns the new root hash (the IndexTree is
+/// copy-on-write — every put produces a new root chunk).
+#[rustler::nif]
+fn index_tree_put<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    root_hash: Binary,
+    tier: String,
+    key: Binary,
+    value: Binary,
+) -> Result<Binary<'a>, String> {
+    let parsed_tier = parse_tier(&tier)?;
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+
+    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let mut tree = IndexTree::new(adapter, TreeConfig::default());
+
+    let root = parse_optional_root(&root_hash)?;
+
+    let new_root = tree
+        .put(
+            root.as_ref(),
+            key.as_slice().to_vec(),
+            value.as_slice().to_vec(),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(vec_to_binary(env, new_root.as_bytes()))
+}
+
+/// Tombstone `key` in an index tree. Even on a never-written tree
+/// (`root_hash == <<>>`) this writes a tombstone so anti-entropy
+/// can replicate the delete; the returned hash is the new root.
+#[rustler::nif]
+fn index_tree_delete<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    root_hash: Binary,
+    tier: String,
+    key: Binary,
+) -> Result<Binary<'a>, String> {
+    let parsed_tier = parse_tier(&tier)?;
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+
+    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let mut tree = IndexTree::new(adapter, TreeConfig::default());
+
+    let root = parse_optional_root(&root_hash)?;
+
+    let new_root = tree
+        .delete(root.as_ref(), key.as_slice())
+        .map_err(|e| e.to_string())?;
+
+    Ok(vec_to_binary(env, new_root.as_bytes()))
+}
+
+/// Reap tombstones whose `deleted_at` is older than
+/// `before_unix_nanos`. Walks every leaf and rewrites those that
+/// changed. Returns the new root hash (equal to the input if
+/// nothing was reaped).
+///
+/// Errors if the input root_hash is `<<>>` — there's nothing to
+/// purge from a tree that was never written.
+#[rustler::nif]
+fn index_tree_purge_tombstones<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    root_hash: Binary,
+    tier: String,
+    before_unix_nanos: u64,
+) -> Result<Binary<'a>, String> {
+    if root_hash.is_empty() {
+        return Err("cannot purge tombstones on an empty tree (root_hash is <<>>)".to_string());
+    }
+
+    let parsed_tier = parse_tier(&tier)?;
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+
+    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let mut tree = IndexTree::new(adapter, TreeConfig::default());
+
+    let root = parse_hash(&root_hash)?;
+
+    let before = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(before_unix_nanos);
+
+    let new_root = tree
+        .purge_tombstones(&root, before)
+        .map_err(|e| e.to_string())?;
+
+    Ok(vec_to_binary(env, new_root.as_bytes()))
+}
+
 /// Parses a 0-byte or 32-byte binary into `Option<Hash>`. The
 /// 0-byte form represents a never-written tree (the IndexTree's
 /// `None` root).
