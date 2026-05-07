@@ -75,7 +75,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       end
 
       # Verify file is in index
-      assert {:ok, stored_file} = FileIndex.get(file_meta.id)
+      assert {:ok, stored_file} = FileIndex.get(file_meta.volume_id, file_meta.id)
       assert stored_file.id == file_meta.id
       assert {:ok, stored_by_path} = FileIndex.get_by_path(volume.id, "/test.txt")
       assert stored_by_path.id == file_meta.id
@@ -151,8 +151,8 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert chunk_count_before == chunk_count_after
 
       # Verify both files exist but share chunks
-      assert {:ok, stored_file1} = FileIndex.get(file1.id)
-      assert {:ok, stored_file2} = FileIndex.get(file2.id)
+      assert {:ok, stored_file1} = FileIndex.get(file1.volume_id, file1.id)
+      assert {:ok, stored_file2} = FileIndex.get(file2.volume_id, file2.id)
       assert stored_file1.id == file1.id
       assert stored_file2.id == file2.id
       assert file1.chunks == file2.chunks

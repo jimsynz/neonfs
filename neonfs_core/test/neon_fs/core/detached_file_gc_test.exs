@@ -40,12 +40,15 @@ defmodule NeonFS.Core.DetachedFileGCTest do
       local_node: node()
     ]
 
+    metadata_reader_opts = build_mock_metadata_reader_opts(store)
+
     stop_if_running(NeonFS.Core.FileIndex)
     stop_if_running(NeonFS.Core.DetachedFileGC)
     cleanup_ets_table(:file_index_by_id)
 
     start_supervised!(
-      {NeonFS.Core.FileIndex, quorum_opts: quorum_opts},
+      {NeonFS.Core.FileIndex,
+       quorum_opts: quorum_opts, metadata_reader_opts: metadata_reader_opts},
       restart: :temporary
     )
 
@@ -80,7 +83,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         }
       )
 
-      assert {:error, :not_found} = FileIndex.get(created.id)
+      assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
     end
 
     test "leaves the tombstone in place when other pins remain" do
@@ -94,7 +97,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
       )
 
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ids}} =
-               FileIndex.get(created.id)
+               FileIndex.get(created.volume_id, created.id)
 
       assert ids == ["c2"]
     end
@@ -115,7 +118,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
       )
 
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ["mine"]}} =
-               FileIndex.get(created.id)
+               FileIndex.get(created.volume_id, created.id)
     end
 
     test "tolerates an idempotent re-fire (claim already released)" do
@@ -132,7 +135,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
 
       # File is already gone now. A re-fire of the same telemetry event
       # — Ra command replay or a stale subscriber — must not error.
-      assert {:error, :not_found} = FileIndex.get(created.id)
+      assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
 
       :telemetry.execute(
         [:neonfs, :ra, :command, :release_namespace_claim],
@@ -140,7 +143,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         meta
       )
 
-      assert {:error, :not_found} = FileIndex.get(created.id)
+      assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
     end
   end
 
@@ -161,15 +164,15 @@ defmodule NeonFS.Core.DetachedFileGCTest do
       )
 
       # /a's last pin released → purged.
-      assert {:error, :not_found} = FileIndex.get(file_a.id)
+      assert {:error, :not_found} = FileIndex.get(file_a.volume_id, file_a.id)
 
       # /b had two pins; only one was held by the dead holder → still detached.
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ["other-holder"]}} =
-               FileIndex.get(file_b.id)
+               FileIndex.get(file_b.volume_id, file_b.id)
 
       # /c wasn't pinned by the dead holder → untouched.
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ["unrelated"]}} =
-               FileIndex.get(file_c.id)
+               FileIndex.get(file_c.volume_id, file_c.id)
     end
 
     test "tolerates an empty released_claim_ids list" do
@@ -183,7 +186,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
       )
 
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ["c1"]}} =
-               FileIndex.get(file.id)
+               FileIndex.get(file.volume_id, file.id)
     end
   end
 
