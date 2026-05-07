@@ -328,7 +328,12 @@ defmodule NeonFS.Core.StripeRepair do
       {:ok, chunk_meta} ->
         {tier, drive_id} = extract_location(chunk_meta)
 
-        case ChunkFetcher.fetch_chunk(hash, tier: tier, drive_id: drive_id, verify: false) do
+        case ChunkFetcher.fetch_chunk(hash,
+               tier: tier,
+               drive_id: drive_id,
+               verify: false,
+               volume_id: volume_id
+             ) do
           {:ok, data, _source} -> {:ok, data}
           {:error, reason} -> {:error, reason}
         end

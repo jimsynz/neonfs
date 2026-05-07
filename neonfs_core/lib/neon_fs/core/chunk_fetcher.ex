@@ -181,7 +181,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   end
 
   defp fetch_from_local_then_remote(hash, start_time, opts) do
-    read_opts = build_read_opts(opts) |> with_compression_locator(hash)
+    read_opts = build_read_opts(opts) |> with_compression_locator(hash, opts)
     drive_id = Keyword.get(opts, :drive_id, "default")
     tier = Keyword.get(opts, :tier, "hot")
     volume_id = Keyword.get(opts, :volume_id, "_system")
@@ -224,7 +224,7 @@ defmodule NeonFS.Core.ChunkFetcher do
   end
 
   defp try_remote_fetch(hash, start_time, opts, local_reason) do
-    read_opts = build_read_opts(opts) |> with_compression_locator(hash)
+    read_opts = build_read_opts(opts) |> with_compression_locator(hash, opts)
     tier = Keyword.get(opts, :tier, "hot")
     cache_remote = Keyword.get(opts, :cache_remote, false)
 
@@ -237,7 +237,7 @@ defmodule NeonFS.Core.ChunkFetcher do
     exclude_nodes = Keyword.get(opts, :exclude_nodes, [])
 
     result =
-      case ChunkIndex.get(hash) do
+      case lookup_chunk_meta(opts, hash) do
         {:error, :not_found} ->
           {:error, :chunk_not_found}
 
@@ -399,14 +399,26 @@ defmodule NeonFS.Core.ChunkFetcher do
     end
   end
 
-  defp with_compression_locator(read_opts, hash) do
+  defp with_compression_locator(read_opts, hash, opts) do
     if Keyword.has_key?(read_opts, :compression) do
       read_opts
     else
-      case ChunkIndex.get(hash) do
+      case lookup_chunk_meta(opts, hash) do
         {:ok, meta} -> Keyword.put(read_opts, :compression, meta.compression)
         {:error, _} -> read_opts
       end
+    end
+  end
+
+  # Prefer the volume-scoped lookup when the caller threads `:volume_id`
+  # through `opts` — falls back to the legacy hash-only lookup so
+  # background runners that don't yet carry `volume_id` keep working
+  # (see #874 for the design call). Once those runners thread `volume_id`,
+  # the fallback can go.
+  defp lookup_chunk_meta(opts, hash) do
+    case Keyword.fetch(opts, :volume_id) do
+      {:ok, volume_id} -> ChunkIndex.get(volume_id, hash)
+      :error -> ChunkIndex.get(hash)
     end
   end
 
