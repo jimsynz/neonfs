@@ -315,7 +315,7 @@ defmodule NeonFS.Core.ReadOperation do
         {s, e} = normalise_byte_range(stripe_ref.byte_range)
         s < end_byte and e > offset
       end)
-      |> build_stripe_refs_list(offset, end_byte)
+      |> build_stripe_refs_list(file_meta.volume_id, offset, end_byte)
       |> case do
         {:ok, refs} -> {:ok, %{file_size: file_meta.size, chunks: refs}}
         {:error, _} = err -> err
@@ -331,19 +331,19 @@ defmodule NeonFS.Core.ReadOperation do
         []
       else
         file_meta.chunks
-        |> build_chunk_info_list(0, [])
+        |> build_chunk_info_list(file_meta.volume_id, 0, [])
         |> Enum.filter(fn {_hash, chunk_start, chunk_end} ->
           chunk_start < end_byte and chunk_end > offset
         end)
-        |> Enum.map(&to_chunk_ref(&1, offset, end_byte))
+        |> Enum.map(&to_chunk_ref(&1, file_meta.volume_id, offset, end_byte))
         |> Enum.reject(&is_nil/1)
       end
 
     {:ok, %{file_size: file_meta.size, chunks: refs}}
   end
 
-  defp to_chunk_ref({hash, chunk_start, chunk_end}, offset, end_byte) do
-    case ChunkIndex.get(hash) do
+  defp to_chunk_ref({hash, chunk_start, chunk_end}, volume_id, offset, end_byte) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         read_start = max(0, offset - chunk_start)
         read_end = min(chunk_end - chunk_start, end_byte - chunk_start)
@@ -369,10 +369,10 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp build_stripe_refs_list(stripe_refs, offset, end_byte) do
+  defp build_stripe_refs_list(stripe_refs, volume_id, offset, end_byte) do
     stripe_refs
     |> Enum.reduce_while({:ok, []}, fn stripe_ref, {:ok, acc} ->
-      case build_stripe_refs(stripe_ref, offset, end_byte) do
+      case build_stripe_refs(stripe_ref, volume_id, offset, end_byte) do
         {:ok, refs} -> {:cont, {:ok, [refs | acc]}}
         {:error, _} = err -> {:halt, err}
       end
@@ -383,14 +383,14 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp build_stripe_refs(%{stripe_id: stripe_id} = stripe_ref, offset, end_byte) do
-    case StripeIndex.get(stripe_id) do
+  defp build_stripe_refs(%{stripe_id: stripe_id} = stripe_ref, volume_id, offset, end_byte) do
+    case StripeIndex.get(volume_id, stripe_id) do
       {:ok, stripe} ->
         {stripe_start, _} = normalise_byte_range(stripe_ref.byte_range)
         data_hashes = Stripe.data_chunk_hashes(stripe)
 
-        if Enum.all?(data_hashes, &chunk_available?/1) do
-          build_stripe_data_chunk_refs(stripe, stripe_start, offset, end_byte)
+        if Enum.all?(data_hashes, &chunk_available?(volume_id, &1)) do
+          build_stripe_data_chunk_refs(stripe, volume_id, stripe_start, offset, end_byte)
         else
           {:error, :stripe_refs_unsupported}
         end
@@ -400,7 +400,7 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp build_stripe_data_chunk_refs(stripe, stripe_start, offset, end_byte) do
+  defp build_stripe_data_chunk_refs(stripe, volume_id, stripe_start, offset, end_byte) do
     chunk_size = stripe.config.chunk_size
     data_bytes = stripe.data_bytes
 
@@ -409,7 +409,16 @@ defmodule NeonFS.Core.ReadOperation do
       |> Stripe.data_chunk_hashes()
       |> Enum.with_index()
       |> Enum.map(fn {hash, idx} ->
-        build_single_stripe_ref(hash, idx, chunk_size, data_bytes, stripe_start, offset, end_byte)
+        build_single_stripe_ref(
+          hash,
+          volume_id,
+          idx,
+          chunk_size,
+          data_bytes,
+          stripe_start,
+          offset,
+          end_byte
+        )
       end)
       |> Enum.reject(&is_nil/1)
 
@@ -419,7 +428,16 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp build_single_stripe_ref(hash, idx, chunk_size, data_bytes, stripe_start, offset, end_byte) do
+  defp build_single_stripe_ref(
+         hash,
+         volume_id,
+         idx,
+         chunk_size,
+         data_bytes,
+         stripe_start,
+         offset,
+         end_byte
+       ) do
     chunk_start_in_stripe = idx * chunk_size
     real_end_in_stripe = min((idx + 1) * chunk_size, data_bytes)
 
@@ -439,12 +457,12 @@ defmodule NeonFS.Core.ReadOperation do
         read_start = max(0, offset - chunk_file_start)
         read_end = min(real_chunk_length, end_byte - chunk_file_start)
 
-        to_stripe_chunk_ref(hash, chunk_file_start, read_start, read_end - read_start)
+        to_stripe_chunk_ref(hash, volume_id, chunk_file_start, read_start, read_end - read_start)
     end
   end
 
-  defp to_stripe_chunk_ref(hash, chunk_offset, read_start, read_length) do
-    case ChunkIndex.get(hash) do
+  defp to_stripe_chunk_ref(hash, volume_id, chunk_offset, read_start, read_length) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         %{
           hash: hash,
@@ -547,7 +565,8 @@ defmodule NeonFS.Core.ReadOperation do
     if offset >= file_meta.size or end_byte <= offset do
       Stream.unfold(nil, fn _ -> nil end)
     else
-      chunk_infos = build_chunk_info_list(file_meta.chunks, 0, [])
+      volume_id = volume.id
+      chunk_infos = build_chunk_info_list(file_meta.chunks, volume_id, 0, [])
 
       needed =
         chunk_infos
@@ -561,7 +580,6 @@ defmodule NeonFS.Core.ReadOperation do
         end)
 
       should_verify = should_verify_on_read?(volume.verification)
-      volume_id = volume.id
 
       Stream.unfold(needed, &stream_next_chunk(&1, should_verify, volume_id))
     end
@@ -642,7 +660,7 @@ defmodule NeonFS.Core.ReadOperation do
     if offset >= file_meta.size do
       {:ok, []}
     else
-      chunk_infos = build_chunk_info_list(file_meta.chunks, 0, [])
+      chunk_infos = build_chunk_info_list(file_meta.chunks, file_meta.volume_id, 0, [])
 
       needed =
         chunk_infos
@@ -659,17 +677,20 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp build_chunk_info_list([], _offset, acc), do: Enum.reverse(acc)
+  defp build_chunk_info_list([], _volume_id, _offset, acc), do: Enum.reverse(acc)
 
-  defp build_chunk_info_list([hash | rest], current_offset, acc) do
-    case ChunkIndex.get(hash) do
+  defp build_chunk_info_list([hash | rest], volume_id, current_offset, acc) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         chunk_end = current_offset + chunk_meta.original_size
-        build_chunk_info_list(rest, chunk_end, [{hash, current_offset, chunk_end} | acc])
+
+        build_chunk_info_list(rest, volume_id, chunk_end, [
+          {hash, current_offset, chunk_end} | acc
+        ])
 
       {:error, :not_found} ->
         Logger.error("Chunk metadata not found", chunk_hash: Base.encode16(hash))
-        build_chunk_info_list(rest, current_offset, acc)
+        build_chunk_info_list(rest, volume_id, current_offset, acc)
     end
   end
 
@@ -739,7 +760,7 @@ defmodule NeonFS.Core.ReadOperation do
   end
 
   defp read_stripe(stripe_id, offset_in_stripe, length, should_verify, volume_id) do
-    case StripeIndex.get(stripe_id) do
+    case StripeIndex.get(volume_id, stripe_id) do
       {:ok, stripe} ->
         max_readable = max(0, stripe.data_bytes - offset_in_stripe)
         actual_length = min(length, max_readable)
@@ -780,7 +801,7 @@ defmodule NeonFS.Core.ReadOperation do
 
     available_count =
       stripe.chunks
-      |> Enum.count(&chunk_available?/1)
+      |> Enum.count(&chunk_available?(stripe.volume_id, &1))
 
     cond do
       available_count == n -> :healthy
@@ -789,8 +810,8 @@ defmodule NeonFS.Core.ReadOperation do
     end
   end
 
-  defp chunk_available?(chunk_hash) do
-    match?({:ok, _}, ChunkIndex.get(chunk_hash))
+  defp chunk_available?(volume_id, chunk_hash) do
+    match?({:ok, _}, ChunkIndex.get(volume_id, chunk_hash))
   end
 
   defp read_stripe_healthy(stripe, offset, length, should_verify, volume_id) do
@@ -822,7 +843,7 @@ defmodule NeonFS.Core.ReadOperation do
     available_with_idx =
       stripe.chunks
       |> Enum.with_index()
-      |> Enum.filter(fn {hash, _idx} -> chunk_available?(hash) end)
+      |> Enum.filter(fn {hash, _idx} -> chunk_available?(volume_id, hash) end)
 
     if Kernel.length(available_with_idx) < k do
       {:error, Unavailable.exception(message: "Insufficient chunks for stripe reconstruction")}
@@ -1075,7 +1096,7 @@ defmodule NeonFS.Core.ReadOperation do
   end
 
   defp emit_stripe_read_telemetry(stripe, state) do
-    available = Enum.count(stripe.chunks, &chunk_available?/1)
+    available = Enum.count(stripe.chunks, &chunk_available?(stripe.volume_id, &1))
     total = Kernel.length(stripe.chunks)
 
     :telemetry.execute(
