@@ -95,7 +95,21 @@ defmodule NeonFS.Core.Volume.Provisioner do
     end
   end
 
-  defp default_bootstrap_registrar(command), do: RaSupervisor.command(command)
+  # Normalises `RaSupervisor.command/1`'s `{:ok, result, leader}` reply
+  # shape into the simpler `:ok | {:ok, _} | {:error, _}` contract
+  # `register_root/2` matches against. Without this wrapper the
+  # 3-tuple slipped through `register_root/2`'s `other -> ` clause and
+  # surfaced as `{:bootstrap_register_failed, {:ok, :ok, leader}}` for
+  # every successful Ra commit, which broke `create_volume/2` whenever
+  # the cluster had at least one drive registered. Mirrors the same
+  # wrapper in `Deprovisioner` and `MetadataWriter`.
+  defp default_bootstrap_registrar(command) do
+    case RaSupervisor.command(command) do
+      {:ok, result, _leader} -> {:ok, result}
+      {:error, _} = err -> err
+      other -> {:error, other}
+    end
+  end
 
   defp load_cluster_state(loader) do
     case loader.() do
