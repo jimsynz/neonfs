@@ -102,9 +102,10 @@ defmodule NeonFS.Core.GarbageCollector do
   defp collect_direct_chunks(acc, _), do: acc
 
   # Erasure-coded files: stripes field → StripeIndex → chunk hashes
-  defp collect_stripe_chunks(acc, %{stripes: stripes}) when is_list(stripes) do
+  defp collect_stripe_chunks(acc, %{stripes: stripes, volume_id: volume_id})
+       when is_list(stripes) do
     Enum.reduce(stripes, acc, fn %{stripe_id: sid}, inner_acc ->
-      case StripeIndex.get(sid) do
+      case StripeIndex.get(volume_id, sid) do
         {:ok, stripe} ->
           Enum.reduce(stripe.chunks, inner_acc, &MapSet.put(&2, &1))
 
