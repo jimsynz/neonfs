@@ -374,7 +374,7 @@ defmodule NeonFS.Core.WriteOperation do
 
       with {:ok, chunks} <- chunk_and_store(data, volume, write_ctx, opts),
            {:ok, file_meta} <- create_file_metadata(volume.id, path, chunks, data, opts),
-           :ok <- commit_chunks(write_id, chunks),
+           :ok <- commit_chunks(volume.id, write_id, chunks),
            :ok <- update_volume_stats(volume.id, data, chunks) do
         {:ok, file_meta}
       else
@@ -405,7 +405,7 @@ defmodule NeonFS.Core.WriteOperation do
              stream_chunks(stream, chunker, compression_config, volume, write_ctx),
            {:ok, file_meta} <-
              create_file_metadata_with_size(volume.id, path, chunks, total_bytes, opts),
-           :ok <- commit_chunks(write_id, chunks),
+           :ok <- commit_chunks(volume.id, write_id, chunks),
            :ok <- update_volume_stats_with_size(volume.id, total_bytes, chunks) do
         PendingWriteLog.clear(write_id)
         {:ok, file_meta}
@@ -556,7 +556,7 @@ defmodule NeonFS.Core.WriteOperation do
       all_hashes = prefix_hashes ++ new_hashes ++ suffix_hashes
       new_size = max(file_meta.size, write_end)
 
-      update_file_and_commit(file_meta.id, write_id, new_chunks,
+      update_file_and_commit(file_meta.volume_id, file_meta.id, write_id, new_chunks,
         chunks: all_hashes,
         size: new_size
       )
@@ -733,6 +733,7 @@ defmodule NeonFS.Core.WriteOperation do
         all_stripes = prefix_stripes ++ new_stripe_refs ++ suffix_stripes
 
         update_file_and_commit(
+          file_meta.volume_id,
           file_meta.id,
           write_ctx.write_id,
           all_new_chunks,
@@ -895,7 +896,7 @@ defmodule NeonFS.Core.WriteOperation do
          all_chunks = collect_all_stripe_chunks(stripe_results),
          {:ok, file_meta} <-
            create_erasure_file_metadata(volume.id, path, stripe_results, data, opts),
-         :ok <- commit_chunks(write_ctx.write_id, all_chunks),
+         :ok <- commit_chunks(volume.id, write_ctx.write_id, all_chunks),
          :ok <- validate_erasure_commit(stripe_results, data),
          :ok <- update_volume_stats(volume.id, data, all_chunks) do
       {:ok, file_meta}
@@ -1631,13 +1632,13 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp update_file_and_commit(file_id, write_id, new_chunks, update_attrs) do
+  defp update_file_and_commit(volume_id, file_id, write_id, new_chunks, update_attrs) do
     now = DateTime.utc_now()
     attrs = update_attrs ++ [modified_at: now, changed_at: now]
 
     case FileIndex.update(file_id, attrs) do
       {:ok, updated_meta} ->
-        commit_chunks(write_id, new_chunks)
+        commit_chunks(volume_id, write_id, new_chunks)
         {:ok, updated_meta}
 
       {:error, _reason} = error ->
@@ -1646,23 +1647,23 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp commit_chunks(write_id, chunks) do
+  defp commit_chunks(volume_id, write_id, chunks) do
     results =
       Enum.map(chunks, fn chunk ->
         ChunkIndex.remove_write_ref(chunk.hash, write_id)
       end)
 
     if Enum.all?(results, &(&1 == :ok)) do
-      commit_all_chunks(chunks)
+      commit_all_chunks(volume_id, chunks)
     else
       {:error, :commit_failed}
     end
   end
 
-  defp commit_all_chunks(chunks) do
+  defp commit_all_chunks(volume_id, chunks) do
     commit_results =
       Enum.map(chunks, fn chunk ->
-        commit_chunk_if_ready(chunk.hash)
+        commit_chunk_if_ready(volume_id, chunk.hash)
       end)
 
     if Enum.all?(commit_results, &(&1 in [:ok, {:error, :has_active_writes}])) do
@@ -1672,8 +1673,8 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp commit_chunk_if_ready(hash) do
-    case ChunkIndex.get(hash) do
+  defp commit_chunk_if_ready(volume_id, hash) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, meta} ->
         if MapSet.size(meta.active_write_refs) == 0 do
           ChunkIndex.commit(hash)
