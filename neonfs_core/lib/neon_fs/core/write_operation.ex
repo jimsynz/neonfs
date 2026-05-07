@@ -651,7 +651,7 @@ defmodule NeonFS.Core.WriteOperation do
   defp maybe_pad_before(data, _offset, _file_size, _chunk_positions), do: data
 
   defp fetch_chunk_for_write(hash, volume_id) do
-    case ChunkIndex.get(hash) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         fetch_opts = build_chunk_fetch_opts(chunk_meta, volume_id)
 
@@ -1459,7 +1459,7 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp process_chunk(data, hash, offset, size, index, compression_config, volume, write_ctx) do
-    case ChunkIndex.get(hash) do
+    case ChunkIndex.get(volume.id, hash) do
       {:ok, existing_chunk} ->
         case ChunkIndex.add_write_ref(hash, write_ctx.write_id) do
           :ok ->
