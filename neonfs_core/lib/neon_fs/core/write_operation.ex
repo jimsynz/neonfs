@@ -784,7 +784,7 @@ defmodule NeonFS.Core.WriteOperation do
   defp rewrite_single_stripe(stripe_ref, offset, data, write_end, volume, write_ctx, opts) do
     %{stripe_id: old_stripe_id, byte_range: {stripe_start, stripe_end}} = stripe_ref
 
-    case StripeIndex.get(old_stripe_id) do
+    case StripeIndex.get(volume.id, old_stripe_id) do
       {:ok, stripe} ->
         data_chunk_count = stripe.config.data_chunks
         data_hashes = Enum.take(stripe.chunks, data_chunk_count)
