@@ -142,7 +142,7 @@ defmodule NeonFS.Core.StripeRepair do
 
     shards_to_fetch = Enum.take(available, k)
 
-    case fetch_shards(shards_to_fetch) do
+    case fetch_shards(stripe.volume_id, shards_to_fetch) do
       {:ok, shards_with_indices} ->
         decode_and_store(
           shards_with_indices,
@@ -279,7 +279,7 @@ defmodule NeonFS.Core.StripeRepair do
 
     available_count =
       stripe.chunks
-      |> Enum.count(&chunk_available?/1)
+      |> Enum.count(&chunk_available?(stripe.volume_id, &1))
 
     missing = n - available_count
 
@@ -290,15 +290,15 @@ defmodule NeonFS.Core.StripeRepair do
     end
   end
 
-  defp chunk_available?(chunk_hash) do
-    match?({:ok, _}, ChunkIndex.get(chunk_hash))
+  defp chunk_available?(volume_id, chunk_hash) do
+    match?({:ok, _}, ChunkIndex.get(volume_id, chunk_hash))
   end
 
   defp partition_chunks(stripe) do
     stripe.chunks
     |> Enum.with_index()
     |> Enum.reduce({[], []}, fn {hash, idx}, {avail, missing} ->
-      if chunk_available?(hash) do
+      if chunk_available?(stripe.volume_id, hash) do
         {[{hash, idx} | avail], missing}
       else
         {avail, [idx | missing]}
@@ -307,10 +307,10 @@ defmodule NeonFS.Core.StripeRepair do
     |> then(fn {avail, missing} -> {Enum.reverse(avail), Enum.reverse(missing)} end)
   end
 
-  defp fetch_shards(shards_to_fetch) do
+  defp fetch_shards(volume_id, shards_to_fetch) do
     results =
       Enum.map(shards_to_fetch, fn {hash, idx} ->
-        case fetch_chunk(hash) do
+        case fetch_chunk(volume_id, hash) do
           {:ok, data} -> {:ok, {idx, data}}
           error -> error
         end
@@ -323,8 +323,8 @@ defmodule NeonFS.Core.StripeRepair do
     end
   end
 
-  defp fetch_chunk(hash) do
-    case ChunkIndex.get(hash) do
+  defp fetch_chunk(volume_id, hash) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         {tier, drive_id} = extract_location(chunk_meta)
 
@@ -380,7 +380,7 @@ defmodule NeonFS.Core.StripeRepair do
     case StripeIndex.get(stripe_id) do
       {:ok, stripe} ->
         stripe.chunks
-        |> Enum.flat_map(&local_drive_resources_for_chunk/1)
+        |> Enum.flat_map(&local_drive_resources_for_chunk(stripe.volume_id, &1))
         |> Enum.uniq()
 
       _ ->
@@ -388,8 +388,8 @@ defmodule NeonFS.Core.StripeRepair do
     end
   end
 
-  defp local_drive_resources_for_chunk(hash) do
-    case ChunkIndex.get(hash) do
+  defp local_drive_resources_for_chunk(volume_id, hash) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk} ->
         chunk.locations
         |> Enum.filter(&(&1.node == Node.self()))
