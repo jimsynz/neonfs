@@ -540,7 +540,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp do_write_at(volume, file_meta, offset, data, write_id, opts) do
     write_end = offset + byte_size(data)
-    chunk_positions = build_chunk_info_list(file_meta.chunks, 0, [])
+    chunk_positions = build_chunk_info_list(file_meta.chunks, volume.id, 0, [])
     {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end)
 
     with {:ok, enc_ctx} <- resolve_encryption(volume),
@@ -567,20 +567,23 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp build_chunk_info_list([], _offset, acc), do: Enum.reverse(acc)
+  defp build_chunk_info_list([], _volume_id, _offset, acc), do: Enum.reverse(acc)
 
-  defp build_chunk_info_list([hash | rest], current_offset, acc) do
-    case ChunkIndex.get(hash) do
+  defp build_chunk_info_list([hash | rest], volume_id, current_offset, acc) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         chunk_end = current_offset + chunk_meta.original_size
-        build_chunk_info_list(rest, chunk_end, [{hash, current_offset, chunk_end} | acc])
+
+        build_chunk_info_list(rest, volume_id, chunk_end, [
+          {hash, current_offset, chunk_end} | acc
+        ])
 
       {:error, :not_found} ->
         Logger.error("Chunk metadata not found during offset write",
           chunk_hash: Base.encode16(hash)
         )
 
-        build_chunk_info_list(rest, current_offset, acc)
+        build_chunk_info_list(rest, volume_id, current_offset, acc)
     end
   end
 
