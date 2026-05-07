@@ -31,6 +31,8 @@ defmodule NeonFS.Core.ChunkIndex do
     RaSupervisor
   }
 
+  alias NeonFS.Core.Volume.MetadataReader
+
   @type location :: ChunkMeta.location()
 
   @chunk_key_prefix "chunk:"
@@ -61,13 +63,24 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @doc """
-  Retrieves chunk metadata by hash.
+  Retrieves chunk metadata by `volume_id` and `hash`.
 
-  Always resolves through `QuorumCoordinator.quorum_read/2` (or the Ra
-  fallback when `quorum_opts` is nil). The local ETS table is a
-  write-through materialisation for list operations on this node —
-  serving point reads from it would return stale values for keys
-  written or deleted elsewhere in the cluster (#342).
+  Resolves through `Volume.MetadataReader.get_chunk_meta/3`. The local
+  ETS table is a write-through materialisation for list operations on
+  this node — serving point reads from it would return stale values
+  for keys written or deleted elsewhere in the cluster (#342).
+  """
+  @spec get(binary(), binary()) :: {:ok, ChunkMeta.t()} | {:error, :not_found}
+  def get(volume_id, hash) when is_binary(volume_id) and is_binary(hash) do
+    get_from_metadata_reader(volume_id, hash)
+  end
+
+  @doc """
+  Legacy hash-only lookup. Retained for callers that do not yet have
+  a `volume_id` on hand — e.g. background runners that work off chunk
+  hashes alone. Callers with volume context should prefer `get/2`,
+  which routes through `Volume.MetadataReader`. This entry point will
+  be retired once #836's caller-threading is complete.
   """
   @spec get(binary()) :: {:ok, ChunkMeta.t()} | {:error, :not_found}
   def get(hash) when is_binary(hash) do
@@ -83,10 +96,19 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @doc """
-  Checks whether chunk metadata exists for the given hash.
+  Checks whether chunk metadata exists for the given `volume_id` /
+  `hash`.
 
-  Always resolves through `QuorumCoordinator.quorum_read/2` — see
-  `get/1` for rationale.
+  Resolves through `Volume.MetadataReader.get_chunk_meta/3` — see
+  `get/2` for rationale.
+  """
+  @spec exists?(binary(), binary()) :: boolean()
+  def exists?(volume_id, hash) when is_binary(volume_id) and is_binary(hash) do
+    match?({:ok, _}, get_from_metadata_reader(volume_id, hash))
+  end
+
+  @doc """
+  Legacy hash-only existence check. Same caveat as `get/1`.
   """
   @spec exists?(binary()) :: boolean()
   def exists?(hash) when is_binary(hash) do
@@ -265,6 +287,12 @@ defmodule NeonFS.Core.ChunkIndex do
         :persistent_term.get({__MODULE__, :quorum_opts}, nil)
 
     :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
+
+    metadata_reader_opts =
+      Keyword.get(opts, :metadata_reader_opts) ||
+        :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
+
+    :persistent_term.put({__MODULE__, :metadata_reader_opts}, metadata_reader_opts)
 
     if quorum_opts do
       case load_from_local_store() do
@@ -462,6 +490,13 @@ defmodule NeonFS.Core.ChunkIndex do
 
   defp safe_erase_quorum_opts do
     :persistent_term.erase({__MODULE__, :quorum_opts})
+
+    try do
+      :persistent_term.erase({__MODULE__, :metadata_reader_opts})
+    rescue
+      ArgumentError -> :ok
+    end
+
     :ok
   rescue
     ArgumentError -> :ok
@@ -472,6 +507,10 @@ defmodule NeonFS.Core.ChunkIndex do
 
   defp quorum_opts do
     :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+  end
+
+  defp metadata_reader_opts do
+    :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
   end
 
   # Private — Quorum operations
@@ -515,6 +554,25 @@ defmodule NeonFS.Core.ChunkIndex do
       {:ok, :written} -> :ok
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # Reads the chunk via `MetadataReader` first, then falls back to the
+  # legacy `QuorumCoordinator.quorum_read` (or Ra) path on `:not_found`
+  # / error. The fallback is load-bearing today because the per-volume
+  # index tree is only populated once the write-side migration (#787)
+  # lands — until then, `MetadataReader` returns `:not_found` in
+  # production for every key, and the only real source of truth is the
+  # old quorum-replicated `<drive>/meta/` segments. Once #787 lands the
+  # fallback can go.
+  defp get_from_metadata_reader(volume_id, hash) do
+    key = chunk_key(hash)
+
+    case MetadataReader.get_chunk_meta(volume_id, key, metadata_reader_opts()) do
+      {:ok, value} -> finalise_quorum_read(hash, value)
+      _ -> get_from_quorum(hash)
+    end
+  rescue
+    _ -> get_from_quorum(hash)
   end
 
   defp get_from_quorum(hash) do

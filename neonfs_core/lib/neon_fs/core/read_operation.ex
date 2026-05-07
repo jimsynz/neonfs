@@ -1012,7 +1012,7 @@ defmodule NeonFS.Core.ReadOperation do
   end
 
   defp fetch_single_chunk(hash, should_verify, volume_id) do
-    case ChunkIndex.get(hash) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         fetch_chunk_data(chunk_meta, should_verify, volume_id)
 
