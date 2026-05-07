@@ -94,10 +94,7 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
       assert summary.commands_failed == []
       assert summary.volumes >= 2
       assert summary.drives >= 1
-      # `Reconstruction.reconstruct/2` skips command construction when
-      # `:dry_run? == true` so `:commands` is `0` here — the runbook
-      # claims the count matches `drives + volumes`; this is a known
-      # discrepancy and is captured as a follow-up.
+      assert summary.commands == summary.drives + summary.volumes
 
       ra_volume_ids = volume_roots(cluster) |> Map.keys() |> MapSet.new()
       assert volume_id_a in ra_volume_ids

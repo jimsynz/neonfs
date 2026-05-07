@@ -203,7 +203,7 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
       assert drive_ids == ["drv-a", "drv-b"]
     end
 
-    test ":dry_run? skips command construction but keeps drives + volumes" do
+    test ":dry_run? still populates the result struct (#855)" do
       identity = sample_identity("drv-1")
       segment = sample_segment("vol-a")
 
@@ -219,7 +219,10 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
 
       assert [^identity] = result.drives
       assert Map.has_key?(result.volumes, "vol-a")
-      assert result.commands == []
+      # Commands are built regardless of `:dry_run?` so the CLI's
+      # preview output matches the runbook (`commands == drives +
+      # volumes`); the handler is what gates actual submission.
+      assert length(result.commands) == 2
     end
   end
 

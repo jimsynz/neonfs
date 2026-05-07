@@ -59,8 +59,10 @@ defmodule NeonFS.Core.Volume.Reconstruction do
 
   Optional opts:
 
-  - `:dry_run?` — skip the command-construction step; return the
-    discovered drives + volumes only.
+  - `:dry_run?` — populate the result struct without submitting
+    any commands. The `:commands` list is built either way so
+    the CLI's preview output matches what would be submitted; the
+    submission gate lives in the handler (`submit_commands/2`).
   - `:chunk_lister` — `(drive_path -> [chunk_hash])`. Default
     raises with a clear error so production callers must supply
     one (the CLI / orchestrator in #839 wires up the real walker).
@@ -73,7 +75,10 @@ defmodule NeonFS.Core.Volume.Reconstruction do
   def reconstruct(drive_paths, opts) when is_list(drive_paths) do
     expected_cluster_id = Keyword.fetch!(opts, :expected_cluster_id)
     target_node = Keyword.fetch!(opts, :node)
-    dry_run? = Keyword.get(opts, :dry_run?, false)
+    # `:dry_run?` is accepted for API stability but no longer changes
+    # what the algorithm returns — the handler gates submission, not
+    # this function. See #855.
+    _ = Keyword.get(opts, :dry_run?, false)
     identity_reader = Keyword.get(opts, :identity_reader, &Identity.read/1)
     chunk_lister = Keyword.get(opts, :chunk_lister, &default_chunk_lister/1)
     chunk_reader = Keyword.get(opts, :chunk_reader, &default_chunk_reader/2)
@@ -92,10 +97,11 @@ defmodule NeonFS.Core.Volume.Reconstruction do
         expected_cluster_id
       )
 
-    commands =
-      if dry_run?,
-        do: [],
-        else: build_commands(drives, volumes, drive_paths_by_id, target_node)
+    # Build commands regardless of `:dry_run?` so the CLI's preview
+    # output reports `commands == drives + volumes` per the runbook
+    # contract. The handler's `submit_commands/2` is what actually
+    # gates submission against the dry-run flag (#855).
+    commands = build_commands(drives, volumes, drive_paths_by_id, target_node)
 
     %{
       drives: drives,
