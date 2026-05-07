@@ -516,13 +516,29 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @doc """
   Reconnect two nodes bidirectionally.
 
-  Restores the cluster cookie on each side, then reconnects.
+  Restores the cluster cookie on each side, then reconnects, then
+  polls the underlying Erlang dist link until a sanity RPC succeeds
+  in both directions. `Node.connect/1` returns `true` once the
+  initial handshake completes, but the dist layer can still be
+  drifting through "Invalid challenge reply" retries after a
+  cookie-driven disconnect — calling code that follows the
+  reconnect with `:erpc.call` then burns its full per-RPC timeout
+  against a link the kernel is actively rejecting (#744).
+
+  ## Options
+
+    * `:timeout` — total wall-time budget for the reconnect probe
+      (default: `5_000` ms). On timeout returns `:ok` anyway —
+      best-effort, callers that depend on healthy distribution
+      should still re-verify with `wait_for_partition_healed/2`.
+
   Idempotent — does nothing if the nodes are already connected.
   """
-  @spec reconnect_nodes(cluster(), atom(), atom()) :: :ok
-  def reconnect_nodes(cluster, node_a_name, node_b_name) do
+  @spec reconnect_nodes(cluster(), atom(), atom(), keyword()) :: :ok
+  def reconnect_nodes(cluster, node_a_name, node_b_name, opts \\ []) do
     info_a = get_node!(cluster, node_a_name)
     info_b = get_node!(cluster, node_b_name)
+    timeout = Keyword.get(opts, :timeout, 5_000)
 
     # Use :peer.call to bypass distribution — the peer control channel is
     # independent of cookies and unaffected by global's partition prevention.
@@ -533,7 +549,40 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
     :peer.call(info_a.peer, Node, :connect, [info_b.node])
     :peer.call(info_b.peer, Node, :connect, [info_a.node])
+
+    wait_for_dist_link(info_a, info_b, timeout)
     :ok
+  end
+
+  # Poll until a 1s :rpc ping succeeds in both directions, or until
+  # the wall-time budget runs out. After a cookie-driven disconnect
+  # the dist layer can stay in a "Invalid challenge reply" loop for
+  # several seconds even though `Node.connect/1` already returned
+  # `true` — using :rpc.call as the probe (rather than `Node.list`)
+  # actually exercises the link the way a real RPC would.
+  defp wait_for_dist_link(info_a, info_b, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_for_dist_link(info_a, info_b, deadline)
+  end
+
+  defp do_wait_for_dist_link(info_a, info_b, deadline) do
+    if dist_rpc_ok?(info_a.peer, info_b.node) and dist_rpc_ok?(info_b.peer, info_a.node) do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        :ok
+      else
+        Process.sleep(100)
+        do_wait_for_dist_link(info_a, info_b, deadline)
+      end
+    end
+  end
+
+  defp dist_rpc_ok?(from_peer, to_node) do
+    case :peer.call(from_peer, :rpc, :call, [to_node, :erlang, :node, [], 1_000]) do
+      ^to_node -> true
+      _ -> false
+    end
   end
 
   @doc """
