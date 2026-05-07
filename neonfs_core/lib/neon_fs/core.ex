@@ -56,6 +56,18 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Gets a volume by its UUID id.
+
+  Counterpart to `get_volume/1` for callers (e.g. interface nodes
+  resolving a filehandle that embeds the volume's UUID rather than
+  its name) that hold a stable id but not the current name.
+  """
+  @spec get_volume_by_id(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, :not_found}
+  def get_volume_by_id(id) do
+    VolumeRegistry.get(id)
+  end
+
+  @doc """
   Creates a volume with the given name.
   """
   @spec create_volume(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, term()}

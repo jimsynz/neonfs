@@ -20,6 +20,7 @@ defmodule NeonFS.NFS.InodeTable do
   Uses ETS tables for fast concurrent reads:
   - `:nfs_inode_to_path` - Maps inode -> {volume_name, path}
   - `:nfs_path_to_inode` - Maps {volume_name, path} -> inode
+  - `:nfs_volume_index` - Maps volume_id_binary -> volume_name (for filehandle resolution; #761)
 
   ## Lifecycle
 
@@ -80,6 +81,56 @@ defmodule NeonFS.NFS.InodeTable do
   end
 
   @doc """
+  Register a `volume_id_binary -> volume_name` mapping in the volume
+  index. Idempotent — re-registering the same pair is a no-op.
+
+  Used by `MountBackend` after a successful export resolution so the
+  NFSv3 backend can recover the volume name from a filehandle's
+  embedded volume id without an extra RPC, even when the in-memory
+  inode table only carries the synthetic `{nil, "/"}` mapping for
+  `fileid: 1`. See `lookup_volume_name/1` and issue #761.
+  """
+  @spec register_volume_id(<<_::128>>, String.t()) :: :ok
+  def register_volume_id(volume_id_binary, volume_name)
+      when is_binary(volume_id_binary) and byte_size(volume_id_binary) == 16 and
+             is_binary(volume_name) do
+    :ets.insert(:nfs_volume_index, {volume_id_binary, volume_name})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc """
+  Look up the volume name registered for a `volume_id_binary`.
+
+  Returns `{:ok, volume_name}` on hit, `{:error, :not_found}` on miss.
+  """
+  @spec lookup_volume_name(<<_::128>>) :: {:ok, String.t()} | {:error, :not_found}
+  def lookup_volume_name(volume_id_binary)
+      when is_binary(volume_id_binary) and byte_size(volume_id_binary) == 16 do
+    case :ets.lookup(:nfs_volume_index, volume_id_binary) do
+      [{^volume_id_binary, volume_name}] -> {:ok, volume_name}
+      [] -> {:error, :not_found}
+    end
+  rescue
+    ArgumentError -> {:error, :not_found}
+  end
+
+  @doc """
+  Remove a `volume_id_binary -> volume_name` mapping. Used when an
+  export is dropped so a stale UUID can't resolve to a name that no
+  longer matches the local cluster.
+  """
+  @spec unregister_volume_id(<<_::128>>) :: :ok
+  def unregister_volume_id(volume_id_binary)
+      when is_binary(volume_id_binary) and byte_size(volume_id_binary) == 16 do
+    :ets.delete(:nfs_volume_index, volume_id_binary)
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc """
   Release (delete) an inode mapping.
 
   The root inode (1) cannot be released.
@@ -111,6 +162,7 @@ defmodule NeonFS.NFS.InodeTable do
   def init(_opts) do
     :ets.new(:nfs_inode_to_path, [:named_table, :public, :set, read_concurrency: true])
     :ets.new(:nfs_path_to_inode, [:named_table, :public, :set, read_concurrency: true])
+    :ets.new(:nfs_volume_index, [:named_table, :public, :set, read_concurrency: true])
 
     :ets.insert(:nfs_inode_to_path, {@root_inode, nil, "/"})
     :ets.insert(:nfs_path_to_inode, {{nil, "/"}, @root_inode})
@@ -165,6 +217,7 @@ defmodule NeonFS.NFS.InodeTable do
   def handle_call(:clear, _from, _state) do
     :ets.delete_all_objects(:nfs_inode_to_path)
     :ets.delete_all_objects(:nfs_path_to_inode)
+    :ets.delete_all_objects(:nfs_volume_index)
 
     :ets.insert(:nfs_inode_to_path, {@root_inode, nil, "/"})
     :ets.insert(:nfs_path_to_inode, {{nil, "/"}, @root_inode})

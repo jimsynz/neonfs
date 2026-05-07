@@ -915,10 +915,44 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp resolve_handle(fh) do
     with {:ok, decoded} <- Filehandle.decode(fh),
          {:ok, {vol_name_or_nil, path}} <- inode_table_get_path(decoded.fileid) do
-      vol_name = vol_name_or_nil || ""
+      vol_name = vol_name_or_nil || resolve_vol_name_from_id(decoded.volume_id)
       {:ok, decoded, vol_name, path}
     else
       _ -> {:error, :stale}
+    end
+  end
+
+  # MountBackend issues every per-volume filehandle with `fileid: 1`,
+  # whose `inode_table` mapping is the synthetic `{nil, "/"}` entry —
+  # the volume name lives in the filehandle's `volume_id` field
+  # instead. Recover it via the local `InodeTable` index (populated
+  # by `MountBackend.resolve/2`); fall back to `Core.get_volume_by_id`
+  # when the cache is empty (e.g. first request after an interface
+  # node restart). See #761.
+  @synthetic_root_volume_id <<0::128>>
+
+  defp resolve_vol_name_from_id(@synthetic_root_volume_id), do: ""
+
+  defp resolve_vol_name_from_id(volume_id_binary) do
+    case lookup_volume_name(volume_id_binary) do
+      {:ok, vol_name} ->
+        vol_name
+
+      {:error, :not_found} ->
+        fetch_and_cache_vol_name(volume_id_binary)
+    end
+  end
+
+  defp fetch_and_cache_vol_name(volume_id_binary) do
+    uuid = Filehandle.volume_uuid_from_binary(volume_id_binary)
+
+    case core_call(NeonFS.Core, :get_volume_by_id, [uuid]) do
+      {:ok, %{name: name}} when is_binary(name) ->
+        register_volume_id(volume_id_binary, name)
+        name
+
+      _ ->
+        ""
     end
   end
 
@@ -1023,6 +1057,20 @@ defmodule NeonFS.NFS.NFSv3Backend do
     case Application.get_env(:neonfs_nfs, :inode_table_allocate_fn) do
       nil -> InodeTable.allocate_inode(vol_name, path)
       fun when is_function(fun, 2) -> fun.(vol_name, path)
+    end
+  end
+
+  defp lookup_volume_name(volume_id_binary) do
+    case Application.get_env(:neonfs_nfs, :lookup_volume_name_fn) do
+      nil -> InodeTable.lookup_volume_name(volume_id_binary)
+      fun when is_function(fun, 1) -> fun.(volume_id_binary)
+    end
+  end
+
+  defp register_volume_id(volume_id_binary, vol_name) do
+    case Application.get_env(:neonfs_nfs, :register_volume_id_fn) do
+      nil -> InodeTable.register_volume_id(volume_id_binary, vol_name)
+      fun when is_function(fun, 2) -> fun.(volume_id_binary, vol_name)
     end
   end
 
