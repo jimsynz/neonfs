@@ -173,7 +173,7 @@ defmodule NeonFS.Core.Replication do
     case volume.write_ack do
       :local ->
         # Background replication - spawn async and return immediately
-        spawn_background_replication(chunk_hash, chunk_data, tier, targets)
+        spawn_background_replication(chunk_hash, chunk_data, tier, targets, volume.id)
         # Return only local location for now
         {:ok, [%{node: Node.self(), drive_id: local_drive_id, tier: tier}]}
 
@@ -183,11 +183,11 @@ defmodule NeonFS.Core.Replication do
 
       :all ->
         # Synchronous replication - wait for all
-        sync_replicate(chunk_hash, chunk_data, tier, targets, local_drive_id)
+        sync_replicate(chunk_hash, chunk_data, tier, targets, volume.id, local_drive_id)
     end
   end
 
-  defp spawn_background_replication(chunk_hash, chunk_data, tier, targets) do
+  defp spawn_background_replication(chunk_hash, chunk_data, tier, targets, volume_id) do
     Task.start(fn ->
       Logger.debug("Starting background replication", chunk_hash: Base.encode16(chunk_hash))
 
@@ -200,7 +200,7 @@ defmodule NeonFS.Core.Replication do
         |> Enum.map(fn {:ok, location} -> location end)
 
       unless Enum.empty?(successful_locations) do
-        add_locations_to_chunk(chunk_hash, successful_locations)
+        add_locations_to_chunk(volume_id, chunk_hash, successful_locations)
       end
 
       # Log any failures
@@ -232,7 +232,7 @@ defmodule NeonFS.Core.Replication do
 
     if length(successful_locations) >= required_successes do
       # Quorum achieved - update metadata and return
-      add_locations_to_chunk(chunk_hash, successful_locations)
+      add_locations_to_chunk(volume.id, chunk_hash, successful_locations)
       {:ok, all_locations}
     else
       # Quorum failed
@@ -245,7 +245,7 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp sync_replicate(chunk_hash, chunk_data, tier, targets, local_drive_id) do
+  defp sync_replicate(chunk_hash, chunk_data, tier, targets, volume_id, local_drive_id) do
     results = replicate_to_targets(chunk_hash, chunk_data, tier, targets)
 
     # Check if all succeeded
@@ -256,7 +256,7 @@ defmodule NeonFS.Core.Replication do
       all_locations = [%{node: Node.self(), drive_id: local_drive_id, tier: tier} | locations]
 
       # Update metadata with all locations
-      add_locations_to_chunk(chunk_hash, locations)
+      add_locations_to_chunk(volume_id, chunk_hash, locations)
       {:ok, all_locations}
     else
       # At least one failed
@@ -361,8 +361,8 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
-  defp add_locations_to_chunk(chunk_hash, new_locations) do
-    case ChunkIndex.get(chunk_hash) do
+  defp add_locations_to_chunk(volume_id, chunk_hash, new_locations) do
+    case ChunkIndex.get(volume_id, chunk_hash) do
       {:ok, chunk_meta} ->
         # Merge new locations with existing ones (avoid duplicates)
         updated_locations = Enum.uniq(chunk_meta.locations ++ new_locations)
