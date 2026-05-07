@@ -33,6 +33,8 @@ defmodule NeonFS.Core.FileIndex do
     QuorumCoordinator
   }
 
+  alias NeonFS.Core.Volume.MetadataReader
+
   alias NeonFS.Events.Broadcaster
 
   alias NeonFS.Events.{
@@ -78,23 +80,23 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
-  Retrieves a file by its ID.
+  Retrieves a file by `volume_id` and `file_id`.
 
-  Always resolves through `QuorumCoordinator.quorum_read/2`. The local
+  Resolves through `Volume.MetadataReader.get_file_meta/3`. The local
   ETS table is a write-through materialisation for list operations on
   this node — serving point reads from it would return stale values
   for files written or deleted elsewhere in the cluster (#342).
   """
-  @spec get(file_id()) :: {:ok, FileMeta.t()} | {:error, :not_found}
-  def get(file_id) do
-    get_from_quorum(file_id)
+  @spec get(volume_id(), file_id()) :: {:ok, FileMeta.t()} | {:error, :not_found}
+  def get(volume_id, file_id) do
+    get_from_metadata_reader(volume_id, file_id)
   end
 
   @doc """
   Retrieves a file by volume ID and path.
 
-  Parses the path into parent_path + name, reads the DirectoryEntry to find
-  the file_id, then reads the FileMeta via quorum.
+  Parses the path into parent_path + name, reads the DirectoryEntry to
+  find the file_id, then reads the FileMeta via `Volume.MetadataReader`.
   """
   @spec get_by_path(volume_id(), path()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get_by_path(volume_id, path) do
@@ -113,8 +115,8 @@ defmodule NeonFS.Core.FileIndex do
     {:ok, synthesise_dir_file_meta(volume_id, path, child)}
   end
 
-  defp resolve_child(_volume_id, _path, child) do
-    case get(child.id) do
+  defp resolve_child(volume_id, _path, child) do
+    case get(volume_id, child.id) do
       {:ok, file} -> {:ok, file}
       {:error, _} -> {:error, :not_found}
     end
@@ -282,7 +284,7 @@ defmodule NeonFS.Core.FileIndex do
 
     file_result =
       if file_id do
-        get(file_id)
+        get(volume_id, file_id)
       else
         get_by_path(volume_id, child_path)
       end
@@ -394,6 +396,12 @@ defmodule NeonFS.Core.FileIndex do
 
     :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
 
+    metadata_reader_opts =
+      Keyword.get(opts, :metadata_reader_opts) ||
+        :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
+
+    :persistent_term.put({__MODULE__, :metadata_reader_opts}, metadata_reader_opts)
+
     if quorum_opts do
       case load_from_local_store() do
         {:ok, count} ->
@@ -501,6 +509,13 @@ defmodule NeonFS.Core.FileIndex do
 
   defp safe_erase_quorum_opts do
     :persistent_term.erase({__MODULE__, :quorum_opts})
+
+    try do
+      :persistent_term.erase({__MODULE__, :metadata_reader_opts})
+    rescue
+      ArgumentError -> :ok
+    end
+
     :ok
   rescue
     ArgumentError -> :ok
@@ -1142,6 +1157,30 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
+  # Reads the file via `MetadataReader` first, then falls back to the
+  # legacy `QuorumCoordinator.quorum_read` path on `:not_found` /
+  # error. The fallback is load-bearing today because the per-volume
+  # index tree (`MetadataReader`'s backing store) is only populated
+  # once the write-side migration (#787) lands — until then,
+  # `MetadataReader` returns `:not_found` in production for every key,
+  # and the only real source of truth is the old quorum-replicated
+  # `<drive>/meta/` segments. Once #787 lands the fallback can go.
+  defp get_from_metadata_reader(volume_id, file_id) do
+    key = file_key(file_id)
+
+    case MetadataReader.get_file_meta(volume_id, key, metadata_reader_opts()) do
+      {:ok, value} ->
+        file = storable_map_to_file(value)
+        :ets.insert(:file_index_by_id, {file_id, file})
+        {:ok, file}
+
+      _ ->
+        get_from_quorum(file_id)
+    end
+  rescue
+    _ -> get_from_quorum(file_id)
+  end
+
   defp get_from_quorum(file_id) do
     case quorum_opts() do
       nil -> {:error, :not_found}
@@ -1516,5 +1555,9 @@ defmodule NeonFS.Core.FileIndex do
 
   defp quorum_opts do
     :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+  end
+
+  defp metadata_reader_opts do
+    :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
   end
 end

@@ -976,12 +976,12 @@ defmodule NeonFS.Core.ReadOperation do
   end
 
   # Counterpart to `get_file/2` keyed by `file_id`. Resolves through
-  # `FileIndex.get/1` which works for both live and `:detached` files
+  # `FileIndex.get/2` which works for both live and `:detached` files
   # — that's the whole point of the unlink-while-open story (#638).
   # Verifies the resolved FileMeta belongs to the requested volume so
   # a stale `file_id` from another volume can't slip through.
   defp get_file_by_id(volume_id, file_id) do
-    case FileIndex.get(file_id) do
+    case FileIndex.get(volume_id, file_id) do
       {:ok, %{volume_id: ^volume_id} = file_meta} ->
         {:ok, file_meta}
 

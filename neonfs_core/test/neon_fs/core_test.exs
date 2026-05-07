@@ -413,12 +413,13 @@ defmodule NeonFS.CoreTest do
     # close.
     test "file delete with no pins runs the full-delete path",
          %{volume_name: vol_name} do
-      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/full-delete.txt", ["data"])
+      {:ok, %{id: id, volume_id: volume_id}} =
+        Core.write_file_streamed(vol_name, "/full-delete.txt", ["data"])
 
       assert :ok = Core.delete_file(vol_name, "/full-delete.txt")
 
       assert {:error, :not_found} = Core.get_file_meta(vol_name, "/full-delete.txt")
-      assert {:error, :not_found} = FileIndex.get(id)
+      assert {:error, :not_found} = FileIndex.get(volume_id, id)
     end
 
     test "file delete with a live pin tombstones the FileMeta in place",
@@ -441,7 +442,7 @@ defmodule NeonFS.CoreTest do
 
         # File-id-based access still works — the FileMeta is detached.
         assert {:ok, %{detached: true, pinned_claim_ids: pin_ids}} =
-                 FileIndex.get(file_id)
+                 FileIndex.get(volume_id, file_id)
 
         assert pin_id in pin_ids
       after

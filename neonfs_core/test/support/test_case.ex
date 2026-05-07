@@ -26,7 +26,9 @@ defmodule NeonFS.TestCase do
 
   use ExUnit.CaseTemplate
 
+  alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.{MetadataRing, RaServer, RaSupervisor}
+  alias NeonFS.Core.Volume.{MetadataValue, RootSegment}
   alias NeonFS.Events.Relay
   alias NeonFS.IO.{Producer, Scheduler, WorkerSupervisor}
 
@@ -190,8 +192,12 @@ defmodule NeonFS.TestCase do
       if Keyword.has_key?(opts, :quorum_opts) do
         opts
       else
-        {quorum_opts, _store} = build_mock_quorum_opts()
-        [quorum_opts: quorum_opts]
+        {quorum_opts, store} = build_mock_quorum_opts()
+
+        [
+          quorum_opts: quorum_opts,
+          metadata_reader_opts: build_mock_metadata_reader_opts(store)
+        ]
       end
 
     stop_if_running(NeonFS.Core.FileIndex)
@@ -201,6 +207,87 @@ defmodule NeonFS.TestCase do
       {NeonFS.Core.FileIndex, opts},
       restart: :temporary
     )
+  end
+
+  @doc """
+  Builds opts for `NeonFS.Core.Volume.MetadataReader` that route every
+  read through a shared ETS `store` (typically the same one returned
+  by `build_mock_quorum_opts/0`). Lets unit tests exercise
+  `FileIndex.get/2` end-to-end against the same ETS the quorum stubs
+  write to. Values are stored as native terms and ETF-encoded by the
+  `index_tree_get` / `index_tree_range` stubs so MetadataReader's
+  `MetadataValue.decode/1` round-trip works.
+  """
+  def build_mock_metadata_reader_opts(store) do
+    cluster_id = "clust-test"
+
+    cluster_state = %ClusterState{
+      cluster_id: cluster_id,
+      cluster_name: "test-cluster",
+      created_at: DateTime.utc_now(),
+      master_key: <<0::256>>,
+      this_node: node()
+    }
+
+    segment =
+      RootSegment.new(
+        volume_id: "vol-stub",
+        volume_name: "vol-stub",
+        cluster_id: cluster_id,
+        cluster_name: "test-cluster",
+        durability: %{type: :replicate, factor: 1, min_copies: 1}
+      )
+
+    encoded_segment = RootSegment.encode(segment)
+
+    [
+      cluster_state_loader: fn -> {:ok, cluster_state} end,
+      bootstrap_lookup: fn volume_id ->
+        {:ok,
+         %{
+           volume_id: volume_id,
+           root_chunk_hash: <<0::256>>,
+           drive_locations: [%{node: node(), drive_id: "stub"}],
+           durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+           updated_at: DateTime.utc_now()
+         }}
+      end,
+      root_chunk_reader: fn _root_entry, _opts -> {:ok, encoded_segment} end,
+      store_handle: :stub_store,
+      index_tree_get: fn _store, _root, _tier, key ->
+        case :ets.lookup(store, key) do
+          [{^key, value}] -> {:ok, MetadataValue.encode(value)}
+          [] -> {:ok, nil}
+        end
+      end,
+      index_tree_range: fn _store, _root, _tier, start_key, end_key ->
+        entries =
+          :ets.foldl(
+            fn
+              {k, v}, acc when is_binary(k) ->
+                if k >= start_key and (end_key == <<>> or k < end_key) do
+                  [{k, MetadataValue.encode(v)} | acc]
+                else
+                  acc
+                end
+
+              _, acc ->
+                acc
+            end,
+            [],
+            store
+          )
+
+        {:ok, Enum.sort(entries)}
+      end,
+      cache_module: __MODULE__.NoopMetadataCache
+    ]
+  end
+
+  defmodule NoopMetadataCache do
+    @moduledoc false
+    def get(_v, _r, _k), do: :miss
+    def put(_v, _r, _k, _val), do: :ok
   end
 
   @doc """

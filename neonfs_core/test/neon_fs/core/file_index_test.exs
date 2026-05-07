@@ -47,11 +47,14 @@ defmodule NeonFS.Core.FileIndexTest do
       local_node: node()
     ]
 
+    metadata_reader_opts = build_mock_metadata_reader_opts(store)
+
     stop_if_running(NeonFS.Core.FileIndex)
     cleanup_ets_table(:file_index_by_id)
 
     start_supervised!(
-      {NeonFS.Core.FileIndex, quorum_opts: quorum_opts},
+      {NeonFS.Core.FileIndex,
+       quorum_opts: quorum_opts, metadata_reader_opts: metadata_reader_opts},
       restart: :temporary
     )
 
@@ -74,7 +77,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert {:ok, ^file} = FileIndex.create(file)
 
       # Verify it was stored in ETS cache
-      assert {:ok, retrieved} = FileIndex.get(file.id)
+      assert {:ok, retrieved} = FileIndex.get(file.volume_id, file.id)
       assert retrieved.id == file.id
       assert retrieved.path == "/test.txt"
       assert retrieved.volume_id == "vol1"
@@ -131,12 +134,12 @@ defmodule NeonFS.Core.FileIndexTest do
       file = FileMeta.new("vol1", "/test.txt")
       {:ok, _} = FileIndex.create(file)
 
-      assert {:ok, retrieved} = FileIndex.get(file.id)
+      assert {:ok, retrieved} = FileIndex.get(file.volume_id, file.id)
       assert retrieved.id == file.id
     end
 
     test "returns error if file not found" do
-      assert {:error, :not_found} = FileIndex.get("nonexistent-id")
+      assert {:error, :not_found} = FileIndex.get("vol1", "nonexistent-id")
     end
 
     test "quorum read populates ETS cache on miss", %{store: store} do
@@ -152,7 +155,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert [{^file_key, _}] = :ets.lookup(store, file_key)
 
       # get/1 should fall back to quorum and re-populate ETS
-      assert {:ok, retrieved} = FileIndex.get(file.id)
+      assert {:ok, retrieved} = FileIndex.get(file.volume_id, file.id)
       assert retrieved.id == file.id
       assert [{_, _}] = :ets.lookup(:file_index_by_id, file.id)
     end
@@ -265,7 +268,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert :ok = FileIndex.delete(created.id)
 
       # File should not be found
-      assert {:error, :not_found} = FileIndex.get(created.id)
+      assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
     end
 
     test "removes from both quorum store and ETS cache", %{store: store} do
@@ -338,7 +341,9 @@ defmodule NeonFS.Core.FileIndexTest do
       {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/keep.txt"))
       {:ok, _} = FileIndex.mark_detached(created.id, ["ns-claim-1"])
 
-      assert {:ok, %FileMeta{detached: true, id: id}} = FileIndex.get(created.id)
+      assert {:ok, %FileMeta{detached: true, id: id}} =
+               FileIndex.get(created.volume_id, created.id)
+
       assert id == created.id
     end
 
@@ -370,7 +375,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert :ok = FileIndex.decrement_pin(created.id, "c2")
 
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ids}} =
-               FileIndex.get(created.id)
+               FileIndex.get(created.volume_id, created.id)
 
       assert Enum.sort(ids) == ["c1", "c3"]
     end
@@ -380,7 +385,7 @@ defmodule NeonFS.Core.FileIndexTest do
       {:ok, _} = FileIndex.mark_detached(created.id, ["only-pin"])
 
       assert :ok = FileIndex.decrement_pin(created.id, "only-pin")
-      assert {:error, :not_found} = FileIndex.get(created.id)
+      assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
     end
 
     test "is a no-op for an unknown claim id (already-released)" do
@@ -389,7 +394,9 @@ defmodule NeonFS.Core.FileIndexTest do
 
       assert :ok = FileIndex.decrement_pin(created.id, "never-existed")
 
-      assert {:ok, %FileMeta{pinned_claim_ids: ids}} = FileIndex.get(created.id)
+      assert {:ok, %FileMeta{pinned_claim_ids: ids}} =
+               FileIndex.get(created.volume_id, created.id)
+
       assert Enum.sort(ids) == ["c1", "c2"]
     end
 
@@ -398,7 +405,7 @@ defmodule NeonFS.Core.FileIndexTest do
 
       assert :ok = FileIndex.decrement_pin(created.id, "irrelevant")
 
-      assert {:ok, %FileMeta{detached: false}} = FileIndex.get(created.id)
+      assert {:ok, %FileMeta{detached: false}} = FileIndex.get(created.volume_id, created.id)
     end
 
     test "is a no-op for a non-existent file_id" do
@@ -412,7 +419,7 @@ defmodule NeonFS.Core.FileIndexTest do
       {:ok, _} = FileIndex.mark_detached(created.id, ["c1"])
 
       assert :ok = FileIndex.purge_detached(created.id)
-      assert {:error, :not_found} = FileIndex.get(created.id)
+      assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
     end
 
     test "refuses to purge a non-detached file" do
@@ -421,7 +428,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert {:error, :not_detached} = FileIndex.purge_detached(created.id)
 
       # Live file still reachable.
-      assert {:ok, %FileMeta{detached: false}} = FileIndex.get(created.id)
+      assert {:ok, %FileMeta{detached: false}} = FileIndex.get(created.volume_id, created.id)
     end
 
     test "is idempotent for an already-purged or non-existent file" do
@@ -670,7 +677,7 @@ defmodule NeonFS.Core.FileIndexTest do
 
       tasks =
         for _ <- 1..100 do
-          Task.async(fn -> FileIndex.get(created.id) end)
+          Task.async(fn -> FileIndex.get(created.volume_id, created.id) end)
         end
 
       results = Task.await_many(tasks)
@@ -873,7 +880,7 @@ defmodule NeonFS.Core.FileIndexTest do
       # Clear ETS cache to force quorum read + deserialization
       :ets.delete(:file_index_by_id, created.id)
 
-      {:ok, retrieved} = FileIndex.get(created.id)
+      {:ok, retrieved} = FileIndex.get(created.volume_id, created.id)
 
       assert retrieved.acl_entries == acl_entries
       assert retrieved.default_acl == default_acl
@@ -885,7 +892,7 @@ defmodule NeonFS.Core.FileIndexTest do
       {:ok, created} = FileIndex.create(file)
       :ets.delete(:file_index_by_id, created.id)
 
-      {:ok, retrieved} = FileIndex.get(created.id)
+      {:ok, retrieved} = FileIndex.get(created.volume_id, created.id)
 
       assert retrieved.acl_entries == []
       assert retrieved.default_acl == nil
@@ -904,7 +911,7 @@ defmodule NeonFS.Core.FileIndexTest do
       # Clear ETS cache to force quorum read
       :ets.delete(:file_index_by_id, updated.id)
 
-      {:ok, retrieved} = FileIndex.get(updated.id)
+      {:ok, retrieved} = FileIndex.get(updated.volume_id, updated.id)
       assert retrieved.acl_entries == acl_entries
     end
 
@@ -1013,9 +1020,9 @@ defmodule NeonFS.Core.FileIndexTest do
       file_key = "file:" <> file_id
       :ets.insert(store, {file_key, stringified})
 
-      # Also insert into ETS so get_by_path can find it... actually, just use get/1
-      # which falls back to quorum when ETS misses.
-      {:ok, retrieved} = FileIndex.get(file_id)
+      # Also insert into ETS so get_by_path can find it... actually, just use
+      # get/2 which falls back to MetadataReader when ETS misses.
+      {:ok, retrieved} = FileIndex.get("vol1", file_id)
 
       assert retrieved.acl_entries == [
                %{type: :user, id: 1000, permissions: MapSet.new([:r, :w])},

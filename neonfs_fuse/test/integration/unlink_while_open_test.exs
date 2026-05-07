@@ -200,7 +200,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
 
       # File still exists by id (create_fh's pin is alive).
       assert {:ok, %{detached: true, id: ^file_id}} =
-               Router.call(FileIndex, :get, [file_id])
+               Router.call(FileIndex, :get, [volume_id, file_id])
 
       # ── Step 7: release the create fh too — last pin drops, GC
       # fires through the release-telemetry handler.
@@ -215,13 +215,11 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
                  fn ->
                    match?(
                      {:error, :not_found},
-                     Router.call(FileIndex, :get, [file_id])
+                     Router.call(FileIndex, :get, [volume_id, file_id])
                    )
                  end,
                  timeout: 5_000
                )
-
-      _ = volume_id
     end
   end
 end

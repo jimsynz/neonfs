@@ -332,7 +332,7 @@ defmodule NeonFS.Integration.ACLTest do
 
       # Verify the default_acl was set
       {:ok, updated_parent} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get, [parent_file.id])
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get, [vid, parent_file.id])
 
       assert is_list(updated_parent.default_acl)
       assert length(updated_parent.default_acl) == 2
