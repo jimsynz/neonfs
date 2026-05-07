@@ -47,11 +47,14 @@ defmodule NeonFS.Core.ChunkIndexTest do
       local_node: node()
     ]
 
+    metadata_reader_opts = build_mock_metadata_reader_opts(store)
+
     stop_if_running(NeonFS.Core.ChunkIndex)
     cleanup_ets_table(:chunk_index)
 
     start_supervised!(
-      {NeonFS.Core.ChunkIndex, quorum_opts: quorum_opts},
+      {NeonFS.Core.ChunkIndex,
+       quorum_opts: quorum_opts, metadata_reader_opts: metadata_reader_opts},
       restart: :temporary
     )
 
@@ -121,6 +124,38 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
       # ETS should be populated again
       assert [{^hash, _}] = :ets.lookup(:chunk_index, hash)
+    end
+  end
+
+  describe "get/2 (volume-scoped read via MetadataReader)" do
+    test "round-trips through the per-volume metadata read path" do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
+
+      assert :ok = ChunkIndex.put(chunk_meta)
+
+      :ets.delete(:chunk_index, hash)
+      assert {:ok, retrieved} = ChunkIndex.get("vol1", hash)
+      assert retrieved.hash == hash
+      assert retrieved.original_size == 1024
+    end
+
+    test "returns :not_found for an unknown chunk" do
+      hash = :crypto.strong_rand_bytes(32)
+      assert {:error, :not_found} = ChunkIndex.get("vol1", hash)
+    end
+  end
+
+  describe "exists?/2 (volume-scoped existence check)" do
+    test "returns true when the chunk is present" do
+      hash = :crypto.strong_rand_bytes(32)
+      assert :ok = ChunkIndex.put(ChunkMeta.new(hash, 1024, 1024))
+      assert ChunkIndex.exists?("vol1", hash)
+    end
+
+    test "returns false for an unknown chunk" do
+      hash = :crypto.strong_rand_bytes(32)
+      refute ChunkIndex.exists?("vol1", hash)
     end
   end
 
