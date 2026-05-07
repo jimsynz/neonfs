@@ -1157,6 +1157,14 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
+  # Reads the file via `MetadataReader` first, then falls back to the
+  # legacy `QuorumCoordinator.quorum_read` path on `:not_found` /
+  # error. The fallback is load-bearing today because the per-volume
+  # index tree (`MetadataReader`'s backing store) is only populated
+  # once the write-side migration (#787) lands — until then,
+  # `MetadataReader` returns `:not_found` in production for every key,
+  # and the only real source of truth is the old quorum-replicated
+  # `<drive>/meta/` segments. Once #787 lands the fallback can go.
   defp get_from_metadata_reader(volume_id, file_id) do
     key = file_key(file_id)
 
@@ -1166,14 +1174,18 @@ defmodule NeonFS.Core.FileIndex do
         :ets.insert(:file_index_by_id, {file_id, file})
         {:ok, file}
 
-      {:error, :not_found} ->
-        {:error, :not_found}
-
-      {:error, _reason} ->
-        {:error, :not_found}
+      _ ->
+        get_from_quorum(file_id)
     end
   rescue
-    _ -> {:error, :not_found}
+    _ -> get_from_quorum(file_id)
+  end
+
+  defp get_from_quorum(file_id) do
+    case quorum_opts() do
+      nil -> {:error, :not_found}
+      opts -> get_file_from_quorum(file_id, opts)
+    end
   end
 
   defp get_file_from_quorum(file_id, quorum_opts) do
