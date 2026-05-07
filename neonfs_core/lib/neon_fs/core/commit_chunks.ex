@@ -106,11 +106,11 @@ defmodule NeonFS.Core.CommitChunks do
            :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
            :ok <- check_lock(volume_id, path, client_ref, opts),
            chunk_metas <-
-             reconcile_chunks(chunk_hashes, locations_map, chunk_codecs, write_id),
+             reconcile_chunks(volume_id, chunk_hashes, locations_map, chunk_codecs, write_id),
            {:ok, reconciled} <- collect_reconciled(chunk_metas),
            {:ok, file_meta} <-
              create_file_metadata(volume.id, path, chunk_hashes, total_size, opts),
-           :ok <- commit_chunk_refs(reconciled, write_id) do
+           :ok <- commit_chunk_refs(volume_id, reconciled, write_id) do
         {:ok, file_meta}
       end
 
@@ -151,9 +151,10 @@ defmodule NeonFS.Core.CommitChunks do
     end
   end
 
-  defp reconcile_chunks(chunk_hashes, locations_map, chunk_codecs, write_id) do
+  defp reconcile_chunks(volume_id, chunk_hashes, locations_map, chunk_codecs, write_id) do
     Enum.map(chunk_hashes, fn hash ->
       reconcile_chunk(
+        volume_id,
         hash,
         Map.get(locations_map, hash),
         Map.get(chunk_codecs, hash, %{compression: :none, crypto: nil}),
@@ -162,12 +163,12 @@ defmodule NeonFS.Core.CommitChunks do
     end)
   end
 
-  defp reconcile_chunk(hash, nil, _codec, _write_id) do
+  defp reconcile_chunk(_volume_id, hash, nil, _codec, _write_id) do
     {:error, {:unknown_chunk_location, hash}}
   end
 
-  defp reconcile_chunk(hash, locations, codec, write_id) do
-    case ChunkIndex.get(hash) do
+  defp reconcile_chunk(volume_id, hash, locations, codec, write_id) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, existing} ->
         add_write_ref(existing, write_id, locations)
 
@@ -305,7 +306,7 @@ defmodule NeonFS.Core.CommitChunks do
     end
   end
 
-  defp commit_chunk_refs(metas, write_id) do
+  defp commit_chunk_refs(volume_id, metas, write_id) do
     remove_results =
       Enum.map(metas, fn %ChunkMeta{hash: hash} ->
         ChunkIndex.remove_write_ref(hash, write_id)
@@ -313,7 +314,7 @@ defmodule NeonFS.Core.CommitChunks do
 
     if Enum.all?(remove_results, &(&1 == :ok)) do
       commit_results =
-        Enum.map(metas, fn %ChunkMeta{hash: hash} -> commit_if_ready(hash) end)
+        Enum.map(metas, fn %ChunkMeta{hash: hash} -> commit_if_ready(volume_id, hash) end)
 
       if Enum.all?(commit_results, &acceptable_commit_result?/1) do
         :ok
@@ -325,8 +326,8 @@ defmodule NeonFS.Core.CommitChunks do
     end
   end
 
-  defp commit_if_ready(hash) do
-    case ChunkIndex.get(hash) do
+  defp commit_if_ready(volume_id, hash) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, %ChunkMeta{active_write_refs: refs}} ->
         if MapSet.size(refs) == 0 do
           ChunkIndex.commit(hash)
