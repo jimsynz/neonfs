@@ -618,32 +618,34 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   defp truncation_updates_for(file, new_size) do
-    trimmed_chunks = trim_chunks_to_size(file.chunks, new_size)
+    trimmed_chunks = trim_chunks_to_size(file.volume_id, file.chunks, new_size)
     trimmed_stripes = trim_stripes_to_size(file.stripes, new_size)
     [size: new_size, chunks: trimmed_chunks, stripes: trimmed_stripes]
   end
 
-  defp trim_chunks_to_size(chunks, target_size) do
-    do_trim_chunks(chunks, target_size, 0, [])
+  defp trim_chunks_to_size(volume_id, chunks, target_size) do
+    do_trim_chunks(volume_id, chunks, target_size, 0, [])
   end
 
-  defp do_trim_chunks([], _target, _offset, acc), do: Enum.reverse(acc)
+  defp do_trim_chunks(_volume_id, [], _target, _offset, acc), do: Enum.reverse(acc)
 
-  defp do_trim_chunks([hash | rest], target, offset, acc) do
-    case ChunkIndex.get(hash) do
+  defp do_trim_chunks(volume_id, [hash | rest], target, offset, acc) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
         if offset >= target do
           # This chunk starts at or beyond the target — drop it and all remaining
           Enum.reverse(acc)
         else
           # This chunk covers bytes before the target — keep it
-          do_trim_chunks(rest, target, offset + chunk_meta.original_size, [hash | acc])
+          do_trim_chunks(volume_id, rest, target, offset + chunk_meta.original_size, [
+            hash | acc
+          ])
         end
 
       {:error, :not_found} ->
         # Can't determine size — keep the chunk to be safe
         Logger.warning("Chunk size unknown during truncation, keeping chunk")
-        do_trim_chunks(rest, target, offset, [hash | acc])
+        do_trim_chunks(volume_id, rest, target, offset, [hash | acc])
     end
   end
 
