@@ -40,10 +40,11 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
     path = "/handle.bin"
     file_id = write_file_and_get_id(cluster, :node1, volume, path)
+    vol_id = volume_id(cluster, volume)
 
     # Pin on node1 — same shape as a FUSE peer holding an open fd.
     holder = start_holder(cluster, :node1)
-    key = "vol:" <> volume_id(cluster, volume) <> ":" <> path
+    key = "vol:" <> vol_id <> ":" <> path
 
     {:ok, pin_id} =
       PeerCluster.rpc(cluster, :node1, NamespaceCoordinator, :claim_pinned_for, [
@@ -63,7 +64,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
                "path should be 404 on #{inspect(node)} after pinned delete"
 
         assert {:ok, %{detached: true, pinned_claim_ids: ids}} =
-                 PeerCluster.rpc(cluster, node, FileIndex, :get, [file_id]),
+                 PeerCluster.rpc(cluster, node, FileIndex, :get, [vol_id, file_id]),
                "file_id should resolve on #{inspect(node)} while pinned"
 
         assert pin_id in ids
@@ -77,7 +78,10 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
       # Wait for the GC to converge across all nodes — the telemetry
       # fires on Ra command commit, which replicates asynchronously.
-      assert :ok = wait_until(fn -> file_gone_everywhere?(cluster, file_id) end, timeout: 5_000)
+      assert :ok =
+               wait_until(fn -> file_gone_everywhere?(cluster, vol_id, file_id) end,
+                 timeout: 5_000
+               )
     after
       Agent.stop(holder, :normal, 1_000)
     end
@@ -90,10 +94,11 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
     path = "/multi-handle.bin"
     file_id = write_file_and_get_id(cluster, :node1, volume, path)
+    vol_id = volume_id(cluster, volume)
 
     holder1 = start_holder(cluster, :node1)
     holder2 = start_holder(cluster, :node2)
-    key = "vol:" <> volume_id(cluster, volume) <> ":" <> path
+    key = "vol:" <> vol_id <> ":" <> path
 
     {:ok, pin1} =
       PeerCluster.rpc(cluster, :node1, NamespaceCoordinator, :claim_pinned_for, [
@@ -114,7 +119,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
       # Both pins captured in the tombstone snapshot.
       assert {:ok, %{detached: true, pinned_claim_ids: snapshot}} =
-               PeerCluster.rpc(cluster, :node3, FileIndex, :get, [file_id])
+               PeerCluster.rpc(cluster, :node3, FileIndex, :get, [vol_id, file_id])
 
       assert pin1 in snapshot and pin2 in snapshot
 
@@ -124,7 +129,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
       assert :ok =
                wait_until(
                  fn ->
-                   case PeerCluster.rpc(cluster, :node3, FileIndex, :get, [file_id]) do
+                   case PeerCluster.rpc(cluster, :node3, FileIndex, :get, [vol_id, file_id]) do
                      {:ok, %{detached: true, pinned_claim_ids: [^pin2]}} -> true
                      _ -> false
                    end
@@ -135,7 +140,10 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
       # Release the second pin — file purged.
       :ok = PeerCluster.rpc(cluster, :node2, NamespaceCoordinator, :release, [pin2])
 
-      assert :ok = wait_until(fn -> file_gone_everywhere?(cluster, file_id) end, timeout: 5_000)
+      assert :ok =
+               wait_until(fn -> file_gone_everywhere?(cluster, vol_id, file_id) end,
+                 timeout: 5_000
+               )
     after
       Agent.stop(holder1, :normal, 1_000)
       Agent.stop(holder2, :normal, 1_000)
@@ -171,11 +179,11 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
     pid
   end
 
-  defp file_gone_everywhere?(cluster, file_id) do
+  defp file_gone_everywhere?(cluster, vol_id, file_id) do
     Enum.all?([:node1, :node2, :node3], fn node ->
       match?(
         {:error, :not_found},
-        PeerCluster.rpc(cluster, node, FileIndex, :get, [file_id])
+        PeerCluster.rpc(cluster, node, FileIndex, :get, [vol_id, file_id])
       )
     end)
   end

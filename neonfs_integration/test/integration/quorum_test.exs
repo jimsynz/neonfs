@@ -383,7 +383,7 @@ defmodule NeonFS.Integration.QuorumTest do
       # pre-#342 code would subsequently serve without consulting the
       # quorum store.
       {:ok, ^file} =
-        PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.id])
+        PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.volume_id, file.id])
 
       # Delete on node1 via the high-level helper (quorum-delete of the
       # FileMeta + the parent DirectoryEntry child). Node1's local ETS
@@ -402,7 +402,7 @@ defmodule NeonFS.Integration.QuorumTest do
       # Quorum writes ack at W=2 but the third replica's apply is async —
       # poll briefly so we do not race the tombstone replication.
       assert_eventually timeout: 10_000 do
-        PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.id]) ==
+        PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.volume_id, file.id]) ==
           {:error, :not_found}
       end
     end
