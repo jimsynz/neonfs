@@ -20,7 +20,7 @@ defmodule NeonFS.NFS.MountBackend do
   @behaviour NFSServer.Mount.Backend
 
   alias NeonFS.Client.Router
-  alias NeonFS.NFS.{ExportManager, Filehandle}
+  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable}
   alias NFSServer.Mount.Types.ExportNode
 
   @synthetic_root_volume_id <<0::128>>
@@ -40,6 +40,11 @@ defmodule NeonFS.NFS.MountBackend do
   def resolve("/" <> volume_name, _ctx) do
     case lookup_export(volume_name) do
       {:ok, volume_id_binary} ->
+        # Populate the volume index so the NFSv3 backend can recover
+        # the volume name from a filehandle's volume id even when
+        # `inode_table_get_path/1` only returns the synthetic
+        # `{nil, "/"}` mapping for `fileid: 1`. See #761.
+        InodeTable.register_volume_id(volume_id_binary, volume_name)
         {:ok, Filehandle.encode(volume_id_binary, @synthetic_root_fileid), @auth_flavors}
 
       {:error, :not_found} ->

@@ -75,4 +75,41 @@ defmodule NeonFS.NFS.InodeTableTest do
     assert {:error, :not_found} = InodeTable.get_path(inode)
     assert {:ok, {nil, "/"}} = InodeTable.get_path(1)
   end
+
+  describe "volume_id index (issue #761)" do
+    @volume_id_bin <<0x12345678::32, 0::32, 0::32, 0::32>>
+
+    test "register_volume_id then lookup_volume_name round-trips" do
+      assert :ok = InodeTable.register_volume_id(@volume_id_bin, "photos")
+      assert {:ok, "photos"} = InodeTable.lookup_volume_name(@volume_id_bin)
+    end
+
+    test "lookup_volume_name returns :not_found before registration" do
+      assert {:error, :not_found} = InodeTable.lookup_volume_name(@volume_id_bin)
+    end
+
+    test "register_volume_id is idempotent on the same id" do
+      :ok = InodeTable.register_volume_id(@volume_id_bin, "photos")
+      :ok = InodeTable.register_volume_id(@volume_id_bin, "photos")
+      assert {:ok, "photos"} = InodeTable.lookup_volume_name(@volume_id_bin)
+    end
+
+    test "re-registering overwrites the previous name (volume rename)" do
+      :ok = InodeTable.register_volume_id(@volume_id_bin, "photos")
+      :ok = InodeTable.register_volume_id(@volume_id_bin, "pictures")
+      assert {:ok, "pictures"} = InodeTable.lookup_volume_name(@volume_id_bin)
+    end
+
+    test "unregister_volume_id drops the mapping" do
+      :ok = InodeTable.register_volume_id(@volume_id_bin, "photos")
+      :ok = InodeTable.unregister_volume_id(@volume_id_bin)
+      assert {:error, :not_found} = InodeTable.lookup_volume_name(@volume_id_bin)
+    end
+
+    test "clear/0 wipes the volume_id index" do
+      :ok = InodeTable.register_volume_id(@volume_id_bin, "photos")
+      :ok = InodeTable.clear()
+      assert {:error, :not_found} = InodeTable.lookup_volume_name(@volume_id_bin)
+    end
+  end
 end

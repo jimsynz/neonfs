@@ -19,6 +19,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       Application.delete_env(:neonfs_nfs, :inode_table_get_path_fn)
       Application.delete_env(:neonfs_nfs, :inode_table_allocate_fn)
       Application.delete_env(:neonfs_nfs, :read_file_stream_fn)
+      Application.delete_env(:neonfs_nfs, :lookup_volume_name_fn)
+      Application.delete_env(:neonfs_nfs, :register_volume_id_fn)
     end)
 
     :ok
@@ -54,6 +56,19 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
   defp normalise_path_pair({_, _} = pair), do: pair
   defp normalise_path_pair(path) when is_binary(path), do: {nil, path}
+
+  defp put_volume_index(index) do
+    Application.put_env(:neonfs_nfs, :lookup_volume_name_fn, fn vol_id_bin ->
+      case Map.fetch(index, vol_id_bin) do
+        {:ok, name} -> {:ok, name}
+        :error -> {:error, :not_found}
+      end
+    end)
+
+    Application.put_env(:neonfs_nfs, :register_volume_id_fn, fn _vol_id_bin, _vol_name ->
+      :ok
+    end)
+  end
 
   defp put_core(handler) do
     Application.put_env(:neonfs_nfs, :core_call_fn, handler)
@@ -1033,6 +1048,78 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       # for the post-op view — two calls total.
       assert_receive :get_called
       assert_receive :get_called
+    end
+  end
+
+  ## Regression — #761 (mount filehandle with `fileid: 1`)
+
+  describe "synthetic-root filehandle (issue #761)" do
+    # `MountBackend.resolve/2` issues every per-volume mount handle
+    # with `fileid: 1`, whose `inode_table` mapping is
+    # `{nil, "/"}`. Without the volume-id index lookup the resolved
+    # `vol_name` was the empty string, so `core_call(NeonFS.Core,
+    # :list_dir, ["", "/"])` failed with `:not_found` and a
+    # freshly-mounted empty volume couldn't be listed.
+
+    @synthetic_root_fileid 1
+
+    test "getattr on the synthetic root fhandle resolves the volume name" do
+      put_inode_table(%{@synthetic_root_fileid => {nil, "/"}})
+      put_volume_index(%{@volume_id_bin => @volume_name})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, _ ->
+          flunk("synthetic-root getattr should not call core for path `/`")
+      end)
+
+      mount_fh = Filehandle.encode(@volume_id_bin, @synthetic_root_fileid)
+      assert {:ok, %Fattr3{type: :dir, mode: 0o755}} = NFSv3Backend.getattr(mount_fh, :auth, %{})
+    end
+
+    test "readdir on an empty volume's synthetic root returns []" do
+      put_inode_table(%{@synthetic_root_fileid => {nil, "/"}})
+      put_volume_index(%{@volume_id_bin => @volume_name})
+
+      test_pid = self()
+
+      put_core(fn NeonFS.Core, :list_dir, [vol_name, "/"] ->
+        send(test_pid, {:list_dir, vol_name})
+        {:ok, []}
+      end)
+
+      mount_fh = Filehandle.encode(@volume_id_bin, @synthetic_root_fileid)
+
+      assert {:ok, [], _verf, true, %Fattr3{type: :dir}} =
+               NFSv3Backend.readdir(mount_fh, 0, <<0::64>>, 1024, :auth, %{})
+
+      # The volume name MUST come from the volume-id index, not the
+      # nil entry in `inode_table`.
+      assert_receive {:list_dir, @volume_name}
+    end
+
+    test "falls back to Core.get_volume_by_id when index is cold" do
+      put_inode_table(%{@synthetic_root_fileid => {nil, "/"}})
+      put_volume_index(%{})
+
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_volume_by_id, [uuid] ->
+          send(test_pid, {:get_volume_by_id, uuid})
+          {:ok, %{id: uuid, name: @volume_name}}
+
+        NeonFS.Core, :list_dir, [vol_name, "/"] ->
+          send(test_pid, {:list_dir, vol_name})
+          {:ok, []}
+      end)
+
+      mount_fh = Filehandle.encode(@volume_id_bin, @synthetic_root_fileid)
+
+      assert {:ok, [], _verf, true, %Fattr3{type: :dir}} =
+               NFSv3Backend.readdir(mount_fh, 0, <<0::64>>, 1024, :auth, %{})
+
+      assert_receive {:get_volume_by_id, @volume_id_uuid}
+      assert_receive {:list_dir, @volume_name}
     end
   end
 end

@@ -45,6 +45,22 @@ defmodule NeonFS.NFS.MountBackendTest do
       assert {:ok, ^vol_id_bin} = Filehandle.volume_uuid_to_binary(vol_id)
     end
 
+    test "volume root resolution populates InodeTable.lookup_volume_name (issue #761)" do
+      {:ok, _id} = ExportManager.export("photos")
+      vol_id = "01234567-89ab-7cde-bf01-23456789abcd"
+
+      stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :get_volume, ["photos"] ->
+        {:ok, %{id: vol_id}}
+      end)
+
+      assert {:ok, fhandle, _flavors} = MountBackend.resolve("/photos", %{})
+      assert {:ok, %{volume_id: vol_id_bin}} = Filehandle.decode(fhandle)
+      # NFSv3Backend.resolve_handle/1 reads back through this index
+      # to recover the volume name from the filehandle's `volume_id`,
+      # which is the actual #761 fix.
+      assert {:ok, "photos"} = InodeTable.lookup_volume_name(vol_id_bin)
+    end
+
     test "unknown volume returns :noent" do
       assert {:error, :noent} = MountBackend.resolve("/unknown-volume", %{})
     end
