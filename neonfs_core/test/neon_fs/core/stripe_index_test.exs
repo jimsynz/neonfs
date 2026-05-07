@@ -45,11 +45,14 @@ defmodule NeonFS.Core.StripeIndexTest do
       local_node: node()
     ]
 
+    metadata_reader_opts = build_mock_metadata_reader_opts(store)
+
     stop_if_running(NeonFS.Core.StripeIndex)
     cleanup_ets_table(:stripe_index)
 
     start_supervised!(
-      {NeonFS.Core.StripeIndex, quorum_opts: quorum_opts},
+      {NeonFS.Core.StripeIndex,
+       quorum_opts: quorum_opts, metadata_reader_opts: metadata_reader_opts},
       restart: :temporary
     )
 
@@ -165,6 +168,34 @@ defmodule NeonFS.Core.StripeIndexTest do
       # Quorum store should be empty
       key = "stripe:" <> stripe.id
       assert [] = :ets.lookup(store, key)
+    end
+  end
+
+  describe "get/2 (volume-scoped read via MetadataReader)" do
+    test "round-trips through the per-volume metadata read path" do
+      stripe = make_stripe()
+      {:ok, _} = StripeIndex.put(stripe)
+
+      :ets.delete(:stripe_index, stripe.id)
+      assert {:ok, retrieved} = StripeIndex.get(stripe.volume_id, stripe.id)
+      assert retrieved.id == stripe.id
+    end
+
+    test "returns :not_found for an unknown stripe" do
+      assert {:error, :not_found} = StripeIndex.get("vol1", "nonexistent-id")
+    end
+  end
+
+  describe "exists?/2 (volume-scoped existence check)" do
+    test "returns true when the stripe is present" do
+      stripe = make_stripe()
+      {:ok, _} = StripeIndex.put(stripe)
+
+      assert StripeIndex.exists?(stripe.volume_id, stripe.id)
+    end
+
+    test "returns false for an unknown stripe" do
+      refute StripeIndex.exists?("vol1", "nonexistent-id")
     end
   end
 

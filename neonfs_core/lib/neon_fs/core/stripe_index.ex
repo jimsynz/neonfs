@@ -11,6 +11,7 @@ defmodule NeonFS.Core.StripeIndex do
   require Logger
 
   alias NeonFS.Core.{MetadataCodec, QuorumCoordinator, Stripe}
+  alias NeonFS.Core.Volume.MetadataReader
 
   @stripe_key_prefix "stripe:"
 
@@ -39,12 +40,23 @@ defmodule NeonFS.Core.StripeIndex do
   end
 
   @doc """
-  Retrieves stripe metadata by ID.
+  Retrieves stripe metadata by `volume_id` and `stripe_id`.
 
-  Always resolves through `QuorumCoordinator.quorum_read/2`. The local
-  ETS table is a write-through materialisation for list operations on
-  this node — serving point reads from it would return stale values
-  for keys written or deleted elsewhere in the cluster (#342).
+  Resolves through `Volume.MetadataReader.get_stripe/3`. The local ETS
+  table is a write-through materialisation for list operations on this
+  node — serving point reads from it would return stale values for
+  keys written or deleted elsewhere in the cluster (#342).
+  """
+  @spec get(binary(), binary()) :: {:ok, Stripe.t()} | {:error, :not_found}
+  def get(volume_id, stripe_id) when is_binary(volume_id) and is_binary(stripe_id) do
+    get_from_metadata_reader(volume_id, stripe_id)
+  end
+
+  @doc """
+  Legacy stripe_id-only lookup. Retained for callers that do not yet
+  have a `volume_id` on hand. Callers with volume context should
+  prefer `get/2`. This entry point will be retired once #837's
+  caller-threading is complete.
   """
   @spec get(binary()) :: {:ok, Stripe.t()} | {:error, :not_found}
   def get(stripe_id) when is_binary(stripe_id) do
@@ -60,10 +72,19 @@ defmodule NeonFS.Core.StripeIndex do
   end
 
   @doc """
-  Checks whether stripe metadata exists for the given ID.
+  Checks whether stripe metadata exists for the given `volume_id` /
+  `stripe_id`.
 
-  Always resolves through `QuorumCoordinator.quorum_read/2` — see
-  `get/1` for rationale.
+  Resolves through `Volume.MetadataReader.get_stripe/3` — see `get/2`
+  for rationale.
+  """
+  @spec exists?(binary(), binary()) :: boolean()
+  def exists?(volume_id, stripe_id) when is_binary(volume_id) and is_binary(stripe_id) do
+    match?({:ok, _}, get_from_metadata_reader(volume_id, stripe_id))
+  end
+
+  @doc """
+  Legacy stripe_id-only existence check. Same caveat as `get/1`.
   """
   @spec exists?(binary()) :: boolean()
   def exists?(stripe_id) when is_binary(stripe_id) do
@@ -118,6 +139,12 @@ defmodule NeonFS.Core.StripeIndex do
         :persistent_term.get({__MODULE__, :quorum_opts}, nil)
 
     :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
+
+    metadata_reader_opts =
+      Keyword.get(opts, :metadata_reader_opts) ||
+        :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
+
+    :persistent_term.put({__MODULE__, :metadata_reader_opts}, metadata_reader_opts)
 
     case load_from_local_store() do
       {:ok, count} ->
@@ -175,6 +202,13 @@ defmodule NeonFS.Core.StripeIndex do
 
   defp safe_erase_quorum_opts do
     :persistent_term.erase({__MODULE__, :quorum_opts})
+
+    try do
+      :persistent_term.erase({__MODULE__, :metadata_reader_opts})
+    rescue
+      ArgumentError -> :ok
+    end
+
     :ok
   rescue
     ArgumentError -> :ok
@@ -185,6 +219,33 @@ defmodule NeonFS.Core.StripeIndex do
 
   defp quorum_opts do
     :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+  end
+
+  defp metadata_reader_opts do
+    :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
+  end
+
+  # Private — MetadataReader-backed read with QuorumCoordinator fallback.
+  # The fallback is load-bearing today because the per-volume index tree
+  # is only populated once the write-side migration (#787) lands — until
+  # then, `MetadataReader` returns `:not_found` in production for every
+  # key, and the only real source of truth is the old quorum-replicated
+  # `<drive>/meta/` segments. Once #787 lands the fallback can go.
+
+  defp get_from_metadata_reader(volume_id, stripe_id) do
+    key = stripe_key(stripe_id)
+
+    case MetadataReader.get_stripe(volume_id, key, metadata_reader_opts()) do
+      {:ok, value} ->
+        stripe = storable_map_to_stripe(value)
+        :ets.insert(:stripe_index, {stripe_id, stripe})
+        {:ok, stripe}
+
+      _ ->
+        get_from_quorum(stripe_id)
+    end
+  rescue
+    _ -> get_from_quorum(stripe_id)
   end
 
   # Private — Quorum reads
