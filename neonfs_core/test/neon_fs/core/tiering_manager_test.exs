@@ -383,13 +383,20 @@ defmodule MockChunkIndex do
   @table :mock_chunk_index_data
 
   def init do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
     :ets.new(@table, [:named_table, :set, :public])
     :ets.insert(@table, {:chunks, []})
   end
 
   def cleanup do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
+  end
+
+  defp safe_delete_table do
+    :ets.delete(@table)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   def set_chunks(chunks) do
@@ -408,12 +415,19 @@ defmodule MockAccessTracker do
   @table :mock_access_tracker_data
 
   def init do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
     :ets.new(@table, [:named_table, :set, :public])
   end
 
   def cleanup do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
+  end
+
+  defp safe_delete_table do
+    :ets.delete(@table)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   def set_stats(chunk_hash, stats) do
@@ -432,12 +446,19 @@ defmodule MockDriveRegistry do
   @table :mock_drive_registry_data
 
   def init do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
     :ets.new(@table, [:named_table, :set, :public])
   end
 
   def cleanup do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
+  end
+
+  defp safe_delete_table do
+    :ets.delete(@table)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   def set_tier_usage(tier, ratio) do
@@ -477,14 +498,21 @@ defmodule MockBackgroundWorker do
   @table :mock_bg_worker_data
 
   def init do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
     :ets.new(@table, [:named_table, :set, :public])
     :ets.insert(@table, {:submitted, []})
     :ets.insert(@table, {:queue_full, false})
   end
 
   def cleanup do
-    if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+    safe_delete_table()
+  end
+
+  defp safe_delete_table do
+    :ets.delete(@table)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   def set_queue_full(full) do
