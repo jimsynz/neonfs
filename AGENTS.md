@@ -8,6 +8,10 @@ NeonFS is a BEAM-orchestrated distributed filesystem combining Elixir's coordina
 
 **Current Status:** Phase 2 (Distributed) complete - multi-node Ra cluster with replication, node failure recovery, and full acceptance tests passing.
 
+## Experimental Project — No Backwards Compatibility
+
+NeonFS is experimental. **There are no production clusters.** Do not preserve backwards compatibility with prior on-disk formats, RPC shapes, module APIs, or behaviour when migrating or refactoring. Delete old code paths outright rather than gating them behind feature flags or fallbacks. This applies to every migration, including (but not limited to) the per-volume metadata work — switch readers and writers to the new path in whatever order is mechanically convenient and remove the old path. Don't add dual-mode shims, "during the transition" fallbacks, or `# legacy` branches.
+
 ## Build Commands
 
 ### Elixir (from repository root or individual packages)
