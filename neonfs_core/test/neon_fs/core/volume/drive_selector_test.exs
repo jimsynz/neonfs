@@ -165,7 +165,8 @@ defmodule NeonFS.Core.Volume.DriveSelectorTest do
     }
   end
 
-  defp drive_lookup(drives, drive_id), do: Enum.find(drives, &(&1.drive_id == drive_id))
+  defp drive_lookup(drives, {node, drive_id}),
+    do: Enum.find(drives, &(&1.node == node and &1.drive_id == drive_id))
 
   defp replicate(factor, min_copies),
     do: %{type: :replicate, factor: factor, min_copies: min_copies}

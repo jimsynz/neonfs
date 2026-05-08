@@ -46,7 +46,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
   describe "version/0" do
     test "returns 13" do
-      assert MetadataStateMachine.version() == 13
+      assert MetadataStateMachine.version() == 14
     end
   end
 
@@ -1233,11 +1233,11 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       {state, :ok, []} =
         MetadataStateMachine.apply(%{}, {:register_drive, entry}, base_state())
 
-      assert state.drives == %{"drv-1" => entry}
+      assert state.drives == %{{:node1@host, "drv-1"} => entry}
       assert state.version == 1
     end
 
-    test "register_drive overwrites an existing entry for the same drive_id" do
+    test "register_drive on the same {node, drive_id} overwrites the prior entry" do
       old = %{
         drive_id: "drv-1",
         node: :node1@host,
@@ -1252,10 +1252,32 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         MetadataStateMachine.apply(
           %{},
           {:register_drive, new},
-          %{base_state() | drives: %{"drv-1" => old}}
+          %{base_state() | drives: %{{:node1@host, "drv-1"} => old}}
         )
 
-      assert state.drives["drv-1"] == new
+      assert state.drives[{:node1@host, "drv-1"}] == new
+    end
+
+    test "register_drive on the same drive_id from a different node coexists" do
+      node1 = %{
+        drive_id: "default",
+        node: :node1@host,
+        cluster_id: "clust-1",
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      node2 = %{node1 | node: :node2@host}
+
+      {state1, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:register_drive, node1}, base_state())
+
+      {state2, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:register_drive, node2}, state1)
+
+      assert state2.drives[{:node1@host, "default"}] == node1
+      assert state2.drives[{:node2@host, "default"}] == node2
+      assert map_size(state2.drives) == 2
     end
 
     test "deregister_drive removes the entry and bumps version" do
@@ -1267,18 +1289,18 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         registered_at: DateTime.utc_now()
       }
 
-      state = %{base_state() | drives: %{"drv-1" => entry}}
+      state = %{base_state() | drives: %{{:node1@host, "drv-1"} => entry}}
 
       {state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:deregister_drive, "drv-1"}, state)
+        MetadataStateMachine.apply(%{}, {:deregister_drive, {:node1@host, "drv-1"}}, state)
 
       assert state.drives == %{}
       assert state.version == 1
     end
 
-    test "deregister_drive on a missing drive_id is a no-op (still bumps version)" do
+    test "deregister_drive on a missing key is a no-op (still bumps version)" do
       {state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:deregister_drive, "nope"}, base_state())
+        MetadataStateMachine.apply(%{}, {:deregister_drive, {:node1@host, "nope"}}, base_state())
 
       assert state.drives == %{}
       assert state.version == 1
@@ -1372,7 +1394,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       {state, :ok, []} =
         MetadataStateMachine.apply(%{}, {:register_drive, entry}, pre_v13)
 
-      assert state.drives == %{"drv-1" => entry}
+      assert state.drives == %{{:node1@host, "drv-1"} => entry}
       assert state.volume_roots == %{}
     end
   end

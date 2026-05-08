@@ -310,12 +310,15 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   end
 
   defp pick_local_replica(root_entry, all_drives) do
-    by_id = Map.new(all_drives, &{&1.drive_id, &1})
+    # `drive_id` alone is not unique across nodes — two nodes may
+    # both expose a `default` drive. Key by `{node, drive_id}` to
+    # match the bootstrap drives table's v14 schema.
+    by_key = Map.new(all_drives, &{{&1.node, &1.drive_id}, &1})
     locals = Enum.filter(root_entry.drive_locations, &(&1.node == node()))
 
     found =
       Enum.find_value(locals, fn loc ->
-        case Map.fetch(by_id, loc.drive_id) do
+        case Map.fetch(by_key, {loc.node, loc.drive_id}) do
           {:ok, drive} -> drive
           :error -> nil
         end

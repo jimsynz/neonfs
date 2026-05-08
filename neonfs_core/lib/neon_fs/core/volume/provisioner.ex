@@ -127,9 +127,9 @@ defmodule NeonFS.Core.Volume.Provisioner do
     end
   end
 
-  defp filter_drives(all_drives, replica_ids) do
-    by_id = Map.new(all_drives, &{&1.drive_id, &1})
-    Enum.map(replica_ids, &Map.fetch!(by_id, &1))
+  defp filter_drives(all_drives, replica_keys) do
+    by_key = Map.new(all_drives, &{{&1.node, &1.drive_id}, &1})
+    Enum.map(replica_keys, &Map.fetch!(by_key, &1))
   end
 
   defp build_segment(%Volume{} = volume, %ClusterState{} = cluster) do

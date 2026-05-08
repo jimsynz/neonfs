@@ -267,7 +267,7 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   defp deregister_drive_in_bootstrap_layer(drive_id) do
-    case RaSupervisor.command({:deregister_drive, drive_id}) do
+    case RaSupervisor.command({:deregister_drive, {Node.self(), drive_id}}) do
       {:ok, _result, _leader} ->
         :ok
 
