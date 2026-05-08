@@ -364,7 +364,8 @@ defmodule NeonFS.TestCase do
 
   defmodule NoopReplicator do
     @moduledoc false
-    def write_chunk(_data, _drives, _opts), do: {:ok, <<0::256>>, %{successful: ["stub"], failed: []}}
+    def write_chunk(_data, _drives, _opts),
+      do: {:ok, <<0::256>>, %{successful: ["stub"], failed: []}}
   end
 
   defmodule NoopProvisioner do
