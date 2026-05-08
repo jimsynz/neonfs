@@ -74,6 +74,15 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
     call(:write_file_at, [volume_name, path, 0, body, opts])
   end
 
+  # Single-drive integration harness: pin replicate:1 for buckets the
+  # S3 backend creates implicitly. Mirrors `WebDAVCoreBridge`'s default
+  # — `Volume.MetadataWriter`'s post-#835 lazy-provision can't satisfy
+  # the default `replicate:3, min_copies:2` against one drive.
+  def call(:create_volume, [name]) do
+    opts = [durability: %{type: :replicate, factor: 1, min_copies: 1}]
+    call(:create_volume, [name, opts])
+  end
+
   def call(function, args) do
     core_node = :persistent_term.get(:s3_integration_core_node)
     rpc(core_node, NeonFS.Core, function, args)

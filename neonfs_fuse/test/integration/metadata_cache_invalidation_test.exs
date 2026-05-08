@@ -25,7 +25,7 @@ defmodule NeonFS.FUSE.IntegrationTest.MetadataCacheInvalidationTest do
     {:ok, volume} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         volume_name,
-        %{}
+        %{durability: %{type: :replicate, factor: 1, min_copies: 1}}
       ])
 
     %{volume_id: volume.id, volume_name: volume_name}

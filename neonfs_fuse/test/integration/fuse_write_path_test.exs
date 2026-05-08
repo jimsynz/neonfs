@@ -30,7 +30,7 @@ defmodule NeonFS.FUSE.IntegrationTest.WritePathTest do
     {:ok, volume_map} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         "write-path-test",
-        %{}
+        %{durability: %{type: :replicate, factor: 1, min_copies: 1}}
       ])
 
     %{volume_id: volume_map[:id], volume_name: "write-path-test"}

@@ -29,7 +29,7 @@ defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
     {:ok, volume_map} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         "session-test",
-        %{}
+        %{durability: %{type: :replicate, factor: 1, min_copies: 1}}
       ])
 
     volume_id = volume_map[:id]
