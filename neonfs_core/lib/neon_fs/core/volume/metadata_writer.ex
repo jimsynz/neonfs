@@ -273,13 +273,25 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     chunk_replicator = Keyword.get(opts, :chunk_replicator, ChunkReplicator)
     min_copies = min_copies(durability)
 
-    case chunk_replicator.write_chunk(encoded, replica_drives,
-           min_copies: min_copies,
-           writer_fn: Keyword.get(opts, :writer_fn)
-         ) do
+    write_opts = maybe_put_writer_fn([min_copies: min_copies], opts)
+
+    case chunk_replicator.write_chunk(encoded, replica_drives, write_opts) do
       {:ok, hash, _summary} -> {:ok, hash}
       {:error, _, _} = err -> err
       {:error, _} = err -> err
+    end
+  end
+
+  # `Keyword.get(opts, :writer_fn)` returns `nil` when the caller
+  # didn't supply a stub; passing `writer_fn: nil` straight through
+  # to `ChunkReplicator.write_chunk/3` defeats its `Keyword.get_lazy`
+  # default and crashes the per-drive `Task.async_stream` worker
+  # with "expected a function, got: nil". Only thread `:writer_fn`
+  # when the caller actually set one.
+  defp maybe_put_writer_fn(write_opts, opts) do
+    case Keyword.get(opts, :writer_fn) do
+      nil -> write_opts
+      fun when is_function(fun) -> Keyword.put(write_opts, :writer_fn, fun)
     end
   end
 
