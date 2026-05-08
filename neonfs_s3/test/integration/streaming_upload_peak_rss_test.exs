@@ -107,7 +107,10 @@ defmodule NeonFS.S3.IntegrationTest.StreamingUploadPeakRSSTest do
     volume = "peak-rss-bucket-#{System.unique_integer([:positive])}"
 
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [volume, %{}])
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        volume,
+        %{"durability" => "replicate:1"}
+      ])
 
     :ok =
       ClusterCase.wait_until(
