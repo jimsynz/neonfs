@@ -38,7 +38,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           %{id: "hot0", path: device.path, tier: :hot, capacity: @small_device_mb * 1024 * 1024}
         ])
 
-      :ok = init_single_node_cluster(cluster, name: "enospc", volumes: [{"vol", %{}}])
+      :ok = init_single_node_cluster(cluster, name: "enospc", volumes: [{"vol", %{"durability" => "replicate:1"}}])
 
       results = write_until_error(cluster, "vol", @chunk_size)
       {successes, failures} = Enum.split_with(results, &match?({:ok, _}, &1))
@@ -56,7 +56,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           %{id: "hot0", path: device.path, tier: :hot, capacity: @small_device_mb * 1024 * 1024}
         ])
 
-      :ok = init_single_node_cluster(cluster, name: "enospc-prop", volumes: [{"vol", %{}}])
+      :ok = init_single_node_cluster(cluster, name: "enospc-prop", volumes: [{"vol", %{"durability" => "replicate:1"}}])
 
       # Fill the drive
       _results = write_until_error(cluster, "vol", @chunk_size)
@@ -90,7 +90,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           %{id: "hot0", path: device.path, tier: :hot, capacity: drive_capacity}
         ])
 
-      :ok = init_single_node_cluster(cluster, name: "gc-pressure", volumes: [{"vol", %{}}])
+      :ok = init_single_node_cluster(cluster, name: "gc-pressure", volumes: [{"vol", %{"durability" => "replicate:1"}}])
 
       # Write enough data to exceed 85% of 1 MB (>850 KB = ~18 chunks of 50 KB)
       write_data(cluster, "vol", 20, @chunk_size)
@@ -132,7 +132,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           %{id: "hot0", path: device.path, tier: :hot, capacity: @medium_device_mb * 1024 * 1024}
         ])
 
-      :ok = init_single_node_cluster(cluster, name: "gc-reclaim", volumes: [{"vol", %{}}])
+      :ok = init_single_node_cluster(cluster, name: "gc-reclaim", volumes: [{"vol", %{"durability" => "replicate:1"}}])
 
       # Write files until the drive is full
       results = write_until_error(cluster, "vol", large_chunk)
@@ -245,7 +245,7 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           %{id: "drive_b", path: drive_b.path, tier: :hot, capacity: drive_capacity}
         ])
 
-      :ok = init_single_node_cluster(cluster, name: "evac", volumes: [{"vol", %{}}])
+      :ok = init_single_node_cluster(cluster, name: "evac", volumes: [{"vol", %{"durability" => "replicate:1"}}])
 
       # Write several files (they distribute across the two drives)
       file_data =

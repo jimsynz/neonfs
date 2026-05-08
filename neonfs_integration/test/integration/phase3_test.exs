@@ -253,6 +253,8 @@ defmodule NeonFS.Integration.Phase3Test do
   # Helpers
 
   defp init_cluster_with_volume(cluster) do
-    init_single_node_cluster(cluster, volumes: [{"test-volume", %{}}])
+    init_single_node_cluster(cluster,
+      volumes: [{"test-volume", %{"durability" => "replicate:1"}}]
+    )
   end
 end
