@@ -538,6 +538,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
     wait_for_full_mesh(cluster)
     rebuild_quorum_rings(cluster)
+    wait_for_all_drives_in_bootstrap(cluster)
 
     for {name, vol_opts} <- volumes do
       {:ok, _} =
@@ -545,6 +546,39 @@ defmodule NeonFS.TestSupport.ClusterCase do
     end
 
     :ok
+  end
+
+  @doc false
+  # `Cluster.Join.join_cluster_rpc/3` returns once the synchronous
+  # parts of the join finish, but the actual `RaServer.join_cluster`
+  # call — and therefore the joining node's drive registration in the
+  # bootstrap layer — happens 500 ms later in a spawned process. Tests
+  # that read multi-replica metadata (cross-node reads, durability
+  # `replicate: factor=N` with N > 1) need every node's drives present
+  # before any volume is created, otherwise the volume's
+  # `drive_locations` only captures the bootstrap node's drive and the
+  # write-side never replicates the metadata segment to peers.
+  @spec wait_for_all_drives_in_bootstrap(map()) :: :ok
+  def wait_for_all_drives_in_bootstrap(cluster) do
+    expected =
+      MapSet.new(cluster.nodes, fn ni -> PeerCluster.get_node!(cluster, ni.name).node end)
+
+    :ok =
+      wait_until(
+        fn ->
+          case PeerCluster.rpc(cluster, :node1, NeonFS.Core.RaSupervisor, :local_query, [
+                 &NeonFS.Core.MetadataStateMachine.get_drives/1
+               ]) do
+            {:ok, drives_map} when is_map(drives_map) ->
+              registered = drives_map |> Map.values() |> MapSet.new(& &1.node)
+              MapSet.subset?(expected, registered)
+
+            _ ->
+              false
+          end
+        end,
+        timeout: 15_000
+      )
   end
 
   @doc """
