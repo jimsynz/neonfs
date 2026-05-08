@@ -42,10 +42,14 @@ defmodule NeonFS.Core.Volume.DriveSelector do
 
   `drives` may be a list of drive entries or the map shape returned
   by `MetadataStateMachine.get_drives/1` (the keys are ignored — only
-  the values matter). At most one entry per `drive_id` is honoured.
+  the values matter). At most one entry per `{node, drive_id}` is
+  honoured — `drive_id` alone is not unique across nodes.
+
+  Returns a list of `{node, drive_id}` composite keys identifying the
+  selected replicas.
   """
-  @spec select_replicas(durability(), [drive_entry()] | %{drive_id() => drive_entry()}) ::
-          {:ok, [drive_id()]} | insufficient()
+  @spec select_replicas(durability(), [drive_entry()] | %{any() => drive_entry()}) ::
+          {:ok, [{node(), drive_id()}]} | insufficient()
   def select_replicas(durability, drives) do
     drive_list = normalise_drives(drives)
     {target, minimum} = counts(durability)
@@ -54,7 +58,12 @@ defmodule NeonFS.Core.Volume.DriveSelector do
       {:error, :insufficient_drives, %{available: length(drive_list), needed: minimum}}
     else
       take = min(target, length(drive_list))
-      {:ok, drive_list |> spread_across_nodes() |> Enum.take(take) |> Enum.map(& &1.drive_id)}
+
+      {:ok,
+       drive_list
+       |> spread_across_nodes()
+       |> Enum.take(take)
+       |> Enum.map(&{&1.node, &1.drive_id})}
     end
   end
 
@@ -65,8 +74,11 @@ defmodule NeonFS.Core.Volume.DriveSelector do
   end
 
   defp normalise_drives(drives) when is_list(drives) do
+    # Drives are uniquely identified by the composite `{node, drive_id}`
+    # — `drive_id` alone collides across nodes (every node may expose
+    # a `default` drive). Match the bootstrap layer's v14 keying.
     drives
-    |> Enum.uniq_by(& &1.drive_id)
+    |> Enum.uniq_by(&{&1.node, &1.drive_id})
     |> Enum.sort_by(&{&1.node, &1.drive_id})
   end
 

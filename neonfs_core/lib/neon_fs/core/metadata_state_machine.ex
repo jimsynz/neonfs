@@ -670,6 +670,31 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 13, 14}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 13,
+      to: 14,
+      change: "rekey bootstrap drives by {node, drive_id} so multi-node clusters with " <>
+                "duplicate drive_ids (e.g. each node's `default`) don't clobber each other"
+    )
+
+    rekeyed =
+      state
+      |> Map.get(:drives, %{})
+      |> Enum.into(%{}, fn
+        {drive_id, %{node: node} = entry} when is_binary(drive_id) ->
+          {{node, drive_id}, entry}
+
+        {{_node, _drive_id} = key, entry} ->
+          # Already rekeyed (snapshot loaded after upgrade applied).
+          {key, entry}
+      end)
+
+    {%{state | drives: rekeyed}, :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade", from: from_version, to: to_version)
@@ -1440,27 +1465,28 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def apply(_meta, {:register_drive, entry}, state) do
     state = ensure_bootstrap(state)
     drive_id = Map.fetch!(entry, :drive_id)
-    new_drives = Map.put(state.drives, drive_id, entry)
+    node = Map.fetch!(entry, :node)
+    new_drives = Map.put(state.drives, {node, drive_id}, entry)
     new_state = %{state | drives: new_drives, version: state.version + 1}
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :register_drive],
       %{version: new_state.version},
-      %{drive_id: drive_id, node: entry.node, cluster_id: entry.cluster_id}
+      %{drive_id: drive_id, node: node, cluster_id: entry.cluster_id}
     )
 
     {new_state, :ok, []}
   end
 
-  def apply(_meta, {:deregister_drive, drive_id}, state) do
+  def apply(_meta, {:deregister_drive, {node, drive_id}}, state) do
     state = ensure_bootstrap(state)
-    new_drives = Map.delete(state.drives, drive_id)
+    new_drives = Map.delete(state.drives, {node, drive_id})
     new_state = %{state | drives: new_drives, version: state.version + 1}
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :deregister_drive],
       %{version: new_state.version},
-      %{drive_id: drive_id}
+      %{drive_id: drive_id, node: node}
     )
 
     {new_state, :ok, []}
@@ -1786,7 +1812,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 13
+  def version, do: 14
 
   @doc """
   Return the module to handle a specific state machine version.

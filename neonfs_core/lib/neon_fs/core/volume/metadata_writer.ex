@@ -242,11 +242,11 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   defp pick_local_drive(root_entry, all_drives) do
-    by_id = Map.new(all_drives, &{&1.drive_id, &1})
+    by_key = Map.new(all_drives, &{{&1.node, &1.drive_id}, &1})
     locals = Enum.filter(root_entry.drive_locations, &(&1.node == node()))
 
     Enum.find_value(locals, fn loc ->
-      case Map.fetch(by_id, loc.drive_id) do
+      case Map.fetch(by_key, {loc.node, loc.drive_id}) do
         {:ok, drive} -> drive
         :error -> nil
       end
@@ -257,11 +257,11 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     drive_lister = Keyword.get(opts, :drive_lister, &default_drive_lister/0)
 
     with {:ok, all_drives} <- drive_lister.() do
-      by_id = Map.new(all_drives, &{&1.drive_id, &1})
+      by_key = Map.new(all_drives, &{{&1.node, &1.drive_id}, &1})
 
       drives =
-        for %{drive_id: id} <- root_entry.drive_locations,
-            drive = Map.get(by_id, id),
+        for %{node: node, drive_id: id} <- root_entry.drive_locations,
+            drive = Map.get(by_key, {node, id}),
             not is_nil(drive),
             do: drive
 
