@@ -17,6 +17,7 @@ defmodule NeonFS.Cluster.Init do
 
   alias NeonFS.Core.{
     CertificateAuthority,
+    DriveManager,
     RaServer,
     ServiceRegistry,
     SystemVolume,
@@ -84,6 +85,7 @@ defmodule NeonFS.Cluster.Init do
 
     with :ok <- State.save(state),
          :ok <- RaServer.init_cluster(),
+         :ok <- DriveManager.register_local_drives_in_bootstrap(),
          {:ok, _volume} <- create_system_volume(),
          :ok <- write_cluster_identity(cluster_name),
          {:ok, _ca_cert, _ca_key} <- init_cluster_ca(cluster_name),

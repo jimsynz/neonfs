@@ -17,6 +17,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
   alias NeonFS.Core.Volume.Deprovisioner
+  alias NeonFS.Core.Volume.DriveSelector
   alias NeonFS.Core.Volume.Provisioner
   alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Error.Invalid, as: InvalidError
@@ -355,13 +356,38 @@ defmodule NeonFS.Core.VolumeRegistry do
          {:error, :not_found} <- get_by_name(@system_volume_name) do
       volume = build_system_volume(cluster_name)
 
-      case persist_volume(volume) do
-        :ok -> {:ok, volume}
-        error -> error
+      with :ok <- persist_volume(volume),
+           :ok <- provision_system_volume(volume) do
+        {:ok, volume}
+      else
+        {:error, _reason} = error -> error
       end
     else
       {:ok, _existing} -> {:error, :already_exists}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # System volume is always `replicate: factor=1, min_copies=1`, so
+  # any single registered drive is sufficient. Provision it
+  # eagerly when drives are available in the bootstrap layer —
+  # without per-volume metadata the bootstrap → root segment →
+  # index tree read path returns `:not_found` for every
+  # system-volume read, which breaks `SystemVolume.read` for cluster
+  # identity / TLS / audit-log files.
+  #
+  # When the bootstrap layer is empty (Ra not running yet, or no
+  # drives registered — common in unit-test setups), provisioning is
+  # deferred to the first metadata write through #785.
+  defp provision_system_volume(%Volume{} = volume) do
+    if sufficient_drives_for?(volume.durability) do
+      case Provisioner.provision(volume) do
+        {:ok, _root_chunk_hash} -> :ok
+        {:error, _reason} = err -> err
+        {:error, reason, info} -> {:error, {reason, info}}
+      end
+    else
+      :ok
     end
   end
 
@@ -400,18 +426,18 @@ defmodule NeonFS.Core.VolumeRegistry do
   # Builds a fresh `RootSegment` for the volume, writes the chunk to
   # replica drives, and registers the bootstrap-layer entry (#779).
   #
-  # Skipped when the bootstrap layer's drives table is empty — that
-  # means the cluster predates the per-volume metadata wiring (no
-  # drive has been registered via the new `:register_drive` Ra path
-  # yet, e.g. on a fresh test node) — and the root segment will be
-  # allocated lazily on the first metadata write through #785.
+  # Skipped when the bootstrap layer doesn't have enough drives to
+  # satisfy the volume's `min_copies` (replicate) or `data_chunks`
+  # (erasure). The under-provisioned volume still exists in the
+  # registry — its first metadata write through #785 will allocate
+  # a root segment lazily once enough drives come online.
   #
   # Tests can pass `:provisioner` opt to override the default
   # `Volume.Provisioner` for stubbing.
   defp provision_metadata(volume, opts) do
     cond do
       Keyword.get(opts, :skip_provisioning?, false) -> :ok
-      not bootstrap_drives_present?() -> :ok
+      not sufficient_drives_for?(volume.durability) -> :ok
       true -> run_provisioner(volume, opts)
     end
   end
@@ -426,10 +452,16 @@ defmodule NeonFS.Core.VolumeRegistry do
     end
   end
 
-  defp bootstrap_drives_present? do
+  defp sufficient_drives_for?(durability) do
     case RaSupervisor.local_query(&MetadataStateMachine.get_drives/1) do
-      {:ok, drives_map} when is_map(drives_map) and map_size(drives_map) > 0 -> true
-      _ -> false
+      {:ok, drives_map} when is_map(drives_map) ->
+        case DriveSelector.select_replicas(durability, drives_map) do
+          {:ok, _} -> true
+          {:error, :insufficient_drives, _} -> false
+        end
+
+      _ ->
+        false
     end
   end
 
