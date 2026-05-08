@@ -676,8 +676,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Logger.info("Ra machine version upgrade",
       from: 13,
       to: 14,
-      change: "rekey bootstrap drives by {node, drive_id} so multi-node clusters with " <>
-                "duplicate drive_ids (e.g. each node's `default`) don't clobber each other"
+      change:
+        "rekey bootstrap drives by {node, drive_id} so multi-node clusters with " <>
+          "duplicate drive_ids (e.g. each node's `default`) don't clobber each other"
     )
 
     rekeyed =
