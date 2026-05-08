@@ -42,7 +42,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   alias NeonFS.Core.BlobStore
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.RaSupervisor
-  alias NeonFS.Core.Volume.{ChunkReplicator, HLC, MetadataReader, RootSegment}
+  alias NeonFS.Core.Volume.{ChunkReplicator, HLC, MetadataReader, Provisioner, RootSegment}
+  alias NeonFS.Core.VolumeRegistry
 
   @type index_kind :: :file_index | :chunk_index | :stripe_index
   @type write_error ::
@@ -122,7 +123,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   defp do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left) do
     with {:ok, segment, root_entry} <-
-           MetadataReader.resolve_segment_for_write(volume_id, opts),
+           resolve_or_provision(volume_id, opts),
          current_tree_root = Map.fetch!(segment.index_roots, index_kind),
          store = pick_store_handle(root_entry, opts),
          {:ok, new_tree_root} <- run_tree_op(tree_op, store, current_tree_root),
@@ -148,6 +149,51 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
         {:error, _} = err ->
           err
       end
+    end
+  end
+
+  # Looks up the volume's bootstrap entry. If missing — `VolumeRegistry`
+  # skipped eager provisioning at create-time because the cluster
+  # didn't have enough drives for the volume's durability — provision
+  # the volume now, then retry the lookup. Production volumes that
+  # were created before the cluster grew enough drives end up in this
+  # state until their first metadata write.
+  #
+  # Returns the same `{:ok, segment, root_entry}` shape as
+  # `MetadataReader.resolve_segment_for_write/2`. Provisioning errors
+  # surface as `{:error, _}` / `{:error, _, _}`.
+  defp resolve_or_provision(volume_id, opts) do
+    case MetadataReader.resolve_segment_for_write(volume_id, opts) do
+      {:ok, _segment, _root_entry} = ok ->
+        ok
+
+      {:error, :not_found} ->
+        with {:ok, volume} <- fetch_volume(volume_id, opts),
+             :ok <- provision_volume(volume, opts) do
+          MetadataReader.resolve_segment_for_write(volume_id, opts)
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp fetch_volume(volume_id, opts) do
+    fetcher = Keyword.get(opts, :volume_fetcher, &VolumeRegistry.get/1)
+
+    case fetcher.(volume_id) do
+      {:ok, volume} -> {:ok, volume}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp provision_volume(volume, opts) do
+    provisioner = Keyword.get(opts, :provisioner, Provisioner)
+
+    case provisioner.provision(volume) do
+      {:ok, _root_chunk_hash} -> :ok
+      {:error, _reason} = err -> err
+      {:error, reason, info} -> {:error, {reason, info}}
     end
   end
 
