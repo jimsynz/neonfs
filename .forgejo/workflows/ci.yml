@@ -73,8 +73,8 @@ jobs:
             neonfs_client/_build
             neonfs_client/native/neonfs_chunker/target
             neonfs_client/priv/native
-          key: v3-build-neonfs_client-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_client/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_client-${{ runner.arch }}-
+          key: v4-build-neonfs_client-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_client/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs') }}
+          restore-keys: v4-build-neonfs_client-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_client
@@ -111,8 +111,8 @@ jobs:
             neonfs_core/_build
             neonfs_core/target
             neonfs_core/priv/native
-          key: v4-build-neonfs_core-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_core/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_core-${{ runner.arch }}-
+          key: v5-build-neonfs_core-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_core/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/lib/**/*.ex', 'neonfs_core/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs') }}
+          restore-keys: v5-build-neonfs_core-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_core
@@ -157,8 +157,8 @@ jobs:
             neonfs_fuse/_build
             neonfs_fuse/target
             neonfs_fuse/priv/native
-          key: v4-build-neonfs_fuse-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock', 'neonfs_core/Cargo.lock', 'fuse_server/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_fuse-${{ runner.arch }}-
+          key: v5-build-neonfs_fuse-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock', 'neonfs_core/Cargo.lock', 'fuse_server/Cargo.lock', 'neonfs_fuse/lib/**/*.ex', 'neonfs_fuse/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs', 'neonfs_test_support/lib/**/*.ex', 'neonfs_test_support/mix.exs') }}
+          restore-keys: v5-build-neonfs_fuse-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_fuse
@@ -210,8 +210,8 @@ jobs:
             neonfs_core/priv/native
             neonfs_docker/deps
             neonfs_docker/_build
-          key: v4-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_docker/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_docker-${{ runner.arch }}-
+          key: v5-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_docker/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock', 'neonfs_docker/lib/**/*.ex', 'neonfs_docker/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs', 'neonfs_test_support/lib/**/*.ex', 'neonfs_test_support/mix.exs') }}
+          restore-keys: v5-build-neonfs_docker-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_docker
@@ -277,8 +277,8 @@ jobs:
             neonfs_client/priv/native
             neonfs_cifs/deps
             neonfs_cifs/_build
-          key: v3-build-neonfs_cifs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_cifs/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_cifs-${{ runner.arch }}-
+          key: v4-build-neonfs_cifs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_cifs/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_cifs/lib/**/*.ex', 'neonfs_cifs/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs') }}
+          restore-keys: v4-build-neonfs_cifs-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_cifs
@@ -315,8 +315,8 @@ jobs:
             neonfs_client/priv/native
             neonfs_csi/deps
             neonfs_csi/_build
-          key: v3-build-neonfs_csi-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_csi/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_csi-${{ runner.arch }}-
+          key: v4-build-neonfs_csi-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_csi/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_csi/lib/**/*.ex', 'neonfs_csi/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs') }}
+          restore-keys: v4-build-neonfs_csi-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_csi
@@ -355,8 +355,8 @@ jobs:
             neonfs_client/priv/native
             neonfs_containerd/deps
             neonfs_containerd/_build
-          key: v3-build-neonfs_containerd-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_containerd/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_containerd-${{ runner.arch }}-
+          key: v4-build-neonfs_containerd-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_containerd/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_containerd/lib/**/*.ex', 'neonfs_containerd/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs') }}
+          restore-keys: v4-build-neonfs_containerd-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_containerd
@@ -395,8 +395,8 @@ jobs:
             neonfs_nfs/_build
             neonfs_nfs/target
             neonfs_nfs/priv/native
-          key: v4-build-neonfs_nfs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_nfs/mix.lock', 'neonfs_nfs/native/neonfs_nfs/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_nfs-${{ runner.arch }}-
+          key: v5-build-neonfs_nfs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_nfs/mix.lock', 'neonfs_nfs/native/neonfs_nfs/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock', 'neonfs_nfs/lib/**/*.ex', 'neonfs_nfs/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs', 'neonfs_test_support/lib/**/*.ex', 'neonfs_test_support/mix.exs') }}
+          restore-keys: v5-build-neonfs_nfs-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_nfs
@@ -429,8 +429,8 @@ jobs:
             fuse_server/_build
             fuse_server/target
             fuse_server/priv/native
-          key: v3-build-fuse_server-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('fuse_server/mix.lock', 'fuse_server/Cargo.lock') }}
-          restore-keys: v3-build-fuse_server-${{ runner.arch }}-
+          key: v4-build-fuse_server-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('fuse_server/mix.lock', 'fuse_server/Cargo.lock', 'fuse_server/lib/**/*.ex', 'fuse_server/mix.exs') }}
+          restore-keys: v4-build-fuse_server-${{ runner.arch }}-
 
       - name: Build
         working-directory: fuse_server
@@ -461,8 +461,8 @@ jobs:
           path: |
             nfs_server/deps
             nfs_server/_build
-          key: v3-build-nfs_server-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('nfs_server/mix.lock') }}
-          restore-keys: v3-build-nfs_server-${{ runner.arch }}-
+          key: v4-build-nfs_server-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('nfs_server/mix.lock', 'nfs_server/lib/**/*.ex', 'nfs_server/mix.exs') }}
+          restore-keys: v4-build-nfs_server-${{ runner.arch }}-
 
       - name: Build
         working-directory: nfs_server
@@ -500,8 +500,8 @@ jobs:
             neonfs_core/priv/native
             neonfs_s3/deps
             neonfs_s3/_build
-          key: v5-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v5-build-neonfs_s3-${{ runner.arch }}-
+          key: v6-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock', 'neonfs_s3/lib/**/*.ex', 'neonfs_s3/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs', 'neonfs_test_support/lib/**/*.ex', 'neonfs_test_support/mix.exs', 'neonfs_webdav/lib/**/*.ex', 'neonfs_webdav/mix.exs') }}
+          restore-keys: v6-build-neonfs_s3-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_s3
@@ -541,8 +541,8 @@ jobs:
             webdav_server/_build
             neonfs_webdav/deps
             neonfs_webdav/_build
-          key: v4-build-neonfs_webdav-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_webdav/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_webdav-${{ runner.arch }}-
+          key: v5-build-neonfs_webdav-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_webdav/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock', 'neonfs_webdav/lib/**/*.ex', 'neonfs_webdav/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs', 'neonfs_test_support/lib/**/*.ex', 'neonfs_test_support/mix.exs') }}
+          restore-keys: v5-build-neonfs_webdav-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_webdav
@@ -578,8 +578,8 @@ jobs:
             neonfs_client/priv/native
             neonfs_iam/deps
             neonfs_iam/_build
-          key: v3-build-neonfs_iam-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_iam/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_iam-${{ runner.arch }}-
+          key: v4-build-neonfs_iam-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_iam/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_iam/lib/**/*.ex', 'neonfs_iam/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs') }}
+          restore-keys: v4-build-neonfs_iam-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_iam
@@ -671,8 +671,8 @@ jobs:
             neonfs_integration/priv/native
             neonfs_core/target
             neonfs_core/priv/native
-          key: v5-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v5-build-neonfs_integration-${{ runner.arch }}-
+          key: v6-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_integration/lib/**/*.ex', 'neonfs_integration/mix.exs', 'neonfs_core/lib/**/*.ex', 'neonfs_core/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs', 'neonfs_test_support/lib/**/*.ex', 'neonfs_test_support/mix.exs') }}
+          restore-keys: v6-build-neonfs_integration-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_integration
@@ -731,8 +731,8 @@ jobs:
             neonfs_client/_build
             neonfs_omnibus/deps
             neonfs_omnibus/_build
-          key: v3-build-neonfs_omnibus-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_omnibus/mix.lock', 'neonfs_omnibus/native/neonfs_omnibus/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_omnibus-${{ runner.arch }}-
+          key: v4-build-neonfs_omnibus-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_omnibus/mix.lock', 'neonfs_omnibus/native/neonfs_omnibus/Cargo.lock', 'neonfs_omnibus/lib/**/*.ex', 'neonfs_omnibus/mix.exs', 'neonfs_core/lib/**/*.ex', 'neonfs_core/mix.exs', 'neonfs_fuse/lib/**/*.ex', 'neonfs_fuse/mix.exs', 'neonfs_nfs/lib/**/*.ex', 'neonfs_nfs/mix.exs', 'neonfs_webdav/lib/**/*.ex', 'neonfs_webdav/mix.exs', 'neonfs_s3/lib/**/*.ex', 'neonfs_s3/mix.exs', 'neonfs_client/lib/**/*.ex', 'neonfs_client/mix.exs') }}
+          restore-keys: v4-build-neonfs_omnibus-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_omnibus
