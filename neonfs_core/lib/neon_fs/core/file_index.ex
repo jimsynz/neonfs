@@ -7,10 +7,14 @@ defmodule NeonFS.Core.FileIndex do
   Directory entries are stored with key `"dir:<volume_id>:<parent_path>"` and
   sharded by `hash(parent_path)`.
 
-  ## Quorum Mode
+  ## Read / write paths
 
-  Writes go through `QuorumCoordinator.quorum_write/3` and cache misses fall back
-  to `QuorumCoordinator.quorum_read/2`. Requires `:quorum_opts` at startup.
+  Writes go through `QuorumCoordinator.quorum_write/3` (write-side
+  migration to the per-volume `Volume.MetadataWriter` is tracked under
+  #787). Reads delegate to `Volume.MetadataReader` which walks the
+  bootstrap layer → root segment → index tree path. Requires
+  `:quorum_opts` at startup for the write path and
+  `:metadata_reader_opts` for the read path.
 
   ## Cross-Segment Operations
 
@@ -962,18 +966,11 @@ defmodule NeonFS.Core.FileIndex do
   defp do_ensure_root_dir(volume_id, quorum_opts) do
     dir_key = dir_key(volume_id, "/")
 
-    case QuorumCoordinator.quorum_read(dir_key, quorum_opts) do
+    case MetadataReader.get_file_meta(volume_id, dir_key, metadata_reader_opts()) do
       {:ok, _value} ->
         :ok
 
-      {:ok, _value, :possibly_stale} ->
-        :ok
-
-      {:error, :not_found} ->
-        root = DirectoryEntry.new(volume_id, "/")
-        quorum_write_dir_entry(root, quorum_opts)
-
-      {:error, _reason} ->
+      {:error, _} ->
         root = DirectoryEntry.new(volume_id, "/")
         quorum_write_dir_entry(root, quorum_opts)
     end
@@ -997,11 +994,8 @@ defmodule NeonFS.Core.FileIndex do
   defp ensure_single_parent_dir(volume_id, dir_path, quorum_opts) do
     dir_key = dir_key(volume_id, dir_path)
 
-    case QuorumCoordinator.quorum_read(dir_key, quorum_opts) do
+    case MetadataReader.get_file_meta(volume_id, dir_key, metadata_reader_opts()) do
       {:ok, _} ->
-        :ok
-
-      {:ok, _, :possibly_stale} ->
         :ok
 
       {:error, :not_found} ->
@@ -1128,20 +1122,10 @@ defmodule NeonFS.Core.FileIndex do
   ## Private — Read helpers
 
   defp read_dir_entry(volume_id, path) do
-    case quorum_opts() do
-      nil -> {:error, :not_found}
-      opts -> read_dir_entry_quorum(volume_id, path, opts)
-    end
-  end
-
-  defp read_dir_entry_quorum(volume_id, path, quorum_opts) do
     key = dir_key(volume_id, path)
 
-    case QuorumCoordinator.quorum_read(key, quorum_opts) do
+    case MetadataReader.get_file_meta(volume_id, key, metadata_reader_opts()) do
       {:ok, value} ->
-        {:ok, DirectoryEntry.from_storable_map(value)}
-
-      {:ok, value, :possibly_stale} ->
         {:ok, DirectoryEntry.from_storable_map(value)}
 
       {:error, :not_found} ->
@@ -1152,21 +1136,13 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  defp fetch_file(file_id, quorum_opts) do
+  defp fetch_file(file_id, _quorum_opts) do
     case :ets.lookup(:file_index_by_id, file_id) do
       [{^file_id, file}] -> {:ok, file}
-      [] -> get_file_from_quorum(file_id, quorum_opts)
+      [] -> {:error, :not_found}
     end
   end
 
-  # Reads the file via `MetadataReader` first, then falls back to the
-  # legacy `QuorumCoordinator.quorum_read` path on `:not_found` /
-  # error. The fallback is load-bearing today because the per-volume
-  # index tree (`MetadataReader`'s backing store) is only populated
-  # once the write-side migration (#787) lands — until then,
-  # `MetadataReader` returns `:not_found` in production for every key,
-  # and the only real source of truth is the old quorum-replicated
-  # `<drive>/meta/` segments. Once #787 lands the fallback can go.
   defp get_from_metadata_reader(volume_id, file_id) do
     key = file_key(file_id)
 
@@ -1176,42 +1152,9 @@ defmodule NeonFS.Core.FileIndex do
         :ets.insert(:file_index_by_id, {file_id, file})
         {:ok, file}
 
-      _ ->
-        get_from_quorum(file_id)
-    end
-  rescue
-    _ -> get_from_quorum(file_id)
-  end
-
-  defp get_from_quorum(file_id) do
-    case quorum_opts() do
-      nil -> {:error, :not_found}
-      opts -> get_file_from_quorum(file_id, opts)
-    end
-  end
-
-  defp get_file_from_quorum(file_id, quorum_opts) do
-    key = file_key(file_id)
-
-    case QuorumCoordinator.quorum_read(key, quorum_opts) do
-      {:ok, value} ->
-        file = storable_map_to_file(value)
-        :ets.insert(:file_index_by_id, {file_id, file})
-        {:ok, file}
-
-      {:ok, value, :possibly_stale} ->
-        file = storable_map_to_file(value)
-        :ets.insert(:file_index_by_id, {file_id, file})
-        {:ok, file}
-
-      {:error, :not_found} ->
-        {:error, :not_found}
-
-      {:error, _reason} ->
+      {:error, _} ->
         {:error, :not_found}
     end
-  rescue
-    _ -> {:error, :not_found}
   end
 
   ## Private — IntentLog helpers
