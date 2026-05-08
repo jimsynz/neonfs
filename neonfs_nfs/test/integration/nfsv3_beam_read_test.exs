@@ -119,9 +119,17 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
       end
     end)
 
-    # 1. Volume + multi-chunk file.
+    # 1. Volume + multi-chunk file. Pin `replicate:1` because in this
+    # cluster only `node1`'s drive is in the bootstrap layer
+    # (`Cluster.Init.do_init_cluster/1` registers local drives via
+    # #890; joining nodes' drives don't get registered there) — so
+    # `Volume.MetadataWriter`'s lazy provisioning sees just one drive
+    # and can't satisfy the default `replicate:3, min_copies:2`.
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [volume, %{}])
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        volume,
+        %{"durability" => "replicate:1"}
+      ])
 
     assert_eventually timeout: 10_000 do
       case PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [volume]) do
