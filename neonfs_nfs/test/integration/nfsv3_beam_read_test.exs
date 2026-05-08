@@ -121,7 +121,10 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
 
     # 1. Volume + multi-chunk file.
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [volume, %{}])
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        volume,
+        %{"durability" => "replicate:1"}
+      ])
 
     assert_eventually timeout: 10_000 do
       case PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [volume]) do
