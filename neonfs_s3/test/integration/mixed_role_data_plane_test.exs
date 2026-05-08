@@ -58,7 +58,11 @@ defmodule NeonFS.S3.IntegrationTest.MixedRoleDataPlaneTest do
     # as `chunk_writer_test.exs`; tracked in the `CommitChunks` module
     # docstring.
     volume_name = "mr-vol-#{System.unique_integer([:positive])}"
-    volume_opts = %{compression: %{algorithm: :none, level: 0, min_size: 0}}
+
+    volume_opts = %{
+      "durability" => "replicate:1",
+      compression: %{algorithm: :none, level: 0, min_size: 0}
+    }
 
     {:ok, _} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [

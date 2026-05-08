@@ -34,7 +34,10 @@ defmodule NeonFS.S3.IntegrationTest.ProcessHeapProfileTest do
     volume_name = "profile-vol-#{System.unique_integer([:positive])}"
 
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [volume_name, %{}])
+      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+        volume_name,
+        %{"durability" => "replicate:1"}
+      ])
 
     :ok =
       ClusterCase.wait_until(
