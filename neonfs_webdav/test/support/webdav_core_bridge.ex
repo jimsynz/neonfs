@@ -45,7 +45,8 @@ defmodule NeonFS.WebDAV.IntegrationTest.CoreBridge do
   # is wired into FileIndex (#835) lazy provisioning surfaces that
   # mismatch as a test failure rather than a silent skip.
   def call(:create_volume, [name]) do
-    call(:create_volume, [name, durability: %{type: :replicate, factor: 1, min_copies: 1}])
+    opts = [durability: %{type: :replicate, factor: 1, min_copies: 1}]
+    call(:create_volume, [name, opts])
   end
 
   def call(function, args) do
