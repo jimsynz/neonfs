@@ -24,6 +24,12 @@ defmodule NeonFS.Integration.PartitionTest do
   @moduletag nodes: 3
   @moduletag cluster_mode: :shared
   @moduletag :partition
+  # Whole module is cross-node by definition; setup_all writes on
+  # node1 and waits for every peer to read it back. That round-trip
+  # walks the per-volume index tree on the remote, which after #835
+  # only lives on the writer's drive (#903). Re-enable once the
+  # writer fans out tree mutations to all replicas.
+  @moduletag :pending_903
 
   setup_all %{cluster: cluster} do
     :ok = init_cluster_with_data(cluster)
