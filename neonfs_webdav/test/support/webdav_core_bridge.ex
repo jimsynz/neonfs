@@ -38,6 +38,16 @@ defmodule NeonFS.WebDAV.IntegrationTest.CoreBridge do
     call(:write_file_at, [volume_name, path, 0, body, opts])
   end
 
+  # Single-drive integration harness: pin replicate:1 unless the
+  # caller already supplied opts. Default-durability volumes
+  # (`replicate: factor=3, min_copies=2`) can't satisfy the gate's
+  # `min_copies` against one drive, and once `Volume.MetadataWriter`
+  # is wired into FileIndex (#835) lazy provisioning surfaces that
+  # mismatch as a test failure rather than a silent skip.
+  def call(:create_volume, [name]) do
+    call(:create_volume, [name, durability: %{type: :replicate, factor: 1, min_copies: 1}])
+  end
+
   def call(function, args) do
     core_node = :persistent_term.get(:webdav_integration_core_node)
     rpc(core_node, NeonFS.Core, function, args)
