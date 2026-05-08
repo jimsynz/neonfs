@@ -7,10 +7,13 @@ defmodule NeonFS.Core.FileIndex do
   Directory entries are stored with key `"dir:<volume_id>:<parent_path>"` and
   sharded by `hash(parent_path)`.
 
-  ## Quorum Mode
+  ## Per-volume metadata path
 
-  Writes go through `QuorumCoordinator.quorum_write/3` and cache misses fall back
-  to `QuorumCoordinator.quorum_read/2`. Requires `:quorum_opts` at startup.
+  Reads delegate to `Volume.MetadataReader` and writes to `Volume.MetadataWriter` —
+  both walk the bootstrap layer → root segment → index tree. The
+  `:metadata_reader_opts` and `:metadata_writer_opts` start_link opts inject the
+  underlying cluster-state / Ra / NIF dependencies so unit tests can stub them.
+  Production callers leave both empty and pick up real defaults.
 
   ## Cross-Segment Operations
 
@@ -28,12 +31,10 @@ defmodule NeonFS.Core.FileIndex do
     DirectoryEntry,
     FileMeta,
     Intent,
-    IntentLog,
-    MetadataCodec,
-    QuorumCoordinator
+    IntentLog
   }
 
-  alias NeonFS.Core.Volume.MetadataReader
+  alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, MetadataWriter}
 
   alias NeonFS.Events.Broadcaster
 
@@ -386,146 +387,122 @@ defmodule NeonFS.Core.FileIndex do
   def init(opts) do
     :ets.new(:file_index_by_id, [:set, :named_table, :public, read_concurrency: true])
 
-    # Use explicit opts first (unit tests pass quorum_opts directly).
-    # Fall back to persistent_term (set by Supervisor or rebuild_quorum_ring).
-    # On crash restart, child_spec has no quorum_opts, so persistent_term
-    # (preserved by crash-safe terminate) provides the authoritative ring.
-    quorum_opts =
-      Keyword.get(opts, :quorum_opts) ||
-        :persistent_term.get({__MODULE__, :quorum_opts}, nil)
-
-    :persistent_term.put({__MODULE__, :quorum_opts}, quorum_opts)
-
     metadata_reader_opts =
       Keyword.get(opts, :metadata_reader_opts) ||
         :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
 
     :persistent_term.put({__MODULE__, :metadata_reader_opts}, metadata_reader_opts)
 
-    if quorum_opts do
-      case load_from_local_store() do
-        {:ok, count} ->
-          Logger.info("FileIndex started in quorum mode, loaded files from local store",
-            count: count
-          )
+    metadata_writer_opts =
+      Keyword.get(opts, :metadata_writer_opts) ||
+        :persistent_term.get({__MODULE__, :metadata_writer_opts}, [])
 
-        {:error, reason} ->
-          Logger.debug("FileIndex started in quorum mode, local store not available",
-            reason: reason
-          )
-      end
-    else
-      Logger.warning("FileIndex started without quorum_opts — writes will fail")
-    end
+    :persistent_term.put({__MODULE__, :metadata_writer_opts}, metadata_writer_opts)
 
-    {:ok, %{quorum_opts: quorum_opts}}
+    {:ok, %{}}
   end
 
   @impl true
   def handle_call({:create, file}, _from, state) do
-    reply = do_create(file, quorum_opts())
+    reply = do_create(file)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:update, file_id, updates}, _from, state) do
-    reply = do_update(file_id, updates, quorum_opts())
+    reply = do_update(file_id, updates)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:truncate, file_id, new_size, additional_updates}, _from, state) do
-    reply = do_truncate(file_id, new_size, additional_updates, quorum_opts())
+    reply = do_truncate(file_id, new_size, additional_updates)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:touch, file_id}, _from, state) do
-    reply = do_touch(file_id, quorum_opts())
+    reply = do_touch(file_id)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:delete, file_id}, _from, state) do
-    reply = do_delete(file_id, quorum_opts())
+    reply = do_delete(file_id)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:mark_detached, file_id, pinned_claim_ids}, _from, state) do
-    reply = do_mark_detached(file_id, pinned_claim_ids, quorum_opts())
+    reply = do_mark_detached(file_id, pinned_claim_ids)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:decrement_pin, file_id, claim_id}, _from, state) do
-    reply = do_decrement_pin(file_id, claim_id, quorum_opts())
+    reply = do_decrement_pin(file_id, claim_id)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:purge_detached, file_id}, _from, state) do
-    reply = do_purge_detached(file_id, quorum_opts())
+    reply = do_purge_detached(file_id)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:mkdir, volume_id, path, opts}, _from, state) do
-    reply = do_mkdir(volume_id, path, opts, quorum_opts())
+    reply = do_mkdir(volume_id, path, opts)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:rename, volume_id, parent_path, old_name, new_name}, _from, state) do
-    reply = do_rename(volume_id, parent_path, old_name, new_name, quorum_opts())
+    reply = do_rename(volume_id, parent_path, old_name, new_name)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:move, volume_id, source_dir, dest_dir, name}, _from, state) do
-    reply = do_move(volume_id, source_dir, dest_dir, name, quorum_opts())
+    reply = do_move(volume_id, source_dir, dest_dir, name)
     {:reply, reply, state}
   end
 
   @impl true
   def handle_call({:ensure_root_dir, volume_id}, _from, state) do
-    reply = do_ensure_root_dir(volume_id, quorum_opts())
+    reply = do_ensure_root_dir(volume_id)
     {:reply, reply, state}
   end
 
   # Only erase persistent_term on clean shutdown, not on crash. On crash
-  # restart, the surviving persistent_term value (set by rebuild_quorum_ring)
-  # prevents the child from overwriting it with a stale child_spec ring.
+  # restart, the surviving values prevent the child from overwriting them
+  # with a stale child_spec.
   @impl true
   def terminate(reason, _state) when reason in [:normal, :shutdown] do
-    safe_erase_quorum_opts()
+    safe_erase_metadata_opts()
   end
 
   def terminate({:shutdown, _}, _state) do
-    safe_erase_quorum_opts()
+    safe_erase_metadata_opts()
   end
 
   def terminate(_reason, _state), do: :ok
 
-  defp safe_erase_quorum_opts do
-    :persistent_term.erase({__MODULE__, :quorum_opts})
-
-    try do
-      :persistent_term.erase({__MODULE__, :metadata_reader_opts})
-    rescue
-      ArgumentError -> :ok
+  defp safe_erase_metadata_opts do
+    for key <- [:metadata_reader_opts, :metadata_writer_opts] do
+      try do
+        :persistent_term.erase({__MODULE__, key})
+      rescue
+        ArgumentError -> :ok
+      end
     end
 
     :ok
-  rescue
-    ArgumentError -> :ok
   end
 
   ## Private — Create
 
-  defp do_create(_file, nil), do: {:error, :no_quorum}
-
-  defp do_create(file, quorum_opts) do
+  defp do_create(file) do
     with :ok <- FileMeta.validate_path(file.path) do
       {parent_path, name} = split_path(file.path)
 
@@ -538,11 +515,11 @@ defmodule NeonFS.Core.FileIndex do
         )
 
       with {:ok, intent_id} <- try_acquire_intent(intent),
-           :ok <- do_ensure_root_dir(file.volume_id, quorum_opts),
-           :ok <- ensure_parent_dirs(file.volume_id, parent_path, quorum_opts),
-           :ok <- quorum_write_file(file, quorum_opts),
+           :ok <- do_ensure_root_dir(file.volume_id),
+           :ok <- ensure_parent_dirs(file.volume_id, parent_path),
+           :ok <- write_file(file),
            :ok <-
-             quorum_add_dir_child(file.volume_id, parent_path, name, :file, file.id, quorum_opts) do
+             add_dir_child(file.volume_id, parent_path, name, :file, file.id) do
         complete_intent(intent_id)
         :ets.insert(:file_index_by_id, {file.id, file})
 
@@ -565,14 +542,12 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Update
 
-  defp do_update(_file_id, _updates, nil), do: {:error, :no_quorum}
-
-  defp do_update(file_id, updates, quorum_opts) do
-    case fetch_file(file_id, quorum_opts) do
+  defp do_update(file_id, updates) do
+    case fetch_file(file_id) do
       {:ok, old_file} ->
         updated_file = FileMeta.update(old_file, updates)
 
-        case quorum_write_file(updated_file, quorum_opts) do
+        case write_file(updated_file) do
           :ok ->
             :ets.insert(:file_index_by_id, {file_id, updated_file})
 
@@ -595,14 +570,12 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Truncate
 
-  defp do_truncate(_file_id, _new_size, _additional_updates, nil), do: {:error, :no_quorum}
-
-  defp do_truncate(file_id, new_size, additional_updates, quorum_opts) do
-    case fetch_file(file_id, quorum_opts) do
+  defp do_truncate(file_id, new_size, additional_updates) do
+    case fetch_file(file_id) do
       {:ok, file} ->
         truncation_updates = truncation_updates_for(file, new_size)
         all_updates = Keyword.merge(additional_updates, truncation_updates)
-        do_update(file_id, all_updates, quorum_opts)
+        do_update(file_id, all_updates)
 
       {:error, reason} ->
         {:error, reason}
@@ -678,14 +651,12 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Touch (atime-only update, no version bump)
 
-  defp do_touch(_file_id, nil), do: {:error, :no_quorum}
-
-  defp do_touch(file_id, quorum_opts) do
-    case fetch_file(file_id, quorum_opts) do
+  defp do_touch(file_id) do
+    case fetch_file(file_id) do
       {:ok, old_file} ->
         touched_file = FileMeta.touch(old_file)
 
-        case quorum_write_file(touched_file, quorum_opts) do
+        case write_file(touched_file) do
           :ok ->
             :ets.insert(:file_index_by_id, {file_id, touched_file})
             {:ok, touched_file}
@@ -701,10 +672,8 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Delete
 
-  defp do_delete(_file_id, nil), do: {:error, :no_quorum}
-
-  defp do_delete(file_id, quorum_opts) do
-    case fetch_file(file_id, quorum_opts) do
+  defp do_delete(file_id) do
+    case fetch_file(file_id) do
       {:ok, file} ->
         {parent_path, name} = split_path(file.path)
 
@@ -717,9 +686,9 @@ defmodule NeonFS.Core.FileIndex do
           )
 
         with {:ok, intent_id} <- try_acquire_intent(intent),
-             :ok <- quorum_delete_file(file_id, quorum_opts),
+             :ok <- delete_file_meta(file),
              :ok <-
-               quorum_remove_dir_child(file.volume_id, parent_path, name, quorum_opts) do
+               remove_dir_child(file.volume_id, parent_path, name) do
           complete_intent(intent_id)
           delete_file_from_ets(file_id, file)
           :ok
@@ -747,22 +716,20 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Mark detached (POSIX unlink-while-open, #643 of #638)
 
-  defp do_mark_detached(_file_id, _pinned_claim_ids, nil), do: {:error, :no_quorum}
-
-  defp do_mark_detached(file_id, pinned_claim_ids, quorum_opts) do
-    case fetch_file(file_id, quorum_opts) do
+  defp do_mark_detached(file_id, pinned_claim_ids) do
+    case fetch_file(file_id) do
       {:ok, %FileMeta{detached: true} = existing} ->
         {:ok, existing}
 
       {:ok, file} ->
-        detach_file(file, pinned_claim_ids, quorum_opts)
+        detach_file(file, pinned_claim_ids)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp detach_file(file, pinned_claim_ids, quorum_opts) do
+  defp detach_file(file, pinned_claim_ids) do
     {parent_path, name} = split_path(file.path)
     detached_file = FileMeta.update(file, detached: true, pinned_claim_ids: pinned_claim_ids)
 
@@ -775,8 +742,8 @@ defmodule NeonFS.Core.FileIndex do
       )
 
     with {:ok, intent_id} <- try_acquire_intent(intent),
-         :ok <- quorum_write_file(detached_file, quorum_opts),
-         :ok <- quorum_remove_dir_child(file.volume_id, parent_path, name, quorum_opts) do
+         :ok <- write_file(detached_file),
+         :ok <- remove_dir_child(file.volume_id, parent_path, name) do
       complete_intent(intent_id)
       :ets.insert(:file_index_by_id, {file.id, detached_file})
 
@@ -792,12 +759,10 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Decrement pin (POSIX unlink-while-open, #644 of #638)
 
-  defp do_decrement_pin(_file_id, _claim_id, nil), do: {:error, :no_quorum}
-
-  defp do_decrement_pin(file_id, claim_id, quorum_opts) do
-    case fetch_file(file_id, quorum_opts) do
+  defp do_decrement_pin(file_id, claim_id) do
+    case fetch_file(file_id) do
       {:ok, %FileMeta{detached: true, pinned_claim_ids: ids} = file} ->
-        decrement_pinned_claim_ids(file, claim_id, ids, quorum_opts)
+        decrement_pinned_claim_ids(file, claim_id, ids)
 
       {:ok, _file} ->
         # Not detached — treat as no-op so duplicate / stale telemetry
@@ -809,23 +774,23 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  defp decrement_pinned_claim_ids(file, claim_id, ids, quorum_opts) do
+  defp decrement_pinned_claim_ids(file, claim_id, ids) do
     case List.delete(ids, claim_id) do
       ^ids ->
         :ok
 
       [] ->
-        purge_detached_record(file, quorum_opts)
+        purge_detached_record(file)
 
       remaining ->
-        rewrite_pinned_claim_ids(file, remaining, quorum_opts)
+        rewrite_pinned_claim_ids(file, remaining)
     end
   end
 
-  defp rewrite_pinned_claim_ids(file, remaining, quorum_opts) do
+  defp rewrite_pinned_claim_ids(file, remaining) do
     updated = FileMeta.update(file, pinned_claim_ids: remaining)
 
-    case quorum_write_file(updated, quorum_opts) do
+    case write_file(updated) do
       :ok ->
         :ets.insert(:file_index_by_id, {file.id, updated})
         :ok
@@ -837,12 +802,10 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Purge detached (POSIX unlink-while-open, #644 of #638)
 
-  defp do_purge_detached(_file_id, nil), do: {:error, :no_quorum}
-
-  defp do_purge_detached(file_id, quorum_opts) do
-    case fetch_file(file_id, quorum_opts) do
+  defp do_purge_detached(file_id) do
+    case fetch_file(file_id) do
       {:ok, %FileMeta{detached: true} = file} ->
-        purge_detached_record(file, quorum_opts)
+        purge_detached_record(file)
 
       {:ok, _file} ->
         {:error, :not_detached}
@@ -852,8 +815,8 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  defp purge_detached_record(file, quorum_opts) do
-    case quorum_delete_file(file.id, quorum_opts) do
+  defp purge_detached_record(file) do
+    case delete_file_meta(file) do
       :ok ->
         delete_file_from_ets(file.id, file)
         :ok
@@ -875,19 +838,17 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Mkdir
 
-  defp do_mkdir(_volume_id, _path, _opts, nil), do: {:error, :quorum_required}
-
-  defp do_mkdir(volume_id, path, opts, quorum_opts) do
+  defp do_mkdir(volume_id, path, opts) do
     normalized = FileMeta.normalize_path(path)
     {parent_path, name} = split_path(normalized)
 
     dir_id = UUIDv7.generate()
     new_dir = DirectoryEntry.new(volume_id, normalized, opts)
 
-    with :ok <- do_ensure_root_dir(volume_id, quorum_opts),
-         :ok <- ensure_parent_dirs(volume_id, parent_path, quorum_opts),
-         :ok <- quorum_write_dir_entry(new_dir, quorum_opts),
-         :ok <- quorum_add_dir_child(volume_id, parent_path, name, :dir, dir_id, quorum_opts) do
+    with :ok <- do_ensure_root_dir(volume_id),
+         :ok <- ensure_parent_dirs(volume_id, parent_path),
+         :ok <- write_dir_entry(new_dir),
+         :ok <- add_dir_child(volume_id, parent_path, name, :dir, dir_id) do
       safe_broadcast(volume_id, %DirCreated{volume_id: volume_id, path: normalized})
       {:ok, new_dir}
     end
@@ -895,16 +856,13 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Rename (within same directory)
 
-  defp do_rename(_volume_id, _parent_path, _old_name, _new_name, nil),
-    do: {:error, :quorum_required}
-
-  defp do_rename(volume_id, parent_path, old_name, new_name, quorum_opts) do
+  defp do_rename(volume_id, parent_path, old_name, new_name) do
     normalized = FileMeta.normalize_path(parent_path)
 
     with {:ok, dir_entry} <- read_dir_entry(volume_id, normalized),
          child_result = DirectoryEntry.get_child(dir_entry, old_name),
          {:ok, updated_entry} <- DirectoryEntry.rename_child(dir_entry, old_name, new_name),
-         :ok <- quorum_write_dir_entry(updated_entry, quorum_opts) do
+         :ok <- write_dir_entry(updated_entry) do
       broadcast_rename_event(volume_id, child_result, normalized, old_name, new_name)
       :ok
     end
@@ -912,9 +870,7 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Move (across directories)
 
-  defp do_move(_volume_id, _source_dir, _dest_dir, _name, nil), do: {:error, :quorum_required}
-
-  defp do_move(volume_id, source_dir, dest_dir, name, quorum_opts) do
+  defp do_move(volume_id, source_dir, dest_dir, name) do
     source_normalized = FileMeta.normalize_path(source_dir)
     dest_normalized = FileMeta.normalize_path(dest_dir)
 
@@ -935,16 +891,9 @@ defmodule NeonFS.Core.FileIndex do
          {:ok, child} <- DirectoryEntry.get_child(source_entry, name),
          {:ok, intent_id} <- try_acquire_intent(intent),
          :ok <-
-           quorum_remove_dir_child(volume_id, source_normalized, name, quorum_opts),
+           remove_dir_child(volume_id, source_normalized, name),
          :ok <-
-           quorum_add_dir_child(
-             volume_id,
-             dest_normalized,
-             name,
-             child.type,
-             child.id,
-             quorum_opts
-           ) do
+           add_dir_child(volume_id, dest_normalized, name, child.type, child.id) do
       complete_intent(intent_id)
 
       broadcast_move_event(volume_id, child, source_normalized, dest_normalized, name)
@@ -957,108 +906,88 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Root directory
 
-  defp do_ensure_root_dir(_volume_id, nil), do: {:error, :no_quorum}
-
-  defp do_ensure_root_dir(volume_id, quorum_opts) do
-    dir_key = dir_key(volume_id, "/")
-
-    case QuorumCoordinator.quorum_read(dir_key, quorum_opts) do
-      {:ok, _value} ->
-        :ok
-
-      {:ok, _value, :possibly_stale} ->
-        :ok
-
-      {:error, :not_found} ->
-        root = DirectoryEntry.new(volume_id, "/")
-        quorum_write_dir_entry(root, quorum_opts)
-
-      {:error, _reason} ->
-        root = DirectoryEntry.new(volume_id, "/")
-        quorum_write_dir_entry(root, quorum_opts)
+  defp do_ensure_root_dir(volume_id) do
+    case read_dir_entry(volume_id, "/") do
+      {:ok, _entry} -> :ok
+      {:error, _} -> write_dir_entry(DirectoryEntry.new(volume_id, "/"))
     end
   end
 
   ## Private — Parent directory creation
 
-  defp ensure_parent_dirs(_volume_id, "/", _quorum_opts), do: :ok
+  defp ensure_parent_dirs(_volume_id, "/"), do: :ok
 
-  defp ensure_parent_dirs(volume_id, path, quorum_opts) do
+  defp ensure_parent_dirs(volume_id, path) do
     parts = path_parts(path)
 
     Enum.reduce_while(parts, :ok, fn dir_path, :ok ->
-      case ensure_single_parent_dir(volume_id, dir_path, quorum_opts) do
+      case ensure_single_parent_dir(volume_id, dir_path) do
         :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp ensure_single_parent_dir(volume_id, dir_path, quorum_opts) do
-    dir_key = dir_key(volume_id, dir_path)
-
-    case QuorumCoordinator.quorum_read(dir_key, quorum_opts) do
-      {:ok, _} ->
-        :ok
-
-      {:ok, _, :possibly_stale} ->
-        :ok
-
-      {:error, :not_found} ->
-        create_parent_dir(volume_id, dir_path, quorum_opts)
-
-      {:error, reason} ->
-        {:error, reason}
+  defp ensure_single_parent_dir(volume_id, dir_path) do
+    case read_dir_entry(volume_id, dir_path) do
+      {:ok, _entry} -> :ok
+      {:error, :not_found} -> create_parent_dir(volume_id, dir_path)
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp create_parent_dir(volume_id, dir_path, quorum_opts) do
+  defp create_parent_dir(volume_id, dir_path) do
     dir = DirectoryEntry.new(volume_id, dir_path)
     {parent, name} = split_path(dir_path)
 
-    with :ok <- quorum_write_dir_entry(dir, quorum_opts) do
-      quorum_add_dir_child(volume_id, parent, name, :dir, UUIDv7.generate(), quorum_opts)
+    with :ok <- write_dir_entry(dir) do
+      add_dir_child(volume_id, parent, name, :dir, UUIDv7.generate())
     end
   end
 
-  ## Private — Quorum operations for files
+  ## Private — MetadataWriter operations for files
 
-  defp quorum_write_file(file, quorum_opts) do
+  defp write_file(%FileMeta{} = file) do
     key = file_key(file.id)
     storable = file_to_storable_map(file)
+    encoded = MetadataValue.encode(storable)
 
-    case QuorumCoordinator.quorum_write(key, storable, quorum_opts) do
-      {:ok, :written} -> :ok
-      {:error, reason} -> {:error, reason}
+    case MetadataWriter.put(file.volume_id, :file_index, key, encoded, metadata_writer_opts()) do
+      {:ok, _root} -> :ok
+      {:error, _, _} = err -> err
+      {:error, _reason} = err -> err
     end
   end
 
-  defp quorum_delete_file(file_id, quorum_opts) do
-    key = file_key(file_id)
+  defp delete_file_meta(%FileMeta{} = file) do
+    key = file_key(file.id)
 
-    case QuorumCoordinator.quorum_delete(key, quorum_opts) do
-      {:ok, :written} -> :ok
-      {:error, reason} -> {:error, reason}
+    case MetadataWriter.delete(file.volume_id, :file_index, key, metadata_writer_opts()) do
+      {:ok, _root} -> :ok
+      {:error, _, _} = err -> err
+      {:error, _reason} = err -> err
     end
   end
 
-  ## Private — Quorum operations for directory entries
+  ## Private — MetadataWriter operations for directory entries
 
-  defp quorum_write_dir_entry(%DirectoryEntry{} = entry, quorum_opts) do
+  defp write_dir_entry(%DirectoryEntry{} = entry) do
     key = dir_key(entry.volume_id, entry.parent_path)
     storable = DirectoryEntry.to_storable_map(entry)
+    encoded = MetadataValue.encode(storable)
 
-    case QuorumCoordinator.quorum_write(key, storable, quorum_opts) do
-      {:ok, :written} -> :ok
-      {:error, reason} -> {:error, reason}
+    case MetadataWriter.put(entry.volume_id, :file_index, key, encoded, metadata_writer_opts()) do
+      {:ok, _root} -> :ok
+      {:error, _, _} = err -> err
+      {:error, _reason} = err -> err
     end
   end
 
-  defp quorum_add_dir_child(volume_id, parent_path, name, type, id, quorum_opts) do
+  defp add_dir_child(volume_id, parent_path, name, type, id) do
     case read_dir_entry(volume_id, parent_path) do
       {:ok, dir_entry} ->
         updated = DirectoryEntry.add_child(dir_entry, name, type, id)
-        quorum_write_dir_entry(updated, quorum_opts)
+        write_dir_entry(updated)
 
       {:error, :not_found} ->
         # Parent doesn't exist yet — create it with the child
@@ -1066,18 +995,18 @@ defmodule NeonFS.Core.FileIndex do
           DirectoryEntry.new(volume_id, parent_path)
           |> DirectoryEntry.add_child(name, type, id)
 
-        quorum_write_dir_entry(new_dir, quorum_opts)
+        write_dir_entry(new_dir)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp quorum_remove_dir_child(volume_id, parent_path, name, quorum_opts) do
+  defp remove_dir_child(volume_id, parent_path, name) do
     case read_dir_entry(volume_id, parent_path) do
       {:ok, dir_entry} ->
         updated = DirectoryEntry.remove_child(dir_entry, name)
-        quorum_write_dir_entry(updated, quorum_opts)
+        write_dir_entry(updated)
 
       {:error, :not_found} ->
         # Parent doesn't exist — nothing to remove
@@ -1128,45 +1057,22 @@ defmodule NeonFS.Core.FileIndex do
   ## Private — Read helpers
 
   defp read_dir_entry(volume_id, path) do
-    case quorum_opts() do
-      nil -> {:error, :not_found}
-      opts -> read_dir_entry_quorum(volume_id, path, opts)
-    end
-  end
-
-  defp read_dir_entry_quorum(volume_id, path, quorum_opts) do
     key = dir_key(volume_id, path)
 
-    case QuorumCoordinator.quorum_read(key, quorum_opts) do
-      {:ok, value} ->
-        {:ok, DirectoryEntry.from_storable_map(value)}
-
-      {:ok, value, :possibly_stale} ->
-        {:ok, DirectoryEntry.from_storable_map(value)}
-
-      {:error, :not_found} ->
-        {:error, :not_found}
-
-      {:error, reason} ->
-        {:error, reason}
+    case MetadataReader.get_file_meta(volume_id, key, metadata_reader_opts()) do
+      {:ok, value} -> {:ok, DirectoryEntry.from_storable_map(value)}
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp fetch_file(file_id, quorum_opts) do
+  defp fetch_file(file_id) do
     case :ets.lookup(:file_index_by_id, file_id) do
       [{^file_id, file}] -> {:ok, file}
-      [] -> get_file_from_quorum(file_id, quorum_opts)
+      [] -> {:error, :not_found}
     end
   end
 
-  # Reads the file via `MetadataReader` first, then falls back to the
-  # legacy `QuorumCoordinator.quorum_read` path on `:not_found` /
-  # error. The fallback is load-bearing today because the per-volume
-  # index tree (`MetadataReader`'s backing store) is only populated
-  # once the write-side migration (#787) lands — until then,
-  # `MetadataReader` returns `:not_found` in production for every key,
-  # and the only real source of truth is the old quorum-replicated
-  # `<drive>/meta/` segments. Once #787 lands the fallback can go.
   defp get_from_metadata_reader(volume_id, file_id) do
     key = file_key(file_id)
 
@@ -1176,42 +1082,9 @@ defmodule NeonFS.Core.FileIndex do
         :ets.insert(:file_index_by_id, {file_id, file})
         {:ok, file}
 
-      _ ->
-        get_from_quorum(file_id)
-    end
-  rescue
-    _ -> get_from_quorum(file_id)
-  end
-
-  defp get_from_quorum(file_id) do
-    case quorum_opts() do
-      nil -> {:error, :not_found}
-      opts -> get_file_from_quorum(file_id, opts)
-    end
-  end
-
-  defp get_file_from_quorum(file_id, quorum_opts) do
-    key = file_key(file_id)
-
-    case QuorumCoordinator.quorum_read(key, quorum_opts) do
-      {:ok, value} ->
-        file = storable_map_to_file(value)
-        :ets.insert(:file_index_by_id, {file_id, file})
-        {:ok, file}
-
-      {:ok, value, :possibly_stale} ->
-        file = storable_map_to_file(value)
-        :ets.insert(:file_index_by_id, {file_id, file})
-        {:ok, file}
-
-      {:error, :not_found} ->
-        {:error, :not_found}
-
-      {:error, _reason} ->
+      {:error, _} ->
         {:error, :not_found}
     end
-  rescue
-    _ -> {:error, :not_found}
   end
 
   ## Private — IntentLog helpers
@@ -1443,97 +1316,6 @@ defmodule NeonFS.Core.FileIndex do
   defp decode_permission(p) when is_atom(p), do: p
   defp decode_permission(p) when is_binary(p), do: String.to_existing_atom(p)
 
-  ## Private — Local store loading
-
-  defp load_from_local_store do
-    drives = Application.get_env(:neonfs_core, :drives) || default_drives()
-
-    count =
-      Enum.reduce(drives, 0, fn drive, total ->
-        path = drive_path(drive)
-        meta_dir = Path.join(path, "meta")
-
-        case File.ls(meta_dir) do
-          {:ok, segment_dirs} ->
-            total + load_segments_from_disk(meta_dir, segment_dirs)
-
-          {:error, _} ->
-            total
-        end
-      end)
-
-    {:ok, count}
-  rescue
-    _ -> {:error, :not_available}
-  end
-
-  defp load_segments_from_disk(meta_dir, segment_dirs) do
-    Enum.reduce(segment_dirs, 0, fn segment_hex, count ->
-      segment_dir = Path.join(meta_dir, segment_hex)
-      file_paths = walk_metadata_files(segment_dir)
-      count + load_file_records(file_paths)
-    end)
-  end
-
-  defp load_file_records(file_paths) do
-    Enum.reduce(file_paths, 0, fn file_path, count ->
-      case load_file_record(file_path) do
-        :ok -> count + 1
-        :skip -> count
-      end
-    end)
-  end
-
-  defp load_file_record(file_path) do
-    with {:ok, data} <- File.read(file_path),
-         {:ok, %{tombstone: false, value: value}} <- MetadataCodec.decode_record(data),
-         true <- file_metadata?(value) do
-      file = storable_map_to_file(value)
-      :ets.insert(:file_index_by_id, {file.id, file})
-      :ok
-    else
-      _ -> :skip
-    end
-  end
-
-  defp file_metadata?(map) when is_map(map) do
-    has_field?(map, :id) and has_field?(map, :volume_id) and has_field?(map, :path)
-  end
-
-  defp file_metadata?(_), do: false
-
-  defp has_field?(map, key) do
-    Map.has_key?(map, key) or Map.has_key?(map, Atom.to_string(key))
-  end
-
-  defp walk_metadata_files(dir) do
-    case File.ls(dir) do
-      {:ok, entries} ->
-        Enum.flat_map(entries, &collect_metadata_entry(dir, &1))
-
-      {:error, _} ->
-        []
-    end
-  end
-
-  defp collect_metadata_entry(dir, entry) do
-    path = Path.join(dir, entry)
-
-    cond do
-      File.dir?(path) -> walk_metadata_files(path)
-      String.contains?(entry, ".tmp") -> []
-      true -> [path]
-    end
-  end
-
-  defp default_drives do
-    base_dir = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs/blobs")
-    [%{id: "default", path: base_dir, tier: :hot, capacity: 0}]
-  end
-
-  defp drive_path(%{path: path}), do: path
-  defp drive_path(drive) when is_map(drive), do: Map.get(drive, :path, Map.get(drive, "path", ""))
-
   ## Private — Path helpers
 
   defp split_path("/"), do: {"/", ""}
@@ -1555,8 +1337,8 @@ defmodule NeonFS.Core.FileIndex do
     |> Enum.map(fn parts -> "/" <> Enum.join(parts, "/") end)
   end
 
-  defp quorum_opts do
-    :persistent_term.get({__MODULE__, :quorum_opts}, nil)
+  defp metadata_writer_opts do
+    :persistent_term.get({__MODULE__, :metadata_writer_opts}, [])
   end
 
   defp metadata_reader_opts do
