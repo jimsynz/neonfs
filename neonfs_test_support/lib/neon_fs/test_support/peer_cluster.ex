@@ -206,7 +206,13 @@ defmodule NeonFS.TestSupport.PeerCluster do
           tls_dir: Path.join(data_dir, "tls"),
           partition_recovery_debounce_ms: 200,
           service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []},
-          bootstrap_nodes: client_bootstrap_nodes
+          bootstrap_nodes: client_bootstrap_nodes,
+          # Single-drive peer harness: collapse the production
+          # default `replicate: factor=3, min_copies=2` to a 1-replica
+          # config tests can satisfy. See `Volume.default_durability/0`
+          # — pre-#835 the global metadata quorum hid this from suites
+          # that called `Volume.new/2` with no explicit durability.
+          default_durability: %{type: :replicate, factor: 1, min_copies: 1}
         ]
 
         app_config = [

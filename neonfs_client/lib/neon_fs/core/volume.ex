@@ -145,11 +145,21 @@ defmodule NeonFS.Core.Volume do
   @doc """
   Returns the default durability configuration.
 
-  Phase 1: 3-way replication with minimum 2 copies for write acknowledgement.
+  Production default is 3-way replication with minimum 2 copies for write
+  acknowledgement. Override via `config :neonfs_client, :default_durability,
+  %{type: :replicate, factor: 1, min_copies: 1}` in environments where the
+  3-replica default can't be satisfied (single-drive integration tests in
+  particular — pre-#835 the global metadata quorum hid this from suites that
+  declared no durability on `Volume.new/2`; post-#835 the per-volume write
+  path refuses to provision).
   """
   @spec default_durability() :: durability_config()
   def default_durability do
-    %{type: :replicate, factor: 3, min_copies: 2}
+    Application.get_env(:neonfs_client, :default_durability, %{
+      type: :replicate,
+      factor: 3,
+      min_copies: 2
+    })
   end
 
   @doc """
