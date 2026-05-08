@@ -207,11 +207,12 @@ defmodule NeonFS.TestSupport.PeerCluster do
           partition_recovery_debounce_ms: 200,
           service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []},
           bootstrap_nodes: client_bootstrap_nodes,
-          # Single-drive peer harness: collapse the production
-          # default `replicate: factor=3, min_copies=2` to a 1-replica
-          # config tests can satisfy. See `Volume.default_durability/0`
-          # — pre-#835 the global metadata quorum hid this from suites
-          # that called `Volume.new/2` with no explicit durability.
+          # Single-drive-per-peer harness: most integration tests
+          # spin up 1- or 3-node clusters with one drive each, so the
+          # production `replicate:3, min_copies:2` default can't be
+          # satisfied for single-node setups. Pin the test default
+          # to `replicate:1` and let multi-node cross-replication
+          # tests opt back into a higher factor explicitly.
           default_durability: %{type: :replicate, factor: 1, min_copies: 1}
         ]
 
