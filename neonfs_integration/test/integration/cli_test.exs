@@ -65,7 +65,7 @@ defmodule NeonFS.Integration.CLITest do
       {:ok, volume} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
           "rpc-test-volume",
-          %{}
+          %{"durability" => "replicate:1"}
         ])
 
       assert volume.name == "rpc-test-volume"
@@ -79,7 +79,10 @@ defmodule NeonFS.Integration.CLITest do
     test "volumes can be deleted via RPC", %{cluster: cluster} do
       # Create volume
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, ["delete-me", %{}])
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+          "delete-me",
+          %{"durability" => "replicate:1"}
+        ])
 
       # Delete volume
       {:ok, _} =

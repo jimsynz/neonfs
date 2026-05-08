@@ -34,7 +34,10 @@ defmodule NeonFS.Integration.ClusterFormationTest do
 
       # Create a volume
       {:ok, volume} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, ["test-volume", %{}])
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+          "test-volume",
+          %{"durability" => "replicate:1"}
+        ])
 
       assert volume.name == "test-volume"
 
