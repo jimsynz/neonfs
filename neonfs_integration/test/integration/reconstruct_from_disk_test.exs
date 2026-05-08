@@ -46,13 +46,19 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
         %{"id" => "drive1", "path" => drive_path, "tier" => "hot"}
       ])
 
+    # Wait for both drives to be in the bootstrap layer: `default`
+    # from `cluster_init`, plus the `drive1` we just added. With
+    # both registered, `replicate:2` volumes land their root
+    # segments on both drives, which means the reconstruction
+    # walker (which only reads the `:drives` app-env, see comment
+    # below) finds the volume roots on `drive1`.
     :ok =
       wait_until(
         fn ->
           case PeerCluster.rpc(cluster, :node1, NeonFS.Core.RaSupervisor, :local_query, [
                  &MetadataStateMachine.get_drives/1
                ]) do
-            {:ok, drives} when is_map(drives) and map_size(drives) > 0 -> true
+            {:ok, drives} when is_map(drives) and map_size(drives) >= 2 -> true
             _ -> false
           end
         end,
@@ -132,10 +138,14 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
   ## Helpers
 
   defp create_volume_and_capture_root(cluster, volume_name) do
+    # `replicate:2` puts a root-segment replica on every drive in
+    # the bootstrap layer (`default` + `drive1`), so the
+    # reconstruction walker (which only walks `drive1` per the
+    # disaster contract) finds the chunk.
     {:ok, volume} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         volume_name,
-        %{"durability" => "replicate:1"}
+        %{"durability" => "replicate:2"}
       ])
 
     volume_id = volume.id

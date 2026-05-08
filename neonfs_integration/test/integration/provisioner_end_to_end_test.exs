@@ -42,13 +42,17 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
         %{"id" => "drive1", "path" => drive_path, "tier" => "hot"}
       ])
 
+    # `cluster_init` registers the runtime-config `default` drive in
+    # the bootstrap layer; `handle_add_drive` registers `drive1`.
+    # Wait for both before creating a volume so the durability=2
+    # replica selection deterministically lands on both drives.
     :ok =
       wait_until(
         fn ->
           case PeerCluster.rpc(cluster, :node1, NeonFS.Core.RaSupervisor, :local_query, [
                  &MetadataStateMachine.get_drives/1
                ]) do
-            {:ok, drives} when is_map(drives) and map_size(drives) > 0 -> true
+            {:ok, drives} when is_map(drives) and map_size(drives) >= 2 -> true
             _ -> false
           end
         end,
@@ -60,10 +64,13 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
 
   test "create_volume registers a bootstrap entry and writes the root segment to the drive",
        %{cluster: cluster, drive_path: drive_path} do
+    # Use `replicate:2` so both drives in the bootstrap layer
+    # (`default` from `cluster_init` + `drive1` from `handle_add_drive`)
+    # land in the volume's `drive_locations`.
     {:ok, volume} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         "provisioner-vol",
-        %{"durability" => "replicate:1"}
+        %{"durability" => "replicate:2"}
       ])
 
     volume_id = volume.id

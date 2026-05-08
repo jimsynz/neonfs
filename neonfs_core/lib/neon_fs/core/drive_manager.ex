@@ -88,6 +88,26 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   @doc """
+  Registers every locally-managed drive in the Ra bootstrap layer
+  (#779).
+
+  Drives configured at startup land in `DriveRegistry`'s ETS table
+  before Ra is up, so they never make it into the bootstrap layer
+  through the regular `add_drive/1` path. This helper is invoked by
+  `Cluster.Init.init_cluster/1` after Ra is available, so the
+  bootstrap layer reflects the local drives before the system
+  volume tries to provision per-volume metadata.
+
+  Best-effort per drive — a failed Ra command logs a warning and
+  the next drive is attempted. Returns `:ok` either way.
+  """
+  @spec register_local_drives_in_bootstrap() :: :ok
+  def register_local_drives_in_bootstrap do
+    DriveRegistry.drives_for_node(Node.self())
+    |> Enum.each(&register_drive_in_bootstrap_layer/1)
+  end
+
+  @doc """
   Lists all drives across the cluster as serialisable maps.
 
   ## Options
