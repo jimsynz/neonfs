@@ -96,7 +96,9 @@ defmodule NeonFS.TestSupport.PeerCluster do
   - `:base_dir` - Base directory for cluster data (default: creates temp dir)
   - `:enable_ra` - Enable Ra consensus (default: true)
   - `:drives` - Custom drive configs per node. A function `(node_name, data_dir) -> [drive_config]`
-    that returns drive config maps. When not provided, uses a single default drive.
+    that returns drive config maps. When not provided, uses two default drives per node (`drive_a`,
+    `drive_b`) so default-durability volumes (`replicate: factor=3, min_copies=2`) can provision
+    even on single-node tests.
   - `:metrics_port` - Base port for HTTP metrics/API server (Bandit). When set, each node
     gets `metrics_enabled: true` with sequential ports (node1 = base, node2 = base+1, etc.).
     The allocated port is stored in `node_info.metrics_port`.
@@ -119,7 +121,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     applications = Keyword.get(opts, :applications, [:neonfs_core])
     # Enable Ra by default
     enable_ra = Keyword.get(opts, :enable_ra, true)
-    drives_fn = Keyword.get(opts, :drives, nil)
+    drives_fn = Keyword.get(opts, :drives, &default_drives/2)
     formation_config = Keyword.get(opts, :formation, nil)
     metrics_base_port = Keyword.get(opts, :metrics_port, nil)
     roles = Keyword.get(opts, :roles, %{})
@@ -306,11 +308,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
       end
 
     core_config =
-      if ctx.drives_fn do
-        Keyword.put(core_config, :drives, ctx.drives_fn.(ctx.alias_name, ctx.data_dir))
-      else
-        core_config
-      end
+      Keyword.put(core_config, :drives, ctx.drives_fn.(ctx.alias_name, ctx.data_dir))
 
     if ctx.formation_config do
       core_config ++
@@ -949,6 +947,18 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   defp generate_cluster_id do
     :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+  end
+
+  # Two drives per node — single-node tests still satisfy the default
+  # durability's `min_copies: 2`, multi-node tests get extra spread.
+  # First id stays `"default"` so callers that reference it directly
+  # (e.g. `drive_id: "default"` in chunk-write integration tests) keep
+  # working.
+  defp default_drives(_alias_name, data_dir) do
+    [
+      %{id: "default", path: Path.join(data_dir, "blobs"), tier: :hot, capacity: 0},
+      %{id: "drive_b", path: Path.join(data_dir, "drive_b"), tier: :hot, capacity: 0}
+    ]
   end
 
   defp generate_cookie do
