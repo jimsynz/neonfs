@@ -27,7 +27,10 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert volume.name == "test-volume"
       assert volume.id != nil
       assert volume.owner == nil
-      assert volume.durability == %{type: :replicate, factor: 3, min_copies: 2}
+      # Test env collapses to replicate:1 via `:neonfs_client,
+      # :default_durability` — see `config/config.exs`. Production
+      # default is `factor=3, min_copies=2`.
+      assert volume.durability == %{type: :replicate, factor: 1, min_copies: 1}
       assert volume.write_ack == :local
 
       assert volume.tiering == %{

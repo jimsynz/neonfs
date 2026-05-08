@@ -494,8 +494,11 @@ defmodule NeonFS.CLI.HandlerTest do
     test "default durability when no durability specified" do
       vol_name = "default-vol-#{:rand.uniform(999_999)}"
       assert {:ok, volume} = Handler.create_volume(vol_name, %{})
-      assert volume.durability == %{type: :replicate, factor: 3, min_copies: 2}
-      assert volume.durability_display == "replicate:3"
+      # Test env collapses to replicate:1 via `:neonfs_client,
+      # :default_durability` — production default is
+      # `replicate:3, min_copies:2`.
+      assert volume.durability == %{type: :replicate, factor: 1, min_copies: 1}
+      assert volume.durability_display == "replicate:1"
     end
 
     test "map durability config passes through unchanged" do
