@@ -21,8 +21,7 @@ defmodule NeonFS.Core.FileIndexTest do
 
     start_supervised!(
       {NeonFS.Core.FileIndex,
-       metadata_reader_opts: metadata_reader_opts,
-       metadata_writer_opts: metadata_writer_opts},
+       metadata_reader_opts: metadata_reader_opts, metadata_writer_opts: metadata_writer_opts},
       restart: :temporary
     )
 
