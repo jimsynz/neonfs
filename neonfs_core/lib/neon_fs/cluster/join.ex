@@ -713,6 +713,15 @@ defmodule NeonFS.Cluster.Join do
     case RaServer.join_cluster(existing_members) do
       :ok ->
         Logger.info("Ra server successfully joined cluster")
+        # The joining node's startup-configured drives live in
+        # `DriveRegistry`'s ETS but never make it into the
+        # Ra-replicated bootstrap-layer drives table — that's the
+        # same gap `Cluster.Init.do_init_cluster/1` plugged for the
+        # bootstrap node via #890. Without this call,
+        # `Volume.Provisioner` only ever sees the bootstrap node's
+        # drives, so `min_copies > 1` durabilities can't be
+        # satisfied even on multi-node clusters.
+        :ok = NeonFS.Core.DriveManager.register_local_drives_in_bootstrap()
         :ok
 
       {:error, reason} ->
