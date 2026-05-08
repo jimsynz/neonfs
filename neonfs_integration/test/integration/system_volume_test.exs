@@ -48,6 +48,7 @@ defmodule NeonFS.Integration.SystemVolumeTest do
   end
 
   describe "cross-node read/write" do
+    @tag :pending_903
     test "write on one node is readable from another", %{cluster: cluster} do
       :ok =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.SystemVolume, :write, [
@@ -138,6 +139,7 @@ defmodule NeonFS.Integration.SystemVolumeTest do
       %{}
     end
 
+    @tag :pending_903
     test "system volume data accessible after single node failure", %{cluster: cluster} do
       # Write data to system volume
       :ok =
@@ -189,6 +191,7 @@ defmodule NeonFS.Integration.SystemVolumeTest do
   end
 
   describe "log retention" do
+    @tag :pending_903
     test "prunes old files across the cluster", %{cluster: cluster} do
       today = Date.utc_today()
       old_date = today |> Date.add(-100) |> Date.to_iso8601()

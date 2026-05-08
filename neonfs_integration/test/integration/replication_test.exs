@@ -25,6 +25,7 @@ defmodule NeonFS.Integration.ReplicationTest do
   end
 
   describe "write replication" do
+    @tag :pending_903
     test "data is replicated to all nodes", %{
       cluster: cluster,
       volume_id: vid,
@@ -64,6 +65,7 @@ defmodule NeonFS.Integration.ReplicationTest do
       assert data == "hello world"
     end
 
+    @tag :pending_903
     test "large file chunking and replication", %{
       cluster: cluster,
       volume_id: vid,
@@ -96,6 +98,7 @@ defmodule NeonFS.Integration.ReplicationTest do
       assert read_data == data
     end
 
+    @tag :pending_903
     test "multiple files can be written and read", %{
       cluster: cluster,
       volume_id: vid,

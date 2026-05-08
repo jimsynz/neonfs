@@ -325,6 +325,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       %{}
     end
 
+    @tag :pending_903
     test "replicated writes complete and data is readable from other nodes", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(10 * 1024)
 

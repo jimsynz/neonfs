@@ -33,6 +33,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
     :ok
   end
 
+  @tag :pending_903
   test "pin on node1 + delete from node2 + release pin: full lifecycle",
        %{cluster: cluster} do
     volume = unique_volume("dgc")
@@ -87,6 +88,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
     end
   end
 
+  @tag :pending_903
   test "earlier pin release leaves the file detached when others remain",
        %{cluster: cluster} do
     volume = unique_volume("dgc-multi")

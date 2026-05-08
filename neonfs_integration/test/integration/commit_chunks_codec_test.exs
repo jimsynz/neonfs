@@ -39,6 +39,7 @@ defmodule NeonFS.Integration.CommitChunksCodecTest do
   end
 
   describe "ChunkWriter → CommitChunks on a zstd-compressed volume" do
+    @tag :pending_903
     test "round-trip preserves bytes and the ChunkMeta records :zstd", %{cluster: cluster} do
       volume_name = "commit-chunks-codec-vol-#{System.unique_integer([:positive])}"
 

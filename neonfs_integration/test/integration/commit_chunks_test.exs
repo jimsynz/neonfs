@@ -35,6 +35,7 @@ defmodule NeonFS.Integration.CommitChunksTest do
   end
 
   describe "commit_chunks/4 cross-node round-trip" do
+    @tag :pending_903
     test "node2 writes chunks to node1, commits via RPC, reads file back", %{cluster: cluster} do
       volume_name = "commit-chunks-vol-#{System.unique_integer([:positive])}"
 

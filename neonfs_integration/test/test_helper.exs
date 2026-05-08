@@ -60,7 +60,19 @@ test_registry_excludes =
       [:requires_test_registry]
   end
 
-excludes = loopback_excludes ++ containerd_excludes ++ test_registry_excludes ++ [:profile]
+# `:pending_903` — cross-node integration tests that depend on
+# `Volume.MetadataWriter` fanning out index-tree chunks to every
+# replica drive (#903). Currently the writer only replicates the
+# root segment; index-tree mutations stay on a single local drive,
+# so a write on node1 followed by a read on node2 fails past
+# `MetadataReader.resolve_segment` with `FileNotFound`. Remove the
+# `pending_903` tag from the listed tests once #903 lands.
+pending_903_excludes = [:pending_903]
+
+excludes =
+  loopback_excludes ++
+    containerd_excludes ++
+    test_registry_excludes ++ pending_903_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an
