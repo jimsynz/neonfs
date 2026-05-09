@@ -252,7 +252,10 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       [%{stripe_id: sid} | _] = file.stripes
 
       {:ok, stripe} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.StripeIndex, :get, [sid])
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.StripeIndex, :get, [
+          file.volume_id,
+          sid
+        ])
 
       chunk_hashes = stripe.chunks
 
@@ -271,12 +274,19 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
       # Verify chunks are gone
       Enum.each(chunk_hashes, fn hash ->
-        result = PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [hash])
+        result =
+          PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [
+            file.volume_id,
+            hash
+          ])
+
         assert {:error, :not_found} = result
       end)
 
       # Verify stripe metadata is gone
-      result = PeerCluster.rpc(cluster, :node1, NeonFS.Core.StripeIndex, :get, [sid])
+      result =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.StripeIndex, :get, [file.volume_id, sid])
+
       assert {:error, :not_found} = result
     end
   end

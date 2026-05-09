@@ -352,7 +352,10 @@ defmodule NeonFS.Integration.MetadataTieringTest do
       [%{stripe_id: sid} | _] = file.stripes
 
       {:ok, stripe} =
-        PeerCluster.rpc(cluster, :node2, NeonFS.Core.StripeIndex, :get, [sid])
+        PeerCluster.rpc(cluster, :node2, NeonFS.Core.StripeIndex, :get, [
+          file.volume_id,
+          sid
+        ])
 
       assert stripe.id == sid
     end
