@@ -145,6 +145,13 @@ defmodule NeonFS.S3.IntegrationTest.StreamingUploadPeakRSSTest do
     assert_within_bound(:s3_interface, s3_result.upload.peak, s3_result.upload.baseline)
     assert_within_bound(:s3_core, s3_result.core_peak, s3_result.core_baseline)
 
+    # The S3 interface peer wrote on node1 (its single bootstrap core)
+    # but `webdav_get_and_hash` runs on node3, which routes its core
+    # call via `Router.CostFunction` and may land on a follower whose
+    # local Ra state machine has not yet applied the latest committed
+    # entry. Wait for follower apply convergence before reading.
+    :ok = ClusterCase.wait_for_ra_apply_consensus(cluster)
+
     {:ok, webdav_hash} =
       PeerCluster.rpc(cluster, :node3, StreamingTestHelpers, :webdav_get_and_hash, [
         @webdav_auth,
@@ -177,6 +184,8 @@ defmodule NeonFS.S3.IntegrationTest.StreamingUploadPeakRSSTest do
     )
 
     assert_within_bound(:webdav_core, webdav_result.core_peak, webdav_result.core_baseline)
+
+    :ok = ClusterCase.wait_for_ra_apply_consensus(cluster)
 
     {:ok, s3_hash} =
       PeerCluster.rpc(cluster, :node2, StreamingTestHelpers, :s3_get_and_hash, [

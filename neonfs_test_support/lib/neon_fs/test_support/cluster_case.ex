@@ -44,6 +44,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
   use ExUnit.CaseTemplate
 
+  alias NeonFS.Core.RaSupervisor
   alias NeonFS.TestSupport.PeerCluster
 
   using do
@@ -579,6 +580,91 @@ defmodule NeonFS.TestSupport.ClusterCase do
         end,
         timeout: 15_000
       )
+  end
+
+  @doc """
+  Wait for every Ra cluster member's local state machine to catch up
+  with the leader's most-recently-applied entry.
+
+  Closes the read-after-write race in peer-cluster tests where a write
+  goes to one core node (which quorum-commits the entry via Ra) but a
+  follow-up read can land on a different core node whose local state
+  machine has not yet applied the latest committed entry. `Ra` returns
+  success on `process_command/2` once a quorum has the entry in their
+  log + the leader has applied it; followers apply asynchronously after
+  the next heartbeat (~100 ms by default).
+
+  Tests that issue a write through one routing path and a read through
+  another (e.g. an external HTTP client driving an interface plug, where
+  consecutive requests can land on different core nodes via
+  `CostFunction.select_core_node`) should call this between the write
+  and the read.
+
+  Captures the highest applied index across all members, then polls
+  every member's local state machine until each one has applied at or
+  past that index. The Ra cluster name is `:neonfs_meta`
+  (`NeonFS.Core.RaSupervisor.cluster_name/0`); members are addressed
+  by `{cluster_name, node()}` tuples.
+
+  ## Options
+  - `:timeout` - Maximum time to wait in milliseconds (default: 5_000)
+
+  ## Example
+
+      ExAws.S3.put_object("bucket", "key", body) |> request!(config)
+      :ok = wait_for_ra_apply_consensus(cluster)
+      result = ExAws.S3.get_object("bucket", "key") |> request!(config)
+  """
+  @spec wait_for_ra_apply_consensus(map(), keyword()) :: :ok | {:error, :timeout}
+  def wait_for_ra_apply_consensus(cluster, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 5_000)
+    cluster_name = RaSupervisor.cluster_name()
+
+    # Only core peers run the Ra cluster — interface-only peers
+    # (`:neonfs_s3`, `:neonfs_webdav`, …) have no `:neonfs_meta`
+    # state machine to query.
+    members =
+      cluster.nodes
+      |> Enum.filter(&core_peer?/1)
+      |> Enum.map(fn ni -> {cluster_name, ni.node} end)
+
+    target_index = max_applied_index(members)
+
+    wait_until(
+      fn -> Enum.all?(members, &applied_at_or_past?(&1, target_index)) end,
+      timeout: timeout
+    )
+  end
+
+  defp core_peer?(node_info) do
+    :neonfs_core in Map.get(node_info, :applications, [:neonfs_core])
+  end
+
+  defp max_applied_index(members) do
+    members
+    |> Enum.map(&applied_index_for/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max(fn -> 0 end)
+  end
+
+  defp applied_at_or_past?(server_id, target_index) do
+    case applied_index_for(server_id) do
+      nil -> false
+      idx -> idx >= target_index
+    end
+  end
+
+  # `:ra.local_query/3` returns the local replica's last-applied
+  # `{Index, Term}` alongside the query result; we only need the index.
+  # The query function is a no-op — querying state at all forces the
+  # local server to surface its current applied position.
+  defp applied_index_for({_cluster_name, node} = server_id) do
+    query = {RaSupervisor, :apply_query, [fn _state -> :ok end]}
+
+    case :rpc.call(node, :ra, :local_query, [server_id, query, 1_000]) do
+      {:ok, {{idx, _term}, _result}, _server} -> idx
+      _ -> nil
+    end
   end
 
   @doc """
