@@ -54,7 +54,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
 
       # Chunks should be gone from ChunkIndex
       Enum.each(chunk_hashes, fn hash ->
-        assert {:error, :not_found} = ChunkIndex.get(hash)
+        assert {:error, :not_found} = ChunkIndex.get("vol-test", hash)
       end)
     end
 
@@ -96,7 +96,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       assert result.chunks_protected >= 1
 
       # The protected chunk should still exist
-      assert {:ok, _} = ChunkIndex.get(hash)
+      assert {:ok, _} = ChunkIndex.get("vol-test", hash)
     end
 
     test "emits telemetry event", %{volume: vol} do
@@ -145,7 +145,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
 
       # All stripe chunks (data + parity) should be deleted
       Enum.each(chunk_hashes, fn hash ->
-        assert {:error, :not_found} = ChunkIndex.get(hash)
+        assert {:error, :not_found} = ChunkIndex.get("vol-test", hash)
       end)
     end
 
@@ -182,7 +182,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       assert result.chunks_protected >= 1
 
       # Protected chunk still exists
-      assert {:ok, _} = ChunkIndex.get(first_hash)
+      assert {:ok, _} = ChunkIndex.get("vol-test", first_hash)
     end
   end
 
@@ -219,7 +219,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       {:ok, stripe} = StripeIndex.get(sid)
 
       Enum.each(stripe.chunks, fn hash ->
-        assert {:ok, _} = ChunkIndex.get(hash)
+        assert {:ok, _} = ChunkIndex.get("vol-test", hash)
       end)
     end
 

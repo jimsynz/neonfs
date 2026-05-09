@@ -16,6 +16,7 @@ defmodule NeonFS.Core.ChunkMeta do
         }
 
   @type t :: %__MODULE__{
+          volume_id: binary(),
           hash: binary(),
           original_size: non_neg_integer(),
           stored_size: non_neg_integer(),
@@ -32,6 +33,7 @@ defmodule NeonFS.Core.ChunkMeta do
         }
 
   defstruct [
+    :volume_id,
     :hash,
     :original_size,
     :stored_size,
@@ -50,9 +52,12 @@ defmodule NeonFS.Core.ChunkMeta do
   @doc """
   Creates a new ChunkMeta struct with default values.
   """
-  @spec new(binary(), non_neg_integer(), non_neg_integer(), compression()) :: %__MODULE__{}
-  def new(hash, original_size, stored_size, compression \\ :none) do
+  @spec new(binary(), binary(), non_neg_integer(), non_neg_integer(), compression()) ::
+          %__MODULE__{}
+  def new(volume_id, hash, original_size, stored_size, compression \\ :none)
+      when is_binary(volume_id) do
     %__MODULE__{
+      volume_id: volume_id,
       hash: hash,
       original_size: original_size,
       stored_size: stored_size,

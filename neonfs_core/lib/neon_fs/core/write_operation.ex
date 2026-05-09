@@ -1093,6 +1093,7 @@ defmodule NeonFS.Core.WriteOperation do
       emit_encrypt_telemetry(ctx.encryption_ctx, hash, ctx.volume_id)
 
       meta_args = %{
+        volume_id: ctx.volume_id,
         hash: hash,
         size: padded_size,
         chunk_info: chunk_info,
@@ -1151,6 +1152,7 @@ defmodule NeonFS.Core.WriteOperation do
       emit_encrypt_telemetry(ctx.encryption_ctx, hash, ctx.volume_id)
 
       meta_args = %{
+        volume_id: ctx.volume_id,
         hash: hash,
         size: size,
         chunk_info: chunk_info,
@@ -1183,6 +1185,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp build_erasure_chunk_meta(args) do
     %ChunkMeta{
+      volume_id: args.volume_id,
       hash: args.hash,
       original_size: args.size,
       stored_size: args.chunk_info.stored_size,
@@ -1539,6 +1542,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp build_chunk_meta(hash, size, chunk_info, drive_id, volume, write_id, crypto) do
     %ChunkMeta{
+      volume_id: volume.id,
       hash: hash,
       original_size: size,
       stored_size: chunk_info.stored_size,
@@ -1708,10 +1712,10 @@ defmodule NeonFS.Core.WriteOperation do
     :ok
   end
 
-  defp abort_single_chunk(meta, write_id) do
-    ChunkIndex.remove_write_ref(meta.hash, write_id)
+  defp abort_single_chunk(%ChunkMeta{volume_id: volume_id, hash: hash} = _meta, write_id) do
+    ChunkIndex.remove_write_ref(hash, write_id)
 
-    case ChunkIndex.get(meta.hash) do
+    case ChunkIndex.get(volume_id, hash) do
       {:ok, updated_meta} -> delete_chunk_if_no_refs(updated_meta)
       {:error, :not_found} -> :ok
     end

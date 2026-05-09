@@ -152,21 +152,28 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts ChunkIndex with mock quorum infrastructure.
+  Starts ChunkIndex with mock metadata-reader / -writer infrastructure.
 
-  Automatically builds mock quorum opts when none are provided.
+  Automatically builds the mock opts against a fresh ETS store when
+  none are provided.
 
   ## Options
 
-    * `:quorum_opts` — explicit quorum opts to use (overrides auto-built ones).
+    * `:metadata_reader_opts` / `:metadata_writer_opts` — explicit opts
+      that override the auto-built ones (used when callers need the
+      reader and writer to share an existing store).
   """
   def start_chunk_index(opts \\ []) do
     opts =
-      if Keyword.has_key?(opts, :quorum_opts) do
+      if Keyword.has_key?(opts, :metadata_reader_opts) do
         opts
       else
-        {quorum_opts, _store} = build_mock_quorum_opts()
-        [quorum_opts: quorum_opts]
+        store = :ets.new(:test_chunk_metadata_store, [:set, :public])
+
+        [
+          metadata_reader_opts: build_mock_metadata_reader_opts(store),
+          metadata_writer_opts: build_mock_metadata_writer_opts(store)
+        ]
       end
 
     stop_if_running(NeonFS.Core.ChunkIndex)

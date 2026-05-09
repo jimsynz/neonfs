@@ -173,7 +173,7 @@ defmodule NeonFS.Core.CommitChunks do
         add_write_ref(existing, write_id, locations)
 
       {:error, :not_found} ->
-        create_chunk_meta(hash, locations, codec, write_id)
+        create_chunk_meta(volume_id, hash, locations, codec, write_id)
     end
   end
 
@@ -211,10 +211,11 @@ defmodule NeonFS.Core.CommitChunks do
     :ok
   end
 
-  defp create_chunk_meta(hash, locations, codec, write_id) do
+  defp create_chunk_meta(volume_id, hash, locations, codec, write_id) do
     case first_has_chunk(hash, locations) do
       {:ok, stored_size} ->
         meta = %ChunkMeta{
+          volume_id: volume_id,
           hash: hash,
           original_size: Map.get(codec, :original_size, stored_size),
           stored_size: stored_size,

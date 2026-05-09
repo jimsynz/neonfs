@@ -234,7 +234,7 @@ defmodule NeonFS.Core.ClusterRebalanceTest do
       location = %{node: node(), drive_id: "drive1", tier: :hot}
 
       chunk =
-        ChunkMeta.new(hash, byte_size(data), byte_size(data))
+        ChunkMeta.new("vol-test", hash, byte_size(data), byte_size(data))
         |> ChunkMeta.add_location(location)
 
       ChunkIndex.put(chunk)

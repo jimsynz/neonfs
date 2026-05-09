@@ -757,7 +757,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
       # Get chunk hash and metadata
       [chunk_hash] = file_meta.chunks
-      {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+      {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
 
       # Modify the chunk's crypto nonce in metadata to simulate wrong decryption params.
       # The chunk stays on disk unchanged — the NIF will attempt decryption with the

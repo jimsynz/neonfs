@@ -235,7 +235,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
       # Manually add crypto metadata to simulate an encrypted chunk
       for chunk_hash <- file.chunks do
-        {:ok, chunk} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk} = ChunkIndex.get("vol-test", chunk_hash)
 
         encrypted_chunk = %{
           chunk
@@ -273,7 +273,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
         WriteOperation.write_file_streamed(vol.id, "/no-verify.txt", ["no verify data"])
 
       for chunk_hash <- file.chunks do
-        {:ok, chunk} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk} = ChunkIndex.get("vol-test", chunk_hash)
 
         encrypted_chunk = %{
           chunk
@@ -292,7 +292,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
       # Chunks should NOT have last_verified updated
       for chunk_hash <- file.chunks do
-        {:ok, chunk} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk} = ChunkIndex.get("vol-test", chunk_hash)
         assert chunk.last_verified == nil
       end
     end

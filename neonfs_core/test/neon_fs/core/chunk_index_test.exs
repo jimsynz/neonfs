@@ -4,57 +4,23 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
   alias NeonFS.Core.ChunkIndex
   alias NeonFS.Core.ChunkMeta
-  alias NeonFS.Core.MetadataRing
 
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
 
-    # Set up mock quorum infrastructure
-    store = :ets.new(:test_quorum_store, [:set, :public])
-
-    ring =
-      MetadataRing.new([node()],
-        virtual_nodes_per_physical: 4,
-        replicas: 1
-      )
-
-    write_fn = fn _node, _segment, key, value ->
-      :ets.insert(store, {key, value})
-      :ok
-    end
-
-    read_fn = fn _node, _segment, key ->
-      case :ets.lookup(store, key) do
-        [{^key, value}] -> {:ok, value, {1_000_000, 0, node()}}
-        [] -> {:error, :not_found}
-      end
-    end
-
-    delete_fn = fn _node, _segment, key ->
-      :ets.delete(store, key)
-      :ok
-    end
-
-    quorum_opts = [
-      ring: ring,
-      write_fn: write_fn,
-      read_fn: read_fn,
-      delete_fn: delete_fn,
-      quarantine_checker: fn _ -> false end,
-      read_repair_fn: fn _work_fn, _opts -> {:ok, "noop"} end,
-      local_node: node()
-    ]
+    store = :ets.new(:test_chunk_store, [:set, :public])
 
     metadata_reader_opts = build_mock_metadata_reader_opts(store)
+    metadata_writer_opts = build_mock_metadata_writer_opts(store)
 
     stop_if_running(NeonFS.Core.ChunkIndex)
     cleanup_ets_table(:chunk_index)
 
     start_supervised!(
       {NeonFS.Core.ChunkIndex,
-       quorum_opts: quorum_opts, metadata_reader_opts: metadata_reader_opts},
+       metadata_reader_opts: metadata_reader_opts, metadata_writer_opts: metadata_writer_opts},
       restart: :temporary
     )
 
@@ -68,16 +34,16 @@ defmodule NeonFS.Core.ChunkIndexTest do
       end
     end)
 
-    %{store: store, quorum_opts: quorum_opts}
+    %{store: store}
   end
 
   describe "put/1 and get/1" do
     test "stores and retrieves chunk metadata via quorum" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512, :zstd)
 
       assert :ok = ChunkIndex.put(chunk_meta)
-      assert {:ok, retrieved} = ChunkIndex.get(hash)
+      assert {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert retrieved.hash == hash
       assert retrieved.original_size == 1024
       assert retrieved.stored_size == 512
@@ -87,25 +53,25 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
     test "returns error for non-existent chunk" do
       hash = :crypto.strong_rand_bytes(32)
-      assert {:error, :not_found} = ChunkIndex.get(hash)
+      assert {:error, :not_found} = ChunkIndex.get("vol-test", hash)
     end
 
     test "updates existing chunk metadata" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta1 = ChunkMeta.new(hash, 1024, 512, :none)
+      chunk_meta1 = ChunkMeta.new("vol-test", hash, 1024, 512, :none)
       chunk_meta2 = %{chunk_meta1 | stored_size: 256, compression: :zstd}
 
       assert :ok = ChunkIndex.put(chunk_meta1)
       assert :ok = ChunkIndex.put(chunk_meta2)
 
-      assert {:ok, retrieved} = ChunkIndex.get(hash)
+      assert {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert retrieved.stored_size == 256
       assert retrieved.compression == :zstd
     end
 
     test "quorum read populates ETS cache on miss", %{store: store} do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512, :zstd)
 
       # Write via put (goes to quorum + ETS)
       assert :ok = ChunkIndex.put(chunk_meta)
@@ -119,7 +85,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       assert [{^key, _}] = :ets.lookup(store, key)
 
       # get/1 should fall back to quorum and re-populate ETS
-      assert {:ok, retrieved} = ChunkIndex.get(hash)
+      assert {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert retrieved.hash == hash
 
       # ETS should be populated again
@@ -130,7 +96,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "get/2 (volume-scoped read via MetadataReader)" do
     test "round-trips through the per-volume metadata read path" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512, :zstd)
 
       assert :ok = ChunkIndex.put(chunk_meta)
 
@@ -149,7 +115,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "exists?/2 (volume-scoped existence check)" do
     test "returns true when the chunk is present" do
       hash = :crypto.strong_rand_bytes(32)
-      assert :ok = ChunkIndex.put(ChunkMeta.new(hash, 1024, 1024))
+      assert :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 1024, 1024))
       assert ChunkIndex.exists?("vol1", hash)
     end
 
@@ -162,13 +128,13 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "delete/1" do
     test "removes chunk metadata from quorum and ETS" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       assert :ok = ChunkIndex.put(chunk_meta)
-      assert {:ok, _} = ChunkIndex.get(hash)
+      assert {:ok, _} = ChunkIndex.get("vol-test", hash)
 
       assert :ok = ChunkIndex.delete(hash)
-      assert {:error, :not_found} = ChunkIndex.get(hash)
+      assert {:error, :not_found} = ChunkIndex.get("vol-test", hash)
     end
 
     test "deleting non-existent chunk is idempotent" do
@@ -181,20 +147,20 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "exists?/1" do
     test "returns true for existing chunk" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       assert :ok = ChunkIndex.put(chunk_meta)
-      assert ChunkIndex.exists?(hash)
+      assert ChunkIndex.exists?("vol-test", hash)
     end
 
     test "returns false for non-existent chunk" do
       hash = :crypto.strong_rand_bytes(32)
-      refute ChunkIndex.exists?(hash)
+      refute ChunkIndex.exists?("vol-test", hash)
     end
 
     test "finds chunk via quorum when not in ETS cache", %{store: store} do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       assert :ok = ChunkIndex.put(chunk_meta)
 
@@ -206,7 +172,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       assert [{^key, _}] = :ets.lookup(store, key)
 
       # exists? should find it via quorum
-      assert ChunkIndex.exists?(hash)
+      assert ChunkIndex.exists?("vol-test", hash)
     end
   end
 
@@ -215,7 +181,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       hashes =
         for _ <- 1..5 do
           hash = :crypto.strong_rand_bytes(32)
-          chunk_meta = ChunkMeta.new(hash, 1024, 512)
+          chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
           ChunkIndex.put(chunk_meta)
           hash
         end
@@ -241,11 +207,11 @@ defmodule NeonFS.Core.ChunkIndexTest do
       location2 = %{node: :node1, drive_id: "drive2", tier: :hot}
       location3 = %{node: :node2, drive_id: "drive1", tier: :cold}
 
-      chunk1 = ChunkMeta.new(hash1, 1024, 512) |> ChunkMeta.add_location(location1)
-      chunk2 = ChunkMeta.new(hash2, 2048, 1024) |> ChunkMeta.add_location(location2)
+      chunk1 = ChunkMeta.new("vol-test", hash1, 1024, 512) |> ChunkMeta.add_location(location1)
+      chunk2 = ChunkMeta.new("vol-test", hash2, 2048, 1024) |> ChunkMeta.add_location(location2)
 
       chunk3 =
-        ChunkMeta.new(hash3, 4096, 2048)
+        ChunkMeta.new("vol-test", hash3, 4096, 2048)
         |> ChunkMeta.add_location(location1)
         |> ChunkMeta.add_location(location3)
 
@@ -284,9 +250,9 @@ defmodule NeonFS.Core.ChunkIndexTest do
       location2 = %{node: :node1, drive_id: "drive2", tier: :cold}
       location3 = %{node: :node2, drive_id: "drive1", tier: :warm}
 
-      chunk1 = ChunkMeta.new(hash1, 1024, 512) |> ChunkMeta.add_location(location1)
-      chunk2 = ChunkMeta.new(hash2, 2048, 1024) |> ChunkMeta.add_location(location2)
-      chunk3 = ChunkMeta.new(hash3, 4096, 2048) |> ChunkMeta.add_location(location3)
+      chunk1 = ChunkMeta.new("vol-test", hash1, 1024, 512) |> ChunkMeta.add_location(location1)
+      chunk2 = ChunkMeta.new("vol-test", hash2, 2048, 1024) |> ChunkMeta.add_location(location2)
+      chunk3 = ChunkMeta.new("vol-test", hash3, 4096, 2048) |> ChunkMeta.add_location(location3)
 
       ChunkIndex.put(chunk1)
       ChunkIndex.put(chunk2)
@@ -318,11 +284,11 @@ defmodule NeonFS.Core.ChunkIndexTest do
       location2 = %{node: :node1, drive_id: "drive2", tier: :hot}
       location3 = %{node: :node2, drive_id: "drive1", tier: :cold}
 
-      chunk1 = ChunkMeta.new(hash1, 1024, 512) |> ChunkMeta.add_location(location1)
-      chunk2 = ChunkMeta.new(hash2, 2048, 1024) |> ChunkMeta.add_location(location2)
+      chunk1 = ChunkMeta.new("vol-test", hash1, 1024, 512) |> ChunkMeta.add_location(location1)
+      chunk2 = ChunkMeta.new("vol-test", hash2, 2048, 1024) |> ChunkMeta.add_location(location2)
 
       chunk3 =
-        ChunkMeta.new(hash3, 4096, 2048)
+        ChunkMeta.new("vol-test", hash3, 4096, 2048)
         |> ChunkMeta.add_location(location1)
         |> ChunkMeta.add_location(location3)
 
@@ -357,9 +323,9 @@ defmodule NeonFS.Core.ChunkIndexTest do
       hash2 = :crypto.strong_rand_bytes(32)
       hash3 = :crypto.strong_rand_bytes(32)
 
-      chunk1 = ChunkMeta.new(hash1, 1024, 512)
-      chunk2 = ChunkMeta.new(hash2, 2048, 1024)
-      chunk3 = ChunkMeta.new(hash3, 4096, 2048)
+      chunk1 = ChunkMeta.new("vol-test", hash1, 1024, 512)
+      chunk2 = ChunkMeta.new("vol-test", hash2, 2048, 1024)
+      chunk3 = ChunkMeta.new("vol-test", hash3, 4096, 2048)
 
       ChunkIndex.put(chunk1)
       ChunkIndex.put(chunk2)
@@ -381,7 +347,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
     test "returns empty list when all chunks are committed" do
       hash1 = :crypto.strong_rand_bytes(32)
-      chunk1 = ChunkMeta.new(hash1, 1024, 512)
+      chunk1 = ChunkMeta.new("vol-test", hash1, 1024, 512)
 
       ChunkIndex.put(chunk1)
       assert :ok = ChunkIndex.commit(hash1)
@@ -394,7 +360,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "add_write_ref/2 and remove_write_ref/2" do
     test "adds and removes write references (local-only)" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       ChunkIndex.put(chunk_meta)
 
@@ -402,7 +368,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       assert :ok = ChunkIndex.add_write_ref(hash, "write1")
       assert :ok = ChunkIndex.add_write_ref(hash, "write2")
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert MapSet.size(retrieved.active_write_refs) == 2
       assert MapSet.member?(retrieved.active_write_refs, "write1")
       assert MapSet.member?(retrieved.active_write_refs, "write2")
@@ -410,7 +376,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       # Remove one write ref
       assert :ok = ChunkIndex.remove_write_ref(hash, "write1")
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert MapSet.size(retrieved.active_write_refs) == 1
       assert MapSet.member?(retrieved.active_write_refs, "write2")
       refute MapSet.member?(retrieved.active_write_refs, "write1")
@@ -418,7 +384,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       # Remove second write ref
       assert :ok = ChunkIndex.remove_write_ref(hash, "write2")
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert MapSet.size(retrieved.active_write_refs) == 0
     end
 
@@ -430,25 +396,25 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
     test "adding same write ref multiple times is idempotent" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       ChunkIndex.put(chunk_meta)
 
       assert :ok = ChunkIndex.add_write_ref(hash, "write1")
       assert :ok = ChunkIndex.add_write_ref(hash, "write1")
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert MapSet.size(retrieved.active_write_refs) == 1
     end
 
     test "removing non-existent write ref is idempotent" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       ChunkIndex.put(chunk_meta)
 
       assert :ok = ChunkIndex.remove_write_ref(hash, "write1")
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert MapSet.size(retrieved.active_write_refs) == 0
     end
   end
@@ -456,32 +422,32 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "commit/1" do
     test "commits a chunk without active write refs" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       ChunkIndex.put(chunk_meta)
 
       assert :ok = ChunkIndex.commit(hash)
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert retrieved.commit_state == :committed
     end
 
     test "cannot commit chunk with active write refs" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       ChunkIndex.put(chunk_meta)
       ChunkIndex.add_write_ref(hash, "write1")
 
       assert {:error, :has_active_writes} = ChunkIndex.commit(hash)
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert retrieved.commit_state == :uncommitted
     end
 
     test "can commit after removing all write refs" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       ChunkIndex.put(chunk_meta)
       ChunkIndex.add_write_ref(hash, "write1")
@@ -495,19 +461,19 @@ defmodule NeonFS.Core.ChunkIndexTest do
       ChunkIndex.remove_write_ref(hash, "write2")
       assert :ok = ChunkIndex.commit(hash)
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert retrieved.commit_state == :committed
     end
 
     test "committing already committed chunk is idempotent" do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       ChunkIndex.put(chunk_meta)
       assert :ok = ChunkIndex.commit(hash)
       assert :ok = ChunkIndex.commit(hash)
 
-      {:ok, retrieved} = ChunkIndex.get(hash)
+      {:ok, retrieved} = ChunkIndex.get("vol-test", hash)
       assert retrieved.commit_state == :committed
     end
 
@@ -523,7 +489,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
       hashes = for _ <- 1..10, do: :crypto.strong_rand_bytes(32)
 
       for hash <- hashes do
-        chunk_meta = ChunkMeta.new(hash, 1024, 512)
+        chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
         ChunkIndex.put(chunk_meta)
       end
 
@@ -532,14 +498,14 @@ defmodule NeonFS.Core.ChunkIndexTest do
         for hash <- hashes do
           Task.async(fn ->
             # Read chunk
-            {:ok, chunk} = ChunkIndex.get(hash)
+            {:ok, chunk} = ChunkIndex.get("vol-test", hash)
             assert chunk.hash == hash
 
             # Add write ref
             ChunkIndex.add_write_ref(hash, "concurrent_write")
 
             # Read again
-            {:ok, chunk} = ChunkIndex.get(hash)
+            {:ok, chunk} = ChunkIndex.get("vol-test", hash)
             assert MapSet.member?(chunk.active_write_refs, "concurrent_write")
 
             # Remove write ref
@@ -555,7 +521,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
       # Verify all chunks created by this test are committed
       for hash <- hashes do
-        {:ok, chunk} = ChunkIndex.get(hash)
+        {:ok, chunk} = ChunkIndex.get("vol-test", hash)
         assert chunk.commit_state == :committed, "Chunk should be committed"
         assert MapSet.size(chunk.active_write_refs) == 0, "No active write refs should remain"
       end
@@ -565,7 +531,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "ETS cache behaviour" do
     test "writes update both quorum and ETS", %{store: store} do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512, :zstd)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512, :zstd)
 
       assert :ok = ChunkIndex.put(chunk_meta)
 
@@ -581,7 +547,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
 
     test "deletes remove from both quorum and ETS", %{store: store} do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       assert :ok = ChunkIndex.put(chunk_meta)
       assert :ok = ChunkIndex.delete(hash)
@@ -598,7 +564,7 @@ defmodule NeonFS.Core.ChunkIndexTest do
   describe "key format" do
     test "uses chunk: prefix with hex-encoded hash", %{store: store} do
       hash = :crypto.strong_rand_bytes(32)
-      chunk_meta = ChunkMeta.new(hash, 1024, 512)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512)
 
       assert :ok = ChunkIndex.put(chunk_meta)
 

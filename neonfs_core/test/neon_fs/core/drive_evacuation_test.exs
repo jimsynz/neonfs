@@ -140,7 +140,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       BlobStore.write_chunk(data, "drive2", "hot")
 
       chunk =
-        ChunkMeta.new(hash, byte_size(data), byte_size(data))
+        ChunkMeta.new("vol-test", hash, byte_size(data), byte_size(data))
         |> ChunkMeta.add_location(location1)
         |> ChunkMeta.add_location(location2)
 
@@ -254,7 +254,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     {:ok, hash, _info} = BlobStore.write_chunk(data, "drive1", "hot")
 
     chunk =
-      ChunkMeta.new(hash, byte_size(data), byte_size(data))
+      ChunkMeta.new("vol-test", hash, byte_size(data), byte_size(data))
       |> ChunkMeta.add_location(%{node: node(), drive_id: "drive1", tier: :hot})
 
     ChunkIndex.put(chunk)

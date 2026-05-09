@@ -40,7 +40,10 @@ defmodule NeonFS.Integration.Phase3Test do
 
       for hash <- chunk_hashes do
         {:ok, meta} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [hash])
+          PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [
+            file.volume_id,
+            hash
+          ])
 
         assert Enum.any?(meta.locations, fn loc -> loc.tier == :hot end),
                "Chunk should be on hot tier"
@@ -145,8 +148,12 @@ defmodule NeonFS.Integration.Phase3Test do
       node_name =
         PeerCluster.rpc(cluster, :node1, Node, :self, [])
 
-      # Run migration from hot to warm
+      # Run migration from hot to warm — `volume_id` is required by
+      # the post-#836 `ChunkIndex.get/2`; without it the migration's
+      # metadata lookup falls through to the `_migration` placeholder
+      # volume and fails with `:chunk_not_found`.
       params = %{
+        volume_id: file.volume_id,
         chunk_hash: hash,
         source_drive: "default",
         source_node: node_name,
@@ -163,7 +170,10 @@ defmodule NeonFS.Integration.Phase3Test do
 
       # Verify the chunk is now on warm tier
       {:ok, meta} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [hash])
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [
+          file.volume_id,
+          hash
+        ])
 
       assert Enum.any?(meta.locations, fn loc -> loc.tier == :warm end),
              "Chunk should be on warm tier after migration"

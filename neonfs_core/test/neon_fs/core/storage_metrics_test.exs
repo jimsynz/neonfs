@@ -65,11 +65,11 @@ defmodule NeonFS.Core.StorageMetricsTest do
       location = %{node: node(), drive_id: "default", tier: :hot}
 
       chunk1 =
-        ChunkMeta.new(hash1, 1024, 512)
+        ChunkMeta.new("vol-test", hash1, 1024, 512)
         |> ChunkMeta.add_location(location)
 
       chunk2 =
-        ChunkMeta.new(hash2, 2048, 1024)
+        ChunkMeta.new("vol-test", hash2, 2048, 1024)
         |> ChunkMeta.add_location(location)
 
       ChunkIndex.put(chunk1)
