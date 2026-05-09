@@ -150,7 +150,10 @@ defmodule NeonFS.Integration.KeyRotationTest do
 
       # Verify chunks have been re-encrypted to v2
       Enum.each(file.chunks, fn chunk_hash ->
-        case PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [chunk_hash]) do
+        case PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [
+               volume.id,
+               chunk_hash
+             ]) do
           {:ok, chunk_meta} when chunk_meta.crypto != nil ->
             assert chunk_meta.crypto.key_version == 2,
                    "Chunk should be at key version 2 after rotation, " <>
