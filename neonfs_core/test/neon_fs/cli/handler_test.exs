@@ -1333,7 +1333,7 @@ defmodule NeonFS.CLI.HandlerTest do
              end)
     end
 
-    test "default mode (no flags) runs the orchestrator end-to-end (#926)" do
+    test "default mode + --no-wait runs orchestrator end-to-end (#926)" do
       # Stub the RPC layer — the orchestrator dispatches `install_node_cert`,
       # `regenerate_ca_bundle`, and `reload_listener` to every node in the
       # BEAM cluster. In a unit test the cluster is a single node (self),
@@ -1354,7 +1354,9 @@ defmodule NeonFS.CLI.HandlerTest do
         end
       end)
 
-      assert {:ok, %{rotated: true} = result} = Handler.handle_ca_rotate()
+      assert {:ok, %{rotated: true} = result} =
+               Handler.handle_ca_rotate(%{"no-wait" => true})
+
       assert is_binary(result.fingerprint)
 
       # The active CA's fingerprint should differ from the pre-rotation
@@ -1378,13 +1380,89 @@ defmodule NeonFS.CLI.HandlerTest do
       refute :cluster_ca_rotate_failed in events
     end
 
+    test "default mode (no --no-wait) stops at pending-finalize for the grace window (#927)" do
+      stub_mod = NeonFS.CLI.HandlerTest.RPCStub
+      Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
+      Agent.start_link(fn -> [] end, name: :ca_rotate_rpc_calls)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod)
+
+        try do
+          Agent.stop(:ca_rotate_rpc_calls)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      assert {:ok,
+              %{
+                rotated: false,
+                pending_finalize: true,
+                grace_window_seconds: 60,
+                message: msg
+              }} = Handler.handle_ca_rotate(%{"grace-window-seconds" => 60})
+
+      assert msg =~ "rotation staged + bundle distributed"
+      assert msg =~ "60s"
+
+      # Incoming CA must still be staged — the operator finalizes
+      # explicitly after the grace window.
+      assert {:ok, _info} = CertificateAuthority.incoming_ca_info()
+
+      :ok = AuditLog.flush()
+      events = AuditLog.recent(20) |> Enum.map(& &1.event_type) |> Enum.uniq()
+      assert :cluster_ca_rotate_started in events
+      assert :cluster_ca_rotate_node_completed in events
+      refute :cluster_ca_rotate_finalized in events
+    end
+
+    test "--node <name> retries the rolling reissue against a single node (#927)" do
+      stub_mod = NeonFS.CLI.HandlerTest.RPCStub
+      Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
+      Agent.start_link(fn -> [] end, name: :ca_rotate_rpc_calls)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod)
+
+        try do
+          Agent.stop(:ca_rotate_rpc_calls)
+        catch
+          :exit, _ -> :ok
+        end
+      end)
+
+      # Stage incoming CA so the retry path has something to work with.
+      {:ok, _ca_cert, _ca_key} = CertificateAuthority.init_incoming_ca("retry-cluster")
+
+      assert {:ok, %{node: "node1@host", reissued: true}} =
+               Handler.handle_ca_rotate(%{"node" => "node1@host"})
+
+      # Retry path: `install_node_cert` + bundle for that one node only.
+      calls = Agent.get(:ca_rotate_rpc_calls, & &1)
+      retried_nodes = calls |> Enum.map(fn {node, _, _, _} -> node end) |> Enum.uniq()
+      assert retried_nodes == [:node1@host]
+
+      called_funs = calls |> Enum.map(fn {_node, _mod, fun, _args} -> fun end) |> Enum.uniq()
+      assert :install_node_cert in called_funs
+      assert :regenerate_ca_bundle in called_funs
+      assert :reload_listener in called_funs
+    end
+
+    test "--node <name> with no rotation staged returns a clear error (#927)" do
+      assert {:error, %NeonFS.Error.Invalid{message: msg}} =
+               Handler.handle_ca_rotate(%{"node" => "node1@host"})
+
+      assert msg =~ "no CA rotation in progress"
+    end
+
     test "default mode emits :cluster_ca_rotate_failed when an RPC fails (#926)" do
       stub_mod = NeonFS.CLI.HandlerTest.FailingRPCStub
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
 
       on_exit(fn -> Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod) end)
 
-      assert {:error, _} = Handler.handle_ca_rotate()
+      assert {:error, _} = Handler.handle_ca_rotate(%{"no-wait" => true})
 
       :ok = AuditLog.flush()
       events = AuditLog.recent(20) |> Enum.map(& &1.event_type) |> Enum.uniq()

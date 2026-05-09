@@ -168,34 +168,59 @@ pub enum CaCommand {
 
     /// Drive the cluster CA rotation lifecycle.
     ///
-    /// One of the four mode flags must be passed; they are mutually
-    /// exclusive and map onto the underlying primitives:
+    /// With no flags: runs the full orchestrator (#926) — stage a new
+    /// incoming CA, walk the cluster reissuing every node's cert, and
+    /// distribute the dual-CA bundle. Without `--no-wait`, the
+    /// rotation **stops** before finalizing so the dual-CA grace
+    /// window can elapse. Operators run `--finalize` after the window.
+    ///
+    /// Mode flags (mutually exclusive):
     ///
     /// - `--status`   inspect rotation state (read-only).
     /// - `--stage`    init a fresh incoming CA into `_system/tls/incoming/`.
     /// - `--abort`    discard the staged incoming CA.
     /// - `--finalize` promote staged → active, drop the previous active CA.
-    ///
-    /// The full automated flow (init + walk every node + reissue + grace
-    /// window + finalize) lands in a follow-up — for now operators drive
-    /// the rotation lifecycle one mode at a time.
+    /// - `--node <n>` retry the rolling reissue for a single node
+    ///   after a per-node failure (see `--abort` to bail).
     Rotate {
         /// Inspect the current rotation state.
-        #[arg(long, conflicts_with_all = ["stage", "abort", "finalize"])]
+        #[arg(long, conflicts_with_all = ["stage", "abort", "finalize", "node"])]
         status: bool,
 
         /// Stage a new incoming CA without touching the active CA.
-        #[arg(long, conflicts_with_all = ["status", "abort", "finalize"])]
+        #[arg(long, conflicts_with_all = ["status", "abort", "finalize", "node"])]
         stage: bool,
 
         /// Discard a staged incoming CA.
-        #[arg(long, conflicts_with_all = ["status", "stage", "finalize"])]
+        #[arg(long, conflicts_with_all = ["status", "stage", "finalize", "node"])]
         abort: bool,
 
         /// Promote the staged incoming CA to active. Drops the previous
         /// active CA and invalidates every cert it signed.
-        #[arg(long, conflicts_with_all = ["status", "stage", "abort"])]
+        #[arg(long, conflicts_with_all = ["status", "stage", "abort", "node"])]
         finalize: bool,
+
+        /// Retry the rolling reissue for a single node — used after a
+        /// per-node failure in the default-mode rotation. Operates
+        /// against the currently-staged incoming CA; no-op if no
+        /// rotation is staged.
+        #[arg(long, conflicts_with_all = ["status", "stage", "abort", "finalize"])]
+        node: Option<String>,
+
+        /// Skip the dual-CA grace window before finalizing. Default
+        /// mode normally stops after bundle distribution so operators
+        /// can wait `--grace-window-seconds` before finalizing; this
+        /// flag finalizes immediately. For tests / automation.
+        #[arg(long, conflicts_with_all = ["status", "stage", "abort", "finalize", "node"])]
+        no_wait: bool,
+
+        /// Recommended grace window between bundle distribution and
+        /// finalize, in seconds. Default 86400 (24h). Echoed back to
+        /// the operator in the post-distribution message; the daemon
+        /// doesn't actually sleep — operators run `--finalize` after
+        /// waiting.
+        #[arg(long, default_value = "86400", conflicts_with_all = ["status", "stage", "abort", "finalize", "node"])]
+        grace_window_seconds: u64,
     },
 
     /// Restore CA material on a single node after the cluster CA has expired.
@@ -922,7 +947,19 @@ impl CaCommand {
                 stage,
                 abort,
                 finalize,
-            } => self.rotate(*status, *stage, *abort, *finalize, format),
+                node,
+                no_wait,
+                grace_window_seconds,
+            } => self.rotate(
+                *status,
+                *stage,
+                *abort,
+                *finalize,
+                node.as_deref(),
+                *no_wait,
+                *grace_window_seconds,
+                format,
+            ),
             CaCommand::EmergencyBootstrap {
                 from_backup,
                 new_key,
@@ -1057,34 +1094,68 @@ impl CaCommand {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rotate(
         &self,
         status: bool,
         stage: bool,
         abort: bool,
         finalize: bool,
+        node: Option<&str>,
+        no_wait: bool,
+        grace_window_seconds: u64,
         format: OutputFormat,
     ) -> Result<()> {
-        let mode_key = match (status, stage, abort, finalize) {
-            (true, false, false, false) => "status",
-            (false, true, false, false) => "stage",
-            (false, false, true, false) => "abort",
-            (false, false, false, true) => "finalize",
-            (false, false, false, false) => {
-                return Err(crate::error::CliError::InvalidArgument(
-                    "specify exactly one of --status, --stage, --abort, --finalize".to_string(),
-                ));
-            }
+        let mode_key = match (status, stage, abort, finalize, node) {
+            (true, false, false, false, None) => "status",
+            (false, true, false, false, None) => "stage",
+            (false, false, true, false, None) => "abort",
+            (false, false, false, true, None) => "finalize",
+            (false, false, false, false, Some(_)) => "node",
+            (false, false, false, false, None) => "default",
             // clap's `conflicts_with_all` rejects combinations at parse time.
             _ => unreachable!("clap should have rejected combined mode flags"),
         };
 
-        let opts = Term::Map(Map::from([(
+        let mut entries: std::collections::HashMap<Term, Term> = std::collections::HashMap::new();
+
+        entries.insert(
             Term::Binary(Binary {
                 bytes: mode_key.as_bytes().to_vec(),
             }),
             Term::Atom(Atom::from("true")),
-        )]));
+        );
+
+        if let Some(node_name) = node {
+            entries.insert(
+                Term::Binary(Binary {
+                    bytes: b"node".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: node_name.as_bytes().to_vec(),
+                }),
+            );
+        }
+
+        if no_wait {
+            entries.insert(
+                Term::Binary(Binary {
+                    bytes: b"no-wait".to_vec(),
+                }),
+                Term::Atom(Atom::from("true")),
+            );
+        }
+
+        entries.insert(
+            Term::Binary(Binary {
+                bytes: b"grace-window-seconds".to_vec(),
+            }),
+            Term::FixInteger(FixInteger {
+                value: grace_window_seconds as i32,
+            }),
+        );
+
+        let opts = Term::Map(Map::from(entries));
 
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
