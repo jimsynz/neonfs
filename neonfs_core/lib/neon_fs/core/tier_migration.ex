@@ -87,7 +87,6 @@ defmodule NeonFS.Core.TierMigration do
 
   defp execute_migration(params) do
     local? = params.source_node == params.target_node
-    chunk_index = NeonFS.Core.ChunkIndex
 
     :telemetry.execute(
       [:neonfs, :tier_migration, :start],
@@ -100,11 +99,18 @@ defmodule NeonFS.Core.TierMigration do
       }
     )
 
+    # Resolve the chunk's volume_id from the local ETS view if the
+    # caller didn't thread it through `params`. Drive-evacuation and
+    # tier-eviction runners don't always know the volume of every
+    # chunk they process — `ChunkMeta.volume_id` (#836) lets us
+    # discover it locally without re-reading the per-volume tree.
+    params = Map.put_new_lazy(params, :volume_id, fn -> resolve_volume_id(params.chunk_hash) end)
+
     # Look up chunk metadata to determine compression.
     # The BlobStore NIF doesn't auto-detect compression, so we must
     # decompress on read and re-compress on write to preserve the format.
     chunk_compression =
-      case chunk_index.get(Map.get(params, :volume_id, "_migration"), params.chunk_hash) do
+      case ChunkIndex.get(params.volume_id, params.chunk_hash) do
         {:ok, meta} -> meta.compression
         _ -> :none
       end
@@ -342,6 +348,24 @@ defmodule NeonFS.Core.TierMigration do
       {:ok, chunk_meta} -> BlobStore.codec_opts_for_chunk(chunk_meta)
       _ -> []
     end
+  end
+
+  # Find a chunk's volume by scanning the local ETS index. Used by
+  # background runners that hand the migration a hash without volume
+  # context (drive evacuation, tier eviction). Falls back to
+  # `"_migration"` so we still produce a stable lookup key — the
+  # subsequent `ChunkIndex.get/2` will simply return `:not_found` and
+  # the migration's caller-side error handling kicks in.
+  defp resolve_volume_id(chunk_hash) do
+    case :ets.lookup(:chunk_index, chunk_hash) do
+      [{^chunk_hash, %NeonFS.Core.ChunkMeta{volume_id: volume_id}}] when is_binary(volume_id) ->
+        volume_id
+
+      _ ->
+        "_migration"
+    end
+  rescue
+    ArgumentError -> "_migration"
   end
 
   defp compression_write_opts(:none), do: []
