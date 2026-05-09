@@ -181,7 +181,7 @@ defmodule NeonFS.Core.KeyRotationTest do
         [loc | _] = chunk.locations
 
         # Read with new key + new nonce (from updated chunk meta)
-        {:ok, updated_chunk} = ChunkIndex.get(chunk.hash)
+        {:ok, updated_chunk} = ChunkIndex.get("vol-test", chunk.hash)
 
         assert {:ok, _data} =
                  BlobStore.read_chunk(chunk.hash, loc.drive_id,
@@ -270,7 +270,7 @@ defmodule NeonFS.Core.KeyRotationTest do
 
       # The chunk metadata must NOT have been updated — nonce and key_version
       # should still be the originals, because no blob was re-encrypted.
-      {:ok, after_chunk} = ChunkIndex.get(chunk.hash)
+      {:ok, after_chunk} = ChunkIndex.get("vol-test", chunk.hash)
       assert after_chunk.crypto.key_version == 1
       assert after_chunk.crypto.nonce == old_nonce
     end

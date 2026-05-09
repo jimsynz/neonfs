@@ -26,6 +26,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       # Create chunk metadata
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -38,7 +39,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       ChunkIndex.put(chunk_meta)
 
       # Fetch the chunk
-      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash)
+      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test")
     end
 
     test "uses correct tier when fetching locally" do
@@ -47,6 +48,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "warm")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -59,7 +61,8 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       ChunkIndex.put(chunk_meta)
 
       # Fetch with correct tier
-      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, tier: "warm")
+      assert {:ok, ^data, :local} =
+               ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test", tier: "warm")
     end
 
     test "returns error when chunk not found locally and not in metadata" do
@@ -67,7 +70,8 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       fake_hash = :crypto.hash(:sha256, "nonexistent")
 
       # Try to fetch it
-      assert {:error, :chunk_not_found} = ChunkFetcher.fetch_chunk(fake_hash)
+      assert {:error, :chunk_not_found} =
+               ChunkFetcher.fetch_chunk(fake_hash, volume_id: "vol-test")
     end
 
     test "verifies chunk when verify option is true" do
@@ -75,6 +79,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -87,7 +92,8 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       ChunkIndex.put(chunk_meta)
 
       # Fetch with verification
-      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, verify: true)
+      assert {:ok, ^data, :local} =
+               ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test", verify: true)
     end
 
     test "decompresses chunk when decompress option is true" do
@@ -96,6 +102,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -108,7 +115,8 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       ChunkIndex.put(chunk_meta)
 
       # Fetch with decompression
-      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, decompress: true)
+      assert {:ok, ^data, :local} =
+               ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test", decompress: true)
     end
   end
 
@@ -122,6 +130,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       fake_hash = :crypto.hash(:sha256, "remote chunk")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: fake_hash,
         original_size: 100,
         stored_size: 100,
@@ -136,7 +145,8 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       ChunkIndex.put(chunk_meta)
 
       # Try to fetch - should fail as remote node doesn't exist
-      assert {:error, :all_replicas_failed} = ChunkFetcher.fetch_chunk(fake_hash)
+      assert {:error, :all_replicas_failed} =
+               ChunkFetcher.fetch_chunk(fake_hash, volume_id: "vol-test")
     end
 
     test "filters out local node from remote fetch attempts" do
@@ -145,6 +155,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       # Create metadata with both local and remote locations
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -160,7 +171,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       ChunkIndex.put(chunk_meta)
 
       # Should fetch locally without trying remote
-      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash)
+      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test")
     end
   end
 
@@ -308,6 +319,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -319,7 +331,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       ChunkIndex.put(chunk_meta)
 
-      {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash)
+      {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test")
 
       # Verify telemetry event was emitted
       assert_receive {:telemetry_event, [:neonfs, :chunk_fetcher, :local_hit], measurements,
@@ -349,6 +361,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       fake_hash = :crypto.hash(:sha256, "remote exception test")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: fake_hash,
         original_size: 100,
         stored_size: 100,
@@ -363,7 +376,8 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       ChunkIndex.put(chunk_meta)
 
       # Try to fetch - should fail and emit exception event
-      assert {:error, :all_replicas_failed} = ChunkFetcher.fetch_chunk(fake_hash)
+      assert {:error, :all_replicas_failed} =
+               ChunkFetcher.fetch_chunk(fake_hash, volume_id: "vol-test")
 
       # Verify telemetry event was emitted
       assert_receive {:telemetry_event, [:neonfs, :chunk_fetcher, :remote_fetch, :exception],
@@ -416,6 +430,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -434,7 +449,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       volume = create_volume_with_caching(%{transformed_chunks: true})
       {_data, hash} = write_compressed_chunk()
 
-      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: volume.id,
+        decompress: true
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)
@@ -445,7 +463,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       volume = create_volume_with_caching(%{transformed_chunks: false})
       {_data, hash} = write_compressed_chunk()
 
-      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: volume.id,
+        decompress: true
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)
@@ -462,7 +483,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       {_data, hash} = write_compressed_chunk()
 
-      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: volume.id,
+        decompress: true
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)
@@ -473,7 +497,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, volume} = VolumeRegistry.create("default-caching-vol")
       {_data, hash} = write_compressed_chunk()
 
-      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: true)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: volume.id,
+        decompress: true
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)
@@ -486,6 +513,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -497,7 +525,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       ChunkIndex.put(chunk_meta)
 
-      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, decompress: false)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: volume.id,
+        decompress: false
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)
@@ -510,6 +541,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -521,7 +553,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       ChunkIndex.put(chunk_meta)
 
-      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, cache_reason: :reconstructed)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: volume.id,
+        cache_reason: :reconstructed
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)
@@ -534,6 +569,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -545,7 +581,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       ChunkIndex.put(chunk_meta)
 
-      ChunkFetcher.fetch_chunk(hash, volume_id: volume.id, cache_reason: :reconstructed)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: volume.id,
+        cache_reason: :reconstructed
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)
@@ -556,7 +595,10 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {_data, hash} = write_compressed_chunk()
 
       # Use a non-existent volume ID
-      ChunkFetcher.fetch_chunk(hash, volume_id: "nonexistent-volume", decompress: true)
+      ChunkFetcher.fetch_chunk(hash,
+        volume_id: "nonexistent-volume",
+        decompress: true
+      )
 
       # Drain ChunkCache mailbox so the async cast is processed
       :sys.get_state(ChunkCache)

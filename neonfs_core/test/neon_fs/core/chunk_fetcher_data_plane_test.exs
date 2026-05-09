@@ -38,6 +38,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
 
       # Create metadata with a fake remote node that is actually self
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -67,6 +68,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       fake_node = :"fallback_node_#{System.unique_integer([:positive])}@localhost"
 
       chunk_meta2 = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash2,
         original_size: info2.original_size,
         stored_size: info2.stored_size,
@@ -82,7 +84,8 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       BlobStore.delete_chunk(hash2, "default")
 
       # Remote fetch will fail (fake node unreachable) — this exercises the fallback path
-      assert {:error, :all_replicas_failed} = ChunkFetcher.fetch_chunk(hash2)
+      assert {:error, :all_replicas_failed} =
+               ChunkFetcher.fetch_chunk(hash2, volume_id: "vol-test")
     end
 
     test "uses RPC directly for compressed chunks (needs decompression)" do
@@ -91,6 +94,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -105,7 +109,11 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       # Local read with decompression works. Compression must be passed so
       # the fetcher can resolve to the codec-suffixed file on disk (#270).
       assert {:ok, ^data, :local} =
-               ChunkFetcher.fetch_chunk(hash, decompress: true, compression: :zstd)
+               ChunkFetcher.fetch_chunk(hash,
+                 volume_id: "vol-test",
+                 decompress: true,
+                 compression: :zstd
+               )
     end
   end
 
@@ -272,6 +280,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
+        volume_id: "vol-test",
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -284,7 +293,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       ChunkIndex.put(chunk_meta)
 
       # Local fetch succeeds without needing any pool
-      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash)
+      assert {:ok, ^data, :local} = ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test")
     end
 
     test "location scoring and preference unchanged" do

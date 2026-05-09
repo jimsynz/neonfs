@@ -69,7 +69,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Verify chunks are committed
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         assert chunk_meta.commit_state == :committed
         assert MapSet.size(chunk_meta.active_write_refs) == 0
       end
@@ -98,7 +98,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Verify all chunks are committed
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         assert chunk_meta.commit_state == :committed
         assert MapSet.size(chunk_meta.active_write_refs) == 0
       end
@@ -119,7 +119,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Verify chunks have compression metadata
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         # Chunk may or may not be compressed depending on size threshold
         assert chunk_meta.compression in [:none, :zstd]
       end
@@ -215,7 +215,7 @@ defmodule NeonFS.Core.WriteOperationTest do
                WriteOperation.write_file_streamed(volume.id, "/plain.txt", [data])
 
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         assert chunk_meta.crypto == nil
       end
     end
@@ -492,7 +492,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Small chunks should not be compressed
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         # May be :none if below threshold
         assert chunk_meta.compression in [:none, :zstd]
       end
@@ -650,7 +650,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       stripe.chunks
       |> Enum.with_index()
       |> Enum.each(fn {chunk_hash, idx} ->
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         assert chunk_meta.stripe_id == stripe_ref.stripe_id
         assert chunk_meta.stripe_index == idx
         assert chunk_meta.commit_state == :committed
@@ -721,7 +721,7 @@ defmodule NeonFS.Core.WriteOperationTest do
         {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
 
         for chunk_hash <- stripe.chunks do
-          {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+          {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
           assert chunk_meta.commit_state == :committed
           assert MapSet.size(chunk_meta.active_write_refs) == 0
         end
@@ -830,7 +830,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Verify all chunks have crypto metadata populated
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         assert chunk_meta.crypto != nil
         assert chunk_meta.crypto.algorithm == :aes_256_gcm
         assert byte_size(chunk_meta.crypto.nonce) == 12
@@ -846,7 +846,7 @@ defmodule NeonFS.Core.WriteOperationTest do
                WriteOperation.write_file_streamed(volume.id, "/overhead.bin", [data])
 
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         # stored_size should be original_size + 16 (GCM auth tag)
         assert chunk_meta.stored_size == chunk_meta.original_size + 16
       end
@@ -864,7 +864,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       blob_dir = Application.get_env(:neonfs_core, :blob_store_base_dir)
 
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         [location | _] = chunk_meta.locations
         tier_str = Atom.to_string(Map.get(location, :tier, :hot))
         hex = Base.encode16(chunk_hash, case: :lower)
@@ -889,7 +889,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       nonces =
         Enum.map(file_meta.chunks, fn hash ->
-          {:ok, meta} = ChunkIndex.get(hash)
+          {:ok, meta} = ChunkIndex.get("vol-test", hash)
           meta.crypto.nonce
         end)
 
@@ -928,7 +928,7 @@ defmodule NeonFS.Core.WriteOperationTest do
                WriteOperation.write_file_streamed(plain_vol.id, "/plain.txt", [data])
 
       for chunk_hash <- file_meta.chunks do
-        {:ok, chunk_meta} = ChunkIndex.get(chunk_hash)
+        {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)
         assert chunk_meta.crypto == nil
       end
     end

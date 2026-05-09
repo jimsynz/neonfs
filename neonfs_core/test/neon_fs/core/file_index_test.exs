@@ -690,7 +690,7 @@ defmodule NeonFS.Core.FileIndexTest do
       chunk_hashes = for i <- 1..4, do: :crypto.hash(:sha256, "chunk#{i}")
 
       Enum.each(chunk_hashes, fn hash ->
-        :ok = ChunkIndex.put(ChunkMeta.new(hash, 256, 256))
+        :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 256, 256))
       end)
 
       file = FileMeta.new("vol1", "/test.txt", chunks: chunk_hashes, size: 1024)
@@ -708,7 +708,7 @@ defmodule NeonFS.Core.FileIndexTest do
       chunk_hashes = for i <- 1..4, do: :crypto.hash(:sha256, "chunk#{i}")
 
       Enum.each(chunk_hashes, fn hash ->
-        :ok = ChunkIndex.put(ChunkMeta.new(hash, 256, 256))
+        :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 256, 256))
       end)
 
       file = FileMeta.new("vol1", "/mid.txt", chunks: chunk_hashes, size: 1024)
@@ -726,7 +726,7 @@ defmodule NeonFS.Core.FileIndexTest do
       chunk_hashes = for i <- 1..3, do: :crypto.hash(:sha256, "chunk#{i}")
 
       Enum.each(chunk_hashes, fn hash ->
-        :ok = ChunkIndex.put(ChunkMeta.new(hash, 256, 256))
+        :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 256, 256))
       end)
 
       file = FileMeta.new("vol1", "/empty.txt", chunks: chunk_hashes, size: 768)
@@ -742,7 +742,7 @@ defmodule NeonFS.Core.FileIndexTest do
       chunk_hashes = for i <- 1..2, do: :crypto.hash(:sha256, "chunk#{i}")
 
       Enum.each(chunk_hashes, fn hash ->
-        :ok = ChunkIndex.put(ChunkMeta.new(hash, 512, 512))
+        :ok = ChunkIndex.put(ChunkMeta.new("vol-test", hash, 512, 512))
       end)
 
       file = FileMeta.new("vol1", "/same.txt", chunks: chunk_hashes, size: 1024)
@@ -755,7 +755,7 @@ defmodule NeonFS.Core.FileIndexTest do
 
     test "truncate to larger size extends without adding chunks" do
       chunk_hash = :crypto.hash(:sha256, "only-chunk")
-      :ok = ChunkIndex.put(ChunkMeta.new(chunk_hash, 512, 512))
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", chunk_hash, 512, 512))
 
       file = FileMeta.new("vol1", "/grow.txt", chunks: [chunk_hash], size: 512)
       {:ok, created} = FileIndex.create(file)
@@ -767,7 +767,7 @@ defmodule NeonFS.Core.FileIndexTest do
 
     test "truncate updates modified_at and changed_at" do
       chunk_hash = :crypto.hash(:sha256, "data")
-      :ok = ChunkIndex.put(ChunkMeta.new(chunk_hash, 1024, 1024))
+      :ok = ChunkIndex.put(ChunkMeta.new("vol-test", chunk_hash, 1024, 1024))
 
       file = FileMeta.new("vol1", "/timestamps.txt", chunks: [chunk_hash], size: 1024)
       {:ok, created} = FileIndex.create(file)

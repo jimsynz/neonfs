@@ -69,11 +69,11 @@ defmodule NeonFS.Core.CommitChunksTest do
       assert file_meta.size == byte_size(chunk_a) + byte_size(chunk_b)
       assert file_meta.chunks == [hash_a, hash_b]
 
-      assert {:ok, stored_a} = ChunkIndex.get(hash_a)
+      assert {:ok, stored_a} = ChunkIndex.get("vol-test", hash_a)
       assert stored_a.commit_state == :committed
       assert Enum.any?(stored_a.locations, &(&1.node == node()))
 
-      assert {:ok, stored_b} = ChunkIndex.get(hash_b)
+      assert {:ok, stored_b} = ChunkIndex.get("vol-test", hash_b)
       assert stored_b.commit_state == :committed
     end
 
@@ -170,7 +170,7 @@ defmodule NeonFS.Core.CommitChunksTest do
                  locations: loc
                )
 
-      assert {:ok, meta} = ChunkIndex.get(hash)
+      assert {:ok, meta} = ChunkIndex.get("vol-test", hash)
       assert meta.commit_state == :committed
     end
   end

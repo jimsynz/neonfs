@@ -411,14 +411,14 @@ defmodule NeonFS.Core.ChunkFetcher do
   end
 
   # Prefer the volume-scoped lookup when the caller threads `:volume_id`
-  # through `opts` — falls back to the legacy hash-only lookup so
-  # background runners that don't yet carry `volume_id` keep working
-  # (see #874 for the design call). Once those runners thread `volume_id`,
-  # the fallback can go.
+  # through `opts`. Background runners without `volume_id` (covered by
+  # the design call in #874) get `:not_found` — the chunk lookup needs
+  # the per-volume index tree to resolve, and there's no way to walk
+  # the global index tree from a hash-only entry point any more (#836).
   defp lookup_chunk_meta(opts, hash) do
     case Keyword.fetch(opts, :volume_id) do
       {:ok, volume_id} -> ChunkIndex.get(volume_id, hash)
-      :error -> ChunkIndex.get(hash)
+      :error -> {:error, :not_found}
     end
   end
 

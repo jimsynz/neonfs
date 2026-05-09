@@ -104,7 +104,7 @@ defmodule NeonFS.Core.TierMigration do
     # The BlobStore NIF doesn't auto-detect compression, so we must
     # decompress on read and re-compress on write to preserve the format.
     chunk_compression =
-      case chunk_index.get(params.chunk_hash) do
+      case chunk_index.get(Map.get(params, :volume_id, "_migration"), params.chunk_hash) do
         {:ok, meta} -> meta.compression
         _ -> :none
       end
@@ -250,7 +250,7 @@ defmodule NeonFS.Core.TierMigration do
   defp update_metadata(params) do
     chunk_index = NeonFS.Core.ChunkIndex
 
-    case chunk_index.get(params.chunk_hash) do
+    case chunk_index.get(Map.get(params, :volume_id, "_migration"), params.chunk_hash) do
       {:ok, chunk_meta} ->
         new_location = %{
           node: params.target_node,
@@ -282,7 +282,9 @@ defmodule NeonFS.Core.TierMigration do
 
   defp cleanup_source(params) do
     blob_store = NeonFS.Core.BlobStore
-    delete_opts = cleanup_delete_opts(params.chunk_hash)
+
+    delete_opts =
+      cleanup_delete_opts(Map.get(params, :volume_id, "_migration"), params.chunk_hash)
 
     result =
       if params.source_node == Node.self() do
@@ -311,7 +313,9 @@ defmodule NeonFS.Core.TierMigration do
 
   defp rollback_copy(params) do
     blob_store = NeonFS.Core.BlobStore
-    delete_opts = cleanup_delete_opts(params.chunk_hash)
+
+    delete_opts =
+      cleanup_delete_opts(Map.get(params, :volume_id, "_migration"), params.chunk_hash)
 
     result =
       if params.target_node == Node.self() do
@@ -333,8 +337,8 @@ defmodule NeonFS.Core.TierMigration do
     end
   end
 
-  defp cleanup_delete_opts(chunk_hash) do
-    case ChunkIndex.get(chunk_hash) do
+  defp cleanup_delete_opts(volume_id, chunk_hash) do
+    case ChunkIndex.get(volume_id, chunk_hash) do
       {:ok, chunk_meta} -> BlobStore.codec_opts_for_chunk(chunk_meta)
       _ -> []
     end

@@ -118,7 +118,7 @@ defmodule NeonFS.Core.TierMigrationTest do
         BlobStore.write_chunk(data, "default", "hot")
 
       # Register the chunk in ChunkIndex
-      chunk_meta = ChunkMeta.new(hash, 1024, 1024)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 1024)
 
       chunk_meta = %{
         chunk_meta
@@ -155,7 +155,7 @@ defmodule NeonFS.Core.TierMigrationTest do
                )
 
       # Verify metadata was updated
-      {:ok, meta} = ChunkIndex.get(hash)
+      {:ok, meta} = ChunkIndex.get("vol-test", hash)
 
       assert Enum.any?(meta.locations, fn loc ->
                loc.tier == :warm and loc.drive_id == "default"
@@ -190,7 +190,7 @@ defmodule NeonFS.Core.TierMigrationTest do
       {:ok, hash, _info} =
         BlobStore.write_chunk(data, "default", "hot")
 
-      chunk_meta = ChunkMeta.new(hash, 1024, 1024)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 1024)
 
       chunk_meta = %{
         chunk_meta
