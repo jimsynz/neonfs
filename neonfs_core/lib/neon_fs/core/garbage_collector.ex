@@ -43,22 +43,26 @@ defmodule NeonFS.Core.GarbageCollector do
 
   ## Options
 
-  - `:volume_id` — when given, only files belonging to that volume are scanned
-    during the mark phase. Chunks not referenced by those files are treated as
-    unreferenced.
+  - `:volume_id` — when given, the entire pass (mark **and** sweep) is
+    scoped to that volume. Files outside the volume are ignored, and
+    only chunks/stripes whose `volume_id` matches are considered for
+    deletion. Without this scoping the sweep would delete every other
+    volume's chunks, since they aren't in the (volume-scoped)
+    referenced set.
 
   Returns a summary map with counts of deleted chunks and stripes.
   """
   @spec collect(keyword()) :: {:ok, gc_result()}
   def collect(opts) when is_list(opts) do
     start_time = System.monotonic_time()
+    volume_filter = Keyword.get(opts, :volume_id)
 
     files = list_files(opts)
     referenced_chunks = mark_referenced_chunks(files)
     referenced_stripes = mark_referenced_stripes(files)
 
-    {chunks_deleted, chunks_protected} = sweep_chunks(referenced_chunks)
-    stripes_deleted = sweep_stripes(referenced_stripes)
+    {chunks_deleted, chunks_protected} = sweep_chunks(referenced_chunks, volume_filter)
+    stripes_deleted = sweep_stripes(referenced_stripes, volume_filter)
 
     duration = System.monotonic_time() - start_time
 
@@ -131,8 +135,8 @@ defmodule NeonFS.Core.GarbageCollector do
 
   # ─── Sweep Phase ───────────────────────────────────────────────────────
 
-  defp sweep_chunks(referenced_set) do
-    all_committed = list_committed_chunks()
+  defp sweep_chunks(referenced_set, volume_filter) do
+    all_committed = list_committed_chunks(volume_filter)
 
     Enum.reduce(all_committed, {0, 0}, fn chunk_meta, {deleted, protected} ->
       cond do
@@ -155,8 +159,9 @@ defmodule NeonFS.Core.GarbageCollector do
     end
   end
 
-  defp sweep_stripes(referenced_set) do
+  defp sweep_stripes(referenced_set, volume_filter) do
     StripeIndex.list_all()
+    |> Enum.filter(&matches_volume?(&1, volume_filter))
     |> Enum.reduce(0, fn stripe, count ->
       if MapSet.member?(referenced_set, stripe.id) do
         count
@@ -167,13 +172,20 @@ defmodule NeonFS.Core.GarbageCollector do
     end)
   end
 
+  defp matches_volume?(_chunk_or_stripe, nil), do: true
+  defp matches_volume?(%{volume_id: volume_id}, volume_id), do: true
+  defp matches_volume?(_, _), do: false
+
   # ─── Helpers ───────────────────────────────────────────────────────────
 
-  defp list_committed_chunks do
+  defp list_committed_chunks(volume_filter) do
     :ets.foldl(
       fn
-        {_hash, %ChunkMeta{commit_state: :committed} = meta}, acc -> [meta | acc]
-        _, acc -> acc
+        {_hash, %ChunkMeta{commit_state: :committed} = meta}, acc ->
+          if matches_volume?(meta, volume_filter), do: [meta | acc], else: acc
+
+        _, acc ->
+          acc
       end,
       [],
       :chunk_index
