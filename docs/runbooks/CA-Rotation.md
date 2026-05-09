@@ -200,15 +200,44 @@ Interface nodes will not be able to reconnect until the core has fresh certs. St
 
 #### 7. Re-bootstrap the CA on one core node
 
-There is no first-class CLI for "re-bootstrap the CA after expiry" today — every available CA command requires a working TLS chain. The workaround is operator-applied:
+`neonfs cluster ca emergency-bootstrap` runs entirely on the bootstrap node and never touches the system volume — every CA command that needs a working TLS chain is unreachable when the chain is the thing that's broken. The CLI installs CA material directly into `$NEONFS_TLS_DIR/`, regenerates the local node's own cert against the freshly-installed CA so distribution can come up, and writes a JSONL audit-log entry under `$NEONFS_DATA_DIR/audit/emergency-bootstrap.log`.
 
-1. Stop `neonfs-core` on the chosen bootstrap node.
-2. Regenerate the CA material manually (tooling: `openssl req -x509 -new …` against a replacement private key OR restore a pre-expiry CA backup that is still in-date), write it to `$NEONFS_TLS_DIR/ca/`.
-3. Regenerate the bootstrap node's own cert against the new CA.
-4. Start `neonfs-core` on the bootstrap node.
-5. Verify: `neonfs cluster ca info` reports the new validity; the node's own distribution listener presents the new cert.
+Pick the source first.
 
-Because this step reaches inside `$NEONFS_TLS_DIR`, escalate to engineering for oversight — see [Escalation](#escalation-path). This is exactly the kind of hands-on-CA operation that should live behind a `neonfs cluster ca emergency-bootstrap` CLI, tracked as a follow-up.
+**With an off-cluster CA backup tarball** (the planned path — every cert keeps validating):
+
+```bash
+# On the chosen bootstrap node, with neonfs-core stopped:
+sudo systemctl stop neonfs-core   # if not already stopped
+
+NEONFS_TLS_DIR=/var/lib/neonfs/tls \
+NEONFS_DATA_DIR=/var/lib/neonfs \
+neonfs cluster ca emergency-bootstrap --from-backup /path/to/ca-backup.tar.gz
+```
+
+The CLI:
+1. Refuses if `neonfs-core` is still listening on the distribution port (probed via `/run/neonfs/dist_port`). Stop the service first.
+2. Validates the tarball (must contain `ca.crt`, `ca.key`, `serial`, `crl.pem`).
+3. Refuses a foreign CA: the tarball's CA `subject CN` (after stripping the trailing ` CA`) must match this node's `cluster.json` `cluster_name`. If you're rebuilding with a backup of a different cluster, edit `cluster.json` first and re-run.
+4. Atomically installs `ca.crt` / `ca.key` / `serial` / `crl.pem` (per-file rename + fsync).
+5. Generates a fresh keypair and signs a node cert against the freshly-installed CA, atomically writing `node.crt` + `node.key` and bumping `serial`.
+
+**Without a backup, with `--new-key`** (last-resort — every previously-issued cert is invalidated):
+
+```bash
+NEONFS_TLS_DIR=/var/lib/neonfs/tls \
+NEONFS_DATA_DIR=/var/lib/neonfs \
+neonfs cluster ca emergency-bootstrap --new-key --yes-i-accept-data-loss
+```
+
+`--new-key` mints a brand-new CA, advances its serial counter past the previous CA's last issued value (so reissued certs do not collide), and runs the same install + node-cert-regen pipeline. Every previously-issued cert is now untrusted. Operators MUST be ready to reissue every interface and core node cert via the subsequent `cluster ca rotate` (step 8). The `--yes-i-accept-data-loss` flag is a deliberate guard-rail; the CLI refuses to run `--new-key` without it.
+
+Once emergency-bootstrap returns success, restart the bootstrap node:
+
+```bash
+sudo systemctl start neonfs-core
+neonfs cluster ca info       # confirms new validity
+```
 
 #### 8. Fan out to the rest of the core
 
@@ -259,8 +288,7 @@ The incident is resolved when:
 
 Escalate to engineering if any of the following hold. Capture context before stopping:
 
-- No off-cluster CA backup exists. The decision between "regenerate from scratch (losing trust chain)" and "wait for key recovery" needs a stakeholder decision — not a runbook decision.
-- Emergency rotation step 7 (re-bootstrapping the CA on one node) is needed. This involves direct manipulation of `$NEONFS_TLS_DIR` and should have engineering oversight until a first-class CLI lands.
+- No off-cluster CA backup exists AND `--new-key` is not acceptable (every cert invalidated, every interface needs reissue). The trade-off between "regenerate from scratch (losing trust chain)" and "wait for key recovery from secure storage" needs a stakeholder decision — not a runbook decision.
 - A node refuses to accept its new cert after rotation and cannot be forced to retry. Corrupted TLS state on disk (wrong permissions, partial write) can surface as "rotation succeeded but node still uses old cert" — diagnosing this is engineering-level.
 - The cluster is multi-site and only one site is reachable for emergency rotation. Bringing fresh certs across a WAN partition during emergency rotation risks split-brain on the CA itself.
 - Rotation succeeds but `neonfs cluster status` shows quorum loss immediately afterwards. This is unexpected and indicates rotation has unblocked a latent quorum problem that was previously masked by TLS errors.
@@ -276,7 +304,6 @@ After the incident, use the post-mortem template at [Post-Mortem-Template.md](Po
 
 ## Known limitations
 
-- There is no `neonfs cluster ca emergency-bootstrap` CLI for the post-expiry recovery case. Step 7 is operator-applied by reaching into `$NEONFS_TLS_DIR`; engineering oversight is required until that lands.
 - `neonfs cluster ca info` does not emit a machine-readable "expiring in N days" warning via telemetry — an operator monitoring dashboard gets visibility only if it polls and evaluates the validity window itself. Tracked as a future improvement.
 - `ca rotate` has no dry-run mode. There is no way to preview which certs would be reissued before running the command for real.
 - After `--finalize`, the new active CA cert is held in the system volume but is not pushed into each node's local `<tls_dir>/ca.crt` cache. Until that cache is refreshed (currently on the next listener restart), the on-disk single-CA copy remains stale even though the dual-CA bundle on disk is correct.
