@@ -48,21 +48,44 @@ defmodule NeonFS.Core.DetachedFileGC do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  # Telemetry handlers run synchronously in the calling process, which
+  # for `:release_namespace_claim` is the Ra apply path. Doing the
+  # `FileIndex.decrement_pin/2` work inline blocks Ra until the
+  # `MetadataWriter` round-trip — itself a Ra command for the
+  # bootstrap pointer update — completes, which it never can while the
+  # current Ra apply is still in flight (#904). The handler therefore
+  # only forwards the claim ids onto this module's GenServer; the
+  # `handle_info/2` callback below picks them up off the apply path
+  # and runs the per-claim work without blocking Ra.
   @doc false
   @spec handle_event([atom()], map(), map(), term()) :: :ok
   def handle_event(@release_event, _measurements, %{claim_id: claim_id}, _config)
       when is_binary(claim_id) do
-    decrement_for_claim(claim_id)
-    :ok
+    forward_claims([claim_id])
   end
 
   def handle_event(@bulk_release_event, _measurements, %{released_claim_ids: ids}, _config)
       when is_list(ids) do
-    Enum.each(ids, &decrement_for_claim/1)
-    :ok
+    forward_claims(ids)
   end
 
   def handle_event(_event, _measurements, _metadata, _config), do: :ok
+
+  defp forward_claims([]), do: :ok
+
+  defp forward_claims(claim_ids) do
+    case Process.whereis(__MODULE__) do
+      nil ->
+        # Server hasn't started or already shut down. The state is
+        # idempotent so dropping is safe — a future restart will see
+        # the same ETS contents and retry on the next event.
+        :ok
+
+      pid ->
+        send(pid, {:claims_released, claim_ids})
+        :ok
+    end
+  end
 
   # Server callbacks
 
@@ -72,6 +95,14 @@ defmodule NeonFS.Core.DetachedFileGC do
     attach_telemetry()
     {:ok, %{}}
   end
+
+  @impl true
+  def handle_info({:claims_released, claim_ids}, state) do
+    Enum.each(claim_ids, &decrement_for_claim/1)
+    {:noreply, state}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, _state) do
