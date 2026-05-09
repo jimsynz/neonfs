@@ -43,7 +43,7 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.Core.Drive.Identity
   alias NeonFS.Core.Job
   alias NeonFS.Core.MetadataStateMachine
-  alias NeonFS.Core.Volume.Reconstruction
+  alias NeonFS.Core.Volume.{MetadataReader, MetadataWriter, Reconstruction}
   alias NeonFS.Core.Volume.Reconstruction.OnDisk
   alias NeonFS.Transport.TLS
 
@@ -1762,6 +1762,124 @@ defmodule NeonFS.CLI.Handler do
       jobs = JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.GarbageCollection)
       {:ok, Enum.map(jobs, &job_to_map/1)}
     end
+  end
+
+  @doc """
+  Triggers an immediate garbage-collection job for the named volume.
+  Returns `{:ok, job_map}` on success, `{:error, reason}` on failure
+  (`:not_found` for an unknown volume name, `:already_running` if a
+  GC job is already in flight for the volume).
+  """
+  @spec handle_volume_gc_now(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_gc_now(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, job} <-
+           JobTracker.create(NeonFS.Core.Job.Runners.GarbageCollection, %{volume_id: volume.id}) do
+      {:ok, job_to_map(job)}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @minimum_volume_gc_interval_ms 60_000
+
+  @doc """
+  Updates `RootSegment.schedules.gc.interval_ms` for the named
+  volume. `interval_ms` must be at least 60_000 (1 minute) — anything
+  smaller would tick faster than the scheduler itself.
+  """
+  @spec handle_volume_gc_set_interval(binary(), pos_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_volume_gc_set_interval(volume_name, interval_ms)
+      when is_binary(volume_name) and is_integer(interval_ms) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         :ok <- validate_volume_gc_interval(interval_ms),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []),
+         existing = Map.get(segment.schedules, :gc, %{interval_ms: interval_ms, last_run: nil}),
+         updated = %{existing | interval_ms: interval_ms},
+         {:ok, _} <- MetadataWriter.update_schedule(volume.id, :gc, updated, []) do
+      {:ok,
+       %{
+         volume_id: volume.id,
+         volume_name: volume_name,
+         schedule: schedule_to_map(updated)
+       }}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  defp validate_volume_gc_interval(interval_ms)
+       when is_integer(interval_ms) and interval_ms >= @minimum_volume_gc_interval_ms,
+       do: :ok
+
+  defp validate_volume_gc_interval(_),
+    do:
+      {:error,
+       Invalid.exception(
+         message: "interval_ms must be at least #{@minimum_volume_gc_interval_ms} (1 minute)"
+       )}
+
+  @doc """
+  Returns the current GC schedule for the named volume — interval,
+  last_run, and the most recent (or running) GC job for that volume.
+  """
+  @spec handle_volume_gc_status(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_gc_status(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []) do
+      schedule = Map.get(segment.schedules, :gc)
+      latest_job = latest_volume_gc_job(volume.id)
+
+      {:ok,
+       %{
+         volume_id: volume.id,
+         volume_name: volume_name,
+         schedule: schedule_to_map(schedule),
+         next_run_due_at: next_run_due_at(schedule),
+         latest_job: latest_job && job_to_map(latest_job)
+       }}
+    else
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  defp fetch_volume(volume_name) do
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} -> {:ok, volume}
+      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_name: volume_name)}
+    end
+  end
+
+  defp schedule_to_map(nil), do: nil
+
+  defp schedule_to_map(%{interval_ms: interval, last_run: last}),
+    do: %{interval_ms: interval, last_run: last}
+
+  defp next_run_due_at(nil), do: nil
+  defp next_run_due_at(%{last_run: nil}), do: :immediately
+
+  defp next_run_due_at(%{interval_ms: interval, last_run: %DateTime{} = last}) do
+    DateTime.add(last, interval, :millisecond)
+  end
+
+  defp latest_volume_gc_job(volume_id) do
+    JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.GarbageCollection)
+    |> Enum.filter(fn job -> Map.get(job.params || %{}, :volume_id) == volume_id end)
+    |> Enum.sort_by(fn job -> job.updated_at end, {:desc, DateTime})
+    |> List.first()
   end
 
   @doc """
