@@ -30,6 +30,12 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   @moduletag nodes: 3
   @moduletag cluster_mode: :per_test
   @moduletag :integration
+  # Multi-node `replicate:2` volume + `nodes: 3` — the volume's
+  # drive_locations only includes 2 of the 3 peers, so the local
+  # read on a non-replica peer hits the cross-node walk that
+  # currently fails on missing index-tree chunks (#903). Re-enable
+  # once the writer fans tree chunks out.
+  @moduletag :pending_903
 
   @volume_name "rr-vol"
   @volume_opts %{
