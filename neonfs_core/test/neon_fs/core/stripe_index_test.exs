@@ -2,57 +2,24 @@ defmodule NeonFS.Core.StripeIndexTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{MetadataRing, Stripe, StripeIndex}
+  alias NeonFS.Core.{Stripe, StripeIndex}
 
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
 
-    # Set up mock quorum infrastructure
-    store = :ets.new(:test_stripe_quorum_store, [:set, :public])
-
-    ring =
-      MetadataRing.new([node()],
-        virtual_nodes_per_physical: 4,
-        replicas: 1
-      )
-
-    write_fn = fn _node, _segment, key, value ->
-      :ets.insert(store, {key, value})
-      :ok
-    end
-
-    read_fn = fn _node, _segment, key ->
-      case :ets.lookup(store, key) do
-        [{^key, value}] -> {:ok, value, {1_000_000, 0, node()}}
-        [] -> {:error, :not_found}
-      end
-    end
-
-    delete_fn = fn _node, _segment, key ->
-      :ets.delete(store, key)
-      :ok
-    end
-
-    quorum_opts = [
-      ring: ring,
-      write_fn: write_fn,
-      read_fn: read_fn,
-      delete_fn: delete_fn,
-      quarantine_checker: fn _ -> false end,
-      read_repair_fn: fn _work_fn, _opts -> {:ok, "noop"} end,
-      local_node: node()
-    ]
+    store = :ets.new(:test_stripe_metadata_store, [:set, :public])
 
     metadata_reader_opts = build_mock_metadata_reader_opts(store)
+    metadata_writer_opts = build_mock_metadata_writer_opts(store)
 
     stop_if_running(NeonFS.Core.StripeIndex)
     cleanup_ets_table(:stripe_index)
 
     start_supervised!(
       {NeonFS.Core.StripeIndex,
-       quorum_opts: quorum_opts, metadata_reader_opts: metadata_reader_opts},
+       metadata_reader_opts: metadata_reader_opts, metadata_writer_opts: metadata_writer_opts},
       restart: :temporary
     )
 
@@ -71,7 +38,6 @@ defmodule NeonFS.Core.StripeIndexTest do
 
     %{
       store: store,
-      quorum_opts: quorum_opts,
       vol1: "vol-1-#{vol_suffix}",
       vol2: "vol-2-#{vol_suffix}"
     }
@@ -101,45 +67,10 @@ defmodule NeonFS.Core.StripeIndexTest do
       stripe = make_stripe()
 
       {:ok, _id} = StripeIndex.put(stripe)
-      assert {:ok, retrieved} = StripeIndex.get(stripe.id)
+      assert {:ok, retrieved} = StripeIndex.get(stripe.volume_id, stripe.id)
       assert retrieved.id == stripe.id
       assert retrieved.volume_id == stripe.volume_id
       assert retrieved.config == stripe.config
-    end
-  end
-
-  describe "get/1" do
-    test "returns {:ok, stripe} for existing stripe" do
-      stripe = make_stripe()
-      {:ok, _} = StripeIndex.put(stripe)
-
-      assert {:ok, result} = StripeIndex.get(stripe.id)
-      assert result.id == stripe.id
-    end
-
-    test "returns {:error, :not_found} for non-existent stripe" do
-      assert {:error, :not_found} = StripeIndex.get("nonexistent-id")
-    end
-
-    test "quorum read populates ETS cache on miss", %{store: store} do
-      stripe = make_stripe()
-      {:ok, _} = StripeIndex.put(stripe)
-
-      # Remove from ETS cache manually
-      :ets.delete(:stripe_index, stripe.id)
-      assert [] = :ets.lookup(:stripe_index, stripe.id)
-
-      # Verify data is still in quorum store
-      key = "stripe:" <> stripe.id
-      assert [{^key, _}] = :ets.lookup(store, key)
-
-      # get/1 should fall back to quorum and re-populate ETS
-      assert {:ok, retrieved} = StripeIndex.get(stripe.id)
-      assert retrieved.id == stripe.id
-
-      # ETS should be populated again
-      stripe_id = stripe.id
-      assert [{^stripe_id, _}] = :ets.lookup(:stripe_index, stripe.id)
     end
   end
 
@@ -149,7 +80,7 @@ defmodule NeonFS.Core.StripeIndexTest do
       {:ok, _} = StripeIndex.put(stripe)
 
       assert :ok = StripeIndex.delete(stripe.id)
-      assert {:error, :not_found} = StripeIndex.get(stripe.id)
+      assert {:error, :not_found} = StripeIndex.get(stripe.volume_id, stripe.id)
     end
 
     test "returns :ok for non-existent stripe" do
@@ -168,6 +99,14 @@ defmodule NeonFS.Core.StripeIndexTest do
       # Quorum store should be empty
       key = "stripe:" <> stripe.id
       assert [] = :ets.lookup(store, key)
+    end
+
+    test "subsequent get returns :not_found via MetadataReader" do
+      stripe = make_stripe()
+      {:ok, _} = StripeIndex.put(stripe)
+      assert :ok = StripeIndex.delete(stripe.id)
+
+      assert {:error, :not_found} = StripeIndex.get(stripe.volume_id, stripe.id)
     end
   end
 
@@ -196,34 +135,6 @@ defmodule NeonFS.Core.StripeIndexTest do
 
     test "returns false for an unknown stripe" do
       refute StripeIndex.exists?("vol1", "nonexistent-id")
-    end
-  end
-
-  describe "exists?/1" do
-    test "returns true for existing stripe" do
-      stripe = make_stripe()
-      {:ok, _} = StripeIndex.put(stripe)
-
-      assert StripeIndex.exists?(stripe.id)
-    end
-
-    test "returns false for non-existent stripe" do
-      refute StripeIndex.exists?("nonexistent-id")
-    end
-
-    test "finds stripe via quorum when not in ETS cache", %{store: store} do
-      stripe = make_stripe()
-      {:ok, _} = StripeIndex.put(stripe)
-
-      # Remove from ETS cache
-      :ets.delete(:stripe_index, stripe.id)
-
-      # Verify data is still in quorum store
-      key = "stripe:" <> stripe.id
-      assert [{^key, _}] = :ets.lookup(store, key)
-
-      # exists? should find it via quorum
-      assert StripeIndex.exists?(stripe.id)
     end
   end
 
@@ -286,7 +197,7 @@ defmodule NeonFS.Core.StripeIndexTest do
       updated = %{stripe | chunks: ["hash1", "hash2"]}
       {:ok, _} = StripeIndex.put(updated)
 
-      assert {:ok, result} = StripeIndex.get(stripe.id)
+      assert {:ok, result} = StripeIndex.get(stripe.volume_id, stripe.id)
       assert result.chunks == ["hash1", "hash2"]
     end
 
@@ -299,8 +210,8 @@ defmodule NeonFS.Core.StripeIndexTest do
       {:ok, _} = StripeIndex.put(s1)
       {:ok, _} = StripeIndex.put(s2)
 
-      {:ok, r1} = StripeIndex.get(s1.id)
-      {:ok, r2} = StripeIndex.get(s2.id)
+      {:ok, r1} = StripeIndex.get(s1.volume_id, s1.id)
+      {:ok, r2} = StripeIndex.get(s2.volume_id, s2.id)
 
       assert r1.config.data_chunks == 4
       assert r2.config.data_chunks == 10

@@ -556,7 +556,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert stripe_ref.byte_range == {0, byte_size(data)}
 
       # Verify stripe metadata in StripeIndex
-      {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
+      {:ok, stripe} = StripeIndex.get(volume.id, stripe_ref.stripe_id)
       assert stripe.partial == true
       assert stripe.data_bytes == byte_size(data)
       assert stripe.padded_bytes >= 0
@@ -589,8 +589,8 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert second_stripe.byte_range == {2048, 4096}
 
       # Both stripes should be complete (not partial)
-      {:ok, s1} = StripeIndex.get(first_stripe.stripe_id)
-      {:ok, s2} = StripeIndex.get(second_stripe.stripe_id)
+      {:ok, s1} = StripeIndex.get(volume.id, first_stripe.stripe_id)
+      {:ok, s2} = StripeIndex.get(volume.id, second_stripe.stripe_id)
       assert s1.partial == false
       assert s2.partial == false
       assert s1.data_bytes == 2048
@@ -621,9 +621,9 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert Enum.at(stripes, 2).byte_range == {4096, 5120}
 
       # First two complete, last partial
-      {:ok, s1} = StripeIndex.get(Enum.at(stripes, 0).stripe_id)
-      {:ok, s2} = StripeIndex.get(Enum.at(stripes, 1).stripe_id)
-      {:ok, s3} = StripeIndex.get(Enum.at(stripes, 2).stripe_id)
+      {:ok, s1} = StripeIndex.get(volume.id, Enum.at(stripes, 0).stripe_id)
+      {:ok, s2} = StripeIndex.get(volume.id, Enum.at(stripes, 1).stripe_id)
+      {:ok, s3} = StripeIndex.get(volume.id, Enum.at(stripes, 2).stripe_id)
 
       assert s1.partial == false
       assert s2.partial == false
@@ -644,7 +644,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert length(file_meta.stripes) == 1
       [stripe_ref] = file_meta.stripes
 
-      {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
+      {:ok, stripe} = StripeIndex.get(volume.id, stripe_ref.stripe_id)
 
       # Verify each chunk in the stripe has correct metadata
       stripe.chunks
@@ -700,7 +700,7 @@ defmodule NeonFS.Core.WriteOperationTest do
       total_data_bytes =
         file_meta.stripes
         |> Enum.map(fn sr ->
-          {:ok, stripe} = StripeIndex.get(sr.stripe_id)
+          {:ok, stripe} = StripeIndex.get(volume.id, sr.stripe_id)
           stripe.data_bytes
         end)
         |> Enum.sum()
@@ -718,7 +718,7 @@ defmodule NeonFS.Core.WriteOperationTest do
 
       # Verify all stripe chunks are committed
       for stripe_ref <- file_meta.stripes do
-        {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
+        {:ok, stripe} = StripeIndex.get(volume.id, stripe_ref.stripe_id)
 
         for chunk_hash <- stripe.chunks do
           {:ok, chunk_meta} = ChunkIndex.get("vol-test", chunk_hash)

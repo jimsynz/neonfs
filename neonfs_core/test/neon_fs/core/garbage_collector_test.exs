@@ -134,7 +134,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
 
       # Get stripe chunk hashes before deletion
       [%{stripe_id: sid} | _] = file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(vol.id, sid)
       chunk_hashes = stripe.chunks
 
       # Delete the file
@@ -162,14 +162,14 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       assert result.stripes_deleted > 0
 
       # Orphaned stripe should be gone
-      assert {:error, :not_found} = StripeIndex.get(sid)
+      assert {:error, :not_found} = StripeIndex.get(vol.id, sid)
     end
 
     test "does not delete active-write-protected stripe chunks", %{volume: vol} do
       {:ok, file} = WriteOperation.write_file_at(vol.id, "/ec-prot.txt", 0, "protect me")
 
       [%{stripe_id: sid} | _] = file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(vol.id, sid)
       [first_hash | _] = stripe.chunks
 
       # Protect one chunk with active write ref
@@ -216,7 +216,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
 
       # EC file's chunks should still exist
       [%{stripe_id: sid} | _] = ec_file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(ec_vol.id, sid)
 
       Enum.each(stripe.chunks, fn hash ->
         assert {:ok, _} = ChunkIndex.get("vol-test", hash)
@@ -259,7 +259,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
 
       assert {:ok, result} = GarbageCollector.collect()
       assert result.stripes_deleted >= 1
-      assert {:error, :not_found} = StripeIndex.get(stripe.id)
+      assert {:error, :not_found} = StripeIndex.get(stripe.volume_id, stripe.id)
     end
   end
 end

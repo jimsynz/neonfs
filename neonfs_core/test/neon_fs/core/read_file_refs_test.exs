@@ -419,7 +419,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
         WriteOperation.write_file_at(volume.id, "/parity.txt", 0, "parity intact")
 
       [%{stripe_id: sid} | _] = file_meta.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(volume.id, sid)
 
       # Remove a parity chunk (index >= data_chunks).
       parity_hash = Enum.at(stripe.chunks, stripe.config.data_chunks)
@@ -461,7 +461,7 @@ defmodule NeonFS.Core.ReadFileRefsTest do
   defp stripe_data_hashes_for(file_meta) do
     file_meta.stripes
     |> Enum.flat_map(fn %{stripe_id: sid} ->
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(file_meta.volume_id, sid)
       Enum.take(stripe.chunks, stripe.config.data_chunks)
     end)
   end

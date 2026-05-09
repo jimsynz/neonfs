@@ -217,7 +217,10 @@ defmodule NeonFS.Integration.EncryptionTest do
       [%{stripe_id: sid} | _] = file.stripes
 
       {:ok, stripe} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.StripeIndex, :get, [sid])
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.StripeIndex, :get, [
+          file.volume_id,
+          sid
+        ])
 
       [first_hash | _] = stripe.chunks
       PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :delete, [first_hash])
