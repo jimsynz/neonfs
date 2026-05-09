@@ -82,40 +82,94 @@ For a full CA rotation (a new CA is generated and every cert reissued), the same
 neonfs cluster ca rotate
 ```
 
-This:
+This drives the rolling reissue in four phases:
 
-1. (Full CA rotation only) Generates a new CA key and cert.
-2. Reissues every known node's cert under the current (or new) CA.
-3. Rolls distribution TLS to the new cert on each node.
+1. **Stage incoming CA.** Generates a new CA key + cert and writes them to the system volume under `_system/tls/incoming/`. The old CA is still active.
+2. **Walk + reissue every node's cert.** For each node connected to the BEAM cluster, the orchestrator generates a fresh keypair, signs a node CSR against the *incoming* CA, and ships the new `node.crt` + `node.key` to that node via RPC. Atomic on-disk swap (temp-file + rename) means a crash mid-write leaves the existing cert intact.
+3. **Distribute the dual-CA bundle.** Every node's `ca_bundle.crt` is regenerated to include both the old and the new CA, then the local `ssl_dist` listener is asked to refresh its trust store. During this window each node accepts inbound connections from peers that present *either* the old-CA-signed cert or the new-CA-signed cert.
+4. **Finalize.** Promotes the staged incoming CA to active in the system volume, deletes the incoming tree. After this step the old CA is no longer trusted; only the new CA bundle is.
 
-Every node reports back in the CLI output as it finishes. A node that does not report back within the rotation timeout has failed — see [Step 4](#4-if-a-node-fails-to-rotate) below.
+By default, the orchestrator stops between phase 3 and phase 4 with the rotation in `pending-finalize` state and prints the grace-window duration. This gives the dual-CA bundle time to settle on every node before the old CA is dropped — important if a node is briefly unreachable during phase 3 and would otherwise come back to find its peers no longer trust its old cert.
+
+After the grace window passes, finalize the rotation:
+
+```bash
+# On any core node with CLI access:
+neonfs cluster ca rotate --finalize
+```
+
+If you've explicitly verified every node picked up the dual-CA bundle in phase 3 and want to skip the grace window (for example: a planned rotation in a maintenance window, every node is reachable, every cert has been visibly reissued), pass `--no-wait` to the initial command and the finalize step runs as part of phase 4 in the same invocation:
+
+```bash
+neonfs cluster ca rotate --no-wait
+```
+
+`--no-wait` is faster but riskier: any node that didn't successfully install the dual-CA bundle in phase 3 will be unable to handshake with its peers immediately. Reach for it only when you have direct visibility into every node.
+
+You can tune the documented grace window with `--grace-window-seconds N` (default `86400`, i.e. 24 hours). The flag affects the duration **printed** in the orchestrator's output; the operator is still the one who decides when to run `--finalize` based on the grace window having elapsed.
+
+Audit-log events are written on the orchestrator node for each phase: `cluster_ca_rotate_started`, `cluster_ca_rotate_node_completed` (one per node), `cluster_ca_rotate_finalized`, and `cluster_ca_rotate_failed` if any phase aborts. Inspect them via `neonfs cluster ca status` or by querying the audit log directly during a post-mortem.
 
 #### 3c. Verify post-rotation
+
+After `--finalize` returns successfully:
 
 ```bash
 neonfs cluster ca info                       # new not_valid_after ≥ rotation window
 neonfs cluster ca list                       # every node's cert shows the new validity
+neonfs cluster ca rotate --status            # rotation_in_progress: false, no incoming CA
 neonfs cluster status                        # leader still elected, quorum healthy
 neonfs node status <each-node>               # service reports running, health checks pass
 ```
 
 From an interface node, perform a smoke-test read and a smoke-test write. If distribution handshakes are silently falling back to old certs you will see handshake retries in the journal; a real write flushing to disk confirms the new chain is end-to-end.
 
+**Estimated downtime: none for the rolling reissue.** Phase 2 and 3 do not interrupt existing inter-node connections — `:ssl_dist` keeps using its already-handshaken sockets under the old trust store and only the *next* listener restart picks up the new bundle. Phase 4 (`--finalize`) atomically swaps the active CA in the system volume; existing connections continue, and a brief reconnect blip is possible if a peer re-handshakes within seconds of finalize.
+
 #### 4. If a node fails to rotate
 
-- `ca rotate` exit non-zero, or a specific node is missing from the output.
-- Check `neonfs node status <node>` — if it reports "cert expiry pending" or similar, its rotation has not completed.
+The orchestrator stops on the first failed node and writes a `cluster_ca_rotate_failed` audit event. The error message identifies the failed node and the failing RPC (typically `install_node_cert`, `regenerate_ca_bundle`, or `reload_listener`). The staged incoming CA stays in place — partial progress is **not** rolled back.
 
-Remediation:
+Diagnose:
 
 ```bash
-# On the node itself:
+# On the failed node:
 sudo journalctl -u neonfs-core --since "10 minutes ago" | grep -iE "tls|cert|handshake"
-# Retry rotation on just that node:
-neonfs cluster ca rotate --node <node>        # if the CLI supports per-node retry
+# On a working core node:
+neonfs cluster ca rotate --status     # confirms incoming CA is still staged
 ```
 
-If per-node retry is not supported by the installed CLI version, stop and [escalate](#escalation-path). An offline node will fail to rotate; the operator guide flags this explicitly — they must be rejoined from scratch after the rest of the cluster has rotated.
+Two recovery paths depending on root cause:
+
+**Per-node retry** — when the failure was transient (the node was briefly unreachable, hit a disk-full error that's now resolved, etc.) and the rest of the cluster reissued cleanly:
+
+```bash
+neonfs cluster ca rotate --node <node-name>
+```
+
+`--node` retries phase 2 + phase 3 for the named node only, against the **same** staged incoming CA. The orchestrator preserves the partial state from the original run, so other nodes' new certs are not regenerated. After the per-node retry succeeds, run `--finalize` (or re-run with `--no-wait`) to complete phase 4 across the cluster. The retry path expects the staged incoming CA to still exist; if you previously ran `--abort`, the retry will refuse and you must restart the rotation from scratch.
+
+**Abort and restart** — when the failure indicates a bigger problem (the staged CA is corrupt, the original rotation never reached phase 3 cleanly, you want to start over):
+
+```bash
+neonfs cluster ca rotate --abort      # discards the staged incoming CA
+neonfs cluster ca rotate              # starts again from phase 1
+```
+
+`--abort` removes the staged incoming CA and every cert it issued; subsequent rotations start fresh.
+
+#### 4a. Offline-node handling
+
+If a core or interface node is offline (Erlang distribution down) at the time of rotation, the orchestrator's BEAM-cluster walk skips it — the failure surfaces as either a missing `node_completed` audit event for that node or, if the node was *intermittently* reachable, an `install_node_cert_failed` mid-walk. There is no path that will reissue an offline node's cert.
+
+The operator guide's design call (#501) for offline nodes is explicit: they must be **rejoined from scratch** after the rest of the cluster has rotated. The procedure:
+
+1. Complete the rotation across the reachable nodes (`--finalize`).
+2. Bring the offline node back to a clean state — remove its `$NEONFS_TLS_DIR/{node.crt,node.key,ca.crt,ca_bundle.crt,ssl_dist.conf}` so it cannot present the old cert. The node's data dir on the blob/meta side is preserved and re-bound on rejoin.
+3. Issue a fresh invite token from any active core node (`neonfs cluster invite create --duration 1h`).
+4. Re-run `neonfs cluster join --invite <token>` on the offline node. It enrols against the **new** CA, gets a fresh node cert, and returns to the cluster.
+
+The "rejoin from scratch" step is the trade-off for not having any in-flight per-node cert distribution; the rotation orchestrator deliberately does not buffer "queued" nodes that are unreachable at rotation time.
 
 ### Emergency rotation (expiry has passed)
 
@@ -225,7 +279,8 @@ After the incident, use the post-mortem template at [Post-Mortem-Template.md](Po
 - There is no `neonfs cluster ca emergency-bootstrap` CLI for the post-expiry recovery case. Step 7 is operator-applied by reaching into `$NEONFS_TLS_DIR`; engineering oversight is required until that lands.
 - `neonfs cluster ca info` does not emit a machine-readable "expiring in N days" warning via telemetry — an operator monitoring dashboard gets visibility only if it polls and evaluates the validity window itself. Tracked as a future improvement.
 - `ca rotate` has no dry-run mode. There is no way to preview which certs would be reissued before running the command for real.
-- Per-node retry for a partially-failed `ca rotate` may not be available in all CLI versions — check `neonfs cluster ca rotate --help` on your installed version.
+- After `--finalize`, the new active CA cert is held in the system volume but is not pushed into each node's local `<tls_dir>/ca.crt` cache. Until that cache is refreshed (currently on the next listener restart), the on-disk single-CA copy remains stale even though the dual-CA bundle on disk is correct.
+- The orchestrator's per-node walk uses `[Node.self() | Node.list()]`. A node that is genuinely offline is skipped and must be re-onboarded via `cluster join` after rotation completes; there is no buffered/deferred reissue.
 
 ## References
 
