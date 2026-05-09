@@ -94,6 +94,40 @@ defmodule NeonFS.Core.FileIndexTest do
       file = %FileMeta{FileMeta.new("vol1", "/valid") | path: "no-leading-slash"}
       assert {:error, :invalid_path} = FileIndex.create(file)
     end
+
+    # #908: when MetadataWriter.put bubbles a 3-tuple
+    # `{:error, :insufficient_replicas, %{...}}` from the segment
+    # replicator (the ENOSPC shape), the GenServer used to MatchError
+    # because `do_create`'s `with...else` only knew the 2-tuple form.
+    # Confirm `normalise_writer_result/1` collapses it cleanly so
+    # callers see a 2-tuple instead of `{:badrpc, {:EXIT, _}}`.
+    test "translates 3-tuple writer errors into 2-tuple replies", %{store: store} do
+      stop_if_running(NeonFS.Core.FileIndex)
+      cleanup_ets_table(:file_index_by_id)
+
+      defmodule InsufficientReplicasReplicator do
+        @moduledoc false
+        def write_chunk(_data, _drives, _opts) do
+          {:error, :insufficient_replicas, %{successful: [], needed: 1}}
+        end
+      end
+
+      writer_opts =
+        store
+        |> build_mock_metadata_writer_opts()
+        |> Keyword.put(:chunk_replicator, InsufficientReplicasReplicator)
+
+      start_supervised!(
+        {NeonFS.Core.FileIndex,
+         metadata_reader_opts: build_mock_metadata_reader_opts(store),
+         metadata_writer_opts: writer_opts},
+        restart: :temporary
+      )
+
+      file = FileMeta.new("vol1", "/enospc.txt")
+      assert {:error, :insufficient_replicas} = FileIndex.create(file)
+      assert Process.alive?(Process.whereis(NeonFS.Core.FileIndex))
+    end
   end
 
   describe "get/1" do
