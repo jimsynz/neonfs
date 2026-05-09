@@ -4,7 +4,7 @@ use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{RotationStatus, VolumeInfo};
-use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
+use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
 use eetf::{Atom, Binary, FixInteger, Map, Term};
 use std::collections::HashMap;
@@ -147,6 +147,31 @@ pub enum VolumeCommand {
         #[arg(long, help_heading = "Metadata Consistency")]
         write_quorum: Option<u32>,
     },
+
+    /// Inspect or trigger garbage collection for a single volume.
+    ///
+    /// With no flags: prints the current GC schedule (interval,
+    /// last_run, next_run_due_at) plus the latest GC job for the
+    /// volume.
+    ///
+    /// With --now: triggers an immediate GC job for the volume.
+    ///
+    /// With --interval: updates the per-volume GC cadence in the
+    /// volume's root segment. Accepts `s`, `m`, `h`, `d` suffixes
+    /// (e.g. `24h`, `30m`); minimum 1 minute.
+    Gc {
+        /// Volume name
+        name: String,
+
+        /// Trigger an immediate GC job for the volume.
+        #[arg(long, conflicts_with = "interval")]
+        now: bool,
+
+        /// New GC cadence (e.g. `24h`, `30m`). Stored in the
+        /// volume's `RootSegment.schedules.gc.interval_ms`.
+        #[arg(long)]
+        interval: Option<String>,
+    },
 }
 
 impl VolumeCommand {
@@ -212,6 +237,11 @@ impl VolumeCommand {
                 *write_quorum,
                 format,
             ),
+            VolumeCommand::Gc {
+                name,
+                now,
+                interval,
+            } => self.gc(name, *now, interval.as_deref(), format),
         }
     }
 
@@ -448,6 +478,189 @@ impl VolumeCommand {
                 println!("Volume '{}' deleted successfully", name);
             }
         }
+        Ok(())
+    }
+
+    fn gc(
+        &self,
+        name: &str,
+        now: bool,
+        interval: Option<&str>,
+        format: OutputFormat,
+    ) -> Result<()> {
+        match (now, interval) {
+            (true, _) => self.gc_now(name, format),
+            (false, Some(d)) => self.gc_set_interval(name, d, format),
+            (false, None) => self.gc_status(name, format),
+        }
+    }
+
+    fn gc_now(&self, name: &str, format: OutputFormat) -> Result<()> {
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_gc_now",
+                vec![name_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let job_map = term_to_map(&data)?;
+
+        let job_id = job_map
+            .get("id")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "status": "started",
+                    "job_id": job_id,
+                    "volume": name,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Garbage collection started for volume '{}'", name);
+                println!("  Job ID: {}", job_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn gc_set_interval(&self, name: &str, interval: &str, format: OutputFormat) -> Result<()> {
+        let interval_ms = parse_duration_ms(interval)?;
+
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+        let interval_term = Term::FixInteger(FixInteger {
+            value: interval_ms as i32,
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_gc_set_interval",
+                vec![name_term, interval_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let stored_interval = map
+            .get("schedule")
+            .and_then(|t| term_to_map(t).ok())
+            .and_then(|m| m.get("interval_ms").cloned())
+            .and_then(|t| crate::term::term_to_i64(&t).ok())
+            .unwrap_or(interval_ms);
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "volume": name,
+                    "interval_ms": stored_interval,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Updated GC interval for volume '{}'", name);
+                println!("  interval_ms: {}", stored_interval);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn gc_status(&self, name: &str, format: OutputFormat) -> Result<()> {
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_gc_status",
+                vec![name_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let schedule_map = map
+            .get("schedule")
+            .and_then(|t| term_to_map(t).ok())
+            .unwrap_or_default();
+
+        let interval_ms = schedule_map
+            .get("interval_ms")
+            .and_then(|t| crate::term::term_to_i64(t).ok())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "<unset>".to_string());
+
+        let last_run = schedule_map
+            .get("last_run")
+            .map(|t| term_to_string(t).unwrap_or_else(|_| "never".to_string()))
+            .unwrap_or_else(|| "never".to_string());
+
+        let next_run = map
+            .get("next_run_due_at")
+            .map(|t| term_to_string(t).unwrap_or_else(|_| "<unknown>".to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let latest_job_id = map
+            .get("latest_job")
+            .and_then(|t| term_to_map(t).ok())
+            .and_then(|m| m.get("id").cloned())
+            .map(|t| term_to_string(&t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "volume": name,
+                    "interval_ms": interval_ms,
+                    "last_run": last_run,
+                    "next_run_due_at": next_run,
+                    "latest_job_id": latest_job_id,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("GC schedule for volume '{}'", name);
+                println!("  interval_ms     : {}", interval_ms);
+                println!("  last_run        : {}", last_run);
+                println!("  next_run_due_at : {}", next_run);
+                println!("  latest_job_id   : {}", latest_job_id);
+            }
+        }
+
         Ok(())
     }
 
@@ -751,9 +964,123 @@ fn bool_val(val: bool) -> Term {
     Term::Atom(Atom::from(if val { "true" } else { "false" }))
 }
 
+/// Parse a duration string ("24h", "30m", "1d", "60s", or a raw
+/// integer of milliseconds) into milliseconds. Used by
+/// `volume gc <name> --interval`.
+fn parse_duration_ms(input: &str) -> Result<i64> {
+    if let Ok(ms) = input.parse::<i64>() {
+        return Ok(ms);
+    }
+
+    if input.len() < 2 {
+        return Err(crate::error::CliError::InvalidArgument(format!(
+            "invalid duration '{}'",
+            input
+        )));
+    }
+
+    let (value_str, unit) = input.split_at(input.len() - 1);
+    let value = value_str.parse::<i64>().map_err(|_| {
+        crate::error::CliError::InvalidArgument(format!("invalid duration value '{}'", input))
+    })?;
+
+    let multiplier_ms: i64 = match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => {
+            return Err(crate::error::CliError::InvalidArgument(format!(
+                "invalid duration unit '{}' (use s, m, h, d)",
+                unit
+            )))
+        }
+    };
+
+    Ok(value * multiplier_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_duration_ms_units() {
+        assert_eq!(parse_duration_ms("60s").unwrap(), 60_000);
+        assert_eq!(parse_duration_ms("30m").unwrap(), 1_800_000);
+        assert_eq!(parse_duration_ms("24h").unwrap(), 86_400_000);
+        assert_eq!(parse_duration_ms("7d").unwrap(), 604_800_000);
+    }
+
+    #[test]
+    fn test_parse_duration_ms_raw_integer() {
+        assert_eq!(parse_duration_ms("60000").unwrap(), 60_000);
+    }
+
+    #[test]
+    fn test_parse_duration_ms_rejects_garbage() {
+        assert!(parse_duration_ms("nope").is_err());
+        assert!(parse_duration_ms("12y").is_err());
+        assert!(parse_duration_ms("h").is_err());
+        assert!(parse_duration_ms("xh").is_err());
+    }
+
+    #[test]
+    fn test_volume_gc_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        // Bare form (status).
+        let cli = TestCli::try_parse_from(["test", "gc", "myvol"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(
+                parsed.command,
+                VolumeCommand::Gc {
+                    now: false,
+                    interval: None,
+                    ..
+                }
+            ));
+        }
+
+        // --now triggers immediate.
+        let cli = TestCli::try_parse_from(["test", "gc", "myvol", "--now"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(
+                parsed.command,
+                VolumeCommand::Gc {
+                    now: true,
+                    interval: None,
+                    ..
+                }
+            ));
+        }
+
+        // --interval updates cadence.
+        let cli = TestCli::try_parse_from(["test", "gc", "myvol", "--interval", "24h"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(
+                parsed.command,
+                VolumeCommand::Gc {
+                    now: false,
+                    interval: Some(_),
+                    ..
+                }
+            ));
+        }
+
+        // --now and --interval are mutually exclusive.
+        let cli = TestCli::try_parse_from(["test", "gc", "myvol", "--now", "--interval", "24h"]);
+        assert!(cli.is_err());
+    }
 
     #[test]
     fn test_volume_command_parsing() {

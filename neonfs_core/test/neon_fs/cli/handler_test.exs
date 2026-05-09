@@ -558,6 +558,33 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "handle_volume_gc_now/1 / handle_volume_gc_set_interval/2 — error paths" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
+      stop_ra()
+      start_volume_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "handle_volume_gc_now returns VolumeNotFound for an unknown volume" do
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.handle_volume_gc_now("no-such-vol")
+    end
+
+    test "handle_volume_gc_set_interval returns VolumeNotFound for an unknown volume" do
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.handle_volume_gc_set_interval("no-such-vol", 60_000)
+    end
+
+    test "handle_volume_gc_set_interval rejects intervals shorter than one minute" do
+      assert {:error, %NeonFS.Error.Invalid{message: "interval_ms must be at least 60000" <> _}} =
+               Handler.handle_volume_gc_set_interval("any-vol", 1_000)
+    end
+  end
+
   describe "mount/3" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
