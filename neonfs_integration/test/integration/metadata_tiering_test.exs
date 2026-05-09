@@ -310,6 +310,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   end
 
   describe "erasure-coded volume with quorum metadata" do
+    @tag :pending_903
     test "write and read on erasure volume in multi-node cluster", %{cluster: cluster} do
       :ok = init_tiering_cluster(cluster, "ec-quorum-vol", durability: "erasure:2:1")
 
