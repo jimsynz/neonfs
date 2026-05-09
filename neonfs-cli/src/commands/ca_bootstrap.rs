@@ -220,10 +220,10 @@ pub fn install_ca_material(validation: &BackupValidation, tls_dir: &Path) -> Res
 
     let _guard = StageDirGuard(stage_dir.clone());
 
-    // Stage every required member — write + fsync. Fail fast if any
-    // entry is missing from `validation.entries` (shouldn't happen if
-    // `validate_backup_tarball` produced the value, but defensively
-    // check rather than `expect` in a public API path).
+    // Stage every required member — write + chmod + fsync. Fail fast
+    // if any entry is missing from `validation.entries` (shouldn't
+    // happen if `validate_backup_tarball` produced the value, but
+    // defensively check rather than `expect` in a public API path).
     for member in REQUIRED_MEMBERS {
         let data = validation.entries.get(*member).ok_or_else(|| {
             CliError::InvalidArgument(format!(
@@ -235,6 +235,7 @@ pub fn install_ca_material(validation: &BackupValidation, tls_dir: &Path) -> Res
         let staged = stage_dir.join(member);
         fs::write(&staged, data)
             .map_err(|e| io_err(&format!("write staged `{}`", member), &staged, e))?;
+        set_member_mode(&staged, member)?;
         File::open(&staged)
             .and_then(|f| f.sync_all())
             .map_err(|e| io_err(&format!("fsync staged `{}`", member), &staged, e))?;
@@ -254,6 +255,21 @@ pub fn install_ca_material(validation: &BackupValidation, tls_dir: &Path) -> Res
         .map_err(|e| io_err("fsync TLS directory", tls_dir, e))?;
 
     Ok(())
+}
+
+/// Set permissions on a staged file before atomic-rename so the bits
+/// land on the final file too. Private keys (`*.key`) need `0600`
+/// because anyone with read access to a node's private key can
+/// impersonate it on the BEAM distribution + data-plane TLS pools.
+/// Everything else stays at `0644` — the rest of the CA material is
+/// public (CA cert, CRL, serial counter).
+fn set_member_mode(path: &Path, name: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = if name.ends_with(".key") { 0o600 } else { 0o644 };
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|e| io_err(&format!("chmod `{name}`"), path, e))
 }
 
 /// RAII guard that removes the staging directory when dropped,
@@ -669,6 +685,7 @@ fn atomic_write_files(tls_dir: &Path, files: &[(&str, Vec<u8>)]) -> Result<()> {
         let staged = stage_dir.join(name);
         fs::write(&staged, data)
             .map_err(|e| io_err(&format!("write staged `{}`", name), &staged, e))?;
+        set_member_mode(&staged, name)?;
         File::open(&staged)
             .and_then(|f| f.sync_all())
             .map_err(|e| io_err(&format!("fsync staged `{}`", name), &staged, e))?;
@@ -1128,6 +1145,33 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    fn install_chmods_keys_to_0600_and_other_members_to_0644() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+
+        let validation = make_validation("install-test");
+        install_ca_material(&validation, &tls_dir).unwrap();
+
+        let mode = |name: &str| -> u32 {
+            std::fs::metadata(tls_dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+
+        // Private key — readable only by the owner.
+        assert_eq!(mode("ca.key"), 0o600, "ca.key must be 0600 (#932)");
+
+        // Public material — readable by everyone.
+        assert_eq!(mode("ca.crt"), 0o644);
+        assert_eq!(mode("crl.pem"), 0o644);
+        assert_eq!(mode("serial"), 0o644);
+    }
+
+    #[test]
     fn install_overwrites_existing_members() {
         let dir = TempDir::new().unwrap();
         let tls_dir = dir.path().join("tls");
@@ -1226,6 +1270,30 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
         // audit:bounded test-only; serial file is a few ASCII bytes.
         let bumped = std::fs::read_to_string(tls_dir.join("serial")).unwrap();
         assert_eq!(bumped.trim(), "43");
+    }
+
+    #[test]
+    fn regenerate_node_cert_writes_node_key_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let tls_dir = dir.path().join("tls");
+        seed_installed_ca(&tls_dir, "1\n");
+
+        let resolve: &HostnameResolver = &|| Ok("testhost".to_string());
+        regenerate_node_cert_with(&tls_dir, resolve).unwrap();
+
+        let mode = |name: &str| -> u32 {
+            std::fs::metadata(tls_dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+
+        assert_eq!(mode("node.key"), 0o600, "node.key must be 0600 (#932)");
+        assert_eq!(mode("node.crt"), 0o644);
+        assert_eq!(mode("serial"), 0o644);
     }
 
     #[test]
