@@ -1180,6 +1180,54 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
+  Resolves the NFS mount parameters for `volume_name` so the CLI can
+  perform the `mount.nfs` syscall locally as the calling user (#847).
+
+  Returns the server address, port, and export path (always
+  `"/<volume_name>"`) for the volume's NFS export. The export must
+  exist — call `nfs_export/1` first if needed. The CLI's
+  `neonfs nfs mount` subcommand consumes this map.
+
+  ## Returns
+
+  - `{:ok, %{server_address, port, export_path, volume_name, node}}` —
+    mount params ready to feed to `mount.nfs`.
+  - `{:error, NeonFS.Error.VolumeNotFound{}}` — unknown volume name.
+  - `{:error, NeonFS.Error.NotFound{}}` — volume exists but isn't
+    NFS-exported.
+  - `{:error, NeonFS.Error.Unavailable{}}` — no reachable NFS node.
+  """
+  @spec handle_nfs_mount_request(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_nfs_mount_request(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, _volume} <- fetch_volume(volume_name),
+         {:ok, nfs_node} <- get_nfs_node(),
+         {:ok, _export} <- rpc_nfs_get_export_by_volume(nfs_node, volume_name) do
+      {server_address, port} = rpc_nfs_bind_info(nfs_node)
+
+      {:ok,
+       %{
+         volume_name: volume_name,
+         node: Atom.to_string(nfs_node),
+         server_address: server_address,
+         port: port,
+         export_path: "/" <> volume_name
+       }}
+    else
+      {:error, :not_found} ->
+        {:error,
+         wrap_error(
+           NotFound.exception(message: "no NFS export for volume #{inspect(volume_name)}")
+         )}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
   Lists all active NFS exports across the cluster.
 
   Queries all discovered NFS nodes and aggregates their exports.
