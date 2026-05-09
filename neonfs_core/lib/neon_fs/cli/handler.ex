@@ -563,31 +563,79 @@ defmodule NeonFS.CLI.Handler do
       Map.get(opts, "stage", false) -> handle_ca_rotate_stage()
       Map.get(opts, "finalize", false) -> handle_ca_rotate_finalize()
       Map.get(opts, "status", false) -> handle_ca_rotate_status()
-      true -> handle_ca_rotate_default()
+      is_binary(Map.get(opts, "node")) -> handle_ca_rotate_node(Map.fetch!(opts, "node"))
+      true -> handle_ca_rotate_default(opts)
     end
   end
 
-  # #926 — orchestrator backbone. Replaces the `:not_implemented` stub
-  # with the rolling-reissue + bundle-distribute + finalize flow.
-  #
-  # Walks `[Node.self() | Node.list()]` (the BEAM cluster topology, which
-  # is the source of truth for "which peers are live") rather than
-  # `CertificateAuthority.list_issued/0`. The issued list is metadata
-  # storage; the actual reachable peer set is what the rotation needs to
-  # cover. Per-peer failure is fail-fast — per-node retry semantics
-  # (`--node <name>`) belong with #927.
-  defp handle_ca_rotate_default do
+  # #926 + #927 — orchestrator. Stages a fresh CA, walks the BEAM
+  # cluster reissuing each node's cert, distributes the dual-CA
+  # bundle, then either finalizes immediately (`no-wait: true`) or
+  # stops with the rotation in `pending-finalize` state so the
+  # operator can wait for the dual-CA grace window before running
+  # `--finalize`.
+  @default_grace_window_seconds 86_400
+
+  defp handle_ca_rotate_default(opts) do
+    no_wait? = Map.get(opts, "no-wait", false)
+    grace_seconds = Map.get(opts, "grace-window-seconds", @default_grace_window_seconds)
+
     with :ok <- require_cluster(),
          {:ok, ca_cert, _ca_key} <- stage_incoming_ca_for_orchestrator(),
          :ok <- log_ca_rotate_started_from_cert(ca_cert),
          :ok <- reissue_node_certs_across_cluster(),
-         :ok <- distribute_dual_ca_bundle_across_cluster(),
-         {:ok, finalize_result} <- finalize_rotation_with_audit() do
-      {:ok, finalize_result}
+         :ok <- distribute_dual_ca_bundle_across_cluster() do
+      if no_wait? do
+        finalize_rotation_with_audit()
+      else
+        {:ok,
+         %{
+           rotated: false,
+           pending_finalize: true,
+           grace_window_seconds: grace_seconds,
+           message:
+             "rotation staged + bundle distributed; run `cluster ca rotate --finalize` " <>
+               "after waiting at least #{grace_seconds}s for the dual-CA grace window"
+         }}
+      end
     else
       {:error, reason} = err ->
         log_ca_rotate_failed(reason)
         err
+    end
+  end
+
+  # #927 — per-node retry. After the rolling reissue from #926 fails
+  # for one node, the operator runs `cluster ca rotate --node <name>`
+  # to pick that one node back up. Reuses the staged incoming CA.
+  defp handle_ca_rotate_node(node_name) do
+    node_atom = String.to_atom(node_name)
+
+    with :ok <- require_cluster(),
+         :ok <- ensure_incoming_ca_staged(),
+         :ok <- reissue_node_cert(node_atom),
+         :ok <- distribute_bundle_to(node_atom) do
+      {:ok, %{node: node_name, reissued: true}}
+    else
+      {:error, reason} = err ->
+        log_ca_rotate_failed(reason)
+        err
+    end
+  end
+
+  defp ensure_incoming_ca_staged do
+    case CertificateAuthority.incoming_ca_info() do
+      {:ok, _info} ->
+        :ok
+
+      {:error, :no_incoming_ca} ->
+        {:error,
+         Invalid.exception(
+           message: "no CA rotation in progress; run `cluster ca rotate` (without --node) first"
+         )}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
     end
   end
 
