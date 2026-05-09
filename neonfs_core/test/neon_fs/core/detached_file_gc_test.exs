@@ -2,7 +2,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{DetachedFileGC, FileIndex, FileMeta, MetadataRing}
+  alias NeonFS.Core.{DetachedFileGC, FileIndex, FileMeta}
 
   @moduletag :tmp_dir
 
@@ -11,36 +11,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
 
     store = :ets.new(:dgc_test_store, [:set, :public])
 
-    ring = MetadataRing.new([node()], virtual_nodes_per_physical: 4, replicas: 1)
-
-    write_fn = fn _node, _segment, key, value ->
-      :ets.insert(store, {key, value})
-      :ok
-    end
-
-    read_fn = fn _node, _segment, key ->
-      case :ets.lookup(store, key) do
-        [{^key, value}] -> {:ok, value, {1_000_000, 0, node()}}
-        [] -> {:error, :not_found}
-      end
-    end
-
-    delete_fn = fn _node, _segment, key ->
-      :ets.delete(store, key)
-      :ok
-    end
-
-    quorum_opts = [
-      ring: ring,
-      write_fn: write_fn,
-      read_fn: read_fn,
-      delete_fn: delete_fn,
-      quarantine_checker: fn _ -> false end,
-      read_repair_fn: fn _work_fn, _opts -> {:ok, "noop"} end,
-      local_node: node()
-    ]
-
     metadata_reader_opts = build_mock_metadata_reader_opts(store)
+    metadata_writer_opts = build_mock_metadata_writer_opts(store)
 
     stop_if_running(NeonFS.Core.FileIndex)
     stop_if_running(NeonFS.Core.DetachedFileGC)
@@ -48,7 +20,7 @@ defmodule NeonFS.Core.DetachedFileGCTest do
 
     start_supervised!(
       {NeonFS.Core.FileIndex,
-       quorum_opts: quorum_opts, metadata_reader_opts: metadata_reader_opts},
+       metadata_reader_opts: metadata_reader_opts, metadata_writer_opts: metadata_writer_opts},
       restart: :temporary
     )
 

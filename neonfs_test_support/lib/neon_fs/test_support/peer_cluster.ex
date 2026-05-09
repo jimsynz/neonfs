@@ -206,7 +206,14 @@ defmodule NeonFS.TestSupport.PeerCluster do
           tls_dir: Path.join(data_dir, "tls"),
           partition_recovery_debounce_ms: 200,
           service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []},
-          bootstrap_nodes: client_bootstrap_nodes
+          bootstrap_nodes: client_bootstrap_nodes,
+          # Single-drive-per-peer harness: most integration tests
+          # spin up 1- or 3-node clusters with one drive each, so the
+          # production `replicate:3, min_copies:2` default can't be
+          # satisfied for single-node setups. Pin the test default
+          # to `replicate:1` and let multi-node cross-replication
+          # tests opt back into a higher factor explicitly.
+          default_durability: %{type: :replicate, factor: 1, min_copies: 1}
         ]
 
         app_config = [

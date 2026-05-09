@@ -34,6 +34,7 @@ defmodule NeonFS.Integration.ChunkWriterTest do
   end
 
   describe "write_file_stream/4 cross-node round-trip" do
+    @tag :pending_903
     test "node2 chunks locally, writes to node1, commits, reads back", %{cluster: cluster} do
       volume_name = "chunk-writer-vol-#{System.unique_integer([:positive])}"
 

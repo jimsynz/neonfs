@@ -189,14 +189,14 @@ defmodule NeonFS.TestCase do
   """
   def start_file_index(opts \\ []) do
     opts =
-      if Keyword.has_key?(opts, :quorum_opts) do
+      if Keyword.has_key?(opts, :metadata_reader_opts) do
         opts
       else
-        {quorum_opts, store} = build_mock_quorum_opts()
+        store = :ets.new(:test_shared_metadata_store, [:set, :public])
 
         [
-          quorum_opts: quorum_opts,
-          metadata_reader_opts: build_mock_metadata_reader_opts(store)
+          metadata_reader_opts: build_mock_metadata_reader_opts(store),
+          metadata_writer_opts: build_mock_metadata_writer_opts(store)
         ]
       end
 
@@ -288,6 +288,90 @@ defmodule NeonFS.TestCase do
     @moduledoc false
     def get(_v, _r, _k), do: :miss
     def put(_v, _r, _k, _val), do: :ok
+  end
+
+  @doc """
+  Builds mock metadata-writer opts backed by the same ETS table as
+  `build_mock_quorum_opts/0` and `build_mock_metadata_reader_opts/1`.
+  Lets unit tests exercise FileIndex / ChunkIndex / StripeIndex
+  writes end-to-end against the same backing store the readers see.
+  Index-tree puts / deletes mutate the store directly; the rest of
+  the writer flow (bootstrap pointer swap, chunk replicator, etc.)
+  is no-op'd because tests don't assert on the chunk replicator or
+  Ra-bootstrap state.
+  """
+  def build_mock_metadata_writer_opts(store) do
+    cluster_id = "clust-test"
+
+    cluster_state = %ClusterState{
+      cluster_id: cluster_id,
+      cluster_name: "test-cluster",
+      created_at: DateTime.utc_now(),
+      master_key: <<0::256>>,
+      this_node: node()
+    }
+
+    segment =
+      RootSegment.new(
+        volume_id: "vol-stub",
+        volume_name: "vol-stub",
+        cluster_id: cluster_id,
+        cluster_name: "test-cluster",
+        durability: %{type: :replicate, factor: 1, min_copies: 1}
+      )
+
+    encoded_segment = RootSegment.encode(segment)
+    drive = %{drive_id: "stub", node: node(), cluster_id: cluster_id}
+
+    [
+      cluster_state_loader: fn -> {:ok, cluster_state} end,
+      bootstrap_lookup: fn volume_id ->
+        {:ok,
+         %{
+           volume_id: volume_id,
+           root_chunk_hash: <<0::256>>,
+           drive_locations: [%{node: node(), drive_id: "stub"}],
+           durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+           updated_at: DateTime.utc_now()
+         }}
+      end,
+      root_chunk_reader: fn _root_entry, _opts -> {:ok, encoded_segment} end,
+      drive_lister: fn -> {:ok, [drive]} end,
+      store_handle: :stub_store,
+      chunk_replicator: __MODULE__.NoopReplicator,
+      bootstrap_registrar: fn _command -> {:ok, :updated} end,
+      index_tree_put: fn _store, _root, _tier, key, value ->
+        case MetadataValue.decode(value) do
+          {:ok, decoded} ->
+            :ets.insert(store, {key, decoded})
+            {:ok, "stub-tree-root"}
+
+          {:error, reason} ->
+            {:error, {:metadata_value_decode_failed, reason}}
+        end
+      end,
+      index_tree_delete: fn _store, _root, _tier, key ->
+        :ets.delete(store, key)
+        {:ok, "stub-tree-root"}
+      end,
+      index_tree_purge_tombstones: fn _store, _root, _tier, _before ->
+        {:ok, "stub-tree-root"}
+      end,
+      volume_fetcher: fn _volume_id -> {:error, :not_found} end,
+      provisioner: __MODULE__.NoopProvisioner
+    ]
+  end
+
+  defmodule NoopReplicator do
+    @moduledoc false
+    def write_chunk(_data, _drives, _opts),
+      do: {:ok, <<0::256>>, %{successful: ["stub"], failed: []}}
+  end
+
+  defmodule NoopProvisioner do
+    @moduledoc false
+    def provision(_volume), do: {:ok, <<0::256>>}
+    def provision(_volume, _opts), do: {:ok, <<0::256>>}
   end
 
   @doc """

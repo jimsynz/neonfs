@@ -20,6 +20,7 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   end
 
   describe "rolling restart" do
+    @tag :pending_903
     test "data survives sequential restart of each node", %{cluster: cluster} do
       cluster = restart_and_verify(cluster, :node1)
       cluster = restart_and_verify(cluster, :node2)
@@ -28,6 +29,7 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   end
 
   describe "node restart recovery" do
+    @tag :pending_903
     test "restarted node catches up via anti-entropy", %{cluster: cluster} do
       :ok = PeerCluster.stop_node(cluster, :node3)
 

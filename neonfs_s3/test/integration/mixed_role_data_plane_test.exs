@@ -60,7 +60,7 @@ defmodule NeonFS.S3.IntegrationTest.MixedRoleDataPlaneTest do
     volume_name = "mr-vol-#{System.unique_integer([:positive])}"
 
     volume_opts = %{
-      "durability" => "replicate:1",
+      durability: %{type: :replicate, factor: 1, min_copies: 1},
       compression: %{algorithm: :none, level: 0, min_size: 0}
     }
 

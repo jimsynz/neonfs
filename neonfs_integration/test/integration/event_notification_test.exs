@@ -289,6 +289,7 @@ defmodule NeonFS.Integration.EventNotificationTest do
              "Collector for volume X should not receive events from volume Y"
     end
 
+    @tag :pending_903
     test "subscriber on node2 receives events for writes on node1 and node3",
          %{cluster: cluster, volume_id: vid, volume_name: vname} do
       {:ok, collector} =

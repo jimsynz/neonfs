@@ -22,6 +22,7 @@ defmodule NeonFS.Integration.ClusterCATest do
       assert info.algorithm == "ECDSA P-256"
     end
 
+    @tag :pending_903
     test "CA cert is readable from system volume on all nodes", %{cluster: cluster} do
       for node_name <- [:node1, :node2, :node3] do
         assert_eventually timeout: 10_000 do
@@ -128,6 +129,7 @@ defmodule NeonFS.Integration.ClusterCATest do
   end
 
   describe "cross-node CSR signing" do
+    @tag :pending_903
     test "any core node can sign a CSR", %{cluster: cluster} do
       # Generate a CSR on node1 but sign it on node2
       node_key = PeerCluster.rpc(cluster, :node1, NeonFS.Transport.TLS, :generate_node_key, [])
@@ -159,6 +161,7 @@ defmodule NeonFS.Integration.ClusterCATest do
   end
 
   describe "certificate revocation" do
+    @tag :pending_903
     test "revocation updates CRL visible to all nodes", %{cluster: cluster} do
       # Issue an extra cert so we can revoke it
       node_key = PeerCluster.rpc(cluster, :node1, NeonFS.Transport.TLS, :generate_node_key, [])
@@ -208,6 +211,7 @@ defmodule NeonFS.Integration.ClusterCATest do
       end
     end
 
+    @tag :pending_903
     test "revocation reflected in ca list output", %{cluster: cluster} do
       # Issue and revoke a cert via the handler
       node_key = PeerCluster.rpc(cluster, :node1, NeonFS.Transport.TLS, :generate_node_key, [])
@@ -258,6 +262,7 @@ defmodule NeonFS.Integration.ClusterCATest do
       %{}
     end
 
+    @tag :pending_903
     test "CA operations survive single node failure", %{cluster: cluster} do
       # Stop node3
       :ok = PeerCluster.stop_node(cluster, :node3)

@@ -21,7 +21,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
     {:ok, volume_map} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         "test-volume",
-        %{}
+        %{durability: %{type: :replicate, factor: 1, min_copies: 1}}
       ])
 
     %{volume_id: volume_map[:id], volume_name: "test-volume"}

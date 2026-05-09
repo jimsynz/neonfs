@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# After `actions/cache` restore, delete path-dep build artifacts from the
+# current package's `_build/<env>/lib/` so Mix recompiles them against
+# the checkout's current source. Hex-dep artifacts in the same _build
+# directory are left intact — those don't drift relative to mix.lock.
+#
+# Cache keys are intentionally narrow (lockfiles only) so the cache
+# stays useful across normal Elixir-source-only commits. Without this
+# scrub a checkout that changed `neonfs_client/lib/foo.ex` (lockfile
+# unchanged) would restore stale `_build/dev/lib/neonfs_client/`
+# beam files alongside the fresh source.
+#
+# Run from a package's working directory (the same dir `mix deps.compile`
+# is invoked in). No-op when there is no `_build/` (cache miss) or when
+# the package has no path deps (neonfs_client, fuse_server, nfs_server).
+
+set -euo pipefail
+
+shopt -s nullglob
+
+# Find the repo root: walk up until we hit a directory containing the
+# canonical sibling layout (a sibling `neonfs_client` plus our own
+# `mix.exs`). If we're already there, use `.`.
+repo_root=""
+candidate="$(pwd)"
+while [ "$candidate" != "/" ]; do
+  if [ -d "$candidate/neonfs_client" ] && [ -f "$candidate/neonfs_client/mix.exs" ]; then
+    repo_root="$candidate"
+    break
+  fi
+  candidate="$(dirname "$candidate")"
+done
+
+if [ -z "$repo_root" ]; then
+  echo "ci-scrub-path-deps: cannot locate repo root from $(pwd); skipping" >&2
+  exit 0
+fi
+
+# Collect every sibling directory that has its own `mix.exs` — these are
+# the path-dep candidates. Exclude the current package; Mix manages its
+# own _build entry correctly.
+self_name="$(basename "$(pwd)")"
+declare -a path_deps=()
+for sibling in "$repo_root"/*; do
+  [ -d "$sibling" ] || continue
+  [ -f "$sibling/mix.exs" ] || continue
+  name="$(basename "$sibling")"
+  [ "$name" = "$self_name" ] && continue
+  path_deps+=("$name")
+done
+
+if [ "${#path_deps[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+# Drop any restored beam files for those path deps. `_build/*/lib/<name>`
+# is the canonical layout; `*` covers `dev`, `test`, `prod`.
+for env_dir in _build/*/lib; do
+  [ -d "$env_dir" ] || continue
+  for name in "${path_deps[@]}"; do
+    if [ -d "$env_dir/$name" ]; then
+      rm -rf "$env_dir/$name"
+    fi
+  done
+done

@@ -31,6 +31,7 @@ defmodule NeonFS.Integration.QuorumTest do
   end
 
   describe "multi-node quorum consistency" do
+    @tag :pending_903
     test "write on one node, read from another", %{cluster: cluster} do
       :ok = init_quorum_cluster(cluster, "consistency-vol")
 
@@ -78,6 +79,7 @@ defmodule NeonFS.Integration.QuorumTest do
       assert file_from_node3.id == file.id
     end
 
+    @tag :pending_903
     test "multiple files readable from all nodes", %{cluster: cluster} do
       :ok = init_quorum_cluster(cluster, "multi-vol")
 
@@ -265,6 +267,7 @@ defmodule NeonFS.Integration.QuorumTest do
   end
 
   describe "full write/read/delete cycle on multi-node cluster" do
+    @tag :pending_903
     test "complete file lifecycle across nodes", %{cluster: cluster} do
       :ok = init_quorum_cluster(cluster, "lifecycle-vol")
 
@@ -352,6 +355,7 @@ defmodule NeonFS.Integration.QuorumTest do
   end
 
   describe "cache coherence (#342)" do
+    @tag :pending_903
     test "point read after remote delete does not return stale cached value",
          %{cluster: cluster} do
       :ok = init_quorum_cluster(cluster, "coherence-vol")

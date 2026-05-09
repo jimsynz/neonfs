@@ -79,6 +79,7 @@ jobs:
       - name: Build
         working-directory: neonfs_client
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -117,6 +118,7 @@ jobs:
       - name: Build
         working-directory: neonfs_core
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -163,6 +165,7 @@ jobs:
       - name: Build
         working-directory: neonfs_fuse
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -216,6 +219,7 @@ jobs:
       - name: Build
         working-directory: neonfs_docker
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -283,6 +287,7 @@ jobs:
       - name: Build
         working-directory: neonfs_cifs
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -321,6 +326,7 @@ jobs:
       - name: Build
         working-directory: neonfs_csi
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -361,6 +367,7 @@ jobs:
       - name: Build
         working-directory: neonfs_containerd
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -401,6 +408,7 @@ jobs:
       - name: Build
         working-directory: neonfs_nfs
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -435,6 +443,7 @@ jobs:
       - name: Build
         working-directory: fuse_server
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -467,6 +476,7 @@ jobs:
       - name: Build
         working-directory: nfs_server
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -506,6 +516,7 @@ jobs:
       - name: Build
         working-directory: neonfs_s3
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -547,6 +558,7 @@ jobs:
       - name: Build
         working-directory: neonfs_webdav
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -584,6 +596,7 @@ jobs:
       - name: Build
         working-directory: neonfs_iam
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -677,6 +690,7 @@ jobs:
       - name: Build
         working-directory: neonfs_integration
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile
@@ -737,6 +751,7 @@ jobs:
       - name: Build
         working-directory: neonfs_omnibus
         run: |
+          bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
           mix deps.get
           mix deps.compile

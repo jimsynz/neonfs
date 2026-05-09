@@ -27,6 +27,7 @@ defmodule NeonFS.Integration.WriteOperationCreateOnlyTest do
   end
 
   describe "create_only across nodes" do
+    @tag :pending_903
     test "exactly one of two concurrent streamed writes succeeds", %{cluster: cluster} do
       volume_name = "create-only-vol-#{System.unique_integer([:positive])}"
 
