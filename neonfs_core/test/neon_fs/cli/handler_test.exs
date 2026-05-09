@@ -583,6 +583,21 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:error, %NeonFS.Error.Invalid{message: "interval_ms must be at least 60000" <> _}} =
                Handler.handle_volume_gc_set_interval("any-vol", 1_000)
     end
+
+    test "handle_volume_scrub_now returns VolumeNotFound for an unknown volume" do
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.handle_volume_scrub_now("no-such-vol")
+    end
+
+    test "handle_volume_scrub_set_interval returns VolumeNotFound for an unknown volume" do
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.handle_volume_scrub_set_interval("no-such-vol", 60_000)
+    end
+
+    test "handle_volume_scrub_set_interval rejects intervals shorter than one minute" do
+      assert {:error, %NeonFS.Error.Invalid{message: "interval_ms must be at least 60000" <> _}} =
+               Handler.handle_volume_scrub_set_interval("any-vol", 1_000)
+    end
   end
 
   describe "mount/3" do
