@@ -567,9 +567,159 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
+  # #926 — orchestrator backbone. Replaces the `:not_implemented` stub
+  # with the rolling-reissue + bundle-distribute + finalize flow.
+  #
+  # Walks `[Node.self() | Node.list()]` (the BEAM cluster topology, which
+  # is the source of truth for "which peers are live") rather than
+  # `CertificateAuthority.list_issued/0`. The issued list is metadata
+  # storage; the actual reachable peer set is what the rotation needs to
+  # cover. Per-peer failure is fail-fast — per-node retry semantics
+  # (`--node <name>`) belong with #927.
   defp handle_ca_rotate_default do
-    with :ok <- require_cluster() do
-      {:error, Unavailable.exception(message: "CA rotation not yet implemented")}
+    with :ok <- require_cluster(),
+         {:ok, ca_cert, _ca_key} <- stage_incoming_ca_for_orchestrator(),
+         :ok <- log_ca_rotate_started_from_cert(ca_cert),
+         :ok <- reissue_node_certs_across_cluster(),
+         :ok <- distribute_dual_ca_bundle_across_cluster(),
+         {:ok, finalize_result} <- finalize_rotation_with_audit() do
+      {:ok, finalize_result}
+    else
+      {:error, reason} = err ->
+        log_ca_rotate_failed(reason)
+        err
+    end
+  end
+
+  defp stage_incoming_ca_for_orchestrator do
+    case CertificateAuthority.incoming_ca_info() do
+      {:ok, _info} ->
+        {:error,
+         Invalid.exception(
+           message: "CA rotation already in progress; abort it first with --abort"
+         )}
+
+      {:error, :no_incoming_ca} ->
+        do_stage_incoming_ca()
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  defp do_stage_incoming_ca do
+    with {:ok, state} <- load_cluster_state() do
+      case CertificateAuthority.init_incoming_ca(state.cluster_name) do
+        {:ok, ca_cert, ca_key} -> {:ok, ca_cert, ca_key}
+        {:error, reason} -> {:error, wrap_error(reason)}
+      end
+    end
+  end
+
+  defp log_ca_rotate_started_from_cert(ca_cert) do
+    fingerprint = ca_fingerprint(ca_cert)
+    info = TLS.certificate_info(ca_cert)
+    log_ca_rotate_started(fingerprint, info)
+    :ok
+  end
+
+  defp reissue_node_certs_across_cluster do
+    nodes = [Node.self() | Node.list()]
+
+    Enum.reduce_while(nodes, :ok, fn node, _acc ->
+      case reissue_node_cert(node) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp reissue_node_cert(node) do
+    with {:ok, key} <- {:ok, TLS.generate_node_key()},
+         csr = TLS.create_csr(key, Atom.to_string(node)),
+         {:ok, signed_cert, _ca_cert} <-
+           CertificateAuthority.sign_node_csr_with_incoming(csr, Atom.to_string(node)),
+         :ok <- rpc_install_node_cert(node, signed_cert, key) do
+      log_ca_rotate_node_completed(node, signed_cert)
+      :ok
+    else
+      {:error, reason} ->
+        {:error,
+         wrap_error(
+           Unavailable.exception(
+             message: "CA rotation failed for #{inspect(node)}: #{inspect(reason)}"
+           )
+         )}
+    end
+  end
+
+  defp rpc_install_node_cert(node, cert, key) do
+    cert_pem = TLS.encode_cert(cert)
+    key_pem = TLS.encode_key(key)
+
+    case rpc_call_for_ca_rotate(node, NeonFS.TLSDistConfig, :install_node_cert, [
+           cert_pem,
+           key_pem
+         ]) do
+      :ok -> :ok
+      {:badrpc, reason} -> {:error, {:rpc_failed, node, reason}}
+      other -> {:error, {:install_node_cert_failed, node, other}}
+    end
+  end
+
+  defp distribute_dual_ca_bundle_across_cluster do
+    nodes = [Node.self() | Node.list()]
+
+    Enum.reduce_while(nodes, :ok, fn node, _acc ->
+      case distribute_bundle_to(node) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp distribute_bundle_to(node) do
+    with :ok <- rpc_call_or_error(node, NeonFS.TLSDistConfig, :regenerate_ca_bundle, []),
+         :ok <- rpc_call_or_error(node, NeonFS.TLSDistConfig, :reload_listener, []) do
+      :ok
+    else
+      err -> err
+    end
+  end
+
+  defp rpc_call_or_error(node, mod, fun, args) do
+    case rpc_call_for_ca_rotate(node, mod, fun, args) do
+      :ok -> :ok
+      {:badrpc, reason} -> {:error, {:rpc_failed, node, reason}}
+      other -> {:error, {:rpc_unexpected, node, other}}
+    end
+  end
+
+  # Indirection so handler-level tests can stub the RPC layer without a
+  # real BEAM cluster. Production callers hit `:rpc.call/4` directly.
+  defp rpc_call_for_ca_rotate(node, mod, fun, args) do
+    rpc_mod = Application.get_env(:neonfs_core, :ca_rotate_rpc_mod, :rpc)
+    rpc_mod.call(node, mod, fun, args)
+  end
+
+  defp finalize_rotation_with_audit do
+    old_fingerprint = current_active_ca_fingerprint()
+
+    case CertificateAuthority.finalize_rotation() do
+      :ok ->
+        new_fingerprint = current_active_ca_fingerprint()
+        log_ca_rotate_finalized(old_fingerprint, new_fingerprint)
+
+        {:ok,
+         %{
+           rotated: true,
+           old_fingerprint: old_fingerprint,
+           fingerprint: new_fingerprint
+         }}
+
+      {:error, reason} ->
+        {:error,
+         Unavailable.exception(message: "Failed to finalize CA rotation: #{inspect(reason)}")}
     end
   end
 
@@ -4286,6 +4436,27 @@ defmodule NeonFS.CLI.Handler do
         old_ca_fingerprint: old_fingerprint,
         new_ca_fingerprint: new_fingerprint
       }
+    )
+  end
+
+  defp log_ca_rotate_node_completed(node, cert) do
+    AuditLog.log_event(
+      event_type: :cluster_ca_rotate_node_completed,
+      actor_uid: 0,
+      resource: cluster_resource(),
+      details: %{
+        node: Atom.to_string(node),
+        new_serial: X509.Certificate.serial(cert)
+      }
+    )
+  end
+
+  defp log_ca_rotate_failed(reason) do
+    AuditLog.log_event(
+      event_type: :cluster_ca_rotate_failed,
+      actor_uid: 0,
+      resource: cluster_resource(),
+      details: %{reason: inspect(reason)}
     )
   end
 
