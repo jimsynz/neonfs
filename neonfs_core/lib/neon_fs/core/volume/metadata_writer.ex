@@ -101,6 +101,24 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     end)
   end
 
+  @doc """
+  Update one of the per-volume background-job schedules
+  (`:gc | :scrub | :anti_entropy`) in the volume's root segment.
+
+  Same CAS-retry semantics as the index-op path: if the bootstrap
+  pointer flips between read and write, the whole flow re-reads and
+  re-applies. Index trees are not touched.
+  """
+  @spec update_schedule(binary(), :gc | :scrub | :anti_entropy, RootSegment.schedule(), keyword()) ::
+          {:ok, binary()} | write_error()
+  def update_schedule(volume_id, schedule_key, schedule, opts \\ [])
+      when is_binary(volume_id) and schedule_key in [:gc, :scrub, :anti_entropy] and
+             is_map(schedule) do
+    apply_segment_op(volume_id, opts, fn segment ->
+      %{segment | schedules: Map.put(segment.schedules, schedule_key, schedule)}
+    end)
+  end
+
   ## Internals
 
   @default_cas_retries 5
@@ -145,6 +163,46 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
         {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
           do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left - 1)
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  # Same shape as `apply_index_op/4` but for changes that mutate the
+  # segment header itself (schedules, future cluster-meta fields)
+  # rather than an index tree. The CAS-retry / replicate / bootstrap-
+  # update flow is identical past the segment build.
+  defp apply_segment_op(volume_id, opts, segment_transform) do
+    retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
+    do_apply_segment_op(volume_id, opts, segment_transform, retries_left)
+  end
+
+  defp do_apply_segment_op(_volume_id, _opts, _transform, retries_left) when retries_left < 0 do
+    {:error, {:cas_retries_exhausted, %{}}}
+  end
+
+  defp do_apply_segment_op(volume_id, opts, transform, retries_left) do
+    with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, opts),
+         updated_segment = RootSegment.touch(transform.(segment)),
+         encoded = RootSegment.encode(updated_segment),
+         {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
+         {:ok, new_root_chunk_hash} <-
+           replicate_segment(encoded, replica_drives, updated_segment.durability, opts) do
+      case update_bootstrap(
+             volume_id,
+             root_entry.root_chunk_hash,
+             new_root_chunk_hash,
+             replica_drives,
+             updated_segment,
+             opts
+           ) do
+        {:ok, _} ->
+          {:ok, new_root_chunk_hash}
+
+        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+          do_apply_segment_op(volume_id, opts, transform, retries_left - 1)
 
         {:error, _} = err ->
           err
