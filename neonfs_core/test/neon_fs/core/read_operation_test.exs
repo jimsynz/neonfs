@@ -599,7 +599,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
       # Get the stripe and delete one data chunk from ChunkIndex
       [stripe_ref] = fm.stripes
-      {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
+      {:ok, stripe} = StripeIndex.get(volume.id, stripe_ref.stripe_id)
 
       # Delete the first data chunk (index 0) from ChunkIndex
       first_data_hash = Enum.at(stripe.chunks, 0)
@@ -620,7 +620,7 @@ defmodule NeonFS.Core.ReadOperationTest do
 
       # Get the stripe and delete 2 chunks (more than parity_chunks=1 can handle)
       [stripe_ref] = fm.stripes
-      {:ok, stripe} = StripeIndex.get(stripe_ref.stripe_id)
+      {:ok, stripe} = StripeIndex.get(volume.id, stripe_ref.stripe_id)
 
       # Delete first two chunks
       ChunkIndex.delete(Enum.at(stripe.chunks, 0))

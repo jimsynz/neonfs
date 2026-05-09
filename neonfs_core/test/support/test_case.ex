@@ -426,15 +426,35 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts StripeIndex with mock quorum infrastructure.
+  Starts StripeIndex with mock quorum + metadata-reader infrastructure.
+
+  Reads delegate to `Volume.MetadataReader`; writes still go through
+  `QuorumCoordinator` (until #787). Both stubs share a single ETS
+  store so put/get round-trips through the same backing data.
+
+  ## Options
+
+    * `:quorum_opts` / `:metadata_reader_opts` — explicit opts that
+      override the auto-built ones (used when callers need the writer
+      and reader to share an existing store).
   """
-  def start_stripe_index do
-    {quorum_opts, _store} = build_mock_quorum_opts()
+  def start_stripe_index(opts \\ []) do
+    opts =
+      if Keyword.has_key?(opts, :metadata_reader_opts) and Keyword.has_key?(opts, :quorum_opts) do
+        opts
+      else
+        {quorum_opts, store} = build_mock_quorum_opts()
+
+        opts
+        |> Keyword.put_new(:quorum_opts, quorum_opts)
+        |> Keyword.put_new(:metadata_reader_opts, build_mock_metadata_reader_opts(store))
+      end
+
     stop_if_running(NeonFS.Core.StripeIndex)
     cleanup_ets_table(:stripe_index)
 
     start_supervised!(
-      {NeonFS.Core.StripeIndex, quorum_opts: quorum_opts},
+      {NeonFS.Core.StripeIndex, opts},
       restart: :temporary
     )
   end

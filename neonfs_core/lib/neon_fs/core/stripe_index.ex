@@ -1,10 +1,12 @@
 defmodule NeonFS.Core.StripeIndex do
   @moduledoc """
-  GenServer managing stripe metadata with quorum-backed distributed storage.
+  GenServer managing stripe metadata.
 
-  Provides fast lookups by stripe ID and queries by volume ID.
-  Uses QuorumCoordinator for distributed writes/reads and maintains a local
-  ETS cache for fast reads.
+  Reads delegate to `Volume.MetadataReader.get_stripe/3` — the local
+  ETS table is a write-through materialisation for list operations
+  (`list_by_volume/1`, `list_all/0`), not the source of truth for
+  point reads. Writes still go through `QuorumCoordinator` until the
+  write-side migration (#787) lands.
   """
 
   use GenServer
@@ -53,17 +55,6 @@ defmodule NeonFS.Core.StripeIndex do
   end
 
   @doc """
-  Legacy stripe_id-only lookup. Retained for callers that do not yet
-  have a `volume_id` on hand. Callers with volume context should
-  prefer `get/2`. This entry point will be retired once #837's
-  caller-threading is complete.
-  """
-  @spec get(binary()) :: {:ok, Stripe.t()} | {:error, :not_found}
-  def get(stripe_id) when is_binary(stripe_id) do
-    get_from_quorum(stripe_id)
-  end
-
-  @doc """
   Deletes stripe metadata from ETS and quorum store.
   """
   @spec delete(binary()) :: :ok | {:error, term()}
@@ -81,14 +72,6 @@ defmodule NeonFS.Core.StripeIndex do
   @spec exists?(binary(), binary()) :: boolean()
   def exists?(volume_id, stripe_id) when is_binary(volume_id) and is_binary(stripe_id) do
     match?({:ok, _}, get_from_metadata_reader(volume_id, stripe_id))
-  end
-
-  @doc """
-  Legacy stripe_id-only existence check. Same caveat as `get/1`.
-  """
-  @spec exists?(binary()) :: boolean()
-  def exists?(stripe_id) when is_binary(stripe_id) do
-    match?({:ok, _}, get_from_quorum(stripe_id))
   end
 
   @doc """
@@ -225,13 +208,6 @@ defmodule NeonFS.Core.StripeIndex do
     :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
   end
 
-  # Private — MetadataReader-backed read with QuorumCoordinator fallback.
-  # The fallback is load-bearing today because the per-volume index tree
-  # is only populated once the write-side migration (#787) lands — until
-  # then, `MetadataReader` returns `:not_found` in production for every
-  # key, and the only real source of truth is the old quorum-replicated
-  # `<drive>/meta/` segments. Once #787 lands the fallback can go.
-
   defp get_from_metadata_reader(volume_id, stripe_id) do
     key = stripe_key(stripe_id)
 
@@ -241,38 +217,11 @@ defmodule NeonFS.Core.StripeIndex do
         :ets.insert(:stripe_index, {stripe_id, stripe})
         {:ok, stripe}
 
-      _ ->
-        get_from_quorum(stripe_id)
-    end
-  rescue
-    _ -> get_from_quorum(stripe_id)
-  end
+      {:error, :not_found} ->
+        {:error, :not_found}
 
-  # Private — Quorum reads
-
-  defp get_from_quorum(stripe_id) do
-    if opts = quorum_opts() do
-      key = stripe_key(stripe_id)
-
-      case QuorumCoordinator.quorum_read(key, opts) do
-        {:ok, value} ->
-          stripe = storable_map_to_stripe(value)
-          :ets.insert(:stripe_index, {stripe_id, stripe})
-          {:ok, stripe}
-
-        {:ok, value, :possibly_stale} ->
-          stripe = storable_map_to_stripe(value)
-          :ets.insert(:stripe_index, {stripe_id, stripe})
-          {:ok, stripe}
-
-        {:error, :not_found} ->
-          {:error, :not_found}
-
-        {:error, _reason} ->
-          {:error, :not_found}
-      end
-    else
-      {:error, :not_found}
+      {:error, _reason} ->
+        {:error, :not_found}
     end
   rescue
     _ -> {:error, :not_found}

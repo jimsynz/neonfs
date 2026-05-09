@@ -44,7 +44,7 @@ defmodule NeonFS.Core.StripeRepair do
   @doc """
   Scans all stripes and returns non-healthy ones with their state.
   """
-  @spec scan_stripes() :: [{binary(), :degraded | :critical, non_neg_integer()}]
+  @spec scan_stripes() :: [{binary(), binary(), :degraded | :critical, non_neg_integer()}]
   def scan_stripes do
     all_stripes = StripeIndex.list_all()
 
@@ -52,7 +52,7 @@ defmodule NeonFS.Core.StripeRepair do
       Enum.reduce(all_stripes, [], fn stripe, acc ->
         case calculate_state(stripe) do
           {:healthy, _} -> acc
-          {state, missing} -> [{stripe.id, state, missing} | acc]
+          {state, missing} -> [{stripe.volume_id, stripe.id, state, missing} | acc]
         end
       end)
 
@@ -67,11 +67,11 @@ defmodule NeonFS.Core.StripeRepair do
   Returns `:ok` if repair succeeded or was unnecessary (healthy stripe),
   `{:error, reason}` on failure.
   """
-  @spec repair_stripe(binary()) :: :ok | {:error, term()}
-  def repair_stripe(stripe_id) do
+  @spec repair_stripe(binary(), binary()) :: :ok | {:error, term()}
+  def repair_stripe(volume_id, stripe_id) do
     case LockTable.acquire_lock(stripe_id) do
       :ok ->
-        result = do_repair(stripe_id)
+        result = do_repair(volume_id, stripe_id)
         LockTable.release_lock(stripe_id)
         result
 
@@ -108,8 +108,8 @@ defmodule NeonFS.Core.StripeRepair do
 
   # ─── Core Repair Logic ─────────────────────────────────────────────
 
-  defp do_repair(stripe_id) do
-    case StripeIndex.get(stripe_id) do
+  defp do_repair(volume_id, stripe_id) do
+    case StripeIndex.get(volume_id, stripe_id) do
       {:ok, stripe} ->
         repair_if_needed(stripe)
 
@@ -356,34 +356,34 @@ defmodule NeonFS.Core.StripeRepair do
   defp run_scan_and_submit do
     degraded = scan_stripes()
 
-    Enum.each(degraded, fn {stripe_id, state, _missing} ->
+    Enum.each(degraded, fn {volume_id, stripe_id, state, _missing} ->
       priority = if state == :critical, do: :high, else: :normal
 
       if not LockTable.locked?(stripe_id) do
-        submit_repair(stripe_id, priority)
+        submit_repair(volume_id, stripe_id, priority)
       end
     end)
   end
 
-  defp submit_repair(stripe_id, priority) do
+  defp submit_repair(volume_id, stripe_id, priority) do
     if Code.ensure_loaded?(BackgroundWorker) and
          Process.whereis(BackgroundWorker) != nil do
-      resources = drive_resources_for_stripe(stripe_id)
+      resources = drive_resources_for_stripe(volume_id, stripe_id)
 
       BackgroundWorker.submit(
-        fn -> repair_stripe(stripe_id) end,
+        fn -> repair_stripe(volume_id, stripe_id) end,
         priority: priority,
         label: "stripe_repair:#{stripe_id}",
         resources: resources
       )
     else
       # BackgroundWorker not available, run directly
-      repair_stripe(stripe_id)
+      repair_stripe(volume_id, stripe_id)
     end
   end
 
-  defp drive_resources_for_stripe(stripe_id) do
-    case StripeIndex.get(stripe_id) do
+  defp drive_resources_for_stripe(volume_id, stripe_id) do
+    case StripeIndex.get(volume_id, stripe_id) do
       {:ok, stripe} ->
         stripe.chunks
         |> Enum.flat_map(&local_drive_resources_for_chunk(stripe.volume_id, &1))
@@ -409,7 +409,7 @@ defmodule NeonFS.Core.StripeRepair do
   # ─── Priority Sorting ──────────────────────────────────────────────
 
   defp sort_by_priority(results) do
-    Enum.sort_by(results, fn {_id, state, _missing} ->
+    Enum.sort_by(results, fn {_volume_id, _id, state, _missing} ->
       case state do
         :critical -> 0
         :degraded -> 1
@@ -420,8 +420,8 @@ defmodule NeonFS.Core.StripeRepair do
   # ─── Telemetry ─────────────────────────────────────────────────────
 
   defp emit_scan_telemetry(total, results) do
-    degraded = Enum.count(results, fn {_, s, _} -> s == :degraded end)
-    critical = Enum.count(results, fn {_, s, _} -> s == :critical end)
+    degraded = Enum.count(results, fn {_, _, s, _} -> s == :degraded end)
+    critical = Enum.count(results, fn {_, _, s, _} -> s == :critical end)
 
     :telemetry.execute(
       [:neonfs, :stripe_repair, :scan],

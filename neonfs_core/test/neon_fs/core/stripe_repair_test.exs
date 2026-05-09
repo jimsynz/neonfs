@@ -54,14 +54,15 @@ defmodule NeonFS.Core.StripeRepairTest do
       {:ok, file} = WriteOperation.write_file_at(vol.id, "/degrade.txt", 0, "degrade data")
 
       [%{stripe_id: sid} | _] = file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(vol.id, sid)
 
       # Delete one chunk to make stripe degraded
       [first_hash | _] = stripe.chunks
       ChunkIndex.delete(first_hash)
 
       results = StripeRepair.scan_stripes()
-      assert [{^sid, :degraded, 1}] = results
+      vol_id = vol.id
+      assert [{^vol_id, ^sid, :degraded, 1}] = results
     end
 
     test "detects critical stripe when too many chunks missing" do
@@ -69,7 +70,7 @@ defmodule NeonFS.Core.StripeRepairTest do
       {:ok, file} = WriteOperation.write_file_at(vol.id, "/critical.txt", 0, "critical data")
 
       [%{stripe_id: sid} | _] = file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(vol.id, sid)
 
       # Delete 2 chunks (> parity_chunks = 1) to make critical
       stripe.chunks
@@ -77,7 +78,8 @@ defmodule NeonFS.Core.StripeRepairTest do
       |> Enum.each(&ChunkIndex.delete/1)
 
       results = StripeRepair.scan_stripes()
-      assert [{^sid, :critical, 2}] = results
+      vol_id = vol.id
+      assert [{^vol_id, ^sid, :critical, 2}] = results
     end
 
     test "sorts critical before degraded" do
@@ -87,8 +89,8 @@ defmodule NeonFS.Core.StripeRepairTest do
 
       [%{stripe_id: sid1} | _] = f1.stripes
       [%{stripe_id: sid2} | _] = f2.stripes
-      {:ok, s1} = StripeIndex.get(sid1)
-      {:ok, s2} = StripeIndex.get(sid2)
+      {:ok, s1} = StripeIndex.get(vol.id, sid1)
+      {:ok, s2} = StripeIndex.get(vol.id, sid2)
 
       # Make s1 degraded (1 missing)
       ChunkIndex.delete(hd(s1.chunks))
@@ -97,7 +99,8 @@ defmodule NeonFS.Core.StripeRepairTest do
       s2.chunks |> Enum.take(2) |> Enum.each(&ChunkIndex.delete/1)
 
       results = StripeRepair.scan_stripes()
-      assert [{^sid2, :critical, 2}, {^sid1, :degraded, 1}] = results
+      vol_id = vol.id
+      assert [{^vol_id, ^sid2, :critical, 2}, {^vol_id, ^sid1, :degraded, 1}] = results
     end
 
     test "emits scan telemetry" do
@@ -120,7 +123,7 @@ defmodule NeonFS.Core.StripeRepairTest do
 
       [%{stripe_id: sid} | _] = file.stripes
 
-      assert :ok = StripeRepair.repair_stripe(sid)
+      assert :ok = StripeRepair.repair_stripe(vol.id, sid)
     end
 
     test "reconstructs missing data chunk" do
@@ -128,17 +131,18 @@ defmodule NeonFS.Core.StripeRepairTest do
       {:ok, file} = WriteOperation.write_file_at(vol.id, "/repair.txt", 0, "repair this data")
 
       [%{stripe_id: sid} | _] = file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(vol.id, sid)
 
       # Delete one data chunk
       [first_hash | _] = stripe.chunks
       ChunkIndex.delete(first_hash)
 
       # Verify it's degraded
-      assert [{^sid, :degraded, 1}] = StripeRepair.scan_stripes()
+      vol_id = vol.id
+      assert [{^vol_id, ^sid, :degraded, 1}] = StripeRepair.scan_stripes()
 
       # Repair
-      assert :ok = StripeRepair.repair_stripe(sid)
+      assert :ok = StripeRepair.repair_stripe(vol.id, sid)
 
       # After repair, scan should show healthy (or the chunk replaced)
       # The original hash might differ from the reconstructed one,
@@ -151,16 +155,17 @@ defmodule NeonFS.Core.StripeRepairTest do
       {:ok, file} = WriteOperation.write_file_at(vol.id, "/crit.txt", 0, "critical stripe data")
 
       [%{stripe_id: sid} | _] = file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(vol.id, sid)
 
       # Delete 2 chunks (more than parity_chunks=1)
       stripe.chunks |> Enum.take(2) |> Enum.each(&ChunkIndex.delete/1)
 
-      assert {:error, :insufficient_chunks} = StripeRepair.repair_stripe(sid)
+      assert {:error, :insufficient_chunks} = StripeRepair.repair_stripe(vol.id, sid)
     end
 
     test "returns error for non-existent stripe" do
-      assert {:error, :stripe_not_found} = StripeRepair.repair_stripe("nonexistent-id")
+      assert {:error, :stripe_not_found} =
+               StripeRepair.repair_stripe("vol-missing", "nonexistent-id")
     end
 
     test "prevents concurrent repair of same stripe" do
@@ -172,11 +177,11 @@ defmodule NeonFS.Core.StripeRepairTest do
       # Manually acquire lock
       :ok = LockTable.acquire_lock(sid)
 
-      assert {:error, :repair_in_progress} = StripeRepair.repair_stripe(sid)
+      assert {:error, :repair_in_progress} = StripeRepair.repair_stripe(vol.id, sid)
 
       # Release and try again
       LockTable.release_lock(sid)
-      assert :ok = StripeRepair.repair_stripe(sid)
+      assert :ok = StripeRepair.repair_stripe(vol.id, sid)
     end
 
     test "emits repair telemetry" do
@@ -186,12 +191,12 @@ defmodule NeonFS.Core.StripeRepairTest do
         WriteOperation.write_file_at(vol.id, "/telem-repair.txt", 0, "repair telem data")
 
       [%{stripe_id: sid} | _] = file.stripes
-      {:ok, stripe} = StripeIndex.get(sid)
+      {:ok, stripe} = StripeIndex.get(vol.id, sid)
 
       # Delete one chunk
       ChunkIndex.delete(hd(stripe.chunks))
 
-      StripeRepair.repair_stripe(sid)
+      StripeRepair.repair_stripe(vol.id, sid)
 
       assert_received {[:neonfs, :stripe_repair, :repair], _ref, %{missing_chunks: 1},
                        %{stripe_id: ^sid, state: :degraded, outcome: :start}}
