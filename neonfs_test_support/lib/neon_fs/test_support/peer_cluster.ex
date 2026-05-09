@@ -2,7 +2,11 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @moduledoc """
   Provides helpers for peer nodes in integration testing.
 
-  Each peer node is started via `:peer.start_link/1` and tracked for cleanup.
+  Each peer node is started via `:peer.start/1` (no link — see #910)
+  and tracked for cleanup. The controller monitors the peer pid so
+  unexpected deaths surface via `:DOWN` messages and telemetry, but a
+  peer crash does **not** propagate as an `EXIT` signal to the test
+  process.
 
   ## Example
 
@@ -60,9 +64,23 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   defp span_peer_spawn(peer_opts) do
     :telemetry.span([:neonfs, :peer_cluster, :node, :spawn], %{}, fn ->
-      case :peer.start_link(peer_opts) do
-        {:ok, peer, node} -> {{:ok, peer, node}, %{node: node}}
-        {:error, reason} -> {{:error, reason}, %{error: reason}}
+      # `:peer.start/1` rather than `start_link/1` (#910). With the
+      # link in place, a peer dying during dist-channel bring-up
+      # (the canonical `{:inet_async, :timeout}` flake) propagates an
+      # EXIT signal to the test process and crashes setup_all/setup
+      # with no actionable stacktrace. With `start/1` + a monitor,
+      # the peer death surfaces only via subsequent `:peer.call/_`
+      # RPC failures which the existing diagnostic capture (in
+      # `start_application_on_peer/3`) already records, and the
+      # ExUnit-side cleanup (`stop_cluster/1`) still calls
+      # `:peer.stop/1` so peer lifetime is bounded by the test.
+      case :peer.start(peer_opts) do
+        {:ok, peer, node} ->
+          Process.monitor(peer)
+          {{:ok, peer, node}, %{node: node}}
+
+        {:error, reason} ->
+          {{:error, reason}, %{error: reason}}
       end
     end)
   end
