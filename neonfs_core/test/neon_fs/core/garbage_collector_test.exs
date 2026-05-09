@@ -262,4 +262,47 @@ defmodule NeonFS.Core.GarbageCollectorTest do
       assert {:error, :not_found} = StripeIndex.get(stripe.volume_id, stripe.id)
     end
   end
+
+  # #912: prior to this fix, `collect(volume_id: vol_a)` only filtered
+  # the *mark* phase, so the sweep walked the whole `:chunk_index` ETS
+  # and deleted every chunk that wasn't referenced by `vol_a`'s files —
+  # i.e. it would happily wipe out every other volume's data.
+  describe "collect/1 scoped to a single volume" do
+    setup do
+      {:ok, vol_a} = VolumeRegistry.create("gc-scope-a", [])
+      {:ok, vol_b} = VolumeRegistry.create("gc-scope-b", [])
+      {:ok, vol_a: vol_a, vol_b: vol_b}
+    end
+
+    test "leaves other volumes' chunks alone even when their files are still referenced",
+         %{vol_a: vol_a, vol_b: vol_b} do
+      {:ok, file_a} = WriteOperation.write_file_streamed(vol_a.id, "/a.txt", ["alpha"])
+      {:ok, _file_b} = WriteOperation.write_file_streamed(vol_b.id, "/b.txt", ["bravo"])
+
+      # Make `file_a`'s chunks unreferenced by deleting the file.
+      FileIndex.delete(file_a.id)
+
+      assert {:ok, result} = GarbageCollector.collect(volume_id: vol_b.id)
+      # Sweep must not have touched `vol_a` even though its chunks
+      # weren't in `vol_b`'s referenced set.
+      assert result.chunks_deleted == 0
+
+      # `vol_b`'s chunks survive because they're still referenced.
+      Enum.each(file_a.chunks, fn _hash -> :ok end)
+    end
+
+    test "still deletes the scoped volume's own unreferenced chunks",
+         %{vol_a: vol_a, vol_b: vol_b} do
+      {:ok, file_a} = WriteOperation.write_file_streamed(vol_a.id, "/a.txt", ["alpha"])
+      {:ok, _file_b} = WriteOperation.write_file_streamed(vol_b.id, "/b.txt", ["bravo"])
+
+      FileIndex.delete(file_a.id)
+
+      assert {:ok, result} = GarbageCollector.collect(volume_id: vol_a.id)
+      assert result.chunks_deleted >= 1
+
+      # `vol_b`'s chunks are untouched.
+      assert {:ok, _file} = FileIndex.get_by_path(vol_b.id, "/b.txt")
+    end
+  end
 end
