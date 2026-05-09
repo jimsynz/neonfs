@@ -4,7 +4,7 @@ defmodule NeonFS.Client.Chunker.Pure do
 
   Direct translation of `fastcdc::v2020::cut_gear` from the upstream
   Rust crate (v4.0.1) so the chunk-boundary set is bit-exact with
-  `NeonFS.Client.Chunker.Native.nif_chunk_data/3` for the same
+  `NeonFS.Client.Chunker.Native.chunk_data/3` for the same
   `(min, avg, max)` parameters and Level1 normalization. Equivalence
   is pinned by the property test at
   `test/neon_fs/client/chunker/pure_property_test.exs`.

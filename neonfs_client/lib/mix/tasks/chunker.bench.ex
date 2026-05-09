@@ -90,7 +90,7 @@ defmodule Mix.Tasks.Chunker.Bench do
   end
 
   defp chunk_native(data, opts) do
-    {:ok, _} = Native.nif_chunk_data(data, "fastcdc", opts.avg)
+    {:ok, _} = Native.chunk_data(data, "fastcdc", opts.avg)
   end
 
   defp chunk_pure(data, opts) do

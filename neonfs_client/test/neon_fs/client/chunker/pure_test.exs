@@ -15,7 +15,7 @@ defmodule NeonFS.Client.Chunker.PureTest do
       data = :crypto.strong_rand_bytes(2 * 1024 * 1024)
       {_pure_hash, pure_end} = Pure.cut(data, @opts)
 
-      {:ok, native_chunks} = Native.nif_chunk_data(data, "fastcdc", @opts.avg)
+      {:ok, native_chunks} = Native.chunk_data(data, "fastcdc", @opts.avg)
       {_data, _hash, native_offset, native_size} = hd(native_chunks)
 
       # The first native chunk's `length` is exactly the first cut.
@@ -47,7 +47,7 @@ defmodule NeonFS.Client.Chunker.PureTest do
 
     defp assert_parity(data) do
       pure = Pure.chunks(data, @opts)
-      {:ok, native} = Native.nif_chunk_data(data, "fastcdc", @opts.avg)
+      {:ok, native} = Native.chunk_data(data, "fastcdc", @opts.avg)
 
       pure_pairs = Enum.map(pure, fn {_hash, offset, length} -> {offset, length} end)
 
