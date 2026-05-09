@@ -1883,6 +1883,98 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
+  Triggers an immediate scrub job for the named volume.
+  """
+  @spec handle_volume_scrub_now(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_scrub_now(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, job} <-
+           JobTracker.create(NeonFS.Core.Job.Runners.Scrub, %{volume_id: volume.id}) do
+      {:ok, job_to_map(job)}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @minimum_volume_scrub_interval_ms 60_000
+
+  @doc """
+  Updates `RootSegment.schedules.scrub.interval_ms` for the named
+  volume. Minimum 60_000 ms (1 minute).
+  """
+  @spec handle_volume_scrub_set_interval(binary(), pos_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_volume_scrub_set_interval(volume_name, interval_ms)
+      when is_binary(volume_name) and is_integer(interval_ms) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         :ok <- validate_volume_scrub_interval(interval_ms),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []),
+         existing = Map.get(segment.schedules, :scrub, %{interval_ms: interval_ms, last_run: nil}),
+         updated = %{existing | interval_ms: interval_ms},
+         {:ok, _} <- MetadataWriter.update_schedule(volume.id, :scrub, updated, []) do
+      {:ok,
+       %{
+         volume_id: volume.id,
+         volume_name: volume_name,
+         schedule: schedule_to_map(updated)
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp validate_volume_scrub_interval(interval_ms)
+       when is_integer(interval_ms) and interval_ms >= @minimum_volume_scrub_interval_ms,
+       do: :ok
+
+  defp validate_volume_scrub_interval(_),
+    do:
+      {:error,
+       Invalid.exception(
+         message: "interval_ms must be at least #{@minimum_volume_scrub_interval_ms} (1 minute)"
+       )}
+
+  @doc """
+  Returns the current scrub schedule for the named volume — interval,
+  last_run, and the latest scrub job for that volume.
+  """
+  @spec handle_volume_scrub_status(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_scrub_status(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []) do
+      schedule = Map.get(segment.schedules, :scrub)
+      latest_job = latest_volume_scrub_job(volume.id)
+
+      {:ok,
+       %{
+         volume_id: volume.id,
+         volume_name: volume_name,
+         schedule: schedule_to_map(schedule),
+         next_run_due_at: next_run_due_at(schedule),
+         latest_job: latest_job && job_to_map(latest_job)
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp latest_volume_scrub_job(volume_id) do
+    JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.Scrub)
+    |> Enum.filter(fn job -> Map.get(job.params || %{}, :volume_id) == volume_id end)
+    |> Enum.sort_by(fn job -> job.updated_at end, {:desc, DateTime})
+    |> List.first()
+  end
+
+  @doc """
   Starts an integrity scrub job.
 
   ## Parameters

@@ -172,6 +172,29 @@ pub enum VolumeCommand {
         #[arg(long)]
         interval: Option<String>,
     },
+
+    /// Inspect or trigger integrity scrub for a single volume.
+    ///
+    /// With no flags: prints the current scrub schedule plus the
+    /// latest scrub job for the volume.
+    ///
+    /// With --now: triggers an immediate scrub job.
+    ///
+    /// With --interval: updates the per-volume scrub cadence in the
+    /// volume's `RootSegment.schedules.scrub.interval_ms`. Accepts
+    /// `s`, `m`, `h`, `d` suffixes; minimum 1 minute.
+    Scrub {
+        /// Volume name
+        name: String,
+
+        /// Trigger an immediate scrub job for the volume.
+        #[arg(long, conflicts_with = "interval")]
+        now: bool,
+
+        /// New scrub cadence (e.g. `7d`, `24h`).
+        #[arg(long)]
+        interval: Option<String>,
+    },
 }
 
 impl VolumeCommand {
@@ -242,6 +265,11 @@ impl VolumeCommand {
                 now,
                 interval,
             } => self.gc(name, *now, interval.as_deref(), format),
+            VolumeCommand::Scrub {
+                name,
+                now,
+                interval,
+            } => self.scrub(name, *now, interval.as_deref(), format),
         }
     }
 
@@ -664,6 +692,189 @@ impl VolumeCommand {
         Ok(())
     }
 
+    fn scrub(
+        &self,
+        name: &str,
+        now: bool,
+        interval: Option<&str>,
+        format: OutputFormat,
+    ) -> Result<()> {
+        match (now, interval) {
+            (true, _) => self.scrub_now(name, format),
+            (false, Some(d)) => self.scrub_set_interval(name, d, format),
+            (false, None) => self.scrub_status(name, format),
+        }
+    }
+
+    fn scrub_now(&self, name: &str, format: OutputFormat) -> Result<()> {
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_scrub_now",
+                vec![name_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let job_map = term_to_map(&data)?;
+
+        let job_id = job_map
+            .get("id")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "status": "started",
+                    "job_id": job_id,
+                    "volume": name,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Scrub started for volume '{}'", name);
+                println!("  Job ID: {}", job_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn scrub_set_interval(&self, name: &str, interval: &str, format: OutputFormat) -> Result<()> {
+        let interval_ms = parse_duration_ms(interval)?;
+
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+        let interval_term = Term::FixInteger(FixInteger {
+            value: interval_ms as i32,
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_scrub_set_interval",
+                vec![name_term, interval_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let stored_interval = map
+            .get("schedule")
+            .and_then(|t| term_to_map(t).ok())
+            .and_then(|m| m.get("interval_ms").cloned())
+            .and_then(|t| crate::term::term_to_i64(&t).ok())
+            .unwrap_or(interval_ms);
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "volume": name,
+                    "interval_ms": stored_interval,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Updated scrub interval for volume '{}'", name);
+                println!("  interval_ms: {}", stored_interval);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn scrub_status(&self, name: &str, format: OutputFormat) -> Result<()> {
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_scrub_status",
+                vec![name_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let schedule_map = map
+            .get("schedule")
+            .and_then(|t| term_to_map(t).ok())
+            .unwrap_or_default();
+
+        let interval_ms = schedule_map
+            .get("interval_ms")
+            .and_then(|t| crate::term::term_to_i64(t).ok())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "<unset>".to_string());
+
+        let last_run = schedule_map
+            .get("last_run")
+            .map(|t| term_to_string(t).unwrap_or_else(|_| "never".to_string()))
+            .unwrap_or_else(|| "never".to_string());
+
+        let next_run = map
+            .get("next_run_due_at")
+            .map(|t| term_to_string(t).unwrap_or_else(|_| "<unknown>".to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let latest_job_id = map
+            .get("latest_job")
+            .and_then(|t| term_to_map(t).ok())
+            .and_then(|m| m.get("id").cloned())
+            .map(|t| term_to_string(&t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "volume": name,
+                    "interval_ms": interval_ms,
+                    "last_run": last_run,
+                    "next_run_due_at": next_run,
+                    "latest_job_id": latest_job_id,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Scrub schedule for volume '{}'", name);
+                println!("  interval_ms     : {}", interval_ms);
+                println!("  last_run        : {}", last_run);
+                println!("  next_run_due_at : {}", next_run);
+                println!("  latest_job_id   : {}", latest_job_id);
+            }
+        }
+
+        Ok(())
+    }
+
     fn show(&self, name: &str, format: OutputFormat) -> Result<()> {
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
@@ -1023,6 +1234,60 @@ mod tests {
         assert!(parse_duration_ms("12y").is_err());
         assert!(parse_duration_ms("h").is_err());
         assert!(parse_duration_ms("xh").is_err());
+    }
+
+    #[test]
+    fn test_volume_scrub_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        let cli = TestCli::try_parse_from(["test", "scrub", "myvol"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(
+                parsed.command,
+                VolumeCommand::Scrub {
+                    now: false,
+                    interval: None,
+                    ..
+                }
+            ));
+        }
+
+        let cli = TestCli::try_parse_from(["test", "scrub", "myvol", "--now"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(
+                parsed.command,
+                VolumeCommand::Scrub {
+                    now: true,
+                    interval: None,
+                    ..
+                }
+            ));
+        }
+
+        let cli = TestCli::try_parse_from(["test", "scrub", "myvol", "--interval", "7d"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = &cli {
+            assert!(matches!(
+                parsed.command,
+                VolumeCommand::Scrub {
+                    now: false,
+                    interval: Some(_),
+                    ..
+                }
+            ));
+        }
+
+        // --now and --interval are mutually exclusive.
+        let cli = TestCli::try_parse_from(["test", "scrub", "myvol", "--now", "--interval", "7d"]);
+        assert!(cli.is_err());
     }
 
     #[test]
