@@ -99,14 +99,6 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
   end
 
   describe "unlink-while-open across the BEAM FUSE stack" do
-    # Step 7 (release the read fh) hangs on the post-#835 metadata
-    # path: `FileIndex.decrement_pin/2` → `MetadataWriter.put/5`
-    # is hitting a stall that lets the 5_000ms `assert_receive` time
-    # out. Same per-volume metadata write path the rest of the suite
-    # exercises, so the underlying issue is real, but it's narrow
-    # enough that it gets its own follow-up rather than blocking the
-    # FileIndex migration. Tracked in #904.
-    @tag :skip
     test "open + unlink-from-elsewhere + read-via-fh + release purges chunks", ctx do
       %{
         handler: handler,

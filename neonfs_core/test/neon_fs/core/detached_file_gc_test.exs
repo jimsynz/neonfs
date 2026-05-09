@@ -4,6 +4,13 @@ defmodule NeonFS.Core.DetachedFileGCTest do
 
   alias NeonFS.Core.{DetachedFileGC, FileIndex, FileMeta}
 
+  # Synchronise with the asynchronous DetachedFileGC handler. Telemetry
+  # is forwarded to the GenServer's mailbox so the handler doesn't run
+  # inline on the Ra apply path (#904); after firing an event, calling
+  # `:sys.get_state/1` flushes the mailbox by serialising behind any
+  # in-flight `handle_info/2`.
+  defp sync_gc, do: :sys.get_state(DetachedFileGC)
+
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
@@ -55,6 +62,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         }
       )
 
+      sync_gc()
+
       assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
     end
 
@@ -67,6 +76,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         %{version: 1, released: 1},
         %{claim_id: "c1", claim_path: "/some.txt", claim_type: :pinned, claim_holder: self()}
       )
+
+      sync_gc()
 
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ids}} =
                FileIndex.get(created.volume_id, created.id)
@@ -89,6 +100,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         }
       )
 
+      sync_gc()
+
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ["mine"]}} =
                FileIndex.get(created.volume_id, created.id)
     end
@@ -105,6 +118,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         meta
       )
 
+      sync_gc()
+
       # File is already gone now. A re-fire of the same telemetry event
       # — Ra command replay or a stale subscriber — must not error.
       assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
@@ -114,6 +129,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         %{version: 1, released: 1},
         meta
       )
+
+      sync_gc()
 
       assert {:error, :not_found} = FileIndex.get(created.volume_id, created.id)
     end
@@ -134,6 +151,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         %{version: 1, released: 2},
         %{released_claim_ids: ["holder-a-1", "holder-a-2"], holder: self()}
       )
+
+      sync_gc()
 
       # /a's last pin released → purged.
       assert {:error, :not_found} = FileIndex.get(file_a.volume_id, file_a.id)
@@ -156,6 +175,8 @@ defmodule NeonFS.Core.DetachedFileGCTest do
         %{version: 1, released: 0},
         %{released_claim_ids: [], holder: self()}
       )
+
+      sync_gc()
 
       assert {:ok, %FileMeta{detached: true, pinned_claim_ids: ["c1"]}} =
                FileIndex.get(file.volume_id, file.id)
