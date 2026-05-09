@@ -1441,7 +1441,7 @@ defmodule NeonFS.CLI.HandlerTest do
       # Retry path: `install_node_cert` + bundle for that one node only.
       calls = Agent.get(:ca_rotate_rpc_calls, & &1)
       retried_nodes = calls |> Enum.map(fn {node, _, _, _} -> node end) |> Enum.uniq()
-      assert retried_nodes == [:"node1@host"]
+      assert retried_nodes == [:node1@host]
 
       called_funs = calls |> Enum.map(fn {_node, _mod, fun, _args} -> fun end) |> Enum.uniq()
       assert :install_node_cert in called_funs
