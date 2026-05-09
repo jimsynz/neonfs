@@ -952,21 +952,17 @@ defmodule NeonFS.Core.FileIndex do
     storable = file_to_storable_map(file)
     encoded = MetadataValue.encode(storable)
 
-    case MetadataWriter.put(file.volume_id, :file_index, key, encoded, metadata_writer_opts()) do
-      {:ok, _root} -> :ok
-      {:error, _, _} = err -> err
-      {:error, _reason} = err -> err
-    end
+    file.volume_id
+    |> MetadataWriter.put(:file_index, key, encoded, metadata_writer_opts())
+    |> normalise_writer_result()
   end
 
   defp delete_file_meta(%FileMeta{} = file) do
     key = file_key(file.id)
 
-    case MetadataWriter.delete(file.volume_id, :file_index, key, metadata_writer_opts()) do
-      {:ok, _root} -> :ok
-      {:error, _, _} = err -> err
-      {:error, _reason} = err -> err
-    end
+    file.volume_id
+    |> MetadataWriter.delete(:file_index, key, metadata_writer_opts())
+    |> normalise_writer_result()
   end
 
   ## Private — MetadataWriter operations for directory entries
@@ -976,12 +972,22 @@ defmodule NeonFS.Core.FileIndex do
     storable = DirectoryEntry.to_storable_map(entry)
     encoded = MetadataValue.encode(storable)
 
-    case MetadataWriter.put(entry.volume_id, :file_index, key, encoded, metadata_writer_opts()) do
-      {:ok, _root} -> :ok
-      {:error, _, _} = err -> err
-      {:error, _reason} = err -> err
-    end
+    entry.volume_id
+    |> MetadataWriter.put(:file_index, key, encoded, metadata_writer_opts())
+    |> normalise_writer_result()
   end
+
+  # `MetadataWriter.put/5` and `delete/4` can return either
+  # `{:error, reason}` or `{:error, reason, info}` (the latter for
+  # things like `:insufficient_replicas`). FileIndex's `do_*` chains
+  # plus every external caller (`Core`, `WriteOperation`, ACL manager)
+  # only pattern-match the 2-tuple, so a 3-tuple bubbling up crashes
+  # the GenServer with `MatchError` (#908). Collapse the 3-tuple at
+  # the writer boundary — `info` is debug detail; the reason is what
+  # callers branch on.
+  defp normalise_writer_result({:ok, _root}), do: :ok
+  defp normalise_writer_result({:error, reason}), do: {:error, reason}
+  defp normalise_writer_result({:error, reason, _info}), do: {:error, reason}
 
   defp add_dir_child(volume_id, parent_path, name, type, id) do
     case read_dir_entry(volume_id, parent_path) do
