@@ -106,6 +106,91 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
+  describe "process_write_stream — STAT carries total and expected (#741)" do
+    test "STAT request's `total` populates the session", %{ref: ref} do
+      [reply] =
+        capture_replies([
+          %WriteContentRequest{action: :STAT, ref: ref, total: 617, expected: "sha256:abc"}
+        ])
+
+      assert %WriteContentResponse{action: :STAT, total: 617} = reply
+    end
+
+    test "STAT request's `expected` carries through to the session's Status RPC", %{ref: ref} do
+      capture_replies([
+        %WriteContentRequest{action: :STAT, ref: ref, total: 617, expected: "sha256:def"}
+      ])
+
+      # The session's expected digest is exposed via a follow-up STAT
+      # which would otherwise not pick up `expected` on its own (the
+      # snapshot doesn't carry it). For coverage we lookup the session
+      # directly to assert the field is set on its state.
+      {:ok, pid} = WriteRegistry.lookup(ref)
+      assert :sys.get_state(pid).expected == "sha256:def"
+    end
+  end
+
+  describe "process_write_stream — telemetry (#741)" do
+    setup do
+      tel_ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :containerd, :write_frame]
+        ])
+
+      {:ok, tel_ref: tel_ref}
+    end
+
+    test "emits a frame event per STAT/WRITE/COMMIT round-trip", %{ref: ref, tel_ref: tel_ref} do
+      payload = "two-frame-blob"
+      digest = "sha256:" <> (:crypto.hash(:sha256, payload) |> Base.encode16(case: :lower))
+
+      capture_replies([
+        %WriteContentRequest{action: :STAT, ref: ref, total: byte_size(payload)},
+        %WriteContentRequest{
+          action: :WRITE,
+          ref: ref,
+          data: payload,
+          offset: 0,
+          total: byte_size(payload)
+        },
+        %WriteContentRequest{
+          action: :COMMIT,
+          ref: ref,
+          offset: byte_size(payload),
+          total: byte_size(payload),
+          expected: digest
+        }
+      ])
+
+      assert_received {[:neonfs, :containerd, :write_frame], ^tel_ref,
+                       %{req_offset: 0, req_data_size: 0, resp_offset: 0},
+                       %{action: :STAT, ref: ^ref, result: :ok}}
+
+      assert_received {[:neonfs, :containerd, :write_frame], ^tel_ref,
+                       %{req_offset: 0, req_data_size: 14, resp_offset: 14},
+                       %{action: :WRITE, ref: ^ref, result: :ok}}
+
+      assert_received {[:neonfs, :containerd, :write_frame], ^tel_ref,
+                       %{req_offset: 14, req_data_size: 0, resp_offset: 14},
+                       %{action: :COMMIT, ref: ^ref, result: :ok, digest: ^digest}}
+    end
+
+    test "emits an :error event with session_offset when WRITE arrives at the wrong offset",
+         %{ref: ref, tel_ref: tel_ref} do
+      try do
+        capture_replies([
+          %WriteContentRequest{action: :WRITE, ref: ref, data: "x", offset: 999}
+        ])
+      rescue
+        GRPC.RPCError -> :ok
+      end
+
+      assert_received {[:neonfs, :containerd, :write_frame], ^tel_ref,
+                       %{req_offset: 999, req_data_size: 1, session_offset: 0},
+                       %{action: :WRITE, ref: ^ref, result: :error, reason: :offset_mismatch}}
+    end
+  end
+
   describe "process_write_stream — full STAT → WRITE → COMMIT cycle" do
     test "emits one response per request, in order, with the COMMIT digest", %{ref: ref} do
       payload = "the entire blob in one frame"
