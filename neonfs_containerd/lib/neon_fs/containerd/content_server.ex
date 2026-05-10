@@ -443,17 +443,32 @@ defmodule NeonFS.Containerd.ContentServer do
     end
   end
 
-  defp handle_stat(%WriteContentRequest{ref: ref}, state, send_fn) do
-    pid = ensure_session(ref)
-    snapshot = call_session(pid, ref, &WriteSession.stat/1)
+  defp handle_stat(%WriteContentRequest{ref: ref} = req, state, send_fn) do
+    pid = ensure_session(ref, req)
 
-    send_fn.(%WriteContentResponse{
+    snapshot =
+      call_session(pid, ref, fn pid ->
+        # Containerd's `proxyContentStore.negotiate` sends the very
+        # first STAT with `Total` and `Expected` populated; subsequent
+        # in-stream STATs (from `Fetch` / `content.Copy`) keep them
+        # populated too. Apply each so the session's `Status` RPC
+        # response and the snapshot we hand back here both reflect
+        # what the client declared.
+        if req.expected != "", do: WriteSession.set_expected(pid, req.expected)
+        if req.total > 0, do: WriteSession.set_total(pid, req.total)
+        WriteSession.stat(pid)
+      end)
+
+    response = %WriteContentResponse{
       action: :STAT,
       started_at: to_timestamp(snapshot.started_at),
       updated_at: to_timestamp(snapshot.updated_at),
       offset: snapshot.offset,
       total: snapshot.total
-    })
+    }
+
+    emit_frame_telemetry(req, response)
+    send_fn.(response)
 
     Map.put(state, ref, pid)
   end
@@ -473,22 +488,28 @@ defmodule NeonFS.Containerd.ContentServer do
       {:ok, _} ->
         snapshot = call_session(pid, req.ref, &WriteSession.stat/1)
 
-        send_fn.(%WriteContentResponse{
+        response = %WriteContentResponse{
           action: :WRITE,
           offset: snapshot.offset,
           total: snapshot.total,
           started_at: to_timestamp(snapshot.started_at),
           updated_at: to_timestamp(snapshot.updated_at)
-        })
+        }
+
+        emit_frame_telemetry(req, response)
+        send_fn.(response)
 
         Map.put(state, req.ref, pid)
 
       {:error, :offset_mismatch} ->
+        snapshot = call_session(pid, req.ref, &WriteSession.stat/1)
+        emit_frame_telemetry(req, {:error, :offset_mismatch, snapshot})
+
         raise RPCError,
           status: :out_of_range,
           message:
             "offset mismatch: containerd asked to resume from #{req.offset} but " <>
-              "session is at #{call_session(pid, req.ref, &WriteSession.stat/1).offset}"
+              "session is at #{snapshot.offset}"
     end
   end
 
@@ -505,30 +526,37 @@ defmodule NeonFS.Containerd.ContentServer do
 
     case commit_result do
       {:ok, %{digest: digest, offset: offset, total: total}} ->
-        send_fn.(%WriteContentResponse{
+        response = %WriteContentResponse{
           action: :COMMIT,
           digest: digest,
           offset: offset,
           total: total,
           started_at: nil,
           updated_at: to_timestamp(DateTime.utc_now())
-        })
+        }
+
+        emit_frame_telemetry(req, response)
+        send_fn.(response)
 
         Map.delete(state, req.ref)
 
       {:error, :digest_mismatch} ->
+        emit_frame_telemetry(req, {:error, :digest_mismatch})
+
         raise RPCError,
           status: :invalid_argument,
           message: "digest mismatch: expected #{req.expected}"
 
       {:error, reason} ->
+        emit_frame_telemetry(req, {:error, reason})
+
         raise RPCError,
           status: :internal,
           message: "commit failed: #{inspect(reason)}"
     end
   end
 
-  defp ensure_session(ref, req \\ nil) do
+  defp ensure_session(ref, %WriteContentRequest{} = req) do
     case WriteSupervisor.start_session(ref, session_opts(req)) do
       {:ok, pid} ->
         pid
@@ -556,8 +584,6 @@ defmodule NeonFS.Containerd.ContentServer do
         message: "write session for #{inspect(ref)} terminated; containerd should retry"
   end
 
-  defp session_opts(nil), do: base_session_opts()
-
   defp session_opts(%WriteContentRequest{} = req) do
     base_session_opts()
     |> maybe_put_opt(:total, positive_integer(req.total))
@@ -583,6 +609,73 @@ defmodule NeonFS.Containerd.ContentServer do
     seconds = DateTime.to_unix(dt, :second)
     nanos = (DateTime.to_unix(dt, :microsecond) - seconds * 1_000_000) * 1_000
     %Google.Protobuf.Timestamp{seconds: seconds, nanos: nanos}
+  end
+
+  # Per-frame telemetry for the bidi `Write` stream — captures the
+  # request action / ref / declared offset / data size and the
+  # response action / offset (or error). Surfaces the offset-leak
+  # pattern from #741 (response offset advancing by more than the
+  # request data size, or stale state surviving across refs).
+  #
+  # Event metadata is intentionally rich — debugging containerd
+  # protocol behaviour benefits from knowing exactly what each frame
+  # carried. Strings are kept short; bytes are not included.
+  defp emit_frame_telemetry(%WriteContentRequest{} = req, %WriteContentResponse{} = resp) do
+    :telemetry.execute(
+      [:neonfs, :containerd, :write_frame],
+      %{
+        req_offset: req.offset,
+        req_data_size: byte_size(req.data || <<>>),
+        req_total: req.total,
+        resp_offset: resp.offset,
+        resp_total: resp.total
+      },
+      %{
+        ref: req.ref,
+        action: req.action,
+        expected: req.expected,
+        result: :ok,
+        digest: resp.digest
+      }
+    )
+  end
+
+  defp emit_frame_telemetry(%WriteContentRequest{} = req, {:error, reason}) do
+    :telemetry.execute(
+      [:neonfs, :containerd, :write_frame],
+      %{
+        req_offset: req.offset,
+        req_data_size: byte_size(req.data || <<>>),
+        req_total: req.total
+      },
+      %{
+        ref: req.ref,
+        action: req.action,
+        expected: req.expected,
+        result: :error,
+        reason: reason
+      }
+    )
+  end
+
+  defp emit_frame_telemetry(%WriteContentRequest{} = req, {:error, reason, snapshot}) do
+    :telemetry.execute(
+      [:neonfs, :containerd, :write_frame],
+      %{
+        req_offset: req.offset,
+        req_data_size: byte_size(req.data || <<>>),
+        req_total: req.total,
+        session_offset: snapshot.offset,
+        session_total: snapshot.total
+      },
+      %{
+        ref: req.ref,
+        action: req.action,
+        expected: req.expected,
+        result: :error,
+        reason: reason
+      }
+    )
   end
 
   @doc """
