@@ -50,6 +50,8 @@ defmodule NeonFS.Core.Volume.MetadataReader do
           | {:error, {:cluster_mismatch, expected: String.t(), actual: String.t()}}
           | {:error, {:no_local_replica, [%{node: node(), drive_id: String.t()}]}}
           | {:error, {:index_tree_read_failed, term()}}
+          | {:error, {:store_handle_unavailable, term()}}
+          | {:error, :all_replicas_failed}
 
   @doc """
   Look up an opaque value by `key` in the volume's `index_kind`
@@ -58,19 +60,24 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   Returns `{:ok, binary}` if the key is present and not tombstoned,
   `{:error, :not_found}` if absent or tombstoned, or another error
   variant for failures along the read path.
+
+  When the local node has no replica drive holding the volume's
+  metadata chunks (or the local read fails for a structural reason),
+  the call is re-dispatched via Erlang distribution to a remote node
+  that does — see "Cross-node fallback" below for details.
   """
   @spec get(volume_id :: binary(), index_kind(), key :: binary(), keyword()) ::
           {:ok, binary()} | read_error()
   def get(volume_id, index_kind, key, opts \\ [])
       when is_binary(volume_id) and is_atom(index_kind) and is_binary(key) do
-    with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts) do
-      tree_root = Map.fetch!(segment.index_roots, index_kind)
-      cache_key = {index_kind, :get, key}
-
-      cached_call(volume_id, root_entry.root_chunk_hash, cache_key, opts, fn ->
-        do_index_tree_get(root_entry, tree_root, key, opts)
-      end)
-    end
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn -> do_local_get(volume_id, index_kind, key, opts) end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :get, [volume_id, index_kind, key, remote_opts])
+      end
+    )
   end
 
   @doc """
@@ -78,7 +85,8 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   index tree. `<<>>` on either side is open-ended.
 
   Returns `{:ok, [{key, value}]}` in ascending key order, with
-  tombstones filtered out, or an error variant.
+  tombstones filtered out, or an error variant. Cross-node fallback
+  semantics match `get/4`.
   """
   @spec range(
           volume_id :: binary(),
@@ -90,6 +98,34 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   def range(volume_id, index_kind, start_key, end_key, opts \\ [])
       when is_binary(volume_id) and is_atom(index_kind) and
              is_binary(start_key) and is_binary(end_key) do
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn -> do_local_range(volume_id, index_kind, start_key, end_key, opts) end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :range, [
+          volume_id,
+          index_kind,
+          start_key,
+          end_key,
+          remote_opts
+        ])
+      end
+    )
+  end
+
+  defp do_local_get(volume_id, index_kind, key, opts) do
+    with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts) do
+      tree_root = Map.fetch!(segment.index_roots, index_kind)
+      cache_key = {index_kind, :get, key}
+
+      cached_call(volume_id, root_entry.root_chunk_hash, cache_key, opts, fn ->
+        do_index_tree_get(root_entry, tree_root, key, opts)
+      end)
+    end
+  end
+
+  defp do_local_range(volume_id, index_kind, start_key, end_key, opts) do
     with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts) do
       tree_root = Map.fetch!(segment.index_roots, index_kind)
       cache_key = {index_kind, :range, start_key, end_key}
@@ -360,43 +396,57 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   end
 
   defp do_index_tree_get(root_entry, tree_root, key, opts) do
-    nif_get = Keyword.get(opts, :index_tree_get, &default_index_tree_get/4)
-    store_handle = pick_store_handle(root_entry, opts)
+    with {:ok, store_handle} <- resolve_store_handle(root_entry, opts) do
+      nif_get = Keyword.get(opts, :index_tree_get, &default_index_tree_get/4)
 
-    case nif_get.(store_handle, tree_root_or_empty(tree_root), "hot", key) do
-      {:ok, nil} -> {:error, :not_found}
-      {:ok, value} when is_binary(value) -> {:ok, value}
-      {:error, reason} -> {:error, {:index_tree_read_failed, reason}}
+      case nif_get.(store_handle, tree_root_or_empty(tree_root), "hot", key) do
+        {:ok, nil} -> {:error, :not_found}
+        {:ok, value} when is_binary(value) -> {:ok, value}
+        {:error, reason} -> {:error, {:index_tree_read_failed, reason}}
+      end
     end
   end
 
   defp do_index_tree_range(root_entry, tree_root, start_key, end_key, opts) do
-    nif_range = Keyword.get(opts, :index_tree_range, &default_index_tree_range/5)
-    store_handle = pick_store_handle(root_entry, opts)
-    root_bytes = tree_root_or_empty(tree_root)
+    with {:ok, store_handle} <- resolve_store_handle(root_entry, opts) do
+      nif_range = Keyword.get(opts, :index_tree_range, &default_index_tree_range/5)
+      root_bytes = tree_root_or_empty(tree_root)
 
-    case nif_range.(store_handle, root_bytes, "hot", start_key, end_key) do
-      {:ok, entries} when is_list(entries) -> {:ok, entries}
-      {:error, reason} -> {:error, {:index_tree_read_failed, reason}}
+      case nif_range.(store_handle, root_bytes, "hot", start_key, end_key) do
+        {:ok, entries} when is_list(entries) -> {:ok, entries}
+        {:error, reason} -> {:error, {:index_tree_read_failed, reason}}
+      end
     end
   end
 
-  defp pick_store_handle(root_entry, opts) do
-    Keyword.get_lazy(opts, :store_handle, fn ->
-      drive_lister = Keyword.get(opts, :drive_lister, &default_drive_lister/0)
+  # Returns `{:ok, handle}` on success or
+  # `{:error, {:no_local_replica, drive_locations}}` when the local
+  # node has no drive in the volume's replica set (the read path
+  # caller — `with_remote_fallback/4` — re-dispatches to a remote
+  # node in that case).
+  defp resolve_store_handle(root_entry, opts) do
+    case Keyword.fetch(opts, :store_handle) do
+      {:ok, handle} ->
+        {:ok, handle}
 
-      with {:ok, all_drives} <- drive_lister.(),
-           {:ok, drive} <- pick_local_replica(root_entry, all_drives),
-           {:ok, handle} <- BlobStore.get_store_handle(drive.drive_id) do
-        handle
-      else
-        _ ->
-          raise ArgumentError,
-                "MetadataReader could not resolve a local store handle for " <>
-                  "volume #{inspect(root_entry.volume_id)}. Pass `:store_handle` " <>
-                  "explicitly, or ensure the volume has a local replica."
-      end
-    end)
+      :error ->
+        drive_lister = Keyword.get(opts, :drive_lister, &default_drive_lister/0)
+
+        with {:ok, all_drives} <- drive_lister.(),
+             {:ok, drive} <- pick_local_replica(root_entry, all_drives),
+             {:ok, handle} <- BlobStore.get_store_handle(drive.drive_id) do
+          {:ok, handle}
+        else
+          {:error, {:no_local_replica, _} = err} ->
+            {:error, err}
+
+          {:error, reason} ->
+            {:error, {:store_handle_unavailable, reason}}
+
+          other ->
+            {:error, {:store_handle_unavailable, other}}
+        end
+    end
   end
 
   defp tree_root_or_empty(nil), do: <<>>
@@ -408,5 +458,119 @@ defmodule NeonFS.Core.Volume.MetadataReader do
 
   defp default_index_tree_range(store, root_hash, tier, start_key, end_key) do
     Native.index_tree_range(store, root_hash, tier, start_key, end_key)
+  end
+
+  ## Cross-node fallback
+  #
+  # Per-volume metadata writes only synchronously replicate to
+  # `min_copies` of the volume's replica drives, and the index tree
+  # itself is written by the writer to a single local drive (the
+  # remaining replicas catch up via background replication / anti-
+  # entropy). A reader landing on a node that doesn't yet have the
+  # chunks therefore needs to dispatch the read to a node that does
+  # — otherwise read-after-write surfaces as a phantom `:not_found`
+  # against an authoritative bootstrap pointer (see #936).
+  #
+  # The fallback runs once: when the local attempt fails for any
+  # reason other than an authoritative miss (`:not_found`,
+  # `:cluster_*`, `:bootstrap_*`, `:malformed_*`), the call is
+  # re-dispatched to a remote node from `root_entry.drive_locations`
+  # with `__remote_dispatched: true`, which suppresses further
+  # fallback on the remote side. The remote node sees the call as
+  # a normal local read and either returns a result or surfaces an
+  # error that the entry node treats as a per-node failure.
+
+  defp with_remote_fallback(volume_id, opts, local_fun, remote_fun) do
+    case local_fun.() do
+      {:ok, _} = ok ->
+        ok
+
+      {:error, reason} = err ->
+        if Keyword.get(opts, :__remote_dispatched, false) or not retryable_error?(reason) do
+          err
+        else
+          remote_dispatch(volume_id, opts, err, remote_fun)
+        end
+    end
+  end
+
+  # `:not_found` is authoritative — the volume isn't provisioned, or
+  # the index tree returned `nil` for the key. Bootstrap / cluster /
+  # malformed-segment errors describe the volume's metadata state in
+  # a way that won't differ on another node. Everything else
+  # (chunk-fetch, store-handle, NIF I/O) is local and worth a remote
+  # retry.
+  defp retryable_error?(:not_found), do: false
+  defp retryable_error?({:cluster_state_unavailable, _}), do: false
+  defp retryable_error?({:cluster_mismatch, _}), do: false
+  defp retryable_error?({:malformed_root_segment, _}), do: false
+  defp retryable_error?({:malformed_value, _}), do: false
+  defp retryable_error?({:bootstrap_query_failed, _}), do: false
+  defp retryable_error?(_), do: true
+
+  defp remote_dispatch(volume_id, opts, fallback_err, remote_fun) do
+    bootstrap_lookup = Keyword.get(opts, :bootstrap_lookup, &default_bootstrap_lookup/1)
+
+    case bootstrap_lookup.(volume_id) do
+      {:ok, root_entry} ->
+        candidates = candidate_remote_nodes(root_entry)
+        try_remote_nodes(candidates, fallback_err, remote_fun)
+
+      _ ->
+        fallback_err
+    end
+  end
+
+  defp candidate_remote_nodes(root_entry) do
+    self_node = node()
+
+    root_entry.drive_locations
+    |> Enum.map(& &1.node)
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == self_node))
+  end
+
+  # Iterate remote nodes. A clean `{:ok, _}` or `{:error, :not_found}`
+  # is authoritative — the remote node has the chunks and answered
+  # for real. Anything else means that particular node also can't
+  # serve the read, so try the next.
+  defp try_remote_nodes([], fallback_err, _fun),
+    do: maybe_collapse_to_all_replicas_failed(fallback_err)
+
+  defp try_remote_nodes([node | rest], fallback_err, fun) do
+    case fun.(node, __remote_dispatched: true) do
+      {:ok, _} = ok -> ok
+      {:error, :not_found} = err -> err
+      {:error, _} -> try_remote_nodes(rest, fallback_err, fun)
+    end
+  end
+
+  # If the local error was specifically about no local replica, and
+  # every remote candidate also failed, surface the more informative
+  # `:all_replicas_failed` rather than the original "this node has
+  # no replica" — the actual problem is now systemic.
+  defp maybe_collapse_to_all_replicas_failed({:error, {:no_local_replica, _}}),
+    do: {:error, :all_replicas_failed}
+
+  defp maybe_collapse_to_all_replicas_failed(
+         {:error, {:root_chunk_unreachable, {:no_local_replica, _}}}
+       ),
+       do: {:error, :all_replicas_failed}
+
+  defp maybe_collapse_to_all_replicas_failed(other), do: other
+
+  # Production callers reach the remote node via Erlang distribution;
+  # tests inject `:remote_caller` to drive the dispatch deterministically.
+  # Stub callers that can't run a real `:rpc.call` short-circuit here.
+  defp remote_call(target_node, opts, fn_name, args) do
+    caller = Keyword.get(opts, :remote_caller, &default_remote_caller/3)
+    caller.(target_node, fn_name, args)
+  end
+
+  defp default_remote_caller(node, fn_name, args) do
+    case :rpc.call(node, __MODULE__, fn_name, args, 10_000) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+      other -> other
+    end
   end
 end
