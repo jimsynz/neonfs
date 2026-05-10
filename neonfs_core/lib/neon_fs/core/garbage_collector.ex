@@ -173,6 +173,10 @@ defmodule NeonFS.Core.GarbageCollector do
   end
 
   defp matches_volume?(_chunk_or_stripe, nil), do: true
+
+  defp matches_volume?(%ChunkMeta{volume_ids: volume_ids}, volume_id),
+    do: MapSet.member?(volume_ids, volume_id)
+
   defp matches_volume?(%{volume_id: volume_id}, volume_id), do: true
   defp matches_volume?(_, _), do: false
 

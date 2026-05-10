@@ -295,18 +295,8 @@ defmodule NeonFS.Core.ChunkIndex do
   @impl true
   def handle_call({:delete, hash}, _from, state) do
     case :ets.lookup(:chunk_index, hash) do
-      [{^hash, %ChunkMeta{volume_id: volume_id} = _meta}] when is_binary(volume_id) ->
-        case delete_chunk_meta(volume_id, hash) do
-          :ok ->
-            :ets.delete(:chunk_index, hash)
-            {:reply, :ok, state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-
-          {:error, reason, info} ->
-            {:reply, {:error, reason, info}, state}
-        end
+      [{^hash, %ChunkMeta{} = meta}] ->
+        do_delete_with_volume(state, hash, ChunkMeta.any_volume_id(meta))
 
       _ ->
         # No local entry, nothing to delete in the index tree either —
@@ -409,24 +399,48 @@ defmodule NeonFS.Core.ChunkIndex do
 
   # Private — MetadataWriter operations
 
-  defp write_chunk(%ChunkMeta{} = chunk_meta) do
-    if is_binary(chunk_meta.volume_id) do
-      key = chunk_key(chunk_meta.hash)
-      encoded = MetadataValue.encode(chunk_to_storable_map(chunk_meta))
+  # `nil` means the chunk had no recorded volume pin — nothing to
+  # delete in any per-volume index tree. Drop the local ETS entry
+  # and ack.
+  defp do_delete_with_volume(state, hash, nil) do
+    :ets.delete(:chunk_index, hash)
+    {:reply, :ok, state}
+  end
 
-      case MetadataWriter.put(
-             chunk_meta.volume_id,
-             :chunk_index,
-             key,
-             encoded,
-             metadata_writer_opts()
-           ) do
-        {:ok, _root} -> :ok
-        {:error, _, _} = err -> err
-        {:error, _reason} = err -> err
-      end
-    else
-      {:error, :missing_volume_id}
+  defp do_delete_with_volume(state, hash, volume_id) do
+    case delete_chunk_meta(volume_id, hash) do
+      :ok ->
+        :ets.delete(:chunk_index, hash)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+
+      {:error, reason, info} ->
+        {:reply, {:error, reason, info}, state}
+    end
+  end
+
+  defp write_chunk(%ChunkMeta{} = chunk_meta) do
+    case ChunkMeta.any_volume_id(chunk_meta) do
+      nil ->
+        {:error, :missing_volume_id}
+
+      volume_id ->
+        key = chunk_key(chunk_meta.hash)
+        encoded = MetadataValue.encode(chunk_to_storable_map(chunk_meta))
+
+        case MetadataWriter.put(
+               volume_id,
+               :chunk_index,
+               key,
+               encoded,
+               metadata_writer_opts()
+             ) do
+          {:ok, _root} -> :ok
+          {:error, _, _} = err -> err
+          {:error, _reason} = err -> err
+        end
     end
   end
 
@@ -519,7 +533,7 @@ defmodule NeonFS.Core.ChunkIndex do
 
   defp chunk_to_storable_map(%ChunkMeta{} = chunk_meta) do
     %{
-      volume_id: chunk_meta.volume_id,
+      volume_ids: chunk_meta.volume_ids,
       hash: chunk_meta.hash,
       original_size: chunk_meta.original_size,
       stored_size: chunk_meta.stored_size,
@@ -537,7 +551,7 @@ defmodule NeonFS.Core.ChunkIndex do
 
   defp storable_map_to_chunk(map) when is_map(map) do
     %ChunkMeta{
-      volume_id: get_field(map, :volume_id),
+      volume_ids: decode_volume_ids(get_field(map, :volume_ids)),
       hash: get_field(map, :hash),
       original_size: get_field(map, :original_size),
       stored_size: get_field(map, :stored_size),
@@ -553,6 +567,10 @@ defmodule NeonFS.Core.ChunkIndex do
       last_verified: decode_datetime(get_field(map, :last_verified))
     }
   end
+
+  defp decode_volume_ids(%MapSet{} = ids), do: ids
+  defp decode_volume_ids(ids) when is_list(ids), do: MapSet.new(ids)
+  defp decode_volume_ids(nil), do: MapSet.new()
 
   defp get_field(map, key, default \\ nil) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key)) || default

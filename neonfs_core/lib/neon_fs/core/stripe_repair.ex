@@ -221,7 +221,7 @@ defmodule NeonFS.Core.StripeRepair do
     case write_to_target(data, target, tier_str, stripe.volume_id) do
       {:ok, hash, chunk_info} ->
         chunk_meta = %ChunkMeta{
-          volume_id: stripe.volume_id,
+          volume_ids: MapSet.new([stripe.volume_id]),
           hash: hash,
           original_size: byte_size(data),
           stored_size: chunk_info.stored_size,

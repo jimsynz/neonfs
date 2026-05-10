@@ -215,7 +215,7 @@ defmodule NeonFS.Core.CommitChunks do
     case first_has_chunk(hash, locations) do
       {:ok, stored_size} ->
         meta = %ChunkMeta{
-          volume_id: volume_id,
+          volume_ids: MapSet.new([volume_id]),
           hash: hash,
           original_size: Map.get(codec, :original_size, stored_size),
           stored_size: stored_size,
