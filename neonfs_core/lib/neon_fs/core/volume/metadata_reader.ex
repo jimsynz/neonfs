@@ -255,8 +255,23 @@ defmodule NeonFS.Core.Volume.MetadataReader do
 
   defp default_cluster_loader, do: ClusterState.load()
 
+  # The volume root entry is the bootstrap pointer for every per-volume
+  # metadata read. It advances on every metadata write via Ra's
+  # `:cas_update_volume_root` command, which returns success once a
+  # quorum has the entry in their log + the leader has applied it
+  # locally. Followers apply asynchronously after the next heartbeat,
+  # so a `local_query` here on a follower can return the pre-write
+  # pointer for up to a heartbeat after the writer's call returned —
+  # i.e. a read on any node immediately after a successful write
+  # against another node may walk the *old* segment and miss the
+  # newly-written file (#935 / #936).
+  #
+  # `consistent_query` round-trips through the leader, which has
+  # applied by the time it answers. One leader round-trip per
+  # bootstrap-pointer read in exchange for read-after-write
+  # linearisability.
   defp default_bootstrap_lookup(volume_id) do
-    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+    case RaSupervisor.query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
       {:ok, nil} -> {:error, :not_found}
       {:ok, entry} when is_map(entry) -> {:ok, entry}
       {:error, _} = err -> err

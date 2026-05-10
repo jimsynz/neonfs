@@ -110,13 +110,23 @@ defmodule NeonFS.S3.Backend do
       {:ok, %{stream: stream}} ->
         {:ok, file_meta_to_stream_object(meta, stream, read_opts)}
 
-      {:error, :not_found} ->
-        {:error, %Firkin.Error{code: :no_such_key}}
-
       {:error, reason} ->
-        {:error, internal_error(reason)}
+        if not_found_reason?(reason) do
+          {:error, %Firkin.Error{code: :no_such_key}}
+        else
+          {:error, internal_error(reason)}
+        end
     end
   end
+
+  # The read path can surface "file is not present" as either
+  # `:not_found` (atom from `MetadataReader`) or
+  # `%NeonFS.Error.FileNotFound{}` (struct wrapped by
+  # `ReadOperation.get_file/2`). Both shape a clean S3 404; only
+  # genuinely-unexpected failures fall through to a 500.
+  defp not_found_reason?(:not_found), do: true
+  defp not_found_reason?(%NeonFS.Error.FileNotFound{}), do: true
+  defp not_found_reason?(_), do: false
 
   @impl true
   def put_object(_ctx, bucket, key, body, opts) do
