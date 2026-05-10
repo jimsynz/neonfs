@@ -163,7 +163,8 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   # presence so per-node fan-out from the test driver is redundant.
   # The `node_names` argument is retained for source compatibility.
   defp trigger_anti_entropy(cluster, _node_names) do
-    [driver | _] = cluster.nodes |> Enum.map(& &1.alias_name) |> Enum.filter(&core_peer?(cluster, &1))
+    [driver | _] =
+      cluster.nodes |> Enum.map(& &1.alias_name) |> Enum.filter(&core_peer?(cluster, &1))
 
     volumes = PeerCluster.rpc(cluster, driver, NeonFS.Core.VolumeRegistry, :list, [])
 

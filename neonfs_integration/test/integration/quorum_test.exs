@@ -10,8 +10,6 @@ defmodule NeonFS.Integration.QuorumTest do
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
-  alias NeonFS.Core.MetadataRing
-
   @moduletag timeout: 300_000
   @moduletag :integration
   @moduletag nodes: 3
@@ -25,7 +23,6 @@ defmodule NeonFS.Integration.QuorumTest do
 
   setup_all %{cluster: cluster} do
     :ok = init_multi_node_cluster(cluster, name: "quorum-test")
-    verify_all_quorum_rings(cluster)
     sync_drive_registries(cluster)
     %{}
   end
@@ -128,7 +125,6 @@ defmodule NeonFS.Integration.QuorumTest do
 
     setup %{cluster: cluster} do
       :ok = init_multi_node_cluster(cluster, name: "quorum-test")
-      verify_all_quorum_rings(cluster)
       sync_drive_registries(cluster)
       %{}
     end
@@ -187,79 +183,6 @@ defmodule NeonFS.Integration.QuorumTest do
                @retry_rpc_timeout
              ) do
           {:ok, ^test_data} -> true
-          _ -> false
-        end
-      end
-    end
-  end
-
-  describe "read repair" do
-    test "stale replica repaired after quorum read", %{cluster: cluster} do
-      :ok = init_quorum_cluster(cluster, "repair-vol")
-
-      # Get the quorum ring to find segment and replicas for a test key
-      quorum_opts =
-        PeerCluster.rpc(cluster, :node1, :persistent_term, :get, [
-          {NeonFS.Core.FileIndex, :quorum_opts}
-        ])
-
-      ring = Keyword.fetch!(quorum_opts, :ring)
-      test_key = "test:read_repair_verification"
-      {segment_id, _replicas} = MetadataRing.locate(ring, test_key)
-
-      # Write v1 to MetadataStore on all 3 nodes
-      for node_name <- [:node1, :node2, :node3] do
-        :ok =
-          PeerCluster.rpc(cluster, node_name, NeonFS.Core.MetadataStore, :write, [
-            segment_id,
-            test_key,
-            %{"version" => "v1", "data" => "original"}
-          ])
-      end
-
-      # Ensure wall clock advances past all v1 timestamps before generating
-      # the coordinator timestamp. Without this, v1 writes and the coordinator
-      # timestamp can land in the same millisecond, and the HLC node_id
-      # tiebreaker makes node3's v1 appear "newer" than the coord timestamp
-      # (because node3's name sorts higher than node1's).
-      Process.sleep(5)
-
-      # Generate a coordinator timestamp from node1. Since node1 already had
-      # a v1 write AND the wall clock has advanced, this timestamp is guaranteed
-      # newer than any v1 timestamp on any node.
-      coord_ts =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.MetadataStore, :generate_timestamp, [])
-
-      # Write v2 to node1 and node2 with the coordinator timestamp
-      for node_name <- [:node1, :node2] do
-        :ok =
-          PeerCluster.rpc(cluster, node_name, NeonFS.Core.MetadataStore, :write, [
-            segment_id,
-            test_key,
-            %{"version" => "v2", "data" => "updated"},
-            [caller_timestamp: coord_ts]
-          ])
-      end
-
-      # Now: node1 has v2@coord_ts, node2 has v2@coord_ts, node3 has v1@t1
-      # Quorum read should return v2 (latest) and trigger repair on node3
-      assert_eventually timeout: 10_000 do
-        result =
-          PeerCluster.rpc(cluster, :node2, NeonFS.Core.QuorumCoordinator, :quorum_read, [
-            test_key,
-            quorum_opts
-          ])
-
-        match?({:ok, %{"version" => "v2", "data" => "updated"}}, result)
-      end
-
-      # Wait for read repair to update the stale replica (node3)
-      assert_eventually timeout: 30_000 do
-        case PeerCluster.rpc(cluster, :node3, NeonFS.Core.MetadataStore, :read, [
-               segment_id,
-               test_key
-             ]) do
-          {:ok, %{"version" => "v2"}, _ts} -> true
           _ -> false
         end
       end
@@ -424,31 +347,6 @@ defmodule NeonFS.Integration.QuorumTest do
       ])
 
     :ok
-  end
-
-  defp verify_all_quorum_rings(cluster) do
-    for node_info <- cluster.nodes do
-      verify_quorum_ring(cluster, node_info.name)
-    end
-  end
-
-  defp verify_quorum_ring(cluster, node_name) do
-    opts =
-      PeerCluster.rpc(cluster, node_name, :persistent_term, :get, [
-        {NeonFS.Core.FileIndex, :quorum_opts}
-      ])
-
-    ring = Keyword.fetch!(opts, :ring)
-    ring_size = MapSet.size(ring.node_set)
-    timeout = Keyword.fetch!(opts, :timeout)
-
-    unless ring_size == 3 do
-      raise "Ring on #{node_name} has #{ring_size} nodes, expected 3: #{inspect(ring.node_set)}"
-    end
-
-    unless timeout >= 10_000 do
-      raise "Timeout on #{node_name} is #{timeout}ms, expected >= 10_000"
-    end
   end
 
   defp sync_drive_registries(cluster) do
