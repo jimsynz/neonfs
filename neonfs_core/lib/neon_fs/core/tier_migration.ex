@@ -29,7 +29,7 @@ defmodule NeonFS.Core.TierMigration do
 
   require Logger
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, ChunkMeta}
   alias NeonFS.Core.TierMigration.LockTable
   alias NeonFS.IO.{Operation, Scheduler}
 
@@ -358,8 +358,8 @@ defmodule NeonFS.Core.TierMigration do
   # the migration's caller-side error handling kicks in.
   defp resolve_volume_id(chunk_hash) do
     case :ets.lookup(:chunk_index, chunk_hash) do
-      [{^chunk_hash, %NeonFS.Core.ChunkMeta{volume_id: volume_id}}] when is_binary(volume_id) ->
-        volume_id
+      [{^chunk_hash, %ChunkMeta{} = meta}] ->
+        ChunkMeta.any_volume_id(meta) || "_migration"
 
       _ ->
         "_migration"

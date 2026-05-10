@@ -38,7 +38,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
 
       # Create metadata with a fake remote node that is actually self
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -68,7 +68,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       fake_node = :"fallback_node_#{System.unique_integer([:positive])}@localhost"
 
       chunk_meta2 = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash2,
         original_size: info2.original_size,
         stored_size: info2.stored_size,
@@ -94,7 +94,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -280,7 +280,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,

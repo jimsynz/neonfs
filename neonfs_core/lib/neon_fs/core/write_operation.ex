@@ -1185,7 +1185,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp build_erasure_chunk_meta(args) do
     %ChunkMeta{
-      volume_id: args.volume_id,
+      volume_ids: MapSet.new([args.volume_id]),
       hash: args.hash,
       original_size: args.size,
       stored_size: args.chunk_info.stored_size,
@@ -1542,7 +1542,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp build_chunk_meta(hash, size, chunk_info, drive_id, volume, write_id, crypto) do
     %ChunkMeta{
-      volume_id: volume.id,
+      volume_ids: MapSet.new([volume.id]),
       hash: hash,
       original_size: size,
       stored_size: chunk_info.stored_size,
@@ -1712,12 +1712,18 @@ defmodule NeonFS.Core.WriteOperation do
     :ok
   end
 
-  defp abort_single_chunk(%ChunkMeta{volume_id: volume_id, hash: hash} = _meta, write_id) do
+  defp abort_single_chunk(%ChunkMeta{hash: hash} = meta, write_id) do
     ChunkIndex.remove_write_ref(hash, write_id)
 
-    case ChunkIndex.get(volume_id, hash) do
-      {:ok, updated_meta} -> delete_chunk_if_no_refs(updated_meta)
-      {:error, :not_found} -> :ok
+    case ChunkMeta.any_volume_id(meta) do
+      nil ->
+        :ok
+
+      volume_id ->
+        case ChunkIndex.get(volume_id, hash) do
+          {:ok, updated_meta} -> delete_chunk_if_no_refs(updated_meta)
+          {:error, :not_found} -> :ok
+        end
     end
   end
 

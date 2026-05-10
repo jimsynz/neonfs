@@ -2,8 +2,11 @@ defmodule NeonFS.Core.ChunkMeta do
   @moduledoc """
   Chunk metadata structure tracking everything about a chunk across the cluster.
 
-  For Phase 1, this is stored in-memory via ETS. In Phase 2, it will be backed
-  by Ra consensus for cluster-wide consistency.
+  Per the design call on #874, chunks carry the **set** of volumes that
+  pin them (`volume_ids`) rather than a single owning volume — this
+  restores cross-volume content-addressed dedup while still letting
+  per-volume background runners look up a representative `volume_id`
+  from any chunk hash.
   """
 
   @type commit_state :: :uncommitted | :committed
@@ -16,7 +19,7 @@ defmodule NeonFS.Core.ChunkMeta do
         }
 
   @type t :: %__MODULE__{
-          volume_id: binary(),
+          volume_ids: MapSet.t(binary()),
           hash: binary(),
           original_size: non_neg_integer(),
           stored_size: non_neg_integer(),
@@ -32,32 +35,35 @@ defmodule NeonFS.Core.ChunkMeta do
           last_verified: DateTime.t() | nil
         }
 
-  defstruct [
-    :volume_id,
-    :hash,
-    :original_size,
-    :stored_size,
-    :compression,
-    :crypto,
-    :locations,
-    :target_replicas,
-    :commit_state,
-    :active_write_refs,
-    :stripe_id,
-    :stripe_index,
-    :created_at,
-    :last_verified
-  ]
+  defstruct volume_ids: MapSet.new(),
+            hash: nil,
+            original_size: nil,
+            stored_size: nil,
+            compression: nil,
+            crypto: nil,
+            locations: nil,
+            target_replicas: nil,
+            commit_state: nil,
+            active_write_refs: nil,
+            stripe_id: nil,
+            stripe_index: nil,
+            created_at: nil,
+            last_verified: nil
 
   @doc """
   Creates a new ChunkMeta struct with default values.
+
+  Accepts a single `volume_id` for compatibility with existing call
+  sites; it's wrapped into a single-element `MapSet` as the chunk's
+  initial `volume_ids` set. Subsequent volumes that pin the chunk
+  go through `add_volume/2`.
   """
   @spec new(binary(), binary(), non_neg_integer(), non_neg_integer(), compression()) ::
           %__MODULE__{}
   def new(volume_id, hash, original_size, stored_size, compression \\ :none)
       when is_binary(volume_id) do
     %__MODULE__{
-      volume_id: volume_id,
+      volume_ids: MapSet.new([volume_id]),
       hash: hash,
       original_size: original_size,
       stored_size: stored_size,
@@ -71,6 +77,46 @@ defmodule NeonFS.Core.ChunkMeta do
       created_at: DateTime.utc_now(),
       last_verified: nil
     }
+  end
+
+  @doc """
+  Adds `volume_id` to the chunk's `volume_ids` set.
+
+  Idempotent — re-adding an already-present id is a no-op.
+  """
+  @spec add_volume(t(), binary()) :: t()
+  def add_volume(%__MODULE__{} = meta, volume_id) when is_binary(volume_id) do
+    %{meta | volume_ids: MapSet.put(meta.volume_ids, volume_id)}
+  end
+
+  @doc """
+  Removes `volume_id` from the chunk's `volume_ids` set.
+
+  Note: a chunk with an empty `volume_ids` set is unreferenced from
+  the metadata side and should be GC'd by the chunk-level garbage
+  collector. Callers that detach the last volume are expected to
+  handle that lifecycle.
+  """
+  @spec remove_volume(t(), binary()) :: t()
+  def remove_volume(%__MODULE__{} = meta, volume_id) when is_binary(volume_id) do
+    %{meta | volume_ids: MapSet.delete(meta.volume_ids, volume_id)}
+  end
+
+  @doc """
+  Returns a representative `volume_id` from the chunk's `volume_ids`
+  set, or `nil` if the set is empty.
+
+  Use this from structural callers that need to address one of the
+  volumes the chunk is pinned by — for example, looking up the
+  chunk in a per-volume index. Callers that need to operate on every
+  pinning volume should iterate `volume_ids` directly.
+  """
+  @spec any_volume_id(t()) :: binary() | nil
+  def any_volume_id(%__MODULE__{volume_ids: ids}) do
+    case MapSet.to_list(ids) do
+      [] -> nil
+      [first | _] -> first
+    end
   end
 
   @doc """

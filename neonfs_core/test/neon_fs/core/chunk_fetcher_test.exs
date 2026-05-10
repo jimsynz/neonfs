@@ -26,7 +26,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       # Create chunk metadata
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -48,7 +48,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "warm")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -79,7 +79,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -102,7 +102,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -130,7 +130,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       fake_hash = :crypto.hash(:sha256, "remote chunk")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: fake_hash,
         original_size: 100,
         stored_size: 100,
@@ -155,7 +155,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
 
       # Create metadata with both local and remote locations
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -319,7 +319,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -361,7 +361,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       fake_hash = :crypto.hash(:sha256, "remote exception test")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: fake_hash,
         original_size: 100,
         stored_size: 100,
@@ -430,7 +430,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot", compression: "zstd")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -513,7 +513,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -541,7 +541,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
@@ -569,7 +569,7 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
 
       chunk_meta = %ChunkMeta{
-        volume_id: "vol-test",
+        volume_ids: MapSet.new(["vol-test"]),
         hash: hash,
         original_size: info.original_size,
         stored_size: info.stored_size,
