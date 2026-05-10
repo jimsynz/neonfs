@@ -242,4 +242,57 @@ defmodule NeonFS.Core.ReplicaRepairTest do
       assert {:error, :not_found} = ReplicaRepair.repair_volume("missing")
     end
   end
+
+  describe "repair_chunks/2 (#921)" do
+    test "reconciles only the supplied hashes, skipping volume-wide walk" do
+      vol = volume()
+      stub(VolumeRegistry, :get, fn _ -> {:ok, vol} end)
+
+      # Volume contains h1, h2, h3 — but caller only asked to repair h2.
+      stub(ChunkIndex, :get, fn _, "h2" -> {:ok, chunk("h2", [loc(@local)], 3)} end)
+
+      expect(BlobStore, :read_chunk, fn "h2", "default" -> {:ok, "data-h2"} end)
+
+      expect(Replication, :replicate_chunk, fn "h2", "data-h2", ^vol, _opts ->
+        {:ok, [loc(:n2), loc(:n3)]}
+      end)
+
+      expect(ChunkIndex, :update_locations, fn "h2", _ -> :ok end)
+      reject(&ChunkIndex.get_chunks_for_volume/1)
+
+      assert {:ok, %{added: 2, removed: 0, errors: [], next_cursor: :done}} =
+               ReplicaRepair.repair_chunks(@volume_id, ["h2"])
+    end
+
+    test "collects :not_found into :errors rather than aborting the pass" do
+      stub(VolumeRegistry, :get, fn _ -> {:ok, volume()} end)
+
+      stub(ChunkIndex, :get, fn
+        _, "h-present" -> {:ok, chunk("h-present", [loc(@local), loc(:n2), loc(:n3)], 3)}
+        _, "h-missing" -> {:error, :not_found}
+      end)
+
+      reject(&Replication.replicate_chunk/4)
+      reject(&BlobStore.delete_chunk/3)
+
+      assert {:ok, %{added: 0, removed: 0, errors: errors, next_cursor: :done}} =
+               ReplicaRepair.repair_chunks(@volume_id, ["h-present", "h-missing"])
+
+      assert {"h-missing", :not_found} in errors
+    end
+
+    test "returns {:error, _} when volume isn't registered" do
+      stub(VolumeRegistry, :get, fn _ -> {:error, :not_found} end)
+
+      assert {:error, :not_found} = ReplicaRepair.repair_chunks("missing", ["h1"])
+    end
+
+    test "empty hash list is a no-op with :done cursor" do
+      stub(VolumeRegistry, :get, fn _ -> {:ok, volume()} end)
+      reject(&ChunkIndex.get/2)
+
+      assert {:ok, %{added: 0, removed: 0, errors: [], next_cursor: :done}} =
+               ReplicaRepair.repair_chunks(@volume_id, [])
+    end
+  end
 end

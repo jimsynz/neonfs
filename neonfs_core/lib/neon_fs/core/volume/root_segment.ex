@@ -131,7 +131,7 @@ defmodule NeonFS.Core.Volume.RootSegment do
             schedules: %{
               gc: %{interval_ms: 86_400_000, last_run: nil},
               scrub: %{interval_ms: 7 * 86_400_000, last_run: nil},
-              anti_entropy: %{interval_ms: 6 * 60 * 60 * 1_000, last_run: nil}
+              anti_entropy: %{interval_ms: 60 * 60 * 1_000, last_run: nil}
             }
 
   @doc """

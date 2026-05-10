@@ -195,6 +195,29 @@ pub enum VolumeCommand {
         #[arg(long)]
         interval: Option<String>,
     },
+
+    /// Inspect or trigger per-volume anti-entropy reconciliation.
+    ///
+    /// With no flags: prints the current schedule plus the latest
+    /// anti-entropy job for the volume.
+    ///
+    /// With --now: triggers an immediate anti-entropy job.
+    ///
+    /// With --interval: updates the per-volume cadence in the
+    /// volume's `RootSegment.schedules.anti_entropy.interval_ms`.
+    /// Accepts `s`, `m`, `h`, `d` suffixes; minimum 1 minute.
+    AntiEntropy {
+        /// Volume name
+        name: String,
+
+        /// Trigger an immediate anti-entropy job for the volume.
+        #[arg(long, conflicts_with = "interval")]
+        now: bool,
+
+        /// New anti-entropy cadence (e.g. `1h`, `30m`).
+        #[arg(long)]
+        interval: Option<String>,
+    },
 }
 
 impl VolumeCommand {
@@ -270,6 +293,11 @@ impl VolumeCommand {
                 now,
                 interval,
             } => self.scrub(name, *now, interval.as_deref(), format),
+            VolumeCommand::AntiEntropy {
+                name,
+                now,
+                interval,
+            } => self.anti_entropy(name, *now, interval.as_deref(), format),
         }
     }
 
@@ -865,6 +893,194 @@ impl VolumeCommand {
             }
             OutputFormat::Table => {
                 println!("Scrub schedule for volume '{}'", name);
+                println!("  interval_ms     : {}", interval_ms);
+                println!("  last_run        : {}", last_run);
+                println!("  next_run_due_at : {}", next_run);
+                println!("  latest_job_id   : {}", latest_job_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn anti_entropy(
+        &self,
+        name: &str,
+        now: bool,
+        interval: Option<&str>,
+        format: OutputFormat,
+    ) -> Result<()> {
+        match (now, interval) {
+            (true, _) => self.anti_entropy_now(name, format),
+            (false, Some(d)) => self.anti_entropy_set_interval(name, d, format),
+            (false, None) => self.anti_entropy_status(name, format),
+        }
+    }
+
+    fn anti_entropy_now(&self, name: &str, format: OutputFormat) -> Result<()> {
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_anti_entropy_now",
+                vec![name_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let job_map = term_to_map(&data)?;
+
+        let job_id = job_map
+            .get("id")
+            .map(|t| term_to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "status": "started",
+                    "job_id": job_id,
+                    "volume": name,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Anti-entropy started for volume '{}'", name);
+                println!("  Job ID: {}", job_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn anti_entropy_set_interval(
+        &self,
+        name: &str,
+        interval: &str,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let interval_ms = parse_duration_ms(interval)?;
+
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+        let interval_term = Term::FixInteger(FixInteger {
+            value: interval_ms as i32,
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_anti_entropy_set_interval",
+                vec![name_term, interval_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let stored_interval = map
+            .get("schedule")
+            .and_then(|t| term_to_map(t).ok())
+            .and_then(|m| m.get("interval_ms").cloned())
+            .and_then(|t| crate::term::term_to_i64(&t).ok())
+            .unwrap_or(interval_ms);
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "volume": name,
+                    "interval_ms": stored_interval,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Updated anti-entropy interval for volume '{}'", name);
+                println!("  interval_ms: {}", stored_interval);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn anti_entropy_status(&self, name: &str, format: OutputFormat) -> Result<()> {
+        let name_term = Term::Binary(Binary {
+            bytes: name.as_bytes().to_vec(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_anti_entropy_status",
+                vec![name_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let schedule_map = map
+            .get("schedule")
+            .and_then(|t| term_to_map(t).ok())
+            .unwrap_or_default();
+
+        let interval_ms = schedule_map
+            .get("interval_ms")
+            .and_then(|t| crate::term::term_to_i64(t).ok())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "<unset>".to_string());
+
+        let last_run = schedule_map
+            .get("last_run")
+            .map(|t| term_to_string(t).unwrap_or_else(|_| "never".to_string()))
+            .unwrap_or_else(|| "never".to_string());
+
+        let next_run = map
+            .get("next_run_due_at")
+            .map(|t| term_to_string(t).unwrap_or_else(|_| "<unknown>".to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let latest_job_id = map
+            .get("latest_job")
+            .and_then(|t| term_to_map(t).ok())
+            .and_then(|m| m.get("id").cloned())
+            .map(|t| term_to_string(&t).unwrap_or_default())
+            .unwrap_or_default();
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "volume": name,
+                    "interval_ms": interval_ms,
+                    "last_run": last_run,
+                    "next_run_due_at": next_run,
+                    "latest_job_id": latest_job_id,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            OutputFormat::Table => {
+                println!("Anti-entropy schedule for volume '{}'", name);
                 println!("  interval_ms     : {}", interval_ms);
                 println!("  last_run        : {}", last_run);
                 println!("  next_run_due_at : {}", next_run);

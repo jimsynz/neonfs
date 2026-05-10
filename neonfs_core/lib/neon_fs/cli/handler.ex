@@ -2221,6 +2221,103 @@ defmodule NeonFS.CLI.Handler do
   end
 
   @doc """
+  Triggers an immediate anti-entropy job for the named volume (#922).
+  """
+  @spec handle_volume_anti_entropy_now(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_anti_entropy_now(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, job} <-
+           JobTracker.create(NeonFS.Core.Job.Runners.VolumeAntiEntropy, %{volume_id: volume.id}) do
+      {:ok, job_to_map(job)}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @minimum_volume_anti_entropy_interval_ms 60_000
+
+  @doc """
+  Updates `RootSegment.schedules.anti_entropy.interval_ms` for the
+  named volume (#922). Minimum 60_000 ms (1 minute).
+  """
+  @spec handle_volume_anti_entropy_set_interval(binary(), pos_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_volume_anti_entropy_set_interval(volume_name, interval_ms)
+      when is_binary(volume_name) and is_integer(interval_ms) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         :ok <- validate_volume_anti_entropy_interval(interval_ms),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []),
+         existing =
+           Map.get(segment.schedules, :anti_entropy, %{
+             interval_ms: interval_ms,
+             last_run: nil
+           }),
+         updated = %{existing | interval_ms: interval_ms},
+         {:ok, _} <- MetadataWriter.update_schedule(volume.id, :anti_entropy, updated, []) do
+      {:ok,
+       %{
+         volume_id: volume.id,
+         volume_name: volume_name,
+         schedule: schedule_to_map(updated)
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp validate_volume_anti_entropy_interval(interval_ms)
+       when is_integer(interval_ms) and interval_ms >= @minimum_volume_anti_entropy_interval_ms,
+       do: :ok
+
+  defp validate_volume_anti_entropy_interval(_),
+    do:
+      {:error,
+       Invalid.exception(
+         message:
+           "interval_ms must be at least #{@minimum_volume_anti_entropy_interval_ms} (1 minute)"
+       )}
+
+  @doc """
+  Returns the current anti-entropy schedule for the named volume —
+  interval, last_run, and the latest job (#922).
+  """
+  @spec handle_volume_anti_entropy_status(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_anti_entropy_status(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []) do
+      schedule = Map.get(segment.schedules, :anti_entropy)
+      latest_job = latest_volume_anti_entropy_job(volume.id)
+
+      {:ok,
+       %{
+         volume_id: volume.id,
+         volume_name: volume_name,
+         schedule: schedule_to_map(schedule),
+         next_run_due_at: next_run_due_at(schedule),
+         latest_job: latest_job && job_to_map(latest_job)
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp latest_volume_anti_entropy_job(volume_id) do
+    JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.VolumeAntiEntropy)
+    |> Enum.filter(fn job -> Map.get(job.params || %{}, :volume_id) == volume_id end)
+    |> Enum.sort_by(fn job -> job.updated_at end, {:desc, DateTime})
+    |> List.first()
+  end
+
+  @doc """
   Starts an integrity scrub job.
 
   ## Parameters
@@ -3112,7 +3209,8 @@ defmodule NeonFS.CLI.Handler do
       NeonFS.Core.Job.Runners.DriveEvacuation,
       NeonFS.Core.Job.Runners.GarbageCollection,
       NeonFS.Core.Job.Runners.KeyRotation,
-      NeonFS.Core.Job.Runners.Scrub
+      NeonFS.Core.Job.Runners.Scrub,
+      NeonFS.Core.Job.Runners.VolumeAntiEntropy
     ]
 
     case Enum.find(known_runners, fn mod -> mod.label() == type_label end) do
