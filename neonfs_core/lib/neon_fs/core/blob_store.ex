@@ -239,6 +239,24 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @doc """
+  Drive-scoped chunk-presence check. Returns `true` if `hash` exists
+  on `drive_id` (any tier, any codec variant), `false` otherwise.
+  Used by anti-entropy (#921) to detect divergence: a chunk whose
+  `ChunkMeta.locations` lists this drive but isn't actually present
+  is a repair target.
+
+  Returns `false` when `drive_id` isn't registered on this node — the
+  question "is the chunk on a drive I don't have?" is unanswerable
+  from here, and reporting absence is the right thing to do (the
+  cross-node RPC at the call site will route the query elsewhere).
+  """
+  @spec chunk_exists?(chunk_hash(), drive_id(), keyword()) :: boolean()
+  def chunk_exists?(hash, drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:chunk_exists?, hash, drive_id})
+  end
+
+  @doc """
   Returns the underlying NIF store handle for a drive.
 
   The handle is the `BlobStoreResource` Rustler reference held by
@@ -828,6 +846,16 @@ defmodule NeonFS.Core.BlobStore do
   @impl true
   def handle_call({:chunk_info, hash}, _from, state) do
     result = do_chunk_info(state.stores, hash)
+    {:reply, result, state}
+  end
+
+  def handle_call({:chunk_exists?, hash, drive_id}, _from, state) do
+    result =
+      case Map.fetch(state.stores, drive_id) do
+        {:ok, store} -> match?({:ok, _tier, _size}, find_chunk_on_store(store, hash))
+        :error -> false
+      end
+
     {:reply, result, state}
   end
 

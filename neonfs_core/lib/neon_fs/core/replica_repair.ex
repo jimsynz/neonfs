@@ -82,6 +82,49 @@ defmodule NeonFS.Core.ReplicaRepair do
     end
   end
 
+  @doc """
+  Reconcile a specific list of `chunk_hashes` for `volume_id` — same
+  per-chunk logic as `repair_volume/2`, but driven by an explicit set
+  rather than a full-volume scan. Anti-entropy uses this so one
+  detected divergence doesn't trigger a volume-wide rebalance.
+
+  Chunks that aren't in `ChunkIndex` for `volume_id` are collected
+  into `:errors` as `{hash, :not_found}` rather than aborting — a
+  missing-from-index chunk is itself a useful signal anti-entropy
+  surfaces to telemetry.
+
+  Returns the same `{added, removed, errors}` shape; `:next_cursor`
+  is always `:done` because this is a one-shot pass over the supplied
+  list (no resumption — the caller decides the batch size).
+  """
+  @spec repair_chunks(binary(), [binary()]) :: {:ok, repair_result()} | {:error, term()}
+  def repair_chunks(volume_id, chunk_hashes)
+      when is_binary(volume_id) and is_list(chunk_hashes) do
+    with {:ok, volume} <- VolumeRegistry.get(volume_id) do
+      result =
+        chunk_hashes
+        |> Enum.reduce(
+          %{added: 0, removed: 0, errors: []},
+          &reduce_chunk(volume_id, volume, &1, &2)
+        )
+        |> Map.put(:next_cursor, :done)
+
+      {:ok, result}
+    end
+  end
+
+  defp reduce_chunk(volume_id, volume, hash, acc) do
+    case ChunkIndex.get(volume_id, hash) do
+      {:ok, chunk} -> reconcile_chunk(chunk, volume, acc)
+      {:error, reason} -> record_lookup_error(hash, reason, acc)
+    end
+  end
+
+  defp record_lookup_error(hash, reason, acc) do
+    emit_error(hash, reason)
+    %{acc | errors: [{hash, reason} | acc.errors]}
+  end
+
   defp reconcile_chunk(%{target_replicas: target} = chunk, volume, acc) do
     current = length(chunk.locations)
 

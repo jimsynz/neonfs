@@ -7,6 +7,7 @@ Mimic.copy(NeonFS.IO.Scheduler)
 Mimic.copy(NeonFS.Core.BlobStore)
 Mimic.copy(NeonFS.Core.ChunkIndex)
 Mimic.copy(NeonFS.Core.Replication)
+Mimic.copy(NeonFS.Core.ReplicaRepair)
 Mimic.copy(NeonFS.Core.VolumeRegistry)
 
 ExUnit.start(capture_log: true)
