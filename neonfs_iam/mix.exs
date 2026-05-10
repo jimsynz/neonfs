@@ -62,7 +62,7 @@ defmodule NeonFS.IAM.MixProject do
       {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:earmark, "~> 1.4", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
-      {:igniter, "~> 0.7", only: [:dev, :test]},
+      {:igniter, "~> 0.8", only: [:dev, :test]},
       {:mimic, "~> 2.0", only: [:test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.0"},

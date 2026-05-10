@@ -16,7 +16,7 @@ COPY --from=src . /workdir/neonfs_s3
 
 RUN mix compile && mix release --overwrite
 
-FROM debian:trixie-20260421
+FROM debian:trixie-20260505
 
 LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \

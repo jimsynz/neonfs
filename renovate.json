@@ -27,6 +27,12 @@
       "matchPackageNames": ["hackney"],
       "allowedVersions": "~> 1.16",
       "description": "Pin to 1.x — ex_aws 2.6.1 (latest) still requires hackney ~> 1.16. Lift this when ex_aws supports hackney 2+."
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["bincode"],
+      "allowedVersions": "<3",
+      "description": "Pin to 2.x — bincode 3.0 was published only as an unmaintained-project notice (lib.rs is a compile_error!). bincode-org repo was archived 2025-08-15. Stay on 2.x until a maintained successor exists."
     }
   ]
 }
