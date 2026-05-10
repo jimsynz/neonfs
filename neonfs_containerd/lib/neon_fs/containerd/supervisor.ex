@@ -105,7 +105,9 @@ defmodule NeonFS.Containerd.Supervisor do
 
   Everything else still logs as before.
   """
-  @spec log_grpc_exception?(GRPC.Server.Adapters.ReportException.t()) :: boolean()
+  # `ReportException` doesn't define a `t/0` type, so spec is on the
+  # generic struct. Pattern matching enforces the shape at runtime.
+  @spec log_grpc_exception?(struct()) :: boolean()
   # `GRPC.RPCError.status` is the integer gRPC status code (e.g. `5`
   # for NOT_FOUND), not the atom — `RPCError.exception/1` resolves
   # the atom to its number via `GRPC.Status` at construction time.
