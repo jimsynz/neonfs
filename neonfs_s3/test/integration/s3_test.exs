@@ -200,30 +200,26 @@ defmodule NeonFS.S3.IntegrationTest do
                ExAws.S3.get_object("s3t-obj", "nope.txt") |> ExAws.request(config)
     end
 
-    test "overwrite existing object updates content", %{config: config, cluster: cluster} do
+    test "overwrite existing object updates content", %{config: config} do
       ExAws.S3.put_object("s3t-obj", "overwrite.txt", "v1") |> request!(config)
       ExAws.S3.put_object("s3t-obj", "overwrite.txt", "v2") |> request!(config)
-      :ok = wait_for_ra_apply_consensus(cluster)
 
       result = ExAws.S3.get_object("s3t-obj", "overwrite.txt") |> request!(config)
       assert result.body == "v2"
     end
 
-    test "nested key paths work correctly", %{config: config, cluster: cluster} do
+    test "nested key paths work correctly", %{config: config} do
       ExAws.S3.put_object("s3t-obj", "path/to/nested.txt", "nested content")
       |> request!(config)
-
-      :ok = wait_for_ra_apply_consensus(cluster)
 
       result = ExAws.S3.get_object("s3t-obj", "path/to/nested.txt") |> request!(config)
       assert result.body == "nested content"
     end
 
-    test "binary data round-trips correctly", %{config: config, cluster: cluster} do
+    test "binary data round-trips correctly", %{config: config} do
       binary_data = :crypto.strong_rand_bytes(64 * 1024)
 
       ExAws.S3.put_object("s3t-obj", "binary.bin", binary_data) |> request!(config)
-      :ok = wait_for_ra_apply_consensus(cluster)
 
       result = ExAws.S3.get_object("s3t-obj", "binary.bin") |> request!(config)
       assert result.body == binary_data

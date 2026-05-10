@@ -345,6 +345,286 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
   end
 
+  describe "cross-node fallback (#936)" do
+    test "remote-dispatches when local read fails with root_chunk_unreachable" do
+      remote_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [%{node: :remote_a@host, drive_id: "drv-remote"}],
+        durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      table = :ets.new(:remote_calls, [:public, :duplicate_bag])
+
+      remote_caller = fn node, fn_name, args ->
+        :ets.insert(table, {:call, node, fn_name, args})
+        {:ok, "remote-value"}
+      end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          root_chunk_reader: fn _entry, _opts -> {:error, :io_error} end,
+          remote_caller: remote_caller
+        )
+
+      assert {:ok, "remote-value"} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert [{:call, :remote_a@host, :get, [_, _, _, dispatched_opts]}] =
+               :ets.tab2list(table)
+
+      assert Keyword.fetch!(dispatched_opts, :__remote_dispatched) == true
+    end
+
+    test "remote-dispatches when local read fails with no_local_replica" do
+      remote_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [%{node: :remote_b@host, drive_id: "drv-r"}],
+        durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      remote_caller = fn _node, :get, _args -> {:ok, "from-remote"} end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          root_chunk_reader: fn _entry, _opts ->
+            {:error, {:no_local_replica, [%{node: :remote_b@host, drive_id: "drv-r"}]}}
+          end,
+          remote_caller: remote_caller
+        )
+
+      assert {:ok, "from-remote"} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+    end
+
+    test "does not dispatch when local read returns :not_found" do
+      table = :ets.new(:not_dispatched, [:public, :duplicate_bag])
+
+      remote_caller = fn node, fn_name, args ->
+        :ets.insert(table, {:call, node, fn_name, args})
+        {:ok, "should-not-be-called"}
+      end
+
+      opts =
+        build_opts(
+          index_tree_get: fn _, _, _, _ -> {:ok, nil} end,
+          remote_caller: remote_caller
+        )
+
+      assert {:error, :not_found} =
+               MetadataReader.get("vol-1", :file_index, "missing", opts)
+
+      assert :ets.tab2list(table) == []
+    end
+
+    test "does not dispatch when local read returns cluster_mismatch" do
+      table = :ets.new(:not_dispatched_mismatch, [:public, :duplicate_bag])
+
+      foreign_segment = sample_segment(cluster_id: "clust-other")
+
+      opts =
+        build_opts(
+          root_chunk_reader: const_chunk_reader(foreign_segment),
+          remote_caller: fn node, fn_name, args ->
+            :ets.insert(table, {:call, node, fn_name, args})
+            {:ok, "nope"}
+          end
+        )
+
+      assert {:error, {:cluster_mismatch, _}} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert :ets.tab2list(table) == []
+    end
+
+    test "does not dispatch when local read returns malformed_root_segment" do
+      opts =
+        build_opts(
+          root_chunk_reader: fn _entry, _opts -> {:ok, <<0, 1, 2, 3>>} end,
+          remote_caller: fn _, _, _ -> raise "remote_caller must not be called" end
+        )
+
+      assert {:error, {:malformed_root_segment, _}} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+    end
+
+    test "does not dispatch when local read returns bootstrap_query_failed" do
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:error, :ra_timeout} end,
+          remote_caller: fn _, _, _ -> raise "remote_caller must not be called" end
+        )
+
+      assert {:error, {:bootstrap_query_failed, :ra_timeout}} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+    end
+
+    test "does not dispatch when caller flagged __remote_dispatched (no recursion)" do
+      opts =
+        build_opts(
+          root_chunk_reader: fn _, _ -> {:error, :io_error} end,
+          remote_caller: fn _, _, _ -> raise "remote_caller must not be called" end,
+          __remote_dispatched: true
+        )
+
+      assert {:error, {:root_chunk_unreachable, :io_error}} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+    end
+
+    test "tries each remote node until one succeeds" do
+      remote_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [
+          %{node: :remote_a@host, drive_id: "drv-a"},
+          %{node: :remote_b@host, drive_id: "drv-b"},
+          %{node: :remote_c@host, drive_id: "drv-c"}
+        ],
+        durability_cache: %{type: :replicate, factor: 3, min_copies: 2},
+        updated_at: DateTime.utc_now()
+      }
+
+      attempts = :ets.new(:attempts, [:public, :duplicate_bag])
+
+      remote_caller = fn
+        :remote_a@host, :get, _args ->
+          :ets.insert(attempts, {:tried, :remote_a@host})
+          {:error, {:rpc_failed, :nodedown}}
+
+        :remote_b@host, :get, _args ->
+          :ets.insert(attempts, {:tried, :remote_b@host})
+          {:ok, "from-b"}
+
+        :remote_c@host, :get, _args ->
+          :ets.insert(attempts, {:tried, :remote_c@host})
+          {:ok, "should-stop-at-b"}
+      end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          root_chunk_reader: fn _, _ -> {:error, :io_error} end,
+          remote_caller: remote_caller
+        )
+
+      assert {:ok, "from-b"} = MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      tried = :ets.tab2list(attempts) |> Enum.map(fn {:tried, n} -> n end)
+      assert :remote_a@host in tried
+      assert :remote_b@host in tried
+      refute :remote_c@host in tried
+    end
+
+    test "remote :not_found is authoritative — does not retry further nodes" do
+      remote_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [
+          %{node: :remote_a@host, drive_id: "drv-a"},
+          %{node: :remote_b@host, drive_id: "drv-b"}
+        ],
+        durability_cache: %{type: :replicate, factor: 2, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      attempts = :ets.new(:auth_attempts, [:public, :duplicate_bag])
+
+      remote_caller = fn node, :get, _args ->
+        :ets.insert(attempts, {:tried, node})
+        {:error, :not_found}
+      end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          root_chunk_reader: fn _, _ -> {:error, :io_error} end,
+          remote_caller: remote_caller
+        )
+
+      assert {:error, :not_found} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      tried = :ets.tab2list(attempts) |> Enum.map(fn {:tried, n} -> n end)
+      assert tried == [:remote_a@host]
+    end
+
+    test "collapses to :all_replicas_failed when every remote also fails" do
+      remote_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [
+          %{node: :remote_a@host, drive_id: "drv-a"},
+          %{node: :remote_b@host, drive_id: "drv-b"}
+        ],
+        durability_cache: %{type: :replicate, factor: 2, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      remote_caller = fn _node, :get, _args -> {:error, {:rpc_failed, :nodedown}} end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          root_chunk_reader: fn _, _ ->
+            {:error, {:no_local_replica, [%{node: :remote_a@host, drive_id: "drv-a"}]}}
+          end,
+          remote_caller: remote_caller
+        )
+
+      assert {:error, :all_replicas_failed} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+    end
+
+    test "range/5 has the same fallback behaviour" do
+      remote_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [%{node: :remote_a@host, drive_id: "drv-a"}],
+        durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      remote_caller = fn :remote_a@host, :range, _args ->
+        {:ok, [{<<"k1">>, <<"v1">>}]}
+      end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          root_chunk_reader: fn _, _ -> {:error, :io_error} end,
+          remote_caller: remote_caller
+        )
+
+      assert {:ok, [{<<"k1">>, <<"v1">>}]} =
+               MetadataReader.range("vol-1", :file_index, "", "", opts)
+    end
+
+    test "no remote candidates surfaces the original local error" do
+      single_node_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [%{node: node(), drive_id: "drv-local"}],
+        durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, single_node_entry} end,
+          root_chunk_reader: fn _, _ -> {:error, :io_error} end,
+          remote_caller: fn _, _, _ -> raise "no remotes — must not be called" end
+        )
+
+      assert {:error, {:root_chunk_unreachable, :io_error}} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+    end
+  end
+
   ## Helpers
 
   defp sample_segment(overrides \\ []) do
