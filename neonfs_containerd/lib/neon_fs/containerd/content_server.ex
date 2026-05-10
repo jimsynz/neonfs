@@ -420,11 +420,52 @@ defmodule NeonFS.Containerd.ContentServer do
   @spec process_write_stream(Enumerable.t(), (WriteContentResponse.t() -> any())) :: :ok
   def process_write_stream(request_stream, send_fn) when is_function(send_fn, 1) do
     _final_state =
-      Enum.reduce(request_stream, %{}, fn request, state ->
-        dispatch_write_frame(request, state, send_fn)
+      Enum.reduce(request_stream, %{bound_ref: nil}, fn request, state ->
+        {bound_request, state} = bind_ref(request, state)
+        dispatch_write_frame(bound_request, state, send_fn)
       end)
 
     :ok
+  end
+
+  # Containerd's `WriteContentRequest` proto explicitly states that
+  # "once a write stream has started, it may only write to a single
+  # ref, thus once a stream is started, the ref may be omitted on
+  # subsequent writes". The client (`core/content/proxy/content_writer.go`)
+  # populates `Ref` only on the opening STAT frame from
+  # `proxyContentStore.negotiate`; every subsequent WRITE / COMMIT /
+  # STAT (from `cw.Status()`) is sent with `ref == ""`. The server
+  # is responsible for binding the stream to the ref established on
+  # the first frame and applying it to every subsequent frame.
+  #
+  # Without this the WRITE frame's empty ref would route to a
+  # different (unbound) session, which would either crash on the
+  # `_writes/` path or get torn down with `failed_precondition` —
+  # exactly the failure mode #741 was reporting.
+  defp bind_ref(%WriteContentRequest{ref: ref} = req, %{bound_ref: nil} = state)
+       when ref != "" do
+    {req, %{state | bound_ref: ref}}
+  end
+
+  defp bind_ref(%WriteContentRequest{ref: ""}, %{bound_ref: nil}) do
+    raise RPCError,
+      status: :invalid_argument,
+      message: "first Write frame must carry a non-empty ref (per containerd proto)"
+  end
+
+  defp bind_ref(%WriteContentRequest{ref: ""} = req, %{bound_ref: bound} = state) do
+    {%{req | ref: bound}, state}
+  end
+
+  defp bind_ref(%WriteContentRequest{ref: ref} = req, %{bound_ref: ref} = state) do
+    {req, state}
+  end
+
+  defp bind_ref(%WriteContentRequest{ref: ref}, %{bound_ref: bound}) do
+    raise RPCError,
+      status: :failed_precondition,
+      message:
+        "ref switched mid-stream: bound to #{inspect(bound)}, frame carried #{inspect(ref)}"
   end
 
   defp dispatch_write_frame(%WriteContentRequest{action: action} = req, state, send_fn) do

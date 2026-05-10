@@ -330,6 +330,79 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
+  describe "process_write_stream — ref binding (#741)" do
+    # Containerd's `WriteContentRequest` proto: "once a write stream
+    # has started, it may only write to a single ref, thus once a
+    # stream is started, the ref may be omitted on subsequent
+    # writes". Server is responsible for the binding.
+    test "WRITE with empty ref binds to the ref established by the opening STAT", %{ref: ref} do
+      payload = "bound-payload"
+      digest = "sha256:" <> (:crypto.hash(:sha256, payload) |> Base.encode16(case: :lower))
+
+      replies =
+        capture_replies([
+          # First frame establishes the binding.
+          %WriteContentRequest{
+            action: :STAT,
+            ref: ref,
+            total: byte_size(payload),
+            expected: digest
+          },
+          # Subsequent frames have ref="" per the containerd proto.
+          %WriteContentRequest{action: :WRITE, ref: "", data: payload, offset: 0},
+          %WriteContentRequest{
+            action: :COMMIT,
+            ref: "",
+            offset: byte_size(payload),
+            expected: digest
+          }
+        ])
+
+      assert [
+               %WriteContentResponse{action: :STAT},
+               %WriteContentResponse{action: :WRITE, offset: write_offset},
+               %WriteContentResponse{action: :COMMIT, digest: ^digest}
+             ] = replies
+
+      assert write_offset == byte_size(payload)
+    end
+
+    test "second STAT (cw.Status() inside the stream) with empty ref still works", %{ref: ref} do
+      replies =
+        capture_replies([
+          # negotiate's STAT.
+          %WriteContentRequest{action: :STAT, ref: ref, total: 100, expected: "sha256:abc"},
+          # cw.Status() called by content.Copy — sends another STAT
+          # with empty ref on the same stream.
+          %WriteContentRequest{action: :STAT, ref: ""}
+        ])
+
+      assert [
+               %WriteContentResponse{action: :STAT, total: 100},
+               %WriteContentResponse{action: :STAT, total: 100}
+             ] = replies
+    end
+
+    test "first frame with empty ref is rejected with invalid_argument" do
+      assert_raise GRPC.RPCError,
+                   ~r/first Write frame must carry a non-empty ref/,
+                   fn ->
+                     capture_replies([
+                       %WriteContentRequest{action: :WRITE, ref: "", data: "oops", offset: 0}
+                     ])
+                   end
+    end
+
+    test "ref switching mid-stream is rejected with failed_precondition", %{ref: ref} do
+      assert_raise GRPC.RPCError, ~r/ref switched mid-stream/, fn ->
+        capture_replies([
+          %WriteContentRequest{action: :STAT, ref: ref},
+          %WriteContentRequest{action: :WRITE, ref: "different-ref", data: "x", offset: 0}
+        ])
+      end
+    end
+  end
+
   describe "process_write_stream — full STAT → WRITE → COMMIT cycle" do
     test "emits one response per request, in order, with the COMMIT digest", %{ref: ref} do
       payload = "the entire blob in one frame"
