@@ -117,16 +117,13 @@ defmodule NeonFS.Integration.PartitionTest do
       :ok = PeerCluster.heal_partition(cluster)
       :ok = wait_for_partition_healed(cluster, timeout: 30_000)
 
-      # `AntiEntropy.sync_now` only syncs `segments_per_cycle` segments
-      # per call (default 100); a single pass also doesn't account for
-      # races between `wait_for_partition_healed` returning and the RPC
-      # layer's connection state actually catching up. Re-trigger sync
-      # on every poll iteration so a missed pass doesn't fail the
-      # whole test (#564). The 120s budget covers the case where the
-      # first post-heal `sync_now` call walks the full ring with one or
-      # two segments stalling on the per-RPC 10s timeout while the dist
-      # channel restabilises — the GenServer is single-threaded, so
-      # subsequent triggers queue behind it (#606).
+      # Post-#792, anti-entropy is per-volume. `trigger_anti_entropy`
+      # dispatches a `Job.Runners.VolumeAntiEntropy` job per volume;
+      # jobs run async via JobTracker. Convergence is also handled
+      # by read-path repair (#947) so a single trigger may not need
+      # to land — re-triggering each poll iteration is harmless and
+      # covers races between `wait_for_partition_healed` returning
+      # and JobTracker actually starting the job.
       assert_eventually timeout: 120_000 do
         trigger_anti_entropy(cluster, [:node3])
         read_matches?(cluster, :node3, path, "partition data")
@@ -193,12 +190,32 @@ defmodule NeonFS.Integration.PartitionTest do
     assert_partitioned(cluster, [:node1, :node2], [:node3], timeout: 60_000)
   end
 
-  defp trigger_anti_entropy(cluster, node_names) do
-    for node_name <- node_names do
-      PeerCluster.rpc(cluster, node_name, NeonFS.Core.AntiEntropy, :sync_now, [])
+  # Post-#792 anti-entropy is per-volume, dispatched via the
+  # `Job.Runners.VolumeAntiEntropy` runner. The old global
+  # `AntiEntropy.sync_now` is gone.
+  defp trigger_anti_entropy(cluster, _node_names) do
+    [driver | _] =
+      cluster.nodes
+      |> Enum.map(& &1.alias_name)
+      |> Enum.filter(&core_peer?(cluster, &1))
+
+    volumes = PeerCluster.rpc(cluster, driver, NeonFS.Core.VolumeRegistry, :list, [])
+
+    for %{id: volume_id} <- volumes do
+      PeerCluster.rpc(cluster, driver, NeonFS.Core.JobTracker, :create, [
+        NeonFS.Core.Job.Runners.VolumeAntiEntropy,
+        %{volume_id: volume_id}
+      ])
     end
 
     :ok
+  end
+
+  defp core_peer?(cluster, alias_name) do
+    case PeerCluster.get_node(cluster, alias_name) do
+      {:ok, ni} -> :neonfs_core in Map.get(ni, :applications, [:neonfs_core])
+      _ -> false
+    end
   end
 
   # ─── Read/write helpers ─────────────────────────────────────────────

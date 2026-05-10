@@ -28,7 +28,7 @@ defmodule NeonFS.Core.Supervisor do
   require Logger
 
   alias NeonFS.Cluster.{Formation, State}
-  alias NeonFS.Core.{AntiEntropy, MetadataRing, MetricsSupervisor, ServiceRegistry}
+  alias NeonFS.Core.{MetricsSupervisor, ServiceRegistry}
 
   def start_link(init_arg) do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
@@ -73,51 +73,19 @@ defmodule NeonFS.Core.Supervisor do
   @doc """
   Rebuilds the quorum metadata ring with the current set of core nodes.
 
-  Call this after cluster membership changes (e.g. a node joins or leaves)
-  to ensure metadata is routed to all core nodes. Updates the persistent_term
-  for ChunkIndex, FileIndex, and StripeIndex.
+  No-op since #792 — the segment-based metadata quorum was retired
+  in favour of per-volume index trees on the bootstrap-pointer
+  substrate. Membership changes are now handled by the per-volume
+  anti-entropy runner (#921) per drive_locations, not by a global
+  ring rebuild. Kept as an export so callers that haven't been
+  audited yet don't crash.
   """
   @spec rebuild_quorum_ring() :: :ok
-  def rebuild_quorum_ring do
-    old_quorum_opts = :persistent_term.get({NeonFS.Core.ChunkIndex, :quorum_opts}, nil)
-    quorum_opts = build_quorum_opts()
-
-    for module <- [NeonFS.Core.ChunkIndex, NeonFS.Core.FileIndex, NeonFS.Core.StripeIndex] do
-      :persistent_term.put({module, :quorum_opts}, quorum_opts)
-    end
-
-    ring = Keyword.fetch!(quorum_opts, :ring)
-    Logger.info("Rebuilt quorum ring", node_count: MapSet.size(ring.node_set))
-
-    sync_after_ring_change(old_quorum_opts, ring)
-
-    :ok
-  end
+  def rebuild_quorum_ring, do: :ok
 
   # Private functions
 
   defp start_children?, do: Application.get_env(:neonfs_core, :start_children?, true)
-
-  defp sync_after_ring_change(nil, _new_ring), do: :ok
-
-  defp sync_after_ring_change(old_quorum_opts, new_ring) do
-    old_ring = Keyword.fetch!(old_quorum_opts, :ring)
-
-    if old_ring.node_set != new_ring.node_set do
-      local_segments =
-        new_ring
-        |> MetadataRing.segments()
-        |> Enum.filter(fn {_seg_id, replicas} -> Node.self() in replicas end)
-
-      Logger.info("Ring membership changed, syncing segments",
-        segment_count: length(local_segments)
-      )
-
-      Enum.each(local_segments, fn {segment_id, _replicas} ->
-        AntiEntropy.sync_segment(segment_id, ring: new_ring)
-      end)
-    end
-  end
 
   defp build_children do
     drives = Application.get_env(:neonfs_core, :drives, default_drives())
@@ -129,16 +97,6 @@ defmodule NeonFS.Core.Supervisor do
     node_named = Node.self() != :nonode@nohost
     ra_config = Application.get_env(:neonfs_core, :enable_ra, false)
     enable_ra = node_named and ra_config
-
-    # Build quorum opts for metadata indexes and set persistent_term BEFORE
-    # children start. Children read from persistent_term at runtime; the opts
-    # are NOT baked into child specs, so crash-restart won't revert the ring
-    # to a stale value from supervisor boot time.
-    quorum_opts = build_quorum_opts()
-
-    for module <- [NeonFS.Core.ChunkIndex, NeonFS.Core.FileIndex, NeonFS.Core.StripeIndex] do
-      :persistent_term.put({module, :quorum_opts}, quorum_opts)
-    end
 
     Logger.info("Building children",
       node: Node.self(),
@@ -183,10 +141,6 @@ defmodule NeonFS.Core.Supervisor do
         NeonFS.IO.Supervisor
       ] ++
         [
-          # MetadataStore wraps BlobStore metadata namespace with ETS caching and HLC timestamps
-          # Must start before ChunkIndex/FileIndex/StripeIndex (they need it for loading)
-          NeonFS.Core.MetadataStore,
-
           # ClockMonitor detects clock skew and quarantines nodes
           NeonFS.Core.ClockMonitor,
 
@@ -208,19 +162,16 @@ defmodule NeonFS.Core.Supervisor do
           # JobTracker manages persistent, resumable background jobs
           NeonFS.Core.JobTracker,
 
-          # ReadRepair submits async repair jobs for stale metadata replicas
-          NeonFS.Core.ReadRepair,
-
           # ResolvedLookupCache caches fully resolved file→chunk mappings
           NeonFS.Core.ResolvedLookupCache,
 
-          # ChunkIndex depends on MetadataStore (quorum-backed)
+          # ChunkIndex — local ETS cache fronting the per-volume chunk_index tree.
           NeonFS.Core.ChunkIndex,
 
-          # FileIndex depends on ChunkIndex (quorum-backed)
+          # FileIndex — local ETS cache fronting the per-volume file_index tree.
           NeonFS.Core.FileIndex,
 
-          # StripeIndex for erasure-coded stripe metadata (quorum-backed)
+          # StripeIndex — local ETS cache fronting the per-volume stripe_index tree.
           NeonFS.Core.StripeIndex,
 
           # StorageMetrics tracks per-drive usage via telemetry
@@ -285,9 +236,6 @@ defmodule NeonFS.Core.Supervisor do
           # ReplicaRepairScheduler creates periodic replica-repair jobs per volume
           {NeonFS.Core.ReplicaRepairScheduler, replica_repair_scheduler_opts()},
 
-          # AntiEntropy periodically syncs metadata segments via Merkle tree comparison
-          NeonFS.Core.AntiEntropy,
-
           # Retention prunes old audit log files from the system volume
           NeonFS.Core.SystemVolume.Retention,
 
@@ -349,52 +297,6 @@ defmodule NeonFS.Core.Supervisor do
         {result, %{id: id}}
       end
     )
-  end
-
-  defp build_quorum_opts do
-    # Build a MetadataRing for the current node.
-    # At startup, only the local node is guaranteed to have MetadataStore running.
-    # Non-core nodes (test controllers, FUSE nodes) must not be included in the ring,
-    # as they lack MetadataStore and would cause quorum failures.
-    #
-    # In a multi-node cluster, the ring is rebuilt when cluster membership changes
-    # (future: dynamic ring rebuild via ServiceRegistry events).
-    core_nodes = discover_core_nodes()
-    timeout = Application.get_env(:neonfs_core, :quorum_timeout_ms, 5_000)
-
-    ring =
-      MetadataRing.new(core_nodes,
-        virtual_nodes_per_physical: 64,
-        replicas: min(3, length(core_nodes))
-      )
-
-    [ring: ring, timeout: timeout]
-  end
-
-  defp discover_core_nodes do
-    other_core =
-      ServiceRegistry.connected_nodes_by_type(:core)
-      |> Enum.filter(fn node ->
-        try do
-          has_metadata_store =
-            case :erpc.call(node, Process, :whereis, [NeonFS.Core.MetadataStore], 2_000) do
-              pid when is_pid(pid) -> true
-              _ -> false
-            end
-
-          # Only include nodes that have actually joined the cluster.
-          # Unjoined nodes may have MetadataStore running (from app start)
-          # but lack cluster data, which would cause quorum read failures.
-          is_cluster_member =
-            :erpc.call(node, State, :exists?, [], 2_000)
-
-          has_metadata_store and is_cluster_member
-        catch
-          _, _ -> false
-        end
-      end)
-
-    [Node.self() | other_core]
   end
 
   defp gc_scheduler_opts do

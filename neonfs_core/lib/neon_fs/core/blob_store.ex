@@ -502,104 +502,6 @@ defmodule NeonFS.Core.BlobStore do
     )
   end
 
-  # Metadata namespace operations
-
-  @doc """
-  Writes metadata to the blob store's metadata namespace.
-
-  ## Parameters
-
-    * `segment_id` - 32-byte binary segment identifier (hex-encoded before NIF call)
-    * `key_hash` - 32-byte binary hash of the metadata key
-    * `data` - Binary metadata to write
-    * `drive_id` - Target drive identifier
-    * `opts` - Optional keyword list:
-      * `:server` - GenServer name, defaults to `__MODULE__`
-
-  ## Returns
-
-    * `{:ok, {}}` - On success
-    * `{:error, reason}` - On failure
-  """
-  @spec write_metadata(binary(), binary(), binary(), drive_id(), keyword()) ::
-          {:ok, {}} | {:error, String.t()}
-  def write_metadata(segment_id, key_hash, data, drive_id, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 5_000)
-    GenServer.call(server, {:write_metadata, segment_id, key_hash, data, drive_id}, timeout)
-  end
-
-  @doc """
-  Reads metadata from the blob store's metadata namespace.
-
-  ## Parameters
-
-    * `segment_id` - 32-byte binary segment identifier
-    * `key_hash` - 32-byte binary hash of the metadata key
-    * `drive_id` - Drive identifier to read from
-    * `opts` - Optional keyword list:
-      * `:server` - GenServer name, defaults to `__MODULE__`
-
-  ## Returns
-
-    * `{:ok, data}` - The metadata as a binary
-    * `{:error, reason}` - On failure
-  """
-  @spec read_metadata(binary(), binary(), drive_id(), keyword()) ::
-          {:ok, binary()} | {:error, String.t()}
-  def read_metadata(segment_id, key_hash, drive_id, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 5_000)
-    GenServer.call(server, {:read_metadata, segment_id, key_hash, drive_id}, timeout)
-  end
-
-  @doc """
-  Deletes metadata from the blob store's metadata namespace.
-
-  ## Parameters
-
-    * `segment_id` - 32-byte binary segment identifier
-    * `key_hash` - 32-byte binary hash of the metadata key
-    * `drive_id` - Drive identifier
-    * `opts` - Optional keyword list:
-      * `:server` - GenServer name, defaults to `__MODULE__`
-
-  ## Returns
-
-    * `{:ok, {}}` - On success
-    * `{:error, reason}` - On failure
-  """
-  @spec delete_metadata(binary(), binary(), drive_id(), keyword()) ::
-          {:ok, {}} | {:error, String.t()}
-  def delete_metadata(segment_id, key_hash, drive_id, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 5_000)
-    GenServer.call(server, {:delete_metadata, segment_id, key_hash, drive_id}, timeout)
-  end
-
-  @doc """
-  Lists all metadata key hashes in a segment.
-
-  ## Parameters
-
-    * `segment_id` - 32-byte binary segment identifier
-    * `drive_id` - Drive identifier
-    * `opts` - Optional keyword list:
-      * `:server` - GenServer name, defaults to `__MODULE__`
-
-  ## Returns
-
-    * `{:ok, hashes}` - List of 32-byte binary key hashes
-    * `{:error, reason}` - On failure
-  """
-  @spec list_metadata_segment(binary(), drive_id(), keyword()) ::
-          {:ok, [binary()]} | {:error, String.t()}
-  def list_metadata_segment(segment_id, drive_id, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 5_000)
-    GenServer.call(server, {:list_metadata_segment, segment_id, drive_id}, timeout)
-  end
-
   @doc """
   Returns configured drives and their status.
 
@@ -977,58 +879,6 @@ defmodule NeonFS.Core.BlobStore do
     {:reply, result, state}
   end
 
-  @impl true
-  def handle_call({:write_metadata, segment_id, key_hash, data, drive_id}, _from, state) do
-    case get_store(state, drive_id) do
-      {:ok, store} ->
-        segment_hex = Base.encode16(segment_id, case: :lower)
-        result = Native.metadata_write(store, segment_hex, key_hash, data)
-        {:reply, result, state}
-
-      {:error, _reason} = error ->
-        {:reply, error, state}
-    end
-  end
-
-  @impl true
-  def handle_call({:read_metadata, segment_id, key_hash, drive_id}, _from, state) do
-    case get_store(state, drive_id) do
-      {:ok, store} ->
-        segment_hex = Base.encode16(segment_id, case: :lower)
-        result = Native.metadata_read(store, segment_hex, key_hash)
-        {:reply, result, state}
-
-      {:error, _reason} = error ->
-        {:reply, error, state}
-    end
-  end
-
-  @impl true
-  def handle_call({:delete_metadata, segment_id, key_hash, drive_id}, _from, state) do
-    case get_store(state, drive_id) do
-      {:ok, store} ->
-        segment_hex = Base.encode16(segment_id, case: :lower)
-        result = Native.metadata_delete(store, segment_hex, key_hash)
-        {:reply, result, state}
-
-      {:error, _reason} = error ->
-        {:reply, error, state}
-    end
-  end
-
-  @impl true
-  def handle_call({:list_metadata_segment, segment_id, drive_id}, _from, state) do
-    case get_store(state, drive_id) do
-      {:ok, store} ->
-        segment_hex = Base.encode16(segment_id, case: :lower)
-        result = Native.metadata_list_segment(store, segment_hex)
-        {:reply, result, state}
-
-      {:error, _reason} = error ->
-        {:reply, error, state}
-    end
-  end
-
   ## Codec helpers
 
   @doc """
@@ -1402,15 +1252,13 @@ defmodule NeonFS.Core.BlobStore do
   ## Private: Drive data check
 
   defp check_drive_has_data(drive_path) do
-    # Chunks live under {drive_path}/blobs/{tier}/{prefix}/.../{hash} and
-    # metadata segments under {drive_path}/meta/{segment_id}/{prefix}/...
-    # We must report empty as soon as no actual files remain — empty
-    # prefix directories left behind by deleted chunks/metadata must not
-    # count as data (issue #753), and a metadata-only drive must not be
-    # mistaken for empty (issue #750).
-    Enum.any?(["blobs", "meta"], fn dir ->
-      drive_path |> Path.join(dir) |> dir_contains_any_file?()
-    end)
+    # Chunks live under `{drive_path}/blobs/{tier}/{prefix}/.../{hash}`.
+    # Per-volume metadata (root segments, index tree pages) is just
+    # ordinary content-addressed chunks under the same `blobs/` tree
+    # post #792 — no separate `meta/` namespace any more. Empty
+    # prefix directories left behind by deleted chunks must not count
+    # as data (issue #753).
+    drive_path |> Path.join("blobs") |> dir_contains_any_file?()
   end
 
   defp dir_contains_any_file?(path) do

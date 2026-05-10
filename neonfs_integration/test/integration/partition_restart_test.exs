@@ -156,11 +156,32 @@ defmodule NeonFS.Integration.PartitionRestartTest do
     :ok
   end
 
-  defp trigger_anti_entropy(cluster, node_names) do
-    for node_name <- node_names do
-      PeerCluster.rpc(cluster, node_name, NeonFS.Core.AntiEntropy, :sync_now, [])
+  # Post-#792 anti-entropy is per-volume, dispatched via the
+  # `Job.Runners.VolumeAntiEntropy` runner. The old global
+  # `AntiEntropy.sync_now` is gone. We pick one node and dispatch
+  # one job per volume; the runner queries every replica for chunk
+  # presence so per-node fan-out from the test driver is redundant.
+  # The `node_names` argument is retained for source compatibility.
+  defp trigger_anti_entropy(cluster, _node_names) do
+    [driver | _] =
+      cluster.nodes |> Enum.map(& &1.alias_name) |> Enum.filter(&core_peer?(cluster, &1))
+
+    volumes = PeerCluster.rpc(cluster, driver, NeonFS.Core.VolumeRegistry, :list, [])
+
+    for %{id: volume_id} <- volumes do
+      PeerCluster.rpc(cluster, driver, NeonFS.Core.JobTracker, :create, [
+        NeonFS.Core.Job.Runners.VolumeAntiEntropy,
+        %{volume_id: volume_id}
+      ])
     end
 
     :ok
+  end
+
+  defp core_peer?(cluster, alias_name) do
+    case PeerCluster.get_node(cluster, alias_name) do
+      {:ok, ni} -> :neonfs_core in Map.get(ni, :applications, [:neonfs_core])
+      _ -> false
+    end
   end
 end
