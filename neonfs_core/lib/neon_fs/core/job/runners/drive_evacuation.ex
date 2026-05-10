@@ -2,12 +2,28 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   @moduledoc """
   Job runner for drive evacuation.
 
-  Processes chunks in batches, either pruning over-replicated copies or migrating
-  under-replicated ones. Each `step/1` call processes one batch of chunks.
+  Walks the on-disk `blobs/` tree (not the ChunkIndex materialisation), so
+  every content-addressed file on the evacuating drive is moved — including
+  per-volume index-tree pages and volume root segments, which are blobs but
+  are not tracked in `ChunkIndex` (they're reached via each volume's
+  bootstrap pointer in Ra).
 
-  The `list_by_drive/2` query naturally skips already-evacuated chunks (they no
-  longer have a location on the evacuating drive), making resume after restart
-  idempotent.
+  For each blob, the runner picks one of two paths:
+
+    * **Tracked chunk** (`ChunkIndex.lookup_by_hash/1` hits): existing
+      chunk-migration path via `TierMigration.run_migration`, which keeps
+      `chunk.locations` consistent with the new on-disk location.
+    * **Untracked blob** (tree page, root segment): `BlobStore.migrate_blob_file/3`
+      copies the file byte-for-byte to a same-node target drive and removes
+      the source. No `ChunkIndex` update.
+
+  Once the drive is empty, the runner walks every Ra-replicated volume root
+  and rewrites any `drive_locations` entry that points at the evacuating
+  drive, swapping it for the local target drive. Only then is the source
+  drive deregistered.
+
+  Resume-after-restart is idempotent: `list_drive_blobs/2` reads the
+  current filesystem state, so already-evacuated blobs don't reappear.
   """
 
   @behaviour NeonFS.Core.Job.Runner
@@ -21,6 +37,8 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     Drive,
     DriveManager,
     DriveRegistry,
+    MetadataStateMachine,
+    RaSupervisor,
     TierMigration,
     VolumeRegistry
   }
@@ -38,14 +56,14 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     node = job.params.node
     drive_id = job.params.drive_id
 
-    remaining = list_remaining_chunks(node, drive_id)
+    remaining = list_remaining_blobs(node, drive_id)
 
     case remaining do
       [] ->
-        complete_evacuation(job)
+        finalise_evacuation(job)
 
-      chunks ->
-        process_batch(job, chunks)
+      blobs ->
+        process_batch(job, blobs)
     end
   end
 
@@ -65,8 +83,8 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     any_tier = job.params.any_tier
 
     results =
-      Enum.map(batch, fn chunk ->
-        process_chunk(job.params, chunk, any_tier)
+      Enum.map(batch, fn blob ->
+        process_blob(job.params, blob, any_tier)
       end)
 
     successes = Enum.count(results, &match?(:ok, &1))
@@ -138,10 +156,10 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   end
 
   defp build_description(completed, total, nil),
-    do: "Evacuating chunks (#{completed}/#{total})"
+    do: "Evacuating blobs (#{completed}/#{total})"
 
   defp build_description(completed, total, last_error) do
-    "Evacuating chunks (#{completed}/#{total}) — last error: #{normalise_evac_reason(last_error)}"
+    "Evacuating blobs (#{completed}/#{total}) — last error: #{normalise_evac_reason(last_error)}"
   end
 
   @doc false
@@ -172,7 +190,22 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   defp describe_posix(p) when is_atom(p), do: Atom.to_string(p)
   defp describe_posix(p), do: inspect(p)
 
-  defp process_chunk(params, chunk, any_tier) do
+  defp process_blob(params, blob, any_tier) do
+    case ChunkIndex.lookup_by_hash(blob.hash) do
+      {:ok, chunk} -> process_tracked_chunk(params, chunk, any_tier)
+      :not_found -> migrate_untracked_blob(params, blob, any_tier)
+    end
+  rescue
+    error ->
+      Logger.warning("Evacuation error processing blob",
+        chunk_hash: Base.encode16(blob.hash, case: :lower),
+        error: inspect(error)
+      )
+
+      {:error, error}
+  end
+
+  defp process_tracked_chunk(params, chunk, any_tier) do
     node = params.node
     drive_id = params.drive_id
 
@@ -192,14 +225,21 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
       true ->
         migrate_chunk(params, chunk, any_tier)
     end
-  rescue
-    error ->
-      Logger.warning("Evacuation error processing chunk",
-        chunk_hash: Base.encode16(chunk.hash, case: :lower),
-        error: inspect(error)
-      )
+  end
 
-      {:error, error}
+  defp migrate_untracked_blob(params, blob, any_tier) do
+    blob_tier_atom = String.to_atom(blob.tier)
+
+    case select_target_drive(params, blob_tier_atom, any_tier) do
+      {:ok, target} ->
+        case BlobStore.migrate_blob_file(blob, target.id) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:migration_failed, reason, target.id}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp delete_chunk_copy(params, chunk) do
@@ -333,9 +373,11 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   ## Private — Completion
 
-  defp complete_evacuation(job) do
+  defp finalise_evacuation(job) do
     node = job.params.node
     drive_id = job.params.drive_id
+
+    rewrite_drive_locations(job)
 
     # Verify drive is truly empty
     has_data =
@@ -383,6 +425,90 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     end
   end
 
+  ## Private — `drive_locations` rewrite
+
+  # After every blob has been migrated off the evacuating drive, walk all
+  # volume roots in the Ra-replicated bootstrap layer and swap any
+  # `drive_locations` entry that still points at the evacuating drive for
+  # a same-node replacement drive. Without this step, the next
+  # `MetadataReader` walk for an affected volume would try to read tree
+  # pages from a drive that no longer exists.
+  defp rewrite_drive_locations(job) do
+    evac_node = job.params.node
+    evac_drive = job.params.drive_id
+    any_tier = job.params.any_tier
+
+    volume_roots =
+      case RaSupervisor.local_query(&MetadataStateMachine.get_volume_roots/1) do
+        {:ok, map} when is_map(map) -> map
+        _ -> %{}
+      end
+
+    Enum.each(volume_roots, fn {volume_id, entry} ->
+      maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive, any_tier)
+    end)
+  end
+
+  defp maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive, any_tier) do
+    drive_locations = Map.get(entry, :drive_locations, [])
+
+    if contains_location?(drive_locations, evac_node, evac_drive) do
+      log_rewrite_result(
+        volume_id,
+        evac_drive,
+        rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive, any_tier)
+      )
+    end
+  end
+
+  defp log_rewrite_result(_volume_id, _evac_drive, :ok), do: :ok
+
+  defp log_rewrite_result(volume_id, evac_drive, {:error, reason}) do
+    Logger.warning("Failed to rewrite drive_locations for volume",
+      volume_id: volume_id,
+      drive_id: evac_drive,
+      reason: inspect(reason)
+    )
+  end
+
+  defp contains_location?(locations, node, drive_id) do
+    Enum.any?(locations, &(&1.node == node and &1.drive_id == drive_id))
+  end
+
+  defp rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive, any_tier) do
+    case select_target_drive(%{node: evac_node, drive_id: evac_drive}, :hot, any_tier) do
+      {:error, reason} ->
+        {:error, reason}
+
+      {:ok, target} ->
+        replacement = %{node: target.node, drive_id: target.id}
+
+        new_locations =
+          drive_locations
+          |> Enum.reject(&(&1.node == evac_node and &1.drive_id == evac_drive))
+          |> maybe_append(replacement)
+
+        command =
+          {:update_volume_root, volume_id,
+           %{drive_locations: new_locations, durability_cache: entry.durability_cache}}
+
+        case RaSupervisor.command(command) do
+          {:ok, :ok, _leader} -> :ok
+          {:ok, {:error, reason}, _leader} -> {:error, reason}
+          {:error, _} = err -> err
+          other -> {:error, other}
+        end
+    end
+  end
+
+  defp maybe_append(locations, location) do
+    if Enum.any?(locations, &(&1.node == location.node and &1.drive_id == location.drive_id)) do
+      locations
+    else
+      locations ++ [location]
+    end
+  end
+
   defp deregister_drive(node, drive_id) do
     if node == Node.self() do
       DriveManager.remove_drive(drive_id, force: true)
@@ -399,18 +525,30 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   ## Private — Helpers
 
-  defp list_remaining_chunks(node, drive_id) do
-    if node == Node.self() do
-      ChunkIndex.list_by_drive(node, drive_id)
-    else
-      case :rpc.call(node, ChunkIndex, :list_by_drive, [node, drive_id], 30_000) do
-        result when is_list(result) ->
-          result
-
-        {:badrpc, reason} ->
-          Logger.warning("Failed to list chunks on node", node: node, reason: inspect(reason))
-          []
+  defp list_remaining_blobs(node, drive_id) do
+    result =
+      if node == Node.self() do
+        BlobStore.list_drive_blobs(drive_id)
+      else
+        case :rpc.call(node, BlobStore, :list_drive_blobs, [drive_id], 30_000) do
+          {:ok, _} = ok -> ok
+          {:error, _} = err -> err
+          {:badrpc, reason} -> {:error, {:rpc_error, reason}}
+        end
       end
+
+    case result do
+      {:ok, blobs} ->
+        blobs
+
+      {:error, reason} ->
+        Logger.warning("Failed to enumerate drive blobs",
+          node: node,
+          drive_id: drive_id,
+          reason: inspect(reason)
+        )
+
+        []
     end
   end
 
