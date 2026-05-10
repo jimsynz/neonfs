@@ -51,4 +51,46 @@ defmodule NeonFS.Containerd.SupervisorTest do
     children = Supervisor.which_children(NeonFS.Containerd.Supervisor)
     assert children == []
   end
+
+  describe "log_grpc_exception?/1 (#952)" do
+    test "drops :not_found RPCError exceptions" do
+      # `GRPC.RPCError.exception(:not_found)` resolves the atom to the
+      # integer status code (5) via GRPC.Status — the struct stores
+      # the int. Use the constructor so the test mirrors what the
+      # gRPC adapter actually produces at runtime.
+      report = %GRPC.Server.Adapters.ReportException{
+        kind: :error,
+        reason: GRPC.RPCError.exception(status: :not_found, message: "blob not found"),
+        stack: [],
+        adapter_extra: []
+      }
+
+      refute NeonFS.Containerd.Supervisor.log_grpc_exception?(report)
+    end
+
+    test "logs other RPCError statuses" do
+      for status <- [:internal, :invalid_argument, :failed_precondition, :unavailable] do
+        report = %GRPC.Server.Adapters.ReportException{
+          kind: :error,
+          reason: GRPC.RPCError.exception(status: status, message: "..."),
+          stack: [],
+          adapter_extra: []
+        }
+
+        assert NeonFS.Containerd.Supervisor.log_grpc_exception?(report),
+               "expected #{status} to be logged"
+      end
+    end
+
+    test "logs non-RPCError exceptions" do
+      report = %GRPC.Server.Adapters.ReportException{
+        kind: :error,
+        reason: %RuntimeError{message: "something else exploded"},
+        stack: [],
+        adapter_extra: []
+      }
+
+      assert NeonFS.Containerd.Supervisor.log_grpc_exception?(report)
+    end
+  end
 end
