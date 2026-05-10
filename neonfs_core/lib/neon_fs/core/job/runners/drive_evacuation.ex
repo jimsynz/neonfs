@@ -17,10 +17,10 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   alias NeonFS.Core.{
     BlobStore,
     ChunkIndex,
+    ChunkMeta,
     Drive,
     DriveManager,
     DriveRegistry,
-    FileIndex,
     TierMigration,
     VolumeRegistry
   }
@@ -415,27 +415,16 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   end
 
   defp target_replicas_for_chunk(chunk) do
-    volume_id = get_volume_for_chunk(chunk)
-
-    case volume_id do
+    case ChunkMeta.any_volume_id(chunk) do
       nil ->
         3
 
-      vid ->
-        case VolumeRegistry.get(vid) do
+      volume_id ->
+        case VolumeRegistry.get(volume_id) do
           {:ok, volume} -> volume.durability.factor
           _ -> 3
         end
     end
-  end
-
-  defp get_volume_for_chunk(chunk) do
-    FileIndex.list_all()
-    |> Enum.find_value(fn file ->
-      if chunk.hash in file.chunks, do: file.volume_id
-    end)
-  rescue
-    _ -> nil
   end
 
   defp handle_rpc_result({:badrpc, reason}), do: {:error, {:rpc_error, reason}}
