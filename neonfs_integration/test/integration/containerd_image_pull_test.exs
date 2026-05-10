@@ -55,8 +55,6 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
   @image_ref "#{@registry_host}/neonfs-test-image:v1"
 
   describe "image pull through containerd proxy plugin" do
-    @tag skip:
-           "ctr content fetch / image pull incompatibility with our proxy plugin parked under #741"
     test "every layer blob lands in the dedicated NeonFS volume" do
       cluster = start_cluster()
       daemon = start_daemon(cluster)
