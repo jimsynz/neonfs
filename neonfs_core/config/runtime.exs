@@ -26,12 +26,6 @@ if config_env() == :prod do
   config :ra,
     data_dir: String.to_charlist("#{data_dir}/ra")
 
-  # Default drive configuration — used when cluster.json has no drives
-  # (fresh install, before `neonfs-cli drive add`).
-  # At startup, Application.start/2 loads drives from cluster.json and
-  # overrides this default via Application.put_env/3.
-  drives = [%{id: "default", path: "#{data_dir}/blobs", tier: :hot, capacity: 0}]
-
   # ChunkCache memory limit (bytes) — default 256 MiB
   # config :neonfs_core, chunk_cache_max_memory: 536_870_912  # 512 MiB
 
@@ -40,10 +34,19 @@ if config_env() == :prod do
     service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
 
   # Core configuration
+  #
+  # Fresh installs come up with no drives configured (#754). Operators
+  # run `neonfs drive add ...` after `cluster init` to register
+  # production storage; the daemon refuses to accept writes until at
+  # least one drive is registered. The previous behaviour
+  # auto-registered a `default` drive at `<data_dir>/blobs`, which
+  # produced an awkward `<data_dir>/blobs/blobs/` doubling on disk
+  # and quietly held the only metadata replicas in single-node
+  # deployments — both fixed by requiring explicit drive registration.
   config :neonfs_core,
     blob_store_base_dir: "#{data_dir}/blobs",
     blob_store_prefix_depth: String.to_integer(System.get_env("NEONFS_PREFIX_DEPTH", "2")),
-    drives: drives,
+    drives: [],
     enable_ra: enable_ra,
     meta_dir: "#{data_dir}/meta",
     ra_data_dir: "#{data_dir}/ra",

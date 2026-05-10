@@ -348,7 +348,7 @@ The FUSE node's service discovery layer (`NeonFS.Client.Discovery`) will automat
 
 ### Drive management
 
-Drives are managed at runtime via the CLI and persisted to `cluster.json`. A fresh node starts with a single default drive at `{NEONFS_DATA_DIR}/blobs`; use `drive add` to configure production storage.
+Drives are managed at runtime via the CLI and persisted to `cluster.json`. A fresh node starts with **no drives configured** — the daemon refuses writes until at least one drive is registered (#754). Run `neonfs drive add ...` after `cluster init` to attach storage.
 
 #### Adding a drive
 

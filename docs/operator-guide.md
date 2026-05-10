@@ -311,7 +311,7 @@ Deletion removes the volume's metadata immediately; chunk reclamation happens as
 
 Drives are the physical storage units that hold blob chunks. Each core node owns zero or more drives, each assigned to one tier (`hot`, `warm`, `cold`).
 
-A fresh node starts with one default drive at `$NEONFS_DATA_DIR/blobs`. Production nodes add dedicated drives and often drop the default.
+A fresh node starts with **no drives configured** — the daemon refuses to accept writes until at least one drive is registered. Run `neonfs drive add ...` after `cluster init` to attach storage. This is deliberate: it forces operators to think about disk topology before going live, and it avoids the data-directory layout footgun where the auto-registered default drive both doubled the on-disk path (`<data_dir>/blobs/blobs/...`) and silently held the only metadata replicas in single-node deployments.
 
 ### Adding a drive
 

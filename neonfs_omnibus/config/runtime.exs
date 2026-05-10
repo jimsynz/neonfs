@@ -16,8 +16,6 @@ if config_env() == :prod do
   config :ra,
     data_dir: String.to_charlist("#{data_dir}/ra")
 
-  drives = [%{id: "default", path: "#{data_dir}/blobs", tier: :hot, capacity: 0}]
-
   # Client infrastructure — shared across every service in omnibus mode
   # (core, fuse, nfs, s3, webdav, docker)
   config :neonfs_client,
@@ -25,10 +23,15 @@ if config_env() == :prod do
     service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
 
   # Core configuration
+  #
+  # Fresh installs come up with no drives configured (#754). Operators
+  # run `neonfs drive add ...` after `cluster init` to register
+  # production storage; the daemon refuses writes until at least one
+  # drive is registered.
   config :neonfs_core,
     blob_store_base_dir: "#{data_dir}/blobs",
     blob_store_prefix_depth: String.to_integer(System.get_env("NEONFS_PREFIX_DEPTH", "2")),
-    drives: drives,
+    drives: [],
     enable_ra: enable_ra,
     meta_dir: "#{data_dir}/meta",
     ra_data_dir: "#{data_dir}/ra",
