@@ -92,9 +92,35 @@ defmodule NeonFS.Containerd.Supervisor do
           endpoint: NeonFS.Containerd.Endpoint,
           port: port,
           start_server: true,
-          adapter_opts: [ip: {127, 0, 0, 1}]}}
+          adapter_opts: [ip: {127, 0, 0, 1}],
+          exception_log_filter: {__MODULE__, :log_grpc_exception?}}}
     end
   end
+
+  @doc """
+  Filter for `GRPC.Server.Supervisor`'s `:exception_log_filter` —
+  drops noisy `:not_found` exceptions emitted by `Status` / `Info` /
+  `Delete` during normal containerd pull behaviour, where containerd
+  probes for blobs / writers it knows might not exist.
+
+  Everything else still logs as before.
+  """
+  # `ReportException` doesn't define a `t/0` type, so spec is on the
+  # generic struct. Pattern matching enforces the shape at runtime.
+  @spec log_grpc_exception?(struct()) :: boolean()
+  # `GRPC.RPCError.status` is the integer gRPC status code (e.g. `5`
+  # for NOT_FOUND), not the atom — `RPCError.exception/1` resolves
+  # the atom to its number via `GRPC.Status` at construction time.
+  # Matching on the atom would miss everything; match on the code.
+  @grpc_status_not_found 5
+
+  def log_grpc_exception?(%GRPC.Server.Adapters.ReportException{
+        reason: %GRPC.RPCError{status: @grpc_status_not_found}
+      }) do
+    false
+  end
+
+  def log_grpc_exception?(_), do: true
 
   defp prepare_socket(socket_path) do
     socket_dir = Path.dirname(socket_path)
@@ -108,7 +134,8 @@ defmodule NeonFS.Containerd.Supervisor do
           endpoint: NeonFS.Containerd.Endpoint,
           port: 0,
           start_server: true,
-          adapter_opts: [ip: {:local, socket_path}]}}
+          adapter_opts: [ip: {:local, socket_path}],
+          exception_log_filter: {__MODULE__, :log_grpc_exception?}}}
 
       {:error, reason} when reason in @skip_errors ->
         {:skip,
