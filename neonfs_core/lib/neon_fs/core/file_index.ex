@@ -61,7 +61,9 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Options
 
-    * `:quorum_opts` — keyword list passed to QuorumCoordinator (must include `:ring`).
+  None currently. Per-volume metadata reader/writer opts are read
+  from `:persistent_term` at call time (post-#792 — see
+  `NeonFS.Core.Volume.MetadataReader` / `Volume.MetadataWriter`).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do

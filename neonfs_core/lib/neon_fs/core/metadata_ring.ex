@@ -6,8 +6,10 @@ defmodule NeonFS.Core.MetadataRing do
   and segments to replica sets. Uses SHA-256 for ring positions and virtual
   nodes (default 64 per physical node) for even distribution.
 
-  This is a pure data structure — no GenServer, no side effects. The
-  QuorumCoordinator (task 0084) uses this ring to determine routing.
+  This is a pure data structure — no GenServer, no side effects.
+  Post-#792 the per-segment metadata quorum store is gone; this ring
+  now only exists for `NeonFS.Core.LockManager.GraceCoordinator`'s
+  membership-change book-keeping.
 
   ## Segments
 

@@ -1,109 +1,86 @@
 # NeonFS Core — Agent Notes
 
-Module-local notes for the Ra / QuorumCoordinator-backed managers that
+Module-local notes for the Ra / per-volume metadata managers that
 live in this directory. Durable conventions; updated when behaviour
 changes.
 
-## QuorumCoordinator-backed indexes: cache coherence
+## Per-volume metadata model (post #750 / #792)
 
 Applies to `ChunkIndex`, `FileIndex`, `StripeIndex`.
 
-These modules front `QuorumCoordinator.quorum_read/2` with a local
-public ETS table (`:chunk_index`, `:file_index_by_id`, `:stripe_index`).
-Unlike the Ra-backed managers (see #341), the underlying store is
-leaderless and network-dependent, so the ETS table is genuinely useful
-for avoiding per-call RPCs on this node — but it is **not a coherent
-distributed cache**.
+Each volume has three index trees (`file_index`, `chunk_index`,
+`stripe_index`) stored as ordinary content-addressed chunks under the
+volume's `drive_locations`. The trees are reached from the
+Ra-replicated *bootstrap pointer* (`MetadataStateMachine.get_volume_root/2`)
+which carries the current `root_chunk_hash` and `drive_locations`.
 
-### Coherence model (as of #342)
+The bootstrap pointer is consensus-strong; tree pages and data chunks
+are eventually-consistent (replicated by background runners, see
+below).
 
-The four dimensions investigated:
+### Read paths
 
-1. **Cross-node write visibility.** `QuorumCoordinator.quorum_write`
-   dispatches `MetadataStore.write` to each replica in the ring — not
-   `ChunkIndex.put`. So a write committed on node A replicates to B's
-   `MetadataStore` (and disk) but **does not** update B's `:chunk_index`
-   ETS. A subsequent read on B that hits the ETS serves the old value.
+- `*Index.get/2`, `exists?/2` front the per-volume `MetadataReader`
+  (`NeonFS.Core.Volume.MetadataReader`). MetadataReader walks
+  bootstrap → root segment → index tree.
+- Read-path cross-node fallback (#947): if the local node's drive
+  doesn't have the canonical tree pages yet, MetadataReader RPCs the
+  call to a remote node listed in `drive_locations`. Replicas
+  converge as readers ask.
 
-2. **Read-repair interaction.** `QuorumCoordinator.trigger_read_repair`
-   targets the remote `MetadataStore` via `dispatch_write`. The stale
-   replica's underlying store is healed; its ETS cache is not.
+ETS tables (`:chunk_index`, `:file_index_by_id`, `:stripe_index`) are
+**local materialisations** — populated by recent local writes and by
+successful MetadataReader reads — used as fast paths for list
+operations (`list_all/0`, `list_by_node/1`, etc). They do **not**
+guarantee cluster-wide truth; the canonical view is the per-volume
+index tree.
 
-3. **Delete propagation.** `quorum_delete` writes a tombstone to each
-   replica's `MetadataStore` but only clears the originating node's
-   ETS. Remote nodes with the key cached continue to return it from
-   ETS hits.
+### Write paths
 
-4. **Partition-heal behaviour.** There is no eviction or
-   invalidation mechanism. Entries cached before the partition persist
-   indefinitely afterwards unless the process restarts or the key is
-   written again locally.
+- `*Index.put/1`, `delete/1`, `update_*/2` front the per-volume
+  `MetadataWriter` (`NeonFS.Core.Volume.MetadataWriter`). The writer
+  runs the index-tree NIF op against a local drive's store handle,
+  builds a new root segment, replicates the segment chunk via
+  `ChunkReplicator`, then CAS-updates the bootstrap pointer through
+  Ra.
 
-### Fix applied in #342
+### Background convergence
 
-**Point reads (`get/1`, `exists?/1`) on all three indexes always go
-through `QuorumCoordinator.quorum_read/2`.** The ETS table is no
-longer consulted on the read path. Coherence for user-facing reads is
-now backed by the quorum protocol — latest HLC wins, tombstones
-resolve, read-repair triggers on divergence.
+- **`Job.Runners.VolumeAntiEntropy` (#921)** walks each volume's
+  `chunk_index`, asks every declared `location.node` whether the
+  chunk exists locally, and enqueues `ReplicaRepair.repair_chunks/2`
+  for gaps. Dispatched periodically by `VolumeAntiEntropyScheduler`
+  (default 1h cadence) per `RootSegment.schedules.anti_entropy`.
+- **`ReplicaRepair.repair_volume/2`** scans `ChunkIndex` for chunks
+  below target replication factor and re-replicates. Periodic via
+  `ReplicaRepairScheduler`.
+- **`Job.Runners.Scrub`** reads each chunk on local drives, verifies
+  the SHA-256 matches, flags bit-rot. Per-volume cadence in
+  `RootSegment.schedules.scrub`.
 
-The ETS remains as a **write-through materialisation**:
+### List operations
 
-- Local writes (`put`, `delete`) still insert/delete the local ETS
-  entry on success.
-- `get_from_quorum` still populates ETS on successful remote reads (a
-  side-effect — nothing reads this back for point lookups, but it
-  keeps list-operation visibility consistent with the previous
-  behaviour on this node).
-- `load_from_local_store` on boot still seeds ETS from locally-persisted
-  `MetadataStore` segments.
+`list_all/0`, `list_by_volume/1`, `list_by_node/1`, etc still iterate
+the local ETS. They see:
 
-Performance: every point read now does a quorum_read. For hot paths
-that resolved thousands of chunks per file read, this is a measurable
-regression. A follow-up (see the issue trail off #342) evaluates
-TTL-invalidated caching or distributed cache invalidation for a
-perf-recoverable fix — don't put the ETS-first check back in without
-that design.
+- Entries written locally.
+- Entries observed via successful local reads.
+- Entries restored from local DETS at boot.
 
-### Known limitations still open
-
-**List operations** (`list_all/0`, `list_by_volume/1`,
-`list_by_location/1`, `list_by_node/1`, `list_by_drive/2`,
-`list_uncommitted/0`, `ChunkIndex.get_chunks_for_volume/1`) still
-iterate the local ETS. They see:
-
-- Entries written locally (via `put`, `update_locations`, etc.).
-- Entries read via `get/1` / quorum read on this node (via the
-  populate-on-read side-effect in `get_from_quorum`).
-- Entries restored from local on-disk `MetadataStore` at boot.
-
-They do **not** see entries written by other nodes that were never
-read locally, and they **will** see entries that were deleted
-elsewhere and not yet expunged locally. Callers treat these as
-node-local maintenance views (scrub, GC, tiering — all per-node
-schedulers). They are not safe for cluster-wide truth queries.
-
-A follow-up is tracked to replace these with a cluster-wide iteration
-API (scan via `MetadataStore.list_all/1` across replicas, or a
-materialised aggregate).
-
-**Internal write-path reads** (`FileIndex.fetch_file/2`, the
-`:ets.lookup(:chunk_index, …)` in `ChunkIndex.handle_call` write-path
-clauses) still read from ETS first. These are read-modify-write
-sequences where staleness can cause a lost-update. HLC-LWW in
-`QuorumCoordinator.quorum_write` masks the raw correctness issue, but
-semantic-version bumps (e.g. `FileMeta.update/2`) are vulnerable. A
-follow-up is tracked to route write-path reads through quorum too.
+They do **not** see entries written elsewhere that were never read
+locally. Callers treat these as node-local maintenance views (scrub,
+GC, tiering — all per-node schedulers). They are not safe for
+cluster-wide truth queries. For cluster-wide reads use the canonical
+`MetadataReader.range/5` path.
 
 ## General reminders for this directory
 
 - `Process.flag(:trap_exit, true)` in `init/1` — without it,
   `terminate/2` is never called on supervisor shutdown.
-- `:ra_not_available` fallbacks that write to ETS (still present in
-  some legacy managers pending #341 slices) look like resilience but
-  silently desynchronise the cluster — never add new ones.
 - Ra `consistent_query` goes via the leader; `local_query` reads the
-  local replica synchronously (see `RaSupervisor.local_query/2` once
-  #345 lands). Prefer local_query for orchestration-layer reads; the
-  state machine apply is synchronous so every replica has the same
-  state after commit.
+  local replica synchronously (`RaSupervisor.local_query/2`). The
+  per-volume `MetadataReader` uses `consistent_query` for the
+  bootstrap-pointer lookup so reads are linearisable against writes.
+- Tree-page replication is currently per-write to a single local
+  drive only — replicas catch up via anti-entropy or read-path
+  fallback. See #903 / #955 for the fan-out-at-write-time follow-up.

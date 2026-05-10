@@ -399,12 +399,14 @@ defmodule NeonFS.Integration.QuorumTest do
         ])
 
       # Node2 must report the file gone. Pre-#342 the ETS-first check
-      # returned the stale {:ok, file}; the fix routes get/1 through
-      # QuorumCoordinator.quorum_read, which sees the tombstone and
-      # returns :not_found.
+      # returned the stale {:ok, file}; the fix routes get/2 through
+      # the per-volume `MetadataReader` which walks the canonical
+      # index tree from the bootstrap-pointer (post #792) and sees
+      # the tombstone, returning :not_found.
       #
-      # Quorum writes ack at W=2 but the third replica's apply is async —
-      # poll briefly so we do not race the tombstone replication.
+      # Bootstrap-pointer updates ack at Ra quorum but tree-page
+      # replication is eventual; poll briefly so we do not race the
+      # cross-node fetch (#947 fallback).
       assert_eventually timeout: 10_000 do
         PeerCluster.rpc(cluster, :node2, NeonFS.Core.FileIndex, :get, [file.volume_id, file.id]) ==
           {:error, :not_found}
