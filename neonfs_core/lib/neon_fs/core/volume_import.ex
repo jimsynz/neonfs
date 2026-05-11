@@ -16,6 +16,7 @@ defmodule NeonFS.Core.VolumeImport do
   `--verify` are tracked as follow-ups.
   """
 
+  alias NeonFS.Core.FileIndex
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
 
@@ -77,7 +78,7 @@ defmodule NeonFS.Core.VolumeImport do
   defp do_import(io, input_path, new_volume_name) do
     with {:ok, manifest, io} <- read_manifest(io),
          {:ok, volume} <- VolumeRegistry.create(new_volume_name, []),
-         {:ok, counts} <- stream_files_into(io, volume) do
+         {:ok, counts} <- stream_files_into(io, volume, manifest_index(manifest)) do
       with :ok <- check_manifest_counts(manifest, counts) do
         {:ok,
          %{
@@ -149,24 +150,24 @@ defmodule NeonFS.Core.VolumeImport do
 
   ## File entries
 
-  defp stream_files_into(io, volume) do
-    stream_files_loop(io, volume, %{file_count: 0, byte_count: 0})
+  defp stream_files_into(io, volume, file_index_by_path) do
+    stream_files_loop(io, volume, %{file_count: 0, byte_count: 0}, file_index_by_path)
   end
 
-  defp stream_files_loop(io, volume, counts) do
+  defp stream_files_loop(io, volume, counts, idx) do
     case read_next_entry(io) do
       {:eof, _io} ->
         {:ok, counts}
 
       {:ok, %{name: @files_prefix <> path, size: size, typeflag: ?0}, io} ->
-        case write_file_entry(io, volume, path, size) do
+        case write_file_entry(io, volume, path, size, idx) do
           {:ok, io} ->
             new_counts = %{
               file_count: counts.file_count + 1,
               byte_count: counts.byte_count + size
             }
 
-            stream_files_loop(io, volume, new_counts)
+            stream_files_loop(io, volume, new_counts, idx)
 
           {:error, _} = err ->
             err
@@ -182,20 +183,111 @@ defmodule NeonFS.Core.VolumeImport do
     end
   end
 
-  defp write_file_entry(io, volume, path, size) do
+  defp write_file_entry(io, volume, path, size, idx) do
     {body_stream, finish_fn} = body_stream(io, size)
 
     case WriteOperation.write_file_streamed(volume.id, "/" <> path, body_stream) do
-      {:ok, _file_meta} ->
+      {:ok, file_meta} ->
         # `write_file_streamed` consumed the stream, advancing the
         # underlying IO device by `size` bytes. Now skip the ustar
         # padding to land at the next entry's header.
-        finish_fn.()
+        with {:ok, io} <- finish_fn.() do
+          :ok = maybe_restore_metadata(file_meta, idx, path)
+          {:ok, io}
+        end
 
       err ->
         err
     end
   end
+
+  # If the manifest carried ACLs / xattrs / default_acl for this
+  # path, apply them via `FileIndex.update/2` after the file's
+  # content is written. The fields are absent when the export ran
+  # without `--include-acls` / `--include-system-xattrs`.
+  defp maybe_restore_metadata(file_meta, idx, path) do
+    case Map.get(idx, "/" <> path) do
+      nil ->
+        :ok
+
+      entry ->
+        updates = manifest_entry_to_updates(entry)
+        if updates == [], do: :ok, else: apply_updates(file_meta.id, updates)
+    end
+  end
+
+  defp manifest_entry_to_updates(entry) do
+    []
+    |> maybe_add_acl(entry, "acl_entries", :acl_entries)
+    |> maybe_add_acl(entry, "default_acl", :default_acl)
+    |> maybe_add_xattrs(entry)
+  end
+
+  defp maybe_add_acl(updates, entry, key, field) do
+    case Map.get(entry, key) do
+      nil -> updates
+      decoded -> [{field, decode_acl_entries(decoded)} | updates]
+    end
+  end
+
+  defp maybe_add_xattrs(updates, %{"xattrs" => xattrs}) when is_map(xattrs) do
+    [{:xattrs, decode_xattrs(xattrs)} | updates]
+  end
+
+  defp maybe_add_xattrs(updates, _entry), do: updates
+
+  defp decode_acl_entries(list) when is_list(list) do
+    Enum.map(list, fn entry ->
+      %{
+        type: String.to_existing_atom(entry["type"]),
+        id: entry["id"],
+        permissions:
+          entry
+          |> Map.get("permissions", [])
+          |> Enum.map(&String.to_existing_atom/1)
+          |> MapSet.new()
+      }
+    end)
+  end
+
+  defp decode_acl_entries(_), do: []
+
+  defp decode_xattrs(map) do
+    Map.new(map, fn {k, v} ->
+      {decode_base64(k), decode_base64(v)}
+    end)
+  end
+
+  defp decode_base64(bin) do
+    case Base.decode64(bin) do
+      {:ok, decoded} -> decoded
+      _ -> bin
+    end
+  end
+
+  defp apply_updates(file_id, updates) do
+    case FileIndex.update(file_id, updates) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        # Metadata restore failure isn't fatal — the content is
+        # already written. Log + continue.
+        Logger.warning(
+          "VolumeImport: failed to restore metadata for #{file_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  # Index the manifest's per-file entries by `path` so the streamer
+  # can pluck the right entry as it processes each tar entry.
+  defp manifest_index(%{"files" => files}) when is_list(files) do
+    Map.new(files, fn entry -> {entry["path"], entry} end)
+  end
+
+  defp manifest_index(_), do: %{}
 
   # Returns `{stream, finish_fn}` where `stream` lazily reads up to
   # `size` bytes from `io` in `@read_chunk` chunks, and `finish_fn`
