@@ -18,6 +18,7 @@ defmodule NeonFS.Cluster.Init do
   alias NeonFS.Core.{
     CertificateAuthority,
     DriveManager,
+    DriveRegistry,
     RaServer,
     ServiceRegistry,
     SystemVolume,
@@ -38,22 +39,34 @@ defmodule NeonFS.Cluster.Init do
   1. Generate cluster/node IDs and master key
   2. Save cluster state to disk
   3. Bootstrap single-node Ra cluster
-  4. Create system volume
-  5. Write cluster identity file
-  6. Generate cluster CA
-  7. Issue first node certificate
+  4. Register the initial drive (if `drive_config` was supplied) so the
+     system volume has somewhere to write its root segment
+  5. Create system volume
+  6. Write cluster identity file
+  7. Generate cluster CA
+  8. Issue first node certificate
+
+  `drive_config` shape matches `NeonFS.Core.DriveManager.add_drive/1`:
+  `%{path: <required>, tier: "hot" | "warm" | "cold", id: <optional>,
+  capacity: <optional>}`. Pass `nil` to fall back to drives configured
+  via the `:neonfs_core, :drives` application environment (the legacy
+  path used by tests and pre-configured deployments).
 
   ## Errors
   - `{:error, :already_initialised}` - cluster state already exists
   - `{:error, :node_not_named}` - Erlang node not named (required for Ra)
   - `{:error, :ra_start_failed}` - Ra cluster failed to start
+  - `{:error, :no_drives_available}` - no `drive_config` supplied AND no
+    drives registered locally; the system volume has nowhere to land
+  - `{:error, {:initial_drive_failed, reason}}` - registering the
+    supplied `drive_config` failed (path missing, not writable, etc.)
   - `{:error, :system_volume_failed}` - system volume creation failed
   - `{:error, :identity_write_failed}` - cluster identity write failed
   - `{:error, {:ca_init_failed, reason}}` - CA initialisation failed
   - `{:error, {:node_cert_failed, reason}}` - first node certificate issuance failed
   """
-  @spec init_cluster(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def init_cluster(cluster_name) do
+  @spec init_cluster(String.t(), map() | nil) :: {:ok, String.t()} | {:error, term()}
+  def init_cluster(cluster_name, drive_config \\ nil) do
     cond do
       State.exists?() ->
         {:error, :already_initialised}
@@ -62,13 +75,13 @@ defmodule NeonFS.Cluster.Init do
         {:error, :node_not_named}
 
       true ->
-        do_init_cluster(cluster_name)
+        do_init_cluster(cluster_name, drive_config)
     end
   end
 
   # Private implementation
 
-  defp do_init_cluster(cluster_name) do
+  defp do_init_cluster(cluster_name, drive_config) do
     cluster_id = generate_cluster_id()
     node_id = generate_node_id()
     master_key = generate_master_key()
@@ -85,7 +98,9 @@ defmodule NeonFS.Cluster.Init do
 
     with :ok <- State.save(state),
          :ok <- RaServer.init_cluster(),
+         :ok <- maybe_add_initial_drive(drive_config),
          :ok <- DriveManager.register_local_drives_in_bootstrap(),
+         :ok <- ensure_drive_available(),
          {:ok, _volume} <- create_system_volume(),
          :ok <- write_cluster_identity(cluster_name),
          {:ok, _ca_cert, _ca_key} <- init_cluster_ca(cluster_name),
@@ -96,6 +111,27 @@ defmodule NeonFS.Cluster.Init do
     else
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp maybe_add_initial_drive(nil), do: :ok
+
+  defp maybe_add_initial_drive(drive_config) when is_map(drive_config) do
+    case DriveManager.add_drive(drive_config) do
+      {:ok, _drive_map} -> :ok
+      {:error, reason} -> {:error, {:initial_drive_failed, reason}}
+    end
+  end
+
+  # Guards step 5 (system-volume creation) from running on a cluster
+  # with no drives — that would deadlock the bootstrap because the
+  # system volume needs a drive to land its root segment on. Run after
+  # both the `--drive` add and the legacy `register_local_drives_in_bootstrap`
+  # path so either source counts.
+  defp ensure_drive_available do
+    case DriveRegistry.drives_for_node(Node.self()) do
+      [] -> {:error, :no_drives_available}
+      [_ | _] -> :ok
     end
   end
 

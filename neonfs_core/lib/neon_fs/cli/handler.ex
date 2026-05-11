@@ -93,16 +93,23 @@ defmodule NeonFS.CLI.Handler do
 
   ## Parameters
   - `cluster_name` - Name for the new cluster (string)
+  - `drive_config` (optional) - Map describing the first drive to register
+    as part of bootstrap. Shape: `%{"path" => path, "tier" => "hot" |
+    "warm" | "cold"}`. Without it the bootstrap falls back to drives
+    registered via the `:neonfs_core, :drives` application environment;
+    a freshly-installed daemon ships with none, so the CLI should always
+    supply a drive.
 
   ## Returns
   - `{:ok, map}` - Success map with cluster_id
   - `{:error, reason}` - Error tuple
   """
-  @spec cluster_init(String.t()) :: {:ok, map()} | {:error, term()}
-  def cluster_init(cluster_name) when is_binary(cluster_name) do
+  @spec cluster_init(String.t(), map() | nil) :: {:ok, map()} | {:error, term()}
+  def cluster_init(cluster_name, drive_config \\ nil)
+      when is_binary(cluster_name) and (is_map(drive_config) or is_nil(drive_config)) do
     set_cli_metadata()
 
-    case Init.init_cluster(cluster_name) do
+    case Init.init_cluster(cluster_name, drive_config) do
       {:ok, cluster_id} ->
         # Load the state to get full details
         case State.load() do
@@ -123,6 +130,18 @@ defmodule NeonFS.CLI.Handler do
 
       {:error, :already_initialised} ->
         {:error, Invalid.exception(message: "Cluster already initialised")}
+
+      {:error, :no_drives_available} ->
+        {:error,
+         Invalid.exception(
+           message:
+             "No drives available — pass `--drive <path>` to `neonfs cluster init` " <>
+               "to designate the initial drive"
+         )}
+
+      {:error, {:initial_drive_failed, reason}} ->
+        {:error,
+         Invalid.exception(message: "Failed to register the initial drive: #{inspect(reason)}")}
 
       {:error, reason} ->
         {:error, wrap_error(reason)}
