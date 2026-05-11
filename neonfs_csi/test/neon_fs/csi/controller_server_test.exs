@@ -10,12 +10,16 @@ defmodule NeonFS.CSI.ControllerServerTest do
     ControllerPublishVolumeRequest,
     ControllerServiceCapability,
     ControllerUnpublishVolumeRequest,
+    CreateSnapshotRequest,
     CreateVolumeRequest,
+    DeleteSnapshotRequest,
     DeleteVolumeRequest,
     GetCapacityRequest,
+    ListSnapshotsRequest,
     ListVolumesRequest,
     ValidateVolumeCapabilitiesRequest,
-    VolumeCapability
+    VolumeCapability,
+    VolumeContentSource
   }
 
   alias NeonFS.Core.Volume
@@ -498,6 +502,317 @@ defmodule NeonFS.CSI.ControllerServerTest do
     test "rejects empty volume_id with INVALID_ARGUMENT" do
       assert_raise GRPC.RPCError, ~r/required/, fn ->
         ControllerServer.controller_get_volume(%ControllerGetVolumeRequest{volume_id: ""}, nil)
+      end
+    end
+  end
+
+  describe "ControllerGetCapabilities — snapshot capabilities (#967)" do
+    test "advertises CREATE_DELETE_SNAPSHOT, LIST_SNAPSHOTS, and CLONE_VOLUME" do
+      reply =
+        ControllerServer.controller_get_capabilities(%ControllerGetCapabilitiesRequest{}, nil)
+
+      types =
+        Enum.map(reply.capabilities, fn %ControllerServiceCapability{type: {:rpc, rpc}} ->
+          rpc.type
+        end)
+
+      assert :CREATE_DELETE_SNAPSHOT in types
+      assert :LIST_SNAPSHOTS in types
+      assert :CLONE_VOLUME in types
+    end
+  end
+
+  describe "CreateSnapshot" do
+    test "resolves the source volume by name and calls Snapshot.create/2" do
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_volume, ["my-vol"] ->
+          {:ok, sample_volume("my-vol", %{id: "vol-uuid-1"})}
+
+        NeonFS.Core.Snapshot, :create, ["vol-uuid-1", [name: "daily-snap"]] ->
+          send(test_pid, :create_called)
+
+          {:ok,
+           %{
+             id: "snap-uuid-1",
+             volume_id: "vol-uuid-1",
+             name: "daily-snap",
+             root_chunk_hash: <<1>>,
+             created_at: DateTime.from_unix!(1_700_000_000)
+           }}
+      end)
+
+      reply =
+        ControllerServer.create_snapshot(
+          %CreateSnapshotRequest{source_volume_id: "my-vol", name: "daily-snap"},
+          nil
+        )
+
+      assert_received :create_called
+      assert reply.snapshot.snapshot_id == "my-vol/snap-uuid-1"
+      assert reply.snapshot.source_volume_id == "my-vol"
+      assert reply.snapshot.ready_to_use == true
+      assert reply.snapshot.creation_time.seconds == 1_700_000_000
+    end
+
+    test "raises NOT_FOUND when the source volume is unknown" do
+      put_core(fn NeonFS.Core, :get_volume, _ -> {:error, :not_found} end)
+
+      assert_raise GRPC.RPCError, ~r/not found/, fn ->
+        ControllerServer.create_snapshot(
+          %CreateSnapshotRequest{source_volume_id: "ghost", name: "s"},
+          nil
+        )
+      end
+    end
+
+    test "raises INVALID_ARGUMENT with empty source_volume_id" do
+      assert_raise GRPC.RPCError, ~r/source_volume_id is required/, fn ->
+        ControllerServer.create_snapshot(
+          %CreateSnapshotRequest{source_volume_id: "", name: "s"},
+          nil
+        )
+      end
+    end
+
+    test "raises INVALID_ARGUMENT with empty name" do
+      assert_raise GRPC.RPCError, ~r/name is required/, fn ->
+        ControllerServer.create_snapshot(
+          %CreateSnapshotRequest{source_volume_id: "vol", name: ""},
+          nil
+        )
+      end
+    end
+  end
+
+  describe "DeleteSnapshot" do
+    test "decodes the CSI snapshot id and calls Snapshot.delete/2" do
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_volume, ["my-vol"] ->
+          {:ok, sample_volume("my-vol", %{id: "vol-uuid"})}
+
+        NeonFS.Core.Snapshot, :delete, ["vol-uuid", "snap-uuid"] ->
+          send(test_pid, :deleted)
+          :ok
+      end)
+
+      assert %_{} =
+               ControllerServer.delete_snapshot(
+                 %DeleteSnapshotRequest{snapshot_id: "my-vol/snap-uuid"},
+                 nil
+               )
+
+      assert_received :deleted
+    end
+
+    test "returns success for a malformed snapshot id (idempotent)" do
+      # No core_call_fn → would crash if we tried to call core.
+      assert %_{} =
+               ControllerServer.delete_snapshot(
+                 %DeleteSnapshotRequest{snapshot_id: "no-slash-here"},
+                 nil
+               )
+    end
+
+    test "returns success when the source volume is already gone" do
+      put_core(fn NeonFS.Core, :get_volume, _ -> {:error, :not_found} end)
+
+      assert %_{} =
+               ControllerServer.delete_snapshot(
+                 %DeleteSnapshotRequest{snapshot_id: "vanished/snap-uuid"},
+                 nil
+               )
+    end
+
+    test "raises INVALID_ARGUMENT with empty snapshot_id" do
+      assert_raise GRPC.RPCError, ~r/snapshot_id is required/, fn ->
+        ControllerServer.delete_snapshot(%DeleteSnapshotRequest{snapshot_id: ""}, nil)
+      end
+    end
+  end
+
+  describe "ListSnapshots" do
+    defp sample_snap(id, name \\ nil, opts \\ %{}) do
+      %{
+        id: id,
+        volume_id: Map.get(opts, :volume_id, "vol-uuid"),
+        name: name,
+        root_chunk_hash: <<1>>,
+        created_at: Map.get(opts, :created_at, DateTime.from_unix!(0))
+      }
+    end
+
+    test "scopes to source_volume_id" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["my-vol"] ->
+          {:ok, sample_volume("my-vol", %{id: "vol-uuid"})}
+
+        NeonFS.Core.Snapshot, :list, ["vol-uuid"] ->
+          {:ok, [sample_snap("s1"), sample_snap("s2")]}
+      end)
+
+      reply =
+        ControllerServer.list_snapshots(
+          %ListSnapshotsRequest{source_volume_id: "my-vol"},
+          nil
+        )
+
+      ids = Enum.map(reply.entries, & &1.snapshot.snapshot_id)
+      assert "my-vol/s1" in ids
+      assert "my-vol/s2" in ids
+      assert reply.next_token == ""
+    end
+
+    test "filters by snapshot_id (single-result lookup)" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["my-vol"] ->
+          {:ok, sample_volume("my-vol", %{id: "vol-uuid"})}
+
+        NeonFS.Core.Snapshot, :get, ["vol-uuid", "snap-s1"] ->
+          {:ok, sample_snap("snap-s1")}
+      end)
+
+      reply =
+        ControllerServer.list_snapshots(
+          %ListSnapshotsRequest{snapshot_id: "my-vol/snap-s1"},
+          nil
+        )
+
+      assert length(reply.entries) == 1
+      assert hd(reply.entries).snapshot.snapshot_id == "my-vol/snap-s1"
+    end
+
+    test "returns empty when filtering by an unknown source_volume" do
+      put_core(fn NeonFS.Core, :get_volume, _ -> {:error, :not_found} end)
+
+      reply =
+        ControllerServer.list_snapshots(
+          %ListSnapshotsRequest{source_volume_id: "ghost"},
+          nil
+        )
+
+      assert reply.entries == []
+    end
+
+    test "unfiltered list walks every volume" do
+      put_core(fn
+        NeonFS.Core, :list_volumes, [] ->
+          {:ok,
+           [
+             sample_volume("vol-a", %{id: "ida"}),
+             sample_volume("vol-b", %{id: "idb"})
+           ]}
+
+        NeonFS.Core.Snapshot, :list, ["ida"] ->
+          {:ok, [sample_snap("a1", nil, %{volume_id: "ida"})]}
+
+        NeonFS.Core.Snapshot, :list, ["idb"] ->
+          {:ok, [sample_snap("b1", nil, %{volume_id: "idb"})]}
+      end)
+
+      reply = ControllerServer.list_snapshots(%ListSnapshotsRequest{}, nil)
+
+      ids = Enum.map(reply.entries, & &1.snapshot.snapshot_id) |> Enum.sort()
+      assert ids == ["vol-a/a1", "vol-b/b1"]
+    end
+
+    test "honours max_entries pagination" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["v"] ->
+          {:ok, sample_volume("v", %{id: "vid"})}
+
+        NeonFS.Core.Snapshot, :list, ["vid"] ->
+          {:ok, [sample_snap("a"), sample_snap("b"), sample_snap("c")]}
+      end)
+
+      reply =
+        ControllerServer.list_snapshots(
+          %ListSnapshotsRequest{source_volume_id: "v", max_entries: 2},
+          nil
+        )
+
+      assert length(reply.entries) == 2
+      assert reply.next_token != ""
+    end
+  end
+
+  describe "CreateVolume from VolumeContentSource (#967)" do
+    test "promotes a snapshot into a new volume when source is a snapshot" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["src-vol"] ->
+          {:ok, sample_volume("src-vol", %{id: "src-id"})}
+
+        NeonFS.Core.Snapshot, :promote, ["src-id", "snap-id", "new-vol", []] ->
+          {:ok, sample_volume("new-vol", %{id: "new-id"})}
+      end)
+
+      source = %VolumeContentSource{
+        type: {:snapshot, %VolumeContentSource.SnapshotSource{snapshot_id: "src-vol/snap-id"}}
+      }
+
+      reply =
+        ControllerServer.create_volume(
+          %CreateVolumeRequest{name: "new-vol", volume_content_source: source},
+          nil
+        )
+
+      assert reply.volume.volume_id == "new-vol"
+      assert reply.volume.content_source == source
+    end
+
+    test "clones a source volume by snapshotting then promoting" do
+      put_core(fn
+        NeonFS.Core, :get_volume, ["src-vol"] ->
+          {:ok, sample_volume("src-vol", %{id: "src-id"})}
+
+        NeonFS.Core.Snapshot, :create, ["src-id", [name: "csi-clone-source-cloned-vol"]] ->
+          {:ok, sample_snap("clone-snap-id", "csi-clone-source-cloned-vol")}
+
+        NeonFS.Core.Snapshot, :promote, ["src-id", "clone-snap-id", "cloned-vol", []] ->
+          {:ok, sample_volume("cloned-vol", %{id: "cloned-id"})}
+      end)
+
+      source = %VolumeContentSource{
+        type: {:volume, %VolumeContentSource.VolumeSource{volume_id: "src-vol"}}
+      }
+
+      reply =
+        ControllerServer.create_volume(
+          %CreateVolumeRequest{name: "cloned-vol", volume_content_source: source},
+          nil
+        )
+
+      assert reply.volume.volume_id == "cloned-vol"
+    end
+
+    test "raises INVALID_ARGUMENT for a malformed CSI snapshot id" do
+      source = %VolumeContentSource{
+        type: {:snapshot, %VolumeContentSource.SnapshotSource{snapshot_id: "no-slash"}}
+      }
+
+      assert_raise GRPC.RPCError, ~r/malformed snapshot id/, fn ->
+        ControllerServer.create_volume(
+          %CreateVolumeRequest{name: "v", volume_content_source: source},
+          nil
+        )
+      end
+    end
+
+    test "raises NOT_FOUND when cloning a non-existent volume" do
+      put_core(fn NeonFS.Core, :get_volume, _ -> {:error, :not_found} end)
+
+      source = %VolumeContentSource{
+        type: {:volume, %VolumeContentSource.VolumeSource{volume_id: "ghost"}}
+      }
+
+      assert_raise GRPC.RPCError, ~r/source volume ghost not found/, fn ->
+        ControllerServer.create_volume(
+          %CreateVolumeRequest{name: "v", volume_content_source: source},
+          nil
+        )
       end
     end
   end
