@@ -298,6 +298,7 @@ fn warn_if_not_empty(path: &Path, mountpoint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn with_data_dir<F: FnOnce()>(data_dir: &str, body: F) {
@@ -342,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(NEONFS_DATA_DIR)]
     fn preflight_rejects_regular_file() {
         let tmp = TempDir::new().unwrap();
         let file = tmp.path().join("a-file");
@@ -360,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(NEONFS_DATA_DIR)]
     fn preflight_accepts_empty_directory_with_matching_owner() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("mountpoint");
@@ -374,6 +377,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(NEONFS_DATA_DIR)]
     fn preflight_skips_owner_check_when_data_dir_missing() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("mountpoint");

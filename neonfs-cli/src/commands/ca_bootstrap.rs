@@ -904,6 +904,7 @@ fn io_err(what: &str, path: &Path, e: std::io::Error) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -1085,6 +1086,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    #[serial(NEONFS_DIST_PORT_FILE)]
     fn read_dist_port_from_env_override() {
         let dir = TempDir::new().unwrap();
         let port_file = dir.path().join("dist_port");
@@ -1368,6 +1370,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    #[serial(NEONFS_DATA_DIR)]
     fn local_cluster_name_missing_file() {
         // Point NEONFS_DATA_DIR at a non-existent dir and ensure the
         // error message names that dir.
@@ -1399,6 +1402,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    #[serial(NEONFS_DATA_DIR)]
     fn local_cluster_name_reads_json() {
         let dir = TempDir::new().unwrap();
         let meta_dir = dir.path().join("meta");
@@ -1730,6 +1734,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    #[serial(NEONFS_DATA_DIR)]
     fn local_cluster_id_reads_field() {
         let dir = TempDir::new().unwrap();
         let meta_dir = dir.path().join("meta");
@@ -1756,6 +1761,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    #[serial(NEONFS_AUDIT_OPERATOR_UID)]
     fn operator_uid_honours_env_override() {
         let old = std::env::var("NEONFS_AUDIT_OPERATOR_UID").ok();
         unsafe {
@@ -1773,6 +1779,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    #[serial(NEONFS_AUDIT_TIMESTAMP)]
     fn audit_timestamp_honours_env_override() {
         let old = std::env::var("NEONFS_AUDIT_TIMESTAMP").ok();
         unsafe {
@@ -1790,6 +1797,7 @@ ZrbuAQ2ClscminzzA+15JSfToEHJkGdObtg8bJUpnjDQ0dhQ/MOeQoez
     }
 
     #[test]
+    #[serial(NEONFS_AUDIT_TIMESTAMP)]
     fn audit_timestamp_default_is_rfc3339_when_no_override() {
         // No env override: should produce something parseable as RFC-3339.
         let prior = std::env::var("NEONFS_AUDIT_TIMESTAMP").ok();
