@@ -93,41 +93,59 @@ defmodule NeonFS.CLI.Handler do
 
   ## Parameters
   - `cluster_name` - Name for the new cluster (string)
+  - `drive_config` (optional) - Map describing the first drive to register
+    as part of bootstrap. Shape: `%{"path" => path, "tier" => "hot" |
+    "warm" | "cold"}`. Without it the bootstrap falls back to drives
+    registered via the `:neonfs_core, :drives` application environment;
+    a freshly-installed daemon ships with none, so the CLI should always
+    supply a drive.
 
   ## Returns
   - `{:ok, map}` - Success map with cluster_id
   - `{:error, reason}` - Error tuple
   """
-  @spec cluster_init(String.t()) :: {:ok, map()} | {:error, term()}
-  def cluster_init(cluster_name) when is_binary(cluster_name) do
+  @spec cluster_init(String.t(), map() | nil) :: {:ok, map()} | {:error, term()}
+  def cluster_init(cluster_name, drive_config \\ nil)
+      when is_binary(cluster_name) and (is_map(drive_config) or is_nil(drive_config)) do
     set_cli_metadata()
+    cluster_name |> Init.init_cluster(drive_config) |> format_cluster_init_result()
+  end
 
-    case Init.init_cluster(cluster_name) do
-      {:ok, cluster_id} ->
-        # Load the state to get full details
-        case State.load() do
-          {:ok, state} ->
-            {:ok,
-             %{
-               cluster_id: cluster_id,
-               cluster_name: state.cluster_name,
-               node_id: state.this_node.id,
-               node_name: Atom.to_string(state.this_node.name),
-               created_at: DateTime.to_iso8601(state.created_at)
-             }}
+  defp format_cluster_init_result({:ok, cluster_id}) do
+    case State.load() do
+      {:ok, state} ->
+        {:ok,
+         %{
+           cluster_id: cluster_id,
+           cluster_name: state.cluster_name,
+           node_id: state.this_node.id,
+           node_name: Atom.to_string(state.this_node.name),
+           created_at: DateTime.to_iso8601(state.created_at)
+         }}
 
-          {:error, _} ->
-            # Fallback if load fails
-            {:ok, %{cluster_id: cluster_id}}
-        end
-
-      {:error, :already_initialised} ->
-        {:error, Invalid.exception(message: "Cluster already initialised")}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
+      {:error, _} ->
+        {:ok, %{cluster_id: cluster_id}}
     end
   end
+
+  defp format_cluster_init_result({:error, :already_initialised}),
+    do: {:error, Invalid.exception(message: "Cluster already initialised")}
+
+  defp format_cluster_init_result({:error, :no_drives_available}),
+    do:
+      {:error,
+       Invalid.exception(
+         message:
+           "No drives available — pass `--drive <path>` to `neonfs cluster init` " <>
+             "to designate the initial drive"
+       )}
+
+  defp format_cluster_init_result({:error, {:initial_drive_failed, reason}}),
+    do:
+      {:error,
+       Invalid.exception(message: "Failed to register the initial drive: #{inspect(reason)}")}
+
+  defp format_cluster_init_result({:error, reason}), do: {:error, wrap_error(reason)}
 
   @doc """
   Returns cluster CA information.

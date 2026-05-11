@@ -35,6 +35,15 @@ pub enum ClusterCommand {
         /// Cluster name
         #[arg(long)]
         name: String,
+
+        /// Path to the initial drive that will host the system volume.
+        /// Required on a freshly-installed daemon (no default drive ships).
+        #[arg(long)]
+        drive: String,
+
+        /// Storage tier for the initial drive
+        #[arg(long, default_value = "hot")]
+        tier: String,
     },
 
     /// Join an existing cluster
@@ -263,7 +272,7 @@ impl ClusterCommand {
         match self {
             ClusterCommand::Ca { command } => command.execute(format),
             ClusterCommand::CreateInvite { expires } => self.create_invite(expires, format),
-            ClusterCommand::Init { name } => self.init(name, format),
+            ClusterCommand::Init { name, drive, tier } => self.init(name, drive, tier, format),
             ClusterCommand::Join { token, via } => self.join(token, via, format),
             ClusterCommand::Rebalance {
                 tier,
@@ -292,14 +301,24 @@ impl ClusterCommand {
         }
     }
 
-    fn init(&self, name: &str, format: OutputFormat) -> Result<()> {
+    fn init(&self, name: &str, drive: &str, tier: &str, format: OutputFormat) -> Result<()> {
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             let name_binary = Binary::from(name.as_bytes().to_vec());
+            let drive_config = Term::Map(Map::from([
+                (
+                    Term::Binary(Binary::from(b"path".to_vec())),
+                    Term::Binary(Binary::from(drive.as_bytes().to_vec())),
+                ),
+                (
+                    Term::Binary(Binary::from(b"tier".to_vec())),
+                    Term::Binary(Binary::from(tier.as_bytes().to_vec())),
+                ),
+            ]));
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "cluster_init",
-                vec![Term::Binary(name_binary)],
+                vec![Term::Binary(name_binary), drive_config],
             )
             .await
         })?;
