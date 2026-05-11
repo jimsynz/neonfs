@@ -2586,6 +2586,7 @@ defmodule NeonFS.CLI.Handler do
   def handle_volume_export(volume_name, output_path, opts \\ %{})
       when is_binary(volume_name) and is_binary(output_path) and is_map(opts) do
     set_cli_metadata()
+    output_path = normalize_local_url(output_path)
 
     with :ok <- require_cluster(),
          {:ok, volume} <- fetch_volume(volume_name),
@@ -2641,6 +2642,7 @@ defmodule NeonFS.CLI.Handler do
   def handle_volume_import(input_path, new_volume_name)
       when is_binary(input_path) and is_binary(new_volume_name) do
     set_cli_metadata()
+    input_path = normalize_local_url(input_path)
 
     with :ok <- require_cluster(),
          {:ok, summary} <- VolumeImport.import_archive(input_path, new_volume_name) do
@@ -2671,6 +2673,7 @@ defmodule NeonFS.CLI.Handler do
   def handle_backup_create(volume_name, output_path, opts \\ %{})
       when is_binary(volume_name) and is_binary(output_path) and is_map(opts) do
     set_cli_metadata()
+    output_path = normalize_local_url(output_path)
 
     with :ok <- require_cluster(),
          {:ok, summary} <- Backup.create(volume_name, output_path, backup_create_opts(opts)) do
@@ -2697,6 +2700,7 @@ defmodule NeonFS.CLI.Handler do
   @spec handle_backup_describe(binary()) :: {:ok, map()} | {:error, term()}
   def handle_backup_describe(input_path) when is_binary(input_path) do
     set_cli_metadata()
+    input_path = normalize_local_url(input_path)
 
     with :ok <- require_cluster(),
          {:ok, manifest} <- Backup.describe(input_path) do
@@ -2715,8 +2719,18 @@ defmodule NeonFS.CLI.Handler do
           {:ok, map()} | {:error, term()}
   def handle_backup_restore(input_path, new_volume_name)
       when is_binary(input_path) and is_binary(new_volume_name) do
+    # `handle_volume_import/2` does the `file://` normalisation
+    # itself; defer to it.
     handle_volume_import(input_path, new_volume_name)
   end
+
+  # Accept `file:///abs/path` URLs as a synonym for plain absolute
+  # paths so operators can use consistent URL syntax across the
+  # backup CLI (#992). `s3://` and other remote schemes aren't
+  # supported yet — they'll pass through and surface as ordinary
+  # file-not-found errors until a remote-writer slice lands.
+  defp normalize_local_url("file://" <> rest), do: rest
+  defp normalize_local_url(path), do: path
 
   defp snapshot_to_map(%Snapshot{} = snap, volume_name) do
     %{
