@@ -318,6 +318,15 @@ defmodule NeonFS.Integration.DriveSpaceTest do
 
       assert chunks_a == [], "Drive A should have no chunks after evacuation"
 
+      # Verify drive_a is deregistered (the original #750 acceptance criterion —
+      # once metadata lives in volumes, drive evacuation collapses into chunk
+      # evacuation and the drive comes out of the registry cleanly).
+      drive_ids =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.DriveRegistry, :list_drives, [])
+        |> Enum.map(& &1.id)
+
+      refute "drive_a" in drive_ids, "Drive A should be deregistered after evacuation"
+
       # Verify all files are still readable with correct content
       for {path, original_data} <- file_data do
         {:ok, read_data} =

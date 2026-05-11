@@ -80,6 +80,26 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @doc """
+  Looks up a chunk by hash in the local ETS materialisation only — no
+  MetadataReader fan-out, no cluster-wide truth. Returns the locally-known
+  chunk metadata if it exists, otherwise `:not_found`.
+
+  Used by drive evacuation to decide whether a blob found on disk is a
+  tracked data chunk (in which case it goes through full chunk migration
+  to keep `chunk.locations` consistent) or an untracked blob like an
+  index-tree page or root segment (which is copied byte-for-byte by
+  `BlobStore.migrate_blob_file/3`). The local-only semantics are correct
+  for evacuation: we're moving blobs that physically live on this node.
+  """
+  @spec lookup_by_hash(binary()) :: {:ok, ChunkMeta.t()} | :not_found
+  def lookup_by_hash(hash) when is_binary(hash) do
+    case :ets.lookup(:chunk_index, hash) do
+      [{^hash, %ChunkMeta{} = chunk_meta}] -> {:ok, chunk_meta}
+      _ -> :not_found
+    end
+  end
+
+  @doc """
   Deletes chunk metadata by hash.
   """
   @spec delete(binary()) :: :ok | {:error, term()}

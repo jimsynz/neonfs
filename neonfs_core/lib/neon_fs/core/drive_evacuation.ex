@@ -8,7 +8,7 @@ defmodule NeonFS.Core.DriveEvacuation do
 
   ## Usage
 
-      {:ok, job} = DriveEvacuation.start_evacuation(node, drive_id, any_tier: false)
+      {:ok, job} = DriveEvacuation.start_evacuation(node, drive_id)
       {:ok, status} = DriveEvacuation.evacuation_status(drive_id)
   """
 
@@ -31,35 +31,31 @@ defmodule NeonFS.Core.DriveEvacuation do
   1. Drive exists
   2. Drive is not already draining
   3. Standby drives are spun up
-  4. Sufficient capacity on candidate target drives
+  4. Sufficient cluster-wide capacity to absorb the evacuating drive
 
-  ## Options
-
-    * `:any_tier` — when `true`, allows migration to any tier (default: `false`)
+  Target drive selection prefers a drive on the same tier as the source,
+  and falls back to any tier when none is available — evacuation must
+  succeed even if no same-tier drive exists on the cluster.
   """
   @spec start_evacuation(node(), String.t(), keyword()) ::
           {:ok, NeonFS.Core.Job.t()} | {:error, term()}
-  def start_evacuation(node, drive_id, opts \\ []) do
-    any_tier = Keyword.get(opts, :any_tier, false)
-
+  def start_evacuation(node, drive_id, _opts \\ []) do
     with {:ok, drive} <- get_drive(node, drive_id),
          :ok <- check_not_draining(drive),
          :ok <- ensure_drive_active(node, drive),
-         :ok <- check_capacity(node, drive, any_tier),
+         :ok <- check_capacity(node, drive),
          :ok <- set_draining(node, drive_id),
          {:ok, total_chunks} <- count_chunks(node, drive_id) do
       params = %{
         node: node,
         drive_id: drive_id,
-        any_tier: any_tier,
         total_chunks: total_chunks
       }
 
       case JobTracker.create(EvacuationRunner, params) do
         {:ok, job} ->
           Logger.info(
-            "Started evacuation of drive #{drive_id} on #{node} " <>
-              "(#{total_chunks} chunks, any_tier: #{any_tier})"
+            "Started evacuation of drive #{drive_id} on #{node} (#{total_chunks} chunks)"
           )
 
           {:ok, job}
@@ -90,8 +86,7 @@ defmodule NeonFS.Core.DriveEvacuation do
            status: job.status,
            progress: job.progress,
            drive_id: drive_id,
-           node: job.params[:node],
-           any_tier: job.params[:any_tier]
+           node: job.params[:node]
          }}
     end
   end
@@ -129,25 +124,13 @@ defmodule NeonFS.Core.DriveEvacuation do
 
   defp ensure_drive_active(_node, _drive), do: :ok
 
-  defp check_capacity(node, drive, any_tier) do
+  defp check_capacity(node, drive) do
     exclude = [{node, drive.id}]
 
-    available =
-      if any_tier do
-        StorageMetrics.available_capacity_any_tier(exclude)
-      else
-        StorageMetrics.available_capacity_for_tier(drive.tier, exclude)
-      end
-
-    case available do
-      :unlimited ->
-        :ok
-
-      bytes when bytes >= drive.used_bytes ->
-        :ok
-
-      _ ->
-        {:error, :insufficient_capacity}
+    case StorageMetrics.available_capacity_any_tier(exclude) do
+      :unlimited -> :ok
+      bytes when bytes >= drive.used_bytes -> :ok
+      _ -> {:error, :insufficient_capacity}
     end
   end
 

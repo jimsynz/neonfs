@@ -151,7 +151,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
         Job.new(EvacuationRunner, %{
           node: node(),
           drive_id: "drive1",
-          any_tier: false,
           total_chunks: 1
         })
 
@@ -169,7 +168,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
         Job.new(EvacuationRunner, %{
           node: node(),
           drive_id: "drive1",
-          any_tier: false,
           total_chunks: 0
         })
 
@@ -194,7 +192,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
 
       {:continue, updated} = EvacuationRunner.step(job)
 
-      assert updated.progress.description =~ "Evacuating chunks"
+      assert updated.progress.description =~ "Evacuating blobs"
       assert updated.progress.description =~ "last error: no eligible target drives"
       assert updated.state.last_error == :no_target_drives
       assert updated.state.stale_batches == 1
@@ -266,7 +264,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       Job.new(EvacuationRunner, %{
         node: node(),
         drive_id: "drive1",
-        any_tier: false,
         total_chunks: 1
       })
 
@@ -281,7 +278,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
         Job.new(EvacuationRunner, %{
           node: node(),
           drive_id: "drive1",
-          any_tier: false,
           total_chunks: 10
         })
 

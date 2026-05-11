@@ -587,6 +587,78 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   @doc """
+  Enumerates every blob present on a drive's `blobs/` tree.
+
+  Walks `{drive_path}/blobs/{tier}/{prefix...}/{hash_hex}.{codec_suffix}` and
+  returns one entry per on-disk file. Used by drive evacuation to migrate
+  blobs that are NOT tracked in `ChunkIndex` — specifically the per-volume
+  index-tree pages and root segments, which are content-addressed blobs in
+  the same `blobs/` tree but are reached via the bootstrap pointer's
+  `drive_locations` rather than via `ChunkIndex.list_by_drive/2`.
+
+  ## Returns
+
+    * `{:ok, [%{hash: binary(), tier: String.t(), codec_suffix: String.t(), path: String.t(), size: non_neg_integer()}]}`
+    * `{:error, :unknown_drive}`
+  """
+  @spec list_drive_blobs(String.t(), keyword()) ::
+          {:ok,
+           [
+             %{
+               hash: binary(),
+               tier: String.t(),
+               codec_suffix: String.t(),
+               path: String.t(),
+               size: non_neg_integer()
+             }
+           ]}
+          | {:error, :unknown_drive}
+  def list_drive_blobs(drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    GenServer.call(server, {:list_drive_blobs, drive_id}, timeout)
+  end
+
+  @doc """
+  Moves a blob file from its current drive to `target_drive_id`, preserving
+  tier and codec suffix. Used by drive evacuation to migrate blobs that are
+  NOT tracked in `ChunkIndex` (per-volume index-tree pages, root segments);
+  tracked chunks go through `TierMigration` so their `chunk.locations` stays
+  consistent with on-disk state.
+
+  Copy-then-delete: the source file is removed only after the target file
+  exists with the same byte length. If the target already exists (the hash
+  matches an existing blob on the target drive), the source is deleted
+  outright.
+
+  Both drives must be managed by this BlobStore (i.e., same node).
+
+  ## Returns
+
+    * `:ok`
+    * `{:error, :unknown_drive}` — neither the blob's source path nor the
+      target drive id resolves to a known drive.
+    * `{:error, posix}` — filesystem error during copy or delete.
+  """
+  @spec migrate_blob_file(
+          blob ::
+            %{
+              hash: binary(),
+              tier: String.t(),
+              codec_suffix: String.t(),
+              path: String.t(),
+              size: non_neg_integer()
+            },
+          target_drive_id :: String.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def migrate_blob_file(blob, target_drive_id, opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    GenServer.call(server, {:migrate_blob_file, blob, target_drive_id}, timeout)
+  end
+
+  @doc """
   Splits data into chunks using the specified strategy.
 
   ## Parameters
@@ -855,6 +927,26 @@ defmodule NeonFS.Core.BlobStore do
 
       :error ->
         {:reply, {:error, :unknown_drive}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:list_drive_blobs, drive_id}, _from, state) do
+    case Map.fetch(state.drives, drive_id) do
+      {:ok, drive} -> {:reply, {:ok, enumerate_blobs(drive.path)}, state}
+      :error -> {:reply, {:error, :unknown_drive}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:migrate_blob_file, blob, target_drive_id}, _from, state) do
+    case Map.fetch(state.drives, target_drive_id) do
+      :error ->
+        {:reply, {:error, :unknown_drive}, state}
+
+      {:ok, target_drive} ->
+        target_path = blob_target_path(target_drive.path, blob, state.prefix_depth)
+        {:reply, do_migrate_blob_file(blob, target_path), state}
     end
   end
 
@@ -1247,6 +1339,112 @@ defmodule NeonFS.Core.BlobStore do
         {:error, _} -> {:cont, acc}
       end
     end)
+  end
+
+  ## Private: Blob enumeration
+
+  defp enumerate_blobs(drive_path) do
+    blobs_root = Path.join(drive_path, "blobs")
+
+    case File.ls(blobs_root) do
+      {:ok, tiers} -> Enum.flat_map(tiers, &enumerate_tier(blobs_root, &1))
+      {:error, _} -> []
+    end
+  end
+
+  defp enumerate_tier(blobs_root, tier) do
+    tier_dir = Path.join(blobs_root, tier)
+
+    case File.stat(tier_dir) do
+      {:ok, %{type: :directory}} -> walk_blob_dir(tier_dir, tier)
+      _ -> []
+    end
+  end
+
+  defp walk_blob_dir(dir, tier) do
+    case File.ls(dir) do
+      {:ok, entries} -> Enum.flat_map(entries, &walk_entry(dir, &1, tier))
+      {:error, _} -> []
+    end
+  end
+
+  defp walk_entry(parent, entry, tier) do
+    path = Path.join(parent, entry)
+
+    case File.stat(path) do
+      {:ok, %{type: :directory}} ->
+        walk_blob_dir(path, tier)
+
+      {:ok, %{type: :regular, size: size}} ->
+        case decode_blob_filename(entry) do
+          {:ok, hash, codec_suffix} ->
+            [%{hash: hash, tier: tier, codec_suffix: codec_suffix, path: path, size: size}]
+
+          :error ->
+            []
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp decode_blob_filename(name) do
+    if tempfile_name?(name) do
+      :error
+    else
+      decode_hash_suffix(name)
+    end
+  end
+
+  defp tempfile_name?(name) do
+    String.contains?(name, ".tmp.") or String.starts_with?(name, "tmp.")
+  end
+
+  defp decode_hash_suffix(name) do
+    with [hex, suffix] when byte_size(hex) == 64 <- String.split(name, ".", parts: 2),
+         {:ok, hash} <- Base.decode16(hex, case: :lower) do
+      {:ok, hash, suffix}
+    else
+      _ -> :error
+    end
+  end
+
+  defp blob_target_path(drive_path, %{hash: hash, tier: tier, codec_suffix: suffix}, prefix_depth) do
+    hex = Base.encode16(hash, case: :lower)
+
+    prefix_segments =
+      for i <- 0..(prefix_depth - 1)//1, do: String.slice(hex, i * 2, 2)
+
+    Path.join([drive_path, "blobs", tier] ++ prefix_segments ++ ["#{hex}.#{suffix}"])
+  end
+
+  defp do_migrate_blob_file(%{path: source_path, size: source_size}, target_path) do
+    cond do
+      source_path == target_path ->
+        :ok
+
+      File.exists?(target_path) ->
+        case File.stat(target_path) do
+          {:ok, %{size: ^source_size}} ->
+            # Target already holds the same blob (content-addressed); drop source.
+            File.rm(source_path)
+
+          _ ->
+            {:error, :target_exists_size_mismatch}
+        end
+
+      true ->
+        with :ok <- File.mkdir_p(Path.dirname(target_path)),
+             :ok <- File.cp(source_path, target_path),
+             {:ok, %{size: ^source_size}} <- File.stat(target_path),
+             :ok <- File.rm(source_path) do
+          :ok
+        else
+          {:error, _} = err -> err
+          {:ok, %{size: _other}} -> {:error, :target_size_mismatch}
+        end
+    end
   end
 
   ## Private: Drive data check
