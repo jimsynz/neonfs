@@ -52,8 +52,13 @@ defmodule NeonFS.Core.VolumeExport do
     content-addressed so the read path is unchanged — only the
     `FileMeta` enumeration differs.
 
-  - `:include_acls`, `:include_system_xattrs` — not implemented
-    yet, tracked under #992 as remaining export-extension work.
+  - `:include_acls` (boolean) — when true, the manifest's per-file
+    entry includes `acl_entries` (and `default_acl` when set).
+    Restored on import via `FileIndex.update/2`.
+
+  - `:include_system_xattrs` (boolean) — when true, the manifest's
+    per-file entry includes `xattrs` (keys + values base64-encoded
+    for JSON binary safety). Restored on import.
   """
   @spec export(binary(), Path.t(), keyword()) ::
           {:ok, export_summary()} | {:error, term()}
@@ -185,17 +190,7 @@ defmodule NeonFS.Core.VolumeExport do
       exported_at: DateTime.utc_now() |> DateTime.to_iso8601(),
       file_count: length(files),
       total_bytes: Enum.reduce(files, 0, fn f, acc -> acc + f.size end),
-      files:
-        Enum.map(files, fn f ->
-          %{
-            path: f.path,
-            size: f.size,
-            mode: f.mode,
-            uid: f.uid,
-            gid: f.gid,
-            modified_at: DateTime.to_iso8601(f.modified_at)
-          }
-        end)
+      files: Enum.map(files, &manifest_file_entry(&1, opts))
     }
 
     case Keyword.get(opts, :snapshot_id) do
@@ -203,6 +198,60 @@ defmodule NeonFS.Core.VolumeExport do
       id -> Map.put(base, :snapshot_id, id)
     end
     |> Jason.encode!()
+  end
+
+  defp manifest_file_entry(f, opts) do
+    base = %{
+      path: f.path,
+      size: f.size,
+      mode: f.mode,
+      uid: f.uid,
+      gid: f.gid,
+      modified_at: DateTime.to_iso8601(f.modified_at)
+    }
+
+    base
+    |> maybe_attach_acls(f, Keyword.get(opts, :include_acls, false))
+    |> maybe_attach_xattrs(f, Keyword.get(opts, :include_system_xattrs, false))
+  end
+
+  defp maybe_attach_acls(entry, _file, false), do: entry
+
+  defp maybe_attach_acls(entry, file, true) do
+    acl_entries = encode_acl_entries(file.acl_entries || [])
+    default_acl = encode_acl_entries(file.default_acl)
+
+    entry
+    |> Map.put(:acl_entries, acl_entries)
+    |> maybe_put(:default_acl, default_acl)
+  end
+
+  defp maybe_attach_xattrs(entry, _file, false), do: entry
+
+  defp maybe_attach_xattrs(entry, file, true) do
+    Map.put(entry, :xattrs, encode_xattrs(file.xattrs || %{}))
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp encode_acl_entries(nil), do: nil
+
+  defp encode_acl_entries(entries) when is_list(entries) do
+    Enum.map(entries, fn %{type: type, id: id, permissions: perms} ->
+      %{
+        type: Atom.to_string(type),
+        id: id,
+        permissions: perms |> MapSet.to_list() |> Enum.sort() |> Enum.map(&Atom.to_string/1)
+      }
+    end)
+  end
+
+  # `xattrs` is `%{binary => binary}`. Keys and values can carry
+  # arbitrary bytes (kernel xattrs are NUL-safe), so base64 both for
+  # JSON-safe transport.
+  defp encode_xattrs(xattrs) do
+    Map.new(xattrs, fn {k, v} -> {Base.encode64(k), Base.encode64(v)} end)
   end
 
   defp write_file_entry(io, volume, file_meta, opts) do

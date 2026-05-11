@@ -3,7 +3,15 @@ defmodule NeonFS.Core.VolumeImportTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core
-  alias NeonFS.Core.{FileIndex, VolumeExport, VolumeImport, VolumeRegistry, WriteOperation}
+
+  alias NeonFS.Core.{
+    FileIndex,
+    FileMeta,
+    VolumeExport,
+    VolumeImport,
+    VolumeRegistry,
+    WriteOperation
+  }
 
   @moduletag :tmp_dir
 
@@ -77,6 +85,87 @@ defmodule NeonFS.Core.VolumeImportTest do
       assert summary.file_count == 1
 
       {:ok, "pinned-by-long-name"} = read_file("rt-longpath-dst", path)
+    end
+
+    test "round-trips ACLs when --include-acls is set", %{tmp_dir: tmp_dir} do
+      {:ok, src} = VolumeRegistry.create("rt-acl-src", [])
+      {:ok, file} = WriteOperation.write_file_streamed(src.id, "/owned.txt", ["x"])
+
+      # Plant an ACL via FileIndex.update — emulates the operator
+      # having set per-file ACLs before exporting.
+      acl_entries = [
+        %{type: :user, id: 1000, permissions: MapSet.new([:r, :w])},
+        %{type: :group, id: 200, permissions: MapSet.new([:r])}
+      ]
+
+      {:ok, _} = FileIndex.update(file.id, acl_entries: acl_entries)
+
+      tar = Path.join(tmp_dir, "acl.tar")
+      assert {:ok, _} = VolumeExport.export(src.name, tar, include_acls: true)
+
+      assert {:ok, _} = VolumeImport.import_archive(tar, "rt-acl-dst")
+
+      {:ok, dst} = VolumeRegistry.get_by_name("rt-acl-dst")
+      {:ok, %FileMeta{acl_entries: restored}} = FileIndex.get_by_path(dst.id, "/owned.txt")
+
+      assert length(restored) == 2
+
+      assert Enum.find(restored, &(&1.type == :user and &1.id == 1000)).permissions ==
+               MapSet.new([:r, :w])
+
+      assert Enum.find(restored, &(&1.type == :group and &1.id == 200)).permissions ==
+               MapSet.new([:r])
+    end
+
+    test "round-trips binary-safe xattrs when --include-system-xattrs is set",
+         %{tmp_dir: tmp_dir} do
+      {:ok, src} = VolumeRegistry.create("rt-xattr-src", [])
+      {:ok, file} = WriteOperation.write_file_streamed(src.id, "/tagged.bin", ["data"])
+
+      xattrs = %{
+        "user.tag" => "alpha",
+        # Key + value with non-printable / NUL bytes to exercise the
+        # base64 round-trip.
+        "user.binary" => <<0, 1, 2, 3, 0xFF, 0xFE>>,
+        <<0xC3, 0xA9>> => <<0, "binkey-too">>
+      }
+
+      {:ok, _} = FileIndex.update(file.id, xattrs: xattrs)
+
+      tar = Path.join(tmp_dir, "xattr.tar")
+      assert {:ok, _} = VolumeExport.export(src.name, tar, include_system_xattrs: true)
+
+      assert {:ok, _} = VolumeImport.import_archive(tar, "rt-xattr-dst")
+
+      {:ok, dst} = VolumeRegistry.get_by_name("rt-xattr-dst")
+      {:ok, %FileMeta{xattrs: restored}} = FileIndex.get_by_path(dst.id, "/tagged.bin")
+
+      assert restored == xattrs
+    end
+
+    test "without the flags ACLs and xattrs are NOT carried across", %{tmp_dir: tmp_dir} do
+      {:ok, src} = VolumeRegistry.create("rt-noflags-src", [])
+      {:ok, file} = WriteOperation.write_file_streamed(src.id, "/x.txt", ["x"])
+
+      {:ok, _} =
+        FileIndex.update(file.id,
+          acl_entries: [%{type: :user, id: 99, permissions: MapSet.new([:r])}],
+          xattrs: %{"user.k" => "v"}
+        )
+
+      tar = Path.join(tmp_dir, "noflags.tar")
+      assert {:ok, _} = VolumeExport.export(src.name, tar)
+
+      assert {:ok, _} = VolumeImport.import_archive(tar, "rt-noflags-dst")
+
+      {:ok, dst} = VolumeRegistry.get_by_name("rt-noflags-dst")
+
+      {:ok, %FileMeta{acl_entries: acls, xattrs: xattrs}} =
+        FileIndex.get_by_path(dst.id, "/x.txt")
+
+      # New file's defaults — no ACL/xattr inherited from the export.
+      assert acls == []
+      assert xattrs == %{}
     end
 
     test "imports an empty volume", %{tmp_dir: tmp_dir} do

@@ -2603,16 +2603,28 @@ defmodule NeonFS.CLI.Handler do
   end
 
   defp export_opts_from_map(volume, opts) do
-    case Map.get(opts, "snapshot_id") || Map.get(opts, :snapshot_id) do
-      nil ->
-        []
+    snapshot_opts =
+      case Map.get(opts, "snapshot_id") || Map.get(opts, :snapshot_id) do
+        nil ->
+          []
 
-      ref when is_binary(ref) ->
-        case resolve_snapshot(volume.id, ref, volume.name) do
-          {:ok, snapshot} -> [snapshot_id: snapshot.id]
-          # Bubble the error up as the export call's outer with-step.
-          _ -> [snapshot_id: ref]
-        end
+        ref when is_binary(ref) ->
+          case resolve_snapshot(volume.id, ref, volume.name) do
+            {:ok, snapshot} -> [snapshot_id: snapshot.id]
+            # Bubble the error up as the export call's outer with-step.
+            _ -> [snapshot_id: ref]
+          end
+      end
+
+    snapshot_opts
+    |> add_bool_opt(opts, "include_acls", :include_acls)
+    |> add_bool_opt(opts, "include_system_xattrs", :include_system_xattrs)
+  end
+
+  defp add_bool_opt(opts_list, opts_map, str_key, atom_key) do
+    case Map.get(opts_map, str_key) || Map.get(opts_map, atom_key) do
+      true -> [{atom_key, true} | opts_list]
+      _ -> opts_list
     end
   end
 

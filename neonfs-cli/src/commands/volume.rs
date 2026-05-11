@@ -267,6 +267,17 @@ pub enum VolumeCommand {
         /// Optional snapshot id (omit to export the live root).
         #[arg(long)]
         snapshot: Option<String>,
+
+        /// Include per-file ACLs in the manifest (restored on
+        /// import).
+        #[arg(long)]
+        include_acls: bool,
+
+        /// Include per-file extended attributes in the manifest
+        /// (restored on import). Values are base64-encoded for
+        /// binary safety.
+        #[arg(long)]
+        include_system_xattrs: bool,
     },
 
     /// Import a volume from a previously-exported tarball (#966).
@@ -458,7 +469,16 @@ impl VolumeCommand {
                 volume,
                 to,
                 snapshot,
-            } => self.export(volume, to, snapshot.as_deref(), format),
+                include_acls,
+                include_system_xattrs,
+            } => self.export(
+                volume,
+                to,
+                snapshot.as_deref(),
+                *include_acls,
+                *include_system_xattrs,
+                format,
+            ),
             VolumeCommand::Import { from, new_name } => self.import(from, new_name, format),
         }
     }
@@ -529,13 +549,24 @@ impl VolumeCommand {
         volume: &str,
         to: &str,
         snapshot: Option<&str>,
+        include_acls: bool,
+        include_system_xattrs: bool,
         format: OutputFormat,
     ) -> Result<()> {
         let mut opt_pairs: Vec<(Term, Term)> = vec![];
         if let Some(snap) = snapshot {
+            opt_pairs.push((Term::Atom(Atom::from("snapshot_id")), binary_val(snap)));
+        }
+        if include_acls {
             opt_pairs.push((
-                Term::Atom(Atom::from("snapshot_id")),
-                binary_val(snap),
+                Term::Atom(Atom::from("include_acls")),
+                Term::Atom(Atom::from("true")),
+            ));
+        }
+        if include_system_xattrs {
+            opt_pairs.push((
+                Term::Atom(Atom::from("include_system_xattrs")),
+                Term::Atom(Atom::from("true")),
             ));
         }
 
@@ -2393,6 +2424,7 @@ mod tests {
                 volume,
                 to,
                 snapshot,
+                ..
             } => {
                 assert_eq!(volume, "vol-1");
                 assert_eq!(to, "/tmp/out.tar");
@@ -2460,6 +2492,7 @@ mod tests {
                 volume,
                 to,
                 snapshot,
+                ..
             } => {
                 assert_eq!(volume, "v");
                 assert_eq!(to, "/tmp/x.tar");
