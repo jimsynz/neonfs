@@ -93,23 +93,40 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
 
     test "writes happen concurrently" do
       drives = [drive_entry("drv-1"), drive_entry("drv-2"), drive_entry("drv-3")]
+      parent = self()
 
-      writer = fn _data, _drive_id, _tier, _opts ->
-        Process.sleep(100)
+      writer = fn _data, drive_id, _tier, _opts ->
+        send(parent, {:writer_started, drive_id, self()})
+
+        receive do
+          :release -> :ok
+        after
+          1_000 -> exit(:no_release)
+        end
+
         {:ok, "h", %{}}
       end
 
-      start = System.monotonic_time(:millisecond)
+      caller =
+        Task.async(fn ->
+          ChunkReplicator.write_chunk("payload", drives,
+            min_copies: 2,
+            writer_fn: writer
+          )
+        end)
 
-      assert {:ok, _, _} =
-               ChunkReplicator.write_chunk("payload", drives,
-                 min_copies: 2,
-                 writer_fn: writer
-               )
+      writer_pids =
+        Enum.map(1..length(drives), fn i ->
+          assert_receive {:writer_started, _drive_id, pid},
+                         1_000,
+                         "writer #{i}/#{length(drives)} never started — expected concurrent execution"
 
-      elapsed = System.monotonic_time(:millisecond) - start
+          pid
+        end)
 
-      assert elapsed < 250, "elapsed=#{elapsed}ms — expected concurrent execution"
+      Enum.each(writer_pids, &send(&1, :release))
+
+      assert {:ok, _, _} = Task.await(caller, 5_000)
     end
 
     test "emits :write telemetry on success" do
