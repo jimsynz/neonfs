@@ -69,4 +69,25 @@ defmodule NeonFS.Core.PersistenceTest do
       assert tmp_files == []
     end
   end
+
+  # #988: between `:ets.whereis/1` (which says the table exists) and
+  # `:ets.to_dets/2` (which actually reads it), the owning GenServer
+  # can shut down and tear the table down. The race manifested as
+  # `ArgumentError` from BEAM crashing Persistence on every 100 ms
+  # snapshot tick — enough scheduler pressure to time out unrelated
+  # `GenServer.call`s.
+  describe "snapshot resilience to ETS teardown race" do
+    test "treats a table vanishing mid-snapshot as a per-table no-op" do
+      # Stop the owning registry so the ETS table is gone before the
+      # snapshot walks it. `GenServer.stop/1` is synchronous — the
+      # named table is auto-deleted when the owner exits, so by the
+      # time the call returns the table is already gone.
+      :ok = GenServer.stop(NeonFS.Core.VolumeRegistry)
+      assert :undefined = :ets.whereis(:volumes_by_id)
+
+      # The snapshot must NOT crash — the table-gone branch logs and
+      # skips, returning :ok across the table set.
+      assert :ok = Persistence.snapshot_now()
+    end
+  end
 end
