@@ -201,6 +201,8 @@ Historical context:
 
 Release notes live in [`CHANGELOG.md`](CHANGELOG.md), generated from conventional commits.
 
+`git_ops` bumps the `version =` field in every Elixir `mix.exs` and every Rust `Cargo.toml` it tracks, but **does not** regenerate the four workspace `Cargo.lock` files (`fuse_server/`, `neonfs_core/`, `neonfs-cli/`, `neonfs_client/native/neonfs_chunker/`). After a release commit, run `cargo update -p <workspace-package>` in each workspace and commit the lockfile changes — otherwise the next clean checkout's first `cargo build` produces an uncommitted lockfile drift (`<pkg> v0.1.0 → v<new>`) that shows up in every subsequent `git status`.
+
 ## Testing
 
 **CRITICAL: Never bypass or exclude tests.** Skipped tests create a false sense of confidence. If a test requires specific environment setup (FUSE support, privileges, etc.), the CI environment must be configured correctly - not the tests excluded. A failing build due to missing infrastructure is preferable to silently skipped tests.
