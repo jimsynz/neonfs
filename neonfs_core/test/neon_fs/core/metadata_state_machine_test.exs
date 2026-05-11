@@ -18,6 +18,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       volume_acls: %{},
       drives: %{},
       volume_roots: %{},
+      snapshots: %{},
       version: 0
     }
   end
@@ -45,8 +46,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 13" do
-      assert MetadataStateMachine.version() == 14
+    test "returns 15" do
+      assert MetadataStateMachine.version() == 15
     end
   end
 
@@ -1555,6 +1556,143 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     test "get_volume_roots/1 returns empty map on pre-v13 state" do
       pre_v13 = base_state() |> Map.delete(:volume_roots)
       assert MetadataStateMachine.get_volume_roots(pre_v13) == %{}
+    end
+  end
+
+  describe "snapshot commands (#960)" do
+    defp snapshot_entry(volume_id, opts) do
+      %{
+        id: Keyword.get(opts, :id, "snap-#{System.unique_integer([:positive])}"),
+        volume_id: volume_id,
+        name: Keyword.get(opts, :name),
+        root_chunk_hash: Keyword.get(opts, :root_chunk_hash, <<1>>),
+        created_at: Keyword.get(opts, :created_at, DateTime.utc_now())
+      }
+    end
+
+    test "put_snapshot stores entry under volume_id / snapshot_id" do
+      entry = snapshot_entry("vol-1", id: "snap-a")
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:put_snapshot, entry}, base_state())
+
+      assert state.snapshots == %{"vol-1" => %{"snap-a" => entry}}
+      assert state.version == 1
+    end
+
+    test "put_snapshot is idempotent on id (overwrites)" do
+      entry_v1 = snapshot_entry("vol-1", id: "snap-a", root_chunk_hash: <<1>>)
+      entry_v2 = %{entry_v1 | root_chunk_hash: <<2>>}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:put_snapshot, entry_v1}, base_state())
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:put_snapshot, entry_v2}, state)
+
+      assert state.snapshots["vol-1"]["snap-a"].root_chunk_hash == <<2>>
+      assert map_size(state.snapshots["vol-1"]) == 1
+    end
+
+    test "put_snapshot keeps snapshots on separate volumes isolated" do
+      e1 = snapshot_entry("vol-1", id: "snap-1")
+      e2 = snapshot_entry("vol-2", id: "snap-2")
+
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:put_snapshot, e1}, base_state())
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:put_snapshot, e2}, state)
+
+      assert state.snapshots == %{
+               "vol-1" => %{"snap-1" => e1},
+               "vol-2" => %{"snap-2" => e2}
+             }
+    end
+
+    test "delete_snapshot removes the entry" do
+      entry = snapshot_entry("vol-1", id: "snap-a")
+      state = %{base_state() | snapshots: %{"vol-1" => %{"snap-a" => entry}}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_snapshot, "vol-1", "snap-a"}, state)
+
+      assert state.snapshots == %{}
+    end
+
+    test "delete_snapshot is idempotent on missing id" do
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_snapshot, "vol-1", "missing"}, base_state())
+
+      assert state.snapshots == %{}
+      assert state.version == 1
+    end
+
+    test "delete_snapshot keeps sibling snapshots on the same volume" do
+      e1 = snapshot_entry("vol-1", id: "snap-1")
+      e2 = snapshot_entry("vol-1", id: "snap-2")
+
+      state = %{base_state() | snapshots: %{"vol-1" => %{"snap-1" => e1, "snap-2" => e2}}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:delete_snapshot, "vol-1", "snap-1"}, state)
+
+      assert state.snapshots == %{"vol-1" => %{"snap-2" => e2}}
+    end
+
+    test "get_snapshot/3 returns the entry or nil" do
+      entry = snapshot_entry("vol-1", id: "snap-a")
+      state = %{base_state() | snapshots: %{"vol-1" => %{"snap-a" => entry}}}
+
+      assert MetadataStateMachine.get_snapshot(state, "vol-1", "snap-a") == entry
+      assert MetadataStateMachine.get_snapshot(state, "vol-1", "missing") == nil
+      assert MetadataStateMachine.get_snapshot(state, "missing", "snap-a") == nil
+    end
+
+    test "list_snapshots/2 returns entries newest first" do
+      now = DateTime.utc_now()
+      older = snapshot_entry("vol-1", id: "older", created_at: DateTime.add(now, -60))
+      newer = snapshot_entry("vol-1", id: "newer", created_at: now)
+
+      state = %{
+        base_state()
+        | snapshots: %{"vol-1" => %{"older" => older, "newer" => newer}}
+      }
+
+      assert [^newer, ^older] = MetadataStateMachine.list_snapshots(state, "vol-1")
+    end
+
+    test "list_snapshots/2 returns empty list when no snapshots / unknown volume" do
+      assert MetadataStateMachine.list_snapshots(base_state(), "vol-1") == []
+    end
+
+    test "get_snapshot/3 and list_snapshots/2 tolerate pre-v15 state" do
+      pre_v15 = base_state() |> Map.delete(:snapshots)
+      assert MetadataStateMachine.get_snapshot(pre_v15, "vol-1", "snap-a") == nil
+      assert MetadataStateMachine.list_snapshots(pre_v15, "vol-1") == []
+    end
+  end
+
+  describe "machine version migration 14 -> 15 (snapshots)" do
+    test "adds the snapshots field" do
+      pre_v15 = base_state() |> Map.delete(:snapshots)
+
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 14, 15}, pre_v15)
+
+      assert state.snapshots == %{}
+    end
+
+    test "preserves existing snapshots when re-applied" do
+      entry = %{
+        id: "snap-a",
+        volume_id: "vol-1",
+        name: nil,
+        root_chunk_hash: <<1>>,
+        created_at: DateTime.utc_now()
+      }
+
+      pre = %{base_state() | snapshots: %{"vol-1" => %{"snap-a" => entry}}}
+
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 14, 15}, pre)
+
+      assert state.snapshots == %{"vol-1" => %{"snap-a" => entry}}
     end
   end
 end
