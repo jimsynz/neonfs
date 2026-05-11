@@ -2,7 +2,7 @@ defmodule NeonFS.Core.SnapshotTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{RaServer, RaSupervisor, Snapshot, VolumeRegistry}
+  alias NeonFS.Core.{MetadataStateMachine, RaServer, RaSupervisor, Snapshot, VolumeRegistry}
 
   @moduletag :tmp_dir
 
@@ -156,7 +156,7 @@ defmodule NeonFS.Core.SnapshotTest do
 
       {:ok, promoted_root} =
         RaSupervisor.local_query(fn state ->
-          NeonFS.Core.MetadataStateMachine.get_volume_root(state, promoted.id)
+          MetadataStateMachine.get_volume_root(state, promoted.id)
         end)
 
       assert promoted_root.root_chunk_hash == <<0xAA, 0xBB>>
@@ -164,7 +164,7 @@ defmodule NeonFS.Core.SnapshotTest do
 
       {:ok, source_root} =
         RaSupervisor.local_query(fn state ->
-          NeonFS.Core.MetadataStateMachine.get_volume_root(state, source.id)
+          MetadataStateMachine.get_volume_root(state, source.id)
         end)
 
       assert source_root.root_chunk_hash == <<0xAA, 0xBB>>

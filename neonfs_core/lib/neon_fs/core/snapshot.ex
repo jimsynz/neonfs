@@ -210,8 +210,6 @@ defmodule NeonFS.Core.Snapshot do
     }
   end
 
-  defp build_durability_cache(%{durability: d}), do: d
-
   defp to_struct(entry) do
     %__MODULE__{
       id: entry.id,
