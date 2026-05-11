@@ -15,7 +15,11 @@ defmodule NeonFS.Core.VolumeExport do
   """
 
   alias NeonFS.Core.FileIndex
+  alias NeonFS.Core.FileMeta
   alias NeonFS.Core.ReadOperation
+  alias NeonFS.Core.Snapshot
+  alias NeonFS.Core.Volume.MetadataReader
+  alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.VolumeRegistry
 
   require Logger
@@ -40,17 +44,25 @@ defmodule NeonFS.Core.VolumeExport do
 
   ## Options
 
-  None currently (placeholder for `:include_acls`,
-  `:include_system_xattrs`, `:snapshot_id` — to land in follow-ups).
+  - `:snapshot_id` — export a specific snapshot's tree rather than
+    the live root. Walks the snapshot's `:file_index` via
+    `MetadataReader.range/5` with `:at_root` set to the snapshot's
+    `root_chunk_hash`, then streams each file's content through
+    `ReadOperation.read_file_stream_from_meta/3`. Chunks remain
+    content-addressed so the read path is unchanged — only the
+    `FileMeta` enumeration differs.
+
+  - `:include_acls`, `:include_system_xattrs` — not implemented
+    yet, tracked under #992 as remaining export-extension work.
   """
   @spec export(binary(), Path.t(), keyword()) ::
           {:ok, export_summary()} | {:error, term()}
   def export(volume_name, output_path, opts \\ [])
       when is_binary(volume_name) and is_binary(output_path) and is_list(opts) do
     with {:ok, volume} <- resolve_volume(volume_name),
-         files <- list_files(volume.id),
+         {:ok, files} <- list_files_for_export(volume, opts),
          :ok <- ensure_paths_fit_ustar(files),
-         {:ok, byte_count} <- write_archive(output_path, volume, files) do
+         {:ok, byte_count} <- write_archive(output_path, volume, files, opts) do
       {:ok,
        %{
          path: output_path,
@@ -69,11 +81,68 @@ defmodule NeonFS.Core.VolumeExport do
     end
   end
 
-  defp list_files(volume_id) do
+  defp list_files_for_export(volume, opts) do
+    case Keyword.get(opts, :snapshot_id) do
+      nil -> {:ok, list_live_files(volume.id)}
+      snapshot_id when is_binary(snapshot_id) -> list_snapshot_files(volume, snapshot_id)
+    end
+  end
+
+  defp list_live_files(volume_id) do
     volume_id
     |> FileIndex.list_volume()
     |> Enum.sort_by(& &1.path)
   end
+
+  defp list_snapshot_files(volume, snapshot_id) do
+    with {:ok, snapshot} <- Snapshot.get(volume.id, snapshot_id),
+         {:ok, raw_entries} <-
+           MetadataReader.range(volume.id, :file_index, <<>>, <<>>,
+             at_root: snapshot.root_chunk_hash
+           ) do
+      files =
+        raw_entries
+        |> Enum.flat_map(&decode_file_entry/1)
+        |> Enum.sort_by(& &1.path)
+
+      {:ok, files}
+    end
+  end
+
+  defp decode_file_entry({"file:" <> _, bytes}) when is_binary(bytes) do
+    case MetadataValue.decode(bytes) do
+      {:ok, map} when is_map(map) -> [storable_to_file_meta(map)]
+      _ -> []
+    end
+  end
+
+  defp decode_file_entry(_), do: []
+
+  defp storable_to_file_meta(map) do
+    %FileMeta{
+      id: Map.get(map, :id),
+      volume_id: Map.get(map, :volume_id),
+      path: Map.get(map, :path),
+      chunks: Map.get(map, :chunks, []) || [],
+      stripes: decode_stripes_field(Map.get(map, :stripes)),
+      size: Map.get(map, :size, 0),
+      content_type: Map.get(map, :content_type) || "application/octet-stream",
+      mode: Map.get(map, :mode, 0o644),
+      uid: Map.get(map, :uid, 0),
+      gid: Map.get(map, :gid, 0),
+      created_at: Map.get(map, :created_at, DateTime.utc_now()),
+      modified_at: Map.get(map, :modified_at, DateTime.utc_now()),
+      accessed_at: Map.get(map, :accessed_at, DateTime.utc_now()),
+      changed_at: Map.get(map, :changed_at, DateTime.utc_now()),
+      version: Map.get(map, :version, 1),
+      previous_version_id: Map.get(map, :previous_version_id),
+      hlc_timestamp: Map.get(map, :hlc_timestamp)
+    }
+  end
+
+  defp decode_stripes_field(nil), do: nil
+  defp decode_stripes_field(list) when is_list(list), do: list
+  defp decode_stripes_field(_), do: nil
 
   # Ustar's prefix (155) + name (100) split caps total path length
   # at ~255 chars. Anything longer needs GNU LongLink — deferred to
@@ -101,16 +170,16 @@ defmodule NeonFS.Core.VolumeExport do
 
   ## Archive writing
 
-  defp write_archive(output_path, volume, files) do
+  defp write_archive(output_path, volume, files, opts) do
     File.mkdir_p!(Path.dirname(output_path))
 
     File.open(output_path, [:write, :raw, :binary], fn io ->
-      manifest_bytes = build_manifest(volume, files)
+      manifest_bytes = build_manifest(volume, files, opts)
       :ok = write_entry(io, @manifest_name, manifest_bytes, now_unix())
 
       byte_count =
         Enum.reduce(files, 0, fn file, acc ->
-          write_file_entry(io, volume, file)
+          write_file_entry(io, volume, file, opts)
           acc + file.size
         end)
 
@@ -123,8 +192,8 @@ defmodule NeonFS.Core.VolumeExport do
     end
   end
 
-  defp build_manifest(volume, files) do
-    Jason.encode!(%{
+  defp build_manifest(volume, files, opts) do
+    base = %{
       version: @manifest_version,
       schema: "neonfs.volume-export.v1",
       volume: %{
@@ -145,22 +214,28 @@ defmodule NeonFS.Core.VolumeExport do
             modified_at: DateTime.to_iso8601(f.modified_at)
           }
         end)
-    })
+    }
+
+    case Keyword.get(opts, :snapshot_id) do
+      nil -> base
+      id -> Map.put(base, :snapshot_id, id)
+    end
+    |> Jason.encode!()
   end
 
-  defp write_file_entry(io, volume, file_meta) do
+  defp write_file_entry(io, volume, file_meta, opts) do
     header = build_ustar_header(entry_name_for(file_meta.path), file_meta)
     :ok = IO.binwrite(io, header)
 
-    :ok = stream_file_content(io, volume, file_meta)
+    :ok = stream_file_content(io, volume, file_meta, opts)
     :ok = write_padding(io, file_meta.size)
     :ok
   end
 
-  defp stream_file_content(_io, _volume, %{size: 0}), do: :ok
+  defp stream_file_content(_io, _volume, %{size: 0}, _opts), do: :ok
 
-  defp stream_file_content(io, _volume, file_meta) do
-    case ReadOperation.read_file_stream(file_meta.volume_id, file_meta.path) do
+  defp stream_file_content(io, volume, file_meta, opts) do
+    case file_stream(volume, file_meta, opts) do
       {:ok, %{stream: stream}} ->
         Enum.each(stream, fn chunk -> :ok = IO.binwrite(io, chunk) end)
         :ok
@@ -169,6 +244,18 @@ defmodule NeonFS.Core.VolumeExport do
         # Mid-stream errors abort the export rather than leaving a
         # truncated entry behind.
         raise "failed to stream #{file_meta.path}: #{inspect(reason)}"
+    end
+  end
+
+  # Live-root export: resolve by path through the live FileIndex.
+  # Snapshot export: the FileMeta was decoded from the snapshot's
+  # `:file_index` tree, so go straight to the chunk-streaming path
+  # without another lookup (which would hit the live root and could
+  # see a different FileMeta or none at all).
+  defp file_stream(volume, file_meta, opts) do
+    case Keyword.get(opts, :snapshot_id) do
+      nil -> ReadOperation.read_file_stream(file_meta.volume_id, file_meta.path)
+      _ -> ReadOperation.read_file_stream_from_meta(volume, file_meta)
     end
   end
 

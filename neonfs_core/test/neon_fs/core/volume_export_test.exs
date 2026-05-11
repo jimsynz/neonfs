@@ -13,6 +13,13 @@ defmodule NeonFS.Core.VolumeExportTest do
     start_stripe_index()
     ensure_chunk_access_tracker()
 
+    # Ra is needed for the snapshot-export tests. Starting it here
+    # is harmless for the live-root tests — they just don't touch
+    # `Snapshot.create/1` / `MetadataReader.range(.., at_root: ...)`.
+    ensure_node_named()
+    start_ra()
+    :ok = NeonFS.Core.RaServer.init_cluster()
+
     on_exit(fn -> cleanup_test_dirs() end)
 
     {:ok, tmp_dir: tmp_dir}
@@ -117,6 +124,33 @@ defmodule NeonFS.Core.VolumeExportTest do
       assert File.exists?(out)
     end
 
+    test "returns :not_found for an unknown :snapshot_id", %{tmp_dir: tmp_dir} do
+      {:ok, vol} = VolumeRegistry.create("export-no-snap", [])
+
+      assert {:error, :not_found} =
+               VolumeExport.export(vol.name, Path.join(tmp_dir, "x.tar"), snapshot_id: "ghost")
+    end
+
+    test "tags the manifest with :snapshot_id when set", %{tmp_dir: tmp_dir} do
+      # Drive a real Snapshot.create via Ra. The volume_root entry
+      # has to exist before Snapshot.create can pin it; we plant it
+      # by hand because the in-test write path doesn't run the
+      # full Ra-backed provisioning that production goes through.
+      {:ok, vol} = VolumeRegistry.create("export-snap-tag", [])
+      :ok = register_volume_root(vol.id, <<0xAA, 0xBB>>)
+      {:ok, snap} = NeonFS.Core.Snapshot.create(vol.id)
+
+      # `MetadataReader.range/5` at the planted root will fail
+      # because the chunk isn't in BlobStore — the export aborts
+      # before writing anything. That's the right behaviour: the
+      # caller sees the error rather than a half-written tar.
+      out = Path.join(tmp_dir, "snap-tag.tar")
+      result = VolumeExport.export(vol.name, out, snapshot_id: snap.id)
+
+      assert match?({:error, _}, result),
+             "expected error from missing snapshot tree, got #{inspect(result)}"
+    end
+
     test "manifest captures POSIX mode bits", %{tmp_dir: tmp_dir} do
       {:ok, vol} = VolumeRegistry.create("export-perm", [])
 
@@ -130,6 +164,19 @@ defmodule NeonFS.Core.VolumeExportTest do
       [file] = manifest["files"]
       assert file["mode"] == 0o640
     end
+  end
+
+  defp register_volume_root(volume_id, root_chunk_hash) do
+    entry = %{
+      volume_id: volume_id,
+      root_chunk_hash: root_chunk_hash,
+      drive_locations: [],
+      durability_cache: %{},
+      updated_at: DateTime.utc_now()
+    }
+
+    {:ok, :ok, _leader} = NeonFS.Core.RaSupervisor.command({:register_volume_root, entry})
+    :ok
   end
 
   # Walks a TAR using :erl_tar's extraction so test logic stays
