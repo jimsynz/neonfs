@@ -203,6 +203,59 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     end
   end
 
+  @doc """
+  List every node chunk hash reachable from the volume's three
+  index trees (`file_index`, `chunk_index`, `stripe_index`) — both
+  internal-page chunks and leaf-page chunks. Used by the
+  anti-entropy runner (#955) so the per-volume reconciliation pass
+  enumerates index-tree pages as well as data chunks, catching
+  tree-page divergence between replicas that the read-path
+  cross-node fallback (#947) would otherwise leave undetected.
+
+  Returns `{:ok, [hash, ...]}` with hashes from all three trees
+  unioned (deduped — internal pages shared across trees are
+  reported once). Empty trees contribute zero hashes.
+
+  ## Options
+
+  Same options as `get/4` / `range/5` for testability (each opt is
+  passed through to `resolve_segment_for_write/2` and the NIF
+  wrapper).
+  """
+  @spec list_referenced_chunks(volume_id :: binary(), keyword()) ::
+          {:ok, [binary()]} | read_error()
+  def list_referenced_chunks(volume_id, opts \\ []) when is_binary(volume_id) do
+    with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts),
+         {:ok, store_handle} <- resolve_store_handle(root_entry, opts) do
+      collect_tree_chunks(store_handle, segment, opts)
+    end
+  end
+
+  defp collect_tree_chunks(store_handle, segment, opts) do
+    nif = Keyword.get(opts, :index_tree_list, &default_index_tree_list/3)
+
+    [:file_index, :chunk_index, :stripe_index]
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn kind, {:ok, acc} ->
+      tree_root = Map.fetch!(segment.index_roots, kind)
+
+      case nif.(store_handle, tree_root_or_empty(tree_root), "hot") do
+        {:ok, hashes} when is_list(hashes) ->
+          {:cont, {:ok, Enum.into(hashes, acc)}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:index_tree_read_failed, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, set} -> {:ok, MapSet.to_list(set)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp default_index_tree_list(store, root_hash, tier) do
+    Native.index_tree_list_referenced_chunks(store, root_hash, tier)
+  end
+
   ## Internals
 
   # Wraps a cache miss + populate around the actual read function.

@@ -241,6 +241,89 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
   end
 
+  describe "list_referenced_chunks/2 (#955)" do
+    test "unions hashes from all three index trees" do
+      tree_root = <<7::256>>
+
+      segment =
+        sample_segment(
+          index_roots: %{
+            file_index: tree_root,
+            chunk_index: <<8::256>>,
+            stripe_index: <<9::256>>
+          }
+        )
+
+      list_fn = fn _store, root, _tier ->
+        cond do
+          root == tree_root ->
+            {:ok, [<<1>>, <<2>>]}
+
+          root == <<8::256>> ->
+            # Overlap with file_index — should dedup.
+            {:ok, [<<2>>, <<3>>]}
+
+          root == <<9::256>> ->
+            {:ok, [<<4>>]}
+        end
+      end
+
+      opts =
+        build_opts(
+          root_chunk_reader: const_chunk_reader(segment),
+          index_tree_list: list_fn
+        )
+
+      assert {:ok, hashes} = MetadataReader.list_referenced_chunks("vol-1", opts)
+      assert MapSet.new(hashes) == MapSet.new([<<1>>, <<2>>, <<3>>, <<4>>])
+    end
+
+    test "empty tree roots pass <<>> to the NIF and contribute no hashes" do
+      segment =
+        sample_segment(
+          index_roots: %{
+            file_index: nil,
+            chunk_index: nil,
+            stripe_index: nil
+          }
+        )
+
+      table = :ets.new(:list_calls, [:public, :duplicate_bag])
+
+      list_fn = fn _store, root, _tier ->
+        :ets.insert(table, {:root, root})
+        {:ok, []}
+      end
+
+      opts =
+        build_opts(
+          root_chunk_reader: const_chunk_reader(segment),
+          index_tree_list: list_fn
+        )
+
+      assert {:ok, []} = MetadataReader.list_referenced_chunks("vol-1", opts)
+
+      observed_roots = :ets.tab2list(table) |> Enum.map(fn {:root, r} -> r end)
+      assert Enum.all?(observed_roots, &(&1 == <<>>))
+    end
+
+    test "propagates a NIF error as :index_tree_read_failed" do
+      segment =
+        sample_segment(
+          index_roots: %{file_index: <<1::256>>, chunk_index: nil, stripe_index: nil}
+        )
+
+      opts =
+        build_opts(
+          root_chunk_reader: const_chunk_reader(segment),
+          index_tree_list: fn _store, _root, _tier -> {:error, "oh no"} end
+        )
+
+      assert {:error, {:index_tree_read_failed, _}} =
+               MetadataReader.list_referenced_chunks("vol-1", opts)
+    end
+  end
+
   describe ":at_root override" do
     test "substitutes the bootstrap entry's root_chunk_hash with the supplied one" do
       snapshot_hash = <<7::256>>
