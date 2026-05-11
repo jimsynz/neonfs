@@ -5,6 +5,187 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.3.0](https://harton.dev/project-neon/neonfs/compare/v0.2.6...v0.3.0) (2026-05-11)
+### Breaking Changes:
+
+* core: flag-day removal of MetadataStore + QuorumCoordinator + global AntiEntropy (#957) by James Harton
+
+* containerd: bind ref on first Write-stream frame, substitute on subsequent frames (#951) by James Harton
+
+* core: rekey bootstrap drives by {node, drive_id} (#900) by James Harton
+
+
+
+### Bug Fixes:
+
+* deps: update all dependencies (#954) by Renovate Bot
+
+* cli: chmod private keys to 0600 in `cluster ca emergency-bootstrap` (#934) by James Harton
+
+* core: scope GC sweep phase by volume_id when collect/1 is volume-scoped (#915) by James Harton
+
+* test_support: isolate peer-cluster controller from peer EXIT signals (#911) by James Harton
+
+* core: collapse 3-tuple writer errors at FileIndex boundary (#909) by James Harton
+
+* core: forward DetachedFileGC release events off the Ra apply path (#905) by James Harton
+
+* core: omit nil writer_fn from MetadataWriter chunk-replicator opts (#894) by James Harton
+
+* core: build commands in `:dry_run?` reconstruct so preview matches runbook (#857) by James Harton
+
+* core: wrap Ra command 3-tuple reply in Provisioner.register_root (#852) by James Harton
+
+* test_support: poll dist link state in reconnect_nodes (#744) (#851) by James Harton
+
+* nfs: resolve volume name from filehandle's volume_id (#761) (#850) by James Harton
+
+* core: floor HLC clamp at state.last_wall to preserve monotonicity (#801) (#842) by James Harton
+
+* containerd: tolerate process-exit race in health_server_test cleanup (#834) by James Harton
+
+* containerd: swallow exit race in StubChunkWriter.stop/0 (#799) by James Harton
+
+* core: use `:infinity` timeout on `RaServer.initialized?/0` (#776) by James Harton
+
+* client: widen `assert_receive` budget in CertRenewalTest to 5s (#775) by James Harton
+
+* ci: drop host port mapping on registry sidecar (#774) by James Harton
+
+* fuse: surface specific cause when fusermount3 returns `:fusermount_no_fd` (#772) by James Harton
+
+* packaging: add `MountFlags=shared` to filesystem-providing units (#771) by James Harton
+
+* nfs: normalise core errors to NFSv3 wire-status atoms (#770) by James Harton
+
+* packaging: make `nfs-common` a hard dependency, not just a recommendation (#769) by James Harton
+
+* core: prune empty prefix dirs and detect data recursively (#768) by James Harton
+
+* packaging: include node hostname in distribution cert SAN (#767) by James Harton
+
+* core: surface evacuation chunk failures and stop after 3 stale batches (#764) by James Harton
+
+* core: probe drive path writability before registering (#762) by James Harton
+
+### Improvements:
+
+* core: drive evacuation reads chunk-volume from `ChunkMeta.volume_ids` (#969) by James Harton
+
+* core,cli: per-volume anti-entropy runner + scheduler + CLI (#956) by James Harton
+
+* containerd: suppress GRPC NOT_FOUND exception logs from Status / Info / Delete (#953) by James Harton
+
+* containerd: per-frame Write-stream telemetry + STAT total/expected fix (#949) by James Harton
+
+* core: migrate ChunkMeta from `volume_id` to `volume_ids :: MapSet` (#948) by James Harton
+
+* core: cross-node fallback for per-volume metadata reads (#947) by James Harton
+
+* core,omnibus: drop default drive auto-registration (#939) by James Harton
+
+* core,s3: linearise volume-root reads + map FileNotFound to 404 (#938) by James Harton
+
+* cli,core: cluster ca rotate â grace window + per-node retry flags (#930) by James Harton
+
+* core: cluster ca rotate orchestrator backbone (#929) by James Harton
+
+* cli,core: `neonfs nfs mount/unmount` via local mount.nfs in the CLI (#925) by James Harton
+
+* core,cli: per-volume scrub scheduler + `neonfs volume scrub` CLI (#919) by James Harton
+
+* cli: `neonfs volume gc <name> [--now] [--interval <duration>]` (#917) by James Harton
+
+* core: per-volume GC scheduler dispatching VolumeGC from RootSegment.schedules.gc (#916) by James Harton
+
+* core: switch StripeIndex read callsites to Volume.MetadataReader (#907) by James Harton
+
+* core: migrate ChunkIndex to Volume.MetadataReader/Writer (#906) by James Harton
+
+* core: migrate FileIndex to Volume.MetadataReader/Writer (#902) by James Harton
+
+* core: register local drives in bootstrap layer on cluster join (#901) by James Harton
+
+* core: lazy-provision volumes on first metadata write (#891) by James Harton
+
+* core: provision system volume eagerly + per-volume capacity gate (#890) by James Harton
+
+* core: thread volume_id through ChunkFetcher via opts (#882) by James Harton
+
+* core: thread volume_id through StripeRepair post-stripe-fetch helpers (#880) by James Harton
+
+* core: thread volume_id through `WriteOperation.commit_chunks` chain (#878) by James Harton
+
+* core: thread volume_id through `Replication.add_locations_to_chunk/3` (#876) by James Harton
+
+* core: thread volume_id through `WriteOperation.build_chunk_info_list/4` (#873) by James Harton
+
+* core: thread volume_id through `CommitChunks` `ChunkIndex.get` callers (#871) by James Harton
+
+* core: thread volume_id through `GarbageCollector.collect_stripe_chunks/2` (#869) by James Harton
+
+* core: thread volume_id through `ReadOperation`'s chunk/stripe lookups (#867) by James Harton
+
+* core: thread volume_id through three `ChunkIndex.get/1` callers (#865) by James Harton
+
+* core: add `StripeIndex.{get,exists?}/2` via `MetadataReader` (#863) by James Harton
+
+* core: add `ChunkIndex.{get,exists?}/2` via `MetadataReader` (#861) by James Harton
+
+* core: switch `FileIndex.get/2` point reads to `MetadataReader` (#859) by James Harton
+
+* cli: neonfs cluster reconstruct-from-disk subcommand (#845) (#848) by James Harton
+
+* core: cluster reconstruct-from-disk handler (Part of #843) (#846) by James Harton
+
+* core: on-disk chunk walker for Volume.Reconstruction (Part of #839) (#844) by James Harton
+
+* core: bootstrap-layer reconstruction algorithm (#838) (#841) by James Harton
+
+* core: per-volume CAS for MetadataWriter to prevent lost updates (#830) (#833) by James Harton
+
+* core: MetadataWriter for the per-volume write path (#829) (#832) by James Harton
+
+* core: Rustler NIFs for index tree write operations (#828) (#831) by James Harton
+
+* core: MetadataReader reads through MetadataCache (#824) (#827) by James Harton
+
+* core: MetadataCache subscribes to bootstrap-layer events (#823) (#826) by James Harton
+
+* core: MetadataCache ETS module for per-volume reads (#822) (#825) by James Harton
+
+* core: MetadataReader typed wrappers + ETF value codec (#819) (#821) by James Harton
+
+* core: MetadataReader for bootstrap â root segment â index tree (#815) (#820) by James Harton
+
+* core: Rustler NIFs for index tree read operations (#814) (#818) by James Harton
+
+* core: BlobStore-backed ChunkStore adapter for IndexTree (#813) (#817) by James Harton
+
+* core: wire Provisioner into create_volume + drive_manager Ra registration (#809) (#812) by James Harton
+
+* core: wire delete_volume to unregister bootstrap entry (#806) (#811) by James Harton
+
+* core: provisioner for per-volume metadata allocation (Part of #805) (#810) by James Harton
+
+* core: replicated chunk write helper for per-volume metadata (#804) (#808) by James Harton
+
+* core: drive selector for per-volume replica placement (#803) (#807) by James Harton
+
+* core: per-volume HLC helper around RootSegment (#782) (#802) by James Harton
+
+* core: chunked CoW B-tree primitive for in-volume metadata indexes (#781) (#800) by James Harton
+
+* core: bootstrap-layer schema for per-volume metadata (#779) (#798) by James Harton
+
+* core: root segment format for per-volume metadata (#796) by James Harton
+
+* core: drive identity file for crash-recovery anchoring (#795) by James Harton
+
+* core: normalise drive paths in `drive add` and on load (#777) by James Harton
+
+* cli: pre-flight mountpoint checks for `fuse mount` (#773) by James Harton
+
 ## [v0.2.6](https://harton.dev/project-neon/neonfs/compare/v0.2.5...v0.2.6) (2026-05-05)
 
 

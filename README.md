@@ -4,7 +4,7 @@ A BEAM-orchestrated distributed filesystem combining Elixir's coordination stren
 
 NeonFS provides location-transparent storage where data is accessible from any node regardless of where it's physically stored. It offers configurable durability, tiered storage, compression, encryption, and multiple access methods.
 
-Current version: v0.2.0.
+Current version: v0.3.0.
 
 ## Design Principles
 
