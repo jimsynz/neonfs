@@ -4,7 +4,9 @@ use crate::daemon::DaemonConnection;
 use crate::error::Result;
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{RotationStatus, VolumeInfo};
-use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
+use crate::term::{
+    extract_error, term_to_list, term_to_map, term_to_string, term_to_u64, unwrap_ok_tuple,
+};
 use clap::Subcommand;
 use eetf::{Atom, Binary, FixInteger, Map, Term};
 use std::collections::HashMap;
@@ -248,6 +250,20 @@ pub enum VolumeCommand {
         new_name: String,
     },
 
+    /// Export a volume's live root as a portable tarball (#965).
+    ///
+    /// V1: live root only, local output path only. Snapshot export,
+    /// ACL/xattr capture, and S3/file:// URL outputs are tracked as
+    /// follow-ups. The output path is on the daemon's filesystem.
+    Export {
+        /// Volume name
+        volume: String,
+
+        /// Output tarball path on the daemon's filesystem
+        #[arg(long = "to")]
+        to: String,
+    },
+
     /// Rollback a volume's live root to a snapshot (#963).
     ///
     /// Destructive in the general case: chunks reachable from the
@@ -418,7 +434,53 @@ impl VolumeCommand {
                 force,
                 r#yes,
             } => self.restore(volume, snapshot, *safe, *force, *r#yes, format),
+            VolumeCommand::Export { volume, to } => self.export(volume, to, format),
         }
+    }
+
+    fn export(&self, volume: &str, to: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_export",
+                vec![binary_val(volume), binary_val(to)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let path = term_to_string(map.get("path").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'path'".to_string())
+        })?)?;
+        let file_count = term_to_u64(map.get("file_count").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'file_count'".to_string())
+        })?)?;
+        let byte_count = term_to_u64(map.get("byte_count").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'byte_count'".to_string())
+        })?)?;
+
+        match format {
+            OutputFormat::Json => {
+                println!(
+                    "{{\"volume\":\"{}\",\"path\":\"{}\",\"file_count\":{},\"byte_count\":{}}}",
+                    volume, path, file_count, byte_count
+                );
+            }
+            OutputFormat::Table => {
+                println!("✓ Exported {} to {}", volume, path);
+                println!();
+                println!("  Files:  {}", file_count);
+                println!("  Bytes:  {}", byte_count);
+            }
+        }
+        Ok(())
     }
 
     fn restore(
@@ -2208,6 +2270,42 @@ mod tests {
             }
             _ => panic!("expected Restore variant"),
         }
+    }
+
+    #[test]
+    fn test_volume_export_parses() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        let cli =
+            TestCli::try_parse_from(["test", "export", "vol-1", "--to", "/tmp/out.tar"]).unwrap();
+        match cli.command {
+            VolumeCommand::Export { volume, to } => {
+                assert_eq!(volume, "vol-1");
+                assert_eq!(to, "/tmp/out.tar");
+            }
+            _ => panic!("expected Export variant"),
+        }
+    }
+
+    #[test]
+    fn test_volume_export_requires_to_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        // Without `--to`, clap rejects.
+        let result = TestCli::try_parse_from(["test", "export", "vol-1"]);
+        assert!(result.is_err());
     }
 
     #[test]
