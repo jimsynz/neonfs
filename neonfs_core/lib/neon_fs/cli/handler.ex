@@ -32,6 +32,7 @@ defmodule NeonFS.CLI.Handler do
     ReplicaRepairScheduler,
     S3CredentialManager,
     ServiceRegistry,
+    Snapshot,
     StorageMetrics,
     SystemVolume,
     Volume,
@@ -2333,6 +2334,142 @@ defmodule NeonFS.CLI.Handler do
     |> Enum.filter(fn job -> Map.get(job.params || %{}, :volume_id) == volume_id end)
     |> Enum.sort_by(fn job -> job.updated_at end, {:desc, DateTime})
     |> List.first()
+  end
+
+  @doc """
+  Snapshots the named volume's current root chunk (#962 / epic #959).
+
+  ## Parameters
+  - `volume_name` — volume name (string).
+  - `opts` — map with optional `"name"` (human-readable snapshot label).
+
+  ## Returns
+  - `{:ok, snapshot_map}` — `%{id, volume_id, volume_name, name, root_chunk_hash_hex, created_at}`.
+  - `{:error, reason}` — volume not found, snapshot create failed, etc.
+  """
+  @spec handle_volume_snapshot_create(binary(), map()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_snapshot_create(volume_name, opts \\ %{}) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, snapshot} <- Snapshot.create(volume.id, snapshot_create_opts(opts)) do
+      {:ok, snapshot_to_map(snapshot, volume_name)}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp snapshot_create_opts(%{"name" => name}) when is_binary(name) and name != "",
+    do: [name: name]
+
+  defp snapshot_create_opts(_), do: []
+
+  @doc """
+  Lists every snapshot for the named volume, newest first.
+  """
+  @spec handle_volume_snapshot_list(binary()) :: {:ok, [map()]} | {:error, term()}
+  def handle_volume_snapshot_list(volume_name) when is_binary(volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, snapshots} <- Snapshot.list(volume.id) do
+      {:ok, Enum.map(snapshots, &snapshot_to_map(&1, volume_name))}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Shows a single snapshot, addressed by ULID or by human-readable
+  `:name` (if unique within the volume), scoped to the named volume.
+  """
+  @spec handle_volume_snapshot_show(binary(), binary()) :: {:ok, map()} | {:error, term()}
+  def handle_volume_snapshot_show(volume_name, snapshot_ref)
+      when is_binary(volume_name) and is_binary(snapshot_ref) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, snapshot} <- resolve_snapshot(volume.id, snapshot_ref, volume_name) do
+      {:ok, snapshot_to_map(snapshot, volume_name)}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Deletes the snapshot's pin. Accepts ULID or human-readable name (if
+  unique within the volume). Idempotent — deleting a missing ULID is a
+  no-op; deleting by an unknown name returns `:not_found`. Chunk
+  reclamation is the GC scheduler's job (#961).
+  """
+  @spec handle_volume_snapshot_delete(binary(), binary()) :: :ok | {:error, term()}
+  def handle_volume_snapshot_delete(volume_name, snapshot_ref)
+      when is_binary(volume_name) and is_binary(snapshot_ref) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, snapshot} <- resolve_snapshot(volume.id, snapshot_ref, volume_name),
+         :ok <- Snapshot.delete(volume.id, snapshot.id) do
+      :ok
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  # Looks up `ref` first as a snapshot ULID, then — if that misses — as
+  # a human-readable `:name`. Multiple snapshots may share a name (see
+  # the epic body); when the name is ambiguous we refuse rather than
+  # picking one silently.
+  defp resolve_snapshot(volume_id, ref, volume_name) do
+    case Snapshot.get(volume_id, ref) do
+      {:ok, snapshot} ->
+        {:ok, snapshot}
+
+      {:error, :not_found} ->
+        resolve_snapshot_by_name(volume_id, ref, volume_name)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp resolve_snapshot_by_name(volume_id, name, volume_name) do
+    case Snapshot.list(volume_id) do
+      {:ok, snapshots} ->
+        case Enum.filter(snapshots, &(&1.name == name)) do
+          [snapshot] ->
+            {:ok, snapshot}
+
+          [] ->
+            {:error, NotFound.exception(message: "snapshot #{name} not found on #{volume_name}")}
+
+          [_ | _] ->
+            {:error,
+             Invalid.exception(
+               message:
+                 "snapshot name #{inspect(name)} is ambiguous on #{volume_name} — " <>
+                   "address by ULID instead"
+             )}
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp snapshot_to_map(%Snapshot{} = snap, volume_name) do
+    %{
+      id: snap.id,
+      volume_id: snap.volume_id,
+      volume_name: volume_name,
+      name: snap.name,
+      root_chunk_hash_hex: Base.encode16(snap.root_chunk_hash, case: :lower),
+      created_at: DateTime.to_iso8601(snap.created_at)
+    }
   end
 
   @doc """
