@@ -297,7 +297,8 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
           source_tier: source_tier,
           target_drive: target.id,
           target_node: target.node,
-          target_tier: target.tier
+          target_tier: target.tier,
+          chunk_meta: chunk
         }
 
         case TierMigration.run_migration(migration_params) do

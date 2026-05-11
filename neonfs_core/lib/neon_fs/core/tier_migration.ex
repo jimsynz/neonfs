@@ -99,21 +99,14 @@ defmodule NeonFS.Core.TierMigration do
       }
     )
 
-    # Resolve the chunk's volume_id from the local ETS view if the
-    # caller didn't thread it through `params`. Drive-evacuation and
-    # tier-eviction runners don't always know the volume of every
-    # chunk they process — `ChunkMeta.volume_id` (#836) lets us
-    # discover it locally without re-reading the per-volume tree.
-    params = Map.put_new_lazy(params, :volume_id, fn -> resolve_volume_id(params.chunk_hash) end)
+    chunk_meta = resolve_chunk_meta(params)
 
-    # Look up chunk metadata to determine compression.
-    # The BlobStore NIF doesn't auto-detect compression, so we must
-    # decompress on read and re-compress on write to preserve the format.
-    chunk_compression =
-      case ChunkIndex.get(params.volume_id, params.chunk_hash) do
-        {:ok, meta} -> meta.compression
-        _ -> :none
-      end
+    params =
+      params
+      |> Map.put_new_lazy(:volume_id, fn -> derive_volume_id(chunk_meta, params.chunk_hash) end)
+      |> Map.put_new(:chunk_meta, chunk_meta)
+
+    chunk_compression = if chunk_meta, do: chunk_meta.compression, else: :none
 
     with {:ok, data} <- copy_read(params, chunk_compression),
          {:ok, _hash, _info} <- copy_write(params, data, chunk_compression),
@@ -256,8 +249,8 @@ defmodule NeonFS.Core.TierMigration do
   defp update_metadata(params) do
     chunk_index = NeonFS.Core.ChunkIndex
 
-    case chunk_index.get(Map.get(params, :volume_id, "_migration"), params.chunk_hash) do
-      {:ok, chunk_meta} ->
+    case Map.get(params, :chunk_meta) || lookup_chunk_meta(params) do
+      %ChunkMeta{} = chunk_meta ->
         new_location = %{
           node: params.target_node,
           drive_id: params.target_drive,
@@ -281,7 +274,7 @@ defmodule NeonFS.Core.TierMigration do
 
         chunk_index.update_locations(params.chunk_hash, updated_locations)
 
-      {:error, :not_found} ->
+      nil ->
         {:error, :chunk_not_found}
     end
   end
@@ -344,19 +337,52 @@ defmodule NeonFS.Core.TierMigration do
   end
 
   defp cleanup_delete_opts(volume_id, chunk_hash) do
-    case ChunkIndex.get(volume_id, chunk_hash) do
-      {:ok, chunk_meta} -> BlobStore.codec_opts_for_chunk(chunk_meta)
-      _ -> []
+    case ChunkIndex.lookup_by_hash(chunk_hash) do
+      {:ok, chunk_meta} ->
+        BlobStore.codec_opts_for_chunk(chunk_meta)
+
+      :not_found ->
+        case ChunkIndex.get(volume_id, chunk_hash) do
+          {:ok, chunk_meta} -> BlobStore.codec_opts_for_chunk(chunk_meta)
+          _ -> []
+        end
     end
   end
 
-  # Find a chunk's volume by scanning the local ETS index. Used by
-  # background runners that hand the migration a hash without volume
-  # context (drive evacuation, tier eviction). Falls back to
-  # `"_migration"` so we still produce a stable lookup key — the
-  # subsequent `ChunkIndex.get/2` will simply return `:not_found` and
-  # the migration's caller-side error handling kicks in.
-  defp resolve_volume_id(chunk_hash) do
+  # Prefer caller-threaded `:chunk_meta` (drive evacuation passes the
+  # ChunkMeta it already read from local ETS). Fall back to local ETS,
+  # then to the cluster-wide MetadataReader. The local-ETS path matters
+  # mid-evacuation: the volume's tree pages may have been migrated off
+  # the evacuating drive before `drive_locations` is rewritten, which
+  # makes `ChunkIndex.get/2` (via MetadataReader) fail to read the
+  # chunk_meta back even though the chunk is locally present.
+  defp resolve_chunk_meta(params) do
+    case Map.get(params, :chunk_meta) do
+      %ChunkMeta{} = meta -> meta
+      _ -> lookup_chunk_meta(params)
+    end
+  end
+
+  defp lookup_chunk_meta(params) do
+    case ChunkIndex.lookup_by_hash(params.chunk_hash) do
+      {:ok, %ChunkMeta{} = meta} ->
+        meta
+
+      :not_found ->
+        volume_id = Map.get(params, :volume_id) || derive_volume_id(nil, params.chunk_hash)
+
+        case ChunkIndex.get(volume_id, params.chunk_hash) do
+          {:ok, %ChunkMeta{} = meta} -> meta
+          _ -> nil
+        end
+    end
+  end
+
+  defp derive_volume_id(%ChunkMeta{} = meta, _hash) do
+    ChunkMeta.any_volume_id(meta) || "_migration"
+  end
+
+  defp derive_volume_id(nil, chunk_hash) do
     case :ets.lookup(:chunk_index, chunk_hash) do
       [{^chunk_hash, %ChunkMeta{} = meta}] ->
         ChunkMeta.any_volume_id(meta) || "_migration"
