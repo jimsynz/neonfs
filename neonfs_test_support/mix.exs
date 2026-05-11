@@ -9,7 +9,7 @@ defmodule NeonFS.TestSupport.MixProject do
 
   See sub-issue #599 (foundation for #582).
   """
-  @version "0.3.1"
+  @version "0.3.2"
 
   def project do
     [

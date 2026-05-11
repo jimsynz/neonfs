@@ -1,6 +1,6 @@
 [package]
 name = "neonfs-cli"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["NeonFS Contributors"]
 description = "Command-line interface for NeonFS distributed filesystem"

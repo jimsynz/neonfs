@@ -5,6 +5,51 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.3.2](https://harton.dev/project-neon/neonfs/compare/v0.3.1...v0.3.2) (2026-05-11)
+
+
+
+
+### Bug Fixes:
+
+* core: Persistence treats ETS table vanishing mid-snapshot as a no-op (#990) by James Harton
+
+* core,cli: `DriveManager.add_drive`/`remove_drive` need 60 s, not 5 (#981) by James Harton
+
+### Improvements:
+
+* core: `file://` URL prefix in volume export/import + backup paths (#1007) by James Harton
+
+* core,cli: `volume export --include-acls / --include-system-xattrs` (#1006) by James Harton
+
+* core: GNU LongLink support in volume export/import (#1002) by James Harton
+
+* core: anti-entropy enumerates index-tree pages (#1001) by James Harton
+
+* core: `MetadataReader.list_referenced_chunks/2` + Rust NIF (#1000) by James Harton
+
+* core,cli: `neonfs backup create | list | restore` (#998) by James Harton
+
+* core,cli: `volume export --snapshot <id>` (#997) by James Harton
+
+* csi: snapshot RPCs + clone-volume content source (#996) by James Harton
+
+* core,cli: `volume import` â restore export into a new volume (#994) by James Harton
+
+* core,cli: `volume export` â stream live root to a tarball (#993) by James Harton
+
+* core,cli: `volume restore` â rollback live root to a snapshot (#991) by James Harton
+
+* core: multi-root GC walks live + every snapshot root (#986) by James Harton
+
+* core: MetadataReader `:at_root` opt for snapshot tree walks (#984) by James Harton
+
+* core,cli: `volume promote` â new volume from snapshot, no chunk copy (#982) by James Harton
+
+* cli: `neonfs volume snapshot create|list|show|delete` (#979) by James Harton
+
+* core: `NeonFS.Core.Snapshot` module + `MetadataStateMachine` snapshot keyspace (#978) by James Harton
+
 ## [v0.3.1](https://harton.dev/project-neon/neonfs/compare/v0.3.0...v0.3.1) (2026-05-11)
 
 
