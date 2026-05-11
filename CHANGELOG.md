@@ -5,6 +5,19 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.3.1](https://harton.dev/project-neon/neonfs/compare/v0.3.0...v0.3.1) (2026-05-11)
+
+
+
+
+### Bug Fixes:
+
+* core: thread local `ChunkMeta` through `TierMigration` for drive evacuation (#974) by James Harton
+
+### Improvements:
+
+* core,cli: `neonfs cluster init` takes an initial drive (#976) by James Harton
+
 ## [v0.3.0](https://harton.dev/project-neon/neonfs/compare/v0.2.6...v0.3.0) (2026-05-11)
 ### Breaking Changes:
 

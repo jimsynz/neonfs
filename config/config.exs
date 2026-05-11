@@ -11,9 +11,10 @@ config :git_ops,
   github_handle_lookup?: false,
   repository_url: "https://harton.dev/project-neon/neonfs",
   version_tag_prefix: "v",
-  managed_files: "*/{mix.exs,README.md,Cargo.toml}"
+  managed_files: "**/{mix.exs,README.md,Cargo.toml}"
     |> Path.wildcard()
-    |> Enum.concat(["mix.exs"])
+    |> Enum.reject(&String.contains?(&1, "/deps/"))
+    |> Enum.uniq()
     |> Enum.map(fn path ->
       cond do
         String.ends_with?(path, "mix.exs") ->
