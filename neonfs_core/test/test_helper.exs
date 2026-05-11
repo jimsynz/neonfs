@@ -9,5 +9,7 @@ Mimic.copy(NeonFS.Core.ChunkIndex)
 Mimic.copy(NeonFS.Core.Replication)
 Mimic.copy(NeonFS.Core.ReplicaRepair)
 Mimic.copy(NeonFS.Core.VolumeRegistry)
+Mimic.copy(NeonFS.Core.Volume.MetadataReader)
+Mimic.copy(NeonFS.Core.RaSupervisor)
 
 ExUnit.start(capture_log: true)

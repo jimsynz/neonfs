@@ -31,25 +31,34 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
 
   ## Scope
 
-  This MVP enumerates `chunk_index` only (data-chunk divergence).
-  Index-tree internal pages aren't enumerated yet — that catch-up
-  rides on the read-path cross-node fallback (#947) until #903
-  (`MetadataWriter` fan-out) replicates them synchronously at write
-  time, after which anti-entropy doesn't need to enumerate them at
-  all. The tree-page enumeration follow-up needs a new Rust NIF;
-  parked under a separate issue.
+  The pass enumerates two canonical sets:
+
+  1. `chunk_index` data chunks — each entry's `locations` is its
+     canonical replica set.
+  2. Index-tree pages — `file_index`, `chunk_index`, and
+     `stripe_index` internal/leaf nodes reachable from the
+     volume's segment, walked via
+     `MetadataReader.list_referenced_chunks/2` (#955). The
+     canonical replica set is the volume's bootstrap
+     `drive_locations` (tree pages don't have per-chunk locations
+     because they're written by `MetadataWriter` to a single drive
+     and the rest of the replica set catches up via this pass).
+
+  Both classes feed `ReplicaRepair.repair_chunks/2` once at end
+  of pass.
 
   ## Params
 
   - `:volume_id` (required) — volume to reconcile.
-  - `:batch_size` (optional, default 100) — chunks per `step/1` call.
+  - `:batch_size` (optional, default 100) — entries per `step/1`
+    call (across both classes).
 
   ## Telemetry
 
   - `[:neonfs, :volume_anti_entropy, :checked]` —
-    `%{count}`, `%{volume_id}` — chunks examined this batch.
+    `%{count}`, `%{volume_id}` — entries examined this batch.
   - `[:neonfs, :volume_anti_entropy, :divergence]` —
-    `%{count}`, `%{volume_id, hashes}` — chunks needing repair.
+    `%{count}`, `%{volume_id, hashes}` — entries needing repair.
   - `[:neonfs, :volume_anti_entropy, :peer_unreachable]` —
     `%{}`, `%{volume_id, peer_node, reason}` — skipped a peer.
   - `[:neonfs, :volume_anti_entropy, :complete]` —
@@ -62,6 +71,9 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
   require Logger
 
   alias NeonFS.Core.{BlobStore, ChunkIndex, ReplicaRepair}
+  alias NeonFS.Core.MetadataStateMachine
+  alias NeonFS.Core.RaSupervisor
+  alias NeonFS.Core.Volume.MetadataReader
 
   @default_batch_size 100
   @rpc_timeout 5_000
@@ -76,6 +88,7 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
 
     state = job.state || %{}
     state = Map.put_new_lazy(state, :hashes, fn -> load_hashes(volume_id) end)
+    state = Map.put_new_lazy(state, :tree_locations, fn -> load_tree_locations(volume_id) end)
     state = Map.put_new(state, :cursor, 0)
     state = Map.put_new(state, :checked, 0)
     state = Map.put_new(state, :divergent_hashes, [])
@@ -85,7 +98,7 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
         complete(job, volume_id, state)
 
       batch ->
-        {checked_inc, divergent_inc} = examine_batch(volume_id, batch)
+        {checked_inc, divergent_inc} = examine_batch(volume_id, batch, state)
 
         new_state = %{
           state
@@ -112,22 +125,70 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
 
   # ─── Internals ──────────────────────────────────────────────────────
 
+  # `load_hashes/1` returns a tagged list. Data-chunk entries carry
+  # only the hash because the canonical locations are looked up
+  # fresh per-examine (chunk locations can change mid-pass).
+  # Tree-page entries use the volume's bootstrap `drive_locations`
+  # snapshot, which is loaded once into state alongside the hash
+  # list — tree pages don't have per-entry locations.
   defp load_hashes(volume_id) do
-    ChunkIndex.get_chunks_for_volume(volume_id)
-    |> Enum.map(& &1.hash)
+    chunk_entries =
+      volume_id
+      |> ChunkIndex.get_chunks_for_volume()
+      |> Enum.map(&{:chunk, &1.hash})
+
+    chunk_entries ++ Enum.map(load_tree_page_hashes(volume_id), &{:tree_page, &1})
   end
 
-  defp examine_batch(volume_id, hashes) do
-    Enum.reduce(hashes, {0, []}, &examine_one(volume_id, &1, &2))
+  defp load_tree_page_hashes(volume_id) do
+    case MetadataReader.list_referenced_chunks(volume_id) do
+      {:ok, hashes} ->
+        hashes
+
+      {:error, reason} ->
+        Logger.warning(
+          "VolumeAntiEntropy: skipping tree-page enumeration for #{volume_id}: " <>
+            inspect(reason)
+        )
+
+        []
+    end
   end
 
-  defp examine_one(volume_id, hash, {checked, divergent}) do
+  defp load_tree_locations(volume_id) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+      {:ok, %{drive_locations: locs}} when is_list(locs) -> locs
+      _ -> []
+    end
+  end
+
+  defp examine_batch(volume_id, hashes, state) do
+    Enum.reduce(hashes, {0, []}, fn entry, acc -> examine_one(volume_id, entry, state, acc) end)
+  end
+
+  defp examine_one(volume_id, {:chunk, hash}, _state, {checked, divergent}) do
     case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk} -> record_examination(volume_id, chunk, {checked, divergent})
       # Chunk vanished from the index between load and examine
       # (race vs concurrent delete). Skip without counting.
       {:error, _} -> {checked, divergent}
     end
+  end
+
+  defp examine_one(volume_id, {:tree_page, hash}, state, {checked, divergent}) do
+    # Tree pages diverge against the volume's bootstrap
+    # drive_locations rather than a per-chunk locations list.
+    if tree_page_divergent?(volume_id, hash, state.tree_locations) do
+      {checked + 1, [hash | divergent]}
+    else
+      {checked + 1, divergent}
+    end
+  end
+
+  defp tree_page_divergent?(volume_id, hash, locations) do
+    Enum.any?(locations, fn location ->
+      not chunk_present_on?(volume_id, hash, location)
+    end)
   end
 
   defp record_examination(volume_id, chunk, {checked, divergent}) do

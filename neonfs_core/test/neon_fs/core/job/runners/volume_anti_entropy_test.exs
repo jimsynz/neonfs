@@ -12,6 +12,8 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropyTest do
 
   alias NeonFS.Core.{BlobStore, ChunkIndex, ChunkMeta, Job, ReplicaRepair}
   alias NeonFS.Core.Job.Runners.VolumeAntiEntropy
+  alias NeonFS.Core.RaSupervisor
+  alias NeonFS.Core.Volume.MetadataReader
 
   setup :verify_on_exit!
 
@@ -161,6 +163,115 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropyTest do
 
       assert_received {[:neonfs, :volume_anti_entropy, :peer_unreachable], ^ref, _,
                        %{peer_node: :far_away_node}}
+    end
+  end
+
+  describe "step/1 — index-tree page enumeration (#955 / #999)" do
+    test "tree-page hash present on every drive_location → no repair" do
+      stub(ChunkIndex, :get_chunks_for_volume, fn @volume_id -> [] end)
+
+      stub(MetadataReader, :list_referenced_chunks, fn @volume_id ->
+        {:ok, ["tree-page-1", "tree-page-2"]}
+      end)
+
+      stub(RaSupervisor, :local_query, fn _fn ->
+        {:ok, %{drive_locations: [loc(@local), loc(@local, "drive2")]}}
+      end)
+
+      stub(BlobStore, :chunk_exists?, fn _hash, _drive_id -> true end)
+      reject(&ReplicaRepair.repair_chunks/2)
+
+      job = Job.new(VolumeAntiEntropy, %{volume_id: @volume_id})
+
+      assert {:continue, mid} = VolumeAntiEntropy.step(job)
+      assert {:complete, done} = VolumeAntiEntropy.step(mid)
+
+      assert done.state.checked == 2
+      assert done.state.divergent_hashes == []
+    end
+
+    test "tree-page hash missing on a drive_location → enqueues repair" do
+      stub(ChunkIndex, :get_chunks_for_volume, fn @volume_id -> [] end)
+
+      stub(MetadataReader, :list_referenced_chunks, fn @volume_id ->
+        {:ok, ["tree-bad"]}
+      end)
+
+      stub(RaSupervisor, :local_query, fn _fn ->
+        {:ok, %{drive_locations: [loc(@local), loc(@local, "drive2")]}}
+      end)
+
+      stub(BlobStore, :chunk_exists?, fn
+        "tree-bad", "default" -> true
+        "tree-bad", "drive2" -> false
+      end)
+
+      expect(ReplicaRepair, :repair_chunks, fn @volume_id, hashes ->
+        assert hashes == ["tree-bad"]
+        {:ok, %{added: 1, removed: 0, errors: []}}
+      end)
+
+      job = Job.new(VolumeAntiEntropy, %{volume_id: @volume_id})
+
+      assert {:continue, mid} = VolumeAntiEntropy.step(job)
+      assert {:complete, done} = VolumeAntiEntropy.step(mid)
+
+      assert done.state.divergent_hashes == ["tree-bad"]
+    end
+
+    test "data chunks and tree pages share the batch + divergence set" do
+      diverged_chunk = chunk("data-bad", [loc(@local), loc(@local, "drive2")])
+
+      stub(ChunkIndex, :get_chunks_for_volume, fn @volume_id -> [diverged_chunk] end)
+      stub(ChunkIndex, :get, fn @volume_id, "data-bad" -> {:ok, diverged_chunk} end)
+
+      stub(MetadataReader, :list_referenced_chunks, fn @volume_id ->
+        {:ok, ["tree-bad"]}
+      end)
+
+      stub(RaSupervisor, :local_query, fn _fn ->
+        {:ok, %{drive_locations: [loc(@local), loc(@local, "drive2")]}}
+      end)
+
+      stub(BlobStore, :chunk_exists?, fn
+        "data-bad", "default" -> true
+        "data-bad", "drive2" -> false
+        "tree-bad", "default" -> true
+        "tree-bad", "drive2" -> false
+      end)
+
+      expect(ReplicaRepair, :repair_chunks, fn @volume_id, hashes ->
+        assert Enum.sort(hashes) == ["data-bad", "tree-bad"]
+        {:ok, %{added: 2, removed: 0, errors: []}}
+      end)
+
+      job = Job.new(VolumeAntiEntropy, %{volume_id: @volume_id})
+
+      assert {:continue, mid} = VolumeAntiEntropy.step(job)
+      assert {:complete, done} = VolumeAntiEntropy.step(mid)
+
+      assert Enum.sort(done.state.divergent_hashes) == ["data-bad", "tree-bad"]
+    end
+
+    test "tree-page enumeration failure is logged and the pass continues with chunks only" do
+      chunk_meta = chunk("h1", [loc(@local)])
+
+      stub(ChunkIndex, :get_chunks_for_volume, fn @volume_id -> [chunk_meta] end)
+      stub(ChunkIndex, :get, fn @volume_id, "h1" -> {:ok, chunk_meta} end)
+
+      stub(MetadataReader, :list_referenced_chunks, fn @volume_id ->
+        {:error, {:bootstrap_query_failed, :ra_down}}
+      end)
+
+      stub(BlobStore, :chunk_exists?, fn _, _ -> true end)
+      reject(&ReplicaRepair.repair_chunks/2)
+
+      job = Job.new(VolumeAntiEntropy, %{volume_id: @volume_id})
+
+      assert {:continue, mid} = VolumeAntiEntropy.step(job)
+      assert {:complete, done} = VolumeAntiEntropy.step(mid)
+
+      assert done.state.checked == 1
     end
   end
 end
