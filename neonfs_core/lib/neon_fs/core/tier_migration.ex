@@ -34,13 +34,15 @@ defmodule NeonFS.Core.TierMigration do
   alias NeonFS.IO.{Operation, Scheduler}
 
   @type migration_params :: %{
-          chunk_hash: binary(),
-          source_drive: String.t(),
-          source_node: node(),
-          source_tier: atom(),
-          target_drive: String.t(),
-          target_node: node(),
-          target_tier: atom()
+          :chunk_hash => binary(),
+          :source_drive => String.t(),
+          :source_node => node(),
+          :source_tier => atom(),
+          :target_drive => String.t(),
+          :target_node => node(),
+          :target_tier => atom(),
+          optional(:chunk_meta) => NeonFS.Core.ChunkMeta.t(),
+          optional(:volume_id) => binary()
         }
 
   @doc """
