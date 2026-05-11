@@ -12,6 +12,7 @@ defmodule NeonFS.Integration.SnapshotMultiNodeTest do
   @moduletag timeout: 180_000
   @moduletag :integration
   @moduletag nodes: 3
+  @moduletag cluster_mode: :shared
 
   setup_all %{cluster: cluster} do
     :ok = init_multi_node_cluster(cluster, name: "snap-multi")
