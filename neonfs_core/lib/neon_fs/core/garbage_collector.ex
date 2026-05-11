@@ -15,8 +15,12 @@ defmodule NeonFS.Core.GarbageCollector do
     ChunkIndex,
     ChunkMeta,
     FileIndex,
+    MetadataStateMachine,
+    RaSupervisor,
     StripeIndex
   }
+
+  alias NeonFS.Core.Volume.{MetadataReader, MetadataValue}
 
   require Logger
 
@@ -38,8 +42,9 @@ defmodule NeonFS.Core.GarbageCollector do
   Runs a garbage collection pass with options.
 
   1. Mark phase: builds the set of all chunk hashes referenced by files
-  2. Sweep phase: deletes committed chunks not in the referenced set
-  3. Stripe cleanup: deletes orphaned stripe metadata
+     reachable from the live volume_root **and** every snapshot root.
+  2. Sweep phase: deletes committed chunks not in the referenced set.
+  3. Stripe cleanup: deletes orphaned stripe metadata.
 
   ## Options
 
@@ -49,6 +54,15 @@ defmodule NeonFS.Core.GarbageCollector do
     deletion. Without this scoping the sweep would delete every other
     volume's chunks, since they aren't in the (volume-scoped)
     referenced set.
+  - `:snapshot_enumerator` — `0`-arity function returning
+    `[{volume_id, snapshot_entry}]`. Defaults to a Ra `local_query`
+    against `MetadataStateMachine.get_all_snapshots/1` and a
+    `volume_id`-scoped filter. Injectable for unit tests so the mark
+    phase can be exercised without spinning up Ra.
+  - `:metadata_reader` — module implementing the `:file_index` /
+    `:stripe_index` read API used to walk a snapshot's tree.
+    Defaults to `NeonFS.Core.Volume.MetadataReader`. Tests stub this
+    to feed deterministic file/stripe entries.
 
   Returns a summary map with counts of deleted chunks and stripes.
   """
@@ -58,8 +72,13 @@ defmodule NeonFS.Core.GarbageCollector do
     volume_filter = Keyword.get(opts, :volume_id)
 
     files = list_files(opts)
-    referenced_chunks = mark_referenced_chunks(files)
-    referenced_stripes = mark_referenced_stripes(files)
+    live_chunks = mark_referenced_chunks(files)
+    live_stripes = mark_referenced_stripes(files)
+
+    {snapshot_chunks, snapshot_stripes} = mark_snapshot_references(volume_filter, opts)
+
+    referenced_chunks = MapSet.union(live_chunks, snapshot_chunks)
+    referenced_stripes = MapSet.union(live_stripes, snapshot_stripes)
 
     {chunks_deleted, chunks_protected} = sweep_chunks(referenced_chunks, volume_filter)
     stripes_deleted = sweep_stripes(referenced_stripes, volume_filter)
@@ -132,6 +151,143 @@ defmodule NeonFS.Core.GarbageCollector do
   end
 
   defp collect_file_stripe_ids(_, acc), do: acc
+
+  # ─── Multi-Root Mark (snapshots) ───────────────────────────────────────
+  #
+  # Each snapshot pins a `root_chunk_hash` — a frozen view of the
+  # volume's index trees at the moment the snapshot was taken. After
+  # the live root advances (files deleted, rewrites, etc.) the chunks
+  # those files referenced are no longer reachable from the live root,
+  # but they're still reachable from the snapshot's root. The mark
+  # phase must therefore walk *every* snapshot's `:file_index` (and
+  # follow stripes through that snapshot's `:stripe_index`) and add
+  # all those chunk hashes to the live-root mark set.
+  #
+  # Chunks and inner tree pages are content-addressed, so shared
+  # structure between the live root and a snapshot dedups for free in
+  # the MapSet — cost is proportional to *distinct* chunks across
+  # roots, not `snapshots × volume_size`.
+
+  defp mark_snapshot_references(volume_filter, opts) do
+    enumerator =
+      Keyword.get(opts, :snapshot_enumerator, fn -> default_snapshot_enumerator(volume_filter) end)
+
+    reader = Keyword.get(opts, :metadata_reader, MetadataReader)
+
+    enumerator.()
+    |> Enum.reduce({MapSet.new(), MapSet.new()}, fn {volume_id, snapshot}, {chunks, stripes} ->
+      entries = walk_snapshot_files(reader, volume_id, snapshot.root_chunk_hash)
+
+      chunks = add_snapshot_chunks(entries, reader, volume_id, snapshot.root_chunk_hash, chunks)
+      stripes = add_snapshot_stripes(entries, stripes)
+
+      {chunks, stripes}
+    end)
+  end
+
+  defp default_snapshot_enumerator(nil) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_all_snapshots/1) do
+      {:ok, by_volume} when is_map(by_volume) ->
+        Enum.flat_map(by_volume, fn {volume_id, snapshots_map} ->
+          Enum.map(Map.values(snapshots_map), &{volume_id, &1})
+        end)
+
+      _ ->
+        []
+    end
+  end
+
+  defp default_snapshot_enumerator(volume_id) when is_binary(volume_id) do
+    case RaSupervisor.local_query(&MetadataStateMachine.list_snapshots(&1, volume_id)) do
+      {:ok, snapshots} when is_list(snapshots) ->
+        Enum.map(snapshots, &{volume_id, &1})
+
+      _ ->
+        []
+    end
+  end
+
+  defp walk_snapshot_files(reader, volume_id, root_chunk_hash) do
+    case reader.range(volume_id, :file_index, <<>>, <<>>, at_root: root_chunk_hash) do
+      {:ok, raw_entries} when is_list(raw_entries) ->
+        Enum.flat_map(raw_entries, &decode_file_entry/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp decode_file_entry({"file:" <> _, bytes}) when is_binary(bytes) do
+    case MetadataValue.decode(bytes) do
+      {:ok, map} when is_map(map) -> [map]
+      _ -> []
+    end
+  end
+
+  defp decode_file_entry(_), do: []
+
+  defp add_snapshot_chunks(entries, reader, volume_id, root_chunk_hash, acc) do
+    Enum.reduce(entries, acc, fn entry, set ->
+      set
+      |> add_direct_chunks(entry)
+      |> add_stripe_chunks(entry, reader, volume_id, root_chunk_hash)
+    end)
+  end
+
+  defp add_direct_chunks(set, %{chunks: chunks}) when is_list(chunks),
+    do: Enum.reduce(chunks, set, &MapSet.put(&2, &1))
+
+  defp add_direct_chunks(set, _), do: set
+
+  defp add_stripe_chunks(set, %{stripes: stripes}, reader, volume_id, root_chunk_hash)
+       when is_list(stripes) do
+    Enum.reduce(stripes, set, fn stripe_ref, inner ->
+      case stripe_ref_id(stripe_ref) do
+        nil ->
+          inner
+
+        stripe_id ->
+          add_chunks_from_stripe(inner, reader, volume_id, stripe_id, root_chunk_hash)
+      end
+    end)
+  end
+
+  defp add_stripe_chunks(set, _entry, _reader, _vol, _root), do: set
+
+  defp stripe_ref_id(%{stripe_id: sid}) when is_binary(sid), do: sid
+  defp stripe_ref_id(%{"stripe_id" => sid}) when is_binary(sid), do: sid
+  defp stripe_ref_id(_), do: nil
+
+  defp add_chunks_from_stripe(set, reader, volume_id, stripe_id, root_chunk_hash) do
+    case reader.get_stripe(volume_id, "stripe:" <> stripe_id, at_root: root_chunk_hash) do
+      {:ok, stripe_map} when is_map(stripe_map) ->
+        case Map.get(stripe_map, :chunks) || Map.get(stripe_map, "chunks") do
+          chunks when is_list(chunks) -> Enum.reduce(chunks, set, &MapSet.put(&2, &1))
+          _ -> set
+        end
+
+      _ ->
+        set
+    end
+  end
+
+  defp add_snapshot_stripes(entries, acc) do
+    Enum.reduce(entries, acc, &add_entry_stripe_ids/2)
+  end
+
+  defp add_entry_stripe_ids(entry, set) do
+    case Map.get(entry, :stripes) || Map.get(entry, "stripes") do
+      stripes when is_list(stripes) -> Enum.reduce(stripes, set, &put_stripe_ref/2)
+      _ -> set
+    end
+  end
+
+  defp put_stripe_ref(ref, set) do
+    case stripe_ref_id(ref) do
+      nil -> set
+      sid -> MapSet.put(set, sid)
+    end
+  end
 
   # ─── Sweep Phase ───────────────────────────────────────────────────────
 
