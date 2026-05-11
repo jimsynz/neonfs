@@ -2511,6 +2511,66 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
+  @doc """
+  Rollback a volume's live root to a snapshot (#963).
+
+  ## Parameters
+
+  - `volume_name` - Volume to restore.
+  - `snapshot_ref` - Snapshot id or unique name on `volume_name`.
+  - `opts` - Map with optional keys (`"safe"`, `"force"`).
+
+  ## Returns
+
+  - `{:ok, map}` - `previous_root_hex`, `new_root_hex`,
+    `pre_restore_snapshot_id` (string id or `nil`).
+  - `{:error, term}` - cluster not initialised, volume / snapshot
+    not found, `:unreferenced_chunks` (live root not covered and
+    neither `:safe` nor `:force` set), or a Ra error.
+  """
+  @spec handle_volume_restore(binary(), binary(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_volume_restore(volume_name, snapshot_ref, opts \\ %{})
+      when is_binary(volume_name) and is_binary(snapshot_ref) and is_map(opts) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, volume} <- fetch_volume(volume_name),
+         {:ok, snapshot} <- resolve_snapshot(volume.id, snapshot_ref, volume_name),
+         {:ok, result} <- Snapshot.restore(volume.id, snapshot.id, restore_opts(opts)) do
+      {:ok, restore_result_to_map(result)}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp restore_opts(opts) do
+    opts
+    |> Enum.flat_map(fn
+      {"safe", true} -> [safe: true]
+      {:safe, true} -> [safe: true]
+      {"force", true} -> [force: true]
+      {:force, true} -> [force: true]
+      _ -> []
+    end)
+  end
+
+  defp restore_result_to_map(%{
+         previous_root: previous_root,
+         new_root: new_root,
+         pre_restore_snapshot: pre_restore_snapshot
+       }) do
+    %{
+      previous_root_hex: Base.encode16(previous_root, case: :lower),
+      new_root_hex: Base.encode16(new_root, case: :lower),
+      pre_restore_snapshot_id:
+        case pre_restore_snapshot do
+          nil -> nil
+          %Snapshot{id: id} -> id
+        end
+    }
+  end
+
   defp snapshot_to_map(%Snapshot{} = snap, volume_name) do
     %{
       id: snap.id,
