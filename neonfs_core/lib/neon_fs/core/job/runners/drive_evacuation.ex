@@ -58,12 +58,34 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
     remaining = list_remaining_blobs(node, drive_id)
 
-    case remaining do
+    case prioritise_blobs(remaining) do
       [] ->
         finalise_evacuation(job)
 
       blobs ->
         process_batch(job, blobs)
+    end
+  end
+
+  # Tracked chunks (those in `ChunkIndex`) must move before untracked
+  # blobs (per-volume index-tree pages, root segments). Migrating a
+  # tracked chunk calls `ChunkIndex.update_locations/2`, which writes
+  # to the volume's index tree — and that write goes through
+  # `MetadataWriter.put/5`, which resolves the volume's current segment
+  # by reading the root segment chunk. If the root segment has already
+  # been migrated off the evacuating drive (the volume's
+  # `drive_locations` is only rewritten at `finalise_evacuation/1`),
+  # that resolve fails with `{:root_chunk_unreachable, _}` and every
+  # subsequent tracked-chunk migration in the evacuation fails too.
+  defp prioritise_blobs(blobs) do
+    {tracked, untracked} =
+      Enum.split_with(blobs, fn blob ->
+        match?({:ok, _}, ChunkIndex.lookup_by_hash(blob.hash))
+      end)
+
+    case tracked do
+      [] -> untracked
+      _ -> tracked
     end
   end
 
