@@ -296,11 +296,18 @@ defmodule NeonFS.Core.Persistence do
 
   @spec copy_and_rename(atom(), reference(), String.t(), String.t()) :: :ok | {:error, term()}
   defp copy_and_rename(ets_table, dets_ref, temp_path, dets_path) do
-    case :ets.to_dets(ets_table, dets_ref) do
-      ^dets_ref ->
+    # `:ets.whereis/1` upstream returned a ref, but the owning
+    # GenServer can still delete the table between that check and
+    # this `:ets.to_dets/2` call. The race surfaces as
+    # `ArgumentError` from BEAM, crashes Persistence, and the 100 ms
+    # snapshot tick used in tests retries the crash on a loop —
+    # enough scheduler pressure that unrelated `GenServer.call`s
+    # time out (#988). Treat "table gone" as a clean per-table no-op.
+    case do_ets_to_dets(ets_table, dets_ref) do
+      {:ok, ^dets_ref} ->
         finalize_snapshot(dets_ref, temp_path, dets_path)
 
-      {:error, reason} ->
+      {:ok, {:error, reason}} ->
         :dets.close(dets_ref)
         File.rm(temp_path)
 
@@ -310,7 +317,23 @@ defmodule NeonFS.Core.Persistence do
         )
 
         {:error, {:to_dets_failed, reason}}
+
+      :table_gone ->
+        :dets.close(dets_ref)
+        File.rm(temp_path)
+
+        Logger.debug("ETS table vanished mid-snapshot, skipping",
+          ets_table: ets_table
+        )
+
+        :ok
     end
+  end
+
+  defp do_ets_to_dets(ets_table, dets_ref) do
+    {:ok, :ets.to_dets(ets_table, dets_ref)}
+  rescue
+    ArgumentError -> :table_gone
   end
 
   @spec finalize_snapshot(reference(), String.t(), String.t()) :: :ok | {:error, term()}
