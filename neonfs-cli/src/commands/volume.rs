@@ -218,6 +218,59 @@ pub enum VolumeCommand {
         #[arg(long)]
         interval: Option<String>,
     },
+
+    /// Manage per-volume snapshots (#962 / epic #959).
+    ///
+    /// A snapshot is a frozen pointer to the volume's current root
+    /// chunk. Create is O(1); chunks shared with the live head share
+    /// storage transparently.
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommand,
+    },
+}
+
+/// Per-volume snapshot subcommands.
+#[derive(Debug, Subcommand)]
+pub enum SnapshotCommand {
+    /// Create a snapshot of the named volume's current root.
+    Create {
+        /// Volume name
+        volume: String,
+
+        /// Optional human-readable label for the snapshot.
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// List every snapshot for the named volume, newest first.
+    List {
+        /// Volume name
+        volume: String,
+    },
+
+    /// Show a single snapshot by id, scoped to the named volume.
+    Show {
+        /// Volume name
+        volume: String,
+
+        /// Snapshot id
+        id: String,
+    },
+
+    /// Delete the snapshot's pin. Idempotent — missing snapshot is a
+    /// no-op. Chunk reclamation is the GC scheduler's job.
+    Delete {
+        /// Volume name
+        volume: String,
+
+        /// Snapshot id or name
+        id: String,
+
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        r#yes: bool,
+    },
 }
 
 impl VolumeCommand {
@@ -298,6 +351,7 @@ impl VolumeCommand {
                 now,
                 interval,
             } => self.anti_entropy(name, *now, interval.as_deref(), format),
+            VolumeCommand::Snapshot { command } => command.execute(format),
         }
     }
 
@@ -1369,6 +1423,227 @@ impl VolumeCommand {
         }
         Ok(())
     }
+}
+
+impl SnapshotCommand {
+    pub fn execute(&self, format: OutputFormat) -> Result<()> {
+        match self {
+            SnapshotCommand::Create { volume, name } => self.create(volume, name.as_deref(), format),
+            SnapshotCommand::List { volume } => self.list(volume, format),
+            SnapshotCommand::Show { volume, id } => self.show(volume, id, format),
+            SnapshotCommand::Delete { volume, id, yes } => self.delete(volume, id, *yes, format),
+        }
+    }
+
+    fn create(&self, volume: &str, name: Option<&str>, format: OutputFormat) -> Result<()> {
+        let opts = match name {
+            Some(name) => Term::Map(Map {
+                map: vec![(binary_val("name"), binary_val(name))]
+                    .into_iter()
+                    .collect(),
+            }),
+            None => Term::Map(Map {
+                map: vec![].into_iter().collect(),
+            }),
+        };
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_snapshot_create",
+                vec![binary_val(volume), opts],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let snap = SnapshotEntry::from_term(data)?;
+        print_snapshot(&snap, "Snapshot created", format)
+    }
+
+    fn list(&self, volume: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_snapshot_list",
+                vec![binary_val(volume)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let entries = term_to_list(&data)?;
+        let snaps: Result<Vec<SnapshotEntry>> =
+            entries.into_iter().map(SnapshotEntry::from_term).collect();
+        let snaps = snaps?;
+
+        match format {
+            OutputFormat::Json => {
+                println!("{}", json::format(&snaps)?);
+            }
+            OutputFormat::Table => {
+                let mut tbl = table::Table::new(vec![
+                    "ID".to_string(),
+                    "NAME".to_string(),
+                    "ROOT".to_string(),
+                    "CREATED".to_string(),
+                ]);
+                for snap in &snaps {
+                    tbl.add_row(vec![
+                        snap.id.clone(),
+                        snap.name.clone().unwrap_or_default(),
+                        snap.root_chunk_hash_hex
+                            .chars()
+                            .take(12)
+                            .collect::<String>(),
+                        snap.created_at.clone(),
+                    ]);
+                }
+                print!("{}", tbl.render()?);
+            }
+        }
+        Ok(())
+    }
+
+    fn show(&self, volume: &str, id: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_snapshot_show",
+                vec![binary_val(volume), binary_val(id)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let snap = SnapshotEntry::from_term(data)?;
+        print_snapshot(&snap, "Snapshot", format)
+    }
+
+    fn delete(&self, volume: &str, id: &str, yes: bool, format: OutputFormat) -> Result<()> {
+        if !yes && matches!(format, OutputFormat::Table) {
+            eprintln!(
+                "Refusing to delete snapshot {} from {} without --yes. Pass --yes to skip this prompt.",
+                id, volume
+            );
+            return Err(crate::error::CliError::InvalidArgument(
+                "snapshot delete requires --yes".to_string(),
+            ));
+        }
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_snapshot_delete",
+                vec![binary_val(volume), binary_val(id)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        match format {
+            OutputFormat::Json => {
+                println!("{{\"status\":\"deleted\",\"snapshot_id\":\"{}\"}}", id);
+            }
+            OutputFormat::Table => {
+                println!("✓ Snapshot {} deleted from {}", id, volume);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SnapshotEntry {
+    id: String,
+    volume_id: String,
+    volume_name: String,
+    name: Option<String>,
+    root_chunk_hash_hex: String,
+    created_at: String,
+}
+
+impl SnapshotEntry {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let id = term_to_string(map.get("id").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'id' field".to_string())
+        })?)?;
+
+        let volume_id = term_to_string(map.get("volume_id").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'volume_id' field".to_string())
+        })?)?;
+
+        let volume_name = term_to_string(map.get("volume_name").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'volume_name' field".to_string())
+        })?)?;
+
+        let name = match map.get("name") {
+            Some(Term::Atom(atom)) if atom.name == "nil" => None,
+            Some(t) => Some(term_to_string(t)?),
+            None => None,
+        };
+
+        let root_chunk_hash_hex =
+            term_to_string(map.get("root_chunk_hash_hex").ok_or_else(|| {
+                crate::error::CliError::TermConversionError(
+                    "Missing 'root_chunk_hash_hex' field".to_string(),
+                )
+            })?)?;
+
+        let created_at = term_to_string(map.get("created_at").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'created_at' field".to_string())
+        })?)?;
+
+        Ok(SnapshotEntry {
+            id,
+            volume_id,
+            volume_name,
+            name,
+            root_chunk_hash_hex,
+            created_at,
+        })
+    }
+}
+
+fn print_snapshot(snap: &SnapshotEntry, heading: &str, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            println!("{}", json::format(snap)?);
+        }
+        OutputFormat::Table => {
+            println!("✓ {}", heading);
+            println!();
+            println!("  ID:      {}", snap.id);
+            if let Some(name) = &snap.name {
+                println!("  Name:    {}", name);
+            }
+            println!("  Volume:  {}", snap.volume_name);
+            println!("  Root:    {}", snap.root_chunk_hash_hex);
+            println!("  Created: {}", snap.created_at);
+        }
+    }
+    Ok(())
 }
 
 fn binary_key(key: &str) -> Term {
