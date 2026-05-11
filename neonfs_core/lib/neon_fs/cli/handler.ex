@@ -2467,6 +2467,50 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
+  @doc """
+  Promotes a snapshot to a new top-level volume (#964). The new
+  volume's `volume_root` points at the snapshot's `root_chunk_hash`;
+  no chunks are copied.
+
+  ## Parameters
+  - `source_volume_name` — source volume name (string).
+  - `snapshot_ref` — snapshot ULID, or human-readable name when unique
+    within the source volume.
+  - `new_volume_name` — name for the new volume.
+  - `opts` — currently unused; reserved for `--storage-policy`
+    forwarding (#964 body).
+
+  ## Returns
+  - `{:ok, %{volume_id, volume_name, source_volume_id, source_volume_name,
+    snapshot_id, root_chunk_hash_hex}}` on success.
+  - `{:error, reason}` — volume not found, snapshot ambiguous, name
+    collision, etc.
+  """
+  @spec handle_volume_promote(binary(), binary(), binary(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_volume_promote(source_volume_name, snapshot_ref, new_volume_name, _opts \\ %{})
+      when is_binary(source_volume_name) and is_binary(snapshot_ref) and
+             is_binary(new_volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, source_volume} <- fetch_volume(source_volume_name),
+         {:ok, snapshot} <- resolve_snapshot(source_volume.id, snapshot_ref, source_volume_name),
+         {:ok, promoted} <- Snapshot.promote(source_volume.id, snapshot.id, new_volume_name) do
+      {:ok,
+       %{
+         volume_id: promoted.id,
+         volume_name: promoted.name,
+         source_volume_id: source_volume.id,
+         source_volume_name: source_volume_name,
+         snapshot_id: snapshot.id,
+         root_chunk_hash_hex: Base.encode16(snapshot.root_chunk_hash, case: :lower)
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
   defp snapshot_to_map(%Snapshot{} = snap, volume_name) do
     %{
       id: snap.id,

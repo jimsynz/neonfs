@@ -228,6 +228,25 @@ pub enum VolumeCommand {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
+
+    /// Promote a snapshot to a brand-new top-level volume (#964).
+    ///
+    /// The new volume points at the snapshot's root chunk — no bytes
+    /// are copied. Both volumes pin the same content-addressed chunk
+    /// graph; per-volume GC keeps chunks alive as long as either root
+    /// references them. The new volume inherits the source volume's
+    /// storage policy.
+    Promote {
+        /// Source volume name
+        source: String,
+
+        /// Snapshot id or name on the source volume
+        snapshot: String,
+
+        /// Name of the new volume to create
+        #[arg(long = "as")]
+        new_name: String,
+    },
 }
 
 /// Per-volume snapshot subcommands.
@@ -352,7 +371,79 @@ impl VolumeCommand {
                 interval,
             } => self.anti_entropy(name, *now, interval.as_deref(), format),
             VolumeCommand::Snapshot { command } => command.execute(format),
+            VolumeCommand::Promote {
+                source,
+                snapshot,
+                new_name,
+            } => self.promote(source, snapshot, new_name, format),
         }
+    }
+
+    fn promote(
+        &self,
+        source: &str,
+        snapshot: &str,
+        new_name: &str,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_promote",
+                vec![
+                    binary_val(source),
+                    binary_val(snapshot),
+                    binary_val(new_name),
+                    Term::Map(Map {
+                        map: vec![].into_iter().collect(),
+                    }),
+                ],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let volume_id = term_to_string(map.get("volume_id").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'volume_id'".to_string())
+        })?)?;
+        let volume_name = term_to_string(map.get("volume_name").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'volume_name'".to_string())
+        })?)?;
+        let snapshot_id = term_to_string(map.get("snapshot_id").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'snapshot_id'".to_string())
+        })?)?;
+        let root_chunk_hash_hex =
+            term_to_string(map.get("root_chunk_hash_hex").ok_or_else(|| {
+                crate::error::CliError::TermConversionError(
+                    "Missing 'root_chunk_hash_hex'".to_string(),
+                )
+            })?)?;
+
+        match format {
+            OutputFormat::Json => {
+                println!(
+                    "{{\"volume_id\":\"{}\",\"volume_name\":\"{}\",\"source\":\"{}\",\"snapshot_id\":\"{}\",\"root_chunk_hash_hex\":\"{}\"}}",
+                    volume_id, volume_name, source, snapshot_id, root_chunk_hash_hex
+                );
+            }
+            OutputFormat::Table => {
+                println!("✓ Promoted snapshot {} from {} to volume {}", snapshot_id, source, volume_name);
+                println!();
+                println!("  Volume ID:    {}", volume_id);
+                println!("  Volume Name:  {}", volume_name);
+                println!("  Source:       {}", source);
+                println!("  Snapshot:     {}", snapshot_id);
+                println!("  Root:         {}", root_chunk_hash_hex);
+            }
+        }
+        Ok(())
     }
 
     fn list(&self, all: bool, format: OutputFormat) -> Result<()> {
