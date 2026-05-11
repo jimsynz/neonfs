@@ -220,6 +220,27 @@ impl<S: ChunkStore> IndexTree<S> {
         Ok(out)
     }
 
+    /// List every node chunk hash reachable from `root` — both
+    /// internal-page chunks and leaf-page chunks. Used by the
+    /// anti-entropy runner (#955) so the per-volume reconciliation
+    /// pass enumerates index-tree pages as well as data chunks,
+    /// catching tree-page divergence between replicas that the
+    /// read-path cross-node fallback (#947) would otherwise leave
+    /// undetected.
+    ///
+    /// An empty (`None`) root returns an empty vector. The output
+    /// is in pre-order (root first, then left-to-right depth-first
+    /// over children) — order doesn't matter for anti-entropy but
+    /// is stable for tests.
+    pub fn list_referenced_chunks(&self, root: Option<&Hash>) -> Result<Vec<Hash>> {
+        let Some(root) = root else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        self.walk_all_nodes(root, &mut out)?;
+        Ok(out)
+    }
+
     /// Reap tombstones whose `deleted_at` falls before `before`.
     /// Walks every leaf and rewrites any that change. Returns the
     /// new root hash (equal to the input root if nothing was reaped).
@@ -340,6 +361,18 @@ impl<S: ChunkStore> IndexTree<S> {
             layer = self.split_and_write_internals(entries)?;
         }
         Ok(Hash::from_bytes(layer.into_iter().next().unwrap().1))
+    }
+
+    fn walk_all_nodes(&self, node_hash: &Hash, out: &mut Vec<Hash>) -> Result<()> {
+        out.push(*node_hash);
+        let node = self.load_node(node_hash)?;
+        if let Node::Internal(entries) = node {
+            for entry in entries {
+                let child = Hash::from_bytes(entry.child);
+                self.walk_all_nodes(&child, out)?;
+            }
+        }
+        Ok(())
     }
 
     fn walk_range(
@@ -674,6 +707,48 @@ mod tests {
         assert_eq!(lower.len(), 3);
         let upper: Vec<_> = t.range(root.as_ref(), b"", b"k3").unwrap();
         assert_eq!(upper.len(), 3);
+    }
+
+    #[test]
+    fn list_referenced_chunks_returns_empty_for_empty_root() {
+        let t = fresh(TreeConfig::default);
+        assert_eq!(t.list_referenced_chunks(None).unwrap(), Vec::<Hash>::new());
+    }
+
+    #[test]
+    fn list_referenced_chunks_includes_root_for_single_leaf() {
+        let mut t = fresh(TreeConfig::default);
+        let root = t.put(None, b"k".to_vec(), b"v".to_vec()).unwrap();
+        let hashes = t.list_referenced_chunks(Some(&root)).unwrap();
+        assert_eq!(hashes, vec![root]);
+    }
+
+    #[test]
+    fn list_referenced_chunks_walks_internal_and_leaf_nodes() {
+        // Force splits so the tree has internal pages.
+        let mut t = fresh(small_config);
+        let mut root: Option<Hash> = None;
+        for i in 0u32..50 {
+            let key = format!("k{:04}", i).into_bytes();
+            root = Some(t.put(root.as_ref(), key, vec![0u8; 32]).unwrap());
+        }
+
+        let hashes = t.list_referenced_chunks(root.as_ref()).unwrap();
+
+        // Every chunk in the store should be reachable from the
+        // root walk. There may be older / orphaned chunks from
+        // intermediate writes, so the walk count is ≤ store size.
+        assert!(!hashes.is_empty());
+        assert!(hashes.len() <= t.store.len());
+
+        // The walk starts at the root.
+        assert_eq!(hashes[0], root.unwrap());
+
+        // No duplicates within a single walk.
+        let mut sorted = hashes.clone();
+        sorted.sort_by_key(|h| *h.as_bytes());
+        sorted.dedup();
+        assert_eq!(sorted.len(), hashes.len());
     }
 
     #[test]

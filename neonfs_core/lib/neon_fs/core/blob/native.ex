@@ -844,4 +844,24 @@ defmodule NeonFS.Core.Blob.Native do
           {:ok, binary()} | {:error, String.t()}
   def index_tree_purge_tombstones(_store, _root_hash, _tier, _before_unix_nanos),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  List every node chunk hash reachable from `root_hash` — both
+  internal-page chunks and leaf-page chunks. Used by the per-volume
+  anti-entropy runner (#955) so index-tree pages are enumerated
+  alongside data chunks.
+
+  Empty `root_hash` returns `{:ok, []}` — there's nothing to walk
+  in a tree that was never written.
+
+  ## Returns
+
+    * `{:ok, [hash, ...]}` — list of 32-byte node hashes in
+      pre-order (root first, then depth-first over children).
+    * `{:error, reason}`.
+  """
+  @spec index_tree_list_referenced_chunks(store(), binary(), tier()) ::
+          {:ok, [binary()]} | {:error, String.t()}
+  def index_tree_list_referenced_chunks(_store, _root_hash, _tier),
+    do: :erlang.nif_error(:nif_not_loaded)
 end

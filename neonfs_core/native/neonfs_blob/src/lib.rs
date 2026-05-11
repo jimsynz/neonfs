@@ -1084,4 +1084,34 @@ fn vec_to_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Binary<'a> {
     out.into()
 }
 
+/// List every node chunk hash reachable from `root_hash` — both
+/// internal-page chunks and leaf-page chunks. Empty `root_hash`
+/// returns `{:ok, []}`. Used by the per-volume anti-entropy runner
+/// (#955) so index-tree pages are enumerated alongside data chunks.
+#[rustler::nif]
+fn index_tree_list_referenced_chunks<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    root_hash: Binary,
+    tier: String,
+) -> Result<Vec<Binary<'a>>, String> {
+    let parsed_tier = parse_tier(&tier)?;
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+
+    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let tree = IndexTree::new(adapter, TreeConfig::default());
+
+    let root = parse_optional_root(&root_hash)?;
+
+    let hashes = tree
+        .list_referenced_chunks(root.as_ref())
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::with_capacity(hashes.len());
+    for hash in hashes {
+        out.push(vec_to_binary(env, hash.as_bytes()));
+    }
+    Ok(out)
+}
+
 rustler::init!("Elixir.NeonFS.Core.Blob.Native");
