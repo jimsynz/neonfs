@@ -44,3 +44,7 @@ libc = "0.2"   # getuid() for emergency-bootstrap audit log (#518)
 
 [dev-dependencies]
 tempfile = "3"
+# Serialise tests that mutate process-global state (env vars). `cargo
+# test` parallelises within a binary; without this annotation, tests
+# that `set_var`/`remove_var` race against concurrent readers (#987).
+serial_test = "3"
