@@ -38,6 +38,7 @@ defmodule NeonFS.CLI.Handler do
     Volume,
     VolumeACL,
     VolumeEncryption,
+    VolumeExport,
     VolumeRegistry
   }
 
@@ -2569,6 +2570,32 @@ defmodule NeonFS.CLI.Handler do
           %Snapshot{id: id} -> id
         end
     }
+  end
+
+  @doc """
+  Export a volume's live root as a TAR archive at `output_path`
+  on the daemon's filesystem (#965).
+
+  V1 scope — live root only, local output only. Snapshot export,
+  ACL/xattr capture, and S3/file:// URL outputs land in follow-ups.
+  """
+  @spec handle_volume_export(binary(), binary()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_volume_export(volume_name, output_path)
+      when is_binary(volume_name) and is_binary(output_path) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, summary} <- VolumeExport.export(volume_name, output_path) do
+      {:ok,
+       %{
+         path: summary.path,
+         file_count: summary.file_count,
+         byte_count: summary.byte_count
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
   end
 
   defp snapshot_to_map(%Snapshot{} = snap, volume_name) do
