@@ -2580,14 +2580,16 @@ defmodule NeonFS.CLI.Handler do
   V1 scope — live root only, local output only. Snapshot export,
   ACL/xattr capture, and S3/file:// URL outputs land in follow-ups.
   """
-  @spec handle_volume_export(binary(), binary()) ::
+  @spec handle_volume_export(binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_export(volume_name, output_path)
-      when is_binary(volume_name) and is_binary(output_path) do
+  def handle_volume_export(volume_name, output_path, opts \\ %{})
+      when is_binary(volume_name) and is_binary(output_path) and is_map(opts) do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, summary} <- VolumeExport.export(volume_name, output_path) do
+         {:ok, volume} <- fetch_volume(volume_name),
+         export_opts <- export_opts_from_map(volume, opts),
+         {:ok, summary} <- VolumeExport.export(volume_name, output_path, export_opts) do
       {:ok,
        %{
          path: summary.path,
@@ -2596,6 +2598,20 @@ defmodule NeonFS.CLI.Handler do
        }}
     else
       {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp export_opts_from_map(volume, opts) do
+    case Map.get(opts, "snapshot_id") || Map.get(opts, :snapshot_id) do
+      nil ->
+        []
+
+      ref when is_binary(ref) ->
+        case resolve_snapshot(volume.id, ref, volume.name) do
+          {:ok, snapshot} -> [snapshot_id: snapshot.id]
+          # Bubble the error up as the export call's outer with-step.
+          _ -> [snapshot_id: ref]
+        end
     end
   end
 

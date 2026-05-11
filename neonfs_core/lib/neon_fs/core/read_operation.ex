@@ -17,6 +17,7 @@ defmodule NeonFS.Core.ReadOperation do
     ChunkIndex,
     ChunkMeta,
     FileIndex,
+    FileMeta,
     KeyManager,
     ResolvedLookupCache,
     Stripe,
@@ -222,6 +223,52 @@ defmodule NeonFS.Core.ReadOperation do
         [:neonfs, :read_stream, :start],
         %{offset: offset, file_size: file_meta.size},
         %{volume_id: volume_id, file_id: file_id, length: length, by_id: true}
+      )
+
+      populate_resolved_cache(file_meta)
+      stream = build_stream(file_meta, volume, offset, length)
+
+      {:ok, %{stream: stream, file_size: file_meta.size}}
+    end
+  end
+
+  @doc """
+  Returns a lazy stream of chunk data for a pre-resolved `FileMeta`.
+
+  Identical to `read_file_stream/3` except the caller supplies the
+  `FileMeta` directly rather than having it looked up by `path` or
+  `file_id`. Used by callers that walk a non-live root (e.g. a
+  snapshot tree via `MetadataReader` with `:at_root`) and have
+  already decoded the `FileMeta` from storage.
+
+  Authorisation against the volume happens up-front; chunks fetch
+  lazily so peak working set is one chunk at a time, regardless of
+  file size.
+
+  ## Options
+
+  Same shape as `read_file_stream/3` (`:offset`, `:length`, `:uid`,
+  `:gids`).
+  """
+  @spec read_file_stream_from_meta(NeonFS.Core.Volume.t(), FileMeta.t(), keyword()) ::
+          stream_result()
+  def read_file_stream_from_meta(
+        %NeonFS.Core.Volume{} = volume,
+        %FileMeta{} = file_meta,
+        opts \\ []
+      ) do
+    Logger.metadata(component: :read_stream_meta, volume_id: volume.id, file_id: file_meta.id)
+
+    offset = Keyword.get(opts, :offset, 0)
+    length = Keyword.get(opts, :length, :all)
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with :ok <- Authorise.check(uid, gids, :read, {:volume, volume.id}) do
+      :telemetry.execute(
+        [:neonfs, :read_stream_meta, :start],
+        %{offset: offset, file_size: file_meta.size},
+        %{volume_id: volume.id, file_id: file_meta.id, length: length}
       )
 
       populate_resolved_cache(file_meta)

@@ -250,11 +250,12 @@ pub enum VolumeCommand {
         new_name: String,
     },
 
-    /// Export a volume's live root as a portable tarball (#965).
+    /// Export a volume as a portable tarball (#965 / #992).
     ///
-    /// V1: live root only, local output path only. Snapshot export,
-    /// ACL/xattr capture, and S3/file:// URL outputs are tracked as
-    /// follow-ups. The output path is on the daemon's filesystem.
+    /// Without `--snapshot`, exports the live root. With
+    /// `--snapshot <id>`, walks the snapshot's frozen tree instead
+    /// (chunks share storage; the snapshot pin keeps them alive).
+    /// The output path is on the daemon's filesystem.
     Export {
         /// Volume name
         volume: String,
@@ -262,6 +263,10 @@ pub enum VolumeCommand {
         /// Output tarball path on the daemon's filesystem
         #[arg(long = "to")]
         to: String,
+
+        /// Optional snapshot id (omit to export the live root).
+        #[arg(long)]
+        snapshot: Option<String>,
     },
 
     /// Import a volume from a previously-exported tarball (#966).
@@ -449,7 +454,11 @@ impl VolumeCommand {
                 force,
                 r#yes,
             } => self.restore(volume, snapshot, *safe, *force, *r#yes, format),
-            VolumeCommand::Export { volume, to } => self.export(volume, to, format),
+            VolumeCommand::Export {
+                volume,
+                to,
+                snapshot,
+            } => self.export(volume, to, snapshot.as_deref(), format),
             VolumeCommand::Import { from, new_name } => self.import(from, new_name, format),
         }
     }
@@ -515,13 +524,31 @@ impl VolumeCommand {
         Ok(())
     }
 
-    fn export(&self, volume: &str, to: &str, format: OutputFormat) -> Result<()> {
+    fn export(
+        &self,
+        volume: &str,
+        to: &str,
+        snapshot: Option<&str>,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let mut opt_pairs: Vec<(Term, Term)> = vec![];
+        if let Some(snap) = snapshot {
+            opt_pairs.push((
+                Term::Atom(Atom::from("snapshot_id")),
+                binary_val(snap),
+            ));
+        }
+
+        let opts_term = Term::Map(Map {
+            map: opt_pairs.into_iter().collect(),
+        });
+
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "handle_volume_export",
-                vec![binary_val(volume), binary_val(to)],
+                vec![binary_val(volume), binary_val(to), opts_term],
             )
             .await
         })?;
@@ -2362,9 +2389,14 @@ mod tests {
         let cli =
             TestCli::try_parse_from(["test", "export", "vol-1", "--to", "/tmp/out.tar"]).unwrap();
         match cli.command {
-            VolumeCommand::Export { volume, to } => {
+            VolumeCommand::Export {
+                volume,
+                to,
+                snapshot,
+            } => {
                 assert_eq!(volume, "vol-1");
                 assert_eq!(to, "/tmp/out.tar");
+                assert!(snapshot.is_none());
             }
             _ => panic!("expected Export variant"),
         }
@@ -2406,6 +2438,35 @@ mod tests {
         assert!(TestCli::try_parse_from(["test", "import"]).is_err());
         assert!(TestCli::try_parse_from(["test", "import", "--from", "/x.tar"]).is_err());
         assert!(TestCli::try_parse_from(["test", "import", "--as", "v"]).is_err());
+    }
+
+    #[test]
+    fn test_volume_export_accepts_snapshot_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test", "export", "v", "--to", "/tmp/x.tar", "--snapshot", "snap-1",
+        ])
+        .unwrap();
+
+        match cli.command {
+            VolumeCommand::Export {
+                volume,
+                to,
+                snapshot,
+            } => {
+                assert_eq!(volume, "v");
+                assert_eq!(to, "/tmp/x.tar");
+                assert_eq!(snapshot.as_deref(), Some("snap-1"));
+            }
+            _ => panic!("expected Export"),
+        }
     }
 
     #[test]
