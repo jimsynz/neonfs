@@ -93,6 +93,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:cas_update_volume_root, volume_id :: binary(), expected_previous_hash :: binary(),
              updates :: map()}
           | {:unregister_volume_root, volume_id :: binary()}
+          | {:put_snapshot, entry :: snapshot_entry()}
+          | {:delete_snapshot, volume_id :: binary(), snapshot_id :: binary()}
 
   @type segment_assignment :: %{
           replica_set: [node()],
@@ -174,6 +176,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           namespace_claim_seq: non_neg_integer(),
           drives: %{optional(String.t()) => drive_entry()},
           volume_roots: %{optional(binary()) => volume_root_entry()},
+          snapshots: %{optional(binary()) => %{optional(binary()) => snapshot_entry()}},
           version: non_neg_integer()
         }
 
@@ -206,6 +209,20 @@ defmodule NeonFS.Core.MetadataStateMachine do
           drive_locations: [%{node: node(), drive_id: String.t()}],
           durability_cache: map(),
           updated_at: DateTime.t()
+        }
+
+  @typedoc """
+  Per-volume snapshot entry (#960 / epic #959). Records a frozen pointer
+  to the volume's root chunk at the moment the snapshot was created. The
+  optional `name` is purely a human label — snapshots are addressed by
+  `id` and the same name may legally repeat across volume forks.
+  """
+  @type snapshot_entry :: %{
+          id: binary(),
+          volume_id: binary(),
+          name: String.t() | nil,
+          root_chunk_hash: binary(),
+          created_at: DateTime.t()
         }
 
   # Public query functions
@@ -293,6 +310,29 @@ defmodule NeonFS.Core.MetadataStateMachine do
   """
   @spec get_volume_root(state(), binary()) :: volume_root_entry() | nil
   def get_volume_root(state, volume_id), do: Map.get(get_volume_roots(state), volume_id)
+
+  @doc """
+  Returns the snapshot for `volume_id` / `snapshot_id`, or nil.
+  """
+  @spec get_snapshot(state(), binary(), binary()) :: snapshot_entry() | nil
+  def get_snapshot(state, volume_id, snapshot_id) do
+    state
+    |> Map.get(:snapshots, %{})
+    |> Map.get(volume_id, %{})
+    |> Map.get(snapshot_id)
+  end
+
+  @doc """
+  Returns every snapshot for `volume_id`, newest first.
+  """
+  @spec list_snapshots(state(), binary()) :: [snapshot_entry()]
+  def list_snapshots(state, volume_id) do
+    state
+    |> Map.get(:snapshots, %{})
+    |> Map.get(volume_id, %{})
+    |> Map.values()
+    |> Enum.sort_by(& &1.created_at, {:desc, DateTime})
+  end
 
   @doc """
   Returns the escalation with the given ID, or nil.
@@ -442,6 +482,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       namespace_claim_seq: 0,
       drives: %{},
       volume_roots: %{},
+      snapshots: %{},
       version: 0
     }
   end
@@ -694,6 +735,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
       end)
 
     {%{state | drives: rekeyed}, :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 14, 15}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 14,
+      to: 15,
+      change: "add `snapshots` keyspace for volume snapshots (#960 / epic #959)"
+    )
+
+    {Map.put_new(state, :snapshots, %{}), :ok, []}
   end
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
@@ -1579,6 +1632,59 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  # Snapshot commands (#960 / epic #959). Snapshots pin a volume's root
+  # chunk hash at the moment they're taken; they don't carry chunk data
+  # themselves. `:put_snapshot` is idempotent on the `id` key, so a
+  # retried command from `Snapshot.create/2` won't produce duplicates.
+
+  def apply(_meta, {:put_snapshot, entry}, state) do
+    state = ensure_snapshots(state)
+    volume_id = Map.fetch!(entry, :volume_id)
+    snapshot_id = Map.fetch!(entry, :id)
+
+    new_for_volume =
+      state.snapshots
+      |> Map.get(volume_id, %{})
+      |> Map.put(snapshot_id, entry)
+
+    new_snapshots = Map.put(state.snapshots, volume_id, new_for_volume)
+    new_state = %{state | snapshots: new_snapshots, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :put_snapshot],
+      %{version: new_state.version},
+      %{volume_id: volume_id, snapshot_id: snapshot_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:delete_snapshot, volume_id, snapshot_id}, state) do
+    state = ensure_snapshots(state)
+
+    new_for_volume =
+      state.snapshots
+      |> Map.get(volume_id, %{})
+      |> Map.delete(snapshot_id)
+
+    new_snapshots =
+      if new_for_volume == %{} do
+        Map.delete(state.snapshots, volume_id)
+      else
+        Map.put(state.snapshots, volume_id, new_for_volume)
+      end
+
+    new_state = %{state | snapshots: new_snapshots, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :delete_snapshot],
+      %{version: new_state.version},
+      %{volume_id: volume_id, snapshot_id: snapshot_id}
+    )
+
+    {new_state, :ok, []}
+  end
+
   # Segment assignment commands (new in v5)
 
   def apply(_meta, {:assign_segment, segment_id, replica_set}, state) do
@@ -1813,7 +1919,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 14
+  def version, do: 15
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -1947,6 +2053,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   # Defensive init for pre-v13 snapshots (before bootstrap layer).
+  defp ensure_snapshots(%{snapshots: _} = state), do: state
+  defp ensure_snapshots(state), do: Map.put(state, :snapshots, %{})
+
   defp ensure_bootstrap(%{drives: _, volume_roots: _} = state), do: state
 
   defp ensure_bootstrap(state) do
