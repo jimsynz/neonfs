@@ -2,7 +2,14 @@ defmodule NeonFS.Core.VolumeExportTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{VolumeExport, VolumeRegistry, WriteOperation}
+  alias NeonFS.Core.{
+    RaServer,
+    RaSupervisor,
+    Snapshot,
+    VolumeExport,
+    VolumeRegistry,
+    WriteOperation
+  }
 
   @moduletag :tmp_dir
 
@@ -18,7 +25,7 @@ defmodule NeonFS.Core.VolumeExportTest do
     # `Snapshot.create/1` / `MetadataReader.range(.., at_root: ...)`.
     ensure_node_named()
     start_ra()
-    :ok = NeonFS.Core.RaServer.init_cluster()
+    :ok = RaServer.init_cluster()
 
     on_exit(fn -> cleanup_test_dirs() end)
 
@@ -138,7 +145,7 @@ defmodule NeonFS.Core.VolumeExportTest do
       # full Ra-backed provisioning that production goes through.
       {:ok, vol} = VolumeRegistry.create("export-snap-tag", [])
       :ok = register_volume_root(vol.id, <<0xAA, 0xBB>>)
-      {:ok, snap} = NeonFS.Core.Snapshot.create(vol.id)
+      {:ok, snap} = Snapshot.create(vol.id)
 
       # `MetadataReader.range/5` at the planted root will fail
       # because the chunk isn't in BlobStore — the export aborts
@@ -175,7 +182,7 @@ defmodule NeonFS.Core.VolumeExportTest do
       updated_at: DateTime.utc_now()
     }
 
-    {:ok, :ok, _leader} = NeonFS.Core.RaSupervisor.command({:register_volume_root, entry})
+    {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, entry})
     :ok
   end
 
