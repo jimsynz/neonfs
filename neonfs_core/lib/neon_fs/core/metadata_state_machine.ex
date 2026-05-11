@@ -335,6 +335,16 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   @doc """
+  Returns every snapshot in the cluster as a `%{volume_id => %{snapshot_id => snapshot_entry}}`
+  map. Used by the multi-root GC mark phase to pin chunks reachable
+  from any snapshot root, not just the live volume_root.
+  """
+  @spec get_all_snapshots(state()) :: %{
+          optional(binary()) => %{optional(binary()) => snapshot_entry()}
+        }
+  def get_all_snapshots(state), do: Map.get(state, :snapshots, %{})
+
+  @doc """
   Returns the escalation with the given ID, or nil.
   """
   @spec get_escalation(state(), String.t()) :: map() | nil
