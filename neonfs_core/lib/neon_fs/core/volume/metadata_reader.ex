@@ -65,6 +65,17 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   metadata chunks (or the local read fails for a structural reason),
   the call is re-dispatched via Erlang distribution to a remote node
   that does — see "Cross-node fallback" below for details.
+
+  ## Options
+
+    * `:at_root` — read the tree as if the volume's bootstrap pointer
+      had this `root_chunk_hash` instead of its live value. The
+      bootstrap entry's `drive_locations` and `durability_cache` are
+      reused — snapshots share storage with the live volume, so the
+      same drives hold the historic root chunk. Used by snapshot
+      consumers (multi-root GC, restore, export). The cache key
+      already includes `root_chunk_hash`, so cache segregation falls
+      out for free.
   """
   @spec get(volume_id :: binary(), index_kind(), key :: binary(), keyword()) ::
           {:ok, binary()} | read_error()
@@ -75,7 +86,12 @@ defmodule NeonFS.Core.Volume.MetadataReader do
       opts,
       fn -> do_local_get(volume_id, index_kind, key, opts) end,
       fn node, remote_opts ->
-        remote_call(node, opts, :get, [volume_id, index_kind, key, remote_opts])
+        remote_call(node, opts, :get, [
+          volume_id,
+          index_kind,
+          key,
+          remote_opts ++ forwardable_opts(opts)
+        ])
       end
     )
   end
@@ -108,7 +124,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
           index_kind,
           start_key,
           end_key,
-          remote_opts
+          remote_opts ++ forwardable_opts(opts)
         ])
       end
     )
@@ -279,15 +295,28 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     cluster_state_loader = Keyword.get(opts, :cluster_state_loader, &default_cluster_loader/0)
     bootstrap_lookup = Keyword.get(opts, :bootstrap_lookup, &default_bootstrap_lookup/1)
     root_chunk_reader = Keyword.get(opts, :root_chunk_reader, &default_root_chunk_reader/2)
+    at_root = Keyword.get(opts, :at_root)
 
     with {:ok, cluster_state} <- load_cluster_state(cluster_state_loader),
-         {:ok, root_entry} <- bootstrap_query(bootstrap_lookup, volume_id),
+         {:ok, bootstrap_entry} <- bootstrap_query(bootstrap_lookup, volume_id),
+         root_entry = apply_at_root_override(bootstrap_entry, at_root),
          {:ok, chunk_bytes} <- read_root_chunk(root_chunk_reader, root_entry),
          {:ok, segment} <- decode_segment(chunk_bytes),
          :ok <- check_cluster(segment, cluster_state) do
       {:ok, segment, root_entry}
     end
   end
+
+  defp apply_at_root_override(entry, nil), do: entry
+
+  defp apply_at_root_override(entry, hash) when is_binary(hash),
+    do: %{entry | root_chunk_hash: hash}
+
+  # Opts that should travel with a cross-node dispatch so the remote
+  # node walks the same logical read. `__remote_dispatched` is added
+  # by `try_remote_nodes/3`; everything else here is a caller-visible
+  # read option that affects which tree gets walked.
+  defp forwardable_opts(opts), do: Keyword.take(opts, [:at_root])
 
   defp default_cluster_loader, do: ClusterState.load()
 

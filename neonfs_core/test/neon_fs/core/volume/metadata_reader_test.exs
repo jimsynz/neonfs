@@ -241,6 +241,202 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
   end
 
+  describe ":at_root override" do
+    test "substitutes the bootstrap entry's root_chunk_hash with the supplied one" do
+      snapshot_hash = <<7::256>>
+      live_hash = <<99::256>>
+
+      live_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: live_hash,
+        drive_locations: [%{node: node(), drive_id: "drv-local"}],
+        durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      table = :ets.new(:reader_calls, [:public, :duplicate_bag])
+
+      capture_reader = fn root_entry, _opts ->
+        :ets.insert(table, {:read, root_entry.root_chunk_hash})
+        {:ok, RootSegment.encode(sample_segment())}
+      end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, live_entry} end,
+          root_chunk_reader: capture_reader,
+          at_root: snapshot_hash
+        )
+
+      assert {:ok, "value-bytes"} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert [{:read, ^snapshot_hash}] = :ets.lookup(table, :read)
+    end
+
+    test "preserves drive_locations from the bootstrap entry" do
+      remote_locations = [
+        %{node: :remote_a@host, drive_id: "drv-a"},
+        %{node: node(), drive_id: "drv-local"}
+      ]
+
+      live_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: remote_locations,
+        durability_cache: %{type: :replicate, factor: 2, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      table = :ets.new(:reader_entries, [:public, :duplicate_bag])
+
+      capture_reader = fn root_entry, _opts ->
+        :ets.insert(table, {:entry, root_entry})
+        {:ok, RootSegment.encode(sample_segment())}
+      end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, live_entry} end,
+          root_chunk_reader: capture_reader,
+          at_root: <<42::256>>
+        )
+
+      assert {:ok, _} = MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert [{:entry, entry}] = :ets.lookup(table, :entry)
+      assert entry.root_chunk_hash == <<42::256>>
+      assert entry.drive_locations == remote_locations
+      assert entry.durability_cache.factor == 2
+    end
+
+    test "cache key is segregated by the overridden root_chunk_hash" do
+      snapshot_hash = <<7::256>>
+      table = :ets.new(:cache_puts, [:public, :duplicate_bag])
+
+      miss_cache = %{
+        get: fn _v, _r, _k -> :miss end,
+        put: fn v, r, k, val ->
+          :ets.insert(table, {:put, v, r, k, val})
+          :ok
+        end
+      }
+
+      opts =
+        build_opts(
+          cache_module: stub_cache(miss_cache),
+          index_tree_get: fn _, _, _, _ -> {:ok, "snap-value"} end,
+          at_root: snapshot_hash
+        )
+
+      assert {:ok, "snap-value"} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert [{:put, "vol-1", ^snapshot_hash, {:file_index, :get, "k"}, "snap-value"}] =
+               :ets.tab2list(table)
+    end
+
+    test "range/5 also honours :at_root" do
+      snapshot_hash = <<7::256>>
+      table = :ets.new(:range_reads, [:public, :duplicate_bag])
+
+      capture_reader = fn root_entry, _opts ->
+        :ets.insert(table, {:read, root_entry.root_chunk_hash})
+        {:ok, RootSegment.encode(sample_segment())}
+      end
+
+      opts =
+        build_opts(
+          root_chunk_reader: capture_reader,
+          at_root: snapshot_hash
+        )
+
+      assert {:ok, []} =
+               MetadataReader.range("vol-1", :file_index, "", "", opts)
+
+      assert [{:read, ^snapshot_hash}] = :ets.lookup(table, :read)
+    end
+
+    test "typed wrappers forward :at_root" do
+      snapshot_hash = <<7::256>>
+      table = :ets.new(:typed_reads, [:public, :duplicate_bag])
+
+      capture_reader = fn root_entry, _opts ->
+        :ets.insert(table, {:read, root_entry.root_chunk_hash})
+        {:ok, RootSegment.encode(sample_segment())}
+      end
+
+      sample = %{path: "/a", size: 1, owner_uid: 0}
+
+      opts =
+        build_opts(
+          root_chunk_reader: capture_reader,
+          index_tree_get: fn _, _, _, _ -> {:ok, MetadataValue.encode(sample)} end,
+          at_root: snapshot_hash
+        )
+
+      assert {:ok, ^sample} =
+               MetadataReader.get_file_meta("vol-1", "file-1", opts)
+
+      assert [{:read, ^snapshot_hash}] = :ets.lookup(table, :read)
+    end
+
+    test "list_dir forwards :at_root" do
+      snapshot_hash = <<7::256>>
+      table = :ets.new(:dir_reads, [:public, :duplicate_bag])
+
+      capture_reader = fn root_entry, _opts ->
+        :ets.insert(table, {:read, root_entry.root_chunk_hash})
+        {:ok, RootSegment.encode(sample_segment())}
+      end
+
+      opts =
+        build_opts(
+          root_chunk_reader: capture_reader,
+          at_root: snapshot_hash
+        )
+
+      assert {:ok, []} =
+               MetadataReader.list_dir("vol-1", "/dir", opts)
+
+      assert [{:read, ^snapshot_hash}] = :ets.lookup(table, :read)
+    end
+
+    test "remote dispatch threads :at_root through to the remote node" do
+      snapshot_hash = <<7::256>>
+
+      remote_entry = %{
+        volume_id: "vol-1",
+        root_chunk_hash: <<99::256>>,
+        drive_locations: [%{node: :remote_a@host, drive_id: "drv-remote"}],
+        durability_cache: %{type: :replicate, factor: 1, min_copies: 1},
+        updated_at: DateTime.utc_now()
+      }
+
+      table = :ets.new(:remote_at_root, [:public, :duplicate_bag])
+
+      remote_caller = fn _node, _fn_name, [_, _, _, dispatched_opts] = args ->
+        :ets.insert(table, {:dispatched, args})
+        assert Keyword.fetch!(dispatched_opts, :__remote_dispatched) == true
+        {:ok, "remote-snap-value"}
+      end
+
+      opts =
+        build_opts(
+          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          root_chunk_reader: fn _entry, _opts -> {:error, :io_error} end,
+          remote_caller: remote_caller,
+          at_root: snapshot_hash
+        )
+
+      assert {:ok, "remote-snap-value"} =
+               MetadataReader.get("vol-1", :file_index, "k", opts)
+
+      assert [{:dispatched, [_, _, _, dispatched_opts]}] = :ets.tab2list(table)
+      assert Keyword.fetch!(dispatched_opts, :at_root) == snapshot_hash
+    end
+  end
+
   describe "cache integration" do
     test "cache hit short-circuits the bootstrap → segment → tree walk" do
       # Stub cache that pretends to have the value cached. The inner
