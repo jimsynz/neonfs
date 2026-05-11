@@ -58,14 +58,21 @@ defmodule NeonFS.CSI.ControllerServer do
     ControllerServiceCapability,
     ControllerUnpublishVolumeRequest,
     ControllerUnpublishVolumeResponse,
+    CreateSnapshotRequest,
+    CreateSnapshotResponse,
     CreateVolumeRequest,
     CreateVolumeResponse,
+    DeleteSnapshotRequest,
+    DeleteSnapshotResponse,
     DeleteVolumeRequest,
     DeleteVolumeResponse,
     GetCapacityRequest,
     GetCapacityResponse,
+    ListSnapshotsRequest,
+    ListSnapshotsResponse,
     ListVolumesRequest,
     ListVolumesResponse,
+    Snapshot,
     ValidateVolumeCapabilitiesRequest,
     ValidateVolumeCapabilitiesResponse,
     Volume,
@@ -115,7 +122,10 @@ defmodule NeonFS.CSI.ControllerServer do
             :LIST_VOLUMES,
             :GET_CAPACITY,
             :GET_VOLUME,
-            :VOLUME_CONDITION
+            :VOLUME_CONDITION,
+            :CREATE_DELETE_SNAPSHOT,
+            :LIST_SNAPSHOTS,
+            :CLONE_VOLUME
           ],
           &capability/1
         )
@@ -129,6 +139,14 @@ defmodule NeonFS.CSI.ControllerServer do
   to `NeonFS.Core.create_volume/2`.
   """
   @spec create_volume(CreateVolumeRequest.t(), term()) :: CreateVolumeResponse.t()
+  def create_volume(
+        %CreateVolumeRequest{name: name, volume_content_source: source} = req,
+        _stream
+      )
+      when is_binary(name) and name != "" and not is_nil(source) do
+    create_volume_from_source(req, source)
+  end
+
   def create_volume(%CreateVolumeRequest{name: name} = req, _stream)
       when is_binary(name) and name != "" do
     opts = parse_create_opts(req)
@@ -156,6 +174,86 @@ defmodule NeonFS.CSI.ControllerServer do
   def create_volume(%CreateVolumeRequest{}, _stream) do
     raise GRPC.RPCError, status: :invalid_argument, message: "name is required"
   end
+
+  # CSI v1 CreateVolume with `VolumeContentSource` — the new volume's
+  # content is sourced from either an existing snapshot or another
+  # volume (clone). Both paths land on `Snapshot.promote/4`, which
+  # creates a volume that shares the source's content-addressed
+  # chunk graph — no bytes are copied.
+  defp create_volume_from_source(req, %{type: {:snapshot, %{snapshot_id: csi_snap_id}}})
+       when is_binary(csi_snap_id) and csi_snap_id != "" do
+    case decode_csi_snapshot_id(csi_snap_id) do
+      {:ok, vol_name, snap_id} ->
+        promote_into_new_volume(req, vol_name, snap_id)
+
+      :error ->
+        raise GRPC.RPCError,
+          status: :invalid_argument,
+          message: "malformed snapshot id #{csi_snap_id}; expected \"<volume>/<snapshot>\""
+    end
+  end
+
+  defp create_volume_from_source(req, %{type: {:volume, %{volume_id: source_volume_id}}})
+       when is_binary(source_volume_id) and source_volume_id != "" do
+    with {:ok, source_volume} <- lookup_volume(source_volume_id),
+         {:ok, snap} <- create_clone_snapshot(source_volume.id, req.name) do
+      promote_into_new_volume(req, source_volume.name, snap.id)
+    else
+      {:error, :not_found} ->
+        raise GRPC.RPCError,
+          status: :not_found,
+          message: "source volume #{source_volume_id} not found"
+
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :internal,
+          message: "clone failed: #{inspect(reason)}"
+    end
+  end
+
+  defp create_volume_from_source(_req, _bad) do
+    raise GRPC.RPCError,
+      status: :invalid_argument,
+      message: "volume_content_source must specify either a snapshot or a volume"
+  end
+
+  defp create_clone_snapshot(source_volume_id, requested_name) do
+    name = "csi-clone-source-#{requested_name}"
+
+    core_call(NeonFS.Core.Snapshot, :create, [source_volume_id, [name: name]])
+  end
+
+  defp promote_into_new_volume(req, source_volume_name, snapshot_id) do
+    with {:ok, source_volume} <- lookup_volume(source_volume_name),
+         {:ok, new_volume} <-
+           core_call(NeonFS.Core.Snapshot, :promote, [
+             source_volume.id,
+             snapshot_id,
+             req.name,
+             []
+           ]) do
+      %CreateVolumeResponse{
+        volume:
+          csi_volume_from(new_volume, requested_capacity(req))
+          |> with_content_source(req.volume_content_source)
+      }
+    else
+      {:error, :not_found} ->
+        raise GRPC.RPCError, status: :not_found, message: "source not found"
+
+      {:error, :volume_not_found} ->
+        raise GRPC.RPCError, status: :not_found, message: "source volume not found"
+
+      {:error, reason} ->
+        raise GRPC.RPCError, status: :internal, message: "promote failed: #{inspect(reason)}"
+    end
+  end
+
+  defp with_content_source(%Volume{} = vol, content_source) when not is_nil(content_source) do
+    %Volume{vol | content_source: content_source}
+  end
+
+  defp with_content_source(vol, _), do: vol
 
   @doc """
   CSI `Controller.DeleteVolume` — idempotent: a `:not_found` from
@@ -376,6 +474,227 @@ defmodule NeonFS.CSI.ControllerServer do
       {:error, reason} ->
         raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
     end
+  end
+
+  @doc """
+  CSI `Controller.CreateSnapshot` — creates a snapshot of the volume
+  identified by `source_volume_id` (the volume's NeonFS name). The
+  returned `snapshot_id` is `"<volume_name>/<snapshot_uuid>"` so
+  `DeleteSnapshot` and `ListSnapshots(snapshot_id: …)` can resolve
+  back to the volume without a second lookup.
+  """
+  @spec create_snapshot(CreateSnapshotRequest.t(), term()) :: CreateSnapshotResponse.t()
+  def create_snapshot(%CreateSnapshotRequest{source_volume_id: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "source_volume_id is required"
+  end
+
+  def create_snapshot(%CreateSnapshotRequest{name: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "name is required"
+  end
+
+  def create_snapshot(
+        %CreateSnapshotRequest{source_volume_id: source_volume_id, name: name},
+        _stream
+      ) do
+    case lookup_volume(source_volume_id) do
+      {:ok, volume} ->
+        case core_call(NeonFS.Core.Snapshot, :create, [volume.id, [name: name]]) do
+          {:ok, snap} ->
+            %CreateSnapshotResponse{
+              snapshot: csi_snapshot_from(snap, volume)
+            }
+
+          {:error, reason} ->
+            raise GRPC.RPCError,
+              status: :internal,
+              message: "create_snapshot failed: #{inspect(reason)}"
+        end
+
+      {:error, :not_found} ->
+        raise GRPC.RPCError,
+          status: :not_found,
+          message: "source volume #{source_volume_id} not found"
+
+      {:error, reason} ->
+        raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  CSI `Controller.DeleteSnapshot` — idempotent. Parses the
+  `"<volume_name>/<snapshot_uuid>"` snapshot id, resolves the
+  volume, and calls `Snapshot.delete/2`. Returns success for
+  unknown ids.
+  """
+  @spec delete_snapshot(DeleteSnapshotRequest.t(), term()) :: DeleteSnapshotResponse.t()
+  def delete_snapshot(%DeleteSnapshotRequest{snapshot_id: ""}, _stream) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "snapshot_id is required"
+  end
+
+  def delete_snapshot(%DeleteSnapshotRequest{snapshot_id: csi_snap_id}, _stream) do
+    # Malformed ids and missing volumes are both treated as idempotent
+    # successes — CSI retries Delete on snapshots that may already be
+    # gone or that the client has lost track of.
+    case decode_csi_snapshot_id(csi_snap_id) do
+      {:ok, vol_name, snap_id} -> delete_snapshot_for(vol_name, snap_id)
+      :error -> %DeleteSnapshotResponse{}
+    end
+  end
+
+  defp delete_snapshot_for(vol_name, snap_id) do
+    case lookup_volume(vol_name) do
+      {:ok, volume} -> do_delete_snapshot(volume.id, snap_id)
+      {:error, :not_found} -> %DeleteSnapshotResponse{}
+    end
+  end
+
+  defp do_delete_snapshot(volume_id, snap_id) do
+    case core_call(NeonFS.Core.Snapshot, :delete, [volume_id, snap_id]) do
+      :ok ->
+        %DeleteSnapshotResponse{}
+
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :internal,
+          message: "delete_snapshot failed: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  CSI `Controller.ListSnapshots` — supports filtering by
+  `source_volume_id`, by `snapshot_id`, or unfiltered (list every
+  snapshot in the cluster). Paginated via the standard
+  `starting_token` + `max_entries` mechanism.
+  """
+  @spec list_snapshots(ListSnapshotsRequest.t(), term()) :: ListSnapshotsResponse.t()
+  def list_snapshots(%ListSnapshotsRequest{snapshot_id: csi_snap_id}, _stream)
+      when is_binary(csi_snap_id) and csi_snap_id != "" do
+    list_snapshots_by_id(csi_snap_id)
+  end
+
+  def list_snapshots(%ListSnapshotsRequest{source_volume_id: vol_name} = req, _stream)
+      when is_binary(vol_name) and vol_name != "" do
+    case lookup_volume(vol_name) do
+      {:ok, volume} ->
+        case core_call(NeonFS.Core.Snapshot, :list, [volume.id]) do
+          {:ok, snapshots} ->
+            paginate_snapshots(snapshots, volume, req)
+
+          {:error, reason} ->
+            raise GRPC.RPCError,
+              status: :internal,
+              message: "list_snapshots failed: #{inspect(reason)}"
+        end
+
+      {:error, :not_found} ->
+        # No volume → no snapshots.
+        %ListSnapshotsResponse{entries: [], next_token: ""}
+    end
+  end
+
+  def list_snapshots(%ListSnapshotsRequest{} = req, _stream) do
+    # No filter — walk every volume's snapshots. Cheap because
+    # snapshots are pointer entries, not chunk data.
+    {:ok, volumes} = core_call(NeonFS.Core, :list_volumes, [])
+
+    pairs =
+      Enum.flat_map(volumes, fn volume ->
+        case core_call(NeonFS.Core.Snapshot, :list, [volume.id]) do
+          {:ok, snapshots} -> Enum.map(snapshots, &{&1, volume})
+          _ -> []
+        end
+      end)
+
+    paginate_snapshot_pairs(pairs, req)
+  end
+
+  defp list_snapshots_by_id(csi_snap_id) do
+    case decode_csi_snapshot_id(csi_snap_id) do
+      {:ok, vol_name, snap_id} ->
+        with {:ok, volume} <- lookup_volume(vol_name),
+             {:ok, snap} <- core_call(NeonFS.Core.Snapshot, :get, [volume.id, snap_id]) do
+          %ListSnapshotsResponse{
+            entries: [%ListSnapshotsResponse.Entry{snapshot: csi_snapshot_from(snap, volume)}],
+            next_token: ""
+          }
+        else
+          _ -> %ListSnapshotsResponse{entries: [], next_token: ""}
+        end
+
+      :error ->
+        %ListSnapshotsResponse{entries: [], next_token: ""}
+    end
+  end
+
+  defp paginate_snapshots(snapshots, volume, %ListSnapshotsRequest{} = req) do
+    pairs = Enum.map(snapshots, &{&1, volume})
+    paginate_snapshot_pairs(pairs, req)
+  end
+
+  defp paginate_snapshot_pairs(pairs, %ListSnapshotsRequest{
+         starting_token: token,
+         max_entries: max
+       }) do
+    sorted = Enum.sort_by(pairs, fn {snap, _vol} -> snap.id end)
+    page = paginate_pairs(sorted, token, max(max, 0))
+
+    entries =
+      Enum.map(page.entries, fn {snap, vol} ->
+        %ListSnapshotsResponse.Entry{snapshot: csi_snapshot_from(snap, vol)}
+      end)
+
+    next_token =
+      case List.last(page.entries) do
+        nil -> ""
+        {snap, _vol} -> if page.more?, do: snap.id, else: ""
+      end
+
+    %ListSnapshotsResponse{entries: entries, next_token: next_token}
+  end
+
+  defp paginate_pairs(pairs, "", 0), do: %{entries: pairs, more?: false}
+  defp paginate_pairs(pairs, "", max), do: take_pair_page(pairs, max)
+
+  defp paginate_pairs(pairs, token, max) do
+    rest = Enum.drop_while(pairs, fn {snap, _vol} -> snap.id <= token end)
+
+    case max do
+      0 -> %{entries: rest, more?: false}
+      _ -> take_pair_page(rest, max)
+    end
+  end
+
+  defp take_pair_page(pairs, max) do
+    {entries, rest} = Enum.split(pairs, max)
+    %{entries: entries, more?: rest != []}
+  end
+
+  defp csi_snapshot_from(snap, volume) do
+    %Snapshot{
+      snapshot_id: "#{volume.name}/#{snap.id}",
+      source_volume_id: volume.name,
+      creation_time: datetime_to_timestamp(snap.created_at),
+      ready_to_use: true,
+      size_bytes: 0
+    }
+  end
+
+  defp datetime_to_timestamp(%DateTime{} = dt) do
+    unix = DateTime.to_unix(dt, :nanosecond)
+    %Google.Protobuf.Timestamp{seconds: div(unix, 1_000_000_000), nanos: rem(unix, 1_000_000_000)}
+  end
+
+  defp datetime_to_timestamp(_), do: nil
+
+  defp decode_csi_snapshot_id(csi_snap_id) do
+    case String.split(csi_snap_id, "/", parts: 2) do
+      [vol_name, snap_id] when vol_name != "" and snap_id != "" -> {:ok, vol_name, snap_id}
+      _ -> :error
+    end
+  end
+
+  defp lookup_volume(name_or_id) do
+    core_call(NeonFS.Core, :get_volume, [name_or_id])
   end
 
   ## Helpers
