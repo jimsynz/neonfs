@@ -141,10 +141,16 @@ defmodule NeonFS.CLI.Handler do
              "to designate the initial drive"
        )}
 
-  defp format_cluster_init_result({:error, {:initial_drive_failed, reason}}),
-    do:
-      {:error,
-       Invalid.exception(message: "Failed to register the initial drive: #{inspect(reason)}")}
+  defp format_cluster_init_result({:error, {:initial_drive_failed, reason}}) do
+    {:error,
+     Invalid.exception(
+       message:
+         "Ra cluster bootstrapped but the initial drive failed to register: " <>
+           "#{inspect(reason)}. The cluster will report `running` from `neonfs cluster status` " <>
+           "but has no drives or system volume yet — re-run `neonfs drive add <path>` to " <>
+           "finish bootstrap. (#980)"
+     )}
+  end
 
   defp format_cluster_init_result({:error, reason}), do: {:error, wrap_error(reason)}
 

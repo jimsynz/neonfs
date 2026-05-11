@@ -61,7 +61,11 @@ defmodule NeonFS.Core.DriveManager do
   """
   @spec add_drive(map()) :: {:ok, map()} | {:error, term()}
   def add_drive(config) when is_map(config) do
-    GenServer.call(__MODULE__, {:add_drive, config})
+    # 60 s rather than the default 5 s — inner operations (BlobStore.open_store,
+    # the bootstrap-layer Ra writes) already pass `:infinity`, and on real
+    # hardware the first add_drive after `RaServer.init_cluster()` can land in
+    # the leader-settle window, blowing the 5 s budget (#980).
+    GenServer.call(__MODULE__, {:add_drive, config}, 60_000)
   end
 
   @doc """
@@ -84,7 +88,9 @@ defmodule NeonFS.Core.DriveManager do
   """
   @spec remove_drive(String.t(), keyword()) :: :ok | {:error, term()}
   def remove_drive(drive_id, opts \\ []) do
-    GenServer.call(__MODULE__, {:remove_drive, drive_id, opts})
+    # Same 60 s budget as `add_drive/1` — the inner data-presence check can be
+    # slow on large drives (#980).
+    GenServer.call(__MODULE__, {:remove_drive, drive_id, opts}, 60_000)
   end
 
   @doc """
