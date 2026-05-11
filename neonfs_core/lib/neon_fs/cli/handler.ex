@@ -20,6 +20,7 @@ defmodule NeonFS.CLI.Handler do
     AuditLog,
     Authorise,
     BackgroundWorker,
+    Backup,
     CertificateAuthority,
     DriveManager,
     DRSnapshot,
@@ -2643,6 +2644,66 @@ defmodule NeonFS.CLI.Handler do
     else
       {:error, reason} -> {:error, wrap_error(reason)}
     end
+  end
+
+  @doc """
+  Take a snapshot of `volume_name`, export it to `output_path`, then
+  drop the snapshot (#968).
+
+  Returns `{:ok, summary}` with `:path`, `:volume`, `:snapshot_id`,
+  `:file_count`, `:byte_count`. On export failure the snapshot is
+  left in place per #968's "retry without re-snapshotting" semantics.
+  """
+  @spec handle_backup_create(binary(), binary(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_backup_create(volume_name, output_path, opts \\ %{})
+      when is_binary(volume_name) and is_binary(output_path) and is_map(opts) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, summary} <- Backup.create(volume_name, output_path, backup_create_opts(opts)) do
+      {:ok, summary}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp backup_create_opts(opts) do
+    Enum.flat_map(opts, fn
+      {"name", name} when is_binary(name) -> [name: name]
+      {:name, name} when is_binary(name) -> [name: name]
+      _ -> []
+    end)
+  end
+
+  @doc """
+  Read a backup's manifest without unpacking the body (#968).
+
+  Returns the parsed manifest map verbatim — the CLI surfaces a
+  human-readable view of the well-known fields.
+  """
+  @spec handle_backup_describe(binary()) :: {:ok, map()} | {:error, term()}
+  def handle_backup_describe(input_path) when is_binary(input_path) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, manifest} <- Backup.describe(input_path) do
+      {:ok, manifest}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Restore a backup tarball at `input_path` into a brand-new volume
+  named `new_volume_name` (#968). Identical wiring to
+  `handle_volume_import/2`.
+  """
+  @spec handle_backup_restore(binary(), binary()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_backup_restore(input_path, new_volume_name)
+      when is_binary(input_path) and is_binary(new_volume_name) do
+    handle_volume_import(input_path, new_volume_name)
   end
 
   defp snapshot_to_map(%Snapshot{} = snap, volume_name) do

@@ -9,10 +9,10 @@ mod tls;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    acl::AclCommand, audit::AuditCommand, cluster::ClusterCommand, dr::DrCommand,
-    drive::DriveCommand, escalation::EscalationCommand, fuse::FuseCommand, gc::GcCommand,
-    job::JobCommand, nfs::NfsCommand, node::NodeCommand, s3::S3Command, scrub::ScrubCommand,
-    volume::VolumeCommand, worker::WorkerCommand,
+    acl::AclCommand, audit::AuditCommand, backup::BackupCommand, cluster::ClusterCommand,
+    dr::DrCommand, drive::DriveCommand, escalation::EscalationCommand, fuse::FuseCommand,
+    gc::GcCommand, job::JobCommand, nfs::NfsCommand, node::NodeCommand, s3::S3Command,
+    scrub::ScrubCommand, volume::VolumeCommand, worker::WorkerCommand,
 };
 use output::OutputFormat;
 
@@ -47,6 +47,12 @@ enum Commands {
     Audit {
         #[command(subcommand)]
         command: AuditCommand,
+    },
+
+    /// Backup orchestration (snapshot + export + import) (#968)
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
     },
 
     /// Cluster management
@@ -146,6 +152,7 @@ fn main() {
     let result = match cli.command {
         Commands::Acl { command } => command.execute(format),
         Commands::Audit { command } => command.execute(format),
+        Commands::Backup { command } => command.execute(format),
         Commands::Cluster { command } => command.execute(format),
         Commands::Dr { command } => command.execute(format),
         Commands::Drive { command } => command.execute(format),
