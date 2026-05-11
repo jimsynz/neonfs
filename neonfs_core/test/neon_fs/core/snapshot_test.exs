@@ -197,9 +197,7 @@ defmodule NeonFS.Core.SnapshotTest do
       {:ok, snapshot} = Snapshot.create(source.id)
 
       {:ok, promoted} =
-        Snapshot.promote(source.id, snapshot.id, "override-target",
-          volume_opts: [io_weight: 999]
-        )
+        Snapshot.promote(source.id, snapshot.id, "override-target", volume_opts: [io_weight: 999])
 
       assert promoted.io_weight == 999
     end
