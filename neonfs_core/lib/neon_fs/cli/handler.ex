@@ -39,6 +39,7 @@ defmodule NeonFS.CLI.Handler do
     VolumeACL,
     VolumeEncryption,
     VolumeExport,
+    VolumeImport,
     VolumeRegistry
   }
 
@@ -2592,6 +2593,36 @@ defmodule NeonFS.CLI.Handler do
          path: summary.path,
          file_count: summary.file_count,
          byte_count: summary.byte_count
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Import a previously-exported tarball into a new volume named
+  `new_volume_name` (#966).
+
+  V1 scope — local input path only, default storage policy. S3/
+  `file://` URLs, custom storage policy, and post-import
+  verification land in follow-ups.
+  """
+  @spec handle_volume_import(binary(), binary()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_volume_import(input_path, new_volume_name)
+      when is_binary(input_path) and is_binary(new_volume_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, summary} <- VolumeImport.import_archive(input_path, new_volume_name) do
+      {:ok,
+       %{
+         path: summary.path,
+         volume_id: summary.volume_id,
+         volume_name: summary.volume_name,
+         file_count: summary.file_count,
+         byte_count: summary.byte_count,
+         source_volume_name: summary.source_volume_name
        }}
     else
       {:error, reason} -> {:error, wrap_error(reason)}
