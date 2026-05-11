@@ -3,6 +3,7 @@ defmodule NeonFS.Core.BackupTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core
+
   alias NeonFS.Core.{
     Backup,
     RaServer,
