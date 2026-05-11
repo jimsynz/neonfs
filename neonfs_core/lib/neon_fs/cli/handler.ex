@@ -1804,26 +1804,27 @@ defmodule NeonFS.CLI.Handler do
   @doc """
   Starts evacuation of all data from a drive.
 
+  Evacuation always prefers a same-tier target drive and falls back to
+  any tier when none is available, so the call has no tier-related
+  options.
+
   ## Parameters
   - `node_name` - Node name string (e.g. "neonfs-core@host")
   - `drive_id` - Drive identifier
-  - `opts` - Options map with optional keys:
-    - `"any_tier"` - Allow migration to any tier (default: false)
 
   ## Returns
   - `{:ok, map}` - Job info map
   - `{:error, reason}` - Error tuple
   """
   @spec handle_evacuate_drive(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
-  def handle_evacuate_drive(node_name, drive_id, opts \\ %{})
+  def handle_evacuate_drive(node_name, drive_id, _opts \\ %{})
       when is_binary(node_name) and is_binary(drive_id) do
     set_cli_metadata()
 
     with :ok <- require_cluster() do
       node = String.to_atom(node_name)
-      any_tier = Map.get(opts, "any_tier", false)
 
-      case NeonFS.Core.DriveEvacuation.start_evacuation(node, drive_id, any_tier: any_tier) do
+      case NeonFS.Core.DriveEvacuation.start_evacuation(node, drive_id) do
         {:ok, job} -> {:ok, job_to_map(job)}
         {:error, reason} -> {:error, wrap_error(reason)}
       end
@@ -1855,8 +1856,7 @@ defmodule NeonFS.CLI.Handler do
              progress_completed: status.progress.completed,
              progress_description: status.progress.description,
              drive_id: status.drive_id,
-             node: if(status.node, do: Atom.to_string(status.node)),
-             any_tier: status.any_tier
+             node: if(status.node, do: Atom.to_string(status.node))
            }}
 
         {:error, reason} ->

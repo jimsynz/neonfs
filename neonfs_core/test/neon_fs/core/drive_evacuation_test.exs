@@ -151,7 +151,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
         Job.new(EvacuationRunner, %{
           node: node(),
           drive_id: "drive1",
-          any_tier: false,
           total_chunks: 1
         })
 
@@ -169,7 +168,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
         Job.new(EvacuationRunner, %{
           node: node(),
           drive_id: "drive1",
-          any_tier: false,
           total_chunks: 0
         })
 
@@ -266,7 +264,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       Job.new(EvacuationRunner, %{
         node: node(),
         drive_id: "drive1",
-        any_tier: false,
         total_chunks: 1
       })
 
@@ -281,7 +278,6 @@ defmodule NeonFS.Core.DriveEvacuationTest do
         Job.new(EvacuationRunner, %{
           node: node(),
           drive_id: "drive1",
-          any_tier: false,
           total_chunks: 10
         })
 

@@ -47,7 +47,11 @@ pub enum DriveCommand {
         node: Option<String>,
     },
 
-    /// Evacuate all data from a drive (graceful removal)
+    /// Evacuate all data from a drive (graceful removal).
+    ///
+    /// Always prefers a same-tier target drive and falls back to any tier
+    /// when none is available — evacuation must succeed even if no
+    /// same-tier drive remains in the cluster.
     Evacuate {
         /// Drive identifier
         drive_id: String,
@@ -55,10 +59,6 @@ pub enum DriveCommand {
         /// Node where the drive is located (default: local node)
         #[arg(long)]
         node: Option<String>,
-
-        /// Allow migration to any tier (default: same tier only)
-        #[arg(long)]
-        any_tier: bool,
     },
 }
 
@@ -74,11 +74,9 @@ impl DriveCommand {
             } => self.add(path, tier, capacity, id.as_deref(), format),
             DriveCommand::Remove { drive_id, force } => self.remove(drive_id, *force, format),
             DriveCommand::List { node } => self.list(node.as_deref(), format),
-            DriveCommand::Evacuate {
-                drive_id,
-                node,
-                any_tier,
-            } => self.evacuate(drive_id, node.as_deref(), *any_tier, format),
+            DriveCommand::Evacuate { drive_id, node } => {
+                self.evacuate(drive_id, node.as_deref(), format)
+            }
         }
     }
 
@@ -297,7 +295,6 @@ impl DriveCommand {
         &self,
         drive_id: &str,
         node: Option<&str>,
-        any_tier: bool,
         format: OutputFormat,
     ) -> Result<()> {
         let node_name = match node {
@@ -327,18 +324,8 @@ impl DriveCommand {
         let drive_id_term = Term::Binary(Binary {
             bytes: drive_id.as_bytes().to_vec(),
         });
-
-        let mut opts_entries = vec![];
-        if any_tier {
-            opts_entries.push((
-                Term::Binary(Binary {
-                    bytes: b"any_tier".to_vec(),
-                }),
-                Term::Atom(Atom::from("true")),
-            ));
-        }
         let opts_term = Term::Map(Map {
-            map: opts_entries.into_iter().collect(),
+            map: std::collections::HashMap::new(),
         });
 
         let result = smol::block_on(async {
@@ -387,7 +374,6 @@ impl DriveCommand {
                     "drive_id": drive_id,
                     "node": node_name,
                     "total_chunks": total,
-                    "any_tier": any_tier
                 });
                 println!("{}", json::format(&response)?);
             }
@@ -396,11 +382,6 @@ impl DriveCommand {
                 println!("  Node: {}", node_name);
                 println!("  Job ID: {}", job_id);
                 println!("  Chunks to evacuate: {}", total);
-                if any_tier {
-                    println!("  Mode: any tier (cross-tier migration allowed)");
-                } else {
-                    println!("  Mode: same tier only");
-                }
                 println!("\nTrack progress with: neonfs job show {}", job_id);
             }
         }
@@ -491,38 +472,22 @@ mod tests {
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                DriveCommand::Evacuate {
-                    drive_id,
-                    node,
-                    any_tier,
-                } => {
+                DriveCommand::Evacuate { drive_id, node } => {
                     assert_eq!(drive_id, "nvme0");
                     assert!(node.is_none());
-                    assert!(!any_tier);
                 }
                 _ => panic!("Expected Evacuate variant"),
             }
         }
 
-        let cli = TestCli::try_parse_from([
-            "test",
-            "evacuate",
-            "sata0",
-            "--node",
-            "neonfs-core@host1",
-            "--any-tier",
-        ]);
+        let cli =
+            TestCli::try_parse_from(["test", "evacuate", "sata0", "--node", "neonfs-core@host1"]);
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                DriveCommand::Evacuate {
-                    drive_id,
-                    node,
-                    any_tier,
-                } => {
+                DriveCommand::Evacuate { drive_id, node } => {
                     assert_eq!(drive_id, "sata0");
                     assert_eq!(node.as_deref(), Some("neonfs-core@host1"));
-                    assert!(any_tier);
                 }
                 _ => panic!("Expected Evacuate variant"),
             }

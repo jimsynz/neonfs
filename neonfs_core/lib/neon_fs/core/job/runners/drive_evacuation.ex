@@ -80,11 +80,10 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   defp process_batch(job, remaining) do
     batch = Enum.take(remaining, batch_size())
-    any_tier = job.params.any_tier
 
     results =
       Enum.map(batch, fn blob ->
-        process_blob(job.params, blob, any_tier)
+        process_blob(job.params, blob)
       end)
 
     successes = Enum.count(results, &match?(:ok, &1))
@@ -190,10 +189,10 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   defp describe_posix(p) when is_atom(p), do: Atom.to_string(p)
   defp describe_posix(p), do: inspect(p)
 
-  defp process_blob(params, blob, any_tier) do
+  defp process_blob(params, blob) do
     case ChunkIndex.lookup_by_hash(blob.hash) do
-      {:ok, chunk} -> process_tracked_chunk(params, chunk, any_tier)
-      :not_found -> migrate_untracked_blob(params, blob, any_tier)
+      {:ok, chunk} -> process_tracked_chunk(params, chunk)
+      :not_found -> migrate_untracked_blob(params, blob)
     end
   rescue
     error ->
@@ -205,7 +204,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
       {:error, error}
   end
 
-  defp process_tracked_chunk(params, chunk, any_tier) do
+  defp process_tracked_chunk(params, chunk) do
     node = params.node
     drive_id = params.drive_id
 
@@ -215,7 +214,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     cond do
       # Erasure-coded chunks always need migration
       chunk.stripe_id != nil ->
-        migrate_chunk(params, chunk, any_tier)
+        migrate_chunk(params, chunk)
 
       # Over-replicated: just delete the copy on the evacuating drive
       length(other_locations) >= target_replicas ->
@@ -223,14 +222,14 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
       # Under-replicated: migrate to another drive
       true ->
-        migrate_chunk(params, chunk, any_tier)
+        migrate_chunk(params, chunk)
     end
   end
 
-  defp migrate_untracked_blob(params, blob, any_tier) do
+  defp migrate_untracked_blob(params, blob) do
     blob_tier_atom = String.to_atom(blob.tier)
 
-    case select_target_drive(params, blob_tier_atom, any_tier) do
+    case select_target_drive(params, blob_tier_atom) do
       {:ok, target} ->
         case BlobStore.migrate_blob_file(blob, target.id) do
           :ok -> :ok
@@ -278,7 +277,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     end
   end
 
-  defp migrate_chunk(params, chunk, any_tier) do
+  defp migrate_chunk(params, chunk) do
     node = params.node
     drive_id = params.drive_id
 
@@ -289,7 +288,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
     source_tier = if location, do: location.tier, else: :hot
 
-    case select_target_drive(params, source_tier, any_tier) do
+    case select_target_drive(params, source_tier) do
       {:ok, target} ->
         migration_params = %{
           chunk_hash: chunk.hash,
@@ -312,31 +311,16 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   end
 
   ## Private — Target drive selection
+  #
+  # Always prefers same-tier and falls back to any tier when none is
+  # available. Evacuation must succeed even if the cluster has no
+  # remaining drive on the source tier — leaving blobs on a draining
+  # drive is worse than landing them on a cooler tier.
 
-  defp select_target_drive(params, source_tier, any_tier) do
-    node = params.node
-    drive_id = params.drive_id
+  defp select_target_drive(params, preferred_tier) do
+    evac_node = params.node
+    evac_drive_id = params.drive_id
 
-    if any_tier do
-      select_any_tier_drive(node, drive_id, source_tier)
-    else
-      select_same_tier_drive(node, drive_id, source_tier)
-    end
-  end
-
-  defp select_same_tier_drive(evac_node, evac_drive_id, tier) do
-    # Try local node first
-    case DriveRegistry.select_drive(tier) do
-      {:ok, drive} when not (drive.node == evac_node and drive.id == evac_drive_id) ->
-        {:ok, drive}
-
-      _ ->
-        # Fall back to cluster-wide search
-        select_from_cluster(evac_node, evac_drive_id, fn d -> d.tier == tier end)
-    end
-  end
-
-  defp select_any_tier_drive(evac_node, evac_drive_id, preferred_tier) do
     all_drives =
       DriveRegistry.list_drives()
       |> Enum.filter(fn d ->
@@ -344,7 +328,6 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
           not (d.node == evac_node and d.id == evac_drive_id)
       end)
 
-    # Prefer same tier, then sort by usage ratio
     case Enum.filter(all_drives, &(&1.tier == preferred_tier)) do
       [_ | _] = same_tier ->
         {:ok, Enum.min_by(same_tier, &Drive.usage_ratio/1)}
@@ -354,20 +337,6 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
           [_ | _] -> {:ok, Enum.min_by(all_drives, &Drive.usage_ratio/1)}
           [] -> {:error, :no_target_drives}
         end
-    end
-  end
-
-  defp select_from_cluster(evac_node, evac_drive_id, filter_fn) do
-    candidates =
-      DriveRegistry.list_drives()
-      |> Enum.filter(fn d ->
-        filter_fn.(d) and d.state not in [:draining] and
-          not (d.node == evac_node and d.id == evac_drive_id)
-      end)
-
-    case candidates do
-      [] -> {:error, :no_target_drives}
-      drives -> {:ok, Enum.min_by(drives, &Drive.usage_ratio/1)}
     end
   end
 
@@ -436,7 +405,6 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   defp rewrite_drive_locations(job) do
     evac_node = job.params.node
     evac_drive = job.params.drive_id
-    any_tier = job.params.any_tier
 
     volume_roots =
       case RaSupervisor.local_query(&MetadataStateMachine.get_volume_roots/1) do
@@ -445,18 +413,18 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
       end
 
     Enum.each(volume_roots, fn {volume_id, entry} ->
-      maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive, any_tier)
+      maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive)
     end)
   end
 
-  defp maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive, any_tier) do
+  defp maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive) do
     drive_locations = Map.get(entry, :drive_locations, [])
 
     if contains_location?(drive_locations, evac_node, evac_drive) do
       log_rewrite_result(
         volume_id,
         evac_drive,
-        rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive, any_tier)
+        rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive)
       )
     end
   end
@@ -475,8 +443,8 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     Enum.any?(locations, &(&1.node == node and &1.drive_id == drive_id))
   end
 
-  defp rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive, any_tier) do
-    case select_target_drive(%{node: evac_node, drive_id: evac_drive}, :hot, any_tier) do
+  defp rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive) do
+    case select_target_drive(%{node: evac_node, drive_id: evac_drive}, :hot) do
       {:error, reason} ->
         {:error, reason}
 
