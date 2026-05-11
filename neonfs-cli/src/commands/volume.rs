@@ -264,6 +264,21 @@ pub enum VolumeCommand {
         to: String,
     },
 
+    /// Import a volume from a previously-exported tarball (#966).
+    ///
+    /// Creates a new volume named `--as <new-volume-name>` populated
+    /// from the export. The input path is on the daemon's
+    /// filesystem.
+    Import {
+        /// Input tarball path on the daemon's filesystem
+        #[arg(long = "from")]
+        from: String,
+
+        /// Name of the new volume to create
+        #[arg(long = "as")]
+        new_name: String,
+    },
+
     /// Rollback a volume's live root to a snapshot (#963).
     ///
     /// Destructive in the general case: chunks reachable from the
@@ -435,7 +450,69 @@ impl VolumeCommand {
                 r#yes,
             } => self.restore(volume, snapshot, *safe, *force, *r#yes, format),
             VolumeCommand::Export { volume, to } => self.export(volume, to, format),
+            VolumeCommand::Import { from, new_name } => self.import(from, new_name, format),
         }
+    }
+
+    fn import(&self, from: &str, new_name: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_import",
+                vec![binary_val(from), binary_val(new_name)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let volume_id = term_to_string(map.get("volume_id").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'volume_id'".to_string())
+        })?)?;
+        let volume_name = term_to_string(map.get("volume_name").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'volume_name'".to_string())
+        })?)?;
+        let file_count = term_to_u64(map.get("file_count").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'file_count'".to_string())
+        })?)?;
+        let byte_count = term_to_u64(map.get("byte_count").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'byte_count'".to_string())
+        })?)?;
+        let source_volume_name = match map.get("source_volume_name") {
+            Some(Term::Atom(a)) if a.name == "nil" => None,
+            Some(term) => Some(term_to_string(term)?),
+            None => None,
+        };
+
+        match format {
+            OutputFormat::Json => {
+                let src = source_volume_name
+                    .as_deref()
+                    .map(|s| format!("\"{}\"", s))
+                    .unwrap_or_else(|| "null".to_string());
+                println!(
+                    "{{\"from\":\"{}\",\"volume_id\":\"{}\",\"volume_name\":\"{}\",\"file_count\":{},\"byte_count\":{},\"source_volume_name\":{}}}",
+                    from, volume_id, volume_name, file_count, byte_count, src
+                );
+            }
+            OutputFormat::Table => {
+                println!("✓ Imported {} from {}", volume_name, from);
+                println!();
+                println!("  Volume ID:   {}", volume_id);
+                if let Some(src) = source_volume_name {
+                    println!("  Original:    {}", src);
+                }
+                println!("  Files:       {}", file_count);
+                println!("  Bytes:       {}", byte_count);
+            }
+        }
+        Ok(())
     }
 
     fn export(&self, volume: &str, to: &str, format: OutputFormat) -> Result<()> {
@@ -2291,6 +2368,44 @@ mod tests {
             }
             _ => panic!("expected Export variant"),
         }
+    }
+
+    #[test]
+    fn test_volume_import_parses() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test", "import", "--from", "/tmp/in.tar", "--as", "restored",
+        ])
+        .unwrap();
+        match cli.command {
+            VolumeCommand::Import { from, new_name } => {
+                assert_eq!(from, "/tmp/in.tar");
+                assert_eq!(new_name, "restored");
+            }
+            _ => panic!("expected Import variant"),
+        }
+    }
+
+    #[test]
+    fn test_volume_import_requires_from_and_as() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        assert!(TestCli::try_parse_from(["test", "import"]).is_err());
+        assert!(TestCli::try_parse_from(["test", "import", "--from", "/x.tar"]).is_err());
+        assert!(TestCli::try_parse_from(["test", "import", "--as", "v"]).is_err());
     }
 
     #[test]
