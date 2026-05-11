@@ -134,7 +134,132 @@ defmodule NeonFS.Core.Snapshot do
     end
   end
 
+  @doc """
+  Restore a volume's live `volume_root` to a snapshot's saved root
+  (#963).
+
+  Destructive in the general case: chunks reachable from the current
+  live root but not from any remaining snapshot become unreferenced
+  and will be reclaimed by the next GC pass (which walks every
+  snapshot root, per #961).
+
+  ## Options
+
+    * `:safe` — auto-create a `pre-restore-<id>` snapshot of the
+      current live root *before* swapping. The discarded state is
+      always recoverable. Defaults to `false`.
+    * `:force` — proceed even when the current live root is not
+      covered by any existing snapshot AND `:safe` is not set.
+      Defaults to `false`. Without this, the call returns
+      `{:error, :unreferenced_chunks}` so the operator (or CLI) can
+      decide whether to discard.
+
+  Returns `{:ok, %{previous_root, new_root, pre_restore_snapshot}}`
+  on success — `pre_restore_snapshot` is the auto-created snapshot
+  struct when `:safe` was used, `nil` otherwise.
+
+  No-op (returns success with `previous_root == new_root`) when the
+  current live root already matches the snapshot's root.
+
+  ## Errors
+
+    * `{:error, :not_found}` — snapshot id doesn't match a snapshot
+      on `volume_id`.
+    * `{:error, :volume_not_found}` — volume has no bootstrap-layer
+      `volume_root` entry.
+    * `{:error, :unreferenced_chunks}` — current live root isn't
+      covered by any other snapshot and neither `:safe` nor `:force`
+      was supplied.
+    * Any error from Ra (`{:error, {:stale_pointer, ...}}` if the
+      live root advanced between the read and the CAS, `{:error,
+      :timeout}`, …) or from `Snapshot.create/2` when `:safe` is set.
+  """
+  @spec restore(binary(), binary(), keyword()) ::
+          {:ok, %{previous_root: binary(), new_root: binary(), pre_restore_snapshot: t() | nil}}
+          | {:error, term()}
+  def restore(volume_id, snapshot_id, opts \\ [])
+      when is_binary(volume_id) and is_binary(snapshot_id) and is_list(opts) do
+    safe? = Keyword.get(opts, :safe, false)
+    force? = Keyword.get(opts, :force, false)
+
+    with {:ok, snapshot} <- get(volume_id, snapshot_id),
+         {:ok, current_root_hash} <- fetch_volume_root_hash(volume_id) do
+      do_restore(volume_id, snapshot, current_root_hash, safe?, force?)
+    end
+  end
+
   ## Private
+
+  defp do_restore(_volume_id, %{root_chunk_hash: target} = _snapshot, target, _safe?, _force?) do
+    # No-op: the live root already matches the snapshot's root.
+    {:ok, %{previous_root: target, new_root: target, pre_restore_snapshot: nil}}
+  end
+
+  defp do_restore(volume_id, snapshot, current_root_hash, safe?, force?) do
+    with {:ok, coverage} <- check_current_root_coverage(volume_id, current_root_hash, snapshot.id),
+         {:ok, pre_restore_snapshot} <- maybe_create_pre_restore(volume_id, safe?, coverage),
+         :ok <- ensure_safe_to_restore(coverage, safe?, force?),
+         :ok <- swap_volume_root(volume_id, current_root_hash, snapshot.root_chunk_hash) do
+      {:ok,
+       %{
+         previous_root: current_root_hash,
+         new_root: snapshot.root_chunk_hash,
+         pre_restore_snapshot: pre_restore_snapshot
+       }}
+    end
+  end
+
+  # `:covered` when at least one *other* snapshot pins the current
+  # live root — restoring is non-destructive because the discarded
+  # state is still reachable via that snapshot.
+  defp check_current_root_coverage(volume_id, current_root_hash, restoring_snapshot_id) do
+    case list(volume_id) do
+      {:ok, snapshots} -> {:ok, coverage(snapshots, current_root_hash, restoring_snapshot_id)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp coverage(snapshots, current_root_hash, restoring_snapshot_id) do
+    if Enum.any?(snapshots, &covers?(&1, current_root_hash, restoring_snapshot_id)) do
+      :covered
+    else
+      :uncovered
+    end
+  end
+
+  defp covers?(%__MODULE__{} = snap, current_root_hash, restoring_snapshot_id) do
+    snap.id != restoring_snapshot_id and snap.root_chunk_hash == current_root_hash
+  end
+
+  defp maybe_create_pre_restore(_volume_id, false, _coverage), do: {:ok, nil}
+  defp maybe_create_pre_restore(_volume_id, true, :covered), do: {:ok, nil}
+
+  defp maybe_create_pre_restore(volume_id, true, :uncovered) do
+    name = "pre-restore-#{UUIDv7.generate()}"
+
+    case create(volume_id, name: name) do
+      {:ok, snapshot} -> {:ok, snapshot}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp ensure_safe_to_restore(:covered, _safe?, _force?), do: :ok
+  defp ensure_safe_to_restore(:uncovered, true, _force?), do: :ok
+  defp ensure_safe_to_restore(:uncovered, _safe?, true), do: :ok
+  defp ensure_safe_to_restore(:uncovered, false, false), do: {:error, :unreferenced_chunks}
+
+  defp swap_volume_root(volume_id, expected_previous_hash, new_root_chunk_hash) do
+    cmd =
+      {:cas_update_volume_root, volume_id, expected_previous_hash,
+       %{root_chunk_hash: new_root_chunk_hash}}
+
+    case RaSupervisor.command(cmd) do
+      {:ok, :ok, _leader} -> :ok
+      {:ok, {:error, _} = err, _leader} -> err
+      {:error, _} = err -> err
+      {:timeout, _} -> {:error, :timeout}
+    end
+  end
 
   defp fetch_volume_root_hash(volume_id) do
     case RaSupervisor.query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do

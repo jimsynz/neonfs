@@ -242,4 +242,155 @@ defmodule NeonFS.Core.SnapshotTest do
                Snapshot.promote(source.id, "manual", "promoted-no-root")
     end
   end
+
+  describe "restore/3" do
+    test "swaps the live root to the snapshot's root when the current root is covered" do
+      :ok = register_volume_root("vol-r1", <<0xAA>>)
+      {:ok, target_snap} = Snapshot.create("vol-r1", name: "target")
+
+      # Advance the live root, then take another snapshot of it so the
+      # current root is "covered".
+      :ok = register_volume_root("vol-r1", <<0xBB>>)
+      {:ok, _cover} = Snapshot.create("vol-r1", name: "cover")
+
+      assert {:ok, result} = Snapshot.restore("vol-r1", target_snap.id)
+      assert result.previous_root == <<0xBB>>
+      assert result.new_root == <<0xAA>>
+      assert result.pre_restore_snapshot == nil
+
+      {:ok, latest_root} =
+        RaSupervisor.local_query(fn state ->
+          MetadataStateMachine.get_volume_root(state, "vol-r1")
+        end)
+
+      assert latest_root.root_chunk_hash == <<0xAA>>
+    end
+
+    test "no-op when the current root already matches the snapshot's root" do
+      :ok = register_volume_root("vol-noop", <<1>>)
+      {:ok, snap} = Snapshot.create("vol-noop")
+
+      assert {:ok, result} = Snapshot.restore("vol-noop", snap.id)
+      assert result.previous_root == result.new_root
+      assert result.new_root == <<1>>
+      assert result.pre_restore_snapshot == nil
+    end
+
+    test "refuses to swap when current root is uncovered and neither :safe nor :force set" do
+      :ok = register_volume_root("vol-uncov", <<0xAA>>)
+      {:ok, target} = Snapshot.create("vol-uncov", name: "target")
+
+      # Advance the live root WITHOUT taking another snapshot — the
+      # current root is now unreferenced.
+      :ok = register_volume_root("vol-uncov", <<0xBB>>)
+
+      assert {:error, :unreferenced_chunks} =
+               Snapshot.restore("vol-uncov", target.id)
+
+      # Bootstrap pointer unchanged.
+      {:ok, root} =
+        RaSupervisor.local_query(fn state ->
+          MetadataStateMachine.get_volume_root(state, "vol-uncov")
+        end)
+
+      assert root.root_chunk_hash == <<0xBB>>
+    end
+
+    test "`:safe` creates a pre-restore snapshot of the current root before swapping" do
+      :ok = register_volume_root("vol-safe", <<0xAA>>)
+      {:ok, target} = Snapshot.create("vol-safe", name: "target")
+
+      :ok = register_volume_root("vol-safe", <<0xBB>>)
+
+      assert {:ok, result} = Snapshot.restore("vol-safe", target.id, safe: true)
+      assert result.new_root == <<0xAA>>
+      assert result.previous_root == <<0xBB>>
+
+      assert %Snapshot{} = pre = result.pre_restore_snapshot
+      assert pre.root_chunk_hash == <<0xBB>>
+      assert String.starts_with?(pre.name, "pre-restore-")
+
+      # The pre-restore snapshot is now in the list, and the new live
+      # root is the target snapshot's root.
+      {:ok, snapshots} = Snapshot.list("vol-safe")
+      assert pre.id in Enum.map(snapshots, & &1.id)
+
+      {:ok, root} =
+        RaSupervisor.local_query(fn state ->
+          MetadataStateMachine.get_volume_root(state, "vol-safe")
+        end)
+
+      assert root.root_chunk_hash == <<0xAA>>
+    end
+
+    test "`:safe` is a no-op for `pre_restore_snapshot` when current root is already covered" do
+      :ok = register_volume_root("vol-safe-cov", <<0xAA>>)
+      {:ok, target} = Snapshot.create("vol-safe-cov", name: "target")
+      :ok = register_volume_root("vol-safe-cov", <<0xBB>>)
+      {:ok, _cover} = Snapshot.create("vol-safe-cov", name: "cover")
+
+      assert {:ok, result} =
+               Snapshot.restore("vol-safe-cov", target.id, safe: true)
+
+      # Already covered — no pre-restore snapshot is needed.
+      assert result.pre_restore_snapshot == nil
+    end
+
+    test "`:force` swaps an uncovered live root without creating a safety snapshot" do
+      :ok = register_volume_root("vol-force", <<0xAA>>)
+      {:ok, target} = Snapshot.create("vol-force", name: "target")
+      :ok = register_volume_root("vol-force", <<0xBB>>)
+
+      assert {:ok, result} =
+               Snapshot.restore("vol-force", target.id, force: true)
+
+      assert result.previous_root == <<0xBB>>
+      assert result.new_root == <<0xAA>>
+      assert result.pre_restore_snapshot == nil
+
+      {:ok, root} =
+        RaSupervisor.local_query(fn state ->
+          MetadataStateMachine.get_volume_root(state, "vol-force")
+        end)
+
+      assert root.root_chunk_hash == <<0xAA>>
+    end
+
+    test "returns :not_found for a snapshot that doesn't exist" do
+      :ok = register_volume_root("vol-missing", <<1>>)
+
+      assert {:error, :not_found} =
+               Snapshot.restore("vol-missing", "no-such-snapshot")
+    end
+
+    test "returns :volume_not_found when the volume has no bootstrap entry" do
+      {:ok, :ok, _} =
+        RaSupervisor.command(
+          {:put_snapshot,
+           %{
+             id: "orphan",
+             volume_id: "no-volume",
+             name: nil,
+             root_chunk_hash: <<1>>,
+             created_at: DateTime.utc_now()
+           }}
+        )
+
+      assert {:error, :volume_not_found} =
+               Snapshot.restore("no-volume", "orphan")
+    end
+
+    test "refuses to swap an uncovered root even when the same snapshot would normally cover it" do
+      # The snapshot being restored doesn't count as coverage of the
+      # current root — otherwise restoring would always be "safe" the
+      # moment a snapshot exists, which defeats the precondition.
+      :ok = register_volume_root("vol-self", <<0xAA>>)
+      {:ok, target} = Snapshot.create("vol-self", name: "target")
+      :ok = register_volume_root("vol-self", <<0xBB>>)
+
+      # The only snapshot has root <<0xAA>>; it doesn't cover <<0xBB>>.
+      assert {:error, :unreferenced_chunks} =
+               Snapshot.restore("vol-self", target.id)
+    end
+  end
 end

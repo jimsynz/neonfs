@@ -247,6 +247,41 @@ pub enum VolumeCommand {
         #[arg(long = "as")]
         new_name: String,
     },
+
+    /// Rollback a volume's live root to a snapshot (#963).
+    ///
+    /// Destructive in the general case: chunks reachable from the
+    /// current live root but not from any remaining snapshot become
+    /// unreferenced and are reclaimed by the next GC pass.
+    ///
+    /// By default the rollback is refused unless the current live
+    /// root is already covered by another snapshot — pass `--safe`
+    /// (auto-snapshot the current root first; always recoverable)
+    /// or `--force --yes` to acknowledge the discard.
+    Restore {
+        /// Volume name
+        volume: String,
+
+        /// Snapshot id or name to restore to
+        #[arg(long = "to")]
+        snapshot: String,
+
+        /// Auto-create a `pre-restore-<id>` snapshot of the current
+        /// live root before swapping. The discarded state is always
+        /// recoverable via the new snapshot.
+        #[arg(long, conflicts_with = "force")]
+        safe: bool,
+
+        /// Proceed even when the current live root is not covered by
+        /// any snapshot and `--safe` is not set. Requires `--yes`.
+        #[arg(long, requires = "yes")]
+        force: bool,
+
+        /// Skip the interactive confirmation prompt. Required with
+        /// `--force`.
+        #[arg(long)]
+        r#yes: bool,
+    },
 }
 
 /// Per-volume snapshot subcommands.
@@ -376,7 +411,117 @@ impl VolumeCommand {
                 snapshot,
                 new_name,
             } => self.promote(source, snapshot, new_name, format),
+            VolumeCommand::Restore {
+                volume,
+                snapshot,
+                safe,
+                force,
+                r#yes,
+            } => self.restore(volume, snapshot, *safe, *force, *r#yes, format),
         }
+    }
+
+    fn restore(
+        &self,
+        volume: &str,
+        snapshot: &str,
+        safe: bool,
+        force: bool,
+        r#yes: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let mut opt_pairs: Vec<(Term, Term)> = vec![];
+        if safe {
+            opt_pairs.push((
+                Term::Atom(Atom::from("safe")),
+                Term::Atom(Atom::from("true")),
+            ));
+        }
+        if force {
+            opt_pairs.push((
+                Term::Atom(Atom::from("force")),
+                Term::Atom(Atom::from("true")),
+            ));
+        }
+
+        let opts_term = Term::Map(Map {
+            map: opt_pairs.into_iter().collect(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_volume_restore",
+                vec![binary_val(volume), binary_val(snapshot), opts_term],
+            )
+            .await
+        })?;
+
+        // Distinguish the "uncovered + not forced" precondition error
+        // from any other failure so we can give the operator a clear
+        // next-step hint.
+        if let Some(err) = extract_error(&result) {
+            if matches!(&err, crate::error::CliError::InvalidArgument(msg) if msg.contains("unreferenced_chunks"))
+                && !r#yes
+            {
+                eprintln!(
+                    "✗ Refusing to restore: the current live root of `{}` is not covered by any \
+                     snapshot. Restoring would permanently discard the chunks reachable only \
+                     from the current root.\n\n\
+                     Re-run with `--safe` (recommended; auto-snapshots the current root first) \
+                     or `--force --yes` to discard.",
+                    volume
+                );
+                return Err(err);
+            }
+            return Err(err);
+        }
+
+        let data = unwrap_ok_tuple(result)?;
+        let map = term_to_map(&data)?;
+
+        let previous_root = term_to_string(map.get("previous_root_hex").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'previous_root_hex'".to_string())
+        })?)?;
+        let new_root = term_to_string(map.get("new_root_hex").ok_or_else(|| {
+            crate::error::CliError::TermConversionError("Missing 'new_root_hex'".to_string())
+        })?)?;
+        let pre_restore = match map.get("pre_restore_snapshot_id") {
+            Some(Term::Atom(a)) if a.name == "nil" => None,
+            Some(term) => Some(term_to_string(term)?),
+            None => None,
+        };
+
+        match format {
+            OutputFormat::Json => {
+                let pre = pre_restore
+                    .as_deref()
+                    .map(|s| format!("\"{}\"", s))
+                    .unwrap_or_else(|| "null".to_string());
+                println!(
+                    "{{\"volume\":\"{}\",\"snapshot\":\"{}\",\"previous_root_hex\":\"{}\",\"new_root_hex\":\"{}\",\"pre_restore_snapshot_id\":{}}}",
+                    volume, snapshot, previous_root, new_root, pre
+                );
+            }
+            OutputFormat::Table => {
+                if previous_root == new_root {
+                    println!(
+                        "✓ No-op: {} already at root {} (matching snapshot {})",
+                        volume, new_root, snapshot
+                    );
+                } else {
+                    println!("✓ Restored {} to snapshot {}", volume, snapshot);
+                    println!();
+                    println!("  Previous root: {}", previous_root);
+                    println!("  New root:      {}", new_root);
+                    if let Some(pre) = pre_restore {
+                        println!("  Safety snapshot: {} (pinned the previous root)", pre);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn promote(
@@ -1981,6 +2126,105 @@ mod tests {
 
         let cli = TestCli::try_parse_from(["test", "rotation-status", "myvol"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_volume_restore_parses_minimal_args() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        let cli =
+            TestCli::try_parse_from(["test", "restore", "vol-1", "--to", "snap-1"]).unwrap();
+        match cli.command {
+            VolumeCommand::Restore {
+                volume,
+                snapshot,
+                safe,
+                force,
+                r#yes,
+            } => {
+                assert_eq!(volume, "vol-1");
+                assert_eq!(snapshot, "snap-1");
+                assert!(!safe);
+                assert!(!force);
+                assert!(!r#yes);
+            }
+            _ => panic!("expected Restore variant"),
+        }
+    }
+
+    #[test]
+    fn test_volume_restore_accepts_safe_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        let cli =
+            TestCli::try_parse_from(["test", "restore", "v", "--to", "s", "--safe"]).unwrap();
+        match cli.command {
+            VolumeCommand::Restore { safe, force, .. } => {
+                assert!(safe);
+                assert!(!force);
+            }
+            _ => panic!("expected Restore variant"),
+        }
+    }
+
+    #[test]
+    fn test_volume_restore_force_requires_yes() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        // `--force` without `--yes` is rejected by clap (requires).
+        let result =
+            TestCli::try_parse_from(["test", "restore", "v", "--to", "s", "--force"]);
+        assert!(result.is_err());
+
+        // `--force --yes` parses.
+        let cli =
+            TestCli::try_parse_from(["test", "restore", "v", "--to", "s", "--force", "--yes"])
+                .unwrap();
+        match cli.command {
+            VolumeCommand::Restore {
+                force, r#yes, safe, ..
+            } => {
+                assert!(force);
+                assert!(r#yes);
+                assert!(!safe);
+            }
+            _ => panic!("expected Restore variant"),
+        }
+    }
+
+    #[test]
+    fn test_volume_restore_safe_and_force_are_exclusive() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        // Clap's `conflicts_with` rejects this combination.
+        let result = TestCli::try_parse_from([
+            "test", "restore", "v", "--to", "s", "--safe", "--force", "--yes",
+        ]);
+        assert!(result.is_err());
     }
 
     #[test]
