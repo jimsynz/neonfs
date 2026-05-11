@@ -61,7 +61,6 @@ defmodule NeonFS.Core.VolumeExport do
       when is_binary(volume_name) and is_binary(output_path) and is_list(opts) do
     with {:ok, volume} <- resolve_volume(volume_name),
          {:ok, files} <- list_files_for_export(volume, opts),
-         :ok <- ensure_paths_fit_ustar(files),
          {:ok, byte_count} <- write_archive(output_path, volume, files, opts) do
       {:ok,
        %{
@@ -144,23 +143,6 @@ defmodule NeonFS.Core.VolumeExport do
   defp decode_stripes_field(list) when is_list(list), do: list
   defp decode_stripes_field(_), do: nil
 
-  # Ustar's prefix (155) + name (100) split caps total path length
-  # at ~255 chars. Anything longer needs GNU LongLink — deferred to
-  # a follow-up issue.
-  defp ensure_paths_fit_ustar(files) do
-    files
-    |> Enum.find(&too_long?/1)
-    |> case do
-      nil -> :ok
-      file -> {:error, {:path_too_long_for_ustar, file.path}}
-    end
-  end
-
-  defp too_long?(%{path: path}) do
-    entry_name = entry_name_for(path)
-    byte_size(entry_name) > 255
-  end
-
   defp entry_name_for(path) do
     @files_prefix <> ensure_leading_slash(path)
   end
@@ -224,12 +206,54 @@ defmodule NeonFS.Core.VolumeExport do
   end
 
   defp write_file_entry(io, volume, file_meta, opts) do
-    header = build_ustar_header(entry_name_for(file_meta.path), file_meta)
-    :ok = IO.binwrite(io, header)
+    name = entry_name_for(file_meta.path)
+    :ok = write_header_with_optional_longlink(io, name, file_meta)
 
     :ok = stream_file_content(io, volume, file_meta, opts)
     :ok = write_padding(io, file_meta.size)
     :ok
+  end
+
+  # Paths up to 256 bytes fit in ustar's `prefix` (155) + `name`
+  # (100) split. Anything longer rides through a GNU `LongLink`
+  # (typeflag 'L') pseudo-entry: a fake header whose body is the
+  # real name, followed by the real entry header carrying a
+  # truncated 100-byte name field. Tools that understand LongLink
+  # use the cached name; others see the truncated name (the file
+  # body still lands correctly).
+  defp write_header_with_optional_longlink(io, name, file_meta) do
+    case ustar_split(name) do
+      {:ok, prefix, short_name} ->
+        header = build_ustar_header(prefix, short_name, file_meta)
+        IO.binwrite(io, header)
+
+      :too_long ->
+        :ok = write_long_link(io, name)
+        truncated = binary_part(name, 0, min(100, byte_size(name)))
+        header = build_ustar_header("", truncated, file_meta)
+        IO.binwrite(io, header)
+    end
+  end
+
+  defp write_long_link(io, name) do
+    body = name <> <<0>>
+    body_size = byte_size(body)
+
+    header =
+      build_ustar_header_raw(
+        "././@LongLink",
+        prefix: "",
+        body_size: body_size,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+        mtime: 0,
+        typeflag: ?L
+      )
+
+    :ok = IO.binwrite(io, header)
+    :ok = IO.binwrite(io, body)
+    write_padding(io, body_size)
   end
 
   defp stream_file_content(_io, _volume, %{size: 0}, _opts), do: :ok
@@ -263,9 +287,11 @@ defmodule NeonFS.Core.VolumeExport do
   # in RAM by construction — manifests carry only file metadata, not
   # content.
   defp write_entry(io, name, body, mtime) when is_binary(body) do
+    {:ok, prefix, short_name} = ustar_split(name)
+
     header =
-      build_ustar_header_raw(
-        name,
+      build_ustar_header_raw(short_name,
+        prefix: prefix,
         body_size: byte_size(body),
         mode: 0o644,
         uid: 0,
@@ -279,10 +305,20 @@ defmodule NeonFS.Core.VolumeExport do
     write_padding(io, byte_size(body))
   end
 
-  defp build_ustar_header(name, %{size: size, mode: mode, uid: uid, gid: gid} = file_meta) do
+  defp build_ustar_header(
+         prefix,
+         short_name,
+         %{
+           size: size,
+           mode: mode,
+           uid: uid,
+           gid: gid
+         } = file_meta
+       ) do
     mtime = DateTime.to_unix(file_meta.modified_at)
 
-    build_ustar_header_raw(name,
+    build_ustar_header_raw(short_name,
+      prefix: prefix,
       body_size: size,
       mode: mode,
       uid: uid,
@@ -292,12 +328,11 @@ defmodule NeonFS.Core.VolumeExport do
     )
   end
 
-  # Builds a 512-byte ustar header. Long paths are split across the
-  # ustar prefix (155 bytes) + name (100 bytes) fields, joined by
-  # `/`. `ensure_paths_fit_ustar/1` upstream guarantees the combined
-  # length is ≤ 255.
-  defp build_ustar_header_raw(name, opts) do
-    {prefix, short_name} = split_for_ustar(name)
+  # Builds a 512-byte ustar header. Caller has already done any
+  # name/prefix splitting (or set up a LongLink pre-entry for paths
+  # too long to fit ustar's 256-byte cap).
+  defp build_ustar_header_raw(short_name, opts) do
+    prefix = Keyword.get(opts, :prefix, "")
 
     fields =
       [
@@ -337,31 +372,33 @@ defmodule NeonFS.Core.VolumeExport do
     head <> oct(checksum, 7) <> <<32>> <> tail
   end
 
-  defp split_for_ustar(name) when byte_size(name) <= 100 do
-    {"", name}
+  # Returns `{:ok, prefix, short_name}` when the name fits ustar's
+  # prefix (155) + name (100) split, or `:too_long` when it
+  # doesn't — caller emits a GNU LongLink pseudo-entry instead.
+  defp ustar_split(name) when byte_size(name) <= 100, do: {:ok, "", name}
+
+  defp ustar_split(name) do
+    case find_split_point(name, min(100, byte_size(name) - 1)) do
+      {:ok, idx} ->
+        <<prefix::binary-size(idx), "/", rest::binary>> = name
+        {:ok, prefix, rest}
+
+      :error ->
+        :too_long
+    end
   end
 
-  defp split_for_ustar(name) do
-    # Walk backwards from the 100-byte cap to the first `/`. The
-    # remainder becomes the prefix.
-    split_at = find_split_point(name, min(100, byte_size(name) - 1))
-    <<prefix::binary-size(split_at), "/", rest::binary>> = name
-    {prefix, rest}
-  end
-
-  defp find_split_point(_name, idx) when idx <= 0 do
-    raise ArgumentError, "no `/` in ustar-eligible position"
-  end
+  defp find_split_point(_name, idx) when idx <= 0, do: :error
 
   defp find_split_point(name, idx) do
     case :binary.at(name, idx) do
       ?/ ->
-        # Tail (rest after the `/`) must be ≤ 100 bytes.
+        # Tail (rest after the `/`) must be ≤ 100 bytes; prefix ≤ 155.
         tail_size = byte_size(name) - idx - 1
         head_size = idx
 
         if tail_size <= 100 and head_size <= 155 do
-          idx
+          {:ok, idx}
         else
           find_split_point(name, idx - 1)
         end

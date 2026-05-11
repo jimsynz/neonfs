@@ -59,6 +59,26 @@ defmodule NeonFS.Core.VolumeImportTest do
       assert actual == expected
     end
 
+    test "round-trips a path longer than ustar's 256-byte cap (GNU LongLink)",
+         %{tmp_dir: tmp_dir} do
+      {:ok, src} = VolumeRegistry.create("rt-longpath-src", [])
+
+      # 300-byte path forces the writer through the LongLink fallback
+      # and the reader through `absorb_long_link/2`.
+      long_name = String.duplicate("a", 300) <> ".txt"
+      path = "/deep/nested/" <> long_name
+
+      {:ok, _} = WriteOperation.write_file_streamed(src.id, path, ["pinned-by-long-name"])
+
+      tar = Path.join(tmp_dir, "rt-longpath.tar")
+      assert {:ok, _} = VolumeExport.export(src.name, tar)
+
+      assert {:ok, summary} = VolumeImport.import_archive(tar, "rt-longpath-dst")
+      assert summary.file_count == 1
+
+      {:ok, "pinned-by-long-name"} = read_file("rt-longpath-dst", path)
+    end
+
     test "imports an empty volume", %{tmp_dir: tmp_dir} do
       {:ok, src} = VolumeRegistry.create("rt-empty-src", [])
 

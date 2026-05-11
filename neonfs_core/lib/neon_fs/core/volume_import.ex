@@ -232,7 +232,12 @@ defmodule NeonFS.Core.VolumeImport do
   # Returns `{:ok, %{name, size, typeflag}, io}` for a regular entry,
   # `{:eof, io}` when two consecutive zero blocks mark end of archive,
   # or `{:error, reason}` for a malformed header.
-  defp read_next_entry(io) do
+  #
+  # GNU `LongLink` (`?L`) pseudo-entries are absorbed here: the
+  # body of the LongLink is the next entry's real name, which then
+  # overrides the ustar `name`/`prefix` fields of the following
+  # entry. Callers always see the resolved long-named entry.
+  defp read_next_entry(io, pending_long_name \\ nil) do
     case IO.binread(io, @block) do
       :eof ->
         {:eof, io}
@@ -241,7 +246,7 @@ defmodule NeonFS.Core.VolumeImport do
         if all_zero?(data) do
           handle_possible_end(io)
         else
-          parse_header(data, io)
+          parse_header(data, io, pending_long_name)
         end
 
       _ ->
@@ -267,7 +272,7 @@ defmodule NeonFS.Core.VolumeImport do
     end
   end
 
-  defp parse_header(<<header::binary-size(@block)>>, io) do
+  defp parse_header(<<header::binary-size(@block)>>, io, pending_long_name) do
     <<
       name::binary-size(100),
       _mode::binary-size(8),
@@ -288,8 +293,36 @@ defmodule NeonFS.Core.VolumeImport do
     >> = header
 
     with {:ok, size} <- parse_octal(size_octal) do
-      full_name = ustar_join(strip_nuls(prefix), strip_nuls(name))
-      {:ok, %{name: full_name, size: size, typeflag: typeflag_byte}, io}
+      case typeflag_byte do
+        ?L -> absorb_long_link(io, size)
+        _ -> deliver_entry(typeflag_byte, name, prefix, size, pending_long_name, io)
+      end
+    end
+  end
+
+  defp deliver_entry(typeflag_byte, name, prefix, size, pending_long_name, io) do
+    full_name =
+      case pending_long_name do
+        nil -> ustar_join(strip_nuls(prefix), strip_nuls(name))
+        long -> long
+      end
+
+    {:ok, %{name: full_name, size: size, typeflag: typeflag_byte}, io}
+  end
+
+  # GNU LongLink: the body is the next entry's real name (NUL-
+  # terminated, padded to 512). Read it, skip the padding, then
+  # recurse to grab the real entry with `pending_long_name` set.
+  defp absorb_long_link(io, size) do
+    with {:ok, body} <- binread_exact(io, size),
+         {:ok, io} <- skip_padding(io, size) do
+      read_next_entry(io, strip_trailing_nuls(body))
+    end
+  end
+
+  defp strip_trailing_nuls(bin) do
+    case :binary.split(bin, <<0>>) do
+      [head | _] -> head
     end
   end
 
