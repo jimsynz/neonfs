@@ -535,14 +535,12 @@ defmodule NeonFS.Core.VolumeRegistry do
   defp pick_system_volume_tier do
     present_tiers =
       try do
-        DriveRegistry.list_drives()
-        |> Enum.map(& &1.tier)
-        |> MapSet.new()
+        DriveRegistry.list_drives() |> Enum.map(& &1.tier)
       rescue
-        ArgumentError -> MapSet.new()
+        ArgumentError -> []
       end
 
-    Enum.find([:hot, :warm, :cold], :hot, &MapSet.member?(present_tiers, &1))
+    Enum.find([:hot, :warm, :cold], :hot, &(&1 in present_tiers))
   end
 
   defp build_system_volume(cluster_name) do
