@@ -26,8 +26,22 @@ defmodule NeonFS.TestCase do
 
   use ExUnit.CaseTemplate
 
+  alias NeonFS.Cluster.Init, as: ClusterInit
   alias NeonFS.Cluster.State, as: ClusterState
-  alias NeonFS.Core.{MetadataRing, RaServer, RaSupervisor}
+
+  alias NeonFS.Core.{
+    BlobStore,
+    Drive,
+    DriveConfig,
+    DriveManager,
+    DriveRegistry,
+    MetadataRing,
+    MetadataStateMachine,
+    RaServer,
+    RaSupervisor,
+    VolumeRegistry
+  }
+
   alias NeonFS.Core.Volume.{MetadataValue, RootSegment}
   alias NeonFS.Events.Relay
   alias NeonFS.IO.{Producer, Scheduler, WorkerSupervisor}
@@ -57,6 +71,172 @@ defmodule NeonFS.TestCase do
     start_chunk_index()
     start_file_index()
     start_volume_registry()
+  end
+
+  @doc """
+  Bootstraps a fully-provisioned single-node cluster on top of `tmp_dir`.
+
+  Pre-#1008 the lighter `start_core_subsystems/0` brought up the storage
+  modules with their ETS-stub metadata readers/writers, so writes
+  round-tripped through fakes and no `volume_root` ever landed in Ra.
+  This helper instead starts each index module with empty
+  metadata-reader / -writer opts (which makes them use their production
+  Ra-backed defaults), brings Ra up, and calls
+  `NeonFS.Cluster.Init.init_cluster/2` — the same code path the daemon
+  runs on first boot. After it returns `{:ok, cluster_id}` the cluster
+  has a real `cluster.json`, Ra-replicated drive entries, a provisioned
+  `_system` volume, and a cluster CA. New volumes created through
+  `VolumeRegistry.create/2` will run `Volume.Provisioner.provision/1`
+  and register a `volume_root` in Ra.
+
+  Use this from tests that exercise snapshots, GC, DR restore, or
+  anything else that needs metadata to flow through the real per-volume
+  tree — `#985`, `#995`, `#1005` and the snapshot-export E2E all stall
+  on this helper not existing.
+
+  ## Options
+
+    * `:cluster_name` — name passed to `init_cluster/2`. Defaults to
+      `"test-cluster-<unique>"`.
+    * `:drives` — list of drive-config maps written into the
+      `:neonfs_core, :drives` application env before the drive registry
+      and blob store start. Defaults to a single hot drive at
+      `<tmp_dir>/blobs` (the same default `configure_test_dirs/1`
+      installs). Pass `[]` to bootstrap a driveless cluster — useful
+      for testing `init_cluster`'s `:no_drives_available` rejection.
+    * `:drive_config` — single-drive map forwarded to `init_cluster/2`
+      as its second argument (the `--drive` operator path). Mutually
+      exclusive with `:drives`; tests that want to exercise
+      `DriveManager.add_drive`'s validation use this and leave
+      `:neonfs_core, :drives` empty.
+  """
+  @spec start_provisioned_cluster(Path.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def start_provisioned_cluster(tmp_dir, opts \\ []) do
+    configure_test_dirs(tmp_dir)
+
+    if Keyword.has_key?(opts, :drives) do
+      Application.put_env(:neonfs_core, :drives, Keyword.fetch!(opts, :drives))
+    end
+
+    cluster_name =
+      Keyword.get_lazy(opts, :cluster_name, fn ->
+        "test-cluster-#{System.unique_integer([:positive])}"
+      end)
+
+    drive_config = Keyword.get(opts, :drive_config)
+
+    ensure_node_named()
+    stop_ra()
+    start_drive_registry()
+    start_blob_store()
+    start_chunk_index(metadata_reader_opts: [], metadata_writer_opts: [])
+    start_file_index(metadata_reader_opts: [], metadata_writer_opts: [])
+    start_stripe_index(metadata_reader_opts: [], metadata_writer_opts: [])
+    start_volume_registry()
+    ensure_chunk_access_tracker()
+    ensure_metadata_cache()
+
+    start_supervised!(
+      {DynamicSupervisor, name: NeonFS.Core.DriveStateSupervisor, strategy: :one_for_one},
+      restart: :temporary
+    )
+
+    start_supervised!(DriveManager, restart: :temporary)
+    start_ra()
+
+    ClusterInit.init_cluster(cluster_name, drive_config)
+  end
+
+  @doc """
+  Adds drives to an already-bootstrapped cluster on the fast path:
+  opens the blob-store handle, inserts into `DriveRegistry`'s ETS, and
+  submits `{:register_drive, ...}` directly to Ra. Skips the
+  `DriveManager.add_drive/1` validation pipeline (path-existence check,
+  drive-identity file, capacity probe, `DriveState` child, persistence
+  to `cluster.json`).
+
+  Use this for multi-drive tests where the bootstrap drive registered
+  by `start_provisioned_cluster/2` isn't enough — replicate-3, erasure
+  k+m, evacuation, etc. Tests that need the validation pipeline itself
+  should call `DriveManager.add_drive/1` directly.
+
+  `drive_configs` is a list of maps with at minimum `:path`. Missing
+  `:id` is generated; missing `:tier` defaults to `:hot`. The path is
+  created with `File.mkdir_p!/1` so callers don't have to pre-stage
+  the directory.
+
+  Raises if the cluster isn't initialised — call after
+  `start_provisioned_cluster/2`.
+  """
+  @spec register_test_drives([map()]) :: :ok
+  def register_test_drives(drive_configs) when is_list(drive_configs) do
+    {:ok, cluster_state} = ClusterState.load()
+
+    Enum.each(drive_configs, fn cfg ->
+      cfg = normalise_drive_config(cfg)
+      File.mkdir_p!(cfg.path)
+      {:ok, _drive_id} = BlobStore.open_store(cfg, timeout: :infinity)
+
+      drive =
+        cfg
+        |> Drive.from_config(Node.self())
+        |> DriveConfig.detect_capacity()
+
+      :ok = DriveRegistry.register_drive(drive, timeout: :infinity)
+
+      entry = %{
+        drive_id: drive.id,
+        node: drive.node,
+        cluster_id: cluster_state.cluster_id,
+        on_disk_format_version: 1,
+        registered_at: DateTime.utc_now()
+      }
+
+      {:ok, :ok, _leader} = RaSupervisor.command({:register_drive, entry})
+    end)
+  end
+
+  @doc """
+  Creates a real, provisioned volume against the running cluster and
+  asserts the `volume_root` entry landed in Ra. The latter assertion
+  is the surest signal `Volume.Provisioner.provision/1` ran end-to-end
+  — `VolumeRegistry.create/2` returns `{:ok, _}` even on under-provisioned
+  clusters (it skips provisioning when there aren't enough drives) so
+  callers that need a ready-to-write volume can't trust the `:ok` alone.
+
+  Opts pass straight through to `VolumeRegistry.create/2`. Returns the
+  `%Volume{}` on success or surfaces the create error.
+  """
+  @spec create_provisioned_volume(String.t(), keyword()) ::
+          {:ok, NeonFS.Core.Volume.t()} | {:error, term()}
+  def create_provisioned_volume(name, opts \\ []) when is_binary(name) do
+    with {:ok, volume} <- VolumeRegistry.create(name, opts),
+         :ok <- assert_volume_provisioned(volume.id) do
+      {:ok, volume}
+    end
+  end
+
+  defp normalise_drive_config(cfg) do
+    %{
+      id: cfg[:id] || cfg["id"] || "test-drive-#{System.unique_integer([:positive])}",
+      path: cfg[:path] || cfg["path"],
+      tier: cfg[:tier] || cfg["tier"] || :hot,
+      capacity: cfg[:capacity] || cfg["capacity"] || 0
+    }
+  end
+
+  defp assert_volume_provisioned(volume_id) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+      {:ok, %{root_chunk_hash: hash}} when is_binary(hash) and byte_size(hash) > 0 ->
+        :ok
+
+      {:ok, nil} ->
+        {:error, {:volume_not_provisioned, volume_id}}
+
+      other ->
+        {:error, {:volume_root_query_failed, volume_id, other}}
+    end
   end
 
   @doc """
@@ -125,6 +305,20 @@ defmodule NeonFS.TestCase do
       {NeonFS.Core.BlobStore, drives: drives, prefix_depth: prefix_depth},
       restart: :temporary
     )
+  end
+
+  @doc """
+  Ensures `NeonFS.Core.Volume.MetadataCache` is running so
+  `MetadataReader.get/4` / `range/5` can route through the cache layer.
+  Tests that exercise the real (non-stub) metadata path need this —
+  the cache's ETS table is owned by the GenServer, and reads call
+  `:ets.lookup/2` unconditionally.
+  """
+  def ensure_metadata_cache do
+    case Process.whereis(NeonFS.Core.Volume.MetadataCache) do
+      nil -> start_supervised!(NeonFS.Core.Volume.MetadataCache, restart: :temporary)
+      _pid -> :ok
+    end
   end
 
   @doc """
