@@ -10,6 +10,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   require Logger
 
   alias NeonFS.Cluster.State, as: ClusterState
+  alias NeonFS.Core.DriveRegistry
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.Persistence
@@ -516,6 +517,34 @@ defmodule NeonFS.Core.VolumeRegistry do
     end
   end
 
+  # The system volume needs a concrete tier so its first chunk write —
+  # typically `/cluster/identity.json` from
+  # `Cluster.Init.write_cluster_identity/1` — can find a candidate
+  # drive. Hard-coding `:hot` here regressed operators bootstrapping a
+  # cluster with only non-hot drives (e.g.
+  # `neonfs cluster init --drive ... --tier cold` on a single-disk
+  # deployment).
+  #
+  # Picks the highest-priority tier (hot > warm > cold) that has at
+  # least one drive registered. Defaults to `:hot` when no drives are
+  # registered yet — `do_create_system_volume/0` already short-circuits
+  # provisioning when `sufficient_drives_for?/1` returns false, so the
+  # tier value is inconsequential in that case. Same default applies
+  # when DriveRegistry's ETS table doesn't exist (unit tests that
+  # exercise the volume registry in isolation).
+  defp pick_system_volume_tier do
+    present_tiers =
+      try do
+        DriveRegistry.list_drives()
+        |> Enum.map(& &1.tier)
+        |> MapSet.new()
+      rescue
+        ArgumentError -> MapSet.new()
+      end
+
+    Enum.find([:hot, :warm, :cold], :hot, &MapSet.member?(present_tiers, &1))
+  end
+
   defp build_system_volume(cluster_name) do
     now = DateTime.utc_now()
 
@@ -525,7 +554,11 @@ defmodule NeonFS.Core.VolumeRegistry do
       owner: :system,
       durability: %{type: :replicate, factor: 1, min_copies: 1},
       write_ack: :quorum,
-      tiering: %{initial_tier: :hot, promotion_threshold: 1, demotion_delay: 1},
+      tiering: %{
+        initial_tier: pick_system_volume_tier(),
+        promotion_threshold: 1,
+        demotion_delay: 1
+      },
       caching: %{
         transformed_chunks: false,
         reconstructed_stripes: false,
