@@ -146,30 +146,53 @@ defmodule NeonFS.NFS.NFSv3Backend do
     with {:ok, vol_name, path, dir_meta} <- resolve_meta(fh),
          {:ok, entries} <-
            core_call(NeonFS.Core, :list_dir, [vol_name, path]) do
+      all_entries = build_readdir_entries(vol_name, path, entries)
+
       readdir_entries =
-        entries
+        all_entries
         |> Enum.with_index(1)
         |> Enum.drop(cookie)
         |> Enum.take_while(fn {_e, i} -> i <= cookie + max(div(count, 64), 1) end)
-        |> Enum.map(fn {entry, idx} ->
-          child_path = Path.join(path, entry.path |> Path.basename())
-          {:ok, fileid} = allocate_inode(vol_name, child_path)
-          {fileid, Path.basename(entry.path), idx}
-        end)
+        |> Enum.map(fn {{fileid, name}, idx} -> {fileid, name, idx} end)
 
-      eof = length(readdir_entries) + cookie >= length(entries)
+      eof = length(readdir_entries) + cookie >= length(all_entries)
       {:ok, readdir_entries, <<0::64>>, eof, fattr_from_meta(dir_meta)}
     else
       {:error, status} -> {:error, to_nfs_status(status), nil}
     end
   end
 
+  # POSIX requires every directory listing to include `.` (self) and
+  # `..` (parent). NeonFS's metadata store carries neither — they're
+  # synthesised here at the NFS edge, ahead of the real children.
+  defp build_readdir_entries(vol_name, path, entries) do
+    {:ok, dir_fileid} = allocate_inode(vol_name, path)
+    {:ok, parent_fileid} = allocate_inode(vol_name, parent_path(path))
+
+    children =
+      Enum.map(entries, fn entry ->
+        child_path = Path.join(path, Path.basename(entry.path))
+        {:ok, fileid} = allocate_inode(vol_name, child_path)
+        {fileid, Path.basename(entry.path)}
+      end)
+
+    [{dir_fileid, "."}, {parent_fileid, ".."} | children]
+  end
+
+  defp parent_path("/"), do: "/"
+  defp parent_path(path), do: Path.dirname(path)
+
   @impl true
   def readdirplus(fh, cookie, verf, _dircount, maxcount, auth, ctx) do
     case readdir(fh, cookie, verf, maxcount, auth, ctx) do
       {:ok, plain_entries, new_verf, eof, dir_attr} ->
-        {:ok, vol_name, _path, _meta} = resolve_meta(fh)
-        plus_entries = Enum.map(plain_entries, &expand_readdirplus_entry(&1, vol_name))
+        {:ok, vol_name, dir_path, dir_meta} = resolve_meta(fh)
+        parent_meta = parent_meta_for(vol_name, dir_path, dir_meta)
+
+        plus_entries =
+          Enum.map(plain_entries, fn entry ->
+            expand_readdirplus_entry(entry, vol_name, dir_meta, parent_meta)
+          end)
 
         {:ok, plus_entries, new_verf, eof, dir_attr}
 
@@ -178,13 +201,54 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
-  defp expand_readdirplus_entry({fileid, name, idx}, vol_name) do
+  defp expand_readdirplus_entry({fileid, ".", idx}, _vol_name, dir_meta, _parent_meta) do
+    readdirplus_entry_with_meta(fileid, ".", idx, dir_meta)
+  end
+
+  defp expand_readdirplus_entry({fileid, "..", idx}, _vol_name, _dir_meta, nil) do
+    {fileid, "..", idx, nil, nil}
+  end
+
+  defp expand_readdirplus_entry({fileid, "..", idx}, _vol_name, _dir_meta, parent_meta) do
+    readdirplus_entry_with_meta(fileid, "..", idx, parent_meta)
+  end
+
+  defp expand_readdirplus_entry({fileid, name, idx}, vol_name, _dir_meta, _parent_meta) do
     child_path = "/" <> name
     inflated_path = derive_path_from_inode(fileid, vol_name, child_path)
 
     case core_call(NeonFS.Core, :get_file_meta, [vol_name, inflated_path]) do
       {:ok, child_meta} -> readdirplus_entry_with_meta(fileid, name, idx, child_meta)
       _ -> {fileid, name, idx, nil, nil}
+    end
+  end
+
+  # `..` of `/` is `/` itself. Otherwise look up the parent's metadata
+  # via the same path the FS would use; failures degrade to `nil` so
+  # the entry is still emitted (with no post-op attrs) rather than
+  # disappearing from the listing.
+  defp parent_meta_for(_vol_name, "/", dir_meta), do: dir_meta
+
+  defp parent_meta_for(vol_name, dir_path, _dir_meta) do
+    parent = parent_path(dir_path)
+
+    case parent do
+      "/" ->
+        # Synthesise: matches what resolve_meta returns for the root.
+        case core_call(NeonFS.Core, :get_volume, [vol_name]) do
+          {:ok, %{id: volume_id_str}} ->
+            {:ok, volume_id_bin} = volume_uuid_to_binary(volume_id_str)
+            root_file_meta(volume_id_bin, vol_name)
+
+          _ ->
+            nil
+        end
+
+      _ ->
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, parent]) do
+          {:ok, meta} -> meta
+          _ -> nil
+        end
     end
   end
 

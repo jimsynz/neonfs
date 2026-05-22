@@ -1076,7 +1076,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       assert {:ok, %Fattr3{type: :dir, mode: 0o755}} = NFSv3Backend.getattr(mount_fh, :auth, %{})
     end
 
-    test "readdir on an empty volume's synthetic root returns []" do
+    test "readdir on an empty volume's synthetic root returns `.` and `..`" do
       put_inode_table(%{@synthetic_root_fileid => {nil, "/"}})
       put_volume_index(%{@volume_id_bin => @volume_name})
 
@@ -1089,8 +1089,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       mount_fh = Filehandle.encode(@volume_id_bin, @synthetic_root_fileid)
 
-      assert {:ok, [], _verf, true, %Fattr3{type: :dir}} =
+      assert {:ok, entries, _verf, true, %Fattr3{type: :dir}} =
                NFSv3Backend.readdir(mount_fh, 0, <<0::64>>, 1024, :auth, %{})
+
+      assert [{_, ".", 1}, {_, "..", 2}] = entries
 
       # The volume name MUST come from the volume-id index, not the
       # nil entry in `inode_table`.
@@ -1115,8 +1117,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       mount_fh = Filehandle.encode(@volume_id_bin, @synthetic_root_fileid)
 
-      assert {:ok, [], _verf, true, %Fattr3{type: :dir}} =
+      assert {:ok, entries, _verf, true, %Fattr3{type: :dir}} =
                NFSv3Backend.readdir(mount_fh, 0, <<0::64>>, 1024, :auth, %{})
+
+      assert [{_, ".", 1}, {_, "..", 2}] = entries
 
       assert_receive {:get_volume_by_id, @volume_id_uuid}
       assert_receive {:list_dir, @volume_name}
