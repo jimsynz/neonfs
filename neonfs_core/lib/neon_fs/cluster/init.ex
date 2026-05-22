@@ -52,6 +52,10 @@ defmodule NeonFS.Cluster.Init do
   via the `:neonfs_core, :drives` application environment (the legacy
   path used by tests and pre-configured deployments).
 
+  `opts` may carry `:system_replicas` (positive integer) to seed the
+  `_system` volume with a replication factor greater than `1`. Defaults
+  to `1` (the historical single-node bootstrap).
+
   ## Errors
   - `{:error, :already_initialised}` - cluster state already exists
   - `{:error, :node_not_named}` - Erlang node not named (required for Ra)
@@ -65,8 +69,9 @@ defmodule NeonFS.Cluster.Init do
   - `{:error, {:ca_init_failed, reason}}` - CA initialisation failed
   - `{:error, {:node_cert_failed, reason}}` - first node certificate issuance failed
   """
-  @spec init_cluster(String.t(), map() | nil) :: {:ok, String.t()} | {:error, term()}
-  def init_cluster(cluster_name, drive_config \\ nil) do
+  @spec init_cluster(String.t(), map() | nil, keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def init_cluster(cluster_name, drive_config \\ nil, opts \\ []) do
     cond do
       State.exists?() ->
         {:error, :already_initialised}
@@ -75,13 +80,13 @@ defmodule NeonFS.Cluster.Init do
         {:error, :node_not_named}
 
       true ->
-        do_init_cluster(cluster_name, drive_config)
+        do_init_cluster(cluster_name, drive_config, opts)
     end
   end
 
   # Private implementation
 
-  defp do_init_cluster(cluster_name, drive_config) do
+  defp do_init_cluster(cluster_name, drive_config, opts) do
     cluster_id = generate_cluster_id()
     node_id = generate_node_id()
     master_key = generate_master_key()
@@ -101,7 +106,7 @@ defmodule NeonFS.Cluster.Init do
          :ok <- maybe_add_initial_drive(drive_config),
          :ok <- DriveManager.register_local_drives_in_bootstrap(),
          :ok <- ensure_drive_available(),
-         {:ok, _volume} <- create_system_volume(),
+         {:ok, _volume} <- create_system_volume(opts),
          :ok <- write_cluster_identity(cluster_name),
          {:ok, _ca_cert, _ca_key} <- init_cluster_ca(cluster_name),
          :ok <- issue_first_node_cert(),
@@ -200,8 +205,10 @@ defmodule NeonFS.Cluster.Init do
     _ -> :ok
   end
 
-  defp create_system_volume do
-    case VolumeRegistry.create_system_volume() do
+  defp create_system_volume(opts) do
+    replicas = Keyword.get(opts, :system_replicas, 1)
+
+    case VolumeRegistry.create_system_volume(replicas: replicas) do
       {:ok, volume} -> {:ok, volume}
       {:error, :already_exists} -> VolumeRegistry.get_system_volume()
       {:error, reason} -> {:error, {:system_volume_failed, reason}}

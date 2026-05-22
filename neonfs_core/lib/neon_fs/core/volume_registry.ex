@@ -64,9 +64,9 @@ defmodule NeonFS.Core.VolumeRegistry do
   and has special properties: replicated to all nodes, cannot be deleted
   or renamed, hidden from default volume listings.
   """
-  @spec create_system_volume() :: {:ok, Volume.t()} | {:error, term()}
-  def create_system_volume do
-    GenServer.call(__MODULE__, :create_system_volume, 10_000)
+  @spec create_system_volume(keyword()) :: {:ok, Volume.t()} | {:error, term()}
+  def create_system_volume(opts \\ []) do
+    GenServer.call(__MODULE__, {:create_system_volume, opts}, 10_000)
   end
 
   @doc """
@@ -273,8 +273,8 @@ defmodule NeonFS.Core.VolumeRegistry do
   end
 
   @impl true
-  def handle_call(:create_system_volume, _from, state) do
-    reply = do_create_system_volume()
+  def handle_call({:create_system_volume, opts}, _from, state) do
+    reply = do_create_system_volume(opts)
     {:reply, reply, state}
   end
 
@@ -352,10 +352,10 @@ defmodule NeonFS.Core.VolumeRegistry do
     end
   end
 
-  defp do_create_system_volume do
+  defp do_create_system_volume(opts) do
     with {:ok, cluster_name} <- load_cluster_name(),
          {:error, :not_found} <- get_by_name(@system_volume_name) do
-      volume = build_system_volume(cluster_name)
+      volume = build_system_volume(cluster_name, opts)
 
       with :ok <- persist_volume(volume),
            :ok <- provision_system_volume(volume) do
@@ -543,14 +543,27 @@ defmodule NeonFS.Core.VolumeRegistry do
     Enum.find([:hot, :warm, :cold], :hot, &(&1 in present_tiers))
   end
 
-  defp build_system_volume(cluster_name) do
+  # Defaults to factor=1 when the caller doesn't specify, matching the
+  # historical single-node bootstrap. `neonfs cluster init
+  # --system-replicas N` plumbs `N` through here so operators can seed a
+  # multi-replica system volume on a cluster they intend to scale up.
+  # Any value < 1 falls back to 1.
+  defp system_volume_factor(opts) do
+    case Keyword.get(opts, :replicas, 1) do
+      n when is_integer(n) and n >= 1 -> n
+      _ -> 1
+    end
+  end
+
+  defp build_system_volume(cluster_name, opts) do
     now = DateTime.utc_now()
+    factor = system_volume_factor(opts)
 
     %Volume{
       id: system_volume_id(cluster_name),
       name: @system_volume_name,
       owner: :system,
-      durability: %{type: :replicate, factor: 1, min_copies: 1},
+      durability: %{type: :replicate, factor: factor, min_copies: factor},
       write_ack: :quorum,
       tiering: %{
         initial_tier: pick_system_volume_tier(),

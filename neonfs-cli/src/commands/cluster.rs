@@ -44,6 +44,12 @@ pub enum ClusterCommand {
         /// Storage tier for the initial drive
         #[arg(long, default_value = "hot")]
         tier: String,
+
+        /// Replication factor to seed the `_system` volume with.
+        /// Defaults to 1; raise it on a cluster you plan to scale so
+        /// the system volume isn't pinned to single-copy storage.
+        #[arg(long = "system-replicas", default_value = "1")]
+        system_replicas: u32,
     },
 
     /// Join an existing cluster
@@ -272,7 +278,12 @@ impl ClusterCommand {
         match self {
             ClusterCommand::Ca { command } => command.execute(format),
             ClusterCommand::CreateInvite { expires } => self.create_invite(expires, format),
-            ClusterCommand::Init { name, drive, tier } => self.init(name, drive, tier, format),
+            ClusterCommand::Init {
+                name,
+                drive,
+                tier,
+                system_replicas,
+            } => self.init(name, drive, tier, *system_replicas, format),
             ClusterCommand::Join { token, via } => self.join(token, via, format),
             ClusterCommand::Rebalance {
                 tier,
@@ -301,7 +312,20 @@ impl ClusterCommand {
         }
     }
 
-    fn init(&self, name: &str, drive: &str, tier: &str, format: OutputFormat) -> Result<()> {
+    fn init(
+        &self,
+        name: &str,
+        drive: &str,
+        tier: &str,
+        system_replicas: u32,
+        format: OutputFormat,
+    ) -> Result<()> {
+        if system_replicas < 1 {
+            return Err(crate::error::CliError::InvalidArgument(
+                "--system-replicas must be >= 1".to_string(),
+            ));
+        }
+
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             let name_binary = Binary::from(name.as_bytes().to_vec());
@@ -315,10 +339,16 @@ impl ClusterCommand {
                     Term::Binary(Binary::from(tier.as_bytes().to_vec())),
                 ),
             ]));
+            let opts = Term::Map(Map::from([(
+                Term::Binary(Binary::from(b"system_replicas".to_vec())),
+                Term::FixInteger(FixInteger {
+                    value: system_replicas as i32,
+                }),
+            )]));
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "cluster_init",
-                vec![Term::Binary(name_binary), drive_config],
+                vec![Term::Binary(name_binary), drive_config, opts],
             )
             .await
         })?;
