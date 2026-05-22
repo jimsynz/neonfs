@@ -38,6 +38,14 @@ pub enum VolumeCommand {
         /// Access time update mode (noatime or relatime)
         #[arg(long)]
         atime_mode: Option<String>,
+
+        /// Allow creation when the requested replication factor is
+        /// higher than the current number of core nodes. Without this
+        /// flag, the daemon refuses to create an under-replicated
+        /// volume (writes would block on replication to non-existent
+        /// peers).
+        #[arg(long = "allow-under-replicated")]
+        allow_under_replicated: bool,
     },
 
     /// Delete a volume
@@ -385,6 +393,7 @@ impl VolumeCommand {
                 encryption,
                 scrub_interval,
                 atime_mode,
+                allow_under_replicated,
             } => self.create(
                 name,
                 *replicas,
@@ -392,6 +401,7 @@ impl VolumeCommand {
                 encryption,
                 *scrub_interval,
                 atime_mode.as_deref(),
+                *allow_under_replicated,
                 format,
             ),
             VolumeCommand::Delete { name, force } => self.delete(name, *force, format),
@@ -862,6 +872,7 @@ impl VolumeCommand {
         encryption: &str,
         scrub_interval: Option<u64>,
         atime_mode: Option<&str>,
+        allow_under_replicated: bool,
         format: OutputFormat,
     ) -> Result<()> {
         // Validate encryption mode
@@ -951,6 +962,13 @@ impl VolumeCommand {
             config_entries.push((
                 Term::Atom(Atom::from("atime_mode")),
                 Term::Atom(Atom::from(atime_atom)),
+            ));
+        }
+
+        if allow_under_replicated {
+            config_entries.push((
+                Term::Atom(Atom::from("allow_under_replicated")),
+                Term::Atom(Atom::from("true")),
             ));
         }
 

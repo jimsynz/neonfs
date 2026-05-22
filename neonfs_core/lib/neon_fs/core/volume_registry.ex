@@ -424,6 +424,24 @@ defmodule NeonFS.Core.VolumeRegistry do
     end
   end
 
+  @doc """
+  Number of core nodes in the Ra cluster, or `1` when no cluster
+  state is on disk yet (pre-init / fresh test rigs).
+
+  Exposed so CLI safety gates can refuse under-replicated volume
+  creation without each caller having to load cluster state.
+  """
+  @spec core_node_count() :: pos_integer()
+  def core_node_count do
+    case ClusterState.load() do
+      {:ok, %ClusterState{ra_cluster_members: members}} when is_list(members) ->
+        max(length(members), 1)
+
+      _ ->
+        1
+    end
+  end
+
   # Builds a fresh `RootSegment` for the volume, writes the chunk to
   # replica drives, and registers the bootstrap-layer entry (#779).
   #

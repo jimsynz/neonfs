@@ -1119,6 +1119,7 @@ defmodule NeonFS.CLI.Handler do
       with {:ok, parsed_opts} <- parse_durability_opt(opts),
            {:ok, enc_opts} <- parse_encryption_opt(parsed_opts),
            final_opts = merge_verification_defaults(enc_opts),
+           :ok <- check_durability_fits_cluster(name, final_opts),
            {:ok, volume} <- VolumeRegistry.create(name, final_opts),
            :ok <- setup_encryption_if_needed(volume) do
         create_initial_acl(volume.id, owner_uid, owner_gid)
@@ -4222,6 +4223,53 @@ defmodule NeonFS.CLI.Handler do
 
       _map ->
         {:ok, opts}
+    end
+  end
+
+  # Refuse `neonfs volume create` when the requested durability needs
+  # more nodes than the cluster currently has — chunk replication is
+  # node-keyed, so a single-node cluster cannot satisfy `replicate:3`
+  # and writes hang on RPCs to non-existent peers (#1015).
+  # `--allow-under-replicated` plumbs through as
+  # `allow_under_replicated: true` for operators who are about to
+  # scale out and want the volume in place ahead of the new nodes.
+  defp check_durability_fits_cluster(name, opts) do
+    cond do
+      Keyword.get(opts, :allow_under_replicated, false) ->
+        :ok
+
+      needed = required_replicas_from_opts(opts) ->
+        check_replica_count(name, needed)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_replica_count(name, needed) do
+    core_count = VolumeRegistry.core_node_count()
+
+    if needed <= core_count do
+      :ok
+    else
+      {:error,
+       Invalid.exception(
+         message:
+           "Volume '#{name}' needs #{needed} replicas but the cluster has only " <>
+             "#{core_count} core node(s). Add more nodes, lower the replication " <>
+             "factor, or pass `--allow-under-replicated` to create the volume " <>
+             "anyway (writes will block on RPCs to non-existent peers until the " <>
+             "cluster grows).",
+         details: %{volume_name: name, required_replicas: needed, core_nodes: core_count}
+       )}
+    end
+  end
+
+  defp required_replicas_from_opts(opts) do
+    case Keyword.get(opts, :durability) do
+      %{type: :replicate, factor: factor} when is_integer(factor) -> factor
+      %{type: :erasure, data_chunks: d, parity_chunks: p} -> d + p
+      _ -> nil
     end
   end
 
