@@ -161,6 +161,18 @@ defmodule NeonFS.CLI.Handler do
              "to designate the initial drive"
        )}
 
+  defp format_cluster_init_result({:error, {:drive_preflight_failed, reason}}) do
+    detail = if is_binary(reason), do: reason, else: inspect(reason)
+
+    {:error,
+     Invalid.exception(
+       message:
+         "Initial drive preflight failed: #{detail}. " <>
+           "The cluster was not initialised — fix the drive and re-run " <>
+           "`neonfs cluster init`."
+     )}
+  end
+
   defp format_cluster_init_result({:error, {:initial_drive_failed, reason}}) do
     {:error,
      Invalid.exception(

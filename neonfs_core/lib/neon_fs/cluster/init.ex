@@ -59,11 +59,14 @@ defmodule NeonFS.Cluster.Init do
   ## Errors
   - `{:error, :already_initialised}` - cluster state already exists
   - `{:error, :node_not_named}` - Erlang node not named (required for Ra)
+  - `{:error, {:drive_preflight_failed, reason}}` - the supplied
+    `drive_config` path was missing or not writable; refused before
+    any state was mutated (#1012)
   - `{:error, :ra_start_failed}` - Ra cluster failed to start
   - `{:error, :no_drives_available}` - no `drive_config` supplied AND no
     drives registered locally; the system volume has nowhere to land
   - `{:error, {:initial_drive_failed, reason}}` - registering the
-    supplied `drive_config` failed (path missing, not writable, etc.)
+    supplied `drive_config` failed after preflight passed
   - `{:error, :system_volume_failed}` - system volume creation failed
   - `{:error, :identity_write_failed}` - cluster identity write failed
   - `{:error, {:ca_init_failed, reason}}` - CA initialisation failed
@@ -72,15 +75,33 @@ defmodule NeonFS.Cluster.Init do
   @spec init_cluster(String.t(), map() | nil, keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def init_cluster(cluster_name, drive_config \\ nil, opts \\ []) do
-    cond do
-      State.exists?() ->
-        {:error, :already_initialised}
+    with :ok <- check_not_initialised(),
+         :ok <- check_node_named(),
+         :ok <- preflight_drive(drive_config) do
+      do_init_cluster(cluster_name, drive_config, opts)
+    end
+  end
 
-      Node.self() == :nonode@nohost ->
-        {:error, :node_not_named}
+  defp check_not_initialised do
+    if State.exists?(), do: {:error, :already_initialised}, else: :ok
+  end
 
-      true ->
-        do_init_cluster(cluster_name, drive_config, opts)
+  defp check_node_named do
+    if Node.self() == :nonode@nohost, do: {:error, :node_not_named}, else: :ok
+  end
+
+  # Validate the supplied drive *before* any state mutation. A missing
+  # or read-only drive path used to fail after Ra was already running,
+  # which left the daemon reporting `cluster status: running` with no
+  # drives or system volume (#1012). Skipped when no drive is supplied
+  # — the legacy `:neonfs_core, :drives` config path performs its own
+  # checks at `do_add_drive/2` time.
+  defp preflight_drive(nil), do: :ok
+
+  defp preflight_drive(drive_config) when is_map(drive_config) do
+    case DriveManager.preflight_drive_config(drive_config) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:drive_preflight_failed, reason}}
     end
   end
 

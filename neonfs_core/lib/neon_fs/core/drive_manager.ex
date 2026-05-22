@@ -94,6 +94,26 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   @doc """
+  Validates a drive configuration without mutating any state.
+
+  Runs the same shape, path-exists, and path-writable checks as
+  `add_drive/1`, but with no side effects. Cluster bootstrap calls
+  this *before* persisting cluster state or starting Ra so a
+  read-only drive path fails fast and leaves the daemon untouched
+  (#1012).
+
+  Returns `:ok` on success or `{:error, reason}` with a
+  human-readable string explaining the failure.
+  """
+  @spec preflight_drive_config(map()) :: :ok | {:error, term()}
+  def preflight_drive_config(config) when is_map(config) do
+    with {:ok, parsed} <- validate_drive_config(config),
+         :ok <- check_path_exists(parsed.path) do
+      check_path_writable(parsed.path)
+    end
+  end
+
+  @doc """
   Registers every locally-managed drive in the Ra bootstrap layer
   (#779).
 

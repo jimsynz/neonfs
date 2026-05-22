@@ -5,6 +5,7 @@ defmodule NeonFS.Cluster.InitTest do
   import Bitwise
 
   alias NeonFS.Cluster.Init
+  alias NeonFS.Cluster.State
   alias NeonFS.Core.{SystemVolume, VolumeRegistry}
   alias NeonFS.Transport.TLS
 
@@ -98,6 +99,41 @@ defmodule NeonFS.Cluster.InitTest do
 
       # System volume unchanged after failed re-init
       assert {:ok, ^volume} = VolumeRegistry.get_system_volume()
+    end
+  end
+
+  describe "drive preflight (#1012)" do
+    test "refuses init when the supplied drive path does not exist" do
+      drive_config = %{"path" => "/nonexistent/neonfs-preflight-test", "tier" => "hot"}
+
+      assert {:error, {:drive_preflight_failed, reason}} =
+               Init.init_cluster("preflight-missing", drive_config)
+
+      assert is_binary(reason)
+      assert reason =~ "does not exist"
+
+      # Critical: cluster state must NOT exist after a refused init
+      # (#1012 — preflight runs before any mutation).
+      refute State.exists?()
+    end
+
+    test "refuses init when the supplied drive path is not writable", %{tmp_dir: tmp_dir} do
+      readonly_path = Path.join(tmp_dir, "readonly-drive")
+      File.mkdir_p!(readonly_path)
+      File.chmod!(readonly_path, 0o555)
+
+      on_exit(fn ->
+        _ = File.chmod(readonly_path, 0o755)
+      end)
+
+      drive_config = %{"path" => readonly_path, "tier" => "hot"}
+
+      assert {:error, {:drive_preflight_failed, reason}} =
+               Init.init_cluster("preflight-readonly", drive_config)
+
+      assert is_binary(reason)
+      assert reason =~ "not writable"
+      refute State.exists?()
     end
   end
 end
