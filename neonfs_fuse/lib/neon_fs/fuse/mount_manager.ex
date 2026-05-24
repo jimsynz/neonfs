@@ -114,6 +114,17 @@ defmodule NeonFS.FUSE.MountManager do
     GenServer.call(__MODULE__, {:get_mount_by_path, mount_point})
   end
 
+  @doc """
+  Get mount info by volume name.
+
+  Returns the first matching mount when a volume has multiple mounts
+  (operators typically have one). `{:error, :not_found}` otherwise.
+  """
+  @spec get_mount_by_volume_name(String.t()) :: {:ok, MountInfo.t()} | {:error, :not_found}
+  def get_mount_by_volume_name(volume_name) do
+    GenServer.call(__MODULE__, {:get_mount_by_volume_name, volume_name})
+  end
+
   ## Server Callbacks
 
   @impl true
@@ -144,14 +155,24 @@ defmodule NeonFS.FUSE.MountManager do
   def handle_call({:unmount, mount_id}, _from, state) do
     case Map.fetch(state.mounts, mount_id) do
       {:ok, mount_info} ->
-        case unmount_filesystem(mount_info) do
-          :ok ->
-            new_state = remove_mount(state, mount_id)
-            {:reply, :ok, new_state}
+        # The state entry is dropped unconditionally — leaving it
+        # behind on a `fusermount3 -u` failure strands the operator
+        # with `:already_mounted` for every retry and no API to clear
+        # it short of restarting the daemon (#1016). Bookkeeping
+        # follows kernel reality on a best-effort basis; the actual
+        # unmount result is still reported to the caller.
+        unmount_result = unmount_filesystem(mount_info)
 
-          {:error, _reason} = error ->
-            {:reply, error, state}
+        if match?({:error, _}, unmount_result) do
+          Logger.warning("fusermount3 -u failed; dropping mount-manager entry anyway",
+            mount_id: mount_id,
+            mount_point: mount_info.mount_point,
+            reason: inspect(elem(unmount_result, 1))
+          )
         end
+
+        new_state = remove_mount(state, mount_id)
+        {:reply, unmount_result, new_state}
 
       :error ->
         {:reply, {:error, :not_found}, state}
@@ -183,6 +204,19 @@ defmodule NeonFS.FUSE.MountManager do
 
       :error ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:get_mount_by_volume_name, volume_name}, _from, state) do
+    match =
+      Enum.find_value(state.mounts, fn {_id, mount_info} ->
+        if mount_info.volume_name == volume_name, do: mount_info, else: nil
+      end)
+
+    case match do
+      nil -> {:reply, {:error, :not_found}, state}
+      mount_info -> {:reply, {:ok, mount_info}, state}
     end
   end
 
