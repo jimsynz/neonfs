@@ -103,16 +103,33 @@ defmodule NeonFS.CLI.Handler do
     registered via the `:neonfs_core, :drives` application environment;
     a freshly-installed daemon ships with none, so the CLI should always
     supply a drive.
+  - `opts` (optional) - Map of bootstrap options:
+    - `"system_replicas"` (positive integer, default `1`) - replication
+      factor to seed the `_system` volume with. Use this on a cluster
+      you intend to scale up so the system volume isn't stuck at
+      `replicate:1` after the first node-join ratchet.
 
   ## Returns
   - `{:ok, map}` - Success map with cluster_id
   - `{:error, reason}` - Error tuple
   """
-  @spec cluster_init(String.t(), map() | nil) :: {:ok, map()} | {:error, term()}
-  def cluster_init(cluster_name, drive_config \\ nil)
-      when is_binary(cluster_name) and (is_map(drive_config) or is_nil(drive_config)) do
+  @spec cluster_init(String.t(), map() | nil, map()) :: {:ok, map()} | {:error, term()}
+  def cluster_init(cluster_name, drive_config \\ nil, opts \\ %{})
+      when is_binary(cluster_name) and (is_map(drive_config) or is_nil(drive_config)) and
+             is_map(opts) do
     set_cli_metadata()
-    cluster_name |> Init.init_cluster(drive_config) |> format_cluster_init_result()
+    init_opts = cluster_init_opts(opts)
+
+    cluster_name
+    |> Init.init_cluster(drive_config, init_opts)
+    |> format_cluster_init_result()
+  end
+
+  defp cluster_init_opts(opts) do
+    case Map.get(opts, "system_replicas") do
+      n when is_integer(n) and n >= 1 -> [system_replicas: n]
+      _ -> []
+    end
   end
 
   defp format_cluster_init_result({:ok, cluster_id}) do

@@ -549,22 +549,44 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
+  # Bump the system volume's replication factor when a new core joins,
+  # but never shrink it — `neonfs cluster init --system-replicas N`
+  # seeds the factor at the operator's chosen value, and a 2-node join
+  # arriving later should not knock it back to 2.
   defp maybe_adjust_system_volume_replication(updated_state, type) do
     if ServiceType.core?(type) do
-      core_count = length(updated_state.ra_cluster_members)
+      adjust_system_volume_replication_for_core_join(updated_state)
+    end
+  end
 
-      case VolumeRegistry.adjust_system_volume_replication(core_count) do
-        {:ok, _volume} ->
-          Logger.info("System volume replication factor adjusted",
-            core_count: core_count
-          )
+  defp adjust_system_volume_replication_for_core_join(updated_state) do
+    core_count = length(updated_state.ra_cluster_members)
+    current_factor = current_system_volume_factor()
 
-        {:error, reason} ->
-          Logger.warning("Failed to adjust system volume replication",
-            core_count: core_count,
-            reason: inspect(reason)
-          )
-      end
+    if core_count > current_factor do
+      apply_system_volume_replication(core_count)
+    end
+  end
+
+  defp apply_system_volume_replication(core_count) do
+    case VolumeRegistry.adjust_system_volume_replication(core_count) do
+      {:ok, _volume} ->
+        Logger.info("System volume replication factor adjusted",
+          core_count: core_count
+        )
+
+      {:error, reason} ->
+        Logger.warning("Failed to adjust system volume replication",
+          core_count: core_count,
+          reason: inspect(reason)
+        )
+    end
+  end
+
+  defp current_system_volume_factor do
+    case VolumeRegistry.get_system_volume() do
+      {:ok, %{durability: %{factor: factor}}} -> factor
+      _ -> 0
     end
   end
 

@@ -431,6 +431,16 @@ defmodule NeonFS.Core.VolumeRegistryTest do
       assert volume.verification.on_read == :always
     end
 
+    test "create_system_volume/1 honours :replicas option" do
+      assert {:ok, volume} = VolumeRegistry.create_system_volume(replicas: 3)
+      assert volume.durability == %{type: :replicate, factor: 3, min_copies: 3}
+    end
+
+    test "create_system_volume/1 clamps non-positive :replicas to 1" do
+      assert {:ok, volume} = VolumeRegistry.create_system_volume(replicas: 0)
+      assert volume.durability == %{type: :replicate, factor: 1, min_copies: 1}
+    end
+
     test "create_system_volume/0 uses deterministic ID" do
       assert {:ok, vol1} = VolumeRegistry.create_system_volume()
 
