@@ -422,7 +422,9 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "parses replicate:3 durability string" do
       vol_name = "rep-vol-#{:rand.uniform(999_999)}"
-      config = %{"durability" => "replicate:3"}
+      # Single-node test cluster — `allow_under_replicated` bypasses
+      # the safety gate added for #1015.
+      config = %{"durability" => "replicate:3", "allow_under_replicated" => true}
       assert {:ok, volume} = Handler.create_volume(vol_name, config)
       assert volume.durability == %{type: :replicate, factor: 3, min_copies: 2}
       assert volume.durability_display == "replicate:3"
@@ -438,7 +440,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "parses erasure:10:4 durability string" do
       vol_name = "ec-vol-#{:rand.uniform(999_999)}"
-      config = %{"durability" => "erasure:10:4"}
+      config = %{"durability" => "erasure:10:4", "allow_under_replicated" => true}
       assert {:ok, volume} = Handler.create_volume(vol_name, config)
       assert volume.durability == %{type: :erasure, data_chunks: 10, parity_chunks: 4}
       assert volume.durability_display == "erasure:10+4 (1.40x overhead)"
@@ -446,7 +448,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "parses erasure:4:2 durability string" do
       vol_name = "ec2-vol-#{:rand.uniform(999_999)}"
-      config = %{"durability" => "erasure:4:2"}
+      config = %{"durability" => "erasure:4:2", "allow_under_replicated" => true}
       assert {:ok, volume} = Handler.create_volume(vol_name, config)
       assert volume.durability == %{type: :erasure, data_chunks: 4, parity_chunks: 2}
       assert volume.durability_display == "erasure:4+2 (1.50x overhead)"
@@ -454,7 +456,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "parses erasure:8:3 durability string" do
       vol_name = "ec3-vol-#{:rand.uniform(999_999)}"
-      config = %{"durability" => "erasure:8:3"}
+      config = %{"durability" => "erasure:8:3", "allow_under_replicated" => true}
       assert {:ok, volume} = Handler.create_volume(vol_name, config)
       assert volume.durability == %{type: :erasure, data_chunks: 8, parity_chunks: 3}
       assert volume.durability_display == "erasure:8+3 (1.38x overhead)"
@@ -521,10 +523,21 @@ defmodule NeonFS.CLI.HandlerTest do
     test "map durability config passes through unchanged" do
       vol_name = "map-vol-#{:rand.uniform(999_999)}"
       dur = %{type: :erasure, data_chunks: 6, parity_chunks: 3}
-      config = %{"durability" => dur}
+      config = %{"durability" => dur, "allow_under_replicated" => true}
       assert {:ok, volume} = Handler.create_volume(vol_name, config)
       assert volume.durability == dur
       assert volume.durability_display == "erasure:6+3 (1.50x overhead)"
+    end
+
+    test "refuses under-replicated volume without override" do
+      vol_name = "underrep-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "replicate:3"}
+
+      assert {:error, %NeonFS.Error.Invalid{message: msg}} =
+               Handler.create_volume(vol_name, config)
+
+      assert msg =~ "needs 3 replicas"
+      assert msg =~ "allow-under-replicated"
     end
   end
 
@@ -541,7 +554,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "get_volume returns durability_display for erasure volume" do
       vol_name = "disp-ec-#{:rand.uniform(999_999)}"
-      config = %{"durability" => "erasure:10:4"}
+      config = %{"durability" => "erasure:10:4", "allow_under_replicated" => true}
       {:ok, _} = Handler.create_volume(vol_name, config)
 
       assert {:ok, vol} = Handler.get_volume(vol_name)
@@ -550,7 +563,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "list_volumes includes durability_display" do
       vol_name = "list-ec-#{:rand.uniform(999_999)}"
-      config = %{"durability" => "erasure:4:2"}
+      config = %{"durability" => "erasure:4:2", "allow_under_replicated" => true}
       {:ok, _} = Handler.create_volume(vol_name, config)
 
       assert {:ok, volumes} = Handler.list_volumes()
@@ -562,8 +575,17 @@ defmodule NeonFS.CLI.HandlerTest do
       rep_name = "mix-rep-#{:rand.uniform(999_999)}"
       ec_name = "mix-ec-#{:rand.uniform(999_999)}"
 
-      {:ok, _} = Handler.create_volume(rep_name, %{"durability" => "replicate:3"})
-      {:ok, _} = Handler.create_volume(ec_name, %{"durability" => "erasure:10:4"})
+      {:ok, _} =
+        Handler.create_volume(rep_name, %{
+          "durability" => "replicate:3",
+          "allow_under_replicated" => true
+        })
+
+      {:ok, _} =
+        Handler.create_volume(ec_name, %{
+          "durability" => "erasure:10:4",
+          "allow_under_replicated" => true
+        })
 
       assert {:ok, volumes} = Handler.list_volumes()
 

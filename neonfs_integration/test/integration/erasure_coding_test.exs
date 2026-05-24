@@ -25,7 +25,10 @@ defmodule NeonFS.Integration.ErasureCodingTest do
     {:ok, _} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         "ec-volume",
-        %{"durability" => "erasure:2:1"}
+        # Single-node test cluster — `allow_under_replicated` bypasses
+        # the #1015 safety gate that refuses volumes wanting more
+        # replicas than the cluster has core nodes.
+        %{"durability" => "erasure:2:1", "allow_under_replicated" => true}
       ])
 
     {:ok, _} =
@@ -232,7 +235,9 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
           "gc-ec-volume",
-          %{"durability" => "erasure:2:1"}
+          # Single-node test cluster — see #1015 note in the
+          # `setup_all` block above.
+          %{"durability" => "erasure:2:1", "allow_under_replicated" => true}
         ])
 
       %{}
@@ -335,7 +340,7 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       {:ok, volume} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
           "cli-ec-vol",
-          %{"durability" => "erasure:4:2"}
+          %{"durability" => "erasure:4:2", "allow_under_replicated" => true}
         ])
 
       assert volume.durability == %{type: :erasure, data_chunks: 4, parity_chunks: 2}

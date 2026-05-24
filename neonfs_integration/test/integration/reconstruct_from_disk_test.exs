@@ -145,7 +145,11 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
     {:ok, volume} =
       PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
         volume_name,
-        %{"durability" => "replicate:2"}
+        # `replicate:2` on a single-node test cluster lands metadata
+        # replicas on `default` + `drive1`; chunk replication never
+        # runs here so the #1015 under-replication refusal needs to
+        # be opted-out.
+        %{"durability" => "replicate:2", "allow_under_replicated" => true}
       ])
 
     volume_id = volume.id
