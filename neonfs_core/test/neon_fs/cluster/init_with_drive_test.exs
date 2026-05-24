@@ -38,7 +38,11 @@ defmodule NeonFS.Cluster.InitWithDriveTest do
     end
 
     test "surfaces an actionable error if the supplied drive path is missing" do
-      assert {:error, {:initial_drive_failed, _reason}} =
+      # `:drive_preflight_failed` — `Init.init_cluster/2` now validates
+      # the drive's path before mutating any state (#1012), so a
+      # missing path fails at the preflight gate rather than the
+      # later `DriveManager.add_drive/1` registration.
+      assert {:error, {:drive_preflight_failed, _reason}} =
                Init.init_cluster("bad-drive-cluster", %{
                  "path" => "/var/empty/does-not-exist-#{System.unique_integer([:positive])}",
                  "tier" => "hot"
