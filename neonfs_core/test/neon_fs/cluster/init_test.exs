@@ -118,22 +118,31 @@ defmodule NeonFS.Cluster.InitTest do
     end
 
     test "refuses init when the supplied drive path is not writable", %{tmp_dir: tmp_dir} do
-      readonly_path = Path.join(tmp_dir, "readonly-drive")
-      File.mkdir_p!(readonly_path)
-      File.chmod!(readonly_path, 0o555)
+      # CI runs as root inside a container, where `chmod 0o555` is a
+      # no-op against the writability probe — root bypasses POSIX
+      # mode bits. The missing-path test above already covers the
+      # preflight wiring; here we only run the chmod variant when
+      # the test process is unprivileged.
+      if File.stat!("/proc/self").uid == 0 do
+        :ok
+      else
+        readonly_path = Path.join(tmp_dir, "readonly-drive")
+        File.mkdir_p!(readonly_path)
+        File.chmod!(readonly_path, 0o555)
 
-      on_exit(fn ->
-        _ = File.chmod(readonly_path, 0o755)
-      end)
+        on_exit(fn ->
+          _ = File.chmod(readonly_path, 0o755)
+        end)
 
-      drive_config = %{"path" => readonly_path, "tier" => "hot"}
+        drive_config = %{"path" => readonly_path, "tier" => "hot"}
 
-      assert {:error, {:drive_preflight_failed, reason}} =
-               Init.init_cluster("preflight-readonly", drive_config)
+        assert {:error, {:drive_preflight_failed, reason}} =
+                 Init.init_cluster("preflight-readonly", drive_config)
 
-      assert is_binary(reason)
-      assert reason =~ "not writable"
-      refute State.exists?()
+        assert is_binary(reason)
+        assert reason =~ "not writable"
+        refute State.exists?()
+      end
     end
   end
 end
