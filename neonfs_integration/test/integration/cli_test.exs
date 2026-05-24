@@ -37,9 +37,19 @@ defmodule NeonFS.Integration.CLITest do
         )
       end
 
-      # Create volume via CLI
+      # Create volume via CLI. The default `--replicas 3` would fail
+      # the new under-replication gate on this single-node test
+      # cluster (#1015) — pin replicas to 1 instead of using
+      # `--allow-under-replicated` so the CLI test exercises a
+      # realistic single-node case.
       assert {:ok, _} =
-               run_cli(cluster, :node1, ["volume", "create", "cli-test-volume"])
+               run_cli(cluster, :node1, [
+                 "volume",
+                 "create",
+                 "cli-test-volume",
+                 "--replicas",
+                 "1"
+               ])
 
       # Wait for volume to be created, then list via CLI
       assert_eventually do
