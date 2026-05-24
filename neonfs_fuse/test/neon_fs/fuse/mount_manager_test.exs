@@ -1,7 +1,7 @@
 defmodule NeonFS.FUSE.MountManagerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias NeonFS.FUSE.MountManager
+  alias NeonFS.FUSE.{MountInfo, MountManager}
 
   @moduletag :tmp_dir
 
@@ -80,6 +80,61 @@ defmodule NeonFS.FUSE.MountManagerTest do
                MountManager.diagnose_fusermount_no_fd(dir, nil)
 
       assert message =~ "fusermount3 rejected the mount"
+    end
+  end
+
+  describe "get_mount_by_volume_name/1 (issue #1016)" do
+    # `MountManager` is a `:name`-registered singleton; the suite that
+    # actually spins up the full FUSE stack lives in
+    # `neonfs_integration`. These tests prod the `handle_call/3`
+    # clauses directly so the unit suite covers the new lookup
+    # without needing a kernel mount.
+
+    setup do
+      manager = start_supervised!(MountManager)
+
+      :sys.replace_state(manager, fn _state ->
+        %MountManager.State{
+          mounts: %{
+            "mount_abc123" =>
+              MountInfo.new(
+                id: "mount_abc123",
+                volume_name: "vol-a",
+                mount_point: "/tmp/mnt-a",
+                started_at: DateTime.utc_now(),
+                mount_session: nil,
+                handler_pid: nil,
+                session_pid: nil,
+                cache_pid: nil
+              ),
+            "mount_def456" =>
+              MountInfo.new(
+                id: "mount_def456",
+                volume_name: "vol-b",
+                mount_point: "/tmp/mnt-b",
+                started_at: DateTime.utc_now(),
+                mount_session: nil,
+                handler_pid: nil,
+                session_pid: nil,
+                cache_pid: nil
+              )
+          },
+          mount_points: %{"/tmp/mnt-a" => "mount_abc123", "/tmp/mnt-b" => "mount_def456"}
+        }
+      end)
+
+      {:ok, manager: manager}
+    end
+
+    test "returns the matching mount for an exact volume name" do
+      assert {:ok, %{volume_name: "vol-a", id: "mount_abc123"}} =
+               MountManager.get_mount_by_volume_name("vol-a")
+
+      assert {:ok, %{volume_name: "vol-b"}} = MountManager.get_mount_by_volume_name("vol-b")
+    end
+
+    test "returns :not_found when no mount has the volume name" do
+      assert {:error, :not_found} = MountManager.get_mount_by_volume_name("nope")
     end
   end
 end

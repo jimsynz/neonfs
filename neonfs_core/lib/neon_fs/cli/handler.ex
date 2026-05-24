@@ -1326,7 +1326,12 @@ defmodule NeonFS.CLI.Handler do
       {:ok, %{}}
     else
       {:error, :mount_not_found} ->
-        {:error, NotFound.exception(message: "Mount not found: #{mount_id_or_path}")}
+        {:error,
+         NotFound.exception(
+           message:
+             "No mount matches '#{mount_id_or_path}' (tried mount id, mount point, " <>
+               "and volume name). Use `neonfs fuse list` to see active mounts."
+         )}
 
       {:error, reason} ->
         {:error, wrap_error(reason)}
@@ -3922,6 +3927,16 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
+  defp rpc_get_mount_by_volume_name(fuse_node, volume_name) do
+    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_volume_name, [volume_name]) do
+      {:badrpc, reason} ->
+        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
+
+      result ->
+        result
+    end
+  end
+
   defp rpc_get_mount_by_path(fuse_node, path) do
     case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_path, [path]) do
       {:badrpc, reason} ->
@@ -4085,20 +4100,35 @@ defmodule NeonFS.CLI.Handler do
     }
   end
 
+  # Tries the supplied identifier as a mount-id, then as a mount
+  # point, then as a volume name. The volume-name lookup is the
+  # newest gate (#1016) — operators frequently typed
+  # `neonfs fuse unmount <volume>` and got an unhelpful "Mount not
+  # found" when the daemon only resolved mount ids and paths.
   defp do_unmount(mount_id_or_path, fuse_node) do
-    # Try mount_id first, then try path
     case rpc_get_mount(fuse_node, mount_id_or_path) do
       {:ok, _mount} ->
         wrap_unmount_result(rpc_unmount(fuse_node, mount_id_or_path))
 
       {:error, :not_found} ->
-        case rpc_get_mount_by_path(fuse_node, mount_id_or_path) do
-          {:ok, mount} ->
-            wrap_unmount_result(rpc_unmount(fuse_node, mount.id))
+        unmount_by_path_or_volume(mount_id_or_path, fuse_node)
+    end
+  end
 
-          {:error, :not_found} ->
-            {:error, :mount_not_found}
-        end
+  defp unmount_by_path_or_volume(mount_id_or_path, fuse_node) do
+    case rpc_get_mount_by_path(fuse_node, mount_id_or_path) do
+      {:ok, mount} ->
+        wrap_unmount_result(rpc_unmount(fuse_node, mount.id))
+
+      {:error, :not_found} ->
+        unmount_by_volume_name(mount_id_or_path, fuse_node)
+    end
+  end
+
+  defp unmount_by_volume_name(volume_name, fuse_node) do
+    case rpc_get_mount_by_volume_name(fuse_node, volume_name) do
+      {:ok, mount} -> wrap_unmount_result(rpc_unmount(fuse_node, mount.id))
+      {:error, :not_found} -> {:error, :mount_not_found}
     end
   end
 
