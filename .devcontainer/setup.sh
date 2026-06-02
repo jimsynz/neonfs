@@ -15,6 +15,9 @@ fi
 
 set -euo pipefail
 
+echo "==> Claiming _build volume mounts for $(id -un)"
+sudo chown "$(id -u):$(id -g)" _build */_build
+
 PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$PATH"
 REQUIRED_PLUGINS=$(cat .tool-versions | cut -d \  -f 1)
 INSTALLED_PLUGINS=$(asdf plugin list || echo "")

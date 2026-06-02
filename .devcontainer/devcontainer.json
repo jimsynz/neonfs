@@ -4,6 +4,26 @@
   "privileged": true,
   "workspaceFolder": "/workspaces/neonfs",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/neonfs,type=bind,consistency=cached",
+  "mounts": [
+    "source=${devcontainerId}-build-root,target=/workspaces/neonfs/_build,type=volume",
+    "source=${devcontainerId}-build-fuse_server,target=/workspaces/neonfs/fuse_server/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs-cli,target=/workspaces/neonfs/neonfs-cli/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_cifs,target=/workspaces/neonfs/neonfs_cifs/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_client,target=/workspaces/neonfs/neonfs_client/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_containerd,target=/workspaces/neonfs/neonfs_containerd/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_core,target=/workspaces/neonfs/neonfs_core/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_csi,target=/workspaces/neonfs/neonfs_csi/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_docker,target=/workspaces/neonfs/neonfs_docker/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_fuse,target=/workspaces/neonfs/neonfs_fuse/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_iam,target=/workspaces/neonfs/neonfs_iam/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_integration,target=/workspaces/neonfs/neonfs_integration/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_nfs,target=/workspaces/neonfs/neonfs_nfs/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_omnibus,target=/workspaces/neonfs/neonfs_omnibus/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_s3,target=/workspaces/neonfs/neonfs_s3/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_test_support,target=/workspaces/neonfs/neonfs_test_support/_build,type=volume",
+    "source=${devcontainerId}-build-neonfs_webdav,target=/workspaces/neonfs/neonfs_webdav/_build,type=volume",
+    "source=${devcontainerId}-build-nfs_server,target=/workspaces/neonfs/nfs_server/_build,type=volume"
+  ],
   "containerEnv": {
     "ERL_ZFLAGS": "+Q 65536"
   },
