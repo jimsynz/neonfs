@@ -189,11 +189,14 @@ defmodule NeonFS.Client.Connection do
     # target — `:rpc.call/4` works in-node — but it is deliberately kept
     # out of the Node.connect/monitor machinery (you don't connect to
     # yourself), so it never lands in `connected_nodes`. Without surfacing
-    # it here a single-node cluster reports no reachable core at all and
-    # every interface fails with "all core nodes unreachable" (#1049).
-    # Prefer the local core: it is always reachable and its Ra-replicated
-    # registry holds the same view as any peer.
-    if local_core?(), do: [Node.self() | remote], else: remote
+    # it a single-node cluster reports no reachable core at all and every
+    # interface fails with "all core nodes unreachable" (#1049). Use it only
+    # as a fallback when no remote core is connected, so multi-node routing
+    # is unchanged.
+    case remote do
+      [] -> if local_core?(), do: [Node.self()], else: []
+      _ -> remote
+    end
   end
 
   defp local_core? do
