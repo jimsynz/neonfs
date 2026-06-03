@@ -223,6 +223,104 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
     end
   end
 
+  describe "remote fallback (#1045)" do
+    test "re-dispatches the write to a node holding the root when there is no local replica" do
+      capture = build_capture()
+      parent = self()
+      remote = %{node: :remote@host, drive_id: "drv-remote"}
+
+      opts =
+        build_opts(
+          capture: capture,
+          root_chunk_reader: fn _entry, _opts -> {:error, {:no_local_replica, [remote]}} end,
+          remote_caller: fn node, fn_name, args ->
+            send(parent, {:remote, node, fn_name, length(args)})
+            {:ok, "remote-root-hash"}
+          end
+        )
+
+      assert {:ok, "remote-root-hash"} = MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+      assert_received {:remote, :remote@host, :put, 5}
+    end
+
+    test "does not re-dispatch on a successful local write" do
+      capture = build_capture()
+      parent = self()
+
+      opts =
+        build_opts(
+          capture: capture,
+          remote_caller: fn node, _fn, _args -> send(parent, {:remote, node}) && {:ok, "x"} end
+        )
+
+      assert {:ok, "new-root-hash"} = MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+      refute_received {:remote, _}
+    end
+
+    test "does not re-dispatch when already remote-dispatched (no recursion)" do
+      capture = build_capture()
+      parent = self()
+      remote = %{node: :remote@host, drive_id: "drv-remote"}
+
+      opts =
+        build_opts(
+          capture: capture,
+          __remote_dispatched: true,
+          root_chunk_reader: fn _entry, _opts -> {:error, {:no_local_replica, [remote]}} end,
+          remote_caller: fn node, _fn, _args -> send(parent, {:remote, node}) && {:ok, "x"} end
+        )
+
+      assert {:error, {:root_chunk_unreachable, {:no_local_replica, _}}} =
+               MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+
+      refute_received {:remote, _}
+    end
+
+    test "does not re-dispatch errors other than no_local_replica" do
+      capture = build_capture()
+      parent = self()
+
+      opts =
+        build_opts(
+          capture: capture,
+          root_chunk_reader: fn _entry, _opts -> {:error, :some_other_failure} end,
+          remote_caller: fn node, _fn, _args -> send(parent, {:remote, node}) && {:ok, "x"} end
+        )
+
+      assert {:error, _} = MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+      refute_received {:remote, _}
+    end
+
+    test "tries the next candidate node when the first remote attempt fails" do
+      capture = build_capture()
+      parent = self()
+
+      locations = [
+        %{node: :remote1@host, drive_id: "d1"},
+        %{node: :remote2@host, drive_id: "d2"}
+      ]
+
+      opts =
+        build_opts(
+          capture: capture,
+          root_chunk_reader: fn _entry, _opts -> {:error, {:no_local_replica, locations}} end,
+          remote_caller: fn
+            :remote1@host, _fn, _args ->
+              send(parent, {:remote, :remote1@host})
+              {:error, :unreachable}
+
+            :remote2@host, _fn, _args ->
+              send(parent, {:remote, :remote2@host})
+              {:ok, "second-node-hash"}
+          end
+        )
+
+      assert {:ok, "second-node-hash"} = MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+      assert_received {:remote, :remote1@host}
+      assert_received {:remote, :remote2@host}
+    end
+  end
+
   ## Helpers
 
   defp sample_segment(overrides \\ []) do
