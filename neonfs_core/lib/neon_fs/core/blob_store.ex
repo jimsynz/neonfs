@@ -131,17 +131,19 @@ defmodule NeonFS.Core.BlobStore do
   Interface writers (`NeonFS.Client.ChunkWriter`) ship chunks with the sentinel
   drive_id `"default"`, delegating the choice of drive to the receiving node.
   This maps that sentinel — or any drive_id not registered and active on this
-  node — to a local active drive for the tier, so the chunk lands on real
-  storage and the recorded location points at it (#1042). A drive_id that is
-  already a local active drive is returned unchanged; if the node has no usable
-  drive the id is returned as-is (the write then fails as before).
+  node — to a local active drive **in the requested tier** (#1042). It is
+  tier-strict: it never silently places a chunk on a drive of a different tier.
+  A drive_id that is already a local active drive is returned unchanged; if the
+  node has no active drive in that tier the sentinel is returned as-is so the
+  write fails clearly rather than landing on the wrong tier. (Choosing a node
+  that actually has storage in the tier is target-selection's job — #1044.)
   """
   @spec resolve_drive_id(drive_id(), tier() | String.t()) :: drive_id()
   def resolve_drive_id(drive_id, tier) do
-    if local_active_drive?(drive_id) do
-      drive_id
-    else
-      select_local_drive(tier) || drive_id
+    cond do
+      local_active_drive?(drive_id) -> drive_id
+      id = select_local_drive(tier) -> id
+      true -> log_no_drive_in_tier(tier, drive_id)
     end
   end
 
@@ -155,17 +157,18 @@ defmodule NeonFS.Core.BlobStore do
   defp select_local_drive(tier) do
     case DriveRegistry.select_drive(normalise_tier(tier)) do
       {:ok, %Drive{id: id}} -> id
-      {:error, _} -> any_local_active_drive()
+      {:error, _} -> nil
     end
   end
 
-  defp any_local_active_drive do
-    DriveRegistry.drives_for_node(Node.self())
-    |> Enum.find(&(&1.state in [:active, :standby]))
-    |> case do
-      %Drive{id: id} -> id
-      nil -> nil
-    end
+  defp log_no_drive_in_tier(tier, drive_id) do
+    Logger.warning("No active drive in tier for inbound chunk; write will fail",
+      tier: tier,
+      requested_drive_id: drive_id,
+      node: Node.self()
+    )
+
+    drive_id
   end
 
   defp normalise_tier(tier) when is_atom(tier), do: tier

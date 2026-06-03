@@ -52,10 +52,11 @@ defmodule NeonFS.Core.BlobStoreResolveDriveIdTest do
       assert BlobStore.resolve_drive_id("default", :hot) == "hot0"
     end
 
-    test "falls back to any active drive when the tier has none" do
-      # No cold drive registered; the sentinel still resolves to the hot drive
-      # rather than leaving "default" to fail the write.
-      assert BlobStore.resolve_drive_id("default", "cold") == "hot0"
+    test "is tier-strict: does not cross tiers when the requested tier has none" do
+      # No cold drive registered. Rather than silently landing on the hot drive,
+      # the sentinel is returned unresolved so the write fails clearly (#1042) —
+      # choosing a node with cold storage is target-selection's job (#1044).
+      assert BlobStore.resolve_drive_id("default", "cold") == "default"
     end
   end
 end
