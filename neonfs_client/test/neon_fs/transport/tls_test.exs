@@ -105,6 +105,13 @@ defmodule NeonFS.Transport.TLSTest do
       assert {:dNSName, ~c"node-1.example.com"} in value
     end
 
+    test "cert SAN always covers localhost for the local CLI", %{node_cert: node_cert} do
+      {:Extension, _oid, _critical, value} =
+        X509.Certificate.extension(node_cert, :subject_alt_name)
+
+      assert {:dNSName, ~c"localhost"} in value
+    end
+
     test "cert has correct ext_key_usage", %{node_cert: node_cert} do
       ext = X509.Certificate.extension(node_cert, :ext_key_usage)
       assert ext != nil

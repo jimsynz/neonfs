@@ -66,8 +66,15 @@ defmodule NeonFS.TLSDistConfig do
   Regenerates `ssl_dist.conf` for Erlang TLS distribution.
 
   Pre-cluster: uses only `node-local.crt`/`node-local.key`.
-  Post-cluster: lists the cluster node cert first in `certs_keys`
-  (preferred for inter-node connections), with the local cert as fallback.
+  Post-cluster: uses only the cluster node cert (`node.crt`/`node.key`).
+
+  We deliberately do NOT keep the local cert as a fallback alongside the
+  cluster cert: OTP's TLS 1.3 `certs_keys` selection cannot be relied on to
+  pick the cluster cert for a peer connection, and when it picks the local
+  (self-signed) cert the peer rejects it with "Unknown CA" (#1033). Every
+  verifier — peer nodes and the local CLI — trusts the cluster CA via
+  `ca_bundle.crt` once the node has joined, so presenting the cluster cert
+  alone is both sufficient and unambiguous.
   """
   @spec regenerate_config(String.t()) :: :ok
   def regenerate_config(tls_dir \\ TLS.tls_dir()) do
@@ -193,22 +200,21 @@ defmodule NeonFS.TLSDistConfig do
     ]
   end
 
+  # Prefer the cluster cert once it exists (post-join); otherwise fall back to
+  # the boot-time local cert (pre-cluster). Exactly one entry is emitted — see
+  # `regenerate_config/1` for why we never list both at once.
   defp build_certs_keys(tls_dir) do
-    cluster_cert = Path.join(tls_dir, "node.crt")
-    cluster_key = Path.join(tls_dir, "node.key")
-    local_cert = Path.join(tls_dir, "node-local.crt")
-    local_key = Path.join(tls_dir, "node-local.key")
+    cluster = {Path.join(tls_dir, "node.crt"), Path.join(tls_dir, "node.key")}
+    local = {Path.join(tls_dir, "node-local.crt"), Path.join(tls_dir, "node-local.key")}
 
-    entries =
-      [
-        {cluster_cert, cluster_key},
-        {local_cert, local_key}
-      ]
-      |> Enum.filter(fn {cert, key} -> File.exists?(cert) and File.exists?(key) end)
-      |> Enum.map(fn {cert, key} -> cert_key_entry(cert, key) end)
-
-    Enum.join(entries, ", ")
+    cond do
+      pair_exists?(cluster) -> cert_key_entry(elem(cluster, 0), elem(cluster, 1))
+      pair_exists?(local) -> cert_key_entry(elem(local, 0), elem(local, 1))
+      true -> ""
+    end
   end
+
+  defp pair_exists?({cert, key}), do: File.exists?(cert) and File.exists?(key)
 
   defp cert_key_entry(certfile, keyfile) do
     "\#{certfile => \"#{certfile}\", keyfile => \"#{keyfile}\"}"
