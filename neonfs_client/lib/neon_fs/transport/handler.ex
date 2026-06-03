@@ -93,6 +93,10 @@ defmodule NeonFS.Transport.Handler do
          state
        )
        when is_binary(volume_id) do
+    # Resolve the sentinel/“default” drive_id to a real local drive once, so the
+    # chunk lands on real storage and `local_location` records that drive (#1042).
+    drive_id = resolve_drive_id(state.dispatch, drive_id, tier)
+
     with {:ok, opts} <- resolve_volume_opts(state.dispatch, volume_id),
          {:ok, _hash, _info} <- state.dispatch.write_chunk(data, drive_id, tier, opts),
          {:ok, locations} <-
@@ -108,6 +112,8 @@ defmodule NeonFS.Transport.Handler do
   # processing — replication, internal replay — stay on this path.
   # Stored bytes are written as-is with empty opts.
   defp dispatch({:put_chunk, ref, _hash, drive_id, _write_id, tier, data}, state) do
+    drive_id = resolve_drive_id(state.dispatch, drive_id, tier)
+
     case state.dispatch.write_chunk(data, drive_id, tier, []) do
       {:ok, _hash, _info} -> {:ok, ref}
       {:error, reason} -> {:error, ref, reason}
@@ -129,6 +135,17 @@ defmodule NeonFS.Transport.Handler do
     case state.dispatch.chunk_info(hash) do
       {:ok, tier, size} -> {:ok, ref, tier, size}
       {:error, _reason} -> {:error, ref, :not_found}
+    end
+  end
+
+  # Ask the dispatch (the core blob store) to map a sentinel/unknown drive_id to
+  # a real local drive. Dispatches without the callback (test mocks) keep the
+  # incoming drive_id unchanged.
+  defp resolve_drive_id(dispatch, drive_id, tier) do
+    if function_exported?(dispatch, :resolve_drive_id, 2) do
+      dispatch.resolve_drive_id(drive_id, tier)
+    else
+      drive_id
     end
   end
 
