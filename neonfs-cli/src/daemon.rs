@@ -13,6 +13,14 @@
 
 use crate::error::{CliError, Result};
 use crate::tls;
+use std::time::{Duration, Instant};
+
+/// The daemon is briefly unreachable while it restarts TLS distribution to load
+/// a new cluster cert (just after `cluster init`/`join`, #1033). Retry
+/// connection failures for this long so commands issued in that window don't
+/// spuriously fail.
+const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(8);
+const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 use eetf::{Atom, List, Term, Tuple};
 use erl_dist::handshake::{ClientSideHandshake, HandshakeStatus};
 use erl_dist::message;
@@ -166,7 +174,17 @@ impl DaemonConnection {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| DEFAULT_DAEMON_NODE.to_string())
         });
-        Self::connect_to(&daemon_node).await
+        let deadline = Instant::now() + CONNECT_RETRY_WINDOW;
+
+        loop {
+            match Self::connect_to(&daemon_node).await {
+                Ok(conn) => return Ok(conn),
+                Err(CliError::ConnectionFailed(_)) if Instant::now() < deadline => {
+                    smol::Timer::after(CONNECT_RETRY_BACKOFF).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     async fn connect_to(daemon_node: &str) -> Result<Self> {

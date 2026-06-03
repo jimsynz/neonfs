@@ -105,6 +105,32 @@ defmodule NeonFS.Transport.TLSTest do
       assert {:dNSName, ~c"node-1.example.com"} in value
     end
 
+    test "cert SAN always covers localhost for the local CLI", %{node_cert: node_cert} do
+      {:Extension, _oid, _critical, value} =
+        X509.Certificate.extension(node_cert, :subject_alt_name)
+
+      assert {:dNSName, ~c"localhost"} in value
+    end
+
+    test "cert SAN encodes an IP host as iPAddress so dist hostname check passes",
+         %{ca_cert: ca_cert, ca_key: ca_key} do
+      node_key = TLS.generate_node_key()
+      csr = TLS.create_csr(node_key, "n")
+      cert = TLS.sign_csr(csr, "10.10.10.11", ca_cert, ca_key, 7)
+
+      {:Extension, _oid, _critical, value} =
+        X509.Certificate.extension(cert, :subject_alt_name)
+
+      assert Enum.any?(value, fn {type, _} -> type == :iPAddress end)
+
+      # The exact check that failed in #1033: OTP matches a requested IP against
+      # an iPAddress SAN, not a dNSName.
+      assert :public_key.pkix_verify_hostname(
+               X509.Certificate.to_der(cert),
+               [{:ip, ~c"10.10.10.11"}]
+             )
+    end
+
     test "cert has correct ext_key_usage", %{node_cert: node_cert} do
       ext = X509.Certificate.extension(node_cert, :ext_key_usage)
       assert ext != nil

@@ -42,18 +42,30 @@ defmodule NeonFS.Integration.ClusterJoinTest do
           via_address
         ])
 
-      # Verify join succeeded
-      assert is_binary(join_result["cluster_id"])
-      assert join_result["cluster_name"] == "http-join-test"
-      assert is_binary(join_result["node_id"])
+      # join_cluster now returns an async ack: it redeems the invite synchronously
+      # then finishes the join (restart TLS distribution → connect → Ra membership)
+      # in a detached worker, so the CLI can reconnect and validate (#1033).
+      assert join_result["status"] == "joining"
 
-      # Verify node2 has cluster state
-      assert PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :exists?, []) == true
+      # Verify node2 completes the join: cluster state is persisted...
+      assert :ok =
+               wait_until(
+                 fn ->
+                   PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :exists?, []) == true
+                 end,
+                 timeout: 30_000
+               )
 
-      # Verify node2 can see node1 via distribution
+      # ...and node2 can see node1 via distribution.
       node1_atom = node1_info.node
-      node2_connected = PeerCluster.rpc(cluster, :node2, Node, :list, [])
-      assert node1_atom in node2_connected
+
+      assert :ok =
+               wait_until(
+                 fn ->
+                   node1_atom in PeerCluster.rpc(cluster, :node2, Node, :list, [])
+                 end,
+                 timeout: 30_000
+               )
     end
 
     test "join fails with invalid token", %{cluster: cluster} do

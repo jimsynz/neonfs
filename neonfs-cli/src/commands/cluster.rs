@@ -2,7 +2,7 @@
 
 use crate::commands::repair::RepairCommand;
 use crate::daemon::DaemonConnection;
-use crate::error::Result;
+use crate::error::{CliError, Result};
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
     CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus, RemoveNodeResult,
@@ -13,6 +13,58 @@ use crate::term::{
 use clap::Subcommand;
 use eetf::{Atom, Binary, FixInteger, List, Map, Term};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// How long to wait for a node to finish joining after it restarts TLS
+/// distribution in the background (#1033). Generous to tolerate slow/emulated
+/// hosts; the common case completes in a second or two.
+const JOIN_VALIDATE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Reconnect to the daemon (its distribution may be mid-restart) and wait until
+/// it reports a running cluster. Connection/RPC failures during the window are
+/// treated as "still restarting" and retried until `timeout`.
+async fn await_cluster_running(timeout: Duration, format: OutputFormat) -> Result<ClusterStatus> {
+    let deadline = Instant::now() + timeout;
+    let mut announced = false;
+
+    loop {
+        if let Some(status) = try_cluster_status().await {
+            if status.status == "running" {
+                return Ok(status);
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(CliError::RpcFailed(
+                "timed out waiting for the node to come back and report a running cluster".into(),
+            ));
+        }
+
+        if matches!(format, OutputFormat::Table) && !announced {
+            eprintln!("  reconnecting…");
+            announced = true;
+        }
+
+        smol::Timer::after(Duration::from_secs(2)).await;
+    }
+}
+
+/// One best-effort `cluster status` probe. Returns `None` on any
+/// connect/RPC/parse failure so the caller can keep polling.
+async fn try_cluster_status() -> Option<ClusterStatus> {
+    let mut conn = DaemonConnection::connect().await.ok()?;
+    let result = conn
+        .call("Elixir.NeonFS.CLI.Handler", "cluster_status", vec![])
+        .await
+        .ok()?;
+
+    if extract_error(&result).is_some() {
+        return None;
+    }
+
+    let data = unwrap_ok_tuple(result).ok()?;
+    ClusterStatus::from_term(data).ok()
+}
 
 /// Cluster management subcommands
 #[derive(Debug, Subcommand)]
@@ -468,7 +520,12 @@ impl ClusterCommand {
     }
 
     fn join(&self, token: &str, via: &str, format: OutputFormat) -> Result<()> {
-        let result = smol::block_on(async {
+        // Phase 1 — redeem the invite. The daemon validates the token and writes
+        // the cluster certs synchronously, then finishes the join in the
+        // background: it restarts TLS distribution (dropping this connection) and
+        // connects to the via node. So this call returns a `joining` ack; any
+        // synchronous failure (bad token, unreachable via node) surfaces here.
+        let ack = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             let token_binary = Binary::from(token.as_bytes().to_vec());
             let via_binary = Binary::from(via.as_bytes().to_vec());
@@ -480,31 +537,28 @@ impl ClusterCommand {
             .await
         })?;
 
-        // Check for error response
-        if let Some(err) = extract_error(&result) {
+        if let Some(err) = extract_error(&ack) {
             return Err(err);
         }
+        let _ = unwrap_ok_tuple(ack)?;
 
-        // Unwrap {:ok, value} tuple
-        let data = unwrap_ok_tuple(result)?;
+        if matches!(format, OutputFormat::Table) {
+            eprintln!("Invite redeemed; node is restarting TLS distribution and joining…");
+        }
 
-        // Parse response
-        let join_result = ClusterInitResult::from_term(data)?;
+        // Phase 2 — the node bounced distribution, so reconnect and wait until it
+        // reports a running cluster, confirming the join completed (#1033).
+        let status = smol::block_on(await_cluster_running(JOIN_VALIDATE_TIMEOUT, format))?;
 
-        // Format output
         match format {
             OutputFormat::Json => {
-                println!("{}", json::format(&join_result)?);
+                println!("{}", json::format(&status)?);
             }
             OutputFormat::Table => {
-                println!(
-                    "✓ Successfully joined cluster '{}'",
-                    join_result.cluster_name
-                );
+                println!("✓ Joined cluster '{}'", status.name);
                 println!();
-                println!("  Cluster ID:  {}", join_result.cluster_id);
-                println!("  Node ID:     {}", join_result.node_id);
-                println!("  Node Name:   {}", join_result.node_name);
+                println!("  Node:    {}", status.node);
+                println!("  Status:  {}", status.status);
                 println!();
             }
         }

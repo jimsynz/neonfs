@@ -310,7 +310,7 @@ defmodule NeonFS.TLSDistConfigTest do
       assert String.contains?(conf, "tlsv1.3")
     end
 
-    test "generates config with cluster cert first post-cluster", %{tmp_dir: tmp_dir} do
+    test "generates config with cluster cert only post-cluster", %{tmp_dir: tmp_dir} do
       File.write!(Path.join(tmp_dir, "node.crt"), "cluster-cert-pem")
       File.write!(Path.join(tmp_dir, "node.key"), "cluster-key-pem")
 
@@ -318,13 +318,13 @@ defmodule NeonFS.TLSDistConfigTest do
 
       conf = File.read!(Path.join(tmp_dir, "ssl_dist.conf"))
 
+      # Only the cluster cert is presented — listing the local cert as a
+      # fallback lets OTP's TLS 1.3 selection pick it for peer connections,
+      # which peers reject with "Unknown CA" (#1033).
       assert String.contains?(conf, "node.crt")
-      assert String.contains?(conf, "node-local.crt")
-
-      # Cluster cert should appear before local cert
-      node_pos = :binary.match(conf, "node.crt") |> elem(0)
-      local_pos = :binary.match(conf, "node-local.crt") |> elem(0)
-      assert node_pos < local_pos
+      assert String.contains?(conf, "node.key")
+      refute String.contains?(conf, "node-local.crt")
+      refute String.contains?(conf, "node-local.key")
     end
 
     test "generates valid Erlang term format", %{tmp_dir: tmp_dir} do

@@ -66,8 +66,15 @@ defmodule NeonFS.TLSDistConfig do
   Regenerates `ssl_dist.conf` for Erlang TLS distribution.
 
   Pre-cluster: uses only `node-local.crt`/`node-local.key`.
-  Post-cluster: lists the cluster node cert first in `certs_keys`
-  (preferred for inter-node connections), with the local cert as fallback.
+  Post-cluster: uses only the cluster node cert (`node.crt`/`node.key`).
+
+  We deliberately do NOT keep the local cert as a fallback alongside the
+  cluster cert: OTP's TLS 1.3 `certs_keys` selection cannot be relied on to
+  pick the cluster cert for a peer connection, and when it picks the local
+  (self-signed) cert the peer rejects it with "Unknown CA" (#1033). Every
+  verifier — peer nodes and the local CLI — trusts the cluster CA via
+  `ca_bundle.crt` once the node has joined, so presenting the cluster cert
+  alone is both sufficient and unambiguous.
   """
   @spec regenerate_config(String.t()) :: :ok
   def regenerate_config(tls_dir \\ TLS.tls_dir()) do
@@ -185,6 +192,133 @@ defmodule NeonFS.TLSDistConfig do
     :ok
   end
 
+  @doc """
+  Restarts Erlang's distribution subsystem in-process so a freshly written
+  `ssl_dist.conf` takes effect without a full daemon restart.
+
+  `:ssl_dist` consults `-ssl_dist_optfile` exactly once, when the distribution
+  supervisor's subtree starts, and caches it in an ETS table owned by
+  `ssl_dist_sup` (which lives under `net_sup`). Restarting that supervisor
+  re-consults the file, rebuilds the cache, and re-binds the (fixed) dist port
+  via `NeonFS.Epmd`. We can't use `:net_kernel.stop/0` — a node booted with
+  `-name` rejects it with `{:error, :not_allowed}` — so we bounce the
+  supervisor child directly, which is what OTP does internally.
+
+  This drops every peer connection for the duration (nodedown/nodeup); callers
+  invoke it only when the node has no cluster peers yet (right after
+  `cluster init`, or during `cluster join` before connecting), so the blast
+  radius is empty. Local process state, ETS (other than the dist-owned cache),
+  and the running Ra logs all survive — this is not a VM restart.
+
+  Emits `[:neonfs, :tls, :distribution_restarted]` on success.
+  """
+  @spec restart_distribution(keyword()) :: :ok | {:error, term()}
+  def restart_distribution(opts \\ []) do
+    if tls_distribution?() do
+      do_restart_distribution(opts)
+    else
+      # No TLS distribution to reload (plain inet_tcp, e.g. test/dev nodes and
+      # the in-BEAM peer harness). Bouncing :net_sup there would needlessly tear
+      # down the node's distribution, so it's a no-op.
+      :ok
+    end
+  end
+
+  defp do_restart_distribution(opts) do
+    retries = Keyword.get(opts, :retries, 5)
+    backoff_ms = Keyword.get(opts, :backoff_ms, 200)
+
+    :ssl.clear_pem_cache()
+
+    case dist_sup_id() do
+      nil ->
+        {:error, :no_distribution_supervisor}
+
+      id ->
+        _ = :supervisor.terminate_child(:kernel_sup, id)
+        restart_dist_child(id, retries, backoff_ms)
+    end
+  end
+
+  # True only when the node booted with `-proto_dist inet_tls` (the omnibus/daemon
+  # path). Tests and dev run plain distribution and must not be bounced.
+  defp tls_distribution? do
+    case :init.get_argument(:proto_dist) do
+      {:ok, values} ->
+        Enum.any?(values, fn v -> Enum.any?(v, &(to_string(&1) == "inet_tls")) end)
+
+      _ ->
+        false
+    end
+  end
+
+  @doc """
+  Blocks until distribution is up again after `restart_distribution/1`, i.e.
+  the node has a real name and is alive. Returns `{:error, :timeout}` if it
+  doesn't come back within `timeout_ms`.
+  """
+  @spec await_distribution(non_neg_integer()) :: :ok | {:error, :timeout}
+  def await_distribution(timeout_ms \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_distribution(deadline)
+  end
+
+  defp do_await_distribution(deadline) do
+    cond do
+      Node.alive?() and Node.self() != :nonode@nohost ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:error, :timeout}
+
+      true ->
+        Process.sleep(50)
+        do_await_distribution(deadline)
+    end
+  end
+
+  defp dist_sup_id do
+    :kernel_sup
+    |> :supervisor.which_children()
+    |> Enum.find_value(fn
+      {id, _pid, _type, _mods} when id in [:net_sup, :net_sup_dynamic] -> id
+      _ -> nil
+    end)
+  end
+
+  # The freshly released dist port may not be re-bindable for a few ms, so
+  # retry on any restart error rather than failing the whole join/init.
+  defp restart_dist_child(_id, retries, _backoff_ms) when retries < 0,
+    do: {:error, :restart_exhausted}
+
+  defp restart_dist_child(id, retries, backoff_ms) do
+    case :supervisor.restart_child(:kernel_sup, id) do
+      {:ok, _pid} ->
+        distribution_restarted()
+
+      {:ok, _pid, _info} ->
+        distribution_restarted()
+
+      {:error, :running} ->
+        distribution_restarted()
+
+      {:error, {:already_started, _pid}} ->
+        distribution_restarted()
+
+      {:error, _reason} when retries > 0 ->
+        Process.sleep(backoff_ms)
+        restart_dist_child(id, retries - 1, backoff_ms)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp distribution_restarted do
+    :telemetry.execute([:neonfs, :tls, :distribution_restarted], %{}, %{})
+    :ok
+  end
+
   defp bundle_sources(tls_dir) do
     [
       Path.join(tls_dir, "local-ca.crt"),
@@ -193,22 +327,21 @@ defmodule NeonFS.TLSDistConfig do
     ]
   end
 
+  # Prefer the cluster cert once it exists (post-join); otherwise fall back to
+  # the boot-time local cert (pre-cluster). Exactly one entry is emitted — see
+  # `regenerate_config/1` for why we never list both at once.
   defp build_certs_keys(tls_dir) do
-    cluster_cert = Path.join(tls_dir, "node.crt")
-    cluster_key = Path.join(tls_dir, "node.key")
-    local_cert = Path.join(tls_dir, "node-local.crt")
-    local_key = Path.join(tls_dir, "node-local.key")
+    cluster = {Path.join(tls_dir, "node.crt"), Path.join(tls_dir, "node.key")}
+    local = {Path.join(tls_dir, "node-local.crt"), Path.join(tls_dir, "node-local.key")}
 
-    entries =
-      [
-        {cluster_cert, cluster_key},
-        {local_cert, local_key}
-      ]
-      |> Enum.filter(fn {cert, key} -> File.exists?(cert) and File.exists?(key) end)
-      |> Enum.map(fn {cert, key} -> cert_key_entry(cert, key) end)
-
-    Enum.join(entries, ", ")
+    cond do
+      pair_exists?(cluster) -> cert_key_entry(elem(cluster, 0), elem(cluster, 1))
+      pair_exists?(local) -> cert_key_entry(elem(local, 0), elem(local, 1))
+      true -> ""
+    end
   end
+
+  defp pair_exists?({cert, key}), do: File.exists?(cert) and File.exists?(key)
 
   defp cert_key_entry(certfile, keyfile) do
     "\#{certfile => \"#{certfile}\", keyfile => \"#{keyfile}\"}"
