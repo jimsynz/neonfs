@@ -22,17 +22,16 @@ StateDirectory=neonfs
 # FUSE requires CAP_SYS_ADMIN for mounting
 AmbientCapabilities=CAP_SYS_ADMIN
 NoNewPrivileges=false
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/neonfs /mnt
 
-# This unit creates host-visible filesystem mounts. The default mount-
-# namespace propagation under PrivateTmp/ProtectSystem/ProtectHome is
-# slave, so mounts created inside the unit don't escape back to the
-# host namespace. `shared` makes the unit's mounts propagate outwards,
-# at the cost of also seeing host-side mount changes — fine for a
-# filesystem-providing service. (#758)
+# This unit creates host-visible FUSE mounts that host processes and
+# other interfaces must be able to read and write. The sandbox options
+# PrivateTmp/ProtectSystem/ProtectHome each force the unit's private
+# mount namespace to MS_SLAVE, which traps every FUSE mount inside the
+# daemon's namespace — invisible to the host. With them set,
+# `MountFlags=shared` only yields `shared,slave` (no back-propagation),
+# which is why #758's fix was insufficient and FUSE mounts never reached
+# the host (#1034). They are removed so `MountFlags=shared` leaves the
+# unit's namespace genuinely shared and mounts propagate to the host.
 MountFlags=shared
 
 [Install]

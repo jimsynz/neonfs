@@ -104,11 +104,13 @@ defmodule NeonFS.FUSE.SessionTest do
   end
 
   describe "build_entry/1" do
-    test "wraps build_attr and sets nodeid + valid windows" do
+    test "wraps build_attr and sets nodeid with no positive caching" do
       entry = Session.build_entry(%{"ino" => 99, "size" => 1024, "kind" => "file"})
       assert entry.nodeid == 99
-      assert entry.entry_valid == 1
-      assert entry.attr_valid == 1
+      # No positive dentry/attr caching — peers can change paths at any time, so
+      # the kernel must re-LOOKUP/GETATTR (#1034).
+      assert entry.entry_valid == 0
+      assert entry.attr_valid == 0
       assert entry.attr.ino == 99
       assert entry.attr.size == 1024
     end
