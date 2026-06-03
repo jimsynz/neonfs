@@ -74,8 +74,13 @@ volume_ready() { ncli 1 "volume list" 2>/dev/null | grep -qE "^${ACCEPT_VOL}[[:s
 s_fuse_mount() {
   volume_ready || { echo "  ${ACCEPT_VOL} missing" >&2; return 77; }
   node_ssh 1 "sudo install -d -o neonfs -g neonfs ${FUSE_MNT}" 2>/dev/null
-  ncli 1 "fuse mount ${ACCEPT_VOL} ${FUSE_MNT}" 2>&1 | grep -qiE 'mounted|already' \
-    || { ncli 1 "fuse list" 2>&1 | grep -q "${FUSE_MNT}" || { echo "  fuse mount failed" >&2; return 1; }; }
+  ncli 1 "fuse mount ${ACCEPT_VOL} ${FUSE_MNT}" 2>&1 | sed 's/^/  /' >&2
+  # Verify a real kernel FUSE mount via /proc/mounts rather than
+  # `mountpoint`: the mount is owned by the neonfs uid without
+  # allow_other, so `mountpoint` (run as the ssh user) gets EACCES even
+  # though the mount is attached. Reading the mount table needs no access.
+  node_ssh 1 "for i in \$(seq 1 20); do grep -q ' ${FUSE_MNT} fuse' /proc/mounts && exit 0; sleep 1; done; exit 1" 2>/dev/null \
+    || { echo "  fuse mount did not attach (absent from /proc/mounts)" >&2; return 1; }
 }
 
 s_fuse_ops() {

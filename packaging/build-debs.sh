@@ -118,7 +118,12 @@ for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neon
     echo "==> Building ${component} release..."
     cd "${REPO_ROOT}/${component}"
     MIX_ENV=prod mix deps.get --only prod
-    rm -rf _build/prod/rel
+    # Wipe the release tree (see above) AND the compiled local path-dep
+    # artifacts. `mix release` reassembles from `_build/prod/lib` and does not
+    # reliably recompile sibling path deps (neonfs_*, fuse_server) after their
+    # sources change, so an edited interface package can be packaged with a
+    # stale beam. Hex deps stay cached.
+    rm -rf _build/prod/rel _build/prod/lib/neonfs_* _build/prod/lib/fuse_server
     MIX_ENV=prod mix release --overwrite
 done
 

@@ -93,8 +93,19 @@ ensure_image() {
 }
 
 ensure_debs() {
-  if ls "${DEB_DIR}"/neonfs-omnibus_*.deb >/dev/null 2>&1; then return 0; fi
-  log "building .debs (VERSION=${VERSION}) — this takes several minutes"
+  local deb newer
+  deb="$(ls -t "${DEB_DIR}"/neonfs-omnibus_*.deb 2>/dev/null | head -1 || true)"
+  if [ -n "${deb}" ]; then
+    newer="$(find "${REPO_ROOT}" -type f \
+      \( -name '*.ex' -o -name '*.exs' -o -name '*.rs' -o -name '*.toml' \
+         -o -name '*.service' -o -name '*.yaml' -o -name '*.sh' \) \
+      -not -path '*/_build/*' -not -path '*/deps/*' -not -path '*/target/*' \
+      -newer "${deb}" -print -quit 2>/dev/null || true)"
+    [ -z "${newer}" ] && return 0
+    log "source changed since last build — rebuilding .debs"
+  else
+    log "building .debs (VERSION=${VERSION}) — this takes several minutes"
+  fi
   mkdir -p "${DEB_DIR}"
   VERSION="${VERSION}" OUT_DIR="${DEB_DIR}" bash "${REPO_ROOT}/packaging/build-debs.sh"
 }
@@ -217,7 +228,7 @@ boot_node() {
 }
 
 wait_ssh() {
-  local i="$1" deadline=$(( SECONDS + 180 ))
+  local i="$1" deadline=$(( SECONDS + 360 ))
   log "waiting for ssh on node ${i}"
   while [ "${SECONDS}" -lt "${deadline}" ]; do
     if node_ssh "$i" true 2>/dev/null; then return 0; fi
@@ -271,7 +282,7 @@ EOF
 }
 
 wait_daemon() {
-  local i="$1" deadline=$(( SECONDS + 120 ))
+  local i="$1" deadline=$(( SECONDS + 240 ))
   log "waiting for neonfs daemon on node ${i}"
   while [ "${SECONDS}" -lt "${deadline}" ]; do
     if node_ssh "$i" "sudo neonfs node status >/dev/null 2>&1"; then return 0; fi
