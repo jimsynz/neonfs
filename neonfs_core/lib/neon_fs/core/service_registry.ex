@@ -242,6 +242,22 @@ defmodule NeonFS.Core.ServiceRegistry do
     {:reply, reply, state}
   end
 
+  # A nodedown for the local node is spurious — the registry cannot be
+  # processing this message if its own node is genuinely down. It fires
+  # transiently around the distribution restart on `cluster init`, and
+  # deregistering self would strand a single-node cluster with no
+  # registered core, so every interface reports "all core nodes
+  # unreachable" (#1049). Ignore it; the local core stays registered.
+  @impl true
+  def handle_info({:nodedown, node, _info}, state) when node == node() do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:nodedown, node}, state) when node == node() do
+    {:noreply, state}
+  end
+
   @impl true
   def handle_info({:nodedown, node, _info}, state) do
     Logger.warning("Service node down, deregistering", node: node)
