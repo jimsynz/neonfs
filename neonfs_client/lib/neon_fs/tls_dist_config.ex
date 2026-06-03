@@ -214,6 +214,17 @@ defmodule NeonFS.TLSDistConfig do
   """
   @spec restart_distribution(keyword()) :: :ok | {:error, term()}
   def restart_distribution(opts \\ []) do
+    if tls_distribution?() do
+      do_restart_distribution(opts)
+    else
+      # No TLS distribution to reload (plain inet_tcp, e.g. test/dev nodes and
+      # the in-BEAM peer harness). Bouncing :net_sup there would needlessly tear
+      # down the node's distribution, so it's a no-op.
+      :ok
+    end
+  end
+
+  defp do_restart_distribution(opts) do
     retries = Keyword.get(opts, :retries, 5)
     backoff_ms = Keyword.get(opts, :backoff_ms, 200)
 
@@ -226,6 +237,18 @@ defmodule NeonFS.TLSDistConfig do
       id ->
         _ = :supervisor.terminate_child(:kernel_sup, id)
         restart_dist_child(id, retries, backoff_ms)
+    end
+  end
+
+  # True only when the node booted with `-proto_dist inet_tls` (the omnibus/daemon
+  # path). Tests and dev run plain distribution and must not be bounced.
+  defp tls_distribution? do
+    case :init.get_argument(:proto_dist) do
+      {:ok, values} ->
+        Enum.any?(values, fn v -> Enum.any?(v, &(to_string(&1) == "inet_tls")) end)
+
+      _ ->
+        false
     end
   end
 
