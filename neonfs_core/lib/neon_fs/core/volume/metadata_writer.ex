@@ -61,10 +61,19 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
           {:ok, binary()} | write_error()
   def put(volume_id, index_kind, key, value, opts \\ [])
       when is_binary(volume_id) and is_atom(index_kind) and is_binary(key) and is_binary(value) do
-    apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
-      nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
-      nif_put.(store, current_tree_root, "hot", key, value)
-    end)
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn ->
+        apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
+          nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
+          nif_put.(store, current_tree_root, "hot", key, value)
+        end)
+      end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :put, [volume_id, index_kind, key, value, remote_opts])
+      end
+    )
   end
 
   @doc """
@@ -75,10 +84,19 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
           {:ok, binary()} | write_error()
   def delete(volume_id, index_kind, key, opts \\ [])
       when is_binary(volume_id) and is_atom(index_kind) and is_binary(key) do
-    apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
-      nif_delete = Keyword.get(opts, :index_tree_delete, &Native.index_tree_delete/4)
-      nif_delete.(store, current_tree_root, "hot", key)
-    end)
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn ->
+        apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
+          nif_delete = Keyword.get(opts, :index_tree_delete, &Native.index_tree_delete/4)
+          nif_delete.(store, current_tree_root, "hot", key)
+        end)
+      end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :delete, [volume_id, index_kind, key, remote_opts])
+      end
+    )
   end
 
   @doc """
@@ -89,6 +107,22 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
           {:ok, binary()} | write_error()
   def purge_tombstones(volume_id, index_kind, before_unix_nanos, opts \\ [])
       when is_binary(volume_id) and is_atom(index_kind) and is_integer(before_unix_nanos) do
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn -> local_purge_tombstones(volume_id, index_kind, before_unix_nanos, opts) end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :purge_tombstones, [
+          volume_id,
+          index_kind,
+          before_unix_nanos,
+          remote_opts
+        ])
+      end
+    )
+  end
+
+  defp local_purge_tombstones(volume_id, index_kind, before_unix_nanos, opts) do
     apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
       nif_purge =
         Keyword.get(opts, :index_tree_purge_tombstones, &Native.index_tree_purge_tombstones/4)
@@ -114,14 +148,90 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   def update_schedule(volume_id, schedule_key, schedule, opts \\ [])
       when is_binary(volume_id) and schedule_key in [:gc, :scrub, :anti_entropy] and
              is_map(schedule) do
-    apply_segment_op(volume_id, opts, fn segment ->
-      %{segment | schedules: Map.put(segment.schedules, schedule_key, schedule)}
-    end)
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn ->
+        apply_segment_op(volume_id, opts, fn segment ->
+          %{segment | schedules: Map.put(segment.schedules, schedule_key, schedule)}
+        end)
+      end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :update_schedule, [volume_id, schedule_key, schedule, remote_opts])
+      end
+    )
   end
 
   ## Internals
 
   @default_cas_retries 5
+  @remote_write_timeout 30_000
+
+  # A metadata write needs the volume's root segment, but it can only be read
+  # and CAS-updated from a node that holds a replica of it. When the local node
+  # has none, the resolve step fails with `{:no_local_replica, drive_locations}`
+  # (often wrapped in `:root_chunk_unreachable`) *before* anything is committed,
+  # and the candidate nodes are carried in that error. Re-dispatch the whole
+  # operation to one of them — the read path has the same fallback (#1045).
+  #
+  # Correctness-only: this does not change the root segment's replica set; it
+  # just routes the write to a node that can perform it (routing/placement is
+  # tracked in #1046). `__remote_dispatched` stops the remote side recursing.
+  # Only `:no_local_replica` triggers re-dispatch — every other error (CAS
+  # exhaustion, not_found, malformed) is authoritative or already retried
+  # locally, and is returned as-is.
+  defp with_remote_fallback(_volume_id, opts, local_fun, remote_fun) do
+    case local_fun.() do
+      {:error, reason} = err ->
+        with false <- Keyword.get(opts, :__remote_dispatched, false),
+             {:ok, locations} <- no_local_replica_locations(reason),
+             [_ | _] = nodes <- candidate_nodes(locations) do
+          try_remote_nodes(nodes, err, remote_fun)
+        else
+          _ -> err
+        end
+
+      # `{:ok, _}` and the writer's 3-element error tuples
+      # (e.g. `{:error, :insufficient_replicas, details}`) pass through:
+      # only the pre-commit `:no_local_replica` case is re-dispatched.
+      other ->
+        other
+    end
+  end
+
+  defp no_local_replica_locations({:root_chunk_unreachable, {:no_local_replica, locations}}),
+    do: {:ok, locations}
+
+  defp no_local_replica_locations({:no_local_replica, locations}), do: {:ok, locations}
+  defp no_local_replica_locations(_), do: :error
+
+  defp candidate_nodes(locations) do
+    locations
+    |> Enum.map(& &1.node)
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == node()))
+  end
+
+  defp try_remote_nodes([], err, _fun), do: err
+
+  defp try_remote_nodes([node | rest], err, fun) do
+    case fun.(node, __remote_dispatched: true) do
+      {:ok, _} = ok -> ok
+      {:error, _} -> try_remote_nodes(rest, err, fun)
+    end
+  end
+
+  defp remote_call(node, opts, fn_name, args) do
+    caller = Keyword.get(opts, :remote_caller, &default_remote_caller/3)
+    caller.(node, fn_name, args)
+  end
+
+  defp default_remote_caller(node, fn_name, args) do
+    case :rpc.call(node, __MODULE__, fn_name, args, @remote_write_timeout) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, reason}}
+      other -> other
+    end
+  end
 
   # Walks the read path to resolve the current segment, applies the
   # caller's `tree_op` to produce a new tree root hash, then commits
