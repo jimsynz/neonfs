@@ -298,6 +298,10 @@ cluster_bootstrap() {
   # at this point. It auto-adjusts up to the core-node count as nodes join.
   log "initialising cluster '${CLUSTER_NAME}' on node 1"
   node_cli 1 "cluster init --name '${CLUSTER_NAME}' --drive /mnt/neonfs/drive1 --system-replicas 1"
+  # `cluster init` restarts the node to bring the cluster TLS config into effect
+  # (#1051), so it briefly drops out. Wait for it to come back before issuing
+  # any further CLI commands, otherwise they hit the node mid-restart.
+  wait_init_restart 1
   add_extra_drives 1
 
   local i
@@ -320,6 +324,20 @@ add_extra_drives() {
   for d in $(seq 2 "${DRIVES_PER_NODE}"); do
     node_cli "$i" "drive add --path /mnt/neonfs/drive${d}"
   done
+}
+
+# `cluster init` triggers a full node restart (#1051). Wait for the node to drop
+# out (restart started) and then recover, so subsequent CLI commands don't race
+# the reboot.
+wait_init_restart() {
+  local i="$1" deadline
+  log "waiting for node ${i} to restart after cluster init"
+  deadline=$(( SECONDS + 30 ))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    node_ssh "$i" "sudo timeout 5 neonfs node status >/dev/null 2>&1" || break
+    sleep 1
+  done
+  wait_daemon "$i"
 }
 
 # --- teardown --------------------------------------------------------------

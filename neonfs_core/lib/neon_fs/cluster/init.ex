@@ -141,23 +141,29 @@ defmodule NeonFS.Cluster.Init do
     end
   end
 
-  # Reload the freshly written cluster TLS config into the running distribution
-  # so this node presents its cluster cert to peers that join later. Deferred
-  # and detached: the restart drops the CLI's distribution connection, so we let
-  # the init reply flush first; the CLI then reconnects and re-validates via
-  # `cluster status` (#1033). Safe here — the node has no cluster peers yet.
+  # Bring the freshly written cluster TLS config into effect by restarting the
+  # whole node. Bouncing `net_sup` in place reloads the config, but the bounce
+  # fires a self-nodedown that tears down service registration, the data plane,
+  # lock state and discovery across both the core and client supervision trees;
+  # on a single-node cluster there is no peer to restore any of it, so core
+  # reachability collapses seconds after init (#1051). A normal boot does *not*
+  # bounce distribution, so a full restart instead lands on the clean boot path:
+  # the node comes back with its cluster cert and name, every subsystem
+  # initialises once in order, and `ServiceRegistry` re-registers the local core
+  # (with the live data endpoint) with no departure storm to recover from.
+  #
+  # Detached so the init reply flushes to the CLI first; the CLI's distribution
+  # connection drops over the restart and reconnects, re-validating via `cluster
+  # status` (#1033) — the same contract the in-place bounce already had. Gated on
+  # TLS distribution: plain distribution (tests/dev) has nothing to reload and
+  # must not restart.
   defp schedule_distribution_restart do
-    spawn(fn ->
-      Process.sleep(500)
-
-      case TLSDistConfig.restart_distribution() do
-        :ok ->
-          :ok
-
-        {:error, reason} ->
-          Logger.error("distribution restart after cluster init failed: #{inspect(reason)}")
-      end
-    end)
+    if TLSDistConfig.tls_distribution?() do
+      spawn(fn ->
+        Process.sleep(500)
+        :init.restart()
+      end)
+    end
 
     :ok
   end
