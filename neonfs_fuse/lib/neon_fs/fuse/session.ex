@@ -109,6 +109,14 @@ defmodule NeonFS.FUSE.Session do
   # the buffer can't hold a maximum-sized WRITE.
   @max_write 64 * 1024
 
+  # FOPEN_DIRECT_IO (1 << 0): tell the kernel NOT to use its page cache for this
+  # file, so every read/write is forwarded to us and lands in the shared core
+  # FileIndex/chunk store. Without it the kernel serves reads and absorbs writes
+  # from its per-mount cache, so FUSE-written data never reaches the backend and
+  # is invisible to NFS/S3/WebDAV (#1034). Correct for a distributed filesystem;
+  # the cost is no kernel-side read caching.
+  @fopen_direct_io 0x00000001
+
   # POSIX file-type bits.
   @s_ifreg 0o100000
   @s_ifdir 0o040000
@@ -766,7 +774,7 @@ defmodule NeonFS.FUSE.Session do
   end
 
   defp handle_handler_reply(:open, kernel_unique, {"open_ok", payload}, state) do
-    reply = %Response.Open{fh: payload["fh"] || 0, open_flags: 0}
+    reply = %Response.Open{fh: payload["fh"] || 0, open_flags: @fopen_direct_io}
     write_reply(state.fd, kernel_unique, reply, 0)
     emit_opcode_telemetry(:open, :ok, state)
     state
@@ -925,7 +933,10 @@ defmodule NeonFS.FUSE.Session do
   defp handle_handler_reply(:create, kernel_unique, {"entry_ok", payload}, state) do
     reply = %Response.CreateReply{
       entry: build_entry(payload),
-      open: %Response.Open{fh: payload["fh"] || payload["ino"] || 0, open_flags: 0}
+      open: %Response.Open{
+        fh: payload["fh"] || payload["ino"] || 0,
+        open_flags: @fopen_direct_io
+      }
     }
 
     write_reply(state.fd, kernel_unique, reply, 0)
@@ -1044,8 +1055,13 @@ defmodule NeonFS.FUSE.Session do
     %Response.Entry{
       nodeid: payload["ino"] || 0,
       generation: 0,
-      entry_valid: 1,
-      attr_valid: 1,
+      # No positive dentry/attr caching: a peer (NFS/S3/WebDAV or another FUSE
+      # mount) can change this path at any time, so the kernel must re-LOOKUP /
+      # re-GETATTR rather than serve a stale cached entry. Caching positive
+      # entries also let the kernel skip CREATE for a path it thinks exists,
+      # which is how FUSE-created files failed to reach the backend (#1034).
+      entry_valid: 0,
+      attr_valid: 0,
       entry_valid_nsec: 0,
       attr_valid_nsec: 0,
       attr: build_attr(payload)
@@ -1146,8 +1162,10 @@ defmodule NeonFS.FUSE.Session do
         entry: %Response.Entry{
           nodeid: entry["ino"] || 0,
           generation: 0,
-          entry_valid: 1,
-          attr_valid: 1,
+          # See build_entry/1: no positive caching for cross-interface
+          # consistency (#1034).
+          entry_valid: 0,
+          attr_valid: 0,
           entry_valid_nsec: 0,
           attr_valid_nsec: 0,
           attr: attr
