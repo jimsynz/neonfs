@@ -54,6 +54,7 @@ defmodule NeonFS.Core.BlobStore do
 
   alias NeonFS.Core.Blob.Native
   alias NeonFS.Core.Drive
+  alias NeonFS.Core.DriveRegistry
   alias NeonFS.Core.DriveState
   alias NeonFS.Core.KeyManager
   alias NeonFS.Core.Replication
@@ -122,6 +123,59 @@ defmodule NeonFS.Core.BlobStore do
     {server, opts} = Keyword.pop(opts, :server, __MODULE__)
     GenServer.call(server, {:write_chunk, data, drive_id, tier, opts})
   end
+
+  @doc """
+  Resolves an inbound chunk write's `drive_id` to a real, locally-registered
+  active drive.
+
+  Interface writers (`NeonFS.Client.ChunkWriter`) ship chunks with the sentinel
+  drive_id `"default"`, delegating the choice of drive to the receiving node.
+  This maps that sentinel — or any drive_id not registered and active on this
+  node — to a local active drive **in the requested tier** (#1042). It is
+  tier-strict: it never silently places a chunk on a drive of a different tier.
+  A drive_id that is already a local active drive is returned unchanged; if the
+  node has no active drive in that tier the sentinel is returned as-is so the
+  write fails clearly rather than landing on the wrong tier. (Choosing a node
+  that actually has storage in the tier is target-selection's job — #1044.)
+  """
+  @spec resolve_drive_id(drive_id(), tier() | String.t()) :: drive_id()
+  def resolve_drive_id(drive_id, tier) do
+    cond do
+      local_active_drive?(drive_id) -> drive_id
+      id = select_local_drive(tier) -> id
+      true -> log_no_drive_in_tier(tier, drive_id)
+    end
+  end
+
+  defp local_active_drive?(drive_id) do
+    case DriveRegistry.get_drive(Node.self(), drive_id) do
+      {:ok, %Drive{state: state}} -> state in [:active, :standby]
+      _ -> false
+    end
+  end
+
+  defp select_local_drive(tier) do
+    case DriveRegistry.select_drive(normalise_tier(tier)) do
+      {:ok, %Drive{id: id}} -> id
+      {:error, _} -> nil
+    end
+  end
+
+  defp log_no_drive_in_tier(tier, drive_id) do
+    Logger.warning("No active drive in tier for inbound chunk; write will fail",
+      tier: tier,
+      drive_id: drive_id,
+      node: Node.self()
+    )
+
+    drive_id
+  end
+
+  defp normalise_tier(tier) when is_atom(tier), do: tier
+  defp normalise_tier("hot"), do: :hot
+  defp normalise_tier("warm"), do: :warm
+  defp normalise_tier("cold"), do: :cold
+  defp normalise_tier(_), do: :hot
 
   @doc """
   Reads a chunk from a specific drive in the blob store.
