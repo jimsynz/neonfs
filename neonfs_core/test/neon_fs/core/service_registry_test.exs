@@ -70,6 +70,22 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     assert {:error, :not_found} = ServiceRegistry.get(shared_node, :nfs)
   end
 
+  test "ignores a nodedown for the local node and keeps its services registered" do
+    :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+    assert {:ok, _} = ServiceRegistry.get(Node.self(), :core)
+
+    send(
+      Process.whereis(ServiceRegistry),
+      {:nodedown, Node.self(), [nodedown_reason: :net_kernel_terminated]}
+    )
+
+    # Drain the mailbox past the nodedown message before asserting.
+    :sys.get_state(ServiceRegistry)
+
+    assert {:ok, _} = ServiceRegistry.get(Node.self(), :core),
+           "the local core service must survive a spurious self-nodedown (#1049)"
+  end
+
   defp start_test_peer(name, dist_port, peer_ports_env) do
     code_paths =
       :code.get_path()
