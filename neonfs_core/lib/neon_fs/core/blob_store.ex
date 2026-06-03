@@ -164,7 +164,7 @@ defmodule NeonFS.Core.BlobStore do
   defp log_no_drive_in_tier(tier, drive_id) do
     Logger.warning("No active drive in tier for inbound chunk; write will fail",
       tier: tier,
-      requested_drive_id: drive_id,
+      drive_id: drive_id,
       node: Node.self()
     )
 
