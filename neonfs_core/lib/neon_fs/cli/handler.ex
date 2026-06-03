@@ -1013,38 +1013,17 @@ defmodule NeonFS.CLI.Handler do
     type = String.to_existing_atom(type_str)
 
     case Join.join_cluster(token, via_address, type) do
-      {:ok, state} ->
-        # Rebuild the quorum metadata ring on all nodes to include the new member
-        rebuild_quorum_ring_on_all_nodes()
-
-        AuditLog.log_event(
-          event_type: :node_joined,
-          actor_uid: 0,
-          resource: Atom.to_string(Node.self()),
-          details: %{
-            cluster_id: state.cluster_id,
-            node_type: Atom.to_string(state.node_type),
-            via_address: via_address
-          }
-        )
-
+      {:ok, :joining} ->
+        # The join finishes asynchronously: the node restarts TLS distribution
+        # (dropping this connection) and then connects + completes Ra membership.
+        # The audit-log entry and quorum-ring rebuild now happen in that worker
+        # once the node is connected. The CLI reconnects and validates via
+        # `cluster status` (#1033).
         {:ok,
          %{
-           "cluster_id" => state.cluster_id,
-           "cluster_name" => state.cluster_name,
-           "created_at" => DateTime.to_iso8601(state.created_at),
-           "node_id" => state.this_node.id,
-           "node_name" => Atom.to_string(state.this_node.name),
-           "node_type" => Atom.to_string(state.node_type),
-           "joined_at" => DateTime.to_iso8601(state.this_node.joined_at),
-           "known_peers" =>
-             Enum.map(state.known_peers, fn peer ->
-               %{
-                 "id" => peer.id,
-                 "name" => Atom.to_string(peer.name),
-                 "last_seen" => DateTime.to_iso8601(peer.last_seen)
-               }
-             end)
+           "status" => "joining",
+           "via_address" => via_address,
+           "node_name" => Atom.to_string(Node.self())
          }}
 
       {:error, reason} ->
@@ -4728,20 +4707,6 @@ defmodule NeonFS.CLI.Handler do
 
   defp atomise_map(map) when is_map(map) do
     Map.new(map, fn {k, v} -> {coerce_atom(k), v} end)
-  end
-
-  defp rebuild_quorum_ring_on_all_nodes do
-    NeonFS.Core.Supervisor.rebuild_quorum_ring()
-
-    for node <- ServiceRegistry.connected_nodes_by_type(:core) do
-      try do
-        :erpc.call(node, NeonFS.Core.Supervisor, :rebuild_quorum_ring, [], 5_000)
-      catch
-        _, _ -> :ok
-      end
-    end
-
-    :ok
   end
 
   # ── handle_remove_node/2 helpers ─────────────────────────────────────

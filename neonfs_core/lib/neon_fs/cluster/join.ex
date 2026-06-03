@@ -11,6 +11,7 @@ defmodule NeonFS.Cluster.Join do
   alias NeonFS.Cluster.{Invite, InviteRedemption, State}
 
   alias NeonFS.Core.{
+    AuditLog,
     CertificateAuthority,
     DriveManager,
     RaServer,
@@ -18,6 +19,7 @@ defmodule NeonFS.Cluster.Join do
     VolumeRegistry
   }
 
+  alias NeonFS.Core.Supervisor, as: CoreSupervisor
   alias NeonFS.TLSDistConfig
   alias NeonFS.Transport.{Listener, PoolManager, TLS}
 
@@ -47,19 +49,20 @@ defmodule NeonFS.Cluster.Join do
     skip Ra cluster membership but are registered in ServiceRegistry.
 
   ## Returns
-  - `{:ok, state}` on successful join
-  - `{:error, reason}` on failure
+  - `{:ok, :joining}` once the invite is redeemed and credentials are stored.
+    The join then completes asynchronously: the node restarts TLS distribution
+    (to load the cluster cert), connects to the via node, and joins Ra. Callers
+    confirm completion by polling `cluster status` (#1033).
+  - `{:error, reason}` on a synchronous failure (invalid token, unreachable via
+    node, already in a cluster).
 
   ## Examples
 
       iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", "node1:9568")
-      {:ok, %NeonFS.Cluster.State{}}
-
-      iex> NeonFS.Cluster.Join.join_cluster("nfs_inv_...", "node1:9568", :fuse)
-      {:ok, %NeonFS.Cluster.State{}}
+      {:ok, :joining}
   """
   @spec join_cluster(String.t(), String.t(), ServiceType.t()) ::
-          {:ok, State.t()} | {:error, term()}
+          {:ok, State.t() | :joining} | {:error, term()}
   def join_cluster(token, via_address, type \\ :core)
       when is_binary(token) and is_binary(via_address) and is_service_type(type) do
     this_node = Node.self()
@@ -70,20 +73,88 @@ defmodule NeonFS.Cluster.Join do
     with :ok <- validate_not_in_cluster(),
          {:ok, credentials} <- request_join_http(via_address, token, csr, node_name),
          :ok <- store_credentials(credentials, node_key),
-         :ok <- TLSDistConfig.regenerate(TLS.tls_dir()),
+         :ok <- TLSDistConfig.regenerate(TLS.tls_dir()) do
+      # Connecting to the via node over TLS distribution requires the cluster
+      # cert we just wrote, which only goes live after a distribution restart —
+      # and that restart drops the CLI's connection. So the rest of the join
+      # (restart → connect → Ra membership) runs in a detached process; the CLI
+      # reconnects and validates via `cluster status` (#1033). Synchronous
+      # failures (bad token, unreachable via node) are still reported directly.
+      finalize_join_async(credentials, token, this_node, via_address, type)
+      {:ok, :joining}
+    end
+  end
+
+  # Detached: survives both the CLI disconnect and the distribution restart it
+  # triggers (it's a local, unlinked process). The 500 ms delay lets the CLI's
+  # "joining" ack flush before distribution drops.
+  defp finalize_join_async(credentials, token, this_node, via_address, type) do
+    spawn(fn -> do_finalize_join(credentials, token, this_node, via_address, type) end)
+    :ok
+  end
+
+  defp do_finalize_join(credentials, token, this_node, via_address, type) do
+    Process.sleep(500)
+
+    case run_finalize_join(credentials, token, this_node, via_address, type) do
+      :ok ->
+        :ok
+
+      other ->
+        Logger.error("cluster join finalize failed", reason: inspect(other))
+        :telemetry.execute([:neonfs, :cluster, :join_failed], %{}, %{reason: inspect(other)})
+    end
+  end
+
+  defp run_finalize_join(credentials, token, this_node, via_address, type) do
+    with :ok <- TLSDistConfig.restart_distribution(),
+         :ok <- TLSDistConfig.await_distribution(10_000),
          :ok <- activate_cluster_distribution(credentials),
          {:ok, cluster_info} <-
            complete_join_via_distribution(credentials, token, this_node, type),
          {:ok, state} <- build_cluster_state(cluster_info, type),
          :ok <- State.save(state) do
       activate_data_plane()
-
-      if ServiceType.core?(type) do
-        schedule_ra_join_async(state)
-      end
-
-      {:ok, state}
+      finalize_core_membership(state, via_address, type)
+      :telemetry.execute([:neonfs, :cluster, :join_completed], %{}, %{type: type})
+      :ok
     end
+  end
+
+  defp finalize_core_membership(state, via_address, type) do
+    if ServiceType.core?(type) do
+      _ = join_ra_cluster(state)
+      rebuild_quorum_ring_on_cores()
+    end
+
+    log_join_completed(state, via_address)
+  end
+
+  defp rebuild_quorum_ring_on_cores do
+    CoreSupervisor.rebuild_quorum_ring()
+
+    for node <- ServiceRegistry.connected_nodes_by_type(:core) do
+      try do
+        :erpc.call(node, CoreSupervisor, :rebuild_quorum_ring, [], 5_000)
+      catch
+        _, _ -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp log_join_completed(state, via_address) do
+    AuditLog.log_event(
+      event_type: :node_joined,
+      actor_uid: 0,
+      resource: Atom.to_string(state.this_node.name),
+      details: %{
+        cluster_id: state.cluster_id,
+        node_type: Atom.to_string(state.node_type),
+        via_address: via_address
+      }
+    )
   end
 
   @doc """

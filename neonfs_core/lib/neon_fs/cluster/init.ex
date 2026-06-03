@@ -133,11 +133,33 @@ defmodule NeonFS.Cluster.Init do
          :ok <- issue_first_node_cert(),
          :ok <- TLSDistConfig.regenerate(TLS.tls_dir()) do
       activate_data_plane()
+      schedule_distribution_restart()
       {:ok, cluster_id}
     else
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Reload the freshly written cluster TLS config into the running distribution
+  # so this node presents its cluster cert to peers that join later. Deferred
+  # and detached: the restart drops the CLI's distribution connection, so we let
+  # the init reply flush first; the CLI then reconnects and re-validates via
+  # `cluster status` (#1033). Safe here — the node has no cluster peers yet.
+  defp schedule_distribution_restart do
+    spawn(fn ->
+      Process.sleep(500)
+
+      case TLSDistConfig.restart_distribution() do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("distribution restart after cluster init failed: #{inspect(reason)}")
+      end
+    end)
+
+    :ok
   end
 
   defp maybe_add_initial_drive(nil), do: :ok
