@@ -89,12 +89,20 @@ defmodule NeonFS.Transport.PoolManager do
   @doc """
   Returns a `{host, port}` tuple for advertising this node's data transfer endpoint.
 
-  If `:neonfs_client, :data_transfer, :advertise` is configured, uses that address.
-  Otherwise auto-detects the first non-loopback IPv4 address.
+  Address selection, in order:
+
+  1. `:neonfs_client, :data_transfer, :advertise` if configured (operator override,
+     e.g. `NEONFS_DATA_ADVERTISE_ADDR`).
+  2. The node's own distribution address when the node name's host is an IP literal
+     (e.g. `neonfs@10.0.0.1`). This is the address peers already use to reach this
+     node, and it matches the node cert's `iPAddress` SAN — so the data plane is
+     both routable and verifiable. Picking the first arbitrary NIC instead breaks
+     cross-node reads/writes on multi-homed hosts (#1040).
+  3. The first non-loopback IPv4 (single-homed / hostname-named fallback).
   """
   @spec advertise_endpoint(:inet.port_number()) :: endpoint()
   def advertise_endpoint(port) do
-    host = configured_advertise_address() || auto_detect_address()
+    host = configured_advertise_address() || dist_host_address() || auto_detect_address()
     {host, port}
   end
 
@@ -385,8 +393,38 @@ defmodule NeonFS.Transport.PoolManager do
   end
 
   defp configured_advertise_address do
-    Application.get_env(:neonfs_client, :data_transfer, [])
-    |> Keyword.get(:advertise)
+    case Application.get_env(:neonfs_client, :data_transfer, []) |> Keyword.get(:advertise) do
+      nil -> nil
+      "" -> nil
+      addr -> normalize_host(addr)
+    end
+  end
+
+  # The address peers use to reach this node for distribution — but only when the
+  # node name's host is an IP literal. A hostname (or the test harness's
+  # `@localhost`) returns nil so we fall through to auto-detection unchanged.
+  defp dist_host_address do
+    with node when node != :nonode@nohost <- Node.self(),
+         host = node |> Atom.to_string() |> String.split("@") |> List.last(),
+         {:ok, addr} <- :inet.parse_address(String.to_charlist(host)) do
+      addr
+    else
+      _ -> nil
+    end
+  end
+
+  # Accept an IP tuple, a charlist hostname/IP, or a string; produce a form
+  # `:ssl.connect/:gen_tcp.connect` accept (IP tuple, or charlist hostname).
+  defp normalize_host(addr) when is_tuple(addr), do: addr
+  defp normalize_host(addr) when is_list(addr), do: addr
+
+  defp normalize_host(addr) when is_binary(addr) do
+    charlist = String.to_charlist(addr)
+
+    case :inet.parse_address(charlist) do
+      {:ok, ip} -> ip
+      {:error, _} -> charlist
+    end
   end
 
   defp auto_detect_address do

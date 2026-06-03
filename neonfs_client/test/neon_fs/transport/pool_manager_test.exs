@@ -214,6 +214,21 @@ defmodule NeonFS.Transport.PoolManagerTest do
       # Host should be a tuple (IPv4) or charlist
       assert is_tuple(host) or is_list(host)
     end
+
+    test "normalizes a configured string IP to an address tuple" do
+      # NEONFS_DATA_ADVERTISE_ADDR arrives as a string via runtime config.
+      Application.put_env(:neonfs_client, :data_transfer, advertise: "10.0.1.5")
+      on_exit(fn -> Application.delete_env(:neonfs_client, :data_transfer) end)
+
+      assert {{10, 0, 1, 5}, 44_831} = PoolManager.advertise_endpoint(44_831)
+    end
+
+    test "keeps a configured hostname string as a charlist" do
+      Application.put_env(:neonfs_client, :data_transfer, advertise: "data.example.com")
+      on_exit(fn -> Application.delete_env(:neonfs_client, :data_transfer) end)
+
+      assert {~c"data.example.com", 44_831} = PoolManager.advertise_endpoint(44_831)
+    end
   end
 
   describe "discovery refresh" do

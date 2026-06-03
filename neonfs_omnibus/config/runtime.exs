@@ -22,6 +22,13 @@ if config_env() == :prod do
     bootstrap_nodes: [core_node],
     service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
 
+  # Address peers should use to reach this node's data plane. Defaults to the
+  # node's distribution address; override here for multi-homed/hostname-named
+  # hosts where auto-detection would pick the wrong NIC (#1040).
+  if advertise = System.get_env("NEONFS_DATA_ADVERTISE_ADDR") do
+    config :neonfs_client, :data_transfer, advertise: advertise
+  end
+
   # Core configuration
   #
   # Fresh installs come up with no drives configured (#754). Operators
