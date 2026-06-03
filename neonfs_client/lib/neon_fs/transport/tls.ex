@@ -66,10 +66,14 @@ defmodule NeonFS.Transport.TLS do
   Uses the `:server` template with SAN for the hostname and
   ext_key_usage `[:serverAuth, :clientAuth]`.
 
-  `localhost` is always added to the SAN: the `neonfs` CLI connects to the
-  daemon's distribution port over loopback and verifies the server name
-  `localhost`, so the cluster node cert (which is the only cert presented once
-  the node has joined — see `NeonFS.TLSDistConfig`) must cover it.
+  This is the only cert presented once a node has joined (see
+  `NeonFS.TLSDistConfig`), and OTP's TLS distribution verifies the peer's host
+  against the cert SAN, so the SAN must cover whatever the node name resolves
+  to. An IP-shaped host (e.g. `neonfs@10.0.0.1`) is encoded as an `iPAddress`
+  entry — OTP matches a requested IP against `iPAddress`, not `dNSName` — and a
+  name is encoded as `dNSName`. `localhost`/`127.0.0.1` are always included so
+  the `neonfs` CLI, which verifies the server name `localhost` over loopback,
+  accepts the cert too.
   """
   @spec sign_csr(csr(), String.t(), cert(), key(), non_neg_integer()) :: cert()
   def sign_csr(csr, hostname, ca_cert, ca_key, serial) do
@@ -82,10 +86,28 @@ defmodule NeonFS.Transport.TLS do
       serial: serial,
       validity: node_validity_days(),
       extensions: [
-        subject_alt_name: Extension.subject_alt_name(Enum.uniq([hostname, "localhost"])),
+        subject_alt_name: Extension.subject_alt_name(san_entries(hostname)),
         ext_key_usage: Extension.ext_key_usage([:serverAuth, :clientAuth])
       ]
     )
+  end
+
+  defp san_entries(hostname) do
+    loopback = [{:dNSName, ~c"localhost"}, {:iPAddress, [127, 0, 0, 1]}]
+
+    host =
+      case :inet.parse_address(to_charlist(hostname)) do
+        {:ok, addr} -> {:iPAddress, ip_octets(addr)}
+        {:error, _} -> {:dNSName, to_charlist(hostname)}
+      end
+
+    Enum.uniq([host | loopback])
+  end
+
+  defp ip_octets({a, b, c, d}), do: [a, b, c, d]
+
+  defp ip_octets(addr) when tuple_size(addr) == 8 do
+    addr |> Tuple.to_list() |> Enum.flat_map(&[div(&1, 256), rem(&1, 256)])
   end
 
   @doc """
