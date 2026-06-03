@@ -240,9 +240,13 @@ defmodule NeonFS.TLSDistConfig do
     end
   end
 
-  # True only when the node booted with `-proto_dist inet_tls` (the omnibus/daemon
-  # path). Tests and dev run plain distribution and must not be bounced.
-  defp tls_distribution? do
+  @doc """
+  True only when the node booted with `-proto_dist inet_tls` (the omnibus/daemon
+  path). Tests and dev run plain distribution and are never bounced, so callers
+  can use this to gate distribution-restart recovery work.
+  """
+  @spec tls_distribution?() :: boolean()
+  def tls_distribution? do
     case :init.get_argument(:proto_dist) do
       {:ok, values} ->
         Enum.any?(values, fn v -> Enum.any?(v, &(to_string(&1) == "inet_tls")) end)
