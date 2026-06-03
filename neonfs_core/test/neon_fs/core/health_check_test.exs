@@ -3,9 +3,37 @@ defmodule NeonFS.Core.HealthCheckTest do
 
   alias NeonFS.Client.HealthCheck
   alias NeonFS.Core.HealthCheck, as: CoreHealthCheck
+  alias NeonFS.Core.Volume
+
+  defmodule StubVolumeRegistry do
+    def list(_opts), do: Process.get(:stub_volumes, [])
+  end
+
+  defmodule StubServiceRegistry do
+    def list_by_type(:core), do: List.duplicate(%{type: :core}, Process.get(:stub_core_nodes, 1))
+  end
 
   setup do
     on_exit(fn -> HealthCheck.reset() end)
+  end
+
+  # Runs the real check_volumes/2 (not a stub) with a controllable set of
+  # volumes and core-node count.
+  defp run_volumes_check(volumes, core_nodes) do
+    Process.put(:stub_volumes, volumes)
+    Process.put(:stub_core_nodes, core_nodes)
+    Process.register(self(), StubServiceRegistry)
+
+    check =
+      CoreHealthCheck.checks(
+        volume_registry_mod: StubVolumeRegistry,
+        service_registry_mod: StubServiceRegistry
+      )
+      |> Keyword.fetch!(:volumes)
+
+    check.()
+  after
+    Process.unregister(StubServiceRegistry)
   end
 
   describe "register_checks/0" do
@@ -133,6 +161,57 @@ defmodule NeonFS.Core.HealthCheckTest do
       assert report.status == :unhealthy
       assert report.checks.ra.status == :unhealthy
       assert report.checks.ra.reason == :timeout
+    end
+  end
+
+  describe "check_volumes via real Volume structs" do
+    test "replicated volumes satisfied by core count are healthy" do
+      volumes = [
+        Volume.new("data", durability: %{type: :replicate, factor: 1, min_copies: 1}),
+        %{
+          Volume.new("_system", durability: %{type: :replicate, factor: 1, min_copies: 1})
+          | system: true
+        }
+      ]
+
+      result = run_volumes_check(volumes, 1)
+
+      assert result.status == :healthy
+      assert result.degraded_redundancy_count == 0
+      assert result.volume_count == 2
+      refute Map.get(result, :reason) == :not_available
+    end
+
+    test "erasure-coded volumes count data + parity chunks as required replicas" do
+      volumes = [
+        Volume.new("ec", durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1})
+      ]
+
+      assert run_volumes_check(volumes, 3).status == :healthy
+      assert run_volumes_check(volumes, 2).status == :unhealthy
+    end
+
+    test "volumes requiring more replicas than core nodes are unhealthy" do
+      volumes = [
+        Volume.new("data", durability: %{type: :replicate, factor: 3, min_copies: 2})
+      ]
+
+      result = run_volumes_check(volumes, 1)
+
+      assert result.status == :unhealthy
+      assert result.degraded_redundancy_count == 1
+    end
+
+    test "a mix of satisfied and under-replicated volumes is degraded" do
+      volumes = [
+        Volume.new("ok", durability: %{type: :replicate, factor: 1, min_copies: 1}),
+        Volume.new("under", durability: %{type: :replicate, factor: 3, min_copies: 2})
+      ]
+
+      result = run_volumes_check(volumes, 1)
+
+      assert result.status == :degraded
+      assert result.degraded_redundancy_count == 1
     end
   end
 end

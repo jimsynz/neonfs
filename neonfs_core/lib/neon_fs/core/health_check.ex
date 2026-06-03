@@ -201,7 +201,7 @@ defmodule NeonFS.Core.HealthCheck do
 
     degraded_volumes =
       Enum.filter(volumes, fn volume ->
-        get_in(volume, [:durability, :factor]) > core_count
+        required_replicas(volume.durability) > core_count
       end)
 
     status =
@@ -314,6 +314,11 @@ defmodule NeonFS.Core.HealthCheck do
       true -> :healthy
     end
   end
+
+  defp required_replicas(%{type: :replicate, factor: factor}), do: factor
+
+  defp required_replicas(%{type: :erasure, data_chunks: data, parity_chunks: parity}),
+    do: data + parity
 
   defp storage_utilisation(%{total_capacity: :unlimited}), do: nil
   defp storage_utilisation(%{total_capacity: 0}), do: nil

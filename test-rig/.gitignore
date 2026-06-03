@@ -1,0 +1,3 @@
+# Downloaded base images, built .debs, and per-cluster runtime state.
+# Everything here is reproducible from the scripts; none of it belongs in git.
+.cache/

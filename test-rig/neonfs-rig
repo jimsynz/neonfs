@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# NeonFS QEMU test rig — spin up VM nodes, install neonfs_omnibus, form a cluster.
+# See test-rig/README.md for details. Run `./neonfs-rig help` for commands.
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/rig.sh"
+
+cmd_up() {
+  require_tools
+  ensure_image
+  ensure_debs
+  ensure_ssh_key
+
+  local i
+  for i in $(seq 1 "${NODES}"); do
+    create_node_disks "$i"
+    write_seed "$i"
+    boot_node "$i"
+  done
+  for i in $(seq 1 "${NODES}"); do
+    wait_ssh "$i"
+    wait_cloud_init "$i"
+    provision_node "$i"
+  done
+
+  cluster_bootstrap
+
+  echo
+  log "cluster '${CLUSTER_NAME}' is up (${NODES} node(s))"
+  cmd_status
+}
+
+cmd_boot() {
+  require_tools; ensure_image; ensure_debs; ensure_ssh_key
+  local i
+  for i in $(seq 1 "${NODES}"); do
+    create_node_disks "$i"; write_seed "$i"; boot_node "$i"
+  done
+  for i in $(seq 1 "${NODES}"); do
+    wait_ssh "$i"; wait_cloud_init "$i"; provision_node "$i"
+  done
+  log "${NODES} node(s) booted and provisioned (cluster not initialised — run 'init')"
+}
+
+cmd_init() { cluster_bootstrap; }
+
+cmd_ssh() {
+  local i="${1:-1}"; shift || true
+  node_ssh "$i" "$@"
+}
+
+cmd_cli() {
+  local i="1"
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then i="$1"; shift; fi
+  [ "${1:-}" = "--" ] && shift
+  node_cli "$i" "$*"
+}
+
+cmd_status() {
+  local i
+  echo "nodes:"
+  for i in $(discovered_nodes); do
+    if node_running "$i"; then
+      printf '  node %s  %-18s ssh 127.0.0.1:%s  [running]\n' \
+        "$i" "$(node_erl "$i")" "$(node_ssh_port "$i")"
+    else
+      printf '  node %s  %-18s [stopped]\n' "$i" "$(node_erl "$i")"
+    fi
+  done
+  if node_running 1; then
+    echo; echo "cluster status (node 1):"
+    node_cli 1 "cluster status" 2>/dev/null || warn "cluster not initialised yet"
+    echo; echo "volumes:"
+    node_cli 1 "volume list" 2>/dev/null || true
+  fi
+}
+
+cmd_down() {
+  local i
+  for i in $(discovered_nodes); do stop_node "$i"; done
+}
+
+cmd_clean() {
+  cmd_down
+  log "removing per-cluster runtime state (${RUN_DIR})"
+  rm -rf "${RUN_DIR}"
+}
+
+cmd_help() {
+  cat <<EOF
+NeonFS QEMU test rig
+
+Usage: ./neonfs-rig <command> [args]
+
+Commands:
+  up                 Boot NODES VMs, install neonfs_omnibus, form a cluster, create a volume
+  boot               Boot + provision VMs only (skip cluster init)
+  init               Initialise/join the cluster on already-provisioned VMs
+  status             Show VM and cluster status
+  ssh <n> [cmd...]   SSH into node <n> (default 1)
+  cli <n> -- <args>  Run the neonfs CLI on node <n>, e.g. cli 1 -- volume list
+  down               Stop all VMs (keep disks)
+  clean              Stop all VMs and delete runtime state (disks, seeds, ssh key)
+  help               This message
+
+Key environment variables (defaults):
+  NODES=${NODES}             DRIVES_PER_NODE=${DRIVES_PER_NODE}      DRIVE_SIZE=${DRIVE_SIZE}
+  ROOT_SIZE=${ROOT_SIZE}        VM_MEM=${VM_MEM}            VM_CPUS=${VM_CPUS}
+  REPLICAS=${REPLICAS}              CLUSTER_NAME=${CLUSTER_NAME}      VOLUME_NAME=${VOLUME_NAME}
+  DIST_PORT=${DIST_PORT}         SSH_BASE_PORT=${SSH_BASE_PORT}
+
+Examples:
+  ./neonfs-rig up                 # single-node cluster
+  NODES=3 ./neonfs-rig up         # three-node cluster (replicas=3)
+  ./neonfs-rig cli 1 -- volume list
+  ./neonfs-rig down
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "${cmd}" in
+    up)     cmd_up "$@" ;;
+    boot)   cmd_boot "$@" ;;
+    init)   cmd_init "$@" ;;
+    status) cmd_status "$@" ;;
+    ssh)    cmd_ssh "$@" ;;
+    cli)    cmd_cli "$@" ;;
+    down)   cmd_down "$@" ;;
+    clean)  cmd_clean "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)      die "unknown command '${cmd}' (try: ./neonfs-rig help)" ;;
+  esac
+}
+
+main "$@"

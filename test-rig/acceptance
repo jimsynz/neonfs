@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# NeonFS acceptance suite — drive a running cluster through the single- or
+# multi-node acceptance matrix (cluster/drives/volume, FUSE, NFS, S3, WebDAV,
+# cross-interface consistency, and multi-node replication), reporting
+# PASS/FAIL/SKIP per step. Exit non-zero if any step fails.
+#
+# Bring a cluster up first with ./neonfs-rig:
+#   ./neonfs-rig up                 # single node
+#   NODES=3 ./neonfs-rig up         # multi node
+#
+# Then run:
+#   ./acceptance single
+#   ./acceptance multi [N]          # N = expected node count (default: running nodes)
+#
+# Env: KEEP=1 leaves mounts in place; CLI_TIMEOUT, CONSISTENCY_TIMEOUT tune waits.
+set -eo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${HERE}/lib/rig.sh"
+source "${HERE}/lib/acceptance.sh"
+
+usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+mode="${1:-}"; [ -n "${mode}" ] || usage 1
+case "${mode}" in
+  single) NODES=1 ;;
+  multi)
+    if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+      NODES="$2"
+    else
+      NODES=$(discovered_nodes | grep -c .)
+      [ "${NODES}" -ge 2 ] || NODES=2
+    fi
+    ;;
+  -h|--help|help) usage 0 ;;
+  *) echo "unknown mode '${mode}' (use: single | multi [N])" >&2; usage 1 ;;
+esac
+
+[ -f "${SSH_KEY}" ] || die "no rig ssh key — bring a cluster up with ./neonfs-rig up first"
+node_running 1 || die "node 1 is not running — bring a cluster up with ./neonfs-rig up first"
+
+TAG="$(date +%s)"
+
+acceptance_run "${mode}"
