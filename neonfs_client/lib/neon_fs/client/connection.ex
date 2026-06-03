@@ -178,10 +178,26 @@ defmodule NeonFS.Client.Connection do
   end
 
   defp connected_core_nodes(state) do
-    state.connected_nodes
-    |> MapSet.intersection(state.core_nodes)
-    |> MapSet.to_list()
-    |> Enum.sort()
+    remote =
+      state.connected_nodes
+      |> MapSet.intersection(state.core_nodes)
+      |> MapSet.to_list()
+      |> Enum.sort()
+
+    # Omnibus (and any co-located deployment) runs the core application in
+    # the same BEAM node as the client. The local core is a valid RPC
+    # target — `:rpc.call/4` works in-node — but it is deliberately kept
+    # out of the Node.connect/monitor machinery (you don't connect to
+    # yourself), so it never lands in `connected_nodes`. Without surfacing
+    # it here a single-node cluster reports no reachable core at all and
+    # every interface fails with "all core nodes unreachable" (#1049).
+    # Prefer the local core: it is always reachable and its Ra-replicated
+    # registry holds the same view as any peer.
+    if local_core?(), do: [Node.self() | remote], else: remote
+  end
+
+  defp local_core? do
+    Process.whereis(NeonFS.Core.ServiceRegistry) != nil
   end
 
   defp reconcile_connections(state) do

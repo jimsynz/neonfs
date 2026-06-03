@@ -117,6 +117,24 @@ defmodule NeonFS.Client.ConnectionTest do
     end
   end
 
+  describe "connected_core_node/0 with a co-located core (omnibus)" do
+    test "returns the local node when the core ServiceRegistry runs in-process" do
+      # Stand in for the NeonFS.Core.ServiceRegistry process an omnibus node
+      # registers in the same BEAM; local_core?/0 keys off this name (#1049).
+      registry = spawn(fn -> Process.sleep(:infinity) end)
+      Process.register(registry, NeonFS.Core.ServiceRegistry)
+
+      on_exit(fn ->
+        if pid = Process.whereis(NeonFS.Core.ServiceRegistry), do: Process.exit(pid, :kill)
+      end)
+
+      start_supervised!({Connection, bootstrap_nodes: []})
+
+      assert {:ok, node} = Connection.connected_core_node()
+      assert node == Node.self()
+    end
+  end
+
   describe "nodedown handling" do
     test "handles 2-tuple nodedown for untracked node without crashing" do
       pid = start_supervised!({Connection, bootstrap_nodes: []})
