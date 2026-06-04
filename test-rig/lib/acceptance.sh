@@ -162,7 +162,10 @@ s_s3_ops() {
   ncli 1 "s3 bucket list" 2>/dev/null | grep -q "${ACCEPT_VOL}" \
     || { echo "  ${ACCEPT_VOL} not listed as a bucket" >&2; return 1; }
   node_ssh 1 "printf %s s3-content > /tmp/s3o.txt
-    s3cmd ${S3_FLAGS} put /tmp/s3o.txt s3://${ACCEPT_VOL}/s3o_${TAG}.txt >/dev/null 2>&1 || true
+    out=\$(s3cmd ${S3_FLAGS} put /tmp/s3o.txt s3://${ACCEPT_VOL}/s3o_${TAG}.txt 2>&1); rc=\$?
+    if [ \$rc -ne 0 ] || echo \"\$out\" | grep -qi 'MD5.*match'; then
+      echo \"s3cmd PUT failed (rc=\$rc) — ETag/MD5 integrity (#1037): \$out\"; exit 1
+    fi
     got=\$(s3cmd ${S3_FLAGS} get --force s3://${ACCEPT_VOL}/s3o_${TAG}.txt - 2>/dev/null)
     [ \"\$got\" = s3-content ]" 2>&1 | sed 's/^/  /' >&2 \
     || { echo "  S3 put/get round-trip failed" >&2; return 1; }
