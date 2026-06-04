@@ -50,6 +50,20 @@ defmodule NeonFS.Core.FileIndexTest do
       assert retrieved.volume_id == "vol1"
     end
 
+    test "round-trips the generic metadata map through storage" do
+      file =
+        FileMeta.new("vol1", "/m.txt",
+          metadata: %{"neonfs:content-md5" => "abc123", "user" => "alice"}
+        )
+
+      assert {:ok, _} = FileIndex.create(file)
+
+      # Read through the decode path (not the struct cache).
+      assert {:ok, retrieved} = FileIndex.get_by_path("vol1", "/m.txt")
+      assert retrieved.metadata["neonfs:content-md5"] == "abc123"
+      assert retrieved.metadata["user"] == "alice"
+    end
+
     test "writes both FileMeta and DirectoryEntry", %{store: store} do
       file = FileMeta.new("vol1", "/test.txt")
       assert {:ok, _} = FileIndex.create(file)
