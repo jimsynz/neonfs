@@ -384,6 +384,20 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert {:ok, latest} = FileIndex.get_by_path(volume.id, "/overwrite.txt")
       assert latest.size == 9
     end
+
+    test "offset writes to an existing file update volume stats (#1036)", %{volume: volume} do
+      {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/grow.bin", ["seed"])
+      {:ok, before} = VolumeRegistry.get(volume.id)
+
+      # Append past the end — exercises the do_write_at path, which previously
+      # left volume stats at their pre-write values (#1036).
+      {:ok, _} = WriteOperation.write_file_at(volume.id, "/grow.bin", 4, "appended-data")
+      {:ok, after_write} = VolumeRegistry.get(volume.id)
+
+      assert after_write.logical_size == before.logical_size + byte_size("appended-data")
+      assert after_write.chunk_count >= before.chunk_count
+      assert after_write.physical_size > 0
+    end
   end
 
   describe "generate_write_id/0" do
