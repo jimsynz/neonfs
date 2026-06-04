@@ -556,10 +556,24 @@ defmodule NeonFS.Core.WriteOperation do
       all_hashes = prefix_hashes ++ new_hashes ++ suffix_hashes
       new_size = max(file_meta.size, write_end)
 
-      update_file_and_commit(file_meta.volume_id, file_meta.id, write_id, new_chunks,
-        chunks: all_hashes,
-        size: new_size
-      )
+      case update_file_and_commit(file_meta.volume_id, file_meta.id, write_id, new_chunks,
+             chunks: all_hashes,
+             size: new_size
+           ) do
+        {:ok, _updated_meta} = ok ->
+          # Account the offset write against volume stats (#1036): only the
+          # grown bytes are new logical data, plus any newly-stored (non-deduped)
+          # chunks. Without this, files written via FUSE/NFS — create an empty
+          # file, then write at offsets through this path — leave the volume
+          # reporting 0 bytes / 0 chunks despite blobs on the drives. Best-effort:
+          # the file is already committed, so a stats glitch (including a
+          # VolumeRegistry call timeout, which exits) must never fail it.
+          safe_update_volume_stats(volume.id, new_size - file_meta.size, new_chunks)
+          ok
+
+        error ->
+          error
+      end
     else
       {:error, _reason} = error ->
         abort_chunks(write_id)
@@ -1747,6 +1761,22 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp update_volume_stats(volume_id, data, chunks) do
     update_volume_stats_with_size(volume_id, byte_size(data), chunks)
+  end
+
+  # Best-effort stats update for the offset-write path: the file is already
+  # committed, so a VolumeRegistry timeout (which exits) or error must not
+  # propagate and fail the write (#1036).
+  defp safe_update_volume_stats(volume_id, size, chunks) do
+    update_volume_stats_with_size(volume_id, size, chunks)
+  catch
+    kind, reason ->
+      Logger.warning("volume stats update failed after offset write",
+        volume_id: volume_id,
+        kind: kind,
+        reason: inspect(reason)
+      )
+
+      :ok
   end
 
   defp update_volume_stats_with_size(volume_id, size, chunks) do

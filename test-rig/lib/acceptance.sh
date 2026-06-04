@@ -194,6 +194,17 @@ s_cross_consistency() {
 }
 
 # Multi-node only: replicated volume must place copies on >= 2 distinct nodes.
+s_volume_stats() {
+  volume_ready || return 77
+  # By now the FUSE/NFS/S3/WebDAV steps have written data into the volume.
+  # `volume show` must reflect it rather than reporting 0 chunks / 0 bytes (#1036).
+  local out; out=$(ncli 1 "volume show ${ACCEPT_VOL}" 2>/dev/null)
+  echo "${out}" | grep -iE 'chunks|logical|physical' | sed 's/^/  /' >&2
+  local chunks; chunks=$(echo "${out}" | grep -iE 'chunks' | grep -oE '[0-9]+' | head -1)
+  [ "${chunks:-0}" -gt 0 ] \
+    || { echo "  volume show reports 0 chunks despite writes (#1036)" >&2; return 1; }
+}
+
 s_replication() {
   [ "${NODES}" -ge 2 ] || { echo "  single node — replication not applicable" >&2; return 77; }
   local cores; cores=$(ncli 1 "cluster status" 2>/dev/null | grep -iE 'core nodes|members' | grep -oE '[0-9]+' | head -1)
@@ -245,6 +256,7 @@ acceptance_run() {
   step "S3 operations (list/put/get)"               s_s3_ops
   step "consistency S3/NFS/FUSE/WebDAV (FUSE write)" s_cross_consistency
   step "WebDAV operations (PUT/GET)"                s_webdav_ops
+  step "volume show reflects stored data"           s_volume_stats
   step "replication across nodes"                   s_replication
 
   acceptance_cleanup
