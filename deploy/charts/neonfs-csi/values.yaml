@@ -22,7 +22,7 @@ sidecars:
     pullPolicy: IfNotPresent
     extraArgs: []
   attacher:
-    image: registry.k8s.io/sig-storage/csi-attacher:v4.11.0
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.12.0
     pullPolicy: IfNotPresent
     extraArgs: []
   resizer:
@@ -30,10 +30,10 @@ sidecars:
     pullPolicy: IfNotPresent
     extraArgs: []
   livenessProbe:
-    image: registry.k8s.io/sig-storage/livenessprobe:v2.18.0
+    image: registry.k8s.io/sig-storage/livenessprobe:v2.19.0
     pullPolicy: IfNotPresent
   nodeDriverRegistrar:
-    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.16.0
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
     pullPolicy: IfNotPresent
 
 # Bootstrap token used by the plugin to join the NeonFS cluster.
