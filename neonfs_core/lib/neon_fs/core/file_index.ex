@@ -1207,6 +1207,7 @@ defmodule NeonFS.Core.FileIndex do
       acl_entries: file.acl_entries,
       default_acl: file.default_acl,
       xattrs: file.xattrs,
+      metadata: file.metadata,
       created_at: file.created_at,
       modified_at: file.modified_at,
       accessed_at: file.accessed_at,
@@ -1236,6 +1237,7 @@ defmodule NeonFS.Core.FileIndex do
       acl_entries: decode_acl_entries(get_field(map, :acl_entries, [])),
       default_acl: decode_default_acl(get_field(map, :default_acl)),
       xattrs: decode_xattrs(get_field(map, :xattrs, %{})),
+      metadata: decode_metadata(get_field(map, :metadata, %{})),
       created_at: decode_datetime(get_field(map, :created_at)),
       modified_at: decode_datetime(get_field(map, :modified_at)),
       accessed_at: decode_datetime(get_field(map, :accessed_at)),
@@ -1297,6 +1299,17 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   defp decode_xattrs(_), do: %{}
+
+  # FileMeta.metadata is a generic string-keyed map (S3 user metadata, the S3
+  # content-MD5 ETag, etc.). Normalise keys to binary on decode but leave values
+  # untouched — unlike xattrs, values are not necessarily binary.
+  defp decode_metadata(nil), do: %{}
+
+  defp decode_metadata(map) when is_map(map) do
+    Map.new(map, fn {k, v} -> {to_binary(k), v} end)
+  end
+
+  defp decode_metadata(_), do: %{}
 
   defp to_binary(b) when is_binary(b), do: b
   defp to_binary(other), do: :erlang.iolist_to_binary([other])
