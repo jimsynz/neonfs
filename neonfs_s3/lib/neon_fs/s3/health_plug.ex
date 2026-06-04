@@ -39,8 +39,8 @@ defmodule NeonFS.S3.HealthPlug do
       :ok ->
         Firkin.Plug.call(conn, opts.inner)
 
-      degraded_or_unavailable when conn.method in @write_methods ->
-        reason = status.reason || to_string(degraded_or_unavailable)
+      _degraded_or_unavailable when conn.method in @write_methods ->
+        reason = status.reason
 
         conn
         |> Plug.Conn.put_resp_header("retry-after", "30")
@@ -49,7 +49,7 @@ defmodule NeonFS.S3.HealthPlug do
 
       _degraded_or_unavailable ->
         conn
-        |> Plug.Conn.put_resp_header("x-neonfs-status", status.reason || "degraded")
+        |> Plug.Conn.put_resp_header("x-neonfs-status", status.reason)
         |> Firkin.Plug.call(opts.inner)
     end
   end

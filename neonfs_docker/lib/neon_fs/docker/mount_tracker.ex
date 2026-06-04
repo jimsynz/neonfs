@@ -37,7 +37,7 @@ defmodule NeonFS.Docker.MountTracker do
   @type mount_point :: String.t()
   @type mount_fn :: (volume_name() -> {:ok, {mount_id(), mount_point()}} | {:error, term()})
   @type unmount_fn :: (mount_id() -> :ok | {:error, term()})
-  @type record :: %{mount_id: mount_id(), mount_point: mount_point(), ref_count: pos_integer()}
+  @type t :: %{mount_id: mount_id(), mount_point: mount_point(), ref_count: pos_integer()}
 
   @default_mount_root "/var/lib/neonfs-docker/mounts"
 
@@ -83,7 +83,7 @@ defmodule NeonFS.Docker.MountTracker do
   List every tracked mount as `{volume_name, record}` pairs. Used for
   operator introspection and tests.
   """
-  @spec list(GenServer.server()) :: [{volume_name(), record()}]
+  @spec list(GenServer.server()) :: [{volume_name(), t()}]
   def list(server \\ __MODULE__) do
     GenServer.call(server, :list)
   end

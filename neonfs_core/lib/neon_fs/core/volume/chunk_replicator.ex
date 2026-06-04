@@ -91,8 +91,8 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
 
     failed =
       Enum.map(err_results, fn
-        {drive, {:error, reason}} -> {drive.drive_id, reason}
         {nil, {:error, reason}} -> {nil, reason}
+        {drive, {:error, reason}} -> {drive.drive_id, reason}
       end)
 
     classify(ok_results, successful, failed, min_copies, length(drives))

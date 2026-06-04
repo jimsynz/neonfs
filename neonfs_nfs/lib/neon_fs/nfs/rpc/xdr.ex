@@ -85,7 +85,7 @@ defmodule NeonFS.NFS.RPC.XDR do
     pad = xdr_pad(len)
 
     case rest do
-      <<data::binary-size(len), _padding::binary-size(pad), rest2::binary>> ->
+      <<data::binary-size(^len), _padding::binary-size(^pad), rest2::binary>> ->
         {:ok, data, rest2}
 
       _ ->

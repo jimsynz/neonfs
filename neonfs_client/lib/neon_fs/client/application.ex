@@ -12,8 +12,6 @@ defmodule NeonFS.Client.Application do
 
   use Application
 
-  require Logger
-
   @impl true
   def start(_type, _args) do
     start_children? = Application.get_env(:neonfs_client, :start_children?, true)

@@ -19,7 +19,7 @@ defmodule NeonFS.Docker.VolumeStore do
 
   @type volume_name :: String.t()
   @type opts :: map()
-  @type record :: %{name: volume_name(), opts: opts()}
+  @type t :: %{name: volume_name(), opts: opts()}
 
   ## Client API
 
@@ -53,7 +53,7 @@ defmodule NeonFS.Docker.VolumeStore do
   Fetch a single record. Returns `{:error, :not_found}` if the name
   isn't known to the plugin.
   """
-  @spec get(GenServer.server(), volume_name()) :: {:ok, record()} | {:error, :not_found}
+  @spec get(GenServer.server(), volume_name()) :: {:ok, t()} | {:error, :not_found}
   def get(server \\ __MODULE__, name) when is_binary(name) do
     GenServer.call(server, {:get, name})
   end
@@ -61,7 +61,7 @@ defmodule NeonFS.Docker.VolumeStore do
   @doc """
   Return all known volume records.
   """
-  @spec list(GenServer.server()) :: [record()]
+  @spec list(GenServer.server()) :: [t()]
   def list(server \\ __MODULE__) do
     GenServer.call(server, :list)
   end

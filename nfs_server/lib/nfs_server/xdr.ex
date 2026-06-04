@@ -163,7 +163,7 @@ defmodule NFSServer.XDR do
     pad = pad_bytes(length)
 
     case binary do
-      <<data::binary-size(length), padding::binary-size(pad), rest::binary>> ->
+      <<data::binary-size(^length), padding::binary-size(^pad), rest::binary>> ->
         check_pad(data, padding, rest)
 
       _ ->

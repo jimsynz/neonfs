@@ -26,8 +26,6 @@ defmodule NeonFS.Core.CommitChunks do
   propagate those options; that is tracked outside this module.
   """
 
-  require Logger
-
   alias NeonFS.Client.Router
   alias NeonFS.Core.Authorise
   alias NeonFS.Core.BlobStore

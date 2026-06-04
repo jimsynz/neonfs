@@ -291,12 +291,7 @@ impl DriveCommand {
         Ok(())
     }
 
-    fn evacuate(
-        &self,
-        drive_id: &str,
-        node: Option<&str>,
-        format: OutputFormat,
-    ) -> Result<()> {
+    fn evacuate(&self, drive_id: &str, node: Option<&str>, format: OutputFormat) -> Result<()> {
         let node_name = match node {
             Some(n) => n.to_string(),
             None => {

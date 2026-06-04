@@ -7,8 +7,6 @@ defmodule NeonFS.Client.CLIHandler do
   distribution to get health status regardless of node type.
   """
 
-  require Logger
-
   alias NeonFS.Client.HealthCheck
 
   @doc """

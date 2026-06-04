@@ -380,7 +380,7 @@ defmodule FuseServer.Protocol.Response do
     pad = rem(8 - rem(24 + namelen, 8), 8)
 
     case rest do
-      <<name::binary-size(namelen), _pad::size(pad * 8), tail::binary>> ->
+      <<name::binary-size(^namelen), _pad::size(^pad * 8), tail::binary>> ->
         do_decode_dirents(tail, [%Dirent{ino: ino, off: off, type: type, name: name} | acc])
 
       _ ->
@@ -442,7 +442,7 @@ defmodule FuseServer.Protocol.Response do
     pad = rem(8 - rem(24 + namelen, 8), 8)
 
     case rest do
-      <<name::binary-size(namelen), _pad::size(pad * 8), tail::binary>> ->
+      <<name::binary-size(^namelen), _pad::size(^pad * 8), tail::binary>> ->
         {:ok, %Dirent{ino: ino, off: off, type: type, name: name}, tail}
 
       _ ->

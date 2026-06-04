@@ -62,21 +62,29 @@ impl DrSnapshotEntry {
     fn from_term(term: Term) -> Result<Self> {
         let map = term_to_map(&term)?;
 
-        let id = term_to_string(map.get("id").ok_or_else(|| {
-            CliError::TermConversionError("Missing 'id' field".to_string())
-        })?)?;
+        let id = term_to_string(
+            map.get("id")
+                .ok_or_else(|| CliError::TermConversionError("Missing 'id' field".to_string()))?,
+        )?;
 
-        let path = term_to_string(map.get("path").ok_or_else(|| {
-            CliError::TermConversionError("Missing 'path' field".to_string())
-        })?)?;
+        let path =
+            term_to_string(map.get("path").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'path' field".to_string())
+            })?)?;
 
         let created_at = term_to_string(map.get("created_at").ok_or_else(|| {
             CliError::TermConversionError("Missing 'created_at' field".to_string())
         })?)?;
 
         let state_version = map.get("state_version").and_then(|t| term_to_u64(t).ok());
-        let file_count = map.get("file_count").and_then(|t| term_to_u64(t).ok()).unwrap_or(0);
-        let total_bytes = map.get("total_bytes").and_then(|t| term_to_u64(t).ok()).unwrap_or(0);
+        let file_count = map
+            .get("file_count")
+            .and_then(|t| term_to_u64(t).ok())
+            .unwrap_or(0);
+        let total_bytes = map
+            .get("total_bytes")
+            .and_then(|t| term_to_u64(t).ok())
+            .unwrap_or(0);
 
         Ok(Self {
             id,

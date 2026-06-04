@@ -154,7 +154,7 @@ defmodule NeonFS.Core.KeyManager do
     ciphertext_size = byte_size(wrapped_key) - @nonce_size - @tag_size
 
     if ciphertext_size > 0 do
-      <<nonce::binary-size(@nonce_size), ciphertext::binary-size(ciphertext_size),
+      <<nonce::binary-size(@nonce_size), ciphertext::binary-size(^ciphertext_size),
         tag::binary-size(@tag_size)>> = wrapped_key
 
       aad = build_aad(volume_id, key_version)

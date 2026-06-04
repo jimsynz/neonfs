@@ -1255,9 +1255,6 @@ defmodule NeonFS.CLI.Handler do
 
         {:error, :not_found} ->
           {:error, VolumeNotFound.exception(volume_name: name)}
-
-        {:error, reason} ->
-          {:error, wrap_error(reason)}
       end
     end
   end
@@ -1965,9 +1962,6 @@ defmodule NeonFS.CLI.Handler do
 
         {:error, :no_rebalance} ->
           {:error, NotFound.exception(message: "No rebalance in progress")}
-
-        {:error, reason} ->
-          {:error, wrap_error(reason)}
       end
     end
   end
@@ -3216,9 +3210,6 @@ defmodule NeonFS.CLI.Handler do
 
         {:error, :not_found} ->
           {:error, NotFound.exception(message: "Bucket '#{bucket_name}' not found")}
-
-        {:error, reason} ->
-          {:error, wrap_error(reason)}
       end
     end
   end

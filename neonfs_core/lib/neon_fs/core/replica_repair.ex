@@ -36,8 +36,6 @@ defmodule NeonFS.Core.ReplicaRepair do
       Metadata: `chunk_hash`, `reason`.
   """
 
-  require Logger
-
   alias NeonFS.Core.{BlobStore, ChunkIndex, Replication, VolumeRegistry}
 
   @default_batch_size 100

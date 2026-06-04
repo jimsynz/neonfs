@@ -35,7 +35,6 @@ defmodule NeonFS.Containerd.WriteSession do
   """
 
   use GenServer, restart: :temporary
-  require Logger
 
   alias NeonFS.Client.{ChunkWriter, Router}
   alias NeonFS.Containerd.{Digest, WriteRegistry}

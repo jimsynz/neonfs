@@ -162,9 +162,7 @@ impl BackupCommand {
             .unwrap_or_else(|| "<unknown>".to_string());
         let file_count = required_u64(&map, "file_count").unwrap_or(0);
         let total_bytes = required_u64(&map, "total_bytes").unwrap_or(0);
-        let snapshot_id = map
-            .get("snapshot_id")
-            .and_then(|v| term_to_string(v).ok());
+        let snapshot_id = map.get("snapshot_id").and_then(|v| term_to_string(v).ok());
         let exported_at = map
             .get("exported_at")
             .and_then(|v| term_to_string(v).ok())
@@ -295,7 +293,14 @@ mod tests {
     #[test]
     fn create_accepts_name() {
         let cli = TestCli::try_parse_from([
-            "test", "create", "--volume", "v", "--to", "/tmp/b.tar", "--name", "weekly",
+            "test",
+            "create",
+            "--volume",
+            "v",
+            "--to",
+            "/tmp/b.tar",
+            "--name",
+            "weekly",
         ])
         .unwrap();
 
@@ -317,7 +322,12 @@ mod tests {
     #[test]
     fn restore_parses() {
         let cli = TestCli::try_parse_from([
-            "test", "restore", "--from", "/tmp/b.tar", "--as", "restored-vol",
+            "test",
+            "restore",
+            "--from",
+            "/tmp/b.tar",
+            "--as",
+            "restored-vol",
         ])
         .unwrap();
         match cli.command {

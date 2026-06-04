@@ -21,8 +21,6 @@ defmodule NeonFS.Core.Log do
 
   """
 
-  require Logger
-
   @type metadata :: keyword()
 
   @doc """

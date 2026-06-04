@@ -131,7 +131,7 @@ defmodule NeonFS.NFS.RPC.Transport do
         state
 
       true ->
-        <<fragment::binary-size(frag_len), remaining::binary>> = rest
+        <<fragment::binary-size(^frag_len), remaining::binary>> = rest
         fragments = state.fragments ++ [fragment]
 
         if last_flag == 1 do

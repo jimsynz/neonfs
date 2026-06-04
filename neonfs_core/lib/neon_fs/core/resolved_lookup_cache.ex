@@ -27,7 +27,6 @@ defmodule NeonFS.Core.ResolvedLookupCache do
   """
 
   use GenServer
-  require Logger
 
   @ets_table :resolved_lookup_cache
   @default_ttl_ms 300_000

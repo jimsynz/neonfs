@@ -23,7 +23,6 @@ defmodule NeonFS.Core.ChunkIndex do
   """
 
   use GenServer
-  require Logger
 
   alias NeonFS.Core.{
     ChunkCrypto,
@@ -610,7 +609,6 @@ defmodule NeonFS.Core.ChunkIndex do
 
   defp to_atom(value) when is_atom(value), do: value
   defp to_atom(value) when is_binary(value), do: String.to_existing_atom(value)
-  defp to_atom(nil), do: nil
 
   defp decode_datetime(%DateTime{} = dt), do: dt
   defp decode_datetime(nil), do: nil

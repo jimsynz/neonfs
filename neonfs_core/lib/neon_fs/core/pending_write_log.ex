@@ -41,7 +41,7 @@ defmodule NeonFS.Core.PendingWriteLog do
   @table :pending_writes
 
   @typedoc "Per-write record stored in DETS."
-  @type record :: %{
+  @type t :: %{
           write_id: binary(),
           volume_id: binary(),
           path: String.t(),
@@ -152,7 +152,7 @@ defmodule NeonFS.Core.PendingWriteLog do
   @doc """
   Fetch a single record for inspection. Primarily a test helper.
   """
-  @spec get(binary()) :: {:ok, record()} | {:error, :not_found}
+  @spec get(binary()) :: {:ok, t()} | {:error, :not_found}
   def get(write_id) do
     case :dets.lookup(@table, write_id) do
       [{^write_id, record}] -> {:ok, record}
@@ -165,7 +165,7 @@ defmodule NeonFS.Core.PendingWriteLog do
   pass uses this to find orphaned writes whose chunks should be
   cleaned up.
   """
-  @spec list_orphans(non_neg_integer()) :: [record()]
+  @spec list_orphans(non_neg_integer()) :: [t()]
   def list_orphans(grace_seconds) when grace_seconds >= 0 do
     cutoff = DateTime.utc_now() |> DateTime.add(-grace_seconds, :second)
 
@@ -185,7 +185,7 @@ defmodule NeonFS.Core.PendingWriteLog do
   @doc """
   Return every record regardless of age. Primarily a test helper.
   """
-  @spec list_all() :: [record()]
+  @spec list_all() :: [t()]
   def list_all do
     :dets.foldl(fn {_id, record}, acc -> [record | acc] end, [], @table)
   end

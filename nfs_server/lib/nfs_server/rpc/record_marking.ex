@@ -106,7 +106,7 @@ defmodule NFSServer.RPC.RecordMarking do
   end
 
   defp do_encode_fragments(body, max, acc) do
-    <<chunk::binary-size(max), rest::binary>> = body
+    <<chunk::binary-size(^max), rest::binary>> = body
 
     do_encode_fragments(rest, max, [:erlang.iolist_to_binary(encode_fragment(chunk, false)) | acc])
   end
@@ -117,7 +117,7 @@ defmodule NFSServer.RPC.RecordMarking do
   """
   @spec decode_fragment(binary()) :: fragment_result()
   def decode_fragment(<<last_bit::1, length::31, rest::binary>>) when byte_size(rest) >= length do
-    <<body::binary-size(length), tail::binary>> = rest
+    <<body::binary-size(^length), tail::binary>> = rest
     {:ok, last_bit == 1, body, tail}
   end
 

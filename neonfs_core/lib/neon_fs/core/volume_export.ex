@@ -22,8 +22,6 @@ defmodule NeonFS.Core.VolumeExport do
   alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.VolumeRegistry
 
-  require Logger
-
   @manifest_version 1
   @manifest_name "manifest.json"
   @files_prefix "files"
@@ -429,7 +427,7 @@ defmodule NeonFS.Core.VolumeExport do
   defp ustar_split(name) do
     case find_split_point(name, min(100, byte_size(name) - 1)) do
       {:ok, idx} ->
-        <<prefix::binary-size(idx), "/", rest::binary>> = name
+        <<prefix::binary-size(^idx), "/", rest::binary>> = name
         {:ok, prefix, rest}
 
       :error ->

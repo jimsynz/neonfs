@@ -11,7 +11,6 @@ defmodule NeonFS.IO.Scheduler do
   """
 
   use GenServer
-  require Logger
 
   alias NeonFS.IO.{Operation, Producer, WorkerSupervisor}
 

@@ -9,7 +9,6 @@ defmodule NeonFS.Core.StripeIndex do
   """
 
   use GenServer
-  require Logger
 
   alias NeonFS.Core.Stripe
   alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, MetadataWriter}

@@ -16,8 +16,6 @@ defmodule NeonFS.Transport.Handler do
 
   use GenServer, restart: :temporary
 
-  require Logger
-
   @active_n 10
   @default_dispatch NeonFS.Core.BlobStore
 

@@ -24,7 +24,6 @@ defmodule NeonFS.IO.Producer do
   """
 
   use GenStage
-  require Logger
 
   alias NeonFS.IO.{Operation, Priority}
 

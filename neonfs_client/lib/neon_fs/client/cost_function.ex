@@ -9,7 +9,6 @@ defmodule NeonFS.Client.CostFunction do
   """
 
   use GenServer
-  require Logger
 
   alias NeonFS.Client.Discovery
 

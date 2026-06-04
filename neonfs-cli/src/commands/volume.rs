@@ -786,7 +786,10 @@ impl VolumeCommand {
                 );
             }
             OutputFormat::Table => {
-                println!("✓ Promoted snapshot {} from {} to volume {}", snapshot_id, source, volume_name);
+                println!(
+                    "✓ Promoted snapshot {} from {} to volume {}",
+                    snapshot_id, source, volume_name
+                );
                 println!();
                 println!("  Volume ID:    {}", volume_id);
                 println!("  Volume Name:  {}", volume_name);
@@ -1879,7 +1882,9 @@ impl VolumeCommand {
 impl SnapshotCommand {
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            SnapshotCommand::Create { volume, name } => self.create(volume, name.as_deref(), format),
+            SnapshotCommand::Create { volume, name } => {
+                self.create(volume, name.as_deref(), format)
+            }
             SnapshotCommand::List { volume } => self.list(volume, format),
             SnapshotCommand::Show { volume, id } => self.show(volume, id, format),
             SnapshotCommand::Delete { volume, id, yes } => self.delete(volume, id, *yes, format),
@@ -2353,8 +2358,7 @@ mod tests {
             command: VolumeCommand,
         }
 
-        let cli =
-            TestCli::try_parse_from(["test", "restore", "vol-1", "--to", "snap-1"]).unwrap();
+        let cli = TestCli::try_parse_from(["test", "restore", "vol-1", "--to", "snap-1"]).unwrap();
         match cli.command {
             VolumeCommand::Restore {
                 volume,
@@ -2383,8 +2387,7 @@ mod tests {
             command: VolumeCommand,
         }
 
-        let cli =
-            TestCli::try_parse_from(["test", "restore", "v", "--to", "s", "--safe"]).unwrap();
+        let cli = TestCli::try_parse_from(["test", "restore", "v", "--to", "s", "--safe"]).unwrap();
         match cli.command {
             VolumeCommand::Restore { safe, force, .. } => {
                 assert!(safe);
@@ -2405,8 +2408,7 @@ mod tests {
         }
 
         // `--force` without `--yes` is rejected by clap (requires).
-        let result =
-            TestCli::try_parse_from(["test", "restore", "v", "--to", "s", "--force"]);
+        let result = TestCli::try_parse_from(["test", "restore", "v", "--to", "s", "--force"]);
         assert!(result.is_err());
 
         // `--force --yes` parses.
@@ -2463,7 +2465,12 @@ mod tests {
         }
 
         let cli = TestCli::try_parse_from([
-            "test", "import", "--from", "/tmp/in.tar", "--as", "restored",
+            "test",
+            "import",
+            "--from",
+            "/tmp/in.tar",
+            "--as",
+            "restored",
         ])
         .unwrap();
         match cli.command {
@@ -2501,7 +2508,13 @@ mod tests {
         }
 
         let cli = TestCli::try_parse_from([
-            "test", "export", "v", "--to", "/tmp/x.tar", "--snapshot", "snap-1",
+            "test",
+            "export",
+            "v",
+            "--to",
+            "/tmp/x.tar",
+            "--snapshot",
+            "snap-1",
         ])
         .unwrap();
 

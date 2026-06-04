@@ -4,7 +4,6 @@ defmodule NeonFS.Docker.Application do
   """
 
   use Application
-  require Logger
 
   alias NeonFS.Docker.HealthCheck
 

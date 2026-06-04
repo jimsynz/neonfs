@@ -856,7 +856,7 @@ defmodule NFSServer.NFSv3.Handler do
             {:cont, {[chunk | acc], total + chunk_size}}
 
           true ->
-            <<head::binary-size(remaining), _::binary>> = chunk
+            <<head::binary-size(^remaining), _::binary>> = chunk
             {:halt, {[head | acc], total + remaining}}
         end
       end)

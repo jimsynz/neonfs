@@ -19,7 +19,6 @@ defmodule NeonFS.WebDAV.Backend do
   alias NeonFS.Client.Router
   alias NeonFS.WebDAV.LockStore
 
-  require Logger
   import Bitwise
 
   @s_ifmt 0o170000
