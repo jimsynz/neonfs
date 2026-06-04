@@ -255,8 +255,30 @@ defmodule NeonFS.Client.ChunkWriter do
       [] ->
         {:error, :no_core_nodes_available}
 
-      [node | _] ->
+      candidates ->
+        node = tier_capable_node(candidates, tier) || hd(candidates)
         {:ok, %{node: node, drive_id: drive_id, tier: tier}}
+    end
+  end
+
+  # Prefer a reachable core node that actually has an active drive in the
+  # requested tier, so a chunk is not pinned to a node that cannot store it
+  # (#1044). Falls back to the first candidate when the cluster drive view is
+  # unavailable or no node advertises an active drive in the tier — the
+  # receiving node still resolves the concrete drive and rejects the write if it
+  # genuinely cannot place it.
+  defp tier_capable_node(candidates, tier) do
+    case Router.call(NeonFS.Core.DriveRegistry, :drives_for_tier, [tier]) do
+      drives when is_list(drives) ->
+        tier_nodes =
+          drives
+          |> Enum.filter(&(&1.state == :active))
+          |> MapSet.new(& &1.node)
+
+        Enum.find(candidates, &MapSet.member?(tier_nodes, &1))
+
+      _ ->
+        nil
     end
   end
 
