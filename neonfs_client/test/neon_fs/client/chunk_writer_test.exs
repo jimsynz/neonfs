@@ -30,7 +30,14 @@ defmodule NeonFS.Client.ChunkWriterTest do
   end
 
   defp stub_volume_lookup(volume) do
-    expect(Router, :call, fn NeonFS.Core, :get_volume, ["test-vol"] -> {:ok, volume} end)
+    # ChunkWriter calls Router.call/3 twice on the discovery path: the volume
+    # lookup, and a cluster drive-tier query for tier-aware target selection
+    # (#1044). Returning no tier drives makes selection fall back to the first
+    # discovered node, preserving the @target_node expectations below.
+    stub(Router, :call, fn
+      NeonFS.Core, :get_volume, ["test-vol"] -> {:ok, volume}
+      NeonFS.Core.DriveRegistry, :drives_for_tier, [_tier] -> []
+    end)
   end
 
   defp stub_discovery(nodes) do
@@ -471,6 +478,66 @@ defmodule NeonFS.Client.ChunkWriterTest do
       assert_receive {:abort, @target_node, _}
       assert_receive {:abort, :replica_b@host, _}
       refute_receive {:abort, _, _}, 10
+    end
+  end
+
+  describe "write_file_stream/4 — tier-aware target selection (#1044)" do
+    test "prefers a node with an active drive in the requested tier over the first" do
+      volume = volume_fixture()
+      node_a = :core_a@host
+      node_b = :core_b@host
+
+      stub(Router, :call, fn
+        NeonFS.Core, :get_volume, ["test-vol"] ->
+          {:ok, volume}
+
+        NeonFS.Core.DriveRegistry, :drives_for_tier, [:hot] ->
+          # Only node_b advertises an active hot drive; node_a is bypassed.
+          [%{node: node_b, state: :active, tier: :hot}]
+      end)
+
+      stub_discovery([node_a, node_b])
+
+      data = :binary.copy(<<0xCD>>, 128)
+
+      expect(Router, :data_call, fn target, :put_chunk, _args, _opts ->
+        assert target == node_b
+        :ok
+      end)
+
+      assert {:ok, [_ref]} =
+               ChunkWriter.write_file_stream("test-vol", "/tier.bin", [data],
+                 drive_id: @drive_id,
+                 strategy: "fixed",
+                 strategy_param: 128
+               )
+    end
+
+    test "falls back to the first node when no drive advertises the tier" do
+      volume = volume_fixture()
+      node_a = :core_a@host
+      node_b = :core_b@host
+
+      stub(Router, :call, fn
+        NeonFS.Core, :get_volume, ["test-vol"] -> {:ok, volume}
+        NeonFS.Core.DriveRegistry, :drives_for_tier, [:hot] -> []
+      end)
+
+      stub_discovery([node_a, node_b])
+
+      data = :binary.copy(<<0xEF>>, 128)
+
+      expect(Router, :data_call, fn target, :put_chunk, _args, _opts ->
+        assert target == node_a
+        :ok
+      end)
+
+      assert {:ok, [_ref]} =
+               ChunkWriter.write_file_stream("test-vol", "/fallback.bin", [data],
+                 drive_id: @drive_id,
+                 strategy: "fixed",
+                 strategy_param: 128
+               )
     end
   end
 end
