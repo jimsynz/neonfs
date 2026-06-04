@@ -186,6 +186,34 @@ defmodule NeonFS.S3.BackendTest do
       assert String.length(etag) == 32
     end
 
+    test "etag is the content MD5 and is consistent across put/get/head (#1037)" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      body = "hello from integration test"
+      expected = :crypto.hash(:md5, body) |> Base.encode16(case: :lower)
+
+      assert {:ok, ^expected} =
+               Backend.put_object(@ctx, "my-bucket", "obj.txt", body, %Firkin.PutOpts{})
+
+      assert {:ok, head} = Backend.head_object(@ctx, "my-bucket", "obj.txt")
+      assert head.etag == expected
+
+      assert {:ok, object} = Backend.get_object(@ctx, "my-bucket", "obj.txt", %Firkin.GetOpts{})
+      assert object.etag == expected
+    end
+
+    test "streaming put etag is the content MD5 and consistent on head (#1037)" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      body = "streamed content for etag verification"
+      expected = :crypto.hash(:md5, body) |> Base.encode16(case: :lower)
+      stream = body |> String.graphemes() |> Enum.chunk_every(7) |> Enum.map(&Enum.join/1)
+
+      assert {:ok, ^expected} =
+               Backend.put_object_stream(@ctx, "my-bucket", "s.txt", stream, %Firkin.PutOpts{})
+
+      assert {:ok, head} = Backend.head_object(@ctx, "my-bucket", "s.txt")
+      assert head.etag == expected
+    end
+
     test "returns error for non-existent bucket" do
       assert {:error, %Firkin.Error{code: :no_such_bucket}} =
                Backend.put_object(@ctx, "missing", "file.txt", "data", %Firkin.PutOpts{})

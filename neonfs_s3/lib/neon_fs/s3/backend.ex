@@ -20,6 +20,12 @@ defmodule NeonFS.S3.Backend do
 
   require Logger
 
+  # Internal FileMeta.metadata key holding the object's content MD5, which is
+  # returned as the S3 ETag. Stored at write time (the MD5 is computed while the
+  # body streams) so HEAD/GET return the same value without re-reading the
+  # object. Not exposed as S3 user metadata. (#1037)
+  @etag_metadata_key "neonfs:content-md5"
+
   # Credential lookup
 
   @impl true
@@ -131,10 +137,7 @@ defmodule NeonFS.S3.Backend do
   @impl true
   def put_object(_ctx, bucket, key, body, opts) do
     with :ok <- ensure_bucket_exists(bucket) do
-      case write_via_chunk_writer(bucket, key, body, put_object_write_opts(opts)) do
-        {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
-        {:error, reason} -> {:error, internal_error(reason)}
-      end
+      write_with_etag(bucket, key, body, put_object_write_opts(opts), &write_via_chunk_writer/4)
     end
   end
 
@@ -147,11 +150,63 @@ defmodule NeonFS.S3.Backend do
   end
 
   defp do_put_object_stream(bucket, key, body, write_opts) do
-    case stream_write(bucket, key, body, write_opts) do
-      {:ok, meta} -> {:ok, compute_etag_from_meta(meta)}
+    write_with_etag(bucket, key, body, write_opts, &stream_write/4)
+  end
+
+  # Computes the object's content MD5, persists it as the ETag in FileMeta
+  # metadata so HEAD/GET return the same value, and returns it as the S3 ETag.
+  # The non-streaming path already holds the whole body, so it hashes directly
+  # and stores the ETag in the write itself. The streaming path tracks the MD5
+  # as the body flows through the write (bounded working set — the object is
+  # never buffered), so the MD5 is only known afterwards and is persisted in a
+  # follow-up metadata update. (#1037)
+  defp write_with_etag(bucket, key, body, write_opts, writer) when is_binary(body) do
+    etag = Base.encode16(:crypto.hash(:md5, body), case: :lower)
+
+    # The whole body is in hand, so store the ETag in the write itself — no
+    # follow-up metadata update and no read-after-write window.
+    case writer.(bucket, key, body, put_etag_in_metadata(write_opts, etag)) do
+      {:ok, _meta} -> {:ok, etag}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
+
+  defp write_with_etag(bucket, key, body, write_opts, writer) do
+    {tracked, finish} = track_md5_and_size(body)
+
+    case writer.(bucket, key, tracked, write_opts) do
+      {:ok, meta} ->
+        %{md5: md5} = finish.()
+        etag = Base.encode16(md5, case: :lower)
+        persist_object_etag(bucket, key, meta, etag)
+        {:ok, etag}
+
+      {:error, reason} ->
+        _ = finish.()
+        {:error, internal_error(reason)}
+    end
+  end
+
+  # Best-effort persistence of the content MD5 as the stored ETag. The PUT
+  # response already carries the correct ETag; a failed update only affects a
+  # later HEAD/GET, which falls back to the chunk-derived value.
+  defp persist_object_etag(bucket, key, meta, etag) do
+    metadata = Map.put(meta_metadata(meta), @etag_metadata_key, etag)
+    _ = call_core(:update_file_meta, [bucket, key, [metadata: metadata]])
+    :ok
+  end
+
+  defp put_etag_in_metadata(write_opts, etag) do
+    metadata =
+      write_opts
+      |> Keyword.get(:metadata, %{})
+      |> Map.put(@etag_metadata_key, etag)
+
+    Keyword.put(write_opts, :metadata, metadata)
+  end
+
+  defp meta_metadata(%{metadata: md}) when is_map(md), do: md
+  defp meta_metadata(_), do: %{}
 
   # Writes a byte stream to `bucket/key`. Prefers the co-located
   # `write_file_streamed/4` fast path when it's reachable (via
@@ -251,10 +306,15 @@ defmodule NeonFS.S3.Backend do
          {:ok, source_meta} <- fetch_object_meta(bucket, source_key),
          {:ok, %{stream: source_stream}} <- try_stream_read(bucket, source_key, []),
          write_opts = content_type_write_opts(source_meta),
-         {:ok, dest_meta} <- stream_write(bucket, dest_key, source_stream, write_opts) do
+         {tracked, finish} = track_md5_and_size(source_stream),
+         {:ok, dest_meta} <- stream_write(bucket, dest_key, tracked, write_opts) do
+      %{md5: md5} = finish.()
+      etag = Base.encode16(md5, case: :lower)
+      persist_object_etag(bucket, dest_key, dest_meta, etag)
+
       {:ok,
        %Firkin.CopyResult{
-         etag: compute_etag_from_meta(dest_meta),
+         etag: etag,
          last_modified: DateTime.utc_now()
        }}
     else
@@ -337,6 +397,22 @@ defmodule NeonFS.S3.Backend do
     {:ok, etag}
   end
 
+  # The S3 ETag of a completed multipart upload is the hex MD5 of the
+  # concatenated raw part MD5s, suffixed with "-<part count>". Each part's ETag
+  # is the hex MD5 of that part's content (see `record_part/5`). (#1037)
+  defp multipart_etag(sorted_parts) do
+    raw =
+      for {_num, part} <- sorted_parts, into: <<>> do
+        case Base.decode16(part.etag, case: :mixed) do
+          {:ok, bytes} -> bytes
+          :error -> <<>>
+        end
+      end
+
+    digest = :crypto.hash(:md5, raw) |> Base.encode16(case: :lower)
+    "#{digest}-#{length(sorted_parts)}"
+  end
+
   # Returns `{stream, finish_fn}` where `stream` yields each chunk of `body`
   # unchanged while accumulating md5 state and total size in the process
   # dictionary. After the stream is consumed (by `call_core_stream` or an
@@ -403,13 +479,15 @@ defmodule NeonFS.S3.Backend do
         case commit_refs(bucket, key, flattened_refs, write_opts) do
           {:ok, meta} ->
             MultipartStore.delete(upload_id)
+            etag = multipart_etag(sorted_parts)
+            persist_object_etag(bucket, key, meta, etag)
 
             {:ok,
              %Firkin.CompleteResult{
                location: "/#{bucket}/#{key}",
                bucket: bucket,
                key: key,
-               etag: compute_etag_from_meta(meta)
+               etag: etag
              }}
 
           {:error, reason} ->
@@ -657,14 +735,26 @@ defmodule NeonFS.S3.Backend do
   defp meta_content_type(%{content_type: ct}) when is_binary(ct), do: ct
   defp meta_content_type(_meta), do: "application/octet-stream"
 
-  defp compute_etag_from_meta(%{chunks: chunks}) when is_list(chunks) and chunks != [] do
+  # Prefer the content MD5 stored at write time (the true S3 ETag). Objects
+  # written before #1037 have no stored value and fall back to the chunk-derived
+  # digest — not the object MD5, but stable per object.
+  defp compute_etag_from_meta(%{metadata: md} = meta) when is_map(md) do
+    case Map.get(md, @etag_metadata_key) do
+      etag when is_binary(etag) -> etag
+      _ -> fallback_etag_from_meta(meta)
+    end
+  end
+
+  defp compute_etag_from_meta(meta), do: fallback_etag_from_meta(meta)
+
+  defp fallback_etag_from_meta(%{chunks: chunks}) when is_list(chunks) and chunks != [] do
     chunks
     |> IO.iodata_to_binary()
     |> then(&:crypto.hash(:md5, &1))
     |> Base.encode16(case: :lower)
   end
 
-  defp compute_etag_from_meta(%{size: size}) do
+  defp fallback_etag_from_meta(%{size: size}) do
     :crypto.hash(:md5, <<size::64>>) |> Base.encode16(case: :lower)
   end
 
