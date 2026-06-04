@@ -3875,9 +3875,20 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
-  # RPC wrappers for MountManager operations
+  # RPC wrappers for MountManager operations. Bounded timeouts so a misbehaving
+  # FUSE node can't hang the calling CLI command indefinitely (#1035) — a stuck
+  # mount surfaces as a clear error rather than an unbounded wait.
+  @mount_rpc_timeout 60_000
+  @unmount_rpc_timeout 30_000
+
   defp rpc_mount(fuse_node, volume_name, mount_point, opts) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :mount, [volume_name, mount_point, opts]) do
+    case :rpc.call(
+           fuse_node,
+           NeonFS.FUSE.MountManager,
+           :mount,
+           [volume_name, mount_point, opts],
+           @mount_rpc_timeout
+         ) do
       {:badrpc, reason} ->
         {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
 
@@ -3887,7 +3898,13 @@ defmodule NeonFS.CLI.Handler do
   end
 
   defp rpc_unmount(fuse_node, mount_id) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :unmount, [mount_id]) do
+    case :rpc.call(
+           fuse_node,
+           NeonFS.FUSE.MountManager,
+           :unmount,
+           [mount_id],
+           @unmount_rpc_timeout
+         ) do
       {:badrpc, reason} ->
         {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
 
