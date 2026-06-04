@@ -397,8 +397,17 @@ defmodule NeonFS.FUSE.MountManager do
     ]
 
     case Session.start_link(session_opts) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, reason} -> {:error, {:session_start_failed, reason}}
+      {:ok, pid} ->
+        # Decouple the session from the manager: `mount_filesystem/5` monitors
+        # it, so MountManager learns of its death via `:DOWN`. Leaving them
+        # linked meant `GenServer.stop(session, :shutdown)` on unmount (or a
+        # session crash) propagated the exit and took the manager down with it —
+        # wedging the whole FUSE control interface until a daemon restart (#1035).
+        Process.unlink(pid)
+        {:ok, pid}
+
+      {:error, reason} ->
+        {:error, {:session_start_failed, reason}}
     end
   end
 
