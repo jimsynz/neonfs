@@ -369,9 +369,13 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           data
         ])
 
+      # Halt on any non-`{:ok, _}` result, capturing the actual shape. The
+      # write path can return a `{:error, reason, info}` quorum 3-tuple
+      # (#1058), a `{:badrpc, _}` when a peer process is gone mid-test, or a
+      # bare `{:error, reason}` — all are "stop, the drive is full" (#1070).
       case result do
         {:ok, _} -> {:cont, [{:ok, path} | acc]}
-        {:error, _} = error -> {:halt, [error | acc]}
+        other -> {:halt, [other | acc]}
       end
     end)
     |> Enum.reverse()
