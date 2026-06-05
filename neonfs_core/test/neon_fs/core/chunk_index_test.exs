@@ -91,6 +91,21 @@ defmodule NeonFS.Core.ChunkIndexTest do
       # ETS should be populated again
       assert [{^hash, _}] = :ets.lookup(:chunk_index, hash)
     end
+
+    test "tolerates the backing store being deleted before a late write (#1067)", %{store: store} do
+      hash = :crypto.strong_rand_bytes(32)
+      chunk_meta = ChunkMeta.new("vol-test", hash, 1024, 512, :zstd)
+
+      pid = Process.whereis(ChunkIndex)
+
+      # Reproduces the ExUnit teardown race: the test-owned store table is
+      # deleted while the supervised ChunkIndex is still alive. A late put
+      # must not crash the GenServer.
+      :ets.delete(store)
+
+      assert :ok = ChunkIndex.put(chunk_meta)
+      assert Process.alive?(pid)
+    end
   end
 
   describe "get/2 (volume-scoped read via MetadataReader)" do
