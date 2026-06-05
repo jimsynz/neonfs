@@ -544,7 +544,7 @@ defmodule NeonFS.TestCase do
       index_tree_put: fn _store, _root, _tier, key, value ->
         case MetadataValue.decode(value) do
           {:ok, decoded} ->
-            :ets.insert(store, {key, decoded})
+            mock_store_insert(store, {key, decoded})
             {:ok, "stub-tree-root"}
 
           {:error, reason} ->
@@ -552,7 +552,7 @@ defmodule NeonFS.TestCase do
         end
       end,
       index_tree_delete: fn _store, _root, _tier, key ->
-        :ets.delete(store, key)
+        mock_store_delete(store, key)
         {:ok, "stub-tree-root"}
       end,
       index_tree_purge_tombstones: fn _store, _root, _tier, _before ->
@@ -561,6 +561,22 @@ defmodule NeonFS.TestCase do
       volume_fetcher: fn _volume_id -> {:error, :not_found} end,
       provisioner: __MODULE__.NoopProvisioner
     ]
+  end
+
+  # The mock store's ETS table is owned by the test process. During ExUnit
+  # teardown that process dies — deleting the table — before the supervised
+  # index GenServer that writes through these closures is stopped, so a late
+  # {:put, …} / {:delete, …} can land here after the table is gone (#1067).
+  defp mock_store_insert(store, record) do
+    :ets.insert(store, record)
+  rescue
+    ArgumentError -> true
+  end
+
+  defp mock_store_delete(store, key) do
+    :ets.delete(store, key)
+  rescue
+    ArgumentError -> true
   end
 
   defmodule NoopReplicator do
@@ -590,7 +606,7 @@ defmodule NeonFS.TestCase do
       )
 
     write_fn = fn _node, _segment, key, value ->
-      :ets.insert(store, {key, value})
+      mock_store_insert(store, {key, value})
       :ok
     end
 
@@ -602,7 +618,7 @@ defmodule NeonFS.TestCase do
     end
 
     delete_fn = fn _node, _segment, key ->
-      :ets.delete(store, key)
+      mock_store_delete(store, key)
       :ok
     end
 
