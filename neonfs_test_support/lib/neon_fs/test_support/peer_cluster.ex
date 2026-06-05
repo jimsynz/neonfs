@@ -20,6 +20,13 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   require Logger
 
+  # On a loaded CI runner the peer dist-channel bring-up intermittently fails
+  # with a transient error (`:tcp_closed`, `{:inet_async, :timeout}`) that
+  # succeeds on a retry. Without a retry a single transient boot failure fails
+  # the whole test module in `setup_all`/`setup` (#1071).
+  @peer_boot_attempts 3
+  @peer_boot_backoff_ms 250
+
   @type node_info :: %{
           name: atom(),
           peer: pid(),
@@ -74,7 +81,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
       # `start_application_on_peer/3`) already records, and the
       # ExUnit-side cleanup (`stop_cluster/1`) still calls
       # `:peer.stop/1` so peer lifetime is bounded by the test.
-      case :peer.start(peer_opts) do
+      case peer_start_with_retry(peer_opts, @peer_boot_attempts) do
         {:ok, peer, node} ->
           Process.monitor(peer)
           {{:ok, peer, node}, %{node: node}}
@@ -84,6 +91,32 @@ defmodule NeonFS.TestSupport.PeerCluster do
       end
     end)
   end
+
+  defp peer_start_with_retry(peer_opts, attempts_left) do
+    case :peer.start(peer_opts) do
+      {:ok, peer, node} ->
+        {:ok, peer, node}
+
+      {:error, reason} = error ->
+        if attempts_left > 1 and transient_boot_error?(reason) do
+          Logger.warning(
+            "peer boot failed transiently (#{inspect(reason)}), " <>
+              "retrying (#{attempts_left - 1} attempt(s) left)"
+          )
+
+          Process.sleep(@peer_boot_backoff_ms)
+          peer_start_with_retry(peer_opts, attempts_left - 1)
+        else
+          error
+        end
+    end
+  end
+
+  defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
+  defp transient_boot_error?(:tcp_closed), do: true
+  defp transient_boot_error?(:timeout), do: true
+  defp transient_boot_error?({:inet_async, :timeout}), do: true
+  defp transient_boot_error?(_reason), do: false
 
   defp span_apply_config(peer, node, app_config) do
     :telemetry.span([:neonfs, :peer_cluster, :node, :apply_config], %{node: node}, fn ->
