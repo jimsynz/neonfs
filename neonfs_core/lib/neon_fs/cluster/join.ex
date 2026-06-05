@@ -257,11 +257,13 @@ defmodule NeonFS.Cluster.Join do
     with :ok <- Invite.validate_invite(token),
          {:ok, state} <- State.load(),
          {:ok, node_cert_pem, ca_cert_pem} <- sign_joining_node_csr(csr, hostname),
-         {:ok, updated_state} <- add_peer_to_state(state, joining_node, type, dist_port),
+         {:ok, updated_state, joiner_peer} <-
+           add_peer_to_state(state, joining_node, type, dist_port),
          :ok <- State.save(updated_state),
          :ok <- maybe_add_to_ra_cluster(joining_node, type) do
       register_service(joining_node, type, data_endpoint)
       maybe_adjust_system_volume_replication(updated_state, type)
+      propagate_new_peer(state, joining_node, joiner_peer, type)
 
       cluster_info = %{
         cluster_id: state.cluster_id,
@@ -269,14 +271,9 @@ defmodule NeonFS.Cluster.Join do
         created_at: DateTime.to_iso8601(state.created_at),
         master_key: state.master_key,
         known_peers:
-          Enum.map(updated_state.known_peers, fn peer ->
-            %{
-              id: peer.id,
-              name: Atom.to_string(peer.name),
-              last_seen: DateTime.to_iso8601(peer.last_seen),
-              dist_port: peer[:dist_port] || 0
-            }
-          end),
+          [self_as_peer(state.this_node) | state.known_peers]
+          |> sanitise_peers(joining_node)
+          |> Enum.map(&peer_to_wire/1),
         ra_cluster_members: Enum.map(updated_state.ra_cluster_members, &Atom.to_string/1),
         node_cert_pem: node_cert_pem,
         ca_cert_pem: ca_cert_pem,
@@ -288,7 +285,67 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
+  @doc """
+  Returns `peers` with any entry for `exclude_name` removed and duplicate node
+  names collapsed. A node must never record itself in `known_peers`, and a
+  re-join must not introduce duplicate peer entries.
+  """
+  @spec sanitise_peers([State.peer_info()], atom()) :: [State.peer_info()]
+  def sanitise_peers(peers, exclude_name) do
+    peers
+    |> Enum.reject(fn peer -> peer.name == exclude_name end)
+    |> Enum.uniq_by(fn peer -> peer.name end)
+  end
+
+  @doc """
+  Adds `peer` to this node's persisted `known_peers`, deduped and excluding this
+  node itself. Invoked via RPC on existing core peers when a new node joins, so
+  every core node holds the full peer set and can resolve every other node's
+  distribution port (#1060/#1061). Idempotent.
+  """
+  @spec add_known_peer(State.peer_info()) :: :ok | {:error, term()}
+  def add_known_peer(peer) do
+    with {:ok, state} <- State.load() do
+      State.save(%{
+        state
+        | known_peers: sanitise_peers([peer | state.known_peers], state.this_node.name)
+      })
+    end
+  end
+
+  @doc """
+  Builds the joining node's `ra_cluster_members`. Core nodes include themselves;
+  the advertised members already contain the joiner, so the result is deduped to
+  avoid a duplicate self entry. Non-core nodes are not Ra members.
+  """
+  @spec joiner_ra_members([atom()], atom(), ServiceType.t()) :: [atom()]
+  def joiner_ra_members(ra_members, this_node, type) do
+    if ServiceType.core?(type) do
+      Enum.uniq([this_node | ra_members])
+    else
+      Enum.uniq(ra_members)
+    end
+  end
+
   # Private functions
+
+  defp self_as_peer(node_info) do
+    %{
+      id: node_info.id,
+      name: node_info.name,
+      last_seen: DateTime.utc_now(),
+      dist_port: node_info[:dist_port] || 0
+    }
+  end
+
+  defp peer_to_wire(peer) do
+    %{
+      id: peer.id,
+      name: Atom.to_string(peer.name),
+      last_seen: DateTime.to_iso8601(peer.last_seen),
+      dist_port: peer[:dist_port] || 0
+    }
+  end
 
   defp activate_data_plane do
     case Listener.rebind() do
@@ -526,9 +583,9 @@ defmodule NeonFS.Cluster.Join do
         _ -> DateTime.utc_now()
       end
 
-    # Convert known_peers back to proper format
     known_peers =
-      Enum.map(cluster_info.known_peers, fn peer ->
+      cluster_info.known_peers
+      |> Enum.map(fn peer ->
         %{
           id: peer["id"] || peer.id,
           name: parse_atom(peer["name"] || peer.name),
@@ -536,20 +593,10 @@ defmodule NeonFS.Cluster.Join do
           dist_port: peer["dist_port"] || peer[:dist_port] || 0
         }
       end)
+      |> sanitise_peers(this_node)
 
-    # Convert ra_cluster_members back to atoms
-    ra_members =
-      Enum.map(cluster_info.ra_cluster_members, fn member ->
-        parse_atom(member)
-      end)
-
-    # Non-core nodes don't add themselves to ra_cluster_members
-    ra_cluster_members =
-      if ServiceType.core?(type) do
-        [this_node | ra_members]
-      else
-        ra_members
-      end
+    ra_members = Enum.map(cluster_info.ra_cluster_members, &parse_atom/1)
+    ra_cluster_members = joiner_ra_members(ra_members, this_node, type)
 
     state = %State{
       cluster_id: cluster_info.cluster_id,
@@ -605,11 +652,32 @@ defmodule NeonFS.Cluster.Join do
 
     updated_state = %{
       state
-      | known_peers: [peer_info | state.known_peers],
-        ra_cluster_members: ra_cluster_members
+      | known_peers: sanitise_peers([peer_info | state.known_peers], state.this_node.name),
+        ra_cluster_members: Enum.uniq(ra_cluster_members)
     }
 
-    {:ok, updated_state}
+    {:ok, updated_state, peer_info}
+  end
+
+  # Tell the existing core peers about the newly-joined core node so every core
+  # node holds the complete peer set and the distribution mesh closes. Without
+  # this, a node that joined earlier never learns about later joiners and cannot
+  # resolve their dist port (#1060/#1061). Best-effort: a peer that is briefly
+  # unreachable picks the entry up on its next restart from its own join state.
+  defp propagate_new_peer(%State{} = state, joining_node, joiner_peer, type) do
+    if ServiceType.core?(type) do
+      state.ra_cluster_members
+      |> Enum.reject(&(&1 == Node.self() or &1 == joining_node))
+      |> Enum.each(fn peer_node ->
+        try do
+          :erpc.call(peer_node, __MODULE__, :add_known_peer, [joiner_peer], 5_000)
+        catch
+          _, _ -> :ok
+        end
+      end)
+    end
+
+    :ok
   end
 
   defp maybe_add_to_ra_cluster(joining_node, type) do

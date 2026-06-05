@@ -22,3 +22,10 @@
 
 ## Enable SMP support
 -smp auto
+
+## Cluster membership is governed by Ra consensus, not OTP `global`. With
+## prevent_overlapping_partitions enabled (the OTP default), a transient
+## partial mesh during sequential `cluster join` sends `global` into a
+## permanent disconnect loop that collapses the cluster (see #1061). Ra
+## handles partition safety, so disable it.
+-kernel prevent_overlapping_partitions false

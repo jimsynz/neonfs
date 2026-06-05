@@ -2,7 +2,7 @@ defmodule NeonFS.Cluster.JoinTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Cluster.{Init, Invite, Join}
+  alias NeonFS.Cluster.{Init, Invite, Join, State}
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Transport.TLS
 
@@ -45,6 +45,12 @@ defmodule NeonFS.Cluster.JoinTest do
       fuse_csr = TLS.create_csr(fuse_key, "fuse_peer@localhost")
 
       {:ok, cluster_info} = Join.accept_join(token1, :fuse_peer@localhost, :fuse, fuse_csr)
+
+      # Advertised peers include the accepting (bootstrap) node and exclude the
+      # joining node, so the joiner records every other node and never itself (#1060).
+      peer_names = Enum.map(cluster_info.known_peers, & &1.name)
+      assert Atom.to_string(Node.self()) in peer_names
+      refute "fuse_peer@localhost" in peer_names
 
       # Response includes signed cert and CA cert
       assert is_binary(cluster_info.node_cert_pem)
@@ -94,6 +100,25 @@ defmodule NeonFS.Cluster.JoinTest do
 
       # Reset for test isolation
       VolumeRegistry.adjust_system_volume_replication(1)
+    end
+  end
+
+  describe "add_known_peer/1" do
+    test "adds a peer, is idempotent, and never records this node (#1060/#1061)" do
+      peer = %{id: "p1", name: :"peer@10.0.0.9", last_seen: DateTime.utc_now(), dist_port: 9100}
+
+      assert :ok = Join.add_known_peer(peer)
+      {:ok, state} = State.load()
+      assert :"peer@10.0.0.9" in Enum.map(state.known_peers, & &1.name)
+
+      assert :ok = Join.add_known_peer(peer)
+      {:ok, state2} = State.load()
+      assert Enum.count(state2.known_peers, &(&1.name == :"peer@10.0.0.9")) == 1
+
+      self_peer = %{id: "s", name: Node.self(), last_seen: DateTime.utc_now(), dist_port: 9100}
+      assert :ok = Join.add_known_peer(self_peer)
+      {:ok, state3} = State.load()
+      refute Node.self() in Enum.map(state3.known_peers, & &1.name)
     end
   end
 
