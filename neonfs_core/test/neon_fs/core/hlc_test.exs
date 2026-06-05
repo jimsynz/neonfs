@@ -278,7 +278,6 @@ defmodule NeonFS.Core.HLCTest do
   end
 
   describe "property: monotonicity" do
-    @tag timeout: 10_000
     test "generating N timestamps always yields a sorted sequence" do
       for _ <- 1..50 do
         node_id = :"node_#{:rand.uniform(10)}@host"

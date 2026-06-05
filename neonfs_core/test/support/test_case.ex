@@ -244,7 +244,7 @@ defmodule NeonFS.TestCase do
   """
   def start_persistence do
     meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/tmp/neonfs_test/meta")
-    snapshot_interval_ms = Application.get_env(:neonfs_core, :snapshot_interval_ms, 100)
+    snapshot_interval_ms = Application.get_env(:neonfs_core, :snapshot_interval_ms, :infinity)
 
     start_supervised!(
       %{

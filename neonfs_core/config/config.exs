@@ -292,7 +292,7 @@ if Mix.env() == :test do
     meta_dir: "/tmp/neonfs_test/meta",
     metrics_enabled: false,
     ra_data_dir: "/tmp/neonfs_test/ra",
-    snapshot_interval_ms: 100,
+    snapshot_interval_ms: :infinity,
     enable_ra: true,
     # Don't auto-start children in tests - each test starts what it needs
     start_children?: false

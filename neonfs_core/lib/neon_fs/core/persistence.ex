@@ -44,7 +44,9 @@ defmodule NeonFS.Core.Persistence do
   ## Options
 
   - `:meta_dir` - Directory for DETS files (default: #{@default_meta_dir})
-  - `:snapshot_interval_ms` - Snapshot interval in milliseconds (default: #{@default_snapshot_interval_ms})
+  - `:snapshot_interval_ms` - Snapshot interval in milliseconds (default:
+    #{@default_snapshot_interval_ms}). Pass `:infinity` to disable periodic
+    snapshots entirely; callers then snapshot explicitly via `snapshot_now/0`.
   """
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -358,8 +360,10 @@ defmodule NeonFS.Core.Persistence do
     end
   end
 
-  @spec schedule_snapshot(non_neg_integer()) :: reference()
-  defp schedule_snapshot(interval_ms) do
+  @spec schedule_snapshot(non_neg_integer() | :infinity) :: reference() | :ok
+  defp schedule_snapshot(:infinity), do: :ok
+
+  defp schedule_snapshot(interval_ms) when is_integer(interval_ms) do
     Process.send_after(self(), :snapshot, interval_ms)
   end
 
