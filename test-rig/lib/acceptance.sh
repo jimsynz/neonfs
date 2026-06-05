@@ -18,6 +18,11 @@ S3_KEY="" ; S3_SECRET="" ; S3_FLAGS=""
 S3_HOST="127.0.0.1:8080"
 DAV_BASE="http://127.0.0.1:8081"
 
+# Container runtime integrations: the omnibus daemon owns these Unix sockets.
+DOCKER_SOCK="${DOCKER_SOCK:-/run/neonfs/docker.sock}"
+CONTAINERD_SOCK="${CONTAINERD_SOCK:-/run/neonfs/containerd.sock}"
+DOCKER_VOL="${DOCKER_VOL:-accept_docker}"
+
 # --- harness ---------------------------------------------------------------
 
 A_PASS=0 ; A_FAIL=0 ; A_SKIP=0
@@ -181,6 +186,77 @@ s_webdav_ops() {
     || { echo "  WebDAV PUT/GET failed" >&2; return 1; }
 }
 
+# POST a Docker Volume Plugin request to the driver's Unix socket. $1 is the
+# endpoint, $2 the JSON body (single-quote it at the call site). Runs as root
+# because the socket is neonfs-owned and not world-writable.
+dvd() {
+  node_ssh 1 "sudo curl -s --max-time 20 --unix-socket ${DOCKER_SOCK} \
+    -H 'Content-Type: application/json' -d '$2' http://plugin/$1" 2>/dev/null
+}
+
+# Docker/Podman VolumeDriver: drive the full lifecycle over the plugin socket —
+# Activate, Create (which provisions a replicas-1 NeonFS volume in core), Mount
+# (a real FUSE-backed mountpoint), a read/write round-trip at that mountpoint,
+# Path/List, then Unmount + Remove.
+s_docker_volume_driver() {
+  node_ssh 1 "sudo test -S ${DOCKER_SOCK}" 2>/dev/null \
+    || { echo "  docker plugin socket ${DOCKER_SOCK} absent — driver not deployed" >&2; return 77; }
+
+  dvd Plugin.Activate '{}' | grep -q 'VolumeDriver' \
+    || { echo "  Plugin.Activate did not advertise VolumeDriver" >&2; return 1; }
+
+  local out
+  out=$(dvd VolumeDriver.Create "{\"Name\":\"${DOCKER_VOL}\",\"Opts\":{\"durability\":\"1\"}}")
+  echo "${out}" | grep -q '"Err":""' \
+    || { echo "  VolumeDriver.Create failed: ${out}" >&2; return 1; }
+
+  out=$(dvd VolumeDriver.Mount "{\"Name\":\"${DOCKER_VOL}\"}")
+  local mp; mp=$(echo "${out}" | grep -oE '"Mountpoint":"[^"]+"' | head -1 | cut -d'"' -f4)
+  [ -n "${mp}" ] \
+    || { echo "  VolumeDriver.Mount returned no mountpoint: ${out}" >&2; return 1; }
+  echo "  mountpoint ${mp}" >&2
+
+  local rc=0
+  node_ssh 1 "sudo -u neonfs bash -c '
+    set -e
+    echo docker-content > ${mp}/dvd_${TAG}.txt
+    sync
+    [ \"\$(cat ${mp}/dvd_${TAG}.txt)\" = docker-content ]
+  '" 2>&1 | sed 's/^/  /' >&2 || rc=1
+
+  dvd VolumeDriver.Path "{\"Name\":\"${DOCKER_VOL}\"}" | grep -q "${mp}" \
+    || { echo "  VolumeDriver.Path did not return the mountpoint" >&2; rc=1; }
+  dvd VolumeDriver.List '{}' | grep -q "${DOCKER_VOL}" \
+    || { echo "  VolumeDriver.List did not include ${DOCKER_VOL}" >&2; rc=1; }
+
+  dvd VolumeDriver.Unmount "{\"Name\":\"${DOCKER_VOL}\"}" | grep -q '"Err":""' \
+    || { echo "  VolumeDriver.Unmount failed" >&2; rc=1; }
+  dvd VolumeDriver.Remove "{\"Name\":\"${DOCKER_VOL}\"}" >/dev/null 2>&1
+
+  [ "${rc}" -eq 0 ] || return 1
+}
+
+# containerd content store: the plugin speaks the gRPC content protocol over a
+# Unix socket that a containerd daemon dials as a proxy plugin. Content RPCs
+# (Read/Write/Info) are not yet implemented (#549/#550), so this verifies the
+# endpoint is bound, listening, and the service is registered + healthy — not a
+# content round-trip.
+s_containerd_endpoint() {
+  node_ssh 1 "sudo test -S ${CONTAINERD_SOCK}" 2>/dev/null \
+    || { echo "  containerd socket ${CONTAINERD_SOCK} absent — backend not deployed" >&2; return 77; }
+
+  node_ssh 1 "sudo ss -lxn 2>/dev/null | grep -q '${CONTAINERD_SOCK}'" 2>/dev/null \
+    || { echo "  ${CONTAINERD_SOCK} is not a listening socket" >&2; return 1; }
+
+  local status; status=$(ncli 1 "node status" 2>&1)
+  echo "${status}" | grep -iE 'containerd_(cluster|registrar)' | sed 's/^/  /' >&2 || true
+  if echo "${status}" | grep -iE 'containerd_(cluster|registrar)' | grep -qi 'unhealthy'; then
+    echo "  containerd service reported unhealthy" >&2; return 1
+  fi
+
+  echo "  note: content Read/Write unimplemented (#549/#550) — endpoint liveness only" >&2
+}
+
 # Cross-interface: write via FUSE, must be visible via S3 and WebDAV (and NFS).
 s_cross_consistency() {
   [ -n "${S3_KEY}" ] || return 77
@@ -251,6 +327,10 @@ s_replication() {
 acceptance_cleanup() {
   [ "${KEEP:-0}" = 1 ] && return 0
   node_ssh 1 "sudo umount ${NFS_MNT} 2>/dev/null; sudo timeout 20 neonfs fuse unmount ${FUSE_MNT} 2>/dev/null" >/dev/null 2>&1 || true
+  if node_ssh 1 "sudo test -S ${DOCKER_SOCK}" 2>/dev/null; then
+    dvd VolumeDriver.Unmount "{\"Name\":\"${DOCKER_VOL}\"}" >/dev/null 2>&1 || true
+    dvd VolumeDriver.Remove "{\"Name\":\"${DOCKER_VOL}\"}" >/dev/null 2>&1 || true
+  fi
 }
 
 # --- driver ----------------------------------------------------------------
@@ -272,6 +352,8 @@ acceptance_run() {
   step "S3 operations (list/put/get)"               s_s3_ops
   step "consistency S3/NFS/FUSE/WebDAV (FUSE write)" s_cross_consistency
   step "WebDAV operations (PUT/GET)"                s_webdav_ops
+  step "Docker volume driver (create/mount/io)"     s_docker_volume_driver
+  step "containerd content store endpoint"          s_containerd_endpoint
   step "volume show reflects stored data"           s_volume_stats
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
   step "replication across nodes"                   s_replication

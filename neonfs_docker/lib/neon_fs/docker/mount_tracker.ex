@@ -25,7 +25,7 @@ defmodule NeonFS.Docker.MountTracker do
   Application env keys used by the defaults:
 
     * `:mount_root` — directory under which per-volume mount points are
-      created (default `"/var/lib/neonfs-docker/mounts"`).
+      created (default `"/var/lib/neonfs/docker/mounts"`).
     * `:fuse_node` — Erlang node hosting `NeonFS.FUSE.MountManager`
       (default `Node.self/0`, i.e. co-located).
   """
@@ -39,7 +39,11 @@ defmodule NeonFS.Docker.MountTracker do
   @type unmount_fn :: (mount_id() -> :ok | {:error, term()})
   @type t :: %{mount_id: mount_id(), mount_point: mount_point(), ref_count: pos_integer()}
 
-  @default_mount_root "/var/lib/neonfs-docker/mounts"
+  # Lives under /var/lib/neonfs: that directory is created and chowned to the
+  # neonfs user by packaging (pre-install.sh) and is the only path the daemon's
+  # systemd unit lists in ReadWritePaths. A sibling like /var/lib/neonfs-docker
+  # is neither created nor writable, so Mount fails with :eacces (#1063).
+  @default_mount_root "/var/lib/neonfs/docker/mounts"
 
   ## Client API
 
