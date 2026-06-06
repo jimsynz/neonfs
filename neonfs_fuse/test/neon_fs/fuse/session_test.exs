@@ -184,7 +184,6 @@ defmodule NeonFS.FUSE.SessionTest do
   describe "INIT handshake" do
     setup do
       ctx = setup_session()
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -243,7 +242,6 @@ defmodule NeonFS.FUSE.SessionTest do
     setup do
       ctx = setup_session()
       _ = handshake!(ctx)
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -263,7 +261,6 @@ defmodule NeonFS.FUSE.SessionTest do
       start_supervised!(InodeTable)
       ctx = setup_session()
       _ = handshake!(ctx)
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -291,7 +288,6 @@ defmodule NeonFS.FUSE.SessionTest do
 
       send(ctx.handler, {:set_session, ctx.session})
 
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -341,7 +337,6 @@ defmodule NeonFS.FUSE.SessionTest do
         })
 
       send(ctx.handler, {:set_session, ctx.session})
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -390,7 +385,6 @@ defmodule NeonFS.FUSE.SessionTest do
           end
         })
 
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -460,7 +454,6 @@ defmodule NeonFS.FUSE.SessionTest do
           end
         })
 
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -495,7 +488,6 @@ defmodule NeonFS.FUSE.SessionTest do
           "rmdir" => {"ok", %{}}
         })
 
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -531,7 +523,6 @@ defmodule NeonFS.FUSE.SessionTest do
           "rename" => {"ok", %{}}
         })
 
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -591,7 +582,6 @@ defmodule NeonFS.FUSE.SessionTest do
           end
         })
 
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -697,7 +687,6 @@ defmodule NeonFS.FUSE.SessionTest do
           end
         })
 
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -755,7 +744,6 @@ defmodule NeonFS.FUSE.SessionTest do
     setup do
       ctx = setup_session()
       _ = handshake!(ctx)
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -799,7 +787,6 @@ defmodule NeonFS.FUSE.SessionTest do
     setup do
       ctx = setup_session()
       _ = handshake!(ctx)
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -831,7 +818,6 @@ defmodule NeonFS.FUSE.SessionTest do
         })
 
       send(ctx.handler, {:set_session, ctx.session})
-      on_exit(fn -> teardown_session(ctx) end)
       ctx
     end
 
@@ -853,22 +839,20 @@ defmodule NeonFS.FUSE.SessionTest do
   defp setup_session do
     {:ok, {kernel_fd, server_fd}} = FNative.socketpair_stream()
 
-    {:ok, handler} = StubHandler.start_link([])
+    # Start the handler before the session so ExUnit tears them down in
+    # reverse (session first, then handler), matching the old manual order.
+    handler = start_supervised!({StubHandler, []}, id: :stub_handler)
 
-    {:ok, session} =
-      Session.start_link(fd: server_fd, volume: "test", handler: handler)
+    session =
+      start_supervised!(
+        {Session, [fd: server_fd, volume: "test", handler: handler]},
+        id: :session
+      )
 
     %{session: session, handler: handler, kernel_fd: kernel_fd, server_fd: server_fd}
   end
 
   defp setup_session_with_handler, do: setup_session()
-
-  defp teardown_session(ctx) do
-    if Process.alive?(ctx.session), do: GenServer.stop(ctx.session, :normal, 1_000)
-    if Process.alive?(ctx.handler), do: GenServer.stop(ctx.handler, :normal, 1_000)
-  catch
-    :exit, _ -> :ok
-  end
 
   defp send_init(ctx, kernel_unique, opts) do
     minor = Keyword.get(opts, :kernel_minor, 31)

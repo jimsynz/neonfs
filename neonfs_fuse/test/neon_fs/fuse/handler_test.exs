@@ -13,12 +13,8 @@ defmodule NeonFS.FUSE.HandlerTest do
     setup do
       start_supervised!(InodeTable)
       {:ok, inode} = InodeTable.allocate_inode("vol", "/file.txt")
-      {:ok, handler} = Handler.start_link(volume: "vol", test_notify: self())
+      handler = start_supervised!({Handler, volume: "vol", test_notify: self()})
       Mimic.allow(ChunkReader, self(), handler)
-
-      on_exit(fn ->
-        if Process.alive?(handler), do: GenServer.stop(handler)
-      end)
 
       {:ok, handler: handler, inode: inode}
     end
@@ -135,12 +131,8 @@ defmodule NeonFS.FUSE.HandlerTest do
       # can resolve it via `resolve_inode/2`.
       {:ok, parent_inode} = InodeTable.allocate_inode("vol", "/")
 
-      {:ok, handler} = Handler.start_link(volume: "vol", test_notify: self())
+      handler = start_supervised!({Handler, volume: "vol", test_notify: self()})
       Mimic.allow(NeonFS.Client, self(), handler)
-
-      on_exit(fn ->
-        if Process.alive?(handler), do: GenServer.stop(handler)
-      end)
 
       {:ok, handler: handler, parent_inode: parent_inode}
     end
@@ -238,12 +230,8 @@ defmodule NeonFS.FUSE.HandlerTest do
       {:ok, parent_inode} = InodeTable.allocate_inode("vol", "/")
       {:ok, file_inode} = InodeTable.allocate_inode("vol", "/handle.txt")
 
-      {:ok, handler} = Handler.start_link(volume: "vol", test_notify: self())
+      handler = start_supervised!({Handler, volume: "vol", test_notify: self()})
       Mimic.allow(NeonFS.Client, self(), handler)
-
-      on_exit(fn ->
-        if Process.alive?(handler), do: GenServer.stop(handler)
-      end)
 
       {:ok, handler: handler, parent_inode: parent_inode, file_inode: file_inode}
     end
@@ -347,14 +335,10 @@ defmodule NeonFS.FUSE.HandlerTest do
       start_supervised!(InodeTable)
       {:ok, file_inode} = InodeTable.allocate_inode("vol", "/data.txt")
 
-      {:ok, handler} =
-        Handler.start_link(volume: "vol", volume_name: "vol-name", test_notify: self())
+      handler =
+        start_supervised!({Handler, volume: "vol", volume_name: "vol-name", test_notify: self()})
 
       Mimic.allow(NeonFS.Client, self(), handler)
-
-      on_exit(fn ->
-        if Process.alive?(handler), do: GenServer.stop(handler)
-      end)
 
       {:ok, handler: handler, file_inode: file_inode}
     end

@@ -88,21 +88,19 @@ defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
     {:ok, fd} =
       Fusermount.mount(mount_point, ["fsname=neonfs_session_test", "subtype=neonfs"])
 
-    {:ok, session} =
-      Session.start_link(fd: fd, volume: volume_id, volume_name: volume_name)
-
+    # Register umount/rmdir before start_supervised so ExUnit tears the
+    # session down first (LIFO), then we unmount — matching the previous
+    # stop-session-then-unmount order.
     on_exit(fn ->
-      if Process.alive?(session) do
-        try do
-          GenServer.stop(session, :shutdown, 5_000)
-        catch
-          :exit, _ -> :ok
-        end
-      end
-
       _ = Fusermount.unmount(mount_point, lazy: true)
       _ = File.rmdir(mount_point)
     end)
+
+    session =
+      start_supervised!(
+        {Session, [fd: fd, volume: volume_id, volume_name: volume_name]},
+        id: :session
+      )
 
     {:ok, mount_point: mount_point, session: session}
   end
