@@ -97,7 +97,6 @@ defmodule NeonFS.Docker.HealthCheckTest do
       # finds something. Tests that span the registered name need
       # `async: false` (already set at the module level).
       pid = start_mount_tracker(max_mounts: 2)
-      on_exit(fn -> ensure_stopped(pid) end)
 
       {:ok, tracker: pid}
     end
@@ -129,8 +128,7 @@ defmodule NeonFS.Docker.HealthCheckTest do
     end
 
     test "is :healthy with max: nil when no cap is configured" do
-      pid = start_mount_tracker([])
-      on_exit(fn -> ensure_stopped(pid) end)
+      start_mount_tracker([])
 
       DockerHealthCheck.register_checks()
 
@@ -143,13 +141,11 @@ defmodule NeonFS.Docker.HealthCheckTest do
   end
 
   defp start_mount_tracker(opts) do
-    # The tracker registers under the global `MountTracker` atom
-    # because the health check's `Process.whereis/1` lookup relies on
-    # it. Stop any prior instance first to keep tests deterministic.
-    case Process.whereis(MountTracker) do
-      nil -> :ok
-      pid -> ensure_stopped(pid)
-    end
+    # The tracker registers under the global `MountTracker` atom because the
+    # health check's `Process.whereis/1` lookup relies on it. Replace any prior
+    # supervised instance so re-registering the name is deterministic; ExUnit
+    # tears the tracker down after the test.
+    _ = stop_supervised(MountTracker)
 
     full_opts =
       Keyword.merge(
@@ -161,18 +157,6 @@ defmodule NeonFS.Docker.HealthCheckTest do
         opts
       )
 
-    {:ok, pid} = MountTracker.start_link(full_opts)
-    Process.unlink(pid)
-    pid
-  end
-
-  defp ensure_stopped(pid) do
-    if Process.alive?(pid) do
-      try do
-        GenServer.stop(pid, :shutdown, 1_000)
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    start_supervised!({MountTracker, full_opts}, restart: :temporary)
   end
 end

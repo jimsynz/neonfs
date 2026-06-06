@@ -5,16 +5,12 @@ defmodule NeonFS.Docker.MountTrackerTest do
 
   defp start_tracker(opts) do
     name = :"mount_tracker_#{System.unique_integer([:positive])}"
-    {:ok, pid} = MountTracker.start_link(Keyword.put(opts, :name, name))
-    Process.unlink(pid)
 
-    on_exit(fn ->
-      try do
-        if Process.alive?(pid), do: GenServer.stop(pid, :shutdown, 1_000)
-      catch
-        :exit, _ -> :ok
-      end
-    end)
+    pid =
+      start_supervised!({MountTracker, Keyword.put(opts, :name, name)},
+        id: name,
+        restart: :temporary
+      )
 
     %{pid: pid, name: name}
   end

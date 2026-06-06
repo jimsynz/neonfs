@@ -10,26 +10,17 @@ defmodule NeonFS.Docker.PlugTest do
     store_name = :"volume_store_#{suffix}"
     tracker_name = :"mount_tracker_#{suffix}"
 
-    {:ok, store_pid} = VolumeStore.start_link(name: store_name)
+    # Start VolumeStore before MountTracker so ExUnit tears them down in
+    # reverse (tracker first), matching the previous manual on_exit order.
+    start_supervised!({VolumeStore, name: store_name}, restart: :temporary)
 
-    {:ok, tracker_pid} =
-      MountTracker.start_link(
-        name: tracker_name,
-        mount_fn: fn vol -> {:ok, {{:mock_id, vol}, "/mnt/#{vol}"}} end,
-        unmount_fn: fn _ -> :ok end
-      )
-
-    Process.unlink(tracker_pid)
-
-    on_exit(fn ->
-      if Process.alive?(store_pid), do: GenServer.stop(store_pid)
-
-      try do
-        if Process.alive?(tracker_pid), do: GenServer.stop(tracker_pid, :shutdown, 1_000)
-      catch
-        :exit, _ -> :ok
-      end
-    end)
+    start_supervised!(
+      {MountTracker,
+       name: tracker_name,
+       mount_fn: fn vol -> {:ok, {{:mock_id, vol}, "/mnt/#{vol}"}} end,
+       unmount_fn: fn _ -> :ok end},
+      restart: :temporary
+    )
 
     {:ok, store: store_name, tracker: tracker_name}
   end
@@ -303,22 +294,14 @@ defmodule NeonFS.Docker.PlugTest do
     test "reports mount_fn errors in Err", %{store: store} do
       failing_tracker = :"failing_tracker_#{System.unique_integer([:positive])}"
 
-      {:ok, pid} =
-        MountTracker.start_link(
-          name: failing_tracker,
-          mount_fn: fn _ -> {:error, :permission_denied} end,
-          unmount_fn: fn _ -> :ok end
-        )
-
-      Process.unlink(pid)
-
-      on_exit(fn ->
-        try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :shutdown, 1_000)
-        catch
-          :exit, _ -> :ok
-        end
-      end)
+      start_supervised!(
+        {MountTracker,
+         name: failing_tracker,
+         mount_fn: fn _ -> {:error, :permission_denied} end,
+         unmount_fn: fn _ -> :ok end},
+        id: :failing_tracker,
+        restart: :temporary
+      )
 
       conn =
         post("/VolumeDriver.Mount", %{"Name" => "vol-x"},
@@ -339,23 +322,15 @@ defmodule NeonFS.Docker.PlugTest do
          %{store: store} do
       capped_tracker = :"capped_tracker_#{System.unique_integer([:positive])}"
 
-      {:ok, pid} =
-        MountTracker.start_link(
-          name: capped_tracker,
-          mount_fn: fn name -> {:ok, {{:mount_id, name}, "/tmp/" <> name}} end,
-          unmount_fn: fn _ -> :ok end,
-          max_mounts: 0
-        )
-
-      Process.unlink(pid)
-
-      on_exit(fn ->
-        try do
-          if Process.alive?(pid), do: GenServer.stop(pid, :shutdown, 1_000)
-        catch
-          :exit, _ -> :ok
-        end
-      end)
+      start_supervised!(
+        {MountTracker,
+         name: capped_tracker,
+         mount_fn: fn name -> {:ok, {{:mount_id, name}, "/tmp/" <> name}} end,
+         unmount_fn: fn _ -> :ok end,
+         max_mounts: 0},
+        id: :capped_tracker,
+        restart: :temporary
+      )
 
       conn =
         post("/VolumeDriver.Mount", %{"Name" => "vol-overflow"},
