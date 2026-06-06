@@ -68,7 +68,7 @@ defmodule NeonFS.S3.IntegrationTest do
         startup_log: false
       )
 
-    {:ok, multipart_store} = MultipartStore.start_link([])
+    start_supervised!(MultipartStore)
 
     config =
       [
@@ -87,7 +87,6 @@ defmodule NeonFS.S3.IntegrationTest do
       ]
 
     on_exit(fn ->
-      if Process.alive?(multipart_store), do: GenServer.stop(multipart_store)
       Supervisor.stop(server)
       Application.delete_env(:neonfs_s3, :core_call_fn)
       Application.delete_env(:neonfs_s3, :ship_chunks_fn)
