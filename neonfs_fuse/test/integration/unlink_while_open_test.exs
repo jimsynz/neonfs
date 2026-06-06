@@ -75,22 +75,10 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
         timeout: 10_000
       )
 
-    {:ok, handler} =
-      Handler.start_link(
-        volume: volume_id,
-        volume_name: volume_name,
-        test_notify: self()
+    handler =
+      start_supervised!(
+        {Handler, volume: volume_id, volume_name: volume_name, test_notify: self()}
       )
-
-    on_exit(fn ->
-      if Process.alive?(handler) do
-        try do
-          GenServer.stop(handler, :shutdown, 5_000)
-        catch
-          :exit, _ -> :ok
-        end
-      end
-    end)
 
     {:ok, parent_inode} = InodeTable.allocate_inode(volume_id, "/")
 

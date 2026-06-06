@@ -58,12 +58,10 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       )
 
     # Start a handler for testing with test_notify so we can assert_receive
-    {:ok, handler} =
-      Handler.start_link(volume: volume_id, volume_name: volume_name, test_notify: self())
-
-    on_exit(fn ->
-      if Process.alive?(handler), do: GenServer.stop(handler)
-    end)
+    handler =
+      start_supervised!(
+        {Handler, volume: volume_id, volume_name: volume_name, test_notify: self()}
+      )
 
     {:ok, handler: handler}
   end
@@ -720,8 +718,10 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       ])
 
       # Start a non-root handler (uid 1000)
-      {:ok, non_root_handler} =
-        Handler.start_link(volume: volume_id, test_notify: self(), uid: 1000)
+      non_root_handler =
+        start_supervised!({Handler, volume: volume_id, test_notify: self(), uid: 1000},
+          id: :non_root_handler
+        )
 
       {:ok, inode} = InodeTable.allocate_inode(volume_id, "/root_chmod.txt")
 
@@ -732,8 +732,6 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
 
       # Should return EACCES (errno 13)
       assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, 5_000
-
-      GenServer.stop(non_root_handler)
     end
 
     test "non-owner UID cannot chown (returns EACCES)", %{
@@ -747,8 +745,10 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         "content"
       ])
 
-      {:ok, non_root_handler} =
-        Handler.start_link(volume: volume_id, test_notify: self(), uid: 1000)
+      non_root_handler =
+        start_supervised!({Handler, volume: volume_id, test_notify: self(), uid: 1000},
+          id: :non_root_handler
+        )
 
       {:ok, inode} = InodeTable.allocate_inode(volume_id, "/root_chown.txt")
 
@@ -758,8 +758,6 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       )
 
       assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, 5_000
-
-      GenServer.stop(non_root_handler)
     end
   end
 
