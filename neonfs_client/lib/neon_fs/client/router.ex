@@ -12,7 +12,7 @@ defmodule NeonFS.Client.Router do
 
   require Logger
 
-  alias NeonFS.Client.{CostFunction, Discovery}
+  alias NeonFS.Client.{CostFunction, Discovery, RootPlacement}
   alias NeonFS.Error.Unavailable
   alias NeonFS.Transport.{ConnPool, PoolManager}
 
@@ -89,6 +89,56 @@ defmodule NeonFS.Client.Router do
   @spec metadata_call(module(), atom(), [term()]) :: term()
   def metadata_call(module, function, args) do
     do_call(module, function, args, 10_000, @max_retries, prefer_leader: true)
+  end
+
+  @doc """
+  Routes a volume-scoped metadata *write* to a node that holds the volume's
+  root segment, so the core-side `MetadataWriter` performs it locally instead
+  of remote-dispatching on every operation (#1046).
+
+  Resolves the volume's root-holding nodes via `RootPlacement` (cached),
+  intersects them with the currently reachable core nodes, and dispatches to
+  one — failing over across the remaining root holders on `:badrpc`. If no
+  root holder is reachable (or the lookup fails), falls back to
+  `metadata_call/3`, whose core-side fallback still routes the write
+  correctly.
+  """
+  @spec volume_metadata_call(String.t(), module(), atom(), [term()]) :: term()
+  def volume_metadata_call(volume_name, module, function, args) when is_binary(volume_name) do
+    case eligible_root_nodes(volume_name) do
+      [] -> metadata_call(module, function, args)
+      [_ | _] = nodes -> root_call(nodes, module, function, args, 10_000)
+    end
+  end
+
+  defp eligible_root_nodes(volume_name) do
+    case RootPlacement.get(volume_name) do
+      {:ok, root_nodes} ->
+        reachable = MapSet.new(Discovery.get_core_nodes())
+        Enum.filter(root_nodes, &MapSet.member?(reachable, &1))
+
+      _ ->
+        []
+    end
+  end
+
+  defp root_call([], module, function, args, _timeout) do
+    metadata_call(module, function, args)
+  end
+
+  defp root_call([node | rest], module, function, args, timeout) do
+    case :rpc.call(node, module, function, args, timeout) do
+      {:badrpc, reason} ->
+        Logger.warning(
+          "metadata write to root holder #{node} failed: #{inspect(reason)}, " <>
+            "trying next root holder"
+        )
+
+        root_call(rest, module, function, args, timeout)
+
+      result ->
+        result
+    end
   end
 
   ## Private helpers — data_call

@@ -11,7 +11,9 @@ defmodule NeonFS.Core do
   alias NeonFS.Core.CommitChunks
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
+  alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.NamespaceCoordinator
+  alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.ReadOperation
   alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
@@ -53,6 +55,32 @@ defmodule NeonFS.Core do
   @spec get_volume(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, :not_found}
   def get_volume(name) do
     VolumeRegistry.get_by_name(name)
+  end
+
+  @doc """
+  Returns the distinct core nodes that hold a replica of the volume's
+  root metadata segment.
+
+  Interface nodes use this (via `NeonFS.Client.RootPlacement`) to route
+  metadata writes to a node that can perform them locally, avoiding the
+  per-write remote re-dispatch the `MetadataWriter` fallback otherwise
+  pays (#1046). Reads the authoritative `root_entry.drive_locations`
+  from the Ra-backed bootstrap layer — no untracked copies.
+  """
+  @spec volume_root_nodes(String.t()) :: {:ok, [node()]} | {:error, term()}
+  def volume_root_nodes(volume_name) when is_binary(volume_name) do
+    with {:ok, %{id: volume_id}} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, entry} <- fetch_volume_root(volume_id) do
+      {:ok, entry.drive_locations |> Enum.map(& &1.node) |> Enum.uniq()}
+    end
+  end
+
+  defp fetch_volume_root(volume_id) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, entry} -> {:ok, entry}
+      {:error, _} = error -> error
+    end
   end
 
   @doc """

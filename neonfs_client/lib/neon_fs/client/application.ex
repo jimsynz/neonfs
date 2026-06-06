@@ -76,6 +76,9 @@ defmodule NeonFS.Client.Application do
       NeonFS.Client.Connection,
       NeonFS.Client.Discovery,
       NeonFS.Client.CostFunction,
+      # Per-volume root-placement cache for metadata-write routing (#1046);
+      # resolves via Router, so it follows Discovery/CostFunction.
+      NeonFS.Client.RootPlacement,
 
       # Event notification infrastructure
       %{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}},
