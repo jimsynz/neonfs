@@ -191,7 +191,7 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
           startup_log: false
         )
 
-      {:ok, multipart_store} = MultipartStore.start_link([])
+      start_supervised!(MultipartStore)
 
       config = [
         access_key_id: access_key,
@@ -209,12 +209,6 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
       ]
 
       on_exit(fn ->
-        try do
-          if Process.alive?(multipart_store), do: GenServer.stop(multipart_store, :normal, 5_000)
-        catch
-          :exit, _ -> :ok
-        end
-
         try do
           Supervisor.stop(server, :normal, 5_000)
         catch
