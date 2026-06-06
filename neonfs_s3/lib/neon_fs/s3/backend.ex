@@ -655,7 +655,7 @@ defmodule NeonFS.S3.Backend do
       nil ->
         commit_opts = build_commit_opts(refs, write_opts)
 
-        Router.call(NeonFS.Core, :commit_chunks, [
+        Router.volume_metadata_call(bucket, NeonFS.Core, :commit_chunks, [
           bucket,
           key,
           commit_opts.hashes,

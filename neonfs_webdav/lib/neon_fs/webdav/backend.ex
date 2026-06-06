@@ -191,7 +191,7 @@ defmodule NeonFS.WebDAV.Backend do
     with {:ok, refs} <- ChunkWriter.write_file_stream(volume_name, file_path, stream) do
       commit_opts = build_commit_opts(refs, write_opts)
 
-      Router.call(NeonFS.Core, :commit_chunks, [
+      Router.volume_metadata_call(volume_name, NeonFS.Core, :commit_chunks, [
         volume_name,
         file_path,
         commit_opts.hashes,
