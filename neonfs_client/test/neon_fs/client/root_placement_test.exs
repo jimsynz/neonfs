@@ -68,4 +68,23 @@ defmodule NeonFS.Client.RootPlacementTest do
       assert_received {:resolved, "vol"}
     end
   end
+
+  describe "get_by_id/2 (#1087)" do
+    test "resolves + caches under a key namespace distinct from get/2" do
+      id_resolver = counting_resolver({:ok, [:core1@host]})
+
+      assert {:ok, [:core1@host]} = RootPlacement.get_by_id("vol-id", resolver: id_resolver)
+      assert_received {:resolved, "vol-id"}
+
+      # Second by-id read is a cache hit.
+      assert {:ok, [:core1@host]} = RootPlacement.get_by_id("vol-id", resolver: id_resolver)
+      refute_received {:resolved, "vol-id"}
+
+      # A by-name lookup for the same string is a separate cache entry (must
+      # still resolve), proving the {:name, _} / {:id, _} namespaces don't clash.
+      name_resolver = counting_resolver({:ok, [:core2@host]})
+      assert {:ok, [:core2@host]} = RootPlacement.get("vol-id", resolver: name_resolver)
+      assert_received {:resolved, "vol-id"}
+    end
+  end
 end

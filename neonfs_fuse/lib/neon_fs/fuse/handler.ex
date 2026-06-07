@@ -990,7 +990,7 @@ defmodule NeonFS.FUSE.Handler do
          child_path <- build_child_path(parent_path, name),
          {:ok, inode} <- InodeTable.get_inode(volume_id, child_path),
          {:ok, file} <- file_index_get_by_path(volume_id, child_path),
-         :ok <- file_index_delete(file.id),
+         :ok <- file_index_delete(volume_id, file.id),
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
@@ -1027,7 +1027,7 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, files} <- list_directory(volume_id, child_path),
          true <- Enum.empty?(files) || {:error, :directory_not_empty},
          {:ok, file} <- file_index_get_by_path(volume_id, child_path),
-         :ok <- file_index_delete(file.id),
+         :ok <- file_index_delete(volume_id, file.id),
          :ok <- InodeTable.release_inode(inode) do
       {"ok", %{}}
     else
@@ -1082,7 +1082,7 @@ defmodule NeonFS.FUSE.Handler do
              new_parent_path,
              new_name
            ),
-         {:ok, _updated_file} <- file_index_update(file.id, path: new_path) do
+         {:ok, _updated_file} <- file_index_update(volume_id, file.id, path: new_path) do
       # FUSE renames must preserve the inode number — `d_move/2` in the
       # kernel keeps the dentry pointing at the same inode, and any
       # subsequent `getattr` arrives with that inode. Re-pointing the
@@ -1127,7 +1127,7 @@ defmodule NeonFS.FUSE.Handler do
     with {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          {:ok, file} <- file_index_get_by_path(volume_id, path),
          :ok <- check_setattr_permission(file, params, state) do
-      result = apply_setattr(file, params)
+      result = apply_setattr(volume_id, file, params)
 
       case result do
         {:ok, updated_file} ->
@@ -1178,7 +1178,8 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, {volume_id, path}} <- resolve_inode(ino, state),
          {:ok, file} <- file_index_get_by_path(volume_id, path),
          :ok <- check_xattr_flags(file.xattrs, name, flags),
-         {:ok, updated} <- file_index_update(file.id, xattrs: Map.put(file.xattrs, name, value)) do
+         {:ok, updated} <-
+           file_index_update(volume_id, file.id, xattrs: Map.put(file.xattrs, name, value)) do
       refresh_attrs_cache(state.cache_table, volume_id, updated)
       {"ok", %{}}
     else
@@ -1249,7 +1250,7 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, file} <- file_index_get_by_path(volume_id, path),
          true <- Map.has_key?(file.xattrs, name) || {:error, :enodata},
          {:ok, updated} <-
-           file_index_update(file.id, xattrs: Map.delete(file.xattrs, name)) do
+           file_index_update(volume_id, file.id, xattrs: Map.delete(file.xattrs, name)) do
       refresh_attrs_cache(state.cache_table, volume_id, updated)
       {"ok", %{}}
     else
@@ -1565,16 +1566,16 @@ defmodule NeonFS.FUSE.Handler do
   defp check_same_volume(_old_vol, _new_vol), do: {:error, :cross_volume}
 
   # Apply setattr, routing to truncate when size is being reduced
-  defp apply_setattr(file, params) do
+  defp apply_setattr(volume_id, file, params) do
     new_size = params["size"]
 
     if new_size != nil and new_size < file.size do
       # Size reduction: delegate to FileIndex.truncate which trims chunks/stripes
       other_updates = build_setattr_updates_without_size(params)
-      file_index_truncate(file.id, new_size, other_updates)
+      file_index_truncate(volume_id, file.id, new_size, other_updates)
     else
       updates = build_setattr_updates(params)
-      file_index_update(file.id, updates)
+      file_index_update(volume_id, file.id, updates)
     end
   end
 
@@ -1661,7 +1662,7 @@ defmodule NeonFS.FUSE.Handler do
       with {:ok, file} <-
              NeonFS.Client.core_call(NeonFS.Core.FileIndex, :get_by_path, [volume_id, path]),
            true <- relatime_stale?(file.accessed_at, file.modified_at) do
-        NeonFS.Client.core_call(NeonFS.Core.FileIndex, :touch, [file.id])
+        write_call(volume_id, NeonFS.Core.FileIndex, :touch, [file.id])
       end
     end)
 
@@ -1671,6 +1672,15 @@ defmodule NeonFS.FUSE.Handler do
   # RPC wrappers — route all core operations through the client
   defp core_call(module, function, args) do
     NeonFS.Client.core_call(module, function, args)
+  end
+
+  # Volume-scoped metadata WRITES through id-keyed core APIs
+  # (`WriteOperation` / `FileIndex`) go to a node holding the volume's root
+  # segment, so the core-side `MetadataWriter` performs them locally instead
+  # of remote-dispatching on every op (#1046 / #1087). Resolution is by volume
+  # id and falls back to cost-based routing if the volume can't be resolved.
+  defp write_call(volume_id, module, function, args) do
+    NeonFS.Client.write_call_by_id(volume_id, module, function, args)
   end
 
   defp file_index_get_by_path(volume_id, path) do
@@ -1692,12 +1702,12 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
-  defp file_index_delete(file_id) do
-    core_call(NeonFS.Core.FileIndex, :delete, [file_id])
+  defp file_index_delete(volume_id, file_id) do
+    write_call(volume_id, NeonFS.Core.FileIndex, :delete, [file_id])
   end
 
-  defp file_index_update(file_id, updates) do
-    core_call(NeonFS.Core.FileIndex, :update, [file_id, updates])
+  defp file_index_update(volume_id, file_id, updates) do
+    write_call(volume_id, NeonFS.Core.FileIndex, :update, [file_id, updates])
   end
 
   # Rename/move dispatching the same way `NeonFS.Core.do_rename/3` does:
@@ -1707,22 +1717,41 @@ defmodule NeonFS.FUSE.Handler do
   # lookups consult — `FileIndex.update(:path)` does not.
   defp file_index_rename(volume_id, old_parent, old_name, new_parent, new_name)
        when old_parent == new_parent do
-    core_call(NeonFS.Core.FileIndex, :rename, [volume_id, old_parent, old_name, new_name])
+    write_call(volume_id, NeonFS.Core.FileIndex, :rename, [
+      volume_id,
+      old_parent,
+      old_name,
+      new_name
+    ])
   end
 
   defp file_index_rename(volume_id, old_parent, name, new_parent, name) do
-    core_call(NeonFS.Core.FileIndex, :move, [volume_id, old_parent, new_parent, name])
+    write_call(volume_id, NeonFS.Core.FileIndex, :move, [volume_id, old_parent, new_parent, name])
   end
 
   defp file_index_rename(volume_id, old_parent, old_name, new_parent, new_name) do
     with :ok <-
-           core_call(NeonFS.Core.FileIndex, :move, [volume_id, old_parent, new_parent, old_name]) do
-      core_call(NeonFS.Core.FileIndex, :rename, [volume_id, new_parent, old_name, new_name])
+           write_call(volume_id, NeonFS.Core.FileIndex, :move, [
+             volume_id,
+             old_parent,
+             new_parent,
+             old_name
+           ]) do
+      write_call(volume_id, NeonFS.Core.FileIndex, :rename, [
+        volume_id,
+        new_parent,
+        old_name,
+        new_name
+      ])
     end
   end
 
-  defp file_index_truncate(file_id, new_size, additional_updates) do
-    core_call(NeonFS.Core.FileIndex, :truncate, [file_id, new_size, additional_updates])
+  defp file_index_truncate(volume_id, file_id, new_size, additional_updates) do
+    write_call(volume_id, NeonFS.Core.FileIndex, :truncate, [
+      file_id,
+      new_size,
+      additional_updates
+    ])
   end
 
   defp read_file(volume_id, path, opts) do
@@ -1760,7 +1789,12 @@ defmodule NeonFS.FUSE.Handler do
         ])
 
       nil ->
-        core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume_id, path, offset, data])
+        write_call(volume_id, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          path,
+          offset,
+          data
+        ])
     end
   end
 
@@ -1769,7 +1803,13 @@ defmodule NeonFS.FUSE.Handler do
   # through `write_file_at/5` with offset 0 rather than the streaming
   # API (which doesn't support erasure-coded volumes yet).
   defp create_empty_file(volume_id, path, opts) do
-    core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume_id, path, 0, <<>>, opts])
+    write_call(volume_id, NeonFS.Core.WriteOperation, :write_file_at, [
+      volume_id,
+      path,
+      0,
+      <<>>,
+      opts
+    ])
   end
 
   # Linux `O_EXCL` — same value across glibc / musl / kernel headers.
