@@ -10,7 +10,7 @@ defmodule NeonFS.Core.MixProject do
     [
       aliases: aliases(),
       app: :neonfs_core,
-      consolidate_protocols: Mix.env() != :dev,
+      consolidate_protocols: Mix.env() == :prod,
       deps: deps(),
       description: @moduledoc,
       dialyzer: dialyzer(),
