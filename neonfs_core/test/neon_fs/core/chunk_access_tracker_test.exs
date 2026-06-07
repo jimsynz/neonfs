@@ -6,34 +6,16 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
-    # Stop any existing tracker
-    case GenServer.whereis(ChunkAccessTracker) do
-      nil -> :ok
-      pid -> GenServer.stop(pid, :normal, 5_000)
-    end
-
-    # Clean up persistent_term from previous runs
+    # Clean up persistent_term from previous runs (ExUnit doesn't manage it)
     try do
       :persistent_term.erase({ChunkAccessTracker, :max_chunks})
     rescue
       ArgumentError -> :ok
     end
 
-    {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0)
+    start_supervised!({ChunkAccessTracker, decay_interval_ms: 0})
 
     on_exit(fn ->
-      case GenServer.whereis(ChunkAccessTracker) do
-        nil ->
-          :ok
-
-        pid ->
-          try do
-            GenServer.stop(pid, :normal, 5_000)
-          catch
-            :exit, _ -> :ok
-          end
-      end
-
       try do
         :persistent_term.erase({ChunkAccessTracker, :max_chunks})
       rescue
@@ -294,8 +276,8 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
 
       # Restarting the manager drops all stats — the table is ETS-only.
       # Operators and the tiering heuristics both tolerate a cold start.
-      GenServer.stop(GenServer.whereis(ChunkAccessTracker), :normal, 5_000)
-      {:ok, _pid} = ChunkAccessTracker.start_link(decay_interval_ms: 0)
+      stop_supervised!(ChunkAccessTracker)
+      start_supervised!({ChunkAccessTracker, decay_interval_ms: 0})
 
       stats = ChunkAccessTracker.get_stats(hash)
       assert stats.hourly == 0
@@ -306,15 +288,9 @@ defmodule NeonFS.Core.ChunkAccessTrackerTest do
 
   describe "table size management" do
     test "inserting beyond max triggers pruning" do
-      # Stop current tracker
-      GenServer.stop(GenServer.whereis(ChunkAccessTracker), :normal, 5_000)
-
-      # Start with a very small max
-      {:ok, _pid} =
-        ChunkAccessTracker.start_link(
-          decay_interval_ms: 0,
-          max_chunks: 10
-        )
+      # Restart with a very small max
+      stop_supervised!(ChunkAccessTracker)
+      start_supervised!({ChunkAccessTracker, decay_interval_ms: 0, max_chunks: 10})
 
       # Insert 10 stale entries (zero activity, high staleness)
       for i <- 1..10 do

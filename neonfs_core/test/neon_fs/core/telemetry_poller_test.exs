@@ -72,15 +72,23 @@ defmodule NeonFS.Core.TelemetryPollerTest do
           [:neonfs, :telemetry_poller, :measurement]
         ])
 
-      {:ok, pid} =
-        TelemetryPoller.start_link(
-          period: 20,
-          background_worker_mod: __MODULE__.DownBackgroundWorker,
-          chunk_cache_mod: __MODULE__.DownChunkCache,
-          ra_mod: __MODULE__.DownRa,
-          ra_supervisor_mod: __MODULE__.DownRaSupervisor,
-          storage_metrics_mod: __MODULE__.DownStorageMetrics
-        )
+      pid =
+        start_supervised!(%{
+          id: TelemetryPoller,
+          restart: :temporary,
+          start:
+            {TelemetryPoller, :start_link,
+             [
+               [
+                 period: 20,
+                 background_worker_mod: __MODULE__.DownBackgroundWorker,
+                 chunk_cache_mod: __MODULE__.DownChunkCache,
+                 ra_mod: __MODULE__.DownRa,
+                 ra_supervisor_mod: __MODULE__.DownRaSupervisor,
+                 storage_metrics_mod: __MODULE__.DownStorageMetrics
+               ]
+             ]}
+        })
 
       on_exit(fn ->
         Application.delete_env(:neonfs_core, :telemetry_poller_runtime_opts)
@@ -95,8 +103,6 @@ defmodule NeonFS.Core.TelemetryPollerTest do
 
       refute_received {:DOWN, ^ref, :process, ^pid, _reason}
       assert Process.alive?(pid)
-
-      Process.exit(pid, :normal)
     end
   end
 

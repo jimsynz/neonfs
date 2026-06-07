@@ -14,18 +14,9 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     :ok = RaServer.init_cluster()
 
     name = :"namespace_coordinator_#{System.unique_integer([:positive])}"
-    {:ok, pid} = NamespaceCoordinator.start_link(name: name)
-    Process.unlink(pid)
+    start_supervised!({NamespaceCoordinator, name: name}, restart: :temporary)
 
-    on_exit(fn ->
-      try do
-        if Process.alive?(pid), do: GenServer.stop(pid, :shutdown, 1_000)
-      catch
-        :exit, _ -> :ok
-      end
-
-      cleanup_test_dirs()
-    end)
+    on_exit(fn -> cleanup_test_dirs() end)
 
     {:ok, server: name}
   end

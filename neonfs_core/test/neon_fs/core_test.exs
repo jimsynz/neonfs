@@ -336,14 +336,7 @@ defmodule NeonFS.CoreTest do
       ensure_node_named()
       start_ra()
       :ok = RaServer.init_cluster()
-      {:ok, _} = NamespaceCoordinator.start_link()
-
-      on_exit(fn ->
-        case Process.whereis(NamespaceCoordinator) do
-          nil -> :ok
-          pid -> GenServer.stop(pid, :shutdown, 1_000)
-        end
-      end)
+      start_supervised!(NamespaceCoordinator)
 
       {:ok, volume_id: volume.id}
     end
@@ -429,7 +422,7 @@ defmodule NeonFS.CoreTest do
 
       key = "vol:" <> volume_id <> ":/pinned.txt"
 
-      {:ok, holder} = Agent.start_link(fn -> nil end)
+      holder = start_supervised!(%{id: :pin_holder, start: {Agent, :start_link, [fn -> nil end]}})
 
       {:ok, pin_id} =
         NamespaceCoordinator.claim_pinned_for(NamespaceCoordinator, key, holder)
@@ -448,7 +441,6 @@ defmodule NeonFS.CoreTest do
       after
         # Releasing the pin doesn't auto-GC yet (#644). Manual cleanup.
         :ok = NamespaceCoordinator.release(NamespaceCoordinator, pin_id)
-        Agent.stop(holder, :normal, 1_000)
       end
     end
 
@@ -457,7 +449,7 @@ defmodule NeonFS.CoreTest do
       {:ok, _} = Core.write_file_streamed(vol_name, "/dup-delete.txt", ["data"])
 
       key = "vol:" <> volume_id <> ":/dup-delete.txt"
-      {:ok, holder} = Agent.start_link(fn -> nil end)
+      holder = start_supervised!(%{id: :pin_holder, start: {Agent, :start_link, [fn -> nil end]}})
       {:ok, pin_id} = NamespaceCoordinator.claim_pinned_for(NamespaceCoordinator, key, holder)
 
       try do
@@ -465,7 +457,6 @@ defmodule NeonFS.CoreTest do
         assert {:error, :not_found} = Core.delete_file(vol_name, "/dup-delete.txt")
       after
         :ok = NamespaceCoordinator.release(NamespaceCoordinator, pin_id)
-        Agent.stop(holder, :normal, 1_000)
       end
     end
 

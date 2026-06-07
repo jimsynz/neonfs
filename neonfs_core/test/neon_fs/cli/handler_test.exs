@@ -1364,16 +1364,14 @@ defmodule NeonFS.CLI.HandlerTest do
       stub_mod = NeonFS.CLI.HandlerTest.RPCStub
 
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
-      Agent.start_link(fn -> [] end, name: :ca_rotate_rpc_calls)
+
+      start_supervised!(%{
+        id: :ca_rotate_rpc_calls,
+        start: {Agent, :start_link, [fn -> [] end, [name: :ca_rotate_rpc_calls]]}
+      })
 
       on_exit(fn ->
         Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod)
-
-        try do
-          Agent.stop(:ca_rotate_rpc_calls)
-        catch
-          :exit, _ -> :ok
-        end
       end)
 
       assert {:ok, %{rotated: true} = result} =
@@ -1405,16 +1403,14 @@ defmodule NeonFS.CLI.HandlerTest do
     test "default mode (no --no-wait) stops at pending-finalize for the grace window (#927)" do
       stub_mod = NeonFS.CLI.HandlerTest.RPCStub
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
-      Agent.start_link(fn -> [] end, name: :ca_rotate_rpc_calls)
+
+      start_supervised!(%{
+        id: :ca_rotate_rpc_calls,
+        start: {Agent, :start_link, [fn -> [] end, [name: :ca_rotate_rpc_calls]]}
+      })
 
       on_exit(fn ->
         Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod)
-
-        try do
-          Agent.stop(:ca_rotate_rpc_calls)
-        catch
-          :exit, _ -> :ok
-        end
       end)
 
       assert {:ok,
@@ -1442,16 +1438,14 @@ defmodule NeonFS.CLI.HandlerTest do
     test "--node <name> retries the rolling reissue against a single node (#927)" do
       stub_mod = NeonFS.CLI.HandlerTest.RPCStub
       Application.put_env(:neonfs_core, :ca_rotate_rpc_mod, stub_mod)
-      Agent.start_link(fn -> [] end, name: :ca_rotate_rpc_calls)
+
+      start_supervised!(%{
+        id: :ca_rotate_rpc_calls,
+        start: {Agent, :start_link, [fn -> [] end, [name: :ca_rotate_rpc_calls]]}
+      })
 
       on_exit(fn ->
         Application.delete_env(:neonfs_core, :ca_rotate_rpc_mod)
-
-        try do
-          Agent.stop(:ca_rotate_rpc_calls)
-        catch
-          :exit, _ -> :ok
-        end
       end)
 
       # Stage incoming CA so the retry path has something to work with.

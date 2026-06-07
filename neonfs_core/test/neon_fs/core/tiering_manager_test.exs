@@ -13,15 +13,9 @@ defmodule NeonFS.Core.TieringManagerTest do
     MockDriveRegistry.init()
     MockBackgroundWorker.init()
 
-    {:ok, pid} = start_test_manager()
+    pid = start_test_manager()
 
     on_exit(fn ->
-      try do
-        GenServer.stop(pid)
-      catch
-        :exit, _ -> :ok
-      end
-
       MockChunkIndex.cleanup()
       MockAccessTracker.cleanup()
       MockDriveRegistry.cleanup()
@@ -77,13 +71,11 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, high_access_stats())
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.promotions == 1
       assert result.demotions == 0
-
-      GenServer.stop(pid)
     end
 
     test "promotes cold chunk to warm (not directly to hot)" do
@@ -93,7 +85,7 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, high_access_stats())
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.promotions == 1
@@ -103,8 +95,6 @@ defmodule NeonFS.Core.TieringManagerTest do
       [{_fn, opts}] = submitted
       assert opts[:label] =~ "promote"
       assert opts[:label] =~ "cold->warm"
-
-      GenServer.stop(pid)
     end
 
     test "demotes chunk with no recent access past delay" do
@@ -114,13 +104,11 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, stale_access_stats())
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.demotions == 1
       assert result.promotions == 0
-
-      GenServer.stop(pid)
     end
 
     test "demotes hot chunk to warm (not directly to cold)" do
@@ -130,7 +118,7 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, stale_access_stats())
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
       GenServer.call(pid, :evaluate_now, 10_000)
 
       submitted = MockBackgroundWorker.get_submitted()
@@ -138,8 +126,6 @@ defmodule NeonFS.Core.TieringManagerTest do
       [{_fn, opts}] = submitted
       assert opts[:label] =~ "demote"
       assert opts[:label] =~ "hot->warm"
-
-      GenServer.stop(pid)
     end
 
     test "does not promote chunk already on hot tier" do
@@ -149,12 +135,10 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, high_access_stats())
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.promotions == 0
-
-      GenServer.stop(pid)
     end
 
     test "does not demote chunk already on cold tier" do
@@ -164,24 +148,20 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, stale_access_stats())
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.demotions == 0
-
-      GenServer.stop(pid)
     end
 
     test "skips evaluation when background worker queue is full" do
       MockBackgroundWorker.set_queue_full(true)
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.skipped == true
       assert result.reason == :queue_full
-
-      GenServer.stop(pid)
     end
 
     test "dry run mode logs but does not submit work" do
@@ -191,15 +171,13 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, high_access_stats())
 
-      {:ok, pid} = start_test_manager(dry_run: true)
+      pid = start_test_manager(dry_run: true)
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.promotions == 1
 
       submitted = MockBackgroundWorker.get_submitted()
       assert submitted == []
-
-      GenServer.stop(pid)
     end
 
     test "eviction under pressure forces demotion regardless of delay" do
@@ -210,12 +188,10 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockAccessTracker.set_stats(chunk_hash, recent_access_stats())
       MockDriveRegistry.set_tier_usage(:hot, 0.95)
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.evictions >= 1
-
-      GenServer.stop(pid)
     end
 
     test "does not promote chunks with low access count" do
@@ -225,12 +201,10 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, low_access_stats())
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.promotions == 0
-
-      GenServer.stop(pid)
     end
 
     test "handles chunk with nil last_accessed as demotion candidate" do
@@ -240,12 +214,10 @@ defmodule NeonFS.Core.TieringManagerTest do
       MockChunkIndex.set_chunks([chunk])
       MockAccessTracker.set_stats(chunk_hash, %{hourly: 0, daily: 0, last_accessed: nil})
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
 
       result = GenServer.call(pid, :evaluate_now, 10_000)
       assert result.demotions == 1
-
-      GenServer.stop(pid)
     end
   end
 
@@ -272,15 +244,13 @@ defmodule NeonFS.Core.TieringManagerTest do
           [:neonfs, :tiering_manager, :evaluation]
         ])
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
       GenServer.call(pid, :evaluate_now, 10_000)
 
       assert_receive {[:neonfs, :tiering_manager, :evaluation], ^ref, measurements, %{}}
       assert is_integer(measurements.chunks_evaluated)
       assert is_integer(measurements.promotions)
       assert is_integer(measurements.demotions)
-
-      GenServer.stop(pid)
     end
 
     test "emits promotion telemetry event" do
@@ -295,13 +265,11 @@ defmodule NeonFS.Core.TieringManagerTest do
           [:neonfs, :tiering_manager, :promotion]
         ])
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
       GenServer.call(pid, :evaluate_now, 10_000)
 
       assert_receive {[:neonfs, :tiering_manager, :promotion], ^ref, %{},
                       %{hash: ^chunk_hash, from_tier: :warm, to_tier: :hot, dry_run: false}}
-
-      GenServer.stop(pid)
     end
 
     test "emits demotion telemetry event" do
@@ -316,28 +284,33 @@ defmodule NeonFS.Core.TieringManagerTest do
           [:neonfs, :tiering_manager, :demotion]
         ])
 
-      {:ok, pid} = start_test_manager()
+      pid = start_test_manager()
       GenServer.call(pid, :evaluate_now, 10_000)
 
       assert_receive {[:neonfs, :tiering_manager, :demotion], ^ref, %{},
                       %{hash: ^chunk_hash, from_tier: :hot, to_tier: :warm, dry_run: false}}
-
-      GenServer.stop(pid)
     end
   end
 
   ## Helpers
 
   defp start_test_manager(opts \\ []) do
-    TieringManager.start_link(
-      name: :"tiering_test_#{:erlang.unique_integer([:positive])}",
-      eval_interval_ms: 600_000,
-      dry_run: Keyword.get(opts, :dry_run, false),
-      chunk_index_mod: MockChunkIndex,
-      access_tracker_mod: MockAccessTracker,
-      drive_registry_mod: MockDriveRegistry,
-      volume_registry_mod: MockVolumeRegistry,
-      background_worker_mod: MockBackgroundWorker
+    name = :"tiering_test_#{:erlang.unique_integer([:positive])}"
+
+    start_supervised!(
+      {TieringManager,
+       [
+         name: name,
+         eval_interval_ms: 600_000,
+         dry_run: Keyword.get(opts, :dry_run, false),
+         chunk_index_mod: MockChunkIndex,
+         access_tracker_mod: MockAccessTracker,
+         drive_registry_mod: MockDriveRegistry,
+         volume_registry_mod: MockVolumeRegistry,
+         background_worker_mod: MockBackgroundWorker
+       ]},
+      id: name,
+      restart: :temporary
     )
   end
 
