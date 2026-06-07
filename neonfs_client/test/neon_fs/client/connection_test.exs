@@ -176,4 +176,56 @@ defmodule NeonFS.Client.ConnectionTest do
       assert state.monitors == %{}
     end
   end
+
+  # `Node.connect/1` runs in a throw-away process and reports back as
+  # `{:connect_result, node, result}` so it never blocks the GenServer loop
+  # (#1072). These cover the result handler without a real distribution dial.
+  describe "async connect results" do
+    test "a failed result clears the in-flight `connecting` entry without connecting" do
+      pid = start_supervised!({Connection, bootstrap_nodes: []})
+
+      :sys.replace_state(pid, fn state ->
+        %{state | connecting: MapSet.new([:slow@localhost])}
+      end)
+
+      send(pid, {:connect_result, :slow@localhost, false})
+      state = :sys.get_state(pid)
+
+      refute MapSet.member?(state.connecting, :slow@localhost)
+      refute MapSet.member?(state.connected_nodes, :slow@localhost)
+    end
+
+    test "an `:ignored` result clears `connecting` too" do
+      pid = start_supervised!({Connection, bootstrap_nodes: []})
+
+      :sys.replace_state(pid, fn state ->
+        %{state | connecting: MapSet.new([:slow@localhost])}
+      end)
+
+      send(pid, {:connect_result, :slow@localhost, :ignored})
+      state = :sys.get_state(pid)
+
+      refute MapSet.member?(state.connecting, :slow@localhost)
+    end
+
+    test "a success for an already-connected node clears `connecting`, no duplicate monitor" do
+      pid = start_supervised!({Connection, bootstrap_nodes: []})
+
+      :sys.replace_state(pid, fn state ->
+        %{
+          state
+          | connected_nodes: MapSet.new([:neonfs_core@localhost]),
+            connecting: MapSet.new([:neonfs_core@localhost]),
+            monitors: %{}
+        }
+      end)
+
+      send(pid, {:connect_result, :neonfs_core@localhost, true})
+      state = :sys.get_state(pid)
+
+      refute MapSet.member?(state.connecting, :neonfs_core@localhost)
+      assert MapSet.member?(state.connected_nodes, :neonfs_core@localhost)
+      assert state.monitors == %{}
+    end
+  end
 end

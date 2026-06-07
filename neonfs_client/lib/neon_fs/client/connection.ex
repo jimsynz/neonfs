@@ -27,6 +27,7 @@ defmodule NeonFS.Client.Connection do
   @type state :: %{
           bootstrap_nodes: [node()],
           connected_nodes: MapSet.t(node()),
+          connecting: MapSet.t(node()),
           core_nodes: MapSet.t(node()),
           desired_nodes: MapSet.t(node()),
           monitors: %{optional(reference()) => node()},
@@ -94,6 +95,7 @@ defmodule NeonFS.Client.Connection do
     state = %{
       bootstrap_nodes: bootstrap,
       connected_nodes: MapSet.new(),
+      connecting: MapSet.new(),
       core_nodes: bootstrap_set,
       desired_nodes: bootstrap_set,
       monitors: %{},
@@ -161,6 +163,40 @@ defmodule NeonFS.Client.Connection do
     {:noreply, reconcile_connections(state)}
   end
 
+  # Result of an async `Node.connect/1` started by `reconcile_connections/1`.
+  # The monitor is set up here (in the GenServer process) rather than in the
+  # connect worker — a `Node.monitor/2` is bound to the calling process, so it
+  # must live with the GenServer, not the short-lived worker.
+  @impl true
+  def handle_info({:connect_result, node, true}, state) do
+    state = %{state | connecting: MapSet.delete(state.connecting, node)}
+
+    if MapSet.member?(state.connected_nodes, node) do
+      {:noreply, state}
+    else
+      ref = Node.monitor(node, true)
+
+      :telemetry.execute(
+        [:neonfs, :client, :connection, :connected],
+        %{},
+        %{node: node}
+      )
+
+      {:noreply,
+       %{
+         state
+         | connected_nodes: MapSet.put(state.connected_nodes, node),
+           monitors: Map.put(state.monitors, ref, node)
+       }}
+    end
+  end
+
+  def handle_info({:connect_result, node, result}, state)
+      when result in [false, :ignored] do
+    Logger.debug("Failed to connect to cluster node (#{inspect(result)})", node: node)
+    {:noreply, %{state | connecting: MapSet.delete(state.connecting, node)}}
+  end
+
   ## Private helpers
 
   defp handle_nodedown(node, state) do
@@ -174,7 +210,12 @@ defmodule NeonFS.Client.Connection do
       |> Enum.reject(fn {_ref, n} -> n == node end)
       |> Map.new()
 
-    %{state | connected_nodes: new_connected, monitors: new_monitors}
+    %{
+      state
+      | connected_nodes: new_connected,
+        connecting: MapSet.delete(state.connecting, node),
+        monitors: new_monitors
+    }
   end
 
   defp connected_core_nodes(state) do
@@ -204,16 +245,32 @@ defmodule NeonFS.Client.Connection do
   end
 
   defp reconcile_connections(state) do
+    server = self()
+
     state.desired_nodes
     |> MapSet.to_list()
     |> Enum.sort()
     |> Enum.reduce(state, fn node, acc ->
-      if MapSet.member?(acc.connected_nodes, node) do
+      if MapSet.member?(acc.connected_nodes, node) or MapSet.member?(acc.connecting, node) do
         acc
       else
-        try_connect(node, acc)
+        start_connect(server, node, acc)
       end
     end)
+  end
+
+  # `Node.connect/1` blocks the caller while the distribution channel is
+  # established (a TCP connect, up to the net-tick window) — running it inline
+  # in the GenServer starves concurrent calls like `connected_core_node/0`,
+  # which then time out under load (#1072). Run it in a throw-away process and
+  # feed the outcome back as `{:connect_result, node, result}`; the node is
+  # held in `connecting` until then so reconcile doesn't double-dial it.
+  # `Node.connect/1` always returns, so the result message always arrives; if
+  # the GenServer restarts mid-dial the message lands on a dead pid and the
+  # fresh state simply re-dials on its first reconcile.
+  defp start_connect(server, node, state) do
+    spawn(fn -> send(server, {:connect_result, node, Node.connect(node)}) end)
+    %{state | connecting: MapSet.put(state.connecting, node)}
   end
 
   defp schedule_reconcile(ms) do
@@ -240,32 +297,5 @@ defmodule NeonFS.Client.Connection do
       | core_nodes: MapSet.union(bootstrap_nodes, discovered_core_nodes),
         desired_nodes: MapSet.union(bootstrap_nodes, discovered_nodes)
     }
-  end
-
-  defp try_connect(node, state) do
-    case Node.connect(node) do
-      true ->
-        ref = Node.monitor(node, true)
-
-        :telemetry.execute(
-          [:neonfs, :client, :connection, :connected],
-          %{},
-          %{node: node}
-        )
-
-        %{
-          state
-          | connected_nodes: MapSet.put(state.connected_nodes, node),
-            monitors: Map.put(state.monitors, ref, node)
-        }
-
-      false ->
-        Logger.debug("Failed to connect to bootstrap node", node: node)
-        state
-
-      :ignored ->
-        Logger.debug("Node connection ignored (distribution not started)")
-        state
-    end
   end
 end
