@@ -540,4 +540,61 @@ defmodule NeonFS.Client.ChunkWriterTest do
                )
     end
   end
+
+  describe "write_file_stream/4 — per-chunk failover (#1044)" do
+    @node_a :node_a@host
+    @node_b :node_b@host
+
+    test "fails over to another eligible node when put_chunk fails on the target" do
+      volume = volume_fixture()
+      stub_volume_lookup(volume)
+      # First discovered node (no tier drives advertised) is the initial target.
+      stub_discovery([@node_a, @node_b])
+
+      test_pid = self()
+
+      stub(Router, :data_call, fn
+        @node_a, :put_chunk, _args, _opts ->
+          send(test_pid, :node_a_tried)
+          {:error, :node_a_down}
+
+        @node_b, :put_chunk, _args, _opts ->
+          send(test_pid, :node_b_tried)
+          {:ok, %{compression: :none, crypto: nil, original_size: 0}}
+      end)
+
+      data = :binary.copy(<<0xAB>>, 128)
+
+      assert {:ok, [ref]} =
+               ChunkWriter.write_file_stream("test-vol", "/failover.bin", [data],
+                 drive_id: @drive_id,
+                 strategy: "fixed",
+                 strategy_param: 128
+               )
+
+      assert_received :node_a_tried
+      assert_received :node_b_tried
+      # The surviving location is the failover node, not the failed one.
+      assert ref.locations == [%{node: @node_b, drive_id: @drive_id, tier: :hot}]
+    end
+
+    test "aborts with the put_chunk error when every eligible node fails" do
+      volume = volume_fixture()
+      stub_volume_lookup(volume)
+      stub_discovery([@node_a, @node_b])
+
+      stub(Router, :data_call, fn _node, :put_chunk, _args, _opts ->
+        {:error, :all_down}
+      end)
+
+      data = :binary.copy(<<0xCD>>, 128)
+
+      assert {:error, {:put_chunk_failed, :all_down}} =
+               ChunkWriter.write_file_stream("test-vol", "/doomed.bin", [data],
+                 drive_id: @drive_id,
+                 strategy: "fixed",
+                 strategy_param: 128
+               )
+    end
+  end
 end

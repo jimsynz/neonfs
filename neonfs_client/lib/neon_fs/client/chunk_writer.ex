@@ -291,19 +291,25 @@ defmodule NeonFS.Client.ChunkWriter do
   defp do_stream(stream, chunker, volume, target, opts) do
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     abort_fn = Keyword.get(opts, :abort_fn, &default_abort/2)
-    # The accumulator only holds `refs` — the abort path derives the
-    # `[{hash, locations}]` list it needs from `refs` rather than
+    # The accumulator carries `refs` plus the live failover state — the
+    # current `target` and the set of nodes already `excluded` (the initial
+    # `:exclude_nodes` plus any that have failed mid-stream). The abort path
+    # derives the `[{hash, locations}]` list it needs from `refs` rather than
     # tracking it in parallel. See `do_abort_from_refs/2`.
-    initial = %{refs: []}
+    initial = %{
+      refs: [],
+      target: target,
+      excluded: Keyword.get(opts, :exclude_nodes, [])
+    }
 
     feed_result =
       Enum.reduce_while(stream, {:ok, initial}, fn segment, {:ok, acc} ->
-        feed_segment(segment, chunker, volume, target, timeout, acc)
+        feed_segment(segment, chunker, volume, timeout, acc)
       end)
 
     with {:ok, acc} <- feed_result,
          tail = Native.chunker_finish(chunker),
-         {:ok, acc} <- process_emitted(tail, volume, target, timeout, acc) do
+         {:ok, acc} <- process_emitted(tail, volume, timeout, acc) do
       {:ok, Enum.reverse(acc.refs)}
     else
       {:error, reason, acc} ->
@@ -312,36 +318,60 @@ defmodule NeonFS.Client.ChunkWriter do
     end
   end
 
-  defp feed_segment(segment, chunker, volume, target, timeout, acc) do
+  defp feed_segment(segment, chunker, volume, timeout, acc) do
     case Native.chunker_feed(chunker, segment) do
       [] -> {:cont, {:ok, acc}}
-      emitted -> continue_with_emitted(emitted, volume, target, timeout, acc)
+      emitted -> continue_with_emitted(emitted, volume, timeout, acc)
     end
   end
 
-  defp continue_with_emitted(emitted, volume, target, timeout, acc) do
-    case process_emitted(emitted, volume, target, timeout, acc) do
+  defp continue_with_emitted(emitted, volume, timeout, acc) do
+    case process_emitted(emitted, volume, timeout, acc) do
       {:ok, acc} -> {:cont, {:ok, acc}}
       {:error, reason, acc} -> {:halt, {:error, reason, acc}}
     end
   end
 
-  defp process_emitted([], _volume, _target, _timeout, acc), do: {:ok, acc}
+  defp process_emitted([], _volume, _timeout, acc), do: {:ok, acc}
 
-  defp process_emitted([{data, hash, _offset, size} | rest], volume, target, timeout, acc) do
-    case put_chunk(data, hash, volume, target, timeout) do
+  defp process_emitted([{data, hash, _offset, size} | rest], volume, timeout, acc) do
+    case write_chunk_with_failover(data, hash, size, volume, timeout, acc) do
+      {:ok, acc} -> process_emitted(rest, volume, timeout, acc)
+      {:error, _reason, _acc} = error -> error
+    end
+  end
+
+  # Ship one chunk to the current target; on a `put_chunk` failure exclude that
+  # node, re-select an eligible target, and retry *this chunk* — its bytes are
+  # already in hand, so the retry is bounded by chunk size (no whole-file
+  # buffering or stream replay). The new target sticks for subsequent chunks,
+  # so a node dying mid-stream doesn't fail the write. Exhausting eligible
+  # nodes aborts with the original failure (#1044).
+  defp write_chunk_with_failover(data, hash, size, volume, timeout, acc) do
+    case put_chunk(data, hash, volume, acc.target, timeout) do
       {:ok, codec_info, locations} ->
-        ref = %{
-          hash: hash,
-          locations: locations,
-          size: size,
-          codec: codec_info
-        }
-
-        process_emitted(rest, volume, target, timeout, %{acc | refs: [ref | acc.refs]})
+        ref = %{hash: hash, locations: locations, size: size, codec: codec_info}
+        {:ok, %{acc | refs: [ref | acc.refs]}}
 
       {:error, reason} ->
-        {:error, {:put_chunk_failed, reason}, acc}
+        excluded = Enum.uniq([acc.target.node | acc.excluded])
+
+        case discover_target(acc.target.tier, acc.target.drive_id, excluded) do
+          {:ok, new_target} ->
+            Logger.warning(
+              "put_chunk failed on #{acc.target.node} (#{inspect(reason)}); " <>
+                "failing over to #{new_target.node}"
+            )
+
+            write_chunk_with_failover(data, hash, size, volume, timeout, %{
+              acc
+              | target: new_target,
+                excluded: excluded
+            })
+
+          {:error, _} ->
+            {:error, {:put_chunk_failed, reason}, acc}
+        end
     end
   end
 
