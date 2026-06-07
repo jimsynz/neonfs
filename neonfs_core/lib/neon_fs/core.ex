@@ -69,8 +69,21 @@ defmodule NeonFS.Core do
   """
   @spec volume_root_nodes(String.t()) :: {:ok, [node()]} | {:error, term()}
   def volume_root_nodes(volume_name) when is_binary(volume_name) do
-    with {:ok, %{id: volume_id}} <- VolumeRegistry.get_by_name(volume_name),
-         {:ok, entry} <- fetch_volume_root(volume_id) do
+    with {:ok, %{id: volume_id}} <- VolumeRegistry.get_by_name(volume_name) do
+      volume_root_nodes_by_id(volume_id)
+    end
+  end
+
+  @doc """
+  Like `volume_root_nodes/1` but keyed by the volume's UUID id.
+
+  The Ra `volume_root` bootstrap entry is already keyed by `volume_id`, so this
+  skips the name→id resolution `volume_root_nodes/1` does — for callers (e.g.
+  FUSE) that hold the id and issue writes through id-keyed APIs (#1087).
+  """
+  @spec volume_root_nodes_by_id(String.t()) :: {:ok, [node()]} | {:error, term()}
+  def volume_root_nodes_by_id(volume_id) when is_binary(volume_id) do
+    with {:ok, entry} <- fetch_volume_root(volume_id) do
       {:ok, entry.drive_locations |> Enum.map(& &1.node) |> Enum.uniq()}
     end
   end

@@ -145,6 +145,12 @@ defmodule NeonFS.FUSE.HandlerTest do
 
       stub(NeonFS.Client, :core_call, &create_test_core_call(&1, &2, &3, test_pid, "file-1"))
 
+      stub(
+        NeonFS.Client,
+        :write_call_by_id,
+        &create_test_write_call(&1, &2, &3, &4, test_pid, "file-1")
+      )
+
       send(
         handler,
         {:fuse_op, 1,
@@ -170,6 +176,12 @@ defmodule NeonFS.FUSE.HandlerTest do
 
       stub(NeonFS.Client, :core_call, &create_test_core_call(&1, &2, &3, test_pid, "file-2"))
 
+      stub(
+        NeonFS.Client,
+        :write_call_by_id,
+        &create_test_write_call(&1, &2, &3, &4, test_pid, "file-2")
+      )
+
       send(
         handler,
         {:fuse_op, 2,
@@ -191,11 +203,13 @@ defmodule NeonFS.FUSE.HandlerTest do
       handler: handler,
       parent_inode: parent_inode
     } do
-      # `:exists` short-circuits before claim_pinned_for_path runs,
-      # so a single `expect` for the write call still suffices.
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core.WriteOperation,
-                                           :write_file_at,
-                                           [_volume_id, _path, 0, <<>>, opts] ->
+      # `:exists` short-circuits before claim_pinned_for_path runs, so a single
+      # `expect` on the write path (routed via write_call_by_id since #1087)
+      # still suffices.
+      expect(NeonFS.Client, :write_call_by_id, fn _volume_id,
+                                                  NeonFS.Core.WriteOperation,
+                                                  :write_file_at,
+                                                  [_v, _path, 0, <<>>, opts] ->
         assert Keyword.get(opts, :create_only) == true
         {:error, :exists}
       end)
@@ -407,11 +421,18 @@ defmodule NeonFS.FUSE.HandlerTest do
   # the `NamespaceCoordinator.claim_pinned_for` that pins it
   # (#651). Forwards the write opts to the test process so the
   # caller can assert on `:create_only`.
-  defp create_test_core_call(
+  # Only `claim_pinned_for` reaches `core_call/3` now — `write_file_at` routes
+  # through `write_call_by_id/4` since #1087 (see `create_test_write_call/6`).
+  defp create_test_core_call(_coordinator, :claim_pinned_for, [_, _, _], _test_pid, _file_id) do
+    {:ok, "ns-claim-stub"}
+  end
+
+  defp create_test_write_call(
+         _volume_id,
          NeonFS.Core.WriteOperation,
          :write_file_at,
          [
-           _volume_id,
+           _v,
            _path,
            0,
            <<>>,
@@ -422,9 +443,5 @@ defmodule NeonFS.FUSE.HandlerTest do
        ) do
     send(test_pid, {:write_opts, opts})
     {:ok, %{id: file_id, size: 0}}
-  end
-
-  defp create_test_core_call(_coordinator, :claim_pinned_for, [_, _, _], _test_pid, _file_id) do
-    {:ok, "ns-claim-stub"}
   end
 end

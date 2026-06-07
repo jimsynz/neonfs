@@ -43,10 +43,17 @@ defmodule NeonFS.Client.RootPlacement do
   """
   @spec get(String.t(), keyword()) :: {:ok, [node()]} | {:error, term()}
   def get(volume_name, opts \\ []) when is_binary(volume_name) do
-    case lookup_fresh(volume_name) do
-      {:ok, _nodes} = hit -> hit
-      :miss -> resolve_and_cache(volume_name, opts)
-    end
+    resolve({:name, volume_name}, volume_name, &default_resolver/1, opts)
+  end
+
+  @doc """
+  Like `get/2` but keyed by the volume's UUID id — resolves via
+  `NeonFS.Core.volume_root_nodes_by_id/1` for callers (e.g. FUSE) that hold
+  the id rather than the name (#1087). Cached under a distinct key namespace.
+  """
+  @spec get_by_id(String.t(), keyword()) :: {:ok, [node()]} | {:error, term()}
+  def get_by_id(volume_id, opts \\ []) when is_binary(volume_id) do
+    resolve({:id, volume_id}, volume_id, &default_resolver_by_id/1, opts)
   end
 
   @doc """
@@ -55,7 +62,7 @@ defmodule NeonFS.Client.RootPlacement do
   """
   @spec invalidate(String.t()) :: :ok
   def invalidate(volume_name) when is_binary(volume_name) do
-    :ets.delete(@table, volume_name)
+    :ets.delete(@table, {:name, volume_name})
     :ok
   end
 
@@ -65,11 +72,18 @@ defmodule NeonFS.Client.RootPlacement do
     {:ok, %{}}
   end
 
-  defp lookup_fresh(volume_name) do
+  defp resolve(cache_key, ident, default_resolver, opts) do
+    case lookup_fresh(cache_key) do
+      {:ok, _nodes} = hit -> hit
+      :miss -> resolve_and_cache(cache_key, ident, default_resolver, opts)
+    end
+  end
+
+  defp lookup_fresh(cache_key) do
     now = System.monotonic_time(:millisecond)
 
-    case safe_lookup(volume_name) do
-      [{^volume_name, nodes, expires_at}] when expires_at > now -> {:ok, nodes}
+    case safe_lookup(cache_key) do
+      [{^cache_key, nodes, expires_at}] when expires_at > now -> {:ok, nodes}
       _ -> :miss
     end
   end
@@ -77,18 +91,18 @@ defmodule NeonFS.Client.RootPlacement do
   # The table only exists once the GenServer has started; tolerate the
   # window before init/1 (or a node where the client isn't running) by
   # treating a missing table as a miss rather than crashing the caller.
-  defp safe_lookup(volume_name) do
-    :ets.lookup(@table, volume_name)
+  defp safe_lookup(cache_key) do
+    :ets.lookup(@table, cache_key)
   rescue
     ArgumentError -> []
   end
 
-  defp resolve_and_cache(volume_name, opts) do
-    resolver = Keyword.get(opts, :resolver, &default_resolver/1)
+  defp resolve_and_cache(cache_key, ident, default_resolver, opts) do
+    resolver = Keyword.get(opts, :resolver, default_resolver)
 
-    case resolver.(volume_name) do
+    case resolver.(ident) do
       {:ok, nodes} when is_list(nodes) ->
-        cache(volume_name, nodes, Keyword.get(opts, :ttl_ms, @default_ttl_ms))
+        cache(cache_key, nodes, Keyword.get(opts, :ttl_ms, @default_ttl_ms))
         {:ok, nodes}
 
       {:error, _} = error ->
@@ -103,9 +117,13 @@ defmodule NeonFS.Client.RootPlacement do
     Router.call(NeonFS.Core, :volume_root_nodes, [volume_name])
   end
 
-  defp cache(volume_name, nodes, ttl_ms) do
+  defp default_resolver_by_id(volume_id) do
+    Router.call(NeonFS.Core, :volume_root_nodes_by_id, [volume_id])
+  end
+
+  defp cache(cache_key, nodes, ttl_ms) do
     expires_at = System.monotonic_time(:millisecond) + ttl_ms
-    :ets.insert(@table, {volume_name, nodes, expires_at})
+    :ets.insert(@table, {cache_key, nodes, expires_at})
   rescue
     ArgumentError -> :ok
   end

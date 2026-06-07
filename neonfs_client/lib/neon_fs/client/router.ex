@@ -105,22 +105,32 @@ defmodule NeonFS.Client.Router do
   """
   @spec volume_metadata_call(String.t(), module(), atom(), [term()]) :: term()
   def volume_metadata_call(volume_name, module, function, args) when is_binary(volume_name) do
-    case eligible_root_nodes(volume_name) do
+    dispatch_metadata_write(RootPlacement.get(volume_name), module, function, args)
+  end
+
+  @doc """
+  Like `volume_metadata_call/4` but resolves the volume's root holders by its
+  UUID id (via `RootPlacement.get_by_id/1`) — for callers that hold the id
+  rather than the name (e.g. FUSE's id-keyed write APIs, #1087).
+  """
+  @spec volume_metadata_call_by_id(String.t(), module(), atom(), [term()]) :: term()
+  def volume_metadata_call_by_id(volume_id, module, function, args) when is_binary(volume_id) do
+    dispatch_metadata_write(RootPlacement.get_by_id(volume_id), module, function, args)
+  end
+
+  defp dispatch_metadata_write(root_lookup, module, function, args) do
+    case eligible_root_nodes(root_lookup) do
       [] -> metadata_call(module, function, args)
       [_ | _] = nodes -> root_call(nodes, module, function, args, 10_000)
     end
   end
 
-  defp eligible_root_nodes(volume_name) do
-    case RootPlacement.get(volume_name) do
-      {:ok, root_nodes} ->
-        reachable = MapSet.new(Discovery.get_core_nodes())
-        Enum.filter(root_nodes, &MapSet.member?(reachable, &1))
-
-      _ ->
-        []
-    end
+  defp eligible_root_nodes({:ok, root_nodes}) do
+    reachable = MapSet.new(Discovery.get_core_nodes())
+    Enum.filter(root_nodes, &MapSet.member?(reachable, &1))
   end
+
+  defp eligible_root_nodes(_), do: []
 
   defp root_call([], module, function, args, _timeout) do
     metadata_call(module, function, args)

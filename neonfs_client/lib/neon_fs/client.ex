@@ -92,4 +92,17 @@ defmodule NeonFS.Client do
   def core_call(module, function, args) do
     Router.call(module, function, args)
   end
+
+  @doc """
+  Routes a volume-scoped metadata *write* through an id-keyed core API
+  (e.g. `NeonFS.Core.WriteOperation` / `NeonFS.Core.FileIndex`) to a node
+  holding the volume's root segment, resolved by `volume_id` (#1087).
+
+  For callers that hold the volume id rather than its name. Falls back to
+  cost-based routing if the volume can't be resolved.
+  """
+  @spec write_call_by_id(String.t(), module(), atom(), [term()]) :: term()
+  def write_call_by_id(volume_id, module, function, args) do
+    Router.volume_metadata_call_by_id(volume_id, module, function, args)
+  end
 end

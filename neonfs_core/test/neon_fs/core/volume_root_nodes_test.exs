@@ -31,9 +31,13 @@ defmodule NeonFS.Core.VolumeRootNodesTest do
 
     assert {:ok, nodes} = Core.volume_root_nodes(volume.name)
     assert nodes == [node()]
+
+    # by-id variant resolves the same root nodes without name resolution (#1087)
+    assert {:ok, ^nodes} = Core.volume_root_nodes_by_id(volume.id)
   end
 
   test "returns {:error, :not_found} for an unknown volume" do
     assert {:error, :not_found} = Core.volume_root_nodes("no-such-volume")
+    assert {:error, :not_found} = Core.volume_root_nodes_by_id("no-such-volume-id")
   end
 end

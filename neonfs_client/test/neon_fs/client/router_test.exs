@@ -50,4 +50,20 @@ defmodule NeonFS.Client.RouterTest do
                Router.volume_metadata_call("vol", SomeModule, :some_function, [])
     end
   end
+
+  describe "volume_metadata_call_by_id/4 (#1087)" do
+    test "dispatches to a reachable root holder resolved by volume id" do
+      stub(RootPlacement, :get_by_id, fn "vol-id" -> {:ok, [Node.self()]} end)
+      stub(Discovery, :get_core_nodes, fn -> [Node.self()] end)
+
+      assert 3 == Router.volume_metadata_call_by_id("vol-id", Kernel, :+, [1, 2])
+    end
+
+    test "falls back to metadata_call when the by-id lookup fails" do
+      stub(RootPlacement, :get_by_id, fn "vol-id" -> {:error, :not_found} end)
+
+      assert {:error, %Unavailable{}} =
+               Router.volume_metadata_call_by_id("vol-id", SomeModule, :some_function, [])
+    end
+  end
 end
