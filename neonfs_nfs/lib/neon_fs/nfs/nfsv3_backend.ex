@@ -42,7 +42,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @behaviour NFSServer.NFSv3.Backend
 
-  alias NeonFS.Client.{ChunkReader, Router}
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.Core.FileMeta
   alias NeonFS.NFS.{Filehandle, InodeTable}
   alias NFSServer.NFSv3.Types.{Fattr3, Nfstime3, Sattr3, Specdata3, WccAttr, WccData}
@@ -1085,7 +1085,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp core_call(module, function, args) do
     case Application.get_env(:neonfs_nfs, :core_call_fn) do
       nil ->
-        Router.call(module, function, args)
+        # core_call/3 routes volume-scoped metadata writes to a root holder (#1076).
+        NeonFS.Client.core_call(module, function, args)
 
       fun when is_function(fun, 3) ->
         fun.(module, function, args)

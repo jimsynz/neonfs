@@ -422,7 +422,8 @@ defmodule NeonFS.WebDAV.Backend do
 
   defp call_core(function, args) do
     case Application.get_env(:neonfs_webdav, :core_call_fn) do
-      nil -> Router.call(NeonFS.Core, function, args)
+      # core_call/3 routes volume-scoped metadata writes to a root holder (#1076).
+      nil -> NeonFS.Client.core_call(NeonFS.Core, function, args)
       fun when is_function(fun, 2) -> fun.(function, args)
     end
   end
