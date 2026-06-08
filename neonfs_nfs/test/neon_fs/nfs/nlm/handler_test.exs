@@ -1,6 +1,7 @@
 defmodule NeonFS.NFS.NLM.HandlerTest do
   use ExUnit.Case, async: true
 
+  alias NeonFS.Error.Unavailable
   alias NeonFS.NFS.NLM.{Codec, Handler}
   alias NeonFS.NFS.RPC.XDR
 
@@ -94,7 +95,7 @@ defmodule NeonFS.NFS.NLM.HandlerTest do
     test "returns denied_nolocks when unavailable" do
       core_call_fn = fn
         NeonFS.Core.LockManager, :lock, _ ->
-          {:error, NeonFS.Error.Unavailable.from_reason(:unavailable)}
+          {:error, Unavailable.from_reason(:unavailable)}
 
         _, _, _ ->
           :ok
@@ -165,7 +166,7 @@ defmodule NeonFS.NFS.NLM.HandlerTest do
     test "returns denied_nolocks when unavailable" do
       core_call_fn = fn
         NeonFS.Core.LockManager, :unlock, _ ->
-          {:error, NeonFS.Error.Unavailable.from_reason(:unavailable)}
+          {:error, Unavailable.from_reason(:unavailable)}
 
         _, _, _ ->
           :ok
