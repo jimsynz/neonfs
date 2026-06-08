@@ -185,6 +185,53 @@ defmodule NeonFS.Transport.HandlerTest do
     end
   end
 
+  describe "store_chunk/6 (RPC fallback contract, #1094)" do
+    test "stores the chunk and returns {:ok, codec_info} with replica locations" do
+      StubBlobStore.put_volume_opts("vol-1", compression: "zstd", compression_level: 5)
+
+      payload = "rpc fallback payload"
+
+      assert {:ok, codec} =
+               Handler.store_chunk(<<0::256>>, "vol-1", "drive-1", :hot, payload, StubBlobStore)
+
+      assert codec.compression == :zstd
+      assert codec.crypto == nil
+      assert codec.original_size == byte_size(payload)
+      assert [%{node: node, drive_id: "drive-1", tier: :hot}] = codec.locations
+      assert node == Node.self()
+      assert StubBlobStore.last_write_opts() == [compression: "zstd", compression_level: 5]
+    end
+
+    test "propagates {:error, _} from resolve_put_chunk_opts/1 without writing" do
+      StubBlobStore.put_volume_opts("vol-missing-key", {:error, :key_not_found})
+      StubBlobStore.put_volume_opts("vol-sentinel", marker: :pre_test)
+
+      assert {:ok, _} =
+               Handler.store_chunk(
+                 <<0::256>>,
+                 "vol-sentinel",
+                 "drive-1",
+                 :hot,
+                 "ok",
+                 StubBlobStore
+               )
+
+      assert StubBlobStore.last_write_opts() == [marker: :pre_test]
+
+      assert {:error, :key_not_found} =
+               Handler.store_chunk(
+                 <<0::256>>,
+                 "vol-missing-key",
+                 "drive-1",
+                 :hot,
+                 "x",
+                 StubBlobStore
+               )
+
+      assert StubBlobStore.last_write_opts() == [marker: :pre_test]
+    end
+  end
+
   describe "get_chunk dispatch" do
     test "returns chunk data for existing chunk", ctx do
       data = "test chunk data"

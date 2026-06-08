@@ -173,6 +173,71 @@ defmodule NeonFS.Client.ChunkWriterTest do
     end
   end
 
+  describe "write_file_stream/4 — :no_data_endpoint fallback (#1094)" do
+    test "stores via NeonFS.Transport.Handler over distribution when no data-plane pool exists" do
+      volume = volume_fixture()
+      stub_discovery([@target_node])
+
+      fallback_locations = [%{node: @target_node, drive_id: @drive_id, tier: :hot}]
+
+      stub(Router, :call, fn
+        NeonFS.Core, :get_volume, ["test-vol"] ->
+          {:ok, volume}
+
+        NeonFS.Core.DriveRegistry, :drives_for_tier, [_tier] ->
+          []
+
+        NeonFS.Transport.Handler, :store_chunk, [hash, vol_id, drive_id, tier, data] ->
+          assert is_binary(hash)
+          assert vol_id == volume.id
+          assert drive_id == @drive_id
+          assert tier == "hot"
+          assert byte_size(data) == 256
+
+          {:ok,
+           %{compression: :none, crypto: nil, original_size: 256, locations: fallback_locations}}
+      end)
+
+      expect(Router, :data_call, fn @target_node, :put_chunk, _args, _opts ->
+        {:error, :no_data_endpoint}
+      end)
+
+      data = :binary.copy(<<0xAB>>, 256)
+
+      assert {:ok, [ref]} =
+               ChunkWriter.write_file_stream("test-vol", "/fallback.bin", [data],
+                 drive_id: @drive_id,
+                 strategy: "fixed",
+                 strategy_param: 256
+               )
+
+      assert ref.locations == fallback_locations
+      assert ref.size == 256
+      refute Map.has_key?(ref.codec, :locations)
+    end
+
+    test "surfaces the fallback store error when distribution write fails" do
+      volume = volume_fixture()
+      stub_discovery([@target_node])
+
+      stub(Router, :call, fn
+        NeonFS.Core, :get_volume, ["test-vol"] -> {:ok, volume}
+        NeonFS.Core.DriveRegistry, :drives_for_tier, [_tier] -> []
+        NeonFS.Transport.Handler, :store_chunk, _args -> {:error, :disk_full}
+      end)
+
+      expect(Router, :data_call, fn @target_node, :put_chunk, _args, _opts ->
+        {:error, :no_data_endpoint}
+      end)
+
+      assert {:error, {:put_chunk_failed, :disk_full}} =
+               ChunkWriter.write_file_stream("test-vol", "/fail.bin", [<<0::64*8>>],
+                 drive_id: @drive_id,
+                 strategy: "single"
+               )
+    end
+  end
+
   describe "write_file_stream/4 — error paths" do
     test "returns the volume lookup error when get_volume fails" do
       expect(Router, :call, fn NeonFS.Core, :get_volume, ["test-vol"] ->

@@ -24,6 +24,32 @@ defmodule NeonFS.Transport.Handler do
     GenServer.start_link(__MODULE__, opts)
   end
 
+  @doc """
+  Stores one chunk on this node's blob store, fans out replicas, and
+  returns the codec descriptor (with replica `:locations`) that the
+  data-plane `put_chunk` response carries.
+
+  Shared by the TLS data-plane handler and the `NeonFS.Client.ChunkWriter`
+  RPC fallback used when no data-plane pool exists for the target node
+  (#1094). `dispatch` is the blob-store module (default
+  `NeonFS.Core.BlobStore`); `volume_id` selects volume-level compression /
+  encryption while `drive_id` selects the storage drive.
+  """
+  @spec store_chunk(binary(), binary(), binary(), atom() | binary(), binary(), module()) ::
+          {:ok, map()} | {:error, term()}
+  def store_chunk(hash, volume_id, drive_id, tier, data, dispatch \\ @default_dispatch) do
+    # Resolve the sentinel/“default” drive_id to a real local drive once, so the
+    # chunk lands on real storage and `local_location` records that drive (#1042).
+    drive_id = resolve_drive_id(dispatch, drive_id, tier)
+
+    with {:ok, opts} <- resolve_volume_opts(dispatch, volume_id),
+         {:ok, _hash, _info} <- dispatch.write_chunk(data, drive_id, tier, opts),
+         {:ok, locations} <-
+           replicate_if_supported(dispatch, hash, data, volume_id, drive_id, tier) do
+      {:ok, codec_info_from_opts(opts, byte_size(data), locations)}
+    end
+  end
+
   # GenServer callbacks
 
   @impl GenServer
@@ -91,16 +117,8 @@ defmodule NeonFS.Transport.Handler do
          state
        )
        when is_binary(volume_id) do
-    # Resolve the sentinel/“default” drive_id to a real local drive once, so the
-    # chunk lands on real storage and `local_location` records that drive (#1042).
-    drive_id = resolve_drive_id(state.dispatch, drive_id, tier)
-
-    with {:ok, opts} <- resolve_volume_opts(state.dispatch, volume_id),
-         {:ok, _hash, _info} <- state.dispatch.write_chunk(data, drive_id, tier, opts),
-         {:ok, locations} <-
-           replicate_if_supported(state.dispatch, hash, data, volume_id, drive_id, tier) do
-      {:ok, ref, codec_info_from_opts(opts, byte_size(data), locations)}
-    else
+    case store_chunk(hash, volume_id, drive_id, tier, data, state.dispatch) do
+      {:ok, codec_info} -> {:ok, ref, codec_info}
       {:error, reason} -> {:error, ref, reason}
     end
   end

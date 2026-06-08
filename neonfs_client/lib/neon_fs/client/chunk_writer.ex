@@ -85,6 +85,7 @@ defmodule NeonFS.Client.ChunkWriter do
   alias NeonFS.Client.{Discovery, Router}
   alias NeonFS.Core.Volume
   alias NeonFS.Error.Unavailable
+  alias NeonFS.Transport.Handler
 
   @default_strategy "auto"
   @default_timeout 30_000
@@ -390,6 +391,9 @@ defmodule NeonFS.Client.ChunkWriter do
         {codec, locations} = extract_codec_and_locations(codec_info, target)
         {:ok, codec, locations}
 
+      {:error, :no_data_endpoint} ->
+        store_via_core(data, hash, volume, target)
+
       :ok ->
         # Handler on older core nodes doesn't send codec info back.
         # Fall back to the pre-#481 assumption (compression=:none,
@@ -404,6 +408,33 @@ defmodule NeonFS.Client.ChunkWriter do
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  # No TLS data-plane pool exists for the target node — e.g. a single
+  # co-located omnibus, where `self` has no self-pool, or any node whose
+  # pool was lost. Store the chunk over Erlang distribution instead,
+  # symmetric with `ChunkReader`'s `:no_data_endpoint` read fallback
+  # (#1094). The storing core node resolves a concrete local drive and
+  # reports the actual replica locations, so the resulting ref is accurate
+  # regardless of which node served the write.
+  defp store_via_core(data, hash, volume, target) do
+    case Router.call(Handler, :store_chunk, [
+           hash,
+           volume.id,
+           target.drive_id,
+           tier_to_string(target.tier),
+           data
+         ]) do
+      {:ok, %{compression: _, crypto: _, original_size: _} = codec_info} ->
+        {codec, locations} = extract_codec_and_locations(codec_info, target)
+        {:ok, codec, locations}
+
+      {:error, _} = err ->
+        err
+
+      other ->
+        {:error, {:fallback_store_failed, other}}
     end
   end
 
