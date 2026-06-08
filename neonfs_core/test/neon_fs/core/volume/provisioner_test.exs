@@ -5,6 +5,7 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
   alias NeonFS.Core.Volume
   alias NeonFS.Core.Volume.Provisioner
   alias NeonFS.Core.Volume.RootSegment
+  alias NeonFS.Error.QuorumUnavailable
 
   describe "provision/2" do
     test "returns {:ok, hash} on the happy path" do
@@ -125,7 +126,7 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
     test "surfaces insufficient_drives error from DriveSelector" do
       volume = sample_volume()
 
-      assert {:error, :insufficient_drives, %{available: 1, needed: 2}} =
+      assert {:error, %QuorumUnavailable{operation: :select_replicas, required: 2, available: 1}} =
                Provisioner.provision(volume,
                  cluster_state_loader: fn -> {:ok, sample_cluster_state()} end,
                  drive_lister: fn -> {:ok, [drive("drv-1", :n1@h)]} end,
@@ -140,9 +141,17 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
       drives = [drive("drv-1", :n1@h), drive("drv-2", :n2@h), drive("drv-3", :n3@h)]
 
       replicator =
-        stub_replicator_failure(:insufficient_replicas, %{successful: [], failed: [], needed: 2})
+        stub_replicator_failure(
+          QuorumUnavailable.exception(
+            operation: :write_chunk,
+            required: 2,
+            available: 0,
+            successful: [],
+            failed: []
+          )
+        )
 
-      assert {:error, :insufficient_replicas, _} =
+      assert {:error, %QuorumUnavailable{operation: :write_chunk, required: 2}} =
                Provisioner.provision(volume,
                  cluster_state_loader: fn -> {:ok, sample_cluster_state()} end,
                  drive_lister: fn -> {:ok, drives} end,
@@ -217,20 +226,17 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
     name
   end
 
-  defp stub_replicator_failure(reason, info) do
+  defp stub_replicator_failure(error) do
     name =
       String.to_atom(
         "Elixir.NeonFS.Core.Volume.ProvisionerTest.FR#{:erlang.unique_integer([:positive])}"
       )
 
-    {reason_code, info_term} = {reason, info}
-
     Module.create(
       name,
       quote do
-        @reason unquote(Macro.escape(reason_code))
-        @info unquote(Macro.escape(info_term))
-        def write_chunk(_data, _drives, _opts), do: {:error, @reason, @info}
+        @error unquote(Macro.escape(error))
+        def write_chunk(_data, _drives, _opts), do: {:error, @error}
       end,
       Macro.Env.location(__ENV__)
     )

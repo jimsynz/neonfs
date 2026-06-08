@@ -385,7 +385,6 @@ defmodule NeonFS.Core.VolumeRegistry do
       case Provisioner.provision(volume) do
         {:ok, _root_chunk_hash} -> :ok
         {:error, _reason} = err -> err
-        {:error, reason, info} -> {:error, {reason, info}}
       end
     else
       :ok
@@ -449,17 +448,13 @@ defmodule NeonFS.Core.VolumeRegistry do
     case provisioner.provision(volume) do
       {:ok, _root_chunk_hash} -> :ok
       {:error, _reason} = err -> err
-      {:error, _, _} = err -> err
     end
   end
 
   defp sufficient_drives_for?(durability) do
     case RaSupervisor.local_query(&MetadataStateMachine.get_drives/1) do
       {:ok, drives_map} when is_map(drives_map) ->
-        case DriveSelector.select_replicas(durability, drives_map) do
-          {:ok, _} -> true
-          {:error, :insufficient_drives, _} -> false
-        end
+        match?({:ok, _}, DriveSelector.select_replicas(durability, drives_map))
 
       _ ->
         false

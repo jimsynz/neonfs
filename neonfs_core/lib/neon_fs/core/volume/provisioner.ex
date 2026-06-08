@@ -34,8 +34,7 @@ defmodule NeonFS.Core.Volume.Provisioner do
   @type provision_error ::
           {:error, {:cluster_state_unavailable, term()}}
           | {:error, {:drive_query_failed, term()}}
-          | {:error, :insufficient_drives, %{available: non_neg_integer(), needed: pos_integer()}}
-          | {:error, :insufficient_replicas, map()}
+          | {:error, Splode.Error.t()}
           | {:error, {:bootstrap_register_failed, term()}}
 
   @doc """
@@ -46,9 +45,8 @@ defmodule NeonFS.Core.Volume.Provisioner do
 
   - cluster state unavailable → `{:error, {:cluster_state_unavailable, _}}`
   - bootstrap-layer drive query failed → `{:error, {:drive_query_failed, _}}`
-  - fewer drives available than the durability's minimum →
-    `{:error, :insufficient_drives, %{available, needed}}`
-  - chunk-write quorum failure → `{:error, :insufficient_replicas, _}`
+  - fewer drives available than the durability's minimum, or a
+    chunk-write quorum failure → `{:error, %NeonFS.Error.QuorumUnavailable{}}`
   - Ra `:register_volume_root` rejected → `{:error, {:bootstrap_register_failed, _}}`
 
   The caller is responsible for rolling back the volume's

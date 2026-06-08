@@ -4,6 +4,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
   alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.Volume.MetadataWriter
   alias NeonFS.Core.Volume.RootSegment
+  alias NeonFS.Error.QuorumUnavailable
 
   describe "put/5" do
     test "calls the put NIF, encodes a fresh segment, replicates, and updates the bootstrap entry" do
@@ -133,12 +134,19 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
                MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
     end
 
-    test "surfaces insufficient_replicas when the chunk replicator can't meet quorum" do
+    test "surfaces QuorumUnavailable when the chunk replicator can't meet quorum" do
       capture = build_capture()
 
       failing_replicator = %{
         write_chunk: fn _data, _drives, _opts ->
-          {:error, :insufficient_replicas, %{successful: [], failed: [], needed: 2}}
+          {:error,
+           QuorumUnavailable.exception(
+             operation: :write_chunk,
+             required: 2,
+             available: 0,
+             successful: [],
+             failed: []
+           )}
         end
       }
 
@@ -148,7 +156,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
           chunk_replicator: stub_replicator(failing_replicator)
         )
 
-      assert {:error, :insufficient_replicas, %{needed: 2}} =
+      assert {:error, %QuorumUnavailable{required: 2}} =
                MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
     end
 

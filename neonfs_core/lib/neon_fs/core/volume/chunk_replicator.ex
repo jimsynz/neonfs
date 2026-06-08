@@ -23,6 +23,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
 
   alias NeonFS.Core.BlobStore
   alias NeonFS.Core.MetadataStateMachine
+  alias NeonFS.Error.QuorumUnavailable
 
   @type drive_entry :: MetadataStateMachine.drive_entry()
   @type drive_id :: String.t()
@@ -35,8 +36,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
 
   @type write_result ::
           {:ok, chunk_hash(), write_summary()}
-          | {:error, :insufficient_replicas,
-             %{successful: [drive_id()], failed: [{drive_id(), term()}], needed: pos_integer()}}
+          | {:error, Splode.Error.t()}
 
   @default_timeout_ms 30_000
   @default_tier "hot"
@@ -44,7 +44,8 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
   @doc """
   Writes `data` to every drive in `drives`, concurrently. Returns
   `{:ok, hash, summary}` if at least `:min_copies` drives accepted
-  the write, otherwise `{:error, :insufficient_replicas, info}`.
+  the write, otherwise `{:error, %NeonFS.Error.QuorumUnavailable{}}`
+  carrying the per-drive `successful`/`failed` breakdown.
 
   Required opts:
 
@@ -137,9 +138,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
     cond do
       ok_results == [] ->
         emit_insufficient_telemetry(successful, failed, min_copies, total)
-
-        {:error, :insufficient_replicas,
-         %{successful: successful, failed: failed, needed: min_copies}}
+        insufficient_error(successful, failed, min_copies)
 
       length(successful) >= min_copies ->
         {_drive, {:ok, hash, _info}} = hd(ok_results)
@@ -149,10 +148,19 @@ defmodule NeonFS.Core.Volume.ChunkReplicator do
       true ->
         {_drive, {:ok, hash, _info}} = hd(ok_results)
         emit_insufficient_telemetry(successful, failed, min_copies, total, hash)
-
-        {:error, :insufficient_replicas,
-         %{successful: successful, failed: failed, needed: min_copies}}
+        insufficient_error(successful, failed, min_copies)
     end
+  end
+
+  defp insufficient_error(successful, failed, min_copies) do
+    {:error,
+     QuorumUnavailable.exception(
+       operation: :write_chunk,
+       required: min_copies,
+       available: length(successful),
+       successful: successful,
+       failed: failed
+     )}
   end
 
   defp emit_write_telemetry(hash, successful, failed, total) do

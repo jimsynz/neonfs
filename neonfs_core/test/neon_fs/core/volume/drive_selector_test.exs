@@ -3,6 +3,7 @@ defmodule NeonFS.Core.Volume.DriveSelectorTest do
   use ExUnitProperties
 
   alias NeonFS.Core.Volume.DriveSelector
+  alias NeonFS.Error.QuorumUnavailable
 
   describe "select_replicas/2 — replicate" do
     test "picks `factor` drives spread across distinct nodes when possible" do
@@ -52,7 +53,7 @@ defmodule NeonFS.Core.Volume.DriveSelectorTest do
     test "returns insufficient_drives when fewer than min_copies are available" do
       drives = [drive(:n1@h, "drv-1")]
 
-      assert {:error, :insufficient_drives, %{available: 1, needed: 2}} =
+      assert {:error, %QuorumUnavailable{operation: :select_replicas, required: 2, available: 1}} =
                DriveSelector.select_replicas(replicate(3, 2), drives)
     end
 
@@ -95,7 +96,7 @@ defmodule NeonFS.Core.Volume.DriveSelectorTest do
       assert length(picked) == 4
 
       # data=5 parity=2 → minimum is 5, available is 4 → fails.
-      assert {:error, :insufficient_drives, %{available: 4, needed: 5}} =
+      assert {:error, %QuorumUnavailable{operation: :select_replicas, required: 5, available: 4}} =
                DriveSelector.select_replicas(erasure(5, 2), drives)
     end
   end
@@ -128,7 +129,7 @@ defmodule NeonFS.Core.Volume.DriveSelectorTest do
             # No duplicate drives in the output.
             assert length(Enum.uniq(picked)) == length(picked)
 
-          {:error, :insufficient_drives, %{available: a, needed: n}} ->
+          {:error, %QuorumUnavailable{available: a, required: n}} ->
             assert a == drive_count
             assert n == min_copies
             assert a < n

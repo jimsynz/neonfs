@@ -5,6 +5,7 @@ defmodule NeonFS.Core.FileIndexTest do
   import Bitwise
 
   alias NeonFS.Core.{ChunkIndex, ChunkMeta, DirectoryEntry, FileIndex, FileMeta}
+  alias NeonFS.Error.QuorumUnavailable
 
   @moduletag :tmp_dir
 
@@ -109,20 +110,27 @@ defmodule NeonFS.Core.FileIndexTest do
       assert {:error, :invalid_path} = FileIndex.create(file)
     end
 
-    # #908: when MetadataWriter.put bubbles a 3-tuple
-    # `{:error, :insufficient_replicas, %{...}}` from the segment
-    # replicator (the ENOSPC shape), the GenServer used to MatchError
-    # because `do_create`'s `with...else` only knew the 2-tuple form.
-    # Confirm `normalise_writer_result/1` collapses it cleanly so
-    # callers see a 2-tuple instead of `{:badrpc, {:EXIT, _}}`.
-    test "translates 3-tuple writer errors into 2-tuple replies", %{store: store} do
+    # #908/#1058: when MetadataWriter.put returns a quorum failure from
+    # the segment replicator (the ENOSPC shape), the structured
+    # `%QuorumUnavailable{}` must propagate to the caller without the
+    # GenServer crashing (it used to MatchError on a bare 3-tuple).
+    test "propagates the structured quorum error without crashing", %{store: store} do
       stop_if_running(NeonFS.Core.FileIndex)
       cleanup_ets_table(:file_index_by_id)
 
       defmodule InsufficientReplicasReplicator do
         @moduledoc false
+        alias NeonFS.Error.QuorumUnavailable
+
         def write_chunk(_data, _drives, _opts) do
-          {:error, :insufficient_replicas, %{successful: [], needed: 1}}
+          {:error,
+           QuorumUnavailable.exception(
+             operation: :write_chunk,
+             required: 1,
+             available: 0,
+             successful: [],
+             failed: []
+           )}
         end
       end
 
@@ -139,7 +147,7 @@ defmodule NeonFS.Core.FileIndexTest do
       )
 
       file = FileMeta.new("vol1", "/enospc.txt")
-      assert {:error, :insufficient_replicas} = FileIndex.create(file)
+      assert {:error, %QuorumUnavailable{required: 1}} = FileIndex.create(file)
       assert Process.alive?(Process.whereis(NeonFS.Core.FileIndex))
     end
   end

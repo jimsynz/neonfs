@@ -140,9 +140,6 @@ defmodule NeonFS.Core.StripeIndex do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
-
-      {:error, reason, info} ->
-        {:reply, {:error, reason, info}, state}
     end
   end
 
@@ -157,9 +154,6 @@ defmodule NeonFS.Core.StripeIndex do
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
-
-          {:error, reason, info} ->
-            {:reply, {:error, reason, info}, state}
         end
 
       _ ->
@@ -219,7 +213,6 @@ defmodule NeonFS.Core.StripeIndex do
              metadata_writer_opts()
            ) do
         {:ok, _root} -> :ok
-        {:error, _, _} = err -> err
         {:error, _reason} = err -> err
       end
     else
@@ -232,7 +225,6 @@ defmodule NeonFS.Core.StripeIndex do
 
     case MetadataWriter.delete(volume_id, :stripe_index, key, metadata_writer_opts()) do
       {:ok, _root} -> :ok
-      {:error, _, _} = err -> err
       {:error, _reason} = err -> err
     end
   end

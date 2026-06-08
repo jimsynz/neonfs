@@ -48,7 +48,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   @type index_kind :: :file_index | :chunk_index | :stripe_index
   @type write_error ::
           MetadataReader.read_error()
-          | {:error, :insufficient_replicas, map()}
+          | {:error, Splode.Error.t()}
           | {:error, {:bootstrap_update_failed, term()}}
           | {:error, {:index_tree_write_failed, term()}}
 
@@ -191,9 +191,9 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
           _ -> err
         end
 
-      # `{:ok, _}` and the writer's 3-element error tuples
-      # (e.g. `{:error, :insufficient_replicas, details}`) pass through:
-      # only the pre-commit `:no_local_replica` case is re-dispatched.
+      # `{:ok, _}` and structured write errors (e.g. the quorum
+      # `%NeonFS.Error.QuorumUnavailable{}`) pass through: only the
+      # pre-commit `:no_local_replica` case is re-dispatched.
       other ->
         other
     end
@@ -329,7 +329,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   #
   # Returns the same `{:ok, segment, root_entry}` shape as
   # `MetadataReader.resolve_segment_for_write/2`. Provisioning errors
-  # surface as `{:error, _}` / `{:error, _, _}`.
+  # surface as `{:error, _}`.
   defp resolve_or_provision(volume_id, opts) do
     case MetadataReader.resolve_segment_for_write(volume_id, opts) do
       {:ok, _segment, _root_entry} = ok ->
@@ -361,7 +361,6 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     case provisioner.provision(volume) do
       {:ok, _root_chunk_hash} -> :ok
       {:error, _reason} = err -> err
-      {:error, reason, info} -> {:error, {reason, info}}
     end
   end
 
@@ -445,7 +444,6 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
     case chunk_replicator.write_chunk(encoded, replica_drives, write_opts) do
       {:ok, hash, _summary} -> {:ok, hash}
-      {:error, _, _} = err -> err
       {:error, _} = err -> err
     end
   end
