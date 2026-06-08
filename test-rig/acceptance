@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # NeonFS acceptance suite — drive a running cluster through the single- or
 # multi-node acceptance matrix (cluster/drives/volume, FUSE, NFS, S3, WebDAV,
-# cross-interface consistency, and multi-node replication), reporting
-# PASS/FAIL/SKIP per step. Exit non-zero if any step fails.
+# cross-interface consistency, container-runtime integration — Docker volume
+# attach and the containerd content store — and multi-node replication),
+# reporting PASS/FAIL/SKIP per step. Exit non-zero if any step fails.
 #
 # Bring a cluster up first with ./neonfs-rig:
 #   ./neonfs-rig up                 # single node

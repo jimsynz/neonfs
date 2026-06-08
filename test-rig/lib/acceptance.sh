@@ -22,6 +22,9 @@ DAV_BASE="http://127.0.0.1:8081"
 DOCKER_SOCK="${DOCKER_SOCK:-/run/neonfs/docker.sock}"
 CONTAINERD_SOCK="${CONTAINERD_SOCK:-/run/neonfs/containerd.sock}"
 DOCKER_VOL="${DOCKER_VOL:-accept_docker}"
+# Volume the containerd content-store plugin stores blobs in
+# (:neonfs_containerd, :volume — default "containerd").
+CONTAINERD_VOL="${CONTAINERD_VOL:-containerd}"
 
 # --- harness ---------------------------------------------------------------
 
@@ -74,7 +77,8 @@ s_volume_create() {
     || { echo "  volume create failed" >&2; return 1; }
 }
 
-volume_ready() { ncli 1 "volume list" 2>/dev/null | grep -qE "^${ACCEPT_VOL}[[:space:]]"; }
+volume_present() { ncli 1 "volume list" 2>/dev/null | grep -qE "^$1[[:space:]]"; }
+volume_ready() { volume_present "${ACCEPT_VOL}"; }
 
 s_fuse_mount() {
   volume_ready || { echo "  ${ACCEPT_VOL} missing" >&2; return 77; }
@@ -186,75 +190,102 @@ s_webdav_ops() {
     || { echo "  WebDAV PUT/GET failed" >&2; return 1; }
 }
 
-# POST a Docker Volume Plugin request to the driver's Unix socket. $1 is the
-# endpoint, $2 the JSON body (single-quote it at the call site). Runs as root
-# because the socket is neonfs-owned and not world-writable.
-dvd() {
-  node_ssh 1 "sudo curl -s --max-time 20 --unix-socket ${DOCKER_SOCK} \
-    -H 'Content-Type: application/json' -d '$2' http://plugin/$1" 2>/dev/null
-}
-
-# Docker/Podman VolumeDriver: drive the full lifecycle over the plugin socket —
-# Activate, Create (which provisions a replicas-1 NeonFS volume in core), Mount
-# (a real FUSE-backed mountpoint), a read/write round-trip at that mountpoint,
-# Path/List, then Unmount + Remove.
-s_docker_volume_driver() {
+# Attach a Docker volume to a NeonFS volume through a real Docker daemon: the
+# omnibus package ships /etc/docker/plugins/neonfs.spec, so `docker volume
+# create -d neonfs` provisions a NeonFS volume in core and `docker run -v`
+# attaches it (the driver's FUSE mount reaches the container's namespace via the
+# omnibus unit's MountFlags=shared). Writing from one container and reading it
+# back from a second proves the NeonFS volume is genuinely attached.
+s_docker_volume_attach() {
+  node_ssh 1 "command -v docker >/dev/null 2>&1" 2>/dev/null \
+    || { echo "  docker not installed — skipping" >&2; return 77; }
+  node_ssh 1 "sudo systemctl is-active --quiet docker || sudo systemctl start docker" 2>/dev/null
   node_ssh 1 "sudo test -S ${DOCKER_SOCK}" 2>/dev/null \
-    || { echo "  docker plugin socket ${DOCKER_SOCK} absent — driver not deployed" >&2; return 77; }
+    || { echo "  neonfs docker plugin socket ${DOCKER_SOCK} absent — driver not deployed" >&2; return 77; }
+  node_ssh 1 "test -f /etc/docker/plugins/neonfs.spec" 2>/dev/null \
+    || { echo "  /etc/docker/plugins/neonfs.spec missing — docker cannot discover the driver" >&2; return 1; }
 
-  dvd Plugin.Activate '{}' | grep -q 'VolumeDriver' \
-    || { echo "  Plugin.Activate did not advertise VolumeDriver" >&2; return 1; }
+  node_ssh 1 "sudo docker pull busybox:latest >/dev/null 2>&1" 2>/dev/null \
+    || { echo "  could not pull busybox (no registry connectivity?) — skipping" >&2; return 77; }
 
-  local out
-  out=$(dvd VolumeDriver.Create "{\"Name\":\"${DOCKER_VOL}\",\"Opts\":{\"durability\":\"1\"}}")
-  echo "${out}" | grep -q '"Err":""' \
-    || { echo "  VolumeDriver.Create failed: ${out}" >&2; return 1; }
+  node_ssh 1 "sudo docker volume rm ${DOCKER_VOL} >/dev/null 2>&1 || true
+    sudo docker volume create -d neonfs --opt durability=1 ${DOCKER_VOL}" 2>&1 | sed 's/^/  /' >&2
+  node_ssh 1 "sudo docker volume ls --format '{{.Driver}} {{.Name}}' | grep -qx 'neonfs ${DOCKER_VOL}'" 2>/dev/null \
+    || { echo "  docker volume create -d neonfs failed" >&2; return 1; }
 
-  out=$(dvd VolumeDriver.Mount "{\"Name\":\"${DOCKER_VOL}\"}")
-  local mp; mp=$(echo "${out}" | grep -oE '"Mountpoint":"[^"]+"' | head -1 | cut -d'"' -f4)
-  [ -n "${mp}" ] \
-    || { echo "  VolumeDriver.Mount returned no mountpoint: ${out}" >&2; return 1; }
-  echo "  mountpoint ${mp}" >&2
+  retry_until volume_present "${DOCKER_VOL}" \
+    || { echo "  driver did not provision a NeonFS volume named ${DOCKER_VOL}" >&2; return 1; }
 
   local rc=0
-  node_ssh 1 "sudo -u neonfs bash -c '
-    set -e
-    echo docker-content > ${mp}/dvd_${TAG}.txt
-    sync
-    [ \"\$(cat ${mp}/dvd_${TAG}.txt)\" = docker-content ]
-  '" 2>&1 | sed 's/^/  /' >&2 || rc=1
+  node_ssh 1 "sudo docker run --rm -v ${DOCKER_VOL}:/data busybox sh -c 'echo docker-vol-content > /data/dv_${TAG}.txt && sync'" 2>&1 | sed 's/^/  /' >&2 || rc=1
+  node_ssh 1 "got=\$(sudo docker run --rm -v ${DOCKER_VOL}:/data busybox cat /data/dv_${TAG}.txt 2>/dev/null); [ \"\$got\" = docker-vol-content ]" 2>&1 | sed 's/^/  /' >&2 \
+    || { echo "  data written via one container not readable from another — volume not attached" >&2; rc=1; }
 
-  dvd VolumeDriver.Path "{\"Name\":\"${DOCKER_VOL}\"}" | grep -q "${mp}" \
-    || { echo "  VolumeDriver.Path did not return the mountpoint" >&2; rc=1; }
-  dvd VolumeDriver.List '{}' | grep -q "${DOCKER_VOL}" \
-    || { echo "  VolumeDriver.List did not include ${DOCKER_VOL}" >&2; rc=1; }
-
-  dvd VolumeDriver.Unmount "{\"Name\":\"${DOCKER_VOL}\"}" | grep -q '"Err":""' \
-    || { echo "  VolumeDriver.Unmount failed" >&2; rc=1; }
-  dvd VolumeDriver.Remove "{\"Name\":\"${DOCKER_VOL}\"}" >/dev/null 2>&1
-
+  node_ssh 1 "sudo docker volume rm ${DOCKER_VOL} >/dev/null 2>&1 || true"
   [ "${rc}" -eq 0 ] || return 1
 }
 
-# containerd content store: the plugin speaks the gRPC content protocol over a
-# Unix socket that a containerd daemon dials as a proxy plugin. Content RPCs
-# (Read/Write/Info) are not yet implemented (#549/#550), so this verifies the
-# endpoint is bound, listening, and the service is registered + healthy — not a
-# content round-trip.
-s_containerd_endpoint() {
+# containerd content store: store a real image-layer blob in a NeonFS volume
+# through the content proxy plugin. Spawn a throwaway containerd whose only
+# content backend is the neonfs plugin (default bolt store disabled, per the
+# proxy_plugins wiring in docs/containerd.md), then round-trip a blob with
+# `ctr content ingest`/`ls`/`get` — mirroring neonfs_integration's
+# ContainerdDaemon. The plugin lands the blob in the CONTAINERD_VOL NeonFS
+# volume as a sharded sha256 object.
+s_containerd_content() {
+  node_ssh 1 "command -v containerd >/dev/null 2>&1 && command -v ctr >/dev/null 2>&1" 2>/dev/null \
+    || { echo "  containerd/ctr not installed — skipping" >&2; return 77; }
   node_ssh 1 "sudo test -S ${CONTAINERD_SOCK}" 2>/dev/null \
-    || { echo "  containerd socket ${CONTAINERD_SOCK} absent — backend not deployed" >&2; return 77; }
+    || { echo "  containerd plugin socket ${CONTAINERD_SOCK} absent — backend not deployed" >&2; return 77; }
 
-  node_ssh 1 "sudo ss -lxn 2>/dev/null | grep -q '${CONTAINERD_SOCK}'" 2>/dev/null \
-    || { echo "  ${CONTAINERD_SOCK} is not a listening socket" >&2; return 1; }
+  volume_present "${CONTAINERD_VOL}" \
+    || ncli 1 "volume create ${CONTAINERD_VOL} --replicas 1" 2>&1 | grep -qi 'created successfully' \
+    || { echo "  could not create the ${CONTAINERD_VOL} content-store volume" >&2; return 1; }
 
-  local status; status=$(ncli 1 "node status" 2>&1)
-  echo "${status}" | grep -iE 'containerd_(cluster|registrar)' | sed 's/^/  /' >&2 || true
-  if echo "${status}" | grep -iE 'containerd_(cluster|registrar)' | grep -qi 'unhealthy'; then
-    echo "  containerd service reported unhealthy" >&2; return 1
-  fi
+  node_ssh 1 "sudo bash -s ${CONTAINERD_SOCK} ${TAG}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+PROXY_SOCK="$1"; TAG="$2"
+TMP="$(mktemp -d /tmp/neonfs-ctrd.XXXXXX)"
+trap 'kill "${CTRD_PID:-0}" 2>/dev/null || true; rm -rf "${TMP}"' EXIT
+mkdir -p "${TMP}/root" "${TMP}/state"
+GRPC="${TMP}/containerd.sock"
 
-  echo "  note: content Read/Write unimplemented (#549/#550) — endpoint liveness only" >&2
+cat > "${TMP}/config.toml" <<CFG
+version = 2
+root = "${TMP}/root"
+state = "${TMP}/state"
+disabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.content.v1.content"]
+imports = []
+
+[grpc]
+address = "${GRPC}"
+
+[ttrpc]
+address = "${GRPC}.ttrpc"
+
+[proxy_plugins]
+  [proxy_plugins.neonfs]
+  type = "content"
+  address = "${PROXY_SOCK}"
+CFG
+
+containerd --config "${TMP}/config.toml" --log-level info > "${TMP}/containerd.log" 2>&1 &
+CTRD_PID=$!
+for _ in $(seq 1 50); do [ -S "${GRPC}" ] && break; sleep 0.2; done
+[ -S "${GRPC}" ] || { echo "containerd grpc socket never came up"; tail -20 "${TMP}/containerd.log"; exit 1; }
+
+head -c 65536 /dev/urandom > "${TMP}/blob"
+DIGEST="sha256:$(sha256sum "${TMP}/blob" | awk '{print $1}')"
+
+ctr --address "${GRPC}" --namespace test content ingest --expected-digest "${DIGEST}" "ref_${TAG}" < "${TMP}/blob" \
+  || { echo "ctr content ingest failed"; tail -20 "${TMP}/containerd.log"; exit 1; }
+ctr --address "${GRPC}" --namespace test content ls | grep -q "${DIGEST}" \
+  || { echo "ingested digest ${DIGEST} absent from content ls"; exit 1; }
+ctr --address "${GRPC}" --namespace test content get "${DIGEST}" > "${TMP}/got"
+cmp -s "${TMP}/blob" "${TMP}/got" \
+  || { echo "blob retrieved from the content store differs from the original"; exit 1; }
+echo "content round-trip OK (${DIGEST})"
+REMOTE
 }
 
 # Cross-interface: write via FUSE, must be visible via S3 and WebDAV (and NFS).
@@ -327,10 +358,7 @@ s_replication() {
 acceptance_cleanup() {
   [ "${KEEP:-0}" = 1 ] && return 0
   node_ssh 1 "sudo umount ${NFS_MNT} 2>/dev/null; sudo timeout 20 neonfs fuse unmount ${FUSE_MNT} 2>/dev/null" >/dev/null 2>&1 || true
-  if node_ssh 1 "sudo test -S ${DOCKER_SOCK}" 2>/dev/null; then
-    dvd VolumeDriver.Unmount "{\"Name\":\"${DOCKER_VOL}\"}" >/dev/null 2>&1 || true
-    dvd VolumeDriver.Remove "{\"Name\":\"${DOCKER_VOL}\"}" >/dev/null 2>&1 || true
-  fi
+  node_ssh 1 "command -v docker >/dev/null 2>&1 && sudo docker volume rm ${DOCKER_VOL} >/dev/null 2>&1" >/dev/null 2>&1 || true
 }
 
 # --- driver ----------------------------------------------------------------
@@ -352,8 +380,8 @@ acceptance_run() {
   step "S3 operations (list/put/get)"               s_s3_ops
   step "consistency S3/NFS/FUSE/WebDAV (FUSE write)" s_cross_consistency
   step "WebDAV operations (PUT/GET)"                s_webdav_ops
-  step "Docker volume driver (create/mount/io)"     s_docker_volume_driver
-  step "containerd content store endpoint"          s_containerd_endpoint
+  step "Docker volume attach (create -d neonfs + run -v)" s_docker_volume_attach
+  step "containerd content store (ingest/get via ctr)"    s_containerd_content
   step "volume show reflects stored data"           s_volume_stats
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
   step "replication across nodes"                   s_replication

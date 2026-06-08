@@ -113,7 +113,9 @@ exceeds the number of core nodes).
    and `neonfs-omnibus` (plus the other service packages) into `.cache/debs/`.
 3. **Disks** — `DRIVES_PER_NODE` raw images per node, attached as virtio block
    devices (`/dev/vdb`, `/dev/vdc`, …). cloud-init formats them `ext4` and mounts
-   them at `/mnt/neonfs/drive1`, `/mnt/neonfs/drive2`, …
+   them at `/mnt/neonfs/drive1`, `/mnt/neonfs/drive2`, … cloud-init also installs
+   `docker.io` and `containerd`, which back the container-runtime acceptance
+   steps (the NeonFS Docker volume driver and the containerd content store).
 4. **Networking** — two NICs per VM:
    - a user-mode (NAT) NIC for outbound internet + an SSH port forward to the host;
    - a socket/multicast NIC giving all VMs a shared L2 segment with static IPs
@@ -135,8 +137,26 @@ peer's distribution port through the `--via host:9568` join handshake.
 
 `./acceptance` drives a **running** cluster through the full acceptance matrix —
 cluster/drives/volume checks, FUSE, NFS, S3 and WebDAV operations,
-cross-interface consistency, and (multi-node) replication — reporting
-`PASS`/`FAIL`/`SKIP` per step and exiting non-zero if any step fails.
+cross-interface consistency, container-runtime integration, and (multi-node)
+replication — reporting `PASS`/`FAIL`/`SKIP` per step and exiting non-zero if any
+step fails.
+
+The container-runtime steps exercise NeonFS as backing storage for Docker and
+containerd:
+
+- **Docker volume attach** — `docker volume create -d neonfs` provisions a
+  NeonFS volume through the driver the omnibus package registers at
+  `/etc/docker/plugins/neonfs.spec`, then `docker run -v` attaches it; writing
+  in one container and reading it back in a second proves the volume is
+  attached.
+- **containerd content store** — a throwaway `containerd` configured with the
+  NeonFS content proxy plugin (default store disabled) stores and retrieves an
+  image-layer blob via `ctr content ingest`/`get`, landing it in the
+  `containerd` NeonFS volume as a sharded `sha256` object.
+
+Both steps `SKIP` rather than `FAIL` where their prerequisites are absent
+(Docker/containerd not installed, the plugin socket not deployed, or no registry
+connectivity to pull the test image).
 
 ```bash
 ./neonfs-rig up            # bring a single-node cluster up first

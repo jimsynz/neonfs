@@ -150,6 +150,13 @@ EOF
       dev="/dev/vd${letters[$((d - 1))]}"
       echo "  - ['${dev}', '/mnt/neonfs/drive${d}', 'ext4', 'defaults,noatime', '0', '2']"
     done
+    # Docker + containerd back the container-runtime acceptance steps: the
+    # NeonFS Docker volume driver (docker volume create -d neonfs) and the
+    # containerd content-store proxy plugin (ctr content ingest/get).
+    echo "package_update: true"
+    echo "packages:"
+    echo "  - docker.io"
+    echo "  - containerd"
   } > "${dir}/user-data"
 
   cat > "${dir}/network-config" <<EOF
