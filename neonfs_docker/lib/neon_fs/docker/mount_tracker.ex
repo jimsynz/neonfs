@@ -215,11 +215,14 @@ defmodule NeonFS.Docker.MountTracker do
     fuse_node = Application.get_env(:neonfs_docker, :fuse_node, Node.self())
     mount_point = Path.join(mount_root, volume_name)
 
+    # Containers run as arbitrary UIDs (typically root), different from the
+    # `neonfs` daemon that owns the FUSE mount. Without `allow_other` the
+    # kernel FUSE module denies them access before file permissions apply.
     with :ok <- File.mkdir_p(mount_point),
          {:ok, mount_id} <-
            GenServer.call(
              {NeonFS.FUSE.MountManager, fuse_node},
-             {:mount, volume_name, mount_point, []}
+             {:mount, volume_name, mount_point, [allow_other: true]}
            ) do
       {:ok, {mount_id, mount_point}}
     end
