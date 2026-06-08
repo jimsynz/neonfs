@@ -23,6 +23,7 @@ defmodule NeonFS.CLI.Handler do
     Backup,
     CertificateAuthority,
     DriveManager,
+    DriveRegistry,
     DRSnapshot,
     Escalation,
     JobTracker,
@@ -4256,12 +4257,15 @@ defmodule NeonFS.CLI.Handler do
   end
 
   # Refuse `neonfs volume create` when the requested durability needs
-  # more nodes than the cluster currently has — chunk replication is
-  # node-keyed, so a single-node cluster cannot satisfy `replicate:3`
-  # and writes hang on RPCs to non-existent peers (#1015).
+  # more drives than the cluster currently has — replicas and erasure
+  # shards are placed on distinct drives, which may live on the same
+  # node, so the bound is the cluster-wide drive count, not the core
+  # node count (#1032). A single multi-drive node can satisfy
+  # `replicate:2`; a factor above the total drive count cannot be
+  # placed and writes would leave the chunk under-replicated.
   # `--allow-under-replicated` plumbs through as
   # `allow_under_replicated: true` for operators who are about to
-  # scale out and want the volume in place ahead of the new nodes.
+  # scale out and want the volume in place ahead of the new drives.
   defp check_durability_fits_cluster(name, opts) do
     cond do
       Keyword.get(opts, :allow_under_replicated, false) ->
@@ -4276,21 +4280,34 @@ defmodule NeonFS.CLI.Handler do
   end
 
   defp check_replica_count(name, needed) do
-    core_count = VolumeRegistry.core_node_count()
+    drive_count = cluster_drive_count()
 
-    if needed <= core_count do
+    if needed <= drive_count do
       :ok
     else
       {:error,
        Invalid.exception(
          message:
            "Volume '#{name}' needs #{needed} replicas but the cluster has only " <>
-             "#{core_count} core node(s). Add more nodes, lower the replication " <>
+             "#{drive_count} drive(s). Add more drives, lower the replication " <>
              "factor, or pass `--allow-under-replicated` to create the volume " <>
-             "anyway (writes will block on RPCs to non-existent peers until the " <>
-             "cluster grows).",
-         details: %{volume_name: name, required_replicas: needed, core_nodes: core_count}
+             "anyway (chunks stay under-replicated until the cluster grows).",
+         details: %{volume_name: name, required_replicas: needed, drives: drive_count}
        )}
+    end
+  end
+
+  # The authoritative cluster-wide drive set lives in the Ra
+  # `MetadataStateMachine` (strongly consistent). `DriveRegistry`'s ETS
+  # table is an eventually-consistent local cache that under-counts
+  # remote drives until its periodic peer sync catches up, which races
+  # volume creation during cluster formation (#1032). Prefer Ra; fall
+  # back to the local cache only when Ra is unreachable (no core node
+  # to coordinate with — e.g. handler unit tests without a cluster).
+  defp cluster_drive_count do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_drives/1) do
+      {:ok, drives} when is_map(drives) -> map_size(drives)
+      _ -> length(DriveRegistry.list_drives())
     end
   end
 

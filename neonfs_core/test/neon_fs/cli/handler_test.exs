@@ -4,7 +4,16 @@ defmodule NeonFS.CLI.HandlerTest do
 
   alias NeonFS.CLI.Handler
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{AuditLog, CertificateAuthority, RaServer, VolumeRegistry}
+
+  alias NeonFS.Core.{
+    AuditLog,
+    CertificateAuthority,
+    Drive,
+    DriveRegistry,
+    RaServer,
+    VolumeRegistry
+  }
+
   alias NeonFS.Transport.TLS
 
   defmodule RPCStub do
@@ -415,6 +424,7 @@ defmodule NeonFS.CLI.HandlerTest do
       ensure_cluster_state()
       stop_ra()
       start_volume_registry()
+      start_drive_registry()
 
       on_exit(fn -> cleanup_test_dirs() end)
       :ok
@@ -538,6 +548,26 @@ defmodule NeonFS.CLI.HandlerTest do
 
       assert msg =~ "needs 3 replicas"
       assert msg =~ "allow-under-replicated"
+    end
+
+    test "allows replicate:2 on a single node with two drives (#1032)" do
+      register_extra_drive("hot1")
+
+      vol_name = "two-drive-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "replicate:2"}
+
+      assert {:ok, volume} = Handler.create_volume(vol_name, config)
+      assert volume.durability == %{type: :replicate, factor: 2, min_copies: 1}
+    end
+
+    test "gate counts drives, not core nodes (#1032)" do
+      register_extra_drive("hot1")
+      register_extra_drive("hot2")
+
+      vol_name = "three-drive-#{:rand.uniform(999_999)}"
+      config = %{"durability" => "replicate:3"}
+
+      assert {:ok, _volume} = Handler.create_volume(vol_name, config)
     end
   end
 
@@ -1683,5 +1713,17 @@ defmodule NeonFS.CLI.HandlerTest do
 
       assert msg =~ "Cluster not initialised"
     end
+  end
+
+  defp register_extra_drive(id) do
+    base = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs_test/blobs")
+
+    drive =
+      Drive.from_config(
+        %{id: id, path: Path.join(base, id), tier: :hot, capacity: 0},
+        Node.self()
+      )
+
+    :ok = DriveRegistry.register_drive(drive)
   end
 end

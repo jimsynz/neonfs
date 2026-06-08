@@ -11,7 +11,6 @@ defmodule NeonFS.Core.Replication do
   """
 
   alias NeonFS.Client.Router
-  alias NeonFS.Cluster.State, as: ClusterState
   alias NeonFS.Core.{BlobStore, ChunkIndex, DriveRegistry}
 
   require Logger
@@ -29,7 +28,12 @@ defmodule NeonFS.Core.Replication do
     * `volume` - The volume configuration
     * `opts` - Optional parameters:
       * `:tier` - Target tier for replicas (default: volume.tiering.initial_tier)
-      * `:exclude_nodes` - Nodes to exclude from selection (default: [])
+      * `:local_drive_id` - The drive already holding the primary copy
+        (default: the least-used local drive for `tier`). Excluded from
+        replica selection so the extra copies land on distinct drives.
+      * `:exclude_drives` - `{node, drive_id}` pairs already holding the
+        chunk; never selected for a new replica (default: the local
+        drive). Used during repair to skip drives that already have a copy.
 
   ## Returns
     * `{:ok, locations}` - List of all locations where chunk is stored
@@ -40,7 +44,8 @@ defmodule NeonFS.Core.Replication do
   def replicate_chunk(chunk_hash, chunk_data, volume, opts \\ []) do
     start_time = System.monotonic_time()
     tier = Keyword.get(opts, :tier, volume.tiering.initial_tier)
-    exclude_nodes = Keyword.get(opts, :exclude_nodes, [Node.self()])
+    local_drive_id = Keyword.get(opts, :local_drive_id) || local_drive_id_for_tier(tier)
+    exclude_drives = Keyword.get(opts, :exclude_drives, [{Node.self(), local_drive_id}])
 
     :telemetry.execute(
       [:neonfs, :replication, :start],
@@ -51,18 +56,17 @@ defmodule NeonFS.Core.Replication do
     # Determine how many replicas we need (minus the local copy already stored)
     target_count = volume.durability.factor - 1
 
-    local_drive_id = local_drive_id_for_tier(tier)
+    {:ok, targets} = select_replication_targets(target_count, tier, exclude_drives)
+
+    maybe_emit_under_replicated(chunk_hash, volume, target_count, length(targets))
 
     result =
-      case select_replication_targets(target_count, exclude_nodes) do
-        {:ok, targets} ->
-          perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id)
-
-        {:error, :no_targets} ->
-          # No replication targets available - return local location only
-          # This is acceptable when running in single-node mode
-          Logger.debug("No replication targets available, returning local location only")
+      case targets do
+        [] ->
           {:ok, [%{node: Node.self(), drive_id: local_drive_id, tier: tier}]}
+
+        _ ->
+          perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id)
       end
 
     duration = System.monotonic_time() - start_time
@@ -87,86 +91,90 @@ defmodule NeonFS.Core.Replication do
   end
 
   @doc """
-  Selects replication target nodes from available cluster members.
+  Selects replica drives for a chunk from the active drives across the
+  cluster.
 
-  Attempts to maximize failure domain separation by selecting nodes
-  on different physical machines. If the requested count exceeds
-  available nodes, returns all available nodes with a warning.
+  Replication is drive-keyed: a chunk's copies must land on distinct
+  drives, which may sit on the same node or on different nodes. Distinct
+  nodes are preferred — the selector round-robins across nodes first,
+  then doubles up on already-used nodes — so a single multi-drive node
+  still satisfies a replication factor greater than one.
+
+  `exclude` lists the `{node, drive_id}` pairs that already hold the
+  chunk (the local primary copy, plus any existing replicas during
+  repair) so they are never selected again.
 
   ## Arguments
-    * `count` - Number of target nodes to select
-    * `exclude_nodes` - Nodes to exclude from selection
+    * `count` - Number of replica drives to select
+    * `tier` - Storage tier to draw drives from
+    * `exclude` - `{node, drive_id}` pairs to skip
 
   ## Returns
-    * `{:ok, targets}` - List of target nodes
-    * `{:error, :no_targets}` - No suitable targets available
+    * `{:ok, targets}` - Up to `count` replica drives. Fewer than `count`
+      means the cluster cannot currently satisfy the requested factor;
+      the chunk is under-replicated and left for anti-entropy.
   """
-  @spec select_replication_targets(non_neg_integer(), [atom()]) ::
-          {:ok, [replication_target()]} | {:error, :no_targets}
-  def select_replication_targets(count, exclude_nodes \\ []) when count >= 0 do
-    # If count is 0, no replication needed
+  @spec select_replication_targets(non_neg_integer(), atom(), [{node(), String.t()}]) ::
+          {:ok, [replication_target()]}
+  def select_replication_targets(count, tier, exclude \\ []) when count >= 0 do
     if count == 0 do
       {:ok, []}
     else
-      case get_cluster_members() do
-        {:ok, members} ->
-          members
-          |> filter_and_prepare_targets(exclude_nodes)
-          |> Enum.take(count)
-          |> validate_selected_targets(count)
+      targets =
+        tier
+        |> DriveRegistry.drives_for_tier()
+        |> Enum.filter(&(&1.state == :active))
+        |> Enum.reject(&({&1.node, &1.id} in exclude))
+        |> spread_across_nodes()
+        |> Enum.take(count)
+        |> Enum.map(&%{node: &1.node, drive_id: &1.id})
 
-        {:error, _reason} ->
-          {:error, :no_targets}
-      end
+      {:ok, targets}
     end
   end
 
   # Private Functions
 
-  defp validate_selected_targets([], _count), do: {:error, :no_targets}
-
-  defp validate_selected_targets(selected, count) do
-    if length(selected) < count do
-      Logger.warning(
-        "Requested more replicas than nodes available, some redundancy is better than none",
-        requested: count,
-        available: length(selected)
-      )
-    end
-
-    {:ok, selected}
+  # Round-robins drives across nodes (nodes sorted by name, drives
+  # within a node by id), so successive replicas prefer distinct nodes
+  # before doubling up on a node's remaining drives. Mirrors
+  # `NeonFS.Core.Volume.DriveSelector` and `NeonFS.Core.StripePlacement`.
+  defp spread_across_nodes(drives) do
+    drives
+    |> Enum.group_by(& &1.node)
+    |> Enum.sort_by(fn {node, _drives} -> node end)
+    |> Enum.map(fn {_node, node_drives} -> Enum.sort_by(node_drives, & &1.id) end)
+    |> round_robin()
   end
 
-  defp filter_and_prepare_targets(members, exclude_nodes) do
-    members
-    |> Enum.reject(&(&1 in exclude_nodes))
-    |> Enum.map(fn node ->
-      # Try to find a drive for this node from registry; fall back to "default"
-      drive_id =
-        DriveRegistry.drives_for_node(node)
-        |> Enum.filter(&(&1.state == :active))
-        |> case do
-          [drive | _] -> drive.id
-          [] -> "default"
-        end
+  defp round_robin(buckets) do
+    case Enum.reject(buckets, &(&1 == [])) do
+      [] ->
+        []
 
-      %{node: node, drive_id: drive_id}
-    end)
+      non_empty ->
+        Enum.map(non_empty, &hd/1) ++ round_robin(Enum.map(non_empty, &tl/1))
+    end
   end
 
-  defp get_cluster_members do
-    case ClusterState.load() do
-      {:ok, state} ->
-        # Include all Ra cluster members as potential targets
-        {:ok, state.ra_cluster_members}
+  defp maybe_emit_under_replicated(_hash, _volume, requested, available)
+       when available >= requested,
+       do: :ok
 
-      {:error, :not_found} ->
-        # Single-node cluster (no cluster state file)
-        {:ok, [Node.self()]}
+  defp maybe_emit_under_replicated(chunk_hash, volume, requested, available) do
+    :telemetry.execute(
+      [:neonfs, :replication, :under_replicated],
+      %{requested: requested, available: available},
+      %{hash: chunk_hash, volume_id: volume.id}
+    )
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+    Logger.warning("Insufficient drives to fully replicate chunk; flagged for anti-entropy",
+      volume_id: volume.id,
+      requested: requested,
+      available: available
+    )
+
+    :ok
   end
 
   defp perform_replication(chunk_hash, chunk_data, tier, targets, volume, local_drive_id) do

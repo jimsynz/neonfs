@@ -35,8 +35,9 @@ defmodule NeonFS.Core.ReplicationDataPlaneTest do
     end
 
     test "falls back to distribution RPC when no pool exists", %{volume: volume} do
-      # In single-node test, select_replication_targets excludes self by default,
-      # so replication returns local-only. Include self to exercise replicate_to_node.
+      # In single-node test the only drive is "default", which the primary
+      # copy already holds and is excluded by default — leaving an empty
+      # `exclude_drives` lets it be re-selected to exercise replicate_to_node.
       volume_no_exclude = %{volume | durability: %{volume.durability | factor: 2}}
 
       chunk_data = "fallback test data"
@@ -45,9 +46,9 @@ defmodule NeonFS.Core.ReplicationDataPlaneTest do
       # Write local chunk first so replication has a base
       {:ok, _hash, _info} = BlobStore.write_chunk(chunk_data, "default", "hot")
 
-      # Replicate with self as a potential target (not excluded)
+      # Replicate with the local drive as a potential target (not excluded)
       result =
-        Replication.replicate_chunk(chunk_hash, chunk_data, volume_no_exclude, exclude_nodes: [])
+        Replication.replicate_chunk(chunk_hash, chunk_data, volume_no_exclude, exclude_drives: [])
 
       # Should succeed: data_call fails (no pool), falls back to RPC to self
       assert {:ok, [_ | _] = locations} = result
