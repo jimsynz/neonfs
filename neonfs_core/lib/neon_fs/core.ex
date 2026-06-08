@@ -18,6 +18,7 @@ defmodule NeonFS.Core do
   alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
+  alias NeonFS.Error.Unavailable
 
   import Bitwise, only: [&&&: 2]
 
@@ -637,19 +638,19 @@ defmodule NeonFS.Core do
   defp safe_claim(:path, scope, key) do
     NamespaceCoordinator.claim_path(key, scope)
   catch
-    :exit, _ -> {:error, :coordinator_unavailable}
+    :exit, _ -> {:error, Unavailable.from_reason(:coordinator_unavailable)}
   end
 
   defp safe_claim(:subtree, scope, key) do
     NamespaceCoordinator.claim_subtree(key, scope)
   catch
-    :exit, _ -> {:error, :coordinator_unavailable}
+    :exit, _ -> {:error, Unavailable.from_reason(:coordinator_unavailable)}
   end
 
   defp safe_claim_rename(src_key, dst_key) do
     NamespaceCoordinator.claim_rename(src_key, dst_key)
   catch
-    :exit, _ -> {:error, :coordinator_unavailable}
+    :exit, _ -> {:error, Unavailable.from_reason(:coordinator_unavailable)}
   end
 
   defp safe_release(claim_id) do

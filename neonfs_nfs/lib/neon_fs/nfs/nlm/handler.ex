@@ -266,7 +266,7 @@ defmodule NeonFS.NFS.NLM.Handler do
       {:error, :grace_period} ->
         Codec.encode_res(args.cookie, :denied_grace_period)
 
-      {:error, :unavailable} ->
+      {:error, %{class: :unavailable}} ->
         Codec.encode_res(args.cookie, :denied_nolocks)
 
       {:error, _} ->
@@ -284,7 +284,7 @@ defmodule NeonFS.NFS.NLM.Handler do
 
     case result do
       :ok -> Codec.encode_res(args.cookie, :granted)
-      {:error, :unavailable} -> Codec.encode_res(args.cookie, :denied_nolocks)
+      {:error, %{class: :unavailable}} -> Codec.encode_res(args.cookie, :denied_nolocks)
       {:error, _} -> Codec.encode_res(args.cookie, :failed)
     end
   end

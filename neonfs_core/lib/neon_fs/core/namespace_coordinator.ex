@@ -52,6 +52,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   require Logger
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
+  alias NeonFS.Error.Unavailable
 
   @typedoc "Opaque claim id returned by the coordinator on success."
   @type claim_id :: String.t()
@@ -540,7 +541,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
           {:error, _} = err -> err
         end
       catch
-        :exit, _ -> {:error, :ra_not_available}
+        :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
       end
 
     {:reply, result, state}
@@ -572,7 +573,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
             err
         end
       catch
-        :exit, _ -> {:error, :ra_not_available}
+        :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
       end
 
     {:reply, result, state}
@@ -623,7 +624,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
           {:error, _} = err -> err
         end
       catch
-        :exit, _ -> {:error, :ra_not_available}
+        :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
       end
 
     {:reply, result, state}
@@ -1099,11 +1100,11 @@ defmodule NeonFS.Core.NamespaceCoordinator do
       {:ok, {:error, :conflict, conflicting_id}, _leader} -> {:error, :conflict, conflicting_id}
       {:ok, {:error, reason}, _leader} -> {:error, reason}
       {:ok, other, _leader} -> {:error, {:unexpected_reply, other}}
-      {:error, :noproc} -> {:error, :ra_not_available}
+      {:error, :noproc} -> {:error, Unavailable.from_reason(:ra_not_available)}
       {:error, reason} -> {:error, reason}
-      {:timeout, _node} -> {:error, :timeout}
+      {:timeout, _node} -> {:error, Unavailable.from_reason(:timeout)}
     end
   catch
-    :exit, _ -> {:error, :ra_not_available}
+    :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
   end
 end

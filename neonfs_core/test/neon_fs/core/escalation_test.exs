@@ -228,8 +228,9 @@ defmodule NeonFS.Core.EscalationTest do
       :ok
     end
 
-    test "writes return {:error, :ra_not_available}", %{category: cat} do
-      assert {:error, :ra_not_available} = Escalation.create(base_attrs(cat))
+    test "writes return a structured unavailable error", %{category: cat} do
+      assert {:error, %NeonFS.Error.Unavailable{details: %{reason: :ra_not_available}}} =
+               Escalation.create(base_attrs(cat))
     end
 
     test "reads return :not_found / empty when the state is unreachable" do

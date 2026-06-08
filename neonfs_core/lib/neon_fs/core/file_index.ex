@@ -1097,8 +1097,7 @@ defmodule NeonFS.Core.FileIndex do
     case IntentLog.try_acquire(intent) do
       {:ok, intent_id} -> {:ok, intent_id}
       {:error, :conflict, existing} -> {:error, :conflict, existing}
-      {:error, :ra_not_available} -> {:ok, intent.id}
-      {:error, :ra_unavailable} -> {:ok, intent.id}
+      {:error, %{class: :unavailable}} -> {:ok, intent.id}
       {:error, reason} -> {:error, reason}
     end
   rescue

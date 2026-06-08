@@ -39,6 +39,7 @@ defmodule NeonFS.Core.IntentLog do
   """
 
   alias NeonFS.Core.{Intent, MetadataStateMachine, RaServer, RaSupervisor}
+  alias NeonFS.Error.Unavailable
 
   require Logger
 
@@ -165,7 +166,7 @@ defmodule NeonFS.Core.IntentLog do
           {:error, reason}
 
         {:timeout, _node} ->
-          {:error, :timeout}
+          {:error, Unavailable.from_reason(:timeout)}
       end
     catch
       :exit, {:noproc, _} ->
@@ -176,10 +177,10 @@ defmodule NeonFS.Core.IntentLog do
 
         if initialized,
           do: {:error, {:ra_error, {kind, reason}}},
-          else: {:error, :ra_not_available}
+          else: {:error, Unavailable.from_reason(:ra_not_available)}
     end
   end
 
-  defp ra_noproc_error(true), do: {:error, :ra_unavailable}
-  defp ra_noproc_error(false), do: {:error, :ra_not_available}
+  defp ra_noproc_error(true), do: {:error, Unavailable.from_reason(:ra_unavailable)}
+  defp ra_noproc_error(false), do: {:error, Unavailable.from_reason(:ra_not_available)}
 end

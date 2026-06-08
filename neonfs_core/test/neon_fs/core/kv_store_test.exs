@@ -99,9 +99,12 @@ defmodule NeonFS.Core.KVStoreTest do
       :ok
     end
 
-    test "writes return {:error, :ra_not_available}" do
-      assert {:error, :ra_not_available} = KVStore.put("during-boot", %{})
-      assert {:error, :ra_not_available} = KVStore.delete("during-boot")
+    test "writes return a structured unavailable error" do
+      assert {:error, %NeonFS.Error.Unavailable{details: %{reason: :ra_not_available}}} =
+               KVStore.put("during-boot", %{})
+
+      assert {:error, %NeonFS.Error.Unavailable{details: %{reason: :ra_not_available}}} =
+               KVStore.delete("during-boot")
     end
 
     test "reads return {:error, :not_found} when the state is unreachable" do

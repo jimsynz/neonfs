@@ -135,8 +135,10 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
       :ok
     end
 
-    test "writes return {:error, :ra_not_available}" do
-      assert {:error, :ra_not_available} = S3CredentialManager.create(%{user: "alice"})
+    test "writes return a structured unavailable error" do
+      assert {:error, %NeonFS.Error.Unavailable{details: %{reason: :ra_not_available}}} =
+               S3CredentialManager.create(%{user: "alice"})
+
       assert {:error, :not_found} = S3CredentialManager.delete("NEONFS_UNKNOWN")
       assert {:error, :not_found} = S3CredentialManager.rotate("NEONFS_UNKNOWN")
     end

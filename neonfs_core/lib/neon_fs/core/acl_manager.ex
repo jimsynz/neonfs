@@ -15,6 +15,7 @@ defmodule NeonFS.Core.ACLManager do
   require Logger
 
   alias NeonFS.Core.{AuditLog, FileIndex, MetadataStateMachine, RaSupervisor, VolumeACL}
+  alias NeonFS.Error.Unavailable
   alias NeonFS.Events.Broadcaster
   alias NeonFS.Events.{FileAclChanged, VolumeAclChanged}
 
@@ -249,11 +250,11 @@ defmodule NeonFS.Core.ACLManager do
       {:ok, :ok, _leader} -> :ok
       {:ok, {:error, reason}, _leader} -> {:error, reason}
       {:ok, other, _leader} -> {:error, {:unexpected_reply, other}}
-      {:error, :noproc} -> {:error, :ra_not_available}
+      {:error, :noproc} -> {:error, Unavailable.from_reason(:ra_not_available)}
       {:error, reason} -> {:error, reason}
-      {:timeout, _node} -> {:error, :timeout}
+      {:timeout, _node} -> {:error, Unavailable.from_reason(:timeout)}
     end
   catch
-    :exit, _ -> {:error, :ra_not_available}
+    :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
   end
 end
