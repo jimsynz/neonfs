@@ -38,6 +38,7 @@ defmodule NeonFS.Core.LockManager do
   alias NeonFS.Core.LockManager.GraceCoordinator
   alias NeonFS.Core.LockManager.Supervisor, as: LockSupervisor
   alias NeonFS.Core.{MetadataRing, ServiceRegistry}
+  alias NeonFS.Error.Unavailable
 
   @type file_id :: binary()
 
@@ -57,7 +58,7 @@ defmodule NeonFS.Core.LockManager do
       after lock master failover (default: `false`)
   """
   @spec lock(file_id(), FileLock.client_ref(), FileLock.range(), FileLock.lock_type(), keyword()) ::
-          :ok | {:error, :timeout | :grace_period | :unavailable}
+          :ok | {:error, :timeout | :grace_period | Unavailable.t()}
   def lock(file_id, client_ref, range, type, opts \\ []) do
     with :ok <- check_grace(file_id, opts) do
       with_file_lock(file_id, fn pid ->
@@ -73,7 +74,7 @@ defmodule NeonFS.Core.LockManager do
   `{:error, :conflict, holder_info}` with details of the conflicting lock.
   """
   @spec test_lock(file_id(), FileLock.client_ref(), FileLock.range(), FileLock.lock_type()) ::
-          :ok | {:error, :conflict, map()} | {:error, :unavailable}
+          :ok | {:error, :conflict, map()} | {:error, Unavailable.t()}
   def test_lock(file_id, client_ref, range, type) do
     master = master_for(file_id)
 
@@ -83,8 +84,8 @@ defmodule NeonFS.Core.LockManager do
       :erpc.call(master, __MODULE__, :local_test_lock, [file_id, client_ref, range, type])
     end
   catch
-    :exit, {:erpc, :noconnection} -> {:error, :unavailable}
-    :exit, _ -> {:error, :unavailable}
+    :exit, {:erpc, :noconnection} -> {:error, Unavailable.from_reason(:unavailable)}
+    :exit, _ -> {:error, Unavailable.from_reason(:unavailable)}
   end
 
   @doc false
@@ -101,7 +102,7 @@ defmodule NeonFS.Core.LockManager do
   Releases a specific byte-range lock.
   """
   @spec unlock(file_id(), FileLock.client_ref(), FileLock.range()) ::
-          :ok | {:error, :unavailable}
+          :ok | {:error, Unavailable.t()}
   def unlock(file_id, client_ref, range) do
     with_existing_file_lock(file_id, fn pid ->
       FileLock.unlock(pid, client_ref, range)
@@ -111,7 +112,7 @@ defmodule NeonFS.Core.LockManager do
   @doc """
   Releases all locks, opens, and leases held by a client on a file.
   """
-  @spec unlock_all(file_id(), FileLock.client_ref()) :: :ok | {:error, :unavailable}
+  @spec unlock_all(file_id(), FileLock.client_ref()) :: :ok | {:error, Unavailable.t()}
   def unlock_all(file_id, client_ref) do
     with_existing_file_lock(file_id, fn pid ->
       FileLock.unlock_all(pid, client_ref)
@@ -132,7 +133,7 @@ defmodule NeonFS.Core.LockManager do
           FileLock.share_access(),
           FileLock.share_deny(),
           keyword()
-        ) :: :ok | {:error, :share_violation | :grace_period | :unavailable}
+        ) :: :ok | {:error, :share_violation | :grace_period | Unavailable.t()}
   def open(file_id, client_ref, access, deny, opts \\ []) do
     with :ok <- check_grace(file_id, opts) do
       with_file_lock(file_id, fn pid ->
@@ -144,7 +145,7 @@ defmodule NeonFS.Core.LockManager do
   @doc """
   Closes a file (releases share mode).
   """
-  @spec close(file_id(), FileLock.client_ref()) :: :ok | {:error, :unavailable}
+  @spec close(file_id(), FileLock.client_ref()) :: :ok | {:error, Unavailable.t()}
   def close(file_id, client_ref) do
     with_existing_file_lock(file_id, fn pid ->
       FileLock.close(pid, client_ref)
@@ -161,7 +162,7 @@ defmodule NeonFS.Core.LockManager do
     * `:reclaim` — `true` to reclaim during a grace period (default: `false`)
   """
   @spec grant_lease(file_id(), FileLock.client_ref(), FileLock.lease_type(), keyword()) ::
-          :ok | {:error, :conflict | :grace_period | :unavailable}
+          :ok | {:error, :conflict | :grace_period | Unavailable.t()}
   def grant_lease(file_id, client_ref, lease_type, opts \\ []) do
     with :ok <- check_grace(file_id, opts) do
       with_file_lock(file_id, fn pid ->
@@ -174,7 +175,7 @@ defmodule NeonFS.Core.LockManager do
   Breaks a lease held by a client, invoking the break callback.
   """
   @spec break_lease(file_id(), FileLock.client_ref()) ::
-          :ok | {:error, :not_found | :unavailable}
+          :ok | {:error, :not_found | Unavailable.t()}
   def break_lease(file_id, client_ref) do
     with_existing_file_lock(file_id, fn pid ->
       FileLock.break_lease(pid, client_ref)
@@ -189,7 +190,7 @@ defmodule NeonFS.Core.LockManager do
     * `:ttl` — new TTL in milliseconds (default: 90_000)
   """
   @spec renew(file_id(), FileLock.client_ref(), keyword()) ::
-          :ok | {:error, :not_found | :unavailable}
+          :ok | {:error, :not_found | Unavailable.t()}
   def renew(file_id, client_ref, opts \\ []) do
     with_existing_file_lock(file_id, fn pid ->
       FileLock.renew(pid, client_ref, opts)
@@ -205,13 +206,13 @@ defmodule NeonFS.Core.LockManager do
     another client overlaps the write range. Advisory locks are ignored.
   - `{:error, :share_denied}` — another client has the file open with
     `deny: :write` or `deny: :read_write`.
-  - `{:error, :unavailable}` — the lock master node is unreachable.
+  - `{:error, %NeonFS.Error.Unavailable{}}` — the lock master node is unreachable.
 
   If no lock state exists for the file (no FileLock process), the write
   is always permitted.
   """
   @spec check_write(file_id(), FileLock.client_ref(), FileLock.range()) ::
-          :ok | {:error, :lock_conflict | :share_denied | :unavailable}
+          :ok | {:error, :lock_conflict | :share_denied | Unavailable.t()}
   def check_write(file_id, client_ref, range) do
     with_existing_file_lock(file_id, fn pid ->
       FileLock.check_write(pid, client_ref, range)
@@ -230,7 +231,7 @@ defmodule NeonFS.Core.LockManager do
     * `:timeout` — how long to wait in milliseconds (default: 5_000)
   """
   @spec check_write_blocking(file_id(), FileLock.client_ref(), FileLock.range(), keyword()) ::
-          :ok | {:error, :unavailable}
+          :ok | {:error, Unavailable.t()}
   def check_write_blocking(file_id, client_ref, range, opts \\ []) do
     with_existing_file_lock(file_id, fn pid ->
       FileLock.check_write_blocking(pid, client_ref, range, opts)
@@ -240,7 +241,7 @@ defmodule NeonFS.Core.LockManager do
   @doc """
   Returns the status of locks on a file.
   """
-  @spec status(file_id()) :: {:ok, map()} | {:error, :not_found | :unavailable}
+  @spec status(file_id()) :: {:ok, map()} | {:error, :not_found | Unavailable.t()}
   def status(file_id) do
     case lookup_file_lock(file_id) do
       {:ok, pid} -> {:ok, FileLock.status(pid)}
@@ -272,8 +273,8 @@ defmodule NeonFS.Core.LockManager do
       :erpc.call(master, __MODULE__, :local_with_file_lock, [file_id, fun])
     end
   catch
-    :exit, {:erpc, :noconnection} -> {:error, :unavailable}
-    :exit, _ -> {:error, :unavailable}
+    :exit, {:erpc, :noconnection} -> {:error, Unavailable.from_reason(:unavailable)}
+    :exit, _ -> {:error, Unavailable.from_reason(:unavailable)}
   end
 
   defp with_existing_file_lock(file_id, fun) do
@@ -288,8 +289,8 @@ defmodule NeonFS.Core.LockManager do
       :erpc.call(master, __MODULE__, :local_with_existing_file_lock, [file_id, fun])
     end
   catch
-    :exit, {:erpc, :noconnection} -> {:error, :unavailable}
-    :exit, _ -> {:error, :unavailable}
+    :exit, {:erpc, :noconnection} -> {:error, Unavailable.from_reason(:unavailable)}
+    :exit, _ -> {:error, Unavailable.from_reason(:unavailable)}
   end
 
   defp lookup_file_lock(file_id) do

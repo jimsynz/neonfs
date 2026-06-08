@@ -12,6 +12,7 @@ defmodule NeonFS.Core.S3CredentialManager do
   """
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
+  alias NeonFS.Error.Unavailable
 
   @type access_key_id :: String.t()
   @type secret_access_key :: String.t()
@@ -164,11 +165,11 @@ defmodule NeonFS.Core.S3CredentialManager do
       {:ok, :ok, _leader} -> :ok
       {:ok, {:error, reason}, _leader} -> {:error, reason}
       {:ok, other, _leader} -> {:error, {:unexpected_reply, other}}
-      {:error, :noproc} -> {:error, :ra_not_available}
+      {:error, :noproc} -> {:error, Unavailable.from_reason(:ra_not_available)}
       {:error, reason} -> {:error, reason}
-      {:timeout, _node} -> {:error, :timeout}
+      {:timeout, _node} -> {:error, Unavailable.from_reason(:timeout)}
     end
   catch
-    :exit, _ -> {:error, :ra_not_available}
+    :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
   end
 end

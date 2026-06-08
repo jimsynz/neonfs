@@ -22,6 +22,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   alias NeonFS.Core.Volume.Provisioner
   alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Error.Invalid, as: InvalidError
+  alias NeonFS.Error.Unavailable
   alias NeonFS.Events
   alias NeonFS.Events.Broadcaster
   alias NeonFS.Events.Envelope
@@ -664,7 +665,7 @@ defmodule NeonFS.Core.VolumeRegistry do
         insert_volume(volume)
         :ok
 
-      {:error, :ra_not_available} ->
+      {:error, %Unavailable{details: %{reason: :ra_not_available}}} ->
         insert_volume(volume)
         :ok
 
@@ -679,7 +680,7 @@ defmodule NeonFS.Core.VolumeRegistry do
         delete_volume_from_ets(volume)
         :ok
 
-      {:error, :ra_not_available} ->
+      {:error, %Unavailable{details: %{reason: :ra_not_available}}} ->
         delete_volume_from_ets(volume)
         :ok
 
@@ -778,23 +779,23 @@ defmodule NeonFS.Core.VolumeRegistry do
       {:error, :noproc} ->
         # Ra server not running - check if it was ever initialized
         if RaServer.initialized?() do
-          {:error, :ra_unavailable}
+          {:error, Unavailable.from_reason(:ra_unavailable)}
         else
-          {:error, :ra_not_available}
+          {:error, Unavailable.from_reason(:ra_not_available)}
         end
 
       {:error, reason} ->
         {:error, reason}
 
       {:timeout, _node} ->
-        {:error, :timeout}
+        {:error, Unavailable.from_reason(:timeout)}
     end
   catch
     :exit, {:noproc, _} ->
       if RaServer.initialized?() do
-        {:error, :ra_unavailable}
+        {:error, Unavailable.from_reason(:ra_unavailable)}
       else
-        {:error, :ra_not_available}
+        {:error, Unavailable.from_reason(:ra_not_available)}
       end
 
     kind, reason ->
@@ -803,7 +804,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       if RaServer.initialized?() do
         {:error, {:ra_error, {kind, reason}}}
       else
-        {:error, :ra_not_available}
+        {:error, Unavailable.from_reason(:ra_not_available)}
       end
   end
 

@@ -330,7 +330,7 @@ defmodule NeonFS.Core.WriteOperation do
   defp safe_claim_create(key) do
     NamespaceCoordinator.claim_create(key)
   catch
-    :exit, _ -> {:error, :coordinator_unavailable}
+    :exit, _ -> {:error, Unavailable.from_reason(:coordinator_unavailable)}
   end
 
   defp safe_release_namespace_claim(claim_id) do

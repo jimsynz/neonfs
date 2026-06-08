@@ -14,6 +14,7 @@ defmodule NeonFS.Core.KVStore do
   """
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
+  alias NeonFS.Error.Unavailable
 
   @type key :: binary()
   @type value :: term()
@@ -94,11 +95,11 @@ defmodule NeonFS.Core.KVStore do
     case RaSupervisor.command(cmd) do
       {:ok, :ok, _leader} -> :ok
       {:ok, other, _leader} -> {:error, {:unexpected_reply, other}}
-      {:error, :noproc} -> {:error, :ra_not_available}
+      {:error, :noproc} -> {:error, Unavailable.from_reason(:ra_not_available)}
       {:error, reason} -> {:error, reason}
-      {:timeout, _node} -> {:error, :timeout}
+      {:timeout, _node} -> {:error, Unavailable.from_reason(:timeout)}
     end
   catch
-    :exit, _ -> {:error, :ra_not_available}
+    :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
   end
 end

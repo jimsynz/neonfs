@@ -94,7 +94,7 @@ defmodule NeonFS.NFS.NLM.HandlerTest do
     test "returns denied_nolocks when unavailable" do
       core_call_fn = fn
         NeonFS.Core.LockManager, :lock, _ ->
-          {:error, :unavailable}
+          {:error, NeonFS.Error.Unavailable.from_reason(:unavailable)}
 
         _, _, _ ->
           :ok
@@ -165,7 +165,7 @@ defmodule NeonFS.NFS.NLM.HandlerTest do
     test "returns denied_nolocks when unavailable" do
       core_call_fn = fn
         NeonFS.Core.LockManager, :unlock, _ ->
-          {:error, :unavailable}
+          {:error, NeonFS.Error.Unavailable.from_reason(:unavailable)}
 
         _, _, _ ->
           :ok
