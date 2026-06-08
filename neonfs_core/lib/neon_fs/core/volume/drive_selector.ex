@@ -15,15 +15,15 @@ defmodule NeonFS.Core.Volume.DriveSelector do
   first node, the second on the second node, and so on, only doubling
   up on a node once every other node has been used.
 
-  Returns `{:error, :insufficient_drives, %{available: N, needed: M}}`
-  when fewer than the durability's minimum-acceptable number of
-  drives are available — `min_copies` for `:replicate`, `data_chunks`
-  for `:erasure`. (Operating below the *target* count is fine as long
-  as the minimum is met; AntiEntropy fills the gap once more drives
-  come online.)
+  Returns `{:error, %NeonFS.Error.QuorumUnavailable{}}` when fewer than
+  the durability's minimum-acceptable number of drives are available —
+  `min_copies` for `:replicate`, `data_chunks` for `:erasure`.
+  (Operating below the *target* count is fine as long as the minimum is
+  met; AntiEntropy fills the gap once more drives come online.)
   """
 
   alias NeonFS.Core.MetadataStateMachine
+  alias NeonFS.Error.QuorumUnavailable
 
   @type drive_id :: String.t()
   @type durability :: map()
@@ -34,8 +34,7 @@ defmodule NeonFS.Core.Volume.DriveSelector do
   """
   @type drive_entry :: MetadataStateMachine.drive_entry()
 
-  @type insufficient ::
-          {:error, :insufficient_drives, %{available: non_neg_integer(), needed: pos_integer()}}
+  @type insufficient :: {:error, Splode.Error.t()}
 
   @doc """
   Picks replica drives for a metadata chunk.
@@ -55,7 +54,12 @@ defmodule NeonFS.Core.Volume.DriveSelector do
     {target, minimum} = counts(durability)
 
     if length(drive_list) < minimum do
-      {:error, :insufficient_drives, %{available: length(drive_list), needed: minimum}}
+      {:error,
+       QuorumUnavailable.exception(
+         operation: :select_replicas,
+         required: minimum,
+         available: length(drive_list)
+       )}
     else
       take = min(target, length(drive_list))
 

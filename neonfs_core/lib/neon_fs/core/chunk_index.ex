@@ -305,14 +305,6 @@ defmodule NeonFS.Core.ChunkIndex do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
-
-      # `write_chunk/1` delegates to `MetadataWriter`, which surfaces quorum
-      # failures as a 3-tuple `{:error, reason, info}` (e.g.
-      # `:insufficient_replicas`). Every caller of these GenServer ops only
-      # matches the 2-tuple, so collapse here — `info` is debug detail (mirrors
-      # `FileIndex.normalise_writer_result/1`). Structured errors tracked in #1058.
-      {:error, reason, _info} ->
-        {:reply, {:error, reason}, state}
     end
   end
 
@@ -377,10 +369,6 @@ defmodule NeonFS.Core.ChunkIndex do
 
           {:error, reason} ->
             {:reply, {:error, reason}, state}
-
-          # Collapse the quorum 3-tuple — see `{:put, …}` handler (#1058).
-          {:error, reason, _info} ->
-            {:reply, {:error, reason}, state}
         end
 
       [] ->
@@ -440,10 +428,6 @@ defmodule NeonFS.Core.ChunkIndex do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
-
-      # Collapse the quorum 3-tuple — see `{:put, …}` handler (#1058).
-      {:error, reason, _info} ->
-        {:reply, {:error, reason}, state}
     end
   end
 
@@ -464,7 +448,6 @@ defmodule NeonFS.Core.ChunkIndex do
                metadata_writer_opts()
              ) do
           {:ok, _root} -> :ok
-          {:error, _, _} = err -> err
           {:error, _reason} = err -> err
         end
     end
@@ -475,7 +458,6 @@ defmodule NeonFS.Core.ChunkIndex do
 
     case MetadataWriter.delete(volume_id, :chunk_index, key, metadata_writer_opts()) do
       {:ok, _root} -> :ok
-      {:error, _, _} = err -> err
       {:error, _reason} = err -> err
     end
   end

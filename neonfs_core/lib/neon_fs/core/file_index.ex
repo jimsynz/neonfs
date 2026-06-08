@@ -979,17 +979,13 @@ defmodule NeonFS.Core.FileIndex do
     |> normalise_writer_result()
   end
 
-  # `MetadataWriter.put/5` and `delete/4` can return either
-  # `{:error, reason}` or `{:error, reason, info}` (the latter for
-  # things like `:insufficient_replicas`). FileIndex's `do_*` chains
-  # plus every external caller (`Core`, `WriteOperation`, ACL manager)
-  # only pattern-match the 2-tuple, so a 3-tuple bubbling up crashes
-  # the GenServer with `MatchError` (#908). Collapse the 3-tuple at
-  # the writer boundary — `info` is debug detail; the reason is what
-  # callers branch on.
+  # `MetadataWriter.put/5` and `delete/4` return `{:ok, root}` on
+  # success; collapse it to the bare `:ok` that FileIndex's `do_*`
+  # chains and external callers (`Core`, `WriteOperation`, ACL manager)
+  # expect. Errors — including the structured `QuorumUnavailable` from
+  # the replica/drive quorum path (#1058) — pass straight through.
   defp normalise_writer_result({:ok, _root}), do: :ok
   defp normalise_writer_result({:error, reason}), do: {:error, reason}
-  defp normalise_writer_result({:error, reason, _info}), do: {:error, reason}
 
   defp add_dir_child(volume_id, parent_path, name, type, id) do
     case read_dir_entry(volume_id, parent_path) do

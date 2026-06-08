@@ -2,6 +2,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.Core.Volume.ChunkReplicator
+  alias NeonFS.Error.QuorumUnavailable
 
   describe "write_chunk/3" do
     test "returns {:ok, hash, summary} when all drives succeed" do
@@ -48,15 +49,16 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
           "drv-3" => {:error, "no space"}
         })
 
-      assert {:error, :insufficient_replicas, info} =
+      assert {:error, %QuorumUnavailable{} = error} =
                ChunkReplicator.write_chunk("payload", drives,
                  min_copies: 2,
                  writer_fn: writer
                )
 
-      assert info.needed == 2
-      assert info.successful == ["drv-1"]
-      assert Enum.sort(info.failed) == [{"drv-2", "io error"}, {"drv-3", "no space"}]
+      assert error.operation == :write_chunk
+      assert error.required == 2
+      assert error.successful == ["drv-1"]
+      assert Enum.sort(error.failed) == [{"drv-2", "io error"}, {"drv-3", "no space"}]
     end
 
     test "returns insufficient_replicas when all drives fail" do
@@ -68,27 +70,27 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
           "drv-2" => {:error, "fail"}
         })
 
-      assert {:error, :insufficient_replicas, info} =
+      assert {:error, %QuorumUnavailable{} = error} =
                ChunkReplicator.write_chunk("payload", drives,
                  min_copies: 1,
                  writer_fn: writer
                )
 
-      assert info.successful == []
-      assert info.needed == 1
+      assert error.successful == []
+      assert error.required == 1
     end
 
     test "rescues exceptions raised by the writer" do
       drives = [drive_entry("drv-1")]
       writer = fn _, _, _, _ -> raise "boom" end
 
-      assert {:error, :insufficient_replicas, info} =
+      assert {:error, %QuorumUnavailable{} = error} =
                ChunkReplicator.write_chunk("payload", drives,
                  min_copies: 1,
                  writer_fn: writer
                )
 
-      assert [{"drv-1", "boom"}] = info.failed
+      assert [{"drv-1", "boom"}] = error.failed
     end
 
     test "writes happen concurrently" do
@@ -166,7 +168,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
           [:neonfs, :volume, :chunk_replicator, :insufficient_replicas]
         ])
 
-      assert {:error, :insufficient_replicas, _} =
+      assert {:error, %QuorumUnavailable{}} =
                ChunkReplicator.write_chunk("payload", drives,
                  min_copies: 1,
                  writer_fn: writer
