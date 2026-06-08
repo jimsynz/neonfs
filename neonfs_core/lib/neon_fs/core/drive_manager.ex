@@ -24,6 +24,8 @@ defmodule NeonFS.Core.DriveManager do
 
   @valid_tiers [:hot, :warm, :cold]
   @drive_state_supervisor NeonFS.Core.DriveStateSupervisor
+  @bootstrap_register_attempts 5
+  @default_bootstrap_register_backoff_ms 200
 
   ## Client API
 
@@ -255,9 +257,15 @@ defmodule NeonFS.Core.DriveManager do
   end
 
   # Mirrors the ETS register_drive into the Ra-replicated bootstrap
-  # layer (#779). Best-effort: the ETS write is the source of truth
-  # for backwards compatibility, so a Ra failure doesn't block the
-  # operator. Anti-entropy / a future #809 follow-up reconciles.
+  # layer (#779). During multi-node cluster formation the joining
+  # node's `:register_drive` command can transiently fail (`:noproc`,
+  # leadership in flux, a command timeout) before Ra settles; a bounded
+  # retry closes that window rather than silently dropping the drive
+  # from the bootstrap layer, where `Volume.Provisioner` and the
+  # create-time durability gate (#1032) would never see it (#1102).
+  # Still best-effort after the retries are exhausted — the ETS write
+  # is the source of truth and anti-entropy / #809 reconciles — but the
+  # give-up is surfaced via telemetry rather than a silent single-shot.
   defp register_drive_in_bootstrap_layer(%Drive{} = drive) do
     case current_cluster_id() do
       {:ok, cluster_id} ->
@@ -269,18 +277,7 @@ defmodule NeonFS.Core.DriveManager do
           registered_at: DateTime.utc_now()
         }
 
-        case RaSupervisor.command({:register_drive, entry}) do
-          {:ok, _result, _leader} ->
-            :ok
-
-          {:error, reason} ->
-            Logger.warning("Failed to register drive in bootstrap layer",
-              drive_id: drive.id,
-              reason: inspect(reason)
-            )
-
-            :ok
-        end
+        register_in_bootstrap_with_retry(drive, entry, @bootstrap_register_attempts)
 
       {:error, reason} ->
         Logger.warning("Skipping bootstrap-layer drive registration (no cluster id)",
@@ -290,6 +287,40 @@ defmodule NeonFS.Core.DriveManager do
 
         :ok
     end
+  end
+
+  defp register_in_bootstrap_with_retry(drive, entry, attempts_left) do
+    case RaSupervisor.command({:register_drive, entry}) do
+      {:ok, _result, _leader} ->
+        :ok
+
+      _transient when attempts_left > 1 ->
+        Process.sleep(bootstrap_register_backoff_ms())
+        register_in_bootstrap_with_retry(drive, entry, attempts_left - 1)
+
+      failure ->
+        :telemetry.execute(
+          [:neonfs, :drive_manager, :bootstrap_register_failed],
+          %{attempts: @bootstrap_register_attempts},
+          %{drive_id: drive.id, node: drive.node}
+        )
+
+        Logger.warning(
+          "Failed to register drive in bootstrap layer after #{@bootstrap_register_attempts} attempts",
+          drive_id: drive.id,
+          reason: inspect(failure)
+        )
+
+        :ok
+    end
+  end
+
+  defp bootstrap_register_backoff_ms do
+    Application.get_env(
+      :neonfs_core,
+      :bootstrap_register_backoff_ms,
+      @default_bootstrap_register_backoff_ms
+    )
   end
 
   defp deregister_drive_in_bootstrap_layer(drive_id) do

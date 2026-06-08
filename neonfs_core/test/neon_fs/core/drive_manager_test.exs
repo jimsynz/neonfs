@@ -1,8 +1,9 @@
 defmodule NeonFS.Core.DriveManagerTest do
   use ExUnit.Case, async: false
+  use Mimic
 
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{BlobStore, DriveManager, DriveRegistry}
+  alias NeonFS.Core.{BlobStore, DriveManager, DriveRegistry, RaSupervisor}
   alias NeonFS.Core.Drive.Identity
 
   @moduletag :tmp_dir
@@ -64,6 +65,41 @@ defmodule NeonFS.Core.DriveManagerTest do
       drives = DriveManager.list_drives()
       assert length(drives) == 1
       assert hd(drives).id == "default"
+    end
+  end
+
+  describe "register_local_drives_in_bootstrap/0 retry (#1102)" do
+    setup do
+      Application.put_env(:neonfs_core, :bootstrap_register_backoff_ms, 0)
+      on_exit(fn -> Application.delete_env(:neonfs_core, :bootstrap_register_backoff_ms) end)
+      :ok
+    end
+
+    test "retries a transient Ra failure until the registration succeeds" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub(RaSupervisor, :command, fn {:register_drive, _entry} ->
+        attempt = Agent.get_and_update(counter, &{&1 + 1, &1 + 1})
+        if attempt < 3, do: {:error, :noproc}, else: {:ok, :ok, :leader@node}
+      end)
+
+      assert :ok = DriveManager.register_local_drives_in_bootstrap()
+      assert Agent.get(counter, & &1) == 3
+    end
+
+    test "gives up after the attempt budget and emits telemetry" do
+      stub(RaSupervisor, :command, fn {:register_drive, _entry} -> {:error, :noproc} end)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :drive_manager, :bootstrap_register_failed]
+        ])
+
+      assert :ok = DriveManager.register_local_drives_in_bootstrap()
+
+      assert_receive {[:neonfs, :drive_manager, :bootstrap_register_failed], ^ref, %{attempts: 5},
+                      %{drive_id: "default"}},
+                     1_000
     end
   end
 
