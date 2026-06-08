@@ -27,6 +27,8 @@ defmodule NeonFS.Core.HLC do
   runaway timestamps from propagating through the cluster.
   """
 
+  alias NeonFS.Error.ClockSkewDetected
+
   @type timestamp ::
           {wall_ms :: non_neg_integer(), counter :: non_neg_integer(), node_id :: node()}
 
@@ -110,11 +112,11 @@ defmodule NeonFS.Core.HLC do
   Incorporates a remote timestamp into the local HLC state.
 
   Returns `{:ok, timestamp, new_state}` if the remote timestamp is within the
-  allowed skew bounds, or `{:error, :clock_skew_detected, skew_ms}` if the
+  allowed skew bounds, or `{:error, %NeonFS.Error.ClockSkewDetected{}}` if the
   remote wall time exceeds local time by more than `max_clock_skew_ms`.
   """
   @spec receive_timestamp(t(), timestamp()) ::
-          {:ok, timestamp(), t()} | {:error, :clock_skew_detected, non_neg_integer()}
+          {:ok, timestamp(), t()} | {:error, Splode.Error.t()}
   def receive_timestamp(%__MODULE__{} = state, remote_timestamp) do
     receive_timestamp(state, remote_timestamp, System.system_time(:millisecond))
   end
@@ -125,7 +127,7 @@ defmodule NeonFS.Core.HLC do
   This variant is useful for testing with deterministic clock values.
   """
   @spec receive_timestamp(t(), timestamp(), non_neg_integer()) ::
-          {:ok, timestamp(), t()} | {:error, :clock_skew_detected, non_neg_integer()}
+          {:ok, timestamp(), t()} | {:error, Splode.Error.t()}
   def receive_timestamp(
         %__MODULE__{} = state,
         {remote_wall, remote_counter, _remote_node},
@@ -134,7 +136,7 @@ defmodule NeonFS.Core.HLC do
     skew = remote_wall - wall_ms
 
     if skew > state.max_clock_skew_ms do
-      {:error, :clock_skew_detected, skew}
+      {:error, ClockSkewDetected.exception(skew_ms: skew, max_skew_ms: state.max_clock_skew_ms)}
     else
       max_wall = wall_ms + state.max_clock_skew_ms
       clamped = min(max(wall_ms, max(state.last_wall, remote_wall)), max_wall)

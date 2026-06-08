@@ -2,6 +2,7 @@ defmodule NeonFS.Core.HLCTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.Core.HLC
+  alias NeonFS.Error.ClockSkewDetected
 
   describe "new/1" do
     test "creates initial state with node_id" do
@@ -146,7 +147,7 @@ defmodule NeonFS.Core.HLCTest do
 
       remote = {2000, 0, :node_b@host}
 
-      assert {:error, :clock_skew_detected, skew} =
+      assert {:error, %ClockSkewDetected{skew_ms: skew}} =
                HLC.receive_timestamp(state, remote, 1000)
 
       assert skew == 1000
