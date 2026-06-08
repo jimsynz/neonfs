@@ -42,19 +42,19 @@ defmodule NeonFS.Core.Volume.HLC do
   Incorporates a remote timestamp into the volume's HLC.
 
   Returns `{:ok, timestamp, segment}` with the segment's HLC advanced
-  past the merged timestamp, or `{:error, :clock_skew_detected, skew_ms}`
+  past the merged timestamp, or `{:error, %NeonFS.Error.ClockSkewDetected{}}`
   if the remote wall time exceeds the local clock by more than the
   HLC's configured skew bound.
   """
   @spec receive_timestamp(RootSegment.t(), HLC.timestamp()) ::
           {:ok, HLC.timestamp(), RootSegment.t()}
-          | {:error, :clock_skew_detected, non_neg_integer()}
+          | {:error, Splode.Error.t()}
   def receive_timestamp(%RootSegment{hlc: %HLC{} = hlc} = segment, remote_timestamp) do
     case HLC.receive_timestamp(hlc, remote_timestamp) do
       {:ok, timestamp, new_hlc} ->
         {:ok, timestamp, %{segment | hlc: new_hlc}}
 
-      {:error, _, _} = err ->
+      {:error, _} = err ->
         err
     end
   end
@@ -65,14 +65,14 @@ defmodule NeonFS.Core.Volume.HLC do
   """
   @spec receive_timestamp(RootSegment.t(), HLC.timestamp(), non_neg_integer()) ::
           {:ok, HLC.timestamp(), RootSegment.t()}
-          | {:error, :clock_skew_detected, non_neg_integer()}
+          | {:error, Splode.Error.t()}
   def receive_timestamp(%RootSegment{hlc: %HLC{} = hlc} = segment, remote_timestamp, wall_ms)
       when is_integer(wall_ms) and wall_ms >= 0 do
     case HLC.receive_timestamp(hlc, remote_timestamp, wall_ms) do
       {:ok, timestamp, new_hlc} ->
         {:ok, timestamp, %{segment | hlc: new_hlc}}
 
-      {:error, _, _} = err ->
+      {:error, _} = err ->
         err
     end
   end

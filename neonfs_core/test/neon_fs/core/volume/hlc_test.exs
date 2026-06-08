@@ -5,6 +5,7 @@ defmodule NeonFS.Core.Volume.HLCTest do
   alias NeonFS.Core.HLC, as: ClusterHLC
   alias NeonFS.Core.Volume.HLC, as: VolumeHLC
   alias NeonFS.Core.Volume.RootSegment
+  alias NeonFS.Error.ClockSkewDetected
 
   describe "now/1" do
     test "returns a timestamp and an advanced segment" do
@@ -67,7 +68,7 @@ defmodule NeonFS.Core.Volume.HLCTest do
       segment = sample_segment()
       far_future = {System.system_time(:millisecond) + 10_000_000, 0, :other@host}
 
-      assert {:error, :clock_skew_detected, skew} =
+      assert {:error, %ClockSkewDetected{skew_ms: skew}} =
                VolumeHLC.receive_timestamp(segment, far_future)
 
       assert skew > segment.hlc.max_clock_skew_ms
@@ -112,7 +113,7 @@ defmodule NeonFS.Core.Volume.HLCTest do
               case VolumeHLC.receive_timestamp(seg, remote, wall_ms) do
                 {:ok, ts, seg} -> {[ts | acc], seg}
                 # Skew rejection: drop the step but keep state.
-                {:error, _, _} -> {acc, seg}
+                {:error, %ClockSkewDetected{}} -> {acc, seg}
               end
           end)
 

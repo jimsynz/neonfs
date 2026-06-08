@@ -3,6 +3,7 @@ defmodule NeonFS.Core.HLCPropertyTest do
   use ExUnitProperties
 
   alias NeonFS.Core.HLC
+  alias NeonFS.Error.ClockSkewDetected
 
   # Generators
 
@@ -158,7 +159,7 @@ defmodule NeonFS.Core.HLCPropertyTest do
             assert HLC.compare(result_ts, local_ts) == :gt,
                    "Result #{inspect(result_ts)} should be > local #{inspect(local_ts)}"
 
-          {:error, :clock_skew_detected, _skew} ->
+          {:error, %ClockSkewDetected{}} ->
             # Skew rejection is fine — the property only applies when accepted
             :ok
         end
@@ -176,7 +177,7 @@ defmodule NeonFS.Core.HLCPropertyTest do
         remote_wall = local_wall + max_skew + extra
         remote_ts = {remote_wall, 0, :remote@host}
 
-        assert {:error, :clock_skew_detected, skew} =
+        assert {:error, %ClockSkewDetected{skew_ms: skew}} =
                  HLC.receive_timestamp(state, remote_ts, local_wall)
 
         assert skew == remote_wall - local_wall
@@ -213,7 +214,7 @@ defmodule NeonFS.Core.HLCPropertyTest do
               {:recv, remote_ts, w} ->
                 case HLC.receive_timestamp(s, remote_ts, w) do
                   {:ok, ts, new_s} -> {[ts | acc], new_s}
-                  {:error, :clock_skew_detected, _} -> {acc, s}
+                  {:error, %ClockSkewDetected{}} -> {acc, s}
                 end
             end
           end)
