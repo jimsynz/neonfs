@@ -1523,7 +1523,7 @@ defmodule NeonFS.Core.WriteOperation do
 
       case ChunkIndex.put(chunk_meta) do
         :ok ->
-          maybe_replicate_chunk(hash, data, volume, tier)
+          maybe_replicate_chunk(hash, data, volume, tier, drive.id)
           build_chunk_result(hash, offset, size, chunk_info, index)
 
         {:error, reason} ->
@@ -1577,9 +1577,12 @@ defmodule NeonFS.Core.WriteOperation do
   defp parse_compression("zstd:" <> _level), do: :zstd
   defp parse_compression(_), do: :none
 
-  defp maybe_replicate_chunk(hash, data, volume, tier) do
+  defp maybe_replicate_chunk(hash, data, volume, tier, local_drive_id) do
     if volume.durability.factor > 1 do
-      case Replication.replicate_chunk(hash, data, volume, tier: tier) do
+      case Replication.replicate_chunk(hash, data, volume,
+             tier: tier,
+             local_drive_id: local_drive_id
+           ) do
         {:ok, _locations} -> :ok
         {:error, reason} -> Logger.warning("Chunk replication failed", reason: reason)
       end

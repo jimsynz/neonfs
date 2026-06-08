@@ -73,7 +73,7 @@ defmodule NeonFS.Core.ReplicaRepairTest do
       expect(BlobStore, :read_chunk, fn "h1", "default" -> {:ok, "chunk-data"} end)
 
       expect(Replication, :replicate_chunk, fn "h1", "chunk-data", ^vol, opts ->
-        assert opts[:exclude_nodes] == [@local]
+        assert opts[:exclude_drives] == [{@local, "default"}]
 
         {:ok,
          [

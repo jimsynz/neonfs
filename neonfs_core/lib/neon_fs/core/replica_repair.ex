@@ -136,9 +136,11 @@ defmodule NeonFS.Core.ReplicaRepair do
   defp add_replicas(chunk, volume, count, acc) do
     case source_chunk_data(chunk) do
       {:ok, data} ->
-        existing_nodes = Enum.map(chunk.locations, & &1.node)
+        existing_drives = Enum.map(chunk.locations, &{&1.node, &1.drive_id})
 
-        case Replication.replicate_chunk(chunk.hash, data, volume, exclude_nodes: existing_nodes) do
+        case Replication.replicate_chunk(chunk.hash, data, volume,
+               exclude_drives: existing_drives
+             ) do
           {:ok, replicated_locations} ->
             combined = Enum.uniq(chunk.locations ++ replicated_locations)
             ChunkIndex.update_locations(chunk.hash, combined)
@@ -184,7 +186,7 @@ defmodule NeonFS.Core.ReplicaRepair do
 
   # Currently picks the first `count` locations. A future revision
   # can prefer drives in `:draining` / `:failed` state, then
-  # least-recently-accessed — `select_replication_targets/2` already
+  # least-recently-accessed — `select_replication_targets/3` already
   # has the hooks for the inverse direction. Out of scope per
   # issue #687.
   defp pick_excess_replicas(locations, count), do: Enum.take(locations, count)

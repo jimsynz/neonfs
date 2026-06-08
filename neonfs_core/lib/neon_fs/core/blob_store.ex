@@ -405,8 +405,8 @@ defmodule NeonFS.Core.BlobStore do
     * `local_location` — `%{node, drive_id, tier}` where the chunk was
       just written; always included in the returned list.
     * `opts` — optional keyword list:
-        * `:exclude_nodes` — nodes to skip when picking replica targets
-          (default: `[Node.self()]`).
+        * `:exclude_drives` — `{node, drive_id}` pairs to skip when
+          picking replica targets (default: the `local_location` drive).
 
   ## Returns
 
@@ -441,11 +441,13 @@ defmodule NeonFS.Core.BlobStore do
        do: {:ok, [local]}
 
   defp do_replicate_after_put(hash, data, volume, local_location, opts) do
-    exclude = Keyword.get(opts, :exclude_nodes, [Node.self()])
+    exclude =
+      Keyword.get(opts, :exclude_drives, [{local_location.node, local_location.drive_id}])
 
     case Replication.replicate_chunk(hash, data, volume,
            tier: local_location.tier,
-           exclude_nodes: exclude
+           local_drive_id: local_location.drive_id,
+           exclude_drives: exclude
          ) do
       {:ok, locations} ->
         {:ok, merge_local_location(locations, local_location)}
@@ -455,13 +457,14 @@ defmodule NeonFS.Core.BlobStore do
     end
   end
 
-  # `Replication.replicate_chunk/4` synthesises a local entry via
-  # `DriveRegistry.select_drive/1`, which may pick a different drive
-  # from the one the handler actually wrote to on a multi-drive node.
-  # Replace that synthesised entry with the caller's authoritative
-  # `local_location` so the commit metadata matches the on-disk state.
+  # `Replication.replicate_chunk/4` synthesises a local entry for the
+  # primary copy. Replace it with the caller's authoritative
+  # `local_location` so the commit metadata matches the on-disk state,
+  # matching on the exact `{node, drive_id}` so same-node replicas on
+  # other drives are preserved.
   defp merge_local_location(locations, local_location) do
-    non_local = Enum.reject(locations, &(&1.node == local_location.node))
+    key = {local_location.node, local_location.drive_id}
+    non_local = Enum.reject(locations, &({&1.node, &1.drive_id} == key))
     [local_location | non_local]
   end
 

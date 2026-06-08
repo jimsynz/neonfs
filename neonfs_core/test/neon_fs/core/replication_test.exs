@@ -2,7 +2,7 @@ defmodule NeonFS.Core.ReplicationTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{Replication, Volume}
+  alias NeonFS.Core.{Drive, DriveRegistry, Replication, Volume}
 
   @moduletag :tmp_dir
 
@@ -21,71 +21,44 @@ defmodule NeonFS.Core.ReplicationTest do
     {:ok, volume: volume}
   end
 
-  describe "select_replication_targets/2" do
+  describe "select_replication_targets/3" do
     test "returns empty list when count is 0" do
-      assert {:ok, []} = Replication.select_replication_targets(0, [])
+      assert {:ok, []} = Replication.select_replication_targets(0, :hot)
     end
 
-    test "excludes specified nodes" do
-      exclude = [Node.self()]
-      # Since we're likely in a single-node test environment, this should return no targets
-      result = Replication.select_replication_targets(2, exclude)
+    test "selects distinct drives on a single node (drive-aware placement)" do
+      register_drive("hot1")
 
-      case result do
-        {:ok, targets} ->
-          # If we got targets, verify none are excluded
-          target_nodes = Enum.map(targets, & &1.node)
-          refute Enum.any?(target_nodes, &(&1 in exclude))
+      assert {:ok, [target]} =
+               Replication.select_replication_targets(1, :hot, [{Node.self(), "default"}])
 
-        {:error, :no_targets} ->
-          # Expected in single-node test
-          :ok
-      end
+      assert target.node == Node.self()
+      assert target.drive_id == "hot1"
     end
 
-    test "returns error when no targets available" do
-      # Try to get targets when excluding all nodes
-      all_nodes = [Node.self()]
-      result = Replication.select_replication_targets(1, all_nodes)
+    test "never selects an excluded {node, drive_id}" do
+      register_drive("hot1")
+      register_drive("hot2")
 
-      case result do
-        {:ok, []} ->
-          # No targets available, which is acceptable in single-node test
-          :ok
+      exclude = [{Node.self(), "default"}, {Node.self(), "hot1"}]
+      assert {:ok, targets} = Replication.select_replication_targets(3, :hot, exclude)
 
-        {:error, :no_targets} ->
-          # Also acceptable
-          :ok
-      end
+      refute Enum.any?(targets, &({&1.node, &1.drive_id} in exclude))
     end
 
-    test "returns at most available targets" do
-      # In a single-node test, we should get 0 targets when excluding self
-      result = Replication.select_replication_targets(10, [Node.self()])
+    test "returns at most count drives" do
+      register_drive("hot1")
+      register_drive("hot2")
+      register_drive("hot3")
 
-      case result do
-        {:ok, targets} ->
-          # Should get less than or equal to requested if not enough nodes available
-          assert length(targets) <= 10
-
-        {:error, :no_targets} ->
-          # Expected in single-node test when excluding self
-          :ok
-      end
+      assert {:ok, targets} = Replication.select_replication_targets(2, :hot, [])
+      assert length(targets) == 2
     end
 
-    test "sets default drive_id" do
-      case Replication.select_replication_targets(1, []) do
-        {:ok, [target | _]} ->
-          assert target.drive_id == "default"
-
-        {:ok, []} ->
-          # No targets in single-node test
-          :ok
-
-        {:error, :no_targets} ->
-          :ok
-      end
+    test "returns fewer than requested when the cluster lacks drives" do
+      # Only the single "default" drive exists, and it is excluded.
+      assert {:ok, []} =
+               Replication.select_replication_targets(5, :hot, [{Node.self(), "default"}])
     end
   end
 
@@ -219,5 +192,17 @@ defmodule NeonFS.Core.ReplicationTest do
           :ok
       end
     end
+  end
+
+  defp register_drive(id) do
+    base = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs_test/blobs")
+
+    drive =
+      Drive.from_config(
+        %{id: id, path: Path.join(base, id), tier: :hot, capacity: 0},
+        Node.self()
+      )
+
+    :ok = DriveRegistry.register_drive(drive)
   end
 end
