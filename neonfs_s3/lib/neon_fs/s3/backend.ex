@@ -42,6 +42,9 @@ defmodule NeonFS.S3.Backend do
       {:error, :not_found} ->
         {:error, :not_found}
 
+      {:error, %{class: :not_found}} ->
+        {:error, :not_found}
+
       {:error, _reason} ->
         {:error, :not_found}
     end
@@ -131,12 +134,13 @@ defmodule NeonFS.S3.Backend do
   end
 
   # The read path can surface "file is not present" as either
-  # `:not_found` (atom from `MetadataReader`) or
-  # `%NeonFS.Error.FileNotFound{}` (struct wrapped by
-  # `ReadOperation.get_file/2`). Both shape a clean S3 404; only
+  # `:not_found` (atom from `MetadataReader`) or one of the
+  # structured `class: :not_found` errors (e.g. `%FileNotFound{}`,
+  # `%VolumeNotFound{}`, `%ChunkNotFound{}`) wrapped by
+  # `ReadOperation`. Both shape a clean S3 404; only
   # genuinely-unexpected failures fall through to a 500.
   defp not_found_reason?(:not_found), do: true
-  defp not_found_reason?(%NeonFS.Error.FileNotFound{}), do: true
+  defp not_found_reason?(%{class: :not_found}), do: true
   defp not_found_reason?(_), do: false
 
   @impl true
@@ -236,6 +240,7 @@ defmodule NeonFS.S3.Backend do
     case call_core(:delete_file, [bucket, key]) do
       :ok -> :ok
       {:error, :not_found} -> :ok
+      {:error, %{class: :not_found}} -> :ok
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
@@ -249,6 +254,9 @@ defmodule NeonFS.S3.Backend do
             {:deleted, %{key: key}}
 
           {:error, :not_found} ->
+            {:deleted, %{key: key}}
+
+          {:error, %{class: :not_found}} ->
             {:deleted, %{key: key}}
 
           {:error, reason} ->
@@ -270,6 +278,9 @@ defmodule NeonFS.S3.Backend do
           {:ok, file_meta_to_object_meta(meta, key)}
 
         {:error, :not_found} ->
+          {:error, %Firkin.Error{code: :no_such_key}}
+
+        {:error, %{class: :not_found}} ->
           {:error, %Firkin.Error{code: :no_such_key}}
 
         {:error, reason} ->
@@ -324,6 +335,7 @@ defmodule NeonFS.S3.Backend do
        }}
     else
       {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
+      {:error, %{class: :not_found}} -> {:error, %Firkin.Error{code: :no_such_key}}
       {:error, %Firkin.Error{}} = err -> err
       {:error, reason} -> {:error, internal_error(reason)}
     end
@@ -696,6 +708,7 @@ defmodule NeonFS.S3.Backend do
     case call_core(:get_volume, [bucket]) do
       {:ok, _volume} -> :ok
       {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_bucket}}
+      {:error, %{class: :not_found}} -> {:error, %Firkin.Error{code: :no_such_bucket}}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end
@@ -720,6 +733,7 @@ defmodule NeonFS.S3.Backend do
     case call_core(:get_file_meta, [bucket, key]) do
       {:ok, meta} -> {:ok, meta}
       {:error, :not_found} -> {:error, %Firkin.Error{code: :no_such_key}}
+      {:error, %{class: :not_found}} -> {:error, %Firkin.Error{code: :no_such_key}}
       {:error, reason} -> {:error, internal_error(reason)}
     end
   end

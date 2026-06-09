@@ -157,7 +157,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
                Router.call(NeonFS.Core, :delete_file, [volume_name, file_path])
 
       # ── Step 5a: path-based lookup goes 404 from "node3"'s view.
-      assert {:error, :not_found} =
+      assert {:error, %{class: :not_found}} =
                Router.call(NeonFS.Core, :get_file_meta, [volume_name, file_path])
 
       # ── Step 5b: file_id-based read still works through the open

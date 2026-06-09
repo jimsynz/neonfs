@@ -6,6 +6,8 @@ defmodule NeonFS.Error.NotFound do
   """
   use Splode.Error, fields: [message: nil, details: %{}], class: :not_found
 
+  @type t :: %__MODULE__{}
+
   @impl true
   def message(%{message: message}) when is_binary(message), do: message
   def message(_), do: "Resource not found"

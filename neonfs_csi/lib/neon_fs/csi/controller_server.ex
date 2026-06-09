@@ -204,6 +204,11 @@ defmodule NeonFS.CSI.ControllerServer do
           status: :not_found,
           message: "source volume #{source_volume_id} not found"
 
+      {:error, %{class: :not_found}} ->
+        raise GRPC.RPCError,
+          status: :not_found,
+          message: "source volume #{source_volume_id} not found"
+
       {:error, reason} ->
         raise GRPC.RPCError,
           status: :internal,
@@ -241,6 +246,9 @@ defmodule NeonFS.CSI.ControllerServer do
       {:error, :not_found} ->
         raise GRPC.RPCError, status: :not_found, message: "source not found"
 
+      {:error, %{class: :not_found}} ->
+        raise GRPC.RPCError, status: :not_found, message: "source not found"
+
       {:error, :volume_not_found} ->
         raise GRPC.RPCError, status: :not_found, message: "source volume not found"
 
@@ -272,6 +280,9 @@ defmodule NeonFS.CSI.ControllerServer do
         %DeleteVolumeResponse{}
 
       {:error, :not_found} ->
+        %DeleteVolumeResponse{}
+
+      {:error, %{class: :not_found}} ->
         %DeleteVolumeResponse{}
 
       {:error, reason} ->
@@ -316,6 +327,9 @@ defmodule NeonFS.CSI.ControllerServer do
         end
 
       {:error, :not_found} ->
+        raise GRPC.RPCError, status: :not_found, message: "volume #{volume_id} not found"
+
+      {:error, %{class: :not_found}} ->
         raise GRPC.RPCError, status: :not_found, message: "volume #{volume_id} not found"
 
       {:error, reason} ->
@@ -406,6 +420,9 @@ defmodule NeonFS.CSI.ControllerServer do
       {:error, :not_found} ->
         raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
 
+      {:error, %{class: :not_found}} ->
+        raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
+
       {:error, reason} ->
         raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
     end
@@ -471,6 +488,9 @@ defmodule NeonFS.CSI.ControllerServer do
       {:error, :not_found} ->
         raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
 
+      {:error, %{class: :not_found}} ->
+        raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
+
       {:error, reason} ->
         raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
     end
@@ -515,6 +535,11 @@ defmodule NeonFS.CSI.ControllerServer do
           status: :not_found,
           message: "source volume #{source_volume_id} not found"
 
+      {:error, %{class: :not_found}} ->
+        raise GRPC.RPCError,
+          status: :not_found,
+          message: "source volume #{source_volume_id} not found"
+
       {:error, reason} ->
         raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
     end
@@ -545,6 +570,7 @@ defmodule NeonFS.CSI.ControllerServer do
     case lookup_volume(vol_name) do
       {:ok, volume} -> do_delete_snapshot(volume.id, snap_id)
       {:error, :not_found} -> %DeleteSnapshotResponse{}
+      {:error, %{class: :not_found}} -> %DeleteSnapshotResponse{}
     end
   end
 
@@ -587,6 +613,10 @@ defmodule NeonFS.CSI.ControllerServer do
         end
 
       {:error, :not_found} ->
+        # No volume → no snapshots.
+        %ListSnapshotsResponse{entries: [], next_token: ""}
+
+      {:error, %{class: :not_found}} ->
         # No volume → no snapshots.
         %ListSnapshotsResponse{entries: [], next_token: ""}
     end

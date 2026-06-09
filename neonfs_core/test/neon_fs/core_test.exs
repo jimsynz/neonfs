@@ -4,7 +4,7 @@ defmodule NeonFS.CoreTest do
 
   alias NeonFS.Core
   alias NeonFS.Core.{FileIndex, NamespaceCoordinator, RaServer, VolumeRegistry}
-  alias NeonFS.Error.Conflict
+  alias NeonFS.Error.{Conflict, FileNotFound, NotFound, VolumeNotFound}
 
   @moduletag :tmp_dir
 
@@ -44,7 +44,7 @@ defmodule NeonFS.CoreTest do
     end
 
     test "returns error for unknown volume" do
-      assert {:error, :not_found} = Core.get_volume("nonexistent-volume")
+      assert {:error, %VolumeNotFound{}} = Core.get_volume("nonexistent-volume")
     end
   end
 
@@ -69,11 +69,11 @@ defmodule NeonFS.CoreTest do
       name = "delete-test-#{:rand.uniform(999_999)}"
       {:ok, _} = VolumeRegistry.create(name, [])
       assert :ok = Core.delete_volume(name)
-      assert {:error, :not_found} = Core.get_volume(name)
+      assert {:error, %VolumeNotFound{}} = Core.get_volume(name)
     end
 
     test "returns error for unknown volume" do
-      assert {:error, :not_found} = Core.delete_volume("nonexistent-volume")
+      assert {:error, %VolumeNotFound{}} = Core.delete_volume("nonexistent-volume")
     end
   end
 
@@ -122,13 +122,14 @@ defmodule NeonFS.CoreTest do
     end
 
     test "returns error for nonexistent volume" do
-      assert {:error, :not_found} = Core.read_file("no-such-volume", "/file.txt", offset: 0)
+      assert {:error, %VolumeNotFound{}} =
+               Core.read_file("no-such-volume", "/file.txt", offset: 0)
     end
   end
 
   describe "read_file/3 errors" do
     test "returns error for nonexistent volume" do
-      assert {:error, :not_found} = Core.read_file("no-such-volume", "/file.txt", [])
+      assert {:error, %VolumeNotFound{}} = Core.read_file("no-such-volume", "/file.txt", [])
     end
   end
 
@@ -179,7 +180,7 @@ defmodule NeonFS.CoreTest do
     end
 
     test "returns error for a nonexistent volume" do
-      assert {:error, :not_found} = Core.read_file_by_id("no-such-volume", "any-id")
+      assert {:error, %VolumeNotFound{}} = Core.read_file_by_id("no-such-volume", "any-id")
     end
   end
 
@@ -214,8 +215,9 @@ defmodule NeonFS.CoreTest do
       assert {:error, :wrong_volume} = Core.write_file_at_by_id(vol_name, id, 0, "y")
     end
 
-    test "returns :not_found for an unknown file_id", %{volume_name: vol_name} do
-      assert {:error, :not_found} = Core.write_file_at_by_id(vol_name, "nonexistent-id", 0, "x")
+    test "returns FileNotFound for an unknown file_id", %{volume_name: vol_name} do
+      assert {:error, %FileNotFound{}} =
+               Core.write_file_at_by_id(vol_name, "nonexistent-id", 0, "x")
     end
   end
 
@@ -230,11 +232,11 @@ defmodule NeonFS.CoreTest do
     test "deletes a file", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/to-delete.txt", ["data"])
       assert :ok = Core.delete_file(vol_name, "/to-delete.txt")
-      assert {:error, :not_found} = Core.get_file_meta(vol_name, "/to-delete.txt")
+      assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/to-delete.txt")
     end
 
     test "returns error for nonexistent file", %{volume_name: vol_name} do
-      assert {:error, :not_found} = Core.delete_file(vol_name, "/missing.txt")
+      assert {:error, %FileNotFound{}} = Core.delete_file(vol_name, "/missing.txt")
     end
   end
 
@@ -247,7 +249,7 @@ defmodule NeonFS.CoreTest do
     end
 
     test "returns error for nonexistent file", %{volume_name: vol_name} do
-      assert {:error, :not_found} = Core.get_file_meta(vol_name, "/nope.txt")
+      assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/nope.txt")
     end
   end
 
@@ -323,7 +325,7 @@ defmodule NeonFS.CoreTest do
     end
 
     test "returns error for nonexistent volume" do
-      assert {:error, :not_found} = Core.mkdir("no-such-volume", "/dir")
+      assert {:error, %VolumeNotFound{}} = Core.mkdir("no-such-volume", "/dir")
     end
   end
 
@@ -412,7 +414,7 @@ defmodule NeonFS.CoreTest do
 
       assert :ok = Core.delete_file(vol_name, "/full-delete.txt")
 
-      assert {:error, :not_found} = Core.get_file_meta(vol_name, "/full-delete.txt")
+      assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/full-delete.txt")
       assert {:error, :not_found} = FileIndex.get(volume_id, id)
     end
 
@@ -432,7 +434,7 @@ defmodule NeonFS.CoreTest do
         assert :ok = Core.delete_file(vol_name, "/pinned.txt")
 
         # Path-based access goes 404.
-        assert {:error, :not_found} = Core.get_file_meta(vol_name, "/pinned.txt")
+        assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/pinned.txt")
 
         # File-id-based access still works — the FileMeta is detached.
         assert {:ok, %{detached: true, pinned_claim_ids: pin_ids}} =
@@ -455,7 +457,7 @@ defmodule NeonFS.CoreTest do
 
       try do
         assert :ok = Core.delete_file(vol_name, "/dup-delete.txt")
-        assert {:error, :not_found} = Core.delete_file(vol_name, "/dup-delete.txt")
+        assert {:error, %FileNotFound{}} = Core.delete_file(vol_name, "/dup-delete.txt")
       after
         :ok = NamespaceCoordinator.release(NamespaceCoordinator, pin_id)
       end
@@ -481,7 +483,7 @@ defmodule NeonFS.CoreTest do
     test "renames file in same directory", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/old-name.txt", ["data"])
       assert :ok = Core.rename_file(vol_name, "/old-name.txt", "/new-name.txt")
-      assert {:error, :not_found} = Core.get_file_meta(vol_name, "/old-name.txt")
+      assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/old-name.txt")
       assert {:ok, _} = Core.get_file_meta(vol_name, "/new-name.txt")
     end
 
@@ -491,7 +493,7 @@ defmodule NeonFS.CoreTest do
       {:ok, _} = Core.write_file_streamed(vol_name, "/src/file.txt", ["data"])
 
       assert :ok = Core.rename_file(vol_name, "/src/file.txt", "/dst/file.txt")
-      assert {:error, :not_found} = Core.get_file_meta(vol_name, "/src/file.txt")
+      assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/src/file.txt")
       assert {:ok, _} = Core.get_file_meta(vol_name, "/dst/file.txt")
     end
 
@@ -501,12 +503,12 @@ defmodule NeonFS.CoreTest do
       {:ok, _} = Core.write_file_streamed(vol_name, "/from/original.txt", ["data"])
 
       assert :ok = Core.rename_file(vol_name, "/from/original.txt", "/to/renamed.txt")
-      assert {:error, :not_found} = Core.get_file_meta(vol_name, "/from/original.txt")
+      assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/from/original.txt")
       assert {:ok, _} = Core.get_file_meta(vol_name, "/to/renamed.txt")
     end
 
     test "returns error for nonexistent volume" do
-      assert {:error, :not_found} = Core.rename_file("no-volume", "/a.txt", "/b.txt")
+      assert {:error, %VolumeNotFound{}} = Core.rename_file("no-volume", "/a.txt", "/b.txt")
     end
   end
 
@@ -523,7 +525,7 @@ defmodule NeonFS.CoreTest do
     end
 
     test "returns error for unknown credential" do
-      assert {:error, :not_found} = Core.lookup_s3_credential("unknown-key")
+      assert {:error, %NotFound{}} = Core.lookup_s3_credential("unknown-key")
     end
   end
 end

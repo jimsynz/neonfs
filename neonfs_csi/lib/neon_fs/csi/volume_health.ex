@@ -96,11 +96,12 @@ defmodule NeonFS.CSI.VolumeHealth do
       reports `abnormal` so kubelet doesn't keep scheduling fresh
       pods onto a cluster that needs operator attention.
 
-  Returns `{:error, :not_found}` when the volume itself is gone (the
-  CSI server uses this to raise `NOT_FOUND`).
+  Returns a `class: :not_found` error (e.g. `%VolumeNotFound{}`) when
+  the volume itself is gone (the CSI server uses this to raise
+  `NOT_FOUND`).
   """
   @spec controller_condition(String.t(), keyword()) ::
-          {:ok, condition()} | {:error, :not_found | term()}
+          {:ok, condition()} | {:error, term()}
   def controller_condition(volume_id, opts \\ []) when is_binary(volume_id) do
     init_table()
     core_call_fn = core_call_fn(opts)

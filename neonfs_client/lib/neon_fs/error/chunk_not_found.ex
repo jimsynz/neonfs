@@ -4,6 +4,8 @@ defmodule NeonFS.Error.ChunkNotFound do
   """
   use Splode.Error, fields: [:chunk_hash, :volume_id], class: :not_found
 
+  @type t :: %__MODULE__{}
+
   @impl true
   def message(%{chunk_hash: hash}) when is_binary(hash), do: "Chunk not found: #{hash}"
   def message(_), do: "Chunk not found"

@@ -60,7 +60,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
       # Path 404 from every node, but file_id lookup still works.
       for node <- [:node1, :node2, :node3] do
-        assert {:error, :not_found} =
+        assert {:error, %{class: :not_found}} =
                  PeerCluster.rpc(cluster, node, NeonFS.Core, :get_file_meta, [volume, path]),
                "path should be 404 on #{inspect(node)} after pinned delete"
 

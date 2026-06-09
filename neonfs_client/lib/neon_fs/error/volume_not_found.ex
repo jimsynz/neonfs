@@ -4,6 +4,8 @@ defmodule NeonFS.Error.VolumeNotFound do
   """
   use Splode.Error, fields: [:volume_name, :volume_id], class: :not_found
 
+  @type t :: %__MODULE__{}
+
   @impl true
   def message(%{volume_name: name}) when is_binary(name), do: "Volume '#{name}' not found"
   def message(%{volume_id: id}) when not is_nil(id), do: "Volume with ID '#{id}' not found"

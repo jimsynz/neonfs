@@ -46,6 +46,9 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, :not_found} ->
         {:error, %Davy.Error{code: :not_found}}
 
+      {:error, %{class: :not_found}} ->
+        {:error, %Davy.Error{code: :not_found}}
+
       {:error, _reason} ->
         {:error, internal_error()}
     end
@@ -59,14 +62,21 @@ defmodule NeonFS.WebDAV.Backend do
       {:ok, file_resource(volume_name, volume.id, rest, meta)}
     else
       {:error, :not_found} ->
-        if LockStore.lock_null?(path) do
-          {:ok, lock_null_resource(volume_name, rest)}
-        else
-          {:error, %Davy.Error{code: :not_found}}
-        end
+        resolve_missing_or_lock_null(path, volume_name, rest)
+
+      {:error, %{class: :not_found}} ->
+        resolve_missing_or_lock_null(path, volume_name, rest)
 
       {:error, _reason} ->
         {:error, internal_error()}
+    end
+  end
+
+  defp resolve_missing_or_lock_null(path, volume_name, rest) do
+    if LockStore.lock_null?(path) do
+      {:ok, lock_null_resource(volume_name, rest)}
+    else
+      {:error, %Davy.Error{code: :not_found}}
     end
   end
 
@@ -120,6 +130,9 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, :not_found} ->
         {:error, %Davy.Error{code: :not_found}}
 
+      {:error, %{class: :not_found}} ->
+        {:error, %Davy.Error{code: :not_found}}
+
       {:error, _reason} ->
         {:error, internal_error()}
     end
@@ -151,6 +164,9 @@ defmodule NeonFS.WebDAV.Backend do
       {:ok, file_resource(volume_name, volume.id, rest, meta)}
     else
       {:error, :not_found} ->
+        {:error, %Davy.Error{code: :conflict, message: "Volume not found"}}
+
+      {:error, %{class: :not_found}} ->
         {:error, %Davy.Error{code: :conflict, message: "Volume not found"}}
 
       # `:exists` from `WriteOperation` with `create_only: true` is the
@@ -286,6 +302,7 @@ defmodule NeonFS.WebDAV.Backend do
     case call_core(:delete_file, [volume_name, file_path]) do
       :ok -> :ok
       {:error, :not_found} -> :ok
+      {:error, %{class: :not_found}} -> :ok
       {:error, _reason} -> {:error, internal_error()}
     end
   end
@@ -307,6 +324,7 @@ defmodule NeonFS.WebDAV.Backend do
     else
       {:error, %Davy.Error{}} = err -> err
       {:error, :not_found} -> {:error, %Davy.Error{code: :not_found}}
+      {:error, %{class: :not_found}} -> {:error, %Davy.Error{code: :not_found}}
       {:error, _reason} -> {:error, internal_error()}
     end
   end
@@ -415,6 +433,9 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, :not_found} ->
         {:error, %Davy.Error{code: :not_found}}
 
+      {:error, %{class: :not_found}} ->
+        {:error, %Davy.Error{code: :not_found}}
+
       {:error, _reason} ->
         {:error, internal_error()}
     end
@@ -520,6 +541,7 @@ defmodule NeonFS.WebDAV.Backend do
     case call_core(:get_volume, [volume_name]) do
       {:ok, volume} -> {:ok, volume}
       {:error, :not_found} -> {:error, :not_found}
+      {:error, %{class: :not_found}} -> {:error, :not_found}
       {:error, _reason} -> {:error, :internal}
     end
   end
