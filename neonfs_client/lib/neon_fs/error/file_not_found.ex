@@ -4,6 +4,8 @@ defmodule NeonFS.Error.FileNotFound do
   """
   use Splode.Error, fields: [:file_path, :volume_id], class: :not_found
 
+  @type t :: %__MODULE__{}
+
   @impl true
   def message(%{file_path: path}) when is_binary(path), do: "File not found: #{path}"
   def message(_), do: "File not found"

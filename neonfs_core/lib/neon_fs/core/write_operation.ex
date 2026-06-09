@@ -43,7 +43,14 @@ defmodule NeonFS.Core.WriteOperation do
 
   alias NeonFS.IO.{Operation, Scheduler}
 
-  alias NeonFS.Error.{AlreadyExists, Conflict, Unavailable, Unsupported, VolumeNotFound}
+  alias NeonFS.Error.{
+    AlreadyExists,
+    Conflict,
+    FileNotFound,
+    Unavailable,
+    Unsupported,
+    VolumeNotFound
+  }
 
   require Logger
 
@@ -487,9 +494,14 @@ defmodule NeonFS.Core.WriteOperation do
   # another volume).
   defp get_file_by_id(volume_id, file_id) do
     case FileIndex.get(volume_id, file_id) do
-      {:ok, %{volume_id: ^volume_id} = file_meta} -> {:ok, file_meta}
-      {:ok, _other_volume_meta} -> {:error, :wrong_volume}
-      {:error, :not_found} -> {:error, :not_found}
+      {:ok, %{volume_id: ^volume_id} = file_meta} ->
+        {:ok, file_meta}
+
+      {:ok, _other_volume_meta} ->
+        {:error, :wrong_volume}
+
+      {:error, :not_found} ->
+        {:error, FileNotFound.exception(file_path: "<id:#{file_id}>", volume_id: volume_id)}
     end
   end
 

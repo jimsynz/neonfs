@@ -97,7 +97,7 @@ defmodule NeonFS.S3.IntegrationTest.CredentialTest do
     end
 
     test "lookup unknown credential returns not_found", %{cluster: cluster} do
-      assert {:error, :not_found} =
+      assert {:error, %{class: :not_found}} =
                PeerCluster.rpc(cluster, :node1, NeonFS.Core, :lookup_s3_credential, [
                  "NEONFS_NONEXISTENT"
                ])

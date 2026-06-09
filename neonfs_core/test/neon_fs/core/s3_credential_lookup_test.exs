@@ -3,6 +3,7 @@ defmodule NeonFS.Core.S3CredentialLookupTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{RaServer, S3CredentialManager}
+  alias NeonFS.Error.NotFound
 
   @moduletag :tmp_dir
 
@@ -28,7 +29,7 @@ defmodule NeonFS.Core.S3CredentialLookupTest do
     end
 
     test "returns not_found for unknown access key" do
-      assert {:error, :not_found} = NeonFS.Core.lookup_s3_credential("NEONFS_UNKNOWN")
+      assert {:error, %NotFound{}} = NeonFS.Core.lookup_s3_credential("NEONFS_UNKNOWN")
     end
 
     test "returned map has exactly the fields the S3 backend expects" do

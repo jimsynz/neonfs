@@ -52,7 +52,7 @@ defmodule NeonFS.Integration.GCSnapshotLifecycleTest do
     # only from the snapshot's frozen root.
     :ok = PeerCluster.rpc(cluster, :node1, NeonFS.Core, :delete_file, [volume, path])
 
-    assert {:error, :not_found} =
+    assert {:error, %{class: :not_found}} =
              PeerCluster.rpc(cluster, :node1, NeonFS.Core, :get_file_meta, [volume, path])
 
     # The mark phase must walk the snapshot root, so every chunk survives.

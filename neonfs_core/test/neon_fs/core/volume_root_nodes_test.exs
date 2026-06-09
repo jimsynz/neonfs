@@ -9,6 +9,7 @@ defmodule NeonFS.Core.VolumeRootNodesTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core
+  alias NeonFS.Error.VolumeNotFound
 
   @moduletag :tmp_dir
 
@@ -36,8 +37,8 @@ defmodule NeonFS.Core.VolumeRootNodesTest do
     assert {:ok, ^nodes} = Core.volume_root_nodes_by_id(volume.id)
   end
 
-  test "returns {:error, :not_found} for an unknown volume" do
-    assert {:error, :not_found} = Core.volume_root_nodes("no-such-volume")
-    assert {:error, :not_found} = Core.volume_root_nodes_by_id("no-such-volume-id")
+  test "returns a not-found error for an unknown volume" do
+    assert {:error, %VolumeNotFound{}} = Core.volume_root_nodes("no-such-volume")
+    assert {:error, %VolumeNotFound{}} = Core.volume_root_nodes_by_id("no-such-volume-id")
   end
 end

@@ -96,6 +96,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
       {:ok, child_fh, child_attr, dir_attr}
     else
       {:error, :not_found} -> lookup_not_found(dir_fh)
+      {:error, %{class: :not_found}} -> lookup_not_found(dir_fh)
       {:error, :invalid} -> {:error, :stale, nil}
       {:error, status} when is_atom(status) -> {:error, to_nfs_status(status), nil}
       err -> err
@@ -448,6 +449,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # noisy diagnostic at the right layer.
   @spec to_nfs_status(term()) :: atom()
   defp to_nfs_status(:not_found), do: :noent
+  defp to_nfs_status(%{class: :not_found}), do: :noent
   defp to_nfs_status(%NeonFS.Error.AlreadyExists{}), do: :exist
   defp to_nfs_status(:exists), do: :exist
   defp to_nfs_status(:permission_denied), do: :acces
@@ -534,6 +536,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
       {:error, :not_found} ->
         {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
+      {:error, %{class: :not_found}} ->
+        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
       {:error, status} when is_atom(status) ->
         {:error, to_nfs_status(status),
          %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
@@ -575,6 +580,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
         end
 
       {:error, :not_found} ->
+        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, %{class: :not_found}} ->
         {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       _ ->
@@ -722,6 +730,10 @@ defmodule NeonFS.NFS.NFSv3Backend do
            %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
 
         {:error, :not_found} ->
+          {:error, :noent, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+
+        {:error, %{class: :not_found}} ->
           {:error, :noent, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
            %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
 
@@ -938,6 +950,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         case core_call(NeonFS.Core, :get_file_meta, [vol_name, path]) do
           {:ok, meta} -> {:ok, vol_name, path, meta}
           {:error, :not_found} -> {:error, :noent}
+          {:error, %{class: :not_found}} -> {:error, :noent}
           {:error, :stale} -> {:error, :stale}
           {:error, status} when is_atom(status) -> {:error, to_nfs_status(status)}
           _ -> {:error, :stale}

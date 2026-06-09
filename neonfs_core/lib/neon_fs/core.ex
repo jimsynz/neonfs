@@ -18,7 +18,7 @@ defmodule NeonFS.Core do
   alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
-  alias NeonFS.Error.{Conflict, Invalid, Unavailable}
+  alias NeonFS.Error.{Conflict, FileNotFound, Invalid, NotFound, Unavailable, VolumeNotFound}
 
   import Bitwise, only: [&&&: 2]
 
@@ -29,14 +29,14 @@ defmodule NeonFS.Core do
 
   Called by the S3 backend during SigV4 authentication.
   """
-  @spec lookup_s3_credential(String.t()) :: {:ok, map()} | {:error, :not_found}
+  @spec lookup_s3_credential(String.t()) :: {:ok, map()} | {:error, NotFound.t()}
   def lookup_s3_credential(access_key_id) do
     case S3CredentialManager.lookup(access_key_id) do
       {:ok, credential} ->
         {:ok, %{secret_access_key: credential.secret_access_key, identity: credential.identity}}
 
       {:error, :not_found} ->
-        {:error, :not_found}
+        {:error, NotFound.exception(message: "S3 credential not found")}
     end
   end
 
@@ -53,9 +53,9 @@ defmodule NeonFS.Core do
   @doc """
   Gets a volume by name.
   """
-  @spec get_volume(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, :not_found}
+  @spec get_volume(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, VolumeNotFound.t()}
   def get_volume(name) do
-    VolumeRegistry.get_by_name(name)
+    resolve_volume(name)
   end
 
   @doc """
@@ -70,7 +70,7 @@ defmodule NeonFS.Core do
   """
   @spec volume_root_nodes(String.t()) :: {:ok, [node()]} | {:error, term()}
   def volume_root_nodes(volume_name) when is_binary(volume_name) do
-    with {:ok, %{id: volume_id}} <- VolumeRegistry.get_by_name(volume_name) do
+    with {:ok, %{id: volume_id}} <- resolve_volume(volume_name) do
       volume_root_nodes_by_id(volume_id)
     end
   end
@@ -91,7 +91,7 @@ defmodule NeonFS.Core do
 
   defp fetch_volume_root(volume_id) do
     case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
-      {:ok, nil} -> {:error, :not_found}
+      {:ok, nil} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
       {:ok, entry} -> {:ok, entry}
       {:error, _} = error -> error
     end
@@ -104,9 +104,13 @@ defmodule NeonFS.Core do
   resolving a filehandle that embeds the volume's UUID rather than
   its name) that hold a stable id but not the current name.
   """
-  @spec get_volume_by_id(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, :not_found}
+  @spec get_volume_by_id(String.t()) ::
+          {:ok, NeonFS.Core.Volume.t()} | {:error, VolumeNotFound.t()}
   def get_volume_by_id(id) do
-    VolumeRegistry.get(id)
+    case VolumeRegistry.get(id) do
+      {:ok, volume} -> {:ok, volume}
+      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_id: id)}
+    end
   end
 
   @doc """
@@ -130,7 +134,7 @@ defmodule NeonFS.Core do
   """
   @spec delete_volume(String.t()) :: :ok | {:error, term()}
   def delete_volume(name) do
-    with {:ok, volume} <- VolumeRegistry.get_by_name(name) do
+    with {:ok, volume} <- resolve_volume(name) do
       VolumeRegistry.delete(volume.id)
     end
   end
@@ -384,12 +388,12 @@ defmodule NeonFS.Core do
         end)
 
       :not_found ->
-        {:error, :not_found}
+        {:error, FileNotFound.exception(file_path: path, volume_id: volume_id)}
     end
   end
 
   defp do_delete_file(volume_id, path) do
-    with {:ok, file} <- FileIndex.get_by_path(volume_id, path) do
+    with {:ok, file} <- lookup_file(volume_id, path) do
       delete_file_by_pin_state(file, pinned_claim_ids(volume_id, path))
     end
   end
@@ -436,10 +440,10 @@ defmodule NeonFS.Core do
   Gets file metadata by volume name and path.
   """
   @spec get_file_meta(String.t(), String.t()) ::
-          {:ok, NeonFS.Core.FileMeta.t()} | {:error, :not_found | term()}
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
   def get_file_meta(volume_name, path) do
     with {:ok, volume} <- resolve_volume(volume_name) do
-      FileIndex.get_by_path(volume.id, normalize_path(path))
+      lookup_file(volume.id, normalize_path(path))
     end
   end
 
@@ -450,10 +454,10 @@ defmodule NeonFS.Core do
   Automatically increments the version and updates timestamps.
   """
   @spec update_file_meta(String.t(), String.t(), keyword()) ::
-          {:ok, NeonFS.Core.FileMeta.t()} | {:error, :not_found | term()}
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
   def update_file_meta(volume_name, path, updates) do
     with {:ok, volume} <- resolve_volume(volume_name),
-         {:ok, file} <- FileIndex.get_by_path(volume.id, normalize_path(path)) do
+         {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
       FileIndex.update(file.id, updates)
     end
   end
@@ -469,10 +473,10 @@ defmodule NeonFS.Core do
   whole sattr3 mutation land in a single FileIndex write.
   """
   @spec truncate_file(String.t(), String.t(), non_neg_integer(), keyword()) ::
-          {:ok, NeonFS.Core.FileMeta.t()} | {:error, :not_found | term()}
+          {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
   def truncate_file(volume_name, path, new_size, additional_updates \\ []) do
     with {:ok, volume} <- resolve_volume(volume_name),
-         {:ok, file} <- FileIndex.get_by_path(volume.id, normalize_path(path)) do
+         {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
       FileIndex.truncate(file.id, new_size, additional_updates)
     end
   end
@@ -690,7 +694,20 @@ defmodule NeonFS.Core do
   end
 
   defp resolve_volume(volume_name) do
-    VolumeRegistry.get_by_name(volume_name)
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} -> {:ok, volume}
+      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_name: volume_name)}
+    end
+  end
+
+  defp lookup_file(volume_id, path) do
+    case FileIndex.get_by_path(volume_id, path) do
+      {:ok, meta} ->
+        {:ok, meta}
+
+      {:error, :not_found} ->
+        {:error, FileNotFound.exception(file_path: path, volume_id: volume_id)}
+    end
   end
 
   defp normalize_path("/" <> _ = path), do: path

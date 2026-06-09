@@ -135,6 +135,9 @@ defmodule NeonFS.Containerd.ContentServer do
       {:error, :not_found} ->
         raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
 
+      {:error, %{class: :not_found}} ->
+        raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
+
       {:error, reason} when reason in [:invalid_digest, :unsupported_algorithm] ->
         raise_invalid_digest(reason)
 
@@ -179,6 +182,9 @@ defmodule NeonFS.Containerd.ContentServer do
       %UpdateResponse{info: info_struct}
     else
       {:error, :not_found} ->
+        raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
+
+      {:error, %{class: :not_found}} ->
         raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
 
       {:error, reason} when reason in [:invalid_digest, :unsupported_algorithm] ->
@@ -247,6 +253,9 @@ defmodule NeonFS.Containerd.ContentServer do
         %Google.Protobuf.Empty{}
 
       {:error, :not_found} ->
+        raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
+
+      {:error, %{class: :not_found}} ->
         raise RPCError, status: :not_found, message: "blob #{inspect(digest)} not found"
 
       {:error, reason} when reason in [:invalid_digest, :unsupported_algorithm] ->
@@ -324,6 +333,9 @@ defmodule NeonFS.Containerd.ContentServer do
         emit_chunks(chunk_stream, send_fn)
 
       {:error, :not_found} ->
+        raise RPCError, status: :not_found, message: "blob #{inspect(path)} not found"
+
+      {:error, %{class: :not_found}} ->
         raise RPCError, status: :not_found, message: "blob #{inspect(path)} not found"
 
       {:error, %{class: :forbidden}} ->
