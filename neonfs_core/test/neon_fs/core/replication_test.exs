@@ -60,6 +60,29 @@ defmodule NeonFS.Core.ReplicationTest do
       assert {:ok, []} =
                Replication.select_replication_targets(5, :hot, [{Node.self(), "default"}])
     end
+
+    test "prefers a node that holds no copies over the node holding the primary" do
+      node_b = :"nodeb@127.0.0.1"
+      register_drive("hot1")
+      register_drive("hot2")
+      register_drive("hot1", node_b)
+
+      # Primary lives on the local node's "default" drive; one more replica needed.
+      assert {:ok, [target]} =
+               Replication.select_replication_targets(1, :hot, [{Node.self(), "default"}])
+
+      assert target.node == node_b
+    end
+
+    test "doubles up on the primary node only when remote capacity is exhausted" do
+      register_drive("hot1")
+      register_drive("hot2")
+
+      assert {:ok, [target]} =
+               Replication.select_replication_targets(1, :hot, [{Node.self(), "default"}])
+
+      assert target.node == Node.self()
+    end
   end
 
   describe "replicate_chunk/4" do
@@ -194,13 +217,13 @@ defmodule NeonFS.Core.ReplicationTest do
     end
   end
 
-  defp register_drive(id) do
+  defp register_drive(id, node \\ Node.self()) do
     base = Application.get_env(:neonfs_core, :blob_store_base_dir, "/tmp/neonfs_test/blobs")
 
     drive =
       Drive.from_config(
         %{id: id, path: Path.join(base, id), tier: :hot, capacity: 0},
-        Node.self()
+        node
       )
 
     :ok = DriveRegistry.register_drive(drive)

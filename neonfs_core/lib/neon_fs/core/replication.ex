@@ -96,9 +96,11 @@ defmodule NeonFS.Core.Replication do
 
   Replication is drive-keyed: a chunk's copies must land on distinct
   drives, which may sit on the same node or on different nodes. Distinct
-  nodes are preferred — the selector round-robins across nodes first,
-  then doubles up on already-used nodes — so a single multi-drive node
-  still satisfies a replication factor greater than one.
+  failure domains are preferred — nodes already holding a copy (counted
+  from `exclude`) are deprioritised, so a node holding zero copies is
+  filled before doubling up on the node that holds the primary. A single
+  multi-drive node still satisfies a replication factor greater than one
+  when no other node has spare capacity.
 
   `exclude` lists the `{node, drive_id}` pairs that already hold the
   chunk (the local primary copy, plus any existing replicas during
@@ -120,12 +122,14 @@ defmodule NeonFS.Core.Replication do
     if count == 0 do
       {:ok, []}
     else
+      copies_by_node = Enum.frequencies_by(exclude, fn {node, _drive_id} -> node end)
+
       targets =
         tier
         |> DriveRegistry.drives_for_tier()
         |> Enum.filter(&(&1.state == :active))
         |> Enum.reject(&({&1.node, &1.id} in exclude))
-        |> spread_across_nodes()
+        |> spread_across_nodes(copies_by_node)
         |> Enum.take(count)
         |> Enum.map(&%{node: &1.node, drive_id: &1.id})
 
@@ -135,14 +139,15 @@ defmodule NeonFS.Core.Replication do
 
   # Private Functions
 
-  # Round-robins drives across nodes (nodes sorted by name, drives
-  # within a node by id), so successive replicas prefer distinct nodes
-  # before doubling up on a node's remaining drives. Mirrors
-  # `NeonFS.Core.Volume.DriveSelector` and `NeonFS.Core.StripePlacement`.
-  defp spread_across_nodes(drives) do
+  # Round-robins drives across nodes so successive replicas prefer
+  # distinct failure domains. Node buckets are ordered by how many copies
+  # the node already holds (from the exclude set), ascending, then by
+  # name — so a zero-copy node is filled before doubling up on the node
+  # that holds the primary. Drives within a node are ordered by id.
+  defp spread_across_nodes(drives, copies_by_node) do
     drives
     |> Enum.group_by(& &1.node)
-    |> Enum.sort_by(fn {node, _drives} -> node end)
+    |> Enum.sort_by(fn {node, _drives} -> {Map.get(copies_by_node, node, 0), node} end)
     |> Enum.map(fn {_node, node_drives} -> Enum.sort_by(node_drives, & &1.id) end)
     |> round_robin()
   end
