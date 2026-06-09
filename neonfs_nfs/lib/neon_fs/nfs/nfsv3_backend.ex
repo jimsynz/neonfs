@@ -947,17 +947,21 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:ok, vol_name, "/", root_file_meta(decoded.volume_id, vol_name)}
 
       {:ok, _decoded, vol_name, path} ->
-        case core_call(NeonFS.Core, :get_file_meta, [vol_name, path]) do
-          {:ok, meta} -> {:ok, vol_name, path, meta}
-          {:error, :not_found} -> {:error, :noent}
-          {:error, %{class: :not_found}} -> {:error, :noent}
-          {:error, :stale} -> {:error, :stale}
-          {:error, status} when is_atom(status) -> {:error, to_nfs_status(status)}
-          _ -> {:error, :stale}
-        end
+        resolve_file_meta(vol_name, path)
 
       {:error, status} ->
         {:error, to_nfs_status(status)}
+    end
+  end
+
+  defp resolve_file_meta(vol_name, path) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, path]) do
+      {:ok, meta} -> {:ok, vol_name, path, meta}
+      {:error, :not_found} -> {:error, :noent}
+      {:error, %{class: :not_found}} -> {:error, :noent}
+      {:error, :stale} -> {:error, :stale}
+      {:error, status} when is_atom(status) -> {:error, to_nfs_status(status)}
+      _ -> {:error, :stale}
     end
   end
 
