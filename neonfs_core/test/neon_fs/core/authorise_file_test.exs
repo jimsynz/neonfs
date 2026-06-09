@@ -3,6 +3,7 @@ defmodule NeonFS.Core.AuthoriseFileTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{ACLManager, Authorise, FileIndex, FileMeta, RaServer, VolumeACL}
+  alias NeonFS.Error.PermissionDenied
 
   @moduletag :tmp_dir
 
@@ -74,7 +75,8 @@ defmodule NeonFS.Core.AuthoriseFileTest do
     test "other user cannot write file with mode 0o644" do
       create_file("vol-f4", "/file.txt", mode: 0o644, uid: 1000, gid: 1000)
 
-      assert {:error, :forbidden} = Authorise.check(2000, :write, {:file, "vol-f4", "/file.txt"})
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(2000, :write, {:file, "vol-f4", "/file.txt"})
     end
 
     test "other user can read file with mode 0o644" do
@@ -86,10 +88,10 @@ defmodule NeonFS.Core.AuthoriseFileTest do
     test "mode 0o600 denies other users" do
       create_file("vol-f6", "/private.txt", mode: 0o600, uid: 1000, gid: 1000)
 
-      assert {:error, :forbidden} =
+      assert {:error, %PermissionDenied{}} =
                Authorise.check(2000, :read, {:file, "vol-f6", "/private.txt"})
 
-      assert {:error, :forbidden} =
+      assert {:error, %PermissionDenied{}} =
                Authorise.check(2000, :write, {:file, "vol-f6", "/private.txt"})
     end
 
@@ -104,7 +106,7 @@ defmodule NeonFS.Core.AuthoriseFileTest do
       create_file("vol-f8", "/group.txt", mode: 0o640, uid: 1000, gid: 100)
 
       # UID 2000 with GID 200 should NOT be able to read
-      assert {:error, :forbidden} =
+      assert {:error, %PermissionDenied{}} =
                Authorise.check(2000, [200], :read, {:file, "vol-f8", "/group.txt"})
     end
   end
@@ -139,7 +141,7 @@ defmodule NeonFS.Core.AuthoriseFileTest do
       # Mask limits to read-only
       assert :ok = Authorise.check(2000, :read, {:file, "vol-ext2", "/masked.txt"})
 
-      assert {:error, :forbidden} =
+      assert {:error, %PermissionDenied{}} =
                Authorise.check(2000, :write, {:file, "vol-ext2", "/masked.txt"})
     end
 
@@ -232,7 +234,7 @@ defmodule NeonFS.Core.AuthoriseFileTest do
       setup_volume_acl("vol-fallback2", 500, 500)
 
       # Non-owner, no ACL entry — should be denied at volume level
-      assert {:error, :forbidden} =
+      assert {:error, %PermissionDenied{}} =
                Authorise.check(1000, :read, {:file, "vol-fallback2", "/nonexistent.txt"})
     end
   end

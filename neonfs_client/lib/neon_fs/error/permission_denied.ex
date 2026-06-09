@@ -4,6 +4,8 @@ defmodule NeonFS.Error.PermissionDenied do
   """
   use Splode.Error, fields: [:file_path, :operation, :uid, :gid], class: :forbidden
 
+  @type t :: %__MODULE__{}
+
   @impl true
   def message(%{file_path: path, operation: op}) when is_binary(path) and not is_nil(op) do
     "Permission denied: #{op} on #{path}"

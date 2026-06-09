@@ -326,7 +326,7 @@ defmodule NeonFS.Containerd.ContentServer do
       {:error, :not_found} ->
         raise RPCError, status: :not_found, message: "blob #{inspect(path)} not found"
 
-      {:error, :forbidden} ->
+      {:error, %{class: :forbidden}} ->
         raise RPCError, status: :permission_denied, message: "read forbidden"
 
       {:error, reason} ->
