@@ -3,6 +3,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{NamespaceCoordinator, RaServer}
+  alias NeonFS.Error.{AlreadyExists, Conflict}
 
   @moduletag :tmp_dir
 
@@ -34,17 +35,17 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     test "exclusive blocks any subsequent claim on the same path", %{server: server} do
       assert {:ok, claim_a} = NamespaceCoordinator.claim_path(server, "/excl", :exclusive)
 
-      assert {:error, :conflict, ^claim_a} =
+      assert {:error, %Conflict{conflicting: ^claim_a}} =
                NamespaceCoordinator.claim_path(server, "/excl", :exclusive)
 
-      assert {:error, :conflict, ^claim_a} =
+      assert {:error, %Conflict{conflicting: ^claim_a}} =
                NamespaceCoordinator.claim_path(server, "/excl", :shared)
     end
 
     test "shared blocks a subsequent exclusive on the same path", %{server: server} do
       assert {:ok, claim_a} = NamespaceCoordinator.claim_path(server, "/p", :shared)
 
-      assert {:error, :conflict, ^claim_a} =
+      assert {:error, %Conflict{conflicting: ^claim_a}} =
                NamespaceCoordinator.claim_path(server, "/p", :exclusive)
     end
 
@@ -61,24 +62,24 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     test "subtree blocks a path claim under it", %{server: server} do
       assert {:ok, parent} = NamespaceCoordinator.claim_subtree(server, "/a", :exclusive)
 
-      assert {:error, :conflict, ^parent} =
+      assert {:error, %Conflict{conflicting: ^parent}} =
                NamespaceCoordinator.claim_path(server, "/a/b", :exclusive)
 
-      assert {:error, :conflict, ^parent} =
+      assert {:error, %Conflict{conflicting: ^parent}} =
                NamespaceCoordinator.claim_path(server, "/a/b/c", :shared)
     end
 
     test "path claim under a subtree blocks the subtree", %{server: server} do
       assert {:ok, child} = NamespaceCoordinator.claim_path(server, "/a/b", :exclusive)
 
-      assert {:error, :conflict, ^child} =
+      assert {:error, %Conflict{conflicting: ^child}} =
                NamespaceCoordinator.claim_subtree(server, "/a", :exclusive)
     end
 
     test "two subtrees with overlapping roots conflict", %{server: server} do
       assert {:ok, outer} = NamespaceCoordinator.claim_subtree(server, "/a", :exclusive)
 
-      assert {:error, :conflict, ^outer} =
+      assert {:error, %Conflict{conflicting: ^outer}} =
                NamespaceCoordinator.claim_subtree(server, "/a/b", :exclusive)
     end
 
@@ -95,10 +96,10 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     test "the root subtree (`/`) covers everything", %{server: server} do
       assert {:ok, root} = NamespaceCoordinator.claim_subtree(server, "/", :exclusive)
 
-      assert {:error, :conflict, ^root} =
+      assert {:error, %Conflict{conflicting: ^root}} =
                NamespaceCoordinator.claim_path(server, "/anything", :shared)
 
-      assert {:error, :conflict, ^root} =
+      assert {:error, %Conflict{conflicting: ^root}} =
                NamespaceCoordinator.claim_subtree(server, "/some/deep/sub", :shared)
     end
 
@@ -106,7 +107,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       # subtree(/x) covers /x itself, so claim_path(/x) should conflict.
       assert {:ok, sub} = NamespaceCoordinator.claim_subtree(server, "/x", :exclusive)
 
-      assert {:error, :conflict, ^sub} =
+      assert {:error, %Conflict{conflicting: ^sub}} =
                NamespaceCoordinator.claim_path(server, "/x", :shared)
     end
 
@@ -168,7 +169,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert_receive {:claimed, _claim_id}, 1_000
 
       # While the holder is alive, the claim blocks a competing claim.
-      assert {:error, :conflict, _} =
+      assert {:error, %Conflict{}} =
                NamespaceCoordinator.claim_path(server, "/lifetime", :exclusive)
 
       send(holder, :exit)
@@ -191,7 +192,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       :ok = NamespaceCoordinator.release(server, claim_a)
 
       # /multi/b should still be claimed.
-      assert {:error, :conflict, _} =
+      assert {:error, %Conflict{}} =
                NamespaceCoordinator.claim_path(server, "/multi/b", :exclusive)
 
       assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/multi/a", :exclusive)
@@ -200,10 +201,10 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
   # `claim_create/2` is the namespace-coordinator primitive for
   # atomic create-if-not-exist (sub-issue #591 of #303). It pins the
-  # path as `:exclusive :create`, reports `{:error, :exists}` when
+  # path as `:exclusive :create`, reports `{:error, %AlreadyExists{}}` when
   # another `claim_create` already holds the same path (so callers can
   # map directly to `EEXIST` / `PreconditionFailed` / `AlreadyExists`),
-  # and falls back to the standard `{:error, :conflict, _}` shape when
+  # and falls back to the standard `{:error, %Conflict{}}` shape when
   # a non-create claim covers the path (e.g. a `Depth: infinity`
   # collection lock).
   describe "claim_create/2" do
@@ -216,7 +217,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       # Distinct from the generic `:conflict` reply — callers map this
       # to `EEXIST` rather than `:busy`.
-      assert {:error, :exists} = NamespaceCoordinator.claim_create(server, "/race")
+      assert {:error, %AlreadyExists{}} = NamespaceCoordinator.claim_create(server, "/race")
     end
 
     test "after release, a claim_create on the same path succeeds", %{server: server} do
@@ -230,7 +231,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
          %{server: server} do
       assert {:ok, blocker} = NamespaceCoordinator.claim_path(server, "/blocked", :exclusive)
 
-      assert {:error, :conflict, ^blocker} =
+      assert {:error, %Conflict{conflicting: ^blocker}} =
                NamespaceCoordinator.claim_create(server, "/blocked")
     end
 
@@ -238,7 +239,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
          %{server: server} do
       assert {:ok, sub} = NamespaceCoordinator.claim_subtree(server, "/locked", :exclusive)
 
-      assert {:error, :conflict, ^sub} =
+      assert {:error, %Conflict{conflicting: ^sub}} =
                NamespaceCoordinator.claim_create(server, "/locked/new-file")
     end
 
@@ -246,7 +247,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
          %{server: server} do
       assert {:ok, create_id} = NamespaceCoordinator.claim_create(server, "/two-way")
 
-      assert {:error, :conflict, ^create_id} =
+      assert {:error, %Conflict{conflicting: ^create_id}} =
                NamespaceCoordinator.claim_path(server, "/two-way", :exclusive)
     end
 
@@ -271,7 +272,8 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert_receive {:claimed, _}, 1_000
 
       # While the holder is alive, the path is pinned.
-      assert {:error, :exists} = NamespaceCoordinator.claim_create(server, "/dying-create")
+      assert {:error, %AlreadyExists{}} =
+               NamespaceCoordinator.claim_create(server, "/dying-create")
 
       send(holder, :exit)
       assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
@@ -287,7 +289,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       assert is_binary(claim_id)
 
-      assert {:error, :exists} =
+      assert {:error, %AlreadyExists{}} =
                NamespaceCoordinator.claim_create(server, "/explicit-create")
     end
 
@@ -325,7 +327,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
          %{server: server} do
       assert {:ok, sub} = NamespaceCoordinator.claim_subtree(server, "/locked", :exclusive)
 
-      assert {:error, :conflict, ^sub} =
+      assert {:error, %Conflict{conflicting: ^sub}} =
                NamespaceCoordinator.claim_pinned(server, "/locked/file")
     end
 
@@ -333,7 +335,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
          %{server: server} do
       assert {:ok, blocker} = NamespaceCoordinator.claim_path(server, "/blocked", :exclusive)
 
-      assert {:error, :conflict, ^blocker} =
+      assert {:error, %Conflict{conflicting: ^blocker}} =
                NamespaceCoordinator.claim_pinned(server, "/blocked")
     end
 
@@ -439,10 +441,10 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert src_id != dst_id
 
       # Both paths are blocked while the rename claim is held.
-      assert {:error, :conflict, ^src_id} =
+      assert {:error, %Conflict{conflicting: ^src_id}} =
                NamespaceCoordinator.claim_path(server, "/from", :exclusive)
 
-      assert {:error, :conflict, ^dst_id} =
+      assert {:error, %Conflict{conflicting: ^dst_id}} =
                NamespaceCoordinator.claim_path(server, "/to", :exclusive)
     end
 
@@ -463,7 +465,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     test "fails atomically when the source path is already claimed", %{server: server} do
       {:ok, src_claim} = NamespaceCoordinator.claim_path(server, "/locked-src", :exclusive)
 
-      assert {:error, :conflict, ^src_claim} =
+      assert {:error, %Conflict{conflicting: ^src_claim}} =
                NamespaceCoordinator.claim_rename(server, "/locked-src", "/free-dst")
 
       # The destination must NOT have been pinned — atomic failure.
@@ -473,7 +475,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     test "fails atomically when the destination path is already claimed", %{server: server} do
       {:ok, dst_claim} = NamespaceCoordinator.claim_path(server, "/locked-dst", :exclusive)
 
-      assert {:error, :conflict, ^dst_claim} =
+      assert {:error, %Conflict{conflicting: ^dst_claim}} =
                NamespaceCoordinator.claim_rename(server, "/free-src", "/locked-dst")
 
       # The source must NOT have been pinned.
@@ -483,7 +485,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
     test "fails when dst is inside an existing subtree claim", %{server: server} do
       {:ok, sub_claim} = NamespaceCoordinator.claim_subtree(server, "/protected", :exclusive)
 
-      assert {:error, :conflict, ^sub_claim} =
+      assert {:error, %Conflict{conflicting: ^sub_claim}} =
                NamespaceCoordinator.claim_rename(server, "/free-src", "/protected/x")
     end
 
@@ -518,7 +520,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       assert_receive {:claimed, _}, 1_000
 
-      assert {:error, :conflict, _} =
+      assert {:error, %Conflict{}} =
                NamespaceCoordinator.claim_path(server, "/h-src", :exclusive)
 
       send(holder, :exit)
@@ -535,7 +537,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       {:ok, {src_id, _dst_id}} =
         NamespaceCoordinator.claim_rename_for(server, "/explicit-src", "/explicit-dst", holder)
 
-      assert {:error, :conflict, ^src_id} =
+      assert {:error, %Conflict{conflicting: ^src_id}} =
                NamespaceCoordinator.claim_path(server, "/explicit-src", :exclusive)
     end
   end
@@ -565,7 +567,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       # The caller (this test process) is alive but irrelevant — the
       # coordinator monitors `holder`.
-      assert {:error, :conflict, ^claim_id} =
+      assert {:error, %Conflict{conflicting: ^claim_id}} =
                NamespaceCoordinator.claim_path(server, "/explicit/x", :exclusive)
 
       send(holder, :exit)
@@ -581,7 +583,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert {:ok, _} =
                NamespaceCoordinator.claim_path_for(server, "/p", :exclusive, holder)
 
-      assert {:error, :conflict, _} =
+      assert {:error, %Conflict{}} =
                NamespaceCoordinator.claim_path_for(server, "/p", :exclusive, holder)
     end
 
@@ -732,7 +734,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert {:ok, id_a} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
 
-      assert {:error, :conflict, ^id_a} =
+      assert {:error, %Conflict{conflicting: ^id_a}} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {50, 100}, :exclusive)
     end
 
@@ -740,7 +742,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert {:ok, id_a} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :exclusive)
 
-      assert {:error, :conflict, ^id_a} =
+      assert {:error, %Conflict{conflicting: ^id_a}} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {50, 100}, :shared)
     end
 
@@ -748,7 +750,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert {:ok, id_a} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {0, 100}, :shared)
 
-      assert {:error, :conflict, ^id_a} =
+      assert {:error, %Conflict{conflicting: ^id_a}} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {50, 100}, :exclusive)
     end
 
@@ -774,7 +776,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
       assert {:ok, id_a} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {100, 0}, :exclusive)
 
-      assert {:error, :conflict, ^id_a} =
+      assert {:error, %Conflict{conflicting: ^id_a}} =
                NamespaceCoordinator.claim_byte_range(server, "/file", {200, 50}, :exclusive)
 
       assert {:ok, _} =

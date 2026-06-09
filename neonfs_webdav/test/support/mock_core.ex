@@ -9,6 +9,7 @@ defmodule NeonFS.WebDAV.Test.MockCore do
 
   alias NeonFS.Core.FileMeta
   alias NeonFS.Core.Volume
+  alias NeonFS.Error.AlreadyExists
 
   @s_ifdir 0o040755
   @s_ifreg 0o100644
@@ -42,12 +43,12 @@ defmodule NeonFS.WebDAV.Test.MockCore do
     end
   end
 
-  @spec create_volume(String.t()) :: {:ok, Volume.t()} | {:error, :already_exists}
+  @spec create_volume(String.t()) :: {:ok, Volume.t()} | {:error, AlreadyExists.t()}
   def create_volume(name) do
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, name) do
-      {:error, :already_exists}
+      {:error, AlreadyExists.from_reason(:already_exists)}
     else
       volume = Volume.new(name)
       Process.put(:mock_volumes, Map.put(volumes, name, volume))
@@ -99,7 +100,7 @@ defmodule NeonFS.WebDAV.Test.MockCore do
 
       case Map.get(files, key) do
         nil -> write_file(volume_name, path, body, write_opts)
-        _ -> {:error, :exists}
+        _ -> {:error, AlreadyExists.from_reason(:exists)}
       end
     else
       write_file(volume_name, path, body, write_opts)
@@ -281,7 +282,7 @@ defmodule NeonFS.WebDAV.Test.MockCore do
       key = {volume_name, normalised}
 
       if Map.has_key?(files, key) do
-        {:error, :already_exists}
+        {:error, AlreadyExists.from_reason(:already_exists)}
       else
         meta =
           FileMeta.new(volume.id, normalised,

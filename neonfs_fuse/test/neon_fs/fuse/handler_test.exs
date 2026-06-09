@@ -5,6 +5,7 @@ defmodule NeonFS.FUSE.HandlerTest do
   import Bitwise, only: [|||: 2]
 
   alias NeonFS.Client.ChunkReader
+  alias NeonFS.Error.AlreadyExists
   alias NeonFS.FUSE.{Handler, InodeTable}
 
   setup :verify_on_exit!
@@ -211,7 +212,7 @@ defmodule NeonFS.FUSE.HandlerTest do
                                                   :write_file_at,
                                                   [_v, _path, 0, <<>>, opts] ->
         assert Keyword.get(opts, :create_only) == true
-        {:error, :exists}
+        {:error, AlreadyExists.from_reason(:exists)}
       end)
 
       send(

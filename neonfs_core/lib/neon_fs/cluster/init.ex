@@ -259,7 +259,7 @@ defmodule NeonFS.Cluster.Init do
 
     case VolumeRegistry.create_system_volume(replicas: replicas) do
       {:ok, volume} -> {:ok, volume}
-      {:error, :already_exists} -> VolumeRegistry.get_system_volume()
+      {:error, %NeonFS.Error.AlreadyExists{}} -> VolumeRegistry.get_system_volume()
       {:error, reason} -> {:error, {:system_volume_failed, reason}}
     end
   end

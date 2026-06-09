@@ -29,6 +29,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
+  alias NeonFS.Error.Conflict
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -75,7 +76,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
         # node2 attempts a rename that reuses the same src — must conflict
         # against one of the existing claims (the implementation reports
         # whichever it discovers first).
-        assert {:error, :conflict, conflict_id} =
+        assert {:error, %Conflict{conflicting: conflict_id}} =
                  claim_rename_for(cluster, :node2, src, other_dst, holder2)
 
         assert conflict_id in [src_id, dst_id]
@@ -96,7 +97,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
 
       try do
         # node3 attempts a rename that targets the same dst — must conflict.
-        assert {:error, :conflict, conflict_id} =
+        assert {:error, %Conflict{conflicting: conflict_id}} =
                  claim_rename_for(cluster, :node3, other_src, dst, holder3)
 
         assert conflict_id in [src_id, dst_id]
@@ -119,11 +120,11 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
       try do
         # A plain path-claim on the rename's src from node2 must conflict
         # with the src half of the rename pair.
-        assert {:error, :conflict, ^src_id} =
+        assert {:error, %Conflict{conflicting: ^src_id}} =
                  claim_path_for(cluster, :node2, src, :exclusive, holder2)
 
         # …and the same on dst from node3 must conflict with the dst half.
-        assert {:error, :conflict, ^dst_id} =
+        assert {:error, %Conflict{conflicting: ^dst_id}} =
                  claim_path_for(cluster, :node3, dst, :exclusive, holder3)
       after
         release_rename(cluster, :node1, pair)
@@ -158,7 +159,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
         assert length(oks) == 1,
                "expected exactly one rename to win, got #{length(oks)}: #{inspect(results)}"
 
-        assert [{:error, :conflict, _conflict_id}] = errors
+        assert [{:error, %Conflict{}}] = errors
 
         [{:ok, pair}] = oks
         release_rename(cluster, :node1, pair)
@@ -305,7 +306,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
         :ok = release_claim(cluster, node_name, claim_id)
         :ok
 
-      {:error, :conflict, _} ->
+      {:error, %Conflict{}} ->
         if System.monotonic_time(:millisecond) > deadline do
           flunk("path #{path} did not become re-claimable on #{inspect(node_name)} within 5s")
         else

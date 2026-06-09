@@ -4,6 +4,7 @@ defmodule NeonFS.CIFS.HandlerTest do
 
   alias NeonFS.CIFS.Handler
   alias NeonFS.Client.ChunkReader
+  alias NeonFS.Error.AlreadyExists
 
   setup :verify_on_exit!
 
@@ -220,7 +221,7 @@ defmodule NeonFS.CIFS.HandlerTest do
           # primitive lives in #592; here we just verify the
           # interface-level translation.
           assert Keyword.get(opts, :create_only) == true
-          {:error, :exists}
+          {:error, AlreadyExists.from_reason(:exists)}
       end)
 
       {reply, _} =

@@ -24,6 +24,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
   alias NeonFS.Core.Volume
   alias NeonFS.CSI.{ControllerServer, VolumeHealth}
+  alias NeonFS.Error.AlreadyExists
 
   setup do
     ControllerServer.reset_publish_table()
@@ -104,7 +105,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
     test "returns the existing volume when create reports :exists (idempotent)" do
       put_core(fn
-        NeonFS.Core, :create_volume, _ -> {:error, :exists}
+        NeonFS.Core, :create_volume, _ -> {:error, AlreadyExists.from_reason(:exists)}
         NeonFS.Core, :get_volume, ["pvc-2"] -> {:ok, sample_volume("pvc-2")}
       end)
 

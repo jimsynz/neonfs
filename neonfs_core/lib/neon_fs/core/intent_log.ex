@@ -32,14 +32,14 @@ defmodule NeonFS.Core.IntentLog do
           # Do work...
           IntentLog.complete(intent_id)
 
-        {:error, :conflict, existing} ->
+        {:error, %NeonFS.Error.Conflict{conflicting: existing}} ->
           # Another writer holds the lock
           :retry_later
       end
   """
 
   alias NeonFS.Core.{Intent, MetadataStateMachine, RaServer, RaSupervisor}
-  alias NeonFS.Error.Unavailable
+  alias NeonFS.Error.{Conflict, Unavailable}
 
   require Logger
 
@@ -47,18 +47,18 @@ defmodule NeonFS.Core.IntentLog do
   Acquires an exclusive intent via Ra.
 
   Returns `{:ok, intent_id}` if the intent was acquired, or
-  `{:error, :conflict, existing_intent}` if another active intent
-  holds the same conflict key.
+  `{:error, %NeonFS.Error.Conflict{conflicting: existing_intent}}` if
+  another active intent holds the same conflict key.
 
   If an existing intent's TTL has expired, the new intent takes over
   (expired intent marked as `:expired`).
   """
   @spec try_acquire(Intent.t()) ::
-          {:ok, binary()} | {:error, :conflict, Intent.t()} | {:error, term()}
+          {:ok, binary()} | {:error, Conflict.t()} | {:error, term()}
   def try_acquire(%Intent{} = intent) do
     case ra_command({:try_acquire_intent, intent}) do
       {:ok, {:ok, :acquired}} -> {:ok, intent.id}
-      {:ok, {:ok, :conflict, existing}} -> {:error, :conflict, existing}
+      {:ok, {:ok, :conflict, existing}} -> {:error, Conflict.from_reason(:conflict, existing)}
       {:error, reason} -> {:error, reason}
     end
   end

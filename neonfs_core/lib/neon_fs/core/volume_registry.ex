@@ -21,6 +21,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   alias NeonFS.Core.Volume.DriveSelector
   alias NeonFS.Core.Volume.Provisioner
   alias NeonFS.Core.VolumeEncryption
+  alias NeonFS.Error.AlreadyExists
   alias NeonFS.Error.Invalid, as: InvalidError
   alias NeonFS.Error.Unavailable
   alias NeonFS.Events
@@ -365,7 +366,7 @@ defmodule NeonFS.Core.VolumeRegistry do
         {:error, _reason} = error -> error
       end
     else
-      {:ok, _existing} -> {:error, :already_exists}
+      {:ok, _existing} -> {:error, AlreadyExists.from_reason(:already_exists)}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -413,11 +414,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       end
     else
       {:ok, _} ->
-        {:error,
-         InvalidError.exception(
-           message: "Volume with name '#{name}' already exists",
-           details: %{volume_name: name}
-         )}
+        {:error, AlreadyExists.from_reason(:already_exists, name)}
 
       {:error, reason} ->
         {:error, reason}

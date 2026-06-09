@@ -15,6 +15,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorByteRangeTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
+  alias NeonFS.Error.Conflict
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -36,7 +37,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorByteRangeTest do
       try do
         {:ok, id_a} = claim_byte_range_for(cluster, :node1, path, {0, 100}, :exclusive, holder1)
 
-        assert {:error, :conflict, ^id_a} =
+        assert {:error, %Conflict{conflicting: ^id_a}} =
                  claim_byte_range_for(cluster, :node2, path, {50, 100}, :exclusive, holder2)
 
         release_claim(cluster, :node1, id_a)

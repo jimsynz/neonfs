@@ -14,7 +14,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     WriteOperation
   }
 
-  alias NeonFS.Error.VolumeNotFound
+  alias NeonFS.Error.{AlreadyExists, VolumeNotFound}
 
   @moduletag :tmp_dir
 
@@ -346,7 +346,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     test "returns :exists when the streamed target already exists", %{volume: volume} do
       {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/already.txt", ["seed"])
 
-      assert {:error, :exists} =
+      assert {:error, %AlreadyExists{}} =
                WriteOperation.write_file_streamed(volume.id, "/already.txt", ["overwrite"],
                  create_only: true
                )
@@ -369,7 +369,7 @@ defmodule NeonFS.Core.WriteOperationTest do
          %{volume: volume} do
       {:ok, _} = WriteOperation.write_file_streamed(volume.id, "/at-exists.txt", ["seed"])
 
-      assert {:error, :exists} =
+      assert {:error, %AlreadyExists{}} =
                WriteOperation.write_file_at(volume.id, "/at-exists.txt", 0, "data",
                  create_only: true
                )

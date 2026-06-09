@@ -4,6 +4,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
   import Bitwise, only: [<<<: 2]
 
   alias NeonFS.Core.FileMeta
+  alias NeonFS.Error.AlreadyExists
   alias NeonFS.NFS.{Filehandle, NFSv3Backend}
   alias NFSServer.NFSv3.Types.Fattr3
 
@@ -782,8 +783,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
-        NeonFS.Core, :mkdir, [@volume_name, "/parent/exists"] -> {:error, :eexist}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :mkdir, [@volume_name, "/parent/exists"] ->
+          {:error, AlreadyExists.from_reason(:eexist)}
       end)
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xA000_A000_A000_A000)

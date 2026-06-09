@@ -52,7 +52,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   require Logger
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
-  alias NeonFS.Error.Unavailable
+  alias NeonFS.Error.{AlreadyExists, Conflict, Unavailable}
 
   @typedoc "Opaque claim id returned by the coordinator on success."
   @type claim_id :: String.t()
@@ -80,7 +80,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   collides.
   """
   @spec claim_path(GenServer.server(), String.t(), scope()) ::
-          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+          {:ok, claim_id()} | {:error, Conflict.t()} | {:error, term()}
   def claim_path(server \\ __MODULE__, path, scope)
       when is_binary(path) and scope in [:exclusive, :shared] do
     claim_path_for(server, path, scope, self())
@@ -96,7 +96,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   something stable.
   """
   @spec claim_path_for(GenServer.server(), String.t(), scope(), pid()) ::
-          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+          {:ok, claim_id()} | {:error, Conflict.t()} | {:error, term()}
   def claim_path_for(server \\ __MODULE__, path, scope, holder)
       when is_binary(path) and scope in [:exclusive, :shared] and is_pid(holder) do
     GenServer.call(server, {:claim, :path, path, scope, holder})
@@ -107,7 +107,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   `claim_path/3`.
   """
   @spec claim_subtree(GenServer.server(), String.t(), scope()) ::
-          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+          {:ok, claim_id()} | {:error, Conflict.t()} | {:error, term()}
   def claim_subtree(server \\ __MODULE__, path, scope)
       when is_binary(path) and scope in [:exclusive, :shared] do
     claim_subtree_for(server, path, scope, self())
@@ -118,7 +118,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   holder pid. See `claim_path_for/4` for the cross-node motivation.
   """
   @spec claim_subtree_for(GenServer.server(), String.t(), scope(), pid()) ::
-          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+          {:ok, claim_id()} | {:error, Conflict.t()} | {:error, term()}
   def claim_subtree_for(server \\ __MODULE__, path, scope, holder)
       when is_binary(path) and scope in [:exclusive, :shared] and is_pid(holder) do
     GenServer.call(server, {:claim, :subtree, path, scope, holder})
@@ -152,8 +152,8 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   """
   @spec claim_create(GenServer.server(), String.t()) ::
           {:ok, claim_id()}
-          | {:error, :exists}
-          | {:error, :conflict, claim_id()}
+          | {:error, AlreadyExists.t()}
+          | {:error, Conflict.t()}
           | {:error, term()}
   def claim_create(server \\ __MODULE__, path) when is_binary(path) do
     claim_create_for(server, path, self())
@@ -165,8 +165,8 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   """
   @spec claim_create_for(GenServer.server(), String.t(), pid()) ::
           {:ok, claim_id()}
-          | {:error, :exists}
-          | {:error, :conflict, claim_id()}
+          | {:error, AlreadyExists.t()}
+          | {:error, Conflict.t()}
           | {:error, term()}
   def claim_create_for(server \\ __MODULE__, path, holder)
       when is_binary(path) and is_pid(holder) do
@@ -187,7 +187,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   """
   @spec claim_pinned(GenServer.server(), String.t()) ::
           {:ok, claim_id()}
-          | {:error, :conflict, claim_id()}
+          | {:error, Conflict.t()}
           | {:error, term()}
   def claim_pinned(server \\ __MODULE__, path) when is_binary(path) do
     claim_pinned_for(server, path, self())
@@ -199,7 +199,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   """
   @spec claim_pinned_for(GenServer.server(), String.t(), pid()) ::
           {:ok, claim_id()}
-          | {:error, :conflict, claim_id()}
+          | {:error, Conflict.t()}
           | {:error, term()}
   def claim_pinned_for(server \\ __MODULE__, path, holder)
       when is_binary(path) and is_pid(holder) do
@@ -241,7 +241,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   already exists. The blocking `SETLKW` variant is tracked in #679.
   """
   @spec claim_byte_range(GenServer.server(), String.t(), byte_range(), scope()) ::
-          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+          {:ok, claim_id()} | {:error, Conflict.t()} | {:error, term()}
   def claim_byte_range(server \\ __MODULE__, path, range, scope)
       when is_binary(path) and scope in [:exclusive, :shared] do
     claim_byte_range_for(server, path, range, scope, self())
@@ -253,7 +253,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   motivation.
   """
   @spec claim_byte_range_for(GenServer.server(), String.t(), byte_range(), scope(), pid()) ::
-          {:ok, claim_id()} | {:error, :conflict, claim_id()} | {:error, term()}
+          {:ok, claim_id()} | {:error, Conflict.t()} | {:error, term()}
   def claim_byte_range_for(server \\ __MODULE__, path, range, scope, holder)
       when is_binary(path) and scope in [:exclusive, :shared] and
              is_pid(holder) and is_tuple(range) and tuple_size(range) == 2 do
@@ -395,7 +395,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   """
   @spec claim_rename(GenServer.server(), String.t(), String.t()) ::
           {:ok, rename_claim_id()}
-          | {:error, :conflict, claim_id()}
+          | {:error, Conflict.t()}
           | {:error, :einval}
           | {:error, term()}
   def claim_rename(server \\ __MODULE__, src, dst) when is_binary(src) and is_binary(dst) do
@@ -408,7 +408,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   """
   @spec claim_rename_for(GenServer.server(), String.t(), String.t(), pid()) ::
           {:ok, rename_claim_id()}
-          | {:error, :conflict, claim_id()}
+          | {:error, Conflict.t()}
           | {:error, :einval}
           | {:error, term()}
   def claim_rename_for(server \\ __MODULE__, src, dst, holder)
@@ -495,7 +495,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
         {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
 
       {:error, :conflict, conflicting_id} ->
-        {:reply, {:error, :conflict, conflicting_id}, state}
+        {:reply, {:error, Conflict.from_reason(:conflict, conflicting_id)}, state}
 
       {:error, _} = err ->
         {:reply, err, state}
@@ -508,10 +508,10 @@ defmodule NeonFS.Core.NamespaceCoordinator do
         {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
 
       {:error, :exists} ->
-        {:reply, {:error, :exists}, state}
+        {:reply, {:error, AlreadyExists.from_reason(:exists)}, state}
 
       {:error, :conflict, conflicting_id} ->
-        {:reply, {:error, :conflict, conflicting_id}, state}
+        {:reply, {:error, Conflict.from_reason(:conflict, conflicting_id)}, state}
 
       {:error, _} = err ->
         {:reply, err, state}
@@ -524,7 +524,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
         {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
 
       {:error, :conflict, conflicting_id} ->
-        {:reply, {:error, :conflict, conflicting_id}, state}
+        {:reply, {:error, Conflict.from_reason(:conflict, conflicting_id)}, state}
 
       {:error, _} = err ->
         {:reply, err, state}
@@ -553,7 +553,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
         {:reply, {:ok, claim_id}, track_claim(state, holder, claim_id)}
 
       {:error, :conflict, conflicting_id} ->
-        {:reply, {:error, :conflict, conflicting_id}, state}
+        {:reply, {:error, Conflict.from_reason(:conflict, conflicting_id)}, state}
 
       {:error, _} = err ->
         {:reply, err, state}
@@ -602,7 +602,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
         {:reply, {:error, :einval}, state}
 
       {:error, :conflict, conflicting_id} ->
-        {:reply, {:error, :conflict, conflicting_id}, state}
+        {:reply, {:error, Conflict.from_reason(:conflict, conflicting_id)}, state}
 
       {:error, _} = err ->
         {:reply, err, state}

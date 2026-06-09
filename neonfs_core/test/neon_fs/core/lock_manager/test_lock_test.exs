@@ -2,6 +2,7 @@ defmodule NeonFS.Core.LockManager.TestLockTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.Core.LockManager.FileLock
+  alias NeonFS.Error.Conflict
 
   setup do
     start_supervised!({Registry, keys: :unique, name: NeonFS.Core.LockManager.Registry})
@@ -24,7 +25,7 @@ defmodule NeonFS.Core.LockManager.TestLockTest do
     test "returns conflict when exclusive lock is held on overlapping range", %{pid: pid} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, ttl: 60_000)
 
-      assert {:error, :conflict, holder} =
+      assert {:error, %Conflict{conflicting: holder}} =
                FileLock.test_lock(pid, :client_b, {50, 50}, :shared)
 
       assert holder.type == :exclusive
@@ -34,7 +35,7 @@ defmodule NeonFS.Core.LockManager.TestLockTest do
     test "returns conflict when shared lock is held and testing exclusive", %{pid: pid} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :shared, ttl: 60_000)
 
-      assert {:error, :conflict, holder} =
+      assert {:error, %Conflict{conflicting: holder}} =
                FileLock.test_lock(pid, :client_b, {0, 100}, :exclusive)
 
       assert holder.type == :shared
@@ -54,7 +55,7 @@ defmodule NeonFS.Core.LockManager.TestLockTest do
       assert :ok =
                FileLock.lock(pid, {"host1", 42}, {0, 100}, :exclusive, ttl: 60_000)
 
-      assert {:error, :conflict, holder} =
+      assert {:error, %Conflict{conflicting: holder}} =
                FileLock.test_lock(pid, {"host2", 99}, {0, 100}, :exclusive)
 
       assert holder.svid == 42

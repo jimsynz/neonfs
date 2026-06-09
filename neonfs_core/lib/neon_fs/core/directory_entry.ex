@@ -24,6 +24,8 @@ defmodule NeonFS.Core.DirectoryEntry do
       }
   """
 
+  alias NeonFS.Error.AlreadyExists
+
   @type child_info :: %{type: :file | :dir, id: binary()}
 
   @type t :: %__MODULE__{
@@ -97,7 +99,7 @@ defmodule NeonFS.Core.DirectoryEntry do
   `{:error, :not_found}` otherwise.
   """
   @spec rename_child(t(), String.t(), String.t()) ::
-          {:ok, t()} | {:error, :not_found} | {:error, :already_exists}
+          {:ok, t()} | {:error, :not_found} | {:error, AlreadyExists.t()}
   def rename_child(%__MODULE__{} = entry, old_name, new_name)
       when is_binary(old_name) and is_binary(new_name) do
     cond do
@@ -105,7 +107,7 @@ defmodule NeonFS.Core.DirectoryEntry do
         {:error, :not_found}
 
       old_name != new_name and Map.has_key?(entry.children, new_name) ->
-        {:error, :already_exists}
+        {:error, AlreadyExists.from_reason(:already_exists, new_name)}
 
       true ->
         {child, remaining} = Map.pop(entry.children, old_name)

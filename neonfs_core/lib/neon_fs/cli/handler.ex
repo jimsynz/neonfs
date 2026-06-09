@@ -1125,7 +1125,7 @@ defmodule NeonFS.CLI.Handler do
 
         {:ok, volume_to_map(volume)}
       else
-        {:error, :already_exists} ->
+        {:error, %NeonFS.Error.AlreadyExists{}} ->
           {:error, Invalid.exception(message: "Volume '#{name}' already exists")}
 
         {:error, reason} ->

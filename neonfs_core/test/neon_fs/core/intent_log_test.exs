@@ -3,6 +3,7 @@ defmodule NeonFS.Core.IntentLogTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{Intent, IntentLog, RaServer}
+  alias NeonFS.Error.Conflict
 
   @moduletag :tmp_dir
 
@@ -67,7 +68,7 @@ defmodule NeonFS.Core.IntentLogTest do
       second = make_intent(id: "second-#{p}", conflict_key: key)
 
       assert {:ok, _} = IntentLog.try_acquire(first)
-      assert {:error, :conflict, existing} = IntentLog.try_acquire(second)
+      assert {:error, %Conflict{conflicting: existing}} = IntentLog.try_acquire(second)
       assert existing.id == "first-#{p}"
     end
 

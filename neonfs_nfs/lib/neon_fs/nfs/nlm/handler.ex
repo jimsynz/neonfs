@@ -216,7 +216,7 @@ defmodule NeonFS.NFS.NLM.Handler do
       :ok ->
         Codec.encode_testres(args.cookie, :granted)
 
-      {:error, :conflict, holder_info} ->
+      {:error, %NeonFS.Error.Conflict{conflicting: holder_info}} ->
         holder = %{
           exclusive: holder_info.type == :exclusive,
           svid: Map.get(holder_info, :svid, 0),

@@ -224,7 +224,7 @@ defmodule NeonFS.Docker.Plug do
   defp default_core_create(name, opts) do
     case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name, opts]) do
       {:ok, _volume} -> :ok
-      {:error, %{class: :already_exists}} -> :ok
+      {:error, %{class: :conflict}} -> :ok
       {:error, :already_exists} -> :ok
       {:error, reason} -> {:error, "core create_volume failed: #{inspect(reason)}"}
     end

@@ -388,8 +388,8 @@ defmodule NeonFS.FUSE.Handler do
     else
       {:error, :forbidden} -> {{"error", %{"errno" => errno(:eacces)}}, state}
       {:error, %{class: :forbidden}} -> {{"error", %{"errno" => errno(:eacces)}}, state}
-      {:error, :exists} -> {{"error", %{"errno" => errno(:eexist)}}, state}
-      {:error, :conflict, _} -> {{"error", %{"errno" => errno(:eagain)}}, state}
+      {:error, %NeonFS.Error.AlreadyExists{}} -> {{"error", %{"errno" => errno(:eexist)}}, state}
+      {:error, %NeonFS.Error.Conflict{}} -> {{"error", %{"errno" => errno(:eagain)}}, state}
       {:error, reason} -> log_create_failure_and_eio(reason, state)
     end
   end
@@ -571,7 +571,7 @@ defmodule NeonFS.FUSE.Handler do
         new_table = Map.put(state.flock_table, key, {claim_id, scope})
         {{"ok", %{}}, %{state | flock_table: new_table}}
 
-      {:error, :conflict, _conflicting_id} ->
+      {:error, %NeonFS.Error.Conflict{}} ->
         {{"error", %{"errno" => errno(:eagain)}}, state}
 
       _other ->
@@ -657,7 +657,7 @@ defmodule NeonFS.FUSE.Handler do
         new_table = Map.put(state.byte_range_table, key, claim_id)
         {{"ok", %{}}, %{state | byte_range_table: new_table}}
 
-      {:error, :conflict, _} ->
+      {:error, %NeonFS.Error.Conflict{}} ->
         {{"error", %{"errno" => errno(:eagain)}}, state}
 
       _ ->

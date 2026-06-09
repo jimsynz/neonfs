@@ -155,7 +155,7 @@ defmodule NeonFS.CSI.ControllerServer do
       {:ok, volume} ->
         %CreateVolumeResponse{volume: csi_volume_from(volume, requested_capacity(req))}
 
-      {:error, :exists} ->
+      {:error, %NeonFS.Error.AlreadyExists{}} ->
         case core_call(NeonFS.Core, :get_volume, [name]) do
           {:ok, volume} ->
             %CreateVolumeResponse{volume: csi_volume_from(volume, requested_capacity(req))}

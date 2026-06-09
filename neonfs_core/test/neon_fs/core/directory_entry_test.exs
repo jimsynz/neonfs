@@ -2,6 +2,7 @@ defmodule NeonFS.Core.DirectoryEntryTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.Core.DirectoryEntry
+  alias NeonFS.Error.AlreadyExists
 
   describe "new/3" do
     test "creates a directory entry with defaults" do
@@ -107,7 +108,7 @@ defmodule NeonFS.Core.DirectoryEntryTest do
         |> DirectoryEntry.add_child("a.txt", :file, "id-a")
         |> DirectoryEntry.add_child("b.txt", :file, "id-b")
 
-      assert {:error, :already_exists} = DirectoryEntry.rename_child(entry, "a.txt", "b.txt")
+      assert {:error, %AlreadyExists{}} = DirectoryEntry.rename_child(entry, "a.txt", "b.txt")
     end
 
     test "allows renaming to the same name" do

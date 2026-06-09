@@ -9,6 +9,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.Intent
+  alias NeonFS.Error.Conflict
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -300,7 +301,7 @@ defmodule NeonFS.Integration.MetadataTieringTest do
       result =
         PeerCluster.rpc(cluster, :node2, NeonFS.Core.IntentLog, :try_acquire, [intent2])
 
-      assert {:error, :conflict, existing} = result
+      assert {:error, %Conflict{conflicting: existing}} = result
       assert existing.id == intent1_id
 
       # Cleanup: complete the first intent

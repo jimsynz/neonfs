@@ -7,6 +7,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
   alias NeonFS.Core.Volume
   alias NeonFS.Core.VolumeEncryption
   alias NeonFS.Core.VolumeRegistry
+  alias NeonFS.Error.AlreadyExists
   alias NeonFS.Error.Invalid, as: InvalidError
 
   @moduletag :tmp_dir
@@ -263,8 +264,9 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
     test "create/1 rejects duplicate names" do
       assert {:ok, _} = VolumeRegistry.create("test-volume")
-      assert {:error, %InvalidError{message: msg}} = VolumeRegistry.create("test-volume")
-      assert msg =~ "already exists"
+
+      assert {:error, %AlreadyExists{resource: "test-volume"}} =
+               VolumeRegistry.create("test-volume")
     end
 
     test "get/1 retrieves volume by ID" do
@@ -455,7 +457,7 @@ defmodule NeonFS.Core.VolumeRegistryTest do
 
     test "create_system_volume/0 rejects duplicate creation" do
       assert {:ok, _} = VolumeRegistry.create_system_volume()
-      assert {:error, :already_exists} = VolumeRegistry.create_system_volume()
+      assert {:error, %AlreadyExists{}} = VolumeRegistry.create_system_volume()
     end
 
     test "get_system_volume/0 returns the system volume" do

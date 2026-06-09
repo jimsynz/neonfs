@@ -2,6 +2,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.Core.LockManager.FileLock
+  alias NeonFS.Error.Conflict
 
   setup do
     start_supervised!({Registry, keys: :unique, name: NeonFS.Core.LockManager.Registry})
@@ -126,7 +127,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
 
     test "rejects lease when another client holds one", %{pid: pid} do
       assert :ok = FileLock.grant_lease(pid, :client_a, :read_write, ttl: 60_000)
-      assert {:error, :conflict} = FileLock.grant_lease(pid, :client_b, :read, ttl: 60_000)
+      assert {:error, %Conflict{}} = FileLock.grant_lease(pid, :client_b, :read, ttl: 60_000)
     end
 
     test "same client can renew their lease type", %{pid: pid} do
