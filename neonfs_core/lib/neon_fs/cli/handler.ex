@@ -1226,7 +1226,7 @@ defmodule NeonFS.CLI.Handler do
         {:error, :not_found} ->
           {:error, VolumeNotFound.exception(volume_name: name)}
 
-        {:error, :permission_denied} ->
+        {:error, %{class: :forbidden}} ->
           {:error, PermissionDenied.exception(operation: :admin)}
 
         {:error, reason} ->

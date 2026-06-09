@@ -3,6 +3,7 @@ defmodule NeonFS.Core.AuthoriseTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{ACLManager, Authorise, RaServer, VolumeACL}
+  alias NeonFS.Error.PermissionDenied
 
   @moduletag :tmp_dir
 
@@ -55,7 +56,8 @@ defmodule NeonFS.Core.AuthoriseTest do
 
   describe "check/3 no ACL" do
     test "denies non-root users when no ACL exists" do
-      assert {:error, :forbidden} = Authorise.check(1000, :read, {:volume, "no-acl-volume"})
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(1000, :read, {:volume, "no-acl-volume"})
     end
   end
 
@@ -73,7 +75,8 @@ defmodule NeonFS.Core.AuthoriseTest do
         %{principal: {:uid, 1000}, permissions: MapSet.new([:read])}
       ])
 
-      assert {:error, :forbidden} = Authorise.check(1000, :write, {:volume, "vol-uid-deny"})
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(1000, :write, {:volume, "vol-uid-deny"})
     end
 
     test "denies access when UID not in ACL entries" do
@@ -81,7 +84,8 @@ defmodule NeonFS.Core.AuthoriseTest do
         %{principal: {:uid, 1000}, permissions: MapSet.new([:read])}
       ])
 
-      assert {:error, :forbidden} = Authorise.check(2000, :read, {:volume, "vol-uid-missing"})
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(2000, :read, {:volume, "vol-uid-missing"})
     end
   end
 
@@ -99,7 +103,7 @@ defmodule NeonFS.Core.AuthoriseTest do
         %{principal: {:gid, 100}, permissions: MapSet.new([:write])}
       ])
 
-      assert {:error, :forbidden} =
+      assert {:error, %PermissionDenied{}} =
                Authorise.check(1000, [200, 300], :write, {:volume, "vol-gid-deny"})
     end
   end
@@ -122,7 +126,9 @@ defmodule NeonFS.Core.AuthoriseTest do
 
       assert :ok = Authorise.check(1000, :write, {:volume, "vol-inherit-w"})
       assert :ok = Authorise.check(1000, :read, {:volume, "vol-inherit-w"})
-      assert {:error, :forbidden} = Authorise.check(1000, :admin, {:volume, "vol-inherit-w"})
+
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(1000, :admin, {:volume, "vol-inherit-w"})
     end
 
     test "read does not imply write or admin" do
@@ -131,8 +137,12 @@ defmodule NeonFS.Core.AuthoriseTest do
       ])
 
       assert :ok = Authorise.check(1000, :read, {:volume, "vol-inherit-r"})
-      assert {:error, :forbidden} = Authorise.check(1000, :write, {:volume, "vol-inherit-r"})
-      assert {:error, :forbidden} = Authorise.check(1000, :admin, {:volume, "vol-inherit-r"})
+
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(1000, :write, {:volume, "vol-inherit-r"})
+
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(1000, :admin, {:volume, "vol-inherit-r"})
     end
   end
 
@@ -148,7 +158,8 @@ defmodule NeonFS.Core.AuthoriseTest do
     test "mount denied without read permission" do
       setup_acl("vol-mount-deny", 500, 500)
 
-      assert {:error, :forbidden} = Authorise.check(1000, :mount, {:volume, "vol-mount-deny"})
+      assert {:error, %PermissionDenied{}} =
+               Authorise.check(1000, :mount, {:volume, "vol-mount-deny"})
     end
   end
 

@@ -12,6 +12,7 @@ defmodule NeonFS.Containerd.ContentServerReadTest do
   alias Containerd.Services.Content.V1.{ReadContentRequest, ReadContentResponse}
   alias GRPC.RPCError
   alias NeonFS.Containerd.{ContentServer, Digest, StubChunkReader}
+  alias NeonFS.Error.PermissionDenied
 
   setup do
     Application.put_env(:neonfs_containerd, :chunk_reader, StubChunkReader)
@@ -85,7 +86,7 @@ defmodule NeonFS.Containerd.ContentServerReadTest do
     end
 
     test "forbidden → PERMISSION_DENIED" do
-      StubChunkReader.set_response({:error, :forbidden})
+      StubChunkReader.set_response({:error, PermissionDenied.exception(operation: :read)})
 
       assert_grpc_status(:permission_denied, fn -> capture_replies(@valid_digest, 0, 0) end)
     end

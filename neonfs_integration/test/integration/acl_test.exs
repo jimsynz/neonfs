@@ -51,7 +51,7 @@ defmodule NeonFS.Integration.ACLTest do
           [uid: 1000]
         ])
 
-      assert {:error, :forbidden} = result
+      assert {:error, %{class: :forbidden}} = result
 
       # Write as root (UID 0) should succeed
       {:ok, _} =
@@ -248,7 +248,7 @@ defmodule NeonFS.Integration.ACLTest do
           {:file, vid, "/private.bin"}
         ])
 
-      assert {:error, :forbidden} = result
+      assert {:error, %{class: :forbidden}} = result
     end
   end
 

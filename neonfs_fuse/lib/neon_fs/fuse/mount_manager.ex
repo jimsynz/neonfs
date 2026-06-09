@@ -293,7 +293,7 @@ defmodule NeonFS.FUSE.MountManager do
            {:volume, volume.id}
          ]) do
       :ok -> :ok
-      {:error, :forbidden} -> {:error, :forbidden}
+      {:error, %{class: :forbidden}} = err -> err
       {:error, reason} -> {:error, reason}
     end
   end

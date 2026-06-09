@@ -21,16 +21,17 @@ defmodule NeonFS.Core.Authorise do
   """
 
   alias NeonFS.Core.{ACLManager, AuditLog, FileACL, FileIndex, VolumeACL}
+  alias NeonFS.Error.PermissionDenied
 
   @type action :: :read | :write | :admin | :mount
 
   @doc """
   Checks if a UID is authorised for an action on a resource.
 
-  Returns `:ok` if authorised, `{:error, :forbidden}` otherwise.
-  UID 0 (root) bypasses all permission checks.
+  Returns `:ok` if authorised, `{:error, %NeonFS.Error.PermissionDenied{}}`
+  otherwise. UID 0 (root) bypasses all permission checks.
   """
-  @spec check(non_neg_integer(), action(), term()) :: :ok | {:error, :forbidden}
+  @spec check(non_neg_integer(), action(), term()) :: :ok | {:error, PermissionDenied.t()}
   def check(uid, action, resource) do
     check(uid, [], action, resource)
   end
@@ -40,7 +41,7 @@ defmodule NeonFS.Core.Authorise do
   considering supplementary GIDs.
   """
   @spec check(non_neg_integer(), [non_neg_integer()], action(), term()) ::
-          :ok | {:error, :forbidden}
+          :ok | {:error, PermissionDenied.t()}
   def check(0, _gids, _action, _resource), do: :ok
 
   def check(uid, gids, action, {:volume, _volume_id} = resource) do
@@ -52,13 +53,11 @@ defmodule NeonFS.Core.Authorise do
           emit_granted(uid, action, resource)
           :ok
         else
-          emit_denied(uid, action, resource)
-          {:error, :forbidden}
+          denied(uid, gids, action, resource)
         end
 
       :no_acl ->
-        emit_denied(uid, action, resource)
-        {:error, :forbidden}
+        denied(uid, gids, action, resource)
     end
   end
 
@@ -73,14 +72,31 @@ defmodule NeonFS.Core.Authorise do
             :ok
 
           {:error, :forbidden} ->
-            emit_denied(uid, action, resource)
-            {:error, :forbidden}
+            denied(uid, gids, action, resource)
         end
 
       :no_acl ->
         # No file found — fall through to volume-level check
         check(uid, gids, action, {:volume, volume_id})
     end
+  end
+
+  defp denied(uid, gids, action, resource) do
+    emit_denied(uid, action, resource)
+
+    file_path =
+      case resource do
+        {:file, _volume_id, path} -> path
+        _ -> nil
+      end
+
+    {:error,
+     PermissionDenied.exception(
+       file_path: file_path,
+       operation: action,
+       uid: uid,
+       gid: List.first(gids)
+     )}
   end
 
   # Private
