@@ -217,6 +217,22 @@ defmodule NeonFS.Core.DriveRegistryTest do
     test "returns error for unknown drive" do
       assert {:error, :not_found} = DriveRegistry.update_usage("nonexistent", 100)
     end
+
+    test "updates the local drive, not a remote drive sharing the same id" do
+      remote_node = :"remote@127.0.0.1"
+
+      remote_drive =
+        %{id: "nvme0", path: "/mnt/remote/nvme0", tier: :hot, capacity: 1_000_000_000}
+        |> Drive.from_config(remote_node)
+        |> Map.put(:used_bytes, 777)
+
+      :ets.insert(:drive_registry, {{remote_node, "nvme0"}, remote_drive})
+
+      assert :ok = DriveRegistry.update_usage("nvme0", 100_000)
+
+      assert {:ok, %{used_bytes: 100_000}} = DriveRegistry.get_drive(Node.self(), "nvme0")
+      assert {:ok, %{used_bytes: 777}} = DriveRegistry.get_drive(remote_node, "nvme0")
+    end
   end
 
   describe "update_state/2" do

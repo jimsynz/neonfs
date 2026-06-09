@@ -367,14 +367,16 @@ defmodule NeonFS.Core.DriveRegistry do
     end
   end
 
+  # Drive ids are unique per node, not cluster-wide (every node tends to
+  # name its drives `drive1`, `drive2`, …). The registry holds remote
+  # drives too, keyed by `{node, drive_id}`, so a bare-id scan would match
+  # an arbitrary node's row. `deregister_drive`, `update_usage`, and
+  # `update_state` only ever target the local node's drives, so resolve
+  # against the local key directly.
   defp find_drive(table, drive_id) do
-    result =
-      :ets.tab2list(table)
-      |> Enum.find(fn {_key, drive} -> drive.id == drive_id end)
-
-    case result do
-      {key, drive} -> {:ok, key, drive}
-      nil -> :not_found
+    case :ets.lookup(table, {Node.self(), drive_id}) do
+      [{key, drive}] -> {:ok, key, drive}
+      [] -> :not_found
     end
   end
 
