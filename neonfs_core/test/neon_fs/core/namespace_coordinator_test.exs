@@ -3,7 +3,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
   use NeonFS.TestCase
 
   alias NeonFS.Core.{NamespaceCoordinator, RaServer}
-  alias NeonFS.Error.{AlreadyExists, Conflict}
+  alias NeonFS.Error.{AlreadyExists, Conflict, Invalid}
 
   @moduletag :tmp_dir
 
@@ -450,11 +450,11 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
     test "rejects rename into the source's own subtree (cycle)", %{server: server} do
       # /a -> /a/b/c is a cycle — destination sits under the source.
-      assert {:error, :einval} =
+      assert {:error, %Invalid{}} =
                NamespaceCoordinator.claim_rename(server, "/a", "/a/b/c")
 
       # Self-rename is also a cycle by the same rule (dst == src).
-      assert {:error, :einval} = NamespaceCoordinator.claim_rename(server, "/a", "/a")
+      assert {:error, %Invalid{}} = NamespaceCoordinator.claim_rename(server, "/a", "/a")
     end
 
     test "non-cycle cross-directory renames succeed", %{server: server} do

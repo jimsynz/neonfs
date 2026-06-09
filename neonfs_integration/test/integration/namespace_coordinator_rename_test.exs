@@ -29,7 +29,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
-  alias NeonFS.Error.Conflict
+  alias NeonFS.Error.{Conflict, Invalid}
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -180,9 +180,9 @@ defmodule NeonFS.Integration.NamespaceCoordinatorRenameTest do
         holder = start_holder(cluster, peer)
 
         try do
-          assert {:error, :einval} =
+          assert {:error, %Invalid{}} =
                    claim_rename_for(cluster, peer, root, descendant, holder),
-                 "expected :einval on #{inspect(peer)} for #{root} -> #{descendant}"
+                 "expected an Invalid error on #{inspect(peer)} for #{root} -> #{descendant}"
         after
           Agent.stop(holder)
         end

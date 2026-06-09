@@ -5,7 +5,7 @@ defmodule NeonFS.Core.FileIndexTest do
   import Bitwise
 
   alias NeonFS.Core.{ChunkIndex, ChunkMeta, DirectoryEntry, FileIndex, FileMeta}
-  alias NeonFS.Error.{AlreadyExists, QuorumUnavailable}
+  alias NeonFS.Error.{AlreadyExists, InvalidPath, QuorumUnavailable}
 
   @moduletag :tmp_dir
 
@@ -107,7 +107,7 @@ defmodule NeonFS.Core.FileIndexTest do
 
     test "rejects invalid paths" do
       file = %FileMeta{FileMeta.new("vol1", "/valid") | path: "no-leading-slash"}
-      assert {:error, :invalid_path} = FileIndex.create(file)
+      assert {:error, %InvalidPath{}} = FileIndex.create(file)
     end
 
     # #908/#1058: when MetadataWriter.put returns a quorum failure from

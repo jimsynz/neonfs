@@ -18,7 +18,7 @@ defmodule NeonFS.Core do
   alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
-  alias NeonFS.Error.{Conflict, Unavailable}
+  alias NeonFS.Error.{Conflict, Invalid, Unavailable}
 
   import Bitwise, only: [&&&: 2]
 
@@ -619,8 +619,8 @@ defmodule NeonFS.Core do
           safe_release_rename(claim)
         end
 
-      {:error, :einval} ->
-        {:error, :einval}
+      {:error, %Invalid{}} = err ->
+        err
 
       {:error, %Conflict{}} = err ->
         err

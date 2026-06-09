@@ -717,7 +717,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
           {:ok, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
            %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
 
-        {:error, :einval} ->
+        {:error, %{class: :invalid}} ->
           {:error, :inval, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
            %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
 

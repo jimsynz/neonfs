@@ -19,6 +19,8 @@ defmodule NeonFS.Core.FileMeta do
   fully GC'd. See sub-issue #638 of #306.
   """
 
+  alias NeonFS.Error.InvalidPath
+
   @type acl_entry :: %{
           type: :user | :group | :mask | :other,
           id: non_neg_integer() | nil,
@@ -196,30 +198,34 @@ defmodule NeonFS.Core.FileMeta do
       iex> FileMeta.validate_path("/valid/path.txt")
       :ok
 
-      iex> FileMeta.validate_path("no-leading-slash")
-      {:error, :invalid_path}
+      iex> match?({:error, %NeonFS.Error.InvalidPath{}}, FileMeta.validate_path("no-leading-slash"))
+      true
 
-      iex> FileMeta.validate_path("/../escape")
-      {:error, :invalid_path}
+      iex> match?({:error, %NeonFS.Error.InvalidPath{}}, FileMeta.validate_path("/../escape"))
+      true
   """
-  @spec validate_path(String.t()) :: :ok | {:error, :invalid_path}
+  @spec validate_path(String.t()) :: :ok | {:error, InvalidPath.t()}
   def validate_path(path) when is_binary(path) do
     cond do
       path == "" ->
-        {:error, :invalid_path}
+        invalid_path(path, "must not be empty")
 
       not String.starts_with?(path, "/") ->
-        {:error, :invalid_path}
+        invalid_path(path, "must start with '/'")
 
       String.contains?(path, "..") ->
-        {:error, :invalid_path}
+        invalid_path(path, "must not contain '..'")
 
       path != "/" and String.ends_with?(path, "/") ->
-        {:error, :invalid_path}
+        invalid_path(path, "must not end with '/'")
 
       true ->
         :ok
     end
+  end
+
+  defp invalid_path(path, reason) do
+    {:error, InvalidPath.exception(file_path: path, reason: reason)}
   end
 
   @doc """

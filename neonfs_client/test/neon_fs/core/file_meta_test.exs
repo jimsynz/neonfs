@@ -2,6 +2,7 @@ defmodule NeonFS.Core.FileMetaTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.Core.FileMeta
+  alias NeonFS.Error.InvalidPath
 
   describe "new/3" do
     test "creates with required fields and defaults" do
@@ -207,21 +208,21 @@ defmodule NeonFS.Core.FileMetaTest do
     end
 
     test "rejects empty path" do
-      assert {:error, :invalid_path} = FileMeta.validate_path("")
+      assert {:error, %InvalidPath{}} = FileMeta.validate_path("")
     end
 
     test "rejects path without leading slash" do
-      assert {:error, :invalid_path} = FileMeta.validate_path("no-slash")
+      assert {:error, %InvalidPath{}} = FileMeta.validate_path("no-slash")
     end
 
     test "rejects path with parent directory references" do
-      assert {:error, :invalid_path} = FileMeta.validate_path("/../escape")
-      assert {:error, :invalid_path} = FileMeta.validate_path("/dir/../other")
+      assert {:error, %InvalidPath{}} = FileMeta.validate_path("/../escape")
+      assert {:error, %InvalidPath{}} = FileMeta.validate_path("/dir/../other")
     end
 
     test "rejects trailing slash (except root)" do
-      assert {:error, :invalid_path} = FileMeta.validate_path("/dir/")
-      assert {:error, :invalid_path} = FileMeta.validate_path("/a/b/")
+      assert {:error, %InvalidPath{}} = FileMeta.validate_path("/dir/")
+      assert {:error, %InvalidPath{}} = FileMeta.validate_path("/a/b/")
     end
   end
 
