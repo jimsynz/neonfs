@@ -345,7 +345,7 @@ defmodule NeonFS.CIFS.Handler do
     opts = if exclusive?, do: [{:create_only, true} | base_opts], else: base_opts
 
     case core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume, path, 0, <<>>, opts]) do
-      {:error, :exists} -> {:error, :eexist}
+      {:error, %NeonFS.Error.AlreadyExists{}} -> {:error, :eexist}
       other -> other
     end
   end
@@ -386,6 +386,8 @@ defmodule NeonFS.CIFS.Handler do
   defp errno_for(:forbidden), do: :eacces
   defp errno_for(%{class: :forbidden}), do: :eacces
   defp errno_for(:already_exists), do: :eexist
+  defp errno_for(%NeonFS.Error.AlreadyExists{}), do: :eexist
+  defp errno_for(%NeonFS.Error.Conflict{}), do: :eagain
   defp errno_for(:directory_not_empty), do: :enotempty
   defp errno_for(:cross_volume), do: :exdev
   defp errno_for(:io_error), do: :eio

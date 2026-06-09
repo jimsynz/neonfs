@@ -7,13 +7,14 @@ defmodule NeonFS.Integration.WriteOperationCreateOnlyTest do
   Two concurrent streamed writes for the same new path, originating
   from different nodes, race through the namespace coordinator.
   Exactly one wins (`{:ok, _file_meta}`); the other gets
-  `{:error, :exists}`. The successful write's bytes are observable
+  `{:error, %AlreadyExists{}}`. The successful write's bytes are observable
   cluster-wide via `NeonFS.Core.read_file/2`.
   """
 
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.WriteOperation
+  alias NeonFS.Error.AlreadyExists
   alias NeonFS.TestSupport.PeerCluster
 
   @moduletag timeout: 300_000
@@ -83,10 +84,10 @@ defmodule NeonFS.Integration.WriteOperationCreateOnlyTest do
 
       {winner_node, winner_bytes} =
         case {r1, r2} do
-          {{:ok, _meta}, {:error, :exists}} ->
+          {{:ok, _meta}, {:error, %AlreadyExists{}}} ->
             {:node1, "from-node1"}
 
-          {{:error, :exists}, {:ok, _meta}} ->
+          {{:error, %AlreadyExists{}}, {:ok, _meta}} ->
             {:node2, "from-node2"}
 
           other ->
@@ -109,7 +110,7 @@ defmodule NeonFS.Integration.WriteOperationCreateOnlyTest do
       # A subsequent create_only write must also fail — the file is now
       # committed to FileIndex, even after the in-flight claim was
       # released.
-      assert {:error, :exists} =
+      assert {:error, %AlreadyExists{}} =
                PeerCluster.rpc(cluster, :node2, WriteOperation, :write_file_streamed, [
                  volume.id,
                  path,

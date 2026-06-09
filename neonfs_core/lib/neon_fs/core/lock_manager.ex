@@ -38,14 +38,14 @@ defmodule NeonFS.Core.LockManager do
   alias NeonFS.Core.LockManager.GraceCoordinator
   alias NeonFS.Core.LockManager.Supervisor, as: LockSupervisor
   alias NeonFS.Core.{MetadataRing, ServiceRegistry}
-  alias NeonFS.Error.Unavailable
+  alias NeonFS.Error.{Conflict, Unavailable}
 
   @type file_id :: binary()
 
   @doc """
   Acquires a byte-range lock on a file.
 
-  Returns `:ok` if the lock was granted, `{:error, :conflict}` if an
+  Returns `:ok` if the lock was granted, `{:error, %NeonFS.Error.Conflict{}}` if an
   incompatible lock is held and no waiting is possible, or blocks until
   the conflicting lock is released.
 
@@ -71,10 +71,10 @@ defmodule NeonFS.Core.LockManager do
   Tests whether a byte-range lock would conflict without acquiring it.
 
   Returns `:ok` if the lock would be granted, or
-  `{:error, :conflict, holder_info}` with details of the conflicting lock.
+  `{:error, %NeonFS.Error.Conflict{conflicting: holder_info}}` with details of the conflicting lock.
   """
   @spec test_lock(file_id(), FileLock.client_ref(), FileLock.range(), FileLock.lock_type()) ::
-          :ok | {:error, :conflict, map()} | {:error, Unavailable.t()}
+          :ok | {:error, Conflict.t()} | {:error, Unavailable.t()}
   def test_lock(file_id, client_ref, range, type) do
     master = master_for(file_id)
 
@@ -90,7 +90,7 @@ defmodule NeonFS.Core.LockManager do
 
   @doc false
   @spec local_test_lock(file_id(), FileLock.client_ref(), FileLock.range(), FileLock.lock_type()) ::
-          :ok | {:error, :conflict, map()}
+          :ok | {:error, Conflict.t()}
   def local_test_lock(file_id, client_ref, range, type) do
     case lookup_file_lock(file_id) do
       {:ok, pid} -> FileLock.test_lock(pid, client_ref, range, type)
@@ -162,7 +162,7 @@ defmodule NeonFS.Core.LockManager do
     * `:reclaim` — `true` to reclaim during a grace period (default: `false`)
   """
   @spec grant_lease(file_id(), FileLock.client_ref(), FileLock.lease_type(), keyword()) ::
-          :ok | {:error, :conflict | :grace_period | Unavailable.t()}
+          :ok | {:error, Conflict.t() | :grace_period | Unavailable.t()}
   def grant_lease(file_id, client_ref, lease_type, opts \\ []) do
     with :ok <- check_grace(file_id, opts) do
       with_file_lock(file_id, fn pid ->

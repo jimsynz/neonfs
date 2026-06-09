@@ -36,6 +36,8 @@ defmodule NeonFS.Core.FileIndex do
 
   alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, MetadataWriter}
 
+  alias NeonFS.Error.{AlreadyExists, Conflict}
+
   alias NeonFS.Events.Broadcaster
 
   alias NeonFS.Events.{
@@ -533,8 +535,8 @@ defmodule NeonFS.Core.FileIndex do
 
         {:ok, file}
       else
-        {:error, :conflict, _existing} ->
-          {:error, :already_exists}
+        {:error, %Conflict{}} ->
+          {:error, AlreadyExists.from_reason(:already_exists)}
 
         {:error, reason} ->
           {:error, reason}
@@ -1096,7 +1098,6 @@ defmodule NeonFS.Core.FileIndex do
   defp try_acquire_intent(intent) do
     case IntentLog.try_acquire(intent) do
       {:ok, intent_id} -> {:ok, intent_id}
-      {:error, :conflict, existing} -> {:error, :conflict, existing}
       {:error, %{class: :unavailable}} -> {:ok, intent.id}
       {:error, reason} -> {:error, reason}
     end

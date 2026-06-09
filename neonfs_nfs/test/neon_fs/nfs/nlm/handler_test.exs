@@ -1,7 +1,7 @@
 defmodule NeonFS.NFS.NLM.HandlerTest do
   use ExUnit.Case, async: true
 
-  alias NeonFS.Error.Unavailable
+  alias NeonFS.Error.{Conflict, Unavailable}
   alias NeonFS.NFS.NLM.{Codec, Handler}
   alias NeonFS.NFS.RPC.XDR
 
@@ -50,7 +50,13 @@ defmodule NeonFS.NFS.NLM.HandlerTest do
     test "returns denied when conflict exists" do
       core_call_fn = fn
         NeonFS.Core.LockManager, :test_lock, [_fid, _cref, _range, _type] ->
-          {:error, :conflict, %{type: :exclusive, range: {0, 100}, svid: 99, oh: <<>>}}
+          {:error,
+           Conflict.from_reason(:conflict, %{
+             type: :exclusive,
+             range: {0, 100},
+             svid: 99,
+             oh: <<>>
+           })}
 
         _, _, _ ->
           :ok

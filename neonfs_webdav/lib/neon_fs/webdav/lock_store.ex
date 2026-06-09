@@ -536,7 +536,7 @@ defmodule NeonFS.WebDAV.LockStore do
           {:ok, claim_id} when is_binary(claim_id) ->
             {:ok, claim_id}
 
-          {:error, :conflict, _conflicting_id} ->
+          {:error, %NeonFS.Error.Conflict{}} ->
             {:error, :conflict}
 
           {:error, _reason} ->

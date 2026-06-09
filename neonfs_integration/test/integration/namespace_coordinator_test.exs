@@ -28,6 +28,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
+  alias NeonFS.Error.Conflict
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -76,7 +77,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorTest do
       {:ok, claim_id} = claim_path_for(cluster, :node1, path, :exclusive, holder1)
 
       try do
-        assert {:error, :conflict, ^claim_id} =
+        assert {:error, %Conflict{conflicting: ^claim_id}} =
                  claim_path_for(cluster, :node2, path, :exclusive, holder2)
       after
         release_claim(cluster, :node1, claim_id)
@@ -95,7 +96,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorTest do
       {:ok, claim_id} = claim_subtree_for(cluster, :node1, root, :exclusive, holder1)
 
       try do
-        assert {:error, :conflict, ^claim_id} =
+        assert {:error, %Conflict{conflicting: ^claim_id}} =
                  claim_path_for(cluster, :node3, descendant, :exclusive, holder3)
       after
         release_claim(cluster, :node1, claim_id)
@@ -116,7 +117,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorTest do
       contender = start_holder(cluster, :node2)
 
       try do
-        assert {:error, :conflict, _} =
+        assert {:error, %Conflict{}} =
                  claim_path_for(cluster, :node2, path, :exclusive, contender)
 
         # Kill the holder. The leader's coordinator monitors the
@@ -194,7 +195,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorTest do
         release_claim(cluster, node_name, claim_id)
         :ok
 
-      {:error, :conflict, _} ->
+      {:error, %Conflict{}} ->
         if System.monotonic_time(:millisecond) > deadline do
           flunk("claim on #{path} was not released within 5s of holder death")
         else

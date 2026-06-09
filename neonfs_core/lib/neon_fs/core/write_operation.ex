@@ -43,7 +43,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   alias NeonFS.IO.{Operation, Scheduler}
 
-  alias NeonFS.Error.{Unavailable, VolumeNotFound}
+  alias NeonFS.Error.{AlreadyExists, Conflict, Unavailable, VolumeNotFound}
 
   require Logger
 
@@ -285,7 +285,7 @@ defmodule NeonFS.Core.WriteOperation do
   # — same posture `Core.with_namespace_claim/4` takes.
   defp with_create_claim(volume_id, path, fun) do
     case FileIndex.get_by_path(volume_id, path) do
-      {:ok, _} -> {:error, :exists}
+      {:ok, _} -> {:error, AlreadyExists.from_reason(:exists, path)}
       {:error, :not_found} -> claim_then_create(volume_id, path, fun)
     end
   end
@@ -301,11 +301,11 @@ defmodule NeonFS.Core.WriteOperation do
           safe_release_namespace_claim(claim_id)
         end
 
-      {:error, :exists} ->
-        {:error, :exists}
+      {:error, %AlreadyExists{}} = err ->
+        err
 
-      {:error, :conflict, _conflict_id} ->
-        {:error, :conflict}
+      {:error, %Conflict{}} = err ->
+        err
 
       {:error, _reason} ->
         # Coordinator unreachable — fall back to single-node correctness
@@ -322,7 +322,7 @@ defmodule NeonFS.Core.WriteOperation do
   # be caught here.
   defp recheck_then_create(volume_id, path, fun) do
     case FileIndex.get_by_path(volume_id, path) do
-      {:ok, _} -> {:error, :exists}
+      {:ok, _} -> {:error, AlreadyExists.from_reason(:exists, path)}
       {:error, :not_found} -> fun.()
     end
   end

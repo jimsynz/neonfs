@@ -2,11 +2,12 @@ defmodule NeonFS.Error do
   @moduledoc """
   Structured error system for NeonFS using splode.
 
-  Provides five error classes:
+  Provides six error classes:
 
     * `:invalid` — bad input, validation failures
     * `:not_found` — volume, file, chunk, or key not found
     * `:forbidden` — ACL/permission denied
+    * `:conflict` — resource already exists or is transiently contended
     * `:unavailable` — quorum loss, all nodes unreachable
     * `:internal` — unexpected failures, NIF errors
 
@@ -21,10 +22,12 @@ defmodule NeonFS.Error do
     * `NeonFS.Error.PermissionDenied`
     * `NeonFS.Error.InvalidPath`
     * `NeonFS.Error.InvalidConfig`
+    * `NeonFS.Error.AlreadyExists`
   """
 
   use Splode,
     error_classes: [
+      conflict: NeonFS.Error.Conflict,
       forbidden: NeonFS.Error.Forbidden,
       internal: NeonFS.Error.Internal,
       invalid: NeonFS.Error.Invalid,

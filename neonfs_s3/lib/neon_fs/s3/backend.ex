@@ -70,9 +70,14 @@ defmodule NeonFS.S3.Backend do
   @impl true
   def create_bucket(_ctx, bucket) do
     case call_core(:create_volume, [bucket]) do
-      {:ok, _volume} -> :ok
-      {:error, :already_exists} -> {:error, %Firkin.Error{code: :bucket_already_exists}}
-      {:error, reason} -> {:error, internal_error(reason)}
+      {:ok, _volume} ->
+        :ok
+
+      {:error, %NeonFS.Error.AlreadyExists{}} ->
+        {:error, %Firkin.Error{code: :bucket_already_exists}}
+
+      {:error, reason} ->
+        {:error, internal_error(reason)}
     end
   end
 

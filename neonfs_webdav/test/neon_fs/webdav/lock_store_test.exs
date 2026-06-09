@@ -2,6 +2,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
   use ExUnit.Case, async: false
 
   alias NeonFS.Core.FileMeta
+  alias NeonFS.Error.Conflict
   alias NeonFS.WebDAV.LockStore
 
   @file_path ["my-volume", "docs", "file.txt"]
@@ -470,7 +471,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
     test "coordinator-reported conflict refuses the lock" do
       setup_namespace_coordinator(fn :claim_path_for, _ ->
-        {:error, :conflict, "ns-claim-other"}
+        {:error, Conflict.from_reason(:conflict, "ns-claim-other")}
       end)
 
       assert {:error, :conflict} =
@@ -806,7 +807,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
     test "coordinator-reported conflict refuses the lock" do
       setup_namespace_coordinator(fn :claim_subtree_for, _ ->
-        {:error, :conflict, "ns-claim-99"}
+        {:error, Conflict.from_reason(:conflict, "ns-claim-99")}
       end)
 
       assert {:error, :conflict} =

@@ -28,6 +28,8 @@ defmodule NeonFS.Core.LockManager.FileLock do
 
   require Logger
 
+  alias NeonFS.Error.Conflict
+
   @default_ttl_ms 90_000
   @ttl_check_interval_ms 10_000
   @idle_timeout_ms 60_000
@@ -89,10 +91,11 @@ defmodule NeonFS.Core.LockManager.FileLock do
   Tests whether a byte-range lock would conflict without acquiring it.
 
   Returns `:ok` if the lock would be granted, or
-  `{:error, :conflict, holder_info}` with details of the conflicting lock.
+  `{:error, %NeonFS.Error.Conflict{conflicting: holder_info}}` with
+  details of the conflicting lock.
   """
   @spec test_lock(pid() | GenServer.name(), client_ref(), range(), lock_type()) ::
-          :ok | {:error, :conflict, map()}
+          :ok | {:error, Conflict.t()}
   def test_lock(server, client_ref, range, type) do
     GenServer.call(server, {:test_lock, client_ref, range, type})
   end
@@ -148,7 +151,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
   Grants a lease (oplock/delegation) on the file.
   """
   @spec grant_lease(pid() | GenServer.name(), client_ref(), lease_type(), keyword()) ::
-          :ok | {:error, :conflict}
+          :ok | {:error, Conflict.t()}
   def grant_lease(server, client_ref, lease_type, opts \\ []) do
     ttl = Keyword.get(opts, :ttl, @default_ttl_ms)
     break_callback = Keyword.get(opts, :break_callback)
@@ -264,7 +267,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
           oh: extract_oh(holder.client_ref)
         }
 
-        {:reply, {:error, :conflict, holder_info}, state, @idle_timeout_ms}
+        {:reply, {:error, Conflict.from_reason(:conflict, holder_info)}, state, @idle_timeout_ms}
     end
   end
 
@@ -374,7 +377,7 @@ defmodule NeonFS.Core.LockManager.FileLock do
         {:reply, :ok, new_state, @idle_timeout_ms}
 
       :conflict ->
-        {:reply, {:error, :conflict}, state, @idle_timeout_ms}
+        {:reply, {:error, Conflict.from_reason(:conflict)}, state, @idle_timeout_ms}
     end
   end
 

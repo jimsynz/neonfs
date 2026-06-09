@@ -4,6 +4,7 @@ defmodule NeonFS.CoreTest do
 
   alias NeonFS.Core
   alias NeonFS.Core.{FileIndex, NamespaceCoordinator, RaServer, VolumeRegistry}
+  alias NeonFS.Error.Conflict
 
   @moduletag :tmp_dir
 
@@ -352,7 +353,7 @@ defmodule NeonFS.CoreTest do
           :exclusive
         )
 
-      assert {:error, :busy} = Core.mkdir(vol_name, "/contended")
+      assert {:error, %Conflict{}} = Core.mkdir(vol_name, "/contended")
     end
 
     test "mkdir releases the claim on success", %{volume_name: vol_name, volume_id: volume_id} do
@@ -386,7 +387,7 @@ defmodule NeonFS.CoreTest do
           :exclusive
         )
 
-      assert {:error, :busy} = Core.delete_file(vol_name, "/contended-dir")
+      assert {:error, %Conflict{}} = Core.delete_file(vol_name, "/contended-dir")
     end
 
     test "delete_file releases the subtree claim on success", %{volume_name: vol_name} do
@@ -472,7 +473,7 @@ defmodule NeonFS.CoreTest do
       {:ok, _claim} =
         NamespaceCoordinator.claim_path(NamespaceCoordinator, key, :exclusive)
 
-      assert {:error, :busy} = Core.delete_file(vol_name, "/guarded.txt")
+      assert {:error, %Conflict{}} = Core.delete_file(vol_name, "/guarded.txt")
     end
   end
 

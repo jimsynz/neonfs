@@ -15,6 +15,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
+  alias NeonFS.Error.Conflict
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -140,7 +141,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorPinnedTest do
             holder_lock
           ])
 
-        assert {:error, :conflict, ^sub_id} =
+        assert {:error, %Conflict{conflicting: ^sub_id}} =
                  claim_pinned_for(cluster, :node2, pinned_path, holder_pin)
 
         release_claim(cluster, :node1, sub_id)

@@ -5,7 +5,7 @@ defmodule NeonFS.Core.FileIndexTest do
   import Bitwise
 
   alias NeonFS.Core.{ChunkIndex, ChunkMeta, DirectoryEntry, FileIndex, FileMeta}
-  alias NeonFS.Error.QuorumUnavailable
+  alias NeonFS.Error.{AlreadyExists, QuorumUnavailable}
 
   @moduletag :tmp_dir
 
@@ -574,7 +574,7 @@ defmodule NeonFS.Core.FileIndexTest do
       {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/a.txt"))
       {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/b.txt"))
 
-      assert {:error, :already_exists} = FileIndex.rename("vol1", "/", "a.txt", "b.txt")
+      assert {:error, %AlreadyExists{}} = FileIndex.rename("vol1", "/", "a.txt", "b.txt")
     end
   end
 

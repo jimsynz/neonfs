@@ -4,7 +4,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
   of #303). Validates that the foundation primitive coordinates
   atomic create-if-not-exist across nodes — exactly one of two
   concurrent claim_create calls on different nodes wins for the same
-  path; the other gets `{:error, :exists}`.
+  path; the other gets `{:error, %AlreadyExists{}}`.
 
   Sibling to `namespace_coordinator_test.exs`. Holders are short-lived
   Agents started on each peer so the RPC handler's exit doesn't drop
@@ -14,6 +14,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
   use NeonFS.TestSupport.ClusterCase, async: false
 
   alias NeonFS.Core.NamespaceCoordinator
+  alias NeonFS.Error.AlreadyExists
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -38,7 +39,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
         # leader serialises the underlying commands, so exactly one
         # `:claim_namespace_create` apply sees a fresh state and wins.
         # The other observes the already-allocated claim and returns
-        # `{:error, :exists}`.
+        # `{:error, %AlreadyExists{}}`.
         parent = self()
 
         spawn_link(fn ->
@@ -65,11 +66,11 @@ defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
 
         # Exactly one :ok and one :exists, in some order.
         case {result1, result2} do
-          {{:ok, claim_id}, {:error, :exists}} ->
+          {{:ok, claim_id}, {:error, %AlreadyExists{}}} ->
             assert is_binary(claim_id)
             release_claim(cluster, :node1, claim_id)
 
-          {{:error, :exists}, {:ok, claim_id}} ->
+          {{:error, %AlreadyExists{}}, {:ok, claim_id}} ->
             assert is_binary(claim_id)
             release_claim(cluster, :node2, claim_id)
 
@@ -122,7 +123,7 @@ defmodule NeonFS.Integration.NamespaceCoordinatorCreateTest do
       try do
         {:ok, claim_id} = claim_create_for(cluster, :node1, path, holder1)
 
-        assert {:error, :exists} = claim_create_for(cluster, :node3, path, holder3)
+        assert {:error, %AlreadyExists{}} = claim_create_for(cluster, :node3, path, holder3)
 
         :ok = release_claim(cluster, :node1, claim_id)
 

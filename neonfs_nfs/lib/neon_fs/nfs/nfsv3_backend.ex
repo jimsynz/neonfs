@@ -380,7 +380,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
       {:ok, %FileMeta{} = meta} ->
         ok_create_reply(meta, vol_name, dir_path, pre_dir_wcc)
 
-      {:error, :exists} ->
+      {:error, %NeonFS.Error.AlreadyExists{}} ->
         {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->
@@ -448,6 +448,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # noisy diagnostic at the right layer.
   @spec to_nfs_status(term()) :: atom()
   defp to_nfs_status(:not_found), do: :noent
+  defp to_nfs_status(%NeonFS.Error.AlreadyExists{}), do: :exist
   defp to_nfs_status(:exists), do: :exist
   defp to_nfs_status(:permission_denied), do: :acces
   defp to_nfs_status(:invalid_argument), do: :inval
@@ -499,7 +500,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
              %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
         end
 
-      {:error, :eexist} ->
+      {:error, %NeonFS.Error.AlreadyExists{}} ->
         {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->

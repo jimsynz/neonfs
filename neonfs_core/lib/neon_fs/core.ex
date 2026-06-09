@@ -18,7 +18,7 @@ defmodule NeonFS.Core do
   alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
-  alias NeonFS.Error.Unavailable
+  alias NeonFS.Error.{Conflict, Unavailable}
 
   import Bitwise, only: [&&&: 2]
 
@@ -594,8 +594,8 @@ defmodule NeonFS.Core do
           safe_release(claim_id)
         end
 
-      {:error, :conflict, _conflict_id} ->
-        {:error, :busy}
+      {:error, %Conflict{}} ->
+        {:error, Conflict.from_reason(:busy)}
 
       {:error, _reason} ->
         fun.()
@@ -622,8 +622,8 @@ defmodule NeonFS.Core do
       {:error, :einval} ->
         {:error, :einval}
 
-      {:error, :conflict, _conflict_id} ->
-        {:error, :conflict}
+      {:error, %Conflict{}} = err ->
+        err
 
       {:error, _reason} ->
         # Coordinator unavailable (no Ra cluster, network split, etc.).

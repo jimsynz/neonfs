@@ -9,6 +9,7 @@ defmodule NeonFS.S3.Test.MockCore do
 
   alias NeonFS.Core.FileMeta
   alias NeonFS.Core.Volume
+  alias NeonFS.Error.AlreadyExists
 
   @spec setup :: :ok
   def setup do
@@ -49,7 +50,7 @@ defmodule NeonFS.S3.Test.MockCore do
     volumes = Process.get(:mock_volumes, %{})
 
     if Map.has_key?(volumes, name) do
-      {:error, :already_exists}
+      {:error, AlreadyExists.from_reason(:already_exists)}
     else
       volume = Volume.new(name)
       Process.put(:mock_volumes, Map.put(volumes, name, volume))

@@ -156,7 +156,7 @@ defmodule NeonFS.WebDAV.Backend do
       # `:exists` from `WriteOperation` with `create_only: true` is the
       # RFC 7232 `If-None-Match: *` precondition failure (sub-issue #593
       # of #303). Davy maps `:precondition_failed` to HTTP 412.
-      {:error, :exists} ->
+      {:error, %NeonFS.Error.AlreadyExists{}} ->
         {:error,
          %Davy.Error{
            code: :precondition_failed,
@@ -333,10 +333,20 @@ defmodule NeonFS.WebDAV.Backend do
     case resolve_volume(volume_name) do
       {:ok, _volume} ->
         case call_core(:mkdir, [volume_name, dir_path]) do
-          {:ok, _meta} -> :ok
-          :ok -> :ok
-          {:error, :already_exists} -> {:error, %Davy.Error{code: :method_not_allowed}}
-          {:error, _reason} -> {:error, internal_error()}
+          {:ok, _meta} ->
+            :ok
+
+          :ok ->
+            :ok
+
+          {:error, %NeonFS.Error.AlreadyExists{}} ->
+            {:error, %Davy.Error{code: :method_not_allowed}}
+
+          {:error, :already_exists} ->
+            {:error, %Davy.Error{code: :method_not_allowed}}
+
+          {:error, _reason} ->
+            {:error, internal_error()}
         end
 
       {:error, :not_found} ->
