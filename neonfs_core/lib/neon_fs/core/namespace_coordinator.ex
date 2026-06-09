@@ -52,7 +52,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   require Logger
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
-  alias NeonFS.Error.{AlreadyExists, Conflict, Unavailable}
+  alias NeonFS.Error.{AlreadyExists, Conflict, Invalid, Unavailable}
 
   @typedoc "Opaque claim id returned by the coordinator on success."
   @type claim_id :: String.t()
@@ -396,7 +396,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   @spec claim_rename(GenServer.server(), String.t(), String.t()) ::
           {:ok, rename_claim_id()}
           | {:error, Conflict.t()}
-          | {:error, :einval}
+          | {:error, Invalid.t()}
           | {:error, term()}
   def claim_rename(server \\ __MODULE__, src, dst) when is_binary(src) and is_binary(dst) do
     claim_rename_for(server, src, dst, self())
@@ -409,7 +409,7 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   @spec claim_rename_for(GenServer.server(), String.t(), String.t(), pid()) ::
           {:ok, rename_claim_id()}
           | {:error, Conflict.t()}
-          | {:error, :einval}
+          | {:error, Invalid.t()}
           | {:error, term()}
   def claim_rename_for(server \\ __MODULE__, src, dst, holder)
       when is_binary(src) and is_binary(dst) and is_pid(holder) do
@@ -599,7 +599,10 @@ defmodule NeonFS.Core.NamespaceCoordinator do
         {:reply, {:ok, {src_id, dst_id}}, state}
 
       {:error, :einval} ->
-        {:reply, {:error, :einval}, state}
+        {:reply,
+         {:error,
+          Invalid.exception(message: "rename target must not be a descendant of the source")},
+         state}
 
       {:error, :conflict, conflicting_id} ->
         {:reply, {:error, Conflict.from_reason(:conflict, conflicting_id)}, state}

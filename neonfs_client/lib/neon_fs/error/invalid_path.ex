@@ -4,6 +4,8 @@ defmodule NeonFS.Error.InvalidPath do
   """
   use Splode.Error, fields: [:file_path, :reason], class: :invalid
 
+  @type t :: %__MODULE__{}
+
   @impl true
   def message(%{file_path: path, reason: reason}) when is_binary(path) and not is_nil(reason) do
     "Invalid path '#{path}': #{reason}"

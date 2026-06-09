@@ -4,7 +4,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
   import Bitwise, only: [<<<: 2]
 
   alias NeonFS.Core.FileMeta
-  alias NeonFS.Error.AlreadyExists
+  alias NeonFS.Error.{AlreadyExists, Invalid}
   alias NeonFS.NFS.{Filehandle, NFSv3Backend}
   alias NFSServer.NFSv3.Types.Fattr3
 
@@ -623,11 +623,16 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre_to = file_meta(%{path: "/from", mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, _ -> {:ok, pre_from}
-        # `Core.rename_file` returns `{:error, :einval}` for cycles per
+        NeonFS.Core, :get_file_meta, _ ->
+          {:ok, pre_from}
+
+        # `Core.rename_file` returns a structured `Invalid` for cycles per
         # the namespace coordinator's `claim_rename` check (#304).
-        NeonFS.Core, :rename_file, _ -> {:error, :einval}
-        _, _, _ -> {:ok, pre_to}
+        NeonFS.Core, :rename_file, _ ->
+          {:error, Invalid.exception(message: "rename target must not be a descendant")}
+
+        _, _, _ ->
+          {:ok, pre_to}
       end)
 
       from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)

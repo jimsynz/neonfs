@@ -43,7 +43,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   alias NeonFS.IO.{Operation, Scheduler}
 
-  alias NeonFS.Error.{AlreadyExists, Conflict, Unavailable, VolumeNotFound}
+  alias NeonFS.Error.{AlreadyExists, Conflict, Unavailable, Unsupported, VolumeNotFound}
 
   require Logger
 
@@ -386,7 +386,7 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp do_write_streamed(%{durability: %{type: :erasure}}, _path, _stream, _write_id, _opts) do
-    {:error, :streaming_writes_not_supported_for_erasure}
+    {:error, Unsupported.for_capability(:streaming_writes_for_erasure)}
   end
 
   defp do_write_streamed(volume, path, stream, write_id, opts) do

@@ -14,7 +14,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     WriteOperation
   }
 
-  alias NeonFS.Error.{AlreadyExists, VolumeNotFound}
+  alias NeonFS.Error.{AlreadyExists, Unsupported, VolumeNotFound}
 
   @moduletag :tmp_dir
 
@@ -312,7 +312,7 @@ defmodule NeonFS.Core.WriteOperationTest do
           durability: %{type: :erasure, data_chunks: 2, parity_chunks: 1}
         )
 
-      assert {:error, :streaming_writes_not_supported_for_erasure} =
+      assert {:error, %Unsupported{}} =
                WriteOperation.write_file_streamed(erasure_volume.id, "/x.bin", ["data"])
     end
 
