@@ -287,7 +287,7 @@ Copy the shape from the most recently landed interface package (currently `neonf
 1. **Scaffold**: `lib/neon_fs/<name>/{application.ex, supervisor.ex, health_check.ex, plug.ex | handler.ex}`.
 2. **Supervisor**: service-local state (VolumeStore / MountTracker / cache) → `NeonFS.Client.Registrar` (type `:<name>`) → protocol listener. Strategy `:one_for_one`.
 3. **Application**: `start_link()` first, then `HealthCheck.register_checks()`, then (if not omnibus) `NeonFS.Systemd.notify_ready()`. The `unless Application.spec(:neonfs_omnibus)` guard is critical — omnibus coordinates sd_notify itself.
-4. **Release**: `rel/vm.args.eex` + `rel/env.sh.eex` following the `neonfs_nfs` template (custom EPMD, cookie from `/var/lib/neonfs/.erlang.cookie`, optional TLS-distribution config).
+4. **Release**: `rel/vm.args.eex` + `rel/env.sh.eex` following the `neonfs_nfs` template (custom EPMD, constant cookie, optional TLS-distribution config).
 5. **Container**: `containers/Containerfile.<name>` (three-stage Debian trixie, mirror `Containerfile.nfs`), add `contexts = { client, src, base, cli }` entry in `bake.hcl`.
 6. **Debian packaging**: `packaging/nfpm/neonfs-<name>.yaml` + `packaging/systemd/neonfs-<name>.{service,-daemon}`. Append the new name to every relevant list: `build-debs.sh` build loop + nfpm package loop, `post-install.sh`, `pre-remove.sh`, `release.yml` amd64 + arm64 matrix.
 7. **Omnibus integration**: add as optional dep in `neonfs_omnibus/mix.exs`, start via `neonfs_omnibus/lib/neon_fs/omnibus/application.ex`.

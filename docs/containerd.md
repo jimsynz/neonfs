@@ -72,7 +72,7 @@ PLATFORMS='linux/amd64' docker buildx bake \
 ### Debian package
 
 `apt install neonfs-containerd` after enabling the NeonFS apt repo.
-The package depends on `neonfs-common` (cookie / TLS material) and
+The package depends on `neonfs-common` (TLS material) and
 `neonfs-cli`; it conflicts with `neonfs-omnibus` (the all-in-one
 package ships the plugin already).
 

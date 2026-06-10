@@ -1,7 +1,8 @@
 ## VM arguments for neonfs_fuse
 
 ## Name of the node (set via RELEASE_NODE environment variable)
-## Cookie for distributed Erlang (set via RELEASE_COOKIE environment variable)
+## Cookie for distributed Erlang is the constant "neonfs" (set in env.sh) —
+## mutual TLS is the authentication boundary (#1136)
 
 ## Heartbeat management; auto-restarts VM if it dies or becomes unresponsive
 ## (Disabled by default..use with caution!)

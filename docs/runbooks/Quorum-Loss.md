@@ -86,7 +86,7 @@ This is the low-risk path. The cluster will resume when the partition heals.
 # Reapply network / firewall / DNS fix. Verify with a distribution
 # handshake test from a minority node:
 ssh <minority-host> \
-  "erl -name ping@<minority-host> -setcookie $(cat /var/lib/neonfs/.erlang.cookie) \
+  "erl -name ping@<minority-host> -setcookie neonfs \
    -noshell -eval 'net_kernel:connect_node(<peer>@<peer-host>), halt().'"
 ```
 

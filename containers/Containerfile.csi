@@ -43,7 +43,7 @@ ENV LC_ALL=en_NZ.UTF-8
 WORKDIR "/app"
 RUN chown nobody /app
 
-# Persistent state (cookie, TLS material). The CSI socket directory is
+# Persistent state (TLS material). The CSI socket directory is
 # mounted in from the host by the Helm chart, so no in-image dir is
 # needed for it.
 RUN mkdir -p /var/lib/neonfs && chown -R nobody:nogroup /var/lib/neonfs

@@ -7,9 +7,8 @@ defmodule NeonFS.Cluster.InviteRedemption do
   contains a CSR and proof of invite token possession — the token itself
   never traverses the network.
 
-  The response (containing the cluster CA cert, signed node cert, and
-  cookie) is encrypted with AES-256-GCM using a key derived from the
-  invite token.
+  The response (containing the cluster CA cert and signed node cert) is
+  encrypted with AES-256-GCM using a key derived from the invite token.
 
   ## Security properties
 
@@ -67,9 +66,8 @@ defmodule NeonFS.Cluster.InviteRedemption do
          :ok <- check_expiry(token_expiry_str),
          :ok <- verify_proof(csr_pem, token, proof_b64),
          {:ok, csr} <- decode_and_validate_csr(csr_pem),
-         {:ok, node_cert_pem, ca_cert_pem} <- sign_csr(csr, node_name),
-         {:ok, cookie} <- get_cookie() do
-      response = build_response(ca_cert_pem, node_cert_pem, cookie)
+         {:ok, node_cert_pem, ca_cert_pem} <- sign_csr(csr, node_name) do
+      response = build_response(ca_cert_pem, node_cert_pem)
       encrypted = encrypt_response(response, token)
 
       Logger.info("Invite redeemed successfully", node_name: node_name)
@@ -177,16 +175,10 @@ defmodule NeonFS.Cluster.InviteRedemption do
     end
   end
 
-  defp get_cookie do
-    cookie = Node.get_cookie() |> Atom.to_string()
-    {:ok, cookie}
-  end
-
-  defp build_response(ca_cert_pem, node_cert_pem, cookie) do
+  defp build_response(ca_cert_pem, node_cert_pem) do
     %{
       "ca_cert_pem" => ca_cert_pem,
       "node_cert_pem" => node_cert_pem,
-      "cookie" => cookie,
       "via_node" => Atom.to_string(Node.self()),
       "via_dist_port" => local_dist_port()
     }

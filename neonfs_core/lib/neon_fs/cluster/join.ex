@@ -161,12 +161,10 @@ defmodule NeonFS.Cluster.Join do
   Join a cluster via direct RPC (for testing or pre-connected nodes).
 
   Unlike `join_cluster/3` which uses HTTP for credential exchange, this
-  function uses direct Erlang RPC to the via node. This requires that:
-  - The joining node is already connected to the via node
-  - The cookie is already set correctly
+  function uses direct Erlang RPC to the via node. This requires that
+  the joining node is already connected to the via node.
 
-  Used by integration tests where nodes share a cookie and metrics HTTP
-  server is not running.
+  Used by integration tests where the metrics HTTP server is not running.
   """
   @spec join_cluster_rpc(String.t(), atom(), ServiceType.t()) ::
           {:ok, State.t()} | {:error, term()}
@@ -522,11 +520,8 @@ defmodule NeonFS.Cluster.Join do
   end
 
   defp activate_cluster_distribution(credentials) do
-    cookie = credentials["cookie"] |> String.to_atom()
     via_node = credentials["via_node"] |> String.to_atom()
     via_dist_port = credentials["via_dist_port"]
-
-    :erlang.set_cookie(Node.self(), cookie)
 
     if is_integer(via_dist_port) and via_dist_port > 0 do
       System.put_env("NEONFS_PEER_PORTS", "#{via_node}:#{via_dist_port}")

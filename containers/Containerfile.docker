@@ -44,7 +44,7 @@ RUN chown nobody /app
 # from the host so dockerd can discover the plugin's Unix socket.
 RUN mkdir -p /run/docker/plugins && chown -R nobody:nogroup /run/docker/plugins
 
-# Persistent state (volume metadata, cookie, TLS material)
+# Persistent state (volume metadata, TLS material)
 RUN mkdir -p /var/lib/neonfs && chown -R nobody:nogroup /var/lib/neonfs
 
 VOLUME ["/var/lib/neonfs", "/run/docker/plugins"]

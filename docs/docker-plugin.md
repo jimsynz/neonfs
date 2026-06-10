@@ -51,7 +51,6 @@ docker run -d --name neonfs-docker \
   -v /etc/docker/plugins:/etc/docker/plugins \
   -v /var/lib/neonfs:/var/lib/neonfs \
   -e NEONFS_CORE_NODE=neonfs_core@neonfs-core.example \
-  -e RELEASE_COOKIE=$(cat /var/lib/neonfs/.erlang.cookie) \
   ghcr.io/jimsynz/neonfs/docker:latest
 ```
 
@@ -66,7 +65,6 @@ The defaults try to pick reasonable values from `/var/lib/neonfs/`. Override per
 | `NEONFS_CORE_NODE` | `neonfs_core@$(hostname -f)` | Erlang node name of the core to talk to. |
 | `NEONFS_DOCKER_NODE` | `neonfs_docker@$(hostname -f)` | This node's name. |
 | `NEONFS_DIST_PORT` | random 49152–65535, persisted | Erlang distribution listen port. |
-| `RELEASE_COOKIE_PATH` | `/var/lib/neonfs/.erlang.cookie` | Where to read the shared cookie. |
 | Application env `:neonfs_docker, :fuse_node` | `Node.self()` | Erlang node hosting `NeonFS.FUSE.MountManager`. Override when neonfs_docker and neonfs_fuse run as separate BEAMs on the same host. |
 | Application env `:neonfs_docker, :mount_root` | `/var/lib/neonfs-docker/mounts` | Directory under which per-volume mount points are created. |
 | Application env `:neonfs_docker, :socket_path` | `/run/neonfs/docker.sock` | Path of the plugin's Unix socket. The packaged `/etc/docker/plugins/neonfs.spec` points here; if you change this, update the spec file too. |

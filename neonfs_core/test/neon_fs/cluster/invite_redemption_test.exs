@@ -10,7 +10,6 @@ defmodule NeonFS.Cluster.InviteRedemptionTest do
       response = %{
         "ca_cert_pem" => "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----",
         "node_cert_pem" => "-----BEGIN CERTIFICATE-----\nfake2\n-----END CERTIFICATE-----",
-        "cookie" => "test_cookie_12345",
         "via_node" => "neonfs_core@node1"
       }
 
@@ -26,7 +25,7 @@ defmodule NeonFS.Cluster.InviteRedemptionTest do
       encrypted = iv <> tag <> ciphertext
 
       assert {:ok, decrypted} = InviteRedemption.decrypt_response(encrypted, token)
-      assert decrypted["cookie"] == "test_cookie_12345"
+      assert decrypted["node_cert_pem"] =~ "BEGIN CERTIFICATE"
       assert decrypted["via_node"] == "neonfs_core@node1"
       assert decrypted["ca_cert_pem"] =~ "BEGIN CERTIFICATE"
     end
@@ -35,7 +34,7 @@ defmodule NeonFS.Cluster.InviteRedemptionTest do
       token = "nfs_inv_abc123_9999999999_sig456"
       wrong_token = "nfs_inv_xyz789_9999999999_other00"
 
-      plaintext = :json.encode(%{"cookie" => "secret"}) |> IO.iodata_to_binary()
+      plaintext = :json.encode(%{"ca_cert_pem" => "secret"}) |> IO.iodata_to_binary()
 
       key = :crypto.mac(:hmac, :sha256, "neonfs-invite-response", token)
       iv = :crypto.strong_rand_bytes(12)

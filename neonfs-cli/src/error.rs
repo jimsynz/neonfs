@@ -62,15 +62,6 @@ pub enum CliError {
     #[error("{0}")]
     ConnectionFailed(String),
 
-    // Cookie authentication errors
-    /// Cookie file not found
-    #[error("{0}")]
-    CookieNotFound(String),
-
-    /// Failed to read cookie file
-    #[error("{0}")]
-    CookieReadError(String),
-
     // RPC errors
     /// RPC call failed
     #[error("RPC call failed: {0}")]

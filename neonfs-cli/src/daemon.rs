@@ -35,8 +35,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-/// Default cookie file location
-const DEFAULT_COOKIE_PATH: &str = "/var/lib/neonfs/.erlang.cookie";
+/// The cluster-wide constant cookie. Distribution security comes from
+/// mutual TLS (cluster-CA-issued certificates), not the cookie (#1136).
+const CONSTANT_COOKIE: &str = "neonfs";
 
 /// Default daemon node name (last resort fallback)
 const DEFAULT_DAEMON_NODE: &str = "neonfs@localhost";
@@ -188,7 +189,7 @@ impl DaemonConnection {
     }
 
     async fn connect_to(daemon_node: &str) -> Result<Self> {
-        let cookie = read_cookie(DEFAULT_COOKIE_PATH)?;
+        let cookie = cookie();
         let node_name: NodeName = daemon_node.parse().map_err(|e| {
             CliError::ConnectionFailed(format!("Invalid node name '{}': {}", daemon_node, e))
         })?;
@@ -661,58 +662,38 @@ fn read_dist_port() -> Result<u16> {
     })
 }
 
-/// Read the Erlang cookie from environment variable or file
-fn read_cookie(path: &str) -> Result<String> {
+/// The Erlang cookie: the `NEONFS_COOKIE` env override (used by
+/// integration tests whose peer clusters run with per-run cookies),
+/// otherwise the cluster-wide constant.
+fn cookie() -> String {
     if let Ok(cookie) = std::env::var("NEONFS_COOKIE") {
         let cookie = cookie.trim().to_string();
         if !cookie.is_empty() {
-            return Ok(cookie);
+            return cookie;
         }
     }
 
-    let path_obj = Path::new(path);
-
-    if !path_obj.exists() {
-        return Err(CliError::CookieNotFound(format!(
-            "Cookie file not found at {}. Is the NeonFS daemon running?",
-            path
-        )));
-    }
-
-    // audit:bounded Erlang cookie file holds a single short atom
-    fs::read_to_string(path_obj)
-        .map(|s| s.trim().to_string())
-        .map_err(|e| CliError::CookieReadError(format!("Failed to read cookie file: {}", e)))
+    CONSTANT_COOKIE.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
+    // One test covers default, override, and whitespace trimming
+    // sequentially — Rust runs tests in parallel, and NEONFS_COOKIE is
+    // process-global, so splitting these into separate tests races.
     #[test]
-    fn test_read_cookie_success() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "test_cookie_123").unwrap();
+    fn test_cookie_env_override_and_default() {
+        std::env::remove_var("NEONFS_COOKIE");
+        assert_eq!(cookie(), CONSTANT_COOKIE);
 
-        let cookie = read_cookie(temp_file.path().to_str().unwrap()).unwrap();
-        assert_eq!(cookie, "test_cookie_123");
-    }
+        std::env::set_var("NEONFS_COOKIE", "  per_run_cookie  ");
+        assert_eq!(cookie(), "per_run_cookie");
 
-    #[test]
-    fn test_read_cookie_trims_whitespace() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "  test_cookie_456  ").unwrap();
+        std::env::set_var("NEONFS_COOKIE", "   ");
+        assert_eq!(cookie(), CONSTANT_COOKIE);
 
-        let cookie = read_cookie(temp_file.path().to_str().unwrap()).unwrap();
-        assert_eq!(cookie, "test_cookie_456");
-    }
-
-    #[test]
-    fn test_read_cookie_not_found() {
-        let result = read_cookie("/nonexistent/path/.erlang.cookie");
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), CliError::CookieNotFound(_)));
+        std::env::remove_var("NEONFS_COOKIE");
     }
 }

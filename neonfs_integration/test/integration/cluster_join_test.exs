@@ -181,7 +181,6 @@ defmodule NeonFS.Integration.ClusterJoinTest do
 
       assert is_binary(credentials["ca_cert_pem"])
       assert is_binary(credentials["node_cert_pem"])
-      assert is_binary(credentials["cookie"])
       assert is_binary(credentials["via_node"])
 
       assert credentials["ca_cert_pem"] =~ "BEGIN CERTIFICATE"

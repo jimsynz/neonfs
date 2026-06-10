@@ -98,7 +98,6 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_core@neonfs-core-{{.Task.Slot}}"
-      RELEASE_COOKIE_FILE: "/run/secrets/erlang_cookie"
       NEONFS_DATA_DIR: "/var/lib/neonfs/data"
       NEONFS_AUTO_BOOTSTRAP: "true"
       NEONFS_CLUSTER_NAME: "production"
@@ -108,8 +107,6 @@ services:
       ERL_AFLAGS: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9200"
     volumes:
       - core-data-{{.Task.Slot}}:/var/lib/neonfs
-    secrets:
-      - erlang_cookie
     networks:
       - neonfs
     ports:
@@ -139,7 +136,6 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_fuse@neonfs-fuse-{{.Node.Hostname}}"
-      RELEASE_COOKIE_FILE: "/run/secrets/erlang_cookie"
       NEONFS_CORE_NODE: "neonfs_core@neonfs-core-1"
     volumes:
       - fuse-data:/var/lib/neonfs
@@ -148,8 +144,6 @@ services:
       - /dev/fuse:/dev/fuse
     cap_add:
       - SYS_ADMIN
-    secrets:
-      - erlang_cookie
     networks:
       - neonfs
     deploy:
@@ -167,10 +161,6 @@ networks:
   neonfs:
     driver: overlay
     attachable: true
-
-secrets:
-  erlang_cookie:
-    external: true
 ```
 
 ### Deploying
@@ -178,9 +168,6 @@ secrets:
 ```bash
 # Initialise Swarm (if not already done)
 docker swarm init
-
-# Create the Erlang cookie secret
-openssl rand -hex 32 | docker secret create erlang_cookie -
 
 # Deploy the stack
 docker stack deploy -c neonfs-stack.yml neonfs
@@ -260,7 +247,11 @@ Kubernetes StatefulSets provide stable network identities and persistent storage
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Namespace and secrets
+### Namespace
+
+The Erlang cookie is the constant `neonfs` baked into every release — it is
+not a secret (mutual TLS is the authentication boundary), so no cookie
+Secret is needed.
 
 ```yaml
 # namespace.yml
@@ -268,23 +259,11 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: neonfs
----
-# secret.yml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: neonfs-erlang-cookie
-  namespace: neonfs
-type: Opaque
-stringData:
-  cookie: "CHANGE-ME-generate-with-openssl-rand-hex-32"
 ```
 
 ```bash
-# Or generate the secret imperatively:
+# Or create it imperatively:
 kubectl create namespace neonfs
-kubectl -n neonfs create secret generic neonfs-erlang-cookie \
-  --from-literal=cookie="$(openssl rand -hex 32)"
 ```
 
 ### Headless service
@@ -354,11 +333,6 @@ spec:
               value: "name"
             - name: RELEASE_NODE
               value: "neonfs_core@$(POD_NAME).neonfs-core-headless.neonfs.svc.cluster.local"
-            - name: RELEASE_COOKIE
-              valueFrom:
-                secretKeyRef:
-                  name: neonfs-erlang-cookie
-                  key: cookie
             - name: NEONFS_DATA_DIR
               value: "/var/lib/neonfs/data"
             - name: NEONFS_AUTO_BOOTSTRAP
@@ -454,11 +428,6 @@ spec:
               value: "name"
             - name: RELEASE_NODE
               value: "neonfs_fuse@$(NODE_NAME)"
-            - name: RELEASE_COOKIE
-              valueFrom:
-                secretKeyRef:
-                  name: neonfs-erlang-cookie
-                  key: cookie
             - name: NEONFS_CORE_NODE
               value: "neonfs_core@neonfs-core-0.neonfs-core-headless.neonfs.svc.cluster.local"
           securityContext:
@@ -546,10 +515,6 @@ fuse:
     limits:
       memory: 1Gi
       cpu: 1000m
-
-erlangCookie:
-  existingSecret: ""  # Set to use pre-existing secret
-  # If empty, the chart generates one
 ```
 
 The chart template would derive `NEONFS_BOOTSTRAP_PEERS` and `NEONFS_BOOTSTRAP_EXPECT` from `.Values.core.replicas`.
@@ -645,7 +610,6 @@ Key log messages to watch for:
 - Check that EPMD (port 4369) and the distribution port range are reachable between pods
 - Verify `NEONFS_BOOTSTRAP_PEERS` contains the correct node names for all replicas
 - In Kubernetes, ensure the headless service has `publishNotReadyAddresses: true`
-- Check that `RELEASE_COOKIE` matches on all nodes
 - Increase `NEONFS_BOOTSTRAP_TIMEOUT` if startup is slow (e.g. large images, slow storage)
 
 **Formation detects orphaned data.**

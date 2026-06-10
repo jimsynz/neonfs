@@ -27,7 +27,6 @@ DIST_PORT="${DIST_PORT:-9100}"
 CLUSTER_API_PORT="${CLUSTER_API_PORT:-9568}"
 MCAST_ADDR="${MCAST_ADDR:-230.13.37.1:6555}"
 CLUSTER_NAME="${CLUSTER_NAME:-rig}"
-CLUSTER_COOKIE="${CLUSTER_COOKIE:-neonfs-rig-cookie}"
 VOLUME_NAME="${VOLUME_NAME:-test}"
 # Default replication factor tracks the node count so `volume create` is
 # satisfiable without --allow-under-replicated.
@@ -66,8 +65,8 @@ node_scp() {
   scp "${ssh_opts[@]}" -P "$(node_ssh_port "$i")" "$@"
 }
 
-# Run the neonfs CLI on a node (as root, so it reads the cookie/dist files
-# the daemon wrote under /run/neonfs and /var/lib/neonfs).
+# Run the neonfs CLI on a node (as root, so it reads the runtime files the
+# daemon wrote under /run/neonfs and the TLS material under /var/lib/neonfs).
 node_cli() {
   local i="$1"; shift
   node_ssh "$i" "sudo neonfs $*"
@@ -274,14 +273,10 @@ provision_node() {
   node_ssh "$i" "sudo tee /etc/neonfs/neonfs.conf >/dev/null" <<EOF
 RELEASE_DISTRIBUTION=name
 RELEASE_NODE=$(node_erl "$i")
-RELEASE_COOKIE=${CLUSTER_COOKIE}
 NEONFS_DIST_PORT=${DIST_PORT}
 NEONFS_CORE_NODE=$(node_erl "$i")
 EOF
 
-  node_ssh "$i" "printf %s '${CLUSTER_COOKIE}' | sudo tee /var/lib/neonfs/.erlang.cookie >/dev/null \
-    && sudo chown neonfs:neonfs /var/lib/neonfs/.erlang.cookie \
-    && sudo chmod 600 /var/lib/neonfs/.erlang.cookie"
   node_ssh "$i" "sudo chown -R neonfs:neonfs /mnt/neonfs"
 
   node_ssh "$i" "sudo systemctl start neonfs-omnibus"
