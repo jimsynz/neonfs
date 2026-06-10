@@ -7,6 +7,12 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
 
   @moduletag :tmp_dir
 
+  # Each property runs many synchronous compress/encrypt writes. The default
+  # 5s `GenServer.call` timeout is too tight on a heavily contended CI runner
+  # (#1132), so give every call generous headroom — the assertions are about
+  # correctness, not latency.
+  @call_timeout 30_000
+
   setup %{tmp_dir: tmp_dir} do
     File.mkdir_p!(tmp_dir)
 
@@ -51,19 +57,10 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
     property "compress then decompress round-trip preserves data", %{server: server} do
       check all(data <- StreamData.binary(min_length: 0, max_length: 65_536), max_runs: 100) do
         {:ok, hash, _info} =
-          BlobStore.write_chunk(data, "default", "hot",
-            compression: "zstd",
-            compression_level: 3,
-            server: server
-          )
+          write_chunk(server, data, compression: "zstd", compression_level: 3)
 
         {:ok, result} =
-          BlobStore.read_chunk_with_options(hash, "default", "hot",
-            decompress: true,
-            verify: true,
-            compression: "zstd:3",
-            server: server
-          )
+          read_chunk(server, hash, decompress: true, verify: true, compression: "zstd:3")
 
         assert result == data
       end
@@ -72,11 +69,7 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
     property "compressed size has bounded overhead", %{server: server} do
       check all(data <- StreamData.binary(min_length: 0, max_length: 65_536), max_runs: 100) do
         {:ok, _hash, info} =
-          BlobStore.write_chunk(data, "default", "hot",
-            compression: "zstd",
-            compression_level: 3,
-            server: server
-          )
+          write_chunk(server, data, compression: "zstd", compression_level: 3)
 
         # Zstd worst-case expansion: ~original + original/128 + frame overhead.
         # Use a generous bound to avoid flaky tests.
@@ -94,19 +87,9 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
               nonce <- StreamData.binary(length: 12),
               max_runs: 100
             ) do
-        {:ok, hash, _info} =
-          BlobStore.write_chunk(data, "default", "hot",
-            key: key,
-            nonce: nonce,
-            server: server
-          )
+        {:ok, hash, _info} = write_chunk(server, data, key: key, nonce: nonce)
 
-        {:ok, result} =
-          BlobStore.read_chunk_with_options(hash, "default", "hot",
-            key: key,
-            nonce: nonce,
-            server: server
-          )
+        {:ok, result} = read_chunk(server, hash, key: key, nonce: nonce)
 
         assert result == data
       end
@@ -126,45 +109,38 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
         # with key_b + same nonce overwrites the file in place. The test
         # verifies that the resulting ciphertext really did change by
         # attempting to decrypt with the old key — it must now fail.
-        {:ok, hash, _} =
-          BlobStore.write_chunk(data, "default", "hot",
-            key: key_a,
-            nonce: nonce,
-            server: server
-          )
+        {:ok, hash, _} = write_chunk(server, data, key: key_a, nonce: nonce)
 
-        assert {:ok, ^data} =
-                 BlobStore.read_chunk_with_options(hash, "default", "hot",
-                   key: key_a,
-                   nonce: nonce,
-                   server: server
-                 )
+        assert {:ok, ^data} = read_chunk(server, hash, key: key_a, nonce: nonce)
 
-        {:ok, ^hash, _} =
-          BlobStore.write_chunk(data, "default", "hot",
-            key: key_b,
-            nonce: nonce,
-            server: server
-          )
+        {:ok, ^hash, _} = write_chunk(server, data, key: key_b, nonce: nonce)
 
         # After the rewrite with key_b the on-disk ciphertext is different.
         # Decrypting with key_a must now fail authentication.
-        assert {:error, reason} =
-                 BlobStore.read_chunk_with_options(hash, "default", "hot",
-                   key: key_a,
-                   nonce: nonce,
-                   server: server
-                 )
+        assert {:error, reason} = read_chunk(server, hash, key: key_a, nonce: nonce)
 
         assert reason =~ "authentication failed" or reason =~ "encryption error"
 
-        assert {:ok, ^data} =
-                 BlobStore.read_chunk_with_options(hash, "default", "hot",
-                   key: key_b,
-                   nonce: nonce,
-                   server: server
-                 )
+        assert {:ok, ^data} = read_chunk(server, hash, key: key_b, nonce: nonce)
       end
     end
+  end
+
+  defp write_chunk(server, data, opts) do
+    BlobStore.write_chunk(
+      data,
+      "default",
+      "hot",
+      Keyword.merge([server: server, timeout: @call_timeout], opts)
+    )
+  end
+
+  defp read_chunk(server, hash, opts) do
+    BlobStore.read_chunk_with_options(
+      hash,
+      "default",
+      "hot",
+      Keyword.merge([server: server, timeout: @call_timeout], opts)
+    )
   end
 end
