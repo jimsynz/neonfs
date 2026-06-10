@@ -222,7 +222,11 @@ defmodule NeonFS.Docker.Plug do
   # — empty when docker omitted `-o`, otherwise a typed kw list
   # `Volume.new/2` accepts (see #583).
   defp default_core_create(name, opts) do
-    case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name, opts]) do
+    # 35 s outlives VolumeRegistry's 30 s call budget so a loaded
+    # cluster returns its clean `Unavailable` error rather than a
+    # `:badrpc` failover retry (#1165). A retry after a timed-out but
+    # server-side-successful create resolves via the conflict clause.
+    case NeonFS.Client.Router.call(NeonFS.Core, :create_volume, [name, opts], timeout: 35_000) do
       {:ok, _volume} -> :ok
       {:error, %{class: :conflict}} -> :ok
       {:error, :already_exists} -> :ok
