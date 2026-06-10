@@ -14,6 +14,11 @@ defmodule NeonFS.Epmd do
 
   The local node's listen port is determined by `NEONFS_DIST_PORT` env var,
   which is set by the daemon wrapper script on startup.
+
+  The `cluster.json` location is resolved the same way the release runtime
+  config resolves `:meta_dir` (this module runs before applications start,
+  so env vars are the only shared channel): `$NEONFS_META_DIR` if set,
+  otherwise `$NEONFS_DATA_DIR/meta`, otherwise `/var/lib/neonfs/data/meta`.
   """
 
   @dist_version 5
@@ -261,13 +266,21 @@ defmodule NeonFS.Epmd do
   defp find_port_in_peers([_ | rest], full_name), do: find_port_in_peers(rest, full_name)
 
   defp cluster_state_path do
-    meta_dir =
-      case :os.getenv(~c"NEONFS_META_DIR") do
-        false -> "/var/lib/neonfs/meta"
-        dir -> List.to_string(dir)
-      end
+    Path.join(meta_dir(), "cluster.json")
+  end
 
-    Path.join(meta_dir, "cluster.json")
+  defp meta_dir do
+    case :os.getenv(~c"NEONFS_META_DIR") do
+      false -> Path.join(data_dir(), "meta")
+      dir -> List.to_string(dir)
+    end
+  end
+
+  defp data_dir do
+    case :os.getenv(~c"NEONFS_DATA_DIR") do
+      false -> "/var/lib/neonfs/data"
+      dir -> List.to_string(dir)
+    end
   end
 
   defp short_name(full_name) do

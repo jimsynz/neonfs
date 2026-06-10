@@ -2,8 +2,9 @@ defmodule NeonFS.Cluster.State do
   @moduledoc """
   Cluster state structure and persistence.
 
-  Cluster state is persisted to disk as JSON at /var/lib/neonfs/meta/cluster.json
-  and contains cluster identity, node information, and Ra cluster membership.
+  Cluster state is persisted to disk as JSON at `<meta dir>/cluster.json`
+  (see `meta_dir/0` for how the directory is resolved) and contains cluster
+  identity, node information, and Ra cluster membership.
   """
 
   alias __MODULE__
@@ -88,12 +89,30 @@ defmodule NeonFS.Cluster.State do
   end
 
   @doc """
+  Returns the metadata directory.
+
+  Resolution order matches `NeonFS.Epmd`'s cluster.json lookup so the
+  reader and the writer always agree on one path: the `:meta_dir`
+  application env (set by the release runtime config) wins, then
+  `$NEONFS_META_DIR`, then `$NEONFS_DATA_DIR/meta`, then
+  `/var/lib/neonfs/data/meta`. The env-var chain matters on interface
+  nodes, which don't configure `:neonfs_core` at all but still persist
+  `cluster.json` through the join flow.
+  """
+  @spec meta_dir() :: String.t()
+  def meta_dir do
+    case Application.fetch_env(:neonfs_core, :meta_dir) do
+      {:ok, dir} -> dir
+      :error -> meta_dir_from_env()
+    end
+  end
+
+  @doc """
   Returns the path to the cluster state file.
   """
   @spec state_file_path() :: String.t()
   def state_file_path do
-    meta_dir = Application.get_env(:neonfs_core, :meta_dir, "/var/lib/neonfs/meta")
-    Path.join(meta_dir, "cluster.json")
+    Path.join(meta_dir(), "cluster.json")
   end
 
   @doc """
@@ -224,6 +243,11 @@ defmodule NeonFS.Cluster.State do
   end
 
   # Private helpers
+
+  defp meta_dir_from_env do
+    System.get_env("NEONFS_META_DIR") ||
+      Path.join(System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs/data"), "meta")
+  end
 
   defp check_file_exists(path) do
     if File.exists?(path), do: :ok, else: {:error, :not_found}
