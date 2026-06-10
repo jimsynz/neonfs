@@ -134,7 +134,11 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
 
   defp sync(producer), do: Producer.status(producer)
 
-  defp collect_dispatched(count, timeout \\ 500) do
+  # Deadlines in this file only bound scheduling latency — the adjuster's
+  # 50 ms check_interval keeps the happy path fast, but a loaded CI runner
+  # can take seconds to start the GenServer and complete its first cycle
+  # (#1147). Generous timeouts cost nothing when the suite is healthy.
+  defp collect_dispatched(count, timeout \\ 5_000) do
     Enum.map(1..count, fn _ ->
       assert_receive {:dispatched, op}, timeout
       op
@@ -211,7 +215,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
       )
 
       # Wait for at least one check cycle via telemetry
-      assert_receive {[:neon_fs, :io, :priority_check], ^ref, %{}, %{level: :normal}}, 1_000
+      assert_receive {[:neon_fs, :io, :priority_check], ^ref, %{}, %{level: :normal}}, 10_000
 
       # No adjustment should fire since we're at normal level from the start
       refute_received {[:neon_fs, :io, :priority_adjusted], ^ref, _, _}
@@ -264,7 +268,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
 
       # Wait for adjustment
       assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :boost}},
-                     1_000
+                     10_000
 
       sync(producer)
     end
@@ -293,7 +297,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
       )
 
       # Wait for adjustment to propagate
-      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :boost}}, 1_000
+      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :boost}}, 10_000
       sync(producer)
 
       # Under boost: scrub weight = 15 (10 * 1.5), repair weight = 30 (20 * 1.5)
@@ -347,7 +351,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
         id: :"adjuster_#{ctx.test}"
       )
 
-      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :critical}}, 1_000
+      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :critical}}, 10_000
 
       # Under critical: scrub=60, repair=60, matching replication=60
       # Enqueue all three — they should dispatch in any order since weights are equal
@@ -401,7 +405,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
         id: :"adjuster_#{ctx.test}"
       )
 
-      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :critical}}, 1_000
+      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :critical}}, 10_000
       sync(producer)
 
       # Under critical: scrub=60, repair=60, read_repair=40 (static)
@@ -458,7 +462,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
 
       assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{},
                       %{degraded_volumes: degraded}},
-                     1_000
+                     10_000
 
       assert "vol-1" in degraded
 
@@ -517,7 +521,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
         id: :"adjuster_#{ctx.test}"
       )
 
-      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, _}, 1_000
+      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, _}, 10_000
       sync(producer)
 
       # vol-1 repair promoted to 100 (user_read weight)
@@ -584,7 +588,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
       )
 
       # Wait for at least one check cycle via telemetry
-      assert_receive {[:neon_fs, :io, :priority_check], ^ref, %{}, %{level: :normal}}, 1_000
+      assert_receive {[:neon_fs, :io, :priority_check], ^ref, %{}, %{level: :normal}}, 10_000
 
       # Should not fire any adjustment event
       refute_received {[:neon_fs, :io, :priority_adjusted], ^ref, _, _}
@@ -626,7 +630,7 @@ defmodule NeonFS.IO.PriorityAdjusterTest do
       )
 
       # At 70% with custom boost=60%, should trigger boost
-      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :boost}}, 1_000
+      assert_receive {[:neon_fs, :io, :priority_adjusted], ^ref, %{}, %{level: :boost}}, 10_000
     end
   end
 end
