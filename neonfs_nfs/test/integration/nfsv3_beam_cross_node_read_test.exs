@@ -109,8 +109,17 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
       durability: %{type: :replicate, factor: 1, min_copies: 1}
     }
 
+    # Volume creation is a Ra-replicated write with a 30 s internal
+    # budget (#1167); give the RPC a slow-runner margin beyond that.
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [volume, volume_opts])
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.CLI.Handler,
+        :create_volume,
+        [volume, volume_opts],
+        60_000
+      )
 
     assert_eventually(
       fn ->
@@ -129,13 +138,19 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
 
     # Write from the core peer so chunks land in its drive store.
     # The interface peer (node2) has no core role and no local
-    # chunks — its READ must traverse the data plane.
+    # chunks — its READ must traverse the data plane. The write goes
+    # through Ra and the blob store, which exceeds the default 30 s
+    # RPC budget on a loaded runner (#1166) — match the 120 s
+    # slow-runner convention.
     {:ok, _meta} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core, :write_file_streamed, [
-        volume,
-        file_path,
-        [payload]
-      ])
+      PeerCluster.rpc(
+        cluster,
+        :node1,
+        NeonFS.Core,
+        :write_file_streamed,
+        [volume, file_path, [payload]],
+        120_000
+      )
 
     assert_eventually(
       fn ->
