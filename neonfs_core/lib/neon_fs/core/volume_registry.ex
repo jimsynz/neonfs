@@ -60,7 +60,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   """
   @spec create(String.t(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def create(name, opts \\ []) do
-    GenServer.call(__MODULE__, {:create, name, opts}, 10_000)
+    GenServer.call(__MODULE__, {:create, name, opts}, 30_000)
   end
 
   @doc """
@@ -72,7 +72,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   """
   @spec create_system_volume(keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def create_system_volume(opts \\ []) do
-    GenServer.call(__MODULE__, {:create_system_volume, opts}, 10_000)
+    GenServer.call(__MODULE__, {:create_system_volume, opts}, 30_000)
   end
 
   @doc """
@@ -85,7 +85,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   """
   @spec delete(volume_id()) :: :ok | {:error, term()}
   def delete(id) do
-    GenServer.call(__MODULE__, {:delete, id}, 10_000)
+    GenServer.call(__MODULE__, {:delete, id}, 30_000)
   end
 
   @doc """
@@ -186,7 +186,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   """
   @spec update(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def update(id, opts) do
-    GenServer.call(__MODULE__, {:update, id, opts}, 10_000)
+    GenServer.call(__MODULE__, {:update, id, opts}, 30_000)
   end
 
   @doc """
@@ -196,7 +196,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   """
   @spec update_stats(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
   def update_stats(id, stats) do
-    GenServer.call(__MODULE__, {:update_stats, id, stats}, 10_000)
+    GenServer.call(__MODULE__, {:update_stats, id, stats}, 30_000)
   end
 
   # Server callbacks
@@ -772,8 +772,15 @@ defmodule NeonFS.Core.VolumeRegistry do
   # IMPORTANT: Only returns :ra_not_available when Ra has not been initialized yet
   # (Phase 1 single-node mode). Once Ra is initialized, errors are propagated
   # so that quorum loss is properly detected.
+  # Ra commands are cluster-wide replicated writes; the 5 s
+  # `RaSupervisor.command/2` default is a local-lookup budget that times
+  # out under load (#1165). 20 s nests inside the 30 s GenServer.call
+  # timeouts on this module's public API, so the clean `Unavailable`
+  # error still fires before the caller's exit.
+  @ra_command_timeout 20_000
+
   defp maybe_ra_command(cmd) do
-    case RaSupervisor.command(cmd) do
+    case RaSupervisor.command(cmd, @ra_command_timeout) do
       {:ok, result, _leader} ->
         {:ok, result}
 
