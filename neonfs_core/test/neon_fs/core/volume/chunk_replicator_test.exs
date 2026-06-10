@@ -97,13 +97,21 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
       drives = [drive_entry("drv-1"), drive_entry("drv-2"), drive_entry("drv-3")]
       parent = self()
 
+      # Concurrency is proven by all three writers starting while every one
+      # of them is still blocked on :release — a sequential implementation
+      # would block on the first writer and the second :writer_started
+      # message would never arrive. The receive windows only bound
+      # scheduling latency, so they are generous to survive loaded CI
+      # runners (#1144); the writer's self-exit hatch must stay longer than
+      # the assert windows so a sequential implementation fails the assert,
+      # not the hatch.
       writer = fn _data, drive_id, _tier, _opts ->
         send(parent, {:writer_started, drive_id, self()})
 
         receive do
           :release -> :ok
         after
-          1_000 -> exit(:no_release)
+          30_000 -> exit(:no_release)
         end
 
         {:ok, "h", %{}}
@@ -120,7 +128,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
       writer_pids =
         Enum.map(1..length(drives), fn i ->
           assert_receive {:writer_started, _drive_id, pid},
-                         1_000,
+                         10_000,
                          "writer #{i}/#{length(drives)} never started — expected concurrent execution"
 
           pid
@@ -128,7 +136,7 @@ defmodule NeonFS.Core.Volume.ChunkReplicatorTest do
 
       Enum.each(writer_pids, &send(&1, :release))
 
-      assert {:ok, _, _} = Task.await(caller, 5_000)
+      assert {:ok, _, _} = Task.await(caller, 15_000)
     end
 
     test "emits :write telemetry on success" do
