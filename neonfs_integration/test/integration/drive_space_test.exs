@@ -164,9 +164,12 @@ defmodule NeonFS.Integration.DriveSpaceTest do
         ])
       end
 
-      # Run GC to reclaim orphaned chunks
+      # Run GC to reclaim orphaned chunks. A full-drive pass (mark phase
+      # plus ~100 chunk deletes on a loopback device) exceeds the default
+      # 30 s RPC timeout on loaded CI runners (#1155) — match the 120 s
+      # slow-runner budget the evacuation test below already uses.
       {:ok, gc_result} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.Core.GarbageCollector, :collect, [])
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.GarbageCollector, :collect, [], 120_000)
 
       assert gc_result.chunks_deleted > 0, "GC should have deleted orphaned chunks"
 
