@@ -58,6 +58,48 @@ defmodule NeonFS.Cluster.StateTest do
     end
   end
 
+  describe "meta_dir/0 env-var fallback (#1137)" do
+    setup do
+      saved =
+        Map.new(["NEONFS_META_DIR", "NEONFS_DATA_DIR"], fn var -> {var, System.get_env(var)} end)
+
+      Enum.each(Map.keys(saved), &System.delete_env/1)
+      Application.delete_env(:neonfs_core, :meta_dir)
+
+      on_exit(fn ->
+        Enum.each(saved, fn
+          {var, nil} -> System.delete_env(var)
+          {var, value} -> System.put_env(var, value)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "falls back to $NEONFS_META_DIR when :meta_dir app env is unset" do
+      System.put_env("NEONFS_META_DIR", "/custom/meta")
+
+      assert State.meta_dir() == "/custom/meta"
+    end
+
+    test "falls back to $NEONFS_DATA_DIR/meta when NEONFS_META_DIR is unset" do
+      System.put_env("NEONFS_DATA_DIR", "/custom/data")
+
+      assert State.meta_dir() == "/custom/data/meta"
+    end
+
+    test "defaults to the release data dir when no env vars are set" do
+      assert State.meta_dir() == "/var/lib/neonfs/data/meta"
+    end
+
+    test ":meta_dir app env wins over env vars" do
+      System.put_env("NEONFS_META_DIR", "/custom/meta")
+      Application.put_env(:neonfs_core, :meta_dir, "/app/env/meta")
+
+      assert State.meta_dir() == "/app/env/meta"
+    end
+  end
+
   describe "exists?/0" do
     test "returns false when file doesn't exist" do
       refute State.exists?()

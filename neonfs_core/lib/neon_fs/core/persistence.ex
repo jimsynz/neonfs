@@ -28,12 +28,13 @@ defmodule NeonFS.Core.Persistence do
   use GenServer
   require Logger
 
+  alias NeonFS.Cluster.State
+
   @type table_config :: %{
           ets_table: atom(),
           dets_path: String.t()
         }
 
-  @default_meta_dir "/var/lib/neonfs/meta"
   @default_snapshot_interval_ms 30_000
 
   # Client API
@@ -43,7 +44,7 @@ defmodule NeonFS.Core.Persistence do
 
   ## Options
 
-  - `:meta_dir` - Directory for DETS files (default: #{@default_meta_dir})
+  - `:meta_dir` - Directory for DETS files (default: `meta_dir/0`)
   - `:snapshot_interval_ms` - Snapshot interval in milliseconds (default:
     #{@default_snapshot_interval_ms}). Pass `:infinity` to disable periodic
     snapshots entirely; callers then snapshot explicitly via `snapshot_now/0`.
@@ -80,9 +81,7 @@ defmodule NeonFS.Core.Persistence do
   Returns the configured metadata directory.
   """
   @spec meta_dir() :: String.t()
-  def meta_dir do
-    Application.get_env(:neonfs_core, :meta_dir, @default_meta_dir)
-  end
+  defdelegate meta_dir, to: State
 
   # Server Callbacks
 
@@ -91,7 +90,7 @@ defmodule NeonFS.Core.Persistence do
     # Trap exits so terminate/2 is called during supervisor shutdown
     Process.flag(:trap_exit, true)
 
-    meta_dir = Keyword.get(opts, :meta_dir, @default_meta_dir)
+    meta_dir = Keyword.get_lazy(opts, :meta_dir, &meta_dir/0)
     snapshot_interval_ms = Keyword.get(opts, :snapshot_interval_ms, @default_snapshot_interval_ms)
 
     # Ensure metadata directory exists
