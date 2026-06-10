@@ -3,6 +3,7 @@ defmodule NeonFS.CLI.HandlerTest do
   use NeonFS.TestCase
 
   alias NeonFS.CLI.Handler
+  alias NeonFS.Client.ServiceInfo
   alias NeonFS.Cluster.State
 
   alias NeonFS.Core.{
@@ -11,6 +12,7 @@ defmodule NeonFS.CLI.HandlerTest do
     Drive,
     DriveRegistry,
     RaServer,
+    ServiceRegistry,
     VolumeRegistry
   }
 
@@ -1040,6 +1042,38 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, report} = Handler.handle_node_status()
       assert is_binary(report.node)
       assert report.node == Atom.to_string(Node.self())
+    end
+  end
+
+  describe "handle_node_list/0" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      ensure_node_named()
+      start_ra()
+      :ok = RaServer.init_cluster()
+      start_service_registry()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "renders an unreachable registered node as offline instead of crashing (#1138)" do
+      unreachable = :neonfs_core_unreachable@localhost
+      :ok = ServiceRegistry.register(ServiceInfo.new(unreachable, :core))
+      :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+
+      assert {:ok, nodes} = Handler.handle_node_list()
+
+      offline_row = Enum.find(nodes, &(&1.node == Atom.to_string(unreachable)))
+      assert offline_row.status == "offline"
+      assert offline_row.uptime_seconds == 0
+
+      self_row = Enum.find(nodes, &(&1.node == Atom.to_string(Node.self())))
+      assert self_row.status == "online"
+      assert self_row.uptime_seconds >= 0
     end
   end
 
