@@ -78,6 +78,12 @@ defmodule NeonFS.Core.BlobStore do
 
   @tiers ["hot", "warm", "cold"]
 
+  # Default `GenServer.call` timeout for chunk reads/writes. Each call drives
+  # a synchronous compress/encrypt NIF, which can exceed the 5s `GenServer`
+  # default on a heavily contended host; callers (e.g. property tests) may pass
+  # a larger `:timeout` to stay robust under load.
+  @default_call_timeout 5_000
+
   ## Client API
 
   @doc """
@@ -109,6 +115,7 @@ defmodule NeonFS.Core.BlobStore do
       * `:compression` - Compression type: "none" (default) or "zstd"
       * `:compression_level` - Compression level for zstd (1-19), defaults to 3
       * `:server` - GenServer name, defaults to `__MODULE__`
+      * `:timeout` - `GenServer.call` timeout in ms, defaults to `#{@default_call_timeout}`
 
   ## Returns
 
@@ -121,7 +128,8 @@ defmodule NeonFS.Core.BlobStore do
   def write_chunk(data, drive_id, tier, opts \\ []) do
     DriveState.ensure_active(drive_id)
     {server, opts} = Keyword.pop(opts, :server, __MODULE__)
-    GenServer.call(server, {:write_chunk, data, drive_id, tier, opts})
+    {timeout, opts} = Keyword.pop(opts, :timeout, @default_call_timeout)
+    GenServer.call(server, {:write_chunk, data, drive_id, tier, opts}, timeout)
   end
 
   @doc """
@@ -225,6 +233,7 @@ defmodule NeonFS.Core.BlobStore do
       * `:verify` - Verify data integrity (default: false)
       * `:decompress` - Decompress data (default: false)
       * `:server` - GenServer name, defaults to `__MODULE__`
+      * `:timeout` - `GenServer.call` timeout in ms, defaults to `#{@default_call_timeout}`
 
   ## Returns
 
@@ -237,6 +246,7 @@ defmodule NeonFS.Core.BlobStore do
   def read_chunk_with_options(hash, drive_id, tier, read_opts) do
     DriveState.ensure_active(drive_id)
     {server, read_opts} = Keyword.pop(read_opts, :server, __MODULE__)
+    {timeout, read_opts} = Keyword.pop(read_opts, :timeout, @default_call_timeout)
     verify = Keyword.get(read_opts, :verify, false)
     decompress = Keyword.get(read_opts, :decompress, false)
     key = Keyword.get(read_opts, :key, <<>>)
@@ -245,7 +255,8 @@ defmodule NeonFS.Core.BlobStore do
 
     GenServer.call(
       server,
-      {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce, codec_opts}
+      {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce, codec_opts},
+      timeout
     )
   end
 
