@@ -11,7 +11,9 @@ n="${1:-}"
 me=$(fj_curl GET "https://$FJ_HOST/api/v1/user" | jq -r '.login')
 [ -n "$me" ] && [ "$me" != "null" ] || fj_die "could not resolve authenticated user"
 
+# Assignment must use PATCH /issues/:n — the POST /issues/:n/assignees
+# endpoint no longer exists on this Forgejo version (404).
 jq -nc --arg me "$me" '{assignees: [$me]}' \
-  | fj_curl POST "/issues/$n/assignees" --data-binary @- > /dev/null
+  | fj_curl PATCH "/issues/$n" --data-binary @- > /dev/null
 
 echo "assigned #$n to $me"
