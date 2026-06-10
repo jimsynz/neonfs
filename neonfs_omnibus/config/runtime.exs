@@ -3,7 +3,7 @@ import Config
 if config_env() == :prod do
   config :logger, :default_handler, formatter: LoggerJSON.Formatters.Basic.new(metadata: :all)
 
-  data_dir = System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs/data")
+  data_dir = System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs")
   node_name = System.get_env("RELEASE_NODE", "neonfs@localhost")
 
   # In omnibus mode, core is local — every interface client points at self

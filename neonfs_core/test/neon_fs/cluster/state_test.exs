@@ -89,7 +89,7 @@ defmodule NeonFS.Cluster.StateTest do
     end
 
     test "defaults to the release data dir when no env vars are set" do
-      assert State.meta_dir() == "/var/lib/neonfs/data/meta"
+      assert State.meta_dir() == "/var/lib/neonfs/meta"
     end
 
     test ":meta_dir app env wins over env vars" do

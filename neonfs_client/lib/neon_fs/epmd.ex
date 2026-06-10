@@ -18,7 +18,7 @@ defmodule NeonFS.Epmd do
   The `cluster.json` location is resolved the same way the release runtime
   config resolves `:meta_dir` (this module runs before applications start,
   so env vars are the only shared channel): `$NEONFS_META_DIR` if set,
-  otherwise `$NEONFS_DATA_DIR/meta`, otherwise `/var/lib/neonfs/data/meta`.
+  otherwise `$NEONFS_DATA_DIR/meta`, otherwise `/var/lib/neonfs/meta`.
   """
 
   @dist_version 5
@@ -278,7 +278,7 @@ defmodule NeonFS.Epmd do
 
   defp data_dir do
     case :os.getenv(~c"NEONFS_DATA_DIR") do
-      false -> "/var/lib/neonfs/data"
+      false -> "/var/lib/neonfs"
       dir -> List.to_string(dir)
     end
   end

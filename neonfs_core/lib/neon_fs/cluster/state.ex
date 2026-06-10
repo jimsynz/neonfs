@@ -95,7 +95,7 @@ defmodule NeonFS.Cluster.State do
   reader and the writer always agree on one path: the `:meta_dir`
   application env (set by the release runtime config) wins, then
   `$NEONFS_META_DIR`, then `$NEONFS_DATA_DIR/meta`, then
-  `/var/lib/neonfs/data/meta`. The env-var chain matters on interface
+  `/var/lib/neonfs/meta`. The env-var chain matters on interface
   nodes, which don't configure `:neonfs_core` at all but still persist
   `cluster.json` through the join flow.
   """
@@ -246,7 +246,7 @@ defmodule NeonFS.Cluster.State do
 
   defp meta_dir_from_env do
     System.get_env("NEONFS_META_DIR") ||
-      Path.join(System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs/data"), "meta")
+      Path.join(System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs"), "meta")
   end
 
   defp check_file_exists(path) do

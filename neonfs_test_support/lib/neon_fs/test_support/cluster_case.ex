@@ -601,22 +601,24 @@ defmodule NeonFS.TestSupport.ClusterCase do
     for %{name: name} <- cluster.nodes do
       :ok =
         wait_until(
-          fn ->
-            PeerCluster.rpc(cluster, name, NeonFS.Core.DriveRegistry, :sync_now, [])
-
-            case PeerCluster.rpc(cluster, name, NeonFS.Core.DriveRegistry, :list_drives, []) do
-              drives when is_list(drives) ->
-                MapSet.subset?(expected, MapSet.new(drives, & &1.node))
-
-              _ ->
-                false
-            end
-          end,
+          fn -> drive_registry_converged?(cluster, name, expected) end,
           timeout: 15_000
         )
     end
 
     :ok
+  end
+
+  defp drive_registry_converged?(cluster, node_name, expected) do
+    PeerCluster.rpc(cluster, node_name, NeonFS.Core.DriveRegistry, :sync_now, [])
+
+    case PeerCluster.rpc(cluster, node_name, NeonFS.Core.DriveRegistry, :list_drives, []) do
+      drives when is_list(drives) ->
+        MapSet.subset?(expected, MapSet.new(drives, & &1.node))
+
+      _ ->
+        false
+    end
   end
 
   @doc """

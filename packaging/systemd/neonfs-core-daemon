@@ -13,14 +13,14 @@ RELEASE_NAME="${RELEASE_NAME:-neonfs_core}"
 NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
 DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname)"
 RELEASE_NODE="${NEONFS_CORE_NODE:-${RELEASE_NODE:-neonfs_core@${DEFAULT_HOST}}}"
+# Exported so the release's env.sh sees the wrapper's choices (#1141)
+export NEONFS_DATA_DIR RELEASE_NODE
 
 # Ensure base data directories exist
 # Note: Tier subdirectories (hot/warm/cold) are created by BlobStore
 # based on volume configuration, not at daemon startup
 ensure_directories() {
-    mkdir -p "${NEONFS_DATA_DIR}/data"
     mkdir -p "${NEONFS_DATA_DIR}/meta"
-    mkdir -p "${NEONFS_DATA_DIR}/wal"
 
     # Set ownership if running as root
     if [ "$EUID" -eq 0 ]; then

@@ -98,7 +98,7 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_core@neonfs-core-{{.Task.Slot}}"
-      NEONFS_DATA_DIR: "/var/lib/neonfs/data"
+      NEONFS_DATA_DIR: "/var/lib/neonfs"
       NEONFS_AUTO_BOOTSTRAP: "true"
       NEONFS_CLUSTER_NAME: "production"
       NEONFS_BOOTSTRAP_EXPECT: "3"
@@ -334,7 +334,7 @@ spec:
             - name: RELEASE_NODE
               value: "neonfs_core@$(POD_NAME).neonfs-core-headless.neonfs.svc.cluster.local"
             - name: NEONFS_DATA_DIR
-              value: "/var/lib/neonfs/data"
+              value: "/var/lib/neonfs"
             - name: NEONFS_AUTO_BOOTSTRAP
               value: "true"
             - name: NEONFS_CLUSTER_NAME

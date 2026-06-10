@@ -63,7 +63,7 @@ services:
     restart: unless-stopped
     environment:
       RELEASE_NODE: "neonfs_core@neonfs-core"
-      NEONFS_DATA_DIR: "/var/lib/neonfs/data"
+      NEONFS_DATA_DIR: "/var/lib/neonfs"
       NEONFS_FUSE_NODE: "neonfs_fuse@neonfs-fuse"
     volumes:
       - core-data:/var/lib/neonfs
@@ -116,7 +116,7 @@ networks:
 |----------|---------|-------------|
 | `RELEASE_NODE` | `neonfs_core@localhost` | Erlang node name |
 | `RELEASE_DISTRIBUTION` | `sname` | Distribution mode (`sname` or `name`) |
-| `NEONFS_DATA_DIR` | `/var/lib/neonfs/data` | Base directory for data, metadata, and Ra state |
+| `NEONFS_DATA_DIR` | `/var/lib/neonfs` | Base directory for data, metadata, and Ra state |
 | `NEONFS_FUSE_NODE` | `neonfs_fuse@localhost` | FUSE node name (for RPC calls to FUSE) |
 | `NEONFS_ENABLE_RA` | `true` | Enable Ra consensus (set `false` only for debugging) |
 | `NEONFS_PREFIX_DEPTH` | `2` | Blob store directory prefix depth |
@@ -224,7 +224,7 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_core@core1.neonfs.example.com"
-      NEONFS_DATA_DIR: "/var/lib/neonfs/data"
+      NEONFS_DATA_DIR: "/var/lib/neonfs"
       ERL_AFLAGS: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9200"
     volumes:
       - /var/lib/neonfs:/var/lib/neonfs
@@ -258,7 +258,7 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_core@core2.neonfs.example.com"
-      NEONFS_DATA_DIR: "/var/lib/neonfs/data"
+      NEONFS_DATA_DIR: "/var/lib/neonfs"
       ERL_AFLAGS: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9200"
     volumes:
       - /var/lib/neonfs:/var/lib/neonfs
@@ -374,13 +374,14 @@ This is the recovery path when the CLI or runtime management isn't available.
 
 ### Data directory layout
 
-The core node's data directory (`NEONFS_DATA_DIR`, default `/var/lib/neonfs/data`) contains:
+The core node's data directory (`NEONFS_DATA_DIR`, default `/var/lib/neonfs`) contains:
 
 ```
-/var/lib/neonfs/data/
+/var/lib/neonfs/
   blobs/      # Default blob storage (before drives are configured)
   meta/       # File and chunk metadata, including cluster.json
   ra/         # Ra consensus log and snapshots
+  tls/        # Local CA and cluster-issued certificates
 ```
 
 When custom drives are added, blob data is stored at the paths specified in each drive's configuration rather than under the data directory.
@@ -463,9 +464,9 @@ docker compose start core
 
 Key directories to back up:
 
-- `/var/lib/neonfs/data/ra/` — Ra consensus log and snapshots (cluster membership, metadata)
-- `/var/lib/neonfs/data/meta/` — file and chunk metadata
-- `/var/lib/neonfs/data/blobs/` — stored blob data (or custom drive paths)
+- `/var/lib/neonfs/ra/` — Ra consensus log and snapshots (cluster membership, metadata)
+- `/var/lib/neonfs/meta/` — file and chunk metadata
+- `/var/lib/neonfs/blobs/` — stored blob data (or custom drive paths)
 
 ## Troubleshooting
 
