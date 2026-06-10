@@ -14,6 +14,8 @@ NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
 DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname)"
 RELEASE_NODE="${NEONFS_DOCKER_NODE:-${RELEASE_NODE:-neonfs_docker@${DEFAULT_HOST}}}"
 NEONFS_CORE_NODE="${NEONFS_CORE_NODE:-neonfs_core@${DEFAULT_HOST}}"
+# Exported so the release's env.sh sees the wrapper's choices (#1141)
+export NEONFS_DATA_DIR RELEASE_NODE NEONFS_CORE_NODE
 DOCKER_PLUGIN_DIR="${DOCKER_PLUGIN_DIR:-/run/docker/plugins}"
 
 # Generate and persist the Erlang distribution port

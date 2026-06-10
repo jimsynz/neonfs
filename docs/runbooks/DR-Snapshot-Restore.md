@@ -22,7 +22,7 @@ This runbook covers two scenarios:
 ## Precondition
 
 - A DR snapshot whose `created_at` predates the metadata event exists. `neonfs dr snapshot list` returns at least one snapshot newer than the cluster's current outage and older than the bad event. If the only snapshots are *after* the event, restore won't help — escalate.
-- The `_system` volume itself is intact. Restore reads from `_system`'s `/dr/<id>/`; if `_system` is the index that was destroyed, the snapshot is unreachable from inside the cluster and you need an off-cluster copy of `_system` (LVM/ZFS snapshot, periodic `tar` of `/var/lib/neonfs/data/`).
+- The `_system` volume itself is intact. Restore reads from `_system`'s `/dr/<id>/`; if `_system` is the index that was destroyed, the snapshot is unreachable from inside the cluster and you need an off-cluster copy of `_system` (LVM/ZFS snapshot, periodic `tar` of `/var/lib/neonfs/`).
 - An off-cluster CA backup exists. The DR snapshot embeds a copy of the CA material under `/dr/<id>/ca/`, but it cannot be the only copy — the [CA-Rotation runbook](CA-Rotation.md) lists the off-cluster backup as a hard requirement.
 - Blob storage on the cluster's drives is intact. A DR snapshot restores **metadata only** — restored `FileIndex` rows reference chunk hashes that must still exist as blobs on disk, otherwise reads will return `:all_replicas_failed`. Stop and verify drive health before restoring if any drives have been replaced or wiped since the snapshot was taken.
 - Ra quorum is currently healthy (or you are intentionally rebuilding it as part of the recovery — see [Quorum-Loss runbook](Quorum-Loss.md) first if not).

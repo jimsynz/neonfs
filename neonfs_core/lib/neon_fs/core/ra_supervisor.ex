@@ -45,7 +45,7 @@ defmodule NeonFS.Core.RaSupervisor do
     data_dir = ra_data_dir()
 
     # Ra appends the node name to create a subdirectory, so we need to create that too
-    # e.g., /var/lib/neonfs/data/ra -> /var/lib/neonfs/data/ra/neonfs_core@neonfs-core-1
+    # e.g., /var/lib/neonfs/ra -> /var/lib/neonfs/ra/neonfs_core@neonfs-core-1
     node_data_dir = Path.join(data_dir, Atom.to_string(Node.self()))
 
     File.mkdir_p!(data_dir)

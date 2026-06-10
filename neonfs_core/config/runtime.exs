@@ -8,7 +8,7 @@ if config_env() == :prod do
   config :logger, :default_handler, formatter: LoggerJSON.Formatters.Basic.new(metadata: :all)
 
   # Data directory for blob storage
-  data_dir = System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs/data")
+  data_dir = System.get_env("NEONFS_DATA_DIR", "/var/lib/neonfs")
 
   # Node name for Erlang distribution
   node_name = System.get_env("RELEASE_NODE", "neonfs_core@localhost")
