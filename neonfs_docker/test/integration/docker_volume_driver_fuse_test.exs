@@ -20,6 +20,8 @@ defmodule NeonFS.Docker.RealFuseIntegrationTest do
   @moduletag :fuse
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
+  alias NeonFS.Events.Relay
+  alias NeonFS.FUSE.{InodeTable, MountManager, MountSupervisor}
 
   @plugin_spec_dir "/etc/docker/plugins"
 
@@ -59,14 +61,14 @@ defmodule NeonFS.Docker.RealFuseIntegrationTest do
     # remote `:pg` events into the local Registry).
     start_supervised!(%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}})
     start_supervised!({Registry, keys: :duplicate, name: NeonFS.Events.Registry})
-    start_supervised!(NeonFS.Events.Relay)
+    start_supervised!(Relay)
 
     # The real FUSE stack the plugin's MountTracker targets on
     # `Node.self()`. No Registrar — service registration isn't under
     # test here.
-    start_supervised!(NeonFS.FUSE.InodeTable)
-    start_supervised!(NeonFS.FUSE.MountSupervisor)
-    start_supervised!(NeonFS.FUSE.MountManager)
+    start_supervised!(InodeTable)
+    start_supervised!(MountSupervisor)
+    start_supervised!(MountManager)
 
     suffix = System.unique_integer([:positive])
     driver_name = "neonfs-fuse-test-#{suffix}"
@@ -138,7 +140,7 @@ defmodule NeonFS.Docker.RealFuseIntegrationTest do
         # `docker run` returning, so poll.
         :ok =
           wait_until(fn ->
-            NeonFS.FUSE.MountManager.list_mounts() == []
+            MountManager.list_mounts() == []
           end)
       after
         _ = run_docker(["volume", "rm", "-f", vol_name])
