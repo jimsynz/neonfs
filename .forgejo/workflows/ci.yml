@@ -255,6 +255,28 @@ jobs:
           docker info 2>&1 || true
           exit 1
 
+      - name: Pre-pull e2e test images
+        env:
+          DOCKER_HOST: unix:///var/run/docker.sock
+        run: |
+          # The VolumeDriver e2e test runs `docker run … alpine …`, which
+          # pulls `alpine:latest` from Docker Hub on demand. A transient
+          # registry network error there surfaced as a confusing test
+          # failure on unrelated PRs (#1128). Pull the image up front with
+          # backoff so any Docker Hub hiccup is retried — and reported here
+          # as an environmental step failure — rather than flaking the test.
+          # The test then finds the image locally and does not pull at runtime.
+          for i in $(seq 1 5); do
+            if docker pull alpine:latest; then
+              echo "Pulled alpine:latest"
+              exit 0
+            fi
+            echo "alpine:latest pull attempt ${i} failed; retrying in $((i * 5))s"
+            sleep $((i * 5))
+          done
+          echo "Failed to pull alpine:latest after 5 attempts"
+          exit 1
+
       - name: Check
         working-directory: neonfs_docker
         run: mix check
