@@ -1,30 +1,64 @@
 # neonfs_csi
 
-Kubernetes Container Storage Interface (CSI) v1 plugin for NeonFS —
-the Elixir gRPC server that a kubelet (Node mode) or external
-provisioner sidecar (Controller mode) speaks to over a Unix domain
-socket to provision and mount NeonFS volumes.
+A Kubernetes CSI (Container Storage Interface) driver for NeonFS,
+written in Elixir. Pods get persistent volumes backed by replicated,
+deduplicated, optionally encrypted cluster storage — dynamically
+provisioned through a `StorageClass`, FUSE-mounted on the node, and
+reachable over every other NeonFS interface at the same time.
 
-This package is the **first slice** of the CSI driver epic (#244):
+The driver implements all three CSI services over a Unix domain socket:
 
-- New OTP application `NeonFS.CSI.Application`.
-- gRPC server bound to a Unix socket. Default paths follow the CSI
-  spec:
-  - Controller mode: `/var/lib/csi/sockets/pluginproxy/csi.sock`.
-  - Node mode: `/var/lib/kubelet/plugins/neonfs.csi.harton.dev/csi.sock`.
-- Vendored CSI v1.9 protobuf definitions under `proto/csi.proto`.
-- Generated Elixir bindings under `lib/csi/csi.pb.ex` (regenerate with
+- **Identity** — `GetPluginInfo`, `GetPluginCapabilities`, `Probe`.
+- **Controller** — volume lifecycle (create/delete, publish/unpublish,
+  capacity, capability validation) plus snapshots: `CreateSnapshot`,
+  `DeleteSnapshot`, `ListSnapshots`, and creating volumes from
+  snapshots or as clones of existing volumes.
+- **Node** — stage/unstage and publish/unpublish with FUSE mounts, and
+  volume health reporting (`VOLUME_CONDITION`) for pod scheduling.
+
+Deployment is via the [Helm chart](../deploy/charts/neonfs-csi/): a
+Controller `Deployment` with provisioner/attacher/resizer sidecars and
+a Node `DaemonSet` with registrar and liveness-probe sidecars.
+
+Depends on [`neonfs_client`](../neonfs_client/) only — it has **no
+dependency on `neonfs_core`**. The remaining work on the epic
+([#244](https://harton.dev/project-neon/neonfs/issues/244)) is
+end-to-end test coverage on a kind/k3d cluster
+([#319](https://harton.dev/project-neon/neonfs/issues/319),
+[#995](https://harton.dev/project-neon/neonfs/issues/995)).
+
+## Install
+
+```bash
+helm install neonfs-csi ./deploy/charts/neonfs-csi \
+  --namespace kube-system \
+  --set bootstrap.value=$(cat /etc/neonfs/bootstrap-token)
+```
+
+See the [chart README](../deploy/charts/neonfs-csi/README.md) for
+production patterns (existing Secrets, StorageClass management) and
+[`docs/orchestration.md`](../docs/orchestration.md) for the wider
+Kubernetes story.
+
+## Implementation notes
+
+- gRPC server bound to a Unix socket at the CSI-spec default paths:
+  - Controller mode: `/var/lib/csi/sockets/pluginproxy/csi.sock`
+  - Node mode: `/var/lib/kubelet/plugins/neonfs.csi.harton.dev/csi.sock`
+- Vendored CSI protobuf definitions under `proto/csi.proto`; Elixir
+  bindings generated into `lib/csi/csi.pb.ex` (regenerate with
   `mix csi.gen_proto`).
-- Identity service (`GetPluginInfo`, `GetPluginCapabilities`, `Probe`)
-  — required by every CSI plugin regardless of mode.
-- Service registry registration as `:csi` so the cluster can discover
-  the plugin.
+- Registers as `:csi` in the cluster service registry.
 
-## Out of scope (subsequent slices)
+## Building and testing
 
-- Controller service RPCs (#314).
-- Node service RPCs (#315).
-- Volume health reporting (#316).
-- Helm chart (#317).
-- Container image / packaging (#318).
-- End-to-end test on a kind/k3d cluster (#319).
+```bash
+mix deps.get
+mix compile
+mix test                          # unit tests (run without core)
+mix check --no-retry              # full check suite
+```
+
+## Licence
+
+Apache-2.0 — see [LICENSE](../LICENSE) for details.

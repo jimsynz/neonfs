@@ -1,18 +1,59 @@
 # NeonFS
 
-A BEAM-orchestrated distributed filesystem combining Elixir's coordination strengths with Rust's performance for storage operations.
+**Store it once. Serve it everywhere.**
 
-NeonFS provides location-transparent storage where data is accessible from any node regardless of where it's physically stored. It offers configurable durability, tiered storage, compression, encryption, and multiple access methods.
+NeonFS is a distributed filesystem that keeps one deduplicated,
+content-addressed copy of your data and serves it over FUSE, NFSv3, S3,
+WebDAV, Docker volumes, containerd, and Kubernetes CSI — simultaneously,
+from any node in the cluster. Write a file over NFS from a legacy
+application, read it from a Kubernetes pod, list it with `aws s3 ls`,
+and browse it in Finder: same bytes, same namespace, no sync jobs.
 
-Current version: v0.3.0.
+It pairs the BEAM (Elixir/OTP) for coordination — Raft consensus,
+supervision trees, failure recovery, policy — with Rust for the data
+path — chunking, hashing, compression, encryption, and erasure coding
+as Rustler NIFs. Each side does what it is best at.
 
-## Design Principles
+## Why NeonFS?
 
-- **Separation of concerns** — Elixir handles coordination, policy, and APIs; Rust handles I/O, chunking, and cryptography via Rustler NIFs.
-- **Content-addressed storage** — immutable, SHA-256-identified chunks enable deduplication, integrity verification, and data recovery.
-- **Location transparency** — metadata flows through Elixir for a single code path, while bulk chunk data moves over a dedicated TLS data plane.
-- **Per-volume isolation** — each volume has its own supervision tree with independent durability, tiering, compression, encryption, and ACL settings.
-- **No whole-file buffering** — read and write paths process data as streams of chunks; RAM usage is bounded by chunk size, not file size.
+- **Every protocol, one namespace.** Interface nodes are thin,
+  independently deployable translators over a shared client library.
+  Adding an access method never duplicates your data.
+- **Per-volume policy, not per-cluster policy.** Each volume chooses its
+  own durability (replication factor N, or Reed–Solomon erasure coding
+  such as 10+4), storage tiering, Zstandard compression, and AES-256-GCM
+  encryption with background key rotation. Each volume also gets its own
+  supervision tree, so one volume's trouble doesn't take down the rest.
+- **Content-addressed storage.** FastCDC chunking with SHA-256
+  addressing gives you deduplication for free, verifiable integrity end
+  to end, and chunk-level repair when a drive dies.
+- **Secure by default.** The cluster operates its own ECDSA P-256
+  certificate authority. Node certificates auto-renew, bulk data moves
+  over an mTLS data plane, Erlang distribution itself runs over TLS, and
+  nodes join with single-use invite tokens that carry a CSR.
+- **Bounded memory, always.** Every read and write path streams data
+  chunk by chunk. RAM usage is bounded by chunk size, never file size —
+  a small node serves arbitrarily large files without buffering them.
+- **Built to be operated.** Scrubbing, repair, anti-entropy, drive
+  evacuation, garbage collection, tier promotion/demotion with HDD
+  spin-down, DR snapshots, a Prometheus exporter with alerting rules,
+  incident runbooks, and a CLI that covers the lot.
+
+## Access methods
+
+| Protocol | Good for | Status |
+|----------|----------|--------|
+| FUSE | Local POSIX mounts on Linux | Shipped |
+| NFSv3 + NLM v4 | Network mounts — clients built into Linux, macOS, Windows | Shipped |
+| S3-compatible HTTP | `aws` CLI and SDKs — Signature v4 auth, multipart uploads, conditional requests | Shipped |
+| WebDAV | Finder, Explorer, rclone — collection locking, dead properties | Shipped |
+| Docker / Podman volume plugin | Container volumes backed by the cluster | Shipped |
+| containerd content store | Image layers stored as NeonFS objects | Shipped |
+| Kubernetes CSI | Persistent volumes via Helm chart | Shipped — kind/k3d end-to-end test outstanding ([#319](https://harton.dev/project-neon/neonfs/issues/319)) |
+| CIFS/SMB (Samba VFS) | Native Windows/macOS shares | In progress ([#116](https://harton.dev/project-neon/neonfs/issues/116)) |
+
+File locks taken over one protocol are honoured by the others — a
+quorum-backed distributed lock manager is shared across all interfaces.
 
 ## Architecture
 
@@ -31,143 +72,135 @@ Current version: v0.3.0.
     │                    neonfs_client (shared)                  │
     │      Router · Discovery · ChunkReader · Transport pool     │
     └────────────────────────────────────────────────────────────┘
-        │            │            │            │
-  ┌─────┴───┐  ┌─────┴───┐  ┌─────┴───┐  ┌─────┴───┐
-  │ FUSE    │  │ NFSv3 + │  │ S3-     │  │ WebDAV  │
-  │ mount   │  │ NLM v4  │  │ compat  │  │ + locks │
-  └─────────┘  └─────────┘  └─────────┘  └─────────┘
+       │       │       │        │        │        │         │
+    ┌──┴──┐ ┌──┴──┐ ┌──┴──┐ ┌───┴───┐ ┌──┴───┐ ┌──┴────┐ ┌──┴──┐
+    │FUSE │ │NFSv3│ │ S3  │ │WebDAV │ │Docker│ │contai-│ │ CSI │
+    │mount│ │+NLM │ │API  │ │+locks │ │volume│ │ nerd  │ │     │
+    └─────┘ └─────┘ └─────┘ └───────┘ └──────┘ └───────┘ └─────┘
 ```
 
-Interface packages (FUSE, NFS, S3, WebDAV) depend only on `neonfs_client`. They talk to core nodes via Erlang distribution for metadata and fetch chunk data directly over a dedicated TLS data plane, keeping bulk traffic off the BEAM distribution channel.
+Interface packages depend only on `neonfs_client` — never on
+`neonfs_core`. They reach core nodes over Erlang distribution for
+metadata and fetch chunk data directly over a dedicated TLS data plane,
+keeping bulk traffic off the BEAM distribution channel.
 
-## Packages
+Cluster metadata uses two mechanisms: Ra (Raft) consensus for membership,
+the service registry, and volume configuration; and leaderless
+R+W>N quorum replication with hybrid-logical-clock conflict resolution
+for the high-churn chunk, file, and stripe indexes.
+
+### Packages
 
 | Package | Description |
 |---------|-------------|
-| [`neonfs_client`](neonfs_client/) | Shared types, service discovery, `Router`, `ChunkReader`, transport pooling |
 | [`neonfs_core`](neonfs_core/) | Storage engine, metadata, Ra consensus, cluster CA, policy |
-| [`neonfs_iam`](neonfs_iam/) | Identity and access management (users, groups, policies, identity mappings) |
+| [`neonfs_client`](neonfs_client/) | Shared types, service discovery, RPC routing, chunk streaming |
 | [`neonfs_fuse`](neonfs_fuse/) | FUSE filesystem interface |
 | [`neonfs_nfs`](neonfs_nfs/) | NFSv3 server with NLM v4 advisory locking |
 | [`neonfs_s3`](neonfs_s3/) | S3-compatible HTTP server |
 | [`neonfs_webdav`](neonfs_webdav/) | WebDAV server with collection locking and dead properties |
-| [`neonfs_docker`](neonfs_docker/) | Docker / Podman VolumeDriver plugin (HTTP over Unix socket) |
-| [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle of core + all interface packages |
-| [`neonfs_integration`](neonfs_integration/) | Peer-based multi-node integration test suite |
-| [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster management |
+| [`neonfs_docker`](neonfs_docker/) | Docker / Podman VolumeDriver plugin |
+| [`neonfs_containerd`](neonfs_containerd/) | containerd content-store gRPC plugin |
+| [`neonfs_csi`](neonfs_csi/) | Kubernetes CSI driver (with [Helm chart](deploy/charts/neonfs-csi/)) |
+| [`neonfs_cifs`](neonfs_cifs/) | Samba VFS module backend (in progress) |
+| [`neonfs_iam`](neonfs_iam/) | Identity and access management domain (scaffold — resources land incrementally) |
+| [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle: core + every interface in a single release |
+| [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster administration |
+| [`fuse_server`](fuse_server/) | Standalone library: FUSE transport and protocol codec on the BEAM |
+| [`nfs_server`](nfs_server/) | Standalone library: pure-Elixir NFSv3/ONC-RPC server |
+| [`neonfs_test_support`](neonfs_test_support/) | Shared peer-cluster test scaffolding |
+| [`neonfs_integration`](neonfs_integration/) | Multi-node cluster-correctness test suite |
 
-### Dependency graph
+## Try it
 
-```
-neonfs_client  ← neonfs_core
-neonfs_client  ← neonfs_iam
-neonfs_client  ← neonfs_fuse
-neonfs_client  ← neonfs_nfs
-neonfs_client  ← neonfs_s3       (firkin)
-neonfs_client  ← neonfs_webdav   (davy)
-neonfs_client  ← neonfs_docker
-neonfs_core, neonfs_fuse, neonfs_nfs, neonfs_s3, neonfs_webdav, neonfs_docker  ← neonfs_omnibus
-all of the above                                                               ← neonfs_integration
-```
-
-Interface packages have **no dependency** on `neonfs_core`. All communication with core nodes goes through `NeonFS.Client.Router`.
-
-## Features
-
-### Storage
-- **Flexible durability** — replication (factor N) or Reed–Solomon erasure coding (e.g. 10+4) per volume.
-- **Storage tiering** — hot (NVMe), warm (SATA SSD), and cold (HDD) tiers with access-based promotion/demotion and HDD spin-down.
-- **Content-addressed chunks** — FastCDC chunking, SHA-256 addressing, automatic deduplication.
-- **Compression** — per-volume Zstandard with configurable levels.
-- **Encryption** — server-side AES-256-GCM or envelope encryption, per-volume key management with background rotation.
-
-### Cluster
-- **Ra consensus** — metadata and service registry backed by Raft.
-- **Leaderless quorum metadata** — chunk, file, and stripe indexes use R+W>N quorum reads/writes.
-- **HLC-based conflict resolution** — hybrid logical clocks for ordering across nodes.
-- **Self-signed cluster CA** — ECDSA P-256 via pure-Elixir `x509`, mTLS on the data plane, auto-renewing node certificates.
-- **TLS Erlang distribution** — all BEAM distribution traffic encrypted.
-- **Event notification** — `:pg`-based cache invalidation for interface nodes.
-- **Distributed lock manager** — quorum-backed DLM shared across all interface protocols.
-
-### Access methods
-
-Shipped:
-
-- FUSE mounts
-- NFSv3 + NLM v4 advisory locking
-- S3-compatible HTTP API (virtual-hosted-style, RFC 7232 conditional requests, multipart uploads)
-- WebDAV with collection locking and dead property storage
-
-Tracked for future work:
-
-- Docker/Podman VolumeDriver plugin ([#243](https://harton.dev/project-neon/neonfs/issues/243))
-- Kubernetes CSI driver ([#244](https://harton.dev/project-neon/neonfs/issues/244))
-- CIFS/SMB via Samba VFS ([#116](https://harton.dev/project-neon/neonfs/issues/116))
-- containerd content store ([#196](https://harton.dev/project-neon/neonfs/issues/196))
-
-### Operations
-
-- Prometheus metrics exporter with alerting rules.
-- HTTP health endpoint for load balancers and orchestrators.
-- Cluster-wide CLI queries (`drive list`, `volume list`, `gc status`, `scrub status`, etc.).
-- Debian packages (amd64 + arm64) and multi-arch container images.
-- systemd integration with `sd_notify` readiness.
-
-## Prerequisites
-
-- Elixir 1.19.5 (OTP 28)
-- Erlang 28.3.1
-- Rust 1.93.0
-- FUSE (`libfuse3-dev` on Debian/Ubuntu)
-
-All managed via `.tool-versions` — `asdf install` or `mise install` will fetch them.
-
-## Getting started
-
-Build everything from the repository root:
+The [QEMU test rig](test-rig/) brings up a real cluster — base OS, `.deb`
+packages, systemd units, the works — with one command:
 
 ```bash
-mix deps.get
-mix compile
+cd test-rig
+./neonfs-rig up              # single-node cluster with a volume, end to end
+./neonfs-rig cli 1 -- volume list
+NODES=3 ./neonfs-rig up      # or a 3-node cluster with replicas=3
 ```
 
-Run the full check suite (formatting, Credo, Dialyzer, Clippy, tests) across every subproject:
+See [`test-rig/README.md`](test-rig/README.md) for requirements (QEMU,
+nfpm) and the acceptance suite that drives every interface against the
+running cluster.
+
+## Installing
+
+**Debian packages** (amd64 + arm64) from the project repository:
 
 ```bash
-mix check --no-retry
+curl -fsSL https://harton.dev/api/packages/project-neon/debian/repository.key \
+  | sudo tee /etc/apt/keyrings/neonfs.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/neonfs.asc] https://harton.dev/api/packages/project-neon/debian trixie main" \
+  | sudo tee /etc/apt/sources.list.d/neonfs.list
+sudo apt update
+sudo apt install neonfs-omnibus        # everything in one node, or:
+sudo apt install neonfs-core neonfs-fuse neonfs-nfs neonfs-s3   # split services
 ```
 
-Run tests for a specific package:
+**Container images** are published per interface under
+`ghcr.io/jimsynz/neonfs/` (`core`, `fuse`, `nfs`, `s3`, `webdav`,
+`docker`, `containerd`, `csi`, `omnibus`, `cli`). The CSI driver
+installs into Kubernetes via the [Helm chart](deploy/charts/neonfs-csi/).
+
+See [`packaging/README.md`](packaging/README.md) for deployment
+topologies and [`docs/deployment.md`](docs/deployment.md) for Docker
+Compose, Swarm, and Kubernetes recipes.
+
+## Your first cluster
 
 ```bash
-cd neonfs_core && mix test
+neonfs cluster init --name production           # first core node: Ra, cluster CA, certs
+neonfs drive add --path /data/nvme0 --tier hot --capacity 1T --id nvme0
+neonfs volume create my-data --replicas 3 --compression zstd
+neonfs fuse mount my-data /mnt/my-data
 ```
 
-## Container builds
+Additional nodes join with `neonfs cluster create-invite` on an existing
+node and `neonfs cluster join` on the new one — the invite token is
+single-use and carries the CSR for the node's TLS certificate.
 
-Targets live in `containers/bake.hcl`:
+The [operator guide](docs/operator-guide.md) covers the full lifecycle
+(bootstrap, joins, drives, volumes, upgrades, troubleshooting); the
+[user guide](docs/user-guide.md) covers consuming a running cluster.
 
-```bash
-PLATFORMS='linux/amd64' docker buildx bake -f containers/bake.hcl --load \
-  base core fuse nfs s3 webdav docker omnibus cli
-```
+## Documentation
 
-`--load` is required for local testing; it loads images into the local Docker daemon rather than pushing to a registry.
+| Document | Covers |
+|----------|--------|
+| [Operator guide](docs/operator-guide.md) | Installation, bootstrap, node join, drives, volumes, upgrades |
+| [User guide](docs/user-guide.md) | Access methods, credentials, file operations, performance expectations |
+| [CLI reference](docs/cli-reference.md) | Every `neonfs` command and flag |
+| [Deployment](docs/deployment.md) / [Orchestration](docs/orchestration.md) | Docker Compose, Swarm, Kubernetes |
+| [Docker plugin](docs/docker-plugin.md) / [containerd](docs/containerd.md) | Container-runtime integration |
+| [API reference](docs/api-reference.md) | Programmatic interfaces |
+| [Runbooks](docs/runbooks/) | Incident-shaped procedures: node down, drive failure, quorum loss, … |
+| [Developer guide](docs/developer-guide.md) | Repo layout, subsystem pointers, testing strategy, contributing |
+| [Wiki](https://harton.dev/project-neon/neonfs/wiki) | Full specification, architecture, codebase patterns |
 
-## Deployment
+## Project status
 
-Interface nodes (FUSE, NFS, S3, WebDAV) run as separate Erlang nodes and connect to core nodes via Erlang distribution. For small deployments, `neonfs_omnibus` bundles core + all interfaces into a single release.
+NeonFS is **experimental**. It is feature-rich and heavily tested —
+unit, property, NIF-boundary, multi-node integration, and full
+VM-based acceptance tests — but there are no production deployments
+yet and no backwards-compatibility guarantees between releases:
+on-disk formats and APIs may change without migration paths. Treat it
+as something to evaluate and hack on, not somewhere to put the only
+copy of your data.
 
-Bootstrap a cluster by initialising the first core node, then join additional nodes using single-use invite tokens that carry a CSR for TLS certificate issuance.
+## Issues and contributing
 
-See [`docs/operator-guide.md`](docs/operator-guide.md) for the end-to-end operator guide (installation, bootstrap, node join, volume/drive management, upgrades, troubleshooting), and [`docs/user-guide.md`](docs/user-guide.md) if you're consuming a running cluster (CLI, access methods, credentials, file operations, performance expectations). [`docs/deployment.md`](docs/deployment.md) and [`docs/orchestration.md`](docs/orchestration.md) cover Docker Compose, Swarm, and Kubernetes recipes in depth, [`docs/cli-reference.md`](docs/cli-reference.md) is the full `neonfs` command-line reference, and [`docs/docker-plugin.md`](docs/docker-plugin.md) covers the Docker VolumeDriver plugin specifically. Contributors should start with [`docs/developer-guide.md`](docs/developer-guide.md) for repo layout, subsystem pointers, Rustler conventions, testing strategy, and the contributing workflow.
-
-## Project resources
-
-- **[Wiki](https://harton.dev/project-neon/neonfs/wiki)** — full specification, architecture, codebase patterns, historical progress.
-- **[Issues](https://harton.dev/project-neon/neonfs/issues)** — active work, feature requests, bug reports.
-- **[Changelog](CHANGELOG.md)** — release notes (v0.1.0 onwards).
+- **Bugs and feature requests** — [open an issue](https://harton.dev/project-neon/neonfs/issues).
+- **Contributing** — start with the [developer guide](docs/developer-guide.md),
+  then build with `mix deps.get && mix compile` and run the full check
+  suite with `mix check --no-retry` (needs Elixir 1.19 / OTP 28 and
+  Rust 1.93 — all pinned in `.tool-versions`, so `asdf install` or
+  `mise install` fetches them).
+- **Release notes** — [CHANGELOG.md](CHANGELOG.md), generated from
+  conventional commits.
 
 ## Licence
 

@@ -1,27 +1,49 @@
 # neonfs_cifs
 
-Samba VFS module backend for NeonFS — the Elixir side of the
-`vfs_neonfs` plugin. Listens on a Unix domain socket for
-length-prefixed ETF messages from Samba's process-per-connection
-worker (`smbd`) and routes each VFS op through `neonfs_client` to a
-NeonFS core cluster.
+CIFS/SMB access to NeonFS — native Windows and macOS file shares
+backed by the cluster, via a Samba VFS module. **In progress**: the
+Elixir side is implemented; the Samba-side C shim and packaging are
+still to come (see the
+[#116 epic](https://harton.dev/project-neon/neonfs/issues/116)).
 
-This package provides:
+## How it will fit together
 
-- An `OTP application` (`NeonFS.CIFS.Application`) that owns the
-  listener, the per-connection state, and the registrar handle into
-  the cluster's service registry.
-- A `ThousandIsland`-based UDS server with 4-byte big-endian
-  length-prefix framing and `:erlang.term_to_binary/1` ↔
-  `binary_to_term/1` end-to-end (no JSON, no protobuf).
-- A handler module that dispatches each incoming `{:op_atom, args}`
-  tuple to a per-VFS-op handler. The first slice covers the ~20
-  "Must implement" Samba VFS ops (lifecycle, metadata, file I/O,
-  directory iteration, mutations, statvfs).
-- A handle table per connection — synthetic 64-bit tokens that map
-  to NeonFS volume + path so the C shim can pretend it has POSIX
-  fds.
+Samba handles the SMB protocol, authentication, and Windows semantics
+— problems already solved well — while a thin VFS module
+(`vfs_neonfs.so`) forwards filesystem operations to this package over
+a Unix domain socket, and from there through `neonfs_client` to the
+cluster. The framing is 4-byte big-endian length-prefixed ETF
+(`:erlang.term_to_binary/1` end to end — no JSON, no protobuf).
 
-The C shim itself (`vfs_neonfs.so`), the in-tree Samba build, the
-container packaging, and the end-to-end `smbd` test all live in
-follow-up sub-issues — see #116 for the parent epic.
+## What's implemented (this package)
+
+- `NeonFS.CIFS.Application` — owns the listener, per-connection state,
+  and the cluster service-registry registration.
+- A `ThousandIsland`-based UDS server with length-prefix framing.
+- A handler dispatching each `{:op_atom, args}` tuple to a per-VFS-op
+  handler, covering the ~20 "must implement" Samba VFS ops (lifecycle,
+  metadata, file I/O, directory iteration, mutations, statvfs).
+- A per-connection handle table — synthetic 64-bit tokens mapping to
+  NeonFS volume + path, so the C shim can present POSIX-style fds.
+
+## What's outstanding
+
+- `vfs_neonfs.so` C shim and in-tree Samba build
+  ([#384](https://harton.dev/project-neon/neonfs/issues/384))
+- Container image, Debian package, omnibus integration
+  ([#385](https://harton.dev/project-neon/neonfs/issues/385))
+- End-to-end test against a real `smbd`
+  ([#386](https://harton.dev/project-neon/neonfs/issues/386))
+
+## Building and testing
+
+```bash
+mix deps.get
+mix compile
+mix test
+mix check --no-retry
+```
+
+## Licence
+
+Apache-2.0 — see [LICENSE](../LICENSE) for details.

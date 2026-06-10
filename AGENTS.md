@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 This file provides guidance to coding agents when working with code in this repository.
 
@@ -6,7 +6,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 NeonFS is a BEAM-orchestrated distributed filesystem combining Elixir's coordination strengths with Rust's performance for storage operations. The project follows a strict separation of concerns: Elixir handles coordination, policy, and APIs; Rust handles I/O, chunking, and cryptography via Rustler NIFs.
 
-**Current Status:** Phase 2 (Distributed) complete - multi-node Ra cluster with replication, node failure recovery, and full acceptance tests passing.
+**Current Status:** the storage engine (replication, erasure coding, tiering, compression, encryption), multi-node clustering (Ra consensus, leaderless quorum metadata, cluster CA, TLS distribution, mTLS data plane), and seven access interfaces (FUSE, NFSv3, S3, WebDAV, Docker volumes, containerd content store, Kubernetes CSI) are shipped. CIFS/SMB via Samba VFS is in progress (#116). See the [issue tracker](https://harton.dev/project-neon/neonfs/issues) for active work.
 
 ## Experimental Project — No Backwards Compatibility
 
@@ -55,61 +55,41 @@ git -c commit.gpgsign=false commit -m "commit message"
 
 ## Architecture
 
-```
-neonfs_client/        # Shared types & service discovery (pure Elixir library)
-├── lib/neon_fs/client/
-│   ├── connection.ex     # Bootstrap node connectivity
-│   ├── cost_function.ex  # Latency/load-based node selection
-│   ├── discovery.ex      # Service discovery cache (ETS)
-│   └── router.ex         # RPC routing with failover
-└── lib/neon_fs/core/
-    ├── file_meta.ex      # Shared file metadata type
-    └── volume.ex         # Shared volume type
-
-neonfs_core/          # Elixir control plane (depends on neonfs_client)
-├── lib/neon_fs/core/
-│   ├── application.ex    # Supervision tree root
-│   ├── service_registry.ex  # Ra-backed service registry
-│   └── core.ex           # Main module
-├── native/               # Rustler NIFs (via mix rustler.new)
-└── test/
-
-neonfs_fuse/          # FUSE filesystem package (depends on neonfs_client only)
-├── lib/neon_fs/fuse/
-│   ├── application.ex
-│   ├── handler.ex        # FUSE op → core RPC translation
-│   ├── session.ex        # owns the FUSE fd; dispatches frames to handler
-│   └── mount_manager.ex  # mount/unmount lifecycle (Fusermount + Session)
-└── test/
-
-neonfs_nfs/           # NFSv3 server package (depends on neonfs_client only)
-├── lib/neon_fs/nfs/
-│   ├── nfsv3_backend.ex  # NFSServer.NFSv3.Backend impl against neonfs_client
-│   ├── mount_backend.ex  # NFSServer.Mount.Backend impl against ExportManager
-│   ├── export_manager.ex # Volume export lifecycle + NFS listener
-│   └── metadata_cache.ex # ETS-backed metadata cache
-└── test/
-
-neonfs_integration/   # Peer-based integration tests
-├── lib/neonfs/integration/
-│   └── peer_cluster.ex   # Spawns real peer nodes for testing
-└── test/integration/     # Multi-node integration tests
-
-```
+| Package | Purpose |
+|---------|---------|
+| `neonfs_client/` | Shared library every other package builds on: shared types (`Volume`, `FileMeta`), service discovery (`Connection`, `Discovery`, `CostFunction`), RPC routing (`Router`), chunk streaming over the TLS data plane (`ChunkReader`, `ChunkWriter`), KV access, service registration (`Registrar`). Pure library — no OTP application. |
+| `neonfs_core/` | Control plane and storage engine: blob storage NIFs (`native/neonfs_blob`), file/chunk/stripe indexes on leaderless quorum replication, Ra-backed service + volume registries, cluster CA, join flow, GC, scrub, repair, tiering. |
+| `neonfs_fuse/` | FUSE interface. `Session` owns the `/dev/fuse` fd; `Handler` translates ops into core RPCs; `MountManager` owns mount lifecycle. |
+| `neonfs_nfs/` | NFSv3 interface: `NFSServer.*.Backend` impls against `neonfs_client`, export lifecycle, inode table, metadata cache, NLM v4 locking. |
+| `neonfs_s3/` | S3-compatible HTTP interface (Bandit + `firkin`): backend, multipart store. |
+| `neonfs_webdav/` | WebDAV interface (Bandit + `davy`). |
+| `neonfs_docker/` | Docker/Podman VolumeDriver plugin (HTTP over Unix socket, FUSE-backed mounts). |
+| `neonfs_containerd/` | containerd content-store gRPC plugin (Unix socket). |
+| `neonfs_csi/` | Kubernetes CSI driver (gRPC over Unix socket; Helm chart in `deploy/charts/neonfs-csi/`). |
+| `neonfs_cifs/` | Samba VFS module backend (ETF over Unix socket) — in progress, C shim pending (#384). |
+| `neonfs_iam/` | IAM Ash domain — scaffold, resources land via #288/#290/#291/#292. |
+| `neonfs_omnibus/` | Single release bundling core + all shipped interfaces. |
+| `neonfs-cli/` | Rust CLI; speaks Erlang distribution (TLS) directly via `erl_dist`. |
+| `fuse_server/` | Standalone library: FUSE transport NIF + pure-Elixir protocol codec. |
+| `nfs_server/` | Standalone library: XDR, ONC RPC, MOUNT, NFSv3 against backend behaviours. |
+| `neonfs_test_support/` | Peer-cluster test scaffolding (`PeerCluster`, `ClusterCase`, …) shared by every package's integration tests. |
+| `neonfs_integration/` | Cross-node cluster-correctness test suite (formation, replication, partitions, failure recovery). Per-interface e2e tests live with their packages. |
 
 Architecture and design documentation lives in the [wiki](https://harton.dev/project-neon/neonfs/wiki) — start with [Specification](https://harton.dev/project-neon/neonfs/wiki/Specification).
 
 ### Dependency Graph
 
 ```
-neonfs_client  ← neonfs_core  (shared types, service registry)
-neonfs_client  ← neonfs_fuse  (service discovery, RPC routing)
-neonfs_client  ← neonfs_nfs   (service discovery, RPC routing)
-neonfs_core    ← neonfs_integration (all packages for integration tests)
-neonfs_fuse    ← neonfs_integration
+neonfs_client  ← neonfs_core
+neonfs_client  ← every interface package (fuse, nfs, s3, webdav, docker,
+                 containerd, csi, cifs, iam)
+fuse_server    ← neonfs_fuse          nfs_server  ← neonfs_nfs
+neonfs_core + interfaces              ← neonfs_omnibus
+neonfs_test_support (test-only)       ← all packages with peer-cluster tests
+all of the above                      ← neonfs_integration
 ```
 
-neonfs_fuse and neonfs_nfs have **no dependency** on neonfs_core. All communication with core nodes happens via Erlang distribution, routed through the `NeonFS.Client.Router` module.
+Interface packages have **no dependency** on neonfs_core. All communication with core nodes happens via Erlang distribution, routed through the `NeonFS.Client.Router` module, with bulk chunk data on the TLS data plane.
 
 ### Key Design Principles
 - All data flows through Elixir for single code path and consistency
@@ -266,7 +246,8 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 
 ## Module Naming
 
-- Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, `NeonFS.NFS.*`, and `NeonFS.Integration.*`
+- Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, `NeonFS.NFS.*`, `NeonFS.S3.*`, `NeonFS.WebDAV.*`, `NeonFS.Docker.*`, `NeonFS.Containerd.*`, `NeonFS.CSI.*`, `NeonFS.CIFS.*`, `NeonFS.IAM.*`, `NeonFS.Omnibus.*`, and `NeonFS.TestSupport.*`
+- The standalone protocol libraries use their own namespaces: `FuseServer.*` and `NFSServer.*`
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
 
@@ -316,21 +297,20 @@ If a particular failing job needs deeper inspection, get the `target_url` from `
 
 ## Container Building
 
-Build containers for local testing (single-arch, loaded locally):
+Build containers for local testing (single-arch, loaded locally). Targets live in `containers/bake.hcl` (`base`, `core`, `fuse`, `nfs`, `s3`, `webdav`, `docker`, `csi`, `containerd`, `omnibus`, `cli`):
 ```bash
-PLATFORMS='linux/amd64' docker buildx bake -f bake.hcl --load core fuse nfs cli
+PLATFORMS='linux/amd64' docker buildx bake -f containers/bake.hcl --load core fuse nfs cli
 ```
 
 The `--load` flag is required to load images into the local Docker daemon. Without it, images are only pushed to the registry. Multi-platform builds don't support `--load`, so override PLATFORMS for local testing.
 
 ## Multi-Node Architecture
 
-neonfs_core, neonfs_fuse, and neonfs_nfs run as separate Erlang nodes communicating via distribution:
-- Core node: `neonfs_core@neonfs-core` (storage, metadata, CLI handler, service registry)
-- FUSE node: `neonfs_fuse@neonfs-fuse` (FUSE mount operations, routes to core via neonfs_client)
-- NFS node: `neonfs_nfs@neonfs-nfs` (NFSv3 server, routes to core via neonfs_client)
-- CLI connects to core node, core makes RPC calls to FUSE node for mount operations
-- Ensure matching `RELEASE_COOKIE` across all nodes
+Core and interface packages run as separate Erlang nodes communicating via distribution:
+- Core node: `neonfs_core@<host>` (storage, metadata, CLI handler, service registry)
+- Interface nodes: `neonfs_fuse@<host>`, `neonfs_nfs@<host>`, `neonfs_s3@<host>`, etc. — each routes to core via neonfs_client
+- CLI connects to the core node; core makes RPC calls to interface nodes (e.g. FUSE mount operations)
+- Node authentication is **cluster-managed TLS**, not cookies: distribution runs over TLS from first boot (local CA generated by the daemon wrapper), and joining nodes redeem single-use invite tokens to receive cluster-signed certificates and credentials. The Erlang cookie file is generated and managed by the daemon and the join flow — never instruct operators to create, copy, or match cookies by hand.
 
 ### Service Discovery
 
@@ -387,10 +367,6 @@ assert_receive :child_ready, 1_000
 
 Telemetry events serve double duty: they enable deterministic tests AND provide operational observability (metrics, alerting, dashboards). When adding new async behaviour, always consider adding telemetry — it's useful beyond just testing.
 
-## Phase 5 Metadata Migration
-
-Phase 5 migrates metadata indexes (ChunkIndex, FileIndex, StripeIndex) from Ra-backed storage to leaderless quorum-replicated BlobStore via QuorumCoordinator. **There is no need for backward compatibility with Ra in the migrated modules.** When migrating an index module, remove all Ra fallback code paths entirely — the module should require `quorum_opts` and use QuorumCoordinator exclusively. Do not add dual-mode (Ra + quorum) support.
-
 ## Rustler NIF Return Values
 
 Rustler wraps Rust `Result<T, E>` types:
@@ -422,7 +398,7 @@ Unit tests passing is necessary but NOT sufficient. Integration between:
 must all work via the peer-based integration tests before moving to the next phase.
 
 **Common integration issues to check:**
-- Erlang nodes not connected (need explicit `Node.connect/1` or matching cookies)
+- Erlang nodes not connected (need explicit `Node.connect/1`, or the node lacks cluster TLS credentials — check the join completed)
 - Service discovery failing (check `NeonFS.Client.Discovery.get_core_nodes/0` or `Node.list()`)
 - RPC calls returning `{:badrpc, _}` or `{:error, :all_nodes_unreachable}` (nodes not reachable)
 - Client infrastructure not ready (Connection, Discovery, CostFunction need time to probe after startup)

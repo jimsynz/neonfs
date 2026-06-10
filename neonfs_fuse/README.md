@@ -1,54 +1,49 @@
 # NeonFS FUSE
 
-FUSE filesystem interface for NeonFS, providing local filesystem access to
-cluster-stored data.
+Mount a NeonFS volume as a local directory. `neonfs_fuse` turns
+cluster-stored data into an ordinary POSIX filesystem — `ls`, `cp`,
+your editor, your build — backed by replicated, deduplicated,
+optionally encrypted storage.
 
-This package depends on `neonfs_client` only — it has **no dependency on
-`neonfs_core`**. All communication with core nodes happens via Erlang
-distribution, routed through `NeonFS.Client.Router`.
+What makes it unusual: the FUSE protocol is spoken **natively on the
+BEAM**. There is no libfuse binding and no long-running native event
+loop — a minimal syscall NIF (from the standalone
+[`fuse_server`](../fuse_server/) library) obtains the `/dev/fuse` file
+descriptor via `fusermount3`, and from there frame parsing, dispatch,
+and replies are all Elixir processes under supervision.
 
-## How It Works
+This package depends on [`neonfs_client`](../neonfs_client/) only — it
+has **no dependency on `neonfs_core`**. All communication with core
+nodes happens via Erlang distribution and the TLS data plane, routed
+through the client library.
 
-The FUSE node mounts volumes as local directories via a pure-BEAM
-implementation built on top of `FuseServer.Fusermount` (which uses the
-`fusermount3` userspace helper to obtain a `/dev/fuse` fd) and a
-`NeonFS.FUSE.Session` GenServer that owns the fd and dispatches incoming
-frames. Filesystem operations are translated into RPC calls to core nodes
-through `neonfs_client`'s service discovery and routing.
+## How it works
 
-### Key Modules
-
-- `NeonFS.FUSE.Handler` — translates FUSE operations into core RPC calls
-- `NeonFS.FUSE.Session` — owns the FUSE fd and dispatches frames
-- `NeonFS.FUSE.MountManager` — manages mount/unmount lifecycle per volume
-- `NeonFS.FUSE.Application` — OTP application and supervision tree
+- `NeonFS.FUSE.Session` owns the `/dev/fuse` fd and dispatches incoming
+  frames
+- `NeonFS.FUSE.Handler` translates FUSE operations into core RPC calls
+- `NeonFS.FUSE.MountManager` manages the mount/unmount lifecycle per volume
+- File reads and writes stream chunk by chunk through
+  `NeonFS.Client.ChunkReader` / `ChunkWriter` — memory use is bounded by
+  chunk size, not file size
 
 ## Prerequisites
 
-- FUSE support: `libfuse3-dev` (Debian/Ubuntu) or equivalent
-- `fusermount3` available on `$PATH`
+- FUSE support: `libfuse3-dev` (Debian/Ubuntu) or equivalent, with
+  `fusermount3` on `$PATH`
 - A running NeonFS core cluster to connect to
 
-## Building
+## Building and testing
 
 ```bash
 mix deps.get
 mix compile
-```
-
-The fuser-NIF Rust crate that this package used to ship was removed in
-the cutover (#107). The minimal syscall NIF lives in the
-`fuse_server` package now.
-
-## Testing
-
-```bash
 mix test                          # unit tests (run without core)
 mix check --no-retry              # full check suite
 ```
 
-Integration tests that exercise the full FUSE-to-core path live in
-`neonfs_integration`.
+End-to-end FUSE tests (real mounts against a peer cluster) live in
+`test/integration/`.
 
 ## Running
 
@@ -62,7 +57,13 @@ _build/prod/rel/neonfs_fuse/bin/neonfs_fuse start
 Or as a container:
 
 ```bash
-PLATFORMS='linux/amd64' docker buildx bake -f ../bake.hcl --load fuse
+PLATFORMS='linux/amd64' docker buildx bake -f ../containers/bake.hcl --load fuse
+```
+
+Mounting is driven from the CLI:
+
+```bash
+neonfs fuse mount my-volume /mnt/my-volume
 ```
 
 ## Licence

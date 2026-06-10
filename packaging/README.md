@@ -1,21 +1,30 @@
 # NeonFS Packaging
 
-This directory contains packaging and deployment files for NeonFS.
+Debian packages and systemd integration for NeonFS — install with
+`apt`, manage with `systemctl`, and read logs with `journalctl`, on
+amd64 and arm64.
 
-## Architecture
+## Packages
 
-NeonFS consists of several separate Erlang applications that can be deployed independently:
+| Package | Contains |
+|---------|----------|
+| `neonfs-core` | Storage daemon: chunks, metadata, cluster coordination |
+| `neonfs-fuse` | FUSE filesystem daemon (POSIX mounts) |
+| `neonfs-nfs` | NFSv3 server daemon |
+| `neonfs-s3` | S3-compatible HTTP API daemon |
+| `neonfs-webdav` | WebDAV server daemon |
+| `neonfs-docker` | Docker / Podman VolumeDriver plugin daemon |
+| `neonfs-containerd` | containerd content-store plugin daemon |
+| `neonfs-omnibus` | All of the above in a single BEAM node |
+| `neonfs-cli` | The `neonfs` admin CLI (installed automatically by every daemon package) |
+| `neonfs-common` | Shared user/directory/configuration plumbing |
 
-- **neonfs_core**: Storage daemon that manages data chunks, metadata, and cluster coordination
-- **neonfs_fuse**: FUSE filesystem daemon that provides POSIX filesystem access via FUSE mounts
-- **neonfs_nfs**: NFSv3 server daemon that provides NFS-compatible access
-- **neonfs_omnibus**: All-in-one daemon that runs core, FUSE, and NFS in a single BEAM node
+The services communicate via TLS Erlang distribution, authenticated by
+the cluster's certificate authority. `neonfs-omnibus` conflicts with
+the individual service packages and vice versa — pick split services
+or omnibus, not both.
 
-The separate services communicate via Erlang distribution using a shared cookie for authentication.
-
-## Installing from the Debian Repository
-
-NeonFS packages are published to the Forgejo Debian repository for amd64 and arm64.
+## Installing from the Debian repository
 
 ### Add the repository
 
@@ -35,51 +44,18 @@ sudo apt update
 ### Install packages
 
 ```bash
-# Individual services (for split deployments)
-sudo apt install neonfs-core    # Storage node
-sudo apt install neonfs-fuse    # FUSE mount node
-sudo apt install neonfs-nfs     # NFS server node
-
 # All-in-one (for single-node deployments)
 sudo apt install neonfs-omnibus
+
+# Or individual services (for split deployments) — install what you need
+sudo apt install neonfs-core
+sudo apt install neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav
+sudo apt install neonfs-docker neonfs-containerd
 ```
 
-All daemon packages automatically install `neonfs-cli` as a dependency. The `neonfs-omnibus` package conflicts with the individual service packages and vice versa.
+## Deployment scenarios
 
-## Directory Structure
-
-```
-packaging/
-├── nfpm/                  # nfpm package configurations
-│   ├── neonfs-cli.yaml
-│   ├── neonfs-core.yaml
-│   ├── neonfs-fuse.yaml
-│   ├── neonfs-nfs.yaml
-│   └── neonfs-omnibus.yaml
-├── systemd/               # systemd integration files
-│   ├── neonfs-core.service      # systemd unit for core storage daemon
-│   ├── neonfs-fuse.service      # systemd unit for FUSE daemon
-│   ├── neonfs-nfs.service       # systemd unit for NFS daemon
-│   ├── neonfs-omnibus.service   # systemd unit for omnibus daemon
-│   ├── neonfs.target            # systemd target to start all services
-│   ├── neonfs-core-daemon       # Core daemon wrapper script
-│   ├── neonfs-fuse-daemon       # FUSE daemon wrapper script
-│   ├── neonfs-nfs-daemon        # NFS daemon wrapper script
-│   ├── neonfs-omnibus-daemon    # Omnibus daemon wrapper script
-│   └── neonfs.conf              # Environment configuration
-├── scripts/               # Installation scripts
-│   ├── pre-install.sh           # Create user and directories
-│   ├── post-install.sh          # Reload systemd
-│   ├── pre-remove.sh            # Stop services before removal
-│   ├── post-remove.sh           # Clean up on purge
-│   └── validate-systemd.sh      # Validate systemd unit files
-├── build-debs.sh          # Build .deb packages locally
-└── README.md
-```
-
-## Deployment Scenarios
-
-### Single-Node Deployment (Omnibus)
+### Single node, everything (omnibus)
 
 All services run in a single BEAM node:
 
@@ -90,21 +66,19 @@ sudo systemctl enable --now neonfs-omnibus
 
 Node name: `neonfs@localhost`
 
-### Single-Node Deployment (Split Services)
+### Single node, split services
 
-Core, FUSE, and NFS as separate processes on the same host:
+Core plus the interfaces you want, as separate processes on one host:
 
 ```bash
 sudo apt install neonfs-core neonfs-fuse neonfs-nfs
 sudo systemctl enable --now neonfs.target
 ```
 
-Node names:
-- Core: `neonfs_core@localhost`
-- FUSE: `neonfs_fuse@localhost`
-- NFS: `neonfs_nfs@localhost`
+Node names: `neonfs_core@localhost`, `neonfs_fuse@localhost`,
+`neonfs_nfs@localhost`, …
 
-### Multi-Node Deployment
+### Multi-node
 
 Core and access services run on different hosts.
 
@@ -114,22 +88,28 @@ sudo apt install neonfs-core
 sudo systemctl enable --now neonfs-core
 ```
 
-**Mount/access node** (FUSE and/or NFS, connects to remote core):
+**Access node** (any mix of interfaces, connecting to a remote core):
 ```bash
 sudo apt install neonfs-fuse neonfs-nfs
 
 # Update /etc/neonfs/neonfs.conf:
 # NEONFS_CORE_NODE=neonfs_core@storage-host.domain
 
-sudo systemctl enable --now neonfs-fuse
-sudo systemctl enable --now neonfs-nfs
+sudo systemctl enable --now neonfs-fuse neonfs-nfs
 ```
 
-Ensure:
-- Both nodes have the same Erlang cookie at `/var/lib/neonfs/.erlang.cookie`
-- Erlang distribution ports are accessible (EPMD port 4369 + distribution ports 9100-9155)
+Make sure the Erlang distribution ports are reachable between nodes
+(EPMD port 4369 + distribution ports 9100-9155). No shared secrets
+need copying between hosts — the new node authenticates with a
+single-use invite token (`neonfs cluster create-invite` on an existing
+node, `neonfs cluster join` on the new one) and receives its
+cluster-signed TLS certificate and credentials through the join
+exchange.
 
-## Service Management
+The [operator guide](../docs/operator-guide.md) covers cluster
+bootstrap and node joins from here.
+
+## Service management
 
 ```bash
 # Start/stop all installed services
@@ -145,7 +125,7 @@ sudo journalctl -u neonfs-core -f
 sudo journalctl -u neonfs-fuse -f
 ```
 
-### Configuration Override
+### Configuration override
 
 Override default configuration using systemd drop-in files:
 
@@ -160,7 +140,7 @@ Environment=NEONFS_DATA_DIR=/mnt/storage/neonfs
 Environment=RELEASE_LOG_LEVEL=debug
 ```
 
-## Building Packages Locally
+## Building packages locally
 
 ```bash
 # Install nfpm (https://nfpm.goreleaser.com/)
@@ -171,36 +151,61 @@ VERSION=0.1.0 ./packaging/build-debs.sh
 ls dist/*.deb
 ```
 
-## Filesystem Layout
+## Directory structure
+
+```
+packaging/
+├── nfpm/                  # nfpm package configurations (one per package above)
+├── systemd/               # Units, daemon wrapper scripts, neonfs.target,
+│                          # neonfs.conf, TLS helper (neonfs-tls-common.sh)
+├── scripts/               # pre/post install/remove + systemd validation
+├── build-debs.sh          # Build .deb packages locally
+└── README.md
+```
+
+## Filesystem layout
 
 | Path | Purpose |
 |------|---------|
-| `/usr/lib/neonfs/{core,fuse,nfs,omnibus}/` | Release files (BEAM + NIFs) |
+| `/usr/lib/neonfs/<service>/` | Release files (BEAM + NIFs) per service |
 | `/usr/bin/neonfs` | CLI binary |
 | `/usr/bin/neonfs-*-daemon` | Daemon wrapper scripts |
 | `/etc/neonfs/neonfs.conf` | Environment configuration |
 | `/var/lib/neonfs/` | Data directory (blobs, metadata, WAL) |
-| `/var/lib/neonfs/.erlang.cookie` | Erlang distribution cookie |
-| `/run/neonfs/` | Runtime state (PID files, node names) |
+| `/var/lib/neonfs/tls/` | Local + cluster CA and node certificates |
+| `/run/neonfs/` | Runtime state (PID files, node names, plugin sockets) |
 
-## Security Considerations
+## Security considerations
 
-### Erlang Cookie
+### Cluster-managed TLS
 
-The Erlang cookie at `/var/lib/neonfs/.erlang.cookie` authenticates node-to-node communication:
+Node-to-node authentication is certificate-based, managed by the
+cluster:
 
-- Mode 600 (owner read/write only), owned by `neonfs:neonfs`
-- Generated automatically by the core daemon on first start
-- For multi-node deployments, copy the cookie to all nodes securely
-- Never commit to version control
+- On first boot, the daemon wrapper generates a local CA and node
+  certificate, so Erlang distribution runs over TLS before the node
+  has joined anything.
+- `neonfs cluster init` creates the cluster CA; nodes joining via
+  invite token submit a CSR and receive a cluster-signed certificate
+  and credentials through the encrypted join exchange — there are no
+  shared secrets to distribute by hand.
+- Certificates live under `$NEONFS_TLS_DIR` (default
+  `/var/lib/neonfs/tls`) and renew automatically.
+- Bulk chunk transfer uses a separate mTLS data plane.
 
-### FUSE Capabilities
+(An Erlang cookie file still exists per node as a mechanical
+requirement of BEAM distribution, but it is generated and managed by
+the daemon and the join flow — never copy it between hosts.)
 
-The FUSE and omnibus services require `CAP_SYS_ADMIN` for mounting filesystems. This is configured via `AmbientCapabilities` in their systemd units.
+### Network
 
-### Network Security
+For multi-node deployments, restrict EPMD (port 4369) and the
+distribution ports (9100-9155) to cluster hosts with firewall rules —
+TLS authenticates peers, but there is no reason to expose the ports
+more widely.
 
-For multi-node deployments:
-- Erlang distribution traffic is unencrypted by default
-- Restrict EPMD (port 4369) and distribution ports (9100-9155) with firewall rules
-- Consider VPN or WireGuard for node-to-node communication
+### FUSE capabilities
+
+The FUSE and omnibus services require `CAP_SYS_ADMIN` for mounting
+filesystems. This is configured via `AmbientCapabilities` in their
+systemd units.

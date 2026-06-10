@@ -1,20 +1,33 @@
-# NIF for NeonFS.Core.Blob.Native
+# neonfs_blob
 
-## To build the NIF module:
+The Rust data path of NeonFS, loaded into `neonfs_core` as a Rustler
+NIF (`NeonFS.Core.Blob.Native`). Everything CPU- or I/O-heavy that
+touches chunk bytes happens in this crate, behind a single NIF
+boundary crossing per chunk:
 
-- Your NIF will now build along with your project.
+- `chunking` — FastCDC content-defined chunking (plus fixed-size
+  strategies) with an incremental chunker for streaming writes
+- `hash` — SHA-256 content addressing
+- `compression` — Zstandard
+- `encryption` — AES-256-GCM, including envelope encryption parameters
+- `erasure` — Reed–Solomon encoding/decoding for erasure-coded volumes
+- `store` — the on-disk `BlobStore`: sharded content-addressed layout,
+  tiered paths (hot/warm/cold), and the `WriteOptions`/`ReadOptions`
+  pipeline that applies compression and encryption in one pass
+- `index_tree` — persistent index structures backed by the blob store
 
-## To load the NIF:
+The Elixir side treats chunks as opaque binaries; policy (which volume
+gets which compression, encryption, durability) lives in
+`neonfs_core`, while this crate executes it.
 
-```elixir
-defmodule NeonFS.Core.Blob.Native do
-  use Rustler, otp_app: :neonfs_core, crate: "neonfs_blob"
+## Developing
 
-  # When your NIF is loaded, it will override this function.
-  def add(_a, _b), do: :erlang.nif_error(:nif_not_loaded)
-end
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
-## Examples
-
-[This](https://github.com/rusterlium/NifIo) is a complete example of a NIF written in Rust.
+The crate is compiled automatically by `mix compile` in `neonfs_core`.
+Rustler wraps return values: `Result<(), E>` success arrives in Elixir
+as `{:ok, {}}`, not `:ok`.

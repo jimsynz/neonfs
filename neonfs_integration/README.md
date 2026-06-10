@@ -1,11 +1,16 @@
 # NeonFS Integration
 
-Multi-node integration test suite for NeonFS — narrowed (#582) to the
-cross-node cluster correctness scenarios that genuinely need a peer
-cluster spanning multiple core nodes. Per-interface integration tests
-(FUSE, NFS, S3, WebDAV, Docker, CSI, ...) live with their owning
-packages and pull peer-cluster scaffolding in via
-`neonfs_test_support`.
+Multi-node integration test suite for NeonFS. Every test here boots a
+real cluster of BEAM peer nodes — actual Ra consensus, actual
+replication, actual network partitions — and asserts the cluster
+behaves correctly: this is where claims like "survives node failure"
+and "heals partitions" are proven, not just stated.
+
+The suite is scoped (#582) to cross-node cluster correctness scenarios
+that genuinely need a peer cluster spanning multiple core nodes.
+Per-interface integration tests (FUSE, NFS, S3, WebDAV, Docker, CSI,
+...) live with their owning packages and pull peer-cluster scaffolding
+in via [`neonfs_test_support`](../neonfs_test_support/).
 
 ## What it tests
 
