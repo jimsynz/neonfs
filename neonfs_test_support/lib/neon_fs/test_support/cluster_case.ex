@@ -540,6 +540,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
     wait_for_full_mesh(cluster)
     rebuild_quorum_rings(cluster)
     wait_for_all_drives_in_bootstrap(cluster)
+    wait_for_drive_registry_convergence(cluster)
 
     for {name, vol_opts} <- volumes do
       {:ok, _} =
@@ -580,6 +581,42 @@ defmodule NeonFS.TestSupport.ClusterCase do
         end,
         timeout: 15_000
       )
+  end
+
+  @doc false
+  # `DriveRegistry`'s ETS table is an eventually-consistent local cache
+  # filled by a periodic peer sync (default 30 s). Right after cluster
+  # formation each node's cache may hold only its own drives, so replica
+  # placement (`Replication.select_replication_targets/3` reads
+  # `DriveRegistry.drives_for_tier/1`) can see a single failure domain
+  # and under-replicate — production heals via anti-entropy, but tests
+  # that assert immediate cross-node fan-out flake on the race (#1152).
+  # Force a sync on every node and wait until each cache sees drives
+  # from every expected node.
+  @spec wait_for_drive_registry_convergence(map()) :: :ok
+  def wait_for_drive_registry_convergence(cluster) do
+    expected =
+      MapSet.new(cluster.nodes, fn ni -> PeerCluster.get_node!(cluster, ni.name).node end)
+
+    for %{name: name} <- cluster.nodes do
+      :ok =
+        wait_until(
+          fn ->
+            PeerCluster.rpc(cluster, name, NeonFS.Core.DriveRegistry, :sync_now, [])
+
+            case PeerCluster.rpc(cluster, name, NeonFS.Core.DriveRegistry, :list_drives, []) do
+              drives when is_list(drives) ->
+                MapSet.subset?(expected, MapSet.new(drives, & &1.node))
+
+              _ ->
+                false
+            end
+          end,
+          timeout: 15_000
+        )
+    end
+
+    :ok
   end
 
   @doc """
