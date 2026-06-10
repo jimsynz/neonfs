@@ -4050,12 +4050,18 @@ defmodule NeonFS.CLI.Handler do
         true -> Atom.to_string(service.type)
       end
 
+    {status, uptime_seconds} =
+      case get_remote_uptime(service.node) do
+        {:ok, uptime} -> {Atom.to_string(service.status), uptime}
+        :unreachable -> {"offline", 0}
+      end
+
     %{
       node: Atom.to_string(service.node),
       type: Atom.to_string(service.type),
       role: role,
-      status: Atom.to_string(service.status),
-      uptime_seconds: get_remote_uptime(service.node)
+      status: status,
+      uptime_seconds: uptime_seconds
     }
   end
 
@@ -4067,13 +4073,16 @@ defmodule NeonFS.CLI.Handler do
   end
 
   defp get_remote_uptime(node) when node == node() do
-    get_uptime()
+    {:ok, get_uptime()}
   end
 
   defp get_remote_uptime(node) do
+    # `{:badrpc, reason}` is itself a 2-tuple, so it must be matched before
+    # the wall-clock result or it binds as `uptime_ms` and `div/2` raises
+    # `:badarith` — crashing `node list` exactly when a node is down.
     case :rpc.call(node, :erlang, :statistics, [:wall_clock], 2_000) do
-      {uptime_ms, _} -> div(uptime_ms, 1000)
-      _ -> 0
+      {:badrpc, _reason} -> :unreachable
+      {uptime_ms, _} -> {:ok, div(uptime_ms, 1000)}
     end
   end
 
