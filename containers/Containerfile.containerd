@@ -40,7 +40,7 @@ ENV LC_ALL=en_NZ.UTF-8
 WORKDIR "/app"
 RUN chown nobody /app
 
-# Persistent state (cookie, TLS material). The containerd plugin socket
+# Persistent state (TLS material). The containerd plugin socket
 # lives under /run/containerd/proxy-plugins/ — that directory is bind-
 # mounted from the host so containerd can dial it without sharing the
 # whole image network.

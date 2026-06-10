@@ -193,9 +193,9 @@ cluster:
   `/var/lib/neonfs/tls`) and renew automatically.
 - Bulk chunk transfer uses a separate mTLS data plane.
 
-(An Erlang cookie file still exists per node as a mechanical
-requirement of BEAM distribution, but it is generated and managed by
-the daemon and the join flow — never copy it between hosts.)
+(The Erlang cookie — a mechanical requirement of BEAM distribution —
+is the constant, non-secret value `neonfs` on every node; it plays no
+part in authentication.)
 
 ### Network
 

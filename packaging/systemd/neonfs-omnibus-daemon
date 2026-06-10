@@ -14,7 +14,6 @@ RELEASE_NAME="${RELEASE_NAME:-neonfs_omnibus}"
 NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
 DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname)"
 RELEASE_NODE="${NEONFS_OMNIBUS_NODE:-${RELEASE_NODE:-neonfs@${DEFAULT_HOST}}}"
-RELEASE_COOKIE_PATH="${RELEASE_COOKIE_PATH:-/var/lib/neonfs/.erlang.cookie}"
 
 # Ensure base data directories exist
 ensure_directories() {
@@ -42,19 +41,6 @@ ensure_dist_port() {
     fi
 }
 
-# Generate cookie if it doesn't exist
-ensure_cookie() {
-    if [ ! -f "${RELEASE_COOKIE_PATH}" ]; then
-        tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20 > "${RELEASE_COOKIE_PATH}"
-        chmod 600 "${RELEASE_COOKIE_PATH}"
-
-        # Set ownership if running as root
-        if [ "$EUID" -eq 0 ]; then
-            chown neonfs:neonfs "${RELEASE_COOKIE_PATH}"
-        fi
-    fi
-}
-
 # Write runtime information for CLI discovery
 write_runtime_info() {
     local runtime_dir="${RUNTIME_DIR:-/run/neonfs}"
@@ -73,7 +59,6 @@ write_runtime_info() {
 # Start the daemon
 start_daemon() {
     ensure_directories
-    ensure_cookie
     ensure_dist_port
     ensure_local_tls
     write_runtime_info

@@ -63,7 +63,6 @@ services:
     restart: unless-stopped
     environment:
       RELEASE_NODE: "neonfs_core@neonfs-core"
-      RELEASE_COOKIE: "your-secret-cookie-here"
       NEONFS_DATA_DIR: "/var/lib/neonfs/data"
       NEONFS_FUSE_NODE: "neonfs_fuse@neonfs-fuse"
     volumes:
@@ -80,7 +79,6 @@ services:
       - core
     environment:
       RELEASE_NODE: "neonfs_fuse@neonfs-fuse"
-      RELEASE_COOKIE: "your-secret-cookie-here"
       NEONFS_CORE_NODE: "neonfs_core@neonfs-core"
     volumes:
       - fuse-data:/var/lib/neonfs
@@ -106,42 +104,9 @@ networks:
 ### How it works
 
 - Both containers share the `neonfs` bridge network. Docker's built-in DNS resolves `neonfs-core` and `neonfs-fuse` to the correct container IPs, so Erlang short-name distribution (`sname`) works out of the box.
-- `RELEASE_COOKIE` must match on all nodes. In production, generate a strong random value (e.g. `openssl rand -hex 32`).
+- The Erlang cookie is the constant `neonfs` on every node — it is not a secret and needs no configuration. Node authentication comes from mutual TLS with cluster-CA-issued certificates.
 - The core node stores metadata and blobs under `/var/lib/neonfs`, backed by the `core-data` named volume.
 - The FUSE node mounts the filesystem at `/mnt/neonfs` inside the container. The `:rshared` mount propagation flag makes the FUSE mount visible to the host at `/mnt/neonfs`.
-
-### Using a cookie file instead of an environment variable
-
-If you prefer not to put the cookie in an environment variable, both releases will read from `/var/lib/neonfs/.erlang.cookie` when `RELEASE_COOKIE` is unset (see `rel/env.sh.eex`). Share a cookie file via a named volume or bind mount:
-
-```yaml
-services:
-  core:
-    # ...
-    environment:
-      RELEASE_NODE: "neonfs_core@neonfs-core"
-      # No RELEASE_COOKIE — will read from cookie file
-    volumes:
-      - core-data:/var/lib/neonfs
-      - ./cookie:/var/lib/neonfs/.erlang.cookie:ro
-
-  fuse:
-    # ...
-    environment:
-      RELEASE_NODE: "neonfs_fuse@neonfs-fuse"
-      NEONFS_CORE_NODE: "neonfs_core@neonfs-core"
-    volumes:
-      - fuse-data:/var/lib/neonfs
-      - ./cookie:/var/lib/neonfs/.erlang.cookie:ro
-      - /mnt/neonfs:/mnt/neonfs:rshared
-```
-
-Create the cookie file with restricted permissions:
-
-```bash
-openssl rand -hex 32 > cookie
-chmod 600 cookie
-```
 
 ### Environment variables reference
 
@@ -150,7 +115,6 @@ chmod 600 cookie
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RELEASE_NODE` | `neonfs_core@localhost` | Erlang node name |
-| `RELEASE_COOKIE` | Read from `/var/lib/neonfs/.erlang.cookie` | Erlang distribution cookie |
 | `RELEASE_DISTRIBUTION` | `sname` | Distribution mode (`sname` or `name`) |
 | `NEONFS_DATA_DIR` | `/var/lib/neonfs/data` | Base directory for data, metadata, and Ra state |
 | `NEONFS_FUSE_NODE` | `neonfs_fuse@localhost` | FUSE node name (for RPC calls to FUSE) |
@@ -163,7 +127,6 @@ chmod 600 cookie
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RELEASE_NODE` | `neonfs_fuse@localhost` | Erlang node name |
-| `RELEASE_COOKIE` | Read from `/var/lib/neonfs/.erlang.cookie` | Erlang distribution cookie |
 | `RELEASE_DISTRIBUTION` | `sname` | Distribution mode (`sname` or `name`) |
 | `NEONFS_CORE_NODE` | `neonfs_core@localhost` | Core node to connect to for bootstrap |
 | `NEONFS_FUSERMOUNT_CMD` | `fusermount3` | Unmount command (`fusermount3` or `fusermount`) |
@@ -183,7 +146,6 @@ Or use the CLI container:
 
 ```bash
 docker run --rm --network neonfs \
-  -e RELEASE_COOKIE=your-secret-cookie-here \
   harton.dev/project-neon/neonfs/cli:latest \
   --node neonfs_core@neonfs-core cluster init --name my-cluster
 ```
@@ -192,7 +154,6 @@ Check cluster status:
 
 ```bash
 docker run --rm --network neonfs \
-  -e RELEASE_COOKIE=your-secret-cookie-here \
   harton.dev/project-neon/neonfs/cli:latest \
   --node neonfs_core@neonfs-core cluster status
 ```
@@ -263,7 +224,6 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_core@core1.neonfs.example.com"
-      RELEASE_COOKIE: "your-secret-cookie-here"
       NEONFS_DATA_DIR: "/var/lib/neonfs/data"
       ERL_AFLAGS: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9200"
     volumes:
@@ -298,7 +258,6 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_core@core2.neonfs.example.com"
-      RELEASE_COOKIE: "your-secret-cookie-here"
       NEONFS_DATA_DIR: "/var/lib/neonfs/data"
       ERL_AFLAGS: "-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9200"
     volumes:
@@ -329,7 +288,6 @@ services:
     environment:
       RELEASE_DISTRIBUTION: "name"
       RELEASE_NODE: "neonfs_fuse@fuse1.neonfs.example.com"
-      RELEASE_COOKIE: "your-secret-cookie-here"
       NEONFS_CORE_NODE: "neonfs_core@core1.neonfs.example.com"
     volumes:
       - /var/lib/neonfs:/var/lib/neonfs
@@ -458,7 +416,6 @@ For a more detailed status check via the CLI:
 
 ```bash
 docker run --rm --network neonfs \
-  -e RELEASE_COOKIE=your-secret-cookie-here \
   harton.dev/project-neon/neonfs/cli:latest \
   --node neonfs_core@neonfs-core cluster status
 ```
@@ -512,11 +469,11 @@ Key directories to back up:
 
 ## Troubleshooting
 
-### Cookie mismatch
+### Connection rejected
 
-**Symptom:** Nodes start but cannot connect. Logs show `** Connection attempt from node ... rejected` or `connection_rejected`.
+**Symptom:** Nodes start but cannot connect. Logs show `** Connection attempt from node ... rejected` or TLS handshake errors.
 
-**Fix:** Ensure `RELEASE_COOKIE` is identical on all nodes (core, FUSE, and CLI). If using a cookie file, verify the file contents match and are readable by the container user (`nobody`).
+**Fix:** Node authentication is certificate-based. Confirm the joining node completed its invite-token join (it should hold the cluster CA and a cluster-signed certificate under `$NEONFS_TLS_DIR`); a node that never joined only has its first-boot local certificate and is rejected by `verify_peer`. The Erlang cookie is the constant `neonfs` everywhere and is not a cause of rejection.
 
 ### EPMD connectivity
 

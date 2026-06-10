@@ -95,7 +95,6 @@ All knobs are environment variables (defaults in parentheses):
 | `VM_CPUS` | `2` | vCPUs per VM |
 | `REPLICAS` | `=NODES` | Replication factor for the system volume and the created volume |
 | `CLUSTER_NAME` | `rig` | Cluster name |
-| `CLUSTER_COOKIE` | `neonfs-rig-cookie` | Shared Erlang distribution cookie |
 | `VOLUME_NAME` | `test` | Name of the volume created at the end of `up` |
 | `DIST_PORT` | `9100` | Pinned Erlang distribution port (`NEONFS_DIST_PORT`) |
 | `SSH_BASE_PORT` | `2230` | Host port for node `n` SSH is `SSH_BASE_PORT + n` |
@@ -122,9 +121,9 @@ exceeds the number of core nodes).
      (`10.10.10.1<n>`), used for inter-node Erlang distribution. No host bridge
      or root privileges required.
 5. **Provisioning** (over SSH) — install the three `.deb`s, write
-   `/etc/neonfs/neonfs.conf` (node name `neonfs@10.10.10.1<n>`, shared cookie,
-   pinned `NEONFS_DIST_PORT`), seed the shared `/var/lib/neonfs/.erlang.cookie`,
-   `chown` the drive mountpoints to `neonfs`, and start `neonfs-omnibus`.
+   `/etc/neonfs/neonfs.conf` (node name `neonfs@10.10.10.1<n>`, pinned
+   `NEONFS_DIST_PORT`), `chown` the drive mountpoints to `neonfs`, and start
+   `neonfs-omnibus`.
 6. **Cluster** — node 1 runs `cluster init --drive /mnt/neonfs/drive1`; extra
    nodes `cluster join --via 10.10.10.11:9568` using an invite token; every node
    registers its remaining drives with `drive add`; finally a volume is created.

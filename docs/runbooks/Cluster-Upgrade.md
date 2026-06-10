@@ -18,7 +18,7 @@ Treat this as a ruled procedure — you run it deliberately, with a rollback pla
 Before you start:
 
 - **The cluster is healthy.** `neonfs cluster status` shows all expected nodes, Ra quorum intact, no in-progress migrations, no outstanding replication or scrub jobs. If any of these fail, resolve them first — upgrading a cluster that is mid-replication or mid-evacuation can strand the job partway through when the node in question rolls.
-- **You have read the release notes.** Check [`CHANGELOG.md`](../../CHANGELOG.md) for the target version: breaking changes (`!` in the conventional-commit subject), state-machine version bumps, configuration-file changes, cookie or cert rotations required.
+- **You have read the release notes.** Check [`CHANGELOG.md`](../../CHANGELOG.md) for the target version: breaking changes (`!` in the conventional-commit subject), state-machine version bumps, configuration-file changes, cert rotations required.
 - **Backups are fresh.** Off-cluster backup of the CA material and a recent snapshot of `/var/lib/neonfs/meta/` on every core node. Rollback should be independent of this; the backup is the last-resort fallback if rollback itself fails.
 - **You have a rollback path chosen.** Either the old Debian package version is still in the apt cache / available from the mirror, or you have the old container image tagged locally.
 - **Maintenance window is scheduled.** Rolling upgrades are near-zero-downtime for clients, but mid-upgrade incidents can require a longer window; do not run upgrades against a live user base without one.
@@ -132,7 +132,7 @@ For zero-downtime interface upgrades, deploy the new version alongside the old (
 
 ### 4. Major version upgrade (cross-major)
 
-Cross-major upgrades may add steps this runbook does not cover — metadata migrations, cookie rotations, configuration-file shape changes. **Read the release notes.** If the release notes prescribe a specific sequence (e.g. "rotate CA before upgrade", "run migration X before restarting the first node"), follow that sequence; the generic "one node at a time" rule still applies, but the pre-flight gets longer.
+Cross-major upgrades may add steps this runbook does not cover — metadata migrations, configuration-file shape changes. **Read the release notes.** If the release notes prescribe a specific sequence (e.g. "rotate CA before upgrade", "run migration X before restarting the first node"), follow that sequence; the generic "one node at a time" rule still applies, but the pre-flight gets longer.
 
 Always practise a cross-major upgrade on a **non-production cluster** before touching production. If that is not possible in your environment, escalate the change plan for extra review before running.
 

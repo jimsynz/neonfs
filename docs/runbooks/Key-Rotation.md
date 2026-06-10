@@ -150,7 +150,7 @@ Escalate to engineering if any of the following hold. Capture context before sto
 - `rotation-status` shows no progress for > 10 minutes and no errors in the journal. This suggests the background job is stuck, not rate-limited.
 - `rotate-key` returns `{:error, :rotation_in_progress}` on every attempt despite `rotation-status` reporting nothing in flight. State inconsistency — do not try to force-start another rotation.
 - You find chunks that fail decryption after rotation completes (`{:error, :decryption_failed}` on reads of older files). This indicates the old-to-new migration lost chunks, which is data loss territory.
-- An emergency rotation needs to hit multiple cluster-internal keys that do not have a `volume rotate-key` path (e.g. cluster CA — that belongs to [CA-Rotation](CA-Rotation.md); Erlang cookie — separate procedure not yet in this runbook set).
+- An emergency rotation needs to hit multiple cluster-internal keys that do not have a `volume rotate-key` path (e.g. cluster CA — that belongs to [CA-Rotation](CA-Rotation.md)).
 - Compliance window is tight and the rotation cannot complete within it — may need to take the volume offline to accelerate, which is a change-management decision, not a runbook one.
 
 Capture before escalating:
@@ -166,7 +166,7 @@ Capture before escalating:
 - `rotate-key` has no `--urgent` flag that would deprioritise other background jobs. On a busy cluster, an emergency rotation competes with scrub / GC / rebalance for the same worker pool. Operators cancel those jobs manually if they need to clear the runway.
 - No facility to rotate a specific key version'\''s grace period — once rotation is running, the old key is retained until rotation completes. If you need the old key invalidated faster than rotation can re-encrypt every chunk (e.g. for a regulatory breach-disclosure clock), escalate.
 - There is no built-in notification to downstream backup systems that the volume'\''s key has changed. Backup-lifecycle integration (re-encrypting old backups, tagging the compromise window) is operator-driven today.
-- Erlang cookie rotation and CA rotation are separate procedures with their own runbook ([CA-Rotation](CA-Rotation.md)) / runbook gap (Erlang cookie rotation has no runbook yet).
+- CA rotation is a separate procedure with its own runbook ([CA-Rotation](CA-Rotation.md)). (The Erlang cookie is a constant, non-secret value — there is nothing to rotate.)
 
 ## References
 

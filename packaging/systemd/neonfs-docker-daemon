@@ -13,7 +13,6 @@ RELEASE_NAME="${RELEASE_NAME:-neonfs_docker}"
 NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
 DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname)"
 RELEASE_NODE="${NEONFS_DOCKER_NODE:-${RELEASE_NODE:-neonfs_docker@${DEFAULT_HOST}}}"
-RELEASE_COOKIE_PATH="${RELEASE_COOKIE_PATH:-/var/lib/neonfs/.erlang.cookie}"
 NEONFS_CORE_NODE="${NEONFS_CORE_NODE:-neonfs_core@${DEFAULT_HOST}}"
 DOCKER_PLUGIN_DIR="${DOCKER_PLUGIN_DIR:-/run/docker/plugins}"
 
@@ -29,15 +28,6 @@ ensure_dist_port() {
     else
         export NEONFS_DIST_PORT=$((49152 + RANDOM % 16383))
         echo "${NEONFS_DIST_PORT}" > "${port_file}"
-    fi
-}
-
-# Verify cookie exists (should be created by core daemon)
-ensure_cookie() {
-    if [ ! -f "${RELEASE_COOKIE_PATH}" ]; then
-        echo "Error: Erlang cookie not found at ${RELEASE_COOKIE_PATH}"
-        echo "Ensure neonfs-core.service is running first, or create a cookie manually."
-        exit 1
     fi
 }
 
@@ -73,7 +63,6 @@ write_runtime_info() {
 
 # Start the daemon
 start_daemon() {
-    ensure_cookie
     ensure_dist_port
     ensure_local_tls
     ensure_plugin_dir
