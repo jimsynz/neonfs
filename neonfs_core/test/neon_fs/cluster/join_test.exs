@@ -1,6 +1,7 @@
 defmodule NeonFS.Cluster.JoinTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
+  use Mimic
 
   alias NeonFS.Cluster.{Init, Invite, Join, State}
   alias NeonFS.Core.VolumeRegistry
@@ -100,6 +101,28 @@ defmodule NeonFS.Cluster.JoinTest do
 
       # Reset for test isolation
       VolumeRegistry.adjust_system_volume_replication(1)
+    end
+  end
+
+  describe "accept_join/4 replication-adjustment resilience (#1154)" do
+    test "core join survives a GenServer.call timeout from the adjustment" do
+      {:ok, token} = Invite.create_invite(3600)
+      key = TLS.generate_node_key()
+      csr = TLS.create_csr(key, "core_peer@localhost")
+
+      # A loaded VolumeRegistry exceeds the call timeout, which surfaces in
+      # the caller as an exit — the join must degrade to a warning, exactly
+      # like an `{:error, _}` return, not fail outright.
+      stub(VolumeRegistry, :adjust_system_volume_replication, fn count ->
+        exit(
+          {:timeout,
+           {GenServer, :call,
+            [VolumeRegistry, {:adjust_system_volume_replication, count}, 30_000]}}
+        )
+      end)
+
+      assert {:ok, cluster_info} = Join.accept_join(token, :core_peer@localhost, :core, csr)
+      assert is_binary(cluster_info.node_cert_pem)
     end
   end
 

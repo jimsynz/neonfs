@@ -715,6 +715,18 @@ defmodule NeonFS.Cluster.Join do
           reason: inspect(reason)
         )
     end
+  catch
+    # The adjustment is best-effort during a join — `{:error, _}` already
+    # only warns. A `GenServer.call` timeout arrives as an exit, which
+    # otherwise escapes the `case` and fails the whole join even though
+    # the VolumeRegistry finishes the adjustment server-side (the
+    # caller's timeout only drops the reply). Treat it the same as an
+    # error return (#1154).
+    :exit, reason ->
+      Logger.warning("Failed to adjust system volume replication",
+        core_count: core_count,
+        reason: inspect(reason)
+      )
   end
 
   defp current_system_volume_factor do

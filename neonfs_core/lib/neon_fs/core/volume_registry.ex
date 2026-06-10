@@ -39,11 +39,15 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   @doc """
   Adjusts the system volume replication factor to match cluster size.
+
+  The adjustment persists the volume through Ra, so the call budget
+  reflects a cluster-wide replicated write on a busy system — not a
+  local lookup (#1154).
   """
   @spec adjust_system_volume_replication(pos_integer()) :: {:ok, Volume.t()} | {:error, term()}
   def adjust_system_volume_replication(new_cluster_size)
       when is_integer(new_cluster_size) and new_cluster_size >= 1 do
-    GenServer.call(__MODULE__, {:adjust_system_volume_replication, new_cluster_size}, 10_000)
+    GenServer.call(__MODULE__, {:adjust_system_volume_replication, new_cluster_size}, 30_000)
   end
 
   @doc """
