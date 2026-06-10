@@ -51,6 +51,13 @@ defmodule NeonFS.Docker.RealFuseIntegrationTest do
         timeout: 10_000
       )
 
+    # `:neonfs_client` starts no children in the test env
+    # (`start_children?: false`), but the mount path's MetadataCache
+    # subscribes to NeonFS.Events — start the events infrastructure
+    # the client application would normally own.
+    start_supervised!(%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}})
+    start_supervised!({Registry, keys: :duplicate, name: NeonFS.Events.Registry})
+
     # The real FUSE stack the plugin's MountTracker targets on
     # `Node.self()`. No Registrar — service registration isn't under
     # test here.
