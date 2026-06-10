@@ -11,6 +11,12 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
 
+  # Per-op completion deadline. Core-side writes go through Ra and the
+  # blob store, which can take well over the old 5 s on a loaded CI
+  # runner (#1157); the deadline only bounds latency — a wrong reply
+  # still fails the pattern match.
+  @op_timeout 15_000
+
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.FUSE.{Handler, InodeTable}
 
@@ -69,15 +75,16 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   describe "lookup operation" do
     test "looks up existing file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create test file on core node
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        "/test.txt",
-        0,
-        "hello"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          "/test.txt",
+          0,
+          "hello"
+        ])
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "test.txt"}}})
-      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
 
       {:ok, inode} = InodeTable.get_inode(volume_id, "/test.txt")
       assert inode > 1
@@ -85,7 +92,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
 
     test "returns error for nonexistent file", %{handler: handler, volume_id: volume_id} do
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => "missing.txt"}}})
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 2}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 2}}}, @op_timeout
 
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/missing.txt")
     end
@@ -94,7 +101,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   describe "getattr operation" do
     test "gets attributes for root directory", %{handler: handler} do
       send(handler, {:fuse_op, 1, {"getattr", %{"ino" => 1}}})
-      assert_receive {:fuse_op_complete, 1, {"attr_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"attr_ok", _}}, @op_timeout
 
       # Root should always exist
       assert {:ok, {nil, "/"}} = InodeTable.get_path(1)
@@ -109,7 +116,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "new.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
 
       # Verify inode was allocated
       {:ok, inode} = InodeTable.get_inode(volume_id, "/new.txt")
@@ -120,11 +127,11 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 2, {"write", %{"ino" => inode, "offset" => 0, "data" => "hello world"}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, @op_timeout
 
       # Read the data back — goes through NeonFS.Client.ChunkReader
       send(handler, {:fuse_op, 3, {"read", %{"ino" => inode, "offset" => 0, "size" => 100}}})
-      assert_receive {:fuse_op_complete, 3, {"read_ok", %{"data" => "hello world"}}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"read_ok", %{"data" => "hello world"}}}, @op_timeout
     end
 
     test "reads at non-zero offset and bounded length", %{
@@ -136,7 +143,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "ranged.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/ranged.txt")
 
       send(
@@ -144,10 +151,10 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 2, {"write", %{"ino" => inode, "offset" => 0, "data" => "0123456789abcdef"}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, @op_timeout
 
       send(handler, {:fuse_op, 3, {"read", %{"ino" => inode, "offset" => 4, "size" => 8}}})
-      assert_receive {:fuse_op_complete, 3, {"read_ok", %{"data" => "456789ab"}}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"read_ok", %{"data" => "456789ab"}}}, @op_timeout
     end
   end
 
@@ -159,7 +166,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "docs", "mode" => 0o755}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
 
       {:ok, dir_inode} = InodeTable.get_inode(volume_id, "/docs")
 
@@ -170,11 +177,11 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"create", %{"parent" => dir_inode, "name" => "readme.md", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"entry_ok", _}}, @op_timeout
 
       # List the directory
       send(handler, {:fuse_op, 3, {"readdir", %{"ino" => dir_inode, "offset" => 0}}})
-      assert_receive {:fuse_op_complete, 3, {"readdir_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"readdir_ok", _}}, @op_timeout
 
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/docs/readme.md")
     end
@@ -186,17 +193,17 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "file1.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"create", %{"parent" => 1, "name" => "file2.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"entry_ok", _}}, @op_timeout
 
       send(handler, {:fuse_op, 3, {"readdir", %{"ino" => 1, "offset" => 0}}})
-      assert_receive {:fuse_op_complete, 3, {"readdir_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"readdir_ok", _}}, @op_timeout
 
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/file1.txt")
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/file2.txt")
@@ -214,7 +221,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "private.txt", "mode" => 0o600}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -235,7 +242,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "default.txt", "mode" => nil}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -256,7 +263,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "secret", "mode" => 0o700}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -277,7 +284,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "normal_dir", "mode" => nil}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -292,35 +299,37 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   describe "unlink and rmdir operations" do
     test "deletes a file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create file on core
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        "/delete_me.txt",
-        0,
-        "content"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          "/delete_me.txt",
+          0,
+          "content"
+        ])
 
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/delete_me.txt")
 
       send(handler, {:fuse_op, 1, {"unlink", %{"parent" => 1, "name" => "delete_me.txt"}}})
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/delete_me.txt")
     end
 
     test "deletes empty directory", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create empty directory on core
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        "/empty_dir",
-        0,
-        "",
-        [mode: 0o040755]
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          "/empty_dir",
+          0,
+          "",
+          [mode: 0o040755]
+        ])
 
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/empty_dir")
 
       send(handler, {:fuse_op, 1, {"rmdir", %{"parent" => 1, "name" => "empty_dir"}}})
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/empty_dir")
     end
@@ -329,12 +338,13 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   describe "rename operation" do
     test "renames a file", %{handler: handler, volume_id: volume_id, cluster: cluster} do
       # Create file on core
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        "/old_name.txt",
-        0,
-        "content"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          "/old_name.txt",
+          0,
+          "content"
+        ])
 
       {:ok, _inode} = InodeTable.allocate_inode(volume_id, "/old_name.txt")
 
@@ -350,7 +360,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       assert {:error, :not_found} = InodeTable.get_inode(volume_id, "/old_name.txt")
       assert {:ok, _} = InodeTable.get_inode(volume_id, "/new_name.txt")
@@ -369,7 +379,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "chmod_file.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/chmod_file.txt")
 
       # chmod to 0o755 (with regular file type bits)
@@ -378,7 +388,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 2, {"setattr", %{"ino" => inode, "mode" => 0o100755}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, @op_timeout
 
       # Verify mode was updated on core
       {:ok, file} =
@@ -400,7 +410,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"mkdir", %{"parent" => 1, "name" => "chmod_dir", "mode" => 0o755}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/chmod_dir")
 
       # chmod directory to 0o700
@@ -411,7 +421,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
 
       assert_receive {:fuse_op_complete, 2,
                       {"attr_ok", %{"ino" => ^inode, "kind" => "directory"}}},
-                     5_000
+                     @op_timeout
 
       {:ok, dir} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -432,7 +442,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "chown_file.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/chown_file.txt")
 
       # chown to uid=1000, gid=1000
@@ -441,7 +451,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 2, {"setattr", %{"ino" => inode, "uid" => 1000, "gid" => 1000}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -464,7 +474,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "trunc_file.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/trunc_file.txt")
 
       send(
@@ -473,7 +483,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"write", %{"ino" => inode, "offset" => 0, "data" => "hello world, this is content"}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, @op_timeout
 
       # Verify the file has data
       {:ok, file_before} =
@@ -490,7 +500,8 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 3, {"setattr", %{"ino" => inode, "size" => 5}}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"attr_ok", %{"ino" => ^inode, "size" => 5}}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"attr_ok", %{"ino" => ^inode, "size" => 5}}},
+                     @op_timeout
 
       {:ok, file_after} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -511,7 +522,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "trunc_zero.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/trunc_zero.txt")
 
       send(
@@ -519,7 +530,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 2, {"write", %{"ino" => inode, "offset" => 0, "data" => "data to be removed"}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"write_ok", _}}, @op_timeout
 
       # Truncate to 0
       send(
@@ -527,7 +538,8 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 3, {"setattr", %{"ino" => inode, "size" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"attr_ok", %{"ino" => ^inode, "size" => 0}}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"attr_ok", %{"ino" => ^inode, "size" => 0}}},
+                     @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -549,7 +561,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "utimens_file.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/utimens_file.txt")
 
       # Set atime and mtime to a known value (2025-01-01 00:00:00 UTC)
@@ -567,7 +579,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -591,7 +603,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "utimens_ns.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/utimens_ns.txt")
 
       # Set atime with nanosecond precision
@@ -608,7 +620,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -630,7 +642,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"create", %{"parent" => 1, "name" => "combined.txt", "mode" => 0o644}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"entry_ok", _}}, @op_timeout
       {:ok, inode} = InodeTable.get_inode(volume_id, "/combined.txt")
 
       target_sec = 1_735_689_600
@@ -647,7 +659,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"attr_ok", %{"ino" => ^inode}}}, @op_timeout
 
       {:ok, file} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -667,12 +679,13 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       cluster: cluster
     } do
       # Create file via RPC so we can capture its initial changed_at
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        "/ctime_file.txt",
-        0,
-        "content"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          "/ctime_file.txt",
+          0,
+          "content"
+        ])
 
       {:ok, file_before} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -692,7 +705,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"setattr", %{"ino" => inode, "mode" => 0o100600}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"attr_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"attr_ok", _}}, @op_timeout
 
       {:ok, file_after} =
         PeerCluster.rpc(cluster, :node1, NeonFS.Core.FileIndex, :get_by_path, [
@@ -710,12 +723,13 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       cluster: cluster
     } do
       # Create file owned by root (uid 0) via RPC
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        "/root_chmod.txt",
-        0,
-        "content"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          "/root_chmod.txt",
+          0,
+          "content"
+        ])
 
       # Start a non-root handler (uid 1000)
       non_root_handler =
@@ -731,19 +745,20 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       )
 
       # Should return EACCES (errno 13)
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, @op_timeout
     end
 
     test "non-owner UID cannot chown (returns EACCES)", %{
       volume_id: volume_id,
       cluster: cluster
     } do
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        "/root_chown.txt",
-        0,
-        "content"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          "/root_chown.txt",
+          0,
+          "content"
+        ])
 
       non_root_handler =
         start_supervised!({Handler, volume: volume_id, test_notify: self(), uid: 1000},
@@ -757,14 +772,14 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"setattr", %{"ino" => inode, "uid" => 1000, "gid" => 1000}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 13}}}, @op_timeout
     end
   end
 
   describe "error handling" do
     test "handles unknown operations gracefully", %{handler: handler} do
       send(handler, {:fuse_op, 1, {"unknown_op", %{}}})
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 38}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 38}}}, @op_timeout
 
       # Should log warning and return ENOSYS — handler stays alive
       assert Process.alive?(handler)
@@ -779,15 +794,16 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       name = "xattr-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
 
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        path,
-        0,
-        "x"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          path,
+          0,
+          "x"
+        ])
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
-      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
 
       {:ok, inode} = InodeTable.get_inode(volume_id, path)
       {:ok, inode: inode}
@@ -800,14 +816,14 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.foo", "value" => "bar", "flags" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"getxattr", %{"ino" => ino, "name" => "user.foo", "size" => 100}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"xattr_data", %{"data" => "bar"}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"xattr_data", %{"data" => "bar"}}}, @op_timeout
     end
 
     test "getxattr with size=0 returns the size for the kernel's buffer probe",
@@ -818,14 +834,14 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.size", "value" => "12345", "flags" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"getxattr", %{"ino" => ino, "name" => "user.size", "size" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"xattr_size", %{"size" => 5}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"xattr_size", %{"size" => 5}}}, @op_timeout
     end
 
     test "getxattr with size smaller than value returns ERANGE",
@@ -836,14 +852,14 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.big", "value" => "abcdef", "flags" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"getxattr", %{"ino" => ino, "name" => "user.big", "size" => 3}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 34}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 34}}}, @op_timeout
     end
 
     test "getxattr on missing name returns ENODATA", %{handler: handler, inode: ino} do
@@ -852,7 +868,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"getxattr", %{"ino" => ino, "name" => "user.missing", "size" => 100}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, @op_timeout
     end
 
     test "setxattr with XATTR_CREATE on existing returns EEXIST",
@@ -863,7 +879,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.flag", "value" => "1", "flags" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
@@ -871,7 +887,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.flag", "value" => "2", "flags" => 1}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 17}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 17}}}, @op_timeout
     end
 
     test "setxattr with XATTR_REPLACE on missing returns ENODATA",
@@ -882,7 +898,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.replace", "value" => "x", "flags" => 2}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, @op_timeout
     end
 
     test "non-user.* namespace returns EPERM", %{handler: handler, inode: ino} do
@@ -893,7 +909,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           %{"ino" => ino, "name" => "system.posix_acl_access", "value" => "x", "flags" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 1}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 1}}}, @op_timeout
     end
 
     test "listxattr returns sorted, NUL-separated names",
@@ -909,12 +925,13 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
            {"setxattr", %{"ino" => ino, "name" => name, "value" => val, "flags" => 0}}}
         )
 
-        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, 5_000
+        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, @op_timeout
       end
 
       send(handler, {:fuse_op, 10, {"listxattr", %{"ino" => ino, "size" => 1024}}})
 
-      assert_receive {:fuse_op_complete, 10, {"xattr_list_data", %{"data" => list_bytes}}}, 5_000
+      assert_receive {:fuse_op_complete, 10, {"xattr_list_data", %{"data" => list_bytes}}},
+                     @op_timeout
 
       assert list_bytes == "user.alpha\0user.beta\0user.gamma\0"
     end
@@ -927,12 +944,12 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.probe", "value" => "x", "flags" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(handler, {:fuse_op, 2, {"listxattr", %{"ino" => ino, "size" => 0}}})
 
       # "user.probe\0" = 11 bytes
-      assert_receive {:fuse_op_complete, 2, {"xattr_list_size", %{"size" => 11}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"xattr_list_size", %{"size" => 11}}}, @op_timeout
     end
 
     test "removexattr deletes the attribute and subsequent getxattr returns ENODATA",
@@ -943,23 +960,23 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
          {"setxattr", %{"ino" => ino, "name" => "user.delete", "value" => "x", "flags" => 0}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(handler, {:fuse_op, 2, {"removexattr", %{"ino" => ino, "name" => "user.delete"}}})
-      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 3, {"getxattr", %{"ino" => ino, "name" => "user.delete", "size" => 100}}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"error", %{"errno" => 61}}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"error", %{"errno" => 61}}}, @op_timeout
     end
 
     test "removexattr on missing name returns ENODATA",
          %{handler: handler, inode: ino} do
       send(handler, {:fuse_op, 1, {"removexattr", %{"ino" => ino, "name" => "user.gone"}}})
-      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"error", %{"errno" => 61}}}, @op_timeout
     end
   end
 
@@ -968,15 +985,16 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       name = "flock-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
 
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        path,
-        0,
-        "x"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          path,
+          0,
+          "x"
+        ])
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
-      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
 
       {:ok, inode} = InodeTable.get_inode(volume_id, path)
       {:ok, inode: inode}
@@ -988,7 +1006,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 0, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
     end
 
     test "LOCK_EX (type=1) acquires an exclusive flock", %{handler: handler, inode: ino} do
@@ -997,7 +1015,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
     end
 
     test "two LOCK_EX from different lock_owners conflict — second returns EAGAIN",
@@ -1007,14 +1025,14 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, @op_timeout
     end
 
     test "two LOCK_SH from different lock_owners coexist (POSIX shared)",
@@ -1026,7 +1044,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
            {"flock", %{"ino" => ino, "owner" => owner, "type" => 0, "blocking" => false}}}
         )
 
-        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, 5_000
+        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, @op_timeout
       end
     end
 
@@ -1037,14 +1055,14 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 0, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, @op_timeout
     end
 
     test "LOCK_UN releases an acquired lock and the next LOCK_EX succeeds",
@@ -1054,21 +1072,21 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 3, {"flock", %{"ino" => ino, "owner" => 2, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, @op_timeout
     end
 
     test "LOCK_UN with no held lock is an idempotent no-op",
@@ -1078,7 +1096,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
     end
 
     test "re-acquiring same scope is idempotent",
@@ -1090,7 +1108,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
            {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
         )
 
-        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, 5_000
+        assert_receive {:fuse_op_complete, ^req_id, {"ok", _}}, @op_timeout
       end
     end
 
@@ -1101,14 +1119,14 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 0, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
         {:fuse_op, 2, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
     end
 
     test "blocking SETLKW waits until the conflicting holder releases (#677)",
@@ -1118,7 +1136,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       # Blocking flock from a different owner — should not return
       # immediately because the wait queue from #679 parks the
@@ -1137,8 +1155,8 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 3, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
-      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, @op_timeout
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
     end
 
     test "INTERRUPT cancels a blocked SETLKW; original caller receives EINTR (#675)",
@@ -1148,7 +1166,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 1, {"flock", %{"ino" => ino, "owner" => 1, "type" => 1, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       # Block on conflicting LOCK_EX. Confirm it parks (no immediate
       # reply) before the interrupt fires.
@@ -1164,7 +1182,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       # Handler. Drive the cast directly.
       GenServer.cast(handler, {:fuse_interrupt, 2})
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 4}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 4}}}, @op_timeout
 
       # Releasing owner 1's lock should not wake any further
       # waiters — the cancelled wait was the only queued one.
@@ -1173,7 +1191,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
         {:fuse_op, 3, {"flock", %{"ino" => ino, "owner" => 1, "type" => 2, "blocking" => false}}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, @op_timeout
       refute_receive {:fuse_op_complete, 2, _}, 200
     end
 
@@ -1192,15 +1210,16 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       name = "fcntl-#{System.unique_integer([:positive])}.txt"
       path = "/" <> name
 
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
-        volume_id,
-        path,
-        0,
-        "x"
-      ])
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.WriteOperation, :write_file_at, [
+          volume_id,
+          path,
+          0,
+          "x"
+        ])
 
       send(handler, {:fuse_op, 1, {"lookup", %{"parent" => 1, "name" => name}}})
-      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"lookup_ok", _}}, @op_timeout
 
       {:ok, inode} = InodeTable.get_inode(volume_id, path)
       {:ok, inode: inode}
@@ -1221,7 +1240,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
     end
 
     test "F_WRLCK acquires an exclusive byte-range lock", %{handler: handler, inode: ino} do
@@ -1239,7 +1258,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
     end
 
     test "two F_WRLCK from different owners on overlapping ranges conflict",
@@ -1258,7 +1277,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
@@ -1274,7 +1293,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 11}}}, @op_timeout
     end
 
     test "non-overlapping ranges from different owners coexist",
@@ -1293,7 +1312,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
@@ -1309,7 +1328,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
     end
 
     test "F_UNLCK releases the matching exact-range lock",
@@ -1328,7 +1347,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
@@ -1344,7 +1363,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
 
       send(
         handler,
@@ -1360,7 +1379,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, @op_timeout
     end
 
     test "blocking SETLKW byte-range waits until the conflicting holder releases (#681)",
@@ -1379,7 +1398,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       # Conflicting blocking F_WRLCK from a different owner — should
       # park in the wait queue, not return immediately.
@@ -1414,8 +1433,8 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
-      assert_receive {:fuse_op_complete, 2, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, @op_timeout
+      assert_receive {:fuse_op_complete, 2, {"ok", _}}, @op_timeout
     end
 
     test "INTERRUPT cancels a blocked byte-range SETLKW; caller receives EINTR (#681)",
@@ -1434,7 +1453,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
@@ -1453,7 +1472,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       refute_receive {:fuse_op_complete, 2, _}, 200
 
       GenServer.cast(handler, {:fuse_interrupt, 2})
-      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 4}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"error", %{"errno" => 4}}}, @op_timeout
 
       # Releasing owner 1 doesn't wake any further waiter.
       send(
@@ -1470,7 +1489,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 3, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"ok", _}}, @op_timeout
       refute_receive {:fuse_op_complete, 2, _}, 200
     end
 
@@ -1491,7 +1510,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
       )
 
       assert_receive {:fuse_op_complete, 1, {"getlk_unlocked", %{"start" => 0, "end" => 99}}},
-                     5_000
+                     @op_timeout
     end
 
     test "GETLK on a held range reports the conflict",
@@ -1510,7 +1529,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
           }}}
       )
 
-      assert_receive {:fuse_op_complete, 1, {"ok", _}}, 5_000
+      assert_receive {:fuse_op_complete, 1, {"ok", _}}, @op_timeout
 
       send(
         handler,
@@ -1529,7 +1548,7 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
 
       assert_receive {:fuse_op_complete, 2,
                       {"getlk_conflict", %{"start" => 100, "end" => 199, "type" => 1}}},
-                     5_000
+                     @op_timeout
     end
   end
 end
