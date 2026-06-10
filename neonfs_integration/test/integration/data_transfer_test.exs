@@ -215,6 +215,76 @@ defmodule NeonFS.Integration.DataTransferTest do
     end
   end
 
+  describe "replication uses the data plane (no dist fallback)" do
+    test "replicate_chunk to a replicate volume does not fall back to distribution RPC", %{
+      cluster: cluster
+    } do
+      # Regression guard for #1126: on a healthy multi-node cluster, chunk
+      # replication must travel over the TLS data plane, not fall back to
+      # Erlang distribution RPC. The fallback is otherwise invisible — the
+      # data still lands, so result-only assertions pass either way.
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_volume, [
+          "repl-dataplane-vol",
+          %{"durability" => "replicate:3"}
+        ])
+
+      assert_eventually timeout: 10_000 do
+        match?(
+          {:ok, _},
+          PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+            "repl-dataplane-vol"
+          ])
+        )
+      end
+
+      {:ok, base_volume} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+          "repl-dataplane-vol"
+        ])
+
+      # `:all` ack makes replication synchronous, so the returned locations
+      # and any fallback telemetry are settled by the time the call returns.
+      volume = %{base_volume | write_ack: :all}
+
+      node2 = PeerCluster.get_node!(cluster, :node2).node
+      node3 = PeerCluster.get_node!(cluster, :node3).node
+      wait_for_pool(cluster, :node1, node2)
+      wait_for_pool(cluster, :node1, node3)
+
+      ref = make_ref()
+
+      :ok =
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestSupport.TelemetryForwarder, :attach, [
+          self(),
+          ref,
+          [:neonfs, :replication, :dist_fallback]
+        ])
+
+      chunk_data = "replication travels the data plane, not distribution RPC"
+      chunk_hash = :crypto.hash(:sha256, chunk_data)
+
+      {:ok, locations} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.Replication, :replicate_chunk, [
+          chunk_hash,
+          chunk_data,
+          volume,
+          []
+        ])
+
+      # Replicas landed on at least two distinct nodes — replication really
+      # did fan out across the cluster rather than no-op locally.
+      distinct_nodes = locations |> Enum.map(& &1.node) |> Enum.uniq()
+      assert length(distinct_nodes) >= 2
+
+      # And it used the data plane: the dist-RPC fallback never fired.
+      refute_receive {:telemetry_forwarded, ^ref, [:neonfs, :replication, :dist_fallback], _, _},
+                     2_000
+
+      PeerCluster.rpc(cluster, :node1, NeonFS.TestSupport.TelemetryForwarder, :detach, [ref])
+    end
+  end
+
   describe "remote read via data plane" do
     @tag :pending_903
     test "reading a file from a node without local chunks succeeds", %{cluster: cluster} do

@@ -316,6 +316,13 @@ defmodule NeonFS.Core.Replication do
 
       {:error, :no_data_endpoint} ->
         Logger.info("No data endpoint, falling back to distribution RPC", node: target.node)
+
+        :telemetry.execute(
+          [:neonfs, :replication, :dist_fallback],
+          %{bytes: byte_size(chunk_data)},
+          %{node: target.node, hash: chunk_hash, reason: :no_data_endpoint}
+        )
+
         replicate_to_node_rpc(chunk_hash, chunk_data, tier_str, target)
 
       {:error, reason} ->

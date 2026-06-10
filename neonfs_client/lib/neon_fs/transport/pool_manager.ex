@@ -178,7 +178,13 @@ defmodule NeonFS.Transport.PoolManager do
     {:noreply, state}
   end
 
+  # A peer (re)connecting may have a data endpoint we don't yet have a pool
+  # for. Reconcile immediately rather than waiting up to a full
+  # `refresh_interval` — this closes the window where, just after a node
+  # joins or recovers from a partition, replication/reads fall back to
+  # distribution RPC because the data-plane pool hasn't been created yet.
   def handle_info({:nodeup, _node, _info}, state) do
+    do_discovery_refresh(state)
     {:noreply, state}
   end
 
