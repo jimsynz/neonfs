@@ -194,9 +194,14 @@ jobs:
           # Recommends. With `--no-install-recommends` we have to ask
           # for it explicitly or the e2e test sees `dockerd` running
           # but no `docker` on PATH.
+          #
+          # fuse3/libfuse3-dev back the real-FUSE Mount/Unmount e2e
+          # (#387): the test drives the actual NeonFS.FUSE.MountManager,
+          # whose fuse_server NIF needs libfuse to build and fusermount3
+          # to mount.
           apt-get update
           apt-get install -y --no-install-recommends \
-            docker.io docker-cli iptables
+            docker.io docker-cli iptables libfuse3-dev fuse3
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v6
@@ -211,10 +216,12 @@ jobs:
             neonfs_client/priv/native
             neonfs_core/target
             neonfs_core/priv/native
+            fuse_server/target
+            fuse_server/priv/native
             neonfs_docker/deps
             neonfs_docker/_build
-          key: v4-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_docker/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_docker-${{ runner.arch }}-
+          key: v5-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_docker/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock', 'fuse_server/Cargo.lock') }}
+          restore-keys: v5-build-neonfs_docker-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_docker
