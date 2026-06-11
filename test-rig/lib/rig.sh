@@ -293,6 +293,93 @@ wait_daemon() {
   warn "neonfs daemon on node ${i} not answering CLI yet (continuing)"
 }
 
+# --- standalone interface node (#1163) --------------------------------------
+
+# Fixed index for the interface-only VM so it never collides with core
+# nodes (which count up from 1).
+IFACE_INDEX="${IFACE_INDEX:-9}"
+
+iface_erl() { echo "neonfs_nfs@$(node_ip "$1")"; }
+
+# Install only neonfs-common + neonfs-cli + neonfs-nfs — no core, no
+# omnibus. NEONFS_CORE_NODE deliberately points at the remote core: the
+# pre-join CLI must not be able to authenticate there (#1139), proving
+# `cluster join` drives the local interface daemon instead (#1162).
+provision_iface_node() {
+  local i="$1" ip; ip="$(node_ip "$i")"
+  log "installing neonfs-nfs (interface-only) on node ${i}"
+
+  node_ssh "$i" "sudo mkdir -p /tmp/debs && sudo chown rig:rig /tmp/debs"
+  node_scp "$i" \
+    "${DEB_DIR}/neonfs-common_${VERSION}_amd64.deb" \
+    "${DEB_DIR}/neonfs-cli_${VERSION}_amd64.deb" \
+    "${DEB_DIR}/neonfs-nfs_${VERSION}_amd64.deb" \
+    "rig@127.0.0.1:/tmp/debs/"
+
+  node_ssh "$i" "sudo apt-get update -qq"
+  node_ssh "$i" "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+    /tmp/debs/neonfs-common_${VERSION}_amd64.deb \
+    /tmp/debs/neonfs-cli_${VERSION}_amd64.deb \
+    /tmp/debs/neonfs-nfs_${VERSION}_amd64.deb"
+
+  node_ssh "$i" "sudo systemctl stop neonfs-nfs 2>/dev/null || true"
+  node_ssh "$i" "sudo install -d -m 0755 /etc/neonfs"
+  node_ssh "$i" "sudo tee /etc/neonfs/neonfs.conf >/dev/null" <<EOF
+RELEASE_DISTRIBUTION=name
+NEONFS_NFS_NODE=$(iface_erl "$i")
+NEONFS_CORE_NODE=$(node_erl 1)
+NEONFS_DIST_PORT=${DIST_PORT}
+EOF
+
+  node_ssh "$i" "sudo systemctl start neonfs-nfs"
+  log "interface daemon started on node ${i} ($(iface_erl "$i"))"
+}
+
+# The #1139 acceptance: the interface node joins with an invite token,
+# shows up in `node list` as an nfs service, serves the NFS port, and
+# survives a daemon restart with no manual intervention.
+iface_join_scenario() {
+  local i="${IFACE_INDEX}" ip; ip="$(node_ip "${IFACE_INDEX}")"
+
+  log "joining interface node ${i} ($(iface_erl "$i")) via invite token"
+  local token
+  token="$(node_cli 1 "cluster create-invite --expires 1h" | grep -oE 'nfs_inv_[A-Za-z0-9_]+' | head -1)"
+  [ -n "${token}" ] || die "could not obtain invite token from node 1"
+  node_cli "$i" "cluster join --token '${token}' --via $(node_ip 1):${CLUSTER_API_PORT}"
+
+  iface_assert_serving "registered and serving after join"
+
+  log "restarting the interface daemon (restart survivability, #1136/#1137)"
+  node_ssh "$i" "sudo systemctl restart neonfs-nfs"
+
+  iface_assert_serving "registered and serving after restart"
+
+  log "interface-node join scenario passed"
+}
+
+# Poll until node 1's `node list` shows the interface node as a non-offline
+# nfs service AND its NFS port answers, or die with diagnostics.
+iface_assert_serving() {
+  local label="$1" ip row; ip="$(node_ip "${IFACE_INDEX}")"
+  log "verifying: ${label}"
+
+  local deadline=$(( SECONDS + 120 ))
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    row="$(node_cli 1 "node list" 2>/dev/null | grep "neonfs_nfs@${ip}" || true)"
+
+    if [ -n "${row}" ] && ! echo "${row}" | grep -q offline &&
+      node_ssh 1 "timeout 5 bash -c 'exec 3<>/dev/tcp/${ip}/2049'" 2>/dev/null; then
+      log "OK: ${label}"
+      return 0
+    fi
+
+    sleep 3
+  done
+
+  node_cli 1 "node list" >&2 || true
+  die "interface node not serving: ${label}"
+}
+
 # --- cluster bootstrap -----------------------------------------------------
 
 cluster_bootstrap() {

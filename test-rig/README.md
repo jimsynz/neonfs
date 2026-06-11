@@ -28,6 +28,21 @@ Multi-node:
 NODES=3 ./neonfs-rig up         # 3 core nodes, replicas=3
 ```
 
+Standalone interface-node join (#1163 — the #1139 acceptance):
+
+```bash
+./neonfs-rig up                 # bring up a cluster first
+./neonfs-rig iface-join         # boot an interface-only VM and join it
+```
+
+`iface-join` boots an extra VM (index 9, `neonfs_nfs@10.10.10.19`) with
+only `neonfs-common` + `neonfs-cli` + `neonfs-nfs` installed — no core —
+joins it to the running cluster with `neonfs cluster join` (the CLI
+drives the local NFS daemon, which performs the HTTP invite redemption
+itself), then verifies the node is registered as an `nfs` service in
+`node list`, that its NFS port serves, and that both survive a
+`systemctl restart neonfs-nfs` with no manual intervention.
+
 ## Requirements
 
 The rig needs QEMU and the cloud-init seed tooling on the host:
