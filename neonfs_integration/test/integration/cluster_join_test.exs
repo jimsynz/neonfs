@@ -68,6 +68,74 @@ defmodule NeonFS.Integration.ClusterJoinTest do
                )
     end
 
+    test "interface-type node joins via NeonFS.Client.CLIHandler (#1161)", %{cluster: cluster} do
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["client-join-test"])
+
+      :ok = wait_for_cluster_stable(cluster)
+
+      {:ok, %{"token" => token}} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
+
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node2, :application, :ensure_all_started, [:inets])
+
+      node1_info = PeerCluster.get_node!(cluster, :node1)
+      via_address = "localhost:#{node1_info.metrics_port}"
+
+      # The client-side entry point with an explicit interface type:
+      # the join must register node2 as an :nfs service and skip Ra.
+      {:ok, join_result} =
+        PeerCluster.rpc(cluster, :node2, NeonFS.Client.CLIHandler, :join_cluster, [
+          token,
+          via_address,
+          "nfs"
+        ])
+
+      assert join_result["status"] == "joining"
+      assert join_result["type"] == "nfs"
+
+      # The join persists state and connects distribution...
+      assert :ok =
+               wait_until(
+                 fn ->
+                   PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :exists?, []) == true
+                 end,
+                 timeout: 30_000
+               )
+
+      node1_atom = node1_info.node
+      node2_atom = PeerCluster.get_node!(cluster, :node2).node
+
+      assert :ok =
+               wait_until(
+                 fn ->
+                   node1_atom in PeerCluster.rpc(cluster, :node2, Node, :list, [])
+                 end,
+                 timeout: 30_000
+               )
+
+      # ...and node2 is registered as an :nfs service on the cluster,
+      # not added to Ra membership.
+      assert :ok =
+               wait_until(
+                 fn ->
+                   case PeerCluster.rpc(cluster, :node1, NeonFS.Core.ServiceRegistry, :get, [
+                          node2_atom,
+                          :nfs
+                        ]) do
+                     {:ok, _info} -> true
+                     _ -> false
+                   end
+                 end,
+                 timeout: 30_000
+               )
+
+      {:ok, state} = PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.State, :load, [])
+      assert state.node_type == :nfs
+      refute node2_atom in state.ra_cluster_members
+    end
+
     test "join fails with invalid token", %{cluster: cluster} do
       {:ok, _} =
         PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["bad-token-test"])
