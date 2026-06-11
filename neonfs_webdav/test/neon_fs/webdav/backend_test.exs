@@ -5,7 +5,7 @@ defmodule NeonFS.WebDAV.BackendTest do
   alias NeonFS.Client.ChunkReader
   alias NeonFS.WebDAV.Backend
   alias NeonFS.WebDAV.LockStore
-  alias NeonFS.WebDAV.Test.MockCore
+  alias NeonFS.WebDAV.Test.{FakeKV, MockCore}
 
   @auth %{user: "anonymous"}
 
@@ -13,6 +13,7 @@ defmodule NeonFS.WebDAV.BackendTest do
   setup :verify_on_exit!
 
   setup do
+    FakeKV.stub!()
     MockCore.setup()
 
     Application.put_env(:neonfs_webdav, :core_call_fn, fn function, args ->
@@ -29,6 +30,7 @@ defmodule NeonFS.WebDAV.BackendTest do
 
     on_exit(fn ->
       Application.delete_env(:neonfs_webdav, :core_call_fn)
+      Application.delete_env(:neonfs_webdav, :kv_call_fn)
     end)
 
     :ok
@@ -774,8 +776,6 @@ defmodule NeonFS.WebDAV.BackendTest do
 
   describe "lock-null resources" do
     setup do
-      LockStore.reset()
-
       Application.put_env(:neonfs_webdav, :lock_manager_call_fn, fn function, _args ->
         case function do
           :lock -> :ok
@@ -786,7 +786,6 @@ defmodule NeonFS.WebDAV.BackendTest do
 
       on_exit(fn ->
         Application.delete_env(:neonfs_webdav, :lock_manager_call_fn)
-        LockStore.reset()
       end)
 
       :ok

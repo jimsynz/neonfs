@@ -26,7 +26,6 @@ defmodule NeonFS.WebDAV.Supervisor do
     bind = Application.get_env(:neonfs_webdav, :webdav_bind, "0.0.0.0")
 
     HealthCheck.register_checks()
-    LockStore.init()
 
     children = [
       NamespaceHolder,

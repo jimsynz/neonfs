@@ -4,22 +4,30 @@ defmodule NeonFS.WebDAV.LockStoreTest do
   alias NeonFS.Core.FileMeta
   alias NeonFS.Error.Conflict
   alias NeonFS.WebDAV.LockStore
+  alias NeonFS.WebDAV.Test.FakeKV
 
   @file_path ["my-volume", "docs", "file.txt"]
   @file_id "test-file-id-001"
 
   setup do
-    LockStore.reset()
+    FakeKV.stub!()
 
     on_exit(fn ->
       Application.delete_env(:neonfs_webdav, :core_call_fn)
+      Application.delete_env(:neonfs_webdav, :kv_call_fn)
       Application.delete_env(:neonfs_webdav, :lock_manager_call_fn)
       Application.delete_env(:neonfs_webdav, :namespace_coordinator_call_fn)
       Application.delete_env(:neonfs_webdav, :namespace_holder_pid_fn)
-      LockStore.reset()
     end)
 
     :ok
+  end
+
+  defp backdate_lock!(token) do
+    key = "webdav_lock:" <> token
+    {:ok, lock_info} = FakeKV.call(:get, [key])
+    expired = %{lock_info | expires_at: System.system_time(:second) - 10}
+    FakeKV.call(:put, [key, expired])
   end
 
   defp setup_mock_core(file_id \\ @file_id) do
@@ -231,9 +239,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       # Create a lock with 1-second timeout, then manipulate expiry
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 1)
 
-      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
-      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
-      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+      backdate_lock!(token)
 
       assert {:error, :not_found} = LockStore.refresh(token, 600)
       assert LockStore.get_locks(@file_path) == []
@@ -269,9 +275,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
 
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 1)
 
-      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
-      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
-      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+      backdate_lock!(token)
 
       assert LockStore.get_locks(@file_path) == []
     end
@@ -323,13 +327,11 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     test "returns invalid_token for expired lock and cleans up" do
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 1)
 
-      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
-      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
-      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+      backdate_lock!(token)
 
       assert {:error, :invalid_token} = LockStore.check_token(@file_path, token)
       # Should have been cleaned up
-      assert :ets.lookup(NeonFS.WebDAV.LockStore, token) == []
+      assert FakeKV.call(:get, ["webdav_lock:" <> token]) == {:error, :not_found}
     end
   end
 
@@ -391,9 +393,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     test "is_lock_null? returns false for expired lock-null" do
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 1)
 
-      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
-      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
-      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+      backdate_lock!(token)
 
       refute LockStore.lock_null?(@file_path)
     end
@@ -422,9 +422,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     test "get_lock_null_paths excludes expired entries" do
       {:ok, token} = LockStore.lock(@file_path, :exclusive, :write, 0, "user-a", 1)
 
-      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
-      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
-      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+      backdate_lock!(token)
 
       assert LockStore.get_lock_null_paths(["my-volume", "docs"]) == []
     end
@@ -698,9 +696,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
       {:ok, token} =
         LockStore.lock(@collection_path, :exclusive, :write, :infinity, "user-a", 1)
 
-      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
-      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
-      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+      backdate_lock!(token)
 
       assert LockStore.get_locks_covering(@child_path) == []
     end
@@ -758,9 +754,7 @@ defmodule NeonFS.WebDAV.LockStoreTest do
     test "excludes expired descendant locks" do
       {:ok, token} = LockStore.lock(@child_path, :exclusive, :write, 0, "user-a", 1)
 
-      [{^token, lock_info}] = :ets.lookup(NeonFS.WebDAV.LockStore, token)
-      expired = %{lock_info | expires_at: System.system_time(:second) - 10}
-      :ets.insert(NeonFS.WebDAV.LockStore, {token, expired})
+      backdate_lock!(token)
 
       assert LockStore.get_descendant_locks(@collection_path) == []
     end

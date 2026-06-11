@@ -1,7 +1,7 @@
 defmodule NeonFS.WebDAV.LockStore do
   @moduledoc """
-  WebDAV lock store backed by the distributed lock manager and the
-  namespace coordinator.
+  WebDAV lock store backed by the distributed lock manager, the
+  namespace coordinator, and the cluster KV store.
 
   Translates WebDAV LOCK/UNLOCK operations into DLM byte-range locks
   so that file locks are visible across all access protocols (FUSE,
@@ -37,24 +37,33 @@ defmodule NeonFS.WebDAV.LockStore do
   the holder dies (WebDAV node crash / disconnect), so stale subtree
   claims don't outlive the node that took them.
 
-  When the coordinator is unreachable (e.g. test setups without a Ra
-  cluster or transient outages), the lock store falls back to its
-  local ETS hierarchical scan — single-node correctness is preserved
-  even if cross-node coordination is temporarily unavailable.
+  ## Cluster-shared token index (#1178)
 
-  A local ETS table indexes lock tokens to their DLM state. If the
-  WebDAV node restarts, the ETS table is lost but DLM locks expire
-  via TTL — clients simply re-lock.
+  The token → lock-state index lives in the Ra-backed cluster KV store
+  under `webdav_lock:<token>` keys, so a load balancer can route a
+  client's LOCK, writes carrying `If: <token>`, refresh, and UNLOCK to
+  different WebDAV nodes. The KV index is bookkeeping — conflict
+  arbitration stays with the DLM (existing files) and the namespace
+  coordinator (lock-null and `Depth: infinity` claims), both of which
+  are cluster-level already. The KV-scan conflict pre-check covers
+  depth-0 locks on existing files between DLM acquisitions and serves
+  as the conservative first gate.
+
+  If a WebDAV node dies, namespace claims it held are released by the
+  coordinator's holder-pid `:DOWN` cleanup, and DLM locks expire via
+  TTL; the KV entries are swept by `LockStore.Cleaner` when they
+  expire. Clients simply re-lock.
   """
 
   @behaviour Davy.LockStore
 
+  alias NeonFS.Client.KV
   alias NeonFS.Client.Router
   alias NeonFS.WebDAV.LockStore.NamespaceHolder
 
   require Logger
 
-  @table __MODULE__
+  @key_prefix "webdav_lock:"
 
   # Full-file lock range — large enough to cover any file.
   @full_file_range {0, 0xFFFFFFFFFFFFFFFF}
@@ -62,24 +71,18 @@ defmodule NeonFS.WebDAV.LockStore do
   # --- Lifecycle ---
 
   @doc """
-  Initialise the ETS table. Call once during application startup.
-  """
-  @spec init() :: :ok
-  def init do
-    if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
-    end
-
-    :ok
-  end
-
-  @doc """
   Remove all locks. Useful in tests.
   """
   @spec reset() :: :ok
   def reset do
-    init()
-    :ets.delete_all_objects(@table)
+    case kv(:list_prefix, [@key_prefix]) do
+      entries when is_list(entries) ->
+        Enum.each(entries, fn {key, _info} -> kv(:delete, [key]) end)
+
+      _ ->
+        :ok
+    end
+
     :ok
   end
 
@@ -87,7 +90,6 @@ defmodule NeonFS.WebDAV.LockStore do
 
   @impl true
   def lock(path, scope, type, depth, owner, timeout) do
-    init()
     resolution = resolve_file_id(path)
 
     case acquire_namespace_claim(path, depth, scope, resolution) do
@@ -96,11 +98,10 @@ defmodule NeonFS.WebDAV.LockStore do
 
       result ->
         # `result` is either {:ok, claim_id}, :coordinator_unavailable,
-        # or :not_applicable; either way we still need the local
+        # or :not_applicable; either way we still need the KV-scan
         # pre-check (it covers depth=0 LOCKs on existing files that
-        # don't take a namespace claim, and serves as the single-node
-        # fallback when the coordinator is down).
-        if local_conflict?(path, depth, scope) do
+        # don't take a namespace claim).
+        if conflict?(path, depth, scope) do
           maybe_release_claim(result)
           {:error, :conflict}
         else
@@ -125,7 +126,7 @@ defmodule NeonFS.WebDAV.LockStore do
     case resolution do
       {:existing, file_id} -> lock_via_dlm(file_id, attrs)
       :lock_null -> lock_lock_null(attrs)
-      :local_only -> lock_local(attrs)
+      :local_only -> lock_unresolved(attrs)
     end
   end
 
@@ -142,9 +143,8 @@ defmodule NeonFS.WebDAV.LockStore do
   @doc """
   Best-effort release of a namespace coordinator claim by id. Used by
   the periodic `Cleaner` to release claims for entries it expires from
-  the local ETS table — namespace claims have no TTL of their own, so
-  forgetting them locally would leak the claim until the holder pid
-  dies.
+  the KV index — namespace claims have no TTL of their own, so
+  forgetting them would leak the claim until the holder pid dies.
 
   Errors are swallowed: the cleaner has no way to surface a transient
   coordinator outage, and the holder-pid `:DOWN` cleanup on the
@@ -157,71 +157,60 @@ defmodule NeonFS.WebDAV.LockStore do
 
   @impl true
   def unlock(token) do
-    init()
-
-    case :ets.lookup(@table, token) do
-      [{^token, lock_info}] ->
+    case fetch_lock(token) do
+      {:ok, lock_info} ->
         maybe_unlock_dlm(lock_info)
         maybe_release_claim_id(Map.get(lock_info, :namespace_claim_id))
-        :ets.delete(@table, token)
+        kv(:delete, [lock_key(token)])
         :ok
 
-      [] ->
+      :error ->
         {:error, :not_found}
     end
   end
 
   @impl true
   def refresh(token, timeout) do
-    init()
     now = System.system_time(:second)
 
-    case :ets.lookup(@table, token) do
-      [{^token, lock_info}] ->
-        if lock_info.expires_at > now do
-          maybe_renew_dlm(lock_info, timeout)
-          updated = %{lock_info | timeout: timeout, expires_at: now + timeout}
-          :ets.insert(@table, {token, updated})
-          {:ok, public_lock_info(updated)}
-        else
-          :ets.delete(@table, token)
-          {:error, :not_found}
+    case fetch_lock(token) do
+      {:ok, lock_info} when lock_info.expires_at > now ->
+        maybe_renew_dlm(lock_info, timeout)
+        updated = %{lock_info | timeout: timeout, expires_at: now + timeout}
+
+        case store_lock(updated) do
+          :ok -> {:ok, public_lock_info(updated)}
+          {:error, _reason} -> {:error, :not_found}
         end
 
-      [] ->
+      {:ok, _expired} ->
+        kv(:delete, [lock_key(token)])
+        {:error, :not_found}
+
+      :error ->
         {:error, :not_found}
     end
   end
 
   @impl true
   def get_locks(path) do
-    init()
-    now = System.system_time(:second)
-    get_active_locks(path, now)
+    active_locks()
+    |> Enum.filter(&(&1.path == path))
+    |> Enum.map(&public_lock_info/1)
   end
 
   @impl true
   def get_locks_covering(path) do
-    init()
-    now = System.system_time(:second)
-
-    :ets.tab2list(@table)
-    |> Enum.filter(fn {_token, info} ->
-      info.expires_at > now and covers?(info, path)
-    end)
-    |> Enum.map(fn {_token, info} -> public_lock_info(info) end)
+    active_locks()
+    |> Enum.filter(&covers?(&1, path))
+    |> Enum.map(&public_lock_info/1)
   end
 
   @impl true
   def get_descendant_locks(path) do
-    init()
-    now = System.system_time(:second)
-
-    :ets.tab2list(@table)
-    |> Enum.filter(fn {_token, info} ->
-      info.expires_at > now and descendant?(info.path, path)
-    end)
-    |> Enum.map(fn {_token, info} -> public_lock_info(info) end)
+    active_locks()
+    |> Enum.filter(&descendant?(&1.path, path))
+    |> Enum.map(&public_lock_info/1)
   end
 
   # --- Lock-null resource queries ---
@@ -231,13 +220,8 @@ defmodule NeonFS.WebDAV.LockStore do
   """
   @spec lock_null?(Davy.LockStore.path()) :: boolean()
   def lock_null?(path) do
-    init()
-    now = System.system_time(:second)
-
-    :ets.tab2list(@table)
-    |> Enum.any?(fn {_token, info} ->
-      info.path == path and info.lock_null == true and info.expires_at > now
-    end)
+    active_locks()
+    |> Enum.any?(&(&1.path == path and &1.lock_null == true))
   end
 
   @doc """
@@ -250,17 +234,15 @@ defmodule NeonFS.WebDAV.LockStore do
   """
   @spec get_lock_null_paths([String.t()]) :: [[String.t()]]
   def get_lock_null_paths(parent_path) do
-    init()
-    now = System.system_time(:second)
     parent_len = length(parent_path)
 
-    :ets.tab2list(@table)
-    |> Enum.filter(fn {_token, info} ->
-      info.lock_null == true and info.expires_at > now and
+    active_locks()
+    |> Enum.filter(fn info ->
+      info.lock_null == true and
         length(info.path) == parent_len + 1 and
         List.starts_with?(info.path, parent_path)
     end)
-    |> Enum.map(fn {_token, info} -> info.path end)
+    |> Enum.map(& &1.path)
     |> Enum.uniq()
   end
 
@@ -268,24 +250,21 @@ defmodule NeonFS.WebDAV.LockStore do
   Promote a lock-null resource to a regular locked resource after the file
   has been created. Acquires a DLM lock on the real file ID, releases the
   namespace coordinator claim that was held while the path was lock-null,
-  and updates the ETS entry.
+  and updates the KV entry.
   """
   @spec promote_lock_null(Davy.LockStore.path(), String.t()) :: :ok
   def promote_lock_null(path, real_file_id) do
-    init()
     now = System.system_time(:second)
 
-    :ets.tab2list(@table)
-    |> Enum.filter(fn {_token, info} ->
-      info.path == path and info.lock_null == true and info.expires_at > now
-    end)
-    |> Enum.each(fn {token, info} ->
+    active_locks()
+    |> Enum.filter(&(&1.path == path and &1.lock_null == true))
+    |> Enum.each(fn info ->
       remaining_ttl_ms = max((info.expires_at - now) * 1000, 1000)
       lock_type = scope_to_lock_type(info.scope)
 
       case call_lock_manager(:lock, [
              real_file_id,
-             token,
+             info.token,
              @full_file_range,
              lock_type,
              [ttl: remaining_ttl_ms]
@@ -293,7 +272,8 @@ defmodule NeonFS.WebDAV.LockStore do
         :ok ->
           maybe_release_claim_id(info.namespace_claim_id)
           updated = %{info | file_id: real_file_id, lock_null: false, namespace_claim_id: nil}
-          :ets.insert(@table, {token, updated})
+          _ = store_lock(updated)
+          :ok
 
         {:error, reason} ->
           Logger.warning(
@@ -307,21 +287,78 @@ defmodule NeonFS.WebDAV.LockStore do
 
   @impl true
   def check_token(path, token) do
-    init()
     now = System.system_time(:second)
 
-    case :ets.lookup(@table, token) do
-      [{^token, %{expires_at: expires_at} = info}] when expires_at > now ->
+    case fetch_lock(token) do
+      {:ok, %{expires_at: expires_at} = info} when expires_at > now ->
         if covers?(info, path), do: :ok, else: {:error, :invalid_token}
 
-      [{^token, %{expires_at: expires_at}}] when expires_at <= now ->
-        :ets.delete(@table, token)
+      {:ok, _expired} ->
+        kv(:delete, [lock_key(token)])
         {:error, :invalid_token}
 
-      _ ->
+      :error ->
         {:error, :invalid_token}
     end
   end
+
+  # --- KV index ---
+
+  @doc """
+  All non-expired lock entries from the cluster KV index. Also used by
+  the `Cleaner` to find expired entries (with `include_expired: true`).
+  """
+  @spec active_locks(keyword()) :: [map()]
+  def active_locks(opts \\ []) do
+    now = System.system_time(:second)
+    include_expired? = Keyword.get(opts, :include_expired, false)
+
+    case kv(:list_prefix, [@key_prefix]) do
+      entries when is_list(entries) ->
+        infos = Enum.map(entries, fn {_key, info} -> info end)
+
+        if include_expired? do
+          infos
+        else
+          Enum.filter(infos, &(&1.expires_at > now))
+        end
+
+      {:error, reason} ->
+        # A failed scan must not grant conflicting locks by reporting
+        # "no locks" — but every conflict that matters is arbitrated by
+        # the DLM or the namespace coordinator, which are queried on
+        # the lock path regardless. Degrade to an empty view.
+        Logger.warning("WebDAV lock index scan failed: #{inspect(reason)}")
+        []
+    end
+  end
+
+  @doc """
+  Delete a lock entry from the KV index by token. Used by the `Cleaner`.
+  """
+  @spec delete_entry(String.t()) :: :ok
+  def delete_entry(token) when is_binary(token) do
+    kv(:delete, [lock_key(token)])
+    :ok
+  end
+
+  defp fetch_lock(token) when is_binary(token) do
+    case kv(:get, [lock_key(token)]) do
+      {:ok, info} -> {:ok, info}
+      {:error, _} -> :error
+    end
+  end
+
+  defp fetch_lock(_token), do: :error
+
+  defp store_lock(%{token: token} = info) do
+    case kv(:put, [lock_key(token), info]) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp lock_key(token), do: @key_prefix <> token
 
   # --- DLM integration ---
 
@@ -332,8 +369,9 @@ defmodule NeonFS.WebDAV.LockStore do
 
     case call_lock_manager(:lock, [file_id, token, @full_file_range, lock_type, [ttl: ttl_ms]]) do
       :ok ->
-        :ets.insert(@table, {token, build_lock_info(attrs, token, file_id, false)})
-        {:ok, token}
+        persist_or_rollback(build_lock_info(attrs, token, file_id, false), fn ->
+          maybe_unlock_dlm(%{file_id: file_id, token: token})
+        end)
 
       {:error, _reason} ->
         # `:timeout` and any other DLM rejection collapse into a WebDAV
@@ -345,14 +383,28 @@ defmodule NeonFS.WebDAV.LockStore do
 
   defp lock_lock_null(attrs) do
     token = generate_token()
-    :ets.insert(@table, {token, build_lock_info(attrs, token, nil, true)})
-    {:ok, token}
+    persist_or_rollback(build_lock_info(attrs, token, nil, true), fn -> :ok end)
   end
 
-  defp lock_local(attrs) do
+  # Path resolution failed (core transiently unreachable while looking
+  # up the file). The KV write is the arbiter of whether the lock can
+  # be granted at all — if the cluster is unreachable, the LOCK fails.
+  defp lock_unresolved(attrs) do
     token = generate_token()
-    :ets.insert(@table, {token, build_lock_info(attrs, token, nil, false)})
-    {:ok, token}
+    persist_or_rollback(build_lock_info(attrs, token, nil, false), fn -> :ok end)
+  end
+
+  defp persist_or_rollback(info, rollback) do
+    case store_lock(info) do
+      :ok ->
+        {:ok, info.token}
+
+      {:error, reason} ->
+        Logger.warning("Failed to persist WebDAV lock in KV index: #{inspect(reason)}")
+        rollback.()
+        maybe_release_claim_id(info.namespace_claim_id)
+        {:error, :conflict}
+    end
   end
 
   defp build_lock_info(attrs, token, file_id, lock_null?) do
@@ -433,12 +485,6 @@ defmodule NeonFS.WebDAV.LockStore do
     Map.drop(info, [:file_id, :lock_null, :namespace_claim_id])
   end
 
-  defp get_active_locks(path, now) do
-    :ets.tab2list(@table)
-    |> Enum.filter(fn {_token, info} -> info.path == path and info.expires_at > now end)
-    |> Enum.map(fn {_token, info} -> public_lock_info(info) end)
-  end
-
   defp covers?(%{path: lock_path}, lock_path), do: true
 
   defp covers?(%{path: lock_path, depth: :infinity}, target_path) do
@@ -451,12 +497,9 @@ defmodule NeonFS.WebDAV.LockStore do
     List.starts_with?(lock_path, ancestor_path) and length(lock_path) > length(ancestor_path)
   end
 
-  defp local_conflict?(path, depth, scope) do
-    now = System.system_time(:second)
-
-    :ets.tab2list(@table)
-    |> Enum.filter(fn {_t, info} -> info.expires_at > now end)
-    |> Enum.any?(fn {_t, info} ->
+  defp conflict?(path, depth, scope) do
+    active_locks()
+    |> Enum.any?(fn info ->
       overlaps?(info, path, depth) and scope_conflicts?(info.scope, scope)
     end)
   end
@@ -503,6 +546,15 @@ defmodule NeonFS.WebDAV.LockStore do
     _, _ -> {:error, :unavailable}
   end
 
+  defp kv(function, args) do
+    case Application.get_env(:neonfs_webdav, :kv_call_fn) do
+      nil -> apply(KV, function, args)
+      fun when is_function(fun, 2) -> fun.(function, args)
+    end
+  catch
+    _, reason -> {:error, reason}
+  end
+
   # Acquires a namespace coordinator claim for the LOCK request.
   #
   #   * `Depth: infinity`           → `claim_subtree_for/4`
@@ -512,10 +564,8 @@ defmodule NeonFS.WebDAV.LockStore do
   # Return shape:
   #   * `{:ok, claim_id}`           — claim acquired, store the id and release on UNLOCK
   #   * `{:error, :conflict}`       — coordinator reports a conflicting claim
-  #   * `:coordinator_unavailable`  — coordinator unreachable; caller should
-  #                                   fall back to single-node ETS conflict
-  #                                   detection (preserves existing behaviour
-  #                                   in tests / outages)
+  #   * `:coordinator_unavailable`  — coordinator unreachable; the KV-scan
+  #                                   pre-check is the remaining gate
   #   * `:not_applicable`           — no namespace claim is needed
   defp acquire_namespace_claim(path, :infinity, scope, _resolution) do
     do_acquire_claim(:claim_subtree_for, path, scope)

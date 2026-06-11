@@ -1,21 +1,22 @@
 defmodule NeonFS.WebDAV.LockStore.CleanerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias NeonFS.WebDAV.LockStore.Cleaner
+  alias NeonFS.WebDAV.Test.FakeKV
 
-  @table :cleaner_test_table
+  @key_prefix "webdav_lock:"
 
   setup do
-    table = :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
+    FakeKV.stub!()
 
     on_exit(fn ->
-      if :ets.whereis(@table) != :undefined, do: :ets.delete(@table)
+      Application.delete_env(:neonfs_webdav, :kv_call_fn)
     end)
 
-    {:ok, table: table}
+    :ok
   end
 
-  defp insert_lock(table, token, opts \\ []) do
+  defp insert_lock(token, opts \\ []) do
     expires_at = Keyword.get(opts, :expires_at, System.system_time(:second) + 300)
     lock_null = Keyword.get(opts, :lock_null, false)
     namespace_claim_id = Keyword.get(opts, :namespace_claim_id)
@@ -33,87 +34,66 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
       namespace_claim_id: namespace_claim_id
     }
 
-    :ets.insert(table, {token, lock_info})
+    FakeKV.call(:put, [@key_prefix <> token, lock_info])
+  end
+
+  defp stored_tokens do
+    [@key_prefix]
+    |> then(&FakeKV.call(:list_prefix, &1))
+    |> Enum.map(fn {@key_prefix <> token, _info} -> token end)
+    |> Enum.sort()
+  end
+
+  defp start_cleaner!(name) do
+    {:ok, pid} = Cleaner.start_link(name: name, interval_ms: 50)
+    pid
+  end
+
+  defp sweep!(pid) do
+    send(pid, :sweep)
+    :sys.get_state(pid)
   end
 
   describe "periodic sweep" do
-    test "removes expired entries from ETS" do
-      insert_lock(@table, "expired-1", expires_at: System.system_time(:second) - 60)
-      insert_lock(@table, "expired-2", expires_at: System.system_time(:second) - 10)
-      insert_lock(@table, "active-1", expires_at: System.system_time(:second) + 300)
+    test "removes expired entries from the KV index" do
+      insert_lock("expired-1", expires_at: System.system_time(:second) - 60)
+      insert_lock("expired-2", expires_at: System.system_time(:second) - 10)
+      insert_lock("active-1", expires_at: System.system_time(:second) + 300)
 
-      assert :ets.info(@table, :size) == 3
+      :cleaner_sweep_test |> start_cleaner!() |> sweep!()
 
-      {:ok, pid} =
-        Cleaner.start_link(
-          name: :cleaner_sweep_test,
-          table: @table,
-          interval_ms: 50
-        )
-
-      send(pid, :sweep)
-      :sys.get_state(pid)
-
-      assert :ets.info(@table, :size) == 1
-      assert :ets.lookup(@table, "active-1") != []
-      assert :ets.lookup(@table, "expired-1") == []
-      assert :ets.lookup(@table, "expired-2") == []
+      assert stored_tokens() == ["active-1"]
     end
 
     test "preserves all entries when none are expired" do
-      insert_lock(@table, "active-1")
-      insert_lock(@table, "active-2")
+      insert_lock("active-1")
+      insert_lock("active-2")
 
-      {:ok, pid} =
-        Cleaner.start_link(
-          name: :cleaner_preserve_test,
-          table: @table,
-          interval_ms: 50
-        )
+      :cleaner_preserve_test |> start_cleaner!() |> sweep!()
 
-      send(pid, :sweep)
-      :sys.get_state(pid)
-
-      assert :ets.info(@table, :size) == 2
+      assert stored_tokens() == ["active-1", "active-2"]
     end
 
-    test "handles empty table" do
-      {:ok, pid} =
-        Cleaner.start_link(
-          name: :cleaner_empty_test,
-          table: @table,
-          interval_ms: 50
-        )
+    test "handles empty index" do
+      :cleaner_empty_test |> start_cleaner!() |> sweep!()
 
-      send(pid, :sweep)
-      :sys.get_state(pid)
-
-      assert :ets.info(@table, :size) == 0
+      assert stored_tokens() == []
     end
 
     test "removes expired lock-null entries" do
-      insert_lock(@table, "lock-null-expired",
+      insert_lock("lock-null-expired",
         expires_at: System.system_time(:second) - 30,
         lock_null: true
       )
 
-      insert_lock(@table, "lock-null-active",
+      insert_lock("lock-null-active",
         expires_at: System.system_time(:second) + 300,
         lock_null: true
       )
 
-      {:ok, pid} =
-        Cleaner.start_link(
-          name: :cleaner_lock_null_test,
-          table: @table,
-          interval_ms: 50
-        )
+      :cleaner_lock_null_test |> start_cleaner!() |> sweep!()
 
-      send(pid, :sweep)
-      :sys.get_state(pid)
-
-      assert :ets.info(@table, :size) == 1
-      assert :ets.lookup(@table, "lock-null-active") != []
+      assert stored_tokens() == ["lock-null-active"]
     end
 
     test "releases namespace coordinator claims on expired entries" do
@@ -128,34 +108,24 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
         Application.delete_env(:neonfs_webdav, :namespace_coordinator_call_fn)
       end)
 
-      insert_lock(@table, "expired-with-claim",
+      insert_lock("expired-with-claim",
         expires_at: System.system_time(:second) - 30,
         namespace_claim_id: "ns-claim-expired"
       )
 
-      insert_lock(@table, "active-with-claim",
+      insert_lock("active-with-claim",
         expires_at: System.system_time(:second) + 300,
         namespace_claim_id: "ns-claim-active"
       )
 
-      insert_lock(@table, "expired-no-claim", expires_at: System.system_time(:second) - 30)
+      insert_lock("expired-no-claim", expires_at: System.system_time(:second) - 30)
 
-      {:ok, pid} =
-        Cleaner.start_link(
-          name: :cleaner_claim_release_test,
-          table: @table,
-          interval_ms: 50
-        )
-
-      send(pid, :sweep)
-      :sys.get_state(pid)
+      :cleaner_claim_release_test |> start_cleaner!() |> sweep!()
 
       assert_received {:namespace_coordinator, :release, ["ns-claim-expired"]}
       refute_received {:namespace_coordinator, :release, ["ns-claim-active"]}
 
-      assert :ets.lookup(@table, "expired-with-claim") == []
-      assert :ets.lookup(@table, "expired-no-claim") == []
-      assert :ets.lookup(@table, "active-with-claim") != []
+      assert stored_tokens() == ["active-with-claim"]
     end
   end
 
@@ -166,19 +136,11 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
           [:neonfs, :webdav, :lock_store, :cleanup]
         ])
 
-      insert_lock(@table, "expired-1", expires_at: System.system_time(:second) - 60)
-      insert_lock(@table, "expired-2", expires_at: System.system_time(:second) - 10)
-      insert_lock(@table, "active-1")
+      insert_lock("expired-1", expires_at: System.system_time(:second) - 60)
+      insert_lock("expired-2", expires_at: System.system_time(:second) - 10)
+      insert_lock("active-1")
 
-      {:ok, pid} =
-        Cleaner.start_link(
-          name: :cleaner_telemetry_test,
-          table: @table,
-          interval_ms: 50
-        )
-
-      send(pid, :sweep)
-      :sys.get_state(pid)
+      :cleaner_telemetry_test |> start_cleaner!() |> sweep!()
 
       assert_receive {[:neonfs, :webdav, :lock_store, :cleanup], ^ref, %{expired_count: 2}, %{}}
     end
@@ -189,17 +151,9 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
           [:neonfs, :webdav, :lock_store, :cleanup]
         ])
 
-      insert_lock(@table, "active-1")
+      insert_lock("active-1")
 
-      {:ok, pid} =
-        Cleaner.start_link(
-          name: :cleaner_telemetry_zero_test,
-          table: @table,
-          interval_ms: 50
-        )
-
-      send(pid, :sweep)
-      :sys.get_state(pid)
+      :cleaner_telemetry_zero_test |> start_cleaner!() |> sweep!()
 
       assert_receive {[:neonfs, :webdav, :lock_store, :cleanup], ^ref, %{expired_count: 0}, %{}}
     end
@@ -212,14 +166,9 @@ defmodule NeonFS.WebDAV.LockStore.CleanerTest do
           [:neonfs, :webdav, :lock_store, :cleanup]
         ])
 
-      insert_lock(@table, "expired", expires_at: System.system_time(:second) - 10)
+      insert_lock("expired", expires_at: System.system_time(:second) - 10)
 
-      {:ok, _pid} =
-        Cleaner.start_link(
-          name: :cleaner_schedule_test,
-          table: @table,
-          interval_ms: 50
-        )
+      start_cleaner!(:cleaner_schedule_test)
 
       assert_receive {[:neonfs, :webdav, :lock_store, :cleanup], ^ref, %{expired_count: 1}, %{}},
                      1_000
