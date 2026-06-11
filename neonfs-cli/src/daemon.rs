@@ -45,6 +45,9 @@ const DEFAULT_DAEMON_NODE: &str = "neonfs@localhost";
 /// Runtime file written by the daemon wrapper with the actual node name
 const RUNTIME_NODE_NAME_PATH: &str = "/run/neonfs/core_node_name";
 
+/// Directory holding the daemon wrappers' runtime files
+const RUNTIME_DIR: &str = "/run/neonfs";
+
 /// Runtime file written by the daemon wrapper with the distribution port
 const RUNTIME_DIST_PORT_PATH: &str = "/run/neonfs/dist_port";
 
@@ -164,21 +167,99 @@ pub struct DaemonConnection {
     ref_counter: u32,
 }
 
+/// The local daemon a `cluster join` should target (#1162).
+pub struct JoinTarget {
+    /// Erlang node name of the daemon to drive.
+    pub node: String,
+    /// True when the daemon is an interface service (NFS, S3, …) rather
+    /// than a core/omnibus daemon — interface joins are validated
+    /// differently because interface nodes don't serve `cluster_status`.
+    pub is_interface: bool,
+}
+
+/// Resolves the daemon `cluster join` should drive.
+///
+/// `NEONFS_NODE` wins when set (treated as core-style). Otherwise an
+/// interface daemon's `<svc>_node_name` runtime file is preferred over
+/// `core_node_name`: on a standalone interface host `core_node_name`
+/// points at a *remote* core the CLI cannot authenticate to before the
+/// join, while the local interface daemon performs the outward HTTP
+/// redemption itself. Core and omnibus hosts only write
+/// `core_node_name`, so their behaviour is unchanged.
+pub fn resolve_join_target() -> JoinTarget {
+    if let Ok(node) = std::env::var("NEONFS_NODE") {
+        if !node.trim().is_empty() {
+            return JoinTarget {
+                node: node.trim().to_string(),
+                is_interface: false,
+            };
+        }
+    }
+
+    if let Some(node) = first_interface_node_name() {
+        return JoinTarget {
+            node,
+            is_interface: true,
+        };
+    }
+
+    JoinTarget {
+        node: default_daemon_node(),
+        is_interface: false,
+    }
+}
+
+/// The first interface daemon's node name from `/run/neonfs/*_node_name`
+/// (sorted for determinism), or `None` when only `core_node_name` exists.
+fn first_interface_node_name() -> Option<String> {
+    let mut names: Vec<_> = fs::read_dir(RUNTIME_DIR)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_name = entry.file_name().into_string().ok()?;
+
+            if file_name.ends_with("_node_name") && file_name != "core_node_name" {
+                // audit:bounded runtime node name file is a single short atom
+                let contents = fs::read_to_string(entry.path()).ok()?;
+                let node = contents.trim().to_string();
+                if node.is_empty() {
+                    None
+                } else {
+                    Some(node)
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    names.sort();
+    names.into_iter().next()
+}
+
+fn default_daemon_node() -> String {
+    // audit:bounded runtime node name file is a single short atom
+    fs::read_to_string(RUNTIME_NODE_NAME_PATH)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_DAEMON_NODE.to_string())
+}
+
 impl DaemonConnection {
     /// Connect to the NeonFS daemon
     pub async fn connect() -> Result<Self> {
-        let daemon_node = std::env::var("NEONFS_NODE").unwrap_or_else(|_| {
-            // audit:bounded runtime node name file is a single short atom
-            fs::read_to_string(RUNTIME_NODE_NAME_PATH)
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| DEFAULT_DAEMON_NODE.to_string())
-        });
+        let daemon_node = std::env::var("NEONFS_NODE").unwrap_or_else(|_| default_daemon_node());
+
+        Self::connect_node(&daemon_node).await
+    }
+
+    /// Connect to a specific daemon node, retrying within the connect window.
+    pub async fn connect_node(daemon_node: &str) -> Result<Self> {
         let deadline = Instant::now() + CONNECT_RETRY_WINDOW;
 
         loop {
-            match Self::connect_to(&daemon_node).await {
+            match Self::connect_to(daemon_node).await {
                 Ok(conn) => return Ok(conn),
                 Err(CliError::ConnectionFailed(_)) if Instant::now() < deadline => {
                     smol::Timer::after(CONNECT_RETRY_BACKOFF).await;
