@@ -1,7 +1,7 @@
 //! Cluster management commands
 
 use crate::commands::repair::RepairCommand;
-use crate::daemon::DaemonConnection;
+use crate::daemon::{resolve_join_target, DaemonConnection};
 use crate::error::{CliError, Result};
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
@@ -46,6 +46,46 @@ async fn await_cluster_running(timeout: Duration, format: OutputFormat) -> Resul
         }
 
         smol::Timer::after(Duration::from_secs(2)).await;
+    }
+}
+
+/// Reconnect to an interface daemon (its distribution may be mid-restart)
+/// and wait until its persisted cluster state exists — the join's async
+/// finalize writes `cluster.json` once the node has joined (#1162).
+/// Interface nodes don't serve `cluster_status`, so this is their join
+/// confirmation.
+async fn await_state_persisted(node: &str, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if try_state_exists(node).await {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(CliError::RpcFailed(
+                "timed out waiting for the node to come back with persisted cluster state".into(),
+            ));
+        }
+
+        smol::Timer::after(Duration::from_secs(2)).await;
+    }
+}
+
+/// One best-effort `NeonFS.Cluster.State.exists?/0` probe against a
+/// specific node. Returns `false` on any connect/RPC failure so the
+/// caller can keep polling.
+async fn try_state_exists(node: &str) -> bool {
+    let Ok(mut conn) = DaemonConnection::connect_node(node).await else {
+        return false;
+    };
+
+    match conn
+        .call("Elixir.NeonFS.Cluster.State", "exists?", vec![])
+        .await
+    {
+        Ok(Term::Atom(atom)) => atom.name == "true",
+        _ => false,
     }
 }
 
@@ -520,17 +560,26 @@ impl ClusterCommand {
     }
 
     fn join(&self, token: &str, via: &str, format: OutputFormat) -> Result<()> {
+        // On a standalone interface host the `core_node_name` runtime file
+        // points at a remote core this CLI cannot authenticate to before the
+        // join (no cluster CA yet). The local daemon — whatever its service
+        // type — performs the outward HTTP redemption itself, so drive that
+        // (#1162). Core and omnibus hosts resolve exactly as before.
+        let target = resolve_join_target();
+
         // Phase 1 — redeem the invite. The daemon validates the token and writes
         // the cluster certs synchronously, then finishes the join in the
         // background: it restarts TLS distribution (dropping this connection) and
         // connects to the via node. So this call returns a `joining` ack; any
         // synchronous failure (bad token, unreachable via node) surfaces here.
+        // `NeonFS.Client.CLIHandler` exists on every node type and delegates to
+        // core's handler on core nodes (#1161).
         let ack = smol::block_on(async {
-            let mut conn = DaemonConnection::connect().await?;
+            let mut conn = DaemonConnection::connect_node(&target.node).await?;
             let token_binary = Binary::from(token.as_bytes().to_vec());
             let via_binary = Binary::from(via.as_bytes().to_vec());
             conn.call(
-                "Elixir.NeonFS.CLI.Handler",
+                "Elixir.NeonFS.Client.CLIHandler",
                 "join_cluster",
                 vec![Term::Binary(token_binary), Term::Binary(via_binary)],
             )
@@ -546,8 +595,33 @@ impl ClusterCommand {
             eprintln!("Invite redeemed; node is restarting TLS distribution and joining…");
         }
 
-        // Phase 2 — the node bounced distribution, so reconnect and wait until it
-        // reports a running cluster, confirming the join completed (#1033).
+        // Phase 2 — the node bounced distribution, so reconnect and wait for the
+        // join to complete (#1033). Core nodes report a running cluster via
+        // `cluster_status`; interface nodes don't serve it, so their join is
+        // confirmed by the persisted cluster state instead.
+        if target.is_interface {
+            smol::block_on(await_state_persisted(&target.node, JOIN_VALIDATE_TIMEOUT))?;
+
+            match format {
+                OutputFormat::Json => {
+                    let result = serde_json::json!({
+                        "status": "joined",
+                        "node": target.node,
+                    });
+                    println!("{}", json::format(&result)?);
+                }
+                OutputFormat::Table => {
+                    println!("✓ Joined cluster");
+                    println!();
+                    println!("  Node:    {}", target.node);
+                    println!();
+                    println!("Validate with `neonfs node list` against a core node.");
+                }
+            }
+
+            return Ok(());
+        }
+
         let status = smol::block_on(await_cluster_running(JOIN_VALIDATE_TIMEOUT, format))?;
 
         match format {
