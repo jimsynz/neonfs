@@ -44,6 +44,28 @@ cmd_boot() {
 
 cmd_init() { cluster_bootstrap; }
 
+# Standalone interface-node join acceptance (#1163): boot an extra VM with
+# only neonfs-common + neonfs-cli + neonfs-nfs, join it to the running
+# cluster with an invite token, and verify registration + NFS serving +
+# daemon-restart survivability. Requires a cluster from `up` first.
+cmd_iface_join() {
+  require_tools
+  ensure_image
+  ensure_debs
+  ensure_ssh_key
+  node_running 1 || die "no running cluster — bring one up first with './neonfs-rig up'"
+
+  local i="${IFACE_INDEX}"
+  create_node_disks "$i"
+  write_seed "$i"
+  boot_node "$i"
+  wait_ssh "$i"
+  wait_cloud_init "$i"
+  provision_iface_node "$i"
+
+  iface_join_scenario
+}
+
 cmd_ssh() {
   local i="${1:-1}"; shift || true
   node_ssh "$i" "$@"
@@ -96,6 +118,7 @@ Commands:
   up                 Boot NODES VMs, install neonfs_omnibus, form a cluster, create a volume
   boot               Boot + provision VMs only (skip cluster init)
   init               Initialise/join the cluster on already-provisioned VMs
+  iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token (#1163)
   status             Show VM and cluster status
   ssh <n> [cmd...]   SSH into node <n> (default 1)
   cli <n> -- <args>  Run the neonfs CLI on node <n>, e.g. cli 1 -- volume list
@@ -123,6 +146,7 @@ main() {
     up)     cmd_up "$@" ;;
     boot)   cmd_boot "$@" ;;
     init)   cmd_init "$@" ;;
+    iface-join) cmd_iface_join "$@" ;;
     status) cmd_status "$@" ;;
     ssh)    cmd_ssh "$@" ;;
     cli)    cmd_cli "$@" ;;
