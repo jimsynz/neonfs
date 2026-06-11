@@ -7,7 +7,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
-  alias NeonFS.Cluster.InviteRedemption
+  alias NeonFS.Client.InviteCrypto
   alias NeonFS.Transport.TLS
 
   @moduletag timeout: 120_000
@@ -177,7 +177,7 @@ defmodule NeonFS.Integration.ClusterJoinTest do
 
       # Decrypt using the token
       {:ok, credentials} =
-        InviteRedemption.decrypt_response(encrypted_blob, token)
+        InviteCrypto.decrypt_response(encrypted_blob, token)
 
       assert is_binary(credentials["ca_cert_pem"])
       assert is_binary(credentials["node_cert_pem"])

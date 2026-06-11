@@ -1,17 +1,18 @@
-defmodule NeonFS.Cluster.JoinPeersTest do
+defmodule NeonFS.Client.JoinPeersTest do
   use ExUnit.Case, async: true
 
-  alias NeonFS.Cluster.Join
+  alias NeonFS.Client.Join
+  alias NeonFS.Cluster.State
 
   defp peer(name, port \\ 9100) do
     %{id: "id-#{name}", name: name, last_seen: DateTime.utc_now(), dist_port: port}
   end
 
-  describe "sanitise_peers/2" do
+  describe "State.sanitise_peers/2" do
     test "drops the excluded node and collapses duplicate names" do
       peers = [peer(:a@h), peer(:b@h), peer(:a@h, 9200)]
 
-      result = Join.sanitise_peers(peers, :b@h)
+      result = State.sanitise_peers(peers, :b@h)
 
       assert Enum.map(result, & &1.name) == [:a@h]
     end
@@ -19,7 +20,7 @@ defmodule NeonFS.Cluster.JoinPeersTest do
     test "never keeps an entry for the node itself" do
       peers = [peer(:self@h), peer(:peer@h)]
 
-      result = Join.sanitise_peers(peers, :self@h)
+      result = State.sanitise_peers(peers, :self@h)
 
       assert Enum.map(result, & &1.name) == [:peer@h]
     end

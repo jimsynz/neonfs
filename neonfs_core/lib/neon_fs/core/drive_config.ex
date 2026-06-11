@@ -49,31 +49,13 @@ defmodule NeonFS.Core.DriveConfig do
 
   """
   @spec parse_capacity(String.t()) :: {:ok, non_neg_integer()} | {:error, String.t()}
-  def parse_capacity(string) when is_binary(string) do
-    string = String.trim(string)
-
-    case parse_capacity_parts(string) do
-      {:ok, bytes} when bytes >= 0 ->
-        {:ok, bytes}
-
-      {:ok, _negative} ->
-        {:error, "capacity must not be negative: #{inspect(string)}"}
-
-      :error ->
-        {:error, "invalid capacity format: #{inspect(string)}"}
-    end
-  end
+  defdelegate parse_capacity(string), to: NeonFS.Capacity, as: :parse
 
   @doc """
   Like `parse_capacity/1` but raises on invalid input.
   """
   @spec parse_capacity!(String.t()) :: non_neg_integer()
-  def parse_capacity!(string) do
-    case parse_capacity(string) do
-      {:ok, bytes} -> bytes
-      {:error, reason} -> raise ArgumentError, reason
-    end
-  end
+  defdelegate parse_capacity!(string), to: NeonFS.Capacity, as: :parse!
 
   @doc """
   Validates that configured drive capacities don't exceed actual partition sizes.
@@ -126,40 +108,6 @@ defmodule NeonFS.Core.DriveConfig do
   end
 
   ## Private
-
-  defp parse_capacity_parts(string) do
-    case Integer.parse(string) do
-      {value, ""} ->
-        {:ok, value}
-
-      {_value, _rest} ->
-        parse_with_suffix(string)
-
-      :error ->
-        parse_with_suffix(string)
-    end
-  end
-
-  defp parse_with_suffix(string) do
-    suffix_pattern = ~r/\A([0-9]+(?:\.[0-9]+)?)\s*([mMgGtT])\z/
-
-    case Regex.run(suffix_pattern, string) do
-      [_, number_str, suffix] ->
-        multiplier = suffix_multiplier(String.downcase(suffix))
-
-        case Float.parse(number_str) do
-          {number, ""} -> {:ok, trunc(number * multiplier)}
-          _ -> :error
-        end
-
-      nil ->
-        :error
-    end
-  end
-
-  defp suffix_multiplier("m"), do: @mib
-  defp suffix_multiplier("g"), do: @gib
-  defp suffix_multiplier("t"), do: @tib
 
   defp validate_drive_capacity(%{capacity_bytes: 0}), do: :ok
 
