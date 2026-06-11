@@ -11,9 +11,8 @@ defmodule NeonFS.NFS.Application do
   """
 
   use Application
-  require Logger
 
-  alias NeonFS.NFS.{ExportManager, HealthCheck, NFSv3Backend, Supervisor}
+  alias NeonFS.NFS.{HealthCheck, NFSv3Backend, Supervisor}
   alias NFSServer.NFSv3.Handler, as: NFSv3Handler
 
   @doc """
@@ -47,22 +46,5 @@ defmodule NeonFS.NFS.Application do
     end
 
     result
-  end
-
-  @impl true
-  def stop(_state) do
-    # Graceful shutdown: unexport all volumes
-    case Process.whereis(ExportManager) do
-      nil ->
-        :ok
-
-      _pid ->
-        Enum.each(ExportManager.list_exports(), fn export ->
-          Logger.debug("Unexporting volume before shutdown", volume_name: export.volume_name)
-          ExportManager.unexport(export.id)
-        end)
-    end
-
-    :ok
   end
 end

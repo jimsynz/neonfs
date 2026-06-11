@@ -731,54 +731,66 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
-  describe "nfs_export/1" do
+  describe "NFS exports as cluster state (#1175)" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
       ensure_cluster_state()
       stop_ra()
       start_volume_registry()
+      vol_name = "nfs-export-vol-#{:rand.uniform(999_999)}"
+      {:ok, _vol} = Handler.create_volume(vol_name, %{})
 
       on_exit(fn -> cleanup_test_dirs() end)
-      :ok
+      {:ok, vol_name: vol_name}
     end
 
-    test "returns error for non-existent volume or NFS unavailable" do
-      result = Handler.nfs_export("no-such-vol")
-      assert match?({:error, _}, result)
-    end
-  end
+    test "nfs_export sets the volume's nfs_export flag", %{vol_name: vol_name} do
+      assert {:ok, info} = Handler.nfs_export(vol_name)
+      assert info.volume_name == vol_name
+      assert is_binary(info.node)
+      assert is_binary(info.server_address)
+      assert is_integer(info.port)
 
-  describe "nfs_unexport/1" do
-    setup %{tmp_dir: tmp_dir} do
-      configure_test_dirs(tmp_dir)
-      ensure_cluster_state()
-      stop_ra()
-      start_volume_registry()
-
-      on_exit(fn -> cleanup_test_dirs() end)
-      :ok
+      assert {:ok, volume} = VolumeRegistry.get_by_name(vol_name)
+      assert volume.nfs_export
     end
 
-    test "returns error for non-existent export or NFS unavailable" do
-      result = Handler.nfs_unexport("no-such-export")
-      assert match?({:error, _}, result)
-    end
-  end
-
-  describe "nfs_list_exports/0" do
-    setup %{tmp_dir: tmp_dir} do
-      configure_test_dirs(tmp_dir)
-      ensure_cluster_state()
-      stop_ra()
-      start_volume_registry()
-
-      on_exit(fn -> cleanup_test_dirs() end)
-      :ok
+    test "nfs_export returns VolumeNotFound for an unknown volume" do
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.nfs_export("no-such-vol")
     end
 
-    test "returns list or error depending on NFS availability" do
-      result = Handler.nfs_list_exports()
-      assert match?({:ok, _}, result) or match?({:error, _}, result)
+    test "nfs_unexport clears the flag", %{vol_name: vol_name} do
+      {:ok, _info} = Handler.nfs_export(vol_name)
+
+      assert {:ok, %{}} = Handler.nfs_unexport(vol_name)
+      assert {:ok, volume} = VolumeRegistry.get_by_name(vol_name)
+      refute volume.nfs_export
+    end
+
+    test "nfs_unexport returns NotFound when the volume isn't exported", %{vol_name: vol_name} do
+      assert {:error, %NeonFS.Error.NotFound{}} = Handler.nfs_unexport(vol_name)
+    end
+
+    test "nfs_unexport returns VolumeNotFound for an unknown volume" do
+      assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
+               Handler.nfs_unexport("no-such-vol")
+    end
+
+    test "nfs_list_exports lists exports even with no NFS node reachable", %{
+      vol_name: vol_name
+    } do
+      {:ok, _info} = Handler.nfs_export(vol_name)
+
+      assert {:ok, exports} = Handler.nfs_list_exports()
+      assert [export] = Enum.filter(exports, &(&1.volume_name == vol_name))
+      assert is_binary(export.exported_at)
+    end
+
+    test "handle_nfs_mount_request returns NotFound for an unexported volume", %{
+      vol_name: vol_name
+    } do
+      assert {:error, %NeonFS.Error.NotFound{}} = Handler.handle_nfs_mount_request(vol_name)
     end
   end
 

@@ -1,31 +1,38 @@
 defmodule NeonFS.NFS.ExportManager do
   @moduledoc """
-  Manages NFS server lifecycle and volume exports.
+  Manages the NFS server lifecycle and mirrors the cluster's export set.
 
-  Coordinates:
-  - Starting/stopping the native-BEAM NFS TCP listener
-  - Tracking which volumes are exported (available via NFS)
-  - Auto-exporting configured volumes on startup
+  Exports are cluster state (#1175): a volume is exported when its
+  `nfs_export` flag is set via `neonfs nfs export`, which writes the
+  core volume registry. Every NFS node serves every export, so any node
+  behind a load balancer can answer for any exported volume. This
+  process keeps a local mirror of that set by:
+
+  - resyncing from core on startup (retrying until core is reachable),
+  - subscribing to volume lifecycle events and resyncing on change,
+  - resyncing periodically as a safety net for missed events.
 
   ## Server Lifecycle
 
   1. ExportManager starts, reads bind address from config
   2. Starts an `NFSServer.RPC.Server` listener bound to the BEAM
      NFSv3 + Mount handler programs.
-  3. Auto-exports configured volumes
+  3. Mirrors the cluster export set (resync + events)
   4. On shutdown, stops the listener
 
   ## Export Model
 
   NFS uses a virtual root that lists all exported volumes as top-level
-  directories. Exporting a volume registers it in
-  `NeonFS.NFS.MountBackend`'s view (via `list_exports/0`) so clients
-  can access it. Unexporting removes the mapping.
+  directories. `NeonFS.NFS.MountBackend` reads the mirrored export set
+  via `list_exports/0` and `get_export/1`.
   """
 
   use GenServer
   require Logger
 
+  alias NeonFS.Client.Router
+  alias NeonFS.Events.Envelope
+  alias NeonFS.Events.{VolumeCreated, VolumeDeleted, VolumeUpdated}
   alias NeonFS.NFS.Application, as: NFSApp
   alias NeonFS.NFS.{ExportInfo, MetadataCache}
   alias NFSServer.Mount.Handler, as: MountHandler
@@ -35,11 +42,13 @@ defmodule NeonFS.NFS.ExportManager do
     @moduledoc false
     defstruct [
       :nfs_server,
+      :resync_timer,
       exports: %{}
     ]
 
     @type t :: %__MODULE__{
             nfs_server: pid() | nil,
+            resync_timer: reference() | nil,
             exports: %{String.t() => ExportInfo.t()}
           }
   end
@@ -52,21 +61,11 @@ defmodule NeonFS.NFS.ExportManager do
   end
 
   @doc """
-  Export a volume, making it available via NFS.
-
-  The volume will appear as a directory under the NFS virtual root.
+  Get the export for a volume name, if the volume is exported.
   """
-  @spec export(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def export(volume_name) do
-    GenServer.call(__MODULE__, {:export, volume_name})
-  end
-
-  @doc """
-  Unexport a volume, removing it from NFS.
-  """
-  @spec unexport(String.t()) :: :ok | {:error, term()}
-  def unexport(export_id) do
-    GenServer.call(__MODULE__, {:unexport, export_id})
+  @spec get_export(String.t()) :: {:ok, ExportInfo.t()} | {:error, :not_found}
+  def get_export(volume_name) do
+    GenServer.call(__MODULE__, {:get_export, volume_name})
   end
 
   @doc """
@@ -93,7 +92,8 @@ defmodule NeonFS.NFS.ExportManager do
   def handle_continue(:start_server, state) do
     case start_nfs_server(state) do
       {:ok, new_state} ->
-        auto_export_volumes(new_state)
+        subscribe_volume_events()
+        send(self(), :resync)
         {:noreply, new_state}
 
       {:error, reason} ->
@@ -103,47 +103,10 @@ defmodule NeonFS.NFS.ExportManager do
   end
 
   @impl true
-  def handle_call({:export, volume_name}, _from, state) do
-    if Map.has_key?(state.exports, volume_name) do
-      existing = Map.get(state.exports, volume_name)
-      {:reply, {:ok, existing.id}, state}
-    else
-      export_id = generate_export_id()
-
-      export_info =
-        ExportInfo.new(
-          id: export_id,
-          volume_name: volume_name,
-          exported_at: DateTime.utc_now()
-        )
-
-      new_exports = Map.put(state.exports, volume_name, export_info)
-      new_state = %{state | exports: new_exports}
-
-      subscribe_cache_events(volume_name)
-
-      Logger.info("Exported volume via NFS", volume_name: volume_name, export_id: export_id)
-
-      {:reply, {:ok, export_id}, new_state}
-    end
-  end
-
-  @impl true
-  def handle_call({:unexport, export_id}, _from, state) do
-    case find_export_by_id(state.exports, export_id) do
-      {volume_name, _export_info} ->
-        new_exports = Map.delete(state.exports, volume_name)
-        new_state = %{state | exports: new_exports}
-
-        Logger.info("Unexported volume from NFS",
-          volume_name: volume_name,
-          export_id: export_id
-        )
-
-        {:reply, :ok, new_state}
-
-      nil ->
-        {:reply, {:error, :not_found}, state}
+  def handle_call({:get_export, volume_name}, _from, state) do
+    case Map.fetch(state.exports, volume_name) do
+      {:ok, export} -> {:reply, {:ok, export}, state}
+      :error -> {:reply, {:error, :not_found}, state}
     end
   end
 
@@ -153,9 +116,109 @@ defmodule NeonFS.NFS.ExportManager do
   end
 
   @impl true
+  def handle_info(:resync, state), do: {:noreply, resync(state)}
+
+  def handle_info({:neonfs_event, %Envelope{event: %event_mod{}}}, state)
+      when event_mod in [VolumeCreated, VolumeUpdated, VolumeDeleted] do
+    {:noreply, resync(state)}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   ## Private Helpers
+
+  defp resync(state) do
+    state
+    |> cancel_resync_timer()
+    |> apply_cluster_exports()
+    |> schedule_resync()
+  end
+
+  defp apply_cluster_exports(state) do
+    case fetch_cluster_exports() do
+      {:ok, desired} ->
+        reconcile_cache_subscriptions(state.exports, desired)
+        emit_sync_telemetry(state.exports, desired)
+        %{state | exports: desired}
+
+      {:error, reason} ->
+        Logger.debug("NFS export resync failed, will retry", reason: inspect(reason))
+        state
+    end
+  end
+
+  defp fetch_cluster_exports do
+    case Router.call(NeonFS.Core, :list_volumes, []) do
+      {:ok, volumes} ->
+        exports =
+          volumes
+          |> Enum.filter(& &1.nfs_export)
+          |> Map.new(fn volume ->
+            {volume.name,
+             ExportInfo.new(
+               volume_id: volume.id,
+               volume_name: volume.name,
+               exported_at: volume.updated_at
+             )}
+          end)
+
+        {:ok, exports}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp reconcile_cache_subscriptions(current, desired) do
+    Enum.each(desired, fn {name, export} ->
+      unless Map.has_key?(current, name) do
+        Logger.info("Serving NFS export", volume_name: name)
+        MetadataCache.subscribe_volume(name, export.volume_id)
+      end
+    end)
+
+    Enum.each(current, fn {name, export} ->
+      unless Map.has_key?(desired, name) do
+        Logger.info("Stopped serving NFS export", volume_name: name)
+        MetadataCache.unsubscribe_volume(name, export.volume_id)
+      end
+    end)
+  end
+
+  defp emit_sync_telemetry(current, desired) do
+    :telemetry.execute(
+      [:neonfs, :nfs, :exports, :synced],
+      %{count: map_size(desired)},
+      %{
+        added: Map.keys(desired) -- Map.keys(current),
+        removed: Map.keys(current) -- Map.keys(desired)
+      }
+    )
+  end
+
+  # The Events registry runs under the neonfs_client application
+  # supervisor; without it (client children suppressed in unit tests)
+  # the periodic resync alone keeps the mirror converging.
+  defp subscribe_volume_events do
+    NeonFS.Events.subscribe_volumes()
+  rescue
+    ArgumentError ->
+      Logger.warning("Events registry unavailable; relying on periodic export resync")
+  end
+
+  defp cancel_resync_timer(%State{resync_timer: nil} = state), do: state
+
+  defp cancel_resync_timer(%State{resync_timer: timer} = state) do
+    Process.cancel_timer(timer)
+    %{state | resync_timer: nil}
+  end
+
+  defp schedule_resync(state) do
+    interval = Application.get_env(:neonfs_nfs, :export_resync_interval, 60_000)
+    %{state | resync_timer: Process.send_after(self(), :resync, interval)}
+  end
 
   # Start the native-BEAM NFSv3 + Mount listener (`NFSServer.RPC.Server`).
   # Each TCP connection gets its own accept-loop process; the handler
@@ -194,55 +257,9 @@ defmodule NeonFS.NFS.ExportManager do
     {host, String.to_integer(port_str)}
   end
 
-  defp auto_export_volumes(_state) do
-    volumes = Application.get_env(:neonfs_nfs, :auto_export_volumes, [])
-
-    Enum.each(volumes, fn volume_name ->
-      case GenServer.call(self(), {:export, volume_name}) do
-        {:ok, _id} ->
-          :ok
-
-        {:error, reason} ->
-          Logger.warning("Failed to auto-export volume",
-            volume_name: volume_name,
-            reason: inspect(reason)
-          )
-      end
-    end)
-  end
-
-  defp subscribe_cache_events(volume_name) do
-    case NeonFS.Client.core_call(NeonFS.Core.VolumeRegistry, :get_by_name, [volume_name]) do
-      {:ok, volume} ->
-        MetadataCache.subscribe_volume(volume_name, volume.id)
-
-      {:error, reason} ->
-        Logger.warning("Could not subscribe to cache events for volume",
-          volume_name: volume_name,
-          reason: inspect(reason)
-        )
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
-
   defp nfs_bind_address do
     host = Application.get_env(:neonfs_nfs, :bind_address, "0.0.0.0")
     port = Application.get_env(:neonfs_nfs, :port, 2049)
     "#{host}:#{port}"
-  end
-
-  defp generate_export_id do
-    "export_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
-  end
-
-  defp find_export_by_id(exports, export_id) do
-    Enum.find_value(exports, fn {volume_name, export_info} ->
-      if export_info.id == export_id do
-        {volume_name, export_info}
-      end
-    end)
   end
 end

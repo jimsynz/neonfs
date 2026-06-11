@@ -19,7 +19,6 @@ defmodule NeonFS.NFS.MountBackend do
 
   @behaviour NFSServer.Mount.Backend
 
-  alias NeonFS.Client.Router
   alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable}
   alias NFSServer.Mount.Types.ExportNode
 
@@ -79,20 +78,14 @@ defmodule NeonFS.NFS.MountBackend do
   def forget_all_mounts(_client, _auth), do: :ok
 
   # Resolve a volume name to its 16-byte UUID binary form (the shape
-  # `Filehandle.encode/3` expects). `ExportManager` keeps an in-memory
-  # mapping; we also fall back to an RPC against `Core.get_volume`
-  # so the synthetic root's `LOOKUP` works for volumes the local
-  # `ExportManager` hasn't observed yet.
+  # `Filehandle.encode/3` expects). `ExportManager` mirrors the cluster
+  # export set including each volume's id, so no RPC is needed here.
   defp lookup_export(volume_name) do
-    if Enum.any?(ExportManager.list_exports(), &(&1.volume_name == volume_name)) do
-      with {:ok, %{id: id}} <- Router.call(NeonFS.Core, :get_volume, [volume_name]),
-           {:ok, vol_id_bin} <- Filehandle.volume_uuid_to_binary(id) do
-        {:ok, vol_id_bin}
-      else
-        _ -> {:error, :not_found}
-      end
+    with {:ok, export} <- ExportManager.get_export(volume_name),
+         {:ok, vol_id_bin} <- Filehandle.volume_uuid_to_binary(export.volume_id) do
+      {:ok, vol_id_bin}
     else
-      {:error, :not_found}
+      _ -> {:error, :not_found}
     end
   catch
     :exit, _ -> {:error, :coordinator_unavailable}

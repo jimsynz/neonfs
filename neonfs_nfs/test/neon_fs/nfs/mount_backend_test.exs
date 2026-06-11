@@ -3,8 +3,10 @@ defmodule NeonFS.NFS.MountBackendTest do
 
   use Mimic
 
-  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable, MountBackend}
+  alias NeonFS.NFS.{Filehandle, InodeTable, MountBackend}
   alias NFSServer.Mount.Types.ExportNode
+
+  @volume_id "01234567-89ab-7cde-bf01-23456789abcd"
 
   setup :verify_on_exit!
 
@@ -19,10 +21,24 @@ defmodule NeonFS.NFS.MountBackendTest do
       Application.delete_env(:neonfs_nfs, :port)
     end)
 
-    {:ok, manager} = start_supervised({ExportManager, []})
+    {:ok, manager} = start_supervised({NeonFS.NFS.ExportManager, []})
     :sys.get_state(manager)
     Mimic.allow(NeonFS.Client.Router, self(), manager)
-    :ok
+    {:ok, manager: manager}
+  end
+
+  defp export_volumes(manager, names) do
+    volumes =
+      Enum.map(names, fn name ->
+        %{id: @volume_id, name: name, nfs_export: true, updated_at: DateTime.utc_now()}
+      end)
+
+    stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :list_volumes, [] ->
+      {:ok, volumes}
+    end)
+
+    send(manager, :resync)
+    :sys.get_state(manager)
   end
 
   describe "resolve/2" do
@@ -32,26 +48,18 @@ defmodule NeonFS.NFS.MountBackendTest do
       assert 1 in auth_flavors
     end
 
-    test "volume root resolves through ExportManager + Core.get_volume" do
-      {:ok, _id} = ExportManager.export("photos")
-      vol_id = "01234567-89ab-7cde-bf01-23456789abcd"
-
-      stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :get_volume, ["photos"] ->
-        {:ok, %{id: vol_id}}
-      end)
+    test "volume root resolves through the ExportManager mirror", %{manager: manager} do
+      export_volumes(manager, ["photos"])
 
       assert {:ok, fhandle, _flavors} = MountBackend.resolve("/photos", %{})
       assert {:ok, %{volume_id: vol_id_bin, fileid: 1}} = Filehandle.decode(fhandle)
-      assert {:ok, ^vol_id_bin} = Filehandle.volume_uuid_to_binary(vol_id)
+      assert {:ok, ^vol_id_bin} = Filehandle.volume_uuid_to_binary(@volume_id)
     end
 
-    test "volume root resolution populates InodeTable.lookup_volume_name (issue #761)" do
-      {:ok, _id} = ExportManager.export("photos")
-      vol_id = "01234567-89ab-7cde-bf01-23456789abcd"
-
-      stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :get_volume, ["photos"] ->
-        {:ok, %{id: vol_id}}
-      end)
+    test "volume root resolution populates InodeTable.lookup_volume_name (issue #761)", %{
+      manager: manager
+    } do
+      export_volumes(manager, ["photos"])
 
       assert {:ok, fhandle, _flavors} = MountBackend.resolve("/photos", %{})
       assert {:ok, %{volume_id: vol_id_bin}} = Filehandle.decode(fhandle)
@@ -71,9 +79,8 @@ defmodule NeonFS.NFS.MountBackendTest do
   end
 
   describe "list_exports/1" do
-    test "maps ExportManager exports to ExportNode entries" do
-      {:ok, _} = ExportManager.export("vol-a")
-      {:ok, _} = ExportManager.export("vol-b")
+    test "maps ExportManager exports to ExportNode entries", %{manager: manager} do
+      export_volumes(manager, ["vol-a", "vol-b"])
 
       nodes = MountBackend.list_exports(%{})
       dirs = nodes |> Enum.map(& &1.dir) |> Enum.sort()

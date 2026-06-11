@@ -2,16 +2,18 @@ defmodule NeonFS.NFS.ExportInfo do
   @moduledoc """
   Information about an exported NFS volume.
 
-  Tracks the metadata for a volume that has been made available via NFS.
-  Unlike FUSE mounts (one handler per mount point), NFS uses a single
-  listener serving all exported volumes through the virtual root.
+  Exports are cluster state (#1175): a volume is exported when its
+  `nfs_export` flag is set in the core volume registry. This struct is
+  the local mirror `NeonFS.NFS.ExportManager` keeps of one such volume.
+  Carrying `volume_id` lets the MOUNT/NFSv3 paths build filehandles
+  without a per-lookup RPC to core.
   """
 
-  @enforce_keys [:id, :volume_name, :exported_at]
-  defstruct [:id, :volume_name, :exported_at]
+  @enforce_keys [:volume_id, :volume_name, :exported_at]
+  defstruct [:volume_id, :volume_name, :exported_at]
 
   @type t :: %__MODULE__{
-          id: String.t(),
+          volume_id: String.t(),
           volume_name: String.t(),
           exported_at: DateTime.t()
         }

@@ -1359,7 +1359,9 @@ defmodule NeonFS.CLI.Handler do
   @doc """
   Exports a volume via NFS.
 
-  Requires the neonfs_nfs application to be running on a reachable node.
+  Sets the volume's `nfs_export` flag in cluster state (#1175). Every
+  running NFS node observes the change via volume lifecycle events and
+  serves the export — no node targeting involved.
 
   ## Parameters
   - `volume_name` - Volume name (string)
@@ -1373,11 +1375,9 @@ defmodule NeonFS.CLI.Handler do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, nfs_node} <- get_nfs_node(),
-         {:ok, _volume} <- VolumeRegistry.get_by_name(volume_name),
-         {:ok, _export_id} <- rpc_nfs_export(nfs_node, volume_name),
-         {:ok, export_info} <- rpc_nfs_get_export_by_volume(nfs_node, volume_name) do
-      {:ok, nfs_export_to_map(export_info, nfs_node)}
+         {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, updated} <- VolumeRegistry.update(volume.id, nfs_export: true) do
+      {:ok, nfs_export_to_map(updated)}
     else
       {:error, :not_found} ->
         {:error, VolumeNotFound.exception(volume_name: volume_name)}
@@ -1390,7 +1390,8 @@ defmodule NeonFS.CLI.Handler do
   @doc """
   Unexports a volume from NFS by volume name.
 
-  Requires the neonfs_nfs application to be running on a reachable node.
+  Clears the volume's `nfs_export` flag in cluster state; every NFS
+  node observes the change and stops serving the export.
 
   ## Parameters
   - `volume_name` - Volume name (string)
@@ -1404,12 +1405,14 @@ defmodule NeonFS.CLI.Handler do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, nfs_node} <- get_nfs_node(),
-         {:ok, export} <- rpc_nfs_get_export_by_volume(nfs_node, volume_name),
-         :ok <- rpc_nfs_unexport(nfs_node, export.id) do
+         {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
+         {:ok, _updated} <- clear_nfs_export(volume) do
       {:ok, %{}}
     else
       {:error, :not_found} ->
+        {:error, VolumeNotFound.exception(volume_name: volume_name)}
+
+      {:error, :not_exported} ->
         {:error, NotFound.exception(message: "NFS export not found: #{volume_name}")}
 
       {:error, reason} ->
@@ -1440,9 +1443,9 @@ defmodule NeonFS.CLI.Handler do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, _volume} <- fetch_volume(volume_name),
-         {:ok, nfs_node} <- get_nfs_node(),
-         {:ok, _export} <- rpc_nfs_get_export_by_volume(nfs_node, volume_name) do
+         {:ok, volume} <- fetch_volume(volume_name),
+         :ok <- ensure_nfs_exported(volume),
+         {:ok, nfs_node} <- get_nfs_node() do
       {server_address, port} = rpc_nfs_bind_info(nfs_node)
 
       {:ok,
@@ -1454,7 +1457,7 @@ defmodule NeonFS.CLI.Handler do
          export_path: "/" <> volume_name
        }}
     else
-      {:error, :not_found} ->
+      {:error, :not_exported} ->
         {:error,
          wrap_error(
            NotFound.exception(message: "no NFS export for volume #{inspect(volume_name)}")
@@ -1468,7 +1471,10 @@ defmodule NeonFS.CLI.Handler do
   @doc """
   Lists all active NFS exports across the cluster.
 
-  Queries all discovered NFS nodes and aggregates their exports.
+  Exports are cluster state (volumes with the `nfs_export` flag set),
+  served by every running NFS node — the result contains one row per
+  export per reachable NFS node. When no NFS node is reachable the
+  exports are still listed, with placeholder endpoint fields.
 
   ## Returns
   - `{:ok, [map]}` - List of export info maps with node field
@@ -1478,18 +1484,15 @@ defmodule NeonFS.CLI.Handler do
     set_cli_metadata()
 
     with :ok <- require_cluster() do
-      nfs_nodes = get_all_nfs_nodes()
+      exported = Enum.filter(VolumeRegistry.list(), & &1.nfs_export)
 
-      if Enum.empty?(nfs_nodes) do
-        {:error, wrap_error(Unavailable.exception(message: "NFS service not available"))}
-      else
-        exports =
-          nfs_nodes
-          |> Enum.flat_map(&collect_node_nfs_exports/1)
-          |> Enum.sort_by(& &1.node)
+      rows =
+        case get_all_nfs_nodes() do
+          [] -> Enum.map(exported, &nfs_export_row(&1, "-", "-", 2049))
+          nfs_nodes -> Enum.flat_map(nfs_nodes, &node_export_rows(&1, exported))
+        end
 
-        {:ok, exports}
-      end
+      {:ok, Enum.sort_by(rows, &{&1.volume_name, &1.node})}
     end
   end
 
@@ -3948,48 +3951,11 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
-  # RPC wrappers for NFS ExportManager operations
-  defp rpc_nfs_export(nfs_node, volume_name) do
-    case :rpc.call(nfs_node, NeonFS.NFS.ExportManager, :export, [volume_name]) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "NFS RPC failed: #{inspect(reason)}")}
+  defp clear_nfs_export(%{nfs_export: false}), do: {:error, :not_exported}
+  defp clear_nfs_export(volume), do: VolumeRegistry.update(volume.id, nfs_export: false)
 
-      result ->
-        result
-    end
-  end
-
-  defp rpc_nfs_unexport(nfs_node, export_id) do
-    case :rpc.call(nfs_node, NeonFS.NFS.ExportManager, :unexport, [export_id]) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "NFS RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
-  end
-
-  defp rpc_nfs_list_exports(nfs_node) do
-    case :rpc.call(nfs_node, NeonFS.NFS.ExportManager, :list_exports, []) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "NFS RPC failed: #{inspect(reason)}")}
-
-      exports when is_list(exports) ->
-        {:ok, exports}
-
-      result ->
-        result
-    end
-  end
-
-  defp rpc_nfs_get_export_by_volume(nfs_node, volume_name) do
-    with {:ok, exports} <- rpc_nfs_list_exports(nfs_node) do
-      case Enum.find(exports, &(&1.volume_name == volume_name)) do
-        nil -> {:error, :not_found}
-        export -> {:ok, export}
-      end
-    end
-  end
+  defp ensure_nfs_exported(%{nfs_export: true}), do: :ok
+  defp ensure_nfs_exported(_volume), do: {:error, :not_exported}
 
   defp rpc_nfs_bind_info(nfs_node) do
     host =
@@ -4155,16 +4121,6 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
-  defp collect_node_nfs_exports(nfs_node) do
-    case rpc_nfs_list_exports(nfs_node) do
-      {:ok, node_exports} ->
-        Enum.map(node_exports, &nfs_export_to_map(&1, nfs_node))
-
-      {:error, _} ->
-        []
-    end
-  end
-
   defp mount_info_to_map(mount_info, fuse_node) do
     # Convert mount info to map, excluding PIDs and references
     %{
@@ -4176,16 +4132,34 @@ defmodule NeonFS.CLI.Handler do
     }
   end
 
-  defp nfs_export_to_map(export_info, nfs_node) do
-    {server_address, port} = rpc_nfs_bind_info(nfs_node)
+  # Best-effort endpoint hint for CLI output: exports are served by
+  # every NFS node, so any reachable one will do for the mount-command
+  # hint. Degrades to placeholders when none is up — the export itself
+  # is still valid cluster state.
+  defp nfs_export_to_map(volume) do
+    case get_nfs_node() do
+      {:ok, nfs_node} ->
+        {server_address, port} = rpc_nfs_bind_info(nfs_node)
+        nfs_export_row(volume, Atom.to_string(nfs_node), server_address, port)
 
+      {:error, _} ->
+        nfs_export_row(volume, "-", "-", 2049)
+    end
+  end
+
+  defp nfs_export_row(volume, node_name, server_address, port) do
     %{
-      node: Atom.to_string(nfs_node),
-      volume_name: export_info.volume_name,
-      exported_at: DateTime.to_iso8601(export_info.exported_at),
+      node: node_name,
+      volume_name: volume.name,
+      exported_at: DateTime.to_iso8601(volume.updated_at),
       server_address: server_address,
       port: port
     }
+  end
+
+  defp node_export_rows(nfs_node, exported) do
+    {server_address, port} = rpc_nfs_bind_info(nfs_node)
+    Enum.map(exported, &nfs_export_row(&1, Atom.to_string(nfs_node), server_address, port))
   end
 
   defp service_info_to_map(info) do

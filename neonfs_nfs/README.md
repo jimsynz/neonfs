@@ -36,8 +36,9 @@ or mount the root to browse available exports.
   callbacks against `NeonFS.Client`
 - `NeonFS.NFS.MountBackend` — implements the `NFSServer.Mount.Backend`
   callbacks against `ExportManager`
-- `NeonFS.NFS.ExportManager` — starts the NFS listener and manages the
-  volume export lifecycle
+- `NeonFS.NFS.ExportManager` — starts the NFS listener and mirrors the
+  cluster export set (exports are cluster state: `neonfs nfs export`
+  flags the volume in the core registry and every NFS node serves it)
 - `NeonFS.NFS.MetadataCache` — ETS-backed cache with event-driven
   invalidation
 - `NeonFS.NFS.InodeTable` — bidirectional inode-to-path mapping

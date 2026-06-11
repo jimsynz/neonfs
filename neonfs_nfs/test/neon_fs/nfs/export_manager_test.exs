@@ -1,7 +1,12 @@
 defmodule NeonFS.NFS.ExportManagerTest do
   use ExUnit.Case, async: false
 
+  use Mimic
+
+  alias NeonFS.Events.{Envelope, VolumeUpdated}
   alias NeonFS.NFS.{ExportManager, InodeTable}
+
+  @volume_id "01234567-89ab-7cde-bf01-23456789abcd"
 
   setup do
     start_supervised!(InodeTable)
@@ -20,46 +25,85 @@ defmodule NeonFS.NFS.ExportManagerTest do
     {:ok, manager} = start_supervised({ExportManager, []})
     # Wait for the :start_server continue to complete
     :sys.get_state(manager)
+    Mimic.allow(NeonFS.Client.Router, self(), manager)
     {:ok, manager: manager}
   end
 
-  test "exports a volume" do
-    assert {:ok, export_id} = ExportManager.export("photos")
-    assert is_binary(export_id)
-    assert String.starts_with?(export_id, "export_")
+  defp volume(name, opts \\ []) do
+    %{
+      id: Keyword.get(opts, :id, @volume_id),
+      name: name,
+      nfs_export: Keyword.get(opts, :nfs_export, true),
+      updated_at: DateTime.utc_now()
+    }
   end
 
-  test "export is idempotent for same volume" do
-    {:ok, id1} = ExportManager.export("data")
-    {:ok, id2} = ExportManager.export("data")
-    assert id1 == id2
+  defp sync_exports(manager, volumes) do
+    stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :list_volumes, [] ->
+      {:ok, volumes}
+    end)
+
+    send(manager, :resync)
+    :sys.get_state(manager)
   end
 
-  test "lists exports" do
-    ExportManager.export("vol1")
-    ExportManager.export("vol2")
+  test "mirrors exported volumes from cluster state", %{manager: manager} do
+    sync_exports(manager, [volume("photos"), volume("docs", nfs_export: false)])
 
-    exports = ExportManager.list_exports()
-    names = Enum.map(exports, & &1.volume_name) |> Enum.sort()
-    assert names == ["vol1", "vol2"]
-  end
-
-  test "unexports a volume" do
-    {:ok, export_id} = ExportManager.export("temp")
-    assert :ok = ExportManager.unexport(export_id)
-    assert ExportManager.list_exports() == []
-  end
-
-  test "unexport returns error for unknown id" do
-    assert {:error, :not_found} = ExportManager.unexport("nonexistent")
-  end
-
-  test "export info has correct fields" do
-    {:ok, _id} = ExportManager.export("test_vol")
-    [export] = ExportManager.list_exports()
-
-    assert export.volume_name == "test_vol"
+    assert [export] = ExportManager.list_exports()
+    assert export.volume_name == "photos"
+    assert export.volume_id == @volume_id
     assert %DateTime{} = export.exported_at
+  end
+
+  test "get_export finds exported volumes only", %{manager: manager} do
+    sync_exports(manager, [volume("photos"), volume("docs", nfs_export: false)])
+
+    assert {:ok, export} = ExportManager.get_export("photos")
+    assert export.volume_id == @volume_id
+    assert {:error, :not_found} = ExportManager.get_export("docs")
+  end
+
+  test "resync drops exports removed from cluster state", %{manager: manager} do
+    sync_exports(manager, [volume("photos"), volume("media")])
+    assert length(ExportManager.list_exports()) == 2
+
+    sync_exports(manager, [volume("media")])
+    assert [%{volume_name: "media"}] = ExportManager.list_exports()
+  end
+
+  test "volume lifecycle events trigger a resync", %{manager: manager} do
+    sync_exports(manager, [])
+    assert ExportManager.list_exports() == []
+
+    stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :list_volumes, [] ->
+      {:ok, [volume("photos")]}
+    end)
+
+    envelope = %Envelope{
+      event: %VolumeUpdated{volume_id: @volume_id},
+      source_node: node(),
+      sequence: 1,
+      hlc_timestamp: {0, 0, node()}
+    }
+
+    send(manager, {:neonfs_event, envelope})
+    :sys.get_state(manager)
+
+    assert [%{volume_name: "photos"}] = ExportManager.list_exports()
+  end
+
+  test "failed resync keeps the current mirror", %{manager: manager} do
+    sync_exports(manager, [volume("photos")])
+
+    stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :list_volumes, [] ->
+      {:error, :all_nodes_unreachable}
+    end)
+
+    send(manager, :resync)
+    :sys.get_state(manager)
+
+    assert [%{volume_name: "photos"}] = ExportManager.list_exports()
   end
 
   # The native-BEAM stack starts an `NFSServer.RPC.Server` listener

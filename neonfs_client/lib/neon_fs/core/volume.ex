@@ -77,7 +77,8 @@ defmodule NeonFS.Core.Volume do
           chunk_count: non_neg_integer(),
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
-          system: boolean()
+          system: boolean(),
+          nfs_export: boolean()
         }
 
   defstruct [
@@ -99,6 +100,7 @@ defmodule NeonFS.Core.Volume do
     :created_at,
     :updated_at,
     atime_mode: :noatime,
+    nfs_export: false,
     system: false
   ]
 
@@ -238,6 +240,7 @@ defmodule NeonFS.Core.Volume do
       :encryption,
       :io_weight,
       :metadata_consistency,
+      :nfs_export,
       :owner,
       :tiering,
       :verification,
@@ -326,7 +329,8 @@ defmodule NeonFS.Core.Volume do
          :ok <- validate_io_weight(volume.io_weight),
          :ok <- validate_compression(volume.compression),
          :ok <- validate_verification(volume.verification),
-         :ok <- validate_encryption(volume.encryption) do
+         :ok <- validate_encryption(volume.encryption),
+         :ok <- validate_nfs_export(volume.nfs_export) do
       validate_metadata_consistency(volume.metadata_consistency)
     end
   end
@@ -443,6 +447,9 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_encryption(%VolumeEncryption{} = enc), do: VolumeEncryption.validate(enc)
   defp validate_encryption(_), do: {:error, "encryption must be a VolumeEncryption struct"}
+
+  defp validate_nfs_export(flag) when is_boolean(flag), do: :ok
+  defp validate_nfs_export(_), do: {:error, "nfs_export must be a boolean"}
 
   defp validate_metadata_consistency(nil), do: :ok
 

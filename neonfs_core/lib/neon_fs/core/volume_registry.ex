@@ -33,7 +33,7 @@ defmodule NeonFS.Core.VolumeRegistry do
   @type volume_name :: String.t()
 
   @system_volume_name "_system"
-  @system_volume_protected_fields [:encryption, :owner, :system]
+  @system_volume_protected_fields [:encryption, :nfs_export, :owner, :system]
 
   # Client API
 
@@ -867,6 +867,8 @@ defmodule NeonFS.Core.VolumeRegistry do
       id: volume.id,
       name: volume.name,
       owner: volume.owner,
+      atime_mode: volume.atime_mode,
+      nfs_export: volume.nfs_export,
       durability: volume.durability,
       write_ack: volume.write_ack,
       tiering: volume.tiering,
@@ -896,6 +898,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       name: volume_map.name,
       owner: volume_map[:owner],
       atime_mode: volume_map[:atime_mode] || :noatime,
+      nfs_export: volume_map[:nfs_export] || false,
       durability: volume_map.durability,
       write_ack: volume_map.write_ack,
       tiering: tiering,

@@ -330,7 +330,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   defp allocate_interface_ports(peer_apps, data_dir) do
     port_allocations =
-      for {app, key} <- [{:neonfs_s3, :s3}, {:neonfs_webdav, :webdav}],
+      for {app, key} <- [{:neonfs_nfs, :nfs}, {:neonfs_s3, :s3}, {:neonfs_webdav, :webdav}],
           app in peer_apps do
         {key, allocate_peer_port()}
       end
@@ -386,9 +386,30 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   defp add_interface_config(app_config, peer_apps, interface_ports) do
     app_config
+    |> maybe_add_nfs_config(peer_apps, interface_ports)
     |> maybe_add_s3_config(peer_apps, interface_ports)
     |> maybe_add_webdav_config(peer_apps, interface_ports)
     |> maybe_add_containerd_config(peer_apps, interface_ports)
+  end
+
+  # Per-peer ports keep multi-NFS-peer clusters (#1175) from
+  # contending over the default 2049/4045 binds on the shared test
+  # host — both the NFSv3 listener and the NLM lock server bind fixed
+  # ports by default.
+  defp maybe_add_nfs_config(app_config, peer_apps, ports) do
+    if :neonfs_nfs in peer_apps and Map.has_key?(ports, :nfs) do
+      app_config ++
+        [
+          neonfs_nfs: [
+            port: ports.nfs,
+            bind_address: "127.0.0.1",
+            nlm_port: allocate_peer_port(),
+            nlm_bind: "127.0.0.1"
+          ]
+        ]
+    else
+      app_config
+    end
   end
 
   defp maybe_add_s3_config(app_config, peer_apps, ports) do
