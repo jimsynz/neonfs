@@ -5,14 +5,16 @@ defmodule NeonFS.S3.Supervisor do
   Supervises:
   - Client connectivity (Connection, Discovery, CostFunction)
   - Service registration with the core cluster
-  - MultipartStore for tracking in-progress multipart uploads
   - Bandit HTTP server running Firkin.Plug
+
+  Multipart upload bookkeeping lives in the cluster KV store (#1177),
+  so there is no node-local store process to supervise.
   """
 
   use Supervisor
 
   alias NeonFS.Client.Registrar
-  alias NeonFS.S3.{Backend, HealthCheck, HealthPlug, MultipartStore}
+  alias NeonFS.S3.{Backend, HealthCheck, HealthPlug}
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -28,7 +30,6 @@ defmodule NeonFS.S3.Supervisor do
 
     children = [
       {Registrar, metadata: registration_metadata(), type: :s3, name: NeonFS.Client.Registrar.S3},
-      MultipartStore,
       {Bandit,
        plug: {HealthPlug, backend: Backend},
        port: port,

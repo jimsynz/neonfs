@@ -1,18 +1,31 @@
 defmodule NeonFS.S3.MultipartStore do
   @moduledoc """
-  ETS-backed store for tracking in-progress multipart uploads.
+  Cluster-shared bookkeeping for in-progress multipart uploads (#1177).
 
-  Each upload is identified by a unique upload ID and tracks the bucket, key,
-  content type, and uploaded parts. Each part records the ordered chunk refs
-  its bytes were shipped to core as; `complete_multipart_upload` flattens
+  Upload state lives in the Ra-backed cluster KV store (via
+  `NeonFS.Client.KV`), not in node-local memory, so a load balancer can
+  route `CreateMultipartUpload`, each `UploadPart`, and
+  `CompleteMultipartUpload` to different S3 nodes and the upload still
+  succeeds. Only bookkeeping is shared — part bytes stream to core as
+  chunks while they arrive, and each part records the ordered chunk
+  refs its bytes were shipped as. `complete_multipart_upload` flattens
   the refs across parts in part-number order and issues a single
-  `commit_chunks/4` RPC instead of reading/combining part files. Nothing on
-  this path creates a per-part `FileIndex` entry.
+  `commit_chunks/4` RPC. Nothing on this path creates a per-part
+  `FileIndex` entry.
+
+  ## Key layout
+
+      s3_multipart:<upload_id>:meta      %{bucket, key, content_type, initiated}
+      s3_multipart:<upload_id>:part:<n>  %{part_number, etag, size, chunk_refs}
+
+  Each part is its own key, so concurrent `UploadPart` requests for
+  different parts of the same upload — possibly on different S3 nodes —
+  never read-modify-write shared state.
   """
 
-  use GenServer
+  alias NeonFS.Client.KV
 
-  @table __MODULE__
+  @key_prefix "s3_multipart:"
 
   @type chunk_ref :: NeonFS.Client.ChunkWriter.chunk_ref()
 
@@ -20,6 +33,13 @@ defmodule NeonFS.S3.MultipartStore do
           required(:etag) => String.t(),
           required(:size) => non_neg_integer(),
           required(:chunk_refs) => [chunk_ref()]
+        }
+
+  @type upload_meta :: %{
+          bucket: String.t(),
+          key: String.t(),
+          content_type: String.t(),
+          initiated: DateTime.t()
         }
 
   @type upload_entry :: %{
@@ -30,56 +50,64 @@ defmodule NeonFS.S3.MultipartStore do
           parts: %{pos_integer() => part_entry()}
         }
 
-  @doc "Starts the multipart store process."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
   @doc "Creates a new multipart upload and returns the upload ID."
-  @spec create(String.t(), String.t(), String.t()) :: String.t()
+  @spec create(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def create(bucket, key, content_type \\ "application/octet-stream") do
     upload_id = generate_upload_id()
 
-    entry = %{
+    meta = %{
       bucket: bucket,
       key: key,
       content_type: content_type,
-      initiated: DateTime.utc_now(),
-      parts: %{}
+      initiated: DateTime.utc_now()
     }
 
-    :ets.insert(@table, {upload_id, entry})
-    upload_id
+    case KV.put(meta_key(upload_id), meta) do
+      :ok -> {:ok, upload_id}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
-  @doc "Retrieves an upload entry by ID."
-  @spec get(String.t()) :: {:ok, upload_entry()} | {:error, :not_found}
+  @doc "Retrieves an upload's metadata (without parts) by ID."
+  @spec get_meta(String.t()) :: {:ok, upload_meta()} | {:error, :not_found | term()}
+  def get_meta(upload_id) do
+    KV.get(meta_key(upload_id))
+  end
+
+  @doc "Retrieves an upload entry (metadata plus all recorded parts) by ID."
+  @spec get(String.t()) :: {:ok, upload_entry()} | {:error, :not_found | term()}
   def get(upload_id) do
-    case :ets.lookup(@table, upload_id) do
-      [{^upload_id, entry}] -> {:ok, entry}
-      [] -> {:error, :not_found}
+    with {:ok, meta} <- get_meta(upload_id) do
+      parts =
+        upload_id
+        |> part_prefix()
+        |> KV.list_prefix()
+        |> Map.new(fn {_key, part} ->
+          {part.part_number, Map.delete(part, :part_number)}
+        end)
+
+      {:ok, Map.put(meta, :parts, parts)}
     end
   end
 
   @doc "Records a completed part for a multipart upload."
-  @spec put_part(String.t(), pos_integer(), part_entry()) :: :ok | {:error, :not_found}
+  @spec put_part(String.t(), pos_integer(), part_entry()) ::
+          :ok | {:error, :not_found | term()}
   def put_part(upload_id, part_number, part) do
-    case get(upload_id) do
-      {:ok, entry} ->
-        updated = %{entry | parts: Map.put(entry.parts, part_number, part)}
-        :ets.insert(@table, {upload_id, updated})
-        :ok
-
-      {:error, :not_found} ->
-        {:error, :not_found}
+    with {:ok, _meta} <- get_meta(upload_id) do
+      KV.put(part_key(upload_id, part_number), Map.put(part, :part_number, part_number))
     end
   end
 
-  @doc "Removes an upload from the store."
+  @doc "Removes an upload's metadata and all recorded parts from the store."
   @spec delete(String.t()) :: :ok
   def delete(upload_id) do
-    :ets.delete(@table, upload_id)
+    upload_id
+    |> part_prefix()
+    |> KV.list_prefix()
+    |> Enum.each(fn {key, _part} -> KV.delete(key) end)
+
+    KV.delete(meta_key(upload_id))
     :ok
   end
 
@@ -88,23 +116,30 @@ defmodule NeonFS.S3.MultipartStore do
           %{key: String.t(), upload_id: String.t(), initiated: DateTime.t()}
         ]
   def list_for_bucket(bucket) do
-    :ets.tab2list(@table)
-    |> Enum.filter(fn {_id, entry} -> entry.bucket == bucket end)
-    |> Enum.map(fn {id, entry} ->
-      %{key: entry.key, upload_id: id, initiated: entry.initiated}
+    @key_prefix
+    |> KV.list_prefix()
+    |> Enum.flat_map(fn
+      {@key_prefix <> rest, %{bucket: ^bucket} = meta} ->
+        case String.split(rest, ":") do
+          [upload_id, "meta"] ->
+            [%{key: meta.key, upload_id: upload_id, initiated: meta.initiated}]
+
+          _ ->
+            []
+        end
+
+      _ ->
+        []
     end)
     |> Enum.sort_by(& &1.key)
   end
 
-  # GenServer callbacks
+  defp meta_key(upload_id), do: @key_prefix <> upload_id <> ":meta"
 
-  @impl true
-  def init(_opts) do
-    table = :ets.new(@table, [:named_table, :public, :set])
-    {:ok, %{table: table}}
-  end
+  defp part_prefix(upload_id), do: @key_prefix <> upload_id <> ":part:"
 
-  # Private helpers
+  defp part_key(upload_id, part_number),
+    do: part_prefix(upload_id) <> Integer.to_string(part_number)
 
   defp generate_upload_id do
     Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)

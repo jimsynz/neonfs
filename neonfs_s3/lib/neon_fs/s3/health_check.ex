@@ -11,10 +11,7 @@ defmodule NeonFS.S3.HealthCheck do
   """
   @spec register_checks() :: :ok
   def register_checks do
-    HealthCheck.register(:s3,
-      registrar: &check_registrar/0,
-      multipart_store: &check_multipart_store/0
-    )
+    HealthCheck.register(:s3, registrar: &check_registrar/0)
   end
 
   @doc """
@@ -89,13 +86,5 @@ defmodule NeonFS.S3.HealthCheck do
     end
   rescue
     _ -> %{status: :unhealthy, reason: :not_available}
-  end
-
-  defp check_multipart_store do
-    if Process.whereis(NeonFS.S3.MultipartStore) do
-      %{status: :healthy}
-    else
-      %{status: :unhealthy, reason: :not_running}
-    end
   end
 end

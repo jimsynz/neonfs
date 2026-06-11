@@ -347,8 +347,11 @@ defmodule NeonFS.S3.Backend do
   def create_multipart_upload(_ctx, bucket, key, opts) do
     with :ok <- ensure_bucket_exists(bucket) do
       content_type = Map.get(opts, :content_type, "application/octet-stream")
-      upload_id = MultipartStore.create(bucket, key, content_type)
-      {:ok, upload_id}
+
+      case MultipartStore.create(bucket, key, content_type) do
+        {:ok, upload_id} -> {:ok, upload_id}
+        {:error, reason} -> {:error, internal_error(reason)}
+      end
     end
   end
 
@@ -357,15 +360,14 @@ defmodule NeonFS.S3.Backend do
     body_binary = IO.iodata_to_binary(body)
     etag = compute_etag(body_binary)
 
-    case MultipartStore.get(upload_id) do
+    case MultipartStore.get_meta(upload_id) do
       {:ok, upload} ->
         log_label = multipart_log_label(upload_id, part_number)
 
         case ship_chunks(upload.bucket, log_label, body_binary) do
           {:ok, refs} ->
             part = %{etag: etag, size: byte_size(body_binary), chunk_refs: refs}
-            MultipartStore.put_part(upload_id, part_number, part)
-            {:ok, etag}
+            record_part_result(MultipartStore.put_part(upload_id, part_number, part), etag)
 
           {:error, reason} ->
             {:error, internal_error(reason)}
@@ -378,7 +380,7 @@ defmodule NeonFS.S3.Backend do
 
   @impl true
   def upload_part_stream(_ctx, _bucket, _key, upload_id, part_number, body) do
-    case MultipartStore.get(upload_id) do
+    case MultipartStore.get_meta(upload_id) do
       {:ok, upload} ->
         do_upload_part_stream(upload, upload_id, part_number, body)
 
@@ -405,14 +407,16 @@ defmodule NeonFS.S3.Backend do
   defp record_part(upload_id, part_number, refs, md5, size) do
     etag = Base.encode16(md5, case: :lower)
 
-    MultipartStore.put_part(upload_id, part_number, %{
-      etag: etag,
-      size: size,
-      chunk_refs: refs
-    })
-
-    {:ok, etag}
+    part = %{etag: etag, size: size, chunk_refs: refs}
+    record_part_result(MultipartStore.put_part(upload_id, part_number, part), etag)
   end
+
+  defp record_part_result(:ok, etag), do: {:ok, etag}
+
+  defp record_part_result({:error, :not_found}, _etag),
+    do: {:error, %Firkin.Error{code: :no_such_upload}}
+
+  defp record_part_result({:error, reason}, _etag), do: {:error, internal_error(reason)}
 
   # The S3 ETag of a completed multipart upload is the hex MD5 of the
   # concatenated raw part MD5s, suffixed with "-<part count>". Each part's ETag
@@ -526,7 +530,7 @@ defmodule NeonFS.S3.Backend do
     # `MultipartStore`; we'd need the writer's in-flight state to
     # do that safely. The interface-side `PendingWriteLog` deferred
     # in #450 is the long-term home for tracked aborts.
-    case MultipartStore.get(upload_id) do
+    case MultipartStore.get_meta(upload_id) do
       {:ok, _upload} ->
         MultipartStore.delete(upload_id)
         :ok

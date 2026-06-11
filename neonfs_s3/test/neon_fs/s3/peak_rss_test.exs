@@ -18,10 +18,11 @@ defmodule NeonFS.S3.PeakRSSTest do
 
   use ExUnit.Case, async: false
 
+  use Mimic
+
   alias NeonFS.Core.FileMeta
   alias NeonFS.S3.Backend
-  alias NeonFS.S3.MultipartStore
-  alias NeonFS.S3.Test.MockCore
+  alias NeonFS.S3.Test.{FakeKV, MockCore}
 
   @ctx %{access_key_id: "test-key", identity: %{user: "test-key"}}
 
@@ -38,7 +39,10 @@ defmodule NeonFS.S3.PeakRSSTest do
 
   @moduletag :peak_rss
 
+  setup :set_mimic_global
+
   setup do
+    FakeKV.stub!()
     MockCore.setup()
     {:ok, _volume} = MockCore.create_volume(@bucket)
     :ok = MockCore.add_credential("test-key", "test-secret")
@@ -84,8 +88,6 @@ defmodule NeonFS.S3.PeakRSSTest do
 
       {:ok, meta}
     end)
-
-    start_supervised!(MultipartStore)
 
     on_exit(fn ->
       Application.delete_env(:neonfs_s3, :core_call_fn)

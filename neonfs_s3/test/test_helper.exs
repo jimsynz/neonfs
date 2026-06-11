@@ -11,6 +11,7 @@ end
 Application.put_env(:kernel, :prevent_overlapping_partitions, false)
 
 Mimic.copy(NeonFS.Client.ChunkReader)
+Mimic.copy(NeonFS.Client.KV)
 
 # Exclude diagnostic profile tests by default (e.g. #534's
 # process-heap profile). Match with `--include profile` to run them

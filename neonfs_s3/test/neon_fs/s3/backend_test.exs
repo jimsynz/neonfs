@@ -4,8 +4,7 @@ defmodule NeonFS.S3.BackendTest do
 
   alias NeonFS.Client.ChunkReader
   alias NeonFS.S3.Backend
-  alias NeonFS.S3.MultipartStore
-  alias NeonFS.S3.Test.MockCore
+  alias NeonFS.S3.Test.{FakeKV, MockCore}
 
   @ctx %{access_key_id: "test-key", identity: %{user: "test-key"}}
 
@@ -63,7 +62,7 @@ defmodule NeonFS.S3.BackendTest do
       MockCore.read_file_stream(volume_name, path, opts)
     end)
 
-    start_supervised!(MultipartStore)
+    FakeKV.stub!()
 
     on_exit(fn ->
       Application.delete_env(:neonfs_s3, :core_call_fn)

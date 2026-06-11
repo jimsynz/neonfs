@@ -13,7 +13,6 @@ defmodule NeonFS.S3.IntegrationTest do
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.S3.IntegrationTest.CoreBridge, as: S3CoreBridge
-  alias NeonFS.S3.MultipartStore
 
   @moduletag timeout: 180_000
   @moduletag nodes: 3
@@ -67,8 +66,6 @@ defmodule NeonFS.S3.IntegrationTest do
         ip: :loopback,
         startup_log: false
       )
-
-    start_supervised!(MultipartStore)
 
     config =
       [
