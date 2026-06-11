@@ -1,14 +1,20 @@
 defmodule NeonFS.Cluster.Join do
   @moduledoc """
-  Node join flow for adding nodes to an existing cluster.
+  Serving side of the cluster join flow, plus core's layering on the
+  client join.
 
-  This module handles both sides of the join process:
-  - Creating an invite token on an existing cluster node
-  - Joining a cluster using an invite token
+  The joining-side machinery (HTTP invite redemption, credential
+  install, distribution restart, state persistence) lives in
+  `NeonFS.Client.Join` so any node type can join (#1160). This module:
+
+  - serves join requests on existing cluster members (`accept_join/6`),
+  - wraps the client join with core's finalize hook (Ra membership,
+    quorum-ring rebuild, data-plane activation).
   """
 
+  alias NeonFS.Client.Join, as: ClientJoin
   alias NeonFS.Client.{ServiceInfo, ServiceType}
-  alias NeonFS.Cluster.{Invite, InviteRedemption, State}
+  alias NeonFS.Cluster.{Invite, State}
 
   alias NeonFS.Core.{
     AuditLog,
@@ -20,7 +26,6 @@ defmodule NeonFS.Cluster.Join do
   }
 
   alias NeonFS.Core.Supervisor, as: CoreSupervisor
-  alias NeonFS.TLSDistConfig
   alias NeonFS.Transport.{Listener, PoolManager, TLS}
 
   require Logger
@@ -62,63 +67,15 @@ defmodule NeonFS.Cluster.Join do
       {:ok, :joining}
   """
   @spec join_cluster(String.t(), String.t(), ServiceType.t()) ::
-          {:ok, State.t() | :joining} | {:error, term()}
+          {:ok, :joining} | {:error, term()}
   def join_cluster(token, via_address, type \\ :core)
       when is_binary(token) and is_binary(via_address) and is_service_type(type) do
-    this_node = Node.self()
-    node_name = Atom.to_string(this_node)
-    node_key = TLS.generate_node_key()
-    csr = TLS.create_csr(node_key, node_name)
-
-    with :ok <- validate_not_in_cluster(),
-         {:ok, credentials} <- request_join_http(via_address, token, csr, node_name),
-         :ok <- store_credentials(credentials, node_key),
-         :ok <- TLSDistConfig.regenerate(TLS.tls_dir()) do
-      # Connecting to the via node over TLS distribution requires the cluster
-      # cert we just wrote, which only goes live after a distribution restart —
-      # and that restart drops the CLI's connection. So the rest of the join
-      # (restart → connect → Ra membership) runs in a detached process; the CLI
-      # reconnects and validates via `cluster status` (#1033). Synchronous
-      # failures (bad token, unreachable via node) are still reported directly.
-      finalize_join_async(credentials, token, this_node, via_address, type)
-      {:ok, :joining}
-    end
-  end
-
-  # Detached: survives both the CLI disconnect and the distribution restart it
-  # triggers (it's a local, unlinked process). The 500 ms delay lets the CLI's
-  # "joining" ack flush before distribution drops.
-  defp finalize_join_async(credentials, token, this_node, via_address, type) do
-    spawn(fn -> do_finalize_join(credentials, token, this_node, via_address, type) end)
-    :ok
-  end
-
-  defp do_finalize_join(credentials, token, this_node, via_address, type) do
-    Process.sleep(500)
-
-    case run_finalize_join(credentials, token, this_node, via_address, type) do
-      :ok ->
-        :ok
-
-      other ->
-        Logger.error("cluster join finalize failed", reason: inspect(other))
-        :telemetry.execute([:neonfs, :cluster, :join_failed], %{}, %{reason: inspect(other)})
-    end
-  end
-
-  defp run_finalize_join(credentials, token, this_node, via_address, type) do
-    with :ok <- TLSDistConfig.restart_distribution(),
-         :ok <- TLSDistConfig.await_distribution(10_000),
-         :ok <- activate_cluster_distribution(credentials),
-         {:ok, cluster_info} <-
-           complete_join_via_distribution(credentials, token, this_node, type),
-         {:ok, state} <- build_cluster_state(cluster_info, type),
-         :ok <- State.save(state) do
-      activate_data_plane()
-      finalize_core_membership(state, via_address, type)
-      :telemetry.execute([:neonfs, :cluster, :join_completed], %{}, %{type: type})
-      :ok
-    end
+    ClientJoin.join_cluster(token, via_address, type,
+      finalize_hook: fn state ->
+        activate_data_plane()
+        finalize_core_membership(state, via_address, type)
+      end
+    )
   end
 
   defp finalize_core_membership(state, via_address, type) do
@@ -170,26 +127,15 @@ defmodule NeonFS.Cluster.Join do
           {:ok, State.t()} | {:error, term()}
   def join_cluster_rpc(token, via_node, type \\ :core)
       when is_binary(token) and is_atom(via_node) and is_service_type(type) do
-    this_node = Node.self()
-    node_name = Atom.to_string(this_node)
-    node_key = TLS.generate_node_key()
-    csr = TLS.create_csr(node_key, node_name)
-    data_endpoint = local_data_endpoint()
+    ClientJoin.join_cluster_rpc(token, via_node, type,
+      finalize_hook: fn state ->
+        activate_data_plane()
 
-    with :ok <- validate_not_in_cluster(),
-         {:ok, cluster_info} <-
-           request_join_rpc(via_node, token, this_node, type, csr, data_endpoint),
-         {:ok, state} <- build_cluster_state(cluster_info, type),
-         :ok <- State.save(state),
-         :ok <- store_rpc_tls(cluster_info, node_key) do
-      activate_data_plane()
-
-      if ServiceType.core?(type) do
-        schedule_ra_join_async(state)
+        if ServiceType.core?(type) do
+          schedule_ra_join_async(state)
+        end
       end
-
-      {:ok, state}
-    end
+    )
   end
 
   # Schedule the Ra join to happen asynchronously after a delay.
@@ -270,29 +216,17 @@ defmodule NeonFS.Cluster.Join do
         master_key: state.master_key,
         known_peers:
           [self_as_peer(state.this_node) | state.known_peers]
-          |> sanitise_peers(joining_node)
+          |> State.sanitise_peers(joining_node)
           |> Enum.map(&peer_to_wire/1),
         ra_cluster_members: Enum.map(updated_state.ra_cluster_members, &Atom.to_string/1),
         node_cert_pem: node_cert_pem,
         ca_cert_pem: ca_cert_pem,
-        via_dist_port: local_dist_port()
+        via_dist_port: ClientJoin.local_dist_port()
       }
 
       Logger.info("Accepted join request", type: type, joining_node: joining_node)
       {:ok, cluster_info}
     end
-  end
-
-  @doc """
-  Returns `peers` with any entry for `exclude_name` removed and duplicate node
-  names collapsed. A node must never record itself in `known_peers`, and a
-  re-join must not introduce duplicate peer entries.
-  """
-  @spec sanitise_peers([State.peer_info()], atom()) :: [State.peer_info()]
-  def sanitise_peers(peers, exclude_name) do
-    peers
-    |> Enum.reject(fn peer -> peer.name == exclude_name end)
-    |> Enum.uniq_by(fn peer -> peer.name end)
   end
 
   @doc """
@@ -306,22 +240,8 @@ defmodule NeonFS.Cluster.Join do
     with {:ok, state} <- State.load() do
       State.save(%{
         state
-        | known_peers: sanitise_peers([peer | state.known_peers], state.this_node.name)
+        | known_peers: State.sanitise_peers([peer | state.known_peers], state.this_node.name)
       })
-    end
-  end
-
-  @doc """
-  Builds the joining node's `ra_cluster_members`. Core nodes include themselves;
-  the advertised members already contain the joiner, so the result is deduped to
-  avoid a duplicate self entry. Non-core nodes are not Ra members.
-  """
-  @spec joiner_ra_members([atom()], atom(), ServiceType.t()) :: [atom()]
-  def joiner_ra_members(ra_members, this_node, type) do
-    if ServiceType.core?(type) do
-      Enum.uniq([this_node | ra_members])
-    else
-      Enum.uniq(ra_members)
     end
   end
 
@@ -427,204 +347,10 @@ defmodule NeonFS.Cluster.Join do
     end
   end
 
-  defp validate_not_in_cluster do
-    if State.exists?() do
-      {:error, :already_in_cluster}
-    else
-      :ok
-    end
-  end
-
-  defp request_join_http(via_address, token, csr, node_name) do
-    :inets.start()
-    csr_pem = TLS.encode_csr(csr)
-    {random, expiry} = parse_token_parts(token)
-    proof = :crypto.mac(:hmac, :sha256, token, csr_pem) |> Base.encode64()
-
-    body =
-      %{
-        "csr_pem" => csr_pem,
-        "token_random" => random,
-        "token_expiry" => expiry,
-        "proof" => proof,
-        "node_name" => node_name,
-        "dist_port" => local_dist_port()
-      }
-      |> :json.encode()
-      |> IO.iodata_to_binary()
-
-    url = ~c"http://#{via_address}/api/cluster/redeem-invite"
-    request = {url, [], ~c"application/json", body}
-
-    case :httpc.request(:post, request, [{:timeout, 30_000}], []) do
-      {:ok, {{_, 200, _}, _headers, response_body}} ->
-        response_binary = IO.iodata_to_binary(response_body)
-        InviteRedemption.decrypt_response(response_binary, token)
-
-      {:ok, {{_, status, _}, _, response_body}} ->
-        Logger.error(
-          "Invite redemption HTTP error: status=#{status} body=#{IO.iodata_to_binary(response_body)}"
-        )
-
-        {:error, {:http_error, status}}
-
-      {:error, reason} ->
-        Logger.error("Invite redemption HTTP failed", reason: inspect(reason))
-        {:error, {:http_failed, reason}}
-    end
-  end
-
-  defp parse_token_parts(token) do
-    case String.split(token, "_") do
-      ["nfs", "inv", random, expiry, _signature] -> {random, expiry}
-    end
-  end
-
-  defp request_join_rpc(via_node, token, this_node, type, csr, data_endpoint) do
-    case :rpc.call(via_node, __MODULE__, :accept_join, [
-           token,
-           this_node,
-           type,
-           csr,
-           data_endpoint,
-           local_dist_port()
-         ]) do
-      {:ok, cluster_info} ->
-        {:ok, cluster_info}
-
-      {:error, reason} ->
-        {:error, {:join_rejected, reason}}
-
-      {:badrpc, reason} ->
-        {:error, {:rpc_failed, reason}}
-    end
-  end
-
-  defp store_rpc_tls(%{node_cert_pem: nil}, _node_key), do: :ok
-  defp store_rpc_tls(%{ca_cert_pem: nil}, _node_key), do: :ok
-
-  defp store_rpc_tls(%{node_cert_pem: node_cert_pem, ca_cert_pem: ca_cert_pem}, node_key) do
-    ca_cert = TLS.decode_cert!(ca_cert_pem)
-    node_cert = TLS.decode_cert!(node_cert_pem)
-    TLS.write_local_tls(ca_cert, node_cert, node_key)
-    :ok
-  end
-
-  defp store_rpc_tls(_cluster_info, _node_key), do: :ok
-
-  defp store_credentials(credentials, node_key) do
-    ca_cert = TLS.decode_cert!(credentials["ca_cert_pem"])
-    node_cert = TLS.decode_cert!(credentials["node_cert_pem"])
-    TLS.write_local_tls(ca_cert, node_cert, node_key)
-    :ok
-  end
-
-  defp activate_cluster_distribution(credentials) do
-    via_node = credentials["via_node"] |> String.to_atom()
-    via_dist_port = credentials["via_dist_port"]
-
-    if is_integer(via_dist_port) and via_dist_port > 0 do
-      System.put_env("NEONFS_PEER_PORTS", "#{via_node}:#{via_dist_port}")
-    end
-
-    case Node.connect(via_node) do
-      true ->
-        :ok
-
-      false ->
-        Logger.error("Failed to connect to via node: #{via_node}")
-        {:error, {:connect_failed, via_node}}
-    end
-  end
-
-  defp complete_join_via_distribution(credentials, token, this_node, type) do
-    via_node = credentials["via_node"] |> String.to_atom()
-    data_endpoint = local_data_endpoint()
-
-    case :rpc.call(via_node, __MODULE__, :accept_join, [
-           token,
-           this_node,
-           type,
-           nil,
-           data_endpoint,
-           local_dist_port()
-         ]) do
-      {:ok, cluster_info} ->
-        {:ok, cluster_info}
-
-      {:error, reason} ->
-        {:error, {:join_rejected, reason}}
-
-      {:badrpc, reason} ->
-        {:error, {:rpc_failed, reason}}
-    end
-  end
-
-  defp build_cluster_state(cluster_info, type) do
-    this_node = Node.self()
-    node_id = generate_node_id()
-
-    node_info = %{
-      id: node_id,
-      name: this_node,
-      joined_at: DateTime.utc_now(),
-      dist_port: local_dist_port()
-    }
-
-    # Parse created_at from ISO8601 string
-    created_at =
-      case DateTime.from_iso8601(cluster_info.created_at) do
-        {:ok, dt, _offset} -> dt
-        _ -> DateTime.utc_now()
-      end
-
-    known_peers =
-      cluster_info.known_peers
-      |> Enum.map(fn peer ->
-        %{
-          id: peer["id"] || peer.id,
-          name: parse_atom(peer["name"] || peer.name),
-          last_seen: parse_datetime(peer["last_seen"] || peer.last_seen),
-          dist_port: peer["dist_port"] || peer[:dist_port] || 0
-        }
-      end)
-      |> sanitise_peers(this_node)
-
-    ra_members = Enum.map(cluster_info.ra_cluster_members, &parse_atom/1)
-    ra_cluster_members = joiner_ra_members(ra_members, this_node, type)
-
-    state = %State{
-      cluster_id: cluster_info.cluster_id,
-      cluster_name: cluster_info.cluster_name,
-      created_at: created_at,
-      master_key: cluster_info.master_key,
-      this_node: node_info,
-      known_peers: known_peers,
-      ra_cluster_members: ra_cluster_members,
-      node_type: type
-    }
-
-    {:ok, state}
-  end
-
   defp generate_node_id do
     :crypto.strong_rand_bytes(5)
     |> Base.encode32(case: :lower, padding: false)
     |> binary_part(0, 8)
-  end
-
-  # Parse a value that might be a string or atom into an atom
-  defp parse_atom(value) when is_atom(value), do: value
-  defp parse_atom(value) when is_binary(value), do: String.to_atom(value)
-
-  # Parse a value that might be a DateTime or ISO8601 string into DateTime
-  defp parse_datetime(%DateTime{} = dt), do: dt
-
-  defp parse_datetime(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, dt, _offset} -> dt
-      _ -> DateTime.utc_now()
-    end
   end
 
   defp add_peer_to_state(%State{} = state, joining_node, type, dist_port) do
@@ -647,7 +373,7 @@ defmodule NeonFS.Cluster.Join do
 
     updated_state = %{
       state
-      | known_peers: sanitise_peers([peer_info | state.known_peers], state.this_node.name),
+      | known_peers: State.sanitise_peers([peer_info | state.known_peers], state.this_node.name),
         ra_cluster_members: Enum.uniq(ra_cluster_members)
     }
 
@@ -904,27 +630,5 @@ defmodule NeonFS.Cluster.Join do
         Logger.error("Failed to join Ra cluster", reason: inspect(reason))
         {:error, {:ra_join_failed, reason}}
     end
-  end
-
-  defp local_dist_port do
-    case System.get_env("NEONFS_DIST_PORT") do
-      nil -> 0
-      port_str -> String.to_integer(port_str)
-    end
-  rescue
-    _ -> 0
-  end
-
-  defp local_data_endpoint do
-    case Process.whereis(Listener) do
-      nil ->
-        nil
-
-      _pid ->
-        port = Listener.get_port()
-        if port > 0, do: PoolManager.advertise_endpoint(port)
-    end
-  rescue
-    _ -> nil
   end
 end

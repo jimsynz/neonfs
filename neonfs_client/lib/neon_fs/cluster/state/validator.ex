@@ -7,8 +7,8 @@ defmodule NeonFS.Cluster.State.Validator do
   problems in `cluster.json`.
   """
 
+  alias NeonFS.Capacity
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.DriveConfig
 
   @valid_tiers ~w(hot warm cold)
   @atom_safe_regex ~r/^[a-zA-Z0-9_@.\-]+$/
@@ -199,7 +199,7 @@ defmodule NeonFS.Cluster.State.Validator do
   defp valid_capacity?(""), do: {:error, "must not be empty"}
 
   defp valid_capacity?(value) when is_binary(value) do
-    case DriveConfig.parse_capacity(value) do
+    case Capacity.parse(value) do
       {:ok, _bytes} -> :ok
       {:error, _} -> {:error, "invalid capacity format (got: #{inspect(value)})"}
     end

@@ -21,6 +21,7 @@ defmodule NeonFS.Cluster.InviteRedemption do
 
   import Bitwise
 
+  alias NeonFS.Client.InviteCrypto
   alias NeonFS.Cluster.State
   alias NeonFS.Core.CertificateAuthority
   alias NeonFS.Transport.TLS
@@ -30,8 +31,6 @@ defmodule NeonFS.Cluster.InviteRedemption do
   @type redemption_params :: %{
           String.t() => String.t()
         }
-
-  @response_salt "neonfs-invite-response"
 
   @doc """
   Redeems an invite token and returns encrypted cluster credentials.
@@ -68,7 +67,7 @@ defmodule NeonFS.Cluster.InviteRedemption do
          {:ok, csr} <- decode_and_validate_csr(csr_pem),
          {:ok, node_cert_pem, ca_cert_pem} <- sign_csr(csr, node_name) do
       response = build_response(ca_cert_pem, node_cert_pem)
-      encrypted = encrypt_response(response, token)
+      encrypted = InviteCrypto.encrypt_response(response, token)
 
       Logger.info("Invite redeemed successfully", node_name: node_name)
       {:ok, encrypted}
@@ -76,29 +75,6 @@ defmodule NeonFS.Cluster.InviteRedemption do
   end
 
   def redeem(_params), do: {:error, :invalid_params}
-
-  @doc """
-  Decrypts an invite redemption response using the invite token.
-
-  Called on the joining node after receiving the encrypted blob from
-  the via node's HTTP endpoint.
-  """
-  @spec decrypt_response(binary(), String.t()) :: {:ok, map()} | {:error, atom()}
-  def decrypt_response(encrypted_blob, token) when byte_size(encrypted_blob) > 28 do
-    key = derive_key(token)
-
-    <<iv::binary-12, tag::binary-16, ciphertext::binary>> = encrypted_blob
-
-    case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ciphertext, <<>>, tag, false) do
-      plaintext when is_binary(plaintext) ->
-        {:ok, :json.decode(plaintext)}
-
-      :error ->
-        {:error, :decryption_failed}
-    end
-  end
-
-  def decrypt_response(_blob, _token), do: {:error, :invalid_response}
 
   # Private functions
 
@@ -193,20 +169,6 @@ defmodule NeonFS.Cluster.InviteRedemption do
     end
   rescue
     _ -> 0
-  end
-
-  defp encrypt_response(plaintext, token) do
-    key = derive_key(token)
-    iv = :crypto.strong_rand_bytes(12)
-
-    {ciphertext, tag} =
-      :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, <<>>, true)
-
-    iv <> tag <> ciphertext
-  end
-
-  defp derive_key(token) do
-    :crypto.mac(:hmac, :sha256, @response_salt, token)
   end
 
   defp secure_compare(a, b) when byte_size(a) != byte_size(b), do: false

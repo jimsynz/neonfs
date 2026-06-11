@@ -89,6 +89,18 @@ defmodule NeonFS.Cluster.State do
   end
 
   @doc """
+  Returns `peers` with any entry for `exclude_name` removed and duplicate node
+  names collapsed. A node must never record itself in `known_peers`, and a
+  re-join must not introduce duplicate peer entries.
+  """
+  @spec sanitise_peers([peer_info()], atom()) :: [peer_info()]
+  def sanitise_peers(peers, exclude_name) do
+    peers
+    |> Enum.reject(fn peer -> peer.name == exclude_name end)
+    |> Enum.uniq_by(fn peer -> peer.name end)
+  end
+
+  @doc """
   Returns the metadata directory.
 
   Resolution order matches `NeonFS.Epmd`'s cluster.json lookup so the
