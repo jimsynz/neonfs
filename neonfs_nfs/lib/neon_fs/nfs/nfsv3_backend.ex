@@ -320,23 +320,23 @@ defmodule NeonFS.NFS.NFSv3Backend do
   @createverf_meta_key "nfs3_createverf"
 
   @impl true
-  def create(dir_fh, name, mode, _auth, ctx) do
+  def create(dir_fh, name, mode, auth, ctx) do
     case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
-        do_create(vol_name, dir_path, name, mode)
+        do_create(vol_name, dir_path, name, mode, squashed_identity(auth, dir_fh))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
-  defp do_create(vol_name, dir_path, name, mode) do
+  defp do_create(vol_name, dir_path, name, mode, identity) do
     child_path = Path.join(dir_path, name)
     pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
 
     case mode do
       {:unchecked, %Sattr3{} = sattr} ->
-        write_new_file(vol_name, dir_path, child_path, sattr, pre_dir_wcc, opts: [])
+        write_new_file(vol_name, dir_path, child_path, sattr, pre_dir_wcc, [opts: []], identity)
 
       {:guarded, %Sattr3{} = sattr} ->
         case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
@@ -345,15 +345,23 @@ defmodule NeonFS.NFS.NFSv3Backend do
              %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
           {:error, _} ->
-            write_new_file(vol_name, dir_path, child_path, sattr, pre_dir_wcc, opts: [])
+            write_new_file(
+              vol_name,
+              dir_path,
+              child_path,
+              sattr,
+              pre_dir_wcc,
+              [opts: []],
+              identity
+            )
         end
 
       {:exclusive, verf} when is_binary(verf) and byte_size(verf) == 8 ->
-        exclusive_create(vol_name, dir_path, child_path, verf, pre_dir_wcc)
+        exclusive_create(vol_name, dir_path, child_path, verf, pre_dir_wcc, identity)
     end
   end
 
-  defp exclusive_create(vol_name, dir_path, child_path, verf, pre_dir_wcc) do
+  defp exclusive_create(vol_name, dir_path, child_path, verf, pre_dir_wcc, identity) do
     case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
       {:ok, %FileMeta{metadata: %{@createverf_meta_key => ^verf}} = existing} ->
         # Idempotent retry — same verf, return existing file.
@@ -364,11 +372,14 @@ defmodule NeonFS.NFS.NFSv3Backend do
         {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, _} ->
-        write_new_file(vol_name, dir_path, child_path, %Sattr3{}, pre_dir_wcc,
-          opts: [
-            create_only: true,
-            metadata: %{@createverf_meta_key => verf}
-          ]
+        write_new_file(
+          vol_name,
+          dir_path,
+          child_path,
+          %Sattr3{},
+          pre_dir_wcc,
+          [opts: [create_only: true, metadata: %{@createverf_meta_key => verf}]],
+          identity
         )
     end
   end
@@ -378,13 +389,22 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # extra opts (e.g. `create_only: true` for EXCLUSIVE). Re-fetches
   # the metadata for the post-op view; failures map to a parent-only
   # wcc reply.
-  defp write_new_file(vol_name, dir_path, child_path, %Sattr3{} = sattr, pre_dir_wcc, opts) do
+  defp write_new_file(
+         vol_name,
+         dir_path,
+         child_path,
+         %Sattr3{} = sattr,
+         pre_dir_wcc,
+         opts,
+         identity
+       ) do
     write_opts =
       opts
       |> Keyword.get(:opts, [])
       |> Keyword.merge(opts)
       |> Keyword.delete(:opts)
-      |> sattr_to_write_opts(sattr)
+      |> sattr_to_write_opts(sattr, identity)
+      |> with_auth_identity(identity)
 
     case core_call(NeonFS.Core, :write_file_at, [vol_name, child_path, 0, <<>>, write_opts]) do
       {:ok, %FileMeta{} = meta} ->
@@ -392,6 +412,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
       {:error, %NeonFS.Error.AlreadyExists{}} ->
         {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->
         {:error, to_nfs_status(status),
@@ -416,11 +439,30 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
-  defp sattr_to_write_opts(opts, %Sattr3{} = sattr) do
+  # New-file ownership: an explicit `sattr` uid/gid wins; otherwise the
+  # file is owned by the creating caller (POSIX create semantics),
+  # taking the uid and primary gid from the resolved (possibly
+  # root-squashed) NFS identity rather than defaulting to 0.
+  defp sattr_to_write_opts(opts, %Sattr3{} = sattr, identity) do
+    {owner_uid, owner_gid} = owner_defaults(identity)
+
     opts
     |> maybe_put_opt(:mode, sattr.mode)
-    |> maybe_put_opt(:uid, sattr.uid)
-    |> maybe_put_opt(:gid, sattr.gid)
+    |> Keyword.put(:uid, sattr.uid || owner_uid)
+    |> Keyword.put(:gid, sattr.gid || owner_gid)
+  end
+
+  # Tags the write with the caller's identity for `Authorise.check`,
+  # kept separate from the new file's owner uid/gid (#1230).
+  defp with_auth_identity(opts, identity) do
+    Keyword.merge(opts,
+      auth_uid: Keyword.get(identity, :uid, 0),
+      auth_gids: Keyword.get(identity, :gids, [])
+    )
+  end
+
+  defp owner_defaults(identity) do
+    {Keyword.get(identity, :uid, 0), identity |> Keyword.get(:gids, []) |> List.first(0)}
   end
 
   defp maybe_put_opt(opts, _key, nil), do: opts
@@ -657,17 +699,17 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def symlink(dir_fh, name, %Sattr3{} = sattr, target, _auth, ctx) when is_binary(target) do
+  def symlink(dir_fh, name, %Sattr3{} = sattr, target, auth, ctx) when is_binary(target) do
     case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
-        do_symlink(vol_name, dir_path, name, sattr, target)
+        do_symlink(vol_name, dir_path, name, sattr, target, squashed_identity(auth, dir_fh))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
-  defp do_symlink(vol_name, dir_path, name, %Sattr3{} = sattr, target) do
+  defp do_symlink(vol_name, dir_path, name, %Sattr3{} = sattr, target, identity) do
     child_path = Path.join(dir_path, name)
     pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
 
@@ -678,11 +720,18 @@ defmodule NeonFS.NFS.NFSv3Backend do
     # following the link.
     requested_mode = sattr.mode || 0o777
     mode = Bitwise.bor(requested_mode, @s_iflnk)
-    write_opts = [mode: mode]
+    {owner_uid, owner_gid} = owner_defaults(identity)
+
+    write_opts =
+      [mode: mode, uid: owner_uid, gid: owner_gid]
+      |> with_auth_identity(identity)
 
     case core_call(NeonFS.Core, :write_file_at, [vol_name, child_path, 0, target, write_opts]) do
       {:ok, %FileMeta{} = post_meta} ->
         ok_create_reply(post_meta, vol_name, dir_path, pre_dir_wcc)
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
 
       {:error, status} when is_atom(status) ->
         {:error, to_nfs_status(status),
@@ -814,20 +863,23 @@ defmodule NeonFS.NFS.NFSv3Backend do
   @writeverf_pt_key {__MODULE__, :writeverf}
 
   @impl true
-  def write(fh, offset, data, stable, _auth, ctx) when is_binary(data) do
-    case resolve_meta(fh, [], peer(ctx)) do
+  def write(fh, offset, data, stable, auth, ctx) when is_binary(data) do
+    identity = squashed_identity(auth, fh)
+
+    case resolve_meta(fh, identity, peer(ctx)) do
       {:ok, vol_name, path, pre_meta} ->
-        do_write(vol_name, path, pre_meta, offset, data, stable)
+        do_write(vol_name, path, pre_meta, offset, data, stable, identity)
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
-  defp do_write(vol_name, path, pre_meta, offset, data, requested_stable) do
+  defp do_write(vol_name, path, pre_meta, offset, data, requested_stable, identity) do
     pre_wcc = wcc_attr_from_meta(pre_meta)
+    write_opts = with_auth_identity([], identity)
 
-    case core_call(NeonFS.Core, :write_file_at, [vol_name, path, offset, data, []]) do
+    case core_call(NeonFS.Core, :write_file_at, [vol_name, path, offset, data, write_opts]) do
       {:ok, %FileMeta{} = post_meta} ->
         # NeonFS' `write_file_at` is FileIndex-quorum-replicated and
         # synchronous — every committed write is durable, so we
@@ -843,6 +895,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
            committed: :file_sync,
            verf: writeverf()
          }}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces, %WccData{before: pre_wcc, after: nil}}
 
       {:error, status} when is_atom(status) ->
         {:error, to_nfs_status(status), %WccData{before: pre_wcc, after: nil}}

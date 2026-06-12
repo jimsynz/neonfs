@@ -535,6 +535,76 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
+  ## create/write authorisation (#1230)
+
+  describe "create authorisation" do
+    setup do
+      put_inode_table(%{0xDEAD_DEAD_DEAD_DEAD => {@volume_name, "/docs"}})
+      :ok
+    end
+
+    test "carries the caller as :auth_uid/:auth_gids and owns the file by the caller when sattr omits uid" do
+      child_path = "/docs/mine.txt"
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      child = file_meta(%{path: child_path})
+      test_pid = self()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, opts] ->
+          send(test_pid, {:opts, opts})
+          {:ok, child}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xDEAD_DEAD_DEAD_DEAD)
+      auth = %Auth.Sys{uid: 1000, gid: 50, gids: [50, 60]}
+
+      assert {:ok, _, _, _} =
+               NFSv3Backend.create(
+                 dir_fh,
+                 "mine.txt",
+                 {:unchecked, %NFSServer.NFSv3.Types.Sattr3{}},
+                 auth,
+                 %{}
+               )
+
+      assert_receive {:opts, opts}
+      assert Keyword.get(opts, :auth_uid) == 1000
+      assert Keyword.get(opts, :auth_gids) == [50, 60]
+      # No sattr uid/gid → owned by the creating caller.
+      assert Keyword.get(opts, :uid) == 1000
+      assert Keyword.get(opts, :gid) == 50
+    end
+
+    test "a forbidden write maps to NFS3ERR_ACCES" do
+      child_path = "/docs/denied.txt"
+      pre_dir = file_meta(%{path: "/docs", mode: 0o040_755, size: 0})
+      denied = PermissionDenied.exception(operation: :write, uid: 1000)
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, _opts] ->
+          {:error, denied}
+      end)
+
+      dir_fh = Filehandle.encode(@volume_id_bin, 0xDEAD_DEAD_DEAD_DEAD)
+      auth = %Auth.Sys{uid: 1000, gid: 50, gids: [50]}
+
+      assert {:error, :acces, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.create(
+                 dir_fh,
+                 "denied.txt",
+                 {:unchecked, %NFSServer.NFSv3.Types.Sattr3{}},
+                 auth,
+                 %{}
+               )
+    end
+  end
+
   describe "create/5 — GUARDED" do
     setup do
       put_inode_table(%{0xCAFE_CAFE_CAFE_CAFE => {@volume_name, "/docs"}})
