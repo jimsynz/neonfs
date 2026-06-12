@@ -95,7 +95,7 @@ Interface packages have **no dependency** on neonfs_core. All communication with
 - All data flows through Elixir for single code path and consistency
 - Content-addressed storage: immutable SHA-256 identified chunks
 - Per-volume supervision trees for isolation
-- Async Rust NIFs for backpressure via BEAM scheduler
+- Blocking Rust NIFs run on dirty schedulers (`DirtyIo` for disk/syscall work, `DirtyCpu` for hashing/chunking/erasure) so they don't stall normal BEAM schedulers; the async-runtime rework (#1197) is tracked separately
 
 ## No Whole-File Buffering (CRITICAL)
 

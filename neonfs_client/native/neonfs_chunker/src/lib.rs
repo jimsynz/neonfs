@@ -24,7 +24,7 @@ type ChunkResultTuple<'a> = (Binary<'a>, Binary<'a>, usize, usize);
 /// binary. Matches `NeonFS.Core.Blob.Native.compute_hash/1` — kept in
 /// the client surface so callers on interface nodes do not need a
 /// round-trip to core just to hash.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn compute_hash<'a>(env: Env<'a>, data: Binary) -> Binary<'a> {
     let h = hash::sha256(data.as_slice());
     let mut out = NewBinary::new(env, 32);
@@ -46,7 +46,7 @@ fn nif_auto_chunk_strategy(data_len: usize) -> (String, usize) {
 /// Stateless chunker — splits `data` into chunks according to
 /// `(strategy, strategy_param)` and returns `[{data, hash, offset,
 /// size}, ...]`.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn nif_chunk_data<'a>(
     env: Env<'a>,
     data: Binary,
@@ -86,7 +86,7 @@ fn chunker_init(
 /// Feeds a slice of data into the chunker and returns any complete
 /// chunks that became available. Bytes that may still belong to a
 /// future chunk remain buffered inside the resource.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn chunker_feed<'a>(
     env: Env<'a>,
     chunker: ResourceArc<ChunkerResource>,
@@ -100,7 +100,7 @@ fn chunker_feed<'a>(
 /// Flushes any remaining buffered data as the final chunks. The
 /// chunker may be reused afterwards; offsets continue from where they
 /// left off.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn chunker_finish<'a>(
     env: Env<'a>,
     chunker: ResourceArc<ChunkerResource>,
