@@ -530,6 +530,10 @@ defmodule NeonFS.Core.FileIndexTest do
       assert dir.volume_id == "vol1"
     end
 
+    test "rejects a non-leading-slash path, keeping the leading-slash invariant (#1210)" do
+      assert {:error, %NeonFS.Error.InvalidPath{}} = FileIndex.mkdir("vol1", "documents")
+    end
+
     test "created directory appears in parent listing" do
       {:ok, _} = FileIndex.mkdir("vol1", "/documents")
 
