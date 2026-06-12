@@ -35,7 +35,6 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   # read on a non-replica peer hits the cross-node walk that
   # currently fails on missing index-tree chunks (#903). Re-enable
   # once the writer fans tree chunks out.
-  @moduletag :pending_903
 
   @volume_name "rr-vol"
   @volume_opts %{
@@ -56,6 +55,7 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   end
 
   describe "under-replicated repair" do
+    @tag :pending_reenable
     test "kills a node, triggers repair, chunks reach target replication factor",
          %{cluster: cluster} do
       payload = :crypto.strong_rand_bytes(@payload_bytes)
@@ -105,6 +105,7 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   end
 
   describe "over-replicated repair" do
+    @tag :pending_reenable
     test "drops excess replicas back to the target factor",
          %{cluster: cluster} do
       payload = :crypto.strong_rand_bytes(@payload_bytes)

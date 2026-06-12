@@ -13,6 +13,11 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   @moduletag timeout: 300_000
   @moduletag nodes: 3
   @moduletag :partition
+  # Re-enablement pending: both tests bit-rotted while excluded under the
+  # blanket `:pending_903` tag and fail for reasons unrelated to #903 (now
+  # fixed) — node-restart recovery / anti-entropy catch-up. Tracked in the
+  # #1189 follow-up.
+  @moduletag :pending_reenable
 
   setup %{cluster: cluster} do
     :ok = init_cluster_with_data(cluster)
@@ -20,7 +25,6 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   end
 
   describe "rolling restart" do
-    @tag :pending_903
     test "data survives sequential restart of each node", %{cluster: cluster} do
       cluster = restart_and_verify(cluster, :node1)
       cluster = restart_and_verify(cluster, :node2)
@@ -29,7 +33,6 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   end
 
   describe "node restart recovery" do
-    @tag :pending_903
     test "restarted node catches up via anti-entropy", %{cluster: cluster} do
       :ok = PeerCluster.stop_node(cluster, :node3)
 

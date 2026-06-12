@@ -179,7 +179,7 @@ defmodule NeonFS.Integration.EncryptionTest do
   end
 
   describe "encrypted erasure-coded volume" do
-    @tag :pending_903
+    @tag :pending_reenable
     test "write and read with encryption + erasure coding", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
@@ -202,7 +202,7 @@ defmodule NeonFS.Integration.EncryptionTest do
       assert read_data == test_data
     end
 
-    @tag :pending_903
+    @tag :pending_reenable
     test "degraded read with decryption succeeds", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
