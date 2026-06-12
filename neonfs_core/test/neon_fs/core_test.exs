@@ -4,7 +4,7 @@ defmodule NeonFS.CoreTest do
 
   alias NeonFS.Core
   alias NeonFS.Core.{FileIndex, NamespaceCoordinator, RaServer, VolumeRegistry}
-  alias NeonFS.Error.{Conflict, FileNotFound, NotFound, VolumeNotFound}
+  alias NeonFS.Error.{Conflict, FileNotFound, NotFound, PermissionDenied, VolumeNotFound}
 
   @moduletag :tmp_dir
 
@@ -250,6 +250,71 @@ defmodule NeonFS.CoreTest do
 
     test "returns error for nonexistent file", %{volume_name: vol_name} do
       assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/nope.txt")
+    end
+  end
+
+  # The setup volumes carry no volume ACL, so any non-root identity has
+  # no grant and is denied — the enforcement #1215 wires through from
+  # the NFS AUTH_SYS credentials. Root (the default uid 0) bypasses.
+  describe "identity-based authorisation (#1215)" do
+    test "get_file_meta denies a non-root uid without a grant", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/authz.txt", ["content"])
+
+      assert {:ok, _} = Core.get_file_meta(vol_name, "/authz.txt")
+      assert {:ok, _} = Core.get_file_meta(vol_name, "/authz.txt", uid: 0)
+
+      assert {:error, %PermissionDenied{}} =
+               Core.get_file_meta(vol_name, "/authz.txt", uid: 1000, gids: [1000])
+    end
+
+    test "mkdir denies a non-root uid without a grant", %{volume_name: vol_name} do
+      assert {:error, %PermissionDenied{}} =
+               Core.mkdir(vol_name, "/authz-dir", uid: 1000, gids: [1000])
+
+      assert {:ok, _} = Core.mkdir(vol_name, "/authz-dir")
+    end
+
+    test "delete_file denies a non-root uid without a grant", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-del.txt", ["x"])
+
+      assert {:error, %PermissionDenied{}} =
+               Core.delete_file(vol_name, "/authz-del.txt", uid: 1000, gids: [1000])
+
+      assert :ok = Core.delete_file(vol_name, "/authz-del.txt")
+    end
+
+    test "rename_file denies a non-root uid without a grant", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-src.txt", ["x"])
+
+      assert {:error, %PermissionDenied{}} =
+               Core.rename_file(vol_name, "/authz-src.txt", "/authz-dst.txt",
+                 uid: 1000,
+                 gids: [1000]
+               )
+
+      assert :ok = Core.rename_file(vol_name, "/authz-src.txt", "/authz-dst.txt")
+    end
+
+    test "update_file_meta denies a non-root uid without a grant", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-upd.txt", ["x"])
+
+      assert {:error, %PermissionDenied{}} =
+               Core.update_file_meta(vol_name, "/authz-upd.txt", [content_type: "text/plain"],
+                 uid: 1000,
+                 gids: [1000]
+               )
+
+      assert {:ok, _} =
+               Core.update_file_meta(vol_name, "/authz-upd.txt", content_type: "text/plain")
+    end
+
+    test "truncate_file denies a non-root uid without a grant", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-trunc.txt", ["abcdef"])
+
+      assert {:error, %PermissionDenied{}} =
+               Core.truncate_file(vol_name, "/authz-trunc.txt", 3, [], uid: 1000, gids: [1000])
+
+      assert {:ok, _} = Core.truncate_file(vol_name, "/authz-trunc.txt", 3)
     end
   end
 

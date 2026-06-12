@@ -8,6 +8,7 @@ defmodule NeonFS.Core do
   appropriate internal module.
   """
 
+  alias NeonFS.Core.Authorise
   alias NeonFS.Core.CommitChunks
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
@@ -353,10 +354,17 @@ defmodule NeonFS.Core do
   empty-directory check, which would otherwise race against creates
   inside the target) serialise across interface nodes. See sub-issue
   #305.
+
+  Honours `:uid` / `:gids` opts for `:write` authorisation (default
+  uid 0 bypasses), so an NFS REMOVE/RMDIR is held to the volume ACL.
   """
-  @spec delete_file(String.t(), String.t()) :: :ok | {:error, term()}
-  def delete_file(volume_name, path) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+  @spec delete_file(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_file(volume_name, path, opts \\ []) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}) do
       normalized = normalize_path(path)
       do_delete_dispatch(volume.id, normalized)
     end
@@ -438,11 +446,25 @@ defmodule NeonFS.Core do
 
   @doc """
   Gets file metadata by volume name and path.
+
+  ## Options
+
+    * `:uid` - Caller UID for authorisation (default: 0, root, which
+      bypasses all checks)
+    * `:gids` - Caller group IDs for authorisation (default: `[]`)
+
+  Runs `Authorise.check/4` for `:read` against the volume so callers
+  presenting a non-root identity (NFS AUTH_SYS) are held to the volume
+  ACL.
   """
-  @spec get_file_meta(String.t(), String.t()) ::
+  @spec get_file_meta(String.t(), String.t(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
-  def get_file_meta(volume_name, path) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+  def get_file_meta(volume_name, path, opts \\ []) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <- Authorise.check(uid, gids, :read, {:volume, volume.id}) do
       lookup_file(volume.id, normalize_path(path))
     end
   end
@@ -452,11 +474,18 @@ defmodule NeonFS.Core do
 
   Accepts a keyword list of fields to update on the FileMeta struct.
   Automatically increments the version and updates timestamps.
+
+  Honours `:uid` / `:gids` opts for `:write` authorisation (default
+  uid 0 bypasses), so NFS SETATTR is held to the volume ACL.
   """
-  @spec update_file_meta(String.t(), String.t(), keyword()) ::
+  @spec update_file_meta(String.t(), String.t(), keyword(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
-  def update_file_meta(volume_name, path, updates) do
+  def update_file_meta(volume_name, path, updates, opts \\ []) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
     with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}),
          {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
       FileIndex.update(file.id, updates)
     end
@@ -471,11 +500,19 @@ defmodule NeonFS.Core do
   Used by NFSv3 SETATTR (#621) when the `size` field is set —
   combining truncate with mode/uid/gid/atime/mtime updates lets the
   whole sattr3 mutation land in a single FileIndex write.
+
+  Honours `:uid` / `:gids` opts for `:write` authorisation (default
+  uid 0 bypasses), so an NFS SETATTR that sets `size` is held to the
+  volume ACL just like the no-size SETATTR path.
   """
-  @spec truncate_file(String.t(), String.t(), non_neg_integer(), keyword()) ::
+  @spec truncate_file(String.t(), String.t(), non_neg_integer(), keyword(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
-  def truncate_file(volume_name, path, new_size, additional_updates \\ []) do
+  def truncate_file(volume_name, path, new_size, additional_updates \\ [], opts \\ []) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
     with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}),
          {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
       FileIndex.truncate(file.id, new_size, additional_updates)
     end
@@ -534,11 +571,18 @@ defmodule NeonFS.Core do
   different interface nodes) serialise cleanly — one `mkdir` wins, the
   rest see `FileIndex` already holds the entry and surface `:eexist`,
   rather than racing through quorum-write resolution. Sub-issue #305.
+
+  Honours `:uid` / `:gids` opts for `:write` authorisation (default
+  uid 0 bypasses), so an NFS MKDIR is held to the volume ACL.
   """
-  @spec mkdir(String.t(), String.t()) ::
+  @spec mkdir(String.t(), String.t(), keyword()) ::
           {:ok, NeonFS.Core.DirectoryEntry.t()} | {:error, term()}
-  def mkdir(volume_name, path) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+  def mkdir(volume_name, path, opts \\ []) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}) do
       normalized = normalize_path(path)
 
       with_namespace_claim(:path, volume.id, normalized, fn ->
@@ -552,10 +596,17 @@ defmodule NeonFS.Core do
 
   Handles same-directory renames, cross-directory moves, and combined
   move-and-rename operations.
+
+  Honours `:uid` / `:gids` opts for `:write` authorisation (default
+  uid 0 bypasses), so an NFS RENAME is held to the volume ACL.
   """
-  @spec rename_file(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
-  def rename_file(volume_name, src_path, dest_path) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+  @spec rename_file(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def rename_file(volume_name, src_path, dest_path, opts \\ []) do
+    uid = Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :gids, [])
+
+    with {:ok, volume} <- resolve_volume(volume_name),
+         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}) do
       src = normalize_path(src_path)
       dst = normalize_path(dest_path)
 

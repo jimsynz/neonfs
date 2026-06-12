@@ -43,7 +43,9 @@ defmodule NeonFS.Integration.NFSv3BeamPeakRSSTest do
   @moduletag :nfs
   @moduletag :peak_rss
 
-  @auth %Auth.None{}
+  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; #1215 holds
+  # non-root callers to it.
+  @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
 
   # FastCDC default `max` chunk size from
   # `neonfs_client/native/neonfs_chunker/src/chunking.rs`.

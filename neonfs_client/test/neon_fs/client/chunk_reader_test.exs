@@ -612,7 +612,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         {:error, :stripe_refs_unsupported}
       end)
 
-      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin"] ->
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
         {:ok, %{size: 100, stripes: nil}}
       end)
 
@@ -647,7 +647,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
         {:error, :stripe_refs_unsupported}
       end)
 
-      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin"] ->
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta, ["vol", "/ec.bin" | _] ->
         {:ok, %{size: 250, stripes: stripes}}
       end)
 
