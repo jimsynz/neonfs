@@ -12,6 +12,9 @@ defmodule NeonFS.CLI.Handler do
 
   require Logger
 
+  import NeonFS.CLI.Handler.Common
+
+  alias NeonFS.CLI.Handler.S3, as: S3Handler
   alias NeonFS.Client.HealthCheck, as: ClientHealthCheck
   alias NeonFS.Cluster.{Init, Invite, Join, State}
 
@@ -32,7 +35,6 @@ defmodule NeonFS.CLI.Handler do
     RaServer,
     RaSupervisor,
     ReplicaRepairScheduler,
-    S3CredentialManager,
     ServiceRegistry,
     Snapshot,
     StorageMetrics,
@@ -53,7 +55,6 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.Transport.TLS
 
   alias NeonFS.Error.{
-    Internal,
     Invalid,
     InvalidConfig,
     NotFound,
@@ -3045,23 +3046,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec handle_s3_create_credential(term()) :: {:ok, map()} | {:error, term()}
-  def handle_s3_create_credential(identity) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, credential} <- S3CredentialManager.create(identity) do
-      AuditLog.log_event(
-        event_type: :s3_credential_created,
-        actor_uid: 0,
-        resource: credential.access_key_id,
-        details: %{identity: identity}
-      )
-
-      {:ok, credential_to_serialisable(credential)}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_s3_create_credential(identity), to: S3Handler
 
   @doc """
   Lists S3 credentials, optionally filtered by identity.
@@ -3073,23 +3058,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of credentials (secrets redacted)
   """
   @spec handle_s3_list_credentials(map()) :: {:ok, [map()]}
-  def handle_s3_list_credentials(filters \\ %{}) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      opts =
-        case Map.get(filters, "identity") || Map.get(filters, :identity) do
-          nil -> []
-          id -> [identity: id]
-        end
-
-      credentials =
-        S3CredentialManager.list(opts)
-        |> Enum.map(&credential_to_serialisable/1)
-
-      {:ok, credentials}
-    end
-  end
+  defdelegate handle_s3_list_credentials(filters \\ %{}), to: S3Handler
 
   @doc """
   Deletes an S3 credential by access key ID.
@@ -3102,27 +3071,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec handle_s3_delete_credential(String.t()) :: {:ok, map()} | {:error, term()}
-  def handle_s3_delete_credential(access_key_id) when is_binary(access_key_id) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         :ok <- S3CredentialManager.delete(access_key_id) do
-      AuditLog.log_event(
-        event_type: :s3_credential_deleted,
-        actor_uid: 0,
-        resource: access_key_id,
-        details: %{}
-      )
-
-      {:ok, %{}}
-    else
-      {:error, :not_found} ->
-        {:error, NotFound.exception(message: "S3 credential '#{access_key_id}' not found")}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_s3_delete_credential(access_key_id), to: S3Handler
 
   @doc """
   Rotates the secret access key for an S3 credential.
@@ -3135,27 +3084,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec handle_s3_rotate_credential(String.t()) :: {:ok, map()} | {:error, term()}
-  def handle_s3_rotate_credential(access_key_id) when is_binary(access_key_id) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, credential} <- S3CredentialManager.rotate(access_key_id) do
-      AuditLog.log_event(
-        event_type: :s3_credential_rotated,
-        actor_uid: 0,
-        resource: access_key_id,
-        details: %{}
-      )
-
-      {:ok, credential_to_serialisable(credential)}
-    else
-      {:error, :not_found} ->
-        {:error, NotFound.exception(message: "S3 credential '#{access_key_id}' not found")}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_s3_rotate_credential(access_key_id), to: S3Handler
 
   @doc """
   Shows details of a single S3 credential by access key ID.
@@ -3168,20 +3097,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec handle_s3_show_credential(String.t()) :: {:ok, map()} | {:error, term()}
-  def handle_s3_show_credential(access_key_id) when is_binary(access_key_id) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, credential} <- S3CredentialManager.lookup(access_key_id) do
-      {:ok, credential |> Map.delete(:secret_access_key) |> credential_to_serialisable()}
-    else
-      {:error, :not_found} ->
-        {:error, NotFound.exception(message: "S3 credential '#{access_key_id}' not found")}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_s3_show_credential(access_key_id), to: S3Handler
 
   # S3 bucket management (volumes exposed as S3 buckets)
 
@@ -3192,18 +3108,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of bucket info maps
   """
   @spec handle_s3_list_buckets() :: {:ok, [map()]}
-  def handle_s3_list_buckets do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      buckets =
-        VolumeRegistry.list()
-        |> Enum.map(&volume_to_bucket/1)
-        |> Enum.sort_by(& &1.name)
-
-      {:ok, buckets}
-    end
-  end
+  defdelegate handle_s3_list_buckets(), to: S3Handler
 
   @doc """
   Shows details of a single S3 bucket (volume).
@@ -3216,19 +3121,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec handle_s3_show_bucket(String.t()) :: {:ok, map()} | {:error, term()}
-  def handle_s3_show_bucket(bucket_name) when is_binary(bucket_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      case VolumeRegistry.get_by_name(bucket_name) do
-        {:ok, volume} ->
-          {:ok, volume_to_bucket(volume)}
-
-        {:error, :not_found} ->
-          {:error, NotFound.exception(message: "Bucket '#{bucket_name}' not found")}
-      end
-    end
-  end
+  defdelegate handle_s3_show_bucket(bucket_name), to: S3Handler
 
   @doc """
   Lists escalations, optionally filtered by `:status` or `:category`.
@@ -3438,54 +3331,7 @@ defmodule NeonFS.CLI.Handler do
   defp serialise_datetime(nil), do: nil
   defp serialise_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 
-  defp volume_to_bucket(volume) do
-    %{
-      name: volume.name,
-      created_at: DateTime.to_iso8601(volume.created_at),
-      durability: volume.durability,
-      compression: volume.compression,
-      logical_size: volume.logical_size,
-      physical_size: volume.physical_size
-    }
-  end
-
-  defp credential_to_serialisable(credential) do
-    Map.take(credential, [:access_key_id, :secret_access_key, :identity, :created_at])
-  end
-
   # Private helper functions
-
-  defp require_cluster do
-    if State.exists?() do
-      :ok
-    else
-      {:error,
-       NotFound.exception(
-         message:
-           "Cluster not initialised. Run 'neonfs cluster init' or 'neonfs cluster join' first."
-       )}
-    end
-  end
-
-  defp set_cli_metadata do
-    Logger.metadata(
-      component: :cli,
-      request_id: :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
-    )
-  end
-
-  # Wraps a legacy error reason into a structured NeonFS.Error.
-  # Already-structured errors (Splode exceptions with a class field) pass through unchanged.
-  defp wrap_error(%{__exception__: true, class: _} = error), do: error
-
-  defp wrap_error(reason) when is_binary(reason),
-    do: Internal.exception(message: reason)
-
-  defp wrap_error(reason) when is_atom(reason),
-    do: Internal.exception(message: Atom.to_string(reason))
-
-  defp wrap_error(reason),
-    do: Internal.exception(message: inspect(reason))
 
   @worker_config_keys %{
     "max_concurrent" => :max_concurrent,
