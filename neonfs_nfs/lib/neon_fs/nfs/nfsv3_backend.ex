@@ -44,7 +44,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Core.FileMeta
-  alias NeonFS.NFS.{Filehandle, InodeTable}
+  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable}
   alias NFSServer.NFSv3.Types.{Fattr3, Nfstime3, Sattr3, Specdata3, WccAttr, WccData}
   alias NFSServer.RPC.Auth
 
@@ -62,14 +62,14 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def getattr(fh, auth, _ctx) do
-    with {:ok, _vol, _path, meta} <- resolve_meta(fh, identity_opts(auth)) do
+    with {:ok, _vol, _path, meta} <- resolve_meta(fh, squashed_identity(auth, fh)) do
       {:ok, fattr_from_meta(meta)}
     end
   end
 
   @impl true
   def access(fh, requested_mask, auth, _ctx) do
-    case resolve_meta(fh, identity_opts(auth)) do
+    case resolve_meta(fh, squashed_identity(auth, fh)) do
       {:ok, _vol, _path, meta} ->
         {:ok, requested_mask, fattr_from_meta(meta)}
 
@@ -80,7 +80,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def lookup(dir_fh, name, auth, _ctx) do
-    id = identity_opts(auth)
+    id = squashed_identity(auth, dir_fh)
 
     with {:ok, vol_name, dir_path} <- resolve_dir(dir_fh),
          child_path <- Path.join(dir_path, name),
@@ -109,7 +109,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def readlink(fh, auth, _ctx) do
-    case resolve_meta(fh, identity_opts(auth)) do
+    case resolve_meta(fh, squashed_identity(auth, fh)) do
       {:ok, vol_name, path, meta} -> do_readlink(vol_name, path, meta)
       {:error, status} -> {:error, to_nfs_status(status), nil}
     end
@@ -134,7 +134,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def read(fh, offset, count, auth, _ctx) do
-    identity = identity_opts(auth)
+    identity = squashed_identity(auth, fh)
 
     case resolve_meta(fh, identity) do
       {:ok, vol_name, path, meta} ->
@@ -150,7 +150,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def readdir(fh, cookie, _verf, count, auth, _ctx) do
-    with {:ok, vol_name, path, dir_meta} <- resolve_meta(fh, identity_opts(auth)),
+    with {:ok, vol_name, path, dir_meta} <- resolve_meta(fh, squashed_identity(auth, fh)),
          {:ok, entries} <-
            core_call(NeonFS.Core, :list_dir, [vol_name, path]) do
       all_entries = build_readdir_entries(vol_name, path, entries)
@@ -191,7 +191,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def readdirplus(fh, cookie, verf, _dircount, maxcount, auth, ctx) do
-    identity = identity_opts(auth)
+    identity = squashed_identity(auth, fh)
 
     case readdir(fh, cookie, verf, maxcount, auth, ctx) do
       {:ok, plain_entries, new_verf, eof, dir_attr} ->
@@ -269,7 +269,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def fsstat(fh, auth, _ctx) do
-    case resolve_meta(fh, identity_opts(auth)) do
+    case resolve_meta(fh, squashed_identity(auth, fh)) do
       {:ok, _vol_name, _path, meta} ->
         # Capacity reporting is per-cluster, not per-volume; return
         # generous fixed values until #321 lands a Prometheus-backed
@@ -293,7 +293,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def fsinfo(fh, auth, _ctx) do
-    case resolve_meta(fh, identity_opts(auth)) do
+    case resolve_meta(fh, squashed_identity(auth, fh)) do
       {:ok, _vol_name, _path, meta} ->
         {:ok, fsinfo_reply(), fattr_from_meta(meta)}
 
@@ -304,7 +304,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def pathconf(fh, auth, _ctx) do
-    case resolve_meta(fh, identity_opts(auth)) do
+    case resolve_meta(fh, squashed_identity(auth, fh)) do
       {:ok, _vol_name, _path, meta} ->
         {:ok, pathconf_reply(), fattr_from_meta(meta)}
 
@@ -484,7 +484,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   def mkdir(dir_fh, name, %Sattr3{} = sattr, auth, _ctx) do
     case resolve_dir(dir_fh) do
       {:ok, vol_name, dir_path} ->
-        do_mkdir(vol_name, dir_path, name, sattr, identity_opts(auth))
+        do_mkdir(vol_name, dir_path, name, sattr, squashed_identity(auth, dir_fh))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
@@ -533,7 +533,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   def remove(dir_fh, name, auth, _ctx) do
     case resolve_dir(dir_fh) do
       {:ok, vol_name, dir_path} ->
-        do_remove(vol_name, dir_path, name, identity_opts(auth))
+        do_remove(vol_name, dir_path, name, squashed_identity(auth, dir_fh))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
@@ -574,7 +574,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   def rmdir(dir_fh, name, auth, _ctx) do
     case resolve_dir(dir_fh) do
       {:ok, vol_name, dir_path} ->
-        do_rmdir(vol_name, dir_path, name, identity_opts(auth))
+        do_rmdir(vol_name, dir_path, name, squashed_identity(auth, dir_fh))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
@@ -739,7 +739,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
           to_vol,
           to_dir_path,
           to_name,
-          identity_opts(auth)
+          squashed_identity(auth, from_dir_fh)
         )
 
       _ ->
@@ -888,7 +888,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def setattr(fh, %Sattr3{} = sattr, guard_ctime, auth, _ctx) do
-    identity = identity_opts(auth)
+    identity = squashed_identity(auth, fh)
 
     case resolve_meta(fh, identity) do
       {:ok, vol_name, path, pre_meta} ->
@@ -1004,6 +1004,42 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   defp identity_opts(_auth), do: [uid: @anon_uid, gids: [@anon_gid]]
+
+  # Like `identity_opts/1` but applies the export's root-squash policy
+  # (#1216): when the resolved identity is root (uid 0) and the export
+  # squashes root, the caller is authorised as `nobody` so a remote
+  # root can't act as the volume owner. The export lookup is skipped
+  # for non-root callers (squash only affects uid 0) and when the
+  # export config is unavailable (e.g. unit/e2e harnesses that don't
+  # run `ExportManager`), which leaves uid 0 unsquashed.
+  @spec squashed_identity(Auth.credential() | nil, binary()) :: keyword()
+  defp squashed_identity(auth, fh) do
+    base = identity_opts(auth)
+
+    with 0 <- Keyword.get(base, :uid),
+         {:ok, vol_name, _path} <- resolve_dir(fh),
+         true <- root_squash?(vol_name) do
+      [uid: @anon_uid, gids: [@anon_gid]]
+    else
+      _ -> base
+    end
+  end
+
+  defp root_squash?(vol_name) do
+    case get_export(vol_name) do
+      {:ok, %{root_squash: root_squash}} -> root_squash
+      _ -> false
+    end
+  end
+
+  defp get_export(vol_name) do
+    case Application.get_env(:neonfs_nfs, :get_export_fn) do
+      nil -> ExportManager.get_export(vol_name)
+      fun when is_function(fun, 1) -> fun.(vol_name)
+    end
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
 
   ## Internal — resolution
 

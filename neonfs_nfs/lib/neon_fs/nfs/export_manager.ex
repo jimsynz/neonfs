@@ -159,7 +159,8 @@ defmodule NeonFS.NFS.ExportManager do
                volume_id: volume.id,
                volume_name: volume.name,
                exported_at: volume.updated_at,
-               allowed_ips: Map.get(volume, :nfs_allowed_ips, [])
+               allowed_ips: Map.get(volume, :nfs_allowed_ips, []),
+               root_squash: Map.get(volume, :nfs_root_squash, true)
              )}
           end)
 

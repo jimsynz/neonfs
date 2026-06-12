@@ -870,6 +870,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       atime_mode: volume.atime_mode,
       nfs_export: volume.nfs_export,
       nfs_allowed_ips: volume.nfs_allowed_ips,
+      nfs_root_squash: volume.nfs_root_squash,
       durability: volume.durability,
       write_ack: volume.write_ack,
       tiering: volume.tiering,
@@ -901,6 +902,9 @@ defmodule NeonFS.Core.VolumeRegistry do
       atime_mode: volume_map[:atime_mode] || :noatime,
       nfs_export: volume_map[:nfs_export] || false,
       nfs_allowed_ips: volume_map[:nfs_allowed_ips] || [],
+      # `false` is meaningful (no_root_squash), so default only on a
+      # missing key — `|| true` would clobber an explicit `false`.
+      nfs_root_squash: Map.get(volume_map, :nfs_root_squash, true),
       durability: volume_map.durability,
       write_ack: volume_map.write_ack,
       tiering: tiering,

@@ -79,7 +79,8 @@ defmodule NeonFS.Core.Volume do
           updated_at: DateTime.t(),
           system: boolean(),
           nfs_export: boolean(),
-          nfs_allowed_ips: [String.t()]
+          nfs_allowed_ips: [String.t()],
+          nfs_root_squash: boolean()
         }
 
   defstruct [
@@ -103,6 +104,7 @@ defmodule NeonFS.Core.Volume do
     atime_mode: :noatime,
     nfs_export: false,
     nfs_allowed_ips: [],
+    nfs_root_squash: true,
     system: false
   ]
 
@@ -139,6 +141,7 @@ defmodule NeonFS.Core.Volume do
       encryption: Keyword.get(opts, :encryption, default_encryption()),
       metadata_consistency: Keyword.get(opts, :metadata_consistency),
       nfs_allowed_ips: Keyword.get(opts, :nfs_allowed_ips, []),
+      nfs_root_squash: Keyword.get(opts, :nfs_root_squash, true),
       logical_size: 0,
       physical_size: 0,
       chunk_count: 0,
@@ -245,6 +248,7 @@ defmodule NeonFS.Core.Volume do
       :metadata_consistency,
       :nfs_export,
       :nfs_allowed_ips,
+      :nfs_root_squash,
       :owner,
       :tiering,
       :verification,
@@ -335,7 +339,8 @@ defmodule NeonFS.Core.Volume do
          :ok <- validate_verification(volume.verification),
          :ok <- validate_encryption(volume.encryption),
          :ok <- validate_nfs_export(volume.nfs_export),
-         :ok <- validate_nfs_allowed_ips(volume.nfs_allowed_ips) do
+         :ok <- validate_nfs_allowed_ips(volume.nfs_allowed_ips),
+         :ok <- validate_nfs_root_squash(volume.nfs_root_squash) do
       validate_metadata_consistency(volume.metadata_consistency)
     end
   end
@@ -475,6 +480,9 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_nfs_export(flag) when is_boolean(flag), do: :ok
   defp validate_nfs_export(_), do: {:error, "nfs_export must be a boolean"}
+
+  defp validate_nfs_root_squash(flag) when is_boolean(flag), do: :ok
+  defp validate_nfs_root_squash(_), do: {:error, "nfs_root_squash must be a boolean"}
 
   # An empty list means allow-all (the historical posture); otherwise each
   # entry must be a well-formed IP or CIDR string (#1217).
