@@ -545,7 +545,7 @@ defmodule NeonFS.TestCase do
         case MetadataValue.decode(value) do
           {:ok, decoded} ->
             mock_store_insert(store, {key, decoded})
-            {:ok, "stub-tree-root"}
+            {:ok, {"stub-tree-root", []}}
 
           {:error, reason} ->
             {:error, {:metadata_value_decode_failed, reason}}
@@ -553,10 +553,10 @@ defmodule NeonFS.TestCase do
       end,
       index_tree_delete: fn _store, _root, _tier, key ->
         mock_store_delete(store, key)
-        {:ok, "stub-tree-root"}
+        {:ok, {"stub-tree-root", []}}
       end,
       index_tree_purge_tombstones: fn _store, _root, _tier, _before ->
-        {:ok, "stub-tree-root"}
+        {:ok, {"stub-tree-root", []}}
       end,
       volume_fetcher: fn _volume_id -> {:error, :not_found} end,
       provisioner: __MODULE__.NoopProvisioner

@@ -800,12 +800,16 @@ defmodule NeonFS.Core.Blob.Native do
 
   ## Returns
 
-    * `{:ok, new_root_hash}` — 32-byte binary of the new root chunk.
+    * `{:ok, {new_root_hash, written_nodes}}` — the 32-byte new root
+      chunk hash plus `written_nodes`, the list of `{chunk_hash,
+      chunk_bytes}` copy-on-write node chunks this op wrote. The
+      caller replicates `written_nodes` to the volume's other
+      metadata drives (#903).
     * `{:error, reason}` — for malformed input or chunk-store I/O
       failures.
   """
   @spec index_tree_put(store(), binary(), tier(), binary(), binary()) ::
-          {:ok, binary()} | {:error, String.t()}
+          {:ok, {binary(), [{binary(), binary()}]}} | {:error, String.t()}
   def index_tree_put(_store, _root_hash, _tier, _key, _value),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -816,12 +820,12 @@ defmodule NeonFS.Core.Blob.Native do
 
   ## Returns
 
-    * `{:ok, new_root_hash}` — 32-byte binary of the new root chunk.
+    * `{:ok, {new_root_hash, written_nodes}}` — see `index_tree_put/5`.
     * `{:error, reason}` — for malformed input or chunk-store I/O
       failures.
   """
   @spec index_tree_delete(store(), binary(), tier(), binary()) ::
-          {:ok, binary()} | {:error, String.t()}
+          {:ok, {binary(), [{binary(), binary()}]}} | {:error, String.t()}
   def index_tree_delete(_store, _root_hash, _tier, _key),
     do: :erlang.nif_error(:nif_not_loaded)
 
@@ -836,12 +840,13 @@ defmodule NeonFS.Core.Blob.Native do
 
   ## Returns
 
-    * `{:ok, new_root_hash}` — 32-byte binary of the (possibly
-      unchanged) root chunk.
+    * `{:ok, {new_root_hash, written_nodes}}` — the (possibly
+      unchanged) root chunk hash plus the rewritten node chunks. See
+      `index_tree_put/5`.
     * `{:error, reason}`.
   """
   @spec index_tree_purge_tombstones(store(), binary(), tier(), non_neg_integer()) ::
-          {:ok, binary()} | {:error, String.t()}
+          {:ok, {binary(), [{binary(), binary()}]}} | {:error, String.t()}
   def index_tree_purge_tombstones(_store, _root_hash, _tier, _before_unix_nanos),
     do: :erlang.nif_error(:nif_not_loaded)
 
