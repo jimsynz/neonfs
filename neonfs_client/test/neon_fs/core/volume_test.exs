@@ -208,6 +208,39 @@ defmodule NeonFS.Core.VolumeTest do
       assert {:error, "name must be a non-empty string"} = Volume.validate(vol)
     end
 
+    test "rejects names containing a path separator (#1201)" do
+      for bad <- ["../../tmp", "a/b", "/etc", "foo/"] do
+        vol = %{Volume.new("x") | name: bad}
+        assert {:error, "name must not contain '/'"} = Volume.validate(vol)
+      end
+    end
+
+    test "rejects names containing traversal segments (#1201)" do
+      for bad <- ["..", "foo..bar", ".."] do
+        vol = %{Volume.new("x") | name: bad}
+        assert {:error, "name must not contain '..'"} = Volume.validate(vol)
+      end
+    end
+
+    test "rejects '.' as a name (#1201)" do
+      vol = %{Volume.new("x") | name: "."}
+      assert {:error, "name must not be '.'"} = Volume.validate(vol)
+    end
+
+    test "rejects NUL and control characters (#1201)" do
+      for bad <- ["foo\0bar", "tab\there", "nl\nhere", "del\x7f"] do
+        vol = %{Volume.new("x") | name: bad}
+        assert {:error, "name must not contain NUL or control characters"} = Volume.validate(vol)
+      end
+    end
+
+    test "still accepts ordinary names and the system volume" do
+      for ok <- ["test-vol", "containerd", "vol_1", "bucket.name", "_system"] do
+        vol = %{Volume.new("x") | name: ok}
+        assert :ok = Volume.validate(vol)
+      end
+    end
+
     test "rejects invalid durability" do
       vol = %{Volume.new("x") | durability: %{type: :replicate, factor: 0, min_copies: 0}}
 
