@@ -112,8 +112,7 @@ defmodule NeonFS.Core.WriteOperation do
       %{volume_id: volume_id, path: path, write_id: write_id, offset: offset}
     )
 
-    uid = Keyword.get(opts, :uid, 0)
-    gids = Keyword.get(opts, :gids, [])
+    {uid, gids} = authz_identity(opts)
     client_ref = Keyword.get(opts, :client_ref)
 
     result =
@@ -161,8 +160,7 @@ defmodule NeonFS.Core.WriteOperation do
       %{volume_id: volume_id, file_id: file_id, write_id: write_id, offset: offset, by_id: true}
     )
 
-    uid = Keyword.get(opts, :uid, 0)
-    gids = Keyword.get(opts, :gids, [])
+    {uid, gids} = authz_identity(opts)
     client_ref = Keyword.get(opts, :client_ref)
 
     result =
@@ -214,8 +212,7 @@ defmodule NeonFS.Core.WriteOperation do
       %{volume_id: volume_id, path: path, write_id: write_id, streamed: true}
     )
 
-    uid = Keyword.get(opts, :uid, 0)
-    gids = Keyword.get(opts, :gids, [])
+    {uid, gids} = authz_identity(opts)
     client_ref = Keyword.get(opts, :client_ref)
 
     result =
@@ -1830,6 +1827,18 @@ defmodule NeonFS.Core.WriteOperation do
       {:ok, value} -> Keyword.put(file_opts, key, value)
       :error -> file_opts
     end
+  end
+
+  # The identity authorised for the write — distinct from the new
+  # file's owner. `:auth_uid`/`:auth_gids` carry the *caller* (e.g. an
+  # NFS AUTH_SYS client) so `Authorise.check` runs against them, while
+  # `:uid`/`:gid` set the resulting file's ownership. Callers that pass
+  # only `:uid`/`:gids` (S3, WebDAV, FUSE, containerd) keep their prior
+  # behaviour: the owner doubles as the authorised identity (#1230).
+  defp authz_identity(opts) do
+    uid = Keyword.get(opts, :auth_uid) || Keyword.get(opts, :uid, 0)
+    gids = Keyword.get(opts, :auth_gids) || Keyword.get(opts, :gids, [])
+    {uid, gids}
   end
 
   defp apply_uid_gid_opts(file_opts, opts) do

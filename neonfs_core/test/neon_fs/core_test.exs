@@ -318,6 +318,40 @@ defmodule NeonFS.CoreTest do
     end
   end
 
+  # write_file_at authorises against the *caller* (`:auth_uid`/`:auth_gids`)
+  # while `:uid`/`:gid` set the new file's owner — so an NFS server can
+  # check the AUTH_SYS client yet still assign POSIX ownership (#1230).
+  describe "write authorisation identity vs ownership (#1230)" do
+    test "denies a non-root caller without a grant", %{volume_name: vol_name} do
+      assert {:error, %PermissionDenied{}} =
+               Core.write_file_at(vol_name, "/w.txt", 0, "data",
+                 auth_uid: 1000,
+                 auth_gids: [1000]
+               )
+    end
+
+    test "a root caller may set a different file owner", %{volume_name: vol_name} do
+      assert {:ok, meta} =
+               Core.write_file_at(vol_name, "/w.txt", 0, "data",
+                 auth_uid: 0,
+                 uid: 1000,
+                 gid: 1000
+               )
+
+      assert meta.uid == 1000
+      assert meta.gid == 1000
+    end
+
+    test "falls back to :uid for authorisation when :auth_uid is absent", %{volume_name: vol_name} do
+      # Legacy callers (S3/WebDAV/FUSE/containerd) pass only :uid; it
+      # must still drive the authorisation check — no silent bypass.
+      assert {:error, %PermissionDenied{}} =
+               Core.write_file_at(vol_name, "/w2.txt", 0, "data", uid: 1000)
+
+      assert {:ok, _} = Core.write_file_at(vol_name, "/w2.txt", 0, "data", uid: 0)
+    end
+  end
+
   describe "list_files_recursive/2" do
     test "lists files under path", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/a.txt", ["aaa"])
