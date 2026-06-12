@@ -53,6 +53,83 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       # so just check it's a binary and present.
       assert is_binary(new_segment.last_written_by_neonfs_version)
     end
+
+    test "replicates every copy-on-write index-tree node chunk the write produced (#903)" do
+      capture = build_capture()
+
+      node_chunks = [{"node-hash-a", "node-bytes-a"}, {"node-hash-b", "node-bytes-b"}]
+
+      recording_replicator = %{
+        write_chunk: fn data, drives, opts ->
+          :ets.insert(capture.replicator_calls, {:replicate, {data, drives, opts}})
+          {:ok, "new-root-hash", %{successful: ["drv-local"], failed: []}}
+        end
+      }
+
+      opts =
+        build_opts(
+          capture: capture,
+          chunk_replicator: stub_replicator(recording_replicator),
+          index_tree_put: fn store, root, tier, key, value ->
+            :ets.insert(capture.tree_calls, {:put, store, root, tier, key, value})
+            {:ok, {"new-tree-root", node_chunks}}
+          end
+        )
+
+      assert {:ok, "new-root-hash"} = MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+
+      replicated =
+        capture.replicator_calls
+        |> :ets.lookup(:replicate)
+        |> Enum.map(fn {:replicate, {data, drives, write_opts}} -> {data, drives, write_opts} end)
+
+      replicated_data = Enum.map(replicated, fn {data, _drives, _opts} -> data end)
+
+      # Both node chunks AND the root segment are replicated, each
+      # through the same drive set and min_copies quorum.
+      assert "node-bytes-a" in replicated_data
+      assert "node-bytes-b" in replicated_data
+      assert length(replicated) == 3
+
+      expected_drive_ids = Enum.map(sample_drives(), & &1.drive_id)
+
+      for {_data, drives, write_opts} <- replicated do
+        assert Enum.map(drives, & &1.drive_id) == expected_drive_ids
+        assert Keyword.fetch!(write_opts, :min_copies) == 1
+      end
+    end
+
+    test "aborts the write without flipping the bootstrap pointer when a node chunk can't reach quorum" do
+      capture = build_capture()
+
+      failing_node_replicator = %{
+        write_chunk: fn _data, _drives, _opts ->
+          {:error,
+           QuorumUnavailable.exception(
+             operation: :write_chunk,
+             required: 2,
+             available: 0,
+             successful: [],
+             failed: []
+           )}
+        end
+      }
+
+      opts =
+        build_opts(
+          capture: capture,
+          chunk_replicator: stub_replicator(failing_node_replicator),
+          index_tree_put: fn store, root, tier, key, value ->
+            :ets.insert(capture.tree_calls, {:put, store, root, tier, key, value})
+            {:ok, {"new-tree-root", [{"node-hash-a", "node-bytes-a"}]}}
+          end
+        )
+
+      assert {:error, %QuorumUnavailable{}} =
+               MetadataWriter.put("vol-1", :file_index, "k", "v", opts)
+
+      assert [] = :ets.lookup(capture.bootstrap_calls, :bootstrap)
+    end
   end
 
   describe "delete/4" do
@@ -404,19 +481,23 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       {:ok, :updated}
     end
 
+    # The NIFs return `{new_root, written_nodes}`; the default mocks
+    # write no copy-on-write nodes (empty list) so only the root
+    # segment replicates. The dedicated fan-out test below injects a
+    # non-empty `written_nodes` list.
     capturing_put = fn store, root, tier, key, value ->
       :ets.insert(capture.tree_calls, {:put, store, root, tier, key, value})
-      {:ok, "new-tree-root"}
+      {:ok, {"new-tree-root", []}}
     end
 
     capturing_delete = fn store, root, tier, key ->
       :ets.insert(capture.tree_calls, {:delete, store, root, tier, key})
-      {:ok, "new-tree-root"}
+      {:ok, {"new-tree-root", []}}
     end
 
     capturing_purge = fn store, root, tier, before_nanos ->
       :ets.insert(capture.tree_calls, {:purge, store, root, tier, before_nanos})
-      {:ok, "new-tree-root"}
+      {:ok, {"new-tree-root", []}}
     end
 
     defaults = [

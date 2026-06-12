@@ -254,12 +254,14 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
            resolve_or_provision(volume_id, opts),
          current_tree_root = Map.fetch!(segment.index_roots, index_kind),
          store = pick_store_handle(root_entry, opts),
-         {:ok, new_tree_root} <- run_tree_op(tree_op, store, current_tree_root),
+         {:ok, new_tree_root, written_nodes} <- run_tree_op(tree_op, store, current_tree_root),
          {advanced_segment, _ts} = advance_segment(segment, index_kind, new_tree_root),
          encoded = RootSegment.encode(advanced_segment),
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
+         :ok <-
+           replicate_tree_nodes(written_nodes, replica_drives, advanced_segment.durability, opts),
          {:ok, new_root_chunk_hash} <-
-           replicate_segment(encoded, replica_drives, advanced_segment.durability, opts) do
+           replicate_metadata_chunk(encoded, replica_drives, advanced_segment.durability, opts) do
       case update_bootstrap(
              volume_id,
              root_entry.root_chunk_hash,
@@ -299,7 +301,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
          encoded = RootSegment.encode(updated_segment),
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
          {:ok, new_root_chunk_hash} <-
-           replicate_segment(encoded, replica_drives, updated_segment.durability, opts) do
+           replicate_metadata_chunk(encoded, replica_drives, updated_segment.durability, opts) do
       case update_bootstrap(
              volume_id,
              root_entry.root_chunk_hash,
@@ -366,9 +368,14 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   defp run_tree_op(tree_op, store, current_tree_root) do
     case tree_op.(store, normalise_tree_root(current_tree_root)) do
-      {:ok, new_root} when is_binary(new_root) -> {:ok, new_root}
-      {:error, reason} -> {:error, {:index_tree_write_failed, reason}}
-      other -> {:error, {:index_tree_write_failed, other}}
+      {:ok, {new_root, written_nodes}} when is_binary(new_root) and is_list(written_nodes) ->
+        {:ok, new_root, written_nodes}
+
+      {:error, reason} ->
+        {:error, {:index_tree_write_failed, reason}}
+
+      other ->
+        {:error, {:index_tree_write_failed, other}}
     end
   end
 
@@ -436,7 +443,26 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     end
   end
 
-  defp replicate_segment(encoded, replica_drives, durability, opts) do
+  # The copy-on-write index-tree nodes a write produced were written by
+  # the NIF only to the single local store. Replicate each to the
+  # volume's full metadata drive set with the same majority-wins quorum
+  # (`min_copies`) the root segment uses, before the bootstrap pointer
+  # flips — so any replica node can walk the tree immediately rather
+  # than only after anti-entropy catches up (#903). A node chunk that
+  # can't reach quorum aborts the whole write; the locally-written
+  # chunks orphan to GC, exactly as a failed segment replication does.
+  defp replicate_tree_nodes([], _replica_drives, _durability, _opts), do: :ok
+
+  defp replicate_tree_nodes(written_nodes, replica_drives, durability, opts) do
+    Enum.reduce_while(written_nodes, :ok, fn {_hash, bytes}, :ok ->
+      case replicate_metadata_chunk(bytes, replica_drives, durability, opts) do
+        {:ok, _hash} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp replicate_metadata_chunk(encoded, replica_drives, durability, opts) do
     chunk_replicator = Keyword.get(opts, :chunk_replicator, ChunkReplicator)
     min_copies = min_copies(durability)
 

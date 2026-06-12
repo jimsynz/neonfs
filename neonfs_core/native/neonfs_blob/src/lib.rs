@@ -975,8 +975,13 @@ fn index_tree_range<'a>(
 
 /// Insert or replace `key`'s value in an index tree (#781) backed
 /// by the volume's BlobStore (#813). Empty `root_hash` creates a
-/// new tree. Returns the new root hash (the IndexTree is
-/// copy-on-write — every put produces a new root chunk).
+/// new tree. The IndexTree is copy-on-write — every put produces a
+/// new root chunk plus the rewritten leaf→root path.
+///
+/// Returns `{new_root_hash, [{chunk_hash, chunk_bytes}]}` — the new
+/// root plus the copy-on-write node chunks this op wrote, so the
+/// caller can replicate them to the volume's other metadata drives
+/// (#903).
 #[rustler::nif]
 fn index_tree_put<'a>(
     env: Env<'a>,
@@ -985,7 +990,7 @@ fn index_tree_put<'a>(
     tier: String,
     key: Binary,
     value: Binary,
-) -> Result<Binary<'a>, String> {
+) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
     let parsed_tier = parse_tier(&tier)?;
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
 
@@ -1002,12 +1007,16 @@ fn index_tree_put<'a>(
         )
         .map_err(|e| e.to_string())?;
 
-    Ok(vec_to_binary(env, new_root.as_bytes()))
+    let written = written_nodes_to_binaries(env, tree.store.take_written());
+    Ok((vec_to_binary(env, new_root.as_bytes()), written))
 }
 
 /// Tombstone `key` in an index tree. Even on a never-written tree
 /// (`root_hash == <<>>`) this writes a tombstone so anti-entropy
-/// can replicate the delete; the returned hash is the new root.
+/// can replicate the delete.
+///
+/// Returns `{new_root_hash, [{chunk_hash, chunk_bytes}]}` — see
+/// `index_tree_put`.
 #[rustler::nif]
 fn index_tree_delete<'a>(
     env: Env<'a>,
@@ -1015,7 +1024,7 @@ fn index_tree_delete<'a>(
     root_hash: Binary,
     tier: String,
     key: Binary,
-) -> Result<Binary<'a>, String> {
+) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
     let parsed_tier = parse_tier(&tier)?;
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
 
@@ -1028,13 +1037,15 @@ fn index_tree_delete<'a>(
         .delete(root.as_ref(), key.as_slice())
         .map_err(|e| e.to_string())?;
 
-    Ok(vec_to_binary(env, new_root.as_bytes()))
+    let written = written_nodes_to_binaries(env, tree.store.take_written());
+    Ok((vec_to_binary(env, new_root.as_bytes()), written))
 }
 
 /// Reap tombstones whose `deleted_at` is older than
 /// `before_unix_nanos`. Walks every leaf and rewrites those that
 /// changed. Returns the new root hash (equal to the input if
-/// nothing was reaped).
+/// nothing was reaped) plus the rewritten node chunks — see
+/// `index_tree_put`.
 ///
 /// Errors if the input root_hash is `<<>>` — there's nothing to
 /// purge from a tree that was never written.
@@ -1045,7 +1056,7 @@ fn index_tree_purge_tombstones<'a>(
     root_hash: Binary,
     tier: String,
     before_unix_nanos: u64,
-) -> Result<Binary<'a>, String> {
+) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
     if root_hash.is_empty() {
         return Err("cannot purge tombstones on an empty tree (root_hash is <<>>)".to_string());
     }
@@ -1064,7 +1075,25 @@ fn index_tree_purge_tombstones<'a>(
         .purge_tombstones(&root, before)
         .map_err(|e| e.to_string())?;
 
-    Ok(vec_to_binary(env, new_root.as_bytes()))
+    let written = written_nodes_to_binaries(env, tree.store.take_written());
+    Ok((vec_to_binary(env, new_root.as_bytes()), written))
+}
+
+/// Encodes the adapter's drained write set as `[{hash, bytes}]`
+/// binaries for the return to Elixir.
+fn written_nodes_to_binaries<'a>(
+    env: Env<'a>,
+    written: Vec<(crate::hash::Hash, Vec<u8>)>,
+) -> Vec<(Binary<'a>, Binary<'a>)> {
+    written
+        .into_iter()
+        .map(|(hash, bytes)| {
+            (
+                vec_to_binary(env, hash.as_bytes()),
+                vec_to_binary(env, &bytes),
+            )
+        })
+        .collect()
 }
 
 /// Parses a 0-byte or 32-byte binary into `Option<Hash>`. The

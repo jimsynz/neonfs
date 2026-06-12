@@ -49,20 +49,26 @@ defmodule NeonFS.Core.Blob.NativeIndexTreeTest do
   describe "index_tree_put/5 → index_tree_get/4 round-trip" do
     test "put on an empty tree creates a fresh root, get returns the value",
          %{store: store} do
-      assert {:ok, root} =
+      assert {:ok, {root, written}} =
                Native.index_tree_put(store, <<>>, "hot", "alpha", "value-a")
 
       assert byte_size(root) == 32
+
+      # The copy-on-write nodes this put produced are reported for
+      # replication, the new root chunk among them (#903).
+      assert [_ | _] = written
+      assert Enum.all?(written, fn {h, bytes} -> byte_size(h) == 32 and is_binary(bytes) end)
+      assert Enum.any?(written, fn {h, _bytes} -> h == root end)
 
       assert {:ok, "value-a"} =
                Native.index_tree_get(store, root, "hot", "alpha")
     end
 
     test "successive puts return successive roots, latest overrides", %{store: store} do
-      assert {:ok, root1} =
+      assert {:ok, {root1, _}} =
                Native.index_tree_put(store, <<>>, "hot", "k", "v1")
 
-      assert {:ok, root2} =
+      assert {:ok, {root2, _}} =
                Native.index_tree_put(store, root1, "hot", "k", "v2")
 
       assert root2 != root1
@@ -73,9 +79,9 @@ defmodule NeonFS.Core.Blob.NativeIndexTreeTest do
     end
 
     test "range returns inserted entries in sort order", %{store: store} do
-      {:ok, root} = Native.index_tree_put(store, <<>>, "hot", "b", "B")
-      {:ok, root} = Native.index_tree_put(store, root, "hot", "a", "A")
-      {:ok, root} = Native.index_tree_put(store, root, "hot", "c", "C")
+      {:ok, {root, _}} = Native.index_tree_put(store, <<>>, "hot", "b", "B")
+      {:ok, {root, _}} = Native.index_tree_put(store, root, "hot", "a", "A")
+      {:ok, {root, _}} = Native.index_tree_put(store, root, "hot", "c", "C")
 
       assert {:ok, [{"a", "A"}, {"b", "B"}, {"c", "C"}]} =
                Native.index_tree_range(store, root, "hot", <<>>, <<>>)
@@ -85,17 +91,18 @@ defmodule NeonFS.Core.Blob.NativeIndexTreeTest do
   describe "index_tree_delete/4" do
     test "delete on an existing key returns a new root and get returns nil",
          %{store: store} do
-      {:ok, root} = Native.index_tree_put(store, <<>>, "hot", "k", "v")
+      {:ok, {root, _}} = Native.index_tree_put(store, <<>>, "hot", "k", "v")
 
-      assert {:ok, root2} = Native.index_tree_delete(store, root, "hot", "k")
+      assert {:ok, {root2, written}} = Native.index_tree_delete(store, root, "hot", "k")
       assert root2 != root
+      assert [_ | _] = written
 
       assert {:ok, nil} = Native.index_tree_get(store, root2, "hot", "k")
     end
 
     test "delete on an empty tree writes a tombstone (no-op-equivalent for reads)",
          %{store: store} do
-      assert {:ok, root} = Native.index_tree_delete(store, <<>>, "hot", "missing")
+      assert {:ok, {root, _written}} = Native.index_tree_delete(store, <<>>, "hot", "missing")
       assert byte_size(root) == 32
 
       assert {:ok, nil} = Native.index_tree_get(store, root, "hot", "missing")
@@ -112,14 +119,14 @@ defmodule NeonFS.Core.Blob.NativeIndexTreeTest do
 
     test "drops tombstones whose deleted_at is older than the cutoff",
          %{store: store} do
-      {:ok, root} = Native.index_tree_put(store, <<>>, "hot", "live", "L")
-      {:ok, root} = Native.index_tree_put(store, root, "hot", "dead", "D")
-      {:ok, root} = Native.index_tree_delete(store, root, "hot", "dead")
+      {:ok, {root, _}} = Native.index_tree_put(store, <<>>, "hot", "live", "L")
+      {:ok, {root, _}} = Native.index_tree_put(store, root, "hot", "dead", "D")
+      {:ok, {root, _}} = Native.index_tree_delete(store, root, "hot", "dead")
 
       future_nanos =
         System.system_time(:nanosecond) + 60 * 1_000_000_000
 
-      assert {:ok, purged_root} =
+      assert {:ok, {purged_root, _written}} =
                Native.index_tree_purge_tombstones(store, root, "hot", future_nanos)
 
       assert {:ok, "L"} = Native.index_tree_get(store, purged_root, "hot", "live")

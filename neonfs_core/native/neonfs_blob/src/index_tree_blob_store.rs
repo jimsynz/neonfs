@@ -6,6 +6,8 @@
 //! metadata — read latency is what matters and the chunks are small
 //! enough that compression doesn't pay off.
 
+use std::collections::HashSet;
+
 use crate::error::StoreError;
 use crate::hash::{self, Hash};
 use crate::index_tree::{ChunkStore, IndexTreeError, Result};
@@ -15,18 +17,39 @@ use crate::store::BlobStore;
 /// Borrowed adapter — does not own the `BlobStore`. The caller (the
 /// NIF in lib.rs) holds the `BlobStoreResource` for the lifetime of
 /// the call and constructs this adapter for each operation.
+///
+/// A mutation writes the copy-on-write nodes it produces only to this
+/// one local store. The adapter records each new chunk so the caller
+/// can replicate them to the volume's other metadata drives — index
+/// trees would otherwise be cross-node readable only after anti-entropy
+/// caught up, never synchronously (#903).
 pub struct BlobStoreChunkStore<'a> {
     store: &'a BlobStore,
     tier: Tier,
+    written: Vec<(Hash, Vec<u8>)>,
+    seen: HashSet<Hash>,
 }
 
 impl<'a> BlobStoreChunkStore<'a> {
     pub fn new(store: &'a BlobStore, tier: Tier) -> Self {
-        Self { store, tier }
+        Self {
+            store,
+            tier,
+            written: Vec::new(),
+            seen: HashSet::new(),
+        }
     }
 
     pub fn tier(&self) -> Tier {
         self.tier
+    }
+
+    /// Drains the chunks `put` wrote during this adapter's lifetime, in
+    /// write order and deduplicated by hash. Reads (`get`) are not
+    /// recorded.
+    pub fn take_written(&mut self) -> Vec<(Hash, Vec<u8>)> {
+        self.seen.clear();
+        std::mem::take(&mut self.written)
     }
 }
 
@@ -42,7 +65,12 @@ impl ChunkStore for BlobStoreChunkStore<'_> {
     fn put(&mut self, data: &[u8]) -> Result<Hash> {
         let h = hash::sha256(data);
         match self.store.write_chunk(&h, data, self.tier) {
-            Ok(()) => Ok(h),
+            Ok(()) => {
+                if self.seen.insert(h) {
+                    self.written.push((h, data.to_vec()));
+                }
+                Ok(h)
+            }
             Err(e) => Err(IndexTreeError::Store(e.to_string())),
         }
     }
@@ -88,6 +116,28 @@ mod tests {
         let h2 = adapter.put(b"identical").unwrap();
         assert_eq!(h1, h2);
         assert_eq!(adapter.get(&h1).unwrap(), Some(b"identical".to_vec()));
+    }
+
+    #[test]
+    fn records_written_chunks_in_order_deduped_and_ignores_reads() {
+        let (_dir, store) = fresh_store();
+        let mut adapter = BlobStoreChunkStore::new(&store, Tier::Hot);
+
+        let ha = adapter.put(b"chunk-a").unwrap();
+        let hb = adapter.put(b"chunk-b").unwrap();
+        // Re-writing an identical chunk must not record a duplicate.
+        let _ = adapter.put(b"chunk-a").unwrap();
+        // Reads are not recorded.
+        let _ = adapter.get(&ha).unwrap();
+
+        let written = adapter.take_written();
+        assert_eq!(
+            written,
+            vec![(ha, b"chunk-a".to_vec()), (hb, b"chunk-b".to_vec())]
+        );
+
+        // Draining resets the recorder for the next mutation.
+        assert!(adapter.take_written().is_empty());
     }
 
     #[test]
