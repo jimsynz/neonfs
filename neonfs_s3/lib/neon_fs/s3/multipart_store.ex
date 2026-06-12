@@ -134,6 +134,42 @@ defmodule NeonFS.S3.MultipartStore do
     |> Enum.sort_by(& &1.key)
   end
 
+  @doc """
+  Deletes uploads whose `initiated` is older than `max_age_seconds`,
+  removing the `:meta` key and every `:part:` key. Returns the swept
+  upload IDs.
+
+  Abandoned uploads — never completed, never aborted — would otherwise
+  persist in cluster state (and every Ra snapshot) indefinitely, since
+  the bookkeeping moved off node-local ETS into the KV store (#1181). The
+  shipped part chunks are orphan-reaped by core GC; only this bookkeeping
+  needs sweeping. Idempotent, so it's safe to run from every S3 node.
+  """
+  @spec expire_abandoned(non_neg_integer()) :: [String.t()]
+  def expire_abandoned(max_age_seconds) do
+    cutoff = DateTime.add(DateTime.utc_now(), -max_age_seconds, :second)
+
+    expired =
+      @key_prefix
+      |> KV.list_prefix()
+      |> Enum.flat_map(&expired_upload_id(&1, cutoff))
+
+    Enum.each(expired, &delete/1)
+    expired
+  end
+
+  defp expired_upload_id({@key_prefix <> rest, %{initiated: initiated}}, cutoff) do
+    case String.split(rest, ":") do
+      [upload_id, "meta"] ->
+        if DateTime.compare(initiated, cutoff) == :lt, do: [upload_id], else: []
+
+      _ ->
+        []
+    end
+  end
+
+  defp expired_upload_id(_entry, _cutoff), do: []
+
   defp meta_key(upload_id), do: @key_prefix <> upload_id <> ":meta"
 
   defp part_prefix(upload_id), do: @key_prefix <> upload_id <> ":part:"

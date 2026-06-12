@@ -14,7 +14,7 @@ defmodule NeonFS.S3.Supervisor do
   use Supervisor
 
   alias NeonFS.Client.Registrar
-  alias NeonFS.S3.{Backend, HealthCheck, HealthPlug}
+  alias NeonFS.S3.{Backend, HealthCheck, HealthPlug, MultipartReaper}
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -30,6 +30,7 @@ defmodule NeonFS.S3.Supervisor do
 
     children = [
       {Registrar, metadata: registration_metadata(), type: :s3, name: NeonFS.Client.Registrar.S3},
+      MultipartReaper,
       {Bandit,
        plug: {HealthPlug, backend: Backend},
        port: port,

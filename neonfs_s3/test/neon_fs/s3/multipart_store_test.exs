@@ -103,4 +103,42 @@ defmodule NeonFS.S3.MultipartStoreTest do
   test "list_for_bucket returns empty list for unknown bucket" do
     assert [] = MultipartStore.list_for_bucket("unknown")
   end
+
+  describe "expire_abandoned/1" do
+    # Backdate an upload's `initiated` by rewriting its meta key directly.
+    defp age_upload!(upload_id, seconds_ago) do
+      key = "s3_multipart:" <> upload_id <> ":meta"
+      {:ok, meta} = KV.get(key)
+      aged = %{meta | initiated: DateTime.add(DateTime.utc_now(), -seconds_ago, :second)}
+      :ok = KV.put(key, aged)
+    end
+
+    test "removes uploads older than the threshold, with their parts" do
+      old = create!("bucket", "old")
+      :ok = MultipartStore.put_part(old, 1, %{etag: "e1", size: 1, chunk_refs: []})
+      age_upload!(old, 8 * 24 * 60 * 60)
+
+      assert [^old] = MultipartStore.expire_abandoned(7 * 24 * 60 * 60)
+
+      assert {:error, :not_found} = MultipartStore.get(old)
+      assert KV.list_prefix("s3_multipart:" <> old <> ":") == []
+    end
+
+    test "keeps uploads newer than the threshold" do
+      fresh = create!("bucket", "fresh")
+
+      assert [] = MultipartStore.expire_abandoned(7 * 24 * 60 * 60)
+      assert {:ok, _} = MultipartStore.get(fresh)
+    end
+
+    test "sweeps only the aged uploads, leaving fresh ones" do
+      old = create!("bucket", "old")
+      fresh = create!("bucket", "fresh")
+      age_upload!(old, 8 * 24 * 60 * 60)
+
+      assert [^old] = MultipartStore.expire_abandoned(7 * 24 * 60 * 60)
+      assert {:error, :not_found} = MultipartStore.get(old)
+      assert {:ok, _} = MultipartStore.get(fresh)
+    end
+  end
 end
