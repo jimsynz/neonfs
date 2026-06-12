@@ -6,7 +6,7 @@ use crate::output::{json, table, OutputFormat};
 use crate::term::types::NfsExportInfo;
 use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
-use eetf::{Binary, List, Term};
+use eetf::{Atom, Binary, List, Term};
 use std::process::Command;
 
 /// NFS export and mount subcommands
@@ -21,6 +21,12 @@ pub enum NfsCommand {
         /// Omit to allow all clients. E.g. `--allow 10.0.0.0/8 --allow 192.168.1.5`.
         #[arg(long = "allow", value_name = "IP_OR_CIDR")]
         allow: Vec<String>,
+
+        /// Disable root-squash for this export: a remote uid 0 acts as
+        /// root rather than being mapped to `nobody`. Off by default
+        /// (root-squash on, the standard NFS posture).
+        #[arg(long = "no-root-squash")]
+        no_root_squash: bool,
     },
 
     /// Unexport a volume from NFS
@@ -66,7 +72,11 @@ impl NfsCommand {
     /// Execute the NFS command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            NfsCommand::Export { volume, allow } => self.export(volume, allow, format),
+            NfsCommand::Export {
+                volume,
+                allow,
+                no_root_squash,
+            } => self.export(volume, allow, !no_root_squash, format),
             NfsCommand::Unexport { volume } => self.unexport(volume, format),
             NfsCommand::List => self.list(format),
             NfsCommand::Mount {
@@ -78,7 +88,13 @@ impl NfsCommand {
         }
     }
 
-    fn export(&self, volume: &str, allow: &[String], format: OutputFormat) -> Result<()> {
+    fn export(
+        &self,
+        volume: &str,
+        allow: &[String],
+        root_squash: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
@@ -94,12 +110,14 @@ impl NfsCommand {
                 .collect(),
         });
 
+        let root_squash_term = Term::Atom(Atom::from(if root_squash { "true" } else { "false" }));
+
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "nfs_export",
-                vec![volume_term, allow_term],
+                vec![volume_term, allow_term, root_squash_term],
             )
             .await
         })?;

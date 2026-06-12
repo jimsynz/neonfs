@@ -755,6 +755,19 @@ defmodule NeonFS.CLI.HandlerTest do
       assert volume.nfs_export
     end
 
+    test "nfs_export defaults root-squash on; no_root_squash disables it (#1216)",
+         %{vol_name: vol_name} do
+      assert {:ok, info} = Handler.nfs_export(vol_name)
+      assert info.root_squash == true
+      assert {:ok, volume} = VolumeRegistry.get_by_name(vol_name)
+      assert volume.nfs_root_squash == true
+
+      assert {:ok, info} = Handler.nfs_export(vol_name, [], false)
+      assert info.root_squash == false
+      assert {:ok, volume} = VolumeRegistry.get_by_name(vol_name)
+      assert volume.nfs_root_squash == false
+    end
+
     test "nfs_export returns VolumeNotFound for an unknown volume" do
       assert {:error, %NeonFS.Error.VolumeNotFound{volume_name: "no-such-vol"}} =
                Handler.nfs_export("no-such-vol")

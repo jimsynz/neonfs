@@ -255,6 +255,20 @@ defmodule NeonFS.Core.VolumeTest do
       end
     end
 
+    test "nfs_root_squash defaults on and accepts a boolean (#1216)" do
+      assert Volume.new("x").nfs_root_squash == true
+      assert Volume.new("x", nfs_root_squash: false).nfs_root_squash == false
+      assert :ok = Volume.validate(%{Volume.new("x") | nfs_root_squash: false})
+
+      assert {:error, "nfs_root_squash must be a boolean"} =
+               Volume.validate(%{Volume.new("x") | nfs_root_squash: "yes"})
+    end
+
+    test "update/2 can toggle nfs_root_squash (#1216)" do
+      vol = Volume.new("x")
+      assert Volume.update(vol, nfs_root_squash: false).nfs_root_squash == false
+    end
+
     test "rejects invalid durability" do
       vol = %{Volume.new("x") | durability: %{type: :replicate, factor: 0, min_copies: 0}}
 

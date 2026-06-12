@@ -23,6 +23,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       Application.delete_env(:neonfs_nfs, :read_file_stream_fn)
       Application.delete_env(:neonfs_nfs, :lookup_volume_name_fn)
       Application.delete_env(:neonfs_nfs, :register_volume_id_fn)
+      Application.delete_env(:neonfs_nfs, :get_export_fn)
     end)
 
     :ok
@@ -233,6 +234,68 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       assert {:error, :acces, %NFSServer.NFSv3.Types.WccData{}} =
                NFSv3Backend.mkdir(dir_fh, "new", %NFSServer.NFSv3.Types.Sattr3{}, auth, %{})
+    end
+  end
+
+  ## Root-squash (#1216)
+
+  describe "root-squash" do
+    setup do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      :ok
+    end
+
+    defp capture_identity_for_root(export_result) do
+      test_pid = self()
+      Application.put_env(:neonfs_nfs, :get_export_fn, fn _vol -> export_result end)
+
+      put_core(fn NeonFS.Core, :get_file_meta, [@volume_name, @file_path, opts] ->
+        send(test_pid, {:identity, opts})
+        {:ok, file_meta()}
+      end)
+
+      assert {:ok, %Fattr3{}} =
+               NFSv3Backend.getattr(valid_fh(), %Auth.Sys{uid: 0, gid: 0, gids: []}, %{})
+
+      assert_received {:identity, opts}
+      opts
+    end
+
+    test "maps uid 0 to nobody when the export squashes root" do
+      opts = capture_identity_for_root({:ok, %{root_squash: true}})
+      assert Keyword.get(opts, :uid) == 65_534
+      assert Keyword.get(opts, :gids) == [65_534]
+    end
+
+    test "passes uid 0 through when the export disables root-squash" do
+      opts = capture_identity_for_root({:ok, %{root_squash: false}})
+      assert Keyword.get(opts, :uid) == 0
+    end
+
+    test "leaves uid 0 unsquashed when the export config is unavailable" do
+      opts = capture_identity_for_root({:error, :not_found})
+      assert Keyword.get(opts, :uid) == 0
+    end
+
+    test "never squashes a non-root caller (no export lookup needed)" do
+      test_pid = self()
+
+      Application.put_env(:neonfs_nfs, :get_export_fn, fn _vol ->
+        send(test_pid, :export_looked_up)
+        {:ok, %{root_squash: true}}
+      end)
+
+      put_core(fn NeonFS.Core, :get_file_meta, [@volume_name, @file_path, opts] ->
+        send(test_pid, {:identity, opts})
+        {:ok, file_meta()}
+      end)
+
+      assert {:ok, %Fattr3{}} =
+               NFSv3Backend.getattr(valid_fh(), %Auth.Sys{uid: 1000, gid: 50, gids: []}, %{})
+
+      assert_received {:identity, opts}
+      assert Keyword.get(opts, :uid) == 1000
+      refute_received :export_looked_up
     end
   end
 
