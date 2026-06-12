@@ -237,6 +237,58 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
+  ## Per-request IP allow-list (#1228)
+
+  describe "per-request IP allow-list" do
+    setup do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      put_core(fn _, :get_file_meta, _ -> {:ok, file_meta()} end)
+      :ok
+    end
+
+    defp put_allow_list(allowed_ips) do
+      Application.put_env(:neonfs_nfs, :get_export_fn, fn _vol ->
+        {:ok, %{allowed_ips: allowed_ips, root_squash: false}}
+      end)
+    end
+
+    test "permits a request from an allowed client IP" do
+      put_allow_list(["10.0.0.0/8"])
+      assert {:ok, %Fattr3{}} = NFSv3Backend.getattr(valid_fh(), :auth, %{peer: {10, 1, 2, 3}})
+    end
+
+    test "refuses a request from a disallowed client IP with NFS3ERR_ACCES" do
+      put_allow_list(["10.0.0.0/8"])
+      assert {:error, :acces} = NFSv3Backend.getattr(valid_fh(), :auth, %{peer: {192, 168, 1, 1}})
+    end
+
+    test "an empty allow-list permits any client (allow-all, no regression)" do
+      put_allow_list([])
+      assert {:ok, %Fattr3{}} = NFSv3Backend.getattr(valid_fh(), :auth, %{peer: {203, 0, 113, 9}})
+    end
+
+    test "enforces on a namespace mutation, not just metadata reads" do
+      put_allow_list(["10.0.0.0/8"])
+      dir_inode = 0xCCCC_CCCC_CCCC_CCCC
+      put_inode_table(%{dir_inode => {@volume_name, "/parent"}})
+      dir_fh = Filehandle.encode(@volume_id_bin, dir_inode)
+
+      assert {:error, :acces, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.mkdir(
+                 dir_fh,
+                 "new",
+                 %NFSServer.NFSv3.Types.Sattr3{},
+                 :auth,
+                 %{peer: {192, 168, 1, 1}}
+               )
+    end
+
+    test "skips the check when no peer address is present (fail-open behind MOUNT)" do
+      put_allow_list(["10.0.0.0/8"])
+      assert {:ok, %Fattr3{}} = NFSv3Backend.getattr(valid_fh(), :auth, %{})
+    end
+  end
+
   ## Root-squash (#1216)
 
   describe "root-squash" do
