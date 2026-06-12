@@ -185,7 +185,7 @@ defmodule NeonFS.Client.ChunkReader do
 
     case Router.data_call(loc.node, :get_chunk, args, timeout: timeout) do
       {:ok, bytes} ->
-        {:ok, bytes}
+        verify_and_accept(bytes, loc, ref, rest, timeout)
 
       {:error, reason} ->
         Logger.debug("Data-plane chunk fetch failed, trying next location",
@@ -194,6 +194,34 @@ defmodule NeonFS.Client.ChunkReader do
         )
 
         try_locations(rest, ref, timeout, reason)
+    end
+  end
+
+  # The content-address invariant: a chunk's bytes must hash to its id.
+  # The data plane fetches whole chunks by hash, so verify SHA-256 here —
+  # one place, end-to-end (disk rot, transit, handler bugs), inherited by
+  # every interface (#1199). A mismatch means this replica is corrupt:
+  # emit telemetry (feeds repair/alerting) and fail over to the next
+  # location, which may hold a good copy. Compressed/encrypted chunks are
+  # fetched range-decoded via the core RPC path, not whole, so they can't
+  # be verified against the whole-chunk hash here — that's core/scrub's
+  # responsibility.
+  defp verify_and_accept(bytes, loc, ref, rest, timeout) do
+    if :crypto.hash(:sha256, bytes) == ref.hash do
+      {:ok, bytes}
+    else
+      :telemetry.execute(
+        [:neonfs, :client, :chunk_reader, :verify_failed],
+        %{size: byte_size(bytes)},
+        %{node: loc.node, hash: ref.hash}
+      )
+
+      Logger.warning("Chunk failed content-hash verification, trying next location",
+        node: loc.node,
+        chunk_hash: Base.encode16(ref.hash, case: :lower)
+      )
+
+      try_locations(rest, ref, timeout, {:chunk_verify_failed, ref.hash})
     end
   end
 

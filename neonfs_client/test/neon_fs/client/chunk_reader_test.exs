@@ -17,9 +17,19 @@ defmodule NeonFS.Client.ChunkReaderTest do
     :crypto.hash(:sha256, "fake-hash-#{seed}")
   end
 
+  # Real content hash for data-plane tests, which now verify fetched bytes
+  # against the chunk id (#1199).
+  defp content_hash(content), do: :crypto.hash(:sha256, content)
+
   defp ref(opts) do
+    hash =
+      case Keyword.fetch(opts, :content) do
+        {:ok, content} -> content_hash(content)
+        :error -> fake_hash(Keyword.fetch!(opts, :seed))
+      end
+
     %{
-      hash: fake_hash(Keyword.fetch!(opts, :seed)),
+      hash: hash,
       original_size: Keyword.fetch!(opts, :original_size),
       stored_size: Keyword.get(opts, :stored_size, Keyword.fetch!(opts, :original_size)),
       chunk_offset: Keyword.fetch!(opts, :chunk_offset),
@@ -37,7 +47,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       refs = [
         ref(
-          seed: 1,
+          content: bytes,
           original_size: byte_size(bytes),
           chunk_offset: 0,
           read_start: 0,
@@ -63,7 +73,13 @@ defmodule NeonFS.Client.ChunkReaderTest do
       chunk_bytes = "0123456789abcdef"
 
       refs = [
-        ref(seed: 1, original_size: 16, chunk_offset: 0, read_start: 4, read_length: 8)
+        ref(
+          content: chunk_bytes,
+          original_size: 16,
+          chunk_offset: 0,
+          read_start: 4,
+          read_length: 8
+        )
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
@@ -83,9 +99,15 @@ defmodule NeonFS.Client.ChunkReaderTest do
       chunk_c = String.duplicate("C", 10)
 
       refs = [
-        ref(seed: :a, original_size: 10, chunk_offset: 0, read_start: 5, read_length: 5),
-        ref(seed: :b, original_size: 10, chunk_offset: 10, read_start: 0, read_length: 10),
-        ref(seed: :c, original_size: 10, chunk_offset: 20, read_start: 0, read_length: 3)
+        ref(content: chunk_a, original_size: 10, chunk_offset: 0, read_start: 5, read_length: 5),
+        ref(
+          content: chunk_b,
+          original_size: 10,
+          chunk_offset: 10,
+          read_start: 0,
+          read_length: 10
+        ),
+        ref(content: chunk_c, original_size: 10, chunk_offset: 20, read_start: 0, read_length: 3)
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
@@ -95,9 +117,9 @@ defmodule NeonFS.Client.ChunkReaderTest do
       # The data plane returns chunks matched by hash, not call order.
       stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
         cond do
-          args[:hash] == fake_hash(:a) -> {:ok, chunk_a}
-          args[:hash] == fake_hash(:b) -> {:ok, chunk_b}
-          args[:hash] == fake_hash(:c) -> {:ok, chunk_c}
+          args[:hash] == content_hash(chunk_a) -> {:ok, chunk_a}
+          args[:hash] == content_hash(chunk_b) -> {:ok, chunk_b}
+          args[:hash] == content_hash(chunk_c) -> {:ok, chunk_c}
         end
       end)
 
@@ -122,7 +144,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       refs = [
         ref(
-          seed: 1,
+          content: "abcd",
           original_size: 4,
           chunk_offset: 0,
           read_start: 0,
@@ -149,7 +171,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       refs = [
         ref(
-          seed: 1,
+          content: "okok",
           original_size: 4,
           chunk_offset: 0,
           read_start: 0,
@@ -174,7 +196,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       refs = [
         ref(
-          seed: 1,
+          content: "ok!!",
           original_size: 4,
           chunk_offset: 0,
           read_start: 0,
@@ -236,6 +258,59 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       assert {:error, :no_available_locations} =
                ChunkReader.read_file("vol", "/x", exclude_nodes: [:only@host])
+    end
+  end
+
+  describe "read_file/3 — content-hash verification (#1199)" do
+    test "fails over to the next location when a replica serves corrupt bytes" do
+      good = "good"
+      n1 = :corrupt@host
+      n2 = :good@host
+
+      refs = [
+        ref(
+          content: good,
+          original_size: 4,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 4,
+          locations: [
+            %{node: n1, drive_id: "d1", tier: :hot},
+            %{node: n2, drive_id: "d2", tier: :hot}
+          ]
+        )
+      ]
+
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+
+      stub(Router, :data_call, fn
+        ^n1, :get_chunk, _args, _opts -> {:ok, "evil"}
+        ^n2, :get_chunk, _args, _opts -> {:ok, good}
+      end)
+
+      assert {:ok, ^good} = ChunkReader.read_file("vol", "/x")
+    end
+
+    test "errors and emits telemetry when every replica is corrupt" do
+      ref_a =
+        ref(content: "good", original_size: 4, chunk_offset: 0, read_start: 0, read_length: 4)
+
+      ref_hash = ref_a.hash
+
+      refs = [ref_a]
+
+      expect(Router, :call, fn _, _, _ -> {:ok, %{file_size: 4, chunks: refs}} end)
+      stub(Router, :data_call, fn _node, :get_chunk, _args, _opts -> {:ok, "evil"} end)
+
+      ref_tel =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :client, :chunk_reader, :verify_failed]
+        ])
+
+      assert {:error, {:chunk_verify_failed, ^ref_hash}} = ChunkReader.read_file("vol", "/x")
+
+      assert_received {[:neonfs, :client, :chunk_reader, :verify_failed], ^ref_tel, %{size: 4},
+                       %{hash: ^ref_hash}}
     end
   end
 
@@ -378,8 +453,8 @@ defmodule NeonFS.Client.ChunkReaderTest do
       chunk_b = String.duplicate("B", 10)
 
       refs = [
-        ref(seed: :a, original_size: 10, chunk_offset: 0, read_start: 0, read_length: 10),
-        ref(seed: :b, original_size: 10, chunk_offset: 10, read_start: 0, read_length: 10)
+        ref(content: chunk_a, original_size: 10, chunk_offset: 0, read_start: 0, read_length: 10),
+        ref(content: chunk_b, original_size: 10, chunk_offset: 10, read_start: 0, read_length: 10)
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, ["vol", "/f.txt", []] ->
@@ -388,8 +463,8 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
         cond do
-          args[:hash] == fake_hash(:a) -> {:ok, chunk_a}
-          args[:hash] == fake_hash(:b) -> {:ok, chunk_b}
+          args[:hash] == content_hash(chunk_a) -> {:ok, chunk_a}
+          args[:hash] == content_hash(chunk_b) -> {:ok, chunk_b}
         end
       end)
 
@@ -416,7 +491,13 @@ defmodule NeonFS.Client.ChunkReaderTest do
       chunk_bytes = "0123456789abcdef"
 
       refs = [
-        ref(seed: :a, original_size: 16, chunk_offset: 0, read_start: 4, read_length: 8)
+        ref(
+          content: chunk_bytes,
+          original_size: 16,
+          chunk_offset: 0,
+          read_start: 4,
+          read_length: 8
+        )
       ]
 
       expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
@@ -434,8 +515,10 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
   describe "read_file_stream/3 — per-chunk fallback" do
     test "fetches compressed chunks via a range-limited read_file RPC" do
+      chunk_a = String.duplicate("A", 10)
+
       refs = [
-        ref(seed: :a, original_size: 10, chunk_offset: 0, read_start: 0, read_length: 10),
+        ref(content: chunk_a, original_size: 10, chunk_offset: 0, read_start: 0, read_length: 10),
         ref(
           seed: :b,
           original_size: 10,
@@ -451,8 +534,8 @@ defmodule NeonFS.Client.ChunkReaderTest do
       end)
 
       expect(Router, :data_call, fn _, :get_chunk, args, _ ->
-        assert args[:hash] == fake_hash(:a)
-        {:ok, String.duplicate("A", 10)}
+        assert args[:hash] == content_hash(chunk_a)
+        {:ok, chunk_a}
       end)
 
       expect(Router, :call, fn NeonFS.Core, :read_file, ["vol", "/mixed.txt", opts] ->
@@ -693,7 +776,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
   describe "read_file_stream/3 — mid-stream failure" do
     test "halts the stream when a chunk fetch fails" do
       refs = [
-        ref(seed: :a, original_size: 4, chunk_offset: 0, read_start: 0, read_length: 4),
+        ref(content: "abcd", original_size: 4, chunk_offset: 0, read_start: 0, read_length: 4),
         ref(seed: :b, original_size: 4, chunk_offset: 4, read_start: 0, read_length: 4)
       ]
 
@@ -703,7 +786,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
 
       stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
         cond do
-          args[:hash] == fake_hash(:a) -> {:ok, "abcd"}
+          args[:hash] == content_hash("abcd") -> {:ok, "abcd"}
           args[:hash] == fake_hash(:b) -> {:error, :connection_refused}
         end
       end)
