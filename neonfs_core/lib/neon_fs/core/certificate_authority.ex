@@ -450,7 +450,11 @@ defmodule NeonFS.Core.CertificateAuthority do
 
     case SystemVolume.read(path) do
       {:ok, data} ->
-        :erlang.binary_to_term(data)
+        # `[:safe]` blocks the RCE-gadget surface in cert metadata read from
+        # the system volume (#1200). The payload is a map of module-defined
+        # atoms, which always exist; a crafted term raises and is rescued to
+        # `nil` below.
+        :erlang.binary_to_term(data, [:safe])
 
       {:error, _} ->
         nil

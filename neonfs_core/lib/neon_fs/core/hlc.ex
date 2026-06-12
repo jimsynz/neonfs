@@ -222,7 +222,10 @@ defmodule NeonFS.Core.HLC do
   """
   @spec from_binary(binary()) :: timestamp()
   def from_binary(<<wall_ms::unsigned-big-64, counter::unsigned-big-32, node_bin::binary>>) do
-    node_id = :erlang.binary_to_term(node_bin)
+    # `[:safe]` blocks the RCE-gadget surface a crafted or corrupted replica
+    # could smuggle in (#1200). `node_id` is a node atom, and live-cluster
+    # node names are already interned via distribution, so they decode fine.
+    node_id = :erlang.binary_to_term(node_bin, [:safe])
     {wall_ms, counter, node_id}
   end
 end

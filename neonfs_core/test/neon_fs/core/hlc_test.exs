@@ -276,6 +276,17 @@ defmodule NeonFS.Core.HLCTest do
       # Binary comparison should also be ordered by wall time
       assert bin1 < bin2
     end
+
+    test "from_binary decodes with [:safe], rejecting unknown atoms (#1200)" do
+      # Hand-craft the external term format for an atom that has never been
+      # interned in this VM (writing it as a literal would intern it and
+      # defeat the test). `119` is SMALL_ATOM_UTF8_EXT.
+      name = "nonexistent_hlc_node_#{System.unique_integer([:positive])}"
+      atom_etf = <<131, 119, byte_size(name)::8, name::binary>>
+      crafted = <<1000::unsigned-big-64, 0::unsigned-big-32, atom_etf::binary>>
+
+      assert_raise ArgumentError, fn -> HLC.from_binary(crafted) end
+    end
   end
 
   describe "property: monotonicity" do
