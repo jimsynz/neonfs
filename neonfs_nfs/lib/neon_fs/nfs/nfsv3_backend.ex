@@ -44,7 +44,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Core.FileMeta
-  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable}
+  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable, IpAllowList}
   alias NFSServer.NFSv3.Types.{Fattr3, Nfstime3, Sattr3, Specdata3, WccAttr, WccData}
   alias NFSServer.RPC.Auth
 
@@ -61,15 +61,15 @@ defmodule NeonFS.NFS.NFSv3Backend do
   ## Behaviour callbacks
 
   @impl true
-  def getattr(fh, auth, _ctx) do
-    with {:ok, _vol, _path, meta} <- resolve_meta(fh, squashed_identity(auth, fh)) do
+  def getattr(fh, auth, ctx) do
+    with {:ok, _vol, _path, meta} <- resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)) do
       {:ok, fattr_from_meta(meta)}
     end
   end
 
   @impl true
-  def access(fh, requested_mask, auth, _ctx) do
-    case resolve_meta(fh, squashed_identity(auth, fh)) do
+  def access(fh, requested_mask, auth, ctx) do
+    case resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)) do
       {:ok, _vol, _path, meta} ->
         {:ok, requested_mask, fattr_from_meta(meta)}
 
@@ -79,10 +79,10 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def lookup(dir_fh, name, auth, _ctx) do
+  def lookup(dir_fh, name, auth, ctx) do
     id = squashed_identity(auth, dir_fh)
 
-    with {:ok, vol_name, dir_path} <- resolve_dir(dir_fh),
+    with {:ok, vol_name, dir_path} <- resolve_dir(dir_fh, peer(ctx)),
          child_path <- Path.join(dir_path, name),
          {:ok, child_meta} <- core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path, id]),
          {:ok, vol_id_bin} <- volume_uuid_to_binary(child_meta.volume_id),
@@ -98,8 +98,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
       {:ok, child_fh, child_attr, dir_attr}
     else
-      {:error, :not_found} -> lookup_not_found(dir_fh, id)
-      {:error, %{class: :not_found}} -> lookup_not_found(dir_fh, id)
+      {:error, :not_found} -> lookup_not_found(dir_fh, id, peer(ctx))
+      {:error, %{class: :not_found}} -> lookup_not_found(dir_fh, id, peer(ctx))
       {:error, %{class: :forbidden}} -> {:error, :acces, nil}
       {:error, :invalid} -> {:error, :stale, nil}
       {:error, status} when is_atom(status) -> {:error, to_nfs_status(status), nil}
@@ -108,8 +108,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def readlink(fh, auth, _ctx) do
-    case resolve_meta(fh, squashed_identity(auth, fh)) do
+  def readlink(fh, auth, ctx) do
+    case resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)) do
       {:ok, vol_name, path, meta} -> do_readlink(vol_name, path, meta)
       {:error, status} -> {:error, to_nfs_status(status), nil}
     end
@@ -133,10 +133,10 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def read(fh, offset, count, auth, _ctx) do
+  def read(fh, offset, count, auth, ctx) do
     identity = squashed_identity(auth, fh)
 
-    case resolve_meta(fh, identity) do
+    case resolve_meta(fh, identity, peer(ctx)) do
       {:ok, vol_name, path, meta} ->
         stream = read_file_stream(vol_name, path, offset, count, identity)
         eof = offset + count >= meta.size
@@ -149,8 +149,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def readdir(fh, cookie, _verf, count, auth, _ctx) do
-    with {:ok, vol_name, path, dir_meta} <- resolve_meta(fh, squashed_identity(auth, fh)),
+  def readdir(fh, cookie, _verf, count, auth, ctx) do
+    with {:ok, vol_name, path, dir_meta} <-
+           resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)),
          {:ok, entries} <-
            core_call(NeonFS.Core, :list_dir, [vol_name, path]) do
       all_entries = build_readdir_entries(vol_name, path, entries)
@@ -268,8 +269,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def fsstat(fh, auth, _ctx) do
-    case resolve_meta(fh, squashed_identity(auth, fh)) do
+  def fsstat(fh, auth, ctx) do
+    case resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)) do
       {:ok, _vol_name, _path, meta} ->
         # Capacity reporting is per-cluster, not per-volume; return
         # generous fixed values until #321 lands a Prometheus-backed
@@ -292,8 +293,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def fsinfo(fh, auth, _ctx) do
-    case resolve_meta(fh, squashed_identity(auth, fh)) do
+  def fsinfo(fh, auth, ctx) do
+    case resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)) do
       {:ok, _vol_name, _path, meta} ->
         {:ok, fsinfo_reply(), fattr_from_meta(meta)}
 
@@ -303,8 +304,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def pathconf(fh, auth, _ctx) do
-    case resolve_meta(fh, squashed_identity(auth, fh)) do
+  def pathconf(fh, auth, ctx) do
+    case resolve_meta(fh, squashed_identity(auth, fh), peer(ctx)) do
       {:ok, _vol_name, _path, meta} ->
         {:ok, pathconf_reply(), fattr_from_meta(meta)}
 
@@ -319,8 +320,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   @createverf_meta_key "nfs3_createverf"
 
   @impl true
-  def create(dir_fh, name, mode, _auth, _ctx) do
-    case resolve_dir(dir_fh) do
+  def create(dir_fh, name, mode, _auth, ctx) do
+    case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
         do_create(vol_name, dir_path, name, mode)
 
@@ -481,8 +482,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp to_nfs_status(_other), do: :io
 
   @impl true
-  def mkdir(dir_fh, name, %Sattr3{} = sattr, auth, _ctx) do
-    case resolve_dir(dir_fh) do
+  def mkdir(dir_fh, name, %Sattr3{} = sattr, auth, ctx) do
+    case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
         do_mkdir(vol_name, dir_path, name, sattr, squashed_identity(auth, dir_fh))
 
@@ -530,8 +531,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def remove(dir_fh, name, auth, _ctx) do
-    case resolve_dir(dir_fh) do
+  def remove(dir_fh, name, auth, ctx) do
+    case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
         do_remove(vol_name, dir_path, name, squashed_identity(auth, dir_fh))
 
@@ -571,8 +572,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def rmdir(dir_fh, name, auth, _ctx) do
-    case resolve_dir(dir_fh) do
+  def rmdir(dir_fh, name, auth, ctx) do
+    case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
         do_rmdir(vol_name, dir_path, name, squashed_identity(auth, dir_fh))
 
@@ -656,8 +657,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def symlink(dir_fh, name, %Sattr3{} = sattr, target, _auth, _ctx) when is_binary(target) do
-    case resolve_dir(dir_fh) do
+  def symlink(dir_fh, name, %Sattr3{} = sattr, target, _auth, ctx) when is_binary(target) do
+    case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
         do_symlink(vol_name, dir_path, name, sattr, target)
 
@@ -693,8 +694,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def mknod(dir_fh, _name, _auth, _ctx) do
-    case resolve_dir(dir_fh) do
+  def mknod(dir_fh, _name, _auth, ctx) do
+    case resolve_dir(dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
         # NeonFS doesn't model special files (block / char devices,
         # FIFOs, sockets) — RFC 1813 §3.3.11 explicitly permits
@@ -711,11 +712,11 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def link(_file_fh, link_dir_fh, _name, _auth, _ctx) do
+  def link(_file_fh, link_dir_fh, _name, _auth, ctx) do
     # Hard links would need NeonFS to support multi-name → single
     # FileMeta resolution, which it doesn't today. RFC 1813 §3.3.15
     # permits `NFS3ERR_NOTSUPP` for this case.
-    case resolve_dir(link_dir_fh) do
+    case resolve_dir(link_dir_fh, peer(ctx)) do
       {:ok, vol_name, dir_path} ->
         {:error, :notsupp, nil,
          %WccData{
@@ -729,8 +730,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def rename(from_dir_fh, from_name, to_dir_fh, to_name, auth, _ctx) do
-    case {resolve_dir(from_dir_fh), resolve_dir(to_dir_fh)} do
+  def rename(from_dir_fh, from_name, to_dir_fh, to_name, auth, ctx) do
+    case {resolve_dir(from_dir_fh, peer(ctx)), resolve_dir(to_dir_fh, peer(ctx))} do
       {{:ok, from_vol, from_dir_path}, {:ok, to_vol, to_dir_path}} ->
         do_rename(
           from_vol,
@@ -813,8 +814,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   @writeverf_pt_key {__MODULE__, :writeverf}
 
   @impl true
-  def write(fh, offset, data, stable, _auth, _ctx) when is_binary(data) do
-    case resolve_meta(fh) do
+  def write(fh, offset, data, stable, _auth, ctx) when is_binary(data) do
+    case resolve_meta(fh, [], peer(ctx)) do
       {:ok, vol_name, path, pre_meta} ->
         do_write(vol_name, path, pre_meta, offset, data, stable)
 
@@ -852,8 +853,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def commit(fh, _offset, _count, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def commit(fh, _offset, _count, _auth, ctx) do
+    case resolve_meta(fh, [], peer(ctx)) do
       {:ok, _vol_name, _path, meta} ->
         # FileIndex quorum-writes are already on stable storage
         # before WRITE returns (see `c:write/6` above), so COMMIT is
@@ -887,10 +888,10 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def setattr(fh, %Sattr3{} = sattr, guard_ctime, auth, _ctx) do
+  def setattr(fh, %Sattr3{} = sattr, guard_ctime, auth, ctx) do
     identity = squashed_identity(auth, fh)
 
-    case resolve_meta(fh, identity) do
+    case resolve_meta(fh, identity, peer(ctx)) do
       {:ok, vol_name, path, pre_meta} ->
         do_setattr(vol_name, path, pre_meta, sattr, guard_ctime, identity)
 
@@ -1041,11 +1042,42 @@ defmodule NeonFS.NFS.NFSv3Backend do
     :exit, _ -> {:error, :unavailable}
   end
 
+  # Per-request client IP allow-list enforcement (#1228). MOUNT is the
+  # primary gate (#1229); this refuses forged-filehandle requests from
+  # hosts off the export's allow-list. Only a concrete peer address
+  # triggers enforcement — a missing peer (nil / `:absent`, or an
+  # internal resolution that doesn't carry one) fails open, since the
+  # allow-list is defence-in-depth behind MOUNT and an empty list is
+  # allow-all regardless.
+  @spec peer(map()) :: :inet.ip_address() | nil
+  defp peer(ctx) when is_map(ctx), do: Map.get(ctx, :peer)
+  defp peer(_ctx), do: nil
+
+  defp check_export_ip(vol_name, peer) when is_tuple(peer) do
+    if IpAllowList.allowed?(peer, export_allowed_ips(vol_name)) do
+      :ok
+    else
+      {:error, :acces}
+    end
+  end
+
+  defp check_export_ip(_vol_name, _peer), do: :ok
+
+  defp export_allowed_ips(vol_name) do
+    case get_export(vol_name) do
+      {:ok, %{allowed_ips: allowed_ips}} -> allowed_ips
+      _ -> []
+    end
+  end
+
   ## Internal — resolution
 
-  # Returns `{:ok, volume_name, path}` or `{:error, :stale}`.
-  defp resolve_dir(fh) do
-    with {:ok, _decoded, vol_name, path} <- resolve_handle(fh) do
+  # Returns `{:ok, volume_name, path}` or `{:error, status}`. When a
+  # concrete `peer` is supplied the export's IP allow-list is enforced
+  # (#1228); internal callers omit it to skip the check.
+  defp resolve_dir(fh, peer \\ nil) do
+    with {:ok, _decoded, vol_name, path} <- resolve_handle(fh),
+         :ok <- check_export_ip(vol_name, peer) do
       {:ok, vol_name, path}
     end
   end
@@ -1058,13 +1090,17 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # `:not_found`. Handler-level callers expect root resolution to
   # succeed with a directory FileMeta so GETATTR / READDIRPLUS on the
   # mount root work without the client having to pre-mkdir the root.
-  defp resolve_meta(fh, identity \\ []) do
+  defp resolve_meta(fh, identity, peer \\ nil) do
     case resolve_handle(fh) do
       {:ok, decoded, vol_name, "/"} ->
-        {:ok, vol_name, "/", root_file_meta(decoded.volume_id, vol_name)}
+        with :ok <- check_export_ip(vol_name, peer) do
+          {:ok, vol_name, "/", root_file_meta(decoded.volume_id, vol_name)}
+        end
 
       {:ok, _decoded, vol_name, path} ->
-        resolve_file_meta(vol_name, path, identity)
+        with :ok <- check_export_ip(vol_name, peer) do
+          resolve_file_meta(vol_name, path, identity)
+        end
 
       {:error, status} ->
         {:error, to_nfs_status(status)}
@@ -1156,8 +1192,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
-  defp lookup_not_found(dir_fh, identity) do
-    case resolve_dir(dir_fh) do
+  defp lookup_not_found(dir_fh, identity, peer) do
+    case resolve_dir(dir_fh, peer) do
       {:ok, vol_name, dir_path} ->
         case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path, identity]) do
           {:ok, dm} -> {:error, :noent, fattr_from_meta(dm)}
