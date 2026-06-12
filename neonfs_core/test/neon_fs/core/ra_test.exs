@@ -59,7 +59,7 @@ defmodule NeonFS.Core.RaTest do
     end
 
     test "version/0 returns state machine version" do
-      assert MetadataStateMachine.version() == 15
+      assert MetadataStateMachine.version() == 16
     end
 
     test "which_module/1 returns correct module" do

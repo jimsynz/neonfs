@@ -121,6 +121,10 @@ defmodule NeonFS.Core.Supervisor do
         # Registry for DriveState process naming (must start before BlobStore)
         {Registry, keys: :unique, name: NeonFS.Core.DriveStateRegistry},
 
+        # Per-IP rate limiter for the invite-redemption HTTP endpoint (#1198).
+        # No dependencies; fails open if absent.
+        NeonFS.Cluster.RedeemRateLimiter,
+
         # BlobStore provides storage layer for all components (multi-drive)
         {NeonFS.Core.BlobStore, drives: drives, prefix_depth: prefix_depth},
 

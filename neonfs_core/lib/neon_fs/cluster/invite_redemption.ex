@@ -24,6 +24,7 @@ defmodule NeonFS.Cluster.InviteRedemption do
   alias NeonFS.Client.InviteCrypto
   alias NeonFS.Cluster.State
   alias NeonFS.Core.CertificateAuthority
+  alias NeonFS.Core.RaSupervisor
   alias NeonFS.Transport.TLS
 
   require Logger
@@ -65,6 +66,7 @@ defmodule NeonFS.Cluster.InviteRedemption do
          :ok <- check_expiry(token_expiry_str),
          :ok <- verify_proof(csr_pem, token, proof_b64),
          {:ok, csr} <- decode_and_validate_csr(csr_pem),
+         :ok <- claim_single_use(token_random, token_expiry_str),
          {:ok, node_cert_pem, ca_cert_pem} <- sign_csr(csr, node_name) do
       response = build_response(ca_cert_pem, node_cert_pem)
       encrypted = InviteCrypto.encrypt_response(response, token)
@@ -95,6 +97,29 @@ defmodule NeonFS.Cluster.InviteRedemption do
       |> binary_part(0, 16)
 
     {:ok, "nfs_inv_#{random}_#{expiry_str}_#{signature}"}
+  end
+
+  # Atomically claims the token id as redeemed via Ra, rejecting any
+  # reuse. Runs after the expiry/proof checks (so only valid tokens are
+  # recorded) but before the CSR is signed (so a replay can never reach
+  # certificate issuance — the single Ra apply elects exactly one winner
+  # among concurrent redemptions). `token_random` is the token's unique
+  # component; `expiry_str` was already validated by `check_expiry/1`.
+  defp claim_single_use(token_random, expiry_str) do
+    case Integer.parse(expiry_str) do
+      {expiry, ""} ->
+        now = DateTime.utc_now() |> DateTime.to_unix()
+
+        case RaSupervisor.command({:redeem_invite, token_random, expiry, now}) do
+          {:ok, :ok, _leader} -> :ok
+          {:ok, {:error, :already_redeemed}, _leader} -> {:error, :already_redeemed}
+          {:error, _reason} -> {:error, :redeem_unavailable}
+          _other -> {:error, :redeem_unavailable}
+        end
+
+      _ ->
+        {:error, :invalid_format}
+    end
   end
 
   defp check_expiry(expiry_str) do
