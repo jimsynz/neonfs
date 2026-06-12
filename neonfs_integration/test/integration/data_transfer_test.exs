@@ -164,7 +164,6 @@ defmodule NeonFS.Integration.DataTransferTest do
   end
 
   describe "replicated volume write via data plane" do
-    @tag :pending_903
     test "file write replicates chunks to remote nodes", %{cluster: cluster} do
       # Create a replicated volume
       {:ok, _} =
@@ -286,7 +285,6 @@ defmodule NeonFS.Integration.DataTransferTest do
   end
 
   describe "remote read via data plane" do
-    @tag :pending_903
     test "reading a file from a node without local chunks succeeds", %{cluster: cluster} do
       # Create volume and write file from node1
       {:ok, _} =
@@ -355,7 +353,6 @@ defmodule NeonFS.Integration.DataTransferTest do
       %{}
     end
 
-    @tag :pending_903
     test "surviving nodes continue operating after node failure", %{cluster: cluster} do
       # Create volume and initial data
       {:ok, _} =
@@ -430,7 +427,6 @@ defmodule NeonFS.Integration.DataTransferTest do
   end
 
   describe "erasure-coded volume write via data plane" do
-    @tag :pending_903
     test "file write distributes stripe chunks across nodes", %{cluster: cluster} do
       # Create an erasure-coded volume (2 data + 1 parity = 3 chunks per stripe)
       {:ok, _} =

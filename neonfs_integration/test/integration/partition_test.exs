@@ -29,7 +29,6 @@ defmodule NeonFS.Integration.PartitionTest do
   # walks the per-volume index tree on the remote, which after #835
   # only lives on the writer's drive (#903). Re-enable once the
   # writer fans out tree mutations to all replicas.
-  @moduletag :pending_903
 
   setup_all %{cluster: cluster} do
     :ok = init_cluster_with_data(cluster)
@@ -92,6 +91,7 @@ defmodule NeonFS.Integration.PartitionTest do
              "Expected write to fail on minority partition, got: #{inspect(result)}"
     end
 
+    @tag :pending_reenable
     test "minority can read previously written data", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
@@ -102,6 +102,7 @@ defmodule NeonFS.Integration.PartitionTest do
   end
 
   describe "partition healing" do
+    @tag :pending_reenable
     test "minority receives data written during partition", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
@@ -130,6 +131,7 @@ defmodule NeonFS.Integration.PartitionTest do
       end
     end
 
+    @tag :pending_reenable
     test "all nodes consistent after healing", %{cluster: cluster} do
       partition_majority_minority(cluster)
 

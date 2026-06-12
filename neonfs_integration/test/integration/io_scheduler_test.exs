@@ -264,7 +264,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
     # quorum-write path. Either the writer needs a bigger retry
     # budget or the test needs to lower the concurrency. Skipping
     # until the writer's retry policy is tuned — tracked in #903.
-    @tag :pending_903
+    @tag :pending_reenable
     test "concurrent write burst completes without data loss", %{cluster: cluster} do
       file_count = 50
       file_size = 1024
@@ -331,7 +331,6 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       %{}
     end
 
-    @tag :pending_903
     test "replicated writes complete and data is readable from other nodes", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(10 * 1024)
 

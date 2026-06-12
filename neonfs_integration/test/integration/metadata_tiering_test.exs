@@ -22,7 +22,6 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   end
 
   describe "directory listing via DirectoryEntry" do
-    @tag :pending_903
     test "list_dir returns all children", %{cluster: cluster} do
       :ok = init_tiering_cluster(cluster, "dir-vol")
 
@@ -81,7 +80,6 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   end
 
   describe "cross-segment file creation atomicity" do
-    @tag :pending_903
     test "file creation writes both FileMeta and DirectoryEntry", %{cluster: cluster} do
       :ok = init_tiering_cluster(cluster, "atomic-vol")
 
@@ -311,7 +309,6 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   end
 
   describe "erasure-coded volume with quorum metadata" do
-    @tag :pending_903
     test "write and read on erasure volume in multi-node cluster", %{cluster: cluster} do
       :ok = init_tiering_cluster(cluster, "ec-quorum-vol", durability: "erasure:2:1")
 
@@ -364,7 +361,6 @@ defmodule NeonFS.Integration.MetadataTieringTest do
   end
 
   describe "mixed volume types" do
-    @tag :pending_903
     test "replicated and erasure-coded volumes coexist on multi-node cluster", %{
       cluster: cluster
     } do

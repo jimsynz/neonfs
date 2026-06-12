@@ -38,7 +38,6 @@ defmodule NeonFS.Integration.FailureTest do
       assert {:ok, _} = result
     end
 
-    @tag :pending_903
     test "data written during outage is preserved on surviving nodes", %{cluster: cluster} do
       # Write data, then stop node3
       {:ok, _} =

@@ -16,6 +16,11 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
   @moduletag timeout: 180_000
   @moduletag :integration
+  # Re-enablement pending: these tests bit-rotted while excluded under the
+  # blanket `:pending_903` tag and fail for reasons unrelated to #903 (now
+  # fixed) — erasure-coding gaps on a single node. Tracked in the #1189
+  # follow-up.
+  @moduletag :pending_reenable
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
 
@@ -41,7 +46,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   end
 
   describe "erasure write and read" do
-    @tag :pending_903
     test "write file to erasure volume and read back", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
@@ -64,7 +68,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       assert read_data == test_data
     end
 
-    @tag :pending_903
     test "small file on erasure volume (single partial stripe)", %{cluster: cluster} do
       # Small file — only one partial stripe with 2+1 config
       test_data = :crypto.strong_rand_bytes(512)
@@ -86,7 +89,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       assert byte_size(read_data) == 512
     end
 
-    @tag :pending_903
     test "large file spanning multiple stripes", %{cluster: cluster} do
       # Large file: will span multiple stripes
       test_data = :crypto.strong_rand_bytes(100 * 1024)
@@ -123,7 +125,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   end
 
   describe "degraded read" do
-    @tag :pending_903
     test "read succeeds with one chunk missing (within parity tolerance)", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
@@ -153,7 +154,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       assert read_data == test_data
     end
 
-    @tag :pending_903
     test "read fails when too many chunks missing", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
@@ -187,7 +187,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   end
 
   describe "stripe repair" do
-    @tag :pending_903
     test "repair restores degraded stripe", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
@@ -243,7 +242,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
       %{}
     end
 
-    @tag :pending_903
     test "GC cleans up erasure-coded file chunks and stripes", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
@@ -297,7 +295,6 @@ defmodule NeonFS.Integration.ErasureCodingTest do
   end
 
   describe "mixed cluster" do
-    @tag :pending_903
     test "replicated and erasure volumes coexist", %{cluster: cluster} do
       rep_data = :crypto.strong_rand_bytes(2048)
       ec_data = :crypto.strong_rand_bytes(2048)
