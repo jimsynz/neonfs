@@ -74,7 +74,7 @@ defmodule NeonFS.Client.ChunkReader do
   @spec read_file(String.t(), String.t(), read_opts()) ::
           {:ok, binary()} | {:error, term()}
   def read_file(volume_name, path, opts \\ []) do
-    refs_opts = Keyword.take(opts, [:offset, :length])
+    refs_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
 
     case Router.call(NeonFS.Core, :read_file_refs, [volume_name, path, refs_opts]) do
       {:ok, %{chunks: chunks} = result} ->
@@ -113,7 +113,7 @@ defmodule NeonFS.Client.ChunkReader do
   """
   @spec read_file_stream(String.t(), String.t(), read_opts()) :: stream_result()
   def read_file_stream(volume_name, path, opts \\ []) do
-    refs_opts = Keyword.take(opts, [:offset, :length])
+    refs_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
 
     case Router.call(NeonFS.Core, :read_file_refs, [volume_name, path, refs_opts]) do
       {:ok, %{chunks: chunks, file_size: file_size}} ->
@@ -241,7 +241,7 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   defp fallback_read(volume_name, path, opts) do
-    forward_opts = Keyword.take(opts, [:offset, :length])
+    forward_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
     Router.call(NeonFS.Core, :read_file, [volume_name, path, forward_opts])
   end
 
@@ -294,7 +294,9 @@ defmodule NeonFS.Client.ChunkReader do
   end
 
   defp fallback_stream(volume_name, path, opts) do
-    case Router.call(NeonFS.Core, :get_file_meta, [volume_name, path]) do
+    meta_opts = Keyword.take(opts, [:uid, :gids])
+
+    case Router.call(NeonFS.Core, :get_file_meta, [volume_name, path, meta_opts]) do
       {:ok, %{stripes: stripes} = meta} when is_list(stripes) ->
         {:ok,
          %{stream: stripe_fallback_stream(meta, volume_name, path, opts), file_size: meta.size}}

@@ -4,9 +4,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
   import Bitwise, only: [<<<: 2]
 
   alias NeonFS.Core.FileMeta
-  alias NeonFS.Error.{AlreadyExists, Invalid}
+  alias NeonFS.Error.{AlreadyExists, Invalid, PermissionDenied}
   alias NeonFS.NFS.{Filehandle, NFSv3Backend}
   alias NFSServer.NFSv3.Types.Fattr3
+  alias NFSServer.RPC.Auth
 
   @volume_id_uuid "019dc5d8-3fcf-7d13-b4fa-832c4390b0a0"
   @volume_id_bin Filehandle.volume_uuid_to_binary(@volume_id_uuid) |> elem(1)
@@ -110,7 +111,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     test "returns Fattr3 derived from FileMeta" do
       put_inode_table(%{@file_inode => {@volume_name, @file_path}})
 
-      put_core(fn NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+      put_core(fn NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
         {:ok, file_meta()}
       end)
 
@@ -158,6 +159,83 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     end
   end
 
+  ## AUTH_SYS enforcement (#1215)
+
+  describe "AUTH_SYS identity threading" do
+    test "threads the caller's uid and gids into core authorisation opts" do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      test_pid = self()
+
+      put_core(fn NeonFS.Core, :get_file_meta, [@volume_name, @file_path, opts] ->
+        send(test_pid, {:identity, opts})
+        {:ok, file_meta()}
+      end)
+
+      auth = %Auth.Sys{uid: 1000, gid: 50, gids: [50, 60]}
+      assert {:ok, %Fattr3{}} = NFSv3Backend.getattr(valid_fh(), auth, %{})
+
+      assert_received {:identity, opts}
+      assert Keyword.get(opts, :uid) == 1000
+      assert Keyword.get(opts, :gids) == [50, 60]
+    end
+
+    test "AUTH_NONE squashes to the anonymous identity (uid 65534)" do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+      test_pid = self()
+
+      put_core(fn NeonFS.Core, :get_file_meta, [@volume_name, @file_path, opts] ->
+        send(test_pid, {:identity, opts})
+        {:ok, file_meta()}
+      end)
+
+      assert {:ok, %Fattr3{}} =
+               NFSv3Backend.getattr(valid_fh(), %Auth.None{}, %{})
+
+      assert_received {:identity, opts}
+      assert Keyword.get(opts, :uid) == 65_534
+    end
+
+    test "a forbidden core result on a metadata read maps to NFS3ERR_ACCES" do
+      put_inode_table(%{@file_inode => {@volume_name, @file_path}})
+
+      denied =
+        PermissionDenied.exception(
+          file_path: @file_path,
+          operation: :read,
+          uid: 1000,
+          gid: 50
+        )
+
+      put_core(fn _, :get_file_meta, _ -> {:error, denied} end)
+
+      auth = %Auth.Sys{uid: 1000, gid: 50, gids: [50]}
+      assert {:error, :acces} = NFSv3Backend.getattr(valid_fh(), auth, %{})
+    end
+
+    test "a forbidden core result on a namespace mutation maps to NFS3ERR_ACCES" do
+      dir_path = "/parent"
+      child_path = "/parent/new"
+      dir_inode = 0xBBBB_BBBB_BBBB_BBBB
+      put_inode_table(%{dir_inode => {@volume_name, dir_path}})
+
+      denied = PermissionDenied.exception(operation: :write, uid: 1000)
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] ->
+          {:ok, file_meta(%{path: dir_path, mode: 0o040_755, size: 0})}
+
+        NeonFS.Core, :mkdir, [@volume_name, ^child_path | _] ->
+          {:error, denied}
+      end)
+
+      auth = %Auth.Sys{uid: 1000, gid: 50, gids: [50]}
+      dir_fh = Filehandle.encode(@volume_id_bin, dir_inode)
+
+      assert {:error, :acces, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.mkdir(dir_fh, "new", %NFSServer.NFSv3.Types.Sattr3{}, auth, %{})
+    end
+  end
+
   ## access
 
   describe "access/4" do
@@ -186,7 +264,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
         @file_inode => {@volume_name, child_path}
       })
 
-      put_core(fn _, :get_file_meta, [_vol, path] ->
+      put_core(fn _, :get_file_meta, [_vol, path | _] ->
         case path do
           ^child_path -> {:ok, file_meta(%{path: child_path})}
           ^dir_path -> {:ok, file_meta(%{path: dir_path, mode: 0o040_755, size: 0})}
@@ -209,7 +287,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       put_inode_table(%{dir_inode => {@volume_name, dir_path}})
 
-      put_core(fn _, :get_file_meta, [_vol, path] ->
+      put_core(fn _, :get_file_meta, [_vol, path | _] ->
         case path do
           ^dir_path -> {:ok, file_meta(%{path: dir_path, mode: 0o040_755})}
           _ -> {:error, :not_found}
@@ -297,7 +375,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       child = file_meta(%{path: child_path, mode: 0o100_644, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] -> {:ok, pre_dir}
         NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, _opts] -> {:ok, child}
       end)
 
@@ -319,7 +397,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] ->
           {:ok, pre_dir}
 
         NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, opts] ->
@@ -354,8 +432,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       existing = file_meta(%{path: child_path})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, existing}
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:ok, existing}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] -> {:ok, pre_dir}
         NeonFS.Core, :write_file_at, _ -> flunk("should not be called when GUARDED + exists")
       end)
 
@@ -377,8 +455,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       fresh = file_meta(%{path: child_path})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:error, :not_found}
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:error, :not_found}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] -> {:ok, pre_dir}
         NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, _opts] -> {:ok, fresh}
       end)
 
@@ -409,10 +487,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] ->
           {:error, :not_found}
 
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] ->
           {:ok, pre_dir}
 
         NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, <<>>, opts] ->
@@ -437,8 +515,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       existing = file_meta(%{path: child_path, metadata: %{"nfs3_createverf" => verf}})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, existing}
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:ok, existing}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] -> {:ok, pre_dir}
         NeonFS.Core, :write_file_at, _ -> flunk("retry must not write")
       end)
 
@@ -456,8 +534,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       existing = file_meta(%{path: child_path, metadata: %{"nfs3_createverf" => original_verf}})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, existing}
-        NeonFS.Core, :get_file_meta, [@volume_name, "/docs"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:ok, existing}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/docs" | _] -> {:ok, pre_dir}
       end)
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xBEEF_BEEF_BEEF_BEEF)
@@ -483,7 +561,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] ->
           {:ok, pre_dir}
 
         NeonFS.Core, :write_file_at, [@volume_name, ^child_path, 0, ^target, opts] ->
@@ -518,7 +596,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] -> {:ok, pre_dir}
       end)
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xFEED_FEED_FEED_FEED)
@@ -543,7 +621,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] -> {:ok, pre_dir}
       end)
 
       file_fh = Filehandle.encode(@volume_id_bin, @file_inode)
@@ -578,10 +656,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/from"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/from" | _] ->
           {:ok, pre_from}
 
-        NeonFS.Core, :rename_file, [@volume_name, "/from/old.txt", "/from/new.txt"] ->
+        NeonFS.Core, :rename_file, [@volume_name, "/from/old.txt", "/from/new.txt" | _] ->
           send(test_pid, :rename_called)
           :ok
       end)
@@ -600,13 +678,13 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/from"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/from" | _] ->
           {:ok, pre_from}
 
-        NeonFS.Core, :get_file_meta, [@volume_name, "/to"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/to" | _] ->
           {:ok, pre_to}
 
-        NeonFS.Core, :rename_file, [@volume_name, "/from/x.txt", "/to/y.txt"] ->
+        NeonFS.Core, :rename_file, [@volume_name, "/from/x.txt", "/to/y.txt" | _] ->
           send(test_pid, :rename_called)
           :ok
       end)
@@ -676,7 +754,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
           {:ok, pre}
 
         NeonFS.Core, :write_file_at, [@volume_name, @file_path, 0, ^data, _opts] ->
@@ -696,7 +774,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre = file_meta(%{size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] -> {:ok, pre}
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] -> {:ok, pre}
         NeonFS.Core, :write_file_at, _ -> {:error, :nospc}
       end)
 
@@ -722,7 +800,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       meta = file_meta()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] -> {:ok, meta}
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] -> {:ok, meta}
         NeonFS.Core, :write_file_at, _ -> flunk("commit must not write")
       end)
 
@@ -765,9 +843,9 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       child_dir = file_meta(%{path: child_path, mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
-        NeonFS.Core, :mkdir, [@volume_name, ^child_path] -> {:ok, %{path: child_path}}
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, child_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] -> {:ok, pre_dir}
+        NeonFS.Core, :mkdir, [@volume_name, ^child_path | _] -> {:ok, %{path: child_path}}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:ok, child_dir}
       end)
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xA000_A000_A000_A000)
@@ -788,10 +866,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] ->
           {:ok, pre_dir}
 
-        NeonFS.Core, :mkdir, [@volume_name, "/parent/exists"] ->
+        NeonFS.Core, :mkdir, [@volume_name, "/parent/exists" | _] ->
           {:error, AlreadyExists.from_reason(:eexist)}
       end)
 
@@ -818,8 +896,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
-        NeonFS.Core, :delete_file, [@volume_name, "/parent/doomed.txt"] -> :ok
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] -> {:ok, pre_dir}
+        NeonFS.Core, :delete_file, [@volume_name, "/parent/doomed.txt" | _] -> :ok
       end)
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xB000_B000_B000_B000)
@@ -832,8 +910,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       pre_dir = file_meta(%{path: "/parent", mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
-        NeonFS.Core, :delete_file, [@volume_name, "/parent/missing.txt"] -> {:error, :not_found}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] ->
+          {:ok, pre_dir}
+
+        NeonFS.Core, :delete_file, [@volume_name, "/parent/missing.txt" | _] ->
+          {:error, :not_found}
       end)
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xB000_B000_B000_B000)
@@ -855,10 +936,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       target = file_meta(%{path: child_path, mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, target}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:ok, target}
         NeonFS.Core, :list_dir, [@volume_name, ^child_path] -> {:ok, []}
-        NeonFS.Core, :delete_file, [@volume_name, ^child_path] -> :ok
+        NeonFS.Core, :delete_file, [@volume_name, ^child_path | _] -> :ok
       end)
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xC000_C000_C000_C000)
@@ -873,10 +954,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       target = file_meta(%{path: child_path, mode: 0o040_755, size: 0})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] ->
           {:ok, pre_dir}
 
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] ->
           {:ok, target}
 
         NeonFS.Core, :list_dir, [@volume_name, ^child_path] ->
@@ -898,8 +979,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       target = file_meta(%{path: child_path, mode: 0o100_644, size: 12})
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, "/parent"] -> {:ok, pre_dir}
-        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path] -> {:ok, target}
+        NeonFS.Core, :get_file_meta, [@volume_name, "/parent" | _] -> {:ok, pre_dir}
+        NeonFS.Core, :get_file_meta, [@volume_name, ^child_path | _] -> {:ok, target}
         NeonFS.Core, :list_dir, _ -> flunk("list_dir must not be called for non-dir")
         NeonFS.Core, :delete_file, _ -> flunk("delete_file must not be called for non-dir")
       end)
@@ -925,10 +1006,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
           {:ok, pre}
 
-        NeonFS.Core, :update_file_meta, [@volume_name, @file_path, updates] ->
+        NeonFS.Core, :update_file_meta, [@volume_name, @file_path, updates | _] ->
           send(test_pid, {:update_called, updates})
           {:ok, post}
       end)
@@ -954,10 +1035,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
           {:ok, pre}
 
-        NeonFS.Core, :truncate_file, [@volume_name, @file_path, new_size, additional] ->
+        NeonFS.Core, :truncate_file, [@volume_name, @file_path, new_size, additional | _] ->
           send(test_pid, {:truncate_called, new_size, additional})
           {:ok, post}
       end)
@@ -977,7 +1058,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
           {:ok, pre}
 
         NeonFS.Core, :update_file_meta, _ ->
@@ -1003,7 +1084,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       post = %{pre | mode: 0o100_700, version: 2}
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] -> {:ok, pre}
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] -> {:ok, pre}
         NeonFS.Core, :update_file_meta, _ -> {:ok, post}
       end)
 
@@ -1033,7 +1114,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       test_pid = self()
 
       put_core(fn
-        NeonFS.Core, :get_file_meta, [@volume_name, @file_path] ->
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
           send(test_pid, :get_called)
           {:ok, pre}
 

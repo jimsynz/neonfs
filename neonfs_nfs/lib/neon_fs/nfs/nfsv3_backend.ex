@@ -46,6 +46,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   alias NeonFS.Core.FileMeta
   alias NeonFS.NFS.{Filehandle, InodeTable}
   alias NFSServer.NFSv3.Types.{Fattr3, Nfstime3, Sattr3, Specdata3, WccAttr, WccData}
+  alias NFSServer.RPC.Auth
 
   import Bitwise, only: [<<<: 2, band: 2]
 
@@ -60,15 +61,15 @@ defmodule NeonFS.NFS.NFSv3Backend do
   ## Behaviour callbacks
 
   @impl true
-  def getattr(fh, _auth, _ctx) do
-    with {:ok, _vol, _path, meta} <- resolve_meta(fh) do
+  def getattr(fh, auth, _ctx) do
+    with {:ok, _vol, _path, meta} <- resolve_meta(fh, identity_opts(auth)) do
       {:ok, fattr_from_meta(meta)}
     end
   end
 
   @impl true
-  def access(fh, requested_mask, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def access(fh, requested_mask, auth, _ctx) do
+    case resolve_meta(fh, identity_opts(auth)) do
       {:ok, _vol, _path, meta} ->
         {:ok, requested_mask, fattr_from_meta(meta)}
 
@@ -78,25 +79,28 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def lookup(dir_fh, name, _auth, _ctx) do
+  def lookup(dir_fh, name, auth, _ctx) do
+    id = identity_opts(auth)
+
     with {:ok, vol_name, dir_path} <- resolve_dir(dir_fh),
          child_path <- Path.join(dir_path, name),
-         {:ok, child_meta} <- core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]),
+         {:ok, child_meta} <- core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path, id]),
          {:ok, vol_id_bin} <- volume_uuid_to_binary(child_meta.volume_id),
          {:ok, fileid} <- allocate_inode(vol_name, child_path) do
       child_fh = Filehandle.encode(vol_id_bin, fileid)
       child_attr = fattr_from_meta(child_meta)
 
       dir_attr =
-        case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path]) do
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path, id]) do
           {:ok, dm} -> fattr_from_meta(dm)
           _ -> nil
         end
 
       {:ok, child_fh, child_attr, dir_attr}
     else
-      {:error, :not_found} -> lookup_not_found(dir_fh)
-      {:error, %{class: :not_found}} -> lookup_not_found(dir_fh)
+      {:error, :not_found} -> lookup_not_found(dir_fh, id)
+      {:error, %{class: :not_found}} -> lookup_not_found(dir_fh, id)
+      {:error, %{class: :forbidden}} -> {:error, :acces, nil}
       {:error, :invalid} -> {:error, :stale, nil}
       {:error, status} when is_atom(status) -> {:error, to_nfs_status(status), nil}
       err -> err
@@ -104,8 +108,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def readlink(fh, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def readlink(fh, auth, _ctx) do
+    case resolve_meta(fh, identity_opts(auth)) do
       {:ok, vol_name, path, meta} -> do_readlink(vol_name, path, meta)
       {:error, status} -> {:error, to_nfs_status(status), nil}
     end
@@ -129,10 +133,12 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def read(fh, offset, count, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def read(fh, offset, count, auth, _ctx) do
+    identity = identity_opts(auth)
+
+    case resolve_meta(fh, identity) do
       {:ok, vol_name, path, meta} ->
-        stream = read_file_stream(vol_name, path, offset, count)
+        stream = read_file_stream(vol_name, path, offset, count, identity)
         eof = offset + count >= meta.size
 
         {:ok, %{data: stream, eof: eof, post_op: fattr_from_meta(meta)}}
@@ -143,8 +149,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def readdir(fh, cookie, _verf, count, _auth, _ctx) do
-    with {:ok, vol_name, path, dir_meta} <- resolve_meta(fh),
+  def readdir(fh, cookie, _verf, count, auth, _ctx) do
+    with {:ok, vol_name, path, dir_meta} <- resolve_meta(fh, identity_opts(auth)),
          {:ok, entries} <-
            core_call(NeonFS.Core, :list_dir, [vol_name, path]) do
       all_entries = build_readdir_entries(vol_name, path, entries)
@@ -185,14 +191,16 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
   @impl true
   def readdirplus(fh, cookie, verf, _dircount, maxcount, auth, ctx) do
+    identity = identity_opts(auth)
+
     case readdir(fh, cookie, verf, maxcount, auth, ctx) do
       {:ok, plain_entries, new_verf, eof, dir_attr} ->
-        {:ok, vol_name, dir_path, dir_meta} = resolve_meta(fh)
-        parent_meta = parent_meta_for(vol_name, dir_path, dir_meta)
+        {:ok, vol_name, dir_path, dir_meta} = resolve_meta(fh, identity)
+        parent_meta = parent_meta_for(vol_name, dir_path, dir_meta, identity)
 
         plus_entries =
           Enum.map(plain_entries, fn entry ->
-            expand_readdirplus_entry(entry, vol_name, dir_meta, parent_meta)
+            expand_readdirplus_entry(entry, vol_name, dir_meta, parent_meta, identity)
           end)
 
         {:ok, plus_entries, new_verf, eof, dir_attr}
@@ -202,23 +210,23 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
-  defp expand_readdirplus_entry({fileid, ".", idx}, _vol_name, dir_meta, _parent_meta) do
+  defp expand_readdirplus_entry({fileid, ".", idx}, _vol_name, dir_meta, _parent_meta, _identity) do
     readdirplus_entry_with_meta(fileid, ".", idx, dir_meta)
   end
 
-  defp expand_readdirplus_entry({fileid, "..", idx}, _vol_name, _dir_meta, nil) do
+  defp expand_readdirplus_entry({fileid, "..", idx}, _vol_name, _dir_meta, nil, _identity) do
     {fileid, "..", idx, nil, nil}
   end
 
-  defp expand_readdirplus_entry({fileid, "..", idx}, _vol_name, _dir_meta, parent_meta) do
+  defp expand_readdirplus_entry({fileid, "..", idx}, _vol_name, _dir_meta, parent_meta, _identity) do
     readdirplus_entry_with_meta(fileid, "..", idx, parent_meta)
   end
 
-  defp expand_readdirplus_entry({fileid, name, idx}, vol_name, _dir_meta, _parent_meta) do
+  defp expand_readdirplus_entry({fileid, name, idx}, vol_name, _dir_meta, _parent_meta, identity) do
     child_path = "/" <> name
     inflated_path = derive_path_from_inode(fileid, vol_name, child_path)
 
-    case core_call(NeonFS.Core, :get_file_meta, [vol_name, inflated_path]) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, inflated_path, identity]) do
       {:ok, child_meta} -> readdirplus_entry_with_meta(fileid, name, idx, child_meta)
       _ -> {fileid, name, idx, nil, nil}
     end
@@ -228,9 +236,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # via the same path the FS would use; failures degrade to `nil` so
   # the entry is still emitted (with no post-op attrs) rather than
   # disappearing from the listing.
-  defp parent_meta_for(_vol_name, "/", dir_meta), do: dir_meta
+  defp parent_meta_for(_vol_name, "/", dir_meta, _identity), do: dir_meta
 
-  defp parent_meta_for(vol_name, dir_path, _dir_meta) do
+  defp parent_meta_for(vol_name, dir_path, _dir_meta, identity) do
     parent = parent_path(dir_path)
 
     case parent do
@@ -246,7 +254,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
         end
 
       _ ->
-        case core_call(NeonFS.Core, :get_file_meta, [vol_name, parent]) do
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, parent, identity]) do
           {:ok, meta} -> meta
           _ -> nil
         end
@@ -260,8 +268,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def fsstat(fh, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def fsstat(fh, auth, _ctx) do
+    case resolve_meta(fh, identity_opts(auth)) do
       {:ok, _vol_name, _path, meta} ->
         # Capacity reporting is per-cluster, not per-volume; return
         # generous fixed values until #321 lands a Prometheus-backed
@@ -284,8 +292,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def fsinfo(fh, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def fsinfo(fh, auth, _ctx) do
+    case resolve_meta(fh, identity_opts(auth)) do
       {:ok, _vol_name, _path, meta} ->
         {:ok, fsinfo_reply(), fattr_from_meta(meta)}
 
@@ -295,8 +303,8 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def pathconf(fh, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def pathconf(fh, auth, _ctx) do
+    case resolve_meta(fh, identity_opts(auth)) do
       {:ok, _vol_name, _path, meta} ->
         {:ok, pathconf_reply(), fattr_from_meta(meta)}
 
@@ -417,15 +425,15 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp maybe_put_opt(opts, _key, nil), do: opts
   defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp pre_dir_wcc(vol_name, dir_path) do
-    case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path]) do
+  defp pre_dir_wcc(vol_name, dir_path, identity \\ []) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path, identity]) do
       {:ok, %FileMeta{} = meta} -> wcc_attr_from_meta(meta)
       _ -> nil
     end
   end
 
-  defp post_dir_attr(vol_name, dir_path) do
-    case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path]) do
+  defp post_dir_attr(vol_name, dir_path, identity \\ []) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path, identity]) do
       {:ok, %FileMeta{} = meta} -> fattr_from_meta(meta)
       _ -> nil
     end
@@ -450,6 +458,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   @spec to_nfs_status(term()) :: atom()
   defp to_nfs_status(:not_found), do: :noent
   defp to_nfs_status(%{class: :not_found}), do: :noent
+  defp to_nfs_status(%{class: :forbidden}), do: :acces
   defp to_nfs_status(%NeonFS.Error.AlreadyExists{}), do: :exist
   defp to_nfs_status(:exists), do: :exist
   defp to_nfs_status(:permission_denied), do: :acces
@@ -472,151 +481,177 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp to_nfs_status(_other), do: :io
 
   @impl true
-  def mkdir(dir_fh, name, %Sattr3{} = sattr, _auth, _ctx) do
+  def mkdir(dir_fh, name, %Sattr3{} = sattr, auth, _ctx) do
     case resolve_dir(dir_fh) do
       {:ok, vol_name, dir_path} ->
-        do_mkdir(vol_name, dir_path, name, sattr)
+        do_mkdir(vol_name, dir_path, name, sattr, identity_opts(auth))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
-  defp do_mkdir(vol_name, dir_path, name, %Sattr3{} = _sattr) do
+  defp do_mkdir(vol_name, dir_path, name, %Sattr3{} = _sattr, identity) do
     child_path = Path.join(dir_path, name)
-    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path, identity)
 
-    case core_call(NeonFS.Core, :mkdir, [vol_name, child_path]) do
+    case core_call(NeonFS.Core, :mkdir, [vol_name, child_path, identity]) do
       {:ok, _dir_entry} ->
         # `mkdir` creates the directory entry but doesn't return a
         # `FileMeta`; synthesise the directory's attrs by re-reading
         # via `get_file_meta` (root-style synthesis lives in
         # `resolve_meta`'s `"/"` branch — for non-root dirs FileIndex
         # synthesises directory FileMetas through `get_by_path`).
-        case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path, identity]) do
           {:ok, %FileMeta{} = child_meta} ->
             ok_create_reply(child_meta, vol_name, dir_path, pre_dir_wcc)
 
           _ ->
             {:ok, nil, nil,
-             %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+             %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
         end
 
       {:error, %NeonFS.Error.AlreadyExists{}} ->
-        {:error, :exist, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :exist,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, status} when is_atom(status) ->
         {:error, to_nfs_status(status),
-         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, _} ->
-        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :io,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
     end
   end
 
   @impl true
-  def remove(dir_fh, name, _auth, _ctx) do
+  def remove(dir_fh, name, auth, _ctx) do
     case resolve_dir(dir_fh) do
       {:ok, vol_name, dir_path} ->
-        do_remove(vol_name, dir_path, name)
+        do_remove(vol_name, dir_path, name, identity_opts(auth))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
-  defp do_remove(vol_name, dir_path, name) do
+  defp do_remove(vol_name, dir_path, name, identity) do
     child_path = Path.join(dir_path, name)
-    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path, identity)
 
-    case core_call(NeonFS.Core, :delete_file, [vol_name, child_path]) do
+    case core_call(NeonFS.Core, :delete_file, [vol_name, child_path, identity]) do
       :ok ->
-        {:ok, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:ok, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, :not_found} ->
-        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :noent,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, %{class: :not_found}} ->
-        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :noent,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, status} when is_atom(status) ->
         {:error, to_nfs_status(status),
-         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, _} ->
-        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :io,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
     end
   end
 
   @impl true
-  def rmdir(dir_fh, name, _auth, _ctx) do
+  def rmdir(dir_fh, name, auth, _ctx) do
     case resolve_dir(dir_fh) do
       {:ok, vol_name, dir_path} ->
-        do_rmdir(vol_name, dir_path, name)
+        do_rmdir(vol_name, dir_path, name, identity_opts(auth))
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
-  defp do_rmdir(vol_name, dir_path, name) do
+  defp do_rmdir(vol_name, dir_path, name, identity) do
     child_path = Path.join(dir_path, name)
-    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path)
+    pre_dir_wcc = pre_dir_wcc(vol_name, dir_path, identity)
 
-    with :ok <- check_rmdir_target(vol_name, child_path, pre_dir_wcc, dir_path),
-         :ok <- check_rmdir_empty(vol_name, child_path, pre_dir_wcc, dir_path) do
-      do_rmdir_delete(vol_name, dir_path, child_path, pre_dir_wcc)
+    with :ok <- check_rmdir_target(vol_name, child_path, pre_dir_wcc, dir_path, identity),
+         :ok <- check_rmdir_empty(vol_name, child_path, pre_dir_wcc, dir_path, identity) do
+      do_rmdir_delete(vol_name, dir_path, child_path, pre_dir_wcc, identity)
     end
   end
 
-  defp check_rmdir_target(vol_name, child_path, pre_dir_wcc, dir_path) do
-    case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path]) do
+  defp check_rmdir_target(vol_name, child_path, pre_dir_wcc, dir_path, identity) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, child_path, identity]) do
       {:ok, %FileMeta{mode: mode}} ->
         if Bitwise.band(mode, @s_ifmt) == @s_ifdir do
           :ok
         else
           {:error, :notdir,
-           %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+           %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
         end
 
       {:error, :not_found} ->
-        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :noent,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, %{class: :not_found}} ->
-        {:error, :noent, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :noent,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       _ ->
-        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :io,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
     end
   end
 
-  defp check_rmdir_empty(vol_name, child_path, pre_dir_wcc, dir_path) do
+  defp check_rmdir_empty(vol_name, child_path, pre_dir_wcc, dir_path, identity) do
     case core_call(NeonFS.Core, :list_dir, [vol_name, child_path]) do
       {:ok, []} ->
         :ok
 
       {:ok, [_ | _]} ->
         {:error, :notempty,
-         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       _ ->
         # Treat list-dir failure as a non-empty signal — refuse to
         # delete blindly. The caller still gets `wcc_data`.
-        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :io,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
     end
   end
 
-  defp do_rmdir_delete(vol_name, dir_path, child_path, pre_dir_wcc) do
-    case core_call(NeonFS.Core, :delete_file, [vol_name, child_path]) do
+  defp do_rmdir_delete(vol_name, dir_path, child_path, pre_dir_wcc, identity) do
+    case core_call(NeonFS.Core, :delete_file, [vol_name, child_path, identity]) do
       :ok ->
-        {:ok, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:ok, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, status} when is_atom(status) ->
         {:error, to_nfs_status(status),
-         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
 
       {:error, _} ->
-        {:error, :io, %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path)}}
+        {:error, :io,
+         %WccData{before: pre_dir_wcc, after: post_dir_attr(vol_name, dir_path, identity)}}
     end
   end
 
@@ -694,57 +729,78 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def rename(from_dir_fh, from_name, to_dir_fh, to_name, _auth, _ctx) do
+  def rename(from_dir_fh, from_name, to_dir_fh, to_name, auth, _ctx) do
     case {resolve_dir(from_dir_fh), resolve_dir(to_dir_fh)} do
       {{:ok, from_vol, from_dir_path}, {:ok, to_vol, to_dir_path}} ->
-        do_rename(from_vol, from_dir_path, from_name, to_vol, to_dir_path, to_name)
+        do_rename(
+          from_vol,
+          from_dir_path,
+          from_name,
+          to_vol,
+          to_dir_path,
+          to_name,
+          identity_opts(auth)
+        )
 
       _ ->
         {:error, :stale}
     end
   end
 
-  defp do_rename(from_vol, from_dir, from_name, to_vol, to_dir, to_name) do
+  defp do_rename(from_vol, from_dir, from_name, to_vol, to_dir, to_name, identity) do
     if from_vol != to_vol do
       # Cross-volume renames aren't a thing in NeonFS — the volume
       # is the namespace boundary. RFC 1813 lets us return EXDEV
       # ("cross-device link") which `:exdev` covers.
       {:error, :xdev,
        %WccData{
-         before: pre_dir_wcc(from_vol, from_dir),
-         after: post_dir_attr(from_vol, from_dir)
-       }, %WccData{before: pre_dir_wcc(to_vol, to_dir), after: post_dir_attr(to_vol, to_dir)}}
+         before: pre_dir_wcc(from_vol, from_dir, identity),
+         after: post_dir_attr(from_vol, from_dir, identity)
+       },
+       %WccData{
+         before: pre_dir_wcc(to_vol, to_dir, identity),
+         after: post_dir_attr(to_vol, to_dir, identity)
+       }}
     else
       from_path = Path.join(from_dir, from_name)
       to_path = Path.join(to_dir, to_name)
-      from_pre = pre_dir_wcc(from_vol, from_dir)
-      to_pre = pre_dir_wcc(to_vol, to_dir)
+      from_pre = pre_dir_wcc(from_vol, from_dir, identity)
+      to_pre = pre_dir_wcc(to_vol, to_dir, identity)
 
-      case core_call(NeonFS.Core, :rename_file, [from_vol, from_path, to_path]) do
+      case core_call(NeonFS.Core, :rename_file, [from_vol, from_path, to_path, identity]) do
         :ok ->
-          {:ok, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
-           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+          {:ok, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir, identity)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir, identity)}}
 
         {:error, %{class: :invalid}} ->
-          {:error, :inval, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
-           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+          {:error, :inval,
+           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir, identity)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir, identity)}}
 
         {:error, :not_found} ->
-          {:error, :noent, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
-           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+          {:error, :noent,
+           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir, identity)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir, identity)}}
 
         {:error, %{class: :not_found}} ->
-          {:error, :noent, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
-           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+          {:error, :noent,
+           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir, identity)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir, identity)}}
+
+        {:error, %{class: :forbidden}} ->
+          {:error, :acces,
+           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir, identity)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir, identity)}}
 
         {:error, status} when is_atom(status) ->
           {:error, to_nfs_status(status),
-           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
-           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir, identity)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir, identity)}}
 
         _ ->
-          {:error, :io, %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir)},
-           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir)}}
+          {:error, :io,
+           %WccData{before: from_pre, after: post_dir_attr(from_vol, from_dir, identity)},
+           %WccData{before: to_pre, after: post_dir_attr(to_vol, to_dir, identity)}}
       end
     end
   end
@@ -831,44 +887,49 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   @impl true
-  def setattr(fh, %Sattr3{} = sattr, guard_ctime, _auth, _ctx) do
-    case resolve_meta(fh) do
+  def setattr(fh, %Sattr3{} = sattr, guard_ctime, auth, _ctx) do
+    identity = identity_opts(auth)
+
+    case resolve_meta(fh, identity) do
       {:ok, vol_name, path, pre_meta} ->
-        do_setattr(vol_name, path, pre_meta, sattr, guard_ctime)
+        do_setattr(vol_name, path, pre_meta, sattr, guard_ctime, identity)
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}
     end
   end
 
-  defp do_setattr(vol_name, path, pre_meta, %Sattr3{} = sattr, guard_ctime) do
+  defp do_setattr(vol_name, path, pre_meta, %Sattr3{} = sattr, guard_ctime, identity) do
     pre_wcc = wcc_attr_from_meta(pre_meta)
 
     if guard_failed?(pre_meta, guard_ctime) do
       {:error, :not_sync, %WccData{before: pre_wcc, after: fattr_from_meta(pre_meta)}}
     else
-      apply_sattr(vol_name, path, pre_wcc, sattr)
+      apply_sattr(vol_name, path, pre_wcc, sattr, identity)
     end
   end
 
-  defp apply_sattr(vol_name, path, pre_wcc, %Sattr3{} = sattr) do
+  defp apply_sattr(vol_name, path, pre_wcc, %Sattr3{} = sattr, identity) do
     updates = build_attr_updates(sattr)
 
     result =
       if is_integer(sattr.size) do
-        core_call(NeonFS.Core, :truncate_file, [vol_name, path, sattr.size, updates])
+        core_call(NeonFS.Core, :truncate_file, [vol_name, path, sattr.size, updates, identity])
       else
         if updates == [] do
           # No-op SETATTR — RFC 1813 permits this; just refresh post-op.
-          core_call(NeonFS.Core, :get_file_meta, [vol_name, path])
+          core_call(NeonFS.Core, :get_file_meta, [vol_name, path, identity])
         else
-          core_call(NeonFS.Core, :update_file_meta, [vol_name, path, updates])
+          core_call(NeonFS.Core, :update_file_meta, [vol_name, path, updates, identity])
         end
       end
 
     case result do
       {:ok, %FileMeta{} = post_meta} ->
         {:ok, %WccData{before: pre_wcc, after: fattr_from_meta(post_meta)}}
+
+      {:error, %{class: :forbidden}} ->
+        {:error, :acces, %WccData{before: pre_wcc, after: nil}}
 
       {:error, status} when is_atom(status) ->
         {:error, map_setattr_error(status), %WccData{before: pre_wcc, after: nil}}
@@ -924,6 +985,26 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp map_setattr_error(:not_found), do: :stale
   defp map_setattr_error(other), do: to_nfs_status(other)
 
+  ## Internal — identity
+
+  # Anonymous identity for unauthenticated requests. It holds no
+  # volume ACL grants, so AUTH_NONE callers are denied on any volume
+  # they haven't been explicitly granted — matching the squash a
+  # `sec=sys` export applies to `AUTH_NONE` traffic.
+  @anon_uid 65_534
+  @anon_gid 65_534
+
+  # Maps decoded RPC credentials to the `:uid`/`:gids` opts the core
+  # authorisation path expects. AUTH_SYS carries the caller's uid plus
+  # its primary and supplementary gids; every other flavour squashes
+  # to the anonymous identity.
+  @spec identity_opts(Auth.credential() | nil) :: keyword()
+  defp identity_opts(%Auth.Sys{uid: uid, gid: gid, gids: gids}) do
+    [uid: uid, gids: Enum.uniq([gid | gids])]
+  end
+
+  defp identity_opts(_auth), do: [uid: @anon_uid, gids: [@anon_gid]]
+
   ## Internal — resolution
 
   # Returns `{:ok, volume_name, path}` or `{:error, :stale}`.
@@ -941,24 +1022,25 @@ defmodule NeonFS.NFS.NFSv3Backend do
   # `:not_found`. Handler-level callers expect root resolution to
   # succeed with a directory FileMeta so GETATTR / READDIRPLUS on the
   # mount root work without the client having to pre-mkdir the root.
-  defp resolve_meta(fh) do
+  defp resolve_meta(fh, identity \\ []) do
     case resolve_handle(fh) do
       {:ok, decoded, vol_name, "/"} ->
         {:ok, vol_name, "/", root_file_meta(decoded.volume_id, vol_name)}
 
       {:ok, _decoded, vol_name, path} ->
-        resolve_file_meta(vol_name, path)
+        resolve_file_meta(vol_name, path, identity)
 
       {:error, status} ->
         {:error, to_nfs_status(status)}
     end
   end
 
-  defp resolve_file_meta(vol_name, path) do
-    case core_call(NeonFS.Core, :get_file_meta, [vol_name, path]) do
+  defp resolve_file_meta(vol_name, path, identity) do
+    case core_call(NeonFS.Core, :get_file_meta, [vol_name, path, identity]) do
       {:ok, meta} -> {:ok, vol_name, path, meta}
       {:error, :not_found} -> {:error, :noent}
       {:error, %{class: :not_found}} -> {:error, :noent}
+      {:error, %{class: :forbidden}} -> {:error, :acces}
       {:error, :stale} -> {:error, :stale}
       {:error, status} when is_atom(status) -> {:error, to_nfs_status(status)}
       _ -> {:error, :stale}
@@ -1038,10 +1120,10 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
-  defp lookup_not_found(dir_fh) do
+  defp lookup_not_found(dir_fh, identity) do
     case resolve_dir(dir_fh) do
       {:ok, vol_name, dir_path} ->
-        case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path]) do
+        case core_call(NeonFS.Core, :get_file_meta, [vol_name, dir_path, identity]) do
           {:ok, dm} -> {:error, :noent, fattr_from_meta(dm)}
           _ -> {:error, :noent, nil}
         end
@@ -1118,15 +1200,18 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
-  defp read_file_stream(vol_name, path, offset, count) do
+  defp read_file_stream(vol_name, path, offset, count, identity) do
     case Application.get_env(:neonfs_nfs, :read_file_stream_fn) do
       nil ->
         # `ChunkReader.read_file_stream/3` returns
         # `{:ok, %{stream: ..., file_size: ...}}`. The handler's
         # `take_bytes/2` wants the raw `Enumerable.t()`, so unwrap.
         # Errors propagate through unchanged so `read/5`'s caller
-        # can map them. (#588.)
-        case ChunkReader.read_file_stream(vol_name, path, offset: offset, length: count) do
+        # can map them. (#588.) `identity` carries the caller's
+        # uid/gids so core runs `Authorise.check` against them.
+        read_opts = Keyword.merge(identity, offset: offset, length: count)
+
+        case ChunkReader.read_file_stream(vol_name, path, read_opts) do
           {:ok, %{stream: stream}} -> stream
           {:error, _} = err -> err
         end

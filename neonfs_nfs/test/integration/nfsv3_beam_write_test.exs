@@ -43,7 +43,9 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
   @moduletag :integration
   @moduletag :nfs
 
-  @auth %Auth.None{}
+  # Root AUTH_SYS mount (uid 0) bypasses the volume ACL; #1215 holds
+  # non-root callers to it.
+  @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
   @chunk_size 1_048_576
   @payload_size 4 * @chunk_size
 

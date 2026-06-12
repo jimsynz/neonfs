@@ -44,9 +44,10 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
   @moduletag nodes: 3
   @moduletag cluster_mode: :shared
 
-  # AUTH_NONE — accepted by the BEAM stack today; AUTH_SYS-style
-  # checks live further inside the backend.
-  @auth %Auth.None{}
+  # Root AUTH_SYS mount (uid 0) — bypasses volume ACL checks, the
+  # realistic posture for a default-owned export. Per-uid enforcement
+  # (#1215) holds non-root callers to the volume ACL.
+  @auth %Auth.Sys{uid: 0, gid: 0, gids: []}
 
   # FastCDC default `max` chunk size. Choosing a 16-MiB payload (16
   # whole chunks) keeps the test multi-chunk without ballooning the
