@@ -342,8 +342,28 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_system_field(%Volume{}), do: :ok
 
-  defp validate_name(name) when is_binary(name) and byte_size(name) > 0, do: :ok
+  # Volume names are used to build host paths (e.g. the Docker plugin's
+  # `Path.join(mount_root, name)` + `File.mkdir_p`), so a name like
+  # `../../tmp` would escape the mount root. Reject path separators,
+  # traversal segments, NUL and control characters at the source — this
+  # also keeps names within the conservative subset valid as S3 bucket
+  # names (#1201). File paths inside volumes are already guarded by
+  # `FileMeta.validate_path/1`.
+  defp validate_name(name) when is_binary(name) and byte_size(name) > 0 do
+    cond do
+      String.contains?(name, "/") -> {:error, "name must not contain '/'"}
+      String.contains?(name, "..") -> {:error, "name must not contain '..'"}
+      name == "." -> {:error, "name must not be '.'"}
+      has_unsafe_byte?(name) -> {:error, "name must not contain NUL or control characters"}
+      true -> :ok
+    end
+  end
+
   defp validate_name(_), do: {:error, "name must be a non-empty string"}
+
+  defp has_unsafe_byte?(name) do
+    name |> :binary.bin_to_list() |> Enum.any?(&(&1 < 0x20 or &1 == 0x7F))
+  end
 
   defp validate_atime_mode(mode) when mode in [:noatime, :relatime], do: :ok
   defp validate_atime_mode(_), do: {:error, "atime_mode must be :noatime or :relatime"}
