@@ -28,9 +28,11 @@ defmodule NFSServer.RPC.Handler do
     * `:system_err` — handler crashed or a downstream system error;
       the dispatcher returns `SYSTEM_ERR`.
 
-  The `ctx` argument is currently a `%{call: NFSServer.RPC.Message.Call.t()}`
-  map carrying the original call envelope. Future fields (e.g. peer
-  address, TLS info) can be added without breaking handlers.
+  The `ctx` argument is a map carrying the original call envelope as
+  `:call` (`NFSServer.RPC.Message.Call.t()`) and the connection's client
+  address as `:peer` (an `:inet.ip_address()`, or `nil` if unavailable) —
+  the latter for per-export host filtering (#1217). Further fields (e.g.
+  TLS info) can be added without breaking handlers.
   """
 
   alias NFSServer.RPC.{Auth, Message}

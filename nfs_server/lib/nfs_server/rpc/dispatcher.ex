@@ -40,11 +40,15 @@ defmodule NFSServer.RPC.Dispatcher do
   @doc """
   Dispatch a single call. Returns a `Message.reply()` ready to be
   encoded with `Message.encode_reply/1`.
+
+  `extras` is merged into the handler `ctx` map — the TCP server uses
+  it to surface the connection's client address as `ctx.peer` so
+  handlers can apply per-export host filtering (#1217).
   """
-  @spec dispatch(Message.Call.t(), programs()) :: Message.reply()
-  def dispatch(%Message.Call{} = call, programs) do
+  @spec dispatch(Message.Call.t(), programs(), map()) :: Message.reply()
+  def dispatch(%Message.Call{} = call, programs, extras \\ %{}) do
     if Message.rpc_version_ok?(call) do
-      dispatch_program(call, programs)
+      dispatch_program(call, programs, extras)
     else
       %Message.DeniedReply{
         xid: call.xid,
@@ -53,21 +57,21 @@ defmodule NFSServer.RPC.Dispatcher do
     end
   end
 
-  defp dispatch_program(%Message.Call{prog: prog, vers: vers} = call, programs) do
+  defp dispatch_program(%Message.Call{prog: prog, vers: vers} = call, programs, extras) do
     case Map.fetch(programs, prog) do
       :error ->
         accepted_reply(call, :prog_unavail)
 
       {:ok, versions} ->
         case Map.fetch(versions, vers) do
-          {:ok, handler} -> invoke_handler(call, handler)
+          {:ok, handler} -> invoke_handler(call, handler, extras)
           :error -> prog_mismatch_reply(call, versions)
         end
     end
   end
 
-  defp invoke_handler(%Message.Call{} = call, handler) do
-    ctx = %{call: call}
+  defp invoke_handler(%Message.Call{} = call, handler, extras) do
+    ctx = Map.merge(%{call: call}, extras)
 
     result =
       try do

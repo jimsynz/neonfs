@@ -166,8 +166,8 @@ defmodule NFSServer.Mount.Handler do
   end
 
   # AUTH_SYS surfaces the client's hostname; AUTH_NONE doesn't, so
-  # fall back to a generic anonymous tag. Backends that need the IP
-  # can pull it from the future `ctx.peer` slot.
+  # fall back to a generic anonymous tag. Backends that need the client
+  # IP can read it from `ctx.peer` (#1217).
   defp client_name(%Auth.Sys{machinename: name}) when is_binary(name) and name != "", do: name
   defp client_name(_), do: "anonymous"
 

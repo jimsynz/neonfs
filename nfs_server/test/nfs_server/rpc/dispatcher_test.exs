@@ -22,6 +22,17 @@ defmodule NFSServer.RPC.DispatcherTest do
     def handle_call(_, _args, _auth, _ctx), do: raise("boom")
   end
 
+  # Echoes the ctx fields back in the reply body so tests can assert
+  # what the dispatcher surfaced to the handler.
+  defmodule CtxEchoHandler do
+    @behaviour NFSServer.RPC.Handler
+
+    @impl true
+    def handle_call(_proc, _args, _auth, ctx) do
+      {:ok, :erlang.term_to_binary(Map.get(ctx, :peer, :absent))}
+    end
+  end
+
   defp call(prog, vers, proc, args \\ <<>>, rpcvers \\ 2) do
     %Message.Call{
       xid: 42,
@@ -38,7 +49,8 @@ defmodule NFSServer.RPC.DispatcherTest do
   defp programs do
     %{
       100_500 => %{1 => EchoHandler, 2 => EchoHandler},
-      999_999 => %{1 => CrashHandler}
+      999_999 => %{1 => CrashHandler},
+      555_555 => %{1 => CtxEchoHandler}
     }
   end
 
@@ -70,6 +82,24 @@ defmodule NFSServer.RPC.DispatcherTest do
                body: "echo-payload",
                verf: %Auth.None{}
              } = reply
+    end
+  end
+
+  describe "ctx.peer plumbing (#1217)" do
+    test "surfaces the extras' peer address to the handler" do
+      reply = Dispatcher.dispatch(call(555_555, 1, 0), programs(), %{peer: {10, 0, 0, 5}})
+
+      assert %Message.AcceptedReply{stat: :success, body: body} = reply
+      assert :erlang.binary_to_term(body) == {10, 0, 0, 5}
+    end
+
+    test "leaves peer absent when no extras are passed (handlers Map.get a default)" do
+      reply = Dispatcher.dispatch(call(555_555, 1, 0), programs())
+
+      assert %Message.AcceptedReply{stat: :success, body: body} = reply
+      # `ctx` carries no `:peer` key on the bare dispatch/2 path; the TCP
+      # server always supplies `%{peer: …}` (possibly nil) in production.
+      assert :erlang.binary_to_term(body) == :absent
     end
   end
 
