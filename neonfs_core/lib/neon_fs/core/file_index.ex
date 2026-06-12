@@ -849,7 +849,14 @@ defmodule NeonFS.Core.FileIndex do
     dir_id = UUIDv7.generate()
     new_dir = DirectoryEntry.new(volume_id, normalized, opts)
 
-    with :ok <- do_ensure_root_dir(volume_id),
+    # `validate_path/1` is the storage-layer gate for the leading-slash
+    # invariant — the persisted `/` root entry is only consistent if every
+    # dir path starts with `/`. `do_create` already validates; mirror it
+    # here so a non-normalised path fails loud rather than landing a dir
+    # entry inconsistent with the root (#1210). `FileMeta.normalize_path/1`
+    # only trims trailing slashes; it does not prepend a leading one.
+    with :ok <- FileMeta.validate_path(normalized),
+         :ok <- do_ensure_root_dir(volume_id),
          :ok <- ensure_parent_dirs(volume_id, parent_path),
          :ok <- write_dir_entry(new_dir),
          :ok <- add_dir_child(volume_id, parent_path, name, :dir, dir_id) do

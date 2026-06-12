@@ -231,6 +231,11 @@ defmodule NeonFS.Core.FileMeta do
   @doc """
   Normalizes a file path by removing trailing slashes.
 
+  This only trims trailing slashes — it does **not** prepend a leading
+  one. Distinct from `NeonFS.Core`'s internal `normalize_path/1`, which
+  prepends `/` at the public API boundary. The leading-slash invariant is
+  enforced (not silently fixed) by `validate_path/1` at the storage layer.
+
   ## Examples
       iex> FileMeta.normalize_path("/test/path/")
       "/test/path"
