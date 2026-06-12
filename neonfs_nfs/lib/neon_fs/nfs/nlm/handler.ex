@@ -102,12 +102,12 @@ defmodule NeonFS.NFS.NLM.Handler do
   end
 
   # NLM4_TEST (1)
-  defp dispatch_procedure(1, body, _cred, state) do
+  defp dispatch_procedure(1, body, cred, state) do
     :telemetry.execute([:neonfs, :nlm, :request], %{count: 1}, %{procedure: :test})
 
     case Codec.decode_testargs(body) do
       {:ok, args} ->
-        result = handle_test(args, state)
+        result = handle_test(args, cred, state)
         {result, state}
 
       {:error, _} ->
@@ -116,12 +116,12 @@ defmodule NeonFS.NFS.NLM.Handler do
   end
 
   # NLM4_LOCK (2)
-  defp dispatch_procedure(2, body, _cred, state) do
+  defp dispatch_procedure(2, body, cred, state) do
     :telemetry.execute([:neonfs, :nlm, :request], %{count: 1}, %{procedure: :lock})
 
     case Codec.decode_lockargs(body) do
       {:ok, args} ->
-        result = handle_lock(args, state)
+        result = handle_lock(args, cred, state)
         {result, state}
 
       {:error, _} ->
@@ -144,12 +144,12 @@ defmodule NeonFS.NFS.NLM.Handler do
   end
 
   # NLM4_UNLOCK (4)
-  defp dispatch_procedure(4, body, _cred, state) do
+  defp dispatch_procedure(4, body, cred, state) do
     :telemetry.execute([:neonfs, :nlm, :request], %{count: 1}, %{procedure: :unlock})
 
     case Codec.decode_unlockargs(body) do
       {:ok, args} ->
-        result = handle_unlock(args, state)
+        result = handle_unlock(args, cred, state)
         {result, state}
 
       {:error, _} ->
@@ -198,9 +198,9 @@ defmodule NeonFS.NFS.NLM.Handler do
 
   ## Procedure implementations
 
-  defp handle_test(args, state) do
+  defp handle_test(args, cred, state) do
     file_id = file_id_from_fh(args.lock.fh)
-    client_ref = client_ref(args.lock)
+    client_ref = client_ref(args.lock, cred)
     range = lock_range(args.lock)
     lock_type = if args.exclusive, do: :exclusive, else: :shared
 
@@ -235,9 +235,9 @@ defmodule NeonFS.NFS.NLM.Handler do
     end
   end
 
-  defp handle_lock(args, state) do
+  defp handle_lock(args, cred, state) do
     file_id = file_id_from_fh(args.lock.fh)
-    client_ref = client_ref(args.lock)
+    client_ref = client_ref(args.lock, cred)
     range = lock_range(args.lock)
     lock_type = if args.exclusive, do: :exclusive, else: :shared
 
@@ -274,9 +274,9 @@ defmodule NeonFS.NFS.NLM.Handler do
     end
   end
 
-  defp handle_unlock(args, state) do
+  defp handle_unlock(args, cred, state) do
     file_id = file_id_from_fh(args.lock.fh)
-    client_ref = client_ref(args.lock)
+    client_ref = client_ref(args.lock, cred)
     range = lock_range(args.lock)
 
     result =
@@ -308,9 +308,18 @@ defmodule NeonFS.NFS.NLM.Handler do
 
   defp file_id_from_fh(fh), do: Base.encode16(fh, case: :lower)
 
-  defp client_ref(lock) do
-    {lock.caller_name, lock.svid}
+  # Bind lock ownership to the authenticated RPC credential, not just the
+  # client-supplied `caller_name`/`svid` (untrusted wire data). Including
+  # the credential's identity means a different authenticated principal
+  # can't test, release, or cancel another's locks by replaying a forged
+  # `caller_name` (#1193). AUTH_NONE collapses to a single `:anonymous`
+  # owner.
+  defp client_ref(lock, cred) do
+    {cred_owner(cred), lock.caller_name, lock.svid}
   end
+
+  defp cred_owner(%{uid: uid}), do: {:uid, uid}
+  defp cred_owner(_cred), do: :anonymous
 
   defp lock_range(%{offset: offset, length: 0}), do: {offset, 0xFFFFFFFFFFFFFFFF - offset}
   defp lock_range(%{offset: offset, length: length}), do: {offset, length}
