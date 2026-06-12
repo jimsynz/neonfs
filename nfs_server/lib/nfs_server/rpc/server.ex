@@ -161,7 +161,8 @@ defmodule NFSServer.RPC.Server do
       socket: socket,
       buffer: <<>>,
       programs: programs,
-      portmap_mappings: portmap_mappings
+      portmap_mappings: portmap_mappings,
+      peer: peer_address(socket)
     }
 
     read_loop(state)
@@ -171,6 +172,18 @@ defmodule NFSServer.RPC.Server do
       :gen_tcp.close(socket)
   catch
     :exit, _ -> :gen_tcp.close(socket)
+  end
+
+  # The connection's client address, surfaced to handlers as `ctx.peer`
+  # for per-export host filtering (#1217). Computed once — a TCP peer is
+  # constant for the connection's lifetime. `nil` if it can't be read
+  # (e.g. the socket closed during the race), which handlers treat as
+  # "no host information".
+  defp peer_address(socket) do
+    case :inet.peername(socket) do
+      {:ok, {addr, _port}} -> addr
+      _ -> nil
+    end
   end
 
   defp read_loop(state) do
@@ -206,7 +219,7 @@ defmodule NFSServer.RPC.Server do
     case Message.decode_call(body) do
       {:ok, call} ->
         ctx_extras = %{portmap_mappings: state.portmap_mappings}
-        reply = Dispatcher.dispatch(call, state.programs)
+        reply = Dispatcher.dispatch(call, state.programs, %{peer: state.peer})
         # The portmapper handler uses `ctx.portmap_mappings`; pass it
         # through by stashing it on the call before dispatch. We do
         # this by piggy-backing on the dispatcher's existing ctx
