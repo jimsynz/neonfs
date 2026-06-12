@@ -459,7 +459,7 @@ fn build_fusermount_env(commfd: c_int) -> Vec<CString> {
 /// `options` is the comma-joined argument to `-o` (the format `fusermount3`
 /// itself expects); the caller is responsible for joining individual options.
 /// An empty `options` is allowed — `-o` takes an empty string.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 pub fn fusermount3_mount<'a>(
     env: Env<'a>,
     mount_point: String,

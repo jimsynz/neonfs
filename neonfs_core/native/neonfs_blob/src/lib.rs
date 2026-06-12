@@ -37,7 +37,7 @@ fn add(a: i64, b: i64) -> i64 {
 /// Computes SHA-256 hash of the given binary data.
 ///
 /// Returns the hash as a 32-byte binary.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn compute_hash<'a>(env: Env<'a>, data: Binary) -> Binary<'a> {
     let hash = hash::sha256(data.as_slice());
     let bytes = hash.as_bytes();
@@ -55,7 +55,7 @@ fn compute_hash<'a>(env: Env<'a>, data: Binary) -> Binary<'a> {
 ///
 /// # Returns
 /// A resource reference to the opened store, or an error tuple.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_open(
     base_dir: String,
     prefix_depth: usize,
@@ -80,7 +80,7 @@ fn store_open(
 ///
 /// # Returns
 /// `:ok` on success, or an error tuple.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_write_chunk(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -111,7 +111,7 @@ fn store_write_chunk(
 ///
 /// # Returns
 /// A tuple of (original_size, stored_size, compression, encryption_algorithm, nonce).
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 #[allow(clippy::too_many_arguments)]
 fn store_write_chunk_compressed<'a>(
     env: Env<'a>,
@@ -171,7 +171,7 @@ fn store_write_chunk_compressed<'a>(
 ///
 /// # Returns
 /// The chunk data as a binary, or an error tuple.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_read_chunk<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -203,7 +203,7 @@ fn store_read_chunk<'a>(
 /// # Returns
 /// The chunk data as a binary, or an error tuple.
 /// If `verify` is true and the data is corrupt, returns an error.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_read_chunk_verified<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -261,7 +261,7 @@ fn parse_codec_locator<'a>(
     Ok((compression, encryption))
 }
 
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_read_chunk_with_options<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -302,7 +302,7 @@ fn store_read_chunk_with_options<'a>(
 /// # Returns
 /// `{:ok, bytes_freed}` on success, or an error tuple.
 #[allow(clippy::too_many_arguments)]
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_delete_chunk(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -327,7 +327,7 @@ fn store_delete_chunk(
 ///
 /// Intended for orphan cleanup paths that don't track codec settings.
 /// Returns the total bytes freed across all variants.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_delete_chunk_any_codec(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -344,7 +344,7 @@ fn store_delete_chunk_any_codec(
 
 /// Checks if a specific codec variant of a chunk exists in the blob store.
 #[allow(clippy::too_many_arguments)]
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_chunk_exists(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -364,7 +364,7 @@ fn store_chunk_exists(
 }
 
 /// Checks whether any codec variant of a chunk exists at a tier.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_chunk_exists_any_codec(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -382,7 +382,7 @@ fn store_chunk_exists_any_codec(
 /// Returns the on-disk size of any codec variant of the chunk, or `0` if no
 /// variant exists. Use together with `store_chunk_exists_any_codec` to
 /// distinguish "missing" from "zero-byte".
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_chunk_any_codec_size(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -412,7 +412,7 @@ fn store_chunk_any_codec_size(
 /// # Returns
 /// `:ok` on success, or an error tuple.
 #[allow(clippy::too_many_arguments)]
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_migrate_chunk(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -449,7 +449,7 @@ fn store_migrate_chunk(
 ///
 /// # Returns
 /// The stored size of the re-encrypted chunk, or an error tuple.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn store_reencrypt_chunk(
     store: ResourceArc<BlobStoreResource>,
     hash_bytes: Binary,
@@ -564,7 +564,7 @@ type ChunkResultTuple<'a> = (Binary<'a>, Binary<'a>, usize, usize);
 ///
 /// # Returns
 /// A list of tuples, each containing (data, hash, offset, size).
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn nif_chunk_data<'a>(
     env: Env<'a>,
     data: Binary,
@@ -683,7 +683,7 @@ fn chunker_init(
 /// Feeds a slice of data into the chunker and returns any complete chunks
 /// that became available. Bytes that may still belong to a future chunk
 /// remain buffered inside the resource.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn chunker_feed<'a>(
     env: Env<'a>,
     chunker: ResourceArc<ChunkerResource>,
@@ -696,7 +696,7 @@ fn chunker_feed<'a>(
 
 /// Flushes any remaining buffered data as the final chunks. The chunker may
 /// be reused after `finish`; offsets continue from where they left off.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn chunker_finish<'a>(
     env: Env<'a>,
     chunker: ResourceArc<ChunkerResource>,
@@ -715,7 +715,7 @@ fn chunker_finish<'a>(
 ///
 /// # Returns
 /// A list of parity shard binaries, or an error string.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn erasure_encode<'a>(
     env: Env<'a>,
     data_shards: Vec<Binary>,
@@ -748,7 +748,7 @@ fn erasure_encode<'a>(
 ///
 /// # Returns
 /// A list of all data shard binaries (reconstructed), or an error string.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyCpu")]
 fn erasure_decode<'a>(
     env: Env<'a>,
     shards_with_indices: Vec<(usize, Binary<'a>)>,
@@ -783,7 +783,7 @@ fn erasure_decode<'a>(
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
 /// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
 /// * `data` - Binary metadata to write.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn metadata_write(
     store: ResourceArc<BlobStoreResource>,
     segment_id_hex: String,
@@ -805,7 +805,7 @@ fn metadata_write(
 /// * `store` - Resource reference to the blob store.
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
 /// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn metadata_read<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -830,7 +830,7 @@ fn metadata_read<'a>(
 /// * `store` - Resource reference to the blob store.
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
 /// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn metadata_delete(
     store: ResourceArc<BlobStoreResource>,
     segment_id_hex: String,
@@ -850,7 +850,7 @@ fn metadata_delete(
 /// * `env` - Rustler environment.
 /// * `store` - Resource reference to the blob store.
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn metadata_list_segment<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -879,7 +879,7 @@ fn metadata_list_segment<'a>(
 ///
 /// # Returns
 /// A tuple of `(total_bytes, available_bytes, used_bytes)`.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn filesystem_info(path: String) -> Result<(u64, u64, u64), String> {
     use std::ffi::CString;
     use std::mem::MaybeUninit;
@@ -913,7 +913,7 @@ fn filesystem_info(path: String) -> Result<(u64, u64, u64), String> {
 /// Returns `{:ok, value}` (with `value` either a binary or `nil`)
 /// or `{:error, reason}`. `nil` means the key is absent or
 /// tombstoned.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn index_tree_get<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -945,7 +945,7 @@ fn index_tree_get<'a>(
 ///
 /// Returns `{:ok, [{key, value}, ...]}` in ascending key order, or
 /// `{:error, reason}`.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn index_tree_range<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -982,7 +982,7 @@ fn index_tree_range<'a>(
 /// root plus the copy-on-write node chunks this op wrote, so the
 /// caller can replicate them to the volume's other metadata drives
 /// (#903).
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn index_tree_put<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -1017,7 +1017,7 @@ fn index_tree_put<'a>(
 ///
 /// Returns `{new_root_hash, [{chunk_hash, chunk_bytes}]}` — see
 /// `index_tree_put`.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn index_tree_delete<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -1049,7 +1049,7 @@ fn index_tree_delete<'a>(
 ///
 /// Errors if the input root_hash is `<<>>` — there's nothing to
 /// purge from a tree that was never written.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn index_tree_purge_tombstones<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
@@ -1117,7 +1117,7 @@ fn vec_to_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Binary<'a> {
 /// internal-page chunks and leaf-page chunks. Empty `root_hash`
 /// returns `{:ok, []}`. Used by the per-volume anti-entropy runner
 /// (#955) so index-tree pages are enumerated alongside data chunks.
-#[rustler::nif]
+#[rustler::nif(schedule = "DirtyIo")]
 fn index_tree_list_referenced_chunks<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
