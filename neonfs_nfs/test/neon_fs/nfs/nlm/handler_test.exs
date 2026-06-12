@@ -292,7 +292,56 @@ defmodule NeonFS.NFS.NLM.HandlerTest do
     end
   end
 
+  describe "credential binding (#1193)" do
+    setup do
+      test_pid = self()
+
+      core_call_fn = fn _mod, fun, args when fun in [:lock, :unlock, :test_lock] ->
+        client_ref = Enum.at(args, 1)
+        send(test_pid, {:client_ref, client_ref})
+        :ok
+      end
+
+      %{state: Handler.init(core_call_fn: core_call_fn)}
+    end
+
+    test "binds lock ownership to the authenticated uid, not just caller_name", %{state: state} do
+      body = encode_lockargs("c", true, true, make_lock(), false, 1)
+      call = with_cred(build_call(2, body), 1000)
+
+      Handler.handle_call(call, state)
+      assert_received {:client_ref, {{:uid, 1000}, "testhost", 100}}
+    end
+
+    test "a different uid yields a distinct lock owner for the same caller_name", %{state: state} do
+      body = encode_lockargs("c", true, true, make_lock(), false, 1)
+
+      Handler.handle_call(with_cred(build_call(2, body), 1000), state)
+      assert_received {:client_ref, ref_1000}
+
+      Handler.handle_call(with_cred(build_call(2, body), 1001), state)
+      assert_received {:client_ref, ref_1001}
+
+      refute ref_1000 == ref_1001
+    end
+
+    test "AUTH_NONE collapses to an anonymous owner", %{state: state} do
+      body = encode_unlockargs("c", make_lock())
+      # build_call/2 defaults to AUTH_NONE with a nil cred.
+      Handler.handle_call(build_call(4, body), state)
+      assert_received {:client_ref, {:anonymous, "testhost", 100}}
+    end
+  end
+
   ## Helpers
+
+  defp with_cred(call, uid) do
+    %{
+      call
+      | cred_flavor: :auth_sys,
+        cred: %{stamp: 0, machine_name: "testhost", uid: uid, gid: 0, gids: []}
+    }
+  end
 
   defp build_call(procedure, body) do
     %{
