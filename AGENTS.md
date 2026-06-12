@@ -329,6 +329,19 @@ Consequences operators and contributors must internalise:
 
 Do not add intra-cluster authorisation checks expecting them to be a security control; they cannot be, and they imply a sandbox guarantee that does not exist.
 
+### Listener Posture (interface defaults)
+
+Interface listeners bind **`0.0.0.0` (all interfaces)** by default, and the HTTP ones are **plain HTTP** — unencrypted and world-reachable unless the deployment restricts them:
+
+| Interface | App env (bind / port)                          | Default            | Transport |
+|-----------|------------------------------------------------|--------------------|-----------|
+| S3        | `:neonfs_s3` `:s3_bind` / `:s3_port`           | `0.0.0.0` / `8080` | plain HTTP |
+| WebDAV    | `:neonfs_webdav` `:webdav_bind` / `:webdav_port` | `0.0.0.0` / `8081` | plain HTTP |
+| NFSv3     | `:neonfs_nfs` `:bind_address` / `:port`        | `0.0.0.0` / `2049` | TCP        |
+| NLM       | `:neonfs_nfs` `:nlm_bind` / `:nlm_port`        | `0.0.0.0` / `4045` | TCP        |
+
+Deployment guidance: front the HTTP interfaces (S3, WebDAV) with a TLS-terminating reverse proxy or confine them to a trusted network; firewall the NFS/NLM ports. Override the bind env to `127.0.0.1` where only local access is intended. (Flipping the shipped defaults to loopback is tracked separately — it needs the test-rig, container images, and Helm chart to set binds explicitly first, else deployments break silently.)
+
 ### Service Discovery
 
 Non-core nodes (FUSE, NFS, S3, Docker, etc.) use `neonfs_client` to discover and communicate with core nodes:
