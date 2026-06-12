@@ -6,7 +6,7 @@ use crate::output::{json, table, OutputFormat};
 use crate::term::types::NfsExportInfo;
 use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
 use clap::Subcommand;
-use eetf::{Binary, Term};
+use eetf::{Binary, List, Term};
 use std::process::Command;
 
 /// NFS export and mount subcommands
@@ -16,6 +16,11 @@ pub enum NfsCommand {
     Export {
         /// Volume name
         volume: String,
+
+        /// Restrict the export to these client IPs/CIDRs (repeatable).
+        /// Omit to allow all clients. E.g. `--allow 10.0.0.0/8 --allow 192.168.1.5`.
+        #[arg(long = "allow", value_name = "IP_OR_CIDR")]
+        allow: Vec<String>,
     },
 
     /// Unexport a volume from NFS
@@ -61,7 +66,7 @@ impl NfsCommand {
     /// Execute the NFS command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            NfsCommand::Export { volume } => self.export(volume, format),
+            NfsCommand::Export { volume, allow } => self.export(volume, allow, format),
             NfsCommand::Unexport { volume } => self.unexport(volume, format),
             NfsCommand::List => self.list(format),
             NfsCommand::Mount {
@@ -73,15 +78,30 @@ impl NfsCommand {
         }
     }
 
-    fn export(&self, volume: &str, format: OutputFormat) -> Result<()> {
+    fn export(&self, volume: &str, allow: &[String], format: OutputFormat) -> Result<()> {
         let volume_term = Term::Binary(Binary {
             bytes: volume.as_bytes().to_vec(),
         });
 
+        let allow_term = Term::List(List {
+            elements: allow
+                .iter()
+                .map(|ip| {
+                    Term::Binary(Binary {
+                        bytes: ip.as_bytes().to_vec(),
+                    })
+                })
+                .collect(),
+        });
+
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
-            conn.call("Elixir.NeonFS.CLI.Handler", "nfs_export", vec![volume_term])
-                .await
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "nfs_export",
+                vec![volume_term, allow_term],
+            )
+            .await
         })?;
 
         if let Some(err) = extract_error(&result) {

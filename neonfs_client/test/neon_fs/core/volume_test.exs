@@ -241,6 +241,20 @@ defmodule NeonFS.Core.VolumeTest do
       end
     end
 
+    test "accepts valid nfs_allowed_ips (IPs and CIDRs, v4 and v6) (#1217)" do
+      vol = %{Volume.new("x") | nfs_allowed_ips: ["10.0.0.0/8", "192.168.1.5", "2001:db8::/32"]}
+      assert :ok = Volume.validate(vol)
+
+      assert :ok = Volume.validate(%{Volume.new("x") | nfs_allowed_ips: []})
+    end
+
+    test "rejects malformed nfs_allowed_ips (#1217)" do
+      for bad <- [["not-an-ip"], ["10.0.0.0/99"], ["10.0.0.0/"], "10.0.0.0/8"] do
+        vol = %{Volume.new("x") | nfs_allowed_ips: bad}
+        assert {:error, "nfs_allowed_ips must be" <> _} = Volume.validate(vol)
+      end
+    end
+
     test "rejects invalid durability" do
       vol = %{Volume.new("x") | durability: %{type: :replicate, factor: 0, min_copies: 0}}
 

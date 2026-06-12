@@ -78,7 +78,8 @@ defmodule NeonFS.Core.Volume do
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
           system: boolean(),
-          nfs_export: boolean()
+          nfs_export: boolean(),
+          nfs_allowed_ips: [String.t()]
         }
 
   defstruct [
@@ -101,6 +102,7 @@ defmodule NeonFS.Core.Volume do
     :updated_at,
     atime_mode: :noatime,
     nfs_export: false,
+    nfs_allowed_ips: [],
     system: false
   ]
 
@@ -136,6 +138,7 @@ defmodule NeonFS.Core.Volume do
       verification: Keyword.get(opts, :verification, default_verification()),
       encryption: Keyword.get(opts, :encryption, default_encryption()),
       metadata_consistency: Keyword.get(opts, :metadata_consistency),
+      nfs_allowed_ips: Keyword.get(opts, :nfs_allowed_ips, []),
       logical_size: 0,
       physical_size: 0,
       chunk_count: 0,
@@ -241,6 +244,7 @@ defmodule NeonFS.Core.Volume do
       :io_weight,
       :metadata_consistency,
       :nfs_export,
+      :nfs_allowed_ips,
       :owner,
       :tiering,
       :verification,
@@ -330,7 +334,8 @@ defmodule NeonFS.Core.Volume do
          :ok <- validate_compression(volume.compression),
          :ok <- validate_verification(volume.verification),
          :ok <- validate_encryption(volume.encryption),
-         :ok <- validate_nfs_export(volume.nfs_export) do
+         :ok <- validate_nfs_export(volume.nfs_export),
+         :ok <- validate_nfs_allowed_ips(volume.nfs_allowed_ips) do
       validate_metadata_consistency(volume.metadata_consistency)
     end
   end
@@ -470,6 +475,39 @@ defmodule NeonFS.Core.Volume do
 
   defp validate_nfs_export(flag) when is_boolean(flag), do: :ok
   defp validate_nfs_export(_), do: {:error, "nfs_export must be a boolean"}
+
+  # An empty list means allow-all (the historical posture); otherwise each
+  # entry must be a well-formed IP or CIDR string (#1217).
+  defp validate_nfs_allowed_ips(list) when is_list(list) do
+    if Enum.all?(list, &valid_cidr_or_ip?/1) do
+      :ok
+    else
+      {:error,
+       ~s(nfs_allowed_ips must be a list of IP or CIDR strings, e.g. "10.0.0.0/8" or "192.168.1.5")}
+    end
+  end
+
+  defp validate_nfs_allowed_ips(_), do: {:error, "nfs_allowed_ips must be a list"}
+
+  defp valid_cidr_or_ip?(entry) when is_binary(entry) do
+    case String.split(entry, "/") do
+      [ip] -> match?({:ok, _}, :inet.parse_address(String.to_charlist(ip)))
+      [ip, prefix] -> valid_cidr?(ip, prefix)
+      _ -> false
+    end
+  end
+
+  defp valid_cidr_or_ip?(_), do: false
+
+  defp valid_cidr?(ip, prefix) do
+    with {:ok, addr} <- :inet.parse_address(String.to_charlist(ip)),
+         {n, ""} <- Integer.parse(prefix) do
+      max = if tuple_size(addr) == 4, do: 32, else: 128
+      n >= 0 and n <= max
+    else
+      _ -> false
+    end
+  end
 
   defp validate_metadata_consistency(nil), do: :ok
 

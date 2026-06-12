@@ -41,6 +41,23 @@ defmodule NeonFS.NFS.MountBackendTest do
     :sys.get_state(manager)
   end
 
+  defp export_volume_with_allow(manager, name, allowed_ips) do
+    volume = %{
+      id: @volume_id,
+      name: name,
+      nfs_export: true,
+      nfs_allowed_ips: allowed_ips,
+      updated_at: DateTime.utc_now()
+    }
+
+    stub(NeonFS.Client.Router, :call, fn NeonFS.Core, :list_volumes, [] ->
+      {:ok, [volume]}
+    end)
+
+    send(manager, :resync)
+    :sys.get_state(manager)
+  end
+
   describe "resolve/2" do
     test "synthetic root resolves to a fhandle with a null volume id and fileid 1" do
       assert {:ok, fhandle, [_ | _] = auth_flavors} = MountBackend.resolve("/", %{})
@@ -71,6 +88,32 @@ defmodule NeonFS.NFS.MountBackendTest do
 
     test "unknown volume returns :noent" do
       assert {:error, :noent} = MountBackend.resolve("/unknown-volume", %{})
+    end
+
+    test "permits a client whose source IP is on the export's allow-list (#1217)", %{
+      manager: manager
+    } do
+      export_volume_with_allow(manager, "photos", ["10.0.0.0/8"])
+
+      assert {:ok, _fhandle, _flavors} =
+               MountBackend.resolve("/photos", %{peer: {10, 1, 2, 3}})
+    end
+
+    test "rejects a client whose source IP is not on the allow-list with :acces (#1217)", %{
+      manager: manager
+    } do
+      export_volume_with_allow(manager, "photos", ["10.0.0.0/8"])
+
+      assert {:error, :acces} =
+               MountBackend.resolve("/photos", %{peer: {192, 168, 1, 1}})
+    end
+
+    test "rejects when the peer is unknown and the allow-list is non-empty (#1217)", %{
+      manager: manager
+    } do
+      export_volume_with_allow(manager, "photos", ["10.0.0.0/8"])
+
+      assert {:error, :acces} = MountBackend.resolve("/photos", %{})
     end
 
     test "non-rooted path returns :inval" do

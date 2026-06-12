@@ -10,12 +10,13 @@ defmodule NeonFS.NFS.ExportInfo do
   """
 
   @enforce_keys [:volume_id, :volume_name, :exported_at]
-  defstruct [:volume_id, :volume_name, :exported_at]
+  defstruct [:volume_id, :volume_name, :exported_at, allowed_ips: []]
 
   @type t :: %__MODULE__{
           volume_id: String.t(),
           volume_name: String.t(),
-          exported_at: DateTime.t()
+          exported_at: DateTime.t(),
+          allowed_ips: [String.t()]
         }
 
   @doc """

@@ -19,7 +19,7 @@ defmodule NeonFS.NFS.MountBackend do
 
   @behaviour NFSServer.Mount.Backend
 
-  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable}
+  alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable, IpAllowList}
   alias NFSServer.Mount.Types.ExportNode
 
   @synthetic_root_volume_id <<0::128>>
@@ -36,15 +36,22 @@ defmodule NeonFS.NFS.MountBackend do
     {:ok, Filehandle.encode(@synthetic_root_volume_id, @synthetic_root_fileid), @auth_flavors}
   end
 
-  def resolve("/" <> volume_name, _ctx) do
+  def resolve("/" <> volume_name, ctx) do
     case lookup_export(volume_name) do
-      {:ok, volume_id_binary} ->
-        # Populate the volume index so the NFSv3 backend can recover
-        # the volume name from a filehandle's volume id even when
-        # `inode_table_get_path/1` only returns the synthetic
-        # `{nil, "/"}` mapping for `fileid: 1`. See #761.
-        InodeTable.register_volume_id(volume_id_binary, volume_name)
-        {:ok, Filehandle.encode(volume_id_binary, @synthetic_root_fileid), @auth_flavors}
+      {:ok, volume_id_binary, allowed_ips} ->
+        # Per-export client IP allow-list: reject hosts not on the list
+        # before handing out a root filehandle (#1217). `ctx.peer` is the
+        # client source address (#1227); an empty list means allow-all.
+        if IpAllowList.allowed?(ctx[:peer], allowed_ips) do
+          # Populate the volume index so the NFSv3 backend can recover
+          # the volume name from a filehandle's volume id even when
+          # `inode_table_get_path/1` only returns the synthetic
+          # `{nil, "/"}` mapping for `fileid: 1`. See #761.
+          InodeTable.register_volume_id(volume_id_binary, volume_name)
+          {:ok, Filehandle.encode(volume_id_binary, @synthetic_root_fileid), @auth_flavors}
+        else
+          {:error, :acces}
+        end
 
       {:error, :not_found} ->
         {:error, :noent}
@@ -83,7 +90,7 @@ defmodule NeonFS.NFS.MountBackend do
   defp lookup_export(volume_name) do
     with {:ok, export} <- ExportManager.get_export(volume_name),
          {:ok, vol_id_bin} <- Filehandle.volume_uuid_to_binary(export.volume_id) do
-      {:ok, vol_id_bin}
+      {:ok, vol_id_bin, export.allowed_ips}
     else
       _ -> {:error, :not_found}
     end
