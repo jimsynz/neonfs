@@ -8,6 +8,7 @@ defmodule NeonFS.Core.MetricsPlug do
 
   alias NeonFS.Client.HealthCheck
   alias NeonFS.Cluster.InviteRedemption
+  alias NeonFS.Cluster.RedeemRateLimiter
 
   require Logger
 
@@ -57,6 +58,14 @@ defmodule NeonFS.Core.MetricsPlug do
   end
 
   defp handle_redeem_invite(conn) do
+    if RedeemRateLimiter.allow?(conn.remote_ip) do
+      do_redeem_invite(conn)
+    else
+      send_json_error(conn, 429, "rate_limited", "Too many redemption attempts; retry later")
+    end
+  end
+
+  defp do_redeem_invite(conn) do
     # audit:bounded invite redemption body is a CSR + fixed-size fields (few KB)
     with {:ok, body, conn} <- read_body(conn),
          {:ok, params} <- decode_json(body),
@@ -76,6 +85,12 @@ defmodule NeonFS.Core.MetricsPlug do
 
       {:error, :invalid_proof} ->
         send_json_error(conn, 401, "invalid_proof", "Invalid token proof")
+
+      {:error, :already_redeemed} ->
+        send_json_error(conn, 409, "already_redeemed", "Invite token has already been redeemed")
+
+      {:error, :redeem_unavailable} ->
+        send_json_error(conn, 503, "redeem_unavailable", "Redemption temporarily unavailable")
 
       {:error, :invalid_csr} ->
         send_json_error(conn, 400, "invalid_csr", "Invalid certificate signing request")

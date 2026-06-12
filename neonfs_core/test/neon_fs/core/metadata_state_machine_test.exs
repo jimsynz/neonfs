@@ -19,6 +19,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       drives: %{},
       volume_roots: %{},
       snapshots: %{},
+      redeemed_invites: %{},
       version: 0
     }
   end
@@ -46,8 +47,60 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 15" do
-      assert MetadataStateMachine.version() == 15
+    test "returns 16" do
+      assert MetadataStateMachine.version() == 16
+    end
+  end
+
+  describe "redeem_invite command" do
+    test "first redemption of a token id succeeds and records it" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+
+      assert {new_state, :ok, []} =
+               MetadataStateMachine.apply(
+                 %{},
+                 {:redeem_invite, "tok-1", expiry, now},
+                 base_state()
+               )
+
+      assert new_state.redeemed_invites == %{"tok-1" => expiry}
+      assert new_state.version == 1
+    end
+
+    test "replaying the same token id is rejected atomically" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, now}, base_state())
+
+      assert {_state, {:error, :already_redeemed}, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, now}, state)
+    end
+
+    test "distinct token ids are independent" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      expiry = now + 3600
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-1", expiry, now}, base_state())
+
+      assert {state, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "tok-2", expiry, now}, state)
+
+      assert Map.keys(state.redeemed_invites) |> Enum.sort() == ["tok-1", "tok-2"]
+    end
+
+    test "expired entries are pruned, so the keyspace stays bounded" do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+      stale = %{base_state() | redeemed_invites: %{"old" => now - 10}}
+
+      assert {new_state, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:redeem_invite, "fresh", now + 3600, now}, stale)
+
+      refute Map.has_key?(new_state.redeemed_invites, "old")
+      assert Map.has_key?(new_state.redeemed_invites, "fresh")
     end
   end
 

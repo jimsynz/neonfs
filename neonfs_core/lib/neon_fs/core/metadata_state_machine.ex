@@ -45,6 +45,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:update_file, file_id :: binary(), updates :: map()}
           | {:delete_file, file_id :: binary()}
           | {:register_service, service_info :: map()}
+          | {:redeem_invite, token_id :: binary(), expiry_unix :: non_neg_integer(),
+             now_unix :: non_neg_integer()}
           | {:deregister_service, node()}
           | {:deregister_service, node(), atom()}
           | {:update_service_status, node(), atom()}
@@ -177,6 +179,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           drives: %{optional(String.t()) => drive_entry()},
           volume_roots: %{optional(binary()) => volume_root_entry()},
           snapshots: %{optional(binary()) => %{optional(binary()) => snapshot_entry()}},
+          redeemed_invites: %{optional(binary()) => non_neg_integer()},
           version: non_neg_integer()
         }
 
@@ -493,6 +496,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       drives: %{},
       volume_roots: %{},
       snapshots: %{},
+      redeemed_invites: %{},
       version: 0
     }
   end
@@ -759,6 +763,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {Map.put_new(state, :snapshots, %{}), :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 15, 16}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 15,
+      to: 16,
+      change: "add `redeemed_invites` keyspace for single-use invite tokens (#1198)"
+    )
+
+    {Map.put_new(state, :redeemed_invites, %{}), :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade", from: from_version, to: to_version)
@@ -982,6 +998,39 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {new_state, :ok, []}
+  end
+
+  # Records an invite token id as redeemed, atomically rejecting reuse.
+  # Because a single Ra apply is serialised across the cluster,
+  # concurrent redemptions of the same token yield exactly one `:ok`
+  # winner; every other gets `{:error, :already_redeemed}` (#1198). The
+  # caller supplies `now_unix` so pruning of expired entries is
+  # deterministic across replicas (apply must never read the wall clock).
+  # Already-expired ids are dropped first — they can't be redeemed again
+  # anyway, since redemption rejects expired tokens upstream — keeping the
+  # keyspace bounded by the count of live, unexpired invites.
+  def apply(_meta, {:redeem_invite, token_id, expiry_unix, now_unix}, state) do
+    state = Map.put_new(state, :redeemed_invites, %{})
+    live = :maps.filter(fn _id, exp -> exp >= now_unix end, state.redeemed_invites)
+
+    if Map.has_key?(live, token_id) do
+      new_state = %{state | redeemed_invites: live, version: state.version + 1}
+      {new_state, {:error, :already_redeemed}, []}
+    else
+      new_state = %{
+        state
+        | redeemed_invites: Map.put(live, token_id, expiry_unix),
+          version: state.version + 1
+      }
+
+      :telemetry.execute(
+        [:neonfs, :ra, :command, :redeem_invite],
+        %{version: new_state.version, live_invites: map_size(live) + 1},
+        %{}
+      )
+
+      {new_state, :ok, []}
+    end
   end
 
   def apply(_meta, {:deregister_service, node}, state) do
@@ -1929,7 +1978,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 15
+  def version, do: 16
 
   @doc """
   Return the module to handle a specific state machine version.
