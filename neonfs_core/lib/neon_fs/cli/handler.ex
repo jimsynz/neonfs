@@ -1365,18 +1365,23 @@ defmodule NeonFS.CLI.Handler do
 
   ## Parameters
   - `volume_name` - Volume name (string)
+  - `allowed_ips` - optional list of IP/CIDR strings; only these clients
+    may mount and access the export. An empty list (the default) means
+    allow all (#1217).
 
   ## Returns
   - `{:ok, map}` - Export info as map
   - `{:error, reason}` - Error tuple
   """
-  @spec nfs_export(String.t()) :: {:ok, map()} | {:error, term()}
-  def nfs_export(volume_name) when is_binary(volume_name) do
+  @spec nfs_export(String.t(), [String.t()]) :: {:ok, map()} | {:error, term()}
+  def nfs_export(volume_name, allowed_ips \\ [])
+      when is_binary(volume_name) and is_list(allowed_ips) do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
          {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
-         {:ok, updated} <- VolumeRegistry.update(volume.id, nfs_export: true) do
+         {:ok, updated} <-
+           VolumeRegistry.update(volume.id, nfs_export: true, nfs_allowed_ips: allowed_ips) do
       {:ok, nfs_export_to_map(updated)}
     else
       {:error, :not_found} ->
@@ -4153,7 +4158,8 @@ defmodule NeonFS.CLI.Handler do
       volume_name: volume.name,
       exported_at: DateTime.to_iso8601(volume.updated_at),
       server_address: server_address,
-      port: port
+      port: port,
+      allowed_ips: volume.nfs_allowed_ips
     }
   end
 
