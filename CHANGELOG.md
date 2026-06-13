@@ -5,6 +5,161 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.4.0](https://harton.dev/project-neon/neonfs/compare/v0.3.2...v0.4.0) (2026-06-13)
+### Breaking Changes:
+
+* distribution: eliminate the Erlang cookie â mTLS is the authentication boundary (#1150) by James Harton
+
+
+
+### Features:
+
+* test-rig: QEMU acceptance rig + core_volumes health-check fix (#1038) by James Harton
+
+### Bug Fixes:
+
+* core: enforce leading-slash path invariant symmetrically in FileIndex (#1214) by James Harton
+
+* client: reject path-traversal characters in volume names (#1213) by James Harton
+
+* core: add `[:safe]` to binary_to_term in HLC and CertificateAuthority (#1212) by James Harton
+
+* core: enforce single-use invite tokens via Ra and rate-limit redemption (#1211) by James Harton
+
+* core,client,fuse: schedule blocking Rust NIFs on dirty schedulers (#1209) by James Harton
+
+* core: replicate index-tree node chunks across metadata drives (#1191) by James Harton
+
+* core,docker: realistic budgets for volume-lifecycle Ra writes (#1167) by James Harton
+
+* core: don't fail a cluster join when the replication adjustment times out (#1156) by James Harton
+
+* scripts: use `PATCH /issues/:n` in `fj-issue-assign-self` (#1145) by James Harton
+
+* cli: render unreachable nodes as offline in `node list` instead of crashing (#1143) by James Harton
+
+* client,core: resolve `cluster.json` from one meta dir on reader and writer sides (#1142) by James Harton
+
+* client,core: reconcile data-plane pools on nodeup; surface replication dist-RPC fallback (#1135) by James Harton
+
+* core: scope drive usage/state updates to the local node (#1129) by James Harton
+
+* core: spread replicas across distinct nodes before doubling up (#1127) by James Harton
+
+* core: retry bootstrap-layer drive registration on transient Ra failure (#1103) by James Harton
+
+* client: give ChunkWriter a local store fallback when no data-plane pool exists (#1096) by James Harton
+
+* docker: mount volumes with allow_other so containers can access them (#1095) by James Harton
+
+* core: disable protocol consolidation in test to de-flake MetadataCodec (#1085) (#1091) by James Harton
+
+* client: make Connection reconciliation non-blocking (#1086) by James Harton
+
+* core: drop invalid default Logger handler formatter that floods FORMATTER CRASH (#1068) by James Harton
+
+* docker: mount volumes under /var/lib/neonfs so the driver works as packaged (#1063) (#1064) by James Harton
+
+* cluster: form a stable multi-node distribution mesh on join (#1060, #1061) (#1062) by James Harton
+
+* core: de-flake neonfs_core CI under parallel load by James Harton
+
+* collapse MetadataWriter quorum 3-tuple at the ChunkIndex boundary by James Harton
+
+* resolve Elixir 1.20 and Rust 1.96 warnings across all packages by James Harton
+
+* deps: update all dependencies by Renovate Bot
+
+* #1035: keep MountManager alive across session stop/crash (#1056) by James Harton
+
+* #1044: tier-aware ChunkWriter target selection (#1055) by James Harton
+
+* #1036: account offset writes against volume statistics (#1054) by James Harton
+
+* #1037: return the object content MD5 as the S3 ETag (#1053) by James Harton
+
+* #1051: re-establish the data plane after the cluster-init distribution restart (#1052) by James Harton
+
+* #1049: use the co-located core node on single-node clusters (#1050) by James Harton
+
+* #1034: run FUSE-mounting units in the host mount namespace for cross-interface consistency (#1048) by James Harton
+
+* #1045: remote-fallback for the metadata write path (#1047) by James Harton
+
+* #1042: resolve the "default" drive sentinel at the chunk-write receiver (#1043) by James Harton
+
+* #1040: advertise data plane on the node's distribution address (#1041) by James Harton
+
+* #1033: form multi-node clusters over TLS distribution (#1039) by James Harton
+
+* cli,core: refuse under-replicated volumes on `volume create` (#1024) by James Harton
+
+* core: preflight initial drive before mutating cluster state (#1023) by James Harton
+
+* fuse,cli: resolve FUSE unmount by volume name, always clear stale state (#1025) by James Harton
+
+* core,cli: `neonfs cluster init --system-replicas N` (#1022) by James Harton
+
+* nfs: synthesise `.` and `..` entries in READDIR/READDIRPLUS (#1021) by James Harton
+
+* core: cluster init picks system volume tier from registered drives (#1017) by James Harton
+
+### Improvements:
+
+* nfs,core: authorise NFS create/write against the caller, distinct from file owner (#1230) (#1234) by James Harton
+
+* nfs: enforce per-export IP allow-list on each NFSv3 request (#1228) (#1233) by James Harton
+
+* nfs: per-export root-squash (map uid 0 â nobody) (#1216) (#1232) by James Harton
+
+* nfs,core: enforce AUTH_SYS uid/gid on NFS requests via Authorise (#1215) (#1231) by James Harton
+
+* nfs: per-export client IP allow-lists enforced at MOUNT (#1229) by James Harton
+
+* nfs: plumb client peer address into the RPC ctx (#1227) by James Harton
+
+* client: verify chunk content hashes in ChunkReader (#1223) by James Harton
+
+* nfs: bind NLM lock ownership to the authenticated credential (#1222) by James Harton
+
+* s3: expire abandoned multipart uploads from cluster KV (#1218) by James Harton
+
+* webdav: cluster-shared lock-token index so any gateway serves a session (#1184) by James Harton
+
+* s3: cluster-shared multipart upload state via the Ra-backed KV store (#1182) by James Harton
+
+* NFS exports become cluster state served by every NFS node (#1180) by James Harton
+
+* cli: `cluster join` drives the local daemon on interface hosts (#1174) by James Harton
+
+* client: `join_cluster` entry point on `NeonFS.Client.CLIHandler` (#1173) by James Harton
+
+* client,core: move the joining-side invite flow into `NeonFS.Client.Join` (#1172) by James Harton
+
+* core: structured not-found errors for boundary lookups (#1123) by James Harton
+
+* core: structured permission/auth errors for the `:forbidden` family (#1122) by James Harton
+
+* core: structured invalid-input/capability errors for the `:invalid` family (#1121) by James Harton
+
+* core: structured `NeonFS.Error.Conflict`/`AlreadyExists` for the conflict family (#1120) by James Harton
+
+* core,nfs: structured `NeonFS.Error.Unavailable` for the unavailability family (#1119) by James Harton
+
+* core: structured ClockSkewDetected error for HLC (#1101) by James Harton
+
+* core: structured QuorumUnavailable errors for the quorum path (#1100) by James Harton
+
+* core: drive-aware replication and erasure placement (#1098) by James Harton
+
+* client: per-chunk failover in ChunkWriter (#1044) (#1090) by James Harton
+
+* client,core,fuse: route FUSE volume_id metadata writes to root holders (#1089) by James Harton
+
+* client,s3,nfs,webdav: route facade metadata writes to root-holding nodes (#1088) by James Harton
+
+* client,core: route metadata writes to root-holding nodes (#1077) by James Harton
+
 ## [v0.3.2](https://harton.dev/project-neon/neonfs/compare/v0.3.1...v0.3.2) (2026-05-11)
 
 

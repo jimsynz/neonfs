@@ -8,7 +8,7 @@ defmodule NeonFS.IAM.MixProject do
   and the public authentication/authorisation API surface used by the core
   authoriser and the protocol bridges (S3, WebDAV, FUSE, NFS).
   """
-  @version "0.3.2"
+  @version "0.4.0"
 
   def project do
     [

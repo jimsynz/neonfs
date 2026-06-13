@@ -4,7 +4,7 @@ defmodule NeonFS.S3.MixProject do
   @moduledoc """
   S3-compatible API interface for NeonFS.
   """
-  @version "0.3.2"
+  @version "0.4.0"
 
   def project do
     [

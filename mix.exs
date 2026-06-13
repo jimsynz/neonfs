@@ -2,7 +2,7 @@ defmodule NeonFS.MixProject do
   use Mix.Project
   @moduledoc false
 
-  @version "0.3.2"
+  @version "0.4.0"
 
   defmodule DynamicAlias do
     defstruct []
