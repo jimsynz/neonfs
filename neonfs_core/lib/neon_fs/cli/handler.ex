@@ -19,6 +19,7 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.CLI.Handler.Escalation, as: EscalationHandler
   alias NeonFS.CLI.Handler.Jobs, as: JobsHandler
   alias NeonFS.CLI.Handler.S3, as: S3Handler
+  alias NeonFS.CLI.Handler.Snapshots, as: SnapshotsHandler
   alias NeonFS.Client.HealthCheck, as: ClientHealthCheck
   alias NeonFS.Cluster.{Init, Invite, Join, State}
 
@@ -2129,56 +2130,20 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` — volume not found, snapshot create failed, etc.
   """
   @spec handle_volume_snapshot_create(binary(), map()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_snapshot_create(volume_name, opts \\ %{}) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, snapshot} <- Snapshot.create(volume.id, snapshot_create_opts(opts)) do
-      {:ok, snapshot_to_map(snapshot, volume_name)}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp snapshot_create_opts(%{"name" => name}) when is_binary(name) and name != "",
-    do: [name: name]
-
-  defp snapshot_create_opts(_), do: []
+  defdelegate handle_volume_snapshot_create(volume_name, opts \\ %{}), to: SnapshotsHandler
 
   @doc """
   Lists every snapshot for the named volume, newest first.
   """
   @spec handle_volume_snapshot_list(binary()) :: {:ok, [map()]} | {:error, term()}
-  def handle_volume_snapshot_list(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, snapshots} <- Snapshot.list(volume.id) do
-      {:ok, Enum.map(snapshots, &snapshot_to_map(&1, volume_name))}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_volume_snapshot_list(volume_name), to: SnapshotsHandler
 
   @doc """
   Shows a single snapshot, addressed by ULID or by human-readable
   `:name` (if unique within the volume), scoped to the named volume.
   """
   @spec handle_volume_snapshot_show(binary(), binary()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_snapshot_show(volume_name, snapshot_ref)
-      when is_binary(volume_name) and is_binary(snapshot_ref) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, snapshot} <- resolve_snapshot(volume.id, snapshot_ref, volume_name) do
-      {:ok, snapshot_to_map(snapshot, volume_name)}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_volume_snapshot_show(volume_name, snapshot_ref), to: SnapshotsHandler
 
   @doc """
   Deletes the snapshot's pin. Accepts ULID or human-readable name (if
@@ -2187,60 +2152,7 @@ defmodule NeonFS.CLI.Handler do
   reclamation is the GC scheduler's job (#961).
   """
   @spec handle_volume_snapshot_delete(binary(), binary()) :: :ok | {:error, term()}
-  def handle_volume_snapshot_delete(volume_name, snapshot_ref)
-      when is_binary(volume_name) and is_binary(snapshot_ref) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, snapshot} <- resolve_snapshot(volume.id, snapshot_ref, volume_name),
-         :ok <- Snapshot.delete(volume.id, snapshot.id) do
-      :ok
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  # Looks up `ref` first as a snapshot ULID, then — if that misses — as
-  # a human-readable `:name`. Multiple snapshots may share a name (see
-  # the epic body); when the name is ambiguous we refuse rather than
-  # picking one silently.
-  defp resolve_snapshot(volume_id, ref, volume_name) do
-    case Snapshot.get(volume_id, ref) do
-      {:ok, snapshot} ->
-        {:ok, snapshot}
-
-      {:error, :not_found} ->
-        resolve_snapshot_by_name(volume_id, ref, volume_name)
-
-      {:error, _} = err ->
-        err
-    end
-  end
-
-  defp resolve_snapshot_by_name(volume_id, name, volume_name) do
-    case Snapshot.list(volume_id) do
-      {:ok, snapshots} ->
-        case Enum.filter(snapshots, &(&1.name == name)) do
-          [snapshot] ->
-            {:ok, snapshot}
-
-          [] ->
-            {:error, NotFound.exception(message: "snapshot #{name} not found on #{volume_name}")}
-
-          [_ | _] ->
-            {:error,
-             Invalid.exception(
-               message:
-                 "snapshot name #{inspect(name)} is ambiguous on #{volume_name} — " <>
-                   "address by ULID instead"
-             )}
-        end
-
-      {:error, _} = err ->
-        err
-    end
-  end
+  defdelegate handle_volume_snapshot_delete(volume_name, snapshot_ref), to: SnapshotsHandler
 
   @doc """
   Promotes a snapshot to a new top-level volume (#964). The new
@@ -2270,7 +2182,8 @@ defmodule NeonFS.CLI.Handler do
 
     with :ok <- require_cluster(),
          {:ok, source_volume} <- fetch_volume(source_volume_name),
-         {:ok, snapshot} <- resolve_snapshot(source_volume.id, snapshot_ref, source_volume_name),
+         {:ok, snapshot} <-
+           SnapshotsHandler.resolve_snapshot(source_volume.id, snapshot_ref, source_volume_name),
          {:ok, promoted} <- Snapshot.promote(source_volume.id, snapshot.id, new_volume_name) do
       {:ok,
        %{
@@ -2311,7 +2224,8 @@ defmodule NeonFS.CLI.Handler do
 
     with :ok <- require_cluster(),
          {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, snapshot} <- resolve_snapshot(volume.id, snapshot_ref, volume_name),
+         {:ok, snapshot} <-
+           SnapshotsHandler.resolve_snapshot(volume.id, snapshot_ref, volume_name),
          {:ok, result} <- Snapshot.restore(volume.id, snapshot.id, restore_opts(opts)) do
       {:ok, restore_result_to_map(result)}
     else
@@ -2382,7 +2296,7 @@ defmodule NeonFS.CLI.Handler do
           []
 
         ref when is_binary(ref) ->
-          case resolve_snapshot(volume.id, ref, volume.name) do
+          case SnapshotsHandler.resolve_snapshot(volume.id, ref, volume.name) do
             {:ok, snapshot} -> [snapshot_id: snapshot.id]
             # Bubble the error up as the export call's outer with-step.
             _ -> [snapshot_id: ref]
@@ -2503,17 +2417,6 @@ defmodule NeonFS.CLI.Handler do
   # file-not-found errors until a remote-writer slice lands.
   defp normalize_local_url("file://" <> rest), do: rest
   defp normalize_local_url(path), do: path
-
-  defp snapshot_to_map(%Snapshot{} = snap, volume_name) do
-    %{
-      id: snap.id,
-      volume_id: snap.volume_id,
-      volume_name: volume_name,
-      name: snap.name,
-      root_chunk_hash_hex: Base.encode16(snap.root_chunk_hash, case: :lower),
-      created_at: DateTime.to_iso8601(snap.created_at)
-    }
-  end
 
   @doc """
   Starts an integrity scrub job.
