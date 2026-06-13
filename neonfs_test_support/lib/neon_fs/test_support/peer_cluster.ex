@@ -98,18 +98,40 @@ defmodule NeonFS.TestSupport.PeerCluster do
         {:ok, peer, node}
 
       {:error, reason} = error ->
-        if attempts_left > 1 and transient_boot_error?(reason) do
-          Logger.warning(
-            "peer boot failed transiently (#{inspect(reason)}), " <>
-              "retrying (#{attempts_left - 1} attempt(s) left)"
-          )
-
-          Process.sleep(@peer_boot_backoff_ms)
-          peer_start_with_retry(peer_opts, attempts_left - 1)
+        if retry_boot?(attempts_left, reason) do
+          backoff_and_retry_boot(peer_opts, attempts_left, reason)
         else
           error
         end
     end
+  catch
+    # `:peer.start/1` exits (via `:proc_lib.stop`) with the peer's
+    # termination reason rather than returning `{:error, _}` when the
+    # distribution-channel bring-up times out — the `{:inet_async,
+    # :timeout}` flake under runner load surfaces here as an exit, not a
+    # return value, so the `{:error, _}` retry above never sees it and
+    # `setup_all`/`setup` crashes. Route transient exits through the same
+    # retry; re-raise anything genuinely fatal with its original
+    # stacktrace.
+    :exit, reason ->
+      if retry_boot?(attempts_left, reason) do
+        backoff_and_retry_boot(peer_opts, attempts_left, reason)
+      else
+        :erlang.raise(:exit, reason, __STACKTRACE__)
+      end
+  end
+
+  defp retry_boot?(attempts_left, reason),
+    do: attempts_left > 1 and transient_boot_error?(reason)
+
+  defp backoff_and_retry_boot(peer_opts, attempts_left, reason) do
+    Logger.warning(
+      "peer boot failed transiently (#{inspect(reason)}), " <>
+        "retrying (#{attempts_left - 1} attempt(s) left)"
+    )
+
+    Process.sleep(@peer_boot_backoff_ms)
+    peer_start_with_retry(peer_opts, attempts_left - 1)
   end
 
   defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
