@@ -20,6 +20,7 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.CLI.Handler.Jobs, as: JobsHandler
   alias NeonFS.CLI.Handler.S3, as: S3Handler
   alias NeonFS.CLI.Handler.Snapshots, as: SnapshotsHandler
+  alias NeonFS.CLI.Handler.VolumeLifecycle, as: VolumeLifecycleHandler
   alias NeonFS.Client.HealthCheck, as: ClientHealthCheck
   alias NeonFS.Cluster.{Init, Invite, Join, State}
 
@@ -27,7 +28,6 @@ defmodule NeonFS.CLI.Handler do
     ACLManager,
     AuditLog,
     Authorise,
-    Backup,
     CertificateAuthority,
     DriveManager,
     DriveRegistry,
@@ -39,13 +39,10 @@ defmodule NeonFS.CLI.Handler do
     RaSupervisor,
     ReplicaRepairScheduler,
     ServiceRegistry,
-    Snapshot,
     SystemVolume,
     Volume,
     VolumeACL,
     VolumeEncryption,
-    VolumeExport,
-    VolumeImport,
     VolumeRegistry
   }
 
@@ -2175,29 +2172,13 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_volume_promote(binary(), binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_promote(source_volume_name, snapshot_ref, new_volume_name, _opts \\ %{})
-      when is_binary(source_volume_name) and is_binary(snapshot_ref) and
-             is_binary(new_volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, source_volume} <- fetch_volume(source_volume_name),
-         {:ok, snapshot} <-
-           SnapshotsHandler.resolve_snapshot(source_volume.id, snapshot_ref, source_volume_name),
-         {:ok, promoted} <- Snapshot.promote(source_volume.id, snapshot.id, new_volume_name) do
-      {:ok,
-       %{
-         volume_id: promoted.id,
-         volume_name: promoted.name,
-         source_volume_id: source_volume.id,
-         source_volume_name: source_volume_name,
-         snapshot_id: snapshot.id,
-         root_chunk_hash_hex: Base.encode16(snapshot.root_chunk_hash, case: :lower)
-       }}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_volume_promote(
+                source_volume_name,
+                snapshot_ref,
+                new_volume_name,
+                opts \\ %{}
+              ),
+              to: VolumeLifecycleHandler
 
   @doc """
   Rollback a volume's live root to a snapshot (#963).
@@ -2218,47 +2199,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_volume_restore(binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_restore(volume_name, snapshot_ref, opts \\ %{})
-      when is_binary(volume_name) and is_binary(snapshot_ref) and is_map(opts) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, snapshot} <-
-           SnapshotsHandler.resolve_snapshot(volume.id, snapshot_ref, volume_name),
-         {:ok, result} <- Snapshot.restore(volume.id, snapshot.id, restore_opts(opts)) do
-      {:ok, restore_result_to_map(result)}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp restore_opts(opts) do
-    opts
-    |> Enum.flat_map(fn
-      {"safe", true} -> [safe: true]
-      {:safe, true} -> [safe: true]
-      {"force", true} -> [force: true]
-      {:force, true} -> [force: true]
-      _ -> []
-    end)
-  end
-
-  defp restore_result_to_map(%{
-         previous_root: previous_root,
-         new_root: new_root,
-         pre_restore_snapshot: pre_restore_snapshot
-       }) do
-    %{
-      previous_root_hex: Base.encode16(previous_root, case: :lower),
-      new_root_hex: Base.encode16(new_root, case: :lower),
-      pre_restore_snapshot_id:
-        case pre_restore_snapshot do
-          nil -> nil
-          %Snapshot{id: id} -> id
-        end
-    }
-  end
+  defdelegate handle_volume_restore(volume_name, snapshot_ref, opts \\ %{}),
+    to: VolumeLifecycleHandler
 
   @doc """
   Export a volume's live root as a TAR archive at `output_path`
@@ -2269,51 +2211,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_volume_export(binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_export(volume_name, output_path, opts \\ %{})
-      when is_binary(volume_name) and is_binary(output_path) and is_map(opts) do
-    set_cli_metadata()
-    output_path = normalize_local_url(output_path)
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         export_opts <- export_opts_from_map(volume, opts),
-         {:ok, summary} <- VolumeExport.export(volume_name, output_path, export_opts) do
-      {:ok,
-       %{
-         path: summary.path,
-         file_count: summary.file_count,
-         byte_count: summary.byte_count
-       }}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp export_opts_from_map(volume, opts) do
-    snapshot_opts =
-      case Map.get(opts, "snapshot_id") || Map.get(opts, :snapshot_id) do
-        nil ->
-          []
-
-        ref when is_binary(ref) ->
-          case SnapshotsHandler.resolve_snapshot(volume.id, ref, volume.name) do
-            {:ok, snapshot} -> [snapshot_id: snapshot.id]
-            # Bubble the error up as the export call's outer with-step.
-            _ -> [snapshot_id: ref]
-          end
-      end
-
-    snapshot_opts
-    |> add_bool_opt(opts, "include_acls", :include_acls)
-    |> add_bool_opt(opts, "include_system_xattrs", :include_system_xattrs)
-  end
-
-  defp add_bool_opt(opts_list, opts_map, str_key, atom_key) do
-    case Map.get(opts_map, str_key) || Map.get(opts_map, atom_key) do
-      true -> [{atom_key, true} | opts_list]
-      _ -> opts_list
-    end
-  end
+  defdelegate handle_volume_export(volume_name, output_path, opts \\ %{}),
+    to: VolumeLifecycleHandler
 
   @doc """
   Import a previously-exported tarball into a new volume named
@@ -2325,26 +2224,7 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_volume_import(binary(), binary()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_import(input_path, new_volume_name)
-      when is_binary(input_path) and is_binary(new_volume_name) do
-    set_cli_metadata()
-    input_path = normalize_local_url(input_path)
-
-    with :ok <- require_cluster(),
-         {:ok, summary} <- VolumeImport.import_archive(input_path, new_volume_name) do
-      {:ok,
-       %{
-         path: summary.path,
-         volume_id: summary.volume_id,
-         volume_name: summary.volume_name,
-         file_count: summary.file_count,
-         byte_count: summary.byte_count,
-         source_volume_name: summary.source_volume_name
-       }}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_volume_import(input_path, new_volume_name), to: VolumeLifecycleHandler
 
   @doc """
   Take a snapshot of `volume_name`, export it to `output_path`, then
@@ -2356,26 +2236,8 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_backup_create(binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
-  def handle_backup_create(volume_name, output_path, opts \\ %{})
-      when is_binary(volume_name) and is_binary(output_path) and is_map(opts) do
-    set_cli_metadata()
-    output_path = normalize_local_url(output_path)
-
-    with :ok <- require_cluster(),
-         {:ok, summary} <- Backup.create(volume_name, output_path, backup_create_opts(opts)) do
-      {:ok, summary}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp backup_create_opts(opts) do
-    Enum.flat_map(opts, fn
-      {"name", name} when is_binary(name) -> [name: name]
-      {:name, name} when is_binary(name) -> [name: name]
-      _ -> []
-    end)
-  end
+  defdelegate handle_backup_create(volume_name, output_path, opts \\ %{}),
+    to: VolumeLifecycleHandler
 
   @doc """
   Read a backup's manifest without unpacking the body (#968).
@@ -2384,17 +2246,7 @@ defmodule NeonFS.CLI.Handler do
   human-readable view of the well-known fields.
   """
   @spec handle_backup_describe(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_backup_describe(input_path) when is_binary(input_path) do
-    set_cli_metadata()
-    input_path = normalize_local_url(input_path)
-
-    with :ok <- require_cluster(),
-         {:ok, manifest} <- Backup.describe(input_path) do
-      {:ok, manifest}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_backup_describe(input_path), to: VolumeLifecycleHandler
 
   @doc """
   Restore a backup tarball at `input_path` into a brand-new volume
@@ -2403,20 +2255,7 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_backup_restore(binary(), binary()) ::
           {:ok, map()} | {:error, term()}
-  def handle_backup_restore(input_path, new_volume_name)
-      when is_binary(input_path) and is_binary(new_volume_name) do
-    # `handle_volume_import/2` does the `file://` normalisation
-    # itself; defer to it.
-    handle_volume_import(input_path, new_volume_name)
-  end
-
-  # Accept `file:///abs/path` URLs as a synonym for plain absolute
-  # paths so operators can use consistent URL syntax across the
-  # backup CLI (#992). `s3://` and other remote schemes aren't
-  # supported yet — they'll pass through and surface as ordinary
-  # file-not-found errors until a remote-writer slice lands.
-  defp normalize_local_url("file://" <> rest), do: rest
-  defp normalize_local_url(path), do: path
+  defdelegate handle_backup_restore(input_path, new_volume_name), to: VolumeLifecycleHandler
 
   @doc """
   Starts an integrity scrub job.
