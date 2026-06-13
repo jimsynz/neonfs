@@ -91,6 +91,10 @@ defmodule NeonFS.Integration.PartitionTest do
              "Expected write to fail on minority partition, got: #{inspect(result)}"
     end
 
+    # Still failing for a behavioural reason, not the `core_peer?` harness
+    # drift the other two tests hit: the minority node times out reading
+    # data written before the partition. Tracked under #1219 for a focused
+    # minority-read fix.
     @tag :pending_reenable
     test "minority can read previously written data", %{cluster: cluster} do
       partition_majority_minority(cluster)
@@ -102,7 +106,6 @@ defmodule NeonFS.Integration.PartitionTest do
   end
 
   describe "partition healing" do
-    @tag :pending_reenable
     test "minority receives data written during partition", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
@@ -131,7 +134,6 @@ defmodule NeonFS.Integration.PartitionTest do
       end
     end
 
-    @tag :pending_reenable
     test "all nodes consistent after healing", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
@@ -198,7 +200,7 @@ defmodule NeonFS.Integration.PartitionTest do
   defp trigger_anti_entropy(cluster, _node_names) do
     [driver | _] =
       cluster.nodes
-      |> Enum.map(& &1.alias_name)
+      |> Enum.map(& &1.name)
       |> Enum.filter(&core_peer?(cluster, &1))
 
     volumes = PeerCluster.rpc(cluster, driver, NeonFS.Core.VolumeRegistry, :list, [])
@@ -213,10 +215,10 @@ defmodule NeonFS.Integration.PartitionTest do
     :ok
   end
 
-  defp core_peer?(cluster, alias_name) do
-    case PeerCluster.get_node(cluster, alias_name) do
-      {:ok, ni} -> :neonfs_core in Map.get(ni, :applications, [:neonfs_core])
-      _ -> false
+  defp core_peer?(cluster, node_name) do
+    case PeerCluster.get_node(cluster, node_name) do
+      nil -> false
+      ni -> :neonfs_core in Map.get(ni, :applications, [:neonfs_core])
     end
   end
 
