@@ -39,7 +39,6 @@ defmodule NeonFS.Integration.CommitChunksCodecTest do
   end
 
   describe "ChunkWriter → CommitChunks on a zstd-compressed volume" do
-    @tag :pending_reenable
     test "round-trip preserves bytes and the ChunkMeta records :zstd", %{cluster: cluster} do
       volume_name = "commit-chunks-codec-vol-#{System.unique_integer([:positive])}"
 
@@ -114,7 +113,7 @@ defmodule NeonFS.Integration.CommitChunksCodecTest do
       # compressed.
       for hash <- Enum.uniq(hashes) do
         assert {:ok, chunk_meta} =
-                 PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [hash])
+                 PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :lookup_by_hash, [hash])
 
         assert chunk_meta.compression == :zstd
         assert chunk_meta.crypto == nil
