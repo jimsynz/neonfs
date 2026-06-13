@@ -745,7 +745,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
     cluster_name = Keyword.get(opts, :name, "test")
     volumes = Keyword.get(opts, :volumes, [])
 
-    {core_peer, interface_peers} = split_core_and_interface_peers(cluster)
+    {core_peer, extra_core_peers, interface_peers} = split_core_and_interface_peers(cluster)
 
     {:ok, _} =
       PeerCluster.rpc(cluster, core_peer.name, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
@@ -754,6 +754,8 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
     {:ok, %{"token" => token}} =
       PeerCluster.rpc(cluster, core_peer.name, NeonFS.CLI.Handler, :create_invite, [3600])
+
+    join_extra_core_peers(cluster, core_peer, extra_core_peers, token)
 
     for peer <- interface_peers do
       type = service_type_for_apps(peer.applications)
@@ -766,19 +768,24 @@ defmodule NeonFS.TestSupport.ClusterCase do
         ])
     end
 
-    core_endpoint = fetch_core_endpoint(cluster, core_peer)
+    # Each interface peer needs a data-plane pool to *every* core node,
+    # not just the bootstrap core — with `factor > 1` durability the
+    # client ships replicas to multiple core drives, so a single pool
+    # leaves the other replica targets unreachable.
+    core_endpoints =
+      for c <- [core_peer | extra_core_peers], do: {c, fetch_core_endpoint(cluster, c)}
 
-    for peer <- interface_peers do
+    for peer <- interface_peers, {c, endpoint} <- core_endpoints do
       {:ok, _pid} =
         PeerCluster.rpc(cluster, peer.name, NeonFS.Transport.PoolManager, :ensure_pool, [
-          core_peer.node,
-          core_endpoint
+          c.node,
+          endpoint
         ])
     end
 
-    for peer <- interface_peers do
-      :ok = wait_for_pool(cluster, peer.name, core_peer.node)
-      :ok = wait_for_discovery(cluster, peer.name, core_peer.node)
+    for peer <- interface_peers, {c, _endpoint} <- core_endpoints do
+      :ok = wait_for_pool(cluster, peer.name, c.node)
+      :ok = wait_for_discovery(cluster, peer.name, c.node)
     end
 
     for {name, vol_opts} <- volumes do
@@ -798,9 +805,37 @@ defmodule NeonFS.TestSupport.ClusterCase do
         raise ArgumentError,
               "init_mixed_role_cluster requires at least one peer running :neonfs_core"
 
-      {[core | _], interfaces} ->
-        {core, interfaces}
+      {[core | extra_cores], interfaces} ->
+        {core, extra_cores, interfaces}
     end
+  end
+
+  # Join any additional `:neonfs_core` peers (beyond the bootstrap core)
+  # as full Ra members, then drive the same multi-node convergence
+  # `init_multi_node_cluster/2` uses — but scoped to a core-only cluster
+  # view, since the mesh / quorum-ring / drive-registry helpers query
+  # `NeonFS.Core` services on every node and interface-only peers don't
+  # run them. Convergence must complete before volumes are created so
+  # `factor > 1` metadata sees the full drive set (#1152).
+  defp join_extra_core_peers(_cluster, _core_peer, [], _token), do: :ok
+
+  defp join_extra_core_peers(cluster, core_peer, extra_core_peers, token) do
+    for peer <- extra_core_peers do
+      {:ok, _} =
+        PeerCluster.rpc(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
+          token,
+          core_peer.node
+        ])
+
+      :ok = wait_for_cluster_stable_on(cluster, core_peer.name)
+    end
+
+    core_view = %{cluster | nodes: [core_peer | extra_core_peers]}
+    wait_for_full_mesh(core_view)
+    rebuild_quorum_rings(core_view)
+    wait_for_all_drives_in_bootstrap(core_view)
+    wait_for_drive_registry_convergence(core_view)
+    :ok
   end
 
   defp service_type_for_apps(apps) do
