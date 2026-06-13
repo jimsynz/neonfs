@@ -78,11 +78,17 @@ defmodule NeonFS.Core.BlobStore do
 
   @tiers ["hot", "warm", "cold"]
 
-  # Default `GenServer.call` timeout for chunk reads/writes. Each call drives
-  # a synchronous compress/encrypt NIF, which can exceed the 5s `GenServer`
-  # default on a heavily contended host; callers (e.g. property tests) may pass
-  # a larger `:timeout` to stay robust under load.
-  @default_call_timeout 5_000
+  # Default `GenServer.call` timeout for BlobStore operations. Every op is
+  # serialised through this single GenServer, and the chunk reads/writes each
+  # drive a synchronous compress/encrypt NIF on a dirty scheduler. Under a
+  # heavily contended host (CI running parallel cargo builds + peer VMs) even
+  # a cheap call can sit in the mailbox behind a slow write long enough to
+  # blow the 5s `GenServer` default — the #1254 flake (`write_chunk`
+  # `GenServer.call` timeouts cascading into `{:badrpc, :timeout}` on the
+  # metadata write path). 30s gives headroom for transient dirty-scheduler
+  # starvation without masking a genuine hang (which exceeds any sane bound).
+  # The async-NIF rework that removes the per-op serialisation is #1197.
+  @default_call_timeout 30_000
 
   ## Client API
 
@@ -217,7 +223,8 @@ defmodule NeonFS.Core.BlobStore do
 
     GenServer.call(
       server,
-      {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce, codec_opts}
+      {:read_chunk, hash, drive_id, tier, verify, decompress, key, nonce, codec_opts},
+      @default_call_timeout
     )
   end
 
@@ -283,7 +290,7 @@ defmodule NeonFS.Core.BlobStore do
   def delete_chunk(hash, drive_id, opts \\ []) do
     server = Keyword.pop(opts, :server, __MODULE__) |> elem(0)
     opts = Keyword.delete(opts, :server)
-    GenServer.call(server, {:delete_chunk, hash, drive_id, opts})
+    GenServer.call(server, {:delete_chunk, hash, drive_id, opts}, @default_call_timeout)
   end
 
   @doc """
@@ -300,7 +307,7 @@ defmodule NeonFS.Core.BlobStore do
           {:ok, tier(), non_neg_integer()} | {:error, :not_found}
   def chunk_info(hash, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:chunk_info, hash})
+    GenServer.call(server, {:chunk_info, hash}, @default_call_timeout)
   end
 
   @doc """
@@ -318,7 +325,7 @@ defmodule NeonFS.Core.BlobStore do
   @spec chunk_exists?(chunk_hash(), drive_id(), keyword()) :: boolean()
   def chunk_exists?(hash, drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:chunk_exists?, hash, drive_id})
+    GenServer.call(server, {:chunk_exists?, hash, drive_id}, @default_call_timeout)
   end
 
   @doc """
@@ -340,7 +347,7 @@ defmodule NeonFS.Core.BlobStore do
   @spec get_store_handle(drive_id(), keyword()) :: {:ok, reference()} | {:error, :not_found}
   def get_store_handle(drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:get_store_handle, drive_id})
+    GenServer.call(server, {:get_store_handle, drive_id}, @default_call_timeout)
   end
 
   @doc """
@@ -524,7 +531,12 @@ defmodule NeonFS.Core.BlobStore do
           {:ok, {}} | {:error, String.t()}
   def migrate_chunk(hash, drive_id, from_tier, to_tier, opts \\ []) do
     {server, opts} = Keyword.pop(opts, :server, __MODULE__)
-    GenServer.call(server, {:migrate_chunk, hash, drive_id, from_tier, to_tier, opts})
+
+    GenServer.call(
+      server,
+      {:migrate_chunk, hash, drive_id, from_tier, to_tier, opts},
+      @default_call_timeout
+    )
   end
 
   @doc """
@@ -566,7 +578,8 @@ defmodule NeonFS.Core.BlobStore do
 
     GenServer.call(
       server,
-      {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce, opts}
+      {:reencrypt_chunk, hash, drive_id, tier, old_key, old_nonce, new_key, new_nonce, opts},
+      @default_call_timeout
     )
   end
 
@@ -581,7 +594,7 @@ defmodule NeonFS.Core.BlobStore do
   @spec list_drives(keyword()) :: {:ok, %{String.t() => drive_config()}}
   def list_drives(opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, :list_drives)
+    GenServer.call(server, :list_drives, @default_call_timeout)
   end
 
   @doc """
@@ -603,7 +616,7 @@ defmodule NeonFS.Core.BlobStore do
   @spec open_store(drive_config(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def open_store(drive_config, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 5_000)
+    timeout = Keyword.get(opts, :timeout, @default_call_timeout)
     GenServer.call(server, {:open_store, drive_config}, timeout)
   end
 
@@ -626,7 +639,7 @@ defmodule NeonFS.Core.BlobStore do
   @spec close_store(String.t(), keyword()) :: :ok | {:error, :unknown_drive}
   def close_store(drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 5_000)
+    timeout = Keyword.get(opts, :timeout, @default_call_timeout)
     GenServer.call(server, {:close_store, drive_id}, timeout)
   end
 
@@ -650,7 +663,7 @@ defmodule NeonFS.Core.BlobStore do
   @spec drive_has_data?(String.t(), keyword()) :: {:ok, boolean()} | {:error, :unknown_drive}
   def drive_has_data?(drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 5_000)
+    timeout = Keyword.get(opts, :timeout, @default_call_timeout)
     GenServer.call(server, {:drive_has_data, drive_id}, timeout)
   end
 
@@ -683,7 +696,7 @@ defmodule NeonFS.Core.BlobStore do
           | {:error, :unknown_drive}
   def list_drive_blobs(drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 30_000)
+    timeout = Keyword.get(opts, :timeout, @default_call_timeout)
     GenServer.call(server, {:list_drive_blobs, drive_id}, timeout)
   end
 
@@ -722,7 +735,7 @@ defmodule NeonFS.Core.BlobStore do
         ) :: :ok | {:error, term()}
   def migrate_blob_file(blob, target_drive_id, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    timeout = Keyword.get(opts, :timeout, 30_000)
+    timeout = Keyword.get(opts, :timeout, @default_call_timeout)
     GenServer.call(server, {:migrate_blob_file, blob, target_drive_id}, timeout)
   end
 
@@ -754,7 +767,7 @@ defmodule NeonFS.Core.BlobStore do
              chunk_result: {binary(), chunk_hash(), non_neg_integer(), non_neg_integer()}
   def chunk_data(data, strategy, opts \\ []) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:chunk_data, data, strategy})
+    GenServer.call(server, {:chunk_data, data, strategy}, @default_call_timeout)
   end
 
   @typedoc """
