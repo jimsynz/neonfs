@@ -13,7 +13,7 @@ defmodule NeonFS.CLI.Handler.Common do
 
   alias NeonFS.Cluster.State
   alias NeonFS.Core.{Job, VolumeRegistry}
-  alias NeonFS.Error.{Internal, NotFound, VolumeNotFound}
+  alias NeonFS.Error.{Internal, NotFound, Unavailable, VolumeNotFound}
 
   @doc """
   Returns `:ok` when a cluster has been initialised, or a `NotFound`
@@ -118,5 +118,21 @@ defmodule NeonFS.CLI.Handler.Common do
   def get_uptime do
     {uptime_ms, _} = :erlang.statistics(:wall_clock)
     div(uptime_ms, 1000)
+  end
+
+  @doc """
+  Loads the persisted cluster state, normalising load failures into a
+  structured `Unavailable` error. Shared by the cluster-lifecycle and
+  CA-rotation commands that need the cluster name or id.
+  """
+  @spec load_cluster_state() :: {:ok, State.t()} | {:error, Unavailable.t()}
+  def load_cluster_state do
+    case State.load() do
+      {:ok, state} ->
+        {:ok, state}
+
+      {:error, reason} ->
+        {:error, Unavailable.exception(message: "Cannot load cluster state: #{inspect(reason)}")}
+    end
   end
 end
