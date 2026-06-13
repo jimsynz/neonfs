@@ -21,6 +21,7 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.CLI.Handler.Maintenance, as: MaintenanceHandler
   alias NeonFS.CLI.Handler.Node, as: NodeHandler
   alias NeonFS.CLI.Handler.S3, as: S3Handler
+  alias NeonFS.CLI.Handler.ScrubRepair, as: ScrubRepairHandler
   alias NeonFS.CLI.Handler.Snapshots, as: SnapshotsHandler
   alias NeonFS.CLI.Handler.VolumeLifecycle, as: VolumeLifecycleHandler
   alias NeonFS.Client.HealthCheck, as: ClientHealthCheck
@@ -34,12 +35,10 @@ defmodule NeonFS.CLI.Handler do
     DriveManager,
     DriveRegistry,
     DRSnapshot,
-    JobTracker,
     KeyManager,
     KeyRotation,
     RaServer,
     RaSupervisor,
-    ReplicaRepairScheduler,
     ServiceRegistry,
     SystemVolume,
     Volume,
@@ -2021,18 +2020,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, :not_found}` - Volume name doesn't exist
   """
   @spec handle_scrub_start(map()) :: {:ok, map()} | {:error, term()}
-  def handle_scrub_start(opts \\ %{}) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, params} <- resolve_scrub_params(opts),
-         {:ok, job} <- JobTracker.create(NeonFS.Core.Job.Runners.Scrub, params) do
-      {:ok, job_to_map(job)}
-    else
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_scrub_start(opts \\ %{}), to: ScrubRepairHandler
 
   @doc """
   Returns recent scrub jobs across the cluster.
@@ -2041,14 +2029,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of scrub job maps, most recent first
   """
   @spec handle_scrub_status() :: {:ok, [map()]}
-  def handle_scrub_status do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      jobs = JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.Scrub)
-      {:ok, Enum.map(jobs, &job_to_map/1)}
-    end
-  end
+  defdelegate handle_scrub_status(), to: ScrubRepairHandler
 
   @doc """
   Starts a replica-repair pass.
@@ -2064,19 +2045,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` — volume not found, cluster not initialised, etc.
   """
   @spec handle_repair_start(map()) :: {:ok, [map()]} | {:error, term()}
-  def handle_repair_start(opts \\ %{}) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, scope} <- resolve_repair_scope(opts) do
-      case ReplicaRepairScheduler.trigger_now(scope) do
-        {:ok, jobs} -> {:ok, Enum.map(jobs, &job_to_map/1)}
-        {:skipped, :already_running} -> {:ok, []}
-      end
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_repair_start(opts \\ %{}), to: ScrubRepairHandler
 
   @doc """
   Returns recent replica-repair jobs across the cluster, optionally
@@ -2086,17 +2055,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` — list of repair-job maps, most recent first
   """
   @spec handle_repair_status(map()) :: {:ok, [map()]} | {:error, term()}
-  def handle_repair_status(opts \\ %{}) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      jobs =
-        JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.ReplicaRepair)
-        |> filter_by_volume(opts)
-
-      {:ok, Enum.map(jobs, &job_to_map/1)}
-    end
-  end
+  defdelegate handle_repair_status(opts \\ %{}), to: ScrubRepairHandler
 
   @doc """
   Lists background jobs with optional filters.
@@ -2400,42 +2359,6 @@ defmodule NeonFS.CLI.Handler do
   end
 
   # Private helper functions
-
-  defp resolve_scrub_params(%{"volume" => volume_name}) when is_binary(volume_name) do
-    case VolumeRegistry.get_by_name(volume_name) do
-      {:ok, volume} ->
-        {:ok, %{volume_id: volume.id}}
-
-      {:error, :not_found} ->
-        {:error, VolumeNotFound.exception(volume_name: volume_name)}
-    end
-  end
-
-  defp resolve_scrub_params(_), do: {:ok, %{}}
-
-  # Resolve `:all` (no volume), a list, or a single-volume scope from the CLI opts map.
-  defp resolve_repair_scope(%{"volume" => volume_name}) when is_binary(volume_name) do
-    case VolumeRegistry.get_by_name(volume_name) do
-      {:ok, volume} -> {:ok, volume.id}
-      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_name: volume_name)}
-    end
-  end
-
-  defp resolve_repair_scope(_), do: {:ok, :all}
-
-  defp filter_by_volume(jobs, %{"volume" => volume_name}) when is_binary(volume_name) do
-    case VolumeRegistry.get_by_name(volume_name) do
-      {:ok, volume} ->
-        Enum.filter(jobs, fn job ->
-          (job.params[:volume_id] || job.params["volume_id"]) == volume.id
-        end)
-
-      _ ->
-        []
-    end
-  end
-
-  defp filter_by_volume(jobs, _), do: jobs
 
   # Get all reachable FUSE nodes in the cluster
   defp get_all_fuse_nodes do
