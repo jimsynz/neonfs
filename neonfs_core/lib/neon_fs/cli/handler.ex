@@ -18,6 +18,7 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.CLI.Handler.Drives, as: DrivesHandler
   alias NeonFS.CLI.Handler.Escalation, as: EscalationHandler
   alias NeonFS.CLI.Handler.Jobs, as: JobsHandler
+  alias NeonFS.CLI.Handler.Node, as: NodeHandler
   alias NeonFS.CLI.Handler.S3, as: S3Handler
   alias NeonFS.CLI.Handler.Snapshots, as: SnapshotsHandler
   alias NeonFS.CLI.Handler.VolumeLifecycle, as: VolumeLifecycleHandler
@@ -2420,10 +2421,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, map}` - Health report with node, status, checked_at, and per-subsystem checks
   """
   @spec handle_node_status() :: {:ok, map()}
-  def handle_node_status do
-    set_cli_metadata()
-    ClientHealthCheck.handle_node_status()
-  end
+  defdelegate handle_node_status(), to: NodeHandler
 
   @doc """
   Returns a list of all nodes in the cluster with their roles and uptimes.
@@ -2435,20 +2433,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of node info maps sorted by node name
   """
   @spec handle_node_list() :: {:ok, [map()]}
-  def handle_node_list do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      {ra_members, leader} = get_ra_membership()
-
-      nodes =
-        ServiceRegistry.list()
-        |> Enum.map(&service_to_node_info(&1, ra_members, leader))
-        |> Enum.sort_by(& &1.node)
-
-      {:ok, nodes}
-    end
-  end
+  defdelegate handle_node_list(), to: NodeHandler
 
   # S3 credential management
 
@@ -3005,60 +2990,6 @@ defmodule NeonFS.CLI.Handler do
   defp count_volumes do
     VolumeRegistry.list()
     |> length()
-  end
-
-  defp get_uptime do
-    # Return uptime in seconds
-    {uptime_ms, _} = :erlang.statistics(:wall_clock)
-    div(uptime_ms, 1000)
-  end
-
-  defp service_to_node_info(service, ra_members, leader) do
-    server_id = {RaSupervisor.cluster_name(), service.node}
-    is_leader = server_id == leader
-
-    role =
-      cond do
-        service.type != :core -> Atom.to_string(service.type)
-        is_leader -> "leader"
-        server_id in ra_members -> "follower"
-        true -> Atom.to_string(service.type)
-      end
-
-    {status, uptime_seconds} =
-      case get_remote_uptime(service.node) do
-        {:ok, uptime} -> {Atom.to_string(service.status), uptime}
-        :unreachable -> {"offline", 0}
-      end
-
-    %{
-      node: Atom.to_string(service.node),
-      type: Atom.to_string(service.type),
-      role: role,
-      status: status,
-      uptime_seconds: uptime_seconds
-    }
-  end
-
-  defp get_ra_membership do
-    case :ra.members(RaSupervisor.server_id(), 1_000) do
-      {:ok, members, leader} -> {members, leader}
-      _ -> {[], nil}
-    end
-  end
-
-  defp get_remote_uptime(node) when node == node() do
-    {:ok, get_uptime()}
-  end
-
-  defp get_remote_uptime(node) do
-    # `{:badrpc, reason}` is itself a 2-tuple, so it must be matched before
-    # the wall-clock result or it binds as `uptime_ms` and `div/2` raises
-    # `:badarith` — crashing `node list` exactly when a node is down.
-    case :rpc.call(node, :erlang, :statistics, [:wall_clock], 2_000) do
-      {:badrpc, _reason} -> :unreachable
-      {uptime_ms, _} -> {:ok, div(uptime_ms, 1000)}
-    end
   end
 
   defp volume_to_map(%Volume{} = volume) do

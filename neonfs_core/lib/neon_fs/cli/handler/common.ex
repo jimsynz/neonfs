@@ -109,4 +109,14 @@ defmodule NeonFS.CLI.Handler.Common do
       {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_name: volume_name)}
     end
   end
+
+  @doc """
+  Local node uptime in whole seconds (BEAM wall-clock). Shared by the
+  cluster-status and node-list commands.
+  """
+  @spec get_uptime() :: non_neg_integer()
+  def get_uptime do
+    {uptime_ms, _} = :erlang.statistics(:wall_clock)
+    div(uptime_ms, 1000)
+  end
 end
