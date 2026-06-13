@@ -13,11 +13,6 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   @moduletag timeout: 300_000
   @moduletag nodes: 3
   @moduletag :partition
-  # Re-enablement pending: both tests bit-rotted while excluded under the
-  # blanket `:pending_903` tag and fail for reasons unrelated to #903 (now
-  # fixed) — node-restart recovery / anti-entropy catch-up. Tracked in the
-  # #1189 follow-up.
-  @moduletag :pending_reenable
 
   setup %{cluster: cluster} do
     :ok = init_cluster_with_data(cluster)
@@ -167,7 +162,7 @@ defmodule NeonFS.Integration.PartitionRestartTest do
   # The `node_names` argument is retained for source compatibility.
   defp trigger_anti_entropy(cluster, _node_names) do
     [driver | _] =
-      cluster.nodes |> Enum.map(& &1.alias_name) |> Enum.filter(&core_peer?(cluster, &1))
+      cluster.nodes |> Enum.map(& &1.name) |> Enum.filter(&core_peer?(cluster, &1))
 
     volumes = PeerCluster.rpc(cluster, driver, NeonFS.Core.VolumeRegistry, :list, [])
 
@@ -181,10 +176,10 @@ defmodule NeonFS.Integration.PartitionRestartTest do
     :ok
   end
 
-  defp core_peer?(cluster, alias_name) do
-    case PeerCluster.get_node(cluster, alias_name) do
-      {:ok, ni} -> :neonfs_core in Map.get(ni, :applications, [:neonfs_core])
-      _ -> false
+  defp core_peer?(cluster, node_name) do
+    case PeerCluster.get_node(cluster, node_name) do
+      nil -> false
+      ni -> :neonfs_core in Map.get(ni, :applications, [:neonfs_core])
     end
   end
 end
