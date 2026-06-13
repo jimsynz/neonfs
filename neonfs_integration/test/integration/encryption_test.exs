@@ -19,6 +19,11 @@ defmodule NeonFS.Integration.EncryptionTest do
   @moduletag :integration
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
+  # The `enc-ec-volume` is `erasure:2:1`; its shards plus the now-fanned-out
+  # chunk-index metadata (#903/#1186) need ≥2 failure domains, which a
+  # single default drive can't provide. Three local hot drives satisfy
+  # placement on one node (`DriveSelector` counts each `{node, drive_id}`).
+  @moduletag drives: 3
 
   setup_all %{cluster: cluster} do
     :ok = init_single_node_cluster(cluster, name: "enc-test")
@@ -179,7 +184,6 @@ defmodule NeonFS.Integration.EncryptionTest do
   end
 
   describe "encrypted erasure-coded volume" do
-    @tag :pending_reenable
     test "write and read with encryption + erasure coding", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
@@ -202,7 +206,6 @@ defmodule NeonFS.Integration.EncryptionTest do
       assert read_data == test_data
     end
 
-    @tag :pending_reenable
     test "degraded read with decryption succeeds", %{cluster: cluster} do
       test_data = :crypto.strong_rand_bytes(4096)
 
