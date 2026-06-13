@@ -16,13 +16,16 @@ defmodule NeonFS.Integration.ErasureCodingTest do
 
   @moduletag timeout: 180_000
   @moduletag :integration
-  # Re-enablement pending: these tests bit-rotted while excluded under the
-  # blanket `:pending_903` tag and fail for reasons unrelated to #903 (now
-  # fixed) — erasure-coding gaps on a single node. Tracked in the #1189
-  # follow-up.
-  @moduletag :pending_reenable
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
+  # `erasure:2:1` needs three shards across distinct failure domains, and
+  # since the #903/#1186 fix the chunk-index metadata also fans out per the
+  # volume's durability (`DriveSelector.select_replicas` requires `data`
+  # copies — 2 here). The default single-drive node can't satisfy either, so
+  # writes failed with `QuorumUnavailable{select_replicas, required: 2,
+  # available: 1}`. Three hot drives give the single node the failure
+  # domains shard + index placement need (each `{node, drive_id}` counts).
+  @moduletag drives: 3
 
   setup_all %{cluster: cluster} do
     :ok = init_single_node_cluster(cluster, name: "ec-test")

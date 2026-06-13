@@ -68,6 +68,12 @@ defmodule NeonFS.TestSupport.ClusterCase do
           port -> Keyword.put(cluster_opts, :metrics_port, port)
         end
 
+      cluster_opts =
+        case Map.get(tags, :drives) do
+          nil -> cluster_opts
+          count -> Keyword.put(cluster_opts, :drives, hot_drives_fn(count))
+        end
+
       ensure_clean_node_state()
 
       cluster = PeerCluster.start_cluster!(node_count, cluster_opts)
@@ -106,6 +112,12 @@ defmodule NeonFS.TestSupport.ClusterCase do
           port -> Keyword.put(cluster_opts, :metrics_port, port)
         end
 
+      cluster_opts =
+        case Map.get(tags, :drives) do
+          nil -> cluster_opts
+          count -> Keyword.put(cluster_opts, :drives, hot_drives_fn(count))
+        end
+
       cluster = PeerCluster.start_cluster!(node_count, cluster_opts)
 
       PeerCluster.connect_nodes(cluster)
@@ -124,6 +136,25 @@ defmodule NeonFS.TestSupport.ClusterCase do
       end)
 
       %{cluster: cluster}
+    end
+  end
+
+  # Builds a `PeerCluster.start_cluster!/2` `:drives` function that places
+  # `count` hot drives per node. Volumes needing more than one failure
+  # domain on a small cluster (erasure `k:m`, multi-replica metadata) tag
+  # `@moduletag drives: <count>`; `DriveSelector` counts each
+  # `{node, drive_id}` as a distinct domain, so extra local drives satisfy
+  # placement without extra nodes.
+  defp hot_drives_fn(count) when is_integer(count) and count > 0 do
+    fn _node_name, data_dir ->
+      for i <- 0..(count - 1) do
+        %{
+          id: "hot#{i}",
+          path: Path.join(data_dir, "blobs#{i}"),
+          tier: :hot,
+          capacity: 1024 * 1024 * 1024
+        }
+      end
     end
   end
 
