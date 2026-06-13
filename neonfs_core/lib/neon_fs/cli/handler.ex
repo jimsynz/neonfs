@@ -49,7 +49,6 @@ defmodule NeonFS.CLI.Handler do
   }
 
   alias NeonFS.Core.Drive.Identity
-  alias NeonFS.Core.Job
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.Volume.{MetadataReader, MetadataWriter, Reconstruction}
   alias NeonFS.Core.Volume.Reconstruction.OnDisk
@@ -3191,36 +3190,6 @@ defmodule NeonFS.CLI.Handler do
 
     State.update_worker_config(json_config)
   end
-
-  defp job_to_map(%Job{} = job) do
-    %{
-      id: job.id,
-      type: job.type.label(),
-      node: Atom.to_string(job.node),
-      status: Atom.to_string(job.status),
-      progress_total: job.progress.total,
-      progress_completed: job.progress.completed,
-      progress_description: job.progress.description,
-      params: serialise_params(job.params),
-      error: if(job.error, do: inspect(job.error)),
-      created_at: DateTime.to_iso8601(job.created_at),
-      started_at: if(job.started_at, do: DateTime.to_iso8601(job.started_at)),
-      updated_at: DateTime.to_iso8601(job.updated_at),
-      completed_at: if(job.completed_at, do: DateTime.to_iso8601(job.completed_at))
-    }
-  end
-
-  defp serialise_params(params) when is_map(params) do
-    Map.new(params, fn
-      {k, v} when is_atom(k) -> {Atom.to_string(k), serialise_param_value(v)}
-      {k, v} -> {to_string(k), serialise_param_value(v)}
-    end)
-  end
-
-  defp serialise_param_value(v) when is_atom(v), do: Atom.to_string(v)
-  defp serialise_param_value(v) when is_binary(v), do: v
-  defp serialise_param_value(v) when is_number(v), do: v
-  defp serialise_param_value(v), do: inspect(v)
 
   defp parse_tier_opt(opts, nil), do: opts
 

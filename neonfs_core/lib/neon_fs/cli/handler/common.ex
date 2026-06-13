@@ -4,13 +4,15 @@ defmodule NeonFS.CLI.Handler.Common do
 
   `NeonFS.CLI.Handler` and the per-group modules it delegates to
   (`NeonFS.CLI.Handler.S3`, …) `import` this module so the common
-  request preamble (`set_cli_metadata/0`, `require_cluster/0`) and the
-  error-normalisation (`wrap_error/1`) live in one place rather than
-  being copied into every group. Extracted while splitting the handler
-  per #1203.
+  request preamble (`set_cli_metadata/0`, `require_cluster/0`), the
+  error-normalisation (`wrap_error/1`), and the shared `job_to_map/1`
+  serialiser (every operational command that returns a background job
+  renders it the same way) live in one place rather than being copied
+  into every group. Extracted while splitting the handler per #1203.
   """
 
   alias NeonFS.Cluster.State
+  alias NeonFS.Core.Job
   alias NeonFS.Error.{Internal, NotFound}
 
   @doc """
@@ -58,4 +60,40 @@ defmodule NeonFS.CLI.Handler.Common do
 
   def wrap_error(reason),
     do: Internal.exception(message: inspect(reason))
+
+  @doc """
+  Renders a `NeonFS.Core.Job` as a serialisable map for CLI output.
+  Shared by every command group that kicks off or queries a background
+  job (drives, GC, scrub, snapshots, backup, repair, jobs).
+  """
+  @spec job_to_map(Job.t()) :: map()
+  def job_to_map(%Job{} = job) do
+    %{
+      id: job.id,
+      type: job.type.label(),
+      node: Atom.to_string(job.node),
+      status: Atom.to_string(job.status),
+      progress_total: job.progress.total,
+      progress_completed: job.progress.completed,
+      progress_description: job.progress.description,
+      params: serialise_params(job.params),
+      error: if(job.error, do: inspect(job.error)),
+      created_at: DateTime.to_iso8601(job.created_at),
+      started_at: if(job.started_at, do: DateTime.to_iso8601(job.started_at)),
+      updated_at: DateTime.to_iso8601(job.updated_at),
+      completed_at: if(job.completed_at, do: DateTime.to_iso8601(job.completed_at))
+    }
+  end
+
+  defp serialise_params(params) when is_map(params) do
+    Map.new(params, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), serialise_param_value(v)}
+      {k, v} -> {to_string(k), serialise_param_value(v)}
+    end)
+  end
+
+  defp serialise_param_value(v) when is_atom(v), do: Atom.to_string(v)
+  defp serialise_param_value(v) when is_binary(v), do: v
+  defp serialise_param_value(v) when is_number(v), do: v
+  defp serialise_param_value(v), do: inspect(v)
 end
