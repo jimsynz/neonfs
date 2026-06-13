@@ -12,8 +12,8 @@ defmodule NeonFS.CLI.Handler.Common do
   """
 
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.Job
-  alias NeonFS.Error.{Internal, NotFound}
+  alias NeonFS.Core.{Job, VolumeRegistry}
+  alias NeonFS.Error.{Internal, NotFound, VolumeNotFound}
 
   @doc """
   Returns `:ok` when a cluster has been initialised, or a `NotFound`
@@ -96,4 +96,17 @@ defmodule NeonFS.CLI.Handler.Common do
   defp serialise_param_value(v) when is_binary(v), do: v
   defp serialise_param_value(v) when is_number(v), do: v
   defp serialise_param_value(v), do: inspect(v)
+
+  @doc """
+  Resolves a volume by name, returning a `VolumeNotFound` error when it
+  doesn't exist. The standard volume lookup used by nearly every
+  volume-scoped CLI command.
+  """
+  @spec fetch_volume(String.t()) :: {:ok, struct()} | {:error, VolumeNotFound.t()}
+  def fetch_volume(volume_name) do
+    case VolumeRegistry.get_by_name(volume_name) do
+      {:ok, volume} -> {:ok, volume}
+      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_name: volume_name)}
+    end
+  end
 end

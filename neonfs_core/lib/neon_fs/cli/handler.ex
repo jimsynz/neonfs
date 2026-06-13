@@ -1909,13 +1909,6 @@ defmodule NeonFS.CLI.Handler do
     end
   end
 
-  defp fetch_volume(volume_name) do
-    case VolumeRegistry.get_by_name(volume_name) do
-      {:ok, volume} -> {:ok, volume}
-      {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_name: volume_name)}
-    end
-  end
-
   defp schedule_to_map(nil), do: nil
 
   defp schedule_to_map(%{interval_ms: interval, last_run: last}),
