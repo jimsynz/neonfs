@@ -18,6 +18,7 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.CLI.Handler.Drives, as: DrivesHandler
   alias NeonFS.CLI.Handler.Escalation, as: EscalationHandler
   alias NeonFS.CLI.Handler.Jobs, as: JobsHandler
+  alias NeonFS.CLI.Handler.Maintenance, as: MaintenanceHandler
   alias NeonFS.CLI.Handler.Node, as: NodeHandler
   alias NeonFS.CLI.Handler.S3, as: S3Handler
   alias NeonFS.CLI.Handler.Snapshots, as: SnapshotsHandler
@@ -49,7 +50,7 @@ defmodule NeonFS.CLI.Handler do
 
   alias NeonFS.Core.Drive.Identity
   alias NeonFS.Core.MetadataStateMachine
-  alias NeonFS.Core.Volume.{MetadataReader, MetadataWriter, Reconstruction}
+  alias NeonFS.Core.Volume.Reconstruction
   alias NeonFS.Core.Volume.Reconstruction.OnDisk
   alias NeonFS.Transport.TLS
 
@@ -1787,18 +1788,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, :not_found}` - Volume name doesn't exist
   """
   @spec handle_gc_collect(map()) :: {:ok, map()} | {:error, term()}
-  def handle_gc_collect(opts \\ %{}) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, params} <- resolve_gc_params(opts),
-         {:ok, job} <- JobTracker.create(NeonFS.Core.Job.Runners.GarbageCollection, params) do
-      {:ok, job_to_map(job)}
-    else
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_gc_collect(opts \\ %{}), to: MaintenanceHandler
 
   @doc """
   Returns recent garbage collection jobs across the cluster.
@@ -1807,14 +1797,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of GC job maps, most recent first
   """
   @spec handle_gc_status() :: {:ok, [map()]}
-  def handle_gc_status do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      jobs = JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.GarbageCollection)
-      {:ok, Enum.map(jobs, &job_to_map/1)}
-    end
-  end
+  defdelegate handle_gc_status(), to: MaintenanceHandler
 
   @doc """
   Triggers an immediate garbage-collection job for the named volume.
@@ -1823,21 +1806,7 @@ defmodule NeonFS.CLI.Handler do
   GC job is already in flight for the volume).
   """
   @spec handle_volume_gc_now(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_gc_now(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, job} <-
-           JobTracker.create(NeonFS.Core.Job.Runners.GarbageCollection, %{volume_id: volume.id}) do
-      {:ok, job_to_map(job)}
-    else
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
-
-  @minimum_volume_gc_interval_ms 60_000
+  defdelegate handle_volume_gc_now(volume_name), to: MaintenanceHandler
 
   @doc """
   Updates `RootSegment.schedules.gc.interval_ms` for the named
@@ -1846,105 +1815,20 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_volume_gc_set_interval(binary(), pos_integer()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_gc_set_interval(volume_name, interval_ms)
-      when is_binary(volume_name) and is_integer(interval_ms) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         :ok <- validate_volume_gc_interval(interval_ms),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []),
-         existing = Map.get(segment.schedules, :gc, %{interval_ms: interval_ms, last_run: nil}),
-         updated = %{existing | interval_ms: interval_ms},
-         {:ok, _} <- MetadataWriter.update_schedule(volume.id, :gc, updated, []) do
-      {:ok,
-       %{
-         volume_id: volume.id,
-         volume_name: volume_name,
-         schedule: schedule_to_map(updated)
-       }}
-    else
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
-
-  defp validate_volume_gc_interval(interval_ms)
-       when is_integer(interval_ms) and interval_ms >= @minimum_volume_gc_interval_ms,
-       do: :ok
-
-  defp validate_volume_gc_interval(_),
-    do:
-      {:error,
-       Invalid.exception(
-         message: "interval_ms must be at least #{@minimum_volume_gc_interval_ms} (1 minute)"
-       )}
+  defdelegate handle_volume_gc_set_interval(volume_name, interval_ms), to: MaintenanceHandler
 
   @doc """
   Returns the current GC schedule for the named volume — interval,
   last_run, and the most recent (or running) GC job for that volume.
   """
   @spec handle_volume_gc_status(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_gc_status(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []) do
-      schedule = Map.get(segment.schedules, :gc)
-      latest_job = latest_volume_gc_job(volume.id)
-
-      {:ok,
-       %{
-         volume_id: volume.id,
-         volume_name: volume_name,
-         schedule: schedule_to_map(schedule),
-         next_run_due_at: next_run_due_at(schedule),
-         latest_job: latest_job && job_to_map(latest_job)
-       }}
-    else
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
-
-  defp schedule_to_map(nil), do: nil
-
-  defp schedule_to_map(%{interval_ms: interval, last_run: last}),
-    do: %{interval_ms: interval, last_run: last}
-
-  defp next_run_due_at(nil), do: nil
-  defp next_run_due_at(%{last_run: nil}), do: :immediately
-
-  defp next_run_due_at(%{interval_ms: interval, last_run: %DateTime{} = last}) do
-    DateTime.add(last, interval, :millisecond)
-  end
-
-  defp latest_volume_gc_job(volume_id) do
-    JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.GarbageCollection)
-    |> Enum.filter(fn job -> Map.get(job.params || %{}, :volume_id) == volume_id end)
-    |> Enum.sort_by(fn job -> job.updated_at end, {:desc, DateTime})
-    |> List.first()
-  end
+  defdelegate handle_volume_gc_status(volume_name), to: MaintenanceHandler
 
   @doc """
   Triggers an immediate scrub job for the named volume.
   """
   @spec handle_volume_scrub_now(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_scrub_now(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, job} <-
-           JobTracker.create(NeonFS.Core.Job.Runners.Scrub, %{volume_id: volume.id}) do
-      {:ok, job_to_map(job)}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  @minimum_volume_scrub_interval_ms 60_000
+  defdelegate handle_volume_scrub_now(volume_name), to: MaintenanceHandler
 
   @doc """
   Updates `RootSegment.schedules.scrub.interval_ms` for the named
@@ -1952,91 +1836,20 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_volume_scrub_set_interval(binary(), pos_integer()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_scrub_set_interval(volume_name, interval_ms)
-      when is_binary(volume_name) and is_integer(interval_ms) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         :ok <- validate_volume_scrub_interval(interval_ms),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []),
-         existing = Map.get(segment.schedules, :scrub, %{interval_ms: interval_ms, last_run: nil}),
-         updated = %{existing | interval_ms: interval_ms},
-         {:ok, _} <- MetadataWriter.update_schedule(volume.id, :scrub, updated, []) do
-      {:ok,
-       %{
-         volume_id: volume.id,
-         volume_name: volume_name,
-         schedule: schedule_to_map(updated)
-       }}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp validate_volume_scrub_interval(interval_ms)
-       when is_integer(interval_ms) and interval_ms >= @minimum_volume_scrub_interval_ms,
-       do: :ok
-
-  defp validate_volume_scrub_interval(_),
-    do:
-      {:error,
-       Invalid.exception(
-         message: "interval_ms must be at least #{@minimum_volume_scrub_interval_ms} (1 minute)"
-       )}
+  defdelegate handle_volume_scrub_set_interval(volume_name, interval_ms), to: MaintenanceHandler
 
   @doc """
   Returns the current scrub schedule for the named volume — interval,
   last_run, and the latest scrub job for that volume.
   """
   @spec handle_volume_scrub_status(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_scrub_status(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []) do
-      schedule = Map.get(segment.schedules, :scrub)
-      latest_job = latest_volume_scrub_job(volume.id)
-
-      {:ok,
-       %{
-         volume_id: volume.id,
-         volume_name: volume_name,
-         schedule: schedule_to_map(schedule),
-         next_run_due_at: next_run_due_at(schedule),
-         latest_job: latest_job && job_to_map(latest_job)
-       }}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp latest_volume_scrub_job(volume_id) do
-    JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.Scrub)
-    |> Enum.filter(fn job -> Map.get(job.params || %{}, :volume_id) == volume_id end)
-    |> Enum.sort_by(fn job -> job.updated_at end, {:desc, DateTime})
-    |> List.first()
-  end
+  defdelegate handle_volume_scrub_status(volume_name), to: MaintenanceHandler
 
   @doc """
   Triggers an immediate anti-entropy job for the named volume (#922).
   """
   @spec handle_volume_anti_entropy_now(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_anti_entropy_now(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, job} <-
-           JobTracker.create(NeonFS.Core.Job.Runners.VolumeAntiEntropy, %{volume_id: volume.id}) do
-      {:ok, job_to_map(job)}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  @minimum_volume_anti_entropy_interval_ms 60_000
+  defdelegate handle_volume_anti_entropy_now(volume_name), to: MaintenanceHandler
 
   @doc """
   Updates `RootSegment.schedules.anti_entropy.interval_ms` for the
@@ -2044,77 +1857,15 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_volume_anti_entropy_set_interval(binary(), pos_integer()) ::
           {:ok, map()} | {:error, term()}
-  def handle_volume_anti_entropy_set_interval(volume_name, interval_ms)
-      when is_binary(volume_name) and is_integer(interval_ms) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         :ok <- validate_volume_anti_entropy_interval(interval_ms),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []),
-         existing =
-           Map.get(segment.schedules, :anti_entropy, %{
-             interval_ms: interval_ms,
-             last_run: nil
-           }),
-         updated = %{existing | interval_ms: interval_ms},
-         {:ok, _} <- MetadataWriter.update_schedule(volume.id, :anti_entropy, updated, []) do
-      {:ok,
-       %{
-         volume_id: volume.id,
-         volume_name: volume_name,
-         schedule: schedule_to_map(updated)
-       }}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp validate_volume_anti_entropy_interval(interval_ms)
-       when is_integer(interval_ms) and interval_ms >= @minimum_volume_anti_entropy_interval_ms,
-       do: :ok
-
-  defp validate_volume_anti_entropy_interval(_),
-    do:
-      {:error,
-       Invalid.exception(
-         message:
-           "interval_ms must be at least #{@minimum_volume_anti_entropy_interval_ms} (1 minute)"
-       )}
+  defdelegate handle_volume_anti_entropy_set_interval(volume_name, interval_ms),
+    to: MaintenanceHandler
 
   @doc """
   Returns the current anti-entropy schedule for the named volume —
   interval, last_run, and the latest job (#922).
   """
   @spec handle_volume_anti_entropy_status(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_volume_anti_entropy_status(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         {:ok, segment, _} <- MetadataReader.resolve_segment_for_write(volume.id, []) do
-      schedule = Map.get(segment.schedules, :anti_entropy)
-      latest_job = latest_volume_anti_entropy_job(volume.id)
-
-      {:ok,
-       %{
-         volume_id: volume.id,
-         volume_name: volume_name,
-         schedule: schedule_to_map(schedule),
-         next_run_due_at: next_run_due_at(schedule),
-         latest_job: latest_job && job_to_map(latest_job)
-       }}
-    else
-      {:error, reason} -> {:error, wrap_error(reason)}
-    end
-  end
-
-  defp latest_volume_anti_entropy_job(volume_id) do
-    JobTracker.list_cluster(type: NeonFS.Core.Job.Runners.VolumeAntiEntropy)
-    |> Enum.filter(fn job -> Map.get(job.params || %{}, :volume_id) == volume_id end)
-    |> Enum.sort_by(fn job -> job.updated_at end, {:desc, DateTime})
-    |> List.first()
-  end
+  defdelegate handle_volume_anti_entropy_status(volume_name), to: MaintenanceHandler
 
   @doc """
   Snapshots the named volume's current root chunk (#962 / epic #959).
@@ -2649,18 +2400,6 @@ defmodule NeonFS.CLI.Handler do
   end
 
   # Private helper functions
-
-  defp resolve_gc_params(%{"volume" => volume_name}) when is_binary(volume_name) do
-    case VolumeRegistry.get_by_name(volume_name) do
-      {:ok, volume} ->
-        {:ok, %{volume_id: volume.id}}
-
-      {:error, :not_found} ->
-        {:error, VolumeNotFound.exception(volume_name: volume_name)}
-    end
-  end
-
-  defp resolve_gc_params(_), do: {:ok, %{}}
 
   defp resolve_scrub_params(%{"volume" => volume_name}) when is_binary(volume_name) do
     case VolumeRegistry.get_by_name(volume_name) do
