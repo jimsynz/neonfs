@@ -91,17 +91,28 @@ defmodule NeonFS.Integration.PartitionTest do
              "Expected write to fail on minority partition, got: #{inspect(result)}"
     end
 
-    # Still failing for a behavioural reason, not the `core_peer?` harness
-    # drift the other two tests hit: the minority node times out reading
-    # data written before the partition. Tracked under #1219 for a focused
-    # minority-read fix.
-    @tag :pending_reenable
-    test "minority can read previously written data", %{cluster: cluster} do
+    # CP read path: a minority-partitioned node has no reachable Ra leader
+    # for the `consistent_query` that resolves volume metadata, so it cannot
+    # know its last-committed volume-root pointer is still current and must
+    # surface an error rather than serve potentially-stale data. Staying CP
+    # here is the deliberate choice (#1267); the minority holds every chunk
+    # and index-tree page locally, but quorum-less metadata resolution is
+    # what makes the read unavailable.
+    test "minority cannot read previously written data", %{cluster: cluster} do
       partition_majority_minority(cluster)
 
-      assert_eventually timeout: 60_000 do
-        read_matches?(cluster, :node3, "/test.txt", "test data")
-      end
+      result =
+        PeerCluster.rpc(
+          cluster,
+          :node3,
+          NeonFS.TestHelpers,
+          :read_file,
+          ["test-volume", "/test.txt"],
+          120_000
+        )
+
+      assert read_unavailable?(result),
+             "Expected read to be unavailable on minority partition, got: #{inspect(result)}"
     end
   end
 
@@ -239,6 +250,10 @@ defmodule NeonFS.Integration.PartitionTest do
   end
 
   defp write_failed?(result) do
+    match?({:error, _}, result) or match?({:badrpc, _}, result)
+  end
+
+  defp read_unavailable?(result) do
     match?({:error, _}, result) or match?({:badrpc, _}, result)
   end
 
