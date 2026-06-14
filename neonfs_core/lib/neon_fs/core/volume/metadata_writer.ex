@@ -168,7 +168,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   ## Internals
 
-  @default_cas_retries 10
+  @default_cas_retries 30
 
   # CAS-conflict backoff bounds (#1219). Optimistic
   # `:cas_update_volume_root` conflicts retry end-to-end; retrying
@@ -176,7 +176,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # sleep a jittered, exponentially-growing interval (capped) between
   # attempts to decorrelate the racing writers.
   @cas_backoff_base_ms 2
-  @cas_backoff_max_ms 100
+  @cas_backoff_max_ms 250
   @remote_write_timeout 30_000
 
   # A metadata write needs the volume's root segment, but it can only be read
@@ -544,6 +544,14 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   defp default_bootstrap_registrar(command) do
     case RaSupervisor.command(command) do
+      # `:ra.process_command` wraps the state machine's reply in `{:ok,
+      # Reply, Leader}` even when that reply is itself an error — so a
+      # `:cas_update_volume_root` that the state machine *rejected* with
+      # `{:error, {:stale_pointer, …}}` arrives here as
+      # `{:ok, {:error, …}, leader}`. Unwrap the inner error and surface
+      # it, otherwise a rejected CAS reads as success and the write is
+      # silently dropped (#1260 — concurrent index-tree lost updates).
+      {:ok, {:error, reason}, _leader} -> {:error, reason}
       {:ok, result, _leader} -> {:ok, result}
       {:error, _} = err -> err
       other -> {:error, other}
