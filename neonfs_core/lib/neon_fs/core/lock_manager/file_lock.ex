@@ -297,6 +297,13 @@ defmodule NeonFS.Core.LockManager.FileLock do
 
       {:wait, _holder} ->
         new_queue = :queue.in({from, client_ref, range, type, mode, ttl}, state.wait_queue)
+
+        :telemetry.execute(
+          [:neonfs, :lock_manager, :file_lock, :byte_range_blocked],
+          %{},
+          %{file_id: state.file_id, client_ref: client_ref, type: type}
+        )
+
         {:noreply, %{state | wait_queue: new_queue}, @idle_timeout_ms}
     end
   end

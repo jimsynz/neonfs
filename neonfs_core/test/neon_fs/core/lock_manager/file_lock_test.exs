@@ -9,7 +9,24 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
 
     {:ok, pid} = start_supervised({FileLock, file_id: "test-file-#{System.unique_integer()}"})
 
-    %{pid: pid}
+    # Subscribe to the "request parked in a wait queue" events so tests that
+    # spawn a blocking acquirer can wait for it to actually block — instead of
+    # a fixed `Process.sleep` fudge (#1208).
+    blocked_ref =
+      :telemetry_test.attach_event_handlers(self(), [
+        [:neonfs, :lock_manager, :file_lock, :byte_range_blocked],
+        [:neonfs, :lock_manager, :file_lock, :write_blocked]
+      ])
+
+    %{pid: pid, blocked_ref: blocked_ref}
+  end
+
+  # Block until a spawned acquirer has been parked in the lock's wait queue,
+  # i.e. its blocking `lock` / `check_write_blocking` call has reached the
+  # server and conflicted. Deterministic replacement for `Process.sleep/1`.
+  defp await_blocked(ref, event) do
+    assert_receive {[:neonfs, :lock_manager, :file_lock, ^event], ^ref, _measurements, _meta},
+                   2_000
   end
 
   describe "byte-range locks" do
@@ -26,7 +43,10 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, ttl: 60_000)
     end
 
-    test "blocks exclusive lock when shared lock is held on overlapping range", %{pid: pid} do
+    test "blocks exclusive lock when shared lock is held on overlapping range", %{
+      pid: pid,
+      blocked_ref: ref
+    } do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :shared, ttl: 60_000)
 
       task =
@@ -34,12 +54,15 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
           FileLock.lock(pid, :client_b, {50, 100}, :exclusive, ttl: 60_000, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :byte_range_blocked)
       FileLock.unlock(pid, :client_a, {0, 100})
       assert :ok = Task.await(task)
     end
 
-    test "blocks shared lock when exclusive lock is held on overlapping range", %{pid: pid} do
+    test "blocks shared lock when exclusive lock is held on overlapping range", %{
+      pid: pid,
+      blocked_ref: ref
+    } do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, ttl: 60_000)
 
       task =
@@ -47,7 +70,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
           FileLock.lock(pid, :client_b, {50, 100}, :shared, ttl: 60_000, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :byte_range_blocked)
       FileLock.unlock(pid, :client_a, {0, 100})
       assert :ok = Task.await(task)
     end
@@ -167,6 +190,8 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
     test "expired locks are purged", %{pid: pid} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, ttl: 1)
 
+      # Time-based by nature: wait for the 1 ms TTL to elapse in wall-clock
+      # time before the lazy purge can fire. Not a synchronisation fudge.
       Process.sleep(50)
 
       # Trigger TTL check by attempting a new lock
@@ -175,6 +200,8 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
 
     test "renew extends TTL", %{pid: pid} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, ttl: 200)
+      # Time-based: let part of the 200 ms TTL elapse, then renew and confirm
+      # the lock survived. Genuine elapsed-time behaviour, not a sleep fudge.
       Process.sleep(100)
       assert :ok = FileLock.renew(pid, :client_a, ttl: 60_000)
 
@@ -270,7 +297,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
       assert :ok = FileLock.check_write_blocking(pid, :client_a, {0, 100})
     end
 
-    test "blocks until mandatory lock is released", %{pid: pid} do
+    test "blocks until mandatory lock is released", %{pid: pid, blocked_ref: ref} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
 
       task =
@@ -278,12 +305,12 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
           FileLock.check_write_blocking(pid, :client_b, {50, 50}, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :write_blocked)
       FileLock.unlock(pid, :client_a, {0, 100})
       assert :ok = Task.await(task)
     end
 
-    test "blocks until deny-write share mode is closed", %{pid: pid} do
+    test "blocks until deny-write share mode is closed", %{pid: pid, blocked_ref: ref} do
       assert :ok = FileLock.open(pid, :client_a, :read, :write, ttl: 60_000)
 
       task =
@@ -291,7 +318,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
           FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :write_blocked)
       FileLock.close(pid, :client_a)
       assert :ok = Task.await(task)
     end
@@ -306,7 +333,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
       assert :ok = FileLock.check_write_blocking(pid, :client_a, {0, 100})
     end
 
-    test "unblocks after unlock_all releases the conflict", %{pid: pid} do
+    test "unblocks after unlock_all releases the conflict", %{pid: pid, blocked_ref: ref} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
       assert :ok = FileLock.open(pid, :client_a, :read, :write, ttl: 60_000)
 
@@ -315,7 +342,7 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
           FileLock.check_write_blocking(pid, :client_b, {50, 50}, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :write_blocked)
       FileLock.unlock_all(pid, :client_a)
       assert :ok = Task.await(task)
     end
@@ -341,22 +368,23 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
                catch_exit(FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 100))
     end
 
-    test "write_wait_queue_length is reflected in status", %{pid: pid} do
+    test "write_wait_queue_length is reflected in status", %{pid: pid, blocked_ref: ref} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
 
-      Task.async(fn ->
-        FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 5_000)
-      end)
+      task =
+        Task.async(fn ->
+          FileLock.check_write_blocking(pid, :client_b, {0, 100}, timeout: 5_000)
+        end)
 
-      Process.sleep(50)
+      await_blocked(ref, :write_blocked)
       status = FileLock.status(pid)
       assert status.write_wait_queue_length == 1
 
       FileLock.unlock(pid, :client_a, {0, 100})
-      Process.sleep(50)
+      assert :ok = Task.await(task)
     end
 
-    test "multiple blocked writers are all unblocked", %{pid: pid} do
+    test "multiple blocked writers are all unblocked", %{pid: pid, blocked_ref: ref} do
       assert :ok = FileLock.lock(pid, :client_a, {0, 100}, :exclusive, mode: :mandatory)
 
       tasks =
@@ -366,7 +394,8 @@ defmodule NeonFS.Core.LockManager.FileLockTest do
           end)
         end
 
-      Process.sleep(50)
+      # Wait until all three writers have parked in the wait queue.
+      for _ <- tasks, do: await_blocked(ref, :write_blocked)
       FileLock.unlock(pid, :client_a, {0, 100})
 
       results = Task.await_many(tasks)

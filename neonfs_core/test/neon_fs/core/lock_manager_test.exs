@@ -13,7 +13,23 @@ defmodule NeonFS.Core.LockManagerTest do
 
     # ServiceRegistry ETS tables may not exist in unit tests — LockManager.master_for/1
     # falls back to local node when ServiceRegistry is unavailable
-    :ok
+
+    # Wait-queue events (emitted by the underlying FileLock) let tests wait for
+    # a spawned acquirer to actually block, instead of a fixed sleep (#1208).
+    blocked_ref =
+      :telemetry_test.attach_event_handlers(self(), [
+        [:neonfs, :lock_manager, :file_lock, :byte_range_blocked],
+        [:neonfs, :lock_manager, :file_lock, :write_blocked]
+      ])
+
+    %{blocked_ref: blocked_ref}
+  end
+
+  # Block until a spawned acquirer has been parked in a wait queue.
+  # Deterministic replacement for `Process.sleep/1`.
+  defp await_blocked(ref, event) do
+    assert_receive {[:neonfs, :lock_manager, :file_lock, ^event], ^ref, _measurements, _meta},
+                   2_000
   end
 
   describe "lock/5 and unlock/3" do
@@ -29,7 +45,7 @@ defmodule NeonFS.Core.LockManagerTest do
       assert :ok = LockManager.lock(file_id, :client_b, {50, 100}, :shared)
     end
 
-    test "exclusive locks conflict with shared locks" do
+    test "exclusive locks conflict with shared locks", %{blocked_ref: ref} do
       file_id = "file-#{System.unique_integer([:positive])}"
       assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :shared)
 
@@ -38,7 +54,7 @@ defmodule NeonFS.Core.LockManagerTest do
           LockManager.lock(file_id, :client_b, {50, 100}, :exclusive, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :byte_range_blocked)
       assert :ok = LockManager.unlock(file_id, :client_a, {0, 100})
       assert :ok = Task.await(task)
     end
@@ -191,7 +207,7 @@ defmodule NeonFS.Core.LockManagerTest do
       assert :ok = LockManager.check_write_blocking(file_id, :client_a, {0, 100})
     end
 
-    test "blocks until mandatory lock is released" do
+    test "blocks until mandatory lock is released", %{blocked_ref: ref} do
       file_id = "file-#{System.unique_integer([:positive])}"
       assert :ok = LockManager.lock(file_id, :client_a, {0, 100}, :exclusive, mode: :mandatory)
 
@@ -200,12 +216,12 @@ defmodule NeonFS.Core.LockManagerTest do
           LockManager.check_write_blocking(file_id, :client_b, {50, 50}, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :write_blocked)
       assert :ok = LockManager.unlock(file_id, :client_a, {0, 100})
       assert :ok = Task.await(task)
     end
 
-    test "blocks until share mode is released" do
+    test "blocks until share mode is released", %{blocked_ref: ref} do
       file_id = "file-#{System.unique_integer([:positive])}"
       assert :ok = LockManager.open(file_id, :client_a, :read, :write)
 
@@ -214,7 +230,7 @@ defmodule NeonFS.Core.LockManagerTest do
           LockManager.check_write_blocking(file_id, :client_b, {0, 100}, timeout: 2_000)
         end)
 
-      Process.sleep(50)
+      await_blocked(ref, :write_blocked)
       assert :ok = LockManager.close(file_id, :client_a)
       assert :ok = Task.await(task)
     end
