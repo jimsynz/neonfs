@@ -243,7 +243,8 @@ defmodule NeonFS.Transport.ConnPoolTest do
 
       ref =
         :telemetry_test.attach_event_handlers(self(), [
-          [:neonfs, :transport, :conn_pool, :worker_connected]
+          [:neonfs, :transport, :conn_pool, :worker_connected],
+          [:neonfs, :transport, :conn_pool, :checkout]
         ])
 
       {:ok, pool} =
@@ -266,8 +267,10 @@ defmodule NeonFS.Transport.ConnPoolTest do
           end
         end)
 
-      # Give time for the slow task to check out the connection
-      Process.sleep(100)
+      # Wait until the slow task has actually checked out the only connection,
+      # so the pool is genuinely exhausted before the timeout check (#1208).
+      assert_receive {[:neonfs, :transport, :conn_pool, :checkout], ^ref, _measurements, _meta},
+                     5_000
 
       # Try to checkout with a short timeout — pool exhausted, should exit
       assert catch_exit(ConnPool.execute(pool, {:fast, :request}, timeout: 200))
