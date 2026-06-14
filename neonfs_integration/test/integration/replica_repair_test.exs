@@ -30,11 +30,6 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   @moduletag nodes: 3
   @moduletag cluster_mode: :per_test
   @moduletag :integration
-  # Multi-node `replicate:2` volume + `nodes: 3` — the volume's
-  # drive_locations only includes 2 of the 3 peers, so the local
-  # read on a non-replica peer hits the cross-node walk that
-  # currently fails on missing index-tree chunks (#903). Re-enable
-  # once the writer fans tree chunks out.
 
   @volume_name "rr-vol"
   @volume_opts %{
@@ -55,7 +50,6 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
   end
 
   describe "under-replicated repair" do
-    @tag :pending_reenable
     test "kills a node, triggers repair, chunks reach target replication factor",
          %{cluster: cluster} do
       payload = :crypto.strong_rand_bytes(@payload_bytes)
@@ -100,12 +94,11 @@ defmodule NeonFS.Integration.ReplicaRepairTest do
       # No `:read_path_repair` telemetry should have fired during the
       # repair window — the repair primitive sources data from a
       # surviving replica, not from a read.
-      refute_received {[:neonfs, :read_path_repair, _], ^ref, _, _}, 50
+      refute_receive {[:neonfs, :read_path_repair, _], ^ref, _, _}, 50
     end
   end
 
   describe "over-replicated repair" do
-    @tag :pending_reenable
     test "drops excess replicas back to the target factor",
          %{cluster: cluster} do
       payload = :crypto.strong_rand_bytes(@payload_bytes)
