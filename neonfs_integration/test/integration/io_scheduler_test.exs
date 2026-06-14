@@ -259,13 +259,6 @@ defmodule NeonFS.Integration.IOSchedulerTest do
   end
 
   describe "high concurrency" do
-    # The CAS-retry-budget half of this (write-side `:cas_retries_exhausted`
-    # under 50-way contention) is fixed — `MetadataWriter` now backs off
-    # with full jitter and a larger budget, so every write returns `{:ok}`.
-    # But read-back of an acked file then fails with `FileNotFound`: a
-    # genuine lost update in the concurrent index-tree compose path,
-    # reproducible and single-node. Stays skipped pending that fix — #1260.
-    @tag :pending_reenable
     test "concurrent write burst completes without data loss", %{cluster: cluster} do
       file_count = 50
       file_size = 1024
@@ -293,29 +286,38 @@ defmodule NeonFS.Integration.IOSchedulerTest do
           max_concurrency: 20,
           timeout: 60_000
         )
-        |> Enum.to_list()
+        |> Enum.zip(test_files)
 
-      # All writes should succeed
-      for {:ok, result} <- results do
-        assert {:ok, _file} = result
+      # Every write must succeed — including not crashing/timing out. A
+      # task that exited surfaces as `{:exit, _}`; don't let the
+      # comprehension silently skip it (that masked #1260).
+      for {res, {path, _}} <- results do
+        assert match?({:ok, {:ok, _file}}, res),
+               "write for #{path} did not succeed: #{inspect(res)}"
       end
 
-      assert length(results) == file_count
+      # Every acked file must be readable. Before #1260 was fixed,
+      # concurrent index-tree writes silently dropped acked entries — a
+      # stale `:cas_update_volume_root` rejection was mis-reported as a
+      # successful commit — so the writes returned `{:ok}` but the files
+      # were gone on read.
+      missing =
+        for {path, _data} <- test_files,
+            match?(
+              {:error, _},
+              PeerCluster.rpc(cluster, :node1, NeonFS.Core, :get_file_meta, ["io-test-vol", path])
+            ),
+            do: path
 
-      # Read back a sample and verify data integrity
-      sample_indices = Enum.take_random(1..file_count, 10)
+      assert missing == [], "files missing after acked write: #{inspect(missing)}"
 
-      for i <- sample_indices do
-        {path, expected_data} = Enum.at(test_files, i - 1)
-
-        {:ok, read_data} =
-          PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :read_file, [
-            "io-test-vol",
-            path
-          ])
-
-        assert read_data == expected_data,
-               "Data mismatch for #{path}"
+      # Spot-check byte integrity on a sample.
+      for {path, expected_data} <- Enum.take_random(test_files, 10) do
+        assert {:ok, ^expected_data} =
+                 PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :read_file, [
+                   "io-test-vol",
+                   path
+                 ])
       end
     end
   end
