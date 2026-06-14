@@ -344,8 +344,13 @@ defmodule NeonFS.Integration.IOSchedulerTest do
 
       assert file.chunks != []
 
-      # Wait for replication to complete
-      assert_eventually timeout: 30_000 do
+      # Wait for cross-node replication to reach the target factor. 30s was
+      # too tight under CI load — this flaked the integration job on
+      # unrelated PRs (#1262) when a saturated runner pushed convergence
+      # past the deadline. 60s (the headroom this file already uses for the
+      # sustained-load write step) keeps the assertion robust without
+      # hiding a genuine replication stall.
+      assert_eventually timeout: 60_000 do
         chunks =
           PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get_chunks_for_volume, [
             file.volume_id
