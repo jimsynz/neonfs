@@ -979,6 +979,8 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
               self()
             )
 
+          send(parent, :a_queued)
+
           receive do
             {:byte_range_acquired, ^token, claim_id} ->
               {:a_won, claim_id}
@@ -987,7 +989,9 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      Process.sleep(50)
+      # Wait for A to register its waiter before spawning B, so the FIFO
+      # order under test is deterministic (was a fixed `Process.sleep`, #1208).
+      assert_receive :a_queued, 2_000
 
       task_b =
         Task.async(fn ->
@@ -1000,6 +1004,8 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
               self()
             )
 
+          send(parent, :b_queued)
+
           receive do
             {:byte_range_acquired, ^token, claim_id} ->
               {:b_won, claim_id}
@@ -1008,7 +1014,8 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      Process.sleep(50)
+      # Both waiters are now registered (A before B); release the holder.
+      assert_receive :b_queued, 2_000
       send(holder, :release)
 
       result_a = Task.await(task_a, 3_000)
