@@ -66,7 +66,7 @@ defmodule NeonFS.Containerd.MixProject do
     [
       {:grpc, "~> 0.9"},
       {:neonfs_client, path: "../neonfs_client"},
-      {:protobuf, "~> 0.16"},
+      {:protobuf, "~> 0.17"},
 
       # dev/test
       {:credo, "~> 1.6", only: [:dev, :test], runtime: false},

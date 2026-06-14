@@ -74,7 +74,7 @@ defmodule NeonFS.WebDAV.MixProject do
       # test
       {:neonfs_test_support, path: "../neonfs_test_support", only: :test, runtime: false},
       {:mimic, "~> 2.0", only: [:test]},
-      {:req, "~> 0.5", only: [:dev, :test]}
+      {:req, "~> 0.6", only: [:dev, :test]}
     ]
   end
 end
