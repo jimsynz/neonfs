@@ -62,6 +62,11 @@ defmodule NeonFS.NFS.WriteThrottleTest do
         Application.delete_env(:neonfs_nfs, :write_acquire_timeout)
       end)
 
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :nfs, :write_throttle, :queued]
+        ])
+
       {:ok, permit} = WriteThrottle.acquire(100)
 
       waiter =
@@ -69,7 +74,11 @@ defmodule NeonFS.NFS.WriteThrottleTest do
           WriteThrottle.acquire(100)
         end)
 
-      Process.sleep(20)
+      # Wait until the waiter has actually parked in the throttle's queue,
+      # rather than sleeping a fixed interval (#1208).
+      assert_receive {[:neonfs, :nfs, :write_throttle, :queued], ^ref, _measurements, _meta},
+                     1_000
+
       WriteThrottle.release(permit)
 
       assert {:ok, _permit2} = Task.await(waiter, 1_000)

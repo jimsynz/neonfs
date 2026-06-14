@@ -116,6 +116,13 @@ defmodule NeonFS.NFS.WriteThrottle do
       {:reply, {:ok, permit}, state}
     else
       waiters = :queue.in({from, byte_count}, state.waiters)
+
+      :telemetry.execute(
+        [:neonfs, :nfs, :write_throttle, :queued],
+        %{waiter_count: :queue.len(waiters), byte_count: byte_count},
+        %{}
+      )
+
       {:noreply, %{state | waiters: waiters}}
     end
   end

@@ -250,10 +250,9 @@ defmodule NeonFS.Client.PartitionRecoveryTest do
       send(pid, {:nodeup, core})
       _ = :sys.get_state(pid)
 
-      # Wait for the debounce timer to fire
-      Process.sleep(100)
-
-      assert_received :neonfs_invalidate_all
+      # The debounce timer (50 ms) fires and broadcasts the invalidation;
+      # wait for it deterministically rather than sleeping past the deadline.
+      assert_receive :neonfs_invalidate_all, 1_000
     end
   end
 end
