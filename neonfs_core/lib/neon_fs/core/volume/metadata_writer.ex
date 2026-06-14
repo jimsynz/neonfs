@@ -31,7 +31,11 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   `{:stale_pointer, expected:, actual:}` and the writer retries
   end-to-end (re-reading the now-newer segment, re-applying the
   tree op, replicating the new chunk, and CAS-ing again). The
-  retry budget is configurable via `:cas_retries` (default 5).
+  retry budget is configurable via `:cas_retries` (default 10),
+  and conflicting retries back off with full jitter so a burst of
+  concurrent writers to one volume decorrelates rather than
+  re-colliding on every attempt (#1219 — the high-concurrency
+  write-burst test exhausted an immediate-retry budget).
 
   Each external dependency is injectable via opts so unit tests
   drive the function with deterministic stubs (same pattern as
@@ -164,7 +168,15 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   ## Internals
 
-  @default_cas_retries 5
+  @default_cas_retries 10
+
+  # CAS-conflict backoff bounds (#1219). Optimistic
+  # `:cas_update_volume_root` conflicts retry end-to-end; retrying
+  # immediately under a concurrent write burst just re-collides, so
+  # sleep a jittered, exponentially-growing interval (capped) between
+  # attempts to decorrelate the racing writers.
+  @cas_backoff_base_ms 2
+  @cas_backoff_max_ms 100
   @remote_write_timeout 30_000
 
   # A metadata write needs the volume's root segment, but it can only be read
@@ -274,6 +286,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
           {:ok, new_root_chunk_hash}
 
         {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+          cas_backoff(opts, retries_left)
           do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left - 1)
 
         {:error, _} = err ->
@@ -314,12 +327,24 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
           {:ok, new_root_chunk_hash}
 
         {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+          cas_backoff(opts, retries_left)
           do_apply_segment_op(volume_id, opts, transform, retries_left - 1)
 
         {:error, _} = err ->
           err
       end
     end
+  end
+
+  # Full-jitter exponential backoff between CAS conflicts. `attempt`
+  # grows as `retries_left` shrinks, so each successive collision waits
+  # a wider random window — capped — letting a burst of concurrent
+  # writers to one volume spread out instead of re-colliding in lockstep.
+  defp cas_backoff(opts, retries_left) do
+    budget = Keyword.get(opts, :cas_retries, @default_cas_retries)
+    attempt = max(0, budget - retries_left)
+    ceiling = min(@cas_backoff_max_ms, @cas_backoff_base_ms * Integer.pow(2, attempt))
+    Process.sleep(:rand.uniform(ceiling))
   end
 
   # Looks up the volume's bootstrap entry. If missing — `VolumeRegistry`
