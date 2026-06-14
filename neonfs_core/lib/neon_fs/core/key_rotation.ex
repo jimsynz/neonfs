@@ -120,7 +120,12 @@ defmodule NeonFS.Core.KeyRotation do
       to_version: job.params.to_version,
       started_at: job.started_at,
       progress: %{
-        total_chunks: job.progress.total,
+        # `job.progress.total` is 0 until the runner's first step sets it, so a
+        # caller polling immediately after `start_rotation/1` would otherwise
+        # see `total_chunks: 0` and read `migrated >= total` as "done" before
+        # any chunk is rotated (#1266). `params.total_chunks` is the count
+        # snapshotted at creation, so it is accurate from the first poll.
+        total_chunks: Map.get(job.params, :total_chunks, job.progress.total),
         migrated: job.progress.completed
       }
     }

@@ -195,17 +195,6 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
 
       assert stored_size == byte_size(data) + 16
 
-      # Old key should fail — the old-suffix path no longer exists
-      assert {:error, _} =
-               Native.store_read_chunk_with_options(
-                 store,
-                 hash,
-                 "hot",
-                 false,
-                 false,
-                 {"", 0, old_key, old_nonce}
-               )
-
       # New key should work
       assert {:ok, read_data} =
                Native.store_read_chunk_with_options(
@@ -218,6 +207,32 @@ defmodule NeonFS.Core.Blob.NativeEncryptionTest do
                )
 
       assert read_data == data
+
+      # The old variant is left on disk — the re-encrypt NIF no longer deletes
+      # it, so a concurrent read never hits a dangling path before the metadata
+      # nonce swaps (#1266). It stays readable with the old key until the caller
+      # deletes it explicitly.
+      assert {:ok, ^data} =
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 false,
+                 false,
+                 {"", 0, old_key, old_nonce}
+               )
+
+      assert {:ok, _} = Native.store_delete_chunk(store, hash, "hot", "", 0, old_key, old_nonce)
+
+      assert {:error, _} =
+               Native.store_read_chunk_with_options(
+                 store,
+                 hash,
+                 "hot",
+                 false,
+                 false,
+                 {"", 0, old_key, old_nonce}
+               )
     end
 
     test "re-encrypt preserves compression", %{store: store} do

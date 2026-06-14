@@ -158,6 +158,7 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
 
         case ChunkIndex.put(updated_meta) do
           :ok ->
+            delete_superseded_replicas(chunk, local_locations, old_nonce, new_nonce)
             :ok
 
           {:error, reason} ->
@@ -172,6 +173,34 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
       error ->
         error
     end
+  end
+
+  # The metadata now points at the freshly-encrypted blob, so the
+  # pre-rotation variant is safe to reap. Deleting it earlier — before the
+  # nonce swap commits — would leave a window where a concurrent read
+  # resolves the old (now-deleted) path and fails with "chunk not found"
+  # (#1266), so the re-encrypt NIF deliberately leaves the old blob behind
+  # and we delete it here. A fresh nonce always yields a new codec suffix;
+  # on the astronomically unlikely nonce collision the blob was overwritten
+  # in place and there is nothing to delete.
+  defp delete_superseded_replicas(_chunk, _local_locations, nonce, nonce), do: :ok
+
+  defp delete_superseded_replicas(chunk, local_locations, old_nonce, _new_nonce) do
+    Enum.each(local_locations, fn loc ->
+      codec_opts = [compression: chunk.compression, key: <<0::256>>, nonce: old_nonce]
+
+      case BlobStore.delete_chunk(chunk.hash, loc.drive_id, codec_opts) do
+        {:ok, _bytes_freed} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to delete pre-rotation blob variant; orphan left for GC",
+            chunk_hash: Base.encode16(chunk.hash, case: :lower),
+            drive_id: loc.drive_id,
+            reason: inspect(reason)
+          )
+      end
+    end)
   end
 
   defp extract_stored_size(results) do

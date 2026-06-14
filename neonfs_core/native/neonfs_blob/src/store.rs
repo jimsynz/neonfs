@@ -481,12 +481,22 @@ impl BlobStore {
         Ok(())
     }
 
-    /// Re-encrypts a chunk in place: decrypts with old key/nonce, re-encrypts
-    /// with new key/nonce, writes back atomically.
+    /// Re-encrypts a chunk: decrypts with old key/nonce, re-encrypts with new
+    /// key/nonce, writes the new codec variant.
     ///
     /// The entire decrypt-old → encrypt-new cycle happens in Rust without any
     /// data crossing the NIF boundary. Compression is preserved (only the
     /// encryption layer changes).
+    ///
+    /// The old codec variant is **left on disk**. A fresh nonce gives the
+    /// re-encrypted chunk a new codec suffix (a new path), so the old and new
+    /// blobs coexist. The caller must delete the old variant *after* it has
+    /// committed the chunk metadata's new nonce — deleting here, before the
+    /// metadata swap, opens a window where a concurrent read resolves the old
+    /// (now-deleted) path and fails with "chunk not found" (#1266). When the
+    /// new nonce happens to collide with the old one (suffix unchanged) the
+    /// blob is overwritten in place and there is nothing for the caller to
+    /// delete.
     ///
     /// # Arguments
     /// * `hash` - The SHA-256 hash of the chunk.
@@ -517,15 +527,8 @@ impl BlobStore {
         let new_encrypted = encryption::encrypt(&intermediate, new_params)?;
         let stored_size = new_encrypted.len();
 
-        if old_suffix == new_suffix {
-            // Same suffix (extraordinary: same nonce). Overwrite in place.
-            self.atomic_write(&old_path, &new_encrypted)?;
-        } else {
-            let new_path = self.chunk_path(hash, tier, &new_suffix);
-            self.atomic_write(&new_path, &new_encrypted)?;
-            // Only remove the old variant once the new one is on disk.
-            fs::remove_file(&old_path).map_err(|e| StoreError::io_error(&old_path, e))?;
-        }
+        let new_path = self.chunk_path(hash, tier, &new_suffix);
+        self.atomic_write(&new_path, &new_encrypted)?;
 
         Ok(stored_size)
     }
@@ -1722,17 +1725,6 @@ mod tests {
 
         assert_eq!(stored_size, data.len() + 16);
 
-        // Old key should fail — and the old-suffix path is gone.
-        let old_read = ReadOptions {
-            verify: false,
-            decompress: false,
-            compression: None,
-            encryption: Some(old_enc),
-        };
-        assert!(store
-            .read_chunk_with_options(&hash, Tier::Hot, &old_read)
-            .is_err());
-
         // New key should work
         let new_read = ReadOptions {
             verify: false,
@@ -1744,6 +1736,31 @@ mod tests {
             .read_chunk_with_options(&hash, Tier::Hot, &new_read)
             .unwrap();
         assert_eq!(read_data, data);
+
+        // The old variant is intentionally left on disk so a concurrent read
+        // never finds a dangling reference before the metadata nonce swaps
+        // (#1266). It stays readable with the old key until the caller deletes
+        // it explicitly.
+        let old_read = ReadOptions {
+            verify: false,
+            decompress: false,
+            compression: None,
+            encryption: Some(old_enc.clone()),
+        };
+        assert_eq!(
+            store
+                .read_chunk_with_options(&hash, Tier::Hot, &old_read)
+                .unwrap(),
+            data
+        );
+
+        store
+            .delete_chunk(&hash, Tier::Hot, None, Some(&old_enc))
+            .unwrap();
+
+        assert!(store
+            .read_chunk_with_options(&hash, Tier::Hot, &old_read)
+            .is_err());
     }
 
     #[test]

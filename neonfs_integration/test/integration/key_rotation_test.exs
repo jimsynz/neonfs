@@ -18,13 +18,6 @@ defmodule NeonFS.Integration.KeyRotationTest do
   @moduletag nodes: 1
 
   describe "key rotation lifecycle" do
-    # Re-encrypts the chunk's stored bytes in place under the new
-    # key version — but reads after rotation come back with
-    # `local_read_failed: chunk not found`. Likely a races between
-    # `MetadataWriter.put` rewriting the chunk's tree entry and the
-    # blob-rewrite step in `KeyRotation.reencrypt_chunk/4`. Needs a
-    # focused investigation; tracked under #903.
-    @tag :pending_reenable
     test "write with v1, rotate to v2, read back succeeds", %{cluster: cluster} do
       :ok = init_rotation_cluster(cluster)
 
@@ -104,7 +97,6 @@ defmodule NeonFS.Integration.KeyRotationTest do
       end
     end
 
-    @tag :pending_reenable
     test "complete rotation — data still readable after rotation finishes", %{cluster: cluster} do
       :ok = init_rotation_cluster(cluster)
 
