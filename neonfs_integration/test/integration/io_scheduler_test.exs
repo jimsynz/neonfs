@@ -259,11 +259,12 @@ defmodule NeonFS.Integration.IOSchedulerTest do
   end
 
   describe "high concurrency" do
-    # 50-way concurrent writes through the per-volume index tree
-    # (post-#836) trigger more CAS contention than the previous
-    # quorum-write path. Either the writer needs a bigger retry
-    # budget or the test needs to lower the concurrency. Skipping
-    # until the writer's retry policy is tuned — tracked in #903.
+    # The CAS-retry-budget half of this (write-side `:cas_retries_exhausted`
+    # under 50-way contention) is fixed — `MetadataWriter` now backs off
+    # with full jitter and a larger budget, so every write returns `{:ok}`.
+    # But read-back of an acked file then fails with `FileNotFound`: a
+    # genuine lost update in the concurrent index-tree compose path,
+    # reproducible and single-node. Stays skipped pending that fix — #1260.
     @tag :pending_reenable
     test "concurrent write burst completes without data loss", %{cluster: cluster} do
       file_count = 50
