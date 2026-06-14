@@ -273,19 +273,42 @@ defmodule NeonFS.Core.JobTracker do
             :completed
 
           {:error, reason, updated} ->
-            failed = %{
-              updated
-              | status: :failed,
-                error: reason,
-                updated_at: DateTime.utc_now(),
-                completed_at: DateTime.utc_now()
-            }
-
-            persist_job(failed)
-            emit_telemetry(:failed, failed)
-            {:error, reason}
+            handle_step_error(reason, updated)
         end
     end
+  end
+
+  # A step failing because the node/cluster is shutting down isn't a real
+  # failure. Leave the job resumable (`resume_incomplete_jobs/1` only picks up
+  # :running / :pending) so it continues after restart instead of being
+  # abandoned as terminal `:failed`, and log at :info rather than burning it as
+  # an error (#1268).
+  defp handle_step_error(reason, job) do
+    if Job.interrupted_by_shutdown?(reason) do
+      interrupted = %{job | status: :pending, updated_at: DateTime.utc_now()}
+
+      persist_job(interrupted)
+      emit_telemetry(:interrupted, interrupted)
+
+      Logger.info("Job interrupted by shutdown; will resume after restart",
+        job_id: interrupted.id,
+        job_label: interrupted.type.label(),
+        reason: inspect(reason)
+      )
+    else
+      failed = %{
+        job
+        | status: :failed,
+          error: reason,
+          updated_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+      }
+
+      persist_job(failed)
+      emit_telemetry(:failed, failed)
+    end
+
+    {:error, reason}
   end
 
   defp handle_task_done(state, ref) do

@@ -45,6 +45,18 @@ defmodule NeonFS.Core.JobTrackerTest do
     def label, do: "failing-runner"
   end
 
+  defmodule ShutdownRunner do
+    @behaviour NeonFS.Core.Job.Runner
+
+    @impl true
+    def step(job) do
+      {:error, {:metadata_update_failed, {:bootstrap_update_failed, :shutdown}}, job}
+    end
+
+    @impl true
+    def label, do: "shutdown-runner"
+  end
+
   defmodule SlowRunner do
     @behaviour NeonFS.Core.Job.Runner
 
@@ -114,6 +126,27 @@ defmodule NeonFS.Core.JobTrackerTest do
     end
   end
 
+  describe "Job.interrupted_by_shutdown?/1" do
+    test "detects shutdown signals nested anywhere in the reason" do
+      assert Job.interrupted_by_shutdown?(:shutdown)
+      assert Job.interrupted_by_shutdown?(:noproc)
+      assert Job.interrupted_by_shutdown?(:noconnection)
+
+      assert Job.interrupted_by_shutdown?(
+               {:metadata_update_failed, {:bootstrap_update_failed, :shutdown}}
+             )
+
+      assert Job.interrupted_by_shutdown?({:error, [reason: :noproc]})
+    end
+
+    test "treats genuine failures as real errors" do
+      refute Job.interrupted_by_shutdown?(:intentional_failure)
+      refute Job.interrupted_by_shutdown?({:stale_pointer, expected: "a", actual: "b"})
+      refute Job.interrupted_by_shutdown?({:cas_retries_exhausted, %{}})
+      refute Job.interrupted_by_shutdown?({:metadata_update_failed, :not_found})
+    end
+  end
+
   describe "create/2" do
     test "creates and starts a job" do
       {:ok, job} = JobTracker.create(TestRunner, %{total: 3})
@@ -163,6 +196,26 @@ defmodule NeonFS.Core.JobTrackerTest do
 
       jobs = JobTracker.list()
       assert length(jobs) >= 2
+    end
+
+    test "a step failing with a shutdown-class reason stays resumable, not :failed" do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :job, :interrupted],
+          [:neonfs, :job, :failed]
+        ])
+
+      {:ok, job} = JobTracker.create(ShutdownRunner, %{})
+
+      assert_receive {[:neonfs, :job, :interrupted], ^ref, %{}, %{job_id: job_id}}, 2_000
+      assert job_id == job.id
+      refute_received {[:neonfs, :job, :failed], ^ref, %{}, %{job_id: ^job_id}}
+
+      # `:pending` keeps it eligible for `resume_incomplete_jobs/1` after a
+      # restart, instead of being burned as terminal `:failed`.
+      {:ok, reloaded} = JobTracker.get(job.id)
+      assert reloaded.status == :pending
+      refute Enum.any?(JobTracker.list(status: :failed), &(&1.id == job.id))
     end
 
     test "filters by status" do

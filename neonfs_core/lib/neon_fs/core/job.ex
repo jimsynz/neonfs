@@ -82,10 +82,38 @@ defmodule NeonFS.Core.Job do
   end
 
   @doc """
+  Returns true if a `step/1` failure reason reflects the node or its Ra
+  cluster going away rather than a genuine, persistent error.
+
+  A step that fails because the cluster is shutting down (Ra returns
+  `:shutdown` / `:noproc`, a peer link drops with `:noconnection`) has not
+  hit a real defect — the work is simply interrupted and should resume on
+  restart. The JobTracker uses this to keep such jobs resumable instead of
+  burning them as permanent `:failed`, and runners use it to log at `:info`
+  rather than `:error`. Reasons are arbitrarily nested tuples/lists (e.g.
+  `{:metadata_update_failed, {:bootstrap_update_failed, :shutdown}}`), so the
+  whole term is scanned.
+  """
+  @spec interrupted_by_shutdown?(term()) :: boolean()
+  def interrupted_by_shutdown?(reason), do: contains_shutdown_signal?(reason)
+
+  @doc """
   Returns true if the job is in a terminal state.
   """
   @spec terminal?(t()) :: boolean()
   def terminal?(%__MODULE__{status: status}), do: status in [:completed, :failed, :cancelled]
+
+  @shutdown_signals [:shutdown, :noproc, :noconnection]
+
+  defp contains_shutdown_signal?(atom) when is_atom(atom), do: atom in @shutdown_signals
+
+  defp contains_shutdown_signal?(tuple) when is_tuple(tuple),
+    do: tuple |> Tuple.to_list() |> contains_shutdown_signal?()
+
+  defp contains_shutdown_signal?(list) when is_list(list),
+    do: Enum.any?(list, &contains_shutdown_signal?/1)
+
+  defp contains_shutdown_signal?(_), do: false
 
   defp generate_id do
     :crypto.strong_rand_bytes(12) |> Base.encode16(case: :lower)

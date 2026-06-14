@@ -15,7 +15,7 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
 
   require Logger
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex, ChunkMeta, KeyManager}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, ChunkMeta, Job, KeyManager}
   alias NeonFS.Core.ChunkCrypto
 
   @default_batch_size 1000
@@ -162,11 +162,7 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
             :ok
 
           {:error, reason} ->
-            Logger.error("Failed to persist chunk metadata after re-encryption",
-              chunk_hash: Base.encode16(chunk.hash, case: :lower),
-              reason: inspect(reason)
-            )
-
+            log_metadata_update_failure(chunk.hash, reason)
             {:error, {:metadata_update_failed, reason}}
         end
 
@@ -201,6 +197,25 @@ defmodule NeonFS.Core.Job.Runners.KeyRotation do
           )
       end
     end)
+  end
+
+  # A persist failure caused by the node/cluster shutting down isn't a real
+  # defect — the rotation job stays resumable and continues after restart, so
+  # log it at :debug. Genuine failures still surface at :error (#1268).
+  defp log_metadata_update_failure(hash, reason) do
+    hash_hex = Base.encode16(hash, case: :lower)
+
+    if Job.interrupted_by_shutdown?(reason) do
+      Logger.debug("Key rotation interrupted by shutdown before metadata commit",
+        chunk_hash: hash_hex,
+        reason: inspect(reason)
+      )
+    else
+      Logger.error("Failed to persist chunk metadata after re-encryption",
+        chunk_hash: hash_hex,
+        reason: inspect(reason)
+      )
+    end
   end
 
   defp extract_stored_size(results) do
