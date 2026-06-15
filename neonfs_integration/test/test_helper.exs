@@ -60,18 +60,10 @@ test_registry_excludes =
       [:requires_test_registry]
   end
 
-# `:pending_reenable` — cross-node tests that bit-rotted while excluded
-# under the old blanket `:pending_903` tag. With #903 fixed, the bulk of
-# that suite now passes and runs again; these stragglers fail for reasons
-# unrelated to #903 (stale test-helper APIs, single-node erasure-coding
-# gaps, restart/anti-entropy recovery) and are tracked for re-enablement
-# under the #1189 follow-up.
-pending_reenable_excludes = [:pending_reenable]
-
 excludes =
   loopback_excludes ++
     containerd_excludes ++
-    test_registry_excludes ++ pending_reenable_excludes ++ [:profile]
+    test_registry_excludes ++ [:profile]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an
