@@ -40,10 +40,11 @@
   # but ExUnit internals aren't in the PLT. Unnecessary skip under MIX_ENV=dev.
   ~r"test/support/test_case\.ex",
 
-  # Handler defensive catch-all clauses: each `with` block ends with
+  # Handler defensive catch-all clauses: each `with`/`case` block ends with
   # `{:error, reason} -> {:error, wrap_error(reason)}` for forward compatibility.
   # Dialyzer proves the clause is unreachable given current upstream return types,
   # but we keep them so new error atoms from internal modules are wrapped rather
-  # than leaking raw atoms to the CLI.
-  ~r"lib/neon_fs/cli/handler\.ex:\d+:\d+:pattern_match_cov"
+  # than leaking raw atoms to the CLI. Covers the facade and the per-command-group
+  # submodules it is being split into (#1203).
+  ~r"lib/neon_fs/cli/handler(/\w+)?\.ex:\d+:\d+:pattern_match_cov"
 ]

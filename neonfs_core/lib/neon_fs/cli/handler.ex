@@ -16,6 +16,7 @@ defmodule NeonFS.CLI.Handler do
 
   alias NeonFS.CLI.Handler.ACL, as: ACLHandler
   alias NeonFS.CLI.Handler.CA, as: CAHandler
+  alias NeonFS.CLI.Handler.Cluster, as: ClusterHandler
   alias NeonFS.CLI.Handler.ClusterRecovery, as: ClusterRecoveryHandler
   alias NeonFS.CLI.Handler.Credential, as: CredentialHandler
   alias NeonFS.CLI.Handler.DR, as: DRHandler
@@ -28,7 +29,6 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.CLI.Handler.ScrubRepair, as: ScrubRepairHandler
   alias NeonFS.CLI.Handler.Snapshots, as: SnapshotsHandler
   alias NeonFS.CLI.Handler.VolumeLifecycle, as: VolumeLifecycleHandler
-  alias NeonFS.Cluster.{Init, Invite, Join, State}
 
   alias NeonFS.Core.{
     ACLManager,
@@ -63,29 +63,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, map}` - Status map with cluster information
   """
   @spec cluster_status() :: {:ok, map()}
-  def cluster_status do
-    set_cli_metadata()
-
-    if State.exists?() do
-      {:ok,
-       %{
-         name: get_cluster_name(),
-         node: Atom.to_string(Node.self()),
-         status: :running,
-         volumes: count_volumes(),
-         uptime_seconds: get_uptime()
-       }}
-    else
-      {:ok,
-       %{
-         name: nil,
-         node: Atom.to_string(Node.self()),
-         status: :not_initialised,
-         volumes: 0,
-         uptime_seconds: get_uptime()
-       }}
-    end
-  end
+  defdelegate cluster_status(), to: ClusterHandler
 
   @doc """
   Initializes a new cluster with the given name.
@@ -109,77 +87,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec cluster_init(String.t(), map() | nil, map()) :: {:ok, map()} | {:error, term()}
-  def cluster_init(cluster_name, drive_config \\ nil, opts \\ %{})
-      when is_binary(cluster_name) and (is_map(drive_config) or is_nil(drive_config)) and
-             is_map(opts) do
-    set_cli_metadata()
-    init_opts = cluster_init_opts(opts)
-
-    cluster_name
-    |> Init.init_cluster(drive_config, init_opts)
-    |> format_cluster_init_result()
-  end
-
-  defp cluster_init_opts(opts) do
-    case Map.get(opts, "system_replicas") do
-      n when is_integer(n) and n >= 1 -> [system_replicas: n]
-      _ -> []
-    end
-  end
-
-  defp format_cluster_init_result({:ok, cluster_id}) do
-    case State.load() do
-      {:ok, state} ->
-        {:ok,
-         %{
-           cluster_id: cluster_id,
-           cluster_name: state.cluster_name,
-           node_id: state.this_node.id,
-           node_name: Atom.to_string(state.this_node.name),
-           created_at: DateTime.to_iso8601(state.created_at)
-         }}
-
-      {:error, _} ->
-        {:ok, %{cluster_id: cluster_id}}
-    end
-  end
-
-  defp format_cluster_init_result({:error, :already_initialised}),
-    do: {:error, Invalid.exception(message: "Cluster already initialised")}
-
-  defp format_cluster_init_result({:error, :no_drives_available}),
-    do:
-      {:error,
-       Invalid.exception(
-         message:
-           "No drives available — pass `--drive <path>` to `neonfs cluster init` " <>
-             "to designate the initial drive"
-       )}
-
-  defp format_cluster_init_result({:error, {:drive_preflight_failed, reason}}) do
-    detail = if is_binary(reason), do: reason, else: inspect(reason)
-
-    {:error,
-     Invalid.exception(
-       message:
-         "Initial drive preflight failed: #{detail}. " <>
-           "The cluster was not initialised — fix the drive and re-run " <>
-           "`neonfs cluster init`."
-     )}
-  end
-
-  defp format_cluster_init_result({:error, {:initial_drive_failed, reason}}) do
-    {:error,
-     Invalid.exception(
-       message:
-         "Ra cluster bootstrapped but the initial drive failed to register: " <>
-           "#{inspect(reason)}. The cluster will report `running` from `neonfs cluster status` " <>
-           "but has no drives or system volume yet — re-run `neonfs drive add <path>` to " <>
-           "finish bootstrap. (#980)"
-     )}
-  end
-
-  defp format_cluster_init_result({:error, reason}), do: {:error, wrap_error(reason)}
+  defdelegate cluster_init(cluster_name, drive_config \\ nil, opts \\ %{}), to: ClusterHandler
 
   @doc """
   Returns cluster CA information.
@@ -353,22 +261,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec create_invite(pos_integer()) :: {:ok, map()} | {:error, term()}
-  def create_invite(expires_in) when is_integer(expires_in) and expires_in > 0 do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      case Invite.create_invite(expires_in) do
-        {:ok, token} ->
-          {:ok, %{"token" => token}}
-
-        {:error, :cluster_not_initialized} ->
-          {:error, Unavailable.exception(message: "Cluster not initialised")}
-
-        {:error, reason} ->
-          {:error, wrap_error(reason)}
-      end
-    end
-  end
+  defdelegate create_invite(expires_in), to: ClusterHandler
 
   @doc """
   Joins an existing cluster using an invite token.
@@ -383,29 +276,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec join_cluster(String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def join_cluster(token, via_address, type_str \\ "core")
-      when is_binary(token) and is_binary(via_address) and is_binary(type_str) do
-    set_cli_metadata()
-    type = String.to_existing_atom(type_str)
-
-    case Join.join_cluster(token, via_address, type) do
-      {:ok, :joining} ->
-        # The join finishes asynchronously: the node restarts TLS distribution
-        # (dropping this connection) and then connects + completes Ra membership.
-        # The audit-log entry and quorum-ring rebuild now happen in that worker
-        # once the node is connected. The CLI reconnects and validates via
-        # `cluster status` (#1033).
-        {:ok,
-         %{
-           "status" => "joining",
-           "via_address" => via_address,
-           "node_name" => Atom.to_string(Node.self())
-         }}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate join_cluster(token, via_address, type_str \\ "core"), to: ClusterHandler
 
   @doc """
   Lists all registered services in the cluster.
@@ -1937,21 +1808,6 @@ defmodule NeonFS.CLI.Handler do
     |> Atom.to_string()
     |> String.split("@")
     |> List.last()
-  end
-
-  defp get_cluster_name do
-    # For Phase 1, use the node name as cluster name
-    # Phase 2 will have proper cluster naming via Ra
-    Node.self()
-    |> Atom.to_string()
-    |> String.split("@")
-    |> List.first()
-    |> Kernel.||("neonfs")
-  end
-
-  defp count_volumes do
-    VolumeRegistry.list()
-    |> length()
   end
 
   defp volume_to_map(%Volume{} = volume) do
