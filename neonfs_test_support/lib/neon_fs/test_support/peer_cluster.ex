@@ -23,9 +23,13 @@ defmodule NeonFS.TestSupport.PeerCluster do
   # On a loaded CI runner the peer dist-channel bring-up intermittently fails
   # with a transient error (`:tcp_closed`, `{:inet_async, :timeout}`) that
   # succeeds on a retry. Without a retry a single transient boot failure fails
-  # the whole test module in `setup_all`/`setup` (#1071).
-  @peer_boot_attempts 3
+  # the whole test module in `setup_all`/`setup` (#1071). Late in a long run
+  # (hundreds of cluster setups) the runner can be saturated enough that the
+  # bring-up times out across several consecutive attempts, so the budget is
+  # generous and the backoff widens exponentially up to a cap (#1280).
+  @peer_boot_attempts 5
   @peer_boot_backoff_ms 250
+  @peer_boot_max_backoff_ms 2_000
 
   @type node_info :: %{
           name: atom(),
@@ -130,8 +134,16 @@ defmodule NeonFS.TestSupport.PeerCluster do
         "retrying (#{attempts_left - 1} attempt(s) left)"
     )
 
-    Process.sleep(@peer_boot_backoff_ms)
+    Process.sleep(boot_backoff_ms(attempts_left))
     peer_start_with_retry(peer_opts, attempts_left - 1)
+  end
+
+  # Widen the wait as attempts are consumed so a runner under sustained load
+  # near the end of a long run gets progressively more breathing room before
+  # the suite gives up, capped so a stuck boot doesn't stall setup for long.
+  defp boot_backoff_ms(attempts_left) do
+    retries_used = @peer_boot_attempts - attempts_left
+    min(@peer_boot_backoff_ms * Integer.pow(2, retries_used), @peer_boot_max_backoff_ms)
   end
 
   defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
