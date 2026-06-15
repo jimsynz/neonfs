@@ -8,9 +8,13 @@ defmodule NeonFS.CLI.Handler do
 
   All functions return `{:ok, data}` or `{:error, reason}` tuples where data
   consists only of serializable terms (maps, lists, atoms, strings, numbers).
-  """
 
-  import NeonFS.CLI.Handler.Common
+  This module is a pure dispatch facade: every entry point `defdelegate`s to a
+  per-command-group handler under `NeonFS.CLI.Handler.*` (the split tracked by
+  #1203). Shared helpers live in `NeonFS.CLI.Handler.Common`. Keeping the RPC
+  surface here means the CLI wire contract is one stable module regardless of
+  how the implementation is partitioned.
+  """
 
   alias NeonFS.CLI.Handler.ACL, as: ACLHandler
   alias NeonFS.CLI.Handler.CA, as: CAHandler
@@ -22,16 +26,14 @@ defmodule NeonFS.CLI.Handler do
   alias NeonFS.CLI.Handler.Escalation, as: EscalationHandler
   alias NeonFS.CLI.Handler.Jobs, as: JobsHandler
   alias NeonFS.CLI.Handler.Maintenance, as: MaintenanceHandler
+  alias NeonFS.CLI.Handler.MountRouting, as: MountRoutingHandler
   alias NeonFS.CLI.Handler.Node, as: NodeHandler
   alias NeonFS.CLI.Handler.S3, as: S3Handler
   alias NeonFS.CLI.Handler.ScrubRepair, as: ScrubRepairHandler
+  alias NeonFS.CLI.Handler.Services, as: ServicesHandler
   alias NeonFS.CLI.Handler.Snapshots, as: SnapshotsHandler
   alias NeonFS.CLI.Handler.VolumeLifecycle, as: VolumeLifecycleHandler
   alias NeonFS.CLI.Handler.Volumes, as: VolumesHandler
-
-  alias NeonFS.Core.{ServiceRegistry, VolumeRegistry}
-
-  alias NeonFS.Error.{NotFound, Unavailable, VolumeNotFound}
 
   @doc """
   Returns cluster status information.
@@ -262,17 +264,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of service info maps
   """
   @spec list_services() :: {:ok, [map()]}
-  def list_services do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      services =
-        ServiceRegistry.list()
-        |> Enum.map(&service_info_to_map/1)
-
-      {:ok, services}
-    end
-  end
+  defdelegate list_services(), to: ServicesHandler
 
   @doc """
   Lists volumes in the cluster.
@@ -378,24 +370,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec mount(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
-  def mount(volume_name, mount_point, options)
-      when is_binary(volume_name) and is_binary(mount_point) and is_map(options) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, fuse_node} <- get_fuse_node(),
-         opts = VolumesHandler.map_to_opts(options),
-         {:ok, mount_id} <- rpc_mount(fuse_node, volume_name, mount_point, opts),
-         {:ok, mount_info} <- rpc_get_mount(fuse_node, mount_id) do
-      {:ok, mount_info_to_map(mount_info, fuse_node)}
-    else
-      {:error, :not_found} ->
-        {:error, VolumeNotFound.exception(volume_name: volume_name)}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate mount(volume_name, mount_point, options), to: MountRoutingHandler
 
   @doc """
   Unmounts a filesystem by mount ID or path.
@@ -410,26 +385,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec unmount(String.t()) :: {:ok, map()} | {:error, term()}
-  def unmount(mount_id_or_path) when is_binary(mount_id_or_path) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, fuse_node} <- get_fuse_node(),
-         {:ok, _} <- do_unmount(mount_id_or_path, fuse_node) do
-      {:ok, %{}}
-    else
-      {:error, :mount_not_found} ->
-        {:error,
-         NotFound.exception(
-           message:
-             "No mount matches '#{mount_id_or_path}' (tried mount id, mount point, " <>
-               "and volume name). Use `neonfs fuse list` to see active mounts."
-         )}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate unmount(mount_id_or_path), to: MountRoutingHandler
 
   @doc """
   Lists all active mounts across the cluster.
@@ -440,24 +396,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of mount info maps with node field
   """
   @spec list_mounts() :: {:ok, [map()]}
-  def list_mounts do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      fuse_nodes = get_all_fuse_nodes()
-
-      if Enum.empty?(fuse_nodes) do
-        {:error, wrap_error(Unavailable.exception(message: "FUSE service not available"))}
-      else
-        mounts =
-          fuse_nodes
-          |> Enum.flat_map(&collect_node_mounts/1)
-          |> Enum.sort_by(& &1.node)
-
-        {:ok, mounts}
-      end
-    end
-  end
+  defdelegate list_mounts(), to: MountRoutingHandler
 
   @doc """
   Exports a volume via NFS.
@@ -480,27 +419,8 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec nfs_export(String.t(), [String.t()], boolean()) :: {:ok, map()} | {:error, term()}
-  def nfs_export(volume_name, allowed_ips \\ [], root_squash \\ true)
-      when is_binary(volume_name) and is_list(allowed_ips) and is_boolean(root_squash) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
-         {:ok, updated} <-
-           VolumeRegistry.update(volume.id,
-             nfs_export: true,
-             nfs_allowed_ips: allowed_ips,
-             nfs_root_squash: root_squash
-           ) do
-      {:ok, nfs_export_to_map(updated)}
-    else
-      {:error, :not_found} ->
-        {:error, VolumeNotFound.exception(volume_name: volume_name)}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate nfs_export(volume_name, allowed_ips \\ [], root_squash \\ true),
+    to: MountRoutingHandler
 
   @doc """
   Unexports a volume from NFS by volume name.
@@ -516,24 +436,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, reason}` - Error tuple
   """
   @spec nfs_unexport(String.t()) :: {:ok, map()} | {:error, term()}
-  def nfs_unexport(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- VolumeRegistry.get_by_name(volume_name),
-         {:ok, _updated} <- clear_nfs_export(volume) do
-      {:ok, %{}}
-    else
-      {:error, :not_found} ->
-        {:error, VolumeNotFound.exception(volume_name: volume_name)}
-
-      {:error, :not_exported} ->
-        {:error, NotFound.exception(message: "NFS export not found: #{volume_name}")}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate nfs_unexport(volume_name), to: MountRoutingHandler
 
   @doc """
   Resolves the NFS mount parameters for `volume_name` so the CLI can
@@ -554,34 +457,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:error, NeonFS.Error.Unavailable{}}` — no reachable NFS node.
   """
   @spec handle_nfs_mount_request(binary()) :: {:ok, map()} | {:error, term()}
-  def handle_nfs_mount_request(volume_name) when is_binary(volume_name) do
-    set_cli_metadata()
-
-    with :ok <- require_cluster(),
-         {:ok, volume} <- fetch_volume(volume_name),
-         :ok <- ensure_nfs_exported(volume),
-         {:ok, nfs_node} <- get_nfs_node() do
-      {server_address, port} = rpc_nfs_bind_info(nfs_node)
-
-      {:ok,
-       %{
-         volume_name: volume_name,
-         node: Atom.to_string(nfs_node),
-         server_address: server_address,
-         port: port,
-         export_path: "/" <> volume_name
-       }}
-    else
-      {:error, :not_exported} ->
-        {:error,
-         wrap_error(
-           NotFound.exception(message: "no NFS export for volume #{inspect(volume_name)}")
-         )}
-
-      {:error, reason} ->
-        {:error, wrap_error(reason)}
-    end
-  end
+  defdelegate handle_nfs_mount_request(volume_name), to: MountRoutingHandler
 
   @doc """
   Lists all active NFS exports across the cluster.
@@ -595,21 +471,7 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, [map]}` - List of export info maps with node field
   """
   @spec nfs_list_exports() :: {:ok, [map()]} | {:error, term()}
-  def nfs_list_exports do
-    set_cli_metadata()
-
-    with :ok <- require_cluster() do
-      exported = Enum.filter(VolumeRegistry.list(), & &1.nfs_export)
-
-      rows =
-        case get_all_nfs_nodes() do
-          [] -> Enum.map(exported, &nfs_export_row(&1, "-", "-", 2049))
-          nfs_nodes -> Enum.flat_map(nfs_nodes, &node_export_rows(&1, exported))
-        end
-
-      {:ok, Enum.sort_by(rows, &{&1.volume_name, &1.node})}
-    end
-  end
+  defdelegate nfs_list_exports(), to: MountRoutingHandler
 
   @doc """
   Starts key rotation for a volume.
@@ -1354,383 +1216,4 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_dr_snapshot_show(String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_show(id), to: DRHandler
-
-  # Private helper functions
-
-  # Get all reachable FUSE nodes in the cluster
-  defp get_all_fuse_nodes do
-    registry_nodes =
-      try do
-        ServiceRegistry.list_by_type(:fuse)
-        |> Enum.map(& &1.node)
-      rescue
-        ArgumentError -> []
-      end
-
-    local_node =
-      case check_local_fuse() do
-        :available -> [Node.self()]
-        :not_available -> []
-      end
-
-    connected_fuse_nodes =
-      Node.list()
-      |> Enum.filter(&fuse_node?/1)
-
-    (registry_nodes ++ local_node ++ connected_fuse_nodes)
-    |> Enum.uniq()
-  end
-
-  # Get all reachable NFS nodes in the cluster
-  defp get_all_nfs_nodes do
-    registry_nodes =
-      try do
-        ServiceRegistry.list_by_type(:nfs)
-        |> Enum.map(& &1.node)
-      rescue
-        ArgumentError -> []
-      end
-
-    local_node =
-      case check_local_nfs() do
-        :available -> [Node.self()]
-        :not_available -> []
-      end
-
-    connected_nfs_nodes =
-      Node.list()
-      |> Enum.filter(&nfs_node?/1)
-
-    (registry_nodes ++ local_node ++ connected_nfs_nodes)
-    |> Enum.uniq()
-  end
-
-  # Get the FUSE node and verify it's reachable
-  # Checks in order: ServiceRegistry, local node, connected nodes, configured fallback
-  defp get_fuse_node do
-    with :not_found <- discover_fuse_node_from_registry(),
-         :not_available <- check_local_fuse(),
-         :not_found <- discover_fuse_node() do
-      check_configured_fuse_node()
-    else
-      :available -> {:ok, Node.self()}
-      {:ok, fuse_node} -> {:ok, fuse_node}
-    end
-  end
-
-  # Get the NFS node and verify it's reachable
-  # Checks in order: ServiceRegistry, local node, connected nodes, configured fallback
-  defp get_nfs_node do
-    with :not_found <- discover_nfs_node_from_registry(),
-         :not_available <- check_local_nfs(),
-         :not_found <- discover_nfs_node() do
-      check_configured_nfs_node()
-    else
-      :available -> {:ok, Node.self()}
-      {:ok, nfs_node} -> {:ok, nfs_node}
-    end
-  end
-
-  # Try ServiceRegistry first — this is the authoritative source
-  defp discover_fuse_node_from_registry do
-    case ServiceRegistry.list_by_type(:fuse) do
-      [first | _] -> {:ok, first.node}
-      [] -> :not_found
-    end
-  rescue
-    # ServiceRegistry may not be started yet
-    ArgumentError -> :not_found
-  end
-
-  # Try ServiceRegistry first — this is the authoritative source
-  defp discover_nfs_node_from_registry do
-    case ServiceRegistry.list_by_type(:nfs) do
-      [first | _] -> {:ok, first.node}
-      [] -> :not_found
-    end
-  rescue
-    # ServiceRegistry may not be started yet
-    ArgumentError -> :not_found
-  end
-
-  # Check if FUSE MountManager is available on the local node
-  defp check_local_fuse do
-    case Process.whereis(NeonFS.FUSE.MountManager) do
-      nil -> :not_available
-      _pid -> :available
-    end
-  end
-
-  # Check if NFS ExportManager is available on the local node
-  defp check_local_nfs do
-    case Process.whereis(NeonFS.NFS.ExportManager) do
-      nil -> :not_available
-      _pid -> :available
-    end
-  end
-
-  # Discover FUSE node by looking for connected nodes with neonfs_fuse prefix
-  defp discover_fuse_node do
-    Node.list()
-    |> Enum.find(&fuse_node?/1)
-    |> case do
-      nil -> :not_found
-      fuse_node -> {:ok, fuse_node}
-    end
-  end
-
-  # Discover NFS node by looking for connected nodes with neonfs_nfs prefix
-  defp discover_nfs_node do
-    Node.list()
-    |> Enum.find(&nfs_node?/1)
-    |> case do
-      nil -> :not_found
-      nfs_node -> {:ok, nfs_node}
-    end
-  end
-
-  defp fuse_node?(node) do
-    node |> Atom.to_string() |> String.starts_with?("neonfs_fuse@")
-  end
-
-  defp nfs_node?(node) do
-    node |> Atom.to_string() |> String.starts_with?("neonfs_nfs@")
-  end
-
-  # Fall back to configured node (for backwards compatibility)
-  defp check_configured_fuse_node do
-    fuse_node = Application.get_env(:neonfs_core, :fuse_node, :neonfs_fuse@localhost)
-
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :__info__, [:module]) do
-      {:badrpc, _} ->
-        {:error, Unavailable.exception(message: "FUSE service not available")}
-
-      NeonFS.FUSE.MountManager ->
-        {:ok, fuse_node}
-    end
-  end
-
-  # Fall back to configured node
-  defp check_configured_nfs_node do
-    nfs_node = Application.get_env(:neonfs_core, :nfs_node, :neonfs_nfs@localhost)
-
-    case :rpc.call(nfs_node, NeonFS.NFS.ExportManager, :__info__, [:module]) do
-      {:badrpc, _} ->
-        {:error, Unavailable.exception(message: "NFS service not available")}
-
-      NeonFS.NFS.ExportManager ->
-        {:ok, nfs_node}
-    end
-  end
-
-  # RPC wrappers for MountManager operations. Bounded timeouts so a misbehaving
-  # FUSE node can't hang the calling CLI command indefinitely (#1035) — a stuck
-  # mount surfaces as a clear error rather than an unbounded wait.
-  @mount_rpc_timeout 60_000
-  @unmount_rpc_timeout 30_000
-
-  defp rpc_mount(fuse_node, volume_name, mount_point, opts) do
-    case :rpc.call(
-           fuse_node,
-           NeonFS.FUSE.MountManager,
-           :mount,
-           [volume_name, mount_point, opts],
-           @mount_rpc_timeout
-         ) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
-  end
-
-  defp rpc_unmount(fuse_node, mount_id) do
-    case :rpc.call(
-           fuse_node,
-           NeonFS.FUSE.MountManager,
-           :unmount,
-           [mount_id],
-           @unmount_rpc_timeout
-         ) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
-  end
-
-  defp rpc_list_mounts(fuse_node) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :list_mounts, []) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      mounts when is_list(mounts) ->
-        {:ok, mounts}
-
-      result ->
-        result
-    end
-  end
-
-  defp rpc_get_mount(fuse_node, mount_id) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount, [mount_id]) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
-  end
-
-  defp rpc_get_mount_by_volume_name(fuse_node, volume_name) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_volume_name, [volume_name]) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
-  end
-
-  defp rpc_get_mount_by_path(fuse_node, path) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_path, [path]) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
-  end
-
-  defp clear_nfs_export(%{nfs_export: false}), do: {:error, :not_exported}
-  defp clear_nfs_export(volume), do: VolumeRegistry.update(volume.id, nfs_export: false)
-
-  defp ensure_nfs_exported(%{nfs_export: true}), do: :ok
-  defp ensure_nfs_exported(_volume), do: {:error, :not_exported}
-
-  defp rpc_nfs_bind_info(nfs_node) do
-    host =
-      case :rpc.call(nfs_node, Application, :get_env, [:neonfs_nfs, :bind_address]) do
-        {:badrpc, _} -> nfs_node_hostname(nfs_node)
-        nil -> nfs_node_hostname(nfs_node)
-        address when address in ["0.0.0.0", "::"] -> nfs_node_hostname(nfs_node)
-        address -> address
-      end
-
-    port =
-      case :rpc.call(nfs_node, Application, :get_env, [:neonfs_nfs, :port]) do
-        {:badrpc, _} -> 2049
-        nil -> 2049
-        p -> p
-      end
-
-    {host, port}
-  end
-
-  defp nfs_node_hostname(nfs_node) do
-    nfs_node
-    |> Atom.to_string()
-    |> String.split("@")
-    |> List.last()
-  end
-
-  # Tries the supplied identifier as a mount-id, then as a mount
-  # point, then as a volume name. The volume-name lookup is the
-  # newest gate (#1016) — operators frequently typed
-  # `neonfs fuse unmount <volume>` and got an unhelpful "Mount not
-  # found" when the daemon only resolved mount ids and paths.
-  defp do_unmount(mount_id_or_path, fuse_node) do
-    case rpc_get_mount(fuse_node, mount_id_or_path) do
-      {:ok, _mount} ->
-        wrap_unmount_result(rpc_unmount(fuse_node, mount_id_or_path))
-
-      {:error, :not_found} ->
-        unmount_by_path_or_volume(mount_id_or_path, fuse_node)
-    end
-  end
-
-  defp unmount_by_path_or_volume(mount_id_or_path, fuse_node) do
-    case rpc_get_mount_by_path(fuse_node, mount_id_or_path) do
-      {:ok, mount} ->
-        wrap_unmount_result(rpc_unmount(fuse_node, mount.id))
-
-      {:error, :not_found} ->
-        unmount_by_volume_name(mount_id_or_path, fuse_node)
-    end
-  end
-
-  defp unmount_by_volume_name(volume_name, fuse_node) do
-    case rpc_get_mount_by_volume_name(fuse_node, volume_name) do
-      {:ok, mount} -> wrap_unmount_result(rpc_unmount(fuse_node, mount.id))
-      {:error, :not_found} -> {:error, :mount_not_found}
-    end
-  end
-
-  defp wrap_unmount_result(:ok), do: {:ok, %{}}
-  defp wrap_unmount_result({:error, _} = err), do: err
-
-  defp collect_node_mounts(fuse_node) do
-    case rpc_list_mounts(fuse_node) do
-      {:ok, node_mounts} ->
-        Enum.map(node_mounts, &mount_info_to_map(&1, fuse_node))
-
-      {:error, _} ->
-        []
-    end
-  end
-
-  defp mount_info_to_map(mount_info, fuse_node) do
-    # Convert mount info to map, excluding PIDs and references
-    %{
-      id: mount_info.id,
-      node: Atom.to_string(fuse_node),
-      volume_name: mount_info.volume_name,
-      mount_point: mount_info.mount_point,
-      started_at: DateTime.to_iso8601(mount_info.started_at)
-    }
-  end
-
-  # Best-effort endpoint hint for CLI output: exports are served by
-  # every NFS node, so any reachable one will do for the mount-command
-  # hint. Degrades to placeholders when none is up — the export itself
-  # is still valid cluster state.
-  defp nfs_export_to_map(volume) do
-    case get_nfs_node() do
-      {:ok, nfs_node} ->
-        {server_address, port} = rpc_nfs_bind_info(nfs_node)
-        nfs_export_row(volume, Atom.to_string(nfs_node), server_address, port)
-
-      {:error, _} ->
-        nfs_export_row(volume, "-", "-", 2049)
-    end
-  end
-
-  defp nfs_export_row(volume, node_name, server_address, port) do
-    %{
-      node: node_name,
-      volume_name: volume.name,
-      exported_at: DateTime.to_iso8601(volume.updated_at),
-      server_address: server_address,
-      port: port,
-      allowed_ips: volume.nfs_allowed_ips,
-      root_squash: volume.nfs_root_squash
-    }
-  end
-
-  defp node_export_rows(nfs_node, exported) do
-    {server_address, port} = rpc_nfs_bind_info(nfs_node)
-    Enum.map(exported, &nfs_export_row(&1, Atom.to_string(nfs_node), server_address, port))
-  end
-
-  defp service_info_to_map(info) do
-    %{
-      node: Atom.to_string(info.node),
-      type: Atom.to_string(info.type),
-      status: Atom.to_string(info.status),
-      registered_at: DateTime.to_iso8601(info.registered_at),
-      metadata: info.metadata
-    }
-  end
 end
