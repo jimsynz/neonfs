@@ -292,7 +292,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         app_config = [
           logger: [level: :warning],
           neonfs_client: client_config,
-          ra: [data_dir: to_charlist(ra_dir)]
+          ra: [data_dir: String.to_charlist(ra_dir)]
         ]
 
         app_config =
@@ -373,7 +373,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
       meta_dir: ctx.meta_dir,
       blob_store_base_dir: Path.join(ctx.data_dir, "blobs"),
       metrics_enabled: ctx.metrics_base_port != nil,
-      ra_data_dir: to_charlist(ctx.ra_dir),
+      ra_data_dir: String.to_charlist(ctx.ra_dir),
       enable_ra: ctx.enable_ra,
       quorum_timeout_ms: 15_000
     ]
@@ -917,7 +917,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     args =
       [
         ~c"-setcookie",
-        to_charlist(cookie),
+        Atom.to_charlist(cookie),
         # Custom EPMD module — no external EPMD daemon needed
         ~c"-start_epmd",
         ~c"false",
@@ -930,7 +930,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         ~c"false"
       ] ++
         Enum.flat_map(code_paths, fn path ->
-          [~c"-pa", to_charlist(path)]
+          [~c"-pa", path]
         end)
 
     # Environment variables passed via env option.
@@ -938,13 +938,13 @@ defmodule NeonFS.TestSupport.PeerCluster do
     # propagated here so each peer's custom EPMD module can resolve others.
     env =
       [
-        {~c"NEONFS_DATA_DIR", to_charlist(data_dir)},
-        {~c"NEONFS_META_DIR", to_charlist(meta_dir)},
-        {~c"NEONFS_DIST_PORT", to_charlist(Integer.to_string(dist_port))}
+        {~c"NEONFS_DATA_DIR", String.to_charlist(data_dir)},
+        {~c"NEONFS_META_DIR", String.to_charlist(meta_dir)},
+        {~c"NEONFS_DIST_PORT", Integer.to_charlist(dist_port)}
       ] ++
         case System.get_env("NEONFS_PEER_PORTS") do
           nil -> []
-          ports -> [{~c"NEONFS_PEER_PORTS", to_charlist(ports)}]
+          ports -> [{~c"NEONFS_PEER_PORTS", String.to_charlist(ports)}]
         end
 
     {%{
@@ -995,9 +995,10 @@ defmodule NeonFS.TestSupport.PeerCluster do
   end
 
   defp build_code_paths do
-    # Include ALL code paths, not just _build - we need Elixir's stdlib too
+    # Include ALL code paths, not just _build - we need Elixir's stdlib too.
+    # `:code.get_path/0` already returns charlists, which is the format the
+    # `:peer` module's `-pa` args expect, so no conversion is needed.
     :code.get_path()
-    |> Enum.map(&to_string/1)
   end
 
   defp wait_for_ra_ready(peer) do
@@ -1128,11 +1129,11 @@ defmodule NeonFS.TestSupport.PeerCluster do
         meta_dir: meta_dir,
         blob_store_base_dir: Path.join(data_dir, "blobs"),
         metrics_enabled: false,
-        ra_data_dir: to_charlist(ra_dir),
+        ra_data_dir: String.to_charlist(ra_dir),
         enable_ra: true,
         quorum_timeout_ms: 15_000
       ],
-      ra: [data_dir: to_charlist(ra_dir)]
+      ra: [data_dir: String.to_charlist(ra_dir)]
     ]
 
     {peer_opts, app_config}
