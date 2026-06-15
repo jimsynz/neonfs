@@ -16,6 +16,7 @@ defmodule NeonFS.CLI.Handler do
 
   alias NeonFS.CLI.Handler.ACL, as: ACLHandler
   alias NeonFS.CLI.Handler.CA, as: CAHandler
+  alias NeonFS.CLI.Handler.Credential, as: CredentialHandler
   alias NeonFS.CLI.Handler.DR, as: DRHandler
   alias NeonFS.CLI.Handler.Drives, as: DrivesHandler
   alias NeonFS.CLI.Handler.Escalation, as: EscalationHandler
@@ -1736,10 +1737,10 @@ defmodule NeonFS.CLI.Handler do
   @spec handle_node_list() :: {:ok, [map()]}
   defdelegate handle_node_list(), to: NodeHandler
 
-  # S3 credential management
+  # Credential management (interface-agnostic: S3 SigV4 + WebDAV Basic)
 
   @doc """
-  Creates a new S3 credential for the given user identity.
+  Creates a new credential for the given user identity.
 
   ## Parameters
   - `identity` - User identity to associate with the credential
@@ -1748,11 +1749,11 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, map}` - Credential details including secret key (shown once)
   - `{:error, reason}` - Error tuple
   """
-  @spec handle_s3_create_credential(term()) :: {:ok, map()} | {:error, term()}
-  defdelegate handle_s3_create_credential(identity), to: S3Handler
+  @spec handle_credential_create(term()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_credential_create(identity), to: CredentialHandler
 
   @doc """
-  Lists S3 credentials, optionally filtered by identity.
+  Lists credentials, optionally filtered by identity.
 
   ## Parameters
   - `filters` - Optional map with `:identity` key
@@ -1760,11 +1761,11 @@ defmodule NeonFS.CLI.Handler do
   ## Returns
   - `{:ok, [map]}` - List of credentials (secrets redacted)
   """
-  @spec handle_s3_list_credentials(map()) :: {:ok, [map()]}
-  defdelegate handle_s3_list_credentials(filters \\ %{}), to: S3Handler
+  @spec handle_credential_list(map()) :: {:ok, [map()]}
+  defdelegate handle_credential_list(filters \\ %{}), to: CredentialHandler
 
   @doc """
-  Deletes an S3 credential by access key ID.
+  Deletes a credential by access key ID.
 
   ## Parameters
   - `access_key_id` - The access key ID to delete
@@ -1773,11 +1774,11 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, map}` - Empty map on success
   - `{:error, reason}` - Error tuple
   """
-  @spec handle_s3_delete_credential(String.t()) :: {:ok, map()} | {:error, term()}
-  defdelegate handle_s3_delete_credential(access_key_id), to: S3Handler
+  @spec handle_credential_delete(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_credential_delete(access_key_id), to: CredentialHandler
 
   @doc """
-  Rotates the secret access key for an S3 credential.
+  Rotates the secret access key for a credential.
 
   ## Parameters
   - `access_key_id` - The access key ID to rotate
@@ -1786,11 +1787,11 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, map}` - Updated credential with new secret key (shown once)
   - `{:error, reason}` - Error tuple
   """
-  @spec handle_s3_rotate_credential(String.t()) :: {:ok, map()} | {:error, term()}
-  defdelegate handle_s3_rotate_credential(access_key_id), to: S3Handler
+  @spec handle_credential_rotate(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_credential_rotate(access_key_id), to: CredentialHandler
 
   @doc """
-  Shows details of a single S3 credential by access key ID.
+  Shows details of a single credential by access key ID.
 
   ## Parameters
   - `access_key_id` - The access key ID to look up
@@ -1799,8 +1800,8 @@ defmodule NeonFS.CLI.Handler do
   - `{:ok, map}` - Credential details (secret redacted)
   - `{:error, reason}` - Error tuple
   """
-  @spec handle_s3_show_credential(String.t()) :: {:ok, map()} | {:error, term()}
-  defdelegate handle_s3_show_credential(access_key_id), to: S3Handler
+  @spec handle_credential_show(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_credential_show(access_key_id), to: CredentialHandler
 
   # S3 bucket management (volumes exposed as S3 buckets)
 

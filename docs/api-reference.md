@@ -20,8 +20,8 @@ Package: [`neonfs_s3`](../neonfs_s3/) (HTTP server), built on `firkin` (the S3 p
 ### Authentication
 
 - **AWS SigV4**, header or query-string. `region_name=neonfs` (or whatever you configured).
-- Credentials issued by an operator via `neonfs s3 create-credential --user <identity>`. Each credential is a `(access_key_id, secret_access_key)` pair tied to one identity.
-- `neonfs s3 list-credentials`, `neonfs s3 show-credential`, `neonfs s3 rotate-credential`, `neonfs s3 delete-credential` manage lifecycle.
+- Credentials issued by an operator via `neonfs credential create --user <identity>`. Each credential is a `(access_key_id, secret_access_key)` pair tied to one identity, usable for both S3 SigV4 and WebDAV Basic auth.
+- `neonfs credential list`, `neonfs credential show`, `neonfs credential rotate`, `neonfs credential delete` manage lifecycle.
 
 ### Addressing
 

@@ -15,6 +15,7 @@ Commands:
   acl         ACL management
   audit       Audit log
   cluster     Cluster management
+  credential  Credential management (S3 SigV4 + WebDAV Basic auth)
   drive       Drive management
   escalation  Decision escalation management
   gc          Garbage collection
@@ -22,7 +23,7 @@ Commands:
   fuse        FUSE mount management
   nfs         NFS export management
   node        Node management
-  s3          S3 credential management
+  s3          S3 bucket management
   scrub       Integrity scrubbing
   volume      Volume management
   worker      Background worker management
@@ -300,6 +301,103 @@ Options:
 Show cluster status
 
 Usage: neonfs-cli cluster status [OPTIONS]
+
+Options:
+      --output <OUTPUT>  Output format (json or table) [default: table]
+      --json             Enable JSON output (shorthand for --output json)
+  -h, --help             Print help
+```
+
+## `neonfs credential`
+
+```
+Credential management (S3 SigV4 + WebDAV Basic auth)
+
+Usage: neonfs-cli credential [OPTIONS] <COMMAND>
+
+Commands:
+  create  Create a new credential
+  list    List credentials
+  show    Show details of a credential
+  rotate  Rotate the secret key for a credential
+  delete  Delete a credential
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --output <OUTPUT>  Output format (json or table) [default: table]
+      --json             Enable JSON output (shorthand for --output json)
+  -h, --help             Print help
+```
+
+### `neonfs credential create`
+
+```
+Create a new credential
+
+Usage: neonfs-cli credential create [OPTIONS] --user <USER>
+
+Options:
+      --output <OUTPUT>  Output format (json or table) [default: table]
+      --user <USER>      User identity to associate with the credential
+      --json             Enable JSON output (shorthand for --output json)
+  -h, --help             Print help
+```
+
+### `neonfs credential list`
+
+```
+List credentials
+
+Usage: neonfs-cli credential list [OPTIONS]
+
+Options:
+      --output <OUTPUT>  Output format (json or table) [default: table]
+      --user <USER>      Filter by user identity
+      --json             Enable JSON output (shorthand for --output json)
+  -h, --help             Print help
+```
+
+### `neonfs credential show`
+
+```
+Show details of a credential
+
+Usage: neonfs-cli credential show [OPTIONS] <ACCESS_KEY_ID>
+
+Arguments:
+  <ACCESS_KEY_ID>  Access key ID to show
+
+Options:
+      --output <OUTPUT>  Output format (json or table) [default: table]
+      --json             Enable JSON output (shorthand for --output json)
+  -h, --help             Print help
+```
+
+### `neonfs credential rotate`
+
+```
+Rotate the secret key for a credential
+
+Usage: neonfs-cli credential rotate [OPTIONS] <ACCESS_KEY_ID>
+
+Arguments:
+  <ACCESS_KEY_ID>  Access key ID to rotate
+
+Options:
+      --output <OUTPUT>  Output format (json or table) [default: table]
+      --json             Enable JSON output (shorthand for --output json)
+  -h, --help             Print help
+```
+
+### `neonfs credential delete`
+
+```
+Delete a credential
+
+Usage: neonfs-cli credential delete [OPTIONS] <ACCESS_KEY_ID>
+
+Arguments:
+  <ACCESS_KEY_ID>  Access key ID to delete
 
 Options:
       --output <OUTPUT>  Output format (json or table) [default: table]
@@ -749,94 +847,13 @@ Options:
 ## `neonfs s3`
 
 ```
-S3 credential management
+S3 bucket management
 
 Usage: neonfs-cli s3 [OPTIONS] <COMMAND>
 
 Commands:
-  create-credential  Create a new S3 credential
-  list-credentials   List S3 credentials
-  show-credential    Show details of an S3 credential
-  rotate-credential  Rotate the secret key for an S3 credential
-  delete-credential  Delete an S3 credential
-  bucket             S3 bucket management
-  help               Print this message or the help of the given subcommand(s)
-
-Options:
-      --output <OUTPUT>  Output format (json or table) [default: table]
-      --json             Enable JSON output (shorthand for --output json)
-  -h, --help             Print help
-```
-
-### `neonfs s3 create-credential`
-
-```
-Create a new S3 credential
-
-Usage: neonfs-cli s3 create-credential [OPTIONS] --user <USER>
-
-Options:
-      --output <OUTPUT>  Output format (json or table) [default: table]
-      --user <USER>      User identity to associate with the credential
-      --json             Enable JSON output (shorthand for --output json)
-  -h, --help             Print help
-```
-
-### `neonfs s3 list-credentials`
-
-```
-List S3 credentials
-
-Usage: neonfs-cli s3 list-credentials [OPTIONS]
-
-Options:
-      --output <OUTPUT>  Output format (json or table) [default: table]
-      --user <USER>      Filter by user identity
-      --json             Enable JSON output (shorthand for --output json)
-  -h, --help             Print help
-```
-
-### `neonfs s3 show-credential`
-
-```
-Show details of an S3 credential
-
-Usage: neonfs-cli s3 show-credential [OPTIONS] <ACCESS_KEY_ID>
-
-Arguments:
-  <ACCESS_KEY_ID>  Access key ID to show
-
-Options:
-      --output <OUTPUT>  Output format (json or table) [default: table]
-      --json             Enable JSON output (shorthand for --output json)
-  -h, --help             Print help
-```
-
-### `neonfs s3 rotate-credential`
-
-```
-Rotate the secret key for an S3 credential
-
-Usage: neonfs-cli s3 rotate-credential [OPTIONS] <ACCESS_KEY_ID>
-
-Arguments:
-  <ACCESS_KEY_ID>  Access key ID to rotate
-
-Options:
-      --output <OUTPUT>  Output format (json or table) [default: table]
-      --json             Enable JSON output (shorthand for --output json)
-  -h, --help             Print help
-```
-
-### `neonfs s3 delete-credential`
-
-```
-Delete an S3 credential
-
-Usage: neonfs-cli s3 delete-credential [OPTIONS] <ACCESS_KEY_ID>
-
-Arguments:
-  <ACCESS_KEY_ID>  Access key ID to delete
+  bucket  S3 bucket management
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
       --output <OUTPUT>  Output format (json or table) [default: table]

@@ -10,9 +10,10 @@ mod tls;
 use clap::{Parser, Subcommand};
 use commands::{
     acl::AclCommand, audit::AuditCommand, backup::BackupCommand, cluster::ClusterCommand,
-    dr::DrCommand, drive::DriveCommand, escalation::EscalationCommand, fuse::FuseCommand,
-    gc::GcCommand, job::JobCommand, nfs::NfsCommand, node::NodeCommand, s3::S3Command,
-    scrub::ScrubCommand, volume::VolumeCommand, worker::WorkerCommand,
+    credential::CredentialCommand, dr::DrCommand, drive::DriveCommand,
+    escalation::EscalationCommand, fuse::FuseCommand, gc::GcCommand, job::JobCommand,
+    nfs::NfsCommand, node::NodeCommand, s3::S3Command, scrub::ScrubCommand, volume::VolumeCommand,
+    worker::WorkerCommand,
 };
 use output::OutputFormat;
 
@@ -59,6 +60,12 @@ enum Commands {
     Cluster {
         #[command(subcommand)]
         command: ClusterCommand,
+    },
+
+    /// Credential management (S3 SigV4 + WebDAV Basic auth)
+    Credential {
+        #[command(subcommand)]
+        command: CredentialCommand,
     },
 
     /// Disaster-recovery snapshot management
@@ -109,7 +116,7 @@ enum Commands {
         command: NodeCommand,
     },
 
-    /// S3 credential management
+    /// S3 bucket management
     S3 {
         #[command(subcommand)]
         command: S3Command,
@@ -154,6 +161,7 @@ fn main() {
         Commands::Audit { command } => command.execute(format),
         Commands::Backup { command } => command.execute(format),
         Commands::Cluster { command } => command.execute(format),
+        Commands::Credential { command } => command.execute(format),
         Commands::Dr { command } => command.execute(format),
         Commands::Drive { command } => command.execute(format),
         Commands::Escalation { command } => command.execute(format),
@@ -466,32 +474,32 @@ mod tests {
     }
 
     #[test]
-    fn test_s3_create_credential() {
-        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "create-credential", "--user", "alice"]);
+    fn test_credential_create() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "credential", "create", "--user", "alice"]);
         assert!(cli.is_ok());
     }
 
     #[test]
-    fn test_s3_list_credentials() {
-        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "list-credentials"]);
+    fn test_credential_list() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "credential", "list"]);
         assert!(cli.is_ok());
     }
 
     #[test]
-    fn test_s3_show_credential() {
-        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "show-credential", "NEONFS_SOME_KEY"]);
+    fn test_credential_show() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "credential", "show", "NEONFS_SOME_KEY"]);
         assert!(cli.is_ok());
     }
 
     #[test]
-    fn test_s3_rotate_credential() {
-        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "rotate-credential", "NEONFS_SOME_KEY"]);
+    fn test_credential_rotate() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "credential", "rotate", "NEONFS_SOME_KEY"]);
         assert!(cli.is_ok());
     }
 
     #[test]
-    fn test_s3_delete_credential() {
-        let cli = Cli::try_parse_from(["neonfs-cli", "s3", "delete-credential", "NEONFS_SOME_KEY"]);
+    fn test_credential_delete() {
+        let cli = Cli::try_parse_from(["neonfs-cli", "credential", "delete", "NEONFS_SOME_KEY"]);
         assert!(cli.is_ok());
     }
 

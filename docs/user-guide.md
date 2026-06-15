@@ -26,7 +26,7 @@ User-relevant commands:
 - `neonfs acl get-file <volume> <path>` — inspect POSIX mode / owner / group on a file.
 - `neonfs fuse list` — see active FUSE mounts on this host.
 - `neonfs nfs list` — see NFS exports this cluster advertises.
-- `neonfs s3 list-credentials` / `neonfs s3 show-credential <access-key-id>` — inspect your S3 credentials.
+- `neonfs credential list` / `neonfs credential show <access-key-id>` — inspect your credentials.
 - `neonfs s3 bucket list` — see which volumes are reachable via S3.
 
 Output defaults to tables. Add `--output json` for machine-readable output.
@@ -93,7 +93,7 @@ Notes specific to NeonFS's NFS implementation:
 
 ### S3
 
-Your operator issues S3 credentials per identity (`neonfs s3 credential create`). Each credential is an `access_key_id` / `secret_access_key` pair. NeonFS speaks SigV4; any S3 client library will work.
+Your operator issues credentials per identity (`neonfs credential create`). Each credential is an `access_key_id` / `secret_access_key` pair. NeonFS speaks SigV4; any S3 client library will work.
 
 ```python
 import boto3
@@ -129,7 +129,7 @@ cadaver https://webdav.neonfs.example.com/my-data
 
 Behaviour notes:
 
-- **Authentication**: HTTP Basic over TLS. Credentials are separate from S3 credentials — your operator configures WebDAV principals.
+- **Authentication**: HTTP Basic over TLS, using the same credential store as S3 — the Basic username is your `access_key_id` and the password is your `secret_access_key`.
 - **Locking**: collection (directory) locks with RFC 4918 `LOCK`/`UNLOCK`. Depth `0` and `infinity` locks are supported.
 - **Dead properties**: arbitrary custom properties persist across calls — macOS Finder and Windows Explorer rely on this for metadata like creation dates and icons.
 - **Copy/Move**: atomic at the server when both source and destination are on the same volume.
@@ -168,10 +168,10 @@ Server-side encryption (AES-256-GCM) costs a small CPU overhead per chunk. Turn 
 
 ### S3
 
-- **Creation**: operator runs `neonfs s3 create-credential --user <your-identity>`. They hand you back an `access_key_id` and `secret_access_key`.
-- **Listing your credentials**: `neonfs s3 list-credentials --user <you>` (if the cluster's policy permits you to see them).
-- **Rotation**: `neonfs s3 rotate-credential <access_key_id>` issues a new `secret_access_key` for an existing key ID. Clients must pick up the new secret; rotate callers one-by-one.
-- **Deletion**: `neonfs s3 delete-credential <access_key_id>` immediately revokes.
+- **Creation**: operator runs `neonfs credential create --user <your-identity>`. They hand you back an `access_key_id` and `secret_access_key`.
+- **Listing your credentials**: `neonfs credential list --user <you>` (if the cluster's policy permits you to see them).
+- **Rotation**: `neonfs credential rotate <access_key_id>` issues a new `secret_access_key` for an existing key ID. Clients must pick up the new secret; rotate callers one-by-one.
+- **Deletion**: `neonfs credential delete <access_key_id>` immediately revokes.
 
 Store credentials in `~/.aws/credentials` with a named profile, or inject via environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION=neonfs`). Do **not** commit them to source control.
 
@@ -181,7 +181,7 @@ NFSv3 authenticates by UID/GID, not by password. Your identity on the client is 
 
 ### WebDAV
 
-HTTP Basic authentication over TLS, username/password. The operator provisions principals and hands you credentials; rotate by asking for a new password.
+HTTP Basic authentication over TLS. WebDAV shares the S3 credential store: the Basic username is your `access_key_id` and the password is your `secret_access_key`. The operator manages these with `neonfs credential ...`; rotate with `neonfs credential rotate <access_key_id>`.
 
 ### FUSE
 

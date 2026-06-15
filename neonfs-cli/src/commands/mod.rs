@@ -5,6 +5,7 @@ pub mod audit;
 pub mod backup;
 pub mod ca_bootstrap;
 pub mod cluster;
+pub mod credential;
 pub mod dr;
 pub mod drive;
 pub mod escalation;

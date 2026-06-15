@@ -87,7 +87,7 @@ There is no first-class CLI today. Restore is operator-applied with engineering 
 
 1. Identify the leader: `neonfs cluster status`.
 2. On the leader, the snapshot directory is `$NEONFS_DATA_DIR/system/dr/<id>/`. Each `<index>.snapshot` file is a length-prefixed ETF stream the engineering team will replay through `MetadataStateMachine` Ra commands. Hand the file list and the snapshot manifest (`neonfs dr snapshot show <id>`) over for the replay step.
-3. Engineering replays each index file via Ra commands, in this order: `volumes`, `services`, `segment_assignments`, `encryption_keys`, `volume_acls`, `chunks`, `stripes`, `files`, `escalations`, `s3_credentials`, `kv`. The order matches the dependency graph — a `FileIndex` row references a `ChunkIndex` row that references a `volumes` row.
+3. Engineering replays each index file via Ra commands, in this order: `volumes`, `services`, `segment_assignments`, `encryption_keys`, `volume_acls`, `chunks`, `stripes`, `files`, `escalations`, `credentials`, `kv`. The order matches the dependency graph — a `FileIndex` row references a `ChunkIndex` row that references a `volumes` row.
 4. The CA material under `/dr/<id>/ca/` is restored to `$NEONFS_TLS_DIR/` on each core node. Cluster-wide CA restore is the same shape as [CA-Rotation runbook §Emergency rotation](CA-Rotation.md#emergency-rotation-expiry-has-passed) step 7 — escalate if the snapshot CA differs from the live CA.
 
 This step **must** be applied on every core node that holds a Ra replica. Skipping a follower means it will diverge from the leader on the next snapshot and propagate the divergence.
