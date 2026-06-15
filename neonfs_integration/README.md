@@ -24,6 +24,8 @@ in via [`neonfs_test_support`](../neonfs_test_support/).
   metadata tiering, namespace coordinator (`claim_path`,
   `claim_subtree`, `claim_rename`), DR snapshots.
 - **Profilers** — app start, supervisor child timings (`@tag :profile`).
+- **Benchmarks** — metadata write-throughput baseline (`@tag :benchmark`,
+  excluded by default; run with `--include benchmark`). See #1291/#1292.
 
 What's *not* here any more:
 
@@ -53,7 +55,8 @@ mix test 2>&1 | tee /tmp/neonfs_integration.txt
 
 The peer-cluster scaffolding (`PeerCluster`, `ClusterCase`,
 `EventCollector`, `LoopbackDevice`, `TelemetryForwarder`,
-`AppProfiler`, `SupervisorStartTimer`, `PeerClusterTelemetry`) lives
+`AppProfiler`, `SupervisorStartTimer`, `MetadataBench`,
+`PeerClusterTelemetry`) lives
 in [`neonfs_test_support`](../neonfs_test_support/) so it can be
 reused by every interface package. Reach for `alias
 NeonFS.TestSupport.PeerCluster` (and friends) at the top of any new

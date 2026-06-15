@@ -29,6 +29,8 @@ end
 # Exclude loopback device tests unless running as root with losetup available.
 # Exclude `:profile` diagnostic tests by default (e.g. #507's app-start profiler)
 # — they print diagnostic output rather than assert. Run with `--include profile`.
+# Exclude `:benchmark` tests by default (e.g. #1292's metadata write-throughput
+# baseline) — they print throughput numbers. Run with `--include benchmark`.
 loopback_excludes =
   if NeonFS.TestSupport.LoopbackDevice.available?() do
     []
@@ -63,7 +65,7 @@ test_registry_excludes =
 excludes =
   loopback_excludes ++
     containerd_excludes ++
-    test_registry_excludes ++ [:profile]
+    test_registry_excludes ++ [:profile, :benchmark]
 
 # PeerClusterTelemetry accumulates per-phase timings across every
 # `PeerCluster.start_cluster!` call. We print the summary from an
