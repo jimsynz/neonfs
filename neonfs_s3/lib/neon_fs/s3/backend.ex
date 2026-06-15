@@ -30,7 +30,7 @@ defmodule NeonFS.S3.Backend do
 
   @impl true
   def lookup_credential(access_key_id) do
-    case call_core(:lookup_s3_credential, [access_key_id]) do
+    case call_core(:lookup_credential, [access_key_id]) do
       {:ok, %{secret_access_key: secret, identity: identity}} ->
         {:ok,
          %Firkin.Credential{

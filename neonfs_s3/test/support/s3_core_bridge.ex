@@ -6,7 +6,7 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
   # Now delegates directly to `NeonFS.Core` facade functions, which handle
   # volume name → ID resolution and dispatch to internal modules.
   #
-  # Credential lookups are routed to NeonFS.Core.S3CredentialManager on the
+  # Credential lookups are routed to NeonFS.Core.CredentialManager on the
   # core node. Call `create_test_credential/1` during setup to provision a
   # credential for the test run.
   #
@@ -24,7 +24,7 @@ defmodule NeonFS.S3.IntegrationTest.CoreBridge do
   @spec create_test_credential(node()) :: {String.t(), String.t()}
   def create_test_credential(node_atom) do
     {:ok, credential} =
-      rpc(node_atom, NeonFS.Core.S3CredentialManager, :create, [
+      rpc(node_atom, NeonFS.Core.CredentialManager, :create, [
         %{user: "integration-test"}
       ])
 

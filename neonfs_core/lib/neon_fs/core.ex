@@ -10,13 +10,13 @@ defmodule NeonFS.Core do
 
   alias NeonFS.Core.Authorise
   alias NeonFS.Core.CommitChunks
+  alias NeonFS.Core.CredentialManager
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.NamespaceCoordinator
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.ReadOperation
-  alias NeonFS.Core.S3CredentialManager
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
   alias NeonFS.Error.{Conflict, FileNotFound, Invalid, NotFound, Unavailable, VolumeNotFound}
@@ -26,18 +26,19 @@ defmodule NeonFS.Core do
   # --- Credential operations ---
 
   @doc """
-  Looks up an S3 credential by access key ID.
+  Looks up a credential by access key ID.
 
-  Called by the S3 backend during SigV4 authentication.
+  Called by the S3 backend during SigV4 authentication and by the
+  WebDAV backend during HTTP Basic authentication.
   """
-  @spec lookup_s3_credential(String.t()) :: {:ok, map()} | {:error, NotFound.t()}
-  def lookup_s3_credential(access_key_id) do
-    case S3CredentialManager.lookup(access_key_id) do
+  @spec lookup_credential(String.t()) :: {:ok, map()} | {:error, NotFound.t()}
+  def lookup_credential(access_key_id) do
+    case CredentialManager.lookup(access_key_id) do
       {:ok, credential} ->
         {:ok, %{secret_access_key: credential.secret_access_key, identity: credential.identity}}
 
       {:error, :not_found} ->
-        {:error, NotFound.exception(message: "S3 credential not found")}
+        {:error, NotFound.exception(message: "Credential not found")}
     end
   end
 

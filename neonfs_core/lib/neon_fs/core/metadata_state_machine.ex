@@ -71,8 +71,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:grant_volume_acl_entry, volume_id :: binary(), principal :: term(),
              permissions :: [atom()]}
           | {:revoke_volume_acl_entry, volume_id :: binary(), principal :: term()}
-          | {:put_s3_credential, cred_data :: map()}
-          | {:delete_s3_credential, access_key_id :: String.t()}
+          | {:put_credential, cred_data :: map()}
+          | {:delete_credential, access_key_id :: String.t()}
           | {:put_escalation, escalation_data :: map()}
           | {:delete_escalation, escalation_id :: String.t()}
           | {:kv_put, key :: binary(), value :: term()}
@@ -171,7 +171,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
             optional(binary()) => %{optional(pos_integer()) => wrapped_key_entry()}
           },
           volume_acls: %{optional(binary()) => map()},
-          s3_credentials: %{optional(String.t()) => map()},
+          credentials: %{optional(String.t()) => map()},
           escalations: %{optional(String.t()) => map()},
           kv: %{optional(binary()) => term()},
           namespace_claims: %{optional(String.t()) => namespace_claim()},
@@ -380,20 +380,20 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   @doc """
-  Returns the S3 credential for the given access key ID, or nil.
+  Returns the credential for the given access key ID, or nil.
   """
-  @spec get_s3_credential(state(), String.t()) :: map() | nil
-  def get_s3_credential(state, access_key_id) do
+  @spec get_credential(state(), String.t()) :: map() | nil
+  def get_credential(state, access_key_id) do
     state
-    |> Map.get(:s3_credentials, %{})
+    |> Map.get(:credentials, %{})
     |> Map.get(access_key_id)
   end
 
   @doc """
-  Returns every S3 credential as an `access_key_id => cred` map.
+  Returns every credential as an `access_key_id => cred` map.
   """
-  @spec get_s3_credentials(state()) :: %{optional(String.t()) => map()}
-  def get_s3_credentials(state), do: Map.get(state, :s3_credentials, %{})
+  @spec get_credentials(state()) :: %{optional(String.t()) => map()}
+  def get_credentials(state), do: Map.get(state, :credentials, %{})
 
   @doc """
   Returns the namespace claim with the given id, or `nil` when none
@@ -488,7 +488,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       active_intents_by_conflict_key: %{},
       encryption_keys: %{},
       volume_acls: %{},
-      s3_credentials: %{},
+      credentials: %{},
       escalations: %{},
       kv: %{},
       namespace_claims: %{},
@@ -1314,16 +1314,16 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
-  # S3 credential commands (new in v9)
+  # Credential commands (new in v9)
 
-  def apply(_meta, {:put_s3_credential, cred_data}, state) do
+  def apply(_meta, {:put_credential, cred_data}, state) do
     access_key_id = cred_data.access_key_id
-    state = ensure_s3_credentials(state)
-    new_creds = Map.put(state.s3_credentials, access_key_id, cred_data)
-    new_state = %{state | s3_credentials: new_creds, version: state.version + 1}
+    state = ensure_credentials(state)
+    new_creds = Map.put(state.credentials, access_key_id, cred_data)
+    new_state = %{state | credentials: new_creds, version: state.version + 1}
 
     :telemetry.execute(
-      [:neonfs, :ra, :command, :put_s3_credential],
+      [:neonfs, :ra, :command, :put_credential],
       %{version: new_state.version},
       %{access_key_id: access_key_id}
     )
@@ -1331,13 +1331,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  def apply(_meta, {:delete_s3_credential, access_key_id}, state) do
-    state = ensure_s3_credentials(state)
-    new_creds = Map.delete(state.s3_credentials, access_key_id)
-    new_state = %{state | s3_credentials: new_creds, version: state.version + 1}
+  def apply(_meta, {:delete_credential, access_key_id}, state) do
+    state = ensure_credentials(state)
+    new_creds = Map.delete(state.credentials, access_key_id)
+    new_state = %{state | credentials: new_creds, version: state.version + 1}
 
     :telemetry.execute(
-      [:neonfs, :ra, :command, :delete_s3_credential],
+      [:neonfs, :ra, :command, :delete_credential],
       %{version: new_state.version},
       %{access_key_id: access_key_id}
     )
@@ -2087,9 +2087,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
     Map.put_new(vol, :io_weight, 100)
   end
 
-  # Migration helper for v8 -> v9: ensure s3_credentials key exists
-  defp ensure_s3_credentials(%{s3_credentials: _} = state), do: state
-  defp ensure_s3_credentials(state), do: Map.put(state, :s3_credentials, %{})
+  # Migration helper for v8 -> v9: ensure credentials key exists
+  defp ensure_credentials(%{credentials: _} = state), do: state
+  defp ensure_credentials(state), do: Map.put(state, :credentials, %{})
 
   # Defensive init for pre-escalation-era snapshots
   defp ensure_escalations(%{escalations: _} = state), do: state

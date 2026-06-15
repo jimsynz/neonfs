@@ -18,6 +18,32 @@ defmodule NeonFS.WebDAV.Test.MockCore do
   def setup do
     Process.put(:mock_volumes, %{})
     Process.put(:mock_files, %{})
+    Process.put(:mock_credentials, %{})
+    :ok
+  end
+
+  # Credential operations
+
+  @spec lookup_credential(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def lookup_credential(access_key_id) do
+    creds = Process.get(:mock_credentials, %{})
+
+    case Map.get(creds, access_key_id) do
+      nil -> {:error, :not_found}
+      cred -> {:ok, cred}
+    end
+  end
+
+  @spec add_credential(String.t(), String.t()) :: :ok
+  def add_credential(access_key_id, secret_access_key) do
+    creds = Process.get(:mock_credentials, %{})
+
+    cred = %{
+      secret_access_key: secret_access_key,
+      identity: %{user: access_key_id}
+    }
+
+    Process.put(:mock_credentials, Map.put(creds, access_key_id, cred))
     :ok
   end
 

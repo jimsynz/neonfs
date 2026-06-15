@@ -1,14 +1,16 @@
-defmodule NeonFS.Core.S3CredentialManager do
+defmodule NeonFS.Core.CredentialManager do
   @moduledoc """
-  Stateless facade over Ra-backed S3 credentials.
+  Stateless facade over Ra-backed access credentials.
 
   Reads go through `RaSupervisor.local_query/2` against the
   `MetadataStateMachine`; writes go through `RaSupervisor.command/2`.
   There is no ETS cache and no DETS snapshot — state lives entirely
   in Ra and every read reflects the locally-committed view.
 
-  Maps S3 access key IDs to secret keys and user identities, enabling
-  AWS SigV4 authentication in the S3-compatible API.
+  Maps access key IDs to secret keys and opaque user identities. The
+  same store backs AWS SigV4 authentication in the S3-compatible API
+  and HTTP Basic authentication in the WebDAV interface — the identity
+  is an opaque term, so the store is interface-agnostic.
   """
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor}
@@ -25,7 +27,7 @@ defmodule NeonFS.Core.S3CredentialManager do
         }
 
   @doc """
-  Creates a new S3 credential for the given user identity.
+  Creates a new credential for the given user identity.
 
   Generates a random access key ID and secret access key, persists
   them via Ra, and returns the full credential (including the secret
@@ -40,25 +42,25 @@ defmodule NeonFS.Core.S3CredentialManager do
       created_at: DateTime.utc_now()
     }
 
-    case ra_command({:put_s3_credential, credential}) do
+    case ra_command({:put_credential, credential}) do
       :ok -> {:ok, credential}
       {:error, _} = error -> error
     end
   end
 
   @doc """
-  Deletes an S3 credential by its access key ID.
+  Deletes a credential by its access key ID.
   """
   @spec delete(access_key_id()) :: :ok | {:error, term()}
   def delete(access_key_id) do
     case lookup(access_key_id) do
-      {:ok, _} -> ra_command({:delete_s3_credential, access_key_id})
+      {:ok, _} -> ra_command({:delete_credential, access_key_id})
       {:error, :not_found} -> {:error, :not_found}
     end
   end
 
   @doc """
-  Rotates the secret access key for an existing S3 credential.
+  Rotates the secret access key for an existing credential.
 
   Generates a new secret key while keeping the same access key ID and
   identity. Returns the updated credential including the new secret
@@ -69,7 +71,7 @@ defmodule NeonFS.Core.S3CredentialManager do
     with {:ok, cred} <- lookup(access_key_id) do
       rotated = %{cred | secret_access_key: generate_secret_access_key()}
 
-      case ra_command({:put_s3_credential, rotated}) do
+      case ra_command({:put_credential, rotated}) do
         :ok -> {:ok, rotated}
         {:error, _} = error -> error
       end
@@ -77,7 +79,7 @@ defmodule NeonFS.Core.S3CredentialManager do
   end
 
   @doc """
-  Lists all S3 credentials, optionally filtered by identity.
+  Lists all credentials, optionally filtered by identity.
 
   Returns credentials without their secret keys for security.
   """
@@ -117,13 +119,13 @@ defmodule NeonFS.Core.S3CredentialManager do
   # Private
 
   defp read_credential(access_key_id) do
-    RaSupervisor.local_query(&MetadataStateMachine.get_s3_credential(&1, access_key_id))
+    RaSupervisor.local_query(&MetadataStateMachine.get_credential(&1, access_key_id))
   catch
     :exit, _ -> {:error, :ra_not_available}
   end
 
   defp read_credentials do
-    RaSupervisor.local_query(&MetadataStateMachine.get_s3_credentials/1)
+    RaSupervisor.local_query(&MetadataStateMachine.get_credentials/1)
   catch
     :exit, _ -> {:error, :ra_not_available}
   end

@@ -1,8 +1,8 @@
-defmodule NeonFS.Core.S3CredentialLookupTest do
+defmodule NeonFS.Core.CredentialLookupTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{RaServer, S3CredentialManager}
+  alias NeonFS.Core.{CredentialManager, RaServer}
   alias NeonFS.Error.NotFound
 
   @moduletag :tmp_dir
@@ -19,23 +19,23 @@ defmodule NeonFS.Core.S3CredentialLookupTest do
     :ok
   end
 
-  describe "NeonFS.Core.lookup_s3_credential/1" do
+  describe "NeonFS.Core.lookup_credential/1" do
     test "returns secret and identity for known access key" do
-      {:ok, created} = S3CredentialManager.create(%{user: "alice"})
+      {:ok, created} = CredentialManager.create(%{user: "alice"})
 
-      assert {:ok, result} = NeonFS.Core.lookup_s3_credential(created.access_key_id)
+      assert {:ok, result} = NeonFS.Core.lookup_credential(created.access_key_id)
       assert result.secret_access_key == created.secret_access_key
       assert result.identity == %{user: "alice"}
     end
 
     test "returns not_found for unknown access key" do
-      assert {:error, %NotFound{}} = NeonFS.Core.lookup_s3_credential("NEONFS_UNKNOWN")
+      assert {:error, %NotFound{}} = NeonFS.Core.lookup_credential("NEONFS_UNKNOWN")
     end
 
     test "returned map has exactly the fields the S3 backend expects" do
-      {:ok, created} = S3CredentialManager.create(%{user: "test"})
+      {:ok, created} = CredentialManager.create(%{user: "test"})
 
-      {:ok, result} = NeonFS.Core.lookup_s3_credential(created.access_key_id)
+      {:ok, result} = NeonFS.Core.lookup_credential(created.access_key_id)
 
       assert Map.has_key?(result, :secret_access_key)
       assert Map.has_key?(result, :identity)

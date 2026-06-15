@@ -86,7 +86,7 @@ defmodule NeonFS.Core.DRSnapshotTest do
         segment_assignments: %{},
         encryption_keys: %{},
         volume_acls: %{},
-        s3_credentials: %{},
+        credentials: %{},
         escalations: %{},
         kv: %{}
       }
@@ -98,7 +98,7 @@ defmodule NeonFS.Core.DRSnapshotTest do
 
       # Every captured index must land as a file.
       for index <- ~w(chunks files stripes volumes services segment_assignments
-                      encryption_keys volume_acls s3_credentials escalations kv)a do
+                      encryption_keys volume_acls credentials escalations kv)a do
         path = Path.join(dir, "#{index}.snapshot")
         assert SystemVolume.exists?(path), "expected #{path} to exist"
       end

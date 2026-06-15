@@ -275,8 +275,8 @@ defmodule NeonFS.S3.Test.MockCore do
     Map.has_key?(files, key)
   end
 
-  @spec lookup_s3_credential(String.t()) :: {:ok, map()} | {:error, :not_found}
-  def lookup_s3_credential(access_key_id) do
+  @spec lookup_credential(String.t()) :: {:ok, map()} | {:error, :not_found}
+  def lookup_credential(access_key_id) do
     creds = Process.get(:mock_credentials, %{})
 
     case Map.get(creds, access_key_id) do

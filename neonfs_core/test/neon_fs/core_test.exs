@@ -613,8 +613,8 @@ defmodule NeonFS.CoreTest do
 
   # --- S3 credential operations ---
 
-  describe "lookup_s3_credential/1" do
-    # S3CredentialManager reads via Ra since #347; the outer setup
+  describe "lookup_credential/1" do
+    # CredentialManager reads via Ra since #347; the outer setup
     # stops Ra, so this describe re-enables it.
     setup do
       ensure_node_named()
@@ -624,7 +624,7 @@ defmodule NeonFS.CoreTest do
     end
 
     test "returns error for unknown credential" do
-      assert {:error, %NotFound{}} = Core.lookup_s3_credential("unknown-key")
+      assert {:error, %NotFound{}} = Core.lookup_credential("unknown-key")
     end
   end
 end

@@ -10,7 +10,7 @@ defmodule NeonFS.CLI.Handler.S3 do
 
   import NeonFS.CLI.Handler.Common
 
-  alias NeonFS.Core.{AuditLog, S3CredentialManager, VolumeRegistry}
+  alias NeonFS.Core.{AuditLog, CredentialManager, VolumeRegistry}
   alias NeonFS.Error.NotFound
 
   @doc """
@@ -22,7 +22,7 @@ defmodule NeonFS.CLI.Handler.S3 do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, credential} <- S3CredentialManager.create(identity) do
+         {:ok, credential} <- CredentialManager.create(identity) do
       AuditLog.log_event(
         event_type: :s3_credential_created,
         actor_uid: 0,
@@ -52,7 +52,7 @@ defmodule NeonFS.CLI.Handler.S3 do
         end
 
       credentials =
-        S3CredentialManager.list(opts)
+        CredentialManager.list(opts)
         |> Enum.map(&credential_to_serialisable/1)
 
       {:ok, credentials}
@@ -67,7 +67,7 @@ defmodule NeonFS.CLI.Handler.S3 do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         :ok <- S3CredentialManager.delete(access_key_id) do
+         :ok <- CredentialManager.delete(access_key_id) do
       AuditLog.log_event(
         event_type: :s3_credential_deleted,
         actor_uid: 0,
@@ -94,7 +94,7 @@ defmodule NeonFS.CLI.Handler.S3 do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, credential} <- S3CredentialManager.rotate(access_key_id) do
+         {:ok, credential} <- CredentialManager.rotate(access_key_id) do
       AuditLog.log_event(
         event_type: :s3_credential_rotated,
         actor_uid: 0,
@@ -121,7 +121,7 @@ defmodule NeonFS.CLI.Handler.S3 do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, credential} <- S3CredentialManager.lookup(access_key_id) do
+         {:ok, credential} <- CredentialManager.lookup(access_key_id) do
       {:ok, credential |> Map.delete(:secret_access_key) |> credential_to_serialisable()}
     else
       {:error, :not_found} ->

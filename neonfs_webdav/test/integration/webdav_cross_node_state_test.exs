@@ -72,6 +72,11 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
         volumes: [{@volume, %{}}]
       )
 
+    {:ok, %{access_key_id: access_key, secret_access_key: secret}} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [%{user: "xnode"}])
+
+    auth = "Basic " <> Base.encode64("#{access_key}:#{secret}")
+
     url_a = gateway_url(cluster, :node2)
     url_b = gateway_url(cluster, :node3)
 
@@ -80,11 +85,17 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
 
     # First write retries until the gateway's client infrastructure is
     # warm on a loaded runner.
-    put_until_success(doc_a, "v1")
+    put_until_success(doc_a, "v1", auth)
 
     # LOCK via node2 — the token must be honoured everywhere.
     lock_resp =
-      Req.request!(method: "LOCK", url: doc_a, body: @lockinfo_xml, retry: false)
+      Req.request!(
+        method: "LOCK",
+        url: doc_a,
+        body: @lockinfo_xml,
+        headers: [{"authorization", auth}],
+        retry: false
+      )
 
     assert lock_resp.status == 200
     token = extract_lock_token(lock_resp)
@@ -92,7 +103,13 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
     # Tokenless write via node3 is refused: the lock taken on node2 is
     # cluster state, not node state.
     assert %{status: 423} =
-             Req.request!(method: "PUT", url: doc_b, body: "intruder", retry: false)
+             Req.request!(
+               method: "PUT",
+               url: doc_b,
+               body: "intruder",
+               headers: [{"authorization", auth}],
+               retry: false
+             )
 
     # The same write with the node2-issued token via node3 succeeds.
     assert %{status: status} =
@@ -100,7 +117,7 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
                method: "PUT",
                url: doc_b,
                body: "v2",
-               headers: [{"if", "(<opaquelocktoken:#{token}>)"}],
+               headers: [{"authorization", auth}, {"if", "(<opaquelocktoken:#{token}>)"}],
                retry: false
              )
 
@@ -112,7 +129,7 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
                method: "PROPPATCH",
                url: doc_a,
                body: @proppatch_xml,
-               headers: [{"if", "(<opaquelocktoken:#{token}>)"}],
+               headers: [{"authorization", auth}, {"if", "(<opaquelocktoken:#{token}>)"}],
                retry: false
              )
 
@@ -121,7 +138,7 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
         method: "PROPFIND",
         url: doc_b,
         body: @propfind_xml,
-        headers: [{"depth", "0"}],
+        headers: [{"authorization", auth}, {"depth", "0"}],
         retry: false
       )
 
@@ -133,14 +150,20 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
              Req.request!(
                method: "UNLOCK",
                url: doc_b,
-               headers: [{"lock-token", "<opaquelocktoken:#{token}>"}],
+               headers: [{"authorization", auth}, {"lock-token", "<opaquelocktoken:#{token}>"}],
                retry: false
              )
 
     # The lock is gone cluster-wide: a tokenless write via node2 now
     # succeeds.
     assert %{status: status} =
-             Req.request!(method: "PUT", url: doc_a, body: "v3", retry: false)
+             Req.request!(
+               method: "PUT",
+               url: doc_a,
+               body: "v3",
+               headers: [{"authorization", auth}],
+               retry: false
+             )
 
     assert status in [200, 201, 204]
   end
@@ -156,13 +179,19 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
     token
   end
 
-  defp put_until_success(url, body) do
+  defp put_until_success(url, body, auth) do
     deadline = System.monotonic_time(:millisecond) + 60_000
-    do_put_until_success(url, body, deadline)
+    do_put_until_success(url, body, auth, deadline)
   end
 
-  defp do_put_until_success(url, body, deadline) do
-    case Req.request(method: "PUT", url: url, body: body, retry: false) do
+  defp do_put_until_success(url, body, auth, deadline) do
+    case Req.request(
+           method: "PUT",
+           url: url,
+           body: body,
+           headers: [{"authorization", auth}],
+           retry: false
+         ) do
       {:ok, %{status: status}} when status in [200, 201, 204] ->
         :ok
 
@@ -171,7 +200,7 @@ defmodule NeonFS.WebDAV.CrossNodeStateTest do
           raise "initial PUT never succeeded: #{inspect(other)}"
         else
           Process.sleep(500)
-          do_put_until_success(url, body, deadline)
+          do_put_until_success(url, body, auth, deadline)
         end
     end
   end

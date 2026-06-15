@@ -1,8 +1,8 @@
-defmodule NeonFS.Core.S3CredentialManagerTest do
+defmodule NeonFS.Core.CredentialManagerTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{RaServer, S3CredentialManager}
+  alias NeonFS.Core.{CredentialManager, RaServer}
 
   @moduletag :tmp_dir
 
@@ -20,7 +20,7 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
 
   describe "create/1" do
     test "generates a credential with access key and secret" do
-      assert {:ok, credential} = S3CredentialManager.create(%{user: "alice"})
+      assert {:ok, credential} = CredentialManager.create(%{user: "alice"})
 
       assert String.starts_with?(credential.access_key_id, "NEONFS")
       assert byte_size(credential.access_key_id) == 20
@@ -31,8 +31,8 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
     end
 
     test "generates unique credentials each time" do
-      {:ok, cred1} = S3CredentialManager.create(%{user: "alice"})
-      {:ok, cred2} = S3CredentialManager.create(%{user: "alice"})
+      {:ok, cred1} = CredentialManager.create(%{user: "alice"})
+      {:ok, cred2} = CredentialManager.create(%{user: "alice"})
 
       refute cred1.access_key_id == cred2.access_key_id
       refute cred1.secret_access_key == cred2.secret_access_key
@@ -41,37 +41,37 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
 
   describe "lookup/1" do
     test "returns credential for known access key" do
-      {:ok, created} = S3CredentialManager.create(%{user: "bob"})
+      {:ok, created} = CredentialManager.create(%{user: "bob"})
 
-      assert {:ok, found} = S3CredentialManager.lookup(created.access_key_id)
+      assert {:ok, found} = CredentialManager.lookup(created.access_key_id)
       assert found.access_key_id == created.access_key_id
       assert found.secret_access_key == created.secret_access_key
       assert found.identity == %{user: "bob"}
     end
 
     test "returns not_found for unknown access key" do
-      assert {:error, :not_found} = S3CredentialManager.lookup("NEONFS_NONEXISTENT")
+      assert {:error, :not_found} = CredentialManager.lookup("NEONFS_NONEXISTENT")
     end
   end
 
   describe "delete/1" do
     test "removes a credential" do
-      {:ok, cred} = S3CredentialManager.create(%{user: "charlie"})
+      {:ok, cred} = CredentialManager.create(%{user: "charlie"})
 
-      assert :ok = S3CredentialManager.delete(cred.access_key_id)
-      assert {:error, :not_found} = S3CredentialManager.lookup(cred.access_key_id)
+      assert :ok = CredentialManager.delete(cred.access_key_id)
+      assert {:error, :not_found} = CredentialManager.lookup(cred.access_key_id)
     end
 
     test "returns not_found for unknown access key" do
-      assert {:error, :not_found} = S3CredentialManager.delete("NEONFS_NONEXISTENT")
+      assert {:error, :not_found} = CredentialManager.delete("NEONFS_NONEXISTENT")
     end
   end
 
   describe "rotate/1" do
     test "generates a new secret key while keeping the same access key ID" do
-      {:ok, original} = S3CredentialManager.create(%{user: "dave"})
+      {:ok, original} = CredentialManager.create(%{user: "dave"})
 
-      assert {:ok, rotated} = S3CredentialManager.rotate(original.access_key_id)
+      assert {:ok, rotated} = CredentialManager.rotate(original.access_key_id)
 
       assert rotated.access_key_id == original.access_key_id
       assert rotated.identity == original.identity
@@ -81,15 +81,15 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
     end
 
     test "rotated credential can be looked up with the new secret" do
-      {:ok, original} = S3CredentialManager.create(%{user: "eve"})
-      {:ok, rotated} = S3CredentialManager.rotate(original.access_key_id)
+      {:ok, original} = CredentialManager.create(%{user: "eve"})
+      {:ok, rotated} = CredentialManager.rotate(original.access_key_id)
 
-      {:ok, found} = S3CredentialManager.lookup(original.access_key_id)
+      {:ok, found} = CredentialManager.lookup(original.access_key_id)
       assert found.secret_access_key == rotated.secret_access_key
     end
 
     test "returns not_found for unknown access key" do
-      assert {:error, :not_found} = S3CredentialManager.rotate("NEONFS_NONEXISTENT")
+      assert {:error, :not_found} = CredentialManager.rotate("NEONFS_NONEXISTENT")
     end
   end
 
@@ -101,10 +101,10 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
       id1 = %{user: "list_#{System.unique_integer([:positive])}_a"}
       id2 = %{user: "list_#{System.unique_integer([:positive])}_b"}
 
-      {:ok, _} = S3CredentialManager.create(id1)
-      {:ok, _} = S3CredentialManager.create(id2)
+      {:ok, _} = CredentialManager.create(id1)
+      {:ok, _} = CredentialManager.create(id2)
 
-      listed = S3CredentialManager.list(identity: id1)
+      listed = CredentialManager.list(identity: id1)
 
       assert length(listed) == 1
       assert Enum.all?(listed, fn c -> c.identity == id1 end)
@@ -113,11 +113,11 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
 
     test "filters by identity and returns multiple matching entries" do
       identity = %{user: "list_#{System.unique_integer([:positive])}"}
-      {:ok, _} = S3CredentialManager.create(identity)
-      {:ok, _} = S3CredentialManager.create(identity)
-      {:ok, _} = S3CredentialManager.create(%{user: "someone_else"})
+      {:ok, _} = CredentialManager.create(identity)
+      {:ok, _} = CredentialManager.create(identity)
+      {:ok, _} = CredentialManager.create(%{user: "someone_else"})
 
-      listed = S3CredentialManager.list(identity: identity)
+      listed = CredentialManager.list(identity: identity)
 
       assert length(listed) == 2
       assert Enum.all?(listed, fn c -> c.identity == identity end)
@@ -125,7 +125,7 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
 
     test "filter by unknown identity returns an empty list" do
       unknown = %{user: "list_unknown_#{System.unique_integer([:positive])}"}
-      assert [] = S3CredentialManager.list(identity: unknown)
+      assert [] = CredentialManager.list(identity: unknown)
     end
   end
 
@@ -137,15 +137,15 @@ defmodule NeonFS.Core.S3CredentialManagerTest do
 
     test "writes return a structured unavailable error" do
       assert {:error, %NeonFS.Error.Unavailable{details: %{reason: :ra_not_available}}} =
-               S3CredentialManager.create(%{user: "alice"})
+               CredentialManager.create(%{user: "alice"})
 
-      assert {:error, :not_found} = S3CredentialManager.delete("NEONFS_UNKNOWN")
-      assert {:error, :not_found} = S3CredentialManager.rotate("NEONFS_UNKNOWN")
+      assert {:error, :not_found} = CredentialManager.delete("NEONFS_UNKNOWN")
+      assert {:error, :not_found} = CredentialManager.rotate("NEONFS_UNKNOWN")
     end
 
     test "reads return :not_found / empty when the state is unreachable" do
-      assert {:error, :not_found} = S3CredentialManager.lookup("NEONFS_UNKNOWN")
-      assert [] = S3CredentialManager.list()
+      assert {:error, :not_found} = CredentialManager.lookup("NEONFS_UNKNOWN")
+      assert [] = CredentialManager.list()
     end
   end
 end

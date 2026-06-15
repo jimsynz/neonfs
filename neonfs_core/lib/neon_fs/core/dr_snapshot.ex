@@ -18,7 +18,7 @@ defmodule NeonFS.Core.DRSnapshot do
     * `segment_assignments` — consistent-hash → replica-set table
     * `encryption_keys` — `KeyManager` wrapped keys
     * `volume_acls` — per-volume ACL tables
-    * `s3_credentials` — `NeonFS.S3.Credential` records
+    * `credentials` — access-credential records (S3 SigV4 / WebDAV Basic)
     * `escalations` — `NeonFS.Core.Escalation` records
     * `kv` — generic `KVStore` table
 
@@ -73,7 +73,7 @@ defmodule NeonFS.Core.DRSnapshot do
     :segment_assignments,
     :encryption_keys,
     :volume_acls,
-    :s3_credentials,
+    :credentials,
     :escalations,
     :kv
   ]

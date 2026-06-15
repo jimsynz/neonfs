@@ -178,7 +178,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         active_intents_by_conflict_key: %{},
         encryption_keys: %{},
         volume_acls: %{},
-        s3_credentials: %{},
+        credentials: %{},
         escalations: %{},
         version: 200
       }
@@ -210,7 +210,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         active_intents_by_conflict_key: %{},
         encryption_keys: %{},
         volume_acls: %{},
-        s3_credentials: %{},
+        credentials: %{},
         escalations: %{},
         iam_users: existing_users,
         version: 200
@@ -238,7 +238,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         active_intents_by_conflict_key: %{},
         encryption_keys: %{},
         volume_acls: %{},
-        s3_credentials: %{},
+        credentials: %{},
         escalations: %{},
         kv: %{},
         version: 0
@@ -299,7 +299,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         active_intents_by_conflict_key: %{},
         encryption_keys: %{},
         volume_acls: %{},
-        s3_credentials: %{},
+        credentials: %{},
         escalations: %{},
         iam_users: %{},
         iam_groups: %{},

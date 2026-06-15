@@ -6,7 +6,7 @@ defmodule NeonFS.S3.IntegrationTest do
   server running the S3 plug on the test runner. Uses ExAws.S3 as an external
   client to verify end-to-end S3 protocol compatibility.
 
-  Credential lookups go through real NeonFS.Core.S3CredentialManager on the
+  Credential lookups go through real NeonFS.Core.CredentialManager on the
   core nodes via RPC.
   """
   use NeonFS.TestSupport.ClusterCase, async: false

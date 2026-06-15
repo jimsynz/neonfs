@@ -39,10 +39,39 @@ defmodule NeonFS.WebDAV.BackendTest do
   # Authentication
 
   describe "authenticate/1" do
-    test "accepts all connections" do
+    test "rejects a request with no authorization header" do
       conn = Plug.Test.conn(:get, "/")
-      assert {:ok, %{user: "anonymous"}} = Backend.authenticate(conn)
+      assert {:error, :unauthorized} = Backend.authenticate(conn)
     end
+
+    test "accepts valid Basic credentials" do
+      MockCore.add_credential("alice", "s3cr3t")
+      conn = basic_auth_conn("alice", "s3cr3t")
+      assert {:ok, %{user: "alice", identity: %{user: "alice"}}} = Backend.authenticate(conn)
+    end
+
+    test "rejects a valid user with the wrong password" do
+      MockCore.add_credential("alice", "s3cr3t")
+      conn = basic_auth_conn("alice", "wrong")
+      assert {:error, :unauthorized} = Backend.authenticate(conn)
+    end
+
+    test "rejects an unknown user" do
+      conn = basic_auth_conn("nobody", "whatever")
+      assert {:error, :unauthorized} = Backend.authenticate(conn)
+    end
+
+    test "rejects a malformed authorization header" do
+      conn = Plug.Test.conn(:get, "/") |> Plug.Conn.put_req_header("authorization", "Basic !!!")
+      assert {:error, :unauthorized} = Backend.authenticate(conn)
+    end
+  end
+
+  defp basic_auth_conn(username, password) do
+    encoded = Base.encode64("#{username}:#{password}")
+
+    Plug.Test.conn(:get, "/")
+    |> Plug.Conn.put_req_header("authorization", "Basic #{encoded}")
   end
 
   # Resource resolution

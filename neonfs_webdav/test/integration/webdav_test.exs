@@ -21,7 +21,13 @@ defmodule NeonFS.WebDAV.IntegrationTest do
     node1 = PeerCluster.get_node!(cluster, :node1)
     WebDAVCoreBridge.store_core_node(node1.node)
 
+    {:ok, %{access_key_id: access_key, secret_access_key: secret}} =
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
+        %{user: "webdav-test"}
+      ])
+
     Application.put_env(:neonfs_webdav, :core_call_fn, &WebDAVCoreBridge.call/2)
+    Application.put_env(:neonfs_webdav, :integration_auth_header, basic_auth(access_key, secret))
 
     # Start client infrastructure on the test runner so NeonFS.Client.ChunkReader
     # can resolve a core node via Router → CostFunction for WebDAV GETs.
@@ -58,6 +64,7 @@ defmodule NeonFS.WebDAV.IntegrationTest do
     on_exit(fn ->
       Supervisor.stop(server)
       Application.delete_env(:neonfs_webdav, :core_call_fn)
+      Application.delete_env(:neonfs_webdav, :integration_auth_header)
       WebDAVCoreBridge.cleanup()
     end)
 
@@ -65,6 +72,8 @@ defmodule NeonFS.WebDAV.IntegrationTest do
   end
 
   defp base_url(port), do: "http://localhost:#{port}"
+
+  defp basic_auth(access_key, secret), do: "Basic " <> Base.encode64("#{access_key}:#{secret}")
 
   @webdav_methods %{
     propfind: "PROPFIND",
@@ -75,7 +84,8 @@ defmodule NeonFS.WebDAV.IntegrationTest do
 
   defp webdav_request(method, path, port, opts \\ []) do
     body = Keyword.get(opts, :body)
-    headers = Keyword.get(opts, :headers, [])
+    auth = Application.fetch_env!(:neonfs_webdav, :integration_auth_header)
+    headers = [{"authorization", auth} | Keyword.get(opts, :headers, [])]
     http_method = Map.get(@webdav_methods, method, method)
 
     req_opts = [method: http_method, url: "#{base_url(port)}#{path}", headers: headers]

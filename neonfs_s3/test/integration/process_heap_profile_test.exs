@@ -60,7 +60,7 @@ defmodule NeonFS.S3.IntegrationTest.ProcessHeapProfileTest do
       PeerCluster.rpc(
         cluster,
         :node1,
-        NeonFS.Core.S3CredentialManager,
+        NeonFS.Core.CredentialManager,
         :create,
         [%{user: "profile"}]
       )

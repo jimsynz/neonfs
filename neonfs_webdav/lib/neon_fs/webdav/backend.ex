@@ -9,6 +9,12 @@ defmodule NeonFS.WebDAV.Backend do
   falls back to `NeonFS.Client.ChunkReader` so chunk bytes are fetched over
   the TLS data plane rather than shipped across Erlang distribution when
   streaming isn't available.
+
+  Authentication is HTTP Basic, checked against the core credential store
+  (`NeonFS.Core.CredentialManager`). Basic auth transmits credentials in
+  cleartext, so the listener MUST be fronted by TLS termination (reverse
+  proxy) or confined to a trusted network, per the project's listener-posture
+  guidance.
   """
 
   @behaviour Davy.Backend
@@ -27,8 +33,17 @@ defmodule NeonFS.WebDAV.Backend do
   # --- Authentication ---
 
   @impl true
-  def authenticate(_conn) do
-    {:ok, %{user: "anonymous"}}
+  def authenticate(conn) do
+    with ["Basic " <> encoded] <- Plug.Conn.get_req_header(conn, "authorization"),
+         {:ok, decoded} <- Base.decode64(encoded),
+         [username, password] <- String.split(decoded, ":", parts: 2),
+         {:ok, %{secret_access_key: secret, identity: identity}} <-
+           call_core(:lookup_credential, [username]),
+         true <- Plug.Crypto.secure_compare(password, secret) do
+      {:ok, %{user: username, identity: identity}}
+    else
+      _ -> {:error, :unauthorized}
+    end
   end
 
   # --- Resource resolution ---

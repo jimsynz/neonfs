@@ -44,7 +44,7 @@ defmodule NeonFS.S3.MultipartCrossNodeTest do
     :ok = ClusterCase.init_mixed_role_cluster(cluster, name: "s3-mp-xnode")
 
     {:ok, credential} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.Core.S3CredentialManager, :create, [
+      PeerCluster.rpc(cluster, :node1, NeonFS.Core.CredentialManager, :create, [
         %{user: "mp-xnode-test"}
       ])
 
