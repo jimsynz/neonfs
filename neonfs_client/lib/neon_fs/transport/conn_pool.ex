@@ -125,7 +125,17 @@ defmodule NeonFS.Transport.ConnPool do
            socket
 
          {:error, reason} ->
-           exit({:ssl_connect_failed, host, port, reason})
+           :telemetry.execute(
+             [:neonfs, :transport, :conn_pool, :worker_connect_failed],
+             %{},
+             %{host: host, port: port, reason: reason}
+           )
+
+           # Exit with a `:shutdown` reason so the async init Task is not logged
+           # as a SASL crash. Connection refusal is expected whenever a peer is
+           # intentionally down (partition/failure tests), and NimblePool simply
+           # retries on the resulting :DOWN regardless of reason.
+           exit({:shutdown, {:ssl_connect_failed, host, port, reason}})
        end
      end, pool_state}
   end

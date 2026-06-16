@@ -286,13 +286,27 @@ defmodule NeonFS.Core.Persistence do
         copy_and_rename(ets_table, dets_ref, temp_path, dets_path)
 
       {:error, reason} ->
-        Logger.error("Failed to open DETS temp file",
-          dets_path: temp_path,
-          reason: inspect(reason)
-        )
-
+        log_open_failure(reason, temp_path)
         {:error, {:open_failed, reason}}
     end
+  end
+
+  # A snapshot tick can fire while the node is shutting down and its data dir
+  # has already been removed, so DETS can't create the temp file. That's an
+  # expected teardown race (like the `:table_gone` case below), not a fault —
+  # log it at debug so it doesn't flood integration logs (#1300).
+  defp log_open_failure({:file_error, _path, :enoent} = reason, temp_path) do
+    Logger.debug("DETS temp dir vanished mid-snapshot, skipping",
+      dets_path: temp_path,
+      reason: inspect(reason)
+    )
+  end
+
+  defp log_open_failure(reason, temp_path) do
+    Logger.error("Failed to open DETS temp file",
+      dets_path: temp_path,
+      reason: inspect(reason)
+    )
   end
 
   @spec copy_and_rename(atom(), reference(), String.t(), String.t()) :: :ok | {:error, term()}

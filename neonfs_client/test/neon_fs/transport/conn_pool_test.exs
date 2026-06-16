@@ -320,6 +320,37 @@ defmodule NeonFS.Transport.ConnPoolTest do
     end
   end
 
+  describe "connection refused" do
+    test "init worker exits with a :shutdown reason instead of crashing (#1300)", ctx do
+      {:ok, listen} = :ssl.listen(0, ctx.server_ssl_opts)
+      {:ok, {_addr, refused_port}} = :ssl.sockname(listen)
+      :ssl.close(listen)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connect_failed]
+        ])
+
+      pool_state = %{
+        peer: {~c"localhost", refused_port},
+        ssl_opts: ctx.client_ssl_opts,
+        pool_pid: self()
+      }
+
+      {:async, fun, ^pool_state} = ConnPool.init_worker(pool_state)
+
+      {pid, mref} = spawn_monitor(fun)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connect_failed], ^ref, %{},
+                      %{reason: _}},
+                     5_000
+
+      assert_receive {:DOWN, ^mref, :process, ^pid,
+                      {:shutdown, {:ssl_connect_failed, _host, _port, _reason}}},
+                     5_000
+    end
+  end
+
   describe "handle_ping" do
     test "healthy connections survive ping", ctx do
       {:ok, pool} =

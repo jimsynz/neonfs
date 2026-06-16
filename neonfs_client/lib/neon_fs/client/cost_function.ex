@@ -154,13 +154,16 @@ defmodule NeonFS.Client.CostFunction do
   end
 
   defp fetch_load_score(node) do
-    case :rpc.call(node, :cpu_sup, :avg1, [], 2_000) do
-      load when is_integer(load) ->
-        # avg1 returns load * 256, normalise to 0-1 (cap at 4.0 load)
-        min(load / 256.0 / 4.0, 1.0)
-
-      {:badrpc, _} ->
-        0.5
+    # Probe `:cpu_sup.avg1` only when its server is registered on the peer.
+    # `os_mon` isn't started on every node, and calling `:cpu_sup` while it's
+    # down makes `os_mon` log a warning per probe on the remote — a node we
+    # probe every 10s, so the noise dominated integration logs (#1300).
+    with pid when is_pid(pid) <- :rpc.call(node, :erlang, :whereis, [:cpu_sup], 2_000),
+         load when is_integer(load) <- :rpc.call(node, :cpu_sup, :avg1, [], 2_000) do
+      # avg1 returns load * 256, normalise to 0-1 (cap at 4.0 load)
+      min(load / 256.0 / 4.0, 1.0)
+    else
+      _ -> 0.5
     end
   rescue
     _ -> 0.5

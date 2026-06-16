@@ -260,14 +260,14 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @impl true
   def handle_info({:nodedown, node, _info}, state) do
-    Logger.warning("Service node down, deregistering", node: node)
+    Logger.debug("Service node down, deregistering", node: node)
     {_, new_state} = do_deregister(node, nil, state)
     {:noreply, new_state}
   end
 
   @impl true
   def handle_info({:nodedown, node}, state) do
-    Logger.warning("Service node down, deregistering", node: node)
+    Logger.debug("Service node down, deregistering", node: node)
     {_, new_state} = do_deregister(node, nil, state)
     {:noreply, new_state}
   end
