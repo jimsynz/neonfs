@@ -14,8 +14,10 @@ defmodule NeonFS.Integration.MetadataThroughputBenchTest do
   concurrency:
 
     * **single-directory burst** — `@file_count` files into one directory.
-      This is the #1287 hot-directory case: every create read-modify-writes
-      the same `DirectoryEntry` blob and CAS-flips the one `volume_root`.
+      This is the #1287 hot-directory case. Since #1294 each child is its
+      own `dirent:` key (no shared-blob read-modify-write), so the residual
+      cost is the single `volume_root` CAS flip per create that #1295/#1296
+      target.
     * **spread** — `@file_count` files each in its own directory, so there
       is no hot-directory contention.
 

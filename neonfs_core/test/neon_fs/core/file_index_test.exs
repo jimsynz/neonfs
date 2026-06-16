@@ -65,7 +65,7 @@ defmodule NeonFS.Core.FileIndexTest do
       assert retrieved.metadata["user"] == "alice"
     end
 
-    test "writes both FileMeta and DirectoryEntry", %{store: store} do
+    test "writes both FileMeta and a dirent", %{store: store} do
       file = FileMeta.new("vol1", "/test.txt")
       assert {:ok, _} = FileIndex.create(file)
 
@@ -74,10 +74,10 @@ defmodule NeonFS.Core.FileIndexTest do
       assert [{^file_key, stored}] = :ets.lookup(store, file_key)
       assert stored[:id] == file.id
 
-      # Check directory entry is in quorum store
-      dir_key = "dir:vol1:/"
-      assert [{^dir_key, dir_data}] = :ets.lookup(store, dir_key)
-      assert dir_data[:children]["test.txt"] == %{type: :file, id: file.id}
+      # Check the per-child dirent is in quorum store
+      dirent_key = "dirent:vol1:/" <> <<0>> <> "test.txt"
+      assert [{^dirent_key, dirent}] = :ets.lookup(store, dirent_key)
+      assert dirent == %{type: :file, id: file.id}
     end
 
     test "creates nested parent directories automatically", %{store: store} do
@@ -308,20 +308,18 @@ defmodule NeonFS.Core.FileIndexTest do
       assert [] = :ets.lookup(store, file_key)
     end
 
-    test "removes child from parent DirectoryEntry", %{store: store} do
+    test "removes the dirent for the deleted child", %{store: store} do
       file = FileMeta.new("vol1", "/test.txt")
       {:ok, created} = FileIndex.create(file)
 
-      # Verify child exists in directory
-      dir_key = "dir:vol1:/"
-      [{^dir_key, dir_data}] = :ets.lookup(store, dir_key)
-      assert Map.has_key?(dir_data[:children], "test.txt")
+      # Verify the dirent exists
+      dirent_key = "dirent:vol1:/" <> <<0>> <> "test.txt"
+      assert [{^dirent_key, _}] = :ets.lookup(store, dirent_key)
 
       assert :ok = FileIndex.delete(created.id)
 
-      # Child should be removed from directory
-      [{^dir_key, updated_dir}] = :ets.lookup(store, dir_key)
-      refute Map.has_key?(updated_dir[:children], "test.txt")
+      # Dirent should be gone (tombstoned out of the store)
+      assert [] = :ets.lookup(store, dirent_key)
     end
 
     test "returns error if file not found" do
@@ -343,18 +341,16 @@ defmodule NeonFS.Core.FileIndexTest do
       assert detached.version == created.version + 1
     end
 
-    test "removes the directory entry child so path lookup goes 404",
+    test "removes the dirent so path lookup goes 404",
          %{store: store} do
       {:ok, created} = FileIndex.create(FileMeta.new("vol1", "/p.txt"))
 
-      dir_key = "dir:vol1:/"
-      [{^dir_key, dir_data}] = :ets.lookup(store, dir_key)
-      assert Map.has_key?(dir_data[:children], "p.txt")
+      dirent_key = "dirent:vol1:/" <> <<0>> <> "p.txt"
+      assert [{^dirent_key, _}] = :ets.lookup(store, dirent_key)
 
       {:ok, _} = FileIndex.mark_detached(created.id, ["ns-claim-1"])
 
-      [{^dir_key, updated_dir}] = :ets.lookup(store, dir_key)
-      refute Map.has_key?(updated_dir[:children], "p.txt")
+      assert [] = :ets.lookup(store, dirent_key)
 
       # Path-based access goes 404.
       assert {:error, :not_found} = FileIndex.get_by_path("vol1", "/p.txt")
@@ -493,6 +489,45 @@ defmodule NeonFS.Core.FileIndexTest do
       assert Map.has_key?(vol1_children, "file.txt")
       refute Map.has_key?(vol1_children, "other.txt")
       assert Map.has_key?(vol2_children, "other.txt")
+    end
+
+    # #1294: a single-level listing must not bleed in grandchildren. The
+    # NUL separator between dir path and name keeps `/docs` entries out of
+    # the `/` range scan even though `dirent:vol1:/docs<0>x` shares the
+    # `dirent:vol1:/` textual prefix.
+    test "lists only immediate children, not nested entries" do
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/top.txt"))
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/docs/nested.txt"))
+
+      assert {:ok, root_children} = FileIndex.list_dir("vol1", "/")
+      assert Map.has_key?(root_children, "top.txt")
+      assert Map.has_key?(root_children, "docs")
+      refute Map.has_key?(root_children, "nested.txt")
+
+      assert {:ok, docs_children} = FileIndex.list_dir("vol1", "/docs")
+      assert Map.keys(docs_children) == ["nested.txt"]
+    end
+
+    test "each child is an independent dirent — no shared blob key", %{store: store} do
+      for i <- 1..50 do
+        {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/burst/file#{i}.txt"))
+      end
+
+      dirent_keys =
+        :ets.foldl(
+          fn
+            {"dirent:vol1:/burst" <> _ = key, _}, acc -> [key | acc]
+            _, acc -> acc
+          end,
+          [],
+          store
+        )
+
+      assert length(dirent_keys) == 50
+      assert length(Enum.uniq(dirent_keys)) == 50
+
+      assert {:ok, children} = FileIndex.list_dir("vol1", "/burst")
+      assert map_size(children) == 50
     end
   end
 

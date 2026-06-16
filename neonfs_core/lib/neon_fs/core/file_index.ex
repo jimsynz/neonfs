@@ -1,11 +1,15 @@
 defmodule NeonFS.Core.FileIndex do
   @moduledoc """
   GenServer managing file metadata with quorum-backed distributed storage
-  and DirectoryEntry-based path lookups.
+  and per-entry directory (`dirent:`) path lookups.
 
   Files are stored with key `"file:<file_id>"` and sharded by `hash(file_id)`.
-  Directory entries are stored with key `"dir:<volume_id>:<parent_path>"` and
-  sharded by `hash(parent_path)`.
+  Each directory has a small metadata record at `"dir:<volume_id>:<parent_path>"`
+  (mode/uid/gid/hlc only). Each child is its own keyed entry at
+  `"dirent:<volume_id>:<dir_path>\\0<name>"` → `%{type, id}`, so adding or
+  removing a child is a single small keyed write rather than a
+  read-modify-write of a growing child-list blob. Directory listing is a
+  prefix range scan over the volume's `:file_index` tree.
 
   ## Per-volume metadata path
 
@@ -17,9 +21,10 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Cross-Segment Operations
 
-  File creation and deletion span two segments (FileMeta + DirectoryEntry) and
-  use the IntentLog for crash-safe atomicity. File moves across directories also
-  use IntentLog to coordinate two DirectoryEntry updates.
+  File creation and deletion span two writes (the FileMeta and the child's
+  `dirent:` entry) and use the IntentLog for crash-safe atomicity. Renames
+  and moves also span two dirent writes (drop old, add new) and take the
+  directory intent for cross-node mutual exclusion.
   """
 
   use GenServer
@@ -52,9 +57,11 @@ defmodule NeonFS.Core.FileIndex do
   @type file_id :: String.t()
   @type volume_id :: String.t()
   @type path :: String.t()
+  @type child_info :: %{type: :file | :dir, id: binary()}
 
   @file_key_prefix "file:"
   @dir_key_prefix "dir:"
+  @dirent_key_prefix "dirent:"
 
   ## Client API
 
@@ -75,7 +82,7 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Creates a new file metadata entry.
 
-  Uses IntentLog for cross-segment atomicity (FileMeta + DirectoryEntry).
+  Uses IntentLog for cross-segment atomicity (FileMeta + child dirent).
   The parent directory must exist — use `mkdir/3` to create directories first,
   or this function auto-creates the root directory for the volume.
   """
@@ -100,18 +107,17 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Retrieves a file by volume ID and path.
 
-  Parses the path into parent_path + name, reads the DirectoryEntry to
-  find the file_id, then reads the FileMeta via `Volume.MetadataReader`.
+  Parses the path into parent_path + name, reads the child's `dirent:`
+  entry to find the file_id, then reads the FileMeta via
+  `Volume.MetadataReader`.
   """
   @spec get_by_path(volume_id(), path()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get_by_path(volume_id, path) do
     normalized = FileMeta.normalize_path(path)
     {parent, name} = split_path(normalized)
 
-    with {:ok, dir_entry} <- read_dir_entry(volume_id, parent),
-         {:ok, child} <- DirectoryEntry.get_child(dir_entry, name) do
-      resolve_child(volume_id, normalized, child)
-    else
+    case read_dirent(volume_id, parent, name) do
+      {:ok, child} -> resolve_child(volume_id, normalized, child)
       {:error, _} -> {:error, :not_found}
     end
   end
@@ -130,7 +136,7 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Updates an existing file metadata entry.
 
-  Quorum-writes the updated FileMeta. Does not modify DirectoryEntry
+  Quorum-writes the updated FileMeta. Does not modify any dirent
   (path changes should use `rename/4` or `move/5` instead).
   """
   @spec update(file_id(), keyword()) :: {:ok, FileMeta.t()} | {:error, term()}
@@ -173,7 +179,7 @@ defmodule NeonFS.Core.FileIndex do
   Deletes a file metadata entry.
 
   Uses IntentLog for cross-segment atomicity to remove both the FileMeta
-  and the DirectoryEntry child reference.
+  and the child's dirent.
   """
   @spec delete(file_id()) :: :ok | {:error, term()}
   def delete(file_id) do
@@ -231,19 +237,14 @@ defmodule NeonFS.Core.FileIndex do
   @doc """
   Lists directory contents.
 
-  Quorum reads the DirectoryEntry for the given path and returns
-  the children map: `%{name => %{type: :file | :dir, id: binary()}}`.
+  Range-scans the directory's `dirent:` entries and returns the
+  children map: `%{name => %{type: :file | :dir, id: binary()}}`.
   """
   @spec list_dir(volume_id(), path()) ::
-          {:ok, %{String.t() => DirectoryEntry.child_info()}} | {:error, term()}
+          {:ok, %{String.t() => child_info()}} | {:error, term()}
   def list_dir(volume_id, dir_path) do
     normalized = FileMeta.normalize_path(dir_path)
-
-    case read_dir_entry(volume_id, normalized) do
-      {:ok, dir_entry} -> {:ok, dir_entry.children}
-      {:error, :not_found} -> {:ok, %{}}
-      {:error, reason} -> {:error, reason}
-    end
+    list_dirents(volume_id, normalized)
   end
 
   @doc """
@@ -261,19 +262,16 @@ defmodule NeonFS.Core.FileIndex do
   def list_dir_full(volume_id, dir_path) do
     normalized = FileMeta.normalize_path(dir_path)
 
-    case read_dir_entry(volume_id, normalized) do
-      {:ok, dir_entry} ->
+    case list_dirents(volume_id, normalized) do
+      {:ok, children} ->
         entries =
-          Enum.map(dir_entry.children, fn {name, child_info} ->
+          Enum.map(children, fn {name, child_info} ->
             child_path = Path.join(normalized, name)
             attrs = resolve_child_attrs(child_info, volume_id, child_path)
             {name, child_path, attrs}
           end)
 
         {:ok, entries}
-
-      {:error, :not_found} ->
-        {:ok, []}
 
       {:error, reason} ->
         {:error, reason}
@@ -523,7 +521,7 @@ defmodule NeonFS.Core.FileIndex do
            :ok <- ensure_parent_dirs(file.volume_id, parent_path),
            :ok <- write_file(file),
            :ok <-
-             add_dir_child(file.volume_id, parent_path, name, :file, file.id) do
+             write_dirent(file.volume_id, parent_path, name, :file, file.id) do
         complete_intent(intent_id)
         :ets.insert(:file_index_by_id, {file.id, file})
 
@@ -692,7 +690,7 @@ defmodule NeonFS.Core.FileIndex do
         with {:ok, intent_id} <- try_acquire_intent(intent),
              :ok <- delete_file_meta(file),
              :ok <-
-               remove_dir_child(file.volume_id, parent_path, name) do
+               delete_dirent(file.volume_id, parent_path, name) do
           complete_intent(intent_id)
           delete_file_from_ets(file_id, file)
           :ok
@@ -747,7 +745,7 @@ defmodule NeonFS.Core.FileIndex do
 
     with {:ok, intent_id} <- try_acquire_intent(intent),
          :ok <- write_file(detached_file),
-         :ok <- remove_dir_child(file.volume_id, parent_path, name) do
+         :ok <- delete_dirent(file.volume_id, parent_path, name) do
       complete_intent(intent_id)
       :ets.insert(:file_index_by_id, {file.id, detached_file})
 
@@ -859,7 +857,7 @@ defmodule NeonFS.Core.FileIndex do
          :ok <- do_ensure_root_dir(volume_id),
          :ok <- ensure_parent_dirs(volume_id, parent_path),
          :ok <- write_dir_entry(new_dir),
-         :ok <- add_dir_child(volume_id, parent_path, name, :dir, dir_id) do
+         :ok <- write_dirent(volume_id, parent_path, name, :dir, dir_id) do
       safe_broadcast(volume_id, %DirCreated{volume_id: volume_id, path: normalized})
       {:ok, new_dir}
     end
@@ -867,16 +865,47 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Rename (within same directory)
 
+  # A dirent is per-child, so a rename is a delete-old + put-new pair
+  # rather than a single blob rewrite. Acquire the directory intent for
+  # cross-node mutual exclusion (same conflict key as `move`), write the
+  # new name first then drop the old, so a crash leaves a recoverable
+  # duplicate rather than a vanished entry.
   defp do_rename(volume_id, parent_path, old_name, new_name) do
     normalized = FileMeta.normalize_path(parent_path)
 
-    with {:ok, dir_entry} <- read_dir_entry(volume_id, normalized),
-         child_result = DirectoryEntry.get_child(dir_entry, old_name),
-         {:ok, updated_entry} <- DirectoryEntry.rename_child(dir_entry, old_name, new_name),
-         :ok <- write_dir_entry(updated_entry) do
-      broadcast_rename_event(volume_id, child_result, normalized, old_name, new_name)
+    with {:ok, child} <- read_dirent(volume_id, normalized, old_name),
+         :ok <- check_rename_target(volume_id, normalized, old_name, new_name),
+         {:ok, intent_id} <- try_acquire_intent(rename_intent(volume_id, normalized)),
+         :ok <- write_dirent(volume_id, normalized, new_name, child.type, child.id),
+         :ok <- delete_renamed_old(volume_id, normalized, old_name, new_name) do
+      complete_intent(intent_id)
+      broadcast_rename_event(volume_id, child, normalized, old_name, new_name)
       :ok
     end
+  end
+
+  defp check_rename_target(_volume_id, _dir, name, name), do: :ok
+
+  defp check_rename_target(volume_id, dir, _old_name, new_name) do
+    case read_dirent(volume_id, dir, new_name) do
+      {:ok, _} -> {:error, AlreadyExists.from_reason(:already_exists, new_name)}
+      {:error, :not_found} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp delete_renamed_old(_volume_id, _dir, name, name), do: :ok
+
+  defp delete_renamed_old(volume_id, dir, old_name, _new_name),
+    do: delete_dirent(volume_id, dir, old_name)
+
+  defp rename_intent(volume_id, dir) do
+    Intent.new(
+      id: UUIDv7.generate(),
+      operation: :file_rename,
+      conflict_key: {:dir, volume_id, dir},
+      params: %{volume_id: volume_id, dir: dir}
+    )
   end
 
   ## Private — Move (across directories)
@@ -898,13 +927,12 @@ defmodule NeonFS.Core.FileIndex do
         }
       )
 
-    with {:ok, source_entry} <- read_dir_entry(volume_id, source_normalized),
-         {:ok, child} <- DirectoryEntry.get_child(source_entry, name),
+    with {:ok, child} <- read_dirent(volume_id, source_normalized, name),
          {:ok, intent_id} <- try_acquire_intent(intent),
          :ok <-
-           remove_dir_child(volume_id, source_normalized, name),
+           write_dirent(volume_id, dest_normalized, name, child.type, child.id),
          :ok <-
-           add_dir_child(volume_id, dest_normalized, name, child.type, child.id) do
+           delete_dirent(volume_id, source_normalized, name) do
       complete_intent(intent_id)
 
       broadcast_move_event(volume_id, child, source_normalized, dest_normalized, name)
@@ -952,7 +980,7 @@ defmodule NeonFS.Core.FileIndex do
     {parent, name} = split_path(dir_path)
 
     with :ok <- write_dir_entry(dir) do
-      add_dir_child(volume_id, parent, name, :dir, UUIDv7.generate())
+      write_dirent(volume_id, parent, name, :dir, UUIDv7.generate())
     end
   end
 
@@ -996,39 +1024,64 @@ defmodule NeonFS.Core.FileIndex do
   defp normalise_writer_result({:ok, _root}), do: :ok
   defp normalise_writer_result({:error, reason}), do: {:error, reason}
 
-  defp add_dir_child(volume_id, parent_path, name, type, id) do
-    case read_dir_entry(volume_id, parent_path) do
-      {:ok, dir_entry} ->
-        updated = DirectoryEntry.add_child(dir_entry, name, type, id)
-        write_dir_entry(updated)
+  defp write_dirent(volume_id, dir_path, name, type, id) do
+    key = dirent_key(volume_id, dir_path, name)
+    encoded = MetadataValue.encode(%{type: type, id: id})
 
-      {:error, :not_found} ->
-        # Parent doesn't exist yet — create it with the child
-        new_dir =
-          DirectoryEntry.new(volume_id, parent_path)
-          |> DirectoryEntry.add_child(name, type, id)
+    volume_id
+    |> MetadataWriter.put(:file_index, key, encoded, metadata_writer_opts())
+    |> normalise_writer_result()
+  end
 
-        write_dir_entry(new_dir)
+  # Deleting a never-written key tombstones harmlessly, so this also
+  # covers the "parent gone, nothing to remove" case the blob model
+  # handled explicitly.
+  defp delete_dirent(volume_id, dir_path, name) do
+    key = dirent_key(volume_id, dir_path, name)
 
-      {:error, reason} ->
-        {:error, reason}
+    volume_id
+    |> MetadataWriter.delete(:file_index, key, metadata_writer_opts())
+    |> normalise_writer_result()
+  end
+
+  defp read_dirent(volume_id, dir_path, name) do
+    key = dirent_key(volume_id, dir_path, name)
+
+    case MetadataReader.get_file_meta(volume_id, key, metadata_reader_opts()) do
+      {:ok, value} -> {:ok, decode_dirent(value)}
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp remove_dir_child(volume_id, parent_path, name) do
-    case read_dir_entry(volume_id, parent_path) do
-      {:ok, dir_entry} ->
-        updated = DirectoryEntry.remove_child(dir_entry, name)
-        write_dir_entry(updated)
+  defp list_dirents(volume_id, dir_path) do
+    {start_key, end_key} = dirent_range(volume_id, dir_path)
 
-      {:error, :not_found} ->
-        # Parent doesn't exist — nothing to remove
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
+    case MetadataReader.range(volume_id, :file_index, start_key, end_key, metadata_reader_opts()) do
+      {:ok, raw_entries} -> decode_dirent_entries(raw_entries)
+      {:error, reason} -> {:error, reason}
     end
   end
+
+  defp decode_dirent_entries(raw_entries) do
+    Enum.reduce_while(raw_entries, {:ok, %{}}, fn {key, bytes}, {:ok, acc} ->
+      case MetadataValue.decode(bytes) do
+        {:ok, value} ->
+          {:cont, {:ok, Map.put(acc, dirent_name_from_key(key), decode_dirent(value))}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+  end
+
+  defp decode_dirent(value) do
+    %{type: decode_child_type(get_field(value, :type)), id: get_field(value, :id)}
+  end
+
+  defp decode_child_type(type) when type in [:file, "file"], do: :file
+  defp decode_child_type(type) when type in [:dir, "dir"], do: :dir
+  defp decode_child_type(_), do: :file
 
   ## Private — Directory metadata synthesis
 
@@ -1139,7 +1192,7 @@ defmodule NeonFS.Core.FileIndex do
       :ok
   end
 
-  defp broadcast_rename_event(volume_id, {:ok, child}, parent_path, old_name, new_name) do
+  defp broadcast_rename_event(volume_id, child, parent_path, old_name, new_name) do
     old_path = join_path(parent_path, old_name)
     new_path = join_path(parent_path, new_name)
 
@@ -1160,8 +1213,6 @@ defmodule NeonFS.Core.FileIndex do
         })
     end
   end
-
-  defp broadcast_rename_event(_volume_id, {:error, _}, _parent, _old, _new), do: :ok
 
   defp broadcast_move_event(volume_id, child, source_dir, dest_dir, name) do
     old_path = join_path(source_dir, name)
@@ -1192,6 +1243,28 @@ defmodule NeonFS.Core.FileIndex do
 
   defp file_key(file_id), do: @file_key_prefix <> file_id
   defp dir_key(volume_id, path), do: @dir_key_prefix <> volume_id <> ":" <> path
+
+  # `<<0>>` separates the directory path from the child name. A NUL can
+  # never appear in a path component, so a single-level listing is the
+  # range `[prefix<<0>>, prefix<<1>>)` — grandchildren (whose keys carry
+  # a `/` after the path, sorting above `<<1>>`) are excluded.
+  defp dirent_key(volume_id, dir_path, name),
+    do: dirent_prefix(volume_id, dir_path) <> name
+
+  defp dirent_prefix(volume_id, dir_path),
+    do: @dirent_key_prefix <> volume_id <> ":" <> dir_path <> <<0>>
+
+  defp dirent_range(volume_id, dir_path) do
+    base = @dirent_key_prefix <> volume_id <> ":" <> dir_path
+    {base <> <<0>>, base <> <<1>>}
+  end
+
+  defp dirent_name_from_key(key) do
+    case :binary.split(key, <<0>>) do
+      [_prefix, name] -> name
+      _ -> key
+    end
+  end
 
   ## Private — Serialisation
 

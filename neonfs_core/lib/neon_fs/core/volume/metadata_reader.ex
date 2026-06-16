@@ -186,24 +186,6 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   end
 
   @doc """
-  Walk the directory entries under `parent_path` from the volume's
-  `:file_index`. Encodes the path as a key prefix and uses
-  `range/5` to enumerate entries in sort order.
-
-  Decoded values come back as a list of `{key, value}` pairs where
-  each value has been ETF-decoded.
-  """
-  @spec list_dir(volume_id :: binary(), parent_path :: binary(), keyword()) ::
-          {:ok, [{binary(), term()}]} | read_error() | MetadataValue.decode_error()
-  def list_dir(volume_id, parent_path, opts \\ []) when is_binary(parent_path) do
-    {start_key, end_key} = dir_range_keys(parent_path)
-
-    with {:ok, raw_entries} <- range(volume_id, :file_index, start_key, end_key, opts) do
-      decode_entries(raw_entries)
-    end
-  end
-
-  @doc """
   List every node chunk hash reachable from the volume's three
   index trees (`file_index`, `chunk_index`, `stripe_index`) — both
   internal-page chunks and leaf-page chunks. Used by the
@@ -287,43 +269,6 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     with {:ok, bytes} <- get(volume_id, kind, key, opts) do
       MetadataValue.decode(bytes)
     end
-  end
-
-  defp decode_entries(raw_entries) do
-    Enum.reduce_while(raw_entries, {:ok, []}, fn {key, bytes}, {:ok, acc} ->
-      case MetadataValue.decode(bytes) do
-        {:ok, value} -> {:cont, {:ok, [{key, value} | acc]}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, entries} -> {:ok, Enum.reverse(entries)}
-      {:error, _} = err -> err
-    end
-  end
-
-  # Directory key prefix: parent_path with a trailing separator.
-  # Range is `[parent_path/, parent_path0)` — the `0` byte is the
-  # smallest byte greater than `/`, capturing every key prefixed by
-  # `parent_path/`. Empty parent_path means "root", which uses an
-  # empty prefix → full range.
-  defp dir_range_keys(""), do: {<<>>, <<>>}
-
-  defp dir_range_keys(parent_path) do
-    prefix = ensure_trailing_slash(parent_path)
-    {prefix, byte_after_prefix(prefix)}
-  end
-
-  defp ensure_trailing_slash(path) do
-    if String.ends_with?(path, "/"), do: path, else: path <> "/"
-  end
-
-  defp byte_after_prefix(prefix) do
-    # `/` is 0x2F. The smallest byte > `/` is `0` (0x30) — append it
-    # to make a key strictly greater than every key starting with
-    # `prefix`.
-    base = String.trim_trailing(prefix, "/")
-    base <> "0"
   end
 
   ## Resolve helpers (shared by get/range)
