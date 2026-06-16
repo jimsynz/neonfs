@@ -63,6 +63,13 @@ defmodule NeonFS.Core.FileIndex do
   @dir_key_prefix "dir:"
   @dirent_key_prefix "dirent:"
 
+  # Transaction batching (#1295): operations stage their metadata
+  # mutations and a windowed committer flushes them as one root-CAS per
+  # volume. The window flushes early when the mailbox drains, so a
+  # sequential caller never waits — only a concurrent burst accumulates.
+  @default_max_batch_size 128
+  @default_max_batch_delay_ms 5
+
   ## Client API
 
   @doc """
@@ -401,79 +408,97 @@ defmodule NeonFS.Core.FileIndex do
 
     :persistent_term.put({__MODULE__, :metadata_writer_opts}, metadata_writer_opts)
 
-    {:ok, %{}}
+    state = %{
+      pending: %{},
+      pending_count: 0,
+      pending_files: %{},
+      timer: nil,
+      max_batch_size:
+        Keyword.get(opts, :max_batch_size) ||
+          Application.get_env(:neonfs_core, :metadata_max_batch_size, @default_max_batch_size),
+      max_batch_delay_ms:
+        Keyword.get(opts, :max_batch_delay_ms) ||
+          Application.get_env(
+            :neonfs_core,
+            :metadata_max_batch_delay_ms,
+            @default_max_batch_delay_ms
+          )
+    }
+
+    {:ok, state}
   end
 
   @impl true
-  def handle_call({:create, file}, _from, state) do
-    reply = do_create(file)
-    {:reply, reply, state}
+  def handle_call({:create, file}, from, state) do
+    stage_or_reply(plan_create(file), from, state)
   end
 
   @impl true
-  def handle_call({:update, file_id, updates}, _from, state) do
-    reply = do_update(file_id, updates)
-    {:reply, reply, state}
+  def handle_call({:update, file_id, updates}, from, state) do
+    stage_or_reply(plan_update(file_id, updates, state.pending_files), from, state)
   end
 
   @impl true
-  def handle_call({:truncate, file_id, new_size, additional_updates}, _from, state) do
-    reply = do_truncate(file_id, new_size, additional_updates)
-    {:reply, reply, state}
+  def handle_call({:truncate, file_id, new_size, additional_updates}, from, state) do
+    stage_or_reply(
+      plan_truncate(file_id, new_size, additional_updates, state.pending_files),
+      from,
+      state
+    )
   end
 
   @impl true
-  def handle_call({:touch, file_id}, _from, state) do
-    reply = do_touch(file_id)
-    {:reply, reply, state}
+  def handle_call({:touch, file_id}, from, state) do
+    stage_or_reply(plan_touch(file_id, state.pending_files), from, state)
   end
 
   @impl true
-  def handle_call({:delete, file_id}, _from, state) do
-    reply = do_delete(file_id)
-    {:reply, reply, state}
+  def handle_call({:delete, file_id}, from, state) do
+    stage_or_reply(plan_delete(file_id, state.pending_files), from, state)
   end
 
   @impl true
-  def handle_call({:mark_detached, file_id, pinned_claim_ids}, _from, state) do
-    reply = do_mark_detached(file_id, pinned_claim_ids)
-    {:reply, reply, state}
+  def handle_call({:mark_detached, file_id, pinned_claim_ids}, from, state) do
+    stage_or_reply(
+      plan_mark_detached(file_id, pinned_claim_ids, state.pending_files),
+      from,
+      state
+    )
   end
 
   @impl true
-  def handle_call({:decrement_pin, file_id, claim_id}, _from, state) do
-    reply = do_decrement_pin(file_id, claim_id)
-    {:reply, reply, state}
+  def handle_call({:decrement_pin, file_id, claim_id}, from, state) do
+    stage_or_reply(plan_decrement_pin(file_id, claim_id, state.pending_files), from, state)
   end
 
   @impl true
-  def handle_call({:purge_detached, file_id}, _from, state) do
-    reply = do_purge_detached(file_id)
-    {:reply, reply, state}
+  def handle_call({:purge_detached, file_id}, from, state) do
+    stage_or_reply(plan_purge_detached(file_id, state.pending_files), from, state)
   end
 
   @impl true
-  def handle_call({:mkdir, volume_id, path, opts}, _from, state) do
-    reply = do_mkdir(volume_id, path, opts)
-    {:reply, reply, state}
+  def handle_call({:mkdir, volume_id, path, opts}, from, state) do
+    stage_or_reply(plan_mkdir(volume_id, path, opts), from, state)
   end
 
   @impl true
-  def handle_call({:rename, volume_id, parent_path, old_name, new_name}, _from, state) do
-    reply = do_rename(volume_id, parent_path, old_name, new_name)
-    {:reply, reply, state}
+  def handle_call({:rename, volume_id, parent_path, old_name, new_name}, from, state) do
+    stage_or_reply(plan_rename(volume_id, parent_path, old_name, new_name), from, state)
   end
 
   @impl true
-  def handle_call({:move, volume_id, source_dir, dest_dir, name}, _from, state) do
-    reply = do_move(volume_id, source_dir, dest_dir, name)
-    {:reply, reply, state}
+  def handle_call({:move, volume_id, source_dir, dest_dir, name}, from, state) do
+    stage_or_reply(plan_move(volume_id, source_dir, dest_dir, name), from, state)
   end
 
   @impl true
-  def handle_call({:ensure_root_dir, volume_id}, _from, state) do
-    reply = do_ensure_root_dir(volume_id)
-    {:reply, reply, state}
+  def handle_call({:ensure_root_dir, volume_id}, from, state) do
+    stage_or_reply(plan_ensure_root_dir(volume_id), from, state)
+  end
+
+  @impl true
+  def handle_info(:flush_batch, state) do
+    {:noreply, flush(%{state | timer: nil})}
   end
 
   # Only erase persistent_term on clean shutdown, not on crash. On crash
@@ -502,26 +527,47 @@ defmodule NeonFS.Core.FileIndex do
     :ok
   end
 
-  ## Private — Create
+  ## Private — Operation planners
+  #
+  # Each planner runs synchronously inside `handle_call` (reads,
+  # validation, intent acquire), then returns either `{:now, reply}` —
+  # answered immediately, no metadata write — or `{:stage, volume_id,
+  # mutations, on_commit, on_abort, reply}` to join the next batch.
+  # `mutations` are pure `MetadataWriter` ops; `on_commit` runs the
+  # post-durable side effects (ETS, broadcasts, intent complete) once
+  # the batch commits, `on_abort` handles a failed batch and returns
+  # that caller's reply. `file_effect` (an optional 7th element) feeds
+  # the in-batch `pending_files` overlay so a later same-file read in
+  # the same batch sees this op's result.
 
-  defp do_create(file) do
-    with :ok <- FileMeta.validate_path(file.path) do
-      {parent_path, name} = split_path(file.path)
+  defp plan_create(file) do
+    case FileMeta.validate_path(file.path) do
+      :ok -> plan_validated_create(file)
+      {:error, reason} -> {:now, {:error, reason}}
+    end
+  end
 
-      intent =
-        Intent.new(
-          id: UUIDv7.generate(),
-          operation: :file_create,
-          conflict_key: {:create, file.volume_id, parent_path, name},
-          params: %{volume_id: file.volume_id, path: file.path, file_id: file.id}
-        )
+  defp plan_validated_create(file) do
+    {parent_path, name} = split_path(file.path)
 
-      with {:ok, intent_id} <- try_acquire_intent(intent),
-           :ok <- do_ensure_root_dir(file.volume_id),
-           :ok <- ensure_parent_dirs(file.volume_id, parent_path),
-           :ok <- write_file(file),
-           :ok <-
-             write_dirent(file.volume_id, parent_path, name, :file, file.id) do
+    intent =
+      Intent.new(
+        id: UUIDv7.generate(),
+        operation: :file_create,
+        conflict_key: {:create, file.volume_id, parent_path, name},
+        params: %{volume_id: file.volume_id, path: file.path, file_id: file.id}
+      )
+
+    with {:ok, intent_id} <- try_acquire_intent(intent),
+         {:ok, ancestor_muts} <- ancestor_mutations(file.volume_id, parent_path) do
+      mutations =
+        ancestor_muts ++
+          [
+            file_put_mutation(file),
+            dirent_put_mutation(file.volume_id, parent_path, name, :file, file.id)
+          ]
+
+      on_commit = fn ->
         complete_intent(intent_id)
         :ets.insert(:file_index_by_id, {file.id, file})
 
@@ -530,57 +576,48 @@ defmodule NeonFS.Core.FileIndex do
           file_id: file.id,
           path: file.path
         })
-
-        {:ok, file}
-      else
-        {:error, %Conflict{}} ->
-          {:error, AlreadyExists.from_reason(:already_exists)}
-
-        {:error, reason} ->
-          {:error, reason}
       end
+
+      {:stage, file.volume_id, mutations, on_commit, default_on_abort(), {:ok, file},
+       {:put, file}}
+    else
+      {:error, %Conflict{}} -> {:now, {:error, AlreadyExists.from_reason(:already_exists)}}
+      {:error, reason} -> {:now, {:error, reason}}
     end
   end
 
-  ## Private — Update
-
-  defp do_update(file_id, updates) do
-    case fetch_file(file_id) do
+  defp plan_update(file_id, updates, overlay) do
+    case fetch_file(file_id, overlay) do
       {:ok, old_file} ->
         updated_file = FileMeta.update(old_file, updates)
 
-        case write_file(updated_file) do
-          :ok ->
-            :ets.insert(:file_index_by_id, {file_id, updated_file})
+        on_commit = fn ->
+          :ets.insert(:file_index_by_id, {file_id, updated_file})
 
-            safe_broadcast(updated_file.volume_id, %FileContentUpdated{
-              volume_id: updated_file.volume_id,
-              file_id: file_id,
-              path: updated_file.path
-            })
-
-            {:ok, updated_file}
-
-          {:error, reason} ->
-            {:error, reason}
+          safe_broadcast(updated_file.volume_id, %FileContentUpdated{
+            volume_id: updated_file.volume_id,
+            file_id: file_id,
+            path: updated_file.path
+          })
         end
 
+        {:stage, updated_file.volume_id, [file_put_mutation(updated_file)], on_commit,
+         default_on_abort(), {:ok, updated_file}, {:put, updated_file}}
+
       {:error, reason} ->
-        {:error, reason}
+        {:now, {:error, reason}}
     end
   end
 
-  ## Private — Truncate
-
-  defp do_truncate(file_id, new_size, additional_updates) do
-    case fetch_file(file_id) do
+  defp plan_truncate(file_id, new_size, additional_updates, overlay) do
+    case fetch_file(file_id, overlay) do
       {:ok, file} ->
         truncation_updates = truncation_updates_for(file, new_size)
         all_updates = Keyword.merge(additional_updates, truncation_updates)
-        do_update(file_id, all_updates)
+        plan_update(file_id, all_updates, overlay)
 
       {:error, reason} ->
-        {:error, reason}
+        {:now, {:error, reason}}
     end
   end
 
@@ -653,85 +690,102 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Touch (atime-only update, no version bump)
 
-  defp do_touch(file_id) do
-    case fetch_file(file_id) do
+  defp plan_touch(file_id, overlay) do
+    case fetch_file(file_id, overlay) do
       {:ok, old_file} ->
         touched_file = FileMeta.touch(old_file)
+        on_commit = fn -> :ets.insert(:file_index_by_id, {file_id, touched_file}) end
 
-        case write_file(touched_file) do
-          :ok ->
-            :ets.insert(:file_index_by_id, {file_id, touched_file})
-            {:ok, touched_file}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        {:stage, touched_file.volume_id, [file_put_mutation(touched_file)], on_commit,
+         default_on_abort(), {:ok, touched_file}, {:put, touched_file}}
 
       {:error, reason} ->
-        {:error, reason}
+        {:now, {:error, reason}}
     end
   end
 
   ## Private — Delete
 
-  defp do_delete(file_id) do
-    case fetch_file(file_id) do
-      {:ok, file} ->
-        {parent_path, name} = split_path(file.path)
+  defp plan_delete(file_id, overlay) do
+    case fetch_file(file_id, overlay) do
+      {:ok, file} -> plan_delete_file(file_id, file)
+      {:error, reason} -> {:now, {:error, reason}}
+    end
+  end
 
-        intent =
-          Intent.new(
-            id: UUIDv7.generate(),
-            operation: :file_delete,
-            conflict_key: {:file, file_id},
-            params: %{file_id: file_id, volume_id: file.volume_id, path: file.path}
-          )
+  defp plan_delete_file(file_id, file) do
+    {parent_path, name} = split_path(file.path)
 
-        with {:ok, intent_id} <- try_acquire_intent(intent),
-             :ok <- delete_file_meta(file),
-             :ok <-
-               delete_dirent(file.volume_id, parent_path, name) do
+    intent =
+      Intent.new(
+        id: UUIDv7.generate(),
+        operation: :file_delete,
+        conflict_key: {:file, file_id},
+        params: %{file_id: file_id, volume_id: file.volume_id, path: file.path}
+      )
+
+    case try_acquire_intent(intent) do
+      {:ok, intent_id} ->
+        mutations = [
+          file_delete_mutation(file),
+          dirent_delete_mutation(file.volume_id, parent_path, name)
+        ]
+
+        on_commit = fn ->
           complete_intent(intent_id)
           delete_file_from_ets(file_id, file)
-          :ok
-        else
-          {:error, reason} ->
-            # When quorum writes fail (e.g. ENOSPC), still delete from the local
-            # ETS cache so GC can identify orphaned chunks. The tombstone will be
-            # missing from the quorum store — anti-entropy or the next successful
-            # delete will reconcile. Without this fallback, a full disk creates a
-            # deadlock: file delete needs disk space for tombstone, GC needs file
-            # delete to identify orphans, disk space needs GC to free blobs.
-            Logger.warning(
-              "FileIndex delete quorum write failed (#{inspect(reason)}), " <>
-                "proceeding with local-only delete for file #{file_id}"
-            )
-
-            delete_file_from_ets(file_id, file)
-            :ok
         end
 
+        {:stage, file.volume_id, mutations, on_commit, delete_on_abort(file_id, file), :ok,
+         {:delete, file_id}}
+
       {:error, reason} ->
-        {:error, reason}
+        # When the intent can't be acquired (e.g. quorum down), still delete
+        # from the local ETS cache so GC can identify orphaned chunks — see
+        # `delete_on_abort/2` for why the deadlock matters.
+        local_only_delete(file_id, file, reason)
+        {:now, :ok}
     end
+  end
+
+  # When the batch commit fails (e.g. ENOSPC), still delete from the local
+  # ETS cache so GC can identify orphaned chunks. The tombstone will be
+  # missing from the quorum store — anti-entropy or the next successful
+  # delete reconciles. Without this fallback a full disk deadlocks: file
+  # delete needs disk for the tombstone, GC needs the delete to identify
+  # orphans, freeing disk needs GC.
+  defp delete_on_abort(file_id, file) do
+    fn reason ->
+      local_only_delete(file_id, file, reason)
+      :ok
+    end
+  end
+
+  defp local_only_delete(file_id, file, reason) do
+    Logger.warning(
+      "FileIndex delete quorum write failed (#{inspect(reason)}), " <>
+        "proceeding with local-only delete for file #{file_id}"
+    )
+
+    delete_file_from_ets(file_id, file)
   end
 
   ## Private — Mark detached (POSIX unlink-while-open, #643 of #638)
 
-  defp do_mark_detached(file_id, pinned_claim_ids) do
-    case fetch_file(file_id) do
+  defp plan_mark_detached(file_id, pinned_claim_ids, overlay) do
+    case fetch_file(file_id, overlay) do
       {:ok, %FileMeta{detached: true} = existing} ->
-        {:ok, existing}
+        {:now, {:ok, existing}}
 
       {:ok, file} ->
-        detach_file(file, pinned_claim_ids)
+        plan_detach(file, pinned_claim_ids)
 
       {:error, reason} ->
-        {:error, reason}
+        {:now, {:error, reason}}
     end
   end
 
-  defp detach_file(file, pinned_claim_ids) do
+  defp plan_detach(file, pinned_claim_ids) do
     {parent_path, name} = split_path(file.path)
     detached_file = FileMeta.update(file, detached: true, pinned_claim_ids: pinned_claim_ids)
 
@@ -743,89 +797,81 @@ defmodule NeonFS.Core.FileIndex do
         params: %{file_id: file.id, volume_id: file.volume_id, path: file.path}
       )
 
-    with {:ok, intent_id} <- try_acquire_intent(intent),
-         :ok <- write_file(detached_file),
-         :ok <- delete_dirent(file.volume_id, parent_path, name) do
-      complete_intent(intent_id)
-      :ets.insert(:file_index_by_id, {file.id, detached_file})
+    case try_acquire_intent(intent) do
+      {:ok, intent_id} ->
+        mutations = [
+          file_put_mutation(detached_file),
+          dirent_delete_mutation(file.volume_id, parent_path, name)
+        ]
 
-      safe_broadcast(file.volume_id, %FileDeleted{
-        volume_id: file.volume_id,
-        file_id: file.id,
-        path: file.path
-      })
+        on_commit = fn ->
+          complete_intent(intent_id)
+          :ets.insert(:file_index_by_id, {file.id, detached_file})
 
-      {:ok, detached_file}
+          safe_broadcast(file.volume_id, %FileDeleted{
+            volume_id: file.volume_id,
+            file_id: file.id,
+            path: file.path
+          })
+        end
+
+        {:stage, file.volume_id, mutations, on_commit, default_on_abort(), {:ok, detached_file},
+         {:put, detached_file}}
+
+      {:error, reason} ->
+        {:now, {:error, reason}}
     end
   end
 
   ## Private — Decrement pin (POSIX unlink-while-open, #644 of #638)
 
-  defp do_decrement_pin(file_id, claim_id) do
-    case fetch_file(file_id) do
+  defp plan_decrement_pin(file_id, claim_id, overlay) do
+    case fetch_file(file_id, overlay) do
       {:ok, %FileMeta{detached: true, pinned_claim_ids: ids} = file} ->
-        decrement_pinned_claim_ids(file, claim_id, ids)
+        plan_decrement(file, claim_id, ids)
 
       {:ok, _file} ->
         # Not detached — treat as no-op so duplicate / stale telemetry
         # events don't surface as errors to the GC handler.
-        :ok
+        {:now, :ok}
 
       {:error, :not_found} ->
-        :ok
+        {:now, :ok}
     end
   end
 
-  defp decrement_pinned_claim_ids(file, claim_id, ids) do
+  defp plan_decrement(file, claim_id, ids) do
     case List.delete(ids, claim_id) do
       ^ids ->
-        :ok
+        {:now, :ok}
 
       [] ->
-        purge_detached_record(file)
+        plan_purge_record(file, :ok)
 
       remaining ->
-        rewrite_pinned_claim_ids(file, remaining)
-    end
-  end
+        updated = FileMeta.update(file, pinned_claim_ids: remaining)
+        on_commit = fn -> :ets.insert(:file_index_by_id, {file.id, updated}) end
 
-  defp rewrite_pinned_claim_ids(file, remaining) do
-    updated = FileMeta.update(file, pinned_claim_ids: remaining)
-
-    case write_file(updated) do
-      :ok ->
-        :ets.insert(:file_index_by_id, {file.id, updated})
-        :ok
-
-      {:error, _} = err ->
-        err
+        {:stage, updated.volume_id, [file_put_mutation(updated)], on_commit, default_on_abort(),
+         :ok, {:put, updated}}
     end
   end
 
   ## Private — Purge detached (POSIX unlink-while-open, #644 of #638)
 
-  defp do_purge_detached(file_id) do
-    case fetch_file(file_id) do
-      {:ok, %FileMeta{detached: true} = file} ->
-        purge_detached_record(file)
-
-      {:ok, _file} ->
-        {:error, :not_detached}
-
-      {:error, :not_found} ->
-        :ok
+  defp plan_purge_detached(file_id, overlay) do
+    case fetch_file(file_id, overlay) do
+      {:ok, %FileMeta{detached: true} = file} -> plan_purge_record(file, :ok)
+      {:ok, _file} -> {:now, {:error, :not_detached}}
+      {:error, :not_found} -> {:now, :ok}
     end
   end
 
-  defp purge_detached_record(file) do
-    case delete_file_meta(file) do
-      :ok ->
-        delete_file_from_ets(file.id, file)
-        :ok
+  defp plan_purge_record(file, reply) do
+    on_commit = fn -> delete_file_from_ets(file.id, file) end
 
-      {:error, _} = err ->
-        err
-    end
+    {:stage, file.volume_id, [file_delete_mutation(file)], on_commit, default_on_abort(), reply,
+     {:delete, file.id}}
   end
 
   defp delete_file_from_ets(file_id, file) do
@@ -840,47 +886,62 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Mkdir
 
-  defp do_mkdir(volume_id, path, opts) do
+  defp plan_mkdir(volume_id, path, opts) do
     normalized = FileMeta.normalize_path(path)
     {parent_path, name} = split_path(normalized)
 
-    dir_id = UUIDv7.generate()
-    new_dir = DirectoryEntry.new(volume_id, normalized, opts)
-
     # `validate_path/1` is the storage-layer gate for the leading-slash
     # invariant — the persisted `/` root entry is only consistent if every
-    # dir path starts with `/`. `do_create` already validates; mirror it
-    # here so a non-normalised path fails loud rather than landing a dir
-    # entry inconsistent with the root (#1210). `FileMeta.normalize_path/1`
-    # only trims trailing slashes; it does not prepend a leading one.
+    # dir path starts with `/`. `FileMeta.normalize_path/1` only trims
+    # trailing slashes; it does not prepend a leading one (#1210).
     with :ok <- FileMeta.validate_path(normalized),
-         :ok <- do_ensure_root_dir(volume_id),
-         :ok <- ensure_parent_dirs(volume_id, parent_path),
-         :ok <- write_dir_entry(new_dir),
-         :ok <- write_dirent(volume_id, parent_path, name, :dir, dir_id) do
-      safe_broadcast(volume_id, %DirCreated{volume_id: volume_id, path: normalized})
-      {:ok, new_dir}
+         {:ok, ancestor_muts} <- ancestor_mutations(volume_id, parent_path) do
+      new_dir = DirectoryEntry.new(volume_id, normalized, opts)
+      dir_id = UUIDv7.generate()
+
+      mutations =
+        ancestor_muts ++
+          [
+            dir_record_mutation(new_dir),
+            dirent_put_mutation(volume_id, parent_path, name, :dir, dir_id)
+          ]
+
+      on_commit = fn ->
+        safe_broadcast(volume_id, %DirCreated{volume_id: volume_id, path: normalized})
+      end
+
+      {:stage, volume_id, mutations, on_commit, default_on_abort(), {:ok, new_dir}}
+    else
+      {:error, reason} -> {:now, {:error, reason}}
     end
   end
 
   ## Private — Rename (within same directory)
 
-  # A dirent is per-child, so a rename is a delete-old + put-new pair
-  # rather than a single blob rewrite. Acquire the directory intent for
-  # cross-node mutual exclusion (same conflict key as `move`), write the
-  # new name first then drop the old, so a crash leaves a recoverable
-  # duplicate rather than a vanished entry.
-  defp do_rename(volume_id, parent_path, old_name, new_name) do
+  # A dirent is per-child, so a rename is a delete-old + put-new pair.
+  # Both writes land in one batch commit (atomic root flip); the
+  # directory intent gives cross-node mutual exclusion (same conflict
+  # key as `move`).
+  defp plan_rename(volume_id, parent_path, old_name, new_name) do
     normalized = FileMeta.normalize_path(parent_path)
 
     with {:ok, child} <- read_dirent(volume_id, normalized, old_name),
          :ok <- check_rename_target(volume_id, normalized, old_name, new_name),
-         {:ok, intent_id} <- try_acquire_intent(rename_intent(volume_id, normalized)),
-         :ok <- write_dirent(volume_id, normalized, new_name, child.type, child.id),
-         :ok <- delete_renamed_old(volume_id, normalized, old_name, new_name) do
-      complete_intent(intent_id)
-      broadcast_rename_event(volume_id, child, normalized, old_name, new_name)
-      :ok
+         {:ok, intent_id} <- try_acquire_intent(rename_intent(volume_id, normalized)) do
+      mutations =
+        [
+          dirent_put_mutation(volume_id, normalized, new_name, child.type, child.id)
+          | rename_delete_mutations(volume_id, normalized, old_name, new_name)
+        ]
+
+      on_commit = fn ->
+        complete_intent(intent_id)
+        broadcast_rename_event(volume_id, child, normalized, old_name, new_name)
+      end
+
+      {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok}
+    else
+      {:error, reason} -> {:now, {:error, reason}}
     end
   end
 
@@ -894,10 +955,10 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  defp delete_renamed_old(_volume_id, _dir, name, name), do: :ok
+  defp rename_delete_mutations(_volume_id, _dir, name, name), do: []
 
-  defp delete_renamed_old(volume_id, dir, old_name, _new_name),
-    do: delete_dirent(volume_id, dir, old_name)
+  defp rename_delete_mutations(volume_id, dir, old_name, _new_name),
+    do: [dirent_delete_mutation(volume_id, dir, old_name)]
 
   defp rename_intent(volume_id, dir) do
     Intent.new(
@@ -910,7 +971,7 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Move (across directories)
 
-  defp do_move(volume_id, source_dir, dest_dir, name) do
+  defp plan_move(volume_id, source_dir, dest_dir, name) do
     source_normalized = FileMeta.normalize_path(source_dir)
     dest_normalized = FileMeta.normalize_path(dest_dir)
 
@@ -928,120 +989,204 @@ defmodule NeonFS.Core.FileIndex do
       )
 
     with {:ok, child} <- read_dirent(volume_id, source_normalized, name),
-         {:ok, intent_id} <- try_acquire_intent(intent),
-         :ok <-
-           write_dirent(volume_id, dest_normalized, name, child.type, child.id),
-         :ok <-
-           delete_dirent(volume_id, source_normalized, name) do
-      complete_intent(intent_id)
+         {:ok, intent_id} <- try_acquire_intent(intent) do
+      mutations = [
+        dirent_put_mutation(volume_id, dest_normalized, name, child.type, child.id),
+        dirent_delete_mutation(volume_id, source_normalized, name)
+      ]
 
-      broadcast_move_event(volume_id, child, source_normalized, dest_normalized, name)
+      on_commit = fn ->
+        complete_intent(intent_id)
+        broadcast_move_event(volume_id, child, source_normalized, dest_normalized, name)
+      end
 
-      :ok
+      {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok}
     else
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:now, {:error, reason}}
     end
   end
 
   ## Private — Root directory
 
-  defp do_ensure_root_dir(volume_id) do
-    case read_dir_entry(volume_id, "/") do
-      {:ok, _entry} -> :ok
-      {:error, _} -> write_dir_entry(DirectoryEntry.new(volume_id, "/"))
+  defp plan_ensure_root_dir(volume_id) do
+    case root_dir_mutations(volume_id) do
+      {:ok, []} ->
+        {:now, :ok}
+
+      {:ok, mutations} ->
+        {:stage, volume_id, mutations, noop_on_commit(), default_on_abort(), :ok}
     end
   end
 
-  ## Private — Parent directory creation
+  ## Private — Mutation builders
+  #
+  # Pure `MetadataWriter` ops; reads (`read_dir_entry`) hit the committed
+  # root, so two ops in one batch that both need a missing ancestor each
+  # emit the same idempotent create — last-write-wins on the same key.
 
-  defp ensure_parent_dirs(_volume_id, "/"), do: :ok
+  defp file_put_mutation(%FileMeta{} = file) do
+    {:put, :file_index, file_key(file.id), MetadataValue.encode(file_to_storable_map(file))}
+  end
 
-  defp ensure_parent_dirs(volume_id, path) do
-    parts = path_parts(path)
+  defp file_delete_mutation(%FileMeta{} = file) do
+    {:delete, :file_index, file_key(file.id)}
+  end
 
-    Enum.reduce_while(parts, :ok, fn dir_path, :ok ->
-      case ensure_single_parent_dir(volume_id, dir_path) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
+  defp dir_record_mutation(%DirectoryEntry{} = entry) do
+    {:put, :file_index, dir_key(entry.volume_id, entry.parent_path),
+     MetadataValue.encode(DirectoryEntry.to_storable_map(entry))}
+  end
+
+  defp dirent_put_mutation(volume_id, dir_path, name, type, id) do
+    {:put, :file_index, dirent_key(volume_id, dir_path, name),
+     MetadataValue.encode(%{type: type, id: id})}
+  end
+
+  defp dirent_delete_mutation(volume_id, dir_path, name) do
+    {:delete, :file_index, dirent_key(volume_id, dir_path, name)}
+  end
+
+  defp ancestor_mutations(volume_id, parent_path) do
+    with {:ok, root_muts} <- root_dir_mutations(volume_id),
+         {:ok, parent_muts} <- parent_dir_mutations(volume_id, parent_path) do
+      {:ok, root_muts ++ parent_muts}
+    end
+  end
+
+  defp root_dir_mutations(volume_id) do
+    case read_dir_entry(volume_id, "/") do
+      {:ok, _entry} -> {:ok, []}
+      {:error, _} -> {:ok, [dir_record_mutation(DirectoryEntry.new(volume_id, "/"))]}
+    end
+  end
+
+  defp parent_dir_mutations(_volume_id, "/"), do: {:ok, []}
+
+  defp parent_dir_mutations(volume_id, path) do
+    path
+    |> path_parts()
+    |> Enum.reduce_while({:ok, []}, fn dir_path, {:ok, acc} ->
+      case read_dir_entry(volume_id, dir_path) do
+        {:ok, _entry} ->
+          {:cont, {:ok, acc}}
+
+        {:error, :not_found} ->
+          {parent, name} = split_path(dir_path)
+
+          muts = [
+            dir_record_mutation(DirectoryEntry.new(volume_id, dir_path)),
+            dirent_put_mutation(volume_id, parent, name, :dir, UUIDv7.generate())
+          ]
+
+          {:cont, {:ok, acc ++ muts}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp ensure_single_parent_dir(volume_id, dir_path) do
-    case read_dir_entry(volume_id, dir_path) do
-      {:ok, _entry} -> :ok
-      {:error, :not_found} -> create_parent_dir(volume_id, dir_path)
-      {:error, reason} -> {:error, reason}
+  defp default_on_abort, do: fn reason -> {:error, reason} end
+  defp noop_on_commit, do: fn -> :ok end
+
+  ## Private — Batch committer
+  #
+  # Operations stage their mutations; a windowed flush commits each
+  # volume's pending mutations as one `MetadataWriter.apply_batch` (a
+  # single root-CAS). The window flushes early when the mailbox drains,
+  # so a lone caller commits immediately while a concurrent burst
+  # coalesces — `max_batch_size` ops or `max_batch_delay_ms` cap it.
+
+  defp stage_or_reply({:now, reply}, _from, state), do: {:reply, reply, state}
+
+  defp stage_or_reply({:stage, volume_id, mutations, on_commit, on_abort, reply}, from, state) do
+    stage_or_reply({:stage, volume_id, mutations, on_commit, on_abort, reply, nil}, from, state)
+  end
+
+  defp stage_or_reply(
+         {:stage, volume_id, mutations, on_commit, on_abort, reply, file_effect},
+         from,
+         state
+       ) do
+    txn = %{
+      from: from,
+      mutations: mutations,
+      on_commit: on_commit,
+      on_abort: on_abort,
+      reply: reply
+    }
+
+    state
+    |> stage_txn(volume_id, txn, file_effect)
+    |> after_stage()
+  end
+
+  defp stage_txn(state, volume_id, txn, file_effect) do
+    pending = Map.update(state.pending, volume_id, [txn], &[txn | &1])
+
+    %{
+      state
+      | pending: pending,
+        pending_count: state.pending_count + 1,
+        pending_files: apply_file_effect(state.pending_files, file_effect)
+    }
+  end
+
+  defp apply_file_effect(overlay, nil), do: overlay
+  defp apply_file_effect(overlay, {:put, %FileMeta{} = file}), do: Map.put(overlay, file.id, file)
+  defp apply_file_effect(overlay, {:delete, file_id}), do: Map.put(overlay, file_id, :deleted)
+
+  defp after_stage(state) do
+    cond do
+      state.pending_count >= state.max_batch_size -> {:noreply, flush(cancel_timer(state))}
+      mailbox_empty?() -> {:noreply, flush(cancel_timer(state))}
+      true -> {:noreply, arm_timer(state)}
     end
   end
 
-  defp create_parent_dir(volume_id, dir_path) do
-    dir = DirectoryEntry.new(volume_id, dir_path)
-    {parent, name} = split_path(dir_path)
+  defp flush(%{pending: pending} = state) when map_size(pending) == 0, do: state
 
-    with :ok <- write_dir_entry(dir) do
-      write_dirent(volume_id, parent, name, :dir, UUIDv7.generate())
+  defp flush(state) do
+    Enum.each(state.pending, fn {volume_id, txns} ->
+      commit_volume_batch(volume_id, Enum.reverse(txns))
+    end)
+
+    %{state | pending: %{}, pending_count: 0, pending_files: %{}}
+  end
+
+  defp commit_volume_batch(volume_id, txns) do
+    mutations = Enum.flat_map(txns, & &1.mutations)
+    result = MetadataWriter.apply_batch(volume_id, mutations, metadata_writer_opts())
+    Enum.each(txns, &reply_after_commit(&1, result))
+  end
+
+  defp reply_after_commit(txn, {:ok, _root}) do
+    txn.on_commit.()
+    GenServer.reply(txn.from, txn.reply)
+  end
+
+  defp reply_after_commit(txn, {:error, reason}) do
+    GenServer.reply(txn.from, txn.on_abort.(reason))
+  end
+
+  defp arm_timer(%{timer: nil} = state) do
+    %{state | timer: Process.send_after(self(), :flush_batch, state.max_batch_delay_ms)}
+  end
+
+  defp arm_timer(state), do: state
+
+  defp cancel_timer(%{timer: nil} = state), do: state
+
+  defp cancel_timer(%{timer: ref} = state) do
+    Process.cancel_timer(ref)
+    %{state | timer: nil}
+  end
+
+  defp mailbox_empty? do
+    case Process.info(self(), :message_queue_len) do
+      {:message_queue_len, 0} -> true
+      _ -> false
     end
-  end
-
-  ## Private — MetadataWriter operations for files
-
-  defp write_file(%FileMeta{} = file) do
-    key = file_key(file.id)
-    storable = file_to_storable_map(file)
-    encoded = MetadataValue.encode(storable)
-
-    file.volume_id
-    |> MetadataWriter.put(:file_index, key, encoded, metadata_writer_opts())
-    |> normalise_writer_result()
-  end
-
-  defp delete_file_meta(%FileMeta{} = file) do
-    key = file_key(file.id)
-
-    file.volume_id
-    |> MetadataWriter.delete(:file_index, key, metadata_writer_opts())
-    |> normalise_writer_result()
-  end
-
-  ## Private — MetadataWriter operations for directory entries
-
-  defp write_dir_entry(%DirectoryEntry{} = entry) do
-    key = dir_key(entry.volume_id, entry.parent_path)
-    storable = DirectoryEntry.to_storable_map(entry)
-    encoded = MetadataValue.encode(storable)
-
-    entry.volume_id
-    |> MetadataWriter.put(:file_index, key, encoded, metadata_writer_opts())
-    |> normalise_writer_result()
-  end
-
-  # `MetadataWriter.put/5` and `delete/4` return `{:ok, root}` on
-  # success; collapse it to the bare `:ok` that FileIndex's `do_*`
-  # chains and external callers (`Core`, `WriteOperation`, ACL manager)
-  # expect. Errors — including the structured `QuorumUnavailable` from
-  # the replica/drive quorum path (#1058) — pass straight through.
-  defp normalise_writer_result({:ok, _root}), do: :ok
-  defp normalise_writer_result({:error, reason}), do: {:error, reason}
-
-  defp write_dirent(volume_id, dir_path, name, type, id) do
-    key = dirent_key(volume_id, dir_path, name)
-    encoded = MetadataValue.encode(%{type: type, id: id})
-
-    volume_id
-    |> MetadataWriter.put(:file_index, key, encoded, metadata_writer_opts())
-    |> normalise_writer_result()
-  end
-
-  # Deleting a never-written key tombstones harmlessly, so this also
-  # covers the "parent gone, nothing to remove" case the blob model
-  # handled explicitly.
-  defp delete_dirent(volume_id, dir_path, name) do
-    key = dirent_key(volume_id, dir_path, name)
-
-    volume_id
-    |> MetadataWriter.delete(:file_index, key, metadata_writer_opts())
-    |> normalise_writer_result()
   end
 
   defp read_dirent(volume_id, dir_path, name) do
@@ -1132,7 +1277,20 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  defp fetch_file(file_id) do
+  # Reads the file record, consulting the in-batch overlay first so an
+  # operation sees a same-file mutation staged earlier in the same batch
+  # (otherwise concurrent same-file updates would read the committed
+  # value and lose each other — the #1260 invariant). Falls through to
+  # the local ETS materialisation for anything not touched this batch.
+  defp fetch_file(file_id, overlay) do
+    case Map.get(overlay, file_id) do
+      :deleted -> {:error, :not_found}
+      %FileMeta{} = file -> {:ok, file}
+      nil -> fetch_file_from_ets(file_id)
+    end
+  end
+
+  defp fetch_file_from_ets(file_id) do
     case :ets.lookup(:file_index_by_id, file_id) do
       [{^file_id, file}] -> {:ok, file}
       [] -> {:error, :not_found}

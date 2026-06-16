@@ -144,6 +144,58 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
     end
   end
 
+  describe "apply_batch/3" do
+    test "applies every mutation but commits a single CAS (#1295)" do
+      capture = build_capture()
+      opts = build_opts(capture: capture)
+
+      mutations = [
+        {:put, :file_index, "k1", "v1"},
+        {:put, :file_index, "k2", "v2"},
+        {:delete, :file_index, "k3"}
+      ]
+
+      assert {:ok, "new-root-hash"} = MetadataWriter.apply_batch("vol-1", mutations, opts)
+
+      # Three tree ops applied...
+      assert length(:ets.lookup(capture.tree_calls, :put)) == 2
+      assert length(:ets.lookup(capture.tree_calls, :delete)) == 1
+
+      # ...but only one bootstrap CAS / root flip.
+      assert length(:ets.lookup(capture.bootstrap_calls, :bootstrap)) == 1
+    end
+
+    test "threads the tree root forward across mutations" do
+      capture = build_capture()
+      opts = build_opts(capture: capture)
+
+      mutations = [
+        {:put, :file_index, "k1", "v1"},
+        {:put, :file_index, "k2", "v2"}
+      ]
+
+      assert {:ok, _} = MetadataWriter.apply_batch("vol-1", mutations, opts)
+
+      roots =
+        capture.tree_calls
+        |> :ets.lookup(:put)
+        |> Enum.map(fn {:put, _store, root, _tier, _key, _value} -> root end)
+
+      # The second put builds on the first put's new tree root.
+      assert "new-tree-root" in roots
+    end
+
+    test "an empty mutation list is a no-op with no CAS" do
+      capture = build_capture()
+      opts = build_opts(capture: capture)
+
+      assert {:ok, _root} = MetadataWriter.apply_batch("vol-1", [], opts)
+
+      assert :ets.lookup(capture.tree_calls, :put) == []
+      assert :ets.lookup(capture.bootstrap_calls, :bootstrap) == []
+    end
+  end
+
   describe "purge_tombstones/4" do
     test "errors with an empty index tree (current root is nil)" do
       capture = build_capture()

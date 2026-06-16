@@ -50,6 +50,9 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   alias NeonFS.Core.VolumeRegistry
 
   @type index_kind :: :file_index | :chunk_index | :stripe_index
+  @type mutation ::
+          {:put, index_kind(), binary(), binary()}
+          | {:delete, index_kind(), binary()}
   @type write_error ::
           MetadataReader.read_error()
           | {:error, Splode.Error.t()}
@@ -99,6 +102,36 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       end,
       fn node, remote_opts ->
         remote_call(node, opts, :delete, [volume_id, index_kind, key, remote_opts])
+      end
+    )
+  end
+
+  @doc """
+  Apply a list of index-tree mutations as a **single commit** — one
+  CoW tree rebuild across all touched index kinds, one metadata-chunk
+  replication, one `:cas_update_volume_root` flip. Returns the
+  `root_chunk_hash` the bootstrap layer now points at.
+
+  This is the transaction primitive (#1295): a caller that would
+  otherwise issue several `put/5` / `delete/4` calls — each its own
+  root flip — collapses them into one consensus round. Mutations are
+  applied in list order, threading the per-kind tree root forward, so
+  later mutations observe earlier ones (last-write-wins for the same
+  key). A stale-pointer CAS conflict retries the whole batch.
+
+  `mutations` is a list of `{:put, kind, key, value}` /
+  `{:delete, kind, key}`. An empty list is a no-op that returns the
+  current root without flipping.
+  """
+  @spec apply_batch(binary(), [mutation()], keyword()) :: {:ok, binary()} | write_error()
+  def apply_batch(volume_id, mutations, opts \\ [])
+      when is_binary(volume_id) and is_list(mutations) do
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn -> local_apply_batch(volume_id, mutations, opts) end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :apply_batch, [volume_id, mutations, remote_opts])
       end
     )
   end
@@ -293,6 +326,91 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
           err
       end
     end
+  end
+
+  # Batch variant of `apply_index_op/4`: applies a list of mutations
+  # across (possibly several) index kinds against one resolved segment,
+  # then a single segment build + replicate + CAS. Reuses the same
+  # stale-pointer retry / backoff as the single-op path.
+  defp local_apply_batch(volume_id, [], opts) do
+    with {:ok, _segment, root_entry} <- resolve_or_provision(volume_id, opts) do
+      {:ok, root_entry.root_chunk_hash}
+    end
+  end
+
+  defp local_apply_batch(volume_id, mutations, opts) do
+    retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
+    do_apply_batch(volume_id, mutations, opts, retries_left)
+  end
+
+  defp do_apply_batch(_volume_id, _mutations, _opts, retries_left) when retries_left < 0 do
+    {:error, {:cas_retries_exhausted, %{}}}
+  end
+
+  defp do_apply_batch(volume_id, mutations, opts, retries_left) do
+    with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, opts),
+         store = pick_store_handle(root_entry, opts),
+         {:ok, updated_roots, written_nodes} <-
+           run_batch_ops(mutations, store, segment.index_roots, opts),
+         {advanced_segment, _ts} = advance_segment_multi(segment, updated_roots),
+         encoded = RootSegment.encode(advanced_segment),
+         {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
+         :ok <-
+           replicate_tree_nodes(written_nodes, replica_drives, advanced_segment.durability, opts),
+         {:ok, new_root_chunk_hash} <-
+           replicate_metadata_chunk(encoded, replica_drives, advanced_segment.durability, opts) do
+      case update_bootstrap(
+             volume_id,
+             root_entry.root_chunk_hash,
+             new_root_chunk_hash,
+             replica_drives,
+             advanced_segment,
+             opts
+           ) do
+        {:ok, _} ->
+          {:ok, new_root_chunk_hash}
+
+        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+          cas_backoff(opts, retries_left)
+          do_apply_batch(volume_id, mutations, opts, retries_left - 1)
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  # Apply each mutation against the working per-kind tree root, threading
+  # the new root forward so later mutations build on earlier ones, and
+  # accumulate every written CoW node for replication.
+  defp run_batch_ops(mutations, store, initial_roots, opts) do
+    nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
+    nif_delete = Keyword.get(opts, :index_tree_delete, &Native.index_tree_delete/4)
+
+    Enum.reduce_while(mutations, {:ok, initial_roots, []}, fn mutation, {:ok, roots, nodes} ->
+      kind = elem(mutation, 1)
+      current_tree_root = Map.fetch!(roots, kind)
+      op = batch_tree_op(mutation, nif_put, nif_delete)
+
+      case run_tree_op(op, store, current_tree_root) do
+        {:ok, new_root, written} ->
+          {:cont, {:ok, Map.put(roots, kind, new_root), nodes ++ written}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+  end
+
+  defp batch_tree_op({:put, _kind, key, value}, nif_put, _nif_delete),
+    do: fn store, root -> nif_put.(store, root, "hot", key, value) end
+
+  defp batch_tree_op({:delete, _kind, key}, _nif_put, nif_delete),
+    do: fn store, root -> nif_delete.(store, root, "hot", key) end
+
+  defp advance_segment_multi(%RootSegment{} = segment, updated_roots) do
+    {timestamp, advanced} = HLC.now(segment)
+    {RootSegment.touch(%{advanced | index_roots: updated_roots}), timestamp}
   end
 
   # Same shape as `apply_index_op/4` but for changes that mutate the
