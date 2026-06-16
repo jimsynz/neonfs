@@ -273,6 +273,18 @@ defmodule NeonFS.Integration.IOSchedulerTest do
       # Write all files concurrently from the test process.
       # Each RPC call creates a separate process on the remote node,
       # giving us concurrent writes through the scheduler pipeline.
+      #
+      # `max_concurrency` is an interim 10 (was 20) pending the #1291
+      # metadata-write-throughput work (#1293). Every create serialises
+      # through the single `FileIndex` GenServer and CAS-flips the one
+      # `volume_root` ~4x with stale-pointer retries on top; at 20-wide
+      # the queue wait per create crept toward `FileIndex.create/1`'s 15s
+      # internal call timeout (~70% of it on CI-class hardware), tipping
+      # into `{:badrpc, {:timeout, ...}}` flakes (#1287). Halving the
+      # in-flight depth halves the worst-case queue wait without
+      # weakening the data-loss net below (still 50 files, still 10-wide
+      # concurrent CAS contention to catch the #1260 lost-update path).
+      # The structural fix is #1291; remove this cap when it lands.
       results =
         test_files
         |> Task.async_stream(
@@ -283,7 +295,7 @@ defmodule NeonFS.Integration.IOSchedulerTest do
               data
             ])
           end,
-          max_concurrency: 20,
+          max_concurrency: 10,
           timeout: 60_000
         )
         |> Enum.zip(test_files)
