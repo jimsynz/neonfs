@@ -282,6 +282,7 @@ Each script handles auth, error reporting, and JSON parsing; they read the token
 | `fj-pr-create <head> <title> <body\|-> [base]` | Open a PR. |
 | `fj-pr-rebase-stale [author]` | For each open PR (optionally by author), rebase on `main` and force-push if conflict-free; comment + skip on conflict. |
 | `fj-pr-merge-when-green <pr#> [--timeout S] [--poll S] [--no-merge]` | Poll until CI is green, then squash-merge. Exit codes encode outcome: 0 merged, 2 needs rebase, 3 failure, 4 timeout, 5 already closed. |
+| `fj-branch-prune [--delete] [--include-unmerged]` | List (or `--delete`) branches whose PR is merged/closed and safe to remove — squash-merge defeats `git branch --merged`, so it matches branches to PRs via the API. Dry-run by default; TSV `<verb><TAB><branch><TAB><pr#><TAB><note>`. |
 
 Two debug knobs the scripts honour: `FJ_HOST` (default `harton.dev`) and `FJ_REPO` (default `project-neon/neonfs`).
 

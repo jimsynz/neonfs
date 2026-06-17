@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Find (and optionally delete) branches whose work is finished according to
+# their pull requests. Because we squash-merge, a merged PR's commits never
+# appear in main's history, so `git branch --merged main` can't detect them —
+# this walks the PRs instead.
+#
+# Usage:
+#   fj-branch-prune                    # dry run: list deletable branches (TSV)
+#   fj-branch-prune --delete           # delete the merged-PR branches
+#   fj-branch-prune --include-unmerged # also treat closed-without-merge branches
+#                                      #   as deletable (their PRs were rejected)
+#   fj-branch-prune --include-unmerged --delete
+#
+# Protected branches (main, …) are never deletable and are ignored outright.
+# Each remaining branch is classified by its most recent PR in this repo (forks
+# are ignored). A branch is DELETABLE when:
+#   - that PR is merged (work is in main), and
+#   - it is closed (no open PR holds the branch), and
+#   - the branch tip still matches the SHA the PR recorded (nothing pushed
+#     since).
+#
+# Branches are SKIPPED (with a reason) when the tip has diverged from what the
+# PR merged (new work after merge — review by hand), or when the latest PR is
+# closed-without-merge (unless --include-unmerged). Branches with no PR, or
+# whose latest PR is still open, are left untouched and not reported.
+#
+# Why this is structured oddly: harton.dev's `/pulls` *list* endpoint takes
+# ~1 minute per page (it loads diff/merge state for every PR). So instead we
+# enumerate PR numbers via the cheap `issues?type=pulls` endpoint, newest
+# first, and fetch the individual `/pulls/{n}` records (fast) in parallel,
+# stopping as soon as every branch has been matched. Surviving branches are
+# heavily skewed towards recent PRs, so this usually finishes in seconds.
+#
+# Output is TSV so callers can pipe it:  <verb><TAB><branch><TAB><pr#><TAB><note>
+
+source "$(dirname "$(readlink -f "$0")")/_fj-lib.sh"
+
+PRUNE_PARALLEL="${PRUNE_PARALLEL:-8}"
+
+do_delete=false
+include_unmerged=false
+for arg in "$@"; do
+  case "$arg" in
+    --delete)           do_delete=true ;;
+    --include-unmerged) include_unmerged=true ;;
+    -h|--help)          sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)                  fj_die "unknown argument: $arg" ;;
+  esac
+done
+
+# Fetch one PR and print: <number>\t<head-ref>\t<head-sha>\t<merged>\t<state>
+# Restricted to PRs whose head is in this repo (forks produce no output).
+# Exported so xargs subshells can call it in parallel.
+fj_pr_row() {
+  curl -sS \
+    -H "Authorization: token $FJ_TOKEN" \
+    -H "Accept: application/json" \
+    "$FJ_API/pulls/$1" \
+  | jq -r --arg repo "$FJ_REPO" '
+      select(.head.repo.full_name == $repo)
+      | [(.number|tostring), .head.ref, .head.sha, (.merged|tostring), .state]
+      | @tsv'
+}
+export -f fj_pr_row
+
+declare -A branch_sha pending
+declare -A pr_number pr_state pr_merged pr_sha
+
+page=1
+while :; do
+  rows=$(fj_curl GET "/branches?page=$page&limit=50" \
+    | jq -r '.[] | [.name, .commit.id, (.protected | tostring)] | @tsv')
+  [ -z "$rows" ] && break
+  count=0
+  while IFS=$'\t' read -r name sha prot; do
+    [ -n "$name" ] || continue
+    count=$((count + 1))
+    [ "$prot" = "true" ] && continue   # protected branches are never deletable
+    branch_sha["$name"]=$sha
+    pending["$name"]=1
+  done <<< "$rows"
+  [ "$count" -lt 50 ] && break
+  page=$((page + 1))
+done
+[ "${#pending[@]}" -eq 0 ] && { echo "no branches in $FJ_REPO" >&2; exit 0; }
+echo "matching ${#pending[@]} branches against PRs (newest first)..." >&2
+
+page=1
+while [ "${#pending[@]}" -gt 0 ]; do
+  numbers=$(fj_curl GET "/issues?type=pulls&state=all&sort=newest&page=$page&limit=50" \
+    | jq -r '.[].number')
+  [ -z "$numbers" ] && break
+  pagecount=$(wc -l <<< "$numbers")
+
+  # Fetch this page's PRs in parallel; process highest number first so that,
+  # if a branch was reused across PRs in the same page, the latest one wins.
+  while IFS=$'\t' read -r number ref sha merged state; do
+    [ -n "${pending[$ref]:-}" ] || continue
+    pr_number["$ref"]=$number
+    pr_sha["$ref"]=$sha
+    pr_merged["$ref"]=$merged
+    pr_state["$ref"]=$state
+    unset 'pending[$ref]'
+  done < <(printf '%s\n' "$numbers" \
+             | xargs -P "$PRUNE_PARALLEL" -I {} bash -c 'fj_pr_row "$@"' _ {} \
+             | sort -t$'\t' -k1 -nr)
+
+  echo "  page $page: ${pagecount} PRs, ${#pending[@]} branches still unmatched" >&2
+  [ "$pagecount" -lt 50 ] && break
+  page=$((page + 1))
+done
+
+delete_branch() {
+  local enc
+  enc=$(jq -rn --arg b "$1" '$b | @uri')
+  fj_curl DELETE "/branches/$enc" > /dev/null
+}
+
+for branch in "${!pr_number[@]}"; do
+  number=${pr_number[$branch]}
+  state=${pr_state[$branch]}
+  merged=${pr_merged[$branch]}
+
+  [ "$state" = "open" ] && continue   # branch still in active use
+
+  if [ "${branch_sha[$branch]}" != "${pr_sha[$branch]}" ]; then
+    printf 'skip\t%s\t%s\tdiverged: commits pushed after the PR closed — review by hand\n' "$branch" "$number"
+    continue
+  fi
+  if [ "$merged" != "true" ] && [ "$include_unmerged" != "true" ]; then
+    printf 'skip\t%s\t%s\tclosed without merge — pass --include-unmerged to prune\n' "$branch" "$number"
+    continue
+  fi
+
+  note=$([ "$merged" = "true" ] && echo merged || echo closed-unmerged)
+  if [ "$do_delete" = "true" ]; then
+    if delete_branch "$branch"; then
+      printf 'deleted\t%s\t%s\t%s\n' "$branch" "$number" "$note"
+    else
+      printf 'error\t%s\t%s\tdelete failed\n' "$branch" "$number"
+    fi
+  else
+    printf 'deletable\t%s\t%s\t%s\n' "$branch" "$number" "$note"
+  fi
+done
