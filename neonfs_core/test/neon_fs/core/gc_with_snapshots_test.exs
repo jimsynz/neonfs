@@ -47,7 +47,7 @@ defmodule NeonFS.Core.GCWithSnapshotsTest do
       updated_at: DateTime.utc_now()
     }
 
-    {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, entry})
+    {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, volume_id, 0, entry})
     :ok
   end
 
@@ -152,8 +152,8 @@ defmodule NeonFS.Core.GCWithSnapshotsTest do
 
     def range(_volume_id, :file_index, _start, _end_, opts) do
       table = :persistent_term.get({__MODULE__, :table})
-      root = Keyword.fetch!(opts, :at_root)
-      :ets.insert(table, {:range, root})
+      at_roots = Keyword.fetch!(opts, :at_roots)
+      for {_shard, root} <- at_roots, do: :ets.insert(table, {:range, root})
       {:ok, []}
     end
 

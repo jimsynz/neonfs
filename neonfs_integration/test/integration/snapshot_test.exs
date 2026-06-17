@@ -36,8 +36,8 @@ defmodule NeonFS.Integration.SnapshotTest do
 
       assert snap.volume_id == volume_id
       assert snap.name == "v1"
-      assert is_binary(snap.root_chunk_hash)
-      assert byte_size(snap.root_chunk_hash) > 0
+      assert is_map(snap.root_chunk_hashes)
+      assert Enum.all?(Map.values(snap.root_chunk_hashes), &(byte_size(&1) > 0))
 
       assert {:ok, [^snap]} = PeerCluster.rpc(cluster, :node1, Snapshot, :list, [volume_id])
       assert {:ok, ^snap} = PeerCluster.rpc(cluster, :node1, Snapshot, :get, [volume_id, snap.id])

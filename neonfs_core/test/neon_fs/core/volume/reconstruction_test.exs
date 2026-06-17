@@ -45,7 +45,7 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
 
       assert [
                {:register_drive, %{drive_id: "drv-1", cluster_id: @cluster_id, node: this_node}},
-               {:register_volume_root,
+               {:register_volume_root, "vol-a", 0,
                 %{
                   volume_id: "vol-a",
                   root_chunk_hash: ^hash,
@@ -198,7 +198,7 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
           chunk_reader: fn _, ^hash -> {:ok, encoded} end
         )
 
-      [_register_a, _register_b, {:register_volume_root, payload}] = result.commands
+      [_register_a, _register_b, {:register_volume_root, _vol, 0, payload}] = result.commands
       drive_ids = Enum.map(payload.drive_locations, & &1.drive_id) |> Enum.sort()
       assert drive_ids == ["drv-a", "drv-b"]
     end

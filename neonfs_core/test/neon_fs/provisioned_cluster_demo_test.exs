@@ -45,11 +45,11 @@ defmodule NeonFS.ProvisionedClusterDemoTest do
       WriteOperation.write_file_streamed(volume.id, "/greeting.txt", [payload])
 
     {:ok, snap} = Snapshot.create(volume.id, name: "initial")
-    assert is_binary(snap.root_chunk_hash)
-    assert byte_size(snap.root_chunk_hash) == 32
+    assert is_map(snap.root_chunk_hashes)
+    assert Enum.all?(Map.values(snap.root_chunk_hashes), &(byte_size(&1) == 32))
 
     {:ok, snap_entries} =
-      MetadataReader.range(volume.id, :file_index, <<>>, <<>>, at_root: snap.root_chunk_hash)
+      MetadataReader.range(volume.id, :file_index, <<>>, <<>>, at_roots: snap.root_chunk_hashes)
 
     assert snap_entries != [],
            "snapshot's file_index tree should contain at least the file + its dir entry"

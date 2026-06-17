@@ -130,8 +130,8 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
       assert summary.commands_failed == []
 
       post_roots = volume_roots(cluster)
-      assert post_roots[volume_id_a].root_chunk_hash == hash_a
-      assert post_roots[volume_id_b].root_chunk_hash == hash_b
+      assert post_roots[volume_id_a][0].root_chunk_hash == hash_a
+      assert post_roots[volume_id_b][0].root_chunk_hash == hash_b
     end
   end
 
@@ -158,7 +158,7 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
     :ok =
       wait_until(
         fn ->
-          case Map.get(volume_roots(cluster), volume_id) do
+          case get_in(volume_roots(cluster), [volume_id, 0]) do
             %{root_chunk_hash: hash} when is_binary(hash) -> true
             _ -> false
           end
@@ -166,7 +166,7 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
         timeout: 30_000
       )
 
-    %{root_chunk_hash: hash} = Map.fetch!(volume_roots(cluster), volume_id)
+    %{root_chunk_hash: hash} = get_in(volume_roots(cluster), [volume_id, 0])
     {volume_id, hash}
   end
 

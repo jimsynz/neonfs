@@ -176,9 +176,9 @@ defmodule NeonFS.Core.GarbageCollector do
 
     enumerator.()
     |> Enum.reduce({MapSet.new(), MapSet.new()}, fn {volume_id, snapshot}, {chunks, stripes} ->
-      entries = walk_snapshot_files(reader, volume_id, snapshot.root_chunk_hash)
+      entries = walk_snapshot_files(reader, volume_id, snapshot.root_chunk_hashes)
 
-      chunks = add_snapshot_chunks(entries, reader, volume_id, snapshot.root_chunk_hash, chunks)
+      chunks = add_snapshot_chunks(entries, reader, volume_id, snapshot.root_chunk_hashes, chunks)
       stripes = add_snapshot_stripes(entries, stripes)
 
       {chunks, stripes}
@@ -207,8 +207,8 @@ defmodule NeonFS.Core.GarbageCollector do
     end
   end
 
-  defp walk_snapshot_files(reader, volume_id, root_chunk_hash) do
-    case reader.range(volume_id, :file_index, <<>>, <<>>, at_root: root_chunk_hash) do
+  defp walk_snapshot_files(reader, volume_id, root_chunk_hashes) do
+    case reader.range(volume_id, :file_index, <<>>, <<>>, at_roots: root_chunk_hashes) do
       {:ok, raw_entries} when is_list(raw_entries) ->
         Enum.flat_map(raw_entries, &decode_file_entry/1)
 
@@ -226,11 +226,11 @@ defmodule NeonFS.Core.GarbageCollector do
 
   defp decode_file_entry(_), do: []
 
-  defp add_snapshot_chunks(entries, reader, volume_id, root_chunk_hash, acc) do
+  defp add_snapshot_chunks(entries, reader, volume_id, root_chunk_hashes, acc) do
     Enum.reduce(entries, acc, fn entry, set ->
       set
       |> add_direct_chunks(entry)
-      |> add_stripe_chunks(entry, reader, volume_id, root_chunk_hash)
+      |> add_stripe_chunks(entry, reader, volume_id, root_chunk_hashes)
     end)
   end
 
@@ -239,7 +239,7 @@ defmodule NeonFS.Core.GarbageCollector do
 
   defp add_direct_chunks(set, _), do: set
 
-  defp add_stripe_chunks(set, %{stripes: stripes}, reader, volume_id, root_chunk_hash)
+  defp add_stripe_chunks(set, %{stripes: stripes}, reader, volume_id, root_chunk_hashes)
        when is_list(stripes) do
     Enum.reduce(stripes, set, fn stripe_ref, inner ->
       case stripe_ref_id(stripe_ref) do
@@ -247,7 +247,7 @@ defmodule NeonFS.Core.GarbageCollector do
           inner
 
         stripe_id ->
-          add_chunks_from_stripe(inner, reader, volume_id, stripe_id, root_chunk_hash)
+          add_chunks_from_stripe(inner, reader, volume_id, stripe_id, root_chunk_hashes)
       end
     end)
   end
@@ -258,8 +258,8 @@ defmodule NeonFS.Core.GarbageCollector do
   defp stripe_ref_id(%{"stripe_id" => sid}) when is_binary(sid), do: sid
   defp stripe_ref_id(_), do: nil
 
-  defp add_chunks_from_stripe(set, reader, volume_id, stripe_id, root_chunk_hash) do
-    case reader.get_stripe(volume_id, "stripe:" <> stripe_id, at_root: root_chunk_hash) do
+  defp add_chunks_from_stripe(set, reader, volume_id, stripe_id, root_chunk_hashes) do
+    case reader.get_stripe(volume_id, "stripe:" <> stripe_id, at_roots: root_chunk_hashes) do
       {:ok, stripe_map} when is_map(stripe_map) ->
         case Map.get(stripe_map, :chunks) || Map.get(stripe_map, "chunks") do
           chunks when is_list(chunks) -> Enum.reduce(chunks, set, &MapSet.put(&2, &1))

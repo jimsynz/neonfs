@@ -46,7 +46,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   alias NeonFS.Core.BlobStore
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.RaSupervisor
-  alias NeonFS.Core.Volume.{ChunkReplicator, HLC, MetadataReader, Provisioner, RootSegment}
+  alias NeonFS.Core.Volume.{ChunkReplicator, HLC, MetadataReader, Provisioner, RootSegment, Shard}
   alias NeonFS.Core.VolumeRegistry
 
   @type index_kind :: :file_index | :chunk_index | :stripe_index
@@ -72,7 +72,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       volume_id,
       opts,
       fn ->
-        apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
+        apply_index_op(volume_id, Shard.for_key(key), index_kind, opts, fn store,
+                                                                           current_tree_root ->
           nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
           nif_put.(store, current_tree_root, "hot", key, value)
         end)
@@ -95,7 +96,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       volume_id,
       opts,
       fn ->
-        apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
+        apply_index_op(volume_id, Shard.for_key(key), index_kind, opts, fn store,
+                                                                           current_tree_root ->
           nif_delete = Keyword.get(opts, :index_tree_delete, &Native.index_tree_delete/4)
           nif_delete.(store, current_tree_root, "hot", key)
         end)
@@ -107,23 +109,25 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   @doc """
-  Apply a list of index-tree mutations as a **single commit** — one
-  CoW tree rebuild across all touched index kinds, one metadata-chunk
-  replication, one `:cas_update_volume_root` flip. Returns the
-  `root_chunk_hash` the bootstrap layer now points at.
+  Apply a list of index-tree mutations, grouped by the shard their keys
+  belong to (#1307). Each shard's group is one CoW tree rebuild + one
+  metadata-chunk replication + one `:cas_update_volume_root` flip against
+  that shard's root. Returns `%{shard => root_chunk_hash}` for the shards
+  touched.
 
   This is the transaction primitive (#1295): a caller that would
-  otherwise issue several `put/5` / `delete/4` calls — each its own
-  root flip — collapses them into one consensus round. Mutations are
-  applied in list order, threading the per-kind tree root forward, so
-  later mutations observe earlier ones (last-write-wins for the same
-  key). A stale-pointer CAS conflict retries the whole batch.
+  otherwise issue several `put/5` / `delete/4` calls — each its own root
+  flip — collapses same-shard mutations into one consensus round.
+  Within a shard, mutations apply in list order, threading the per-kind
+  tree root forward (last-write-wins for the same key). A stale-pointer
+  CAS conflict retries that shard's batch. Across shards there is no
+  atomicity — IntentLog provides the cross-segment crash guarantee.
 
   `mutations` is a list of `{:put, kind, key, value}` /
-  `{:delete, kind, key}`. An empty list is a no-op that returns the
-  current root without flipping.
+  `{:delete, kind, key}`. An empty list is a no-op.
   """
-  @spec apply_batch(binary(), [mutation()], keyword()) :: {:ok, binary()} | write_error()
+  @spec apply_batch(binary(), [mutation()], keyword()) ::
+          {:ok, %{optional(non_neg_integer()) => binary()}} | write_error()
   def apply_batch(volume_id, mutations, opts \\ [])
       when is_binary(volume_id) and is_list(mutations) do
     with_remote_fallback(
@@ -159,8 +163,11 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     )
   end
 
+  # Tombstone reaping is volume-wide. At one shard, shard 0 is the whole
+  # volume; making this sweep every shard is part of the N>1 activation
+  # follow-on (#1307 covers the structural change at count 1).
   defp local_purge_tombstones(volume_id, index_kind, before_unix_nanos, opts) do
-    apply_index_op(volume_id, index_kind, opts, fn store, current_tree_root ->
+    apply_index_op(volume_id, 0, index_kind, opts, fn store, current_tree_root ->
       nif_purge =
         Keyword.get(opts, :index_tree_purge_tombstones, &Native.index_tree_purge_tombstones/4)
 
@@ -284,19 +291,19 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # bootstrap pointer). On a CAS conflict (`:stale_pointer`) the
   # whole flow retries — a concurrent writer flipped the pointer,
   # so we re-read and re-apply our op against their root.
-  defp apply_index_op(volume_id, index_kind, opts, tree_op) do
+  defp apply_index_op(volume_id, shard, index_kind, opts, tree_op) do
     retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
-    do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left)
+    do_apply_index_op(volume_id, shard, index_kind, opts, tree_op, retries_left)
   end
 
-  defp do_apply_index_op(_volume_id, _index_kind, _opts, _tree_op, retries_left)
+  defp do_apply_index_op(_volume_id, _shard, _index_kind, _opts, _tree_op, retries_left)
        when retries_left < 0 do
     {:error, {:cas_retries_exhausted, %{}}}
   end
 
-  defp do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left) do
+  defp do_apply_index_op(volume_id, shard, index_kind, opts, tree_op, retries_left) do
     with {:ok, segment, root_entry} <-
-           resolve_or_provision(volume_id, opts),
+           resolve_or_provision(volume_id, shard, opts),
          current_tree_root = Map.fetch!(segment.index_roots, index_kind),
          store = pick_store_handle(root_entry, opts),
          {:ok, new_tree_root, written_nodes} <- run_tree_op(tree_op, store, current_tree_root),
@@ -309,6 +316,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
            replicate_metadata_chunk(encoded, replica_drives, advanced_segment.durability, opts) do
       case update_bootstrap(
              volume_id,
+             shard,
              root_entry.root_chunk_hash,
              new_root_chunk_hash,
              replica_drives,
@@ -320,7 +328,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
         {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
           cas_backoff(opts, retries_left)
-          do_apply_index_op(volume_id, index_kind, opts, tree_op, retries_left - 1)
+          do_apply_index_op(volume_id, shard, index_kind, opts, tree_op, retries_left - 1)
 
         {:error, _} = err ->
           err
@@ -332,23 +340,36 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # across (possibly several) index kinds against one resolved segment,
   # then a single segment build + replicate + CAS. Reuses the same
   # stale-pointer retry / backoff as the single-op path.
-  defp local_apply_batch(volume_id, [], opts) do
-    with {:ok, _segment, root_entry} <- resolve_or_provision(volume_id, opts) do
-      {:ok, root_entry.root_chunk_hash}
-    end
-  end
+  defp local_apply_batch(_volume_id, [], _opts), do: {:ok, %{}}
 
+  # Mutations are grouped by the shard their key belongs to (#1307); each
+  # shard's group commits to its own root in one CAS. A cross-shard batch
+  # is therefore several independent CAS flips — IntentLog provides the
+  # cross-segment crash atomicity the single-flip case used to give for
+  # free. Returns `%{shard => new_root_chunk_hash}`.
   defp local_apply_batch(volume_id, mutations, opts) do
-    retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
-    do_apply_batch(volume_id, mutations, opts, retries_left)
+    mutations
+    |> Enum.group_by(&Shard.for_key(mutation_key(&1)))
+    |> Enum.reduce_while({:ok, %{}}, fn {shard, shard_mutations}, {:ok, acc} ->
+      retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
+
+      case do_apply_batch(volume_id, shard, shard_mutations, opts, retries_left) do
+        {:ok, root} -> {:cont, {:ok, Map.put(acc, shard, root)}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
   end
 
-  defp do_apply_batch(_volume_id, _mutations, _opts, retries_left) when retries_left < 0 do
+  defp mutation_key({:put, _kind, key, _value}), do: key
+  defp mutation_key({:delete, _kind, key}), do: key
+
+  defp do_apply_batch(_volume_id, _shard, _mutations, _opts, retries_left)
+       when retries_left < 0 do
     {:error, {:cas_retries_exhausted, %{}}}
   end
 
-  defp do_apply_batch(volume_id, mutations, opts, retries_left) do
-    with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, opts),
+  defp do_apply_batch(volume_id, shard, mutations, opts, retries_left) do
+    with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, shard, opts),
          store = pick_store_handle(root_entry, opts),
          {:ok, updated_roots, written_nodes} <-
            run_batch_ops(mutations, store, segment.index_roots, opts),
@@ -361,6 +382,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
            replicate_metadata_chunk(encoded, replica_drives, advanced_segment.durability, opts) do
       case update_bootstrap(
              volume_id,
+             shard,
              root_entry.root_chunk_hash,
              new_root_chunk_hash,
              replica_drives,
@@ -372,7 +394,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
         {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
           cas_backoff(opts, retries_left)
-          do_apply_batch(volume_id, mutations, opts, retries_left - 1)
+          do_apply_batch(volume_id, shard, mutations, opts, retries_left - 1)
 
         {:error, _} = err ->
           err
@@ -413,10 +435,11 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     {RootSegment.touch(%{advanced | index_roots: updated_roots}), timestamp}
   end
 
-  # Same shape as `apply_index_op/4` but for changes that mutate the
+  # Same shape as `apply_index_op` but for changes that mutate the
   # segment header itself (schedules, future cluster-meta fields)
-  # rather than an index tree. The CAS-retry / replicate / bootstrap-
-  # update flow is identical past the segment build.
+  # rather than an index tree. Volume-level header fields live on the
+  # shard-0 segment (the N>1 question of where per-volume fields are
+  # canonical is part of the activation follow-on).
   defp apply_segment_op(volume_id, opts, segment_transform) do
     retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
     do_apply_segment_op(volume_id, opts, segment_transform, retries_left)
@@ -427,7 +450,9 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   defp do_apply_segment_op(volume_id, opts, transform, retries_left) do
-    with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, opts),
+    shard = 0
+
+    with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, shard, opts),
          updated_segment = RootSegment.touch(transform.(segment)),
          encoded = RootSegment.encode(updated_segment),
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
@@ -435,6 +460,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
            replicate_metadata_chunk(encoded, replica_drives, updated_segment.durability, opts) do
       case update_bootstrap(
              volume_id,
+             shard,
              root_entry.root_chunk_hash,
              new_root_chunk_hash,
              replica_drives,
@@ -475,15 +501,17 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # Returns the same `{:ok, segment, root_entry}` shape as
   # `MetadataReader.resolve_segment_for_write/2`. Provisioning errors
   # surface as `{:error, _}`.
-  defp resolve_or_provision(volume_id, opts) do
-    case MetadataReader.resolve_segment_for_write(volume_id, opts) do
+  defp resolve_or_provision(volume_id, shard, opts) do
+    case MetadataReader.resolve_segment_for_write(volume_id, shard, opts) do
       {:ok, _segment, _root_entry} = ok ->
         ok
 
       {:error, :not_found} ->
+        # Provisioning registers every shard root, so re-resolve the one
+        # this write targets afterwards.
         with {:ok, volume} <- fetch_volume(volume_id, opts),
              :ok <- provision_volume(volume, opts) do
-          MetadataReader.resolve_segment_for_write(volume_id, opts)
+          MetadataReader.resolve_segment_for_write(volume_id, shard, opts)
         end
 
       {:error, _} = err ->
@@ -635,6 +663,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   defp update_bootstrap(
          volume_id,
+         shard,
          expected_previous_hash,
          new_root_chunk_hash,
          replica_drives,
@@ -650,7 +679,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     }
 
     command =
-      {:cas_update_volume_root, volume_id, expected_previous_hash, update_payload}
+      {:cas_update_volume_root, volume_id, shard, expected_previous_hash, update_payload}
 
     case bootstrap_registrar.(command) do
       :ok -> {:ok, :updated}

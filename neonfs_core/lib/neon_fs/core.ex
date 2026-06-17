@@ -91,8 +91,11 @@ defmodule NeonFS.Core do
     end
   end
 
+  # The replica nodes are the same across a volume's shards at provision
+  # time; shard 0 always exists, so it answers "which nodes hold this
+  # volume's metadata" (#1307).
   defp fetch_volume_root(volume_id) do
-    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id, 0)) do
       {:ok, nil} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
       {:ok, entry} -> {:ok, entry}
       {:error, _} = error -> error

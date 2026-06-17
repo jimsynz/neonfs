@@ -140,8 +140,25 @@ defmodule NeonFS.CLI.Handler.Snapshots do
       volume_id: snap.volume_id,
       volume_name: volume_name,
       name: snap.name,
-      root_chunk_hash_hex: Base.encode16(snap.root_chunk_hash, case: :lower),
+      root_chunk_hash_hex: render_root_hashes(snap.root_chunk_hashes),
       created_at: DateTime.to_iso8601(snap.created_at)
     }
+  end
+
+  # Render the per-shard roots (#1307) as a single hex string for the
+  # CLI: one shard → the bare hash (identical to the pre-sharding
+  # output); multiple → `shard:hex` pairs joined by `,`.
+  defp render_root_hashes(root_chunk_hashes) do
+    case Map.to_list(root_chunk_hashes) do
+      [{_shard, hash}] ->
+        Base.encode16(hash, case: :lower)
+
+      pairs ->
+        pairs
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.map_join(",", fn {shard, hash} ->
+          "#{shard}:#{Base.encode16(hash, case: :lower)}"
+        end)
+    end
   end
 end

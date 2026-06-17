@@ -28,7 +28,7 @@ defmodule NeonFS.Core.Volume.Provisioner do
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.Volume
-  alias NeonFS.Core.Volume.{ChunkReplicator, DriveSelector, RootSegment}
+  alias NeonFS.Core.Volume.{ChunkReplicator, DriveSelector, RootSegment, Shard}
 
   @type chunk_hash :: binary()
   @type provision_error ::
@@ -77,9 +77,21 @@ defmodule NeonFS.Core.Volume.Provisioner do
          {:ok, hash, _summary} <-
            replicate(chunk_replicator, encoded, replica_drives, min_copies),
          entry = build_entry(volume, hash, replica_drives),
-         {:ok, _} <- register_root(bootstrap_registrar, entry) do
+         :ok <- register_all_shards(bootstrap_registrar, volume.id, entry) do
       {:ok, hash}
     end
+  end
+
+  # Each shard starts with an identical empty root segment, so they all
+  # share the one content-addressed chunk just replicated; register that
+  # hash under every shard key (#1307). Shards diverge as writes land.
+  defp register_all_shards(registrar, volume_id, entry) do
+    Enum.reduce_while(Shard.all(), :ok, fn shard, :ok ->
+      case register_root(registrar, volume_id, shard, entry) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
   end
 
   ## Internals
@@ -157,8 +169,8 @@ defmodule NeonFS.Core.Volume.Provisioner do
     }
   end
 
-  defp register_root(registrar, entry) do
-    case registrar.({:register_volume_root, entry}) do
+  defp register_root(registrar, volume_id, shard, entry) do
+    case registrar.({:register_volume_root, volume_id, shard, entry}) do
       :ok -> {:ok, :registered}
       {:ok, _} = ok -> ok
       {:error, reason} -> {:error, {:bootstrap_register_failed, reason}}

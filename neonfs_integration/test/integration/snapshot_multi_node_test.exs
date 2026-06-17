@@ -39,7 +39,7 @@ defmodule NeonFS.Integration.SnapshotMultiNodeTest do
                "node #{node} did not see the snapshot"
 
         assert stored.id == snap.id
-        assert stored.root_chunk_hash == snap.root_chunk_hash
+        assert stored.root_chunk_hashes == snap.root_chunk_hashes
         assert stored.name == "fanout"
       end
 

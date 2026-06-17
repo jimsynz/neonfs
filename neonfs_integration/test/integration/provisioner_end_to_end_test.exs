@@ -82,7 +82,7 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
     :ok =
       wait_until(
         fn ->
-          case Map.get(volume_roots(cluster), volume_id) do
+          case get_in(volume_roots(cluster), [volume_id, 0]) do
             %{root_chunk_hash: hash} when is_binary(hash) -> true
             _ -> false
           end
@@ -91,7 +91,7 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
       )
 
     %{root_chunk_hash: root_hash, drive_locations: locations} =
-      Map.fetch!(volume_roots(cluster), volume_id)
+      get_in(volume_roots(cluster), [volume_id, 0])
 
     # The bootstrap entry should record the drive that holds the
     # root segment, not just the volume id.

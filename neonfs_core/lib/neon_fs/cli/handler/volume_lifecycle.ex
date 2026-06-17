@@ -37,7 +37,7 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
          source_volume_id: source_volume.id,
          source_volume_name: source_volume_name,
          snapshot_id: snapshot.id,
-         root_chunk_hash_hex: Base.encode16(snapshot.root_chunk_hash, case: :lower)
+         root_chunk_hash_hex: render_root_hashes(snapshot.root_chunk_hashes)
        }}
     else
       {:error, reason} -> {:error, wrap_error(reason)}
@@ -176,14 +176,30 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
          pre_restore_snapshot: pre_restore_snapshot
        }) do
     %{
-      previous_root_hex: Base.encode16(previous_root, case: :lower),
-      new_root_hex: Base.encode16(new_root, case: :lower),
+      previous_root_hex: render_root_hashes(previous_root),
+      new_root_hex: render_root_hashes(new_root),
       pre_restore_snapshot_id:
         case pre_restore_snapshot do
           nil -> nil
           %Snapshot{id: id} -> id
         end
     }
+  end
+
+  # Render per-shard roots (#1307) as one hex string: a single shard is
+  # the bare hash (pre-sharding output), multiple are `shard:hex` joined.
+  defp render_root_hashes(root_chunk_hashes) do
+    case Map.to_list(root_chunk_hashes) do
+      [{_shard, hash}] ->
+        Base.encode16(hash, case: :lower)
+
+      pairs ->
+        pairs
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.map_join(",", fn {shard, hash} ->
+          "#{shard}:#{Base.encode16(hash, case: :lower)}"
+        end)
+    end
   end
 
   defp export_opts_from_map(volume, opts) do

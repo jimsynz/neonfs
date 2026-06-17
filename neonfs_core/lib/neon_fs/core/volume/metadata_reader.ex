@@ -39,6 +39,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   alias NeonFS.Core.Volume.MetadataCache
   alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.Volume.RootSegment
+  alias NeonFS.Core.Volume.Shard
 
   @type index_kind :: :file_index | :chunk_index | :stripe_index
   @type read_error ::
@@ -130,10 +131,13 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     )
   end
 
+  # A point get resolves the single shard the key belongs to (#1307).
   defp do_local_get(volume_id, index_kind, key, opts) do
-    with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts) do
+    shard = Shard.for_key(key)
+
+    with {:ok, segment, root_entry} <- resolve_segment(volume_id, shard, opts) do
       tree_root = Map.fetch!(segment.index_roots, index_kind)
-      cache_key = {index_kind, :get, key}
+      cache_key = {index_kind, :get, shard, key}
 
       cached_call(volume_id, root_entry.root_chunk_hash, cache_key, opts, fn ->
         do_index_tree_get(root_entry, tree_root, key, opts)
@@ -141,15 +145,40 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     end
   end
 
+  # A range scan spans the whole keyspace, so it walks every shard's tree
+  # and merge-sorts the results (#1307). At one shard this is a single
+  # walk; the merge keeps ascending key order across shards.
   defp do_local_range(volume_id, index_kind, start_key, end_key, opts) do
-    with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts) do
+    Shard.all()
+    |> Enum.reduce_while({:ok, []}, fn shard, {:ok, acc} ->
+      case do_local_range_shard(volume_id, index_kind, shard, start_key, end_key, opts) do
+        {:ok, entries} -> {:cont, {:ok, [entries | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, per_shard} -> {:ok, merge_sorted_entries(per_shard)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp do_local_range_shard(volume_id, index_kind, shard, start_key, end_key, opts) do
+    with {:ok, segment, root_entry} <- resolve_segment(volume_id, shard, opts) do
       tree_root = Map.fetch!(segment.index_roots, index_kind)
-      cache_key = {index_kind, :range, start_key, end_key}
+      cache_key = {index_kind, :range, shard, start_key, end_key}
 
       cached_call(volume_id, root_entry.root_chunk_hash, cache_key, opts, fn ->
         do_index_tree_range(root_entry, tree_root, start_key, end_key, opts)
       end)
     end
+  end
+
+  # Each shard's range already comes back ascending; merge the per-shard
+  # lists into one ascending-by-key list.
+  defp merge_sorted_entries(per_shard_reversed) do
+    per_shard_reversed
+    |> Enum.concat()
+    |> Enum.sort_by(fn {key, _value} -> key end)
   end
 
   @doc """
@@ -207,7 +236,21 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   @spec list_referenced_chunks(volume_id :: binary(), keyword()) ::
           {:ok, [binary()]} | read_error()
   def list_referenced_chunks(volume_id, opts \\ []) when is_binary(volume_id) do
-    with {:ok, segment, root_entry} <- resolve_segment(volume_id, opts),
+    Shard.all()
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn shard, {:ok, acc} ->
+      case list_referenced_chunks_shard(volume_id, shard, opts) do
+        {:ok, hashes} -> {:cont, {:ok, MapSet.union(acc, MapSet.new(hashes))}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, set} -> {:ok, MapSet.to_list(set)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp list_referenced_chunks_shard(volume_id, shard, opts) do
+    with {:ok, segment, root_entry} <- resolve_segment(volume_id, shard, opts),
          {:ok, store_handle} <- resolve_store_handle(root_entry, opts) do
       collect_tree_chunks(store_handle, segment, opts)
     end
@@ -286,22 +329,42 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   @spec resolve_segment_for_write(volume_id :: binary(), keyword()) ::
           {:ok, RootSegment.t(), MetadataStateMachine.volume_root_entry()} | read_error()
   def resolve_segment_for_write(volume_id, opts) when is_binary(volume_id) do
-    resolve_segment(volume_id, opts)
+    resolve_segment_for_write(volume_id, 0, opts)
   end
 
-  defp resolve_segment(volume_id, opts) do
+  @doc """
+  Shard-aware variant of `resolve_segment_for_write/2`. The write path
+  resolves the specific `{volume, shard}` root it is about to CAS (#1307).
+  """
+  @spec resolve_segment_for_write(volume_id :: binary(), non_neg_integer(), keyword()) ::
+          {:ok, RootSegment.t(), MetadataStateMachine.volume_root_entry()} | read_error()
+  def resolve_segment_for_write(volume_id, shard, opts) when is_binary(volume_id) do
+    resolve_segment(volume_id, shard, opts)
+  end
+
+  defp resolve_segment(volume_id, shard, opts) do
     cluster_state_loader = Keyword.get(opts, :cluster_state_loader, &default_cluster_loader/0)
-    bootstrap_lookup = Keyword.get(opts, :bootstrap_lookup, &default_bootstrap_lookup/1)
+    bootstrap_lookup = Keyword.get(opts, :bootstrap_lookup, &default_bootstrap_lookup/2)
     root_chunk_reader = Keyword.get(opts, :root_chunk_reader, &default_root_chunk_reader/2)
-    at_root = Keyword.get(opts, :at_root)
+    at_root = shard_at_root(opts, shard)
 
     with {:ok, cluster_state} <- load_cluster_state(cluster_state_loader),
-         {:ok, bootstrap_entry} <- bootstrap_query(bootstrap_lookup, volume_id),
+         {:ok, bootstrap_entry} <- bootstrap_query(bootstrap_lookup, volume_id, shard),
          root_entry = apply_at_root_override(bootstrap_entry, at_root),
          {:ok, chunk_bytes} <- read_root_chunk(root_chunk_reader, root_entry),
          {:ok, segment} <- decode_segment(chunk_bytes),
          :ok <- check_cluster(segment, cluster_state) do
       {:ok, segment, root_entry}
+    end
+  end
+
+  # The root hash to read a given shard at: an `:at_roots` map (per-shard,
+  # for snapshot scans) wins; a bare `:at_root` (single shard) is the
+  # fallback; otherwise the live bootstrap pointer is used.
+  defp shard_at_root(opts, shard) do
+    case Keyword.get(opts, :at_roots) do
+      roots when is_map(roots) -> Map.get(roots, shard)
+      _ -> Keyword.get(opts, :at_root)
     end
   end
 
@@ -314,7 +377,7 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   # node walks the same logical read. `__remote_dispatched` is added
   # by `try_remote_nodes/3`; everything else here is a caller-visible
   # read option that affects which tree gets walked.
-  defp forwardable_opts(opts), do: Keyword.take(opts, [:at_root])
+  defp forwardable_opts(opts), do: Keyword.take(opts, [:at_root, :at_roots])
 
   defp default_cluster_loader, do: ClusterState.load()
 
@@ -333,8 +396,8 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   # applied by the time it answers. One leader round-trip per
   # bootstrap-pointer read in exchange for read-after-write
   # linearisability.
-  defp default_bootstrap_lookup(volume_id) do
-    case RaSupervisor.query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+  defp default_bootstrap_lookup(volume_id, shard) do
+    case RaSupervisor.query(&MetadataStateMachine.get_volume_root(&1, volume_id, shard)) do
       {:ok, nil} -> {:error, :not_found}
       {:ok, entry} when is_map(entry) -> {:ok, entry}
       {:error, _} = err -> err
@@ -370,8 +433,8 @@ defmodule NeonFS.Core.Volume.MetadataReader do
     end
   end
 
-  defp bootstrap_query(lookup, volume_id) do
-    case lookup.(volume_id) do
+  defp bootstrap_query(lookup, volume_id, shard) do
+    case lookup.(volume_id, shard) do
       {:ok, entry} -> {:ok, entry}
       {:error, :not_found} = err -> err
       {:error, reason} -> {:error, {:bootstrap_query_failed, reason}}
@@ -536,9 +599,10 @@ defmodule NeonFS.Core.Volume.MetadataReader do
   defp retryable_error?(_), do: true
 
   defp remote_dispatch(volume_id, opts, fallback_err, remote_fun) do
-    bootstrap_lookup = Keyword.get(opts, :bootstrap_lookup, &default_bootstrap_lookup/1)
+    bootstrap_lookup = Keyword.get(opts, :bootstrap_lookup, &default_bootstrap_lookup/2)
 
-    case bootstrap_lookup.(volume_id) do
+    # Any shard's entry names replica-holding nodes; shard 0 always exists.
+    case bootstrap_lookup.(volume_id, 0) do
       {:ok, root_entry} ->
         candidates = candidate_remote_nodes(root_entry)
         try_remote_nodes(candidates, fallback_err, remote_fun)

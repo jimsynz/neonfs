@@ -29,7 +29,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       assert segment.index_roots.file_index == "new-tree-root"
 
       assert [{:bootstrap, command}] = :ets.lookup(capture.bootstrap_calls, :bootstrap)
-      {:cas_update_volume_root, "vol-1", expected_prev, payload} = command
+      {:cas_update_volume_root, "vol-1", _shard, expected_prev, payload} = command
       assert is_binary(expected_prev)
       assert payload.root_chunk_hash == "new-root-hash"
       assert payload.durability_cache == segment.durability
@@ -155,7 +155,10 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
         {:delete, :file_index, "k3"}
       ]
 
-      assert {:ok, "new-root-hash"} = MetadataWriter.apply_batch("vol-1", mutations, opts)
+      # All keys hash to the same shard at count 1, so they commit
+      # together as one shard batch → `%{shard => root}`.
+      assert {:ok, roots} = MetadataWriter.apply_batch("vol-1", mutations, opts)
+      assert map_size(roots) == 1
 
       # Three tree ops applied...
       assert length(:ets.lookup(capture.tree_calls, :put)) == 2
@@ -241,7 +244,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       opts =
         build_opts(
           capture: capture,
-          bootstrap_lookup: fn _ -> {:error, :ra_timeout} end
+          bootstrap_lookup: fn _, _shard -> {:error, :ra_timeout} end
         )
 
       assert {:error, {:bootstrap_query_failed, :ra_timeout}} =
@@ -333,7 +336,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       assert length(bootstrap_calls) == 2
 
       Enum.each(bootstrap_calls, fn {_, cmd} ->
-        assert match?({:cas_update_volume_root, "vol-1", _, _}, cmd)
+        assert match?({:cas_update_volume_root, "vol-1", _shard, _, _}, cmd)
       end)
     end
 
@@ -554,7 +557,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
 
     defaults = [
       cluster_state_loader: fn -> {:ok, sample_cluster_state()} end,
-      bootstrap_lookup: fn _vol -> {:ok, sample_root_entry()} end,
+      bootstrap_lookup: fn _vol, _shard -> {:ok, sample_root_entry()} end,
       root_chunk_reader: const_chunk_reader(sample_segment()),
       drive_lister: fn -> {:ok, sample_drives()} end,
       store_handle: :stub_store_handle,

@@ -100,7 +100,7 @@ defmodule NeonFS.Core.VolumeExport do
     with {:ok, snapshot} <- Snapshot.get(volume.id, snapshot_id),
          {:ok, raw_entries} <-
            MetadataReader.range(volume.id, :file_index, <<>>, <<>>,
-             at_root: snapshot.root_chunk_hash
+             at_roots: snapshot.root_chunk_hashes
            ) do
       files =
         raw_entries

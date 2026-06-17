@@ -90,10 +90,12 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:release_namespace_claims_for_holder, holder :: term()}
           | {:register_drive, entry :: drive_entry()}
           | {:deregister_drive, drive_id :: String.t()}
-          | {:register_volume_root, entry :: volume_root_entry()}
-          | {:update_volume_root, volume_id :: binary(), updates :: map()}
-          | {:cas_update_volume_root, volume_id :: binary(), expected_previous_hash :: binary(),
+          | {:register_volume_root, volume_id :: binary(), shard :: non_neg_integer(),
+             entry :: volume_root_entry()}
+          | {:update_volume_root, volume_id :: binary(), shard :: non_neg_integer(),
              updates :: map()}
+          | {:cas_update_volume_root, volume_id :: binary(), shard :: non_neg_integer(),
+             expected_previous_hash :: binary(), updates :: map()}
           | {:unregister_volume_root, volume_id :: binary()}
           | {:put_snapshot, entry :: snapshot_entry()}
           | {:delete_snapshot, volume_id :: binary(), snapshot_id :: binary()}
@@ -177,7 +179,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
           namespace_claims: %{optional(String.t()) => namespace_claim()},
           namespace_claim_seq: non_neg_integer(),
           drives: %{optional(String.t()) => drive_entry()},
-          volume_roots: %{optional(binary()) => volume_root_entry()},
+          volume_roots: %{
+            optional(binary()) => %{optional(non_neg_integer()) => volume_root_entry()}
+          },
           snapshots: %{optional(binary()) => %{optional(binary()) => snapshot_entry()}},
           redeemed_invites: %{optional(binary()) => non_neg_integer()},
           version: non_neg_integer()
@@ -215,8 +219,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
         }
 
   @typedoc """
-  Per-volume snapshot entry (#960 / epic #959). Records a frozen pointer
-  to the volume's root chunk at the moment the snapshot was created. The
+  Per-volume snapshot entry (#960 / epic #959). Records the frozen root
+  chunk hash of **every shard** (#1307) at the moment the snapshot was
+  created — `root_chunk_hashes` maps `shard => root_chunk_hash`. The
   optional `name` is purely a human label — snapshots are addressed by
   `id` and the same name may legally repeat across volume forks.
   """
@@ -224,7 +229,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           id: binary(),
           volume_id: binary(),
           name: String.t() | nil,
-          root_chunk_hash: binary(),
+          root_chunk_hashes: %{optional(non_neg_integer()) => binary()},
           created_at: DateTime.t()
         }
 
@@ -302,17 +307,29 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def get_drive(state, drive_id), do: Map.get(get_drives(state), drive_id)
 
   @doc """
-  Returns the bootstrap-layer volume-root table — `volume_id =>
-  volume_root_entry`. Empty map for pre-v13 states.
+  Returns the full bootstrap-layer volume-root table — `volume_id =>
+  %{shard => volume_root_entry}` (#1307). Empty map for pre-v13 states.
   """
-  @spec get_volume_roots(state()) :: %{optional(binary()) => volume_root_entry()}
+  @spec get_volume_roots(state()) ::
+          %{optional(binary()) => %{optional(non_neg_integer()) => volume_root_entry()}}
   def get_volume_roots(state), do: Map.get(state, :volume_roots, %{})
 
   @doc """
-  Returns a single bootstrap-layer volume-root entry by id, or `nil`.
+  Returns a volume's shard table — `%{shard => volume_root_entry}` — or
+  an empty map if the volume has no roots registered.
   """
-  @spec get_volume_root(state(), binary()) :: volume_root_entry() | nil
-  def get_volume_root(state, volume_id), do: Map.get(get_volume_roots(state), volume_id)
+  @spec get_volume_shards(state(), binary()) ::
+          %{optional(non_neg_integer()) => volume_root_entry()}
+  def get_volume_shards(state, volume_id), do: Map.get(get_volume_roots(state), volume_id, %{})
+
+  @doc """
+  Returns a single bootstrap-layer volume-root entry for `{volume_id,
+  shard}`, or `nil`.
+  """
+  @spec get_volume_root(state(), binary(), non_neg_integer()) :: volume_root_entry() | nil
+  def get_volume_root(state, volume_id, shard) do
+    state |> get_volume_shards(volume_id) |> Map.get(shard)
+  end
 
   @doc """
   Returns the snapshot for `volume_id` / `snapshot_id`, or nil.
@@ -773,6 +790,25 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {Map.put_new(state, :redeemed_invites, %{}), :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 16, 17}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 16,
+      to: 17,
+      change:
+        "shard volume_roots: %{volume_id => entry} -> %{volume_id => %{shard => entry}} (#1307)"
+    )
+
+    # No backwards compatibility (experimental, no production clusters): the
+    # per-volume root shape changed from a single entry to a shard table, and
+    # the key->shard mapping means an old single root can't be slotted into a
+    # shard meaningfully. Reset the table; volumes re-provision their shard
+    # roots on next write. Snapshots taken under the old shape are dropped for
+    # the same reason.
+    {%{state | volume_roots: %{}, snapshots: %{}}, :ok, []}
   end
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
@@ -1605,37 +1641,45 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
-  def apply(_meta, {:register_volume_root, entry}, state) do
+  def apply(_meta, {:register_volume_root, volume_id, shard, entry}, state) do
     state = ensure_bootstrap(state)
-    volume_id = Map.fetch!(entry, :volume_id)
-    new_roots = Map.put(state.volume_roots, volume_id, entry)
+    shards = Map.get(state.volume_roots, volume_id, %{})
+    new_roots = Map.put(state.volume_roots, volume_id, Map.put(shards, shard, entry))
     new_state = %{state | volume_roots: new_roots, version: state.version + 1}
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :register_volume_root],
       %{version: new_state.version},
-      %{volume_id: volume_id, root_chunk_hash_size: byte_size(entry.root_chunk_hash)}
+      %{
+        volume_id: volume_id,
+        shard: shard,
+        root_chunk_hash_size: byte_size(entry.root_chunk_hash)
+      }
     )
 
     {new_state, :ok, []}
   end
 
-  def apply(_meta, {:update_volume_root, volume_id, updates}, state) do
+  def apply(_meta, {:update_volume_root, volume_id, shard, updates}, state) do
     state = ensure_bootstrap(state)
 
-    case Map.fetch(state.volume_roots, volume_id) do
-      :error ->
+    case get_volume_root(state, volume_id, shard) do
+      nil ->
         {state, {:error, :not_found}, []}
 
-      {:ok, existing} ->
+      existing ->
         merged = Map.merge(existing, Map.put(updates, :updated_at, DateTime.utc_now()))
-        new_roots = Map.put(state.volume_roots, volume_id, merged)
-        new_state = %{state | volume_roots: new_roots, version: state.version + 1}
+
+        new_state = %{
+          state
+          | volume_roots: put_shard(state, volume_id, shard, merged),
+            version: state.version + 1
+        }
 
         :telemetry.execute(
           [:neonfs, :ra, :command, :update_volume_root],
           %{version: new_state.version},
-          %{volume_id: volume_id}
+          %{volume_id: volume_id, shard: shard}
         )
 
         {new_state, :ok, []}
@@ -1644,33 +1688,37 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   def apply(
         _meta,
-        {:cas_update_volume_root, volume_id, expected_previous_hash, updates},
+        {:cas_update_volume_root, volume_id, shard, expected_previous_hash, updates},
         state
       ) do
     state = ensure_bootstrap(state)
 
-    case Map.fetch(state.volume_roots, volume_id) do
-      :error ->
+    case get_volume_root(state, volume_id, shard) do
+      nil ->
         {state, {:error, :not_found}, []}
 
-      {:ok, %{root_chunk_hash: ^expected_previous_hash} = existing} ->
+      %{root_chunk_hash: ^expected_previous_hash} = existing ->
         merged = Map.merge(existing, Map.put(updates, :updated_at, DateTime.utc_now()))
-        new_roots = Map.put(state.volume_roots, volume_id, merged)
-        new_state = %{state | volume_roots: new_roots, version: state.version + 1}
+
+        new_state = %{
+          state
+          | volume_roots: put_shard(state, volume_id, shard, merged),
+            version: state.version + 1
+        }
 
         :telemetry.execute(
           [:neonfs, :ra, :command, :update_volume_root],
           %{version: new_state.version},
-          %{volume_id: volume_id, cas: true}
+          %{volume_id: volume_id, shard: shard, cas: true}
         )
 
         {new_state, :ok, []}
 
-      {:ok, %{root_chunk_hash: actual}} ->
+      %{root_chunk_hash: actual} ->
         :telemetry.execute(
           [:neonfs, :ra, :command, :cas_update_volume_root_stale],
           %{version: state.version},
-          %{volume_id: volume_id}
+          %{volume_id: volume_id, shard: shard}
         )
 
         {state, {:error, {:stale_pointer, expected: expected_previous_hash, actual: actual}}, []}
@@ -1978,7 +2026,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 16
+  def version, do: 17
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -2121,6 +2169,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
     state
     |> Map.put_new(:drives, %{})
     |> Map.put_new(:volume_roots, %{})
+  end
+
+  # Returns the updated `volume_roots` map with `entry` set at
+  # `{volume_id, shard}`, creating the volume's shard table if absent.
+  defp put_shard(state, volume_id, shard, entry) do
+    shards = Map.get(state.volume_roots, volume_id, %{})
+    Map.put(state.volume_roots, volume_id, Map.put(shards, shard, entry))
   end
 
   defp apply_namespace_claim(type, path, scope, holder, state) do

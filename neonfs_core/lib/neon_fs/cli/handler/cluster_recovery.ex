@@ -337,8 +337,8 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   defp summarise_command({:register_drive, %{drive_id: id}}),
     do: "register_drive #{id}"
 
-  defp summarise_command({:register_volume_root, %{volume_id: id}}),
-    do: "register_volume_root #{id}"
+  defp summarise_command({:register_volume_root, id, shard, _entry}),
+    do: "register_volume_root #{id} shard #{shard}"
 
   defp summarise_command(other), do: inspect(other)
 

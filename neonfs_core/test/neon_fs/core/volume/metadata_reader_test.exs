@@ -79,14 +79,14 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     end
 
     test "surfaces bootstrap_query_failed" do
-      opts = build_opts(bootstrap_lookup: fn _ -> {:error, :ra_timeout} end)
+      opts = build_opts(bootstrap_lookup: fn _, _shard -> {:error, :ra_timeout} end)
 
       assert {:error, {:bootstrap_query_failed, :ra_timeout}} =
                MetadataReader.get("vol-1", :file_index, "k", opts)
     end
 
     test "returns :not_found when the volume is not in the bootstrap layer" do
-      opts = build_opts(bootstrap_lookup: fn _ -> {:error, :not_found} end)
+      opts = build_opts(bootstrap_lookup: fn _, _shard -> {:error, :not_found} end)
 
       assert {:error, :not_found} =
                MetadataReader.get("vol-missing", :file_index, "k", opts)
@@ -293,7 +293,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, live_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, live_entry} end,
           root_chunk_reader: capture_reader,
           at_root: snapshot_hash
         )
@@ -327,7 +327,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, live_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, live_entry} end,
           root_chunk_reader: capture_reader,
           at_root: <<42::256>>
         )
@@ -362,7 +362,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
       assert {:ok, "snap-value"} =
                MetadataReader.get("vol-1", :file_index, "k", opts)
 
-      assert [{:put, "vol-1", ^snapshot_hash, {:file_index, :get, "k"}, "snap-value"}] =
+      assert [{:put, "vol-1", ^snapshot_hash, {:file_index, :get, 0, "k"}, "snap-value"}] =
                :ets.tab2list(table)
     end
 
@@ -459,7 +459,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, remote_entry} end,
           root_chunk_reader: fn _entry, _opts -> {:error, :io_error} end,
           remote_caller: remote_caller,
           at_root: snapshot_hash
@@ -524,7 +524,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       assert {:ok, "fresh-value"} = MetadataReader.get("vol-1", :file_index, "k", opts)
 
-      assert [{:put, "vol-1", _root_hash, {:file_index, :get, "k"}, "fresh-value"}] =
+      assert [{:put, "vol-1", _root_hash, {:file_index, :get, 0, "k"}, "fresh-value"}] =
                :ets.tab2list(table)
     end
 
@@ -572,7 +572,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
       assert {:ok, ^entries} =
                MetadataReader.range("vol-1", :file_index, "a", "z", opts)
 
-      assert [{:put, "vol-1", _root, {:file_index, :range, "a", "z"}, ^entries}] =
+      assert [{:put, "vol-1", _root, {:file_index, :range, 0, "a", "z"}, ^entries}] =
                :ets.tab2list(table)
     end
   end
@@ -596,7 +596,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, remote_entry} end,
           root_chunk_reader: fn _entry, _opts -> {:error, :io_error} end,
           remote_caller: remote_caller
         )
@@ -623,7 +623,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, remote_entry} end,
           root_chunk_reader: fn _entry, _opts ->
             {:error, {:no_local_replica, [%{node: :remote_b@host, drive_id: "drv-r"}]}}
           end,
@@ -688,7 +688,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
     test "does not dispatch when local read returns bootstrap_query_failed" do
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:error, :ra_timeout} end,
+          bootstrap_lookup: fn _, _shard -> {:error, :ra_timeout} end,
           remote_caller: fn _, _, _ -> raise "remote_caller must not be called" end
         )
 
@@ -739,7 +739,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, remote_entry} end,
           root_chunk_reader: fn _, _ -> {:error, :io_error} end,
           remote_caller: remote_caller
         )
@@ -773,7 +773,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, remote_entry} end,
           root_chunk_reader: fn _, _ -> {:error, :io_error} end,
           remote_caller: remote_caller
         )
@@ -801,7 +801,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, remote_entry} end,
           root_chunk_reader: fn _, _ ->
             {:error, {:no_local_replica, [%{node: :remote_a@host, drive_id: "drv-a"}]}}
           end,
@@ -827,7 +827,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, remote_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, remote_entry} end,
           root_chunk_reader: fn _, _ -> {:error, :io_error} end,
           remote_caller: remote_caller
         )
@@ -847,7 +847,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
 
       opts =
         build_opts(
-          bootstrap_lookup: fn _ -> {:ok, single_node_entry} end,
+          bootstrap_lookup: fn _, _shard -> {:ok, single_node_entry} end,
           root_chunk_reader: fn _, _ -> {:error, :io_error} end,
           remote_caller: fn _, _, _ -> raise "no remotes — must not be called" end
         )
@@ -904,7 +904,7 @@ defmodule NeonFS.Core.Volume.MetadataReaderTest do
   defp build_opts(extra \\ []) do
     defaults = [
       cluster_state_loader: fn -> {:ok, sample_cluster_state()} end,
-      bootstrap_lookup: fn _vol -> {:ok, sample_root_entry()} end,
+      bootstrap_lookup: fn _vol, _shard -> {:ok, sample_root_entry()} end,
       root_chunk_reader: const_chunk_reader(sample_segment()),
       store_handle: :stub_store_handle,
       index_tree_get: fn _store, _root, _tier, _key -> {:ok, "value-bytes"} end,

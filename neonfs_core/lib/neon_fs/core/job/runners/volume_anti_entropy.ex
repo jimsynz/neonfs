@@ -156,7 +156,7 @@ defmodule NeonFS.Core.Job.Runners.VolumeAntiEntropy do
   end
 
   defp load_tree_locations(volume_id) do
-    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id, 0)) do
       {:ok, %{drive_locations: locs}} when is_list(locs) -> locs
       _ -> []
     end

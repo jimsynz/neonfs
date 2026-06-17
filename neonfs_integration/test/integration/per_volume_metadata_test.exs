@@ -114,11 +114,13 @@ defmodule NeonFS.Integration.PerVolumeMetadataTest do
     end
   end
 
+  # Each volume root is sharded (#1307); at shard count 1 the volume's
+  # entry lives at shard 0.
   defp wait_for_root_chunk_hash(cluster, volume_id) do
     :ok =
       wait_until(
         fn ->
-          case Map.get(volume_roots(cluster), volume_id) do
+          case shard_0_root(cluster, volume_id) do
             %{root_chunk_hash: hash} when is_binary(hash) and byte_size(hash) > 0 -> true
             _ -> false
           end
@@ -126,7 +128,11 @@ defmodule NeonFS.Integration.PerVolumeMetadataTest do
         timeout: 30_000
       )
 
-    Map.fetch!(volume_roots(cluster), volume_id)
+    shard_0_root(cluster, volume_id)
+  end
+
+  defp shard_0_root(cluster, volume_id) do
+    get_in(volume_roots(cluster), [volume_id, 0])
   end
 
   defp volume_roots(cluster) do

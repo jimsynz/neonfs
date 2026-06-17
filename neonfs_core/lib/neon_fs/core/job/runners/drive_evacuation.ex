@@ -435,19 +435,21 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
         _ -> %{}
       end
 
-    Enum.each(volume_roots, fn {volume_id, entry} ->
-      maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive)
+    Enum.each(volume_roots, fn {volume_id, shards} ->
+      Enum.each(shards, fn {shard, entry} ->
+        maybe_rewrite_volume(volume_id, shard, entry, evac_node, evac_drive)
+      end)
     end)
   end
 
-  defp maybe_rewrite_volume(volume_id, entry, evac_node, evac_drive) do
+  defp maybe_rewrite_volume(volume_id, shard, entry, evac_node, evac_drive) do
     drive_locations = Map.get(entry, :drive_locations, [])
 
     if contains_location?(drive_locations, evac_node, evac_drive) do
       log_rewrite_result(
         volume_id,
         evac_drive,
-        rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive)
+        rewrite_one(volume_id, shard, entry, drive_locations, evac_node, evac_drive)
       )
     end
   end
@@ -466,7 +468,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     Enum.any?(locations, &(&1.node == node and &1.drive_id == drive_id))
   end
 
-  defp rewrite_one(volume_id, entry, drive_locations, evac_node, evac_drive) do
+  defp rewrite_one(volume_id, shard, entry, drive_locations, evac_node, evac_drive) do
     case select_target_drive(%{node: evac_node, drive_id: evac_drive}, :hot) do
       {:error, reason} ->
         {:error, reason}
@@ -480,7 +482,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
           |> maybe_append(replacement)
 
         command =
-          {:update_volume_root, volume_id,
+          {:update_volume_root, volume_id, shard,
            %{drive_locations: new_locations, durability_cache: entry.durability_cache}}
 
         case RaSupervisor.command(command) do

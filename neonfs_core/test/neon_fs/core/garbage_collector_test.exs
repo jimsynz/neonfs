@@ -452,7 +452,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     %{
       id: "snap-#{:erlang.unique_integer([:positive])}",
       volume_id: volume_id,
-      root_chunk_hash: root_chunk_hash,
+      root_chunk_hashes: %{0 => root_chunk_hash},
       name: nil,
       created_at: DateTime.utc_now()
     }
@@ -506,10 +506,10 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     @moduledoc false
     # Test-only stub for `NeonFS.Core.Volume.MetadataReader`. Reads
     # per-snapshot file/stripe entries from `:persistent_term` keyed by
-    # the `:at_root` opt's `root_chunk_hash`.
+    # the shard-0 `:at_roots` entry's `root_chunk_hash`.
 
     def range(_volume_id, :file_index, _start_key, _end_key, opts) do
-      root = Keyword.fetch!(opts, :at_root)
+      root = opts |> Keyword.fetch!(:at_roots) |> Map.fetch!(0)
 
       case lookup(root, :files) do
         nil -> {:ok, []}
@@ -518,7 +518,7 @@ defmodule NeonFS.Core.GarbageCollectorTest do
     end
 
     def get_stripe(_volume_id, "stripe:" <> sid, opts) do
-      root = Keyword.fetch!(opts, :at_root)
+      root = opts |> Keyword.fetch!(:at_roots) |> Map.fetch!(0)
 
       case lookup(root, :stripes) do
         nil ->

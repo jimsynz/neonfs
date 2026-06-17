@@ -2,23 +2,24 @@ defmodule NeonFS.Core.Snapshot do
   @moduledoc """
   Volume snapshots (#960 / epic #959).
 
-  A snapshot is a frozen pointer to a volume's root chunk hash at a
-  point in time. Snapshots don't carry chunk data — they share storage
-  with the live volume via the content-addressed graph. Deletion is
-  just a Ra write that removes the pin; reclamation is the GC
-  scheduler's job (separate sub-issue).
+  A snapshot is a frozen pointer to a volume's root chunk hashes at a
+  point in time — one per shard (#1307), in `root_chunk_hashes`.
+  Snapshots don't carry chunk data — they share storage with the live
+  volume via the content-addressed graph. Deletion is just a Ra write
+  that removes the pin; reclamation is the GC scheduler's job (separate
+  sub-issue).
   """
 
   alias NeonFS.Core.{MetadataStateMachine, RaSupervisor, VolumeRegistry}
 
-  @enforce_keys [:id, :volume_id, :root_chunk_hash, :created_at]
-  defstruct [:id, :volume_id, :root_chunk_hash, :created_at, :name]
+  @enforce_keys [:id, :volume_id, :root_chunk_hashes, :created_at]
+  defstruct [:id, :volume_id, :root_chunk_hashes, :created_at, :name]
 
   @type t :: %__MODULE__{
           id: binary(),
           volume_id: binary(),
           name: String.t() | nil,
-          root_chunk_hash: binary(),
+          root_chunk_hashes: %{optional(non_neg_integer()) => binary()},
           created_at: DateTime.t()
         }
 
@@ -36,12 +37,12 @@ defmodule NeonFS.Core.Snapshot do
   def create(volume_id, opts \\ []) when is_binary(volume_id) do
     name = Keyword.get(opts, :name)
 
-    with {:ok, root_chunk_hash} <- fetch_volume_root_hash(volume_id) do
+    with {:ok, root_chunk_hashes} <- fetch_volume_root_hashes(volume_id) do
       entry = %{
         id: UUIDv7.generate(),
         volume_id: volume_id,
         name: name,
-        root_chunk_hash: root_chunk_hash,
+        root_chunk_hashes: root_chunk_hashes,
         created_at: DateTime.utc_now()
       }
 
@@ -129,7 +130,7 @@ defmodule NeonFS.Core.Snapshot do
              new_volume_name,
              Keyword.put(volume_opts, :skip_provisioning?, true)
            ),
-         :ok <- register_promoted_root(new_volume, snapshot.root_chunk_hash, source_root) do
+         :ok <- register_promoted_root(new_volume, snapshot.root_chunk_hashes, source_root) do
       {:ok, new_volume}
     end
   end
@@ -175,7 +176,12 @@ defmodule NeonFS.Core.Snapshot do
       :timeout}`, …) or from `Snapshot.create/2` when `:safe` is set.
   """
   @spec restore(binary(), binary(), keyword()) ::
-          {:ok, %{previous_root: binary(), new_root: binary(), pre_restore_snapshot: t() | nil}}
+          {:ok,
+           %{
+             previous_root: %{optional(non_neg_integer()) => binary()},
+             new_root: %{optional(non_neg_integer()) => binary()},
+             pre_restore_snapshot: t() | nil
+           }}
           | {:error, term()}
   def restore(volume_id, snapshot_id, opts \\ [])
       when is_binary(volume_id) and is_binary(snapshot_id) and is_list(opts) do
@@ -183,27 +189,28 @@ defmodule NeonFS.Core.Snapshot do
     force? = Keyword.get(opts, :force, false)
 
     with {:ok, snapshot} <- get(volume_id, snapshot_id),
-         {:ok, current_root_hash} <- fetch_volume_root_hash(volume_id) do
-      do_restore(volume_id, snapshot, current_root_hash, safe?, force?)
+         {:ok, current_root_hashes} <- fetch_volume_root_hashes(volume_id) do
+      do_restore(volume_id, snapshot, current_root_hashes, safe?, force?)
     end
   end
 
   ## Private
 
-  defp do_restore(_volume_id, %{root_chunk_hash: target} = _snapshot, target, _safe?, _force?) do
-    # No-op: the live root already matches the snapshot's root.
+  defp do_restore(_volume_id, %{root_chunk_hashes: target} = _snapshot, target, _safe?, _force?) do
+    # No-op: every shard's live root already matches the snapshot.
     {:ok, %{previous_root: target, new_root: target, pre_restore_snapshot: nil}}
   end
 
-  defp do_restore(volume_id, snapshot, current_root_hash, safe?, force?) do
-    with {:ok, coverage} <- check_current_root_coverage(volume_id, current_root_hash, snapshot.id),
+  defp do_restore(volume_id, snapshot, current_root_hashes, safe?, force?) do
+    with {:ok, coverage} <-
+           check_current_root_coverage(volume_id, current_root_hashes, snapshot.id),
          {:ok, pre_restore_snapshot} <- maybe_create_pre_restore(volume_id, safe?, coverage),
          :ok <- ensure_safe_to_restore(coverage, safe?, force?),
-         :ok <- swap_volume_root(volume_id, current_root_hash, snapshot.root_chunk_hash) do
+         :ok <- swap_volume_roots(volume_id, current_root_hashes, snapshot.root_chunk_hashes) do
       {:ok,
        %{
-         previous_root: current_root_hash,
-         new_root: snapshot.root_chunk_hash,
+         previous_root: current_root_hashes,
+         new_root: snapshot.root_chunk_hashes,
          pre_restore_snapshot: pre_restore_snapshot
        }}
     end
@@ -212,23 +219,23 @@ defmodule NeonFS.Core.Snapshot do
   # `:covered` when at least one *other* snapshot pins the current
   # live root — restoring is non-destructive because the discarded
   # state is still reachable via that snapshot.
-  defp check_current_root_coverage(volume_id, current_root_hash, restoring_snapshot_id) do
+  defp check_current_root_coverage(volume_id, current_root_hashes, restoring_snapshot_id) do
     case list(volume_id) do
-      {:ok, snapshots} -> {:ok, coverage(snapshots, current_root_hash, restoring_snapshot_id)}
+      {:ok, snapshots} -> {:ok, coverage(snapshots, current_root_hashes, restoring_snapshot_id)}
       {:error, _} = err -> err
     end
   end
 
-  defp coverage(snapshots, current_root_hash, restoring_snapshot_id) do
-    if Enum.any?(snapshots, &covers?(&1, current_root_hash, restoring_snapshot_id)) do
+  defp coverage(snapshots, current_root_hashes, restoring_snapshot_id) do
+    if Enum.any?(snapshots, &covers?(&1, current_root_hashes, restoring_snapshot_id)) do
       :covered
     else
       :uncovered
     end
   end
 
-  defp covers?(%__MODULE__{} = snap, current_root_hash, restoring_snapshot_id) do
-    snap.id != restoring_snapshot_id and snap.root_chunk_hash == current_root_hash
+  defp covers?(%__MODULE__{} = snap, current_root_hashes, restoring_snapshot_id) do
+    snap.id != restoring_snapshot_id and snap.root_chunk_hashes == current_root_hashes
   end
 
   defp maybe_create_pre_restore(_volume_id, false, _coverage), do: {:ok, nil}
@@ -248,9 +255,22 @@ defmodule NeonFS.Core.Snapshot do
   defp ensure_safe_to_restore(:uncovered, _safe?, true), do: :ok
   defp ensure_safe_to_restore(:uncovered, false, false), do: {:error, :unreferenced_chunks}
 
-  defp swap_volume_root(volume_id, expected_previous_hash, new_root_chunk_hash) do
+  # Restore swaps every shard's live root to the snapshot's frozen root,
+  # CAS-guarded per shard against the live hash read for that shard.
+  defp swap_volume_roots(volume_id, current_root_hashes, new_root_hashes) do
+    Enum.reduce_while(new_root_hashes, :ok, fn {shard, new_hash}, :ok ->
+      expected = Map.fetch!(current_root_hashes, shard)
+
+      case swap_one_root(volume_id, shard, expected, new_hash) do
+        :ok -> {:cont, :ok}
+        err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp swap_one_root(volume_id, shard, expected_previous_hash, new_root_chunk_hash) do
     cmd =
-      {:cas_update_volume_root, volume_id, expected_previous_hash,
+      {:cas_update_volume_root, volume_id, shard, expected_previous_hash,
        %{root_chunk_hash: new_root_chunk_hash}}
 
     case RaSupervisor.command(cmd) do
@@ -261,11 +281,16 @@ defmodule NeonFS.Core.Snapshot do
     end
   end
 
-  defp fetch_volume_root_hash(volume_id) do
-    case RaSupervisor.query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
-      {:ok, nil} -> {:error, :volume_not_found}
-      {:ok, %{root_chunk_hash: hash}} -> {:ok, hash}
-      {:error, _} = err -> err
+  defp fetch_volume_root_hashes(volume_id) do
+    case RaSupervisor.query(&MetadataStateMachine.get_volume_shards(&1, volume_id)) do
+      {:ok, shards} when map_size(shards) == 0 ->
+        {:error, :volume_not_found}
+
+      {:ok, shards} ->
+        {:ok, Map.new(shards, fn {shard, entry} -> {shard, entry.root_chunk_hash} end)}
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -277,9 +302,9 @@ defmodule NeonFS.Core.Snapshot do
   end
 
   defp fetch_source_volume_root(source_volume_id) do
-    case RaSupervisor.query(&MetadataStateMachine.get_volume_root(&1, source_volume_id)) do
-      {:ok, nil} -> {:error, :source_volume_root_unknown}
-      {:ok, %{} = entry} -> {:ok, entry}
+    case RaSupervisor.query(&MetadataStateMachine.get_volume_shards(&1, source_volume_id)) do
+      {:ok, shards} when map_size(shards) == 0 -> {:error, :source_volume_root_unknown}
+      {:ok, shards} -> {:ok, shards}
       {:error, _} = err -> err
     end
   end
@@ -307,20 +332,25 @@ defmodule NeonFS.Core.Snapshot do
     Keyword.merge(inherited, overrides)
   end
 
-  defp register_promoted_root(new_volume, root_chunk_hash, source_root) do
-    entry = %{
-      volume_id: new_volume.id,
-      root_chunk_hash: root_chunk_hash,
-      drive_locations: source_root.drive_locations,
-      durability_cache: build_durability_cache(new_volume),
-      updated_at: DateTime.utc_now()
-    }
+  defp register_promoted_root(new_volume, root_chunk_hashes, source_shards) do
+    Enum.reduce_while(root_chunk_hashes, :ok, fn {shard, hash}, :ok ->
+      source_entry = Map.fetch!(source_shards, shard)
 
-    case RaSupervisor.command({:register_volume_root, entry}) do
-      {:ok, :ok, _leader} -> :ok
-      {:error, _} = err -> err
-      {:timeout, _} -> {:error, :timeout}
-    end
+      entry = %{
+        volume_id: new_volume.id,
+        root_chunk_hash: hash,
+        drive_locations: source_entry.drive_locations,
+        durability_cache: build_durability_cache(new_volume),
+        updated_at: DateTime.utc_now()
+      }
+
+      case RaSupervisor.command({:register_volume_root, new_volume.id, shard, entry}) do
+        {:ok, :ok, _leader} -> {:cont, :ok}
+        {:ok, {:error, _} = err, _leader} -> {:halt, err}
+        {:error, _} = err -> {:halt, err}
+        {:timeout, _} -> {:halt, {:error, :timeout}}
+      end
+    end)
   end
 
   defp build_durability_cache(%{durability: %{type: :replicate} = d}) do
@@ -340,7 +370,7 @@ defmodule NeonFS.Core.Snapshot do
       id: entry.id,
       volume_id: entry.volume_id,
       name: Map.get(entry, :name),
-      root_chunk_hash: entry.root_chunk_hash,
+      root_chunk_hashes: entry.root_chunk_hashes,
       created_at: entry.created_at
     }
   end

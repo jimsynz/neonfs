@@ -30,7 +30,8 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
 
       [{:cmd, command}] = :ets.lookup(registered_commands, :cmd)
 
-      {:register_volume_root, entry} = command
+      {:register_volume_root, volume_id, 0, entry} = command
+      assert volume_id == volume.id
       assert entry.volume_id == volume.id
       assert entry.root_chunk_hash == "hash-bytes"
       assert entry.durability_cache == volume.durability

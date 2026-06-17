@@ -227,7 +227,7 @@ defmodule NeonFS.TestCase do
   end
 
   defp assert_volume_provisioned(volume_id) do
-    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id)) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_root(&1, volume_id, 0)) do
       {:ok, %{root_chunk_hash: hash}} when is_binary(hash) and byte_size(hash) > 0 ->
         :ok
 
@@ -443,7 +443,7 @@ defmodule NeonFS.TestCase do
 
     [
       cluster_state_loader: fn -> {:ok, cluster_state} end,
-      bootstrap_lookup: fn volume_id ->
+      bootstrap_lookup: fn volume_id, _shard ->
         {:ok,
          %{
            volume_id: volume_id,
@@ -526,7 +526,7 @@ defmodule NeonFS.TestCase do
 
     [
       cluster_state_loader: fn -> {:ok, cluster_state} end,
-      bootstrap_lookup: fn volume_id ->
+      bootstrap_lookup: fn volume_id, _shard ->
         {:ok,
          %{
            volume_id: volume_id,

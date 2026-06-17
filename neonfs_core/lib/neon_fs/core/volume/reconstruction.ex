@@ -261,7 +261,10 @@ defmodule NeonFS.Core.Volume.Reconstruction do
             %{node: target_node, drive_id: drive.drive_id}
           end)
 
-        {:register_volume_root,
+        # Reconstruction rebuilds a volume's single (shard-0) root from
+        # disk; discovering all N shard roots is part of the N>1
+        # activation follow-on (#1307).
+        {:register_volume_root, volume_id, 0,
          %{
            volume_id: volume_id,
            root_chunk_hash: hash,

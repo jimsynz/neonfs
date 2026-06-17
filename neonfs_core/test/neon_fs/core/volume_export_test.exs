@@ -182,7 +182,7 @@ defmodule NeonFS.Core.VolumeExportTest do
       updated_at: DateTime.utc_now()
     }
 
-    {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, entry})
+    {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, volume_id, 0, entry})
     :ok
   end
 

@@ -19,6 +19,8 @@ defmodule NeonFS.Core.SnapshotTest do
     :ok
   end
 
+  # At shard count 1 a volume has a single shard-0 root; these tests
+  # exercise the snapshot lifecycle against that one shard.
   defp register_volume_root(volume_id, root_chunk_hash) do
     entry = %{
       volume_id: volume_id,
@@ -28,7 +30,7 @@ defmodule NeonFS.Core.SnapshotTest do
       updated_at: DateTime.utc_now()
     }
 
-    {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, entry})
+    {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, volume_id, 0, entry})
     :ok
   end
 
@@ -38,7 +40,7 @@ defmodule NeonFS.Core.SnapshotTest do
 
       assert {:ok, %Snapshot{} = snap} = Snapshot.create("vol-1")
       assert snap.volume_id == "vol-1"
-      assert snap.root_chunk_hash == <<0xAA, 0xBB>>
+      assert snap.root_chunk_hashes == %{0 => <<0xAA, 0xBB>>}
       assert is_binary(snap.id)
       assert snap.name == nil
       assert %DateTime{} = snap.created_at
@@ -156,7 +158,7 @@ defmodule NeonFS.Core.SnapshotTest do
 
       {:ok, promoted_root} =
         RaSupervisor.local_query(fn state ->
-          MetadataStateMachine.get_volume_root(state, promoted.id)
+          MetadataStateMachine.get_volume_root(state, promoted.id, 0)
         end)
 
       assert promoted_root.root_chunk_hash == <<0xAA, 0xBB>>
@@ -164,7 +166,7 @@ defmodule NeonFS.Core.SnapshotTest do
 
       {:ok, source_root} =
         RaSupervisor.local_query(fn state ->
-          MetadataStateMachine.get_volume_root(state, source.id)
+          MetadataStateMachine.get_volume_root(state, source.id, 0)
         end)
 
       assert source_root.root_chunk_hash == <<0xAA, 0xBB>>
@@ -232,7 +234,7 @@ defmodule NeonFS.Core.SnapshotTest do
         id: "manual",
         volume_id: source.id,
         name: nil,
-        root_chunk_hash: <<1>>,
+        root_chunk_hashes: %{0 => <<1>>},
         created_at: DateTime.utc_now()
       }
 
@@ -254,13 +256,13 @@ defmodule NeonFS.Core.SnapshotTest do
       {:ok, _cover} = Snapshot.create("vol-r1", name: "cover")
 
       assert {:ok, result} = Snapshot.restore("vol-r1", target_snap.id)
-      assert result.previous_root == <<0xBB>>
-      assert result.new_root == <<0xAA>>
+      assert result.previous_root == %{0 => <<0xBB>>}
+      assert result.new_root == %{0 => <<0xAA>>}
       assert result.pre_restore_snapshot == nil
 
       {:ok, latest_root} =
         RaSupervisor.local_query(fn state ->
-          MetadataStateMachine.get_volume_root(state, "vol-r1")
+          MetadataStateMachine.get_volume_root(state, "vol-r1", 0)
         end)
 
       assert latest_root.root_chunk_hash == <<0xAA>>
@@ -272,7 +274,7 @@ defmodule NeonFS.Core.SnapshotTest do
 
       assert {:ok, result} = Snapshot.restore("vol-noop", snap.id)
       assert result.previous_root == result.new_root
-      assert result.new_root == <<1>>
+      assert result.new_root == %{0 => <<1>>}
       assert result.pre_restore_snapshot == nil
     end
 
@@ -290,7 +292,7 @@ defmodule NeonFS.Core.SnapshotTest do
       # Bootstrap pointer unchanged.
       {:ok, root} =
         RaSupervisor.local_query(fn state ->
-          MetadataStateMachine.get_volume_root(state, "vol-uncov")
+          MetadataStateMachine.get_volume_root(state, "vol-uncov", 0)
         end)
 
       assert root.root_chunk_hash == <<0xBB>>
@@ -303,11 +305,11 @@ defmodule NeonFS.Core.SnapshotTest do
       :ok = register_volume_root("vol-safe", <<0xBB>>)
 
       assert {:ok, result} = Snapshot.restore("vol-safe", target.id, safe: true)
-      assert result.new_root == <<0xAA>>
-      assert result.previous_root == <<0xBB>>
+      assert result.new_root == %{0 => <<0xAA>>}
+      assert result.previous_root == %{0 => <<0xBB>>}
 
       assert %Snapshot{} = pre = result.pre_restore_snapshot
-      assert pre.root_chunk_hash == <<0xBB>>
+      assert pre.root_chunk_hashes == %{0 => <<0xBB>>}
       assert String.starts_with?(pre.name, "pre-restore-")
 
       # The pre-restore snapshot is now in the list, and the new live
@@ -317,7 +319,7 @@ defmodule NeonFS.Core.SnapshotTest do
 
       {:ok, root} =
         RaSupervisor.local_query(fn state ->
-          MetadataStateMachine.get_volume_root(state, "vol-safe")
+          MetadataStateMachine.get_volume_root(state, "vol-safe", 0)
         end)
 
       assert root.root_chunk_hash == <<0xAA>>
@@ -344,13 +346,13 @@ defmodule NeonFS.Core.SnapshotTest do
       assert {:ok, result} =
                Snapshot.restore("vol-force", target.id, force: true)
 
-      assert result.previous_root == <<0xBB>>
-      assert result.new_root == <<0xAA>>
+      assert result.previous_root == %{0 => <<0xBB>>}
+      assert result.new_root == %{0 => <<0xAA>>}
       assert result.pre_restore_snapshot == nil
 
       {:ok, root} =
         RaSupervisor.local_query(fn state ->
-          MetadataStateMachine.get_volume_root(state, "vol-force")
+          MetadataStateMachine.get_volume_root(state, "vol-force", 0)
         end)
 
       assert root.root_chunk_hash == <<0xAA>>
@@ -371,7 +373,7 @@ defmodule NeonFS.Core.SnapshotTest do
              id: "orphan",
              volume_id: "no-volume",
              name: nil,
-             root_chunk_hash: <<1>>,
+             root_chunk_hashes: %{0 => <<1>>},
              created_at: DateTime.utc_now()
            }}
         )

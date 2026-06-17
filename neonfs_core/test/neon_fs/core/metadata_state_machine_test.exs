@@ -47,8 +47,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 16" do
-      assert MetadataStateMachine.version() == 16
+    test "returns 17" do
+      assert MetadataStateMachine.version() == 17
     end
   end
 
@@ -1370,9 +1370,9 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       }
 
       {state, :ok, []} =
-        MetadataStateMachine.apply(%{}, {:register_volume_root, entry}, base_state())
+        MetadataStateMachine.apply(%{}, {:register_volume_root, "vol-1", 0, entry}, base_state())
 
-      assert state.volume_roots == %{"vol-1" => entry}
+      assert state.volume_roots == %{"vol-1" => %{0 => entry}}
       assert state.version == 1
     end
 
@@ -1387,16 +1387,16 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         updated_at: original_updated_at
       }
 
-      state = %{base_state() | volume_roots: %{"vol-1" => existing}}
+      state = %{base_state() | volume_roots: %{"vol-1" => %{0 => existing}}}
 
       {state, :ok, []} =
         MetadataStateMachine.apply(
           %{},
-          {:update_volume_root, "vol-1", %{root_chunk_hash: <<9, 9, 9>>}},
+          {:update_volume_root, "vol-1", 0, %{root_chunk_hash: <<9, 9, 9>>}},
           state
         )
 
-      updated = state.volume_roots["vol-1"]
+      updated = state.volume_roots["vol-1"][0]
       assert updated.root_chunk_hash == <<9, 9, 9>>
       assert updated.drive_locations == [%{node: :node1@host, drive_id: "drv-1"}]
       assert updated.durability_cache == %{type: :replicate, factor: 1}
@@ -1408,7 +1408,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       {state, {:error, :not_found}, []} =
         MetadataStateMachine.apply(
           %{},
-          {:update_volume_root, "missing", %{root_chunk_hash: <<>>}},
+          {:update_volume_root, "missing", 0, %{root_chunk_hash: <<>>}},
           base_state()
         )
 
@@ -1425,7 +1425,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         updated_at: DateTime.utc_now()
       }
 
-      state = %{base_state() | volume_roots: %{"vol-1" => entry}}
+      state = %{base_state() | volume_roots: %{"vol-1" => %{0 => entry}}}
 
       {state, :ok, []} =
         MetadataStateMachine.apply(%{}, {:unregister_volume_root, "vol-1"}, state)
@@ -1463,16 +1463,16 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         updated_at: DateTime.utc_now()
       }
 
-      state = %{base_state() | volume_roots: %{"vol-1" => entry}}
+      state = %{base_state() | volume_roots: %{"vol-1" => %{0 => entry}}}
 
       {state, :ok, []} =
         MetadataStateMachine.apply(
           %{},
-          {:cas_update_volume_root, "vol-1", <<1>>, %{root_chunk_hash: <<2>>}},
+          {:cas_update_volume_root, "vol-1", 0, <<1>>, %{root_chunk_hash: <<2>>}},
           state
         )
 
-      assert state.volume_roots["vol-1"].root_chunk_hash == <<2>>
+      assert state.volume_roots["vol-1"][0].root_chunk_hash == <<2>>
       assert state.version == 1
     end
 
@@ -1485,17 +1485,17 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         updated_at: DateTime.utc_now()
       }
 
-      state = %{base_state() | volume_roots: %{"vol-1" => entry}}
+      state = %{base_state() | volume_roots: %{"vol-1" => %{0 => entry}}}
 
       {state_after, {:error, {:stale_pointer, expected: <<1>>, actual: <<99>>}}, []} =
         MetadataStateMachine.apply(
           %{},
-          {:cas_update_volume_root, "vol-1", <<1>>, %{root_chunk_hash: <<2>>}},
+          {:cas_update_volume_root, "vol-1", 0, <<1>>, %{root_chunk_hash: <<2>>}},
           state
         )
 
       # State unchanged on rejection.
-      assert state_after.volume_roots["vol-1"].root_chunk_hash == <<99>>
+      assert state_after.volume_roots["vol-1"][0].root_chunk_hash == <<99>>
       assert state_after.version == 0
     end
 
@@ -1503,7 +1503,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       {_state, {:error, :not_found}, []} =
         MetadataStateMachine.apply(
           %{},
-          {:cas_update_volume_root, "missing", <<1>>, %{root_chunk_hash: <<2>>}},
+          {:cas_update_volume_root, "missing", 0, <<1>>, %{root_chunk_hash: <<2>>}},
           base_state()
         )
     end
@@ -1585,7 +1585,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       assert MetadataStateMachine.get_drive(state, "missing") == nil
     end
 
-    test "get_volume_roots/1 and get_volume_root/2" do
+    test "get_volume_roots/1, get_volume_shards/2 and get_volume_root/3" do
       root = %{
         volume_id: "vol-1",
         root_chunk_hash: <<1>>,
@@ -1594,11 +1594,14 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
         updated_at: DateTime.utc_now()
       }
 
-      state = %{base_state() | volume_roots: %{"vol-1" => root}}
+      state = %{base_state() | volume_roots: %{"vol-1" => %{0 => root}}}
 
-      assert MetadataStateMachine.get_volume_roots(state) == %{"vol-1" => root}
-      assert MetadataStateMachine.get_volume_root(state, "vol-1") == root
-      assert MetadataStateMachine.get_volume_root(state, "missing") == nil
+      assert MetadataStateMachine.get_volume_roots(state) == %{"vol-1" => %{0 => root}}
+      assert MetadataStateMachine.get_volume_shards(state, "vol-1") == %{0 => root}
+      assert MetadataStateMachine.get_volume_shards(state, "missing") == %{}
+      assert MetadataStateMachine.get_volume_root(state, "vol-1", 0) == root
+      assert MetadataStateMachine.get_volume_root(state, "vol-1", 1) == nil
+      assert MetadataStateMachine.get_volume_root(state, "missing", 0) == nil
     end
 
     test "get_drives/1 returns empty map on pre-v13 state" do
