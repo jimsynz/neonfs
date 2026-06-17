@@ -78,6 +78,15 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
         [%{id: "drive1", path: drive_path, tier: :hot, capacity: 0}]
       ])
 
+    # Reconstruction-from-disk can't yet recover per-shard identity from
+    # disk (#1313), so this DR path runs at one shard until that lands.
+    :ok =
+      PeerCluster.rpc(cluster, :node1, Application, :put_env, [
+        :neonfs_core,
+        :metadata_shard_count,
+        1
+      ])
+
     %{cluster: cluster, drive_path: drive_path}
   end
 

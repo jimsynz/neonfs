@@ -8,3 +8,4 @@ deps/
 dist/
 doc/
 packaging/nfpm/.generated-*.yaml
+next_session

@@ -1,3 +1,9 @@
+# The metadata mock (`build_mock_metadata_*_opts`) is a single ETS store
+# that doesn't model per-shard index trees, so unit tests run at one shard
+# (behaviour-identical to pre-sharding). True N-shard distribution is
+# exercised by the integration suite (#1312).
+Application.put_env(:neonfs_core, :metadata_shard_count, 1)
+
 Application.put_env(:kernel, :epmd_module, NeonFS.Epmd)
 {:ok, _} = Node.start(:neonfs_core_test, name_domain: :shortnames)
 

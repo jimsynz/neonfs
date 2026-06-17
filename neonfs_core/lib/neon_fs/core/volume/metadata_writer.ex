@@ -141,11 +141,12 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   @doc """
-  Reap tombstones older than `before_unix_nanos`. Returns the new
-  `root_chunk_hash`. Errors if the index is empty (nothing to purge).
+  Reap tombstones older than `before_unix_nanos` across every shard
+  (#1312). Returns `%{shard => new_root_chunk_hash}` for the shards that
+  had a non-empty tree; an all-empty volume is a no-op (`{:ok, %{}}`).
   """
   @spec purge_tombstones(binary(), index_kind(), non_neg_integer(), keyword()) ::
-          {:ok, binary()} | write_error()
+          {:ok, %{optional(non_neg_integer()) => binary()}} | write_error()
   def purge_tombstones(volume_id, index_kind, before_unix_nanos, opts \\ [])
       when is_binary(volume_id) and is_atom(index_kind) and is_integer(before_unix_nanos) do
     with_remote_fallback(
@@ -163,20 +164,35 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     )
   end
 
-  # Tombstone reaping is volume-wide. At one shard, shard 0 is the whole
-  # volume; making this sweep every shard is part of the N>1 activation
-  # follow-on (#1307 covers the structural change at count 1).
+  # Tombstone reaping is volume-wide, so it sweeps every shard's tree
+  # (#1312). A shard with no tree root has nothing to purge and is
+  # skipped; an all-empty volume is a no-op (`{:ok, %{}}`). Returns
+  # `%{shard => new_root}` for the shards actually purged; the first
+  # shard whose purge fails aborts the sweep.
   defp local_purge_tombstones(volume_id, index_kind, before_unix_nanos, opts) do
-    apply_index_op(volume_id, 0, index_kind, opts, fn store, current_tree_root ->
-      nif_purge =
-        Keyword.get(opts, :index_tree_purge_tombstones, &Native.index_tree_purge_tombstones/4)
+    nif_purge =
+      Keyword.get(opts, :index_tree_purge_tombstones, &Native.index_tree_purge_tombstones/4)
 
-      if current_tree_root in [nil, <<>>] do
-        {:error, "cannot purge tombstones on an empty tree"}
-      else
-        nif_purge.(store, current_tree_root, "hot", before_unix_nanos)
+    Enum.reduce_while(Shard.all(), {:ok, %{}}, fn shard, {:ok, acc} ->
+      case purge_shard(volume_id, shard, index_kind, before_unix_nanos, nif_purge, opts) do
+        :empty -> {:cont, {:ok, acc}}
+        {:ok, root} -> {:cont, {:ok, Map.put(acc, shard, root)}}
+        {:error, _} = err -> {:halt, err}
       end
     end)
+  end
+
+  defp purge_shard(volume_id, shard, index_kind, before_unix_nanos, nif_purge, opts) do
+    with {:ok, segment, _root_entry} <-
+           MetadataReader.resolve_segment_for_write(volume_id, shard, opts),
+         false <- Map.get(segment.index_roots, index_kind) in [nil, <<>>] do
+      apply_index_op(volume_id, shard, index_kind, opts, fn store, current_tree_root ->
+        nif_purge.(store, current_tree_root, "hot", before_unix_nanos)
+      end)
+    else
+      true -> :empty
+      {:error, _} = err -> err
+    end
   end
 
   @doc """

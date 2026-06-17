@@ -200,15 +200,18 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
   end
 
   describe "purge_tombstones/4" do
-    test "errors with an empty index tree (current root is nil)" do
+    test "is a no-op (no purge, no CAS) when every shard's tree is empty" do
       capture = build_capture()
       opts = build_opts(capture: capture)
 
-      assert {:error, {:index_tree_write_failed, _}} =
-               MetadataWriter.purge_tombstones("vol-1", :file_index, 1_000, opts)
+      # The sample segment has a nil file_index root → empty shard, skipped.
+      assert {:ok, roots} = MetadataWriter.purge_tombstones("vol-1", :file_index, 1_000, opts)
+      assert roots == %{}
+      assert :ets.lookup(capture.tree_calls, :purge) == []
+      assert :ets.lookup(capture.bootstrap_calls, :bootstrap) == []
     end
 
-    test "calls the purge NIF when the index tree has a root" do
+    test "calls the purge NIF on each shard whose index tree has a root" do
       capture = build_capture()
 
       segment_with_root =
@@ -226,7 +229,8 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
           root_chunk_reader: const_chunk_reader(segment_with_root)
         )
 
-      assert {:ok, "new-root-hash"} =
+      # One shard (count 1 in tests) → `%{shard => new_root}`.
+      assert {:ok, %{0 => "new-root-hash"}} =
                MetadataWriter.purge_tombstones("vol-1", :file_index, 1_000, opts)
 
       [{:purge, _store, root, _tier, before_nanos}] =
