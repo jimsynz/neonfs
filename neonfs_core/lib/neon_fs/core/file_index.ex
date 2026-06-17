@@ -36,10 +36,11 @@ defmodule NeonFS.Core.FileIndex do
     DirectoryEntry,
     FileMeta,
     Intent,
-    IntentLog
+    IntentLog,
+    ShardCommitter
   }
 
-  alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, MetadataWriter}
+  alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, Shard}
 
   alias NeonFS.Error.{AlreadyExists, Conflict}
 
@@ -1154,20 +1155,60 @@ defmodule NeonFS.Core.FileIndex do
     %{state | pending: %{}, pending_count: 0, pending_files: %{}}
   end
 
+  # Group the volume batch's mutations by shard and commit each shard
+  # through its `ShardCommitter` worker concurrently (#1308): distinct
+  # shards commit in parallel, the same shard always on one writer. Then
+  # reply each op by whether every shard it touched committed.
   defp commit_volume_batch(volume_id, txns) do
-    mutations = Enum.flat_map(txns, & &1.mutations)
-    result = MetadataWriter.apply_batch(volume_id, mutations, metadata_writer_opts())
-    Enum.each(txns, &reply_after_commit(&1, result))
+    writer_opts = metadata_writer_opts()
+
+    by_shard =
+      txns
+      |> Enum.flat_map(& &1.mutations)
+      |> Enum.group_by(&Shard.for_key(mutation_key(&1)))
+
+    shard_results = commit_shards(volume_id, by_shard, writer_opts)
+
+    Enum.each(txns, &reply_after_commit(&1, shard_results))
   end
 
-  defp reply_after_commit(txn, {:ok, _root}) do
-    txn.on_commit.()
-    GenServer.reply(txn.from, txn.reply)
+  defp commit_shards(volume_id, by_shard, writer_opts) do
+    by_shard
+    |> Task.async_stream(
+      fn {shard, mutations} ->
+        {shard, ShardCommitter.commit(volume_id, shard, mutations, writer_opts)}
+      end,
+      max_concurrency: max(map_size(by_shard), 1),
+      timeout: :infinity,
+      ordered: false
+    )
+    |> Enum.reduce(%{}, fn {:ok, {shard, result}}, acc -> Map.put(acc, shard, result) end)
   end
 
-  defp reply_after_commit(txn, {:error, reason}) do
-    GenServer.reply(txn.from, txn.on_abort.(reason))
+  defp reply_after_commit(txn, shard_results) do
+    shards = txn.mutations |> Enum.map(&Shard.for_key(mutation_key(&1))) |> Enum.uniq()
+
+    case first_shard_error(shards, shard_results) do
+      nil ->
+        txn.on_commit.()
+        GenServer.reply(txn.from, txn.reply)
+
+      {:error, reason} ->
+        GenServer.reply(txn.from, txn.on_abort.(reason))
+    end
   end
+
+  defp first_shard_error(shards, shard_results) do
+    Enum.find_value(shards, fn shard ->
+      case Map.get(shard_results, shard) do
+        {:error, _} = err -> err
+        _ -> nil
+      end
+    end)
+  end
+
+  defp mutation_key({:put, _kind, key, _value}), do: key
+  defp mutation_key({:delete, _kind, key}), do: key
 
   defp arm_timer(%{timer: nil} = state) do
     %{state | timer: Process.send_after(self(), :flush_batch, state.max_batch_delay_ms)}

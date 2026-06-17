@@ -199,6 +199,22 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
     end
   end
 
+  describe "apply_shard_batch/4 (#1308)" do
+    test "commits one shard's mutations with a single CAS" do
+      capture = build_capture()
+      opts = build_opts(capture: capture)
+
+      mutations = [{:put, :file_index, "k1", "v1"}, {:delete, :file_index, "k2"}]
+
+      assert {:ok, "new-root-hash"} =
+               MetadataWriter.apply_shard_batch("vol-1", 0, mutations, opts)
+
+      assert length(:ets.lookup(capture.tree_calls, :put)) == 1
+      assert length(:ets.lookup(capture.tree_calls, :delete)) == 1
+      assert length(:ets.lookup(capture.bootstrap_calls, :bootstrap)) == 1
+    end
+  end
+
   describe "purge_tombstones/4" do
     test "is a no-op (no purge, no CAS) when every shard's tree is empty" do
       capture = build_capture()

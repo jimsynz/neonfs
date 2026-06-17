@@ -4,6 +4,13 @@
 # exercised by the integration suite (#1312).
 Application.put_env(:neonfs_core, :metadata_shard_count, 1)
 
+# The FileIndex flush fans per-shard commits out to this stateless worker
+# pool (#1308); start a suite-global instance so tests that drive FileIndex
+# writes can commit. Workers carry no per-test state — they apply with the
+# writer opts each FileIndex call passes them.
+{PartitionSupervisor, shard_committer_opts} = NeonFS.Core.ShardCommitter.pool_spec()
+{:ok, _} = PartitionSupervisor.start_link(shard_committer_opts)
+
 Application.put_env(:kernel, :epmd_module, NeonFS.Epmd)
 {:ok, _} = Node.start(:neonfs_core_test, name_domain: :shortnames)
 

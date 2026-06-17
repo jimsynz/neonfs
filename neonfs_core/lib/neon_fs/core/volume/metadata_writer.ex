@@ -141,6 +141,28 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   @doc """
+  Commit a batch of mutations that all belong to a single `shard` as one
+  root-CAS on that shard's segment (#1308). Returns the shard's new
+  `root_chunk_hash`. The caller is responsible for routing only that
+  shard's keys here — the per-`{volume, shard}` `ShardCommitter` is the
+  single writer, so concurrent shards commit in parallel without
+  contending on one root pointer.
+  """
+  @spec apply_shard_batch(binary(), non_neg_integer(), [mutation()], keyword()) ::
+          {:ok, binary()} | write_error()
+  def apply_shard_batch(volume_id, shard, mutations, opts \\ [])
+      when is_binary(volume_id) and is_integer(shard) and is_list(mutations) do
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn -> local_apply_shard_batch(volume_id, shard, mutations, opts) end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :apply_shard_batch, [volume_id, shard, mutations, remote_opts])
+      end
+    )
+  end
+
+  @doc """
   Reap tombstones older than `before_unix_nanos` across every shard
   (#1312). Returns `%{shard => new_root_chunk_hash}` for the shards that
   had a non-empty tree; an all-empty volume is a no-op (`{:ok, %{}}`).
@@ -356,6 +378,11 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # across (possibly several) index kinds against one resolved segment,
   # then a single segment build + replicate + CAS. Reuses the same
   # stale-pointer retry / backoff as the single-op path.
+  defp local_apply_shard_batch(volume_id, shard, mutations, opts) do
+    retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
+    do_apply_batch(volume_id, shard, mutations, opts, retries_left)
+  end
+
   defp local_apply_batch(_volume_id, [], _opts), do: {:ok, %{}}
 
   # Mutations are grouped by the shard their key belongs to (#1307); each

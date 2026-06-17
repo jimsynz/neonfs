@@ -28,7 +28,7 @@ defmodule NeonFS.Core.Supervisor do
   require Logger
 
   alias NeonFS.Cluster.{Formation, State}
-  alias NeonFS.Core.{MetricsSupervisor, ServiceRegistry}
+  alias NeonFS.Core.{MetricsSupervisor, ServiceRegistry, ShardCommitter}
 
   def start_link(init_arg) do
     Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
@@ -171,6 +171,10 @@ defmodule NeonFS.Core.Supervisor do
 
           # ChunkIndex — local ETS cache fronting the per-volume chunk_index tree.
           NeonFS.Core.ChunkIndex,
+
+          # ShardCommitter pool — per-{volume,shard} commit workers the
+          # FileIndex flush fans out to (#1308). Must start before FileIndex.
+          ShardCommitter.pool_spec(),
 
           # FileIndex — local ETS cache fronting the per-volume file_index tree.
           NeonFS.Core.FileIndex,
