@@ -78,22 +78,18 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
         [%{id: "drive1", path: drive_path, tier: :hot, capacity: 0}]
       ])
 
-    # Reconstruction-from-disk can't yet recover per-shard identity from
-    # disk (#1313), so this DR path runs at one shard until that lands.
-    :ok =
-      PeerCluster.rpc(cluster, :node1, Application, :put_env, [
-        :neonfs_core,
-        :metadata_shard_count,
-        1
-      ])
-
+    # Runs at the live (default) shard count: reconstruction recovers
+    # per-shard identity from disk via `RootSegment.shard` (#1313).
     %{cluster: cluster, drive_path: drive_path}
   end
 
   describe "cluster reconstruct-from-disk on a populated cluster" do
-    test "--dry-run identifies every registered drive and volume root", %{cluster: cluster} do
-      {volume_id_a, _hash_a} = create_volume_and_capture_root(cluster, "recon-vol-a")
-      {volume_id_b, _hash_b} = create_volume_and_capture_root(cluster, "recon-vol-b")
+    test "--dry-run identifies every registered drive and all shard roots", %{cluster: cluster} do
+      {volume_id_a, roots_a} = create_volume_and_capture_roots(cluster, "recon-vol-a")
+      {volume_id_b, _roots_b} = create_volume_and_capture_roots(cluster, "recon-vol-b")
+
+      shards = shard_count(cluster)
+      assert map_size(roots_a) == shards
 
       {:ok, summary} =
         PeerCluster.rpc(
@@ -109,21 +105,35 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
       assert summary.commands_failed == []
       assert summary.volumes >= 2
       assert summary.drives >= 1
-      assert summary.commands == summary.drives + summary.volumes
+
+      # One root command per shard per discovered volume — proving all N
+      # shard roots are recovered from disk, not just shard 0 (#1313).
+      assert summary.commands == summary.drives + shards * summary.volumes
 
       ra_volume_ids = volume_roots(cluster) |> Map.keys() |> MapSet.new()
       assert volume_id_a in ra_volume_ids
       assert volume_id_b in ra_volume_ids
     end
 
-    test "--yes --overwrite-ra-state preserves the existing volume_roots set",
+    test "--yes --overwrite-ra-state restores every shard root, including a diverged shard",
          %{cluster: cluster} do
-      {volume_id_a, hash_a} = create_volume_and_capture_root(cluster, "recon-apply-a")
-      {volume_id_b, hash_b} = create_volume_and_capture_root(cluster, "recon-apply-b")
+      {volume_id_a, _} = create_volume_and_capture_roots(cluster, "recon-apply-a")
+      {volume_id_b, _} = create_volume_and_capture_roots(cluster, "recon-apply-b")
 
-      pre_roots = volume_roots(cluster)
-      assert Map.has_key?(pre_roots, volume_id_a)
-      assert Map.has_key?(pre_roots, volume_id_b)
+      # Write a file so some of vol-a's shards diverge from the shared
+      # empty root — exercises the "restore shard n by its recorded index"
+      # path, not just the empty-chunk fill.
+      {:ok, _} =
+        PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
+          "recon-apply-a",
+          "/f.bin",
+          :crypto.strong_rand_bytes(64)
+        ])
+
+      pre_a = shard_hashes(cluster, volume_id_a)
+      pre_b = shard_hashes(cluster, volume_id_b)
+      # The write diverged at least one shard from the shared empty root.
+      assert pre_a |> Map.values() |> Enum.uniq() |> length() >= 2
 
       {:ok, summary} =
         PeerCluster.rpc(
@@ -138,15 +148,16 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
       assert summary.commands_submitted == summary.commands
       assert summary.commands_failed == []
 
-      post_roots = volume_roots(cluster)
-      assert post_roots[volume_id_a][0].root_chunk_hash == hash_a
-      assert post_roots[volume_id_b][0].root_chunk_hash == hash_b
+      # Every shard root — diverged and empty alike — is restored to its
+      # pre-reconstruction chunk hash.
+      assert shard_hashes(cluster, volume_id_a) == pre_a
+      assert shard_hashes(cluster, volume_id_b) == pre_b
     end
   end
 
   ## Helpers
 
-  defp create_volume_and_capture_root(cluster, volume_name) do
+  defp create_volume_and_capture_roots(cluster, volume_name) do
     # `replicate:2` puts a root-segment replica on every drive in
     # the bootstrap layer (`default` + `drive1`), so the
     # reconstruction walker (which only walks `drive1` per the
@@ -163,20 +174,27 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
 
     volume_id = volume.id
     assert is_binary(volume_id)
+    shards = shard_count(cluster)
 
+    # Provisioning registers all N shard roots up front (they share the
+    # one empty root chunk); wait until they're all in the bootstrap layer.
     :ok =
       wait_until(
-        fn ->
-          case get_in(volume_roots(cluster), [volume_id, 0]) do
-            %{root_chunk_hash: hash} when is_binary(hash) -> true
-            _ -> false
-          end
-        end,
+        fn -> map_size(get_in(volume_roots(cluster), [volume_id]) || %{}) == shards end,
         timeout: 30_000
       )
 
-    %{root_chunk_hash: hash} = get_in(volume_roots(cluster), [volume_id, 0])
-    {volume_id, hash}
+    {volume_id, get_in(volume_roots(cluster), [volume_id])}
+  end
+
+  defp shard_hashes(cluster, volume_id) do
+    volume_roots(cluster)
+    |> Map.fetch!(volume_id)
+    |> Map.new(fn {shard, entry} -> {shard, entry.root_chunk_hash} end)
+  end
+
+  defp shard_count(cluster) do
+    PeerCluster.rpc(cluster, :node1, NeonFS.Core.Volume.Shard, :count, [])
   end
 
   defp volume_roots(cluster) do

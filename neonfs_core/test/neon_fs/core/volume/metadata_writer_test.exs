@@ -28,6 +28,9 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       assert [{:replicate, encoded}] = :ets.lookup(capture.replicator_calls, :replicate)
       assert {:ok, segment} = RootSegment.decode(encoded)
       assert segment.index_roots.file_index == "new-tree-root"
+      # The write stamps the segment with its shard so reconstruction can
+      # recover per-shard identity from disk (#1313). Unit count is 1.
+      assert segment.shard == 0
 
       assert [{:bootstrap, command}] = :ets.lookup(capture.bootstrap_calls, :bootstrap)
       {:cas_update_volume_root, "vol-1", _shard, expected_prev, payload} = command

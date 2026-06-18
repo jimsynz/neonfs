@@ -66,6 +66,14 @@ defmodule NeonFS.Core.Volume.RootSegment do
   - `index_roots` — chunk hashes for the volume's three index trees.
     `nil` for an empty index that hasn't been written yet.
   - `schedules` — per-volume cadence for GC / scrub / anti-entropy.
+  - `shard` — the shard index (`0..count-1`) this segment's root belongs
+    to, stamped on the first write that diverges the shard from the
+    shared empty root (#1313). `nil` on the provision-time empty segment,
+    which is content-addressed-shared by every shard — so a fresh
+    volume's 64 shards all point at one `shard: nil` chunk. Reconstruction
+    uses this to recover per-shard identity from disk: a `shard: n`
+    segment restores shard `n`; the `shard: nil` empty chunk fills every
+    shard not otherwise recovered.
   """
   @type t :: %__MODULE__{
           format_version: pos_integer(),
@@ -87,7 +95,8 @@ defmodule NeonFS.Core.Volume.RootSegment do
             gc: schedule(),
             scrub: schedule(),
             anti_entropy: schedule()
-          }
+          },
+          shard: non_neg_integer() | nil
         }
 
   @typedoc """
@@ -132,7 +141,8 @@ defmodule NeonFS.Core.Volume.RootSegment do
               gc: %{interval_ms: 86_400_000, last_run: nil},
               scrub: %{interval_ms: 7 * 86_400_000, last_run: nil},
               anti_entropy: %{interval_ms: 60 * 60 * 1_000, last_run: nil}
-            }
+            },
+            shard: nil
 
   @doc """
   Returns the current wire format version this module writes.
@@ -182,7 +192,8 @@ defmodule NeonFS.Core.Volume.RootSegment do
       on_disk_format_version: segment.on_disk_format_version,
       hlc: hlc_to_map(segment.hlc),
       index_roots: segment.index_roots,
-      schedules: schedules_to_map(segment.schedules)
+      schedules: schedules_to_map(segment.schedules),
+      shard: segment.shard
     }
 
     :erlang.term_to_binary({@tag, version, payload})
@@ -266,7 +277,8 @@ defmodule NeonFS.Core.Volume.RootSegment do
          on_disk_format_version: Map.fetch!(payload, :on_disk_format_version),
          hlc: hlc,
          index_roots: Map.get(payload, :index_roots, default_index_roots()),
-         schedules: schedules
+         schedules: schedules,
+         shard: Map.get(payload, :shard)
        }}
     end
   end

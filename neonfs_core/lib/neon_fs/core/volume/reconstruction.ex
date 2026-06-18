@@ -22,25 +22,43 @@ defmodule NeonFS.Core.Volume.Reconstruction do
   is unit-testable against in-memory fixtures without spinning up
   a real cluster.
 
-  When two root-segment chunks are found for the same volume_id,
+  When two root-segment chunks are found for the same `{volume_id, shard}`,
   the one with the highest HLC wins — copy-on-write means newer
   writes produce newer chunks; the older versions linger as
   unreferenced bytes until GC picks them up. Reconstructing from
   partial GC means the operator may see both, and the HLC tiebreak
   is the correct call.
+
+  ## Sharded roots (#1313)
+
+  A volume's metadata root is split into `Shard.count/0` shards, each its
+  own bootstrap pointer. A segment records the shard it belongs to
+  (`RootSegment.shard`), stamped on the first write that diverges the
+  shard from the shared empty root. So reconstruction recovers per-shard
+  identity directly from disk:
+
+  - a `shard: n` segment restores shard `n` (HLC-tiebroken per shard);
+  - the provision-time `shard: nil` empty chunk — content-addressed-shared
+    by every shard that has never been written — fills every shard not
+    otherwise recovered.
+
+  An empty shard needs no individual identity (it's correctly served by
+  the shared empty chunk), so only diverged shards carry one.
   """
 
   alias NeonFS.Core.Drive.Identity
   alias NeonFS.Core.HLC
-  alias NeonFS.Core.Volume.RootSegment
+  alias NeonFS.Core.Volume.{RootSegment, Shard}
 
   @type drive_path :: String.t()
   @type chunk_hash :: binary()
   @type warning :: {atom(), String.t(), map()}
+  @type shard :: non_neg_integer() | nil
+  @type discovered_root :: %{segment: RootSegment.t(), hash: chunk_hash(), drives: [Identity.t()]}
 
   @type result :: %{
           drives: [Identity.t()],
-          volumes: %{optional(binary()) => RootSegment.t()},
+          volumes: %{optional(binary()) => %{optional(shard()) => discovered_root()}},
           commands: [tuple()],
           warnings: [warning()]
         }
@@ -70,11 +88,15 @@ defmodule NeonFS.Core.Volume.Reconstruction do
     {:error, _})`. Same default behaviour as above.
   - `:identity_reader` — `(drive_path -> {:ok, Identity.t()} |
     {:error, _})`. Defaults to `NeonFS.Core.Drive.Identity.read/1`.
+  - `:shards` — the shard indices to fill from the shared empty chunk
+    when a volume has un-diverged shards. Defaults to `Shard.all/0` (the
+    recovering node's configured count). Injectable for tests.
   """
   @spec reconstruct([drive_path()], keyword()) :: result()
   def reconstruct(drive_paths, opts) when is_list(drive_paths) do
     expected_cluster_id = Keyword.fetch!(opts, :expected_cluster_id)
     target_node = Keyword.fetch!(opts, :node)
+    all_shards = Keyword.get(opts, :shards, Shard.all())
     # `:dry_run?` is accepted for API stability but no longer changes
     # what the algorithm returns — the handler gates submission, not
     # this function. See #855.
@@ -101,7 +123,7 @@ defmodule NeonFS.Core.Volume.Reconstruction do
     # output reports `commands == drives + volumes` per the runbook
     # contract. The handler's `submit_commands/2` is what actually
     # gates submission against the dry-run flag (#855).
-    commands = build_commands(drives, volumes, drive_paths_by_id, target_node)
+    commands = build_commands(drives, volumes, target_node, all_shards)
 
     %{
       drives: drives,
@@ -208,9 +230,15 @@ defmodule NeonFS.Core.Volume.Reconstruction do
     end
   end
 
+  # Discovered roots are keyed `volume_id => %{shard => root}`, where
+  # `shard` is the segment's recorded shard (`nil` for the shared empty
+  # chunk). Each `{volume_id, shard}` HLC-tiebreaks independently.
   defp merge_segment(volumes, segment, drive, hash) do
     fresh = %{segment: segment, hash: hash, drives: [drive]}
-    Map.update(volumes, segment.volume_id, fresh, &merge_existing(&1, segment, drive, hash))
+
+    Map.update(volumes, segment.volume_id, %{segment.shard => fresh}, fn shard_map ->
+      Map.update(shard_map, segment.shard, fresh, &merge_existing(&1, segment, drive, hash))
+    end)
   end
 
   defp merge_existing(current, segment, drive, hash) do
@@ -241,7 +269,7 @@ defmodule NeonFS.Core.Volume.Reconstruction do
     end
   end
 
-  defp build_commands(drives, volumes, _drive_paths_by_id, target_node) do
+  defp build_commands(drives, volumes, target_node, all_shards) do
     drive_commands =
       Enum.map(drives, fn drive ->
         {:register_drive,
@@ -255,26 +283,50 @@ defmodule NeonFS.Core.Volume.Reconstruction do
       end)
 
     volume_commands =
-      Enum.map(volumes, fn {volume_id, %{segment: segment, hash: hash, drives: replica_drives}} ->
-        drive_locations =
-          Enum.map(replica_drives, fn drive ->
-            %{node: target_node, drive_id: drive.drive_id}
-          end)
-
-        # Reconstruction rebuilds a volume's single (shard-0) root from
-        # disk; discovering all N shard roots is part of the N>1
-        # activation follow-on (#1307).
-        {:register_volume_root, volume_id, 0,
-         %{
-           volume_id: volume_id,
-           root_chunk_hash: hash,
-           drive_locations: drive_locations,
-           durability_cache: segment.durability,
-           updated_at: DateTime.utc_now()
-         }}
+      Enum.flat_map(volumes, fn {volume_id, shard_map} ->
+        volume_shard_commands(volume_id, shard_map, target_node, all_shards)
       end)
 
     drive_commands ++ volume_commands
+  end
+
+  # A `shard: n` segment restores shard `n`; the `shard: nil` shared empty
+  # chunk fills every shard that didn't diverge (#1313).
+  defp volume_shard_commands(volume_id, shard_map, target_node, all_shards) do
+    {empty_root, diverged} = Map.pop(shard_map, nil)
+
+    diverged_commands =
+      Enum.map(diverged, fn {shard, root} ->
+        register_root_command(volume_id, shard, root, target_node)
+      end)
+
+    empty_commands =
+      case empty_root do
+        nil ->
+          []
+
+        root ->
+          (all_shards -- Map.keys(diverged))
+          |> Enum.map(&register_root_command(volume_id, &1, root, target_node))
+      end
+
+    diverged_commands ++ empty_commands
+  end
+
+  defp register_root_command(volume_id, shard, root, target_node) do
+    %{segment: segment, hash: hash, drives: replica_drives} = root
+
+    drive_locations =
+      Enum.map(replica_drives, fn drive -> %{node: target_node, drive_id: drive.drive_id} end)
+
+    {:register_volume_root, volume_id, shard,
+     %{
+       volume_id: volume_id,
+       root_chunk_hash: hash,
+       drive_locations: drive_locations,
+       durability_cache: segment.durability,
+       updated_at: DateTime.utc_now()
+     }}
   end
 
   defp default_chunk_lister(_drive_path) do

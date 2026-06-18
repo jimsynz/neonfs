@@ -387,7 +387,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
          current_tree_root = Map.fetch!(segment.index_roots, index_kind),
          store = pick_store_handle(root_entry, opts),
          {:ok, new_tree_root, written_nodes} <- run_tree_op(tree_op, store, current_tree_root),
-         {advanced_segment, _ts} = advance_segment(segment, index_kind, new_tree_root),
+         {advanced_segment, _ts} = advance_segment(segment, shard, index_kind, new_tree_root),
          encoded = RootSegment.encode(advanced_segment),
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
          :ok <-
@@ -461,7 +461,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
          store = pick_store_handle(root_entry, opts),
          {:ok, updated_roots, written_nodes} <-
            run_batch_ops(mutations, store, segment.index_roots, opts),
-         {advanced_segment, _ts} = advance_segment_multi(segment, updated_roots),
+         {advanced_segment, _ts} = advance_segment_multi(segment, shard, updated_roots),
          encoded = RootSegment.encode(advanced_segment),
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
          :ok <-
@@ -545,9 +545,9 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     end
   end
 
-  defp advance_segment_multi(%RootSegment{} = segment, updated_roots) do
+  defp advance_segment_multi(%RootSegment{} = segment, shard, updated_roots) do
     {timestamp, advanced} = HLC.now(segment)
-    {RootSegment.touch(%{advanced | index_roots: updated_roots}), timestamp}
+    {RootSegment.touch(%{advanced | index_roots: updated_roots, shard: shard}), timestamp}
   end
 
   # Same shape as `apply_index_op` but for changes that mutate the
@@ -569,7 +569,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     opts = Keyword.put(opts, :volume_id, volume_id)
 
     with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, shard, opts),
-         updated_segment = RootSegment.touch(transform.(segment)),
+         updated_segment = %{RootSegment.touch(transform.(segment)) | shard: shard},
          encoded = RootSegment.encode(updated_segment),
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
          {:ok, new_root_chunk_hash} <-
@@ -669,12 +669,12 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   defp normalise_tree_root(nil), do: <<>>
   defp normalise_tree_root(hash) when is_binary(hash), do: hash
 
-  defp advance_segment(%RootSegment{} = segment, index_kind, new_tree_root) do
+  defp advance_segment(%RootSegment{} = segment, shard, index_kind, new_tree_root) do
     {timestamp, advanced} = HLC.now(segment)
 
     new_index_roots = Map.put(segment.index_roots, index_kind, new_tree_root)
 
-    {%{advanced | index_roots: new_index_roots} |> RootSegment.touch(), timestamp}
+    {%{advanced | index_roots: new_index_roots, shard: shard} |> RootSegment.touch(), timestamp}
   end
 
   defp pick_store_handle(root_entry, opts) do

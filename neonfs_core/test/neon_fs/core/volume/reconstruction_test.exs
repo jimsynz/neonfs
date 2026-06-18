@@ -41,7 +41,7 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
 
       assert [identity] == result.drives
       assert Map.has_key?(result.volumes, "vol-a")
-      assert result.volumes["vol-a"].hash == hash
+      assert result.volumes["vol-a"][nil].hash == hash
 
       assert [
                {:register_drive, %{drive_id: "drv-1", cluster_id: @cluster_id, node: this_node}},
@@ -174,7 +174,39 @@ defmodule NeonFS.Core.Volume.ReconstructionTest do
           end
         )
 
-      assert result.volumes["vol-a"].hash == new_hash
+      assert result.volumes["vol-a"][nil].hash == new_hash
+    end
+
+    test "restores diverged shards by their recorded index and fills the rest from the empty chunk (#1313)" do
+      identity = sample_identity("drv-1")
+
+      # An empty (shard: nil) provision chunk shared by un-diverged shards,
+      # plus a shard-2 segment that diverged after a write.
+      empty_segment = sample_segment("vol-a")
+      shard2_segment = %{empty_segment | shard: 2}
+      empty_hash = "empty"
+      shard2_hash = "shard2"
+
+      result =
+        Reconstruction.reconstruct(["/drv-1"],
+          expected_cluster_id: @cluster_id,
+          node: node(),
+          shards: [0, 1, 2, 3],
+          identity_reader: fn _ -> {:ok, identity} end,
+          chunk_lister: fn _ -> [empty_hash, shard2_hash] end,
+          chunk_reader: fn
+            _, ^empty_hash -> {:ok, RootSegment.encode(empty_segment)}
+            _, ^shard2_hash -> {:ok, RootSegment.encode(shard2_segment)}
+          end
+        )
+
+      roots =
+        for {:register_volume_root, "vol-a", shard, payload} <- result.commands,
+            into: %{},
+            do: {shard, payload.root_chunk_hash}
+
+      # Shard 2 → its own diverged chunk; 0/1/3 → the shared empty chunk.
+      assert roots == %{0 => empty_hash, 1 => empty_hash, 2 => shard2_hash, 3 => empty_hash}
     end
 
     test "same root chunk hash on multiple drives produces a multi-replica drive_locations list" do
