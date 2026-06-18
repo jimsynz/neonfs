@@ -74,6 +74,23 @@ defmodule NeonFS.Core.StripeIndexTest do
     end
   end
 
+  describe "put_mutations/1 + materialize/1 (#1320)" do
+    test "build batchable stripe-index puts and materialise ETS post-commit" do
+      stripe = make_stripe()
+
+      assert [{:put, :stripe_index, key, value}] = StripeIndex.put_mutations([stripe])
+      assert key == "stripe:" <> stripe.id
+      assert is_binary(value)
+
+      # Pure: no ETS write yet — the caller's batch persists, then materialises.
+      assert [] = :ets.lookup(:stripe_index, stripe.id)
+
+      assert :ok = StripeIndex.materialize([stripe])
+      assert [{_id, materialised}] = :ets.lookup(:stripe_index, stripe.id)
+      assert materialised.id == stripe.id
+    end
+  end
+
   describe "delete/1" do
     test "removes stripe from index" do
       stripe = make_stripe()

@@ -45,6 +45,31 @@ defmodule NeonFS.Core.StripeIndex do
   end
 
   @doc """
+  Builds the `:stripe_index` put mutations for `stripes`, for inclusion in
+  a caller's batched root-CAS (#1320) — the erasure write path folds these
+  into the same `FileIndex` batch as the file-meta + chunk commits instead
+  of persisting each stripe with its own `put/1` flip. Pure: no ETS, no
+  persist. Pair with `materialize/1` in the batch's post-commit callback.
+  """
+  @spec put_mutations([Stripe.t()]) :: [NeonFS.Core.Volume.MetadataWriter.mutation()]
+  def put_mutations(stripes) when is_list(stripes) do
+    Enum.map(stripes, fn %Stripe{} = stripe ->
+      {:put, :stripe_index, stripe_key(stripe.id),
+       MetadataValue.encode(stripe_to_storable_map(stripe))}
+    end)
+  end
+
+  @doc """
+  Inserts `stripes` into the local ETS materialisation once the batch that
+  carried `put_mutations/1`'s puts is durable (#1320). ETS-only — the
+  persist already happened in the batch.
+  """
+  @spec materialize([Stripe.t()]) :: :ok
+  def materialize(stripes) when is_list(stripes) do
+    GenServer.call(__MODULE__, {:materialize, stripes}, 10_000)
+  end
+
+  @doc """
   Retrieves stripe metadata by `volume_id` and `stripe_id`.
 
   Resolves through `Volume.MetadataReader.get_stripe/3`. The local ETS
@@ -141,6 +166,15 @@ defmodule NeonFS.Core.StripeIndex do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  @impl true
+  def handle_call({:materialize, stripes}, _from, state) do
+    Enum.each(stripes, fn %Stripe{} = stripe ->
+      :ets.insert(:stripe_index, {stripe.id, stripe})
+    end)
+
+    {:reply, :ok, state}
   end
 
   @impl true

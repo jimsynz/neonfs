@@ -1041,8 +1041,6 @@ defmodule NeonFS.Core.WriteOperation do
           padded_bytes
         )
 
-      store_stripe_metadata(stripe, stripe_id, write_ctx.write_id)
-
       all_chunks = stored_data_chunks ++ stored_parity_chunks
 
       emit_stripe_telemetry(stripe_id, volume, partial, all_chunks)
@@ -1322,13 +1320,6 @@ defmodule NeonFS.Core.WriteOperation do
     })
   end
 
-  defp store_stripe_metadata(stripe, _stripe_id, _write_id) do
-    case StripeIndex.put(stripe) do
-      {:ok, _id} -> :ok
-      {:error, reason} -> Logger.warning("Failed to store stripe metadata", reason: reason)
-    end
-  end
-
   defp emit_stripe_telemetry(stripe_id, volume, partial, all_chunks) do
     :telemetry.execute(
       [:neonfs, :write_operation, :stripe_created],
@@ -1347,11 +1338,10 @@ defmodule NeonFS.Core.WriteOperation do
     Enum.flat_map(stripe_results, & &1.chunks)
   end
 
-  # Persists the erasure file metadata and commits the stripe chunks in
-  # one batched root flip (#1318): folds the stripe chunks' `:committed`
-  # chunk-meta into the same shard-CAS as the file-meta + dirent create,
-  # the same way the replicated path does (#1304). The stripe-index
-  # entries are still written separately by `build_and_store_stripes`.
+  # Persists the erasure file metadata, commits the stripe chunks, and
+  # writes the `:stripe_index` entries in one batched root flip (#1318,
+  # #1320): the stripe chunks' `:committed` chunk-meta and the stripe-index
+  # puts all fold into the same shard-CAS as the file-meta + dirent create.
   defp create_erasure_file_metadata(volume_id, path, stripe_results, data, write_id, chunks, opts) do
     case FileIndex.get_by_path(volume_id, path) do
       {:ok, existing_file} ->
@@ -1385,7 +1375,14 @@ defmodule NeonFS.Core.WriteOperation do
     file_meta = %{file_meta | stripes: stripes}
     chunk_hashes = Enum.map(chunks, & &1.hash)
 
-    case FileIndex.create_committing_chunks(file_meta, write_id, chunk_hashes) do
+    stripe_structs = Enum.map(stripe_results, & &1.stripe)
+    stripe_mutations = StripeIndex.put_mutations(stripe_structs)
+    on_commit = fn -> StripeIndex.materialize(stripe_structs) end
+
+    case FileIndex.create_committing_chunks(file_meta, write_id, chunk_hashes,
+           extra_mutations: stripe_mutations,
+           on_commit: on_commit
+         ) do
       {:ok, stored_meta} -> {:ok, stored_meta}
       {:error, _reason} = error -> error
     end

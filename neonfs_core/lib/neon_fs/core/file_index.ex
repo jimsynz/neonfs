@@ -109,12 +109,23 @@ defmodule NeonFS.Core.FileIndex do
   instead of N+1 separate flips, and concurrent content writes coalesce
   in the windowed committer. On commit, `write_id`'s write refs are
   dropped from the chunks via `ChunkIndex.finalize_commit/2`.
+
+  `opts` may carry additional mutations to fold into the same batch
+  (#1320 — the erasure path folds its `:stripe_index` puts here):
+
+    * `:extra_mutations` — extra `MetadataWriter` mutations to stage.
+    * `:on_commit` — a 0-arity fun run once the batch is durable (e.g.
+      materialising the stripe ETS entries).
   """
-  @spec create_committing_chunks(FileMeta.t(), binary(), [binary()]) ::
+  @spec create_committing_chunks(FileMeta.t(), binary(), [binary()], keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
-  def create_committing_chunks(%FileMeta{} = file, write_id, chunk_hashes)
-      when is_binary(write_id) and is_list(chunk_hashes) do
-    GenServer.call(__MODULE__, {:create_committing_chunks, file, write_id, chunk_hashes}, 15_000)
+  def create_committing_chunks(%FileMeta{} = file, write_id, chunk_hashes, opts \\ [])
+      when is_binary(write_id) and is_list(chunk_hashes) and is_list(opts) do
+    GenServer.call(
+      __MODULE__,
+      {:create_committing_chunks, file, write_id, chunk_hashes, opts},
+      15_000
+    )
   end
 
   @doc """
@@ -470,8 +481,12 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @impl true
-  def handle_call({:create_committing_chunks, file, write_id, chunk_hashes}, from, state) do
-    plan = with_chunk_commit(plan_create(file), write_id, chunk_hashes)
+  def handle_call({:create_committing_chunks, file, write_id, chunk_hashes, opts}, from, state) do
+    plan =
+      plan_create(file)
+      |> with_chunk_commit(write_id, chunk_hashes)
+      |> with_extra_mutations(opts)
+
     stage_or_reply(plan, from, state)
   end
 
@@ -1167,6 +1182,27 @@ defmodule NeonFS.Core.FileIndex do
     end
 
     {:stage, volume_id, mutations ++ chunk_mutations, folded_on_commit, on_abort, reply,
+     file_effect}
+  end
+
+  # Folds caller-supplied extra mutations (#1320 — the erasure path's
+  # `:stripe_index` puts) and an extra post-commit hook into the staged
+  # transaction, so they share the same shard-CAS as the file + chunks.
+  defp with_extra_mutations({:now, _} = now, _opts), do: now
+
+  defp with_extra_mutations(
+         {:stage, volume_id, mutations, on_commit, on_abort, reply, file_effect},
+         opts
+       ) do
+    extra_mutations = Keyword.get(opts, :extra_mutations, [])
+    extra_on_commit = Keyword.get(opts, :on_commit, fn -> :ok end)
+
+    folded_on_commit = fn ->
+      on_commit.()
+      extra_on_commit.()
+    end
+
+    {:stage, volume_id, mutations ++ extra_mutations, folded_on_commit, on_abort, reply,
      file_effect}
   end
 
