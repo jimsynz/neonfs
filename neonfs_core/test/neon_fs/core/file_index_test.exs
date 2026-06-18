@@ -152,6 +152,123 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
+  describe "create_committing_chunks/3 (#1304)" do
+    setup %{store: store} do
+      flips = :counters.new(1, [])
+
+      reader = build_mock_metadata_reader_opts(store)
+
+      writer =
+        store
+        |> build_mock_metadata_writer_opts()
+        |> Keyword.put(:bootstrap_registrar, fn _command ->
+          :counters.add(flips, 1, 1)
+          {:ok, :updated}
+        end)
+
+      shared = [metadata_reader_opts: reader, metadata_writer_opts: writer]
+
+      stop_if_running(NeonFS.Core.FileIndex)
+      cleanup_ets_table(:file_index_by_id)
+      start_supervised!({NeonFS.Core.FileIndex, shared}, restart: :temporary)
+
+      stop_if_running(NeonFS.Core.ChunkIndex)
+      cleanup_ets_table(:chunk_index)
+      start_supervised!({NeonFS.Core.ChunkIndex, shared}, restart: :temporary)
+
+      %{flips: flips}
+    end
+
+    test "commits chunk-meta and file-meta in a single root flip", %{flips: flips} do
+      volume_id = "vol1"
+      write_id = UUIDv7.generate()
+      hash = :crypto.hash(:sha256, "chunk-bytes")
+
+      :ok = ChunkIndex.put(uncommitted_chunk(volume_id, hash, write_id))
+
+      :counters.put(flips, 1, 0)
+
+      file = FileMeta.new(volume_id, "/folded.txt", chunks: [hash], size: 11)
+      assert {:ok, stored} = FileIndex.create_committing_chunks(file, write_id, [hash])
+
+      assert :counters.get(flips, 1) == 1
+
+      assert {:ok, by_path} = FileIndex.get_by_path(volume_id, "/folded.txt")
+      assert by_path.id == stored.id
+
+      assert {:ok, chunk_meta} = ChunkIndex.get(volume_id, hash)
+      assert chunk_meta.commit_state == :committed
+      assert MapSet.size(chunk_meta.active_write_refs) == 0
+    end
+
+    test "leaves the chunk uncommitted while another write still references it", %{flips: flips} do
+      volume_id = "vol1"
+      write_a = UUIDv7.generate()
+      write_b = UUIDv7.generate()
+      hash = :crypto.hash(:sha256, "shared-chunk")
+
+      :ok = ChunkIndex.put(uncommitted_chunk(volume_id, hash, write_a))
+      :ok = ChunkIndex.add_write_ref(hash, write_b)
+
+      :counters.put(flips, 1, 0)
+
+      file = FileMeta.new(volume_id, "/a.txt", chunks: [hash], size: 12)
+      assert {:ok, _} = FileIndex.create_committing_chunks(file, write_a, [hash])
+
+      assert :counters.get(flips, 1) == 1
+
+      # The local ETS view keeps the chunk uncommitted while write_b's ref
+      # remains, so node-local GC won't release it. (The batch persisted
+      # `:committed`, but persisted commit_state is write-only — every GC /
+      # recovery decision reads ETS.)
+      assert {:ok, chunk_meta} = ChunkIndex.lookup_by_hash(hash)
+      assert chunk_meta.commit_state == :uncommitted
+      assert MapSet.equal?(chunk_meta.active_write_refs, MapSet.new([write_b]))
+    end
+
+    test "a concurrent location update is not clobbered by the folded commit" do
+      volume_id = "vol1"
+      write_id = UUIDv7.generate()
+      hash = :crypto.hash(:sha256, "replicated-chunk")
+      loc1 = %{node: node(), drive_id: "d1", tier: :hot}
+      loc2 = %{node: node(), drive_id: "d2", tier: :hot}
+
+      :ok = ChunkIndex.put(%{uncommitted_chunk(volume_id, hash, write_id) | locations: [loc1]})
+
+      file = FileMeta.new(volume_id, "/r.txt", chunks: [hash], size: 13)
+      assert {:ok, _} = FileIndex.create_committing_chunks(file, write_id, [hash])
+
+      # Replication adds the second drive after the commit folded the
+      # commit-state flip in — a `:locations`-only merge, so it must not
+      # revert commit_state, and the commit's flip must not have dropped
+      # the locations.
+      :ok = ChunkIndex.update_locations(hash, [loc1, loc2])
+
+      assert {:ok, chunk_meta} = ChunkIndex.get(volume_id, hash)
+      assert chunk_meta.commit_state == :committed
+      assert Enum.sort_by(chunk_meta.locations, & &1.drive_id) == [loc1, loc2]
+    end
+  end
+
+  defp uncommitted_chunk(volume_id, hash, write_id) do
+    %ChunkMeta{
+      volume_ids: MapSet.new([volume_id]),
+      hash: hash,
+      original_size: 11,
+      stored_size: 11,
+      compression: :none,
+      crypto: nil,
+      locations: [%{node: node(), drive_id: "stub", tier: :hot}],
+      target_replicas: 1,
+      commit_state: :uncommitted,
+      active_write_refs: MapSet.new([write_id]),
+      stripe_id: nil,
+      stripe_index: nil,
+      created_at: DateTime.utc_now(),
+      last_verified: nil
+    }
+  end
+
   describe "get/1" do
     test "retrieves file by ID" do
       file = FileMeta.new("vol1", "/test.txt")

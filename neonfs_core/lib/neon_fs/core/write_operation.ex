@@ -377,8 +377,7 @@ defmodule NeonFS.Core.WriteOperation do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
 
       with {:ok, chunks} <- chunk_and_store(data, volume, write_ctx, opts),
-           {:ok, file_meta} <- create_file_metadata(volume.id, path, chunks, data, opts),
-           :ok <- commit_chunks(volume.id, write_id, chunks),
+           {:ok, file_meta} <- create_file_metadata(volume.id, path, chunks, data, write_id, opts),
            :ok <- update_volume_stats(volume.id, data, chunks) do
         {:ok, file_meta}
       else
@@ -408,8 +407,7 @@ defmodule NeonFS.Core.WriteOperation do
            {:ok, chunks, total_bytes} <-
              stream_chunks(stream, chunker, compression_config, volume, write_ctx),
            {:ok, file_meta} <-
-             create_file_metadata_with_size(volume.id, path, chunks, total_bytes, opts),
-           :ok <- commit_chunks(volume.id, write_id, chunks),
+             create_file_metadata_with_size(volume.id, path, chunks, total_bytes, write_id, opts),
            :ok <- update_volume_stats_with_size(volume.id, total_bytes, chunks) do
         PendingWriteLog.clear(write_id)
         {:ok, file_meta}
@@ -1624,11 +1622,15 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp should_compress_chunk?(_size, _config), do: {false, :none}
 
-  defp create_file_metadata(volume_id, path, chunks, data, opts) do
-    create_file_metadata_with_size(volume_id, path, chunks, byte_size(data), opts)
+  defp create_file_metadata(volume_id, path, chunks, data, write_id, opts) do
+    create_file_metadata_with_size(volume_id, path, chunks, byte_size(data), write_id, opts)
   end
 
-  defp create_file_metadata_with_size(volume_id, path, chunks, size, opts) do
+  # Persists the file metadata and commits the write's content chunks in
+  # one batched root flip (#1304): `FileIndex.create_committing_chunks/3`
+  # folds the chunks' `:committed` chunk-meta into the same shard-CAS as
+  # the file-meta + dirent create.
+  defp create_file_metadata_with_size(volume_id, path, chunks, size, write_id, opts) do
     sorted_chunks = Enum.sort_by(chunks, & &1.offset)
     chunk_hashes = Enum.map(sorted_chunks, & &1.hash)
 
@@ -1656,19 +1658,19 @@ defmodule NeonFS.Core.WriteOperation do
 
     file_meta = FileMeta.new(volume_id, path, file_opts)
 
-    case FileIndex.create(file_meta) do
+    case FileIndex.create_committing_chunks(file_meta, write_id, chunk_hashes) do
       {:ok, stored_meta} -> {:ok, stored_meta}
       {:error, _reason} = error -> error
     end
   end
 
-  defp update_file_and_commit(volume_id, file_id, write_id, new_chunks, update_attrs) do
+  defp update_file_and_commit(_volume_id, file_id, write_id, new_chunks, update_attrs) do
     now = DateTime.utc_now()
     attrs = update_attrs ++ [modified_at: now, changed_at: now]
+    new_hashes = Enum.map(new_chunks, & &1.hash)
 
-    case FileIndex.update(file_id, attrs) do
+    case FileIndex.update_committing_chunks(file_id, attrs, write_id, new_hashes) do
       {:ok, updated_meta} ->
-        commit_chunks(volume_id, write_id, new_chunks)
         {:ok, updated_meta}
 
       {:error, _reason} = error ->

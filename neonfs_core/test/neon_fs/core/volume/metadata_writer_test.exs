@@ -2,6 +2,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
   use ExUnit.Case, async: true
 
   alias NeonFS.Cluster.State, as: ClusterState
+  alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.Volume.MetadataWriter
   alias NeonFS.Core.Volume.RootSegment
   alias NeonFS.Error.QuorumUnavailable
@@ -212,6 +213,52 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       assert length(:ets.lookup(capture.tree_calls, :put)) == 1
       assert length(:ets.lookup(capture.tree_calls, :delete)) == 1
       assert length(:ets.lookup(capture.bootstrap_calls, :bootstrap)) == 1
+    end
+  end
+
+  describe "merge/5 (#1304)" do
+    test "read-decode-merges the given fields over the current value and writes it back" do
+      capture = build_capture()
+
+      current = %{commit_state: :uncommitted, locations: [%{drive_id: "a"}]}
+
+      opts =
+        build_opts(
+          capture: capture,
+          index_tree_get: fn _store, _root, _tier, _key ->
+            {:ok, MetadataValue.encode(current)}
+          end
+        )
+
+      assert {:ok, "new-root-hash"} =
+               MetadataWriter.merge("vol-1", :chunk_index, "k", %{commit_state: :committed}, opts)
+
+      [{:put, _store, _root, _tier, "k", value}] = :ets.lookup(capture.tree_calls, :put)
+      assert {:ok, merged} = MetadataValue.decode(value)
+
+      # The merged field is updated; the disjoint field is preserved — so a
+      # concurrent locations write isn't clobbered by a commit-state flip.
+      assert merged.commit_state == :committed
+      assert merged.locations == [%{drive_id: "a"}]
+    end
+
+    test "errors when the merge target has no current value" do
+      capture = build_capture()
+
+      opts =
+        build_opts(
+          capture: capture,
+          index_tree_get: fn _store, _root, _tier, _key -> {:ok, nil} end
+        )
+
+      assert {:error, {:index_tree_write_failed, :merge_target_missing}} =
+               MetadataWriter.merge(
+                 "vol-1",
+                 :chunk_index,
+                 "missing",
+                 %{commit_state: :committed},
+                 opts
+               )
     end
   end
 
@@ -583,6 +630,7 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
       store_handle: :stub_store_handle,
       chunk_replicator: stub_replicator(capturing_replicator),
       bootstrap_registrar: capturing_registrar,
+      index_tree_get: fn _store, _root, _tier, _key -> {:ok, nil} end,
       index_tree_put: capturing_put,
       index_tree_delete: capturing_delete,
       index_tree_purge_tombstones: capturing_purge

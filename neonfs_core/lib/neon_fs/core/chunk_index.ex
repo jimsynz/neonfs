@@ -275,6 +275,45 @@ defmodule NeonFS.Core.ChunkIndex do
     GenServer.call(__MODULE__, {:update_locations, hash, locations}, 10_000)
   end
 
+  @doc """
+  Builds the metadata mutations that persist `hashes`' chunk metadata as
+  `committed`, for inclusion in a caller's batched root-CAS (#1304).
+
+  Reads the local ETS materialisation and emits a `commit_state`-only
+  `:merge` per chunk currently in the `:uncommitted` state. A merge (not a
+  full put) so it only flips `commit_state` against whatever the chunk's
+  current persisted value is — it can't clobber a concurrent
+  `update_locations/2` that adds a replica location to the same record
+  (#1304). Already-committed chunks (dedup hits against a prior write)
+  need no persist and are skipped. Pair with `finalize_commit/2` in the
+  batch's post-commit callback to flip the ETS state once the root is
+  durable.
+  """
+  @spec commit_mutations(binary(), [binary()]) :: [MetadataWriter.mutation()]
+  def commit_mutations(volume_id, hashes) when is_binary(volume_id) and is_list(hashes) do
+    Enum.flat_map(hashes, fn hash ->
+      case :ets.lookup(:chunk_index, hash) do
+        [{^hash, %ChunkMeta{commit_state: :uncommitted}}] ->
+          [{:merge, :chunk_index, chunk_key(hash), %{commit_state: :committed}}]
+
+        _ ->
+          []
+      end
+    end)
+  end
+
+  @doc """
+  Finalises a batched chunk commit in the local ETS materialisation
+  (#1304): drops `write_id`'s write ref from each chunk and, when no refs
+  remain, flips its `commit_state` to `:committed`. ETS-only — the
+  persisted `:committed` payload was already written by the batch that
+  carried `commit_mutations/2`'s puts, so this does no quorum write.
+  """
+  @spec finalize_commit(ChunkMeta.write_id(), [binary()]) :: :ok
+  def finalize_commit(write_id, hashes) when is_list(hashes) do
+    GenServer.call(__MODULE__, {:finalize_commit, write_id, hashes}, 10_000)
+  end
+
   # Server Callbacks
 
   @impl true
@@ -357,14 +396,30 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @impl true
+  def handle_call({:finalize_commit, write_id, hashes}, _from, state) do
+    Enum.each(hashes, fn hash ->
+      case :ets.lookup(:chunk_index, hash) do
+        [{^hash, %ChunkMeta{} = meta}] ->
+          :ets.insert(:chunk_index, {hash, finalise_meta(meta, write_id)})
+
+        [] ->
+          :ok
+      end
+    end)
+
+    {:reply, :ok, state}
+  end
+
+  @impl true
   def handle_call({:update_locations, hash, locations}, _from, state) do
     case :ets.lookup(:chunk_index, hash) do
       [{^hash, chunk_meta}] ->
-        updated_meta = %{chunk_meta | locations: locations}
-
-        case write_chunk(updated_meta) do
+        # Persist a `locations`-only merge, not a full-meta overwrite, so a
+        # concurrent `commit_state` flip folded into the file batch (#1304)
+        # isn't clobbered.
+        case merge_chunk_fields(chunk_meta, %{locations: locations}) do
           :ok ->
-            :ets.insert(:chunk_index, {hash, updated_meta})
+            :ets.insert(:chunk_index, {hash, %{chunk_meta | locations: locations}})
             {:reply, :ok, state}
 
           {:error, reason} ->
@@ -428,6 +483,25 @@ defmodule NeonFS.Core.ChunkIndex do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp merge_chunk_fields(%ChunkMeta{} = chunk_meta, fields) do
+    case ChunkMeta.any_volume_id(chunk_meta) do
+      nil ->
+        {:error, :missing_volume_id}
+
+      volume_id ->
+        case MetadataWriter.merge(
+               volume_id,
+               :chunk_index,
+               chunk_key(chunk_meta.hash),
+               fields,
+               metadata_writer_opts()
+             ) do
+          {:ok, _root} -> :ok
+          {:error, _reason} = err -> err
+        end
     end
   end
 
@@ -498,6 +572,16 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   # Private — Commit
+
+  defp finalise_meta(%ChunkMeta{} = meta, write_id) do
+    meta = ChunkMeta.remove_write_ref(meta, write_id)
+
+    if meta.commit_state == :uncommitted and MapSet.size(meta.active_write_refs) == 0 do
+      %{meta | commit_state: :committed}
+    else
+      meta
+    end
+  end
 
   defp do_commit_chunk(hash) do
     with [{^hash, chunk_meta}] <- :ets.lookup(:chunk_index, hash),

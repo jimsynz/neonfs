@@ -46,13 +46,17 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   alias NeonFS.Core.BlobStore
   alias NeonFS.Core.MetadataStateMachine
   alias NeonFS.Core.RaSupervisor
-  alias NeonFS.Core.Volume.{ChunkReplicator, HLC, MetadataReader, Provisioner, RootSegment, Shard}
+  alias NeonFS.Core.Volume.HLC
+  alias NeonFS.Core.Volume.MetadataValue
+
+  alias NeonFS.Core.Volume.{ChunkReplicator, MetadataReader, Provisioner, RootSegment, Shard}
   alias NeonFS.Core.VolumeRegistry
 
   @type index_kind :: :file_index | :chunk_index | :stripe_index
   @type mutation ::
           {:put, index_kind(), binary(), binary()}
           | {:delete, index_kind(), binary()}
+          | {:merge, index_kind(), binary(), map()}
   @type write_error ::
           MetadataReader.read_error()
           | {:error, Splode.Error.t()}
@@ -104,6 +108,42 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       end,
       fn node, remote_opts ->
         remote_call(node, opts, :delete, [volume_id, index_kind, key, remote_opts])
+      end
+    )
+  end
+
+  @doc """
+  Read-modify-write `key`: decode its current value, `Map.merge/2` the
+  `fields` map over it, and write the result back (#1304). Returns the
+  `root_chunk_hash` the bootstrap layer now points at, or
+  `{:error, :merge_target_missing}` if the key has no current value.
+
+  Unlike `put/5` (a blind full-value overwrite), a merge only touches the
+  given fields, so two writers updating *disjoint* fields of the same
+  record — e.g. a chunk's `:commit_state` flip folded into the file
+  batch and an `update_locations/2` running concurrently — compose under
+  the per-shard CAS retry instead of clobbering each other. The decode →
+  merge → encode runs inside the CAS loop, so a stale-pointer conflict
+  re-reads the latest value before re-merging.
+  """
+  @spec merge(binary(), index_kind(), binary(), map(), keyword()) ::
+          {:ok, binary()} | write_error()
+  def merge(volume_id, index_kind, key, fields, opts \\ [])
+      when is_binary(volume_id) and is_atom(index_kind) and is_binary(key) and is_map(fields) do
+    with_remote_fallback(
+      volume_id,
+      opts,
+      fn ->
+        apply_index_op(
+          volume_id,
+          Shard.for_key(key),
+          index_kind,
+          opts,
+          merge_tree_op(key, fields, opts)
+        )
+      end,
+      fn node, remote_opts ->
+        remote_call(node, opts, :merge, [volume_id, index_kind, key, fields, remote_opts])
       end
     )
   end
@@ -407,6 +447,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   defp mutation_key({:put, _kind, key, _value}), do: key
   defp mutation_key({:delete, _kind, key}), do: key
+  defp mutation_key({:merge, _kind, key, _fields}), do: key
 
   defp do_apply_batch(_volume_id, _shard, _mutations, _opts, retries_left)
        when retries_left < 0 do
@@ -453,13 +494,10 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   # the new root forward so later mutations build on earlier ones, and
   # accumulate every written CoW node for replication.
   defp run_batch_ops(mutations, store, initial_roots, opts) do
-    nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
-    nif_delete = Keyword.get(opts, :index_tree_delete, &Native.index_tree_delete/4)
-
     Enum.reduce_while(mutations, {:ok, initial_roots, []}, fn mutation, {:ok, roots, nodes} ->
       kind = elem(mutation, 1)
       current_tree_root = Map.fetch!(roots, kind)
-      op = batch_tree_op(mutation, nif_put, nif_delete)
+      op = batch_tree_op(mutation, opts)
 
       case run_tree_op(op, store, current_tree_root) do
         {:ok, new_root, written} ->
@@ -471,11 +509,41 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     end)
   end
 
-  defp batch_tree_op({:put, _kind, key, value}, nif_put, _nif_delete),
-    do: fn store, root -> nif_put.(store, root, "hot", key, value) end
+  defp batch_tree_op({:put, _kind, key, value}, opts) do
+    nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
+    fn store, root -> nif_put.(store, root, "hot", key, value) end
+  end
 
-  defp batch_tree_op({:delete, _kind, key}, _nif_put, nif_delete),
-    do: fn store, root -> nif_delete.(store, root, "hot", key) end
+  defp batch_tree_op({:delete, _kind, key}, opts) do
+    nif_delete = Keyword.get(opts, :index_tree_delete, &Native.index_tree_delete/4)
+    fn store, root -> nif_delete.(store, root, "hot", key) end
+  end
+
+  defp batch_tree_op({:merge, _kind, key, fields}, opts) do
+    merge_tree_op(key, fields, opts)
+  end
+
+  # Read-decode-merge-encode-put against the current tree root. Runs inside
+  # the CAS retry loop, so a stale-pointer conflict re-reads the latest
+  # value and re-merges `fields` over it — disjoint-field writers compose
+  # instead of clobbering (#1304).
+  defp merge_tree_op(key, fields, opts) do
+    nif_get = Keyword.get(opts, :index_tree_get, &Native.index_tree_get/4)
+    nif_put = Keyword.get(opts, :index_tree_put, &Native.index_tree_put/5)
+
+    fn store, root -> do_merge(nif_get, nif_put, store, root, key, fields) end
+  end
+
+  defp do_merge(nif_get, nif_put, store, root, key, fields) do
+    with {:ok, encoded} when is_binary(encoded) <- nif_get.(store, root, "hot", key),
+         {:ok, decoded} <- MetadataValue.decode(encoded) do
+      value = MetadataValue.encode(Map.merge(decoded, fields))
+      nif_put.(store, root, "hot", key, value)
+    else
+      {:ok, nil} -> {:error, :merge_target_missing}
+      {:error, _} = err -> err
+    end
+  end
 
   defp advance_segment_multi(%RootSegment{} = segment, updated_roots) do
     {timestamp, advanced} = HLC.now(segment)

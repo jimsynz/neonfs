@@ -362,12 +362,7 @@ defmodule NeonFS.TestCase do
       if Keyword.has_key?(opts, :metadata_reader_opts) do
         opts
       else
-        store = :ets.new(:test_chunk_metadata_store, [:set, :public])
-
-        [
-          metadata_reader_opts: build_mock_metadata_reader_opts(store),
-          metadata_writer_opts: build_mock_metadata_writer_opts(store)
-        ]
+        shared_metadata_index_opts()
       end
 
     stop_if_running(NeonFS.Core.ChunkIndex)
@@ -393,12 +388,7 @@ defmodule NeonFS.TestCase do
       if Keyword.has_key?(opts, :metadata_reader_opts) do
         opts
       else
-        store = :ets.new(:test_shared_metadata_store, [:set, :public])
-
-        [
-          metadata_reader_opts: build_mock_metadata_reader_opts(store),
-          metadata_writer_opts: build_mock_metadata_writer_opts(store)
-        ]
+        shared_metadata_index_opts()
       end
 
     stop_if_running(NeonFS.Core.FileIndex)
@@ -408,6 +398,32 @@ defmodule NeonFS.TestCase do
       {NeonFS.Core.FileIndex, opts},
       restart: :temporary
     )
+  end
+
+  # ChunkIndex, FileIndex and StripeIndex all persist into the *same*
+  # per-volume index trees in production (chunk / file / dirent / stripe
+  # keys are prefix-namespaced within one RootSegment). The write-path
+  # transaction (#1304) folds chunk-meta commits into the FileIndex
+  # batch, so the indexes must share one backing store in tests too —
+  # otherwise a chunk-meta committed through FileIndex's committer would
+  # be invisible to `ChunkIndex.get/2`. One store per test process,
+  # reused across the three `start_*_index/1` helpers.
+  defp shared_metadata_index_opts do
+    store =
+      case Process.get(:test_metadata_index_store) do
+        nil ->
+          new_store = :ets.new(:test_volume_metadata_store, [:set, :public])
+          Process.put(:test_metadata_index_store, new_store)
+          new_store
+
+        existing ->
+          existing
+      end
+
+    [
+      metadata_reader_opts: build_mock_metadata_reader_opts(store),
+      metadata_writer_opts: build_mock_metadata_writer_opts(store)
+    ]
   end
 
   @doc """
@@ -541,6 +557,12 @@ defmodule NeonFS.TestCase do
       store_handle: :stub_store,
       chunk_replicator: __MODULE__.NoopReplicator,
       bootstrap_registrar: fn _command -> {:ok, :updated} end,
+      index_tree_get: fn _store, _root, _tier, key ->
+        case :ets.lookup(store, key) do
+          [{^key, value}] -> {:ok, MetadataValue.encode(value)}
+          [] -> {:ok, nil}
+        end
+      end,
       index_tree_put: fn _store, _root, _tier, key, value ->
         case MetadataValue.decode(value) do
           {:ok, decoded} ->
@@ -652,12 +674,7 @@ defmodule NeonFS.TestCase do
       if Keyword.has_key?(opts, :metadata_reader_opts) do
         opts
       else
-        store = :ets.new(:test_stripe_metadata_store, [:set, :public])
-
-        [
-          metadata_reader_opts: build_mock_metadata_reader_opts(store),
-          metadata_writer_opts: build_mock_metadata_writer_opts(store)
-        ]
+        shared_metadata_index_opts()
       end
 
     stop_if_running(NeonFS.Core.StripeIndex)

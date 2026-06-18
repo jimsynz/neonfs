@@ -105,11 +105,8 @@ defmodule NeonFS.Core.CommitChunks do
            :ok <- check_lock(volume_id, path, client_ref, opts),
            chunk_metas <-
              reconcile_chunks(volume_id, chunk_hashes, locations_map, chunk_codecs, write_id),
-           {:ok, reconciled} <- collect_reconciled(chunk_metas),
-           {:ok, file_meta} <-
-             create_file_metadata(volume.id, path, chunk_hashes, total_size, opts),
-           :ok <- commit_chunk_refs(volume_id, reconciled, write_id) do
-        {:ok, file_meta}
+           {:ok, _reconciled} <- collect_reconciled(chunk_metas) do
+        create_file_metadata(volume.id, path, chunk_hashes, total_size, write_id, opts)
       end
 
     case result do
@@ -273,7 +270,11 @@ defmodule NeonFS.Core.CommitChunks do
     end
   end
 
-  defp create_file_metadata(volume_id, path, chunk_hashes, total_size, opts) do
+  # Persists the file metadata and commits the file's chunks in one
+  # batched root flip (#1304) — `create_committing_chunks/3` folds the
+  # chunks' `:committed` chunk-meta into the same shard-CAS as the
+  # file-meta + dirent, dropping `write_id`'s refs on commit.
+  defp create_file_metadata(volume_id, path, chunk_hashes, total_size, write_id, opts) do
     case FileIndex.get_by_path(volume_id, path) do
       {:ok, existing} ->
         FileIndex.delete(existing.id)
@@ -292,7 +293,7 @@ defmodule NeonFS.Core.CommitChunks do
 
     file_meta = FileMeta.new(volume_id, path, file_opts)
 
-    case FileIndex.create(file_meta) do
+    case FileIndex.create_committing_chunks(file_meta, write_id, chunk_hashes) do
       {:ok, stored} -> {:ok, stored}
       {:error, _reason} = err -> err
     end
@@ -304,42 +305,4 @@ defmodule NeonFS.Core.CommitChunks do
       :error -> kw
     end
   end
-
-  defp commit_chunk_refs(volume_id, metas, write_id) do
-    remove_results =
-      Enum.map(metas, fn %ChunkMeta{hash: hash} ->
-        ChunkIndex.remove_write_ref(hash, write_id)
-      end)
-
-    if Enum.all?(remove_results, &(&1 == :ok)) do
-      commit_results =
-        Enum.map(metas, fn %ChunkMeta{hash: hash} -> commit_if_ready(volume_id, hash) end)
-
-      if Enum.all?(commit_results, &acceptable_commit_result?/1) do
-        :ok
-      else
-        {:error, :commit_failed}
-      end
-    else
-      {:error, :commit_failed}
-    end
-  end
-
-  defp commit_if_ready(volume_id, hash) do
-    case ChunkIndex.get(volume_id, hash) do
-      {:ok, %ChunkMeta{active_write_refs: refs}} ->
-        if MapSet.size(refs) == 0 do
-          ChunkIndex.commit(hash)
-        else
-          :ok
-        end
-
-      {:error, :not_found} ->
-        :ok
-    end
-  end
-
-  defp acceptable_commit_result?(:ok), do: true
-  defp acceptable_commit_result?({:error, :has_active_writes}), do: true
-  defp acceptable_commit_result?(_), do: false
 end

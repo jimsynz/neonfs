@@ -100,6 +100,24 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  Creates a file and commits its content chunks in the same batched root
+  flip (#1304).
+
+  Folds `ChunkIndex.commit_mutations/2` for `chunk_hashes` into the same
+  staged transaction as the file-meta + dirent create, so a content
+  write's chunk-meta commit and its file create share one shard-CAS
+  instead of N+1 separate flips, and concurrent content writes coalesce
+  in the windowed committer. On commit, `write_id`'s write refs are
+  dropped from the chunks via `ChunkIndex.finalize_commit/2`.
+  """
+  @spec create_committing_chunks(FileMeta.t(), binary(), [binary()]) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def create_committing_chunks(%FileMeta{} = file, write_id, chunk_hashes)
+      when is_binary(write_id) and is_list(chunk_hashes) do
+    GenServer.call(__MODULE__, {:create_committing_chunks, file, write_id, chunk_hashes}, 15_000)
+  end
+
+  @doc """
   Retrieves a file by `volume_id` and `file_id`.
 
   Resolves through `Volume.MetadataReader.get_file_meta/3`. The local
@@ -150,6 +168,23 @@ defmodule NeonFS.Core.FileIndex do
   @spec update(file_id(), keyword()) :: {:ok, FileMeta.t()} | {:error, term()}
   def update(file_id, updates) do
     GenServer.call(__MODULE__, {:update, file_id, updates}, 10_000)
+  end
+
+  @doc """
+  Updates a file and commits its newly-written content chunks in the same
+  batched root flip (#1304) — the `update/2` counterpart of
+  `create_committing_chunks/3`, used by the append / partial-write commit
+  path.
+  """
+  @spec update_committing_chunks(file_id(), keyword(), binary(), [binary()]) ::
+          {:ok, FileMeta.t()} | {:error, term()}
+  def update_committing_chunks(file_id, updates, write_id, chunk_hashes)
+      when is_binary(write_id) and is_list(chunk_hashes) do
+    GenServer.call(
+      __MODULE__,
+      {:update_committing_chunks, file_id, updates, write_id, chunk_hashes},
+      15_000
+    )
   end
 
   @doc """
@@ -435,8 +470,24 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @impl true
+  def handle_call({:create_committing_chunks, file, write_id, chunk_hashes}, from, state) do
+    plan = with_chunk_commit(plan_create(file), write_id, chunk_hashes)
+    stage_or_reply(plan, from, state)
+  end
+
+  @impl true
   def handle_call({:update, file_id, updates}, from, state) do
     stage_or_reply(plan_update(file_id, updates, state.pending_files), from, state)
+  end
+
+  @impl true
+  def handle_call(
+        {:update_committing_chunks, file_id, updates, write_id, chunk_hashes},
+        from,
+        state
+      ) do
+    plan = plan_update(file_id, updates, state.pending_files)
+    stage_or_reply(with_chunk_commit(plan, write_id, chunk_hashes), from, state)
   end
 
   @impl true
@@ -1090,6 +1141,35 @@ defmodule NeonFS.Core.FileIndex do
   defp default_on_abort, do: fn reason -> {:error, reason} end
   defp noop_on_commit, do: fn -> :ok end
 
+  ## Private — Chunk-commit folding (#1304)
+  #
+  # Augments a staged file operation so the content chunks' `:committed`
+  # metadata persists in the *same* shard-grouped batch as the file
+  # create/update — collapsing a content write's N chunk commits + the
+  # file flip into one CAS per shard. A pre-stage failure (`{:now, _}`)
+  # passes straight through so the write path still aborts the chunks.
+
+  defp with_chunk_commit({:now, _} = now, _write_id, _chunk_hashes), do: now
+
+  # `plan_create/1` and `plan_update/3` — the only planners routed here —
+  # always stage a 7-tuple (they carry a `file_effect`), so that's the
+  # only `{:stage, …}` shape this needs to handle.
+  defp with_chunk_commit(
+         {:stage, volume_id, mutations, on_commit, on_abort, reply, file_effect},
+         write_id,
+         hashes
+       ) do
+    chunk_mutations = ChunkIndex.commit_mutations(volume_id, hashes)
+
+    folded_on_commit = fn ->
+      ChunkIndex.finalize_commit(write_id, hashes)
+      on_commit.()
+    end
+
+    {:stage, volume_id, mutations ++ chunk_mutations, folded_on_commit, on_abort, reply,
+     file_effect}
+  end
+
   ## Private — Batch committer
   #
   # Operations stage their mutations; a windowed flush commits each
@@ -1209,6 +1289,7 @@ defmodule NeonFS.Core.FileIndex do
 
   defp mutation_key({:put, _kind, key, _value}), do: key
   defp mutation_key({:delete, _kind, key}), do: key
+  defp mutation_key({:merge, _kind, key, _fields}), do: key
 
   defp arm_timer(%{timer: nil} = state) do
     %{state | timer: Process.send_after(self(), :flush_batch, state.max_batch_delay_ms)}
