@@ -75,7 +75,7 @@ defmodule NeonFS.Core.Volume.Provisioner do
          encoded = RootSegment.encode(segment),
          min_copies = min_copies(volume.durability),
          {:ok, hash, _summary} <-
-           replicate(chunk_replicator, encoded, replica_drives, min_copies),
+           replicate(chunk_replicator, encoded, replica_drives, min_copies, volume.id),
          entry = build_entry(volume, hash, replica_drives),
          :ok <- register_all_shards(bootstrap_registrar, volume.id, entry) do
       {:ok, hash}
@@ -155,8 +155,8 @@ defmodule NeonFS.Core.Volume.Provisioner do
   defp min_copies(%{type: :replicate, min_copies: m}), do: m
   defp min_copies(%{type: :erasure, data_chunks: d}), do: d
 
-  defp replicate(chunk_replicator, encoded, drives, min_copies) do
-    chunk_replicator.write_chunk(encoded, drives, min_copies: min_copies)
+  defp replicate(chunk_replicator, encoded, drives, min_copies, volume_id) do
+    chunk_replicator.write_chunk(encoded, drives, min_copies: min_copies, volume_id: volume_id)
   end
 
   defp build_entry(%Volume{} = volume, root_chunk_hash, replica_drives) do

@@ -340,6 +340,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   defp do_apply_index_op(volume_id, shard, index_kind, opts, tree_op, retries_left) do
+    opts = Keyword.put(opts, :volume_id, volume_id)
+
     with {:ok, segment, root_entry} <-
            resolve_or_provision(volume_id, shard, opts),
          current_tree_root = Map.fetch!(segment.index_roots, index_kind),
@@ -412,6 +414,8 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   defp do_apply_batch(volume_id, shard, mutations, opts, retries_left) do
+    opts = Keyword.put(opts, :volume_id, volume_id)
+
     with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, shard, opts),
          store = pick_store_handle(root_entry, opts),
          {:ok, updated_roots, written_nodes} <-
@@ -494,6 +498,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   defp do_apply_segment_op(volume_id, opts, transform, retries_left) do
     shard = 0
+    opts = Keyword.put(opts, :volume_id, volume_id)
 
     with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, shard, opts),
          updated_segment = RootSegment.touch(transform.(segment)),
@@ -680,7 +685,10 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     chunk_replicator = Keyword.get(opts, :chunk_replicator, ChunkReplicator)
     min_copies = min_copies(durability)
 
-    write_opts = maybe_put_writer_fn([min_copies: min_copies], opts)
+    # Thread the volume so ChunkReplicator routes the write through the IO
+    # scheduler at `:metadata_commit` priority (#1305).
+    base_opts = [min_copies: min_copies, volume_id: Keyword.get(opts, :volume_id)]
+    write_opts = maybe_put_writer_fn(base_opts, opts)
 
     case chunk_replicator.write_chunk(encoded, replica_drives, write_opts) do
       {:ok, hash, _summary} -> {:ok, hash}
