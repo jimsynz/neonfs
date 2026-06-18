@@ -915,10 +915,17 @@ defmodule NeonFS.Core.WriteOperation do
          {:ok, stripe_results} <-
            build_and_store_stripes(chunk_results, volume, write_ctx, opts),
          all_chunks = collect_all_stripe_chunks(stripe_results),
-         {:ok, file_meta} <-
-           create_erasure_file_metadata(volume.id, path, stripe_results, data, opts),
-         :ok <- commit_chunks(volume.id, write_ctx.write_id, all_chunks),
          :ok <- validate_erasure_commit(stripe_results, data),
+         {:ok, file_meta} <-
+           create_erasure_file_metadata(
+             volume.id,
+             path,
+             stripe_results,
+             data,
+             write_ctx.write_id,
+             all_chunks,
+             opts
+           ),
          :ok <- update_volume_stats(volume.id, data, all_chunks) do
       {:ok, file_meta}
     end
@@ -1340,8 +1347,12 @@ defmodule NeonFS.Core.WriteOperation do
     Enum.flat_map(stripe_results, & &1.chunks)
   end
 
-  defp create_erasure_file_metadata(volume_id, path, stripe_results, data, opts) do
-    # Handle file overwrite
+  # Persists the erasure file metadata and commits the stripe chunks in
+  # one batched root flip (#1318): folds the stripe chunks' `:committed`
+  # chunk-meta into the same shard-CAS as the file-meta + dirent create,
+  # the same way the replicated path does (#1304). The stripe-index
+  # entries are still written separately by `build_and_store_stripes`.
+  defp create_erasure_file_metadata(volume_id, path, stripe_results, data, write_id, chunks, opts) do
     case FileIndex.get_by_path(volume_id, path) do
       {:ok, existing_file} ->
         evict_resolved_cache(existing_file.id)
@@ -1372,8 +1383,9 @@ defmodule NeonFS.Core.WriteOperation do
 
     file_meta = FileMeta.new(volume_id, path, file_opts)
     file_meta = %{file_meta | stripes: stripes}
+    chunk_hashes = Enum.map(chunks, & &1.hash)
 
-    case FileIndex.create(file_meta) do
+    case FileIndex.create_committing_chunks(file_meta, write_id, chunk_hashes) do
       {:ok, stored_meta} -> {:ok, stored_meta}
       {:error, _reason} = error -> error
     end
@@ -1676,46 +1688,6 @@ defmodule NeonFS.Core.WriteOperation do
       {:error, _reason} = error ->
         abort_chunks(write_id)
         error
-    end
-  end
-
-  defp commit_chunks(volume_id, write_id, chunks) do
-    results =
-      Enum.map(chunks, fn chunk ->
-        ChunkIndex.remove_write_ref(chunk.hash, write_id)
-      end)
-
-    if Enum.all?(results, &(&1 == :ok)) do
-      commit_all_chunks(volume_id, chunks)
-    else
-      {:error, :commit_failed}
-    end
-  end
-
-  defp commit_all_chunks(volume_id, chunks) do
-    commit_results =
-      Enum.map(chunks, fn chunk ->
-        commit_chunk_if_ready(volume_id, chunk.hash)
-      end)
-
-    if Enum.all?(commit_results, &(&1 in [:ok, {:error, :has_active_writes}])) do
-      :ok
-    else
-      {:error, :commit_failed}
-    end
-  end
-
-  defp commit_chunk_if_ready(volume_id, hash) do
-    case ChunkIndex.get(volume_id, hash) do
-      {:ok, meta} ->
-        if MapSet.size(meta.active_write_refs) == 0 do
-          ChunkIndex.commit(hash)
-        else
-          :ok
-        end
-
-      {:error, :not_found} ->
-        :ok
     end
   end
 
