@@ -16,8 +16,10 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
 
   alias NeonFS.Core.{
     AuditLog,
+    DriveEvacuation,
     DriveManager,
     MetadataStateMachine,
+    NodeRegistry,
     RaServer,
     RaSupervisor,
     ServiceRegistry
@@ -90,6 +92,90 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
       {:error, reason} ->
         {:error, wrap_error(reason)}
     end
+  end
+
+  @doc """
+  Begins graceful decommission of a node: marks it `:draining` and starts
+  evacuating each of its drives (#1325).
+
+  Marking `:draining` first is the point — placement (`DriveSelector` /
+  `Provisioner`, #1323) and client routing (`CostFunction`, #1324)
+  immediately stop giving the node new work, so nothing new lands on it
+  while its existing data drains off. Then each of the node's drives is
+  handed to `DriveEvacuation` to migrate its chunks elsewhere.
+
+  This returns as soon as evacuation is *started* (evacuation runs as a
+  background job). The operator polls drive state, then runs
+  `neonfs cluster remove-node` once the drives are empty — that command
+  already refuses while the node still owns drives.
+
+  ## Parameters
+  - `node_name` — target node (`"neonfs_core@host2"` or `"host2"`).
+  - `opts` — `"evacuate"` (boolean, default `true`): set `false` to mark
+    draining without kicking off drive evacuation.
+
+  ## Returns
+  - `{:ok, %{node, status: "draining", drives: [%{drive_id, evacuation}]}}`.
+  - `{:error, reason}` if the cluster isn't formed, the node can't be
+    resolved, or the lifecycle write fails.
+  """
+  @spec handle_drain_node(String.t(), map()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_drain_node(node_name, opts \\ %{}) when is_binary(node_name) do
+    set_cli_metadata()
+    evacuate? = Map.get(opts, "evacuate", true)
+
+    with :ok <- require_cluster(),
+         {:ok, target_node} <- resolve_target_node(node_name),
+         :ok <- NodeRegistry.set_status(target_node, :draining) do
+      evacuations =
+        if evacuate? do
+          start_drive_evacuations(target_node, DriveManager.list_all_drives(node: target_node))
+        else
+          []
+        end
+
+      {:ok,
+       %{
+         node: Atom.to_string(target_node),
+         status: "draining",
+         drives: evacuations
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Reverses a drain: marks the node `:active` again (#1325) so placement
+  and routing resume giving it new work.
+
+  Note this does not reverse drive evacuation already in flight — chunks
+  that migrated off stay off; this only re-enables the node for *new*
+  work. Use it to abort a decommission before the node is removed.
+  """
+  @spec handle_undrain_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_undrain_node(node_name) when is_binary(node_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, target_node} <- resolve_target_node(node_name),
+         :ok <- NodeRegistry.set_status(target_node, :active) do
+      {:ok, %{node: Atom.to_string(target_node), status: "active"}}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  # Hands each of the node's drives to `DriveEvacuation`, collecting a
+  # per-drive start result. Already-draining drives surface their error
+  # rather than aborting the whole drain.
+  defp start_drive_evacuations(target_node, drives) do
+    Enum.map(drives, fn %{id: drive_id} ->
+      case DriveEvacuation.start_evacuation(target_node, drive_id) do
+        {:ok, _job} -> %{drive_id: drive_id, evacuation: "started"}
+        {:error, reason} -> %{drive_id: drive_id, evacuation: "error", reason: inspect(reason)}
+      end
+    end)
   end
 
   @doc """

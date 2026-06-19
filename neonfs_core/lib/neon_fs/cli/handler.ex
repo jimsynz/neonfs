@@ -122,6 +122,21 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_remove_node(node_name, opts \\ %{}), to: ClusterRecoveryHandler
 
   @doc """
+  Begins graceful decommission: marks a node `:draining` (stopping new
+  placement/routing work) and evacuates its drives (#1325). The operator
+  runs `handle_remove_node/2` once the drives are empty.
+  """
+  @spec handle_drain_node(String.t(), map()) :: {:ok, map()} | {:error, Exception.t()}
+  defdelegate handle_drain_node(node_name, opts \\ %{}), to: ClusterRecoveryHandler
+
+  @doc """
+  Reverses a drain — marks the node `:active` again (#1325) — to abort a
+  decommission before the node is removed.
+  """
+  @spec handle_undrain_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  defdelegate handle_undrain_node(node_name), to: ClusterRecoveryHandler
+
+  @doc """
   Runs the safety-gate pipeline for `neonfs cluster force-reset` and
   records the operator-acknowledged data-loss intent in the audit log.
 

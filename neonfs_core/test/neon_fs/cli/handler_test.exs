@@ -11,6 +11,7 @@ defmodule NeonFS.CLI.HandlerTest do
     CertificateAuthority,
     Drive,
     DriveRegistry,
+    NodeRegistry,
     RaServer,
     ServiceRegistry,
     VolumeRegistry
@@ -175,6 +176,49 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, result} = Handler.create_invite(3600)
       assert is_map(result)
       assert is_binary(result["token"])
+    end
+  end
+
+  describe "node drain / undrain (#1325)" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_ra()
+      Handler.cluster_init("drain-test-cluster")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "drain marks the node :draining" do
+      node_str = Atom.to_string(Node.self())
+
+      assert {:ok, result} = Handler.handle_drain_node(node_str, %{"evacuate" => false})
+      assert result.status == "draining"
+      assert result.drives == []
+      assert NodeRegistry.status(Node.self()) == :draining
+    end
+
+    test "undrain returns the node to :active" do
+      node_str = Atom.to_string(Node.self())
+
+      {:ok, _} = Handler.handle_drain_node(node_str, %{"evacuate" => false})
+      assert NodeRegistry.status(Node.self()) == :draining
+
+      assert {:ok, result} = Handler.handle_undrain_node(node_str)
+      assert result.status == "active"
+      assert NodeRegistry.status(Node.self()) == :active
     end
   end
 
