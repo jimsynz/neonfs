@@ -154,6 +154,31 @@ defmodule NeonFS.Core.Volume.DriveSelectorTest do
     end
   end
 
+  describe "select_replicas/3 — exclude_nodes (#1323)" do
+    test "drops drives on draining nodes before selecting" do
+      drives =
+        for node <- [:n1@h, :n2@h, :n3@h], do: drive(node, "drv")
+
+      assert {:ok, picked} =
+               DriveSelector.select_replicas(replicate(3, 2), drives,
+                 exclude_nodes: MapSet.new([:n2@h])
+               )
+
+      nodes = Enum.map(picked, fn {node, _} -> node end)
+      refute :n2@h in nodes
+      assert length(picked) == 2
+    end
+
+    test "returns QuorumUnavailable when draining drops below the minimum" do
+      drives = [drive(:n1@h, "a"), drive(:n2@h, "b")]
+
+      assert {:error, %QuorumUnavailable{required: 2, available: 1}} =
+               DriveSelector.select_replicas(replicate(3, 2), drives,
+                 exclude_nodes: MapSet.new([:n2@h])
+               )
+    end
+  end
+
   ## Helpers
 
   defp drive(node, drive_id) do

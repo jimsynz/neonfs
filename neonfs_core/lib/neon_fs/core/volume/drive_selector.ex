@@ -46,11 +46,26 @@ defmodule NeonFS.Core.Volume.DriveSelector do
 
   Returns a list of `{node, drive_id}` composite keys identifying the
   selected replicas.
+
+  Opts:
+
+    * `:exclude_nodes` — a `MapSet` of nodes to drop from the candidate
+      set before selecting (#1323). Drives on a `:draining` node are
+      excluded so new replicas don't land on a node being
+      decommissioned; if that drops the candidates below the durability
+      minimum, the call returns `QuorumUnavailable` like any other
+      shortfall.
   """
-  @spec select_replicas(durability(), [drive_entry()] | %{any() => drive_entry()}) ::
+  @spec select_replicas(durability(), [drive_entry()] | %{any() => drive_entry()}, keyword()) ::
           {:ok, [{node(), drive_id()}]} | insufficient()
-  def select_replicas(durability, drives) do
-    drive_list = normalise_drives(drives)
+  def select_replicas(durability, drives, opts \\ []) do
+    exclude_nodes = Keyword.get(opts, :exclude_nodes, MapSet.new())
+
+    drive_list =
+      drives
+      |> normalise_drives()
+      |> Enum.reject(&MapSet.member?(exclude_nodes, &1.node))
+
     {target, minimum} = counts(durability)
 
     if length(drive_list) < minimum do

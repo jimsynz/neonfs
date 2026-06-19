@@ -51,6 +51,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:deregister_service, node(), atom()}
           | {:update_service_status, node(), atom()}
           | {:update_service_metrics, node(), map()}
+          | {:set_node_status, node(), node_status()}
           | {:put_stripe, stripe_data :: map()}
           | {:update_stripe, stripe_id :: binary(), updates :: map()}
           | {:delete_stripe, stripe_id :: binary()}
@@ -179,6 +180,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           namespace_claims: %{optional(String.t()) => namespace_claim()},
           namespace_claim_seq: non_neg_integer(),
           drives: %{optional(String.t()) => drive_entry()},
+          nodes: %{optional(node()) => node_entry()},
           volume_roots: %{
             optional(binary()) => %{optional(non_neg_integer()) => volume_root_entry()}
           },
@@ -199,6 +201,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
           cluster_id: String.t(),
           on_disk_format_version: pos_integer(),
           registered_at: DateTime.t()
+        }
+
+  @typedoc """
+  First-class node lifecycle entry (#1323). `status` is the node's
+  cluster-lifecycle state — distinct from reachability (net_kernel /
+  Ra membership) and from per-service presence (`services`). Placement
+  and routing consumers exclude `:draining` nodes from *new* work
+  (replica/owner placement) while existing data stays put, so a node
+  can be drained before removal. Entries are upserted to `:active` when
+  a node first registers a service; `:draining` is set explicitly.
+  """
+  @type node_status :: :joining | :active | :draining
+  @type node_entry :: %{
+          node: node(),
+          status: node_status(),
+          updated_at: DateTime.t()
         }
 
   @typedoc """
@@ -305,6 +323,29 @@ defmodule NeonFS.Core.MetadataStateMachine do
   """
   @spec get_drive(state(), String.t()) :: drive_entry() | nil
   def get_drive(state, drive_id), do: Map.get(get_drives(state), drive_id)
+
+  @doc """
+  Returns the node lifecycle table — `node => node_entry` (#1323).
+  Empty map for pre-v18 states.
+  """
+  @spec get_nodes(state()) :: %{optional(node()) => node_entry()}
+  def get_nodes(state), do: Map.get(state, :nodes, %{})
+
+  @doc """
+  Returns a single node's lifecycle entry, or `nil` if the node has
+  never registered.
+  """
+  @spec get_node(state(), node()) :: node_entry() | nil
+  def get_node(state, node), do: Map.get(get_nodes(state), node)
+
+  @doc """
+  Returns the set of nodes currently in the `:draining` lifecycle state
+  (#1323). Placement consumers exclude these from new work.
+  """
+  @spec draining_nodes(state()) :: MapSet.t(node())
+  def draining_nodes(state) do
+    for {node, %{status: :draining}} <- get_nodes(state), into: MapSet.new(), do: node
+  end
 
   @doc """
   Returns the full bootstrap-layer volume-root table — `volume_id =>
@@ -511,6 +552,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       namespace_claims: %{},
       namespace_claim_seq: 0,
       drives: %{},
+      nodes: %{},
       volume_roots: %{},
       snapshots: %{},
       redeemed_invites: %{},
@@ -811,6 +853,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {%{state | volume_roots: %{}, snapshots: %{}}, :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 17, 18}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 17,
+      to: 18,
+      change: "add first-class node lifecycle table (nodes) for #1323"
+    )
+
+    {Map.put_new(state, :nodes, %{}), :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade", from: from_version, to: to_version)
@@ -1023,14 +1077,34 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Service registry commands
 
   def apply(_meta, {:register_service, service_info}, state) do
+    state = ensure_nodes(state)
     key = service_key(service_info)
     new_services = Map.put(state.services, key, service_info)
-    new_state = %{state | services: new_services, version: state.version + 1}
+    # A node becomes first-class the moment it registers a service
+    # (#1323). Upsert it as `:active` without clobbering an explicit
+    # `:draining` / `:joining` status a re-registering service would
+    # otherwise reset.
+    new_nodes = ensure_active_node(state.nodes, service_info.node)
+    new_state = %{state | services: new_services, nodes: new_nodes, version: state.version + 1}
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :register_service],
       %{version: new_state.version},
       %{node: service_info.node, type: service_info.type}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:set_node_status, node, status}, state) do
+    state = ensure_nodes(state)
+    entry = %{node: node, status: status, updated_at: DateTime.utc_now()}
+    new_state = %{state | nodes: Map.put(state.nodes, node, entry), version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :set_node_status],
+      %{version: new_state.version},
+      %{node: node, status: status}
     )
 
     {new_state, :ok, []}
@@ -2026,7 +2100,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 17
+  def version, do: 18
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -2162,6 +2236,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Defensive init for pre-v13 snapshots (before bootstrap layer).
   defp ensure_snapshots(%{snapshots: _} = state), do: state
   defp ensure_snapshots(state), do: Map.put(state, :snapshots, %{})
+
+  # Defensive init for pre-v18 snapshots (before the node lifecycle table).
+  defp ensure_nodes(%{nodes: _} = state), do: state
+  defp ensure_nodes(state), do: Map.put(state, :nodes, %{})
+
+  # Add an `:active` entry for a node only if it has none — never
+  # overwrites an existing lifecycle status (#1323).
+  defp ensure_active_node(nodes, node) when is_map_key(nodes, node), do: nodes
+
+  defp ensure_active_node(nodes, node) do
+    Map.put(nodes, node, %{node: node, status: :active, updated_at: DateTime.utc_now()})
+  end
 
   defp ensure_bootstrap(%{drives: _, volume_roots: _} = state), do: state
 

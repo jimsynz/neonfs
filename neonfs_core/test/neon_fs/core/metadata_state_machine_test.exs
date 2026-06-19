@@ -47,8 +47,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 17" do
-      assert MetadataStateMachine.version() == 17
+    test "returns 18" do
+      assert MetadataStateMachine.version() == 18
     end
   end
 
@@ -1750,5 +1750,79 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
       assert state.snapshots == %{"vol-1" => %{"snap-a" => entry}}
     end
+  end
+
+  describe "node lifecycle commands (#1323)" do
+    test "set_node_status upserts an entry and bumps version" do
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:set_node_status, :node1@host, :draining}, base_state())
+
+      assert %{node: :node1@host, status: :draining} = state.nodes[:node1@host]
+      assert state.version == 1
+      assert MetadataStateMachine.get_node(state, :node1@host).status == :draining
+    end
+
+    test "set_node_status overwrites an existing status" do
+      {s1, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:set_node_status, :node1@host, :draining}, base_state())
+
+      {s2, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:set_node_status, :node1@host, :active}, s1)
+
+      assert MetadataStateMachine.get_node(s2, :node1@host).status == :active
+    end
+
+    test "register_service auto-creates an :active node entry" do
+      info = %{node: :node1@host, type: :core, registered_at: DateTime.utc_now()}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:register_service, info}, base_state())
+
+      assert MetadataStateMachine.get_node(state, :node1@host).status == :active
+    end
+
+    test "register_service does not clobber an explicit :draining status" do
+      {draining, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:set_node_status, :node1@host, :draining}, base_state())
+
+      info = %{node: :node1@host, type: :core, registered_at: DateTime.utc_now()}
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:register_service, info}, draining)
+
+      assert MetadataStateMachine.get_node(state, :node1@host).status == :draining
+    end
+
+    test "draining_nodes returns only the draining set" do
+      state =
+        base_state()
+        |> apply_ok({:set_node_status, :a@host, :draining})
+        |> apply_ok({:set_node_status, :b@host, :active})
+        |> apply_ok({:set_node_status, :c@host, :draining})
+
+      assert MetadataStateMachine.draining_nodes(state) == MapSet.new([:a@host, :c@host])
+    end
+  end
+
+  describe "machine version migration 17 -> 18 (node lifecycle)" do
+    test "adds the nodes field" do
+      pre_v18 = base_state() |> Map.delete(:nodes)
+
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 17, 18}, pre_v18)
+
+      assert state.nodes == %{}
+    end
+
+    test "preserves existing node entries when re-applied" do
+      entry = %{node: :node1@host, status: :draining, updated_at: DateTime.utc_now()}
+      pre = Map.put(base_state(), :nodes, %{node1@host: entry})
+
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 17, 18}, pre)
+
+      assert state.nodes == %{node1@host: entry}
+    end
+  end
+
+  defp apply_ok(state, command) do
+    {new_state, :ok, []} = MetadataStateMachine.apply(%{}, command, state)
+    new_state
   end
 end
