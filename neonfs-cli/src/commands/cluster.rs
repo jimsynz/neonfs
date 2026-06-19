@@ -5,7 +5,8 @@ use crate::daemon::{resolve_join_target, DaemonConnection};
 use crate::error::{CliError, Result};
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
-    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus, RemoveNodeResult,
+    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus, DrainNodeResult,
+    NodeStatusResult, RemoveNodeResult,
 };
 use crate::term::{
     extract_error, term_to_i64, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple,
@@ -198,6 +199,28 @@ pub enum ClusterCommand {
         force: bool,
     },
 
+    /// Begin graceful decommission of a node: mark it draining and
+    /// evacuate its drives.
+    ///
+    /// Marking the node draining stops new replica placement and client
+    /// routing from giving it work; its drives are then evacuated in the
+    /// background. Run `cluster remove-node` once the drives are empty.
+    DrainNode {
+        /// Target node name (e.g. `neonfs_core@host2` or `host2`)
+        node: String,
+
+        /// Mark the node draining without starting drive evacuation.
+        #[arg(long)]
+        no_evacuate: bool,
+    },
+
+    /// Reverse a drain: mark a node active again, to abort a
+    /// decommission before the node is removed.
+    UndrainNode {
+        /// Target node name (e.g. `neonfs_core@host2` or `host2`)
+        node: String,
+    },
+
     /// Rebuild the Ra quorum from a surviving minority after catastrophic
     /// membership loss.
     ///
@@ -386,6 +409,10 @@ impl ClusterCommand {
             ClusterCommand::Repair { command } => command.execute(format),
             ClusterCommand::Status => self.status(format),
             ClusterCommand::RemoveNode { node, force } => self.remove_node(node, *force, format),
+            ClusterCommand::DrainNode { node, no_evacuate } => {
+                self.drain_node(node, !*no_evacuate, format)
+            }
+            ClusterCommand::UndrainNode { node } => self.undrain_node(node, format),
             ClusterCommand::ReconstructFromDisk {
                 yes,
                 overwrite_ra_state,
@@ -867,6 +894,87 @@ impl ClusterCommand {
                 );
             }
         }
+        Ok(())
+    }
+
+    fn drain_node(&self, node: &str, evacuate: bool, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            let node_binary = Binary::from(node.as_bytes().to_vec());
+            let evac_key = Binary::from(b"evacuate".to_vec());
+            let evac_value = Term::Atom(eetf::Atom::from(if evacuate { "true" } else { "false" }));
+            let opts = Term::Map(Map::from([(Term::Binary(evac_key), evac_value)]));
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_drain_node",
+                vec![Term::Binary(node_binary), opts],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let drain = DrainNodeResult::from_term(unwrap_ok_tuple(result)?)?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&drain)?),
+            OutputFormat::Table => {
+                println!("✓ Draining node '{}'", drain.node);
+                println!();
+                println!("  Status: {}", drain.status);
+
+                if drain.drives.is_empty() {
+                    println!("  Drives: none to evacuate");
+                } else {
+                    println!("  Drives:");
+                    for d in &drain.drives {
+                        match &d.reason {
+                            Some(reason) => {
+                                println!("    {} — {} ({})", d.drive_id, d.evacuation, reason)
+                            }
+                            None => println!("    {} — {}", d.drive_id, d.evacuation),
+                        }
+                    }
+                }
+
+                println!();
+                println!(
+                    "Run `neonfs cluster remove-node {}` once drained.",
+                    drain.node
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn undrain_node(&self, node: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            let node_binary = Binary::from(node.as_bytes().to_vec());
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_undrain_node",
+                vec![Term::Binary(node_binary)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let status = NodeStatusResult::from_term(unwrap_ok_tuple(result)?)?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&status)?),
+            OutputFormat::Table => {
+                println!("✓ Node '{}' is now {}", status.node, status.status);
+            }
+        }
+
         Ok(())
     }
 

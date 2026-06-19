@@ -347,6 +347,87 @@ impl RemoveNodeResult {
     }
 }
 
+/// `cluster drain-node` response (#1325)
+#[derive(Debug, Serialize)]
+pub struct DrainNodeResult {
+    pub node: String,
+    pub status: String,
+    pub drives: Vec<DrainedDrive>,
+}
+
+/// One drive's evacuation start result within a drain.
+#[derive(Debug, Serialize)]
+pub struct DrainedDrive {
+    pub drive_id: String,
+    pub evacuation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl DrainNodeResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let drives = match map.get("drives") {
+            Some(list) => term_to_list(list)?
+                .into_iter()
+                .map(DrainedDrive::from_term)
+                .collect::<Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+            drives,
+        })
+    }
+}
+
+impl DrainedDrive {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            drive_id: term_to_string(map.get("drive_id").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'drive_id' field".to_string())
+            })?)?,
+            evacuation: term_to_string(map.get("evacuation").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'evacuation' field".to_string())
+            })?)?,
+            reason: map.get("reason").map(term_to_string).transpose()?,
+        })
+    }
+}
+
+/// `cluster undrain-node` response (#1325)
+#[derive(Debug, Serialize)]
+pub struct NodeStatusResult {
+    pub node: String,
+    pub status: String,
+}
+
+impl NodeStatusResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+        })
+    }
+}
+
 /// Volume information response
 #[derive(Debug, Serialize)]
 pub struct VolumeInfo {

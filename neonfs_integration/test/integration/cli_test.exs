@@ -59,6 +59,39 @@ defmodule NeonFS.Integration.CLITest do
         end
       end
     end
+
+    test "CLI can drain and undrain a node (#1325)", %{cluster: cluster} do
+      unless File.exists?(@cli_path) do
+        flunk(
+          "CLI binary not found at #{@cli_path}. Build it with: cd neonfs-cli && cargo build --release"
+        )
+      end
+
+      node = PeerCluster.get_node!(cluster, :node1).node
+      node_str = Atom.to_string(node)
+
+      # Shared 1-node cluster: always restore :active so a mid-test failure
+      # doesn't leave placement with no eligible node for later tests.
+      on_exit(fn ->
+        PeerCluster.rpc(cluster, :node1, NeonFS.Core.NodeRegistry, :set_status, [node, :active])
+      end)
+
+      assert {:ok, drain_out} =
+               run_cli(cluster, :node1, ["cluster", "drain-node", node_str, "--no-evacuate"])
+
+      assert drain_out =~ "draining"
+
+      assert :draining ==
+               PeerCluster.rpc(cluster, :node1, NeonFS.Core.NodeRegistry, :status, [node])
+
+      assert {:ok, undrain_out} =
+               run_cli(cluster, :node1, ["cluster", "undrain-node", node_str])
+
+      assert undrain_out =~ "active"
+
+      assert :active ==
+               PeerCluster.rpc(cluster, :node1, NeonFS.Core.NodeRegistry, :status, [node])
+    end
   end
 
   describe "cluster operations without CLI binary" do
