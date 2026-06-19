@@ -157,6 +157,26 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
     handle_volume_import(input_path, new_volume_name)
   end
 
+  @doc """
+  Restore a chain of backup archives — a full followed by its
+  incrementals, oldest-first — into a new volume (#1003). Each path is
+  resolved as a local destination URL; replayed in order onto the new
+  volume.
+  """
+  @spec handle_backup_restore_chain([binary()], binary()) :: {:ok, map()} | {:error, term()}
+  def handle_backup_restore_chain(archive_paths, new_volume_name)
+      when is_list(archive_paths) and is_binary(new_volume_name) do
+    set_cli_metadata()
+    paths = Enum.map(archive_paths, &normalize_local_url/1)
+
+    with :ok <- require_cluster(),
+         {:ok, summary} <- Backup.restore_chain(paths, new_volume_name) do
+      {:ok, summary}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
   # Private
 
   defp restore_opts(opts) do
@@ -232,6 +252,8 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
     Enum.flat_map(opts, fn
       {"name", name} when is_binary(name) -> [name: name]
       {:name, name} when is_binary(name) -> [name: name]
+      {"incremental_from", p} when is_binary(p) -> [incremental_from: normalize_local_url(p)]
+      {:incremental_from, p} when is_binary(p) -> [incremental_from: normalize_local_url(p)]
       _ -> []
     end)
   end

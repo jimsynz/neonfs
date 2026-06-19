@@ -958,6 +958,15 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_backup_restore(input_path, new_volume_name), to: VolumeLifecycleHandler
 
   @doc """
+  Restore a chain of backup archives (full + incrementals, oldest-first)
+  into a brand-new volume (#1003).
+  """
+  @spec handle_backup_restore_chain([binary()], binary()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate handle_backup_restore_chain(archive_paths, new_volume_name),
+    to: VolumeLifecycleHandler
+
+  @doc """
   Starts an integrity scrub job.
 
   ## Parameters

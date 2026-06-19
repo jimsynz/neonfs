@@ -71,6 +71,72 @@ defmodule NeonFS.Core.VolumeImport do
     end
   end
 
+  @doc """
+  Restore a chain of archives — a full backup followed by zero or more
+  incrementals (#1003) — into a new volume named `new_volume_name`.
+
+  `archive_paths` must be ordered oldest-first (the full base, then each
+  incremental in the order it was taken). The full is imported into a
+  fresh volume; each incremental is then **replayed** into it: its
+  included files overwrite by path, and the paths it records as
+  `deleted` are removed. The result is byte-for-byte the volume state at
+  the last archive.
+
+  A single-element chain is just `import_archive/3`.
+  """
+  @spec restore_chain([Path.t()], binary(), keyword()) ::
+          {:ok, import_summary()} | {:error, term()}
+  def restore_chain(archive_paths, new_volume_name, opts \\ [])
+
+  def restore_chain([base], new_volume_name, opts) do
+    import_archive(base, new_volume_name, opts)
+  end
+
+  def restore_chain([base | incrementals], new_volume_name, opts)
+      when is_list(incrementals) do
+    with {:ok, summary} <- import_archive(base, new_volume_name, opts),
+         {:ok, volume} <- VolumeRegistry.get(summary.volume_id),
+         :ok <- replay_incrementals(incrementals, volume) do
+      {:ok, Map.put(summary, :chain_length, length(incrementals) + 1)}
+    end
+  end
+
+  defp replay_incrementals([], _volume), do: :ok
+
+  defp replay_incrementals([path | rest], volume) do
+    with :ok <- apply_archive_into(path, volume) do
+      replay_incrementals(rest, volume)
+    end
+  end
+
+  # Replay one incremental archive into an existing volume: write its
+  # included file bodies (overwriting by path) and remove the paths it
+  # recorded as deleted since its baseline.
+  defp apply_archive_into(path, volume) do
+    with :ok <- ensure_input_exists(path),
+         {:ok, io} <- File.open(path, [:read, :raw, :binary]) do
+      try do
+        with {:ok, manifest, io} <- read_manifest(io),
+             {:ok, _counts} <- stream_files_into(io, volume, manifest_index(manifest)) do
+          apply_deletions(volume, Map.get(manifest, "deleted", []))
+        end
+      after
+        File.close(io)
+      end
+    end
+  end
+
+  defp apply_deletions(_volume, nil), do: :ok
+
+  defp apply_deletions(volume, paths) when is_list(paths) do
+    Enum.each(paths, fn path ->
+      case FileIndex.get_by_path(volume.id, path) do
+        {:ok, file} -> FileIndex.delete(file.id)
+        {:error, :not_found} -> :ok
+      end
+    end)
+  end
+
   defp ensure_input_exists(path) do
     if File.regular?(path), do: :ok, else: {:error, :input_missing}
   end
@@ -120,6 +186,10 @@ defmodule NeonFS.Core.VolumeImport do
   end
 
   defp validate_manifest_shape(%{"schema" => "neonfs.volume-export.v1"} = manifest, io) do
+    {:ok, manifest, io}
+  end
+
+  defp validate_manifest_shape(%{"schema" => "neonfs.volume-export.v2"} = manifest, io) do
     {:ok, manifest, io}
   end
 

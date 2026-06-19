@@ -54,11 +54,15 @@ defmodule NeonFS.Core.VolumeExportTest do
       assert Enum.find(entries, fn {n, _} -> n == "files/alpha.txt" end) |> elem(1) == "alpha\n"
       assert Enum.find(entries, fn {n, _} -> n == "files/dir/beta.txt" end) |> elem(1) == "bbbbbb"
 
-      assert manifest["version"] == 1
-      assert manifest["schema"] == "neonfs.volume-export.v1"
+      assert manifest["version"] == 2
+      assert manifest["schema"] == "neonfs.volume-export.v2"
+      assert manifest["type"] == "full"
       assert manifest["volume"]["name"] == "export-basic"
       assert manifest["file_count"] == 2
       assert manifest["total_bytes"] == 12
+      # v2 manifest records a content digest + included flag per file.
+      assert Enum.all?(manifest["files"], &(&1["included"] == true))
+      assert Enum.all?(manifest["files"], &is_binary(&1["content_digest"]))
 
       manifest_paths = manifest["files"] |> Enum.map(& &1["path"]) |> Enum.sort()
       assert manifest_paths == ["/alpha.txt", "/dir/beta.txt"]

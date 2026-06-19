@@ -84,7 +84,7 @@ defmodule NeonFS.Core.BackupTest do
       assert {:ok, _} = VolumeExport.export(vol.name, out)
 
       assert {:ok, manifest} = Backup.describe(out)
-      assert manifest["schema"] == "neonfs.volume-export.v1"
+      assert manifest["schema"] == "neonfs.volume-export.v2"
       assert manifest["volume"]["name"] == "bk-describe"
     end
 

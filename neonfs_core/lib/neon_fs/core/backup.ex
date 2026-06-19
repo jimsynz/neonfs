@@ -55,14 +55,42 @@ defmodule NeonFS.Core.Backup do
       when is_binary(volume_name) and is_binary(output_path) and is_list(opts) do
     snapshot_opts = Keyword.take(opts, [:name])
 
-    with {:ok, volume} <- fetch_volume(volume_name),
+    with {:ok, export_opts} <- resolve_baseline(opts),
+         {:ok, volume} <- fetch_volume(volume_name),
          {:ok, snap} <- Snapshot.create(volume.id, snapshot_opts) do
-      finish_create(volume, snap, volume_name, output_path)
+      finish_create(volume, snap, volume_name, output_path, export_opts)
     end
   end
 
-  defp finish_create(volume, snap, volume_name, output_path) do
-    case VolumeExport.export(volume_name, output_path, snapshot_id: snap.id) do
+  # `:incremental_from` names a prior backup archive; read its manifest's
+  # per-file `content_digest`s and hand them to the export as the
+  # baseline, so unchanged files are carried rather than re-shipped
+  # (#1003). The prior archive lives at the destination, so no
+  # cluster-side "last backup" marker is needed.
+  defp resolve_baseline(opts) do
+    case Keyword.get(opts, :incremental_from) do
+      nil ->
+        {:ok, []}
+
+      baseline_path when is_binary(baseline_path) ->
+        with {:ok, manifest} <- describe(baseline_path) do
+          {:ok, [baseline_digests: baseline_digests(manifest)]}
+        end
+    end
+  end
+
+  defp baseline_digests(%{"files" => files}) when is_list(files) do
+    for %{"path" => path, "content_digest" => digest} <- files, into: %{}, do: {path, digest}
+  end
+
+  defp baseline_digests(_), do: %{}
+
+  defp finish_create(volume, snap, volume_name, output_path, export_opts) do
+    case VolumeExport.export(
+           volume_name,
+           output_path,
+           Keyword.put(export_opts, :snapshot_id, snap.id)
+         ) do
       {:ok, summary} ->
         _ = Snapshot.delete(volume.id, snap.id)
 
@@ -98,6 +126,21 @@ defmodule NeonFS.Core.Backup do
   def restore(input_path, new_volume_name, opts \\ [])
       when is_binary(input_path) and is_binary(new_volume_name) do
     VolumeImport.import_archive(input_path, new_volume_name, opts)
+  end
+
+  @doc """
+  Restore a chain of backups — a full archive followed by its
+  incrementals, oldest-first — into a brand-new volume (#1003).
+
+  Replays each archive in order onto the new volume, reproducing its
+  state at the last archive byte-for-byte. A single-element chain is
+  equivalent to `restore/3`.
+  """
+  @spec restore_chain([Path.t()], binary(), keyword()) ::
+          {:ok, VolumeImport.import_summary()} | {:error, term()}
+  def restore_chain(archive_paths, new_volume_name, opts \\ [])
+      when is_list(archive_paths) and archive_paths != [] and is_binary(new_volume_name) do
+    VolumeImport.restore_chain(archive_paths, new_volume_name, opts)
   end
 
   @doc """

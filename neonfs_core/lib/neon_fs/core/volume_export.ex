@@ -22,7 +22,7 @@ defmodule NeonFS.Core.VolumeExport do
   alias NeonFS.Core.Volume.MetadataValue
   alias NeonFS.Core.VolumeRegistry
 
-  @manifest_version 1
+  @manifest_version 2
   @manifest_name "manifest.json"
   @files_prefix "files"
 
@@ -31,6 +31,9 @@ defmodule NeonFS.Core.VolumeExport do
           file_count: non_neg_integer(),
           byte_count: non_neg_integer()
         }
+
+  @typedoc "Per-file content fingerprint, hex SHA-256 of `{size, chunks, stripes}`."
+  @type content_digest :: String.t()
 
   @doc """
   Export `volume_name`'s live root as a TAR archive at
@@ -57,6 +60,15 @@ defmodule NeonFS.Core.VolumeExport do
   - `:include_system_xattrs` (boolean) — when true, the manifest's
     per-file entry includes `xattrs` (keys + values base64-encoded
     for JSON binary safety). Restored on import.
+
+  - `:baseline_digests` — `%{path => content_digest}` from a prior
+    backup's manifest (#1003). When given, the export is **incremental**:
+    a file whose `content_digest` matches its baseline entry is recorded
+    in the manifest but its body is *omitted* from the archive (it's
+    carried from the baseline); paths present in the baseline but absent
+    now are listed under `deleted`. Restore replays the chain (full +
+    incrementals) in order. Without this opt the export is a full backup
+    (every file's body included).
   """
   @spec export(binary(), Path.t(), keyword()) ::
           {:ok, export_summary()} | {:error, term()}
@@ -65,13 +77,35 @@ defmodule NeonFS.Core.VolumeExport do
     with {:ok, volume} <- resolve_volume(volume_name),
          {:ok, files} <- list_files_for_export(volume, opts),
          {:ok, byte_count} <- write_archive(output_path, volume, files, opts) do
+      included = Enum.count(files, &included?(&1, Keyword.get(opts, :baseline_digests)))
+
       {:ok,
        %{
          path: output_path,
-         file_count: length(files),
+         file_count: included,
          byte_count: byte_count
        }}
     end
+  end
+
+  # A file is included (body written) when there's no baseline, or its
+  # content digest differs from (or is absent in) the baseline (#1003).
+  defp included?(_file, nil), do: true
+
+  defp included?(file, baseline) when is_map(baseline) do
+    Map.get(baseline, file.path) != content_digest(file)
+  end
+
+  # Content-addressed fingerprint: identical content (same chunking)
+  # yields the same chunk-hash list → same digest, so an unchanged file
+  # is detectable across backups. Includes `stripes` for erasure files
+  # (whose `chunks` is empty); a rewrite changes the digest, so a changed
+  # file is never mistaken for unchanged.
+  @spec content_digest(FileMeta.t()) :: content_digest()
+  def content_digest(%FileMeta{} = file) do
+    :sha256
+    |> :crypto.hash(:erlang.term_to_binary({file.size, file.chunks, file.stripes}))
+    |> Base.encode16(case: :lower)
   end
 
   ## Volume / file enumeration
@@ -157,16 +191,14 @@ defmodule NeonFS.Core.VolumeExport do
 
   defp write_archive(output_path, volume, files, opts) do
     File.mkdir_p!(Path.dirname(output_path))
+    baseline = Keyword.get(opts, :baseline_digests)
 
     File.open(output_path, [:write, :raw, :binary], fn io ->
       manifest_bytes = build_manifest(volume, files, opts)
       :ok = write_entry(io, @manifest_name, manifest_bytes, now_unix())
 
       byte_count =
-        Enum.reduce(files, 0, fn file, acc ->
-          write_file_entry(io, volume, file, opts)
-          acc + file.size
-        end)
+        Enum.reduce(files, 0, &write_included(io, volume, &1, opts, baseline, &2))
 
       write_end_of_archive(io)
       byte_count
@@ -177,18 +209,38 @@ defmodule NeonFS.Core.VolumeExport do
     end
   end
 
+  defp write_included(io, volume, file, opts, baseline, acc) do
+    if included?(file, baseline) do
+      write_file_entry(io, volume, file, opts)
+      acc + file.size
+    else
+      acc
+    end
+  end
+
+  # The manifest lists *every* file in the volume (each tagged with its
+  # `content_digest` and whether its body is `included` in this archive),
+  # plus the paths `deleted` since the baseline. The full list lets the
+  # next incremental diff against this state; `included`/`deleted` drive
+  # the replay restore. `file_count`/`total_bytes` describe the archive
+  # payload (included bodies) so the importer's count check holds.
   defp build_manifest(volume, files, opts) do
+    baseline = Keyword.get(opts, :baseline_digests)
+    included = Enum.filter(files, &included?(&1, baseline))
+
     base = %{
       version: @manifest_version,
-      schema: "neonfs.volume-export.v1",
+      schema: "neonfs.volume-export.v2",
+      type: if(baseline, do: "incremental", else: "full"),
       volume: %{
         id: volume.id,
         name: volume.name
       },
       exported_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-      file_count: length(files),
-      total_bytes: Enum.reduce(files, 0, fn f, acc -> acc + f.size end),
-      files: Enum.map(files, &manifest_file_entry(&1, opts))
+      file_count: length(included),
+      total_bytes: Enum.reduce(included, 0, fn f, acc -> acc + f.size end),
+      deleted: deleted_paths(baseline, files),
+      files: Enum.map(files, &manifest_file_entry(&1, baseline, opts))
     }
 
     case Keyword.get(opts, :snapshot_id) do
@@ -198,14 +250,23 @@ defmodule NeonFS.Core.VolumeExport do
     |> Jason.encode!()
   end
 
-  defp manifest_file_entry(f, opts) do
+  defp deleted_paths(nil, _files), do: []
+
+  defp deleted_paths(baseline, files) when is_map(baseline) do
+    current = MapSet.new(files, & &1.path)
+    baseline |> Map.keys() |> Enum.reject(&MapSet.member?(current, &1)) |> Enum.sort()
+  end
+
+  defp manifest_file_entry(f, baseline, opts) do
     base = %{
       path: f.path,
       size: f.size,
       mode: f.mode,
       uid: f.uid,
       gid: f.gid,
-      modified_at: DateTime.to_iso8601(f.modified_at)
+      modified_at: DateTime.to_iso8601(f.modified_at),
+      content_digest: content_digest(f),
+      included: included?(f, baseline)
     }
 
     base
@@ -216,7 +277,7 @@ defmodule NeonFS.Core.VolumeExport do
   defp maybe_attach_acls(entry, _file, false), do: entry
 
   defp maybe_attach_acls(entry, file, true) do
-    acl_entries = encode_acl_entries(file.acl_entries || [])
+    acl_entries = encode_acl_entries(file.acl_entries)
     default_acl = encode_acl_entries(file.default_acl)
 
     entry
@@ -227,7 +288,7 @@ defmodule NeonFS.Core.VolumeExport do
   defp maybe_attach_xattrs(entry, _file, false), do: entry
 
   defp maybe_attach_xattrs(entry, file, true) do
-    Map.put(entry, :xattrs, encode_xattrs(file.xattrs || %{}))
+    Map.put(entry, :xattrs, encode_xattrs(file.xattrs))
   end
 
   defp maybe_put(map, _key, nil), do: map
