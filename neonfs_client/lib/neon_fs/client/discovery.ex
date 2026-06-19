@@ -36,6 +36,21 @@ defmodule NeonFS.Client.Discovery do
   end
 
   @doc """
+  Returns the set of core nodes the cluster has marked `:draining` (#1324).
+
+  Sourced from the cached `ServiceInfo.status` the core node stamps from
+  its node lifecycle table. Routing deprioritises — does not exclude —
+  these, so a cluster whose only reachable core node is draining still
+  works.
+  """
+  @spec draining_core_nodes() :: MapSet.t(node())
+  def draining_core_nodes do
+    list_by_type(:core)
+    |> Enum.filter(&(&1.status == :draining))
+    |> MapSet.new(& &1.node)
+  end
+
+  @doc """
   Returns services of the given type from cache.
   """
   @spec list_by_type(NeonFS.Client.ServiceType.t()) :: [ServiceInfo.t()]

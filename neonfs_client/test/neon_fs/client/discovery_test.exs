@@ -24,6 +24,20 @@ defmodule NeonFS.Client.DiscoveryTest do
     end
   end
 
+  describe "draining_core_nodes/0 (#1324)" do
+    test "returns only the core nodes marked :draining" do
+      active = ServiceInfo.new(:core_a@host, :core, status: :online)
+      draining = ServiceInfo.new(:core_b@host, :core, status: :draining)
+      :ets.insert(:neonfs_client_services, {{:by_type, :core}, [active, draining]})
+
+      assert Discovery.draining_core_nodes() == MapSet.new([:core_b@host])
+    end
+
+    test "is empty when nothing is cached" do
+      assert Discovery.draining_core_nodes() == MapSet.new()
+    end
+  end
+
   describe "refresh/0" do
     test "does not crash when no core connection exists" do
       Discovery.refresh()

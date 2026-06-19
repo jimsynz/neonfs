@@ -3,7 +3,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   use NeonFS.TestCase
 
   alias NeonFS.Client.ServiceInfo
-  alias NeonFS.Core.{RaServer, ServiceRegistry}
+  alias NeonFS.Core.{NodeRegistry, RaServer, ServiceRegistry}
 
   @moduletag :tmp_dir
 
@@ -84,6 +84,17 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
     assert {:ok, _} = ServiceRegistry.get(Node.self(), :core),
            "the local core service must survive a spurious self-nodedown (#1049)"
+  end
+
+  test "list/0 stamps :draining on services whose node is draining (#1324)" do
+    :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+    :ok = NodeRegistry.set_status(Node.self(), :draining)
+
+    entry =
+      ServiceRegistry.list()
+      |> Enum.find(&(&1.node == Node.self() and &1.type == :core))
+
+    assert entry.status == :draining
   end
 
   defp start_test_peer(name, dist_port, peer_ports_env) do

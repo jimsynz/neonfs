@@ -25,7 +25,7 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   alias NeonFS.Client.{ServiceInfo, ServiceType}
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{MetadataStateMachine, RaServer, RaSupervisor}
+  alias NeonFS.Core.{MetadataStateMachine, NodeRegistry, RaServer, RaSupervisor}
   alias NeonFS.Transport.{Listener, PoolManager}
 
   @core_probe_timeout_ms 1_000
@@ -100,14 +100,25 @@ defmodule NeonFS.Core.ServiceRegistry do
   def list do
     case read_services() do
       {:ok, services_map} ->
+        draining = NodeRegistry.draining_nodes()
+
         services_map
         |> Map.values()
         |> Enum.map(&ServiceInfo.from_map/1)
+        |> Enum.map(&mark_draining(&1, draining))
         |> Enum.sort_by(&{&1.node, &1.type})
 
       {:error, _} ->
         []
     end
+  end
+
+  # Stamp `status: :draining` on services whose node is in the draining
+  # lifecycle state (#1324), so the existing discovery RPC carries node
+  # lifecycle to clients without a new protocol. The client `CostFunction`
+  # deprioritises draining nodes when routing.
+  defp mark_draining(%ServiceInfo{node: node} = info, draining) do
+    if MapSet.member?(draining, node), do: %{info | status: :draining}, else: info
   end
 
   @doc """

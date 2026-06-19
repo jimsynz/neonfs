@@ -17,11 +17,18 @@ defmodule NeonFS.Client.CostFunction do
   @load_weight 0.4
   @queue_weight 0.3
 
+  # The composite cost is in [0, 1] (weights sum to 1, each score 0–1).
+  # A draining node gets a flat penalty above that ceiling so it always
+  # sorts behind any non-draining node, yet is still picked when it's the
+  # only option — deprioritise, not exclude (#1324).
+  @draining_penalty 1.0
+
   @type node_cost :: %{
           node: node(),
           latency_ms: non_neg_integer(),
           load_score: float(),
           queue_score: float(),
+          draining: boolean(),
           total_cost: float()
         }
 
@@ -106,17 +113,18 @@ defmodule NeonFS.Client.CostFunction do
 
   defp probe_nodes(state) do
     core_nodes = Discovery.get_core_nodes()
+    draining = Discovery.draining_core_nodes()
 
     costs =
       core_nodes
-      |> Enum.map(&measure_node/1)
+      |> Enum.map(&measure_node(&1, MapSet.member?(draining, &1)))
       |> Enum.reject(&is_nil/1)
       |> Map.new(fn cost -> {cost.node, cost} end)
 
     %{state | costs: costs}
   end
 
-  defp measure_node(node) do
+  defp measure_node(node, draining?) do
     latency = measure_latency(node)
 
     if latency do
@@ -126,16 +134,19 @@ defmodule NeonFS.Client.CostFunction do
       # Normalise latency to 0-1 range (cap at 1000ms)
       latency_score = min(latency / 1000.0, 1.0)
 
-      total =
+      base =
         @latency_weight * latency_score +
           @load_weight * load_score +
           @queue_weight * queue_score
+
+      total = if draining?, do: base + @draining_penalty, else: base
 
       %{
         node: node,
         latency_ms: latency,
         load_score: load_score,
         queue_score: queue_score,
+        draining: draining?,
         total_cost: total
       }
     end
