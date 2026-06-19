@@ -14,6 +14,7 @@ defmodule NeonFS.Core.VolumeExport do
   are tracked as follow-ups so this PR stays focused.
   """
 
+  alias NeonFS.Core.BackupCrypto
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.FileMeta
   alias NeonFS.Core.ReadOperation
@@ -69,6 +70,13 @@ defmodule NeonFS.Core.VolumeExport do
     now are listed under `deleted`. Restore replays the chain (full +
     incrementals) in order. Without this opt the export is a full backup
     (every file's body included).
+
+  - `:passphrase` — when given, the archive is encrypted (#1004): a
+    fresh per-archive content key wraps under a PBKDF2 KEK derived from
+    the passphrase, each file body is written as AES-256-GCM frames, and
+    the wrap envelope lands in the manifest's plaintext `encryption`
+    object. The manifest (and path list) stays plaintext, so encryption
+    composes with `:baseline_digests` incrementals unchanged.
   """
   @spec export(binary(), Path.t(), keyword()) ::
           {:ok, export_summary()} | {:error, term()}
@@ -191,21 +199,43 @@ defmodule NeonFS.Core.VolumeExport do
 
   defp write_archive(output_path, volume, files, opts) do
     File.mkdir_p!(Path.dirname(output_path))
-    baseline = Keyword.get(opts, :baseline_digests)
 
-    File.open(output_path, [:write, :raw, :binary], fn io ->
-      manifest_bytes = build_manifest(volume, files, opts)
-      :ok = write_entry(io, @manifest_name, manifest_bytes, now_unix())
+    with {:ok, opts} <- with_encryption(opts) do
+      baseline = Keyword.get(opts, :baseline_digests)
 
-      byte_count =
-        Enum.reduce(files, 0, &write_included(io, volume, &1, opts, baseline, &2))
+      File.open(output_path, [:write, :raw, :binary], fn io ->
+        manifest_bytes = build_manifest(volume, files, opts)
+        :ok = write_entry(io, @manifest_name, manifest_bytes, now_unix())
 
-      write_end_of_archive(io)
-      byte_count
-    end)
-    |> case do
-      {:ok, bytes} -> {:ok, bytes}
-      {:error, _} = err -> err
+        byte_count =
+          Enum.reduce(files, 0, &write_included(io, volume, &1, opts, baseline, &2))
+
+        write_end_of_archive(io)
+        byte_count
+      end)
+      |> case do
+        {:ok, bytes} -> {:ok, bytes}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  # Seal a per-archive content key under the passphrase once, up front:
+  # the wrap envelope rides in the manifest, the content key threads
+  # down to each file body. Without a passphrase the archive is
+  # plaintext and the opts pass through untouched.
+  defp with_encryption(opts) do
+    case Keyword.get(opts, :passphrase) do
+      nil ->
+        {:ok, opts}
+
+      passphrase when is_binary(passphrase) ->
+        {:ok, content_key, envelope} = BackupCrypto.seal(passphrase)
+
+        {:ok,
+         opts
+         |> Keyword.put(:content_key, content_key)
+         |> Keyword.put(:encryption_envelope, envelope)}
     end
   end
 
@@ -243,10 +273,9 @@ defmodule NeonFS.Core.VolumeExport do
       files: Enum.map(files, &manifest_file_entry(&1, baseline, opts))
     }
 
-    case Keyword.get(opts, :snapshot_id) do
-      nil -> base
-      id -> Map.put(base, :snapshot_id, id)
-    end
+    base
+    |> maybe_put(:snapshot_id, Keyword.get(opts, :snapshot_id))
+    |> maybe_put(:encryption, Keyword.get(opts, :encryption_envelope))
     |> Jason.encode!()
   end
 
@@ -315,11 +344,23 @@ defmodule NeonFS.Core.VolumeExport do
 
   defp write_file_entry(io, volume, file_meta, opts) do
     name = entry_name_for(file_meta.path)
-    :ok = write_header_with_optional_longlink(io, name, file_meta)
+    body_size = body_size_for(file_meta, opts)
+    :ok = write_header_with_optional_longlink(io, name, file_meta, body_size)
 
     :ok = stream_file_content(io, volume, file_meta, opts)
-    :ok = write_padding(io, file_meta.size)
+    :ok = write_padding(io, body_size)
     :ok
+  end
+
+  # The ustar body is the ciphertext (frames + per-frame overhead) when
+  # encrypting, or the plaintext size otherwise. The manifest still
+  # records the plaintext `size` per file, so the importer knows how
+  # much to expect after decryption.
+  defp body_size_for(file_meta, opts) do
+    case Keyword.get(opts, :content_key) do
+      nil -> file_meta.size
+      _key -> BackupCrypto.encrypted_size(file_meta.size)
+    end
   end
 
   # Paths up to 256 bytes fit in ustar's `prefix` (155) + `name`
@@ -329,16 +370,16 @@ defmodule NeonFS.Core.VolumeExport do
   # truncated 100-byte name field. Tools that understand LongLink
   # use the cached name; others see the truncated name (the file
   # body still lands correctly).
-  defp write_header_with_optional_longlink(io, name, file_meta) do
+  defp write_header_with_optional_longlink(io, name, file_meta, body_size) do
     case ustar_split(name) do
       {:ok, prefix, short_name} ->
-        header = build_ustar_header(prefix, short_name, file_meta)
+        header = build_ustar_header(prefix, short_name, file_meta, body_size)
         IO.binwrite(io, header)
 
       :too_long ->
         :ok = write_long_link(io, name)
         truncated = binary_part(name, 0, min(100, byte_size(name)))
-        header = build_ustar_header("", truncated, file_meta)
+        header = build_ustar_header("", truncated, file_meta, body_size)
         IO.binwrite(io, header)
     end
   end
@@ -369,7 +410,7 @@ defmodule NeonFS.Core.VolumeExport do
   defp stream_file_content(io, volume, file_meta, opts) do
     case file_stream(volume, file_meta, opts) do
       {:ok, %{stream: stream}} ->
-        Enum.each(stream, fn chunk -> :ok = IO.binwrite(io, chunk) end)
+        write_content(io, stream, file_meta.path, Keyword.get(opts, :content_key))
         :ok
 
       {:error, reason} ->
@@ -377,6 +418,41 @@ defmodule NeonFS.Core.VolumeExport do
         # truncated entry behind.
         raise "failed to stream #{file_meta.path}: #{inspect(reason)}"
     end
+  end
+
+  defp write_content(io, stream, _path, nil) do
+    Enum.each(stream, fn chunk -> :ok = IO.binwrite(io, chunk) end)
+  end
+
+  # Encrypted: re-frame the lazily-read chunks into fixed plaintext
+  # frames, encrypt each as it fills, and flush a final partial frame.
+  # The buffer is bounded by one frame plus one read chunk — never by
+  # file size.
+  defp write_content(io, stream, path, content_key) do
+    frame_size = BackupCrypto.frame_size()
+
+    {buffer, next_index} =
+      Enum.reduce(stream, {<<>>, 0}, fn data, {buf, index} ->
+        flush_full_frames(io, buf <> data, index, content_key, path, frame_size)
+      end)
+
+    flush_final_frame(io, buffer, next_index, content_key, path)
+  end
+
+  defp flush_full_frames(io, buf, index, content_key, path, frame_size)
+       when byte_size(buf) >= frame_size do
+    <<frame::binary-size(^frame_size), rest::binary>> = buf
+    :ok = IO.binwrite(io, BackupCrypto.encrypt_frame(frame, content_key, path, index))
+    flush_full_frames(io, rest, index + 1, content_key, path, frame_size)
+  end
+
+  defp flush_full_frames(_io, buf, index, _content_key, _path, _frame_size), do: {buf, index}
+
+  defp flush_final_frame(_io, <<>>, _index, _content_key, _path), do: :ok
+
+  defp flush_final_frame(io, buffer, index, content_key, path) do
+    :ok = IO.binwrite(io, BackupCrypto.encrypt_frame(buffer, content_key, path, index))
+    :ok
   end
 
   # Live-root export: resolve by path through the live FileIndex.
@@ -417,17 +493,17 @@ defmodule NeonFS.Core.VolumeExport do
          prefix,
          short_name,
          %{
-           size: size,
            mode: mode,
            uid: uid,
            gid: gid
-         } = file_meta
+         } = file_meta,
+         body_size
        ) do
     mtime = DateTime.to_unix(file_meta.modified_at)
 
     build_ustar_header_raw(short_name,
       prefix: prefix,
-      body_size: size,
+      body_size: body_size,
       mode: mode,
       uid: uid,
       gid: gid,

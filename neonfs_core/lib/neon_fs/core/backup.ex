@@ -19,11 +19,12 @@ defmodule NeonFS.Core.Backup do
   acceptance criteria) so the operator can retry the export without
   paying for another snapshot.
 
-  ## V1 scope
+  ## Scope
 
   Local-path destinations only. S3 / `file://` URL handling lands
-  alongside the corresponding follow-ups on #992. Cross-cluster
-  restore and incremental backups remain tracked in #248.
+  alongside the corresponding follow-ups on #992. File-level
+  incremental backups (#1003) and at-rest encryption (#1004) ship via
+  `create/3` options; cross-cluster restore remains tracked in #248.
   """
 
   alias NeonFS.Core.Snapshot
@@ -48,6 +49,13 @@ defmodule NeonFS.Core.Backup do
   Returns `{:ok, summary}` on success. On export failure the
   freshly-created snapshot is *not* deleted so the operator can
   retry without re-snapshotting.
+
+  ## Options
+
+    * `:name` — snapshot name (default: generated).
+    * `:incremental_from` — a prior backup archive to diff against, so
+      unchanged files are carried rather than re-shipped (#1003).
+    * `:passphrase` — encrypt the archive at rest (#1004).
   """
   @spec create(binary(), Path.t(), keyword()) ::
           {:ok, create_summary()} | {:error, term()}
@@ -55,9 +63,10 @@ defmodule NeonFS.Core.Backup do
       when is_binary(volume_name) and is_binary(output_path) and is_list(opts) do
     snapshot_opts = Keyword.take(opts, [:name])
 
-    with {:ok, export_opts} <- resolve_baseline(opts),
+    with {:ok, baseline_opts} <- resolve_baseline(opts),
          {:ok, volume} <- fetch_volume(volume_name),
          {:ok, snap} <- Snapshot.create(volume.id, snapshot_opts) do
+      export_opts = Keyword.merge(baseline_opts, Keyword.take(opts, [:passphrase]))
       finish_create(volume, snap, volume_name, output_path, export_opts)
     end
   end

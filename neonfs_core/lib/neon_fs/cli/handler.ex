@@ -950,20 +950,22 @@ defmodule NeonFS.CLI.Handler do
 
   @doc """
   Restore a backup tarball at `input_path` into a brand-new volume
-  named `new_volume_name` (#968). Identical wiring to
-  `handle_volume_import/2`.
+  named `new_volume_name` (#968). Accepts a `:passphrase` to decrypt an
+  encrypted archive (#1004).
   """
-  @spec handle_backup_restore(binary(), binary()) ::
+  @spec handle_backup_restore(binary(), binary(), map()) ::
           {:ok, map()} | {:error, term()}
-  defdelegate handle_backup_restore(input_path, new_volume_name), to: VolumeLifecycleHandler
+  defdelegate handle_backup_restore(input_path, new_volume_name, opts \\ %{}),
+    to: VolumeLifecycleHandler
 
   @doc """
   Restore a chain of backup archives (full + incrementals, oldest-first)
-  into a brand-new volume (#1003).
+  into a brand-new volume (#1003). Accepts a `:passphrase` to decrypt
+  encrypted archives (#1004).
   """
-  @spec handle_backup_restore_chain([binary()], binary()) ::
+  @spec handle_backup_restore_chain([binary()], binary(), map()) ::
           {:ok, map()} | {:error, term()}
-  defdelegate handle_backup_restore_chain(archive_paths, new_volume_name),
+  defdelegate handle_backup_restore_chain(archive_paths, new_volume_name, opts \\ %{}),
     to: VolumeLifecycleHandler
 
   @doc """

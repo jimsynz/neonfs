@@ -148,13 +148,21 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
   end
 
   @doc """
-  Restores a backup tarball into a brand-new volume (#968). Identical
-  wiring to `handle_volume_import/2`.
+  Restores a backup tarball into a brand-new volume (#968). Accepts a
+  `:passphrase` (#1004) to decrypt an encrypted archive.
   """
-  @spec handle_backup_restore(binary(), binary()) :: {:ok, map()} | {:error, term()}
-  def handle_backup_restore(input_path, new_volume_name)
-      when is_binary(input_path) and is_binary(new_volume_name) do
-    handle_volume_import(input_path, new_volume_name)
+  @spec handle_backup_restore(binary(), binary(), map()) :: {:ok, map()} | {:error, term()}
+  def handle_backup_restore(input_path, new_volume_name, opts \\ %{})
+      when is_binary(input_path) and is_binary(new_volume_name) and is_map(opts) do
+    set_cli_metadata()
+    input_path = normalize_local_url(input_path)
+
+    with :ok <- require_cluster(),
+         {:ok, summary} <- Backup.restore(input_path, new_volume_name, backup_restore_opts(opts)) do
+      {:ok, summary}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
   end
 
   @doc """
@@ -163,14 +171,15 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
   resolved as a local destination URL; replayed in order onto the new
   volume.
   """
-  @spec handle_backup_restore_chain([binary()], binary()) :: {:ok, map()} | {:error, term()}
-  def handle_backup_restore_chain(archive_paths, new_volume_name)
-      when is_list(archive_paths) and is_binary(new_volume_name) do
+  @spec handle_backup_restore_chain([binary()], binary(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def handle_backup_restore_chain(archive_paths, new_volume_name, opts \\ %{})
+      when is_list(archive_paths) and is_binary(new_volume_name) and is_map(opts) do
     set_cli_metadata()
     paths = Enum.map(archive_paths, &normalize_local_url/1)
 
     with :ok <- require_cluster(),
-         {:ok, summary} <- Backup.restore_chain(paths, new_volume_name) do
+         {:ok, summary} <- Backup.restore_chain(paths, new_volume_name, backup_restore_opts(opts)) do
       {:ok, summary}
     else
       {:error, reason} -> {:error, wrap_error(reason)}
@@ -254,6 +263,16 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
       {:name, name} when is_binary(name) -> [name: name]
       {"incremental_from", p} when is_binary(p) -> [incremental_from: normalize_local_url(p)]
       {:incremental_from, p} when is_binary(p) -> [incremental_from: normalize_local_url(p)]
+      {"passphrase", p} when is_binary(p) -> [passphrase: p]
+      {:passphrase, p} when is_binary(p) -> [passphrase: p]
+      _ -> []
+    end)
+  end
+
+  defp backup_restore_opts(opts) do
+    Enum.flat_map(opts, fn
+      {"passphrase", p} when is_binary(p) -> [passphrase: p]
+      {:passphrase, p} when is_binary(p) -> [passphrase: p]
       _ -> []
     end)
   end

@@ -16,6 +16,7 @@ defmodule NeonFS.Core.VolumeImport do
   `--verify` are tracked as follow-ups.
   """
 
+  alias NeonFS.Core.BackupCrypto
   alias NeonFS.Core.FileIndex
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
@@ -54,17 +55,28 @@ defmodule NeonFS.Core.VolumeImport do
     * `{:error, {:manifest_mismatch, field, expected, actual}}` —
       manifest's declared `file_count` / `total_bytes` differs from
       what the archive actually contains.
+    * `{:error, :passphrase_required}` — the archive is encrypted but
+      no `:passphrase` was supplied.
+    * `{:error, :bad_passphrase}` — the supplied passphrase doesn't
+      unwrap the archive's content key.
     * Any `VolumeRegistry.create/2` error (e.g. name collision) or
       `WriteOperation.write_file_streamed/4` error.
+
+  ## Options
+
+    * `:passphrase` — decrypt an encrypted archive (#1004). Required
+      when the manifest carries an `encryption` envelope; checked
+      before the volume is created, so a wrong passphrase writes
+      nothing.
   """
   @spec import_archive(Path.t(), binary(), keyword()) ::
           {:ok, import_summary()} | {:error, term()}
-  def import_archive(input_path, new_volume_name, _opts \\ [])
+  def import_archive(input_path, new_volume_name, opts \\ [])
       when is_binary(input_path) and is_binary(new_volume_name) do
     with :ok <- ensure_input_exists(input_path),
          {:ok, io} <- File.open(input_path, [:read, :raw, :binary]) do
       try do
-        do_import(io, input_path, new_volume_name)
+        do_import(io, input_path, new_volume_name, opts)
       after
         File.close(io)
       end
@@ -96,28 +108,29 @@ defmodule NeonFS.Core.VolumeImport do
       when is_list(incrementals) do
     with {:ok, summary} <- import_archive(base, new_volume_name, opts),
          {:ok, volume} <- VolumeRegistry.get(summary.volume_id),
-         :ok <- replay_incrementals(incrementals, volume) do
+         :ok <- replay_incrementals(incrementals, volume, opts) do
       {:ok, Map.put(summary, :chain_length, length(incrementals) + 1)}
     end
   end
 
-  defp replay_incrementals([], _volume), do: :ok
+  defp replay_incrementals([], _volume, _opts), do: :ok
 
-  defp replay_incrementals([path | rest], volume) do
-    with :ok <- apply_archive_into(path, volume) do
-      replay_incrementals(rest, volume)
+  defp replay_incrementals([path | rest], volume, opts) do
+    with :ok <- apply_archive_into(path, volume, opts) do
+      replay_incrementals(rest, volume, opts)
     end
   end
 
   # Replay one incremental archive into an existing volume: write its
   # included file bodies (overwriting by path) and remove the paths it
   # recorded as deleted since its baseline.
-  defp apply_archive_into(path, volume) do
+  defp apply_archive_into(path, volume, opts) do
     with :ok <- ensure_input_exists(path),
          {:ok, io} <- File.open(path, [:read, :raw, :binary]) do
       try do
         with {:ok, manifest, io} <- read_manifest(io),
-             {:ok, _counts} <- stream_files_into(io, volume, manifest_index(manifest)) do
+             {:ok, crypto} <- resolve_crypto(manifest, opts),
+             {:ok, _counts} <- stream_files_into(io, volume, manifest_index(manifest), crypto) do
           apply_deletions(volume, Map.get(manifest, "deleted", []))
         end
       after
@@ -141,10 +154,11 @@ defmodule NeonFS.Core.VolumeImport do
     if File.regular?(path), do: :ok, else: {:error, :input_missing}
   end
 
-  defp do_import(io, input_path, new_volume_name) do
+  defp do_import(io, input_path, new_volume_name, opts) do
     with {:ok, manifest, io} <- read_manifest(io),
+         {:ok, crypto} <- resolve_crypto(manifest, opts),
          {:ok, volume} <- VolumeRegistry.create(new_volume_name, []),
-         {:ok, counts} <- stream_files_into(io, volume, manifest_index(manifest)) do
+         {:ok, counts} <- stream_files_into(io, volume, manifest_index(manifest), crypto) do
       with :ok <- check_manifest_counts(manifest, counts) do
         {:ok,
          %{
@@ -158,6 +172,24 @@ defmodule NeonFS.Core.VolumeImport do
       end
     end
   end
+
+  # An archive carrying an `encryption` envelope needs the passphrase to
+  # recover its content key. Unwrapping here — before the volume is
+  # created or any body is read — means a wrong passphrase fails fast
+  # with nothing written. Plaintext archives resolve to `nil` crypto.
+  defp resolve_crypto(%{"encryption" => envelope}, opts) when is_map(envelope) do
+    case Keyword.get(opts, :passphrase) do
+      nil ->
+        {:error, :passphrase_required}
+
+      passphrase when is_binary(passphrase) ->
+        with {:ok, content_key} <- BackupCrypto.open(envelope, passphrase) do
+          {:ok, %{content_key: content_key}}
+        end
+    end
+  end
+
+  defp resolve_crypto(_manifest, _opts), do: {:ok, nil}
 
   ## Manifest
 
@@ -220,24 +252,24 @@ defmodule NeonFS.Core.VolumeImport do
 
   ## File entries
 
-  defp stream_files_into(io, volume, file_index_by_path) do
-    stream_files_loop(io, volume, %{file_count: 0, byte_count: 0}, file_index_by_path)
+  defp stream_files_into(io, volume, file_index_by_path, crypto) do
+    stream_files_loop(io, volume, %{file_count: 0, byte_count: 0}, file_index_by_path, crypto)
   end
 
-  defp stream_files_loop(io, volume, counts, idx) do
+  defp stream_files_loop(io, volume, counts, idx, crypto) do
     case read_next_entry(io) do
       {:eof, _io} ->
         {:ok, counts}
 
       {:ok, %{name: @files_prefix <> path, size: size, typeflag: ?0}, io} ->
-        case write_file_entry(io, volume, path, size, idx) do
-          {:ok, io} ->
+        case write_file_entry(io, volume, path, size, idx, crypto) do
+          {:ok, io, plaintext_bytes} ->
             new_counts = %{
               file_count: counts.file_count + 1,
-              byte_count: counts.byte_count + size
+              byte_count: counts.byte_count + plaintext_bytes
             }
 
-            stream_files_loop(io, volume, new_counts, idx)
+            stream_files_loop(io, volume, new_counts, idx, crypto)
 
           {:error, _} = err ->
             err
@@ -253,21 +285,43 @@ defmodule NeonFS.Core.VolumeImport do
     end
   end
 
-  defp write_file_entry(io, volume, path, size, idx) do
-    {body_stream, finish_fn} = body_stream(io, size)
+  defp write_file_entry(io, volume, path, size, idx, crypto) do
+    {body_stream, finish_fn, plaintext_bytes} = entry_body(io, path, size, idx, crypto)
 
     case WriteOperation.write_file_streamed(volume.id, "/" <> path, body_stream) do
       {:ok, file_meta} ->
         # `write_file_streamed` consumed the stream, advancing the
-        # underlying IO device by `size` bytes. Now skip the ustar
-        # padding to land at the next entry's header.
+        # underlying IO device past the (cipher)text body. Now skip the
+        # ustar padding to land at the next entry's header.
         with {:ok, io} <- finish_fn.() do
           :ok = maybe_restore_metadata(file_meta, idx, path)
-          {:ok, io}
+          {:ok, io, plaintext_bytes}
         end
 
       err ->
         err
+    end
+  end
+
+  # Plaintext archive: the tar body is the file content; the stream and
+  # byte count are the body itself. Encrypted archive: the tar body is
+  # ciphertext frames; decrypt them lazily into the plaintext stream,
+  # and report the plaintext size (from the manifest) for the count.
+  defp entry_body(io, _path, size, _idx, nil) do
+    {stream, finish_fn} = body_stream(io, size)
+    {stream, finish_fn, size}
+  end
+
+  defp entry_body(io, path, enc_size, idx, %{content_key: content_key}) do
+    plaintext_size = manifest_plaintext_size(idx, path)
+    {stream, finish_fn} = encrypted_body_stream(io, enc_size, plaintext_size, content_key, path)
+    {stream, finish_fn, plaintext_size}
+  end
+
+  defp manifest_plaintext_size(idx, path) do
+    case Map.get(idx, "/" <> path) do
+      %{"size" => size} when is_integer(size) -> size
+      _ -> 0
     end
   end
 
@@ -387,6 +441,48 @@ defmodule NeonFS.Core.VolumeImport do
     end
 
     {stream, finish_fn}
+  end
+
+  # Decrypting body stream: reads one `nonce ‖ ciphertext ‖ tag` frame
+  # at a time and yields its plaintext. The frame boundaries are derived
+  # from the manifest's plaintext `size` (every frame but the last is
+  # `frame_size`), so no length prefixes are needed on the wire. The
+  # working set is one frame, never the whole file. The AAD path matches
+  # the exporter's `file_meta.path` (leading slash).
+  defp encrypted_body_stream(io, enc_size, plaintext_size, content_key, path) do
+    aad_path = "/" <> path
+    n_frames = BackupCrypto.frame_count(plaintext_size)
+
+    stream =
+      Stream.unfold(0, fn
+        index when index >= n_frames ->
+          nil
+
+        index ->
+          pt_len = BackupCrypto.frame_plaintext_len(plaintext_size, index, n_frames)
+          frame = read_exact_frame!(io, pt_len + BackupCrypto.frame_overhead(), aad_path, index)
+
+          case BackupCrypto.decrypt_frame(frame, content_key, aad_path, index) do
+            {:ok, plaintext} ->
+              {plaintext, index + 1}
+
+            {:error, reason} ->
+              raise "decrypt failed for #{aad_path} frame #{index}: #{inspect(reason)}"
+          end
+      end)
+
+    finish_fn = fn -> skip_padding(io, enc_size) end
+    {stream, finish_fn}
+  end
+
+  defp read_exact_frame!(io, len, path, index) do
+    case binread_exact(io, len) do
+      {:ok, frame} ->
+        frame
+
+      {:error, reason} ->
+        raise "truncated encrypted frame for #{path} frame #{index}: #{inspect(reason)}"
+    end
   end
 
   ## Raw ustar reader

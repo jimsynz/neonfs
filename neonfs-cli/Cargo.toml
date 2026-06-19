@@ -41,6 +41,7 @@ rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 time = { version = "0.3", features = ["formatting"] }  # CRL timestamps + RFC3339 audit log (#518)
 sha2 = "0.11"  # CA fingerprints in emergency-bootstrap audit log (#518)
 libc = "0.2"   # getuid() for emergency-bootstrap audit log (#518)
+rpassword = "7"  # no-echo passphrase prompt for encrypted backups (#1004)
 
 [dev-dependencies]
 tempfile = "3"

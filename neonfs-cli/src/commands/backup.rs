@@ -2,7 +2,7 @@
 //! orchestration over the snapshot + export + import primitives
 //! (#968).
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use eetf::{Atom, List, Map, Term};
 use std::collections::HashMap;
 
@@ -12,6 +12,16 @@ use crate::output::OutputFormat;
 use crate::term::{
     extract_error, term_to_list, term_to_map, term_to_string, term_to_u64, unwrap_ok_tuple,
 };
+
+/// Where the wrap key comes from for an encrypted backup (#1004).
+/// Only `passphrase` is supported in this slice; `kms` / `pubkey` are
+/// tracked as separate sub-issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum KeySource {
+    /// Derive the wrap key from an interactively-prompted passphrase
+    /// (or `--passphrase-file` for automation).
+    Passphrase,
+}
 
 /// `neonfs backup …` — orchestration over snapshot + export +
 /// import.
@@ -48,6 +58,17 @@ pub enum BackupCommand {
         /// archive's path on the daemon's filesystem.
         #[arg(long = "incremental-from")]
         incremental_from: Option<String>,
+
+        /// Encrypt the archive at rest (#1004). The wrap key comes
+        /// from the named source.
+        #[arg(long = "encrypt-with")]
+        encrypt_with: Option<KeySource>,
+
+        /// Read the passphrase from this file instead of prompting
+        /// (for non-interactive automation). The trailing newline is
+        /// stripped.
+        #[arg(long = "passphrase-file")]
+        passphrase_file: Option<String>,
     },
 
     /// Inspect an existing backup's manifest without unpacking the
@@ -72,6 +93,15 @@ pub enum BackupCommand {
         #[arg(long, value_delimiter = ',')]
         chain: Vec<String>,
 
+        /// Decrypt an encrypted archive (#1004), using the named key
+        /// source. Must match what `create --encrypt-with` used.
+        #[arg(long = "decrypt-with")]
+        decrypt_with: Option<KeySource>,
+
+        /// Read the passphrase from this file instead of prompting.
+        #[arg(long = "passphrase-file")]
+        passphrase_file: Option<String>,
+
         /// Name of the new volume to create
         #[arg(long = "as")]
         new_name: String,
@@ -86,28 +116,44 @@ impl BackupCommand {
                 to,
                 name,
                 incremental_from,
+                encrypt_with,
+                passphrase_file,
             } => self.create(
                 volume,
                 to,
                 name.as_deref(),
                 incremental_from.as_deref(),
+                *encrypt_with,
+                passphrase_file.as_deref(),
                 format,
             ),
             BackupCommand::List { from } => self.list(from, format),
             BackupCommand::Restore {
                 from,
                 chain,
+                decrypt_with,
+                passphrase_file,
                 new_name,
-            } => self.restore(from, chain, new_name, format),
+            } => self.restore(
+                from,
+                chain,
+                *decrypt_with,
+                passphrase_file.as_deref(),
+                new_name,
+                format,
+            ),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
         volume: &str,
         to: &str,
         name: Option<&str>,
         incremental_from: Option<&str>,
+        encrypt_with: Option<KeySource>,
+        passphrase_file: Option<&str>,
         format: OutputFormat,
     ) -> Result<()> {
         let mut entries = Vec::new();
@@ -118,6 +164,13 @@ impl BackupCommand {
             entries.push((
                 Term::Atom(Atom::from("incremental_from")),
                 binary_val(baseline),
+            ));
+        }
+        if encrypt_with.is_some() {
+            let passphrase = read_passphrase(passphrase_file, true)?;
+            entries.push((
+                Term::Atom(Atom::from("passphrase")),
+                binary_val(&passphrase),
             ));
         }
         let opts_term = Term::Map(Map {
@@ -225,20 +278,25 @@ impl BackupCommand {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn restore(
         &self,
         from: &str,
         chain: &[String],
+        decrypt_with: Option<KeySource>,
+        passphrase_file: Option<&str>,
         new_name: &str,
         format: OutputFormat,
     ) -> Result<()> {
+        let opts_term = restore_opts_term(decrypt_with, passphrase_file)?;
+
         let result = if chain.is_empty() {
             smol::block_on(async {
                 let mut conn = DaemonConnection::connect().await?;
                 conn.call(
                     "Elixir.NeonFS.CLI.Handler",
                     "handle_backup_restore",
-                    vec![binary_val(from), binary_val(new_name)],
+                    vec![binary_val(from), binary_val(new_name), opts_term],
                 )
                 .await
             })?
@@ -252,7 +310,7 @@ impl BackupCommand {
                 conn.call(
                     "Elixir.NeonFS.CLI.Handler",
                     "handle_backup_restore_chain",
-                    vec![archives, binary_val(new_name)],
+                    vec![archives, binary_val(new_name), opts_term],
                 )
                 .await
             })?
@@ -298,6 +356,64 @@ fn binary_val(s: &str) -> Term {
     })
 }
 
+// Build the restore opts map (third RPC arg). Carries `passphrase`
+// when decrypting, otherwise an empty map (the handler defaults it).
+fn restore_opts_term(
+    decrypt_with: Option<KeySource>,
+    passphrase_file: Option<&str>,
+) -> Result<Term> {
+    let mut entries = Vec::new();
+    if decrypt_with.is_some() {
+        let passphrase = read_passphrase(passphrase_file, false)?;
+        entries.push((
+            Term::Atom(Atom::from("passphrase")),
+            binary_val(&passphrase),
+        ));
+    }
+    Ok(Term::Map(Map {
+        map: entries.into_iter().collect(),
+    }))
+}
+
+// Resolve the passphrase from `--passphrase-file` or an interactive
+// no-echo prompt. On create (`confirm`), the prompt is entered twice
+// and must match, so a typo can't lock an archive.
+fn read_passphrase(passphrase_file: Option<&str>, confirm: bool) -> Result<String> {
+    match passphrase_file {
+        Some(path) => {
+            // audit:bounded passphrase file is small operator-supplied config
+            // (a passphrase + newline), never volume data.
+            let raw = std::fs::read_to_string(path)?;
+            let passphrase = raw.trim_end_matches(['\n', '\r']).to_string();
+            reject_empty(passphrase)
+        }
+        None => {
+            let passphrase = rpassword::prompt_password("Passphrase: ")?;
+
+            if confirm {
+                let again = rpassword::prompt_password("Confirm passphrase: ")?;
+                if passphrase != again {
+                    return Err(CliError::InvalidArgument(
+                        "passphrases did not match".to_string(),
+                    ));
+                }
+            }
+
+            reject_empty(passphrase)
+        }
+    }
+}
+
+fn reject_empty(passphrase: String) -> Result<String> {
+    if passphrase.is_empty() {
+        Err(CliError::InvalidArgument(
+            "passphrase must not be empty".to_string(),
+        ))
+    } else {
+        Ok(passphrase)
+    }
+}
+
 fn required_string(map: &HashMap<String, Term>, key: &str) -> Result<String> {
     map.get(key)
         .ok_or_else(|| CliError::TermConversionError(format!("Missing '{}'", key)))
@@ -341,14 +457,62 @@ mod tests {
                 to,
                 name,
                 incremental_from,
+                encrypt_with,
+                passphrase_file,
             } => {
                 assert_eq!(volume, "v");
                 assert_eq!(to, "/tmp/b.tar");
                 assert!(name.is_none());
                 assert!(incremental_from.is_none());
+                assert!(encrypt_with.is_none());
+                assert!(passphrase_file.is_none());
             }
             _ => panic!("expected Create"),
         }
+    }
+
+    #[test]
+    fn create_accepts_encrypt_with_passphrase() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "create",
+            "--volume",
+            "v",
+            "--to",
+            "/tmp/b.tar",
+            "--encrypt-with",
+            "passphrase",
+            "--passphrase-file",
+            "/tmp/pw",
+        ])
+        .unwrap();
+
+        match cli.command {
+            BackupCommand::Create {
+                encrypt_with,
+                passphrase_file,
+                ..
+            } => {
+                assert_eq!(encrypt_with, Some(KeySource::Passphrase));
+                assert_eq!(passphrase_file.as_deref(), Some("/tmp/pw"));
+            }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn create_rejects_unknown_key_source() {
+        assert!(TestCli::try_parse_from([
+            "test",
+            "create",
+            "--volume",
+            "v",
+            "--to",
+            "/tmp/b.tar",
+            "--encrypt-with",
+            "kms",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -417,11 +581,37 @@ mod tests {
             BackupCommand::Restore {
                 from,
                 chain,
+                decrypt_with,
+                passphrase_file,
                 new_name,
             } => {
                 assert_eq!(from, "/tmp/b.tar");
                 assert!(chain.is_empty());
+                assert!(decrypt_with.is_none());
+                assert!(passphrase_file.is_none());
                 assert_eq!(new_name, "restored-vol");
+            }
+            _ => panic!("expected Restore"),
+        }
+    }
+
+    #[test]
+    fn restore_accepts_decrypt_with() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "restore",
+            "--from",
+            "/tmp/b.tar",
+            "--decrypt-with",
+            "passphrase",
+            "--as",
+            "restored-vol",
+        ])
+        .unwrap();
+
+        match cli.command {
+            BackupCommand::Restore { decrypt_with, .. } => {
+                assert_eq!(decrypt_with, Some(KeySource::Passphrase));
             }
             _ => panic!("expected Restore"),
         }
