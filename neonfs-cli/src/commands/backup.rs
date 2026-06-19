@@ -3,7 +3,7 @@
 //! (#968).
 
 use clap::Subcommand;
-use eetf::{Atom, Map, Term};
+use eetf::{Atom, List, Map, Term};
 use std::collections::HashMap;
 
 use crate::daemon::DaemonConnection;
@@ -23,7 +23,7 @@ use crate::term::{
 /// the body.
 ///
 /// All paths are on the daemon's filesystem. Cross-cluster restore
-/// and incremental backups remain tracked in #248.
+/// remains tracked in #248.
 #[derive(Debug, Subcommand)]
 pub enum BackupCommand {
     /// Take a snapshot, export it to the destination, then drop
@@ -41,6 +41,13 @@ pub enum BackupCommand {
         /// Optional snapshot name (default: generated)
         #[arg(long)]
         name: Option<String>,
+
+        /// Make this an incremental backup against a prior archive:
+        /// files unchanged since that archive are carried by
+        /// reference rather than re-shipped (#1003). The prior
+        /// archive's path on the daemon's filesystem.
+        #[arg(long = "incremental-from")]
+        incremental_from: Option<String>,
     },
 
     /// Inspect an existing backup's manifest without unpacking the
@@ -55,9 +62,15 @@ pub enum BackupCommand {
     /// `volume import` — exposed here because that's where
     /// operators look.
     Restore {
-        /// Backup tarball path on the daemon's filesystem
+        /// Backup tarball path on the daemon's filesystem. The base
+        /// (full) archive when restoring an incremental chain.
         #[arg(long)]
         from: String,
+
+        /// Incremental archives to replay onto `--from`, oldest
+        /// first, comma-separated (#1003). Omit for a plain restore.
+        #[arg(long, value_delimiter = ',')]
+        chain: Vec<String>,
 
         /// Name of the new volume to create
         #[arg(long = "as")]
@@ -68,11 +81,24 @@ pub enum BackupCommand {
 impl BackupCommand {
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            BackupCommand::Create { volume, to, name } => {
-                self.create(volume, to, name.as_deref(), format)
-            }
+            BackupCommand::Create {
+                volume,
+                to,
+                name,
+                incremental_from,
+            } => self.create(
+                volume,
+                to,
+                name.as_deref(),
+                incremental_from.as_deref(),
+                format,
+            ),
             BackupCommand::List { from } => self.list(from, format),
-            BackupCommand::Restore { from, new_name } => self.restore(from, new_name, format),
+            BackupCommand::Restore {
+                from,
+                chain,
+                new_name,
+            } => self.restore(from, chain, new_name, format),
         }
     }
 
@@ -81,18 +107,22 @@ impl BackupCommand {
         volume: &str,
         to: &str,
         name: Option<&str>,
+        incremental_from: Option<&str>,
         format: OutputFormat,
     ) -> Result<()> {
-        let opts_term = match name {
-            None => Term::Map(Map {
-                map: vec![].into_iter().collect(),
-            }),
-            Some(n) => Term::Map(Map {
-                map: vec![(Term::Atom(Atom::from("name")), binary_val(n))]
-                    .into_iter()
-                    .collect(),
-            }),
-        };
+        let mut entries = Vec::new();
+        if let Some(n) = name {
+            entries.push((Term::Atom(Atom::from("name")), binary_val(n)));
+        }
+        if let Some(baseline) = incremental_from {
+            entries.push((
+                Term::Atom(Atom::from("incremental_from")),
+                binary_val(baseline),
+            ));
+        }
+        let opts_term = Term::Map(Map {
+            map: entries.into_iter().collect(),
+        });
 
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
@@ -195,16 +225,38 @@ impl BackupCommand {
         Ok(())
     }
 
-    fn restore(&self, from: &str, new_name: &str, format: OutputFormat) -> Result<()> {
-        let result = smol::block_on(async {
-            let mut conn = DaemonConnection::connect().await?;
-            conn.call(
-                "Elixir.NeonFS.CLI.Handler",
-                "handle_backup_restore",
-                vec![binary_val(from), binary_val(new_name)],
-            )
-            .await
-        })?;
+    fn restore(
+        &self,
+        from: &str,
+        chain: &[String],
+        new_name: &str,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let result = if chain.is_empty() {
+            smol::block_on(async {
+                let mut conn = DaemonConnection::connect().await?;
+                conn.call(
+                    "Elixir.NeonFS.CLI.Handler",
+                    "handle_backup_restore",
+                    vec![binary_val(from), binary_val(new_name)],
+                )
+                .await
+            })?
+        } else {
+            let mut paths = vec![binary_val(from)];
+            paths.extend(chain.iter().map(|p| binary_val(p)));
+            let archives = Term::List(List { elements: paths });
+
+            smol::block_on(async {
+                let mut conn = DaemonConnection::connect().await?;
+                conn.call(
+                    "Elixir.NeonFS.CLI.Handler",
+                    "handle_backup_restore_chain",
+                    vec![archives, binary_val(new_name)],
+                )
+                .await
+            })?
+        };
 
         if let Some(err) = extract_error(&result) {
             return Err(err);
@@ -231,6 +283,9 @@ impl BackupCommand {
                 println!("  Volume ID:  {}", volume_id);
                 println!("  Files:      {}", file_count);
                 println!("  Bytes:      {}", byte_count);
+                if !chain.is_empty() {
+                    println!("  Chain:      {} archives", chain.len() + 1);
+                }
             }
         }
         Ok(())
@@ -281,11 +336,39 @@ mod tests {
                 .unwrap();
 
         match cli.command {
-            BackupCommand::Create { volume, to, name } => {
+            BackupCommand::Create {
+                volume,
+                to,
+                name,
+                incremental_from,
+            } => {
                 assert_eq!(volume, "v");
                 assert_eq!(to, "/tmp/b.tar");
                 assert!(name.is_none());
+                assert!(incremental_from.is_none());
             }
+            _ => panic!("expected Create"),
+        }
+    }
+
+    #[test]
+    fn create_accepts_incremental_from() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "create",
+            "--volume",
+            "v",
+            "--to",
+            "/tmp/inc.tar",
+            "--incremental-from",
+            "/tmp/full.tar",
+        ])
+        .unwrap();
+
+        match cli.command {
+            BackupCommand::Create {
+                incremental_from, ..
+            } => assert_eq!(incremental_from.as_deref(), Some("/tmp/full.tar")),
             _ => panic!("expected Create"),
         }
     }
@@ -331,9 +414,37 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            BackupCommand::Restore { from, new_name } => {
+            BackupCommand::Restore {
+                from,
+                chain,
+                new_name,
+            } => {
                 assert_eq!(from, "/tmp/b.tar");
+                assert!(chain.is_empty());
                 assert_eq!(new_name, "restored-vol");
+            }
+            _ => panic!("expected Restore"),
+        }
+    }
+
+    #[test]
+    fn restore_accepts_chain() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "restore",
+            "--from",
+            "/tmp/full.tar",
+            "--chain",
+            "/tmp/inc1.tar,/tmp/inc2.tar",
+            "--as",
+            "restored-vol",
+        ])
+        .unwrap();
+
+        match cli.command {
+            BackupCommand::Restore { from, chain, .. } => {
+                assert_eq!(from, "/tmp/full.tar");
+                assert_eq!(chain, vec!["/tmp/inc1.tar", "/tmp/inc2.tar"]);
             }
             _ => panic!("expected Restore"),
         }
