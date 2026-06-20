@@ -146,9 +146,9 @@ w_nfs()   { node_ssh 1 "sudo bash -c 'echo $2 > ${NFS_MNT}/$1'" 2>/dev/null; }
 r_fuse()  { node_ssh 1 "sudo -u neonfs test -f ${FUSE_MNT}/$1" 2>/dev/null; }
 r_nfs()   { node_ssh 1 "sudo test -f ${NFS_MNT}/$1" 2>/dev/null; }
 r_s3()    { node_ssh 1 "s3cmd ${S3_FLAGS} ls s3://${ACCEPT_VOL}/$1" 2>/dev/null | grep -q "$1"; }
-r_dav()   { node_ssh 1 "curl -s -m 15 -o /dev/null -w '%{http_code}' ${DAV_BASE}/${ACCEPT_VOL}/$1" 2>/dev/null | grep -q 200; }
+r_dav()   { node_ssh 1 "curl -s -m 15 ${DAV_AUTH} -o /dev/null -w '%{http_code}' ${DAV_BASE}/${ACCEPT_VOL}/$1" 2>/dev/null | grep -q 200; }
 w_s3()    { node_ssh 1 "printf %s $2 > /tmp/$1 && s3cmd ${S3_FLAGS} put /tmp/$1 s3://${ACCEPT_VOL}/$1" 2>/dev/null; }
-w_dav()   { node_ssh 1 "printf %s $2 | curl -s -m 15 -T - ${DAV_BASE}/${ACCEPT_VOL}/$1 -o /dev/null -w '%{http_code}'" 2>/dev/null | grep -qE '20(0|1|4)'; }
+w_dav()   { node_ssh 1 "printf %s $2 | curl -s -m 15 ${DAV_AUTH} -T - ${DAV_BASE}/${ACCEPT_VOL}/$1 -o /dev/null -w '%{http_code}'" 2>/dev/null | grep -qE '20(0|1|4)'; }
 
 s_consistency_fuse_nfs() {
   node_ssh 1 "mount | grep -q '${NFS_MNT}'" 2>/dev/null || return 77
@@ -157,12 +157,15 @@ s_consistency_fuse_nfs() {
 
 s_s3_setup() {
   node_ssh 1 "command -v s3cmd >/dev/null 2>&1 || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q s3cmd >/dev/null 2>&1" 2>/dev/null
-  local out; out=$(ncli 1 "s3 create-credential --user accept" 2>/dev/null)
+  # One credential serves both S3 SigV4 and WebDAV Basic auth (see
+  # `neonfs credential create` — the `s3 create-credential` verb is gone).
+  local out; out=$(ncli 1 "credential create --user accept" 2>/dev/null)
   S3_KEY=$(echo "${out}" | awk '/Access Key ID:/ {print $NF}')
   S3_SECRET=$(echo "${out}" | awk '/Secret Access Key:/ {print $NF}')
   [ -n "${S3_KEY}" ] && [ -n "${S3_SECRET}" ] \
-    || { echo "  failed to create S3 credential" >&2; return 1; }
+    || { echo "  failed to create credential" >&2; return 1; }
   S3_FLAGS="--access_key=${S3_KEY} --secret_key=${S3_SECRET} --host=${S3_HOST} --host-bucket=${S3_HOST} --no-ssl --region=neonfs"
+  DAV_AUTH="-u ${S3_KEY}:${S3_SECRET}"
   echo "  access key ${S3_KEY}" >&2
 }
 
@@ -182,10 +185,11 @@ s_s3_ops() {
 
 s_webdav_ops() {
   volume_ready || return 77
+  [ -n "${DAV_AUTH}" ] || return 77
   node_ssh 1 "
-    code=\$(printf %s dav-content | curl -s -m 15 -T - ${DAV_BASE}/${ACCEPT_VOL}/dav_${TAG}.txt -o /dev/null -w '%{http_code}')
+    code=\$(printf %s dav-content | curl -s -m 15 ${DAV_AUTH} -T - ${DAV_BASE}/${ACCEPT_VOL}/dav_${TAG}.txt -o /dev/null -w '%{http_code}')
     [ \"\$code\" = 201 ] || [ \"\$code\" = 200 ] || [ \"\$code\" = 204 ] || exit 1
-    got=\$(curl -s -m 15 ${DAV_BASE}/${ACCEPT_VOL}/dav_${TAG}.txt)
+    got=\$(curl -s -m 15 ${DAV_AUTH} ${DAV_BASE}/${ACCEPT_VOL}/dav_${TAG}.txt)
     [ \"\$got\" = dav-content ]" 2>&1 | sed 's/^/  /' >&2 \
     || { echo "  WebDAV PUT/GET failed" >&2; return 1; }
 }
