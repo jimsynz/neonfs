@@ -122,7 +122,8 @@ defmodule NeonFS.S3.Backend do
   defp build_object(bucket, key, meta, read_opts) do
     case try_stream_read(bucket, key, read_opts) do
       {:ok, %{stream: stream}} ->
-        {:ok, file_meta_to_stream_object(meta, stream, read_opts)}
+        etag = resolve_etag(bucket, key, meta)
+        {:ok, file_meta_to_stream_object(meta, stream, read_opts, etag)}
 
       {:error, reason} ->
         if not_found_reason?(reason) do
@@ -275,7 +276,7 @@ defmodule NeonFS.S3.Backend do
     with :ok <- ensure_bucket_exists(bucket) do
       case call_core(:get_file_meta, [bucket, key]) do
         {:ok, meta} ->
-          {:ok, file_meta_to_object_meta(meta, key)}
+          {:ok, file_meta_to_object_meta(meta, key, resolve_etag(bucket, key, meta))}
 
         {:error, :not_found} ->
           {:error, %Firkin.Error{code: :no_such_key}}
@@ -587,8 +588,7 @@ defmodule NeonFS.S3.Backend do
     end
   end
 
-  defp file_meta_to_stream_object(meta, stream, read_opts) do
-    etag = compute_etag_from_meta(meta)
+  defp file_meta_to_stream_object(meta, stream, read_opts, etag) do
     content_length = stream_content_length(meta.size, read_opts)
 
     %Firkin.Object{
@@ -746,10 +746,10 @@ defmodule NeonFS.S3.Backend do
     :crypto.hash(:md5, data) |> Base.encode16(case: :lower)
   end
 
-  defp file_meta_to_object_meta(meta, key) do
+  defp file_meta_to_object_meta(meta, key, etag) do
     %Firkin.ObjectMeta{
       key: strip_leading_slash(key),
-      etag: compute_etag_from_meta(meta),
+      etag: etag,
       size: meta.size,
       last_modified: meta.modified_at || meta.created_at || DateTime.utc_now(),
       content_type: meta_content_type(meta)
@@ -759,9 +759,54 @@ defmodule NeonFS.S3.Backend do
   defp meta_content_type(%{content_type: ct}) when is_binary(ct), do: ct
   defp meta_content_type(_meta), do: "application/octet-stream"
 
+  # GET/HEAD ETag resolution (#1037). The content MD5 is stored at write
+  # time only on the S3 PUT path; an object written through another
+  # interface (FUSE/NFS) has none, so compute it lazily here — stream the
+  # content once, hash it, and cache the result back into FileMeta so
+  # subsequent GET/HEAD (and List) are cheap. Bounded memory: the stream
+  # is folded one chunk at a time, never materialised. List/copy keep the
+  # cheap `compute_etag_from_meta/1` (stored-or-fallback) — lazily hashing
+  # every object in a listing would read the whole bucket.
+  defp resolve_etag(bucket, key, meta) do
+    case stored_etag(meta) do
+      etag when is_binary(etag) ->
+        etag
+
+      nil ->
+        case compute_etag_by_streaming(bucket, key) do
+          {:ok, etag} ->
+            persist_object_etag(bucket, key, meta, etag)
+            etag
+
+          {:error, _} ->
+            fallback_etag_from_meta(meta)
+        end
+    end
+  end
+
+  defp compute_etag_by_streaming(bucket, key) do
+    case try_stream_read(bucket, key, []) do
+      {:ok, %{stream: stream}} ->
+        digest =
+          stream
+          |> Enum.reduce(:crypto.hash_init(:md5), &:crypto.hash_update(&2, &1))
+          |> :crypto.hash_final()
+          |> Base.encode16(case: :lower)
+
+        {:ok, digest}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp stored_etag(%{metadata: md}) when is_map(md), do: Map.get(md, @etag_metadata_key)
+  defp stored_etag(_), do: nil
+
   # Prefer the content MD5 stored at write time (the true S3 ETag). Objects
-  # written before #1037 have no stored value and fall back to the chunk-derived
-  # digest — not the object MD5, but stable per object.
+  # without a stored value fall back to the chunk-derived digest — not the
+  # object MD5, but stable per object. Used by List/copy, where computing
+  # the real MD5 per object would be prohibitively expensive.
   defp compute_etag_from_meta(%{metadata: md} = meta) when is_map(md) do
     case Map.get(md, @etag_metadata_key) do
       etag when is_binary(etag) -> etag

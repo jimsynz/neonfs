@@ -331,6 +331,40 @@ defmodule NeonFS.S3.BackendTest do
     end
   end
 
+  describe "ETag for files written via other interfaces (#1037)" do
+    test "GET computes the content MD5 lazily and caches it back" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      # No metadata → simulates a FUSE/NFS write (no stored content-md5).
+      content = "written-via-fuse-not-s3"
+      {:ok, _} = MockCore.write_file("my-bucket", "fuse.txt", content, [])
+      expected = :crypto.hash(:md5, content) |> Base.encode16(case: :lower)
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "fuse.txt", %Firkin.GetOpts{})
+
+      assert object.etag == expected
+      assert Enum.into(object.body, <<>>) == content
+
+      # Cached: the stored metadata now carries the MD5, so HEAD and the
+      # next GET return it without recomputing.
+      assert {:ok, meta} = MockCore.get_file_meta("my-bucket", "fuse.txt")
+      assert meta.metadata["neonfs:content-md5"] == expected
+
+      assert {:ok, head} = Backend.head_object(@ctx, "my-bucket", "fuse.txt")
+      assert head.etag == expected
+    end
+
+    test "HEAD computes the content MD5 lazily for a non-S3-written file" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      content = "head-computes-this"
+      {:ok, _} = MockCore.write_file("my-bucket", "h.txt", content, [])
+      expected = :crypto.hash(:md5, content) |> Base.encode16(case: :lower)
+
+      assert {:ok, head} = Backend.head_object(@ctx, "my-bucket", "h.txt")
+      assert head.etag == expected
+    end
+  end
+
   describe "delete_object/3" do
     test "deletes an existing object" do
       Backend.create_bucket(@ctx, "my-bucket")
