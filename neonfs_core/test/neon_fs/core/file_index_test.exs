@@ -808,6 +808,30 @@ defmodule NeonFS.Core.FileIndexTest do
     end
   end
 
+  describe "list_volume_authoritative/1 (#1034)" do
+    test "lists files from the authoritative store even when the ETS cache is cold" do
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/a.txt"))
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/b.txt"))
+      {:ok, _} = FileIndex.create(FileMeta.new("vol2", "/c.txt"))
+
+      # Simulate a node whose write-through cache never saw these writes
+      # (the cross-node / cross-interface case behind #1034): clear it.
+      :ets.delete_all_objects(:file_index_by_id)
+      assert FileIndex.list_volume("vol1") == []
+
+      assert {:ok, files} = FileIndex.list_volume_authoritative("vol1")
+      assert Enum.map(files, & &1.path) |> Enum.sort() == ["/a.txt", "/b.txt"]
+      assert Enum.all?(files, &(&1.volume_id == "vol1"))
+
+      assert {:ok, vol2} = FileIndex.list_volume_authoritative("vol2")
+      assert Enum.map(vol2, & &1.path) == ["/c.txt"]
+    end
+
+    test "returns an empty list for a volume with no files" do
+      assert {:ok, []} = FileIndex.list_volume_authoritative("empty-volume")
+    end
+  end
+
   describe "key format" do
     test "uses file: prefix for file metadata", %{store: store} do
       file = FileMeta.new("vol1", "/test.txt")

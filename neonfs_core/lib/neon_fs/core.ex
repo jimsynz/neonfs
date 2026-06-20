@@ -532,14 +532,18 @@ defmodule NeonFS.Core do
   @spec list_files_recursive(String.t(), String.t()) ::
           {:ok, [NeonFS.Core.FileMeta.t()]} | {:error, term()}
   def list_files_recursive(volume_name, dir_path) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, files} <- FileIndex.list_volume_authoritative(volume.id) do
       normalized = normalize_path(dir_path)
-      files = FileIndex.list_volume(volume.id)
 
-      filtered =
-        Enum.filter(files, fn file ->
-          file.path != normalized and String.starts_with?(file.path, normalized)
-        end)
+      # Pure prefix match — used for S3 `ListObjects`, whose `prefix` is a
+      # string prefix, not a directory. A prefix that *exactly* equals an
+      # object key must return that object, so don't exclude `== normalized`:
+      # the old exclusion silently dropped a file whose path equalled the
+      # prefix (e.g. `ls s3://bucket/exact-file.txt` returned nothing). No
+      # directory is ever in this file list, so the only thing the exclusion
+      # ever dropped was that exact-key file (#1034).
+      filtered = Enum.filter(files, &String.starts_with?(&1.path, normalized))
 
       {:ok, filtered}
     end

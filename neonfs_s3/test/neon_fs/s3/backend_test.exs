@@ -441,6 +441,19 @@ defmodule NeonFS.S3.BackendTest do
       assert {:error, %Firkin.Error{code: :no_such_bucket}} =
                Backend.list_objects_v2(@ctx, "missing", %Firkin.ListOpts{})
     end
+
+    test "a prefix that exactly equals an object key returns that object (#1034)" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "exact.txt", "x", %Firkin.PutOpts{})
+      Backend.put_object(@ctx, "my-bucket", "other.txt", "y", %Firkin.PutOpts{})
+
+      # `s3cmd ls s3://my-bucket/exact.txt` → ListObjects prefix="exact.txt".
+      # The exact-match object must be returned (it used to be excluded).
+      assert {:ok, result} =
+               Backend.list_objects_v2(@ctx, "my-bucket", %Firkin.ListOpts{prefix: "exact.txt"})
+
+      assert Enum.map(result.contents, & &1.key) == ["exact.txt"]
+    end
   end
 
   # Multipart upload operations

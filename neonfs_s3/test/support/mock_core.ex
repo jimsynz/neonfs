@@ -253,11 +253,12 @@ defmodule NeonFS.S3.Test.MockCore do
       files = Process.get(:mock_files, %{})
       normalised = normalise_path(path)
 
+      # Mirror NeonFS.Core.list_files_recursive: a pure prefix match (a
+      # prefix that exactly equals an object key returns that object — #1034).
       entries =
         files
         |> Enum.filter(fn {{vol, file_path}, _} ->
-          vol == volume_name and file_path != normalised and
-            String.starts_with?(file_path, normalised)
+          vol == volume_name and String.starts_with?(file_path, normalised)
         end)
         |> Enum.map(fn {_key, {meta, _content}} -> meta end)
         |> Enum.sort_by(& &1.path)

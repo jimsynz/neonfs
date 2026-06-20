@@ -437,6 +437,38 @@ defmodule NeonFS.Core.FileIndex do
     )
   end
 
+  @doc """
+  Lists every file in a volume from the **authoritative** metadata tree
+  (a `MetadataReader` range scan over the `file:` keyspace), not the
+  local ETS cache.
+
+  `list_volume/1`'s ETS cache only reflects writes whose `on_commit`
+  ran on the local node, so an interface (e.g. S3 `ListObjects`) routed
+  to a node that didn't perform the write — or reading a file written
+  through a different interface — sees a stale listing (#1034). This
+  reads the same source `get_by_path/2` and WebDAV's `list_dir/2`
+  already use, so a file is listable as soon as it's committed.
+  """
+  @spec list_volume_authoritative(volume_id()) :: {:ok, [FileMeta.t()]} | {:error, term()}
+  def list_volume_authoritative(volume_id) do
+    {start_key, end_key} = file_key_range()
+
+    case MetadataReader.range(volume_id, :file_index, start_key, end_key, metadata_reader_opts()) do
+      {:ok, raw_entries} -> {:ok, decode_file_entries(raw_entries, volume_id)}
+      {:error, _} = err -> err
+    end
+  end
+
+  # The metadata tree is per-volume, so the range is already scoped — but
+  # match `list_volume/1`'s contract and filter on `volume_id` defensively
+  # (the `file:<id>` key carries no volume).
+  defp decode_file_entries(raw_entries, volume_id) do
+    for {_key, bytes} <- raw_entries,
+        {:ok, value} <- [MetadataValue.decode(bytes)],
+        %FileMeta{volume_id: ^volume_id} = file <- [storable_map_to_file(value)],
+        do: file
+  end
+
   ## Server Callbacks
 
   @impl true
@@ -1558,6 +1590,16 @@ defmodule NeonFS.Core.FileIndex do
   ## Private — Key format
 
   defp file_key(file_id), do: @file_key_prefix <> file_id
+
+  # Half-open range `[prefix, prefix⁺)` covering every `file:<id>` key.
+  # The id follows the prefix directly, so the exclusive upper bound
+  # increments the prefix's final byte.
+  defp file_key_range do
+    size = byte_size(@file_key_prefix) - 1
+    <<head::binary-size(^size), last>> = @file_key_prefix
+    {@file_key_prefix, head <> <<last + 1>>}
+  end
+
   defp dir_key(volume_id, path), do: @dir_key_prefix <> volume_id <> ":" <> path
 
   # `<<0>>` separates the directory path from the child name. A NUL can

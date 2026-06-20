@@ -392,6 +392,17 @@ defmodule NeonFS.CoreTest do
       assert {:ok, [_ | _]} = Core.list_files_recursive(vol_name, "/")
     end
 
+    test "a path that exactly equals a file returns that file (#1034 S3 exact-key prefix)", %{
+      volume_name: vol_name
+    } do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/exact.txt", ["x"])
+
+      # S3 `ListObjects` with `prefix == object key` maps to this call; the
+      # exact-match file must be returned (it used to be excluded).
+      assert {:ok, entries} = Core.list_files_recursive(vol_name, "/exact.txt")
+      assert Enum.map(entries, & &1.path) == ["/exact.txt"]
+    end
+
     test "returns all descendants while list_dir returns only direct children", %{
       volume_name: vol_name
     } do
