@@ -79,6 +79,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:kv_put, key :: binary(), value :: term()}
           | {:kv_delete, key :: binary()}
           | {:bulk_restore, keyspace :: atom(), entries :: [{term(), term()}]}
+          | :bump_generation
           | {:claim_namespace_path, path :: String.t(), scope :: namespace_scope(),
              holder :: term()}
           | {:claim_namespace_subtree, path :: String.t(), scope :: namespace_scope(),
@@ -187,6 +188,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           },
           snapshots: %{optional(binary()) => %{optional(binary()) => snapshot_entry()}},
           redeemed_invites: %{optional(binary()) => non_neg_integer()},
+          generation: non_neg_integer(),
           version: non_neg_integer()
         }
 
@@ -311,6 +313,13 @@ defmodule NeonFS.Core.MetadataStateMachine do
   """
   @spec get_kv(state()) :: %{optional(binary()) => term()}
   def get_kv(state), do: Map.get(state, :kv, %{})
+
+  @doc """
+  Returns the cluster generation counter (#1005) — bumped on every DR
+  restore. Zero on a fresh cluster or a pre-v19 state.
+  """
+  @spec get_generation(state()) :: non_neg_integer()
+  def get_generation(state), do: Map.get(state, :generation, 0)
 
   @doc """
   Returns the bootstrap-layer drive table — `drive_id => drive_entry`.
@@ -557,6 +566,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       volume_roots: %{},
       snapshots: %{},
       redeemed_invites: %{},
+      generation: 0,
       version: 0
     }
   end
@@ -864,6 +874,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {Map.put_new(state, :nodes, %{}), :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 18, 19}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 18,
+      to: 19,
+      change: "add cluster generation counter for DR-restore split-brain detection (#1005)"
+    )
+
+    {Map.put_new(state, :generation, 0), :ok, []}
   end
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
@@ -1562,6 +1584,28 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {state, {:error, {:unrestorable_keyspace, keyspace}}, []}
   end
 
+  # Cluster generation (#1005): a monotonic counter bumped on every DR
+  # restore. Lets operators audit "cluster X generation N" and detect
+  # split-brain when a presumed-dead original rejoins at a lower
+  # generation. Deliberately *not* one of the bulk-restorable keyspaces,
+  # so a snapshot's stale generation can never overwrite the live one.
+  def apply(_meta, :bump_generation, state) do
+    new_generation = Map.get(state, :generation, 0) + 1
+
+    new_state =
+      state
+      |> Map.put(:generation, new_generation)
+      |> Map.put(:version, state.version + 1)
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :bump_generation],
+      %{version: new_state.version, generation: new_generation},
+      %{}
+    )
+
+    {new_state, {:ok, new_generation}, []}
+  end
+
   # Namespace coordinator commands (new in v12, sub-issue #300 of #226)
   #
   # `:claim_namespace_path` and `:claim_namespace_subtree` allocate a
@@ -2145,7 +2189,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 18
+  def version, do: 19
 
   @doc """
   Return the module to handle a specific state machine version.

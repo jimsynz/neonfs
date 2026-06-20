@@ -13,7 +13,7 @@ defmodule NeonFS.CLI.Handler.Cluster do
   import NeonFS.CLI.Handler.Common
 
   alias NeonFS.Cluster.{Init, Invite, Join, State}
-  alias NeonFS.Core.VolumeRegistry
+  alias NeonFS.Core.{MetadataStateMachine, RaSupervisor, VolumeRegistry}
   alias NeonFS.Error.{Invalid, Unavailable}
 
   @doc """
@@ -33,6 +33,7 @@ defmodule NeonFS.CLI.Handler.Cluster do
          node: Atom.to_string(Node.self()),
          status: :running,
          volumes: count_volumes(),
+         generation: get_generation(),
          uptime_seconds: get_uptime()
        }}
     else
@@ -221,5 +222,19 @@ defmodule NeonFS.CLI.Handler.Cluster do
   defp count_volumes do
     VolumeRegistry.list()
     |> length()
+  end
+
+  # Cluster generation (#1005): read straight from Ra state, degrading
+  # to 0 if the read fails (or Ra isn't up) so `cluster status` never
+  # errors on it.
+  defp get_generation do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_generation/1) do
+      {:ok, generation} when is_integer(generation) -> generation
+      _ -> 0
+    end
+  rescue
+    _ -> 0
+  catch
+    :exit, _ -> 0
   end
 end

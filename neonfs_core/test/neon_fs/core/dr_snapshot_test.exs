@@ -380,14 +380,17 @@ defmodule NeonFS.Core.DRSnapshotTest do
       {:ok, %{path: dir}} = DRSnapshot.create(state: synthetic, timestamp: "20260620T000000Z")
       id = Path.basename(dir)
 
-      assert {:ok, counts} = DRSnapshot.restore(id)
+      assert {:ok, %{restored: counts, generation: generation}} = DRSnapshot.restore(id)
       assert counts[:kv] == 1
       assert counts[:credentials] == 1
       assert counts[:volumes] == 0
+      # The generation counter is bumped by the restore.
+      assert generation >= 1
 
       {:ok, state} = RaSupervisor.local_query(fn s -> s end)
       assert state.kv["dr-restored-key"] == "dr-restored-value"
       assert state.credentials["AKIA-RESTORED"] == %{secret: "shh"}
+      assert state.generation == generation
     end
 
     test "per-volume indexes are never restored via this path" do
@@ -410,7 +413,7 @@ defmodule NeonFS.Core.DRSnapshotTest do
 
       {:ok, %{path: dir}} = DRSnapshot.create(state: synthetic, timestamp: "20260620T010000Z")
 
-      assert {:ok, counts} = DRSnapshot.restore(Path.basename(dir))
+      assert {:ok, %{restored: counts}} = DRSnapshot.restore(Path.basename(dir))
       refute Map.has_key?(counts, :chunks)
       refute Map.has_key?(counts, :files)
       refute Map.has_key?(counts, :stripes)

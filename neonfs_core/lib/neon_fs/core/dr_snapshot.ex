@@ -186,15 +186,21 @@ defmodule NeonFS.Core.DRSnapshot do
   per-volume indexes (`chunks`/`files`/`stripes`) are *not* touched —
   those are reconstructed per volume via `backup restore`.
 
-  Returns `{:ok, %{keyspace => restored_count}}`.
+  Bumps the cluster generation counter (#1005) once the keyspaces are
+  applied, so operators can audit "cluster X generation N" and detect
+  split-brain. Returns `{:ok, %{restored: %{keyspace => count},
+  generation: new_generation}}`.
   """
   @spec restore(String.t()) ::
-          {:ok, %{atom() => non_neg_integer()}} | {:error, term()}
+          {:ok, %{restored: %{atom() => non_neg_integer()}, generation: non_neg_integer()}}
+          | {:error, term()}
   def restore(id) when is_binary(id) do
     with {:ok, volume} <- get_system_volume(),
-         {:ok, _snapshot} <- load_one(volume.id, id) do
-      snapshot_dir = Path.join(@snapshot_root, id)
-      restore_keyspaces(volume.id, snapshot_dir)
+         {:ok, _snapshot} <- load_one(volume.id, id),
+         snapshot_dir = Path.join(@snapshot_root, id),
+         {:ok, counts} <- restore_keyspaces(volume.id, snapshot_dir),
+         {:ok, generation} <- bump_generation() do
+      {:ok, %{restored: counts, generation: generation}}
     end
   end
 
@@ -249,6 +255,14 @@ defmodule NeonFS.Core.DRSnapshot do
     case RaSupervisor.command({:bulk_restore, keyspace, entries}) do
       {:ok, {:ok, count}, _leader} -> {:ok, count}
       {:ok, {:error, reason}, _leader} -> {:error, reason}
+      {:error, _} = err -> err
+      {:timeout, _} -> {:error, :timeout}
+    end
+  end
+
+  defp bump_generation do
+    case RaSupervisor.command(:bump_generation) do
+      {:ok, {:ok, generation}, _leader} -> {:ok, generation}
       {:error, _} = err -> err
       {:timeout, _} -> {:error, :timeout}
     end

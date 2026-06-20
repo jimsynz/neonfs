@@ -531,6 +531,10 @@ impl ClusterCommand {
                 tbl.add_row(vec!["Node".to_string(), status.node.clone()]);
                 tbl.add_row(vec!["Status".to_string(), status.status.clone()]);
                 tbl.add_row(vec!["Volumes".to_string(), status.volumes.to_string()]);
+                tbl.add_row(vec![
+                    "Generation".to_string(),
+                    status.generation.to_string(),
+                ]);
                 tbl.add_row(vec!["Uptime".to_string(), status.uptime_string()]);
                 print!("{}", tbl.render()?);
             }

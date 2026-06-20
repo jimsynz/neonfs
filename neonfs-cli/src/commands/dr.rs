@@ -63,6 +63,7 @@ pub enum DrSnapshotCommand {
 struct DrRestoreResult {
     id: String,
     total: u64,
+    generation: u64,
     restored: BTreeMap<String, u64>,
 }
 
@@ -75,7 +76,14 @@ impl DrRestoreResult {
                 .ok_or_else(|| CliError::TermConversionError("Missing 'id' field".to_string()))?,
         )?;
 
-        let total = map.get("total").and_then(|t| term_to_u64(t).ok()).unwrap_or(0);
+        let total = map
+            .get("total")
+            .and_then(|t| term_to_u64(t).ok())
+            .unwrap_or(0);
+        let generation = map
+            .get("generation")
+            .and_then(|t| term_to_u64(t).ok())
+            .unwrap_or(0);
 
         let restored = map
             .get("restored")
@@ -87,7 +95,12 @@ impl DrRestoreResult {
             })
             .unwrap_or_default();
 
-        Ok(Self { id, total, restored })
+        Ok(Self {
+            id,
+            total,
+            generation,
+            restored,
+        })
     }
 }
 
@@ -192,6 +205,7 @@ impl DrSnapshotCommand {
             OutputFormat::Table => {
                 println!("Applied snapshot {}", restore.id);
                 println!("  Entries restored: {}", restore.total);
+                println!("  Cluster generation: {}", restore.generation);
                 for (keyspace, count) in &restore.restored {
                     println!("    {:<20} {}", keyspace, count);
                 }

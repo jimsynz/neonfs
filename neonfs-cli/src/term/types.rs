@@ -84,6 +84,7 @@ pub struct ClusterStatus {
     pub node: String,
     pub status: String,
     pub volumes: u64,
+    pub generation: u64,
     pub uptime_seconds: u64,
 }
 
@@ -140,6 +141,11 @@ impl ClusterStatus {
             volumes: term_to_u64(map.get("volumes").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'volumes' field".to_string())
             })?)?,
+            // Absent on a not-initialised cluster; default to 0.
+            generation: map
+                .get("generation")
+                .and_then(|t| term_to_u64(t).ok())
+                .unwrap_or(0),
             uptime_seconds: term_to_u64(map.get("uptime_seconds").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'uptime_seconds' field".to_string())
             })?)?,
@@ -1165,6 +1171,7 @@ mod tests {
             node: "test@localhost".to_string(),
             status: "running".to_string(),
             volumes: 3,
+            generation: 0,
             uptime_seconds: 186300, // 2d 3h 45m
         };
         assert_eq!(status.uptime_string(), "2d 3h 45m");

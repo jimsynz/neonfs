@@ -81,15 +81,21 @@ defmodule NeonFS.CLI.Handler.DR do
     set_cli_metadata()
 
     with :ok <- require_cluster(),
-         {:ok, counts} <- DRSnapshot.restore(id) do
+         {:ok, %{restored: counts, generation: generation}} <- DRSnapshot.restore(id) do
       AuditLog.log_event(
         event_type: :dr_snapshot_applied,
         actor_uid: 0,
         resource: id,
-        details: %{restored: counts}
+        details: %{restored: counts, generation: generation}
       )
 
-      {:ok, %{id: id, restored: counts, total: counts |> Map.values() |> Enum.sum()}}
+      {:ok,
+       %{
+         id: id,
+         restored: counts,
+         total: counts |> Map.values() |> Enum.sum(),
+         generation: generation
+       }}
     else
       {:error, :not_found} ->
         {:error, NotFound.exception(message: "DR snapshot '#{id}' not found")}

@@ -47,8 +47,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 18" do
-      assert MetadataStateMachine.version() == 18
+    test "returns 19" do
+      assert MetadataStateMachine.version() == 19
     end
   end
 
@@ -1899,6 +1899,63 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
                MetadataStateMachine.apply(%{}, {:bulk_restore, :volumes, entries}, base_state())
 
       assert new_state.volumes == original
+    end
+  end
+
+  describe "generation counter (#1005)" do
+    test "bump_generation increments and returns the new value" do
+      assert {state, {:ok, 1}, []} =
+               MetadataStateMachine.apply(%{}, :bump_generation, base_state())
+
+      assert state.generation == 1
+      assert state.version == 1
+
+      assert {state2, {:ok, 2}, []} =
+               MetadataStateMachine.apply(%{}, :bump_generation, state)
+
+      assert state2.generation == 2
+    end
+
+    test "bump_generation tolerates a pre-v19 state with no generation field" do
+      pre = Map.delete(base_state(), :generation)
+
+      assert {state, {:ok, 1}, []} = MetadataStateMachine.apply(%{}, :bump_generation, pre)
+      assert state.generation == 1
+    end
+
+    test "get_generation reads the counter, defaulting to 0" do
+      assert MetadataStateMachine.get_generation(base_state()) == 0
+      assert MetadataStateMachine.get_generation(%{generation: 7}) == 7
+      assert MetadataStateMachine.get_generation(%{}) == 0
+    end
+
+    test "is not one of the bulk-restorable keyspaces" do
+      assert {state, {:error, {:unrestorable_keyspace, :generation}}, []} =
+               MetadataStateMachine.apply(
+                 %{},
+                 {:bulk_restore, :generation, [{"x", 99}]},
+                 Map.put(base_state(), :generation, 3)
+               )
+
+      assert state.generation == 3
+    end
+  end
+
+  describe "machine version migration 18 -> 19 (generation counter)" do
+    test "adds the generation field initialised to zero" do
+      pre_v19 = base_state() |> Map.delete(:generation)
+
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 18, 19}, pre_v19)
+
+      assert state.generation == 0
+    end
+
+    test "preserves an existing generation when re-applied" do
+      pre = Map.put(base_state(), :generation, 5)
+
+      {state, :ok, []} = MetadataStateMachine.apply(%{}, {:machine_version, 18, 19}, pre)
+
+      assert state.generation == 5
     end
   end
 end
