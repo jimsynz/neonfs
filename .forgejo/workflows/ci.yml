@@ -673,7 +673,7 @@ jobs:
   # =========================================================================
   neonfs_integration:
     needs: resolve-versions
-    runs-on: docker
+    runs-on: amd64
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
