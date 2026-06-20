@@ -17,6 +17,7 @@ use crate::term::{
 use clap::Subcommand;
 use eetf::{Binary, Map, Term};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// DR snapshot subcommands
 #[derive(Debug, Subcommand)]
@@ -46,6 +47,48 @@ pub enum DrSnapshotCommand {
         /// Snapshot ID (the timestamp directory under `/dr`)
         id: String,
     },
+
+    /// Apply a snapshot's cluster-wide metadata back into live Ra
+    /// state (#1005). Overlays the eight cluster-wide keyspaces
+    /// (volumes, services, encryption keys, ACLs, segment
+    /// assignments, credentials, escalations, KV); per-volume content
+    /// is restored separately via `backup restore`.
+    Apply {
+        /// Snapshot ID (the timestamp directory under `/dr`)
+        id: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct DrRestoreResult {
+    id: String,
+    total: u64,
+    restored: BTreeMap<String, u64>,
+}
+
+impl DrRestoreResult {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let id = term_to_string(
+            map.get("id")
+                .ok_or_else(|| CliError::TermConversionError("Missing 'id' field".to_string()))?,
+        )?;
+
+        let total = map.get("total").and_then(|t| term_to_u64(t).ok()).unwrap_or(0);
+
+        let restored = map
+            .get("restored")
+            .and_then(|t| term_to_map(t).ok())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| term_to_u64(v).ok().map(|n| (k.clone(), n)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Self { id, total, restored })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -119,7 +162,43 @@ impl DrSnapshotCommand {
             DrSnapshotCommand::Create { label } => Self::create(label.as_deref(), format),
             DrSnapshotCommand::List => Self::list(format),
             DrSnapshotCommand::Show { id } => Self::show(id, format),
+            DrSnapshotCommand::Apply { id } => Self::apply(id, format),
         }
+    }
+
+    fn apply(id: &str, format: OutputFormat) -> Result<()> {
+        let id_term = Term::Binary(Binary {
+            bytes: id.as_bytes().to_vec(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_dr_snapshot_apply",
+                vec![id_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let restore = DrRestoreResult::from_term(unwrap_ok_tuple(result)?)?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&restore)?),
+            OutputFormat::Table => {
+                println!("Applied snapshot {}", restore.id);
+                println!("  Entries restored: {}", restore.total);
+                for (keyspace, count) in &restore.restored {
+                    println!("    {:<20} {}", keyspace, count);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn create(label: Option<&str>, format: OutputFormat) -> Result<()> {
@@ -301,6 +380,18 @@ mod tests {
     #[test]
     fn show_requires_id() {
         let cli = TestCli::try_parse_from(["test", "snapshot", "show"]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn parses_snapshot_apply() {
+        let cli = TestCli::try_parse_from(["test", "snapshot", "apply", "20260425T120000Z"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn apply_requires_id() {
+        let cli = TestCli::try_parse_from(["test", "snapshot", "apply"]);
         assert!(cli.is_err());
     }
 }

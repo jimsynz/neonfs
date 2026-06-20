@@ -1242,4 +1242,11 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_dr_snapshot_show(String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_show(id), to: DRHandler
+
+  @doc """
+  Applies a DR snapshot's cluster-wide metadata back into live Ra
+  state. Used by `neonfs dr snapshot apply <id>` (#1005).
+  """
+  @spec handle_dr_snapshot_apply(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_dr_snapshot_apply(id), to: DRHandler
 end

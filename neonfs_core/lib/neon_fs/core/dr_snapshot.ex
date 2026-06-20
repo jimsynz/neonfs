@@ -43,11 +43,19 @@ defmodule NeonFS.Core.DRSnapshot do
   without materialising the whole file. We compute the SHA-256
   digest in the same pass we serialise — see `serialise_index/2`.
 
+  ## Restore
+
+  `restore/1` overlays a snapshot's eight *cluster-wide* keyspaces
+  (volumes, services, encryption keys, volume ACLs, segment
+  assignments, credentials, escalations, KV) back onto live Ra state
+  via `:bulk_restore` commands — the first slice of full-cluster
+  `dr restore` (#1005). Per-volume content, the catalogue-driven
+  per-volume `backup restore`, the `dr restore` wrapper, and the
+  operator runbook land in later slices.
+
   ## Out of scope (for this slice)
 
     * Scheduling / retention (lives in #323).
-    * CLI surface (lives in #324).
-    * Restore — separate runbook + restore command (`#446`-equivalent).
   """
 
   alias NeonFS.Core.{
@@ -168,7 +176,83 @@ defmodule NeonFS.Core.DRSnapshot do
     end
   end
 
+  @doc """
+  Restore a DR snapshot's cluster-wide metadata back into the live Ra
+  state (#1005), the first slice of full-cluster `dr restore`.
+
+  Reads each cluster-wide index file from the snapshot directory and
+  issues a `:bulk_restore` Ra command per keyspace, overlaying the
+  snapshot's entries onto current state (last-write-wins by key). The
+  per-volume indexes (`chunks`/`files`/`stripes`) are *not* touched —
+  those are reconstructed per volume via `backup restore`.
+
+  Returns `{:ok, %{keyspace => restored_count}}`.
+  """
+  @spec restore(String.t()) ::
+          {:ok, %{atom() => non_neg_integer()}} | {:error, term()}
+  def restore(id) when is_binary(id) do
+    with {:ok, volume} <- get_system_volume(),
+         {:ok, _snapshot} <- load_one(volume.id, id) do
+      snapshot_dir = Path.join(@snapshot_root, id)
+      restore_keyspaces(volume.id, snapshot_dir)
+    end
+  end
+
   ## Private
+
+  @cluster_wide_indexes [
+    :volumes,
+    :services,
+    :encryption_keys,
+    :volume_acls,
+    :segment_assignments,
+    :credentials,
+    :escalations,
+    :kv
+  ]
+
+  defp restore_keyspaces(volume_id, snapshot_dir) do
+    @cluster_wide_indexes
+    |> Enum.reduce_while({:ok, %{}}, fn keyspace, {:ok, acc} ->
+      case restore_keyspace(volume_id, snapshot_dir, keyspace) do
+        {:ok, count} -> {:cont, {:ok, Map.put(acc, keyspace, count)}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp restore_keyspace(volume_id, snapshot_dir, keyspace) do
+    path = Path.join(snapshot_dir, "#{keyspace}.snapshot")
+
+    with {:ok, binary} <- read_index_file(volume_id, path),
+         {:ok, entries} <- deserialise_index(binary) do
+      issue_bulk_restore(keyspace, entries)
+    end
+  end
+
+  # A snapshot writes a file for every captured index, but tolerate a
+  # missing one as an empty keyspace rather than failing the restore.
+  defp read_index_file(volume_id, path) do
+    case ReadOperation.read_file(volume_id, path, []) do
+      {:ok, body} -> {:ok, body}
+      {:error, %{class: :not_found}} -> {:ok, <<>>}
+      {:error, :not_found} -> {:ok, <<>>}
+      err -> err
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
+
+  defp issue_bulk_restore(keyspace, entries) do
+    case RaSupervisor.command({:bulk_restore, keyspace, entries}) do
+      {:ok, {:ok, count}, _leader} -> {:ok, count}
+      {:ok, {:error, reason}, _leader} -> {:error, reason}
+      {:error, _} = err -> err
+      {:timeout, _} -> {:error, :timeout}
+    end
+  end
 
   defp default_timestamp do
     DateTime.utc_now()

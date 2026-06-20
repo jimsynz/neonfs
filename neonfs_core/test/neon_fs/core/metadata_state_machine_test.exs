@@ -1,7 +1,7 @@
 defmodule NeonFS.Core.MetadataStateMachineTest do
   use ExUnit.Case, async: true
 
-  alias NeonFS.Core.{Intent, MetadataStateMachine}
+  alias NeonFS.Core.{DRSnapshot, Intent, MetadataStateMachine}
 
   defp base_state do
     %{
@@ -1824,5 +1824,81 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   defp apply_ok(state, command) do
     {new_state, :ok, []} = MetadataStateMachine.apply(%{}, command, state)
     new_state
+  end
+
+  describe "bulk_restore command (#1005)" do
+    test "merges entries into each cluster-wide keyspace and bumps version" do
+      keyspaces = [
+        :volumes,
+        :services,
+        :encryption_keys,
+        :volume_acls,
+        :segment_assignments,
+        :credentials,
+        :escalations,
+        :kv
+      ]
+
+      for keyspace <- keyspaces do
+        entries = [{"k1", %{a: 1}}, {"k2", %{a: 2}}]
+
+        assert {new_state, {:ok, 2}, []} =
+                 MetadataStateMachine.apply(%{}, {:bulk_restore, keyspace, entries}, base_state())
+
+        assert Map.get(new_state, keyspace) == %{"k1" => %{a: 1}, "k2" => %{a: 2}}
+        assert new_state.version == 1
+      end
+    end
+
+    test "overlays last-write-wins, preserving live entries the snapshot doesn't name" do
+      state = Map.put(base_state(), :volumes, %{"live" => %{x: 1}, "shared" => %{old: true}})
+      entries = [{"shared", %{new: true}}, {"restored", %{y: 2}}]
+
+      assert {new_state, {:ok, 2}, []} =
+               MetadataStateMachine.apply(%{}, {:bulk_restore, :volumes, entries}, state)
+
+      assert new_state.volumes == %{
+               "live" => %{x: 1},
+               "shared" => %{new: true},
+               "restored" => %{y: 2}
+             }
+    end
+
+    test "an empty keyspace restores zero entries but still bumps version" do
+      assert {new_state, {:ok, 0}, []} =
+               MetadataStateMachine.apply(%{}, {:bulk_restore, :kv, []}, base_state())
+
+      assert new_state.kv == %{}
+      assert new_state.version == 1
+    end
+
+    test "rejects per-volume and unknown keyspaces without mutating state" do
+      for keyspace <- [:chunks, :files, :stripes, :nodes, :bogus] do
+        assert {state, {:error, {:unrestorable_keyspace, ^keyspace}}, []} =
+                 MetadataStateMachine.apply(
+                   %{},
+                   {:bulk_restore, keyspace, [{"k", %{}}]},
+                   base_state()
+                 )
+
+        assert state == base_state()
+      end
+    end
+
+    test "round-trips through DRSnapshot serialise/deserialise" do
+      original = %{
+        "vol-a" => %{name: "a", id: "vol-a"},
+        "vol-b" => %{name: "b", id: "vol-b"}
+      }
+
+      {iolist, _hasher, _bytes} = DRSnapshot.serialise_index(original)
+      binary = :erlang.iolist_to_binary(iolist)
+      assert {:ok, entries} = DRSnapshot.deserialise_index(binary)
+
+      assert {new_state, {:ok, 2}, []} =
+               MetadataStateMachine.apply(%{}, {:bulk_restore, :volumes, entries}, base_state())
+
+      assert new_state.volumes == original
+    end
   end
 end

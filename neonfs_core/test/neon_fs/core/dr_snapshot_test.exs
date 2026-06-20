@@ -2,7 +2,7 @@ defmodule NeonFS.Core.DRSnapshotTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{DRSnapshot, KVStore, RaServer, SystemVolume, VolumeRegistry}
+  alias NeonFS.Core.{DRSnapshot, KVStore, RaServer, RaSupervisor, SystemVolume, VolumeRegistry}
 
   @moduletag :tmp_dir
 
@@ -336,6 +336,88 @@ defmodule NeonFS.Core.DRSnapshotTest do
 
     test "get returns :not_found for an unknown id" do
       assert {:error, :not_found} = DRSnapshot.get("00000000T000000Z")
+    end
+  end
+
+  describe "restore/1" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      start_core_subsystems()
+      start_stripe_index()
+      ensure_chunk_access_tracker()
+      ensure_node_named()
+      start_ra()
+      :ok = RaServer.init_cluster()
+
+      {:ok, _vol} = VolumeRegistry.create_system_volume()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "overlays a snapshot's cluster-wide keyspaces back into live Ra state" do
+      # A synthetic snapshot carrying entries that aren't in live state.
+      synthetic = %{
+        version: 7,
+        chunks: %{},
+        files: %{},
+        stripes: %{},
+        volumes: %{},
+        services: %{},
+        segment_assignments: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        credentials: %{"AKIA-RESTORED" => %{secret: "shh"}},
+        escalations: %{},
+        kv: %{"dr-restored-key" => "dr-restored-value"}
+      }
+
+      {:ok, %{path: dir}} = DRSnapshot.create(state: synthetic, timestamp: "20260620T000000Z")
+      id = Path.basename(dir)
+
+      assert {:ok, counts} = DRSnapshot.restore(id)
+      assert counts[:kv] == 1
+      assert counts[:credentials] == 1
+      assert counts[:volumes] == 0
+
+      {:ok, state} = RaSupervisor.local_query(fn s -> s end)
+      assert state.kv["dr-restored-key"] == "dr-restored-value"
+      assert state.credentials["AKIA-RESTORED"] == %{secret: "shh"}
+    end
+
+    test "per-volume indexes are never restored via this path" do
+      # Even though the snapshot captures chunks/files/stripes, restore
+      # only touches the eight cluster-wide keyspaces.
+      synthetic = %{
+        version: 1,
+        chunks: %{"c1" => %{size: 8}},
+        files: %{"f1" => %{path: "/a"}},
+        stripes: %{"s1" => %{}},
+        volumes: %{},
+        services: %{},
+        segment_assignments: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        credentials: %{},
+        escalations: %{},
+        kv: %{}
+      }
+
+      {:ok, %{path: dir}} = DRSnapshot.create(state: synthetic, timestamp: "20260620T010000Z")
+
+      assert {:ok, counts} = DRSnapshot.restore(Path.basename(dir))
+      refute Map.has_key?(counts, :chunks)
+      refute Map.has_key?(counts, :files)
+      refute Map.has_key?(counts, :stripes)
+    end
+
+    test "returns :not_found for an unknown snapshot id" do
+      assert {:error, :not_found} = DRSnapshot.restore("00000000T000000Z")
     end
   end
 end

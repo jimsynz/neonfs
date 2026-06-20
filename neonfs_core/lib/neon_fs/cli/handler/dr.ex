@@ -72,6 +72,33 @@ defmodule NeonFS.CLI.Handler.DR do
     end
   end
 
+  @doc """
+  Apply a DR snapshot's cluster-wide metadata back into live Ra state
+  (#1005) — the restore-primitive slice of full-cluster `dr restore`.
+  """
+  @spec handle_dr_snapshot_apply(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_dr_snapshot_apply(id) when is_binary(id) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, counts} <- DRSnapshot.restore(id) do
+      AuditLog.log_event(
+        event_type: :dr_snapshot_applied,
+        actor_uid: 0,
+        resource: id,
+        details: %{restored: counts}
+      )
+
+      {:ok, %{id: id, restored: counts, total: counts |> Map.values() |> Enum.sum()}}
+    else
+      {:error, :not_found} ->
+        {:error, NotFound.exception(message: "DR snapshot '#{id}' not found")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
   # Private
 
   defp dr_snapshot_to_serialisable(%{id: id, path: path, manifest: manifest}) do

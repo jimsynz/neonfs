@@ -78,6 +78,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:delete_escalation, escalation_id :: String.t()}
           | {:kv_put, key :: binary(), value :: term()}
           | {:kv_delete, key :: binary()}
+          | {:bulk_restore, keyspace :: atom(), entries :: [{term(), term()}]}
           | {:claim_namespace_path, path :: String.t(), scope :: namespace_scope(),
              holder :: term()}
           | {:claim_namespace_subtree, path :: String.t(), scope :: namespace_scope(),
@@ -1515,6 +1516,50 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {new_state, :ok, []}
+  end
+
+  # DR restore (#1005): overlay a snapshot's cluster-wide keyspace onto
+  # live state. `entries` is a list of `{key, value}` pairs decoded from
+  # a `DRSnapshot` index file; they're merged last-write-wins by key, so
+  # the restoring node's own live entries (its `_system` volume, its own
+  # service registration) survive unless the snapshot names the same key.
+  #
+  # Restricted to the eight *cluster-wide* keyspaces. The per-volume
+  # indexes (`chunks`, `files`, `stripes`) are deliberately excluded —
+  # those are reconstructed per volume via `backup restore`, not from the
+  # DR snapshot.
+  @bulk_restore_keyspaces [
+    :volumes,
+    :services,
+    :encryption_keys,
+    :volume_acls,
+    :segment_assignments,
+    :credentials,
+    :escalations,
+    :kv
+  ]
+
+  def apply(_meta, {:bulk_restore, keyspace, entries}, state)
+      when keyspace in @bulk_restore_keyspaces and is_list(entries) do
+    existing = Map.get(state, keyspace, %{})
+    merged = Enum.reduce(entries, existing, fn {key, value}, acc -> Map.put(acc, key, value) end)
+
+    new_state =
+      state
+      |> Map.put(keyspace, merged)
+      |> Map.put(:version, state.version + 1)
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :bulk_restore],
+      %{version: new_state.version, count: length(entries)},
+      %{keyspace: keyspace}
+    )
+
+    {new_state, {:ok, length(entries)}, []}
+  end
+
+  def apply(_meta, {:bulk_restore, keyspace, _entries}, state) do
+    {state, {:error, {:unrestorable_keyspace, keyspace}}, []}
   end
 
   # Namespace coordinator commands (new in v12, sub-issue #300 of #226)
