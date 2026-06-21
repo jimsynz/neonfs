@@ -4,7 +4,7 @@ defmodule FuseServer.MixProject do
   @moduledoc """
   FUSE protocol server as a standalone Elixir library.
   """
-  @version "0.4.1"
+  @version "0.4.2"
 
   def project do
     [

@@ -5,6 +5,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.4.2](https://harton.dev/project-neon/neonfs/compare/v0.4.1...v0.4.2) (2026-06-21)
+
+
+
+
+### Bug Fixes:
+
+* align mix.lock files with the `~> 0.17` protobuf constraint (#1345) by James Harton
+
 ## [v0.4.1](https://harton.dev/project-neon/neonfs/compare/v0.4.0...v0.4.1) (2026-06-21)
 
 
