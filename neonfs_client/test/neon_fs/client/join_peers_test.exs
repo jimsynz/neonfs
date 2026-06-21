@@ -41,4 +41,23 @@ defmodule NeonFS.Client.JoinPeersTest do
       assert Join.joiner_ra_members([:a@h], :fuse@h, :fuse) == [:a@h]
     end
   end
+
+  describe "ensure_redeem_port/1" do
+    test "appends the default port to a bare host" do
+      assert Join.ensure_redeem_port("core1") == "core1:9568"
+    end
+
+    test "leaves an explicit port untouched" do
+      assert Join.ensure_redeem_port("core1:9568") == "core1:9568"
+      assert Join.ensure_redeem_port("core1:80") == "core1:80"
+    end
+
+    test "appends the default port to a bracketed IPv6 address" do
+      assert Join.ensure_redeem_port("[::1]") == "[::1]:9568"
+    end
+
+    test "leaves a bracketed IPv6 address with a port untouched" do
+      assert Join.ensure_redeem_port("[::1]:9568") == "[::1]:9568"
+    end
+  end
 end

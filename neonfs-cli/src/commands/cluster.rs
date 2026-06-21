@@ -583,8 +583,13 @@ impl ClusterCommand {
                 println!();
                 println!("  Token: {}", token);
                 println!();
-                println!("Use this token on a new node with:");
-                println!("  neonfs cluster join --token <TOKEN> --via <NODE_NAME>");
+                println!(
+                    "Run this on the new node (replace <core-host> with this node's address):"
+                );
+                println!(
+                    "  neonfs cluster join --token {} --via <core-host>:9568",
+                    token
+                );
             }
         }
         Ok(())
