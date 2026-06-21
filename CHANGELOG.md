@@ -5,6 +5,87 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.4.1](https://harton.dev/project-neon/neonfs/compare/v0.4.0...v0.4.1) (2026-06-21)
+
+
+
+
+### Bug Fixes:
+
+* s3: compute the S3 ETag lazily for files written via other interfaces (#1037) (#1342) by James Harton
+
+* core: S3 ListObjects reads authoritative metadata + correct exact-key prefix (#1034) (#1341) by James Harton
+
+* test-rig: update acceptance harness to current CLI (credential + WebDAV auth) (#1340) by James Harton
+
+* drop unused earmark dev dep (advisory GHSA-52mm-h59v-f3c7, retired) (#1327) by James Harton
+
+* stop integration log flood from expected connection refusals (#1300) (#1301) by James Harton
+
+* test_support: use type-specific charlist conversions in PeerCluster (#1279) by James Harton
+
+* core: keep pre-rotation blob until key-rotation metadata commits (#1269) by James Harton
+
+* core: propagate stale-pointer CAS rejection so concurrent index writes don't silently drop (#1260) (#1264) by James Harton
+
+* test: widen IOScheduler replication-convergence timeout to 60s (#1262) (#1263) by James Harton
+
+* core: raise BlobStore GenServer.call timeout to 30s to stop CI flake (#1254) (#1255) by James Harton
+
+* test: retry peer boot when `:peer.start/1` exits, not just on error return (#1243) (#1251) by James Harton
+
+### Improvements:
+
+* core: POSIX-mode file authorisation so NFS clients can write (#1339) (#1344) by James Harton
+
+* core: cluster generation counter for DR-restore split-brain detection (#1005) (#1338) by James Harton
+
+* core: DR snapshot restore primitives â bulk_restore + `dr snapshot apply` (#1005) (#1337) by James Harton
+
+* cli: encrypted backup format (`--encrypt-with passphrase`) (#1004) (#1336) by James Harton
+
+* cli: `--incremental-from` and `--chain` backup flags (#1333) (#1335) by James Harton
+
+* cli: file-level incremental backups (#1003) (#1334) by James Harton
+
+* cli: drain-node / undrain-node subcommands + e2e (#1329) (#1331) by James Harton
+
+* cli: graceful node drain handlers (#1325) (#1330) by James Harton
+
+* client: routing deprioritises draining core nodes (#1324) (#1328) by James Harton
+
+* core: first-class node lifecycle state + draining-aware replica placement (#1323) (#1326) by James Harton
+
+* core: reconstruct-from-disk recovers all N sharded volume roots (#1313) (#1322) by James Harton
+
+* core: fold stripe-index writes into the erasure write batch (#1320) (#1321) by James Harton
+
+* core: fold erasure-coded write commits into the file batch (#1318) (#1319) by James Harton
+
+* core: fold chunk-meta commit into the file-create batch (#1304) (#1317) by James Harton
+
+* core: route metadata-commit I/O through the IO scheduler (:metadata_commit priority) (#1316) by James Harton
+
+* core: per-{volume,shard} commit workers via PartitionSupervisor (#1315) by James Harton
+
+* scripts: add fj-branch-prune to delete merged-PR branches (#1311) by James Harton
+
+* core: activate volume-root sharding at N=64 (#1314) by James Harton
+
+* core: shard volume metadata roots â state machine, routing, scans, snapshots (#1310) by James Harton
+
+* core: transaction-batched metadata commit (#1303) by James Harton
+
+* core: per-entry directory entries (#1302) by James Harton
+
+* cli,core: interface-agnostic `credential` command group (#1285) by James Harton
+
+* webdav,core: HTTP Basic auth via generalised credential store (#1284) by James Harton
+
+* core: keep shutdown-interrupted background jobs resumable (#1270) by James Harton
+
+* core: full-jitter backoff on metadata-writer CAS conflicts (#1219) (#1261) by James Harton
+
 ## [v0.4.0](https://harton.dev/project-neon/neonfs/compare/v0.3.2...v0.4.0) (2026-06-13)
 ### Breaking Changes:
 
