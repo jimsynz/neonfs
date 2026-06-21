@@ -256,65 +256,85 @@ defmodule NeonFS.CoreTest do
   # The setup volumes carry no volume ACL, so any non-root identity has
   # no grant and is denied — the enforcement #1215 wires through from
   # the NFS AUTH_SYS credentials. Root (the default uid 0) bypasses.
-  describe "identity-based authorisation (#1215)" do
-    test "get_file_meta denies a non-root uid without a grant", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file_streamed(vol_name, "/authz.txt", ["content"])
-
-      assert {:ok, _} = Core.get_file_meta(vol_name, "/authz.txt")
-      assert {:ok, _} = Core.get_file_meta(vol_name, "/authz.txt", uid: 0)
-
-      assert {:error, %PermissionDenied{}} =
-               Core.get_file_meta(vol_name, "/authz.txt", uid: 1000, gids: [1000])
+  # File ops authorise against POSIX mode (#1215, #1339): reads/writes of an
+  # existing file check the file's mode; creates/deletes/renames check the
+  # parent directory's mode. uid 0 bypasses. A fresh volume's root is
+  # world-writable (0o777) so any authenticated client can populate it.
+  describe "POSIX-mode authorisation (#1215, #1339)" do
+    test "uid 0 bypasses every check", %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/r.txt", ["x"], uid: 0, mode: 0o600)
+      assert {:ok, _} = Core.get_file_meta(vol_name, "/r.txt", uid: 0)
+      assert {:ok, _} = Core.mkdir(vol_name, "/d0", uid: 0)
     end
 
-    test "mkdir denies a non-root uid without a grant", %{volume_name: vol_name} do
-      assert {:error, %PermissionDenied{}} =
-               Core.mkdir(vol_name, "/authz-dir", uid: 1000, gids: [1000])
-
-      assert {:ok, _} = Core.mkdir(vol_name, "/authz-dir")
-    end
-
-    test "delete_file denies a non-root uid without a grant", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-del.txt", ["x"])
-
-      assert {:error, %PermissionDenied{}} =
-               Core.delete_file(vol_name, "/authz-del.txt", uid: 1000, gids: [1000])
-
-      assert :ok = Core.delete_file(vol_name, "/authz-del.txt")
-    end
-
-    test "rename_file denies a non-root uid without a grant", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-src.txt", ["x"])
-
-      assert {:error, %PermissionDenied{}} =
-               Core.rename_file(vol_name, "/authz-src.txt", "/authz-dst.txt",
-                 uid: 1000,
-                 gids: [1000]
-               )
-
-      assert :ok = Core.rename_file(vol_name, "/authz-src.txt", "/authz-dst.txt")
-    end
-
-    test "update_file_meta denies a non-root uid without a grant", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-upd.txt", ["x"])
-
-      assert {:error, %PermissionDenied{}} =
-               Core.update_file_meta(vol_name, "/authz-upd.txt", [content_type: "text/plain"],
-                 uid: 1000,
-                 gids: [1000]
-               )
+    test "a non-root uid can populate the world-writable volume root (#1339)",
+         %{volume_name: vol_name} do
+      assert {:ok, _} = Core.mkdir(vol_name, "/client-dir", uid: 1000, gids: [1000])
 
       assert {:ok, _} =
-               Core.update_file_meta(vol_name, "/authz-upd.txt", content_type: "text/plain")
+               Core.write_file_at(vol_name, "/client.txt", 0, "hi",
+                 auth_uid: 1000,
+                 auth_gids: [1000]
+               )
+
+      assert :ok = Core.delete_file(vol_name, "/client.txt", uid: 1000, gids: [1000])
     end
 
-    test "truncate_file denies a non-root uid without a grant", %{volume_name: vol_name} do
-      {:ok, _} = Core.write_file_streamed(vol_name, "/authz-trunc.txt", ["abcdef"])
+    test "a non-root uid can write inside a directory it just created (#1339)",
+         %{volume_name: vol_name} do
+      # mkdir must give the new dir the caller's ownership, else the caller
+      # can't populate it.
+      assert {:ok, _} = Core.mkdir(vol_name, "/mine", uid: 1000, gids: [1000])
+
+      assert {:ok, _} =
+               Core.write_file_at(vol_name, "/mine/f.txt", 0, "x",
+                 auth_uid: 1000,
+                 auth_gids: [1000]
+               )
+    end
+
+    test "a non-root uid can read a world-readable file but not a private one",
+         %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/pub.txt", ["pub"], uid: 0, mode: 0o644)
+      {:ok, _} = Core.write_file_streamed(vol_name, "/priv.txt", ["priv"], uid: 0, mode: 0o600)
+
+      assert {:ok, _} = Core.get_file_meta(vol_name, "/pub.txt", uid: 1000, gids: [1000])
 
       assert {:error, %PermissionDenied{}} =
-               Core.truncate_file(vol_name, "/authz-trunc.txt", 3, [], uid: 1000, gids: [1000])
+               Core.get_file_meta(vol_name, "/priv.txt", uid: 1000, gids: [1000])
+    end
 
-      assert {:ok, _} = Core.truncate_file(vol_name, "/authz-trunc.txt", 3)
+    test "a non-root uid cannot write a file owned by another (no other-write)",
+         %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/owned.txt", ["x"], uid: 0, mode: 0o644)
+
+      assert {:error, %PermissionDenied{}} =
+               Core.update_file_meta(vol_name, "/owned.txt", [content_type: "text/plain"],
+                 uid: 1000,
+                 gids: [1000]
+               )
+
+      assert {:error, %PermissionDenied{}} =
+               Core.truncate_file(vol_name, "/owned.txt", 0, [], uid: 1000, gids: [1000])
+    end
+
+    test "a non-root uid cannot create/delete inside a directory it can't write",
+         %{volume_name: vol_name} do
+      # A subdir owned by root, mode 0755 → no other-write.
+      {:ok, _} = Core.mkdir(vol_name, "/rootonly", uid: 0)
+      {:ok, _} = Core.write_file_streamed(vol_name, "/rootonly/f.txt", ["x"], uid: 0)
+
+      assert {:error, %PermissionDenied{}} =
+               Core.mkdir(vol_name, "/rootonly/sub", uid: 1000, gids: [1000])
+
+      assert {:error, %PermissionDenied{}} =
+               Core.write_file_at(vol_name, "/rootonly/g.txt", 0, "x",
+                 auth_uid: 1000,
+                 auth_gids: [1000]
+               )
+
+      assert {:error, %PermissionDenied{}} =
+               Core.delete_file(vol_name, "/rootonly/f.txt", uid: 1000, gids: [1000])
     end
   end
 
@@ -322,11 +342,17 @@ defmodule NeonFS.CoreTest do
   # while `:uid`/`:gid` set the new file's owner — so an NFS server can
   # check the AUTH_SYS client yet still assign POSIX ownership (#1230).
   describe "write authorisation identity vs ownership (#1230)" do
-    test "denies a non-root caller without a grant", %{volume_name: vol_name} do
+    test "auth_uid drives the check while :uid sets the new file's owner",
+         %{volume_name: vol_name} do
+      # A root-owned 0755 dir the caller can't write, even though :uid
+      # would set ownership — the *check* uses auth_uid, not :uid.
+      {:ok, _} = Core.mkdir(vol_name, "/rootonly", uid: 0)
+
       assert {:error, %PermissionDenied{}} =
-               Core.write_file_at(vol_name, "/w.txt", 0, "data",
+               Core.write_file_at(vol_name, "/rootonly/w.txt", 0, "data",
                  auth_uid: 1000,
-                 auth_gids: [1000]
+                 auth_gids: [1000],
+                 uid: 1000
                )
     end
 
@@ -342,13 +368,16 @@ defmodule NeonFS.CoreTest do
       assert meta.gid == 1000
     end
 
-    test "falls back to :uid for authorisation when :auth_uid is absent", %{volume_name: vol_name} do
-      # Legacy callers (S3/WebDAV/FUSE/containerd) pass only :uid; it
-      # must still drive the authorisation check — no silent bypass.
-      assert {:error, %PermissionDenied{}} =
-               Core.write_file_at(vol_name, "/w2.txt", 0, "data", uid: 1000)
+    test "falls back to :uid for the check when :auth_uid is absent", %{volume_name: vol_name} do
+      # Legacy callers (S3/WebDAV/FUSE/containerd) pass only :uid; it must
+      # still drive the check — no silent bypass. Denied in a dir it can't
+      # write; uid 0 bypasses.
+      {:ok, _} = Core.mkdir(vol_name, "/rootonly2", uid: 0)
 
-      assert {:ok, _} = Core.write_file_at(vol_name, "/w2.txt", 0, "data", uid: 0)
+      assert {:error, %PermissionDenied{}} =
+               Core.write_file_at(vol_name, "/rootonly2/w.txt", 0, "data", uid: 1000)
+
+      assert {:ok, _} = Core.write_file_at(vol_name, "/rootonly2/w.txt", 0, "data", uid: 0)
     end
   end
 

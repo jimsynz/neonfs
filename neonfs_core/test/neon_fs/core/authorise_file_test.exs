@@ -26,7 +26,10 @@ defmodule NeonFS.Core.AuthoriseFileTest do
       VolumeACL.new(
         volume_id: volume_id,
         owner_uid: owner_uid,
-        owner_gid: owner_gid
+        owner_gid: owner_gid,
+        # Owner-only so the volume-level fallback genuinely denies a
+        # non-owner (the world-writable default would allow — #1339).
+        mode: 0o700
       )
 
     :ok = ACLManager.set_volume_acl(volume_id, acl)

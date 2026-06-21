@@ -92,7 +92,7 @@ defmodule NeonFS.Core.ReadOperation do
 
     result =
       with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}) do
+           :ok <- authorise_read(uid, gids, volume_id, path) do
         read_with_cache(volume, volume_id, path, offset, length)
       end
 
@@ -135,8 +135,8 @@ defmodule NeonFS.Core.ReadOperation do
 
     result =
       with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
-           {:ok, file_meta} <- get_file_by_id(volume_id, file_id) do
+           {:ok, file_meta} <- get_file_by_id(volume_id, file_id),
+           :ok <- authorise_read(uid, gids, volume_id, file_meta.path) do
         read_with_cache_lookup(file_meta, volume, offset, length)
       end
 
@@ -185,7 +185,7 @@ defmodule NeonFS.Core.ReadOperation do
     gids = Keyword.get(opts, :gids, [])
 
     with {:ok, volume} <- get_volume(volume_id),
-         :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
+         :ok <- authorise_read(uid, gids, volume_id, path),
          {:ok, file_meta} <- get_file(volume_id, path) do
       :telemetry.execute(
         [:neonfs, :read_stream, :start],
@@ -217,8 +217,8 @@ defmodule NeonFS.Core.ReadOperation do
     gids = Keyword.get(opts, :gids, [])
 
     with {:ok, volume} <- get_volume(volume_id),
-         :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}),
-         {:ok, file_meta} <- get_file_by_id(volume_id, file_id) do
+         {:ok, file_meta} <- get_file_by_id(volume_id, file_id),
+         :ok <- authorise_read(uid, gids, volume_id, file_meta.path) do
       :telemetry.execute(
         [:neonfs, :read_stream, :start],
         %{offset: offset, file_size: file_meta.size},
@@ -1030,6 +1030,17 @@ defmodule NeonFS.Core.ReadOperation do
     case VolumeRegistry.get(volume_id) do
       {:ok, volume} -> {:ok, volume}
       {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_id: volume_id)}
+    end
+  end
+
+  # Authorise a read against the file's POSIX mode (#1339). uid 0
+  # (FUSE / S3 / WebDAV / internal callers, which pass no auth uid)
+  # bypasses before any lookup.
+  defp authorise_read(0, _gids, _volume_id, _path), do: :ok
+
+  defp authorise_read(uid, gids, volume_id, path) do
+    with :ok <- Authorise.check(uid, gids, :read, {:volume, volume_id}) do
+      Authorise.check(uid, gids, :read, {:file, volume_id, path})
     end
   end
 

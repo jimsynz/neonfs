@@ -117,7 +117,7 @@ defmodule NeonFS.Core.WriteOperation do
 
     result =
       with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
+           :ok <- authorise_path_write(uid, gids, volume_id, path),
            :ok <- check_lock(volume_id, path, client_ref, {offset, byte_size(data)}, opts) do
         do_write_file_at(volume, volume_id, path, offset, data, write_id, opts)
       end
@@ -165,8 +165,8 @@ defmodule NeonFS.Core.WriteOperation do
 
     result =
       with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
            {:ok, file_meta} <- get_file_by_id(volume_id, file_id),
+           :ok <- authorise_file_write(uid, gids, volume_id, file_meta.path),
            :ok <-
              check_lock(volume_id, file_meta.path, client_ref, {offset, byte_size(data)}, opts) do
         do_write_at(volume, file_meta, offset, data, write_id, opts)
@@ -217,7 +217,7 @@ defmodule NeonFS.Core.WriteOperation do
 
     result =
       with {:ok, volume} <- get_volume(volume_id),
-           :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}),
+           :ok <- authorise_path_write(uid, gids, volume_id, path),
            # Streaming writes don't know the byte range up front, so the
            # lock check uses a conservative full-file range — any mandatory
            # byte-range lock or deny-write share mode on the file conflicts.
@@ -1810,6 +1810,35 @@ defmodule NeonFS.Core.WriteOperation do
     uid = Keyword.get(opts, :auth_uid) || Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :auth_gids) || Keyword.get(opts, :gids, [])
     {uid, gids}
+  end
+
+  # Authorise a path-based write against POSIX mode (#1339): an existing
+  # file → write on the file itself; a new path → write on its parent
+  # directory. uid 0 (FUSE / S3 / WebDAV / internal callers, which pass no
+  # auth uid) bypasses before any metadata lookup.
+  defp authorise_path_write(0, _gids, _volume_id, _path), do: :ok
+
+  defp authorise_path_write(uid, gids, volume_id, path) do
+    resource =
+      case FileIndex.get_by_path(volume_id, path) do
+        {:ok, _meta} -> {:file, volume_id, path}
+        _ -> {:create, volume_id, path}
+      end
+
+    # Volume-wide grants (POSIX-shaped VolumeACL) gate the volume; the
+    # per-object/per-parent-dir POSIX check governs the specific target.
+    with :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}) do
+      Authorise.check(uid, gids, :write, resource)
+    end
+  end
+
+  # Authorise a write to an already-resolved existing file (by-id path).
+  defp authorise_file_write(0, _gids, _volume_id, _path), do: :ok
+
+  defp authorise_file_write(uid, gids, volume_id, path) do
+    with :ok <- Authorise.check(uid, gids, :write, {:volume, volume_id}) do
+      Authorise.check(uid, gids, :write, {:file, volume_id, path})
+    end
   end
 
   defp apply_uid_gid_opts(file_opts, opts) do

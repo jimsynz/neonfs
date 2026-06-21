@@ -34,12 +34,18 @@ defmodule NeonFS.Core.VolumeACLTest do
       assert VolumeACL.has_permission?(acl, 1000, :admin)
     end
 
-    test "non-owner without entries has no permissions" do
-      acl = VolumeACL.new(volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000)
+    test "non-owner without an entry falls back to the volume's other/world mode" do
+      # owner-only mode → a non-owner with no entry gets nothing
+      private = VolumeACL.new(volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000, mode: 0o700)
 
-      refute VolumeACL.has_permission?(acl, 1001, :read)
-      refute VolumeACL.has_permission?(acl, 1001, :write)
-      refute VolumeACL.has_permission?(acl, 1001, :admin)
+      refute VolumeACL.has_permission?(private, 1001, :read)
+      refute VolumeACL.has_permission?(private, 1001, :write)
+
+      # world-writable (the fresh-volume default) → non-owners get world access (#1339)
+      world = VolumeACL.new(volume_id: "vol-1", owner_uid: 1000, owner_gid: 1000)
+
+      assert VolumeACL.has_permission?(world, 1001, :read)
+      assert VolumeACL.has_permission?(world, 1001, :write)
     end
 
     test "direct UID entry grants permission" do
@@ -64,6 +70,8 @@ defmodule NeonFS.Core.VolumeACLTest do
           volume_id: "vol-1",
           owner_uid: 1000,
           owner_gid: 1000,
+          # owner-only mode so a non-granted UID has no world fallback
+          mode: 0o700,
           entries: [
             %{principal: {:uid, 1001}, permissions: MapSet.new([:read])}
           ]
@@ -80,6 +88,7 @@ defmodule NeonFS.Core.VolumeACLTest do
           volume_id: "vol-1",
           owner_uid: 1000,
           owner_gid: 1000,
+          mode: 0o700,
           entries: [
             %{principal: {:gid, 200}, permissions: MapSet.new([:read])}
           ]
@@ -95,6 +104,7 @@ defmodule NeonFS.Core.VolumeACLTest do
           volume_id: "vol-1",
           owner_uid: 1000,
           owner_gid: 1000,
+          mode: 0o700,
           entries: [
             %{principal: {:gid, 1001}, permissions: MapSet.new([:read])}
           ]
@@ -104,22 +114,26 @@ defmodule NeonFS.Core.VolumeACLTest do
       refute VolumeACL.has_permission?(acl, 1001, :read)
     end
 
-    test "multiple entries combine permissions" do
+    test "a matching named-user entry takes precedence over group entries (POSIX.1e)" do
       acl =
         VolumeACL.new(
           volume_id: "vol-1",
           owner_uid: 1000,
           owner_gid: 1000,
+          mode: 0o700,
           entries: [
             %{principal: {:uid, 1001}, permissions: MapSet.new([:read])},
             %{principal: {:gid, 200}, permissions: MapSet.new([:write])}
           ]
         )
 
-      # UID 1001 in group 200 gets read (from uid entry) + write (from gid entry)
+      # POSIX precedence: the named-user entry governs for UID 1001 — the
+      # group entry is NOT unioned in, so it has read but not write.
       assert VolumeACL.has_permission?(acl, 1001, [200], :read)
-      assert VolumeACL.has_permission?(acl, 1001, [200], :write)
-      refute VolumeACL.has_permission?(acl, 1001, [200], :admin)
+      refute VolumeACL.has_permission?(acl, 1001, [200], :write)
+
+      # a different UID in group 200 (no named-user entry) gets the group grant
+      assert VolumeACL.has_permission?(acl, 1002, [200], :write)
     end
   end
 

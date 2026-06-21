@@ -368,9 +368,25 @@ defmodule NeonFS.Core do
     gids = Keyword.get(opts, :gids, [])
 
     with {:ok, volume} <- resolve_volume(volume_name),
-         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}) do
+         :ok <-
+           authorise_posix(
+             uid,
+             gids,
+             :write,
+             volume.id,
+             {:create, volume.id, normalize_path(path)}
+           ) do
       normalized = normalize_path(path)
       do_delete_dispatch(volume.id, normalized)
+    end
+  end
+
+  # Volume-wide grants (POSIX-shaped VolumeACL) gate the volume; the
+  # per-object/per-parent-dir POSIX `resource` governs the specific target.
+  # uid 0 bypasses both inside `Authorise.check/4` (#1339).
+  defp authorise_posix(uid, gids, action, volume_id, resource) do
+    with :ok <- Authorise.check(uid, gids, action, {:volume, volume_id}) do
+      Authorise.check(uid, gids, action, resource)
     end
   end
 
@@ -468,7 +484,8 @@ defmodule NeonFS.Core do
     gids = Keyword.get(opts, :gids, [])
 
     with {:ok, volume} <- resolve_volume(volume_name),
-         :ok <- Authorise.check(uid, gids, :read, {:volume, volume.id}) do
+         :ok <-
+           authorise_posix(uid, gids, :read, volume.id, {:file, volume.id, normalize_path(path)}) do
       lookup_file(volume.id, normalize_path(path))
     end
   end
@@ -480,7 +497,7 @@ defmodule NeonFS.Core do
   Automatically increments the version and updates timestamps.
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
-  uid 0 bypasses), so NFS SETATTR is held to the volume ACL.
+  uid 0 bypasses), so NFS SETATTR is held to the file's POSIX mode (#1339).
   """
   @spec update_file_meta(String.t(), String.t(), keyword(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
@@ -489,7 +506,8 @@ defmodule NeonFS.Core do
     gids = Keyword.get(opts, :gids, [])
 
     with {:ok, volume} <- resolve_volume(volume_name),
-         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}),
+         :ok <-
+           authorise_posix(uid, gids, :write, volume.id, {:file, volume.id, normalize_path(path)}),
          {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
       FileIndex.update(file.id, updates)
     end
@@ -507,7 +525,7 @@ defmodule NeonFS.Core do
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
   uid 0 bypasses), so an NFS SETATTR that sets `size` is held to the
-  volume ACL just like the no-size SETATTR path.
+  file's POSIX mode just like the no-size SETATTR path (#1339).
   """
   @spec truncate_file(String.t(), String.t(), non_neg_integer(), keyword(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, FileNotFound.t() | term()}
@@ -516,7 +534,8 @@ defmodule NeonFS.Core do
     gids = Keyword.get(opts, :gids, [])
 
     with {:ok, volume} <- resolve_volume(volume_name),
-         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}),
+         :ok <-
+           authorise_posix(uid, gids, :write, volume.id, {:file, volume.id, normalize_path(path)}),
          {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
       FileIndex.truncate(file.id, new_size, additional_updates)
     end
@@ -590,12 +609,31 @@ defmodule NeonFS.Core do
     gids = Keyword.get(opts, :gids, [])
 
     with {:ok, volume} <- resolve_volume(volume_name),
-         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}) do
+         :ok <-
+           authorise_posix(
+             uid,
+             gids,
+             :write,
+             volume.id,
+             {:create, volume.id, normalize_path(path)}
+           ) do
       normalized = normalize_path(path)
 
+      # The new directory is owned by the creating client (POSIX), so the
+      # client can populate it — without this it defaulted to uid 0 and an
+      # NFS client couldn't write in a directory it had just created (#1339).
       with_namespace_claim(:path, volume.id, normalized, fn ->
-        FileIndex.mkdir(volume.id, normalized)
+        FileIndex.mkdir(volume.id, normalized, dir_create_opts(uid, gids, opts))
       end)
+    end
+  end
+
+  defp dir_create_opts(uid, gids, opts) do
+    base = [uid: uid, gid: List.first(gids) || 0]
+
+    case Keyword.fetch(opts, :mode) do
+      {:ok, mode} -> [{:mode, mode} | base]
+      :error -> base
     end
   end
 
@@ -606,18 +644,20 @@ defmodule NeonFS.Core do
   move-and-rename operations.
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
-  uid 0 bypasses), so an NFS RENAME is held to the volume ACL.
+  uid 0 bypasses). A rename adds a name in the destination directory and
+  removes one from the source, so it requires write on both parents'
+  POSIX modes (#1339).
   """
   @spec rename_file(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def rename_file(volume_name, src_path, dest_path, opts \\ []) do
     uid = Keyword.get(opts, :uid, 0)
     gids = Keyword.get(opts, :gids, [])
+    src = normalize_path(src_path)
+    dst = normalize_path(dest_path)
 
     with {:ok, volume} <- resolve_volume(volume_name),
-         :ok <- Authorise.check(uid, gids, :write, {:volume, volume.id}) do
-      src = normalize_path(src_path)
-      dst = normalize_path(dest_path)
-
+         :ok <- authorise_posix(uid, gids, :write, volume.id, {:create, volume.id, src}),
+         :ok <- authorise_posix(uid, gids, :write, volume.id, {:create, volume.id, dst}) do
       with_rename_claim(volume.id, src, dst, fn -> do_rename(volume.id, src, dst) end)
     end
   end

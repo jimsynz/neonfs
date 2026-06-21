@@ -2,9 +2,15 @@ defmodule NeonFS.Core.Authorise do
   @moduledoc """
   Authorisation checks for volume and file-level access control.
 
-  Supports two resource types:
+  Supports these resource types:
   - `{:volume, volume_id}` — volume-level ACL check via `VolumeACL`
-  - `{:file, volume_id, path}` — file-level POSIX mode + extended ACL check via `FileACL`
+    (used for `:mount` / `:admin` / volume-lifecycle operations).
+  - `{:file, volume_id, path}` — file-level POSIX mode + extended ACL check
+    via `FileACL` (read/write of an existing file or directory).
+  - `{:create, volume_id, path}` — authorise *adding or removing* the name
+    `path` against its **parent directory's** POSIX mode (POSIX: creating,
+    deleting, or renaming a name needs write on the containing directory,
+    not on the not-yet-existent — or about-to-vanish — target).
 
   UID 0 (root) bypasses all checks. For volume resources, the volume owner UID
   has implicit full control. For file resources, POSIX mode bits and extended
@@ -44,20 +50,32 @@ defmodule NeonFS.Core.Authorise do
           :ok | {:error, PermissionDenied.t()}
   def check(0, _gids, _action, _resource), do: :ok
 
-  def check(uid, gids, action, {:volume, _volume_id} = resource) do
-    case resolve_volume_acl(resource) do
-      {:ok, acl} ->
-        permission = action_to_permission(action)
+  def check(uid, gids, action, {:create, volume_id, path}) do
+    # Adding/removing a name is authorised against the parent directory's
+    # mode. The parent exists (ancestors are materialised before the
+    # child), so this resolves a real `FileACL`; only if it somehow
+    # doesn't will `{:file, …}` fall through to the volume check.
+    check(uid, gids, action, {:file, volume_id, parent_dir(path)})
+  end
 
-        if VolumeACL.has_permission?(acl, uid, gids, permission) do
-          emit_granted(uid, action, resource)
-          :ok
-        else
-          denied(uid, gids, action, resource)
-        end
+  def check(uid, gids, action, {:volume, volume_id} = resource) do
+    acl =
+      case resolve_volume_acl(resource) do
+        {:ok, acl} -> acl
+        # A volume with no stored ACL is world-writable by default (#1339):
+        # POSIX governs per object, and the volume is gated at the interface
+        # boundary. Evaluate against a default world-writable ACL rather than
+        # denying outright.
+        :no_acl -> VolumeACL.new(volume_id: volume_id, owner_uid: 0, owner_gid: 0)
+      end
 
-      :no_acl ->
-        denied(uid, gids, action, resource)
+    permission = action_to_permission(action)
+
+    if VolumeACL.has_permission?(acl, uid, gids, permission) do
+      emit_granted(uid, action, resource)
+      :ok
+    else
+      denied(uid, gids, action, resource)
     end
   end
 
@@ -100,6 +118,13 @@ defmodule NeonFS.Core.Authorise do
   end
 
   # Private
+
+  defp parent_dir(path) do
+    case Path.dirname(path) do
+      "." -> "/"
+      parent -> parent
+    end
+  end
 
   defp resolve_volume_acl({:volume, volume_id}) do
     case ACLManager.get_volume_acl(volume_id) do

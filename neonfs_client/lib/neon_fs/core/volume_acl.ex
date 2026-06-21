@@ -11,6 +11,14 @@ defmodule NeonFS.Core.VolumeACL do
   """
 
   alias __MODULE__
+  alias NeonFS.Core.FileACL
+
+  # `mode` (owner/group/other rwx) is the POSIX "world" layer the ACL
+  # previously lacked (#1339). It defaults world-writable so a fresh
+  # volume is usable by any authenticated client; named `entries` add
+  # per-uid/gid grants. Evaluation delegates to `FileACL` so volume and
+  # file authorisation share one POSIX model.
+  @default_mode 0o777
 
   @type permission :: :read | :write | :admin
 
@@ -25,10 +33,11 @@ defmodule NeonFS.Core.VolumeACL do
           volume_id: String.t(),
           owner_uid: non_neg_integer(),
           owner_gid: non_neg_integer(),
+          mode: non_neg_integer(),
           entries: [entry()]
         }
 
-  defstruct [:volume_id, :owner_uid, :owner_gid, entries: []]
+  defstruct [:volume_id, :owner_uid, :owner_gid, mode: @default_mode, entries: []]
 
   @doc """
   Creates a new VolumeACL.
@@ -51,6 +60,7 @@ defmodule NeonFS.Core.VolumeACL do
       volume_id: Keyword.fetch!(opts, :volume_id),
       owner_uid: Keyword.fetch!(opts, :owner_uid),
       owner_gid: Keyword.fetch!(opts, :owner_gid),
+      mode: Keyword.get(opts, :mode, @default_mode),
       entries: Keyword.get(opts, :entries, [])
     }
   end
@@ -81,10 +91,51 @@ defmodule NeonFS.Core.VolumeACL do
   @spec has_permission?(t(), non_neg_integer(), [non_neg_integer()], permission()) :: boolean()
   def has_permission?(%VolumeACL{owner_uid: uid}, uid, _supplementary_gids, _permission), do: true
 
+  # Non-owners are evaluated by the shared POSIX `FileACL` logic over the
+  # volume's mode + named entries (#1339), so a named entry overrides the
+  # "other"/world mode (POSIX.1e precedence) and a world-writable volume
+  # grants any uid that has no more-specific entry.
   def has_permission?(%VolumeACL{} = acl, uid, supplementary_gids, permission) do
-    effective = effective_permissions(acl, uid, supplementary_gids)
-    permission_satisfied?(effective, permission)
+    gid = List.first(supplementary_gids) || acl.owner_gid
+
+    FileACL.check_access(to_file_acl(acl), uid, gid, supplementary_gids, to_posix(permission)) ==
+      :ok
   end
+
+  defp to_file_acl(%VolumeACL{} = acl) do
+    FileACL.new(
+      mode: acl.mode,
+      uid: acl.owner_uid,
+      gid: acl.owner_gid,
+      acl_entries: Enum.map(acl.entries, &entry_to_file_acl_entry/1)
+    )
+  end
+
+  defp entry_to_file_acl_entry(%{principal: principal, permissions: perms}) do
+    {type, id} =
+      case principal do
+        {:uid, uid} -> {:user, uid}
+        {:gid, gid} -> {:group, gid}
+      end
+
+    %{type: type, id: id, permissions: perms_to_posix(perms)}
+  end
+
+  # Volume permissions → POSIX rwx, honouring `:admin ⊃ :write ⊃ :read`.
+  defp perms_to_posix(perms) do
+    rwx =
+      Enum.flat_map(perms, fn
+        :read -> [:r]
+        :write -> [:r, :w]
+        :admin -> [:r, :w, :x]
+      end)
+
+    MapSet.new(rwx)
+  end
+
+  defp to_posix(:read), do: :r
+  defp to_posix(:write), do: :w
+  defp to_posix(:admin), do: :x
 
   @doc """
   Validates a VolumeACL configuration.
@@ -118,30 +169,6 @@ defmodule NeonFS.Core.VolumeACL do
   # --- Private ---
 
   @all_permissions MapSet.new([:read, :write, :admin])
-
-  defp effective_permissions(%VolumeACL{entries: entries}, uid, supplementary_gids) do
-    entries
-    |> Enum.filter(fn entry -> matches_principal?(entry.principal, uid, supplementary_gids) end)
-    |> Enum.reduce(MapSet.new(), fn entry, acc -> MapSet.union(acc, entry.permissions) end)
-  end
-
-  defp matches_principal?({:uid, entry_uid}, uid, _gids), do: entry_uid == uid
-  defp matches_principal?({:gid, entry_gid}, _uid, gids), do: entry_gid in gids
-
-  defp permission_satisfied?(effective, :read) do
-    MapSet.member?(effective, :read) or
-      MapSet.member?(effective, :write) or
-      MapSet.member?(effective, :admin)
-  end
-
-  defp permission_satisfied?(effective, :write) do
-    MapSet.member?(effective, :write) or
-      MapSet.member?(effective, :admin)
-  end
-
-  defp permission_satisfied?(effective, :admin) do
-    MapSet.member?(effective, :admin)
-  end
 
   defp validate_entry(%{principal: {:uid, uid}, permissions: perms})
        when is_integer(uid) and uid >= 0 do

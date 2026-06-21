@@ -150,12 +150,23 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec get_by_path(volume_id(), path()) :: {:ok, FileMeta.t()} | {:error, :not_found}
   def get_by_path(volume_id, path) do
-    normalized = FileMeta.normalize_path(path)
-    {parent, name} = split_path(normalized)
+    case FileMeta.normalize_path(path) do
+      "/" ->
+        # The root has no parent dirent. It's conceptually always present
+        # and world-writable (#1339) — its `dir:` record is materialised
+        # lazily on the first write — so resolve the stored record when
+        # present, else a synthetic world-writable (0o777) root. This lets
+        # getattr and POSIX authorisation of top-level creates see the root
+        # before the first write materialises it.
+        {:ok, synthesise_dir_file_meta(volume_id, "/", %{type: :dir, mode: 0o777})}
 
-    case read_dirent(volume_id, parent, name) do
-      {:ok, child} -> resolve_child(volume_id, normalized, child)
-      {:error, _} -> {:error, :not_found}
+      normalized ->
+        {parent, name} = split_path(normalized)
+
+        case read_dirent(volume_id, parent, name) do
+          {:ok, child} -> resolve_child(volume_id, normalized, child)
+          {:error, _} -> {:error, :not_found}
+        end
     end
   end
 
@@ -1154,8 +1165,16 @@ defmodule NeonFS.Core.FileIndex do
 
   defp root_dir_mutations(volume_id) do
     case read_dir_entry(volume_id, "/") do
-      {:ok, _entry} -> {:ok, []}
-      {:error, _} -> {:ok, [dir_record_mutation(DirectoryEntry.new(volume_id, "/"))]}
+      {:ok, _entry} ->
+        {:ok, []}
+
+      {:error, _} ->
+        # The volume root is world-writable so any authenticated client
+        # (e.g. an NFS AUTH_SYS uid, checked against POSIX mode — #1339)
+        # can populate a fresh volume. Entries created within get normal
+        # per-owner ownership/mode; the volume itself is gated at the
+        # interface boundary (NFS allow-list / S3 creds / WebDAV auth).
+        {:ok, [dir_record_mutation(DirectoryEntry.new(volume_id, "/", mode: 0o777))]}
     end
   end
 
@@ -1427,7 +1446,8 @@ defmodule NeonFS.Core.FileIndex do
           {0o040000 ||| dir_entry.mode, dir_entry.uid, dir_entry.gid, dir_entry.hlc_timestamp}
 
         {:error, _} ->
-          {0o040755, Map.get(child_info, :uid, 0), Map.get(child_info, :gid, 0), nil}
+          {0o040000 ||| Map.get(child_info, :mode, 0o755), Map.get(child_info, :uid, 0),
+           Map.get(child_info, :gid, 0), nil}
       end
 
     now = DateTime.utc_now()
