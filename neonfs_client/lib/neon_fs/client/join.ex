@@ -36,6 +36,10 @@ defmodule NeonFS.Client.Join do
   # target, never as a compile-time dependency.
   @core_join_module NeonFS.Cluster.Join
 
+  # Default port for the core node's metrics HTTP server, which serves
+  # the invite-redemption endpoint. Mirrors `:neonfs_core` `:metrics_port`.
+  @default_redeem_port 9568
+
   @doc """
   Requests cluster membership from an existing node using an invite token.
 
@@ -160,6 +164,27 @@ defmodule NeonFS.Client.Join do
     _ -> 0
   end
 
+  @doc """
+  Appends the default redeem port (#{@default_redeem_port}) to a via address
+  that omits one, so a bare `host` reaches the core metrics HTTP server
+  instead of defaulting to port 80 (#1346).
+
+  An address that already carries a port — `host:9568` or bracketed IPv6
+  `[::1]:9568` — is returned unchanged.
+  """
+  @spec ensure_redeem_port(String.t()) :: String.t()
+  def ensure_redeem_port("[" <> _ = address) do
+    if String.contains?(address, "]:"),
+      do: address,
+      else: address <> ":#{@default_redeem_port}"
+  end
+
+  def ensure_redeem_port(address) do
+    if String.contains?(address, ":"),
+      do: address,
+      else: address <> ":#{@default_redeem_port}"
+  end
+
   # ── Async finalize (HTTP flow) ────────────────────────────────────
 
   # Detached: survives both the CLI disconnect and the distribution restart it
@@ -224,7 +249,7 @@ defmodule NeonFS.Client.Join do
       |> :json.encode()
       |> IO.iodata_to_binary()
 
-    url = ~c"http://#{via_address}/api/cluster/redeem-invite"
+    url = ~c"http://#{ensure_redeem_port(via_address)}/api/cluster/redeem-invite"
     request = {url, [], ~c"application/json", body}
 
     case :httpc.request(:post, request, [{:timeout, 30_000}], []) do
