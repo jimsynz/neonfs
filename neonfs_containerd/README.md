@@ -21,19 +21,43 @@ dependency on `neonfs_core`**.
 Point containerd at the plugin socket via `/etc/containerd/config.toml`:
 
 ```toml
+version = 3
+disabled_plugins = ["io.containerd.content.v1.content"]
+
 [proxy_plugins]
   [proxy_plugins.neonfs]
     type = "content"
     address = "/run/neonfs/containerd.sock"
 ```
 
-containerd dials that socket and uses NeonFS as a content store in
-addition to (or instead of) the default boltdb store. Verify with:
+The `disabled_plugins` line is **required** on containerd 2.x. A content
+proxy registers under the same plugin type as containerd's built-in local
+store, and `metadata.v1.bolt` resolves the content store with
+`GetSingle` — it accepts exactly one plugin of type
+`io.containerd.content.v1`. Leaving the built-in store enabled gives it
+two, so metadata (and every service that depends on it — `content`,
+`leases`, `images`, …) fails to load with
+`multiple plugins registered for io.containerd.content.v1: plugin: multiple instances`,
+and the whole containerd gRPC API returns `unknown service`. Disabling
+the built-in store makes NeonFS the **sole** content store for that
+containerd — there is no local fallback. `disabled_plugins` already
+exists in most configs; add the entry to the existing array rather than
+declaring the key twice.
+
+Verify with:
 
 ```bash
 ctr content ingest < layer.tar     # store a blob
 ctr content get sha256:...         # read it back
 ```
+
+> **Switching an existing containerd.** Disabling the built-in store
+> orphans any content already pulled into it: containerd's metadata DB
+> still references those blobs, but NeonFS doesn't have them, so pulls
+> fail with `failed to lease content: blob not found`. Re-pull a fresh
+> image (a new digest writes cleanly into NeonFS), or reset
+> `/var/lib/containerd/io.containerd.metadata.v1.bolt` on a host with no
+> running containers.
 
 ## Configuration
 
