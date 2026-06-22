@@ -249,15 +249,19 @@ defmodule NeonFS.FUSE.MountManager do
 
   ## Private Helpers
 
+  # The path is checked on this FUSE node's own filesystem, so the node name
+  # is part of the error: an operator who created the directory on a different
+  # host otherwise sees "not found" for a path that is plainly right there
+  # (#1358).
   defp validate_mount_point(mount_point) do
     expanded = Path.expand(mount_point)
 
     cond do
       not File.exists?(expanded) ->
-        {:error, :mount_point_not_found}
+        {:error, "mount point #{expanded} not found on FUSE node #{Node.self()}"}
 
       not File.dir?(expanded) ->
-        {:error, :mount_point_not_directory}
+        {:error, "mount point #{expanded} is not a directory on FUSE node #{Node.self()}"}
 
       true ->
         :ok

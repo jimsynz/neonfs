@@ -36,6 +36,28 @@ defmodule NeonFS.CLI.HandlerTest do
     def call(_node, _mod, _fun, _args), do: {:badrpc, :nodedown}
   end
 
+  defmodule FuseRoutingRPCStub do
+    @moduledoc false
+
+    @doc false
+    def call(node, NeonFS.FUSE.MountManager, :mount, _args, _timeout) do
+      Agent.update(:fuse_routing_rpc_calls, &[{:mount, node} | &1])
+      {:ok, "mount_stub_id"}
+    end
+
+    def call(node, NeonFS.FUSE.MountManager, :get_mount, _args, _timeout) do
+      Agent.update(:fuse_routing_rpc_calls, &[{:get_mount, node} | &1])
+
+      {:ok,
+       %{
+         id: "mount_stub_id",
+         volume_name: "stub-vol",
+         mount_point: "/mnt/stub",
+         started_at: ~U[2026-01-01 00:00:00Z]
+       }}
+    end
+  end
+
   @moduletag :tmp_dir
 
   # Reset Ra state between ALL tests in this module to ensure isolation
@@ -737,6 +759,60 @@ defmodule NeonFS.CLI.HandlerTest do
       result = Handler.mount("no-such-vol", "/mnt/test", %{})
       # Either volume not found or FUSE not available
       assert match?({:error, _}, result)
+    end
+  end
+
+  describe "mount/3 FUSE node routing (#1358)" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      ensure_cluster_state()
+      stop_ra()
+      ensure_node_named()
+      start_ra()
+      :ok = RaServer.init_cluster()
+      start_service_registry()
+
+      # A FUSE service on another node — present so the test proves which
+      # candidate routing actually selects, not just that local works.
+      :ok = ServiceRegistry.register(ServiceInfo.new(:neonfs_fuse@remote, :fuse))
+
+      Application.put_env(:neonfs_core, :fuse_rpc_mod, FuseRoutingRPCStub)
+
+      start_supervised!(%{
+        id: :fuse_routing_rpc_calls,
+        start: {Agent, :start_link, [fn -> [] end, [name: :fuse_routing_rpc_calls]]}
+      })
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_core, :fuse_rpc_mod)
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "prefers the local node when local FUSE is available, ignoring the registry head" do
+      # Stand in for a running MountManager on this node.
+      start_supervised!(%{
+        id: :local_mount_manager,
+        start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
+      })
+
+      assert {:ok, _info} = Handler.mount("stub-vol", "/mnt/stub", %{})
+
+      calls = Agent.get(:fuse_routing_rpc_calls, & &1)
+      assert {:mount, Node.self()} in calls
+      refute Enum.any?(calls, fn {_op, node} -> node == :neonfs_fuse@remote end)
+    end
+
+    test "falls through to the registry when no local FUSE is running" do
+      refute Process.whereis(NeonFS.FUSE.MountManager)
+
+      assert {:ok, _info} = Handler.mount("stub-vol", "/mnt/stub", %{})
+
+      calls = Agent.get(:fuse_routing_rpc_calls, & &1)
+      assert {:mount, :neonfs_fuse@remote} in calls
     end
   end
 
