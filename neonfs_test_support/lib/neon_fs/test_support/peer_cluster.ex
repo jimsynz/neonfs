@@ -449,7 +449,14 @@ defmodule NeonFS.TestSupport.PeerCluster do
             port: ports.nfs,
             bind_address: "127.0.0.1",
             nlm_port: allocate_peer_port(),
-            nlm_bind: "127.0.0.1"
+            nlm_bind: "127.0.0.1",
+            # The export mirror reacts to volume lifecycle events, but the
+            # periodic resync is the safety net for a missed/delayed event.
+            # Its 60 s production default equals the convergence deadline
+            # tests assert against, so a single dropped event under CI load
+            # races the deadline (#1363). Tighten the safety net for peers
+            # so a missed event reconverges well inside any test timeout.
+            export_resync_interval: 2_000
           ]
         ]
     else
