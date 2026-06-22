@@ -113,6 +113,20 @@ defmodule NeonFS.Containerd.ContentServerReadTest do
     end
   end
 
+  describe "mid-stream failure" do
+    test "a chunk fetch failure partway through aborts the RPC with INTERNAL (#1353)" do
+      raising_stream =
+        Stream.unfold(:start, fn
+          :start -> {"alpha", :boom}
+          :boom -> raise NeonFS.Client.ChunkReader.StreamError, reason: :connection_refused
+        end)
+
+      StubChunkReader.set_response({:ok, %{stream: raising_stream, file_size: 100}})
+
+      assert_grpc_status(:internal, fn -> capture_replies(@valid_digest, 0, 0) end)
+    end
+  end
+
   describe "streaming invariant" do
     test "peak in-flight buffer is bounded by chunk size, not blob size" do
       # 100 MiB simulated in 1 MiB chunks. Each chunk gets split into

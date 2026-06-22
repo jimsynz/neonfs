@@ -37,6 +37,7 @@ defmodule NeonFS.Containerd.ContentServer do
   alias Containerd.Services.Content.V1.{Info, InfoResponse, ListContentResponse, UpdateResponse}
   alias Containerd.Services.Content.V1.{Status, WriteContentRequest, WriteContentResponse}
   alias GRPC.RPCError
+  alias NeonFS.Client.ChunkReader
   alias NeonFS.Client.Router
   alias NeonFS.Containerd.{Digest, Metadata, WriteRegistry, WriteSession, WriteSupervisor}
 
@@ -359,6 +360,11 @@ defmodule NeonFS.Containerd.ContentServer do
       end)
 
     :ok
+  rescue
+    e in ChunkReader.StreamError ->
+      reraise RPCError,
+              [status: :internal, message: "blob read failed: #{Exception.message(e)}"],
+              __STACKTRACE__
   end
 
   defp split_oversized_chunk(chunk) when byte_size(chunk) <= @max_response_bytes, do: [chunk]

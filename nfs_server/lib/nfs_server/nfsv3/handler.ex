@@ -99,6 +99,8 @@ defmodule NFSServer.NFSv3.Handler do
 
   @behaviour NFSServer.RPC.Handler
 
+  require Logger
+
   alias NFSServer.NFSv3.Types
   alias NFSServer.XDR
 
@@ -772,20 +774,31 @@ defmodule NFSServer.NFSv3.Handler do
     case backend.read(fh, offset, count, auth, ctx) do
       {:ok, %{data: data, eof: eof} = reply} ->
         post_op = Map.get(reply, :post_op)
-        {chunks, bytes} = take_bytes(data, count)
-        pad = rem(4 - rem(bytes, 4), 4)
 
-        body = [
-          Types.encode_nfsstat3(:ok),
-          Types.encode_post_op_attr(post_op),
-          XDR.encode_uint(bytes),
-          XDR.encode_bool(eof),
-          XDR.encode_uint(bytes),
-          chunks,
-          <<0::size(pad * 8)>>
-        ]
+        case safe_take_bytes(data, count) do
+          {:ok, {chunks, bytes}} ->
+            pad = rem(4 - rem(bytes, 4), 4)
 
-        {:ok, body}
+            body = [
+              Types.encode_nfsstat3(:ok),
+              Types.encode_post_op_attr(post_op),
+              XDR.encode_uint(bytes),
+              XDR.encode_bool(eof),
+              XDR.encode_uint(bytes),
+              chunks,
+              <<0::size(pad * 8)>>
+            ]
+
+            {:ok, body}
+
+          {:error, exception} ->
+            Logger.warning(
+              "NFS READ data stream failed mid-consumption: " <>
+                Exception.message(exception)
+            )
+
+            {:ok, Types.encode_nfsstat3(:io) <> Types.encode_post_op_attr(post_op)}
+        end
 
       {:error, status, attr} ->
         {:ok, Types.encode_nfsstat3(status) <> Types.encode_post_op_attr(attr)}
@@ -842,6 +855,18 @@ defmodule NFSServer.NFSv3.Handler do
   #
   # The accumulator is bounded by `cap` (typically ≤ 1 MiB — the
   # kernel-side per-read limit), not by the file size.
+  # The READ data stream is produced lazily by the backend, so a fetch
+  # failure surfaces as an exception while `take_bytes/2` consumes it
+  # (e.g. `NeonFS.Client.ChunkReader.StreamError` on a mid-stream chunk
+  # failure). A backend data stream that blows up is an I/O error, not a
+  # reason to crash the RPC dispatch and drop the connection — map it to
+  # NFS3ERR_IO so the client sees a clean error and retries (#1353).
+  defp safe_take_bytes(stream, cap) do
+    {:ok, take_bytes(stream, cap)}
+  rescue
+    exception -> {:error, exception}
+  end
+
   defp take_bytes(stream, cap) when is_integer(cap) and cap >= 0 do
     {acc, total} =
       Enum.reduce_while(stream, {[], 0}, fn chunk, {acc, total} ->

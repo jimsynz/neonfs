@@ -440,6 +440,26 @@ defmodule NeonFS.WebDAV.BackendTest do
                Backend.get_content(@auth, resource, %{})
     end
 
+    test "a chunk failure mid-body raises rather than truncating the response (#1353)" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/trunc.bin", "stored content")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "trunc.bin"])
+
+      raising_stream =
+        Stream.unfold(:start, fn
+          :start -> {"partial", :boom}
+          :boom -> raise ChunkReader.StreamError, reason: :connection_refused
+        end)
+
+      expect(ChunkReader, :read_file_stream, fn _, _, _ ->
+        {:ok, %{stream: raising_stream, file_size: 100}}
+      end)
+
+      assert {:ok, stream} = Backend.get_content(@auth, resource, %{})
+
+      assert_raise ChunkReader.StreamError, fn -> Enum.into(stream, <<>>) end
+    end
+
     test "core_stream_fn override replaces ChunkReader streaming" do
       Application.put_env(:neonfs_webdav, :core_stream_fn, fn volume, path, opts ->
         MockCore.read_file_stream(volume, path, opts)

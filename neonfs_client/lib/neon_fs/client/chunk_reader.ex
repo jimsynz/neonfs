@@ -43,6 +43,7 @@ defmodule NeonFS.Client.ChunkReader do
 
   require Logger
 
+  alias NeonFS.Client.ChunkReader.StreamError
   alias NeonFS.Client.Router
 
   @default_chunk_timeout 30_000
@@ -98,8 +99,9 @@ defmodule NeonFS.Client.ChunkReader do
 
   The returned stream yields raw `binary()` slices corresponding to the
   caller's requested byte range. If a chunk fetch fails mid-stream the
-  stream logs the reason and halts; consumers can detect truncation by
-  comparing total bytes received against the returned `file_size`.
+  stream raises `NeonFS.Client.ChunkReader.StreamError` rather than
+  halting silently — a silent halt would be indistinguishable from a
+  clean end-of-file and hand the consumer a truncated read (#1353).
 
   Unlike `NeonFS.Core.read_file_stream/3`, this stream is built entirely
   on the caller's node — it is safe to use from non-co-located interface
@@ -259,12 +261,7 @@ defmodule NeonFS.Client.ChunkReader do
             {bytes, rest}
 
           {:error, reason} ->
-            Logger.error("Streaming chunk fetch failed, halting stream",
-              chunk_hash: Base.encode16(ref.hash, case: :lower),
-              reason: inspect(reason)
-            )
-
-            nil
+            raise StreamError, reason: reason
         end
     end)
   end
@@ -363,11 +360,7 @@ defmodule NeonFS.Client.ChunkReader do
         {bytes, rest}
 
       {:error, reason} ->
-        Logger.error("Stripe fallback segment read failed, halting stream",
-          reason: inspect(reason)
-        )
-
-        nil
+        raise StreamError, reason: reason
     end
   end
 

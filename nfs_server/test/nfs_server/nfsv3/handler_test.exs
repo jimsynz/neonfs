@@ -816,6 +816,29 @@ defmodule NFSServer.NFSv3.HandlerTest do
       assert total <= 20 + requested + 3
     end
 
+    test "maps a data stream that raises mid-consumption to NFS3ERR_IO (#1353)" do
+      fh = "fh-stream-raises"
+      attr = MockBackend.sample_fattr3()
+
+      raising =
+        Stream.unfold(:start, fn
+          :start -> {"partial", :boom}
+          :boom -> raise "chunk fetch failed mid-stream"
+        end)
+
+      MockBackend.put(
+        {:read, {fh, 0, 64}},
+        {:ok, %{data: raising, eof: false, post_op: attr}}
+      )
+
+      args = read_args(fh, 0, 64)
+      {:ok, body} = Handler.handle_call(6, args, @auth, @ctx_base)
+      flat = IO.iodata_to_binary(body)
+
+      assert {:ok, :io, rest} = Types.decode_nfsstat3(flat)
+      assert {:ok, ^attr, <<>>} = Types.decode_post_op_attr(rest)
+    end
+
     test "maps a streaming :ok with explicit eof: false to the on-wire false bit" do
       fh = "fh-noeof"
 

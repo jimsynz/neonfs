@@ -728,7 +728,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
                  String.duplicate("B", 100) <> String.duplicate("C", 10)
     end
 
-    test "halts the stream if a stripe read fails mid-stream" do
+    test "raises StreamError if a stripe read fails mid-stream" do
       stripes = [
         %{stripe_id: "s1", byte_range: {0, 100}},
         %{stripe_id: "s2", byte_range: {100, 200}}
@@ -750,7 +750,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
       end)
 
       assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/ec.bin")
-      assert Enum.to_list(stream) == [String.duplicate("A", 100)]
+      assert_raise ChunkReader.StreamError, fn -> Enum.to_list(stream) end
     end
 
     test "range that falls past the last stripe yields an empty stream" do
@@ -774,7 +774,7 @@ defmodule NeonFS.Client.ChunkReaderTest do
   end
 
   describe "read_file_stream/3 — mid-stream failure" do
-    test "halts the stream when a chunk fetch fails" do
+    test "raises StreamError when a chunk fetch fails, rather than truncating silently" do
       refs = [
         ref(content: "abcd", original_size: 4, chunk_offset: 0, read_start: 0, read_length: 4),
         ref(seed: :b, original_size: 4, chunk_offset: 4, read_start: 0, read_length: 4)
@@ -792,7 +792,11 @@ defmodule NeonFS.Client.ChunkReaderTest do
       end)
 
       assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream("vol", "/half.txt")
-      assert Enum.to_list(stream) == ["abcd"]
+
+      # The first chunk is delivered, then the failed fetch raises rather
+      # than ending the stream — a silent halt would look like a clean EOF.
+      assert ["abcd"] = Enum.take(stream, 1)
+      assert_raise ChunkReader.StreamError, fn -> Enum.to_list(stream) end
     end
   end
 end

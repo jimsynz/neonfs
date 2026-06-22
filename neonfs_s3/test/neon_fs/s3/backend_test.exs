@@ -263,6 +263,28 @@ defmodule NeonFS.S3.BackendTest do
       assert is_binary(object.etag)
     end
 
+    test "a chunk failure mid-body raises rather than truncating the object (#1353)" do
+      Backend.create_bucket(@ctx, "my-bucket")
+      Backend.put_object(@ctx, "my-bucket", "trunc.bin", "stored content", %Firkin.PutOpts{})
+
+      raising_stream =
+        Stream.unfold(:start, fn
+          :start -> {"partial", :boom}
+          :boom -> raise NeonFS.Client.ChunkReader.StreamError, reason: :connection_refused
+        end)
+
+      expect(ChunkReader, :read_file_stream, fn _bucket, _key, _opts ->
+        {:ok, %{stream: raising_stream, file_size: 100}}
+      end)
+
+      assert {:ok, object} =
+               Backend.get_object(@ctx, "my-bucket", "trunc.bin", %Firkin.GetOpts{})
+
+      assert_raise NeonFS.Client.ChunkReader.StreamError, fn ->
+        Enum.into(object.body, <<>>)
+      end
+    end
+
     test "returns error for non-existent key" do
       Backend.create_bucket(@ctx, "my-bucket")
 
