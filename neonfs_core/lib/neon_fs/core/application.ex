@@ -17,6 +17,7 @@ defmodule NeonFS.Core.Application do
 
   @impl true
   def start(_type, _args) do
+    halt_unless_distributed()
     Logger.metadata(node_name: node())
     load_config_from_cluster_state()
 
@@ -52,6 +53,33 @@ defmodule NeonFS.Core.Application do
     end
 
     :ok
+  end
+
+  @doc false
+  @spec distribution_required?() :: boolean()
+  def distribution_required? do
+    System.get_env("RELEASE_NAME") not in [nil, ""] and
+      System.get_env("RELEASE_DISTRIBUTION", "name") != "none"
+  end
+
+  # A core node that boots without Erlang distribution — typically because
+  # its network came up after the BEAM — can neither join Ra nor serve
+  # RPCs, and nothing re-runs `net_kernel` afterwards, so it sits islanded
+  # forever. Exit non-zero so the service manager restarts the node once
+  # the network is available. Only enforced under a release; `mix`, `iex`
+  # and the test suite legitimately run undistributed.
+  defp halt_unless_distributed do
+    if distribution_required?() and not Node.alive?() do
+      Logger.error(
+        "Erlang distribution did not start; a core node cannot operate islanded. " <>
+          "Exiting so the service manager restarts the node once the network is up."
+      )
+
+      # `System.halt/1` stops the VM immediately without draining the
+      # async Logger, so flush first or the operator loses the reason.
+      Logger.flush()
+      System.halt(1)
+    end
   end
 
   defp cache_orphan_detection_result do
