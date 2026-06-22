@@ -9,8 +9,11 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   `nfs_unexport/1`, `handle_nfs_mount_request/1` and `nfs_list_exports/0`
   RPC entry points here, so the CLI wire contract is unchanged.
 
-  Node discovery checks `ServiceRegistry` first, then the local node,
-  then connected peers, then the configured fallback; RPC wrappers carry
+  FUSE node discovery prefers the local node, then `ServiceRegistry`,
+  then connected peers, then the configured fallback — a FUSE mount is
+  only visible on its own host, so the operator's own node is the right
+  default (#1358). NFS discovery checks `ServiceRegistry` first, since an
+  export is cluster state served by every NFS node. RPC wrappers carry
   bounded timeouts so a misbehaving interface node can't hang the CLI.
   """
 
@@ -322,10 +325,14 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   end
 
   # Get the FUSE node and verify it's reachable
-  # Checks in order: ServiceRegistry, local node, connected nodes, configured fallback
+  # Checks in order: local node, ServiceRegistry, connected nodes, configured fallback.
+  # The local node is preferred because a FUSE mount is only visible on its own
+  # host: on an all-omnibus cluster every node registers a `:fuse` service, so
+  # routing to the registry head would mount on an arbitrary node — not the one
+  # the operator ran the CLI on, where the mount point exists (#1358).
   defp get_fuse_node do
-    with :not_found <- discover_fuse_node_from_registry(),
-         :not_available <- check_local_fuse(),
+    with :not_available <- check_local_fuse(),
+         :not_found <- discover_fuse_node_from_registry(),
          :not_found <- discover_fuse_node() do
       check_configured_fuse_node()
     else
@@ -440,72 +447,40 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   end
 
   defp rpc_mount(fuse_node, volume_name, mount_point, opts) do
-    case :rpc.call(
-           fuse_node,
-           NeonFS.FUSE.MountManager,
-           :mount,
-           [volume_name, mount_point, opts],
-           @mount_rpc_timeout
-         ) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
+    fuse_rpc(fuse_node, :mount, [volume_name, mount_point, opts], @mount_rpc_timeout)
   end
 
   defp rpc_unmount(fuse_node, mount_id) do
-    case :rpc.call(
-           fuse_node,
-           NeonFS.FUSE.MountManager,
-           :unmount,
-           [mount_id],
-           @unmount_rpc_timeout
-         ) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
+    fuse_rpc(fuse_node, :unmount, [mount_id], @unmount_rpc_timeout)
   end
 
   defp rpc_list_mounts(fuse_node) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :list_mounts, []) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      mounts when is_list(mounts) ->
-        {:ok, mounts}
-
-      result ->
-        result
+    case fuse_rpc(fuse_node, :list_mounts, [], :infinity) do
+      {:error, _} = error -> error
+      mounts when is_list(mounts) -> {:ok, mounts}
+      result -> result
     end
   end
 
   defp rpc_get_mount(fuse_node, mount_id) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount, [mount_id]) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
+    fuse_rpc(fuse_node, :get_mount, [mount_id], :infinity)
   end
 
   defp rpc_get_mount_by_volume_name(fuse_node, volume_name) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_volume_name, [volume_name]) do
-      {:badrpc, reason} ->
-        {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
-
-      result ->
-        result
-    end
+    fuse_rpc(fuse_node, :get_mount_by_volume_name, [volume_name], :infinity)
   end
 
   defp rpc_get_mount_by_path(fuse_node, path) do
-    case :rpc.call(fuse_node, NeonFS.FUSE.MountManager, :get_mount_by_path, [path]) do
+    fuse_rpc(fuse_node, :get_mount_by_path, [path], :infinity)
+  end
+
+  # Single dispatch point for MountManager RPCs. The RPC module is read from
+  # app env (defaulting to `:rpc`) so tests can inject a stub and assert which
+  # node a mount was routed to (#1358).
+  defp fuse_rpc(fuse_node, fun, args, timeout) do
+    rpc_mod = Application.get_env(:neonfs_core, :fuse_rpc_mod, :rpc)
+
+    case rpc_mod.call(fuse_node, NeonFS.FUSE.MountManager, fun, args, timeout) do
       {:badrpc, reason} ->
         {:error, Unavailable.exception(message: "FUSE RPC failed: #{inspect(reason)}")}
 

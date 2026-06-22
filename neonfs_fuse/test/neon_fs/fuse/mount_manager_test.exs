@@ -83,6 +83,30 @@ defmodule NeonFS.FUSE.MountManagerTest do
     end
   end
 
+  describe "mount/3 mount-point validation names the FUSE node (#1358)" do
+    setup do
+      start_supervised!(MountManager)
+      :ok
+    end
+
+    test "missing mount point reports the node it was checked on", %{tmp_dir: tmp_dir} do
+      missing = Path.join(tmp_dir, "does-not-exist")
+
+      assert {:error, message} = MountManager.mount("vol-a", missing)
+      assert message =~ "mount point #{Path.expand(missing)} not found"
+      assert message =~ "on FUSE node #{Node.self()}"
+    end
+
+    test "non-directory mount point reports the node it was checked on", %{tmp_dir: tmp_dir} do
+      file_path = Path.join(tmp_dir, "regular_file")
+      File.write!(file_path, "")
+
+      assert {:error, message} = MountManager.mount("vol-a", file_path)
+      assert message =~ "is not a directory"
+      assert message =~ "on FUSE node #{Node.self()}"
+    end
+  end
+
   describe "get_mount_by_volume_name/1 (issue #1016)" do
     # `MountManager` is a `:name`-registered singleton; the suite that
     # actually spins up the full FUSE stack lives in
