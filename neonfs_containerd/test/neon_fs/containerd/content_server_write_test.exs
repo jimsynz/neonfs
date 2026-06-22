@@ -437,6 +437,67 @@ defmodule NeonFS.Containerd.ContentServerWriteTest do
     end
   end
 
+  describe "process_write_stream — retried ingest (#1354)" do
+    test "a second stream for the same ref resumes from the offset and commits", %{ref: ref} do
+      part1 = "the first half of the layer"
+      part2 = "the second half of the layer"
+      full = part1 <> part2
+      digest = "sha256:" <> (:crypto.hash(:sha256, full) |> Base.encode16(case: :lower))
+
+      # Stream 1 writes the first part, then the connection drops
+      # (the stream ends) without a COMMIT — the session survives.
+      replies1 =
+        capture_replies([
+          %WriteContentRequest{action: :STAT, ref: ref, total: byte_size(full)},
+          %WriteContentRequest{
+            action: :WRITE,
+            ref: ref,
+            data: part1,
+            offset: 0,
+            total: byte_size(full)
+          }
+        ])
+
+      assert [
+               %WriteContentResponse{action: :STAT, offset: 0},
+               %WriteContentResponse{action: :WRITE, offset: off1}
+             ] = replies1
+
+      assert off1 == byte_size(part1)
+
+      # Stream 2 is containerd retrying with the same ref: its opening
+      # STAT must report where the first stream left off, then it
+      # resumes from that offset and commits the full blob.
+      replies2 =
+        capture_replies([
+          %WriteContentRequest{action: :STAT, ref: ref, total: byte_size(full)},
+          %WriteContentRequest{
+            action: :WRITE,
+            ref: ref,
+            data: part2,
+            offset: byte_size(part1),
+            total: byte_size(full)
+          },
+          %WriteContentRequest{
+            action: :COMMIT,
+            ref: ref,
+            offset: byte_size(full),
+            total: byte_size(full),
+            expected: digest
+          }
+        ])
+
+      assert [
+               %WriteContentResponse{action: :STAT, offset: resume_offset},
+               %WriteContentResponse{action: :WRITE, offset: off2},
+               %WriteContentResponse{action: :COMMIT, digest: ^digest}
+             ] = replies2
+
+      assert resume_offset == byte_size(part1)
+      assert off2 == byte_size(full)
+    end
+  end
+
   ## Helpers
 
   defp capture_replies(requests) do

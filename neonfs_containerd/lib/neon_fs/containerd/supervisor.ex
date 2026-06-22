@@ -21,7 +21,7 @@ defmodule NeonFS.Containerd.Supervisor do
   require Logger
 
   alias NeonFS.Client.Registrar
-  alias NeonFS.Containerd.{HealthCheck, WriteRegistry, WriteSupervisor}
+  alias NeonFS.Containerd.{HealthCheck, WriteReaper, WriteRegistry, WriteSupervisor}
 
   # The plugin owns its socket inside its own RuntimeDirectory; operators
   # point containerd's `[proxy_plugins.neonfs] address` at it via
@@ -60,7 +60,7 @@ defmodule NeonFS.Containerd.Supervisor do
     children =
       case endpoint_child_spec() do
         {:ok, endpoint} ->
-          [WriteRegistry, WriteSupervisor, endpoint]
+          [WriteRegistry, WriteSupervisor, WriteReaper, endpoint]
           |> maybe_add_registrar(register?)
 
         {:skip, message} ->
