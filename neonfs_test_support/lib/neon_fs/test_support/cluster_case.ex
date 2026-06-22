@@ -548,10 +548,12 @@ defmodule NeonFS.TestSupport.ClusterCase do
     volumes = Keyword.get(opts, :volumes, [])
 
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
+      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
+        cluster_name
+      ])
 
     {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
+      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
 
     node1_atom = cluster |> PeerCluster.get_node!(:node1) |> Map.get(:node)
     node_names = cluster.nodes |> Enum.map(& &1.name) |> Enum.reject(&(&1 == :node1))
@@ -560,7 +562,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
       # Use the direct RPC join flow (not HTTP) since test nodes don't run
       # the metrics HTTP server. This calls accept_join on node1 directly.
       {:ok, _} =
-        PeerCluster.rpc(cluster, node_name, NeonFS.Cluster.Join, :join_cluster_rpc, [
+        PeerCluster.rpc_until_ready(cluster, node_name, NeonFS.Cluster.Join, :join_cluster_rpc, [
           token,
           node1_atom
         ])
@@ -779,12 +781,16 @@ defmodule NeonFS.TestSupport.ClusterCase do
     {core_peer, extra_core_peers, interface_peers} = split_core_and_interface_peers(cluster)
 
     {:ok, _} =
-      PeerCluster.rpc(cluster, core_peer.name, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
+      PeerCluster.rpc_until_ready(cluster, core_peer.name, NeonFS.CLI.Handler, :cluster_init, [
+        cluster_name
+      ])
 
     :ok = wait_for_cluster_stable_on(cluster, core_peer.name)
 
     {:ok, %{"token" => token}} =
-      PeerCluster.rpc(cluster, core_peer.name, NeonFS.CLI.Handler, :create_invite, [3600])
+      PeerCluster.rpc_until_ready(cluster, core_peer.name, NeonFS.CLI.Handler, :create_invite, [
+        3600
+      ])
 
     join_extra_core_peers(cluster, core_peer, extra_core_peers, token)
 
@@ -792,7 +798,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
       type = service_type_for_apps(peer.applications)
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
+        PeerCluster.rpc_until_ready(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
           token,
           core_peer.node,
           type
@@ -853,7 +859,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
   defp join_extra_core_peers(cluster, core_peer, extra_core_peers, token) do
     for peer <- extra_core_peers do
       {:ok, _} =
-        PeerCluster.rpc(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
+        PeerCluster.rpc_until_ready(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
           token,
           core_peer.node
         ])
@@ -964,7 +970,9 @@ defmodule NeonFS.TestSupport.ClusterCase do
     volumes = Keyword.get(opts, :volumes, [])
 
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
+      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
+        cluster_name
+      ])
 
     :ok = wait_for_cluster_stable(cluster)
 

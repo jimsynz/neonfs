@@ -535,15 +535,16 @@ defmodule NeonFS.Integration.DataTransferTest do
 
     test "joining node's data plane is discovered by existing nodes", %{cluster: cluster} do
       # Initialize a 2-node cluster first
-      {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+      {:ok, _} =
+        PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
 
       {:ok, %{"token" => token}} =
-        PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
+        PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
 
       node1_atom = PeerCluster.get_node!(cluster, :node1) |> Map.get(:node)
 
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node2, NeonFS.Cluster.Join, :join_cluster_rpc, [
+        PeerCluster.rpc_until_ready(cluster, :node2, NeonFS.Cluster.Join, :join_cluster_rpc, [
           token,
           node1_atom
         ])
@@ -566,7 +567,7 @@ defmodule NeonFS.Integration.DataTransferTest do
 
       # Now join node3 — this should activate its data plane
       {:ok, _} =
-        PeerCluster.rpc(cluster, :node3, NeonFS.Cluster.Join, :join_cluster_rpc, [
+        PeerCluster.rpc_until_ready(cluster, :node3, NeonFS.Cluster.Join, :join_cluster_rpc, [
           token,
           node1_atom
         ])

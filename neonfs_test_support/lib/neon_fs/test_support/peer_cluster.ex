@@ -31,6 +31,17 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @peer_boot_backoff_ms 250
   @peer_boot_max_backoff_ms 2_000
 
+  # The first RPCs a `setup_all`/`setup` issues against a freshly-spawned peer
+  # (`cluster_init`, `create_invite`, `join_cluster_rpc`) intermittently come
+  # back `{:badrpc, :nodedown}` / `{:badrpc, :timeout}` on a loaded CI runner —
+  # the peer's distribution channel or applications haven't settled yet. Plain
+  # `rpc/6` surfaces that straight into a `{:ok, _} =` match and crashes the
+  # whole describe block (#1361). `rpc_until_ready/6` retries only those
+  # transient failures with the same widening backoff as the boot retry.
+  @rpc_ready_attempts 5
+  @rpc_ready_backoff_ms 250
+  @rpc_ready_max_backoff_ms 2_000
+
   @type node_info :: %{
           name: atom(),
           peer: pid(),
@@ -537,6 +548,58 @@ defmodule NeonFS.TestSupport.PeerCluster do
     node_info = get_node!(cluster, node_name)
     :rpc.call(node_info.node, module, function, args, timeout)
   end
+
+  @doc """
+  Like `rpc/6`, but retries transient `{:badrpc, :nodedown}` /
+  `{:badrpc, :timeout}` results before returning.
+
+  Intended for the cluster-bootstrap RPCs a `setup_all`/`setup` issues
+  against a freshly-spawned peer (`cluster_init`, `create_invite`,
+  `join_cluster_rpc`). Under a loaded CI runner those first calls
+  occasionally fail because the peer's distribution channel or
+  applications haven't settled, and plain `rpc/6` crashes the whole
+  describe block on the resulting `{:ok, _} =` match (#1361).
+
+  Only `:nodedown` and `:timeout` `:badrpc` reasons are retried — a genuine
+  `{:badrpc, {:EXIT, _}}`, an application-level error reply, or any
+  successful result is returned unchanged. Do **not** use this for RPCs
+  that assert a node is unreachable; use `rpc/6` there so the expected
+  failure isn't masked by the retry budget.
+  """
+  @spec rpc_until_ready(cluster(), atom(), module(), atom(), [term()], timeout()) :: term()
+  def rpc_until_ready(cluster, node_name, module, function, args, timeout \\ 30_000) do
+    rpc_until_ready(cluster, node_name, module, function, args, timeout, @rpc_ready_attempts)
+  end
+
+  defp rpc_until_ready(cluster, node_name, module, function, args, timeout, attempts_left) do
+    case rpc(cluster, node_name, module, function, args, timeout) do
+      {:badrpc, reason} when attempts_left > 1 ->
+        if transient_rpc_error?(reason) do
+          Logger.warning(
+            "rpc #{inspect(module)}.#{function}/#{length(args)} on #{node_name} failed " <>
+              "transiently (#{inspect(reason)}), retrying " <>
+              "(#{attempts_left - 1} attempt(s) left)"
+          )
+
+          Process.sleep(rpc_ready_backoff_ms(attempts_left))
+          rpc_until_ready(cluster, node_name, module, function, args, timeout, attempts_left - 1)
+        else
+          {:badrpc, reason}
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp rpc_ready_backoff_ms(attempts_left) do
+    retries_used = @rpc_ready_attempts - attempts_left
+    min(@rpc_ready_backoff_ms * Integer.pow(2, retries_used), @rpc_ready_max_backoff_ms)
+  end
+
+  defp transient_rpc_error?(:nodedown), do: true
+  defp transient_rpc_error?(:timeout), do: true
+  defp transient_rpc_error?(_reason), do: false
 
   @doc """
   Get node info by name.
