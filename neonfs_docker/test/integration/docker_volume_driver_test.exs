@@ -92,7 +92,9 @@ defmodule NeonFS.Docker.IntegrationTest do
 
   setup_all %{cluster: cluster} do
     {:ok, _} =
-      PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["docker-test"])
+      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
+        "docker-test"
+      ])
 
     :ok = wait_for_cluster_stable(cluster)
     %{}

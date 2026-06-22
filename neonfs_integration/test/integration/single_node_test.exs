@@ -274,7 +274,8 @@ defmodule NeonFS.Integration.SingleNodeTest do
   end
 
   defp init_cluster_with_volume(cluster) do
-    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+    {:ok, _} =
+      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
 
     # Wait for cluster to be ready
     :ok =

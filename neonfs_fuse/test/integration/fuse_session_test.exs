@@ -23,7 +23,9 @@ defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
   alias NeonFS.FUSE.{InodeTable, Session}
 
   setup_all %{cluster: cluster} do
-    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+    {:ok, _} =
+      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+
     :ok = wait_for_cluster_stable(cluster)
 
     {:ok, volume_map} =
