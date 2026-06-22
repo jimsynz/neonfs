@@ -264,7 +264,8 @@ defmodule NeonFS.Core.Supervisor do
           # readiness detection instead of polling.
           NeonFS.Core.ReadySignal
         ] ++
-        maybe_formation_child()
+        maybe_formation_child() ++
+        maybe_peer_connector_child(node_named)
 
     # Conditionally add RaSupervisor for Phase 2+ distributed operation
     children_with_ra =
@@ -330,6 +331,12 @@ defmodule NeonFS.Core.Supervisor do
         Application.get_env(:neonfs_core, :replica_repair_volume_interval_seconds, 86_400)
     ]
   end
+
+  # Distribution must be up to dial peers; an unnamed node has no cluster
+  # to rejoin. With no persisted peers (greenfield/single node) the
+  # connector is a harmless no-op.
+  defp maybe_peer_connector_child(true), do: [NeonFS.Cluster.PeerConnector]
+  defp maybe_peer_connector_child(false), do: []
 
   defp maybe_formation_child do
     if Application.get_env(:neonfs_core, :auto_bootstrap, false) and
