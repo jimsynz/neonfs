@@ -814,6 +814,34 @@ defmodule NeonFS.CLI.HandlerTest do
       calls = Agent.get(:fuse_routing_rpc_calls, & &1)
       assert {:mount, :neonfs_fuse@remote} in calls
     end
+
+    test "routes to a FUSE node on the mounting client's host, ignoring local preference (#1359)" do
+      # Local FUSE would normally win, but the operator's host owns the
+      # mount point — the client-supplied host must beat local preference.
+      start_supervised!(%{
+        id: :local_mount_manager,
+        start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
+      })
+
+      assert {:ok, _info} = Handler.mount("stub-vol", "/mnt/stub", %{"host" => "remote"})
+
+      calls = Agent.get(:fuse_routing_rpc_calls, & &1)
+      assert {:mount, :neonfs_fuse@remote} in calls
+      refute Enum.any?(calls, fn {_op, node} -> node == Node.self() end)
+    end
+
+    test "falls back to default discovery when the client host matches no FUSE node (#1359)" do
+      start_supervised!(%{
+        id: :local_mount_manager,
+        start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
+      })
+
+      assert {:ok, _info} = Handler.mount("stub-vol", "/mnt/stub", %{"host" => "nosuchhost"})
+
+      calls = Agent.get(:fuse_routing_rpc_calls, & &1)
+      assert {:mount, Node.self()} in calls
+      refute Enum.any?(calls, fn {_op, node} -> node == :neonfs_fuse@remote end)
+    end
   end
 
   describe "unmount/1" do

@@ -57,9 +57,22 @@ impl FuseCommand {
         let mountpoint_term = Term::Binary(Binary {
             bytes: mountpoint.as_bytes().to_vec(),
         });
-        let options_term = Term::Map(Map {
-            map: HashMap::new(),
-        });
+
+        // Tell the daemon which host the operator is on so it routes the
+        // mount to a co-located FUSE node — the mount point only exists
+        // here, even when the RPC lands on a core node elsewhere (#1359).
+        let mut options = HashMap::new();
+        if let Some(host) = local_hostname() {
+            options.insert(
+                Term::Binary(Binary {
+                    bytes: b"host".to_vec(),
+                }),
+                Term::Binary(Binary {
+                    bytes: host.into_bytes(),
+                }),
+            );
+        }
+        let options_term = Term::Map(Map { map: options });
 
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
@@ -295,6 +308,24 @@ fn warn_if_not_empty(path: &Path, mountpoint: &str) {
     }
 }
 
+/// The host's name, for matching against the `@host` of cluster node
+/// names so a mount lands on a co-located FUSE node (#1359). `None` when
+/// the syscall fails or the name isn't valid UTF-8 — the daemon then
+/// falls back to its default FUSE discovery chain.
+fn local_hostname() -> Option<String> {
+    let mut buf = [0_u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    std::str::from_utf8(&buf[..end])
+        .ok()
+        .map(|name| name.to_string())
+        .filter(|name| !name.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +348,17 @@ mod tests {
                 Some(v) => std::env::set_var("NEONFS_DATA_DIR", v),
                 None => std::env::remove_var("NEONFS_DATA_DIR"),
             }
+        }
+    }
+
+    #[test]
+    fn local_hostname_is_trimmed_and_non_empty() {
+        // gethostname succeeds in every realistic environment; when it
+        // does the result must be NUL-trimmed and non-empty so it can
+        // match an `@host` node-name suffix.
+        if let Some(host) = local_hostname() {
+            assert!(!host.is_empty());
+            assert!(!host.contains('\0'));
         }
     }
 

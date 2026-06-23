@@ -9,12 +9,17 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   `nfs_unexport/1`, `handle_nfs_mount_request/1` and `nfs_list_exports/0`
   RPC entry points here, so the CLI wire contract is unchanged.
 
-  FUSE node discovery prefers the local node, then `ServiceRegistry`,
-  then connected peers, then the configured fallback — a FUSE mount is
-  only visible on its own host, so the operator's own node is the right
-  default (#1358). NFS discovery checks `ServiceRegistry` first, since an
-  export is cluster state served by every NFS node. RPC wrappers carry
-  bounded timeouts so a misbehaving interface node can't hang the CLI.
+  FUSE node discovery first honours the mounting client's host: the CLI
+  puts its own hostname in the mount `options` (`"host"`), and a FUSE
+  node on that host is preferred so the mount lands where the operator
+  ran the command even when the RPC is handled by a core-only node
+  elsewhere (#1359). Failing that it prefers the local node, then
+  `ServiceRegistry`, then connected peers, then the configured fallback —
+  a FUSE mount is only visible on its own host, so the operator's own
+  node is the right default (#1358). NFS discovery checks
+  `ServiceRegistry` first, since an export is cluster state served by
+  every NFS node. RPC wrappers carry bounded timeouts so a misbehaving
+  interface node can't hang the CLI.
   """
 
   import NeonFS.CLI.Handler.Common
@@ -35,7 +40,9 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   ## Parameters
   - `volume_name` - Volume name (string)
   - `mount_point` - Mount point path (string)
-  - `options` - Mount options map (currently unused)
+  - `options` - Mount options map. A `"host"` entry (the CLI's own
+    hostname) routes the mount to a FUSE node on that host (#1359); it is
+    consumed here and not forwarded to the FUSE node.
 
   ## Returns
   - `{:ok, map}` - Mount info as map
@@ -45,10 +52,11 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   def mount(volume_name, mount_point, options)
       when is_binary(volume_name) and is_binary(mount_point) and is_map(options) do
     set_cli_metadata()
+    {client_host, mount_options} = pop_client_host(options)
 
     with :ok <- require_cluster(),
-         {:ok, fuse_node} <- get_fuse_node(),
-         opts = Volumes.map_to_opts(options),
+         {:ok, fuse_node} <- get_fuse_node(client_host),
+         opts = Volumes.map_to_opts(mount_options),
          {:ok, mount_id} <- rpc_mount(fuse_node, volume_name, mount_point, opts),
          {:ok, mount_info} <- rpc_get_mount(fuse_node, mount_id) do
       {:ok, mount_info_to_map(mount_info, fuse_node)}
@@ -324,12 +332,22 @@ defmodule NeonFS.CLI.Handler.MountRouting do
     |> Enum.uniq()
   end
 
-  # Get the FUSE node and verify it's reachable
-  # Checks in order: local node, ServiceRegistry, connected nodes, configured fallback.
-  # The local node is preferred because a FUSE mount is only visible on its own
-  # host: on an all-omnibus cluster every node registers a `:fuse` service, so
-  # routing to the registry head would mount on an arbitrary node — not the one
-  # the operator ran the CLI on, where the mount point exists (#1358).
+  # Get the FUSE node and verify it's reachable.
+  # A FUSE node co-located with the mounting client wins outright: the mount
+  # point only exists on the operator's host, so when the CLI tells us its
+  # hostname we honour it even if the RPC landed on a core-only node elsewhere
+  # (#1359). Otherwise checks in order: local node, ServiceRegistry, connected
+  # nodes, configured fallback. The local node is preferred because a FUSE mount
+  # is only visible on its own host: on an all-omnibus cluster every node
+  # registers a `:fuse` service, so routing to the registry head would mount on
+  # an arbitrary node — not the one the operator ran the CLI on (#1358).
+  defp get_fuse_node(client_host) do
+    case same_host_fuse_node(client_host) do
+      {:ok, fuse_node} -> {:ok, fuse_node}
+      :not_found -> get_fuse_node()
+    end
+  end
+
   defp get_fuse_node do
     with :not_available <- check_local_fuse(),
          :not_found <- discover_fuse_node_from_registry(),
@@ -338,6 +356,27 @@ defmodule NeonFS.CLI.Handler.MountRouting do
     else
       :available -> {:ok, Node.self()}
       {:ok, fuse_node} -> {:ok, fuse_node}
+    end
+  end
+
+  # Prefer a known FUSE node whose host matches the mounting client's. No
+  # match (the common all-`@localhost` single-host case, or an unknown host)
+  # falls through to the default discovery chain.
+  defp same_host_fuse_node(nil), do: :not_found
+
+  defp same_host_fuse_node(client_host) do
+    get_all_fuse_nodes()
+    |> Enum.find(fn node -> node_host(node) == client_host end)
+    |> case do
+      nil -> :not_found
+      fuse_node -> {:ok, fuse_node}
+    end
+  end
+
+  defp pop_client_host(options) do
+    case Map.pop(options, "host") do
+      {host, rest} when is_binary(host) and host != "" -> {host, rest}
+      {_absent_or_blank, rest} -> {nil, rest}
     end
   end
 
@@ -498,9 +537,9 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   defp rpc_nfs_bind_info(nfs_node) do
     host =
       case :rpc.call(nfs_node, Application, :get_env, [:neonfs_nfs, :bind_address]) do
-        {:badrpc, _} -> nfs_node_hostname(nfs_node)
-        nil -> nfs_node_hostname(nfs_node)
-        address when address in ["0.0.0.0", "::"] -> nfs_node_hostname(nfs_node)
+        {:badrpc, _} -> node_host(nfs_node)
+        nil -> node_host(nfs_node)
+        address when address in ["0.0.0.0", "::"] -> node_host(nfs_node)
         address -> address
       end
 
@@ -514,8 +553,8 @@ defmodule NeonFS.CLI.Handler.MountRouting do
     {host, port}
   end
 
-  defp nfs_node_hostname(nfs_node) do
-    nfs_node
+  defp node_host(node) do
+    node
     |> Atom.to_string()
     |> String.split("@")
     |> List.last()
