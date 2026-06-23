@@ -71,6 +71,7 @@ defmodule NeonFS.Core.DRSnapshot do
 
   @snapshot_root "/dr"
   @ca_files ["/tls/ca.crt", "/tls/serial", "/tls/crl.pem"]
+  @import_read_chunk 64 * 1024
 
   @indexes_to_capture [
     :chunks,
@@ -204,7 +205,159 @@ defmodule NeonFS.Core.DRSnapshot do
     end
   end
 
+  @doc """
+  Copy a snapshot off-cluster to `dest_dir` on the local filesystem
+  (#1367).
+
+  A DR snapshot normally lives only inside the `_system` volume's
+  `/dr/<id>/` directory, so a genuine bare-metal disaster — where the
+  cluster (and `_system` with it) is gone — leaves nothing for
+  `apply/1` to read. Exporting a copy to durable off-cluster storage is
+  what lets `import_snapshot/1` re-seed a freshly-bootstrapped cluster
+  before `apply/1` runs.
+
+  Streams each file (the per-index `.snapshot` files can scale with
+  cluster size) so the working set is bounded by chunk size, never by
+  file size. Lays the files out under `dest_dir` mirroring the in-volume
+  tree (`manifest.json`, `<index>.snapshot`, `ca/<file>`).
+
+  Returns `{:ok, %{id: id, dest: dest_dir, file_count: n}}`.
+  """
+  @spec export(String.t(), Path.t()) ::
+          {:ok, %{id: String.t(), dest: String.t(), file_count: non_neg_integer()}}
+          | {:error, term()}
+  def export(id, dest_dir) when is_binary(id) and is_binary(dest_dir) do
+    with {:ok, volume} <- get_system_volume(),
+         {:ok, snapshot} <- load_one(volume.id, id),
+         :ok <- File.mkdir_p(dest_dir) do
+      snapshot_dir = Path.join(@snapshot_root, id)
+      rels = ["manifest.json" | relative_file_paths(snapshot.manifest, snapshot_dir)]
+
+      case copy_each(rels, &export_one(volume.id, snapshot_dir, dest_dir, &1)) do
+        :ok -> {:ok, %{id: id, dest: dest_dir, file_count: length(rels)}}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  @doc """
+  Stage an off-cluster snapshot (produced by `export/2`) back into the
+  `_system` volume's `/dr/<id>/` directory so `apply/1` can consume it
+  (#1367).
+
+  Reads the manifest at `source_dir/manifest.json`, then streams every
+  listed file into the `_system` volume, verifying each against its
+  recorded SHA-256 so a corrupted transfer fails loudly rather than
+  seeding a bad snapshot. The id is taken from the manifest, so the
+  restored snapshot keeps its original timestamp.
+
+  Returns `{:ok, %{id: id, file_count: n}}`.
+  """
+  @spec import_snapshot(Path.t()) ::
+          {:ok, %{id: String.t(), file_count: non_neg_integer()}} | {:error, term()}
+  def import_snapshot(source_dir) when is_binary(source_dir) do
+    with {:ok, volume} <- get_system_volume(),
+         {:ok, manifest} <- read_local_manifest(source_dir),
+         {:ok, id} <- manifest_id(manifest) do
+      snapshot_dir = Path.join(@snapshot_root, id)
+      digests = Map.new(manifest.files, &{relative_to(&1.path, snapshot_dir), &1.sha256})
+      rels = ["manifest.json" | Map.keys(digests)]
+
+      case copy_each(rels, &import_one(volume.id, source_dir, snapshot_dir, &1, digests)) do
+        :ok -> {:ok, %{id: id, file_count: length(rels)}}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
   ## Private
+
+  defp copy_each(rels, fun) do
+    Enum.reduce_while(rels, :ok, fn rel, :ok ->
+      case fun.(rel) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # Stream one file out of the `_system` volume to `dest_dir/<rel>`.
+  defp export_one(volume_id, snapshot_dir, dest_dir, rel) do
+    src = Path.join(snapshot_dir, rel)
+    dest = Path.join(dest_dir, rel)
+
+    with :ok <- File.mkdir_p(Path.dirname(dest)),
+         {:ok, %{stream: stream}} <- ReadOperation.read_file_stream(volume_id, src),
+         {:ok, out} <- File.open(dest, [:write, :raw, :binary]) do
+      try do
+        Enum.each(stream, &IO.binwrite(out, &1))
+        :ok
+      rescue
+        e -> {:error, {:export_failed, rel, Exception.message(e)}}
+      after
+        File.close(out)
+      end
+    end
+  end
+
+  # Stream `source_dir/<rel>` into the `_system` volume at
+  # `/dr/<id>/<rel>`, verifying the SHA-256 recorded in the manifest.
+  # `manifest.json` itself carries no digest, so it's copied unverified.
+  defp import_one(volume_id, source_dir, snapshot_dir, rel, digests) do
+    src = Path.join(source_dir, rel)
+    target = Path.join(snapshot_dir, rel)
+
+    if File.regular?(src) do
+      {:ok, hasher} = Agent.start_link(fn -> :crypto.hash_init(:sha256) end)
+
+      try do
+        hashed =
+          src
+          |> File.stream!(@import_read_chunk)
+          |> Stream.map(fn chunk ->
+            Agent.update(hasher, &:crypto.hash_update(&1, chunk))
+            chunk
+          end)
+
+        with {:ok, _} <- WriteOperation.write_file_streamed(volume_id, target, hashed) do
+          actual = hasher |> Agent.get(&:crypto.hash_final/1) |> Base.encode16(case: :lower)
+          verify_digest(rel, actual, Map.get(digests, rel))
+        end
+      after
+        Agent.stop(hasher)
+      end
+    else
+      {:error, {:missing_source_file, rel}}
+    end
+  end
+
+  defp verify_digest(_rel, _actual, nil), do: :ok
+  defp verify_digest(_rel, same, same), do: :ok
+
+  defp verify_digest(rel, actual, expected),
+    do: {:error, {:digest_mismatch, rel, expected: expected, actual: actual}}
+
+  defp relative_file_paths(%{files: files}, snapshot_dir) do
+    Enum.map(files, &relative_to(&1.path, snapshot_dir))
+  end
+
+  defp relative_to(path, snapshot_dir) do
+    Path.relative_to(path, snapshot_dir)
+  end
+
+  defp read_local_manifest(source_dir) do
+    path = Path.join(source_dir, "manifest.json")
+
+    with {:ok, json} <- File.read(path),
+         {:ok, decoded} <- Jason.decode(json) do
+      {:ok, atomise_manifest(decoded)}
+    else
+      {:error, reason} -> {:error, {:manifest_unreadable, reason}}
+    end
+  end
+
+  defp manifest_id(%{created_at: id}) when is_binary(id) and id != "", do: {:ok, id}
+  defp manifest_id(_), do: {:error, :manifest_missing_id}
 
   @cluster_wide_indexes [
     :volumes,

@@ -105,6 +105,57 @@ defmodule NeonFS.CLI.Handler.DR do
     end
   end
 
+  @doc """
+  Export a DR snapshot off-cluster to `dest_dir` on the daemon's
+  filesystem (#1367) so it survives a bare-metal disaster.
+  """
+  @spec handle_dr_snapshot_export(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_dr_snapshot_export(id, dest_dir) when is_binary(id) and is_binary(dest_dir) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, summary} <- DRSnapshot.export(id, dest_dir) do
+      AuditLog.log_event(
+        event_type: :dr_snapshot_exported,
+        actor_uid: 0,
+        resource: id,
+        details: %{dest: summary.dest, file_count: summary.file_count}
+      )
+
+      {:ok, summary}
+    else
+      {:error, :not_found} ->
+        {:error, NotFound.exception(message: "DR snapshot '#{id}' not found")}
+
+      {:error, reason} ->
+        {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Stage an exported DR snapshot from `source_dir` back into the
+  `_system` volume (#1367) so `handle_dr_snapshot_apply/1` can consume
+  it on a freshly-bootstrapped cluster.
+  """
+  @spec handle_dr_snapshot_import(String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_dr_snapshot_import(source_dir) when is_binary(source_dir) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, summary} <- DRSnapshot.import_snapshot(source_dir) do
+      AuditLog.log_event(
+        event_type: :dr_snapshot_imported,
+        actor_uid: 0,
+        resource: summary.id,
+        details: %{source: source_dir, file_count: summary.file_count}
+      )
+
+      {:ok, summary}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
   # Private
 
   defp dr_snapshot_to_serialisable(%{id: id, path: path, manifest: manifest}) do
