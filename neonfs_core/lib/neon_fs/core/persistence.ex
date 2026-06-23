@@ -29,6 +29,7 @@ defmodule NeonFS.Core.Persistence do
   require Logger
 
   alias NeonFS.Cluster.State
+  alias NeonFS.Core.Blob.Native
 
   @type table_config :: %{
           ets_table: atom(),
@@ -358,7 +359,7 @@ defmodule NeonFS.Core.Persistence do
 
     case File.rename(temp_path, dets_path) do
       :ok ->
-        :ok
+        fsync_parent_dir(dets_path)
 
       {:error, reason} ->
         Logger.error("Failed to rename temp file to DETS",
@@ -370,6 +371,28 @@ defmodule NeonFS.Core.Persistence do
         # Clean up the temp file since rename failed
         File.rm(temp_path)
         {:error, {:rename_failed, reason}}
+    end
+  end
+
+  # POSIX leaves the directory entry created by `File.rename/2` unflushed until
+  # the directory itself is fsynced; a power loss before that sync can lose the
+  # renamed snapshot even though its bytes were `:dets.sync`'d (#1379). The BEAM
+  # refuses to open directories (`:eisdir`), so we route through the blob NIF.
+  @spec fsync_parent_dir(String.t()) :: :ok | {:error, term()}
+  defp fsync_parent_dir(dets_path) do
+    parent = Path.dirname(dets_path)
+
+    case Native.fsync_dir(parent) do
+      {:ok, {}} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to fsync snapshot directory",
+          dir: parent,
+          reason: inspect(reason)
+        )
+
+        {:error, {:fsync_dir_failed, reason}}
     end
   end
 
