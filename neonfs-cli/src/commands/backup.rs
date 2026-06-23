@@ -105,6 +105,12 @@ pub enum BackupCommand {
         /// Name of the new volume to create
         #[arg(long = "as")]
         new_name: String,
+
+        /// Restore into the existing volume named by `--as` instead of
+        /// creating a new one (#1368). The volume must already exist;
+        /// files overwrite by path. Used for full-cluster DR restore.
+        #[arg(long = "into-existing")]
+        into_existing: bool,
     },
 }
 
@@ -134,12 +140,14 @@ impl BackupCommand {
                 decrypt_with,
                 passphrase_file,
                 new_name,
+                into_existing,
             } => self.restore(
                 from,
                 chain,
                 *decrypt_with,
                 passphrase_file.as_deref(),
                 new_name,
+                *into_existing,
                 format,
             ),
         }
@@ -286,9 +294,10 @@ impl BackupCommand {
         decrypt_with: Option<KeySource>,
         passphrase_file: Option<&str>,
         new_name: &str,
+        into_existing: bool,
         format: OutputFormat,
     ) -> Result<()> {
-        let opts_term = restore_opts_term(decrypt_with, passphrase_file)?;
+        let opts_term = restore_opts_term(decrypt_with, passphrase_file, into_existing)?;
 
         let result = if chain.is_empty() {
             smol::block_on(async {
@@ -357,10 +366,12 @@ fn binary_val(s: &str) -> Term {
 }
 
 // Build the restore opts map (third RPC arg). Carries `passphrase`
-// when decrypting, otherwise an empty map (the handler defaults it).
+// when decrypting and `into_existing` when restoring into an existing
+// volume; otherwise an empty map (the handler defaults it).
 fn restore_opts_term(
     decrypt_with: Option<KeySource>,
     passphrase_file: Option<&str>,
+    into_existing: bool,
 ) -> Result<Term> {
     let mut entries = Vec::new();
     if decrypt_with.is_some() {
@@ -368,6 +379,12 @@ fn restore_opts_term(
         entries.push((
             Term::Atom(Atom::from("passphrase")),
             binary_val(&passphrase),
+        ));
+    }
+    if into_existing {
+        entries.push((
+            Term::Atom(Atom::from("into_existing")),
+            Term::Atom(Atom::from("true")),
         ));
     }
     Ok(Term::Map(Map {
@@ -584,13 +601,33 @@ mod tests {
                 decrypt_with,
                 passphrase_file,
                 new_name,
+                into_existing,
             } => {
                 assert_eq!(from, "/tmp/b.tar");
                 assert!(chain.is_empty());
                 assert!(decrypt_with.is_none());
                 assert!(passphrase_file.is_none());
                 assert_eq!(new_name, "restored-vol");
+                assert!(!into_existing);
             }
+            _ => panic!("expected Restore"),
+        }
+    }
+
+    #[test]
+    fn restore_into_existing_parses() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "restore",
+            "--from",
+            "/tmp/b.tar",
+            "--as",
+            "existing-vol",
+            "--into-existing",
+        ])
+        .unwrap();
+        match cli.command {
+            BackupCommand::Restore { into_existing, .. } => assert!(into_existing),
             _ => panic!("expected Restore"),
         }
     }

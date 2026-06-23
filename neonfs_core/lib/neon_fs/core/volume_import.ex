@@ -68,6 +68,12 @@ defmodule NeonFS.Core.VolumeImport do
       when the manifest carries an `encryption` envelope; checked
       before the volume is created, so a wrong passphrase writes
       nothing.
+    * `:into_existing` — when `true`, restore into the existing volume
+      named `new_volume_name` instead of creating a fresh one (#1368).
+      The volume record must already exist (else `{:error, :not_found}`).
+      Files overwrite by path; the target's other files are left in
+      place. Used by full-cluster DR restore, where the volume record is
+      reseeded from a DR snapshot before its content is restored.
   """
   @spec import_archive(Path.t(), binary(), keyword()) ::
           {:ok, import_summary()} | {:error, term()}
@@ -157,7 +163,7 @@ defmodule NeonFS.Core.VolumeImport do
   defp do_import(io, input_path, new_volume_name, opts) do
     with {:ok, manifest, io} <- read_manifest(io),
          {:ok, crypto} <- resolve_crypto(manifest, opts),
-         {:ok, volume} <- VolumeRegistry.create(new_volume_name, []),
+         {:ok, volume} <- resolve_target_volume(new_volume_name, opts),
          {:ok, counts} <- stream_files_into(io, volume, manifest_index(manifest), crypto) do
       with :ok <- check_manifest_counts(manifest, counts) do
         {:ok,
@@ -190,6 +196,22 @@ defmodule NeonFS.Core.VolumeImport do
   end
 
   defp resolve_crypto(_manifest, _opts), do: {:ok, nil}
+
+  # By default a fresh volume is created. With `into_existing: true` the
+  # archive is restored into the volume that already carries
+  # `new_volume_name` — the case full-cluster DR restore needs, where the
+  # `volumes` keyspace has already been reseeded from a DR snapshot so the
+  # record exists before its content is restored (#1368). Files overwrite
+  # by path; entries already in the target that the archive doesn't carry
+  # are left untouched (merge-by-path), which is a clean replace when the
+  # target is the freshly-bootstrapped, empty volume.
+  defp resolve_target_volume(name, opts) do
+    if Keyword.get(opts, :into_existing, false) do
+      VolumeRegistry.get_by_name(name)
+    else
+      VolumeRegistry.create(name, [])
+    end
+  end
 
   ## Manifest
 
