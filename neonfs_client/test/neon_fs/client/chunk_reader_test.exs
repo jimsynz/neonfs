@@ -799,4 +799,36 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert_raise ChunkReader.StreamError, fn -> Enum.to_list(stream) end
     end
   end
+
+  describe "chunk cache (#1355)" do
+    setup do
+      start_supervised!({NeonFS.Client.ChunkCache, max_bytes: 1_000_000})
+      :ok
+    end
+
+    test "a second read of the same chunk is served from cache, not re-fetched" do
+      bytes = "cacheable chunk bytes"
+
+      refs = [
+        ref(
+          content: bytes,
+          original_size: byte_size(bytes),
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: byte_size(bytes)
+        )
+      ]
+
+      # read_file_refs is metadata (per read); the chunk bytes data_call
+      # must fire only on the first read — the second hits the cache.
+      stub(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: byte_size(bytes), chunks: refs}}
+      end)
+
+      expect(Router, :data_call, 1, fn _node, :get_chunk, _args, _opts -> {:ok, bytes} end)
+
+      assert {:ok, ^bytes} = ChunkReader.read_file("vol", "/cached.txt", [])
+      assert {:ok, ^bytes} = ChunkReader.read_file("vol", "/cached.txt", [])
+    end
+  end
 end

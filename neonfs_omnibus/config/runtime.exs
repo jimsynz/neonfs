@@ -29,6 +29,11 @@ if config_env() == :prod do
     config :neonfs_client, :data_transfer, advertise: advertise
   end
 
+  # Per-node whole-chunk read cache cap (#1355). Bounds total cached bytes,
+  # not entry count, so the working set never scales with file size.
+  config :neonfs_client, :chunk_cache,
+    max_bytes: String.to_integer(System.get_env("NEONFS_CHUNK_CACHE_MAX_BYTES", "134217728"))
+
   # Core configuration
   #
   # Fresh installs come up with no drives configured (#754). Operators
