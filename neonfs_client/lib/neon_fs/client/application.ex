@@ -88,7 +88,10 @@ defmodule NeonFS.Client.Application do
 
       # Transport pool management
       NeonFS.Transport.PoolSupervisor,
-      NeonFS.Transport.PoolManager
+      NeonFS.Transport.PoolManager,
+
+      # Per-node whole-chunk read cache for the data-plane read path (#1355)
+      NeonFS.Client.ChunkCache
     ]
   end
 end

@@ -43,6 +43,7 @@ defmodule NeonFS.Client.ChunkReader do
 
   require Logger
 
+  alias NeonFS.Client.ChunkCache
   alias NeonFS.Client.ChunkReader.StreamError
   alias NeonFS.Client.Router
 
@@ -134,20 +135,20 @@ defmodule NeonFS.Client.ChunkReader do
     if Enum.any?(chunks, &needs_server_processing?/1) do
       fallback_read(volume_name, path, opts)
     else
-      case assemble(chunks, file_size, opts) do
+      case assemble(chunks, file_size, volume_name, opts) do
         {:error, :no_data_endpoint} -> fallback_read(volume_name, path, opts)
         other -> other
       end
     end
   end
 
-  defp assemble(chunks, _file_size, opts) do
+  defp assemble(chunks, _file_size, volume_name, opts) do
     timeout = Keyword.get(opts, :timeout, @default_chunk_timeout)
     exclude = Keyword.get(opts, :exclude_nodes, [])
 
     chunks
     |> Enum.reduce_while({:ok, []}, fn ref, {:ok, acc} ->
-      case fetch_chunk_bytes(ref, exclude, timeout) do
+      case fetch_chunk_bytes(volume_name, ref, exclude, timeout) do
         {:ok, bytes} ->
           sliced = binary_part(bytes, ref.read_start, ref.read_length)
           {:cont, {:ok, [sliced | acc]}}
@@ -162,24 +163,30 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp fetch_chunk_bytes(ref, exclude, timeout) do
-    ordered =
-      ref.locations
-      |> Enum.reject(&(&1.node in exclude))
-      |> prefer_local()
+  defp fetch_chunk_bytes(volume_name, ref, exclude, timeout) do
+    case ChunkCache.get({volume_name, ref.hash}) do
+      {:ok, bytes} ->
+        {:ok, bytes}
 
-    case ordered do
-      [] ->
-        {:error, :no_available_locations}
+      :miss ->
+        ordered =
+          ref.locations
+          |> Enum.reject(&(&1.node in exclude))
+          |> prefer_local()
 
-      locations ->
-        try_locations(locations, ref, timeout, :no_locations_tried)
+        case ordered do
+          [] ->
+            {:error, :no_available_locations}
+
+          locations ->
+            try_locations(volume_name, locations, ref, timeout, :no_locations_tried)
+        end
     end
   end
 
-  defp try_locations([], _ref, _timeout, last_error), do: {:error, last_error}
+  defp try_locations(_volume_name, [], _ref, _timeout, last_error), do: {:error, last_error}
 
-  defp try_locations([loc | rest], ref, timeout, _last_error) do
+  defp try_locations(volume_name, [loc | rest], ref, timeout, _last_error) do
     tier = tier_to_string(Map.get(loc, :tier, :hot))
     drive_id = Map.get(loc, :drive_id, "default")
 
@@ -187,7 +194,7 @@ defmodule NeonFS.Client.ChunkReader do
 
     case Router.data_call(loc.node, :get_chunk, args, timeout: timeout) do
       {:ok, bytes} ->
-        verify_and_accept(bytes, loc, ref, rest, timeout)
+        verify_and_accept(volume_name, bytes, loc, ref, rest, timeout)
 
       {:error, reason} ->
         Logger.debug("Data-plane chunk fetch failed, trying next location",
@@ -195,7 +202,7 @@ defmodule NeonFS.Client.ChunkReader do
           reason: inspect(reason)
         )
 
-        try_locations(rest, ref, timeout, reason)
+        try_locations(volume_name, rest, ref, timeout, reason)
     end
   end
 
@@ -208,8 +215,9 @@ defmodule NeonFS.Client.ChunkReader do
   # fetched range-decoded via the core RPC path, not whole, so they can't
   # be verified against the whole-chunk hash here — that's core/scrub's
   # responsibility.
-  defp verify_and_accept(bytes, loc, ref, rest, timeout) do
+  defp verify_and_accept(volume_name, bytes, loc, ref, rest, timeout) do
     if :crypto.hash(:sha256, bytes) == ref.hash do
+      ChunkCache.put({volume_name, ref.hash}, bytes)
       {:ok, bytes}
     else
       :telemetry.execute(
@@ -223,7 +231,7 @@ defmodule NeonFS.Client.ChunkReader do
         chunk_hash: Base.encode16(ref.hash, case: :lower)
       )
 
-      try_locations(rest, ref, timeout, {:chunk_verify_failed, ref.hash})
+      try_locations(volume_name, rest, ref, timeout, {:chunk_verify_failed, ref.hash})
     end
   end
 
@@ -270,7 +278,7 @@ defmodule NeonFS.Client.ChunkReader do
     if needs_server_processing?(ref) do
       stream_fetch_via_core(ref, volume_name, path)
     else
-      case fetch_chunk_bytes(ref, exclude, timeout) do
+      case fetch_chunk_bytes(volume_name, ref, exclude, timeout) do
         {:ok, bytes} ->
           {:ok, binary_part(bytes, ref.read_start, ref.read_length)}
 
