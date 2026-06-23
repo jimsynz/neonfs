@@ -287,15 +287,15 @@ defmodule NeonFS.Core.DRSnapshot do
     dest = Path.join(dest_dir, rel)
 
     with :ok <- File.mkdir_p(Path.dirname(dest)),
-         {:ok, %{stream: stream}} <- ReadOperation.read_file_stream(volume_id, src) do
+         {:ok, %{stream: stream}} <- ReadOperation.read_file_stream(volume_id, src),
+         {:ok, out} <- File.open(dest, [:write, :raw, :binary]) do
       try do
-        stream
-        |> Stream.into(File.stream!(dest, [:write, :binary]))
-        |> Stream.run()
-
+        Enum.each(stream, &IO.binwrite(out, &1))
         :ok
       rescue
         e -> {:error, {:export_failed, rel, Exception.message(e)}}
+      after
+        File.close(out)
       end
     end
   end
@@ -313,7 +313,7 @@ defmodule NeonFS.Core.DRSnapshot do
       try do
         hashed =
           src
-          |> File.stream!([:read, :binary], @import_read_chunk)
+          |> File.stream!(@import_read_chunk)
           |> Stream.map(fn chunk ->
             Agent.update(hasher, &:crypto.hash_update(&1, chunk))
             chunk
