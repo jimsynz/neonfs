@@ -652,7 +652,10 @@ impl BlobStore {
 
     /// Writes data to a file atomically via a temp file, with cleanup on failure.
     ///
-    /// Creates a temp file, writes data, syncs, then renames to the final path.
+    /// Creates a temp file, writes data, syncs, renames to the final path, then
+    /// fsyncs the parent directory so the rename (the directory entry) is durable
+    /// before returning. POSIX does not guarantee a rename survives a crash until
+    /// the directory itself is synced.
     /// If any step fails, the temp file is removed before returning the error.
     fn atomic_write(&self, final_path: &Path, data: &[u8]) -> Result<(), StoreError> {
         let temp_path = self.temp_path(final_path);
@@ -667,6 +670,7 @@ impl BlobStore {
             file.sync_all()
                 .map_err(|e| StoreError::io_error(&temp_path, e))?;
             fs::rename(&temp_path, final_path).map_err(|e| StoreError::io_error(final_path, e))?;
+            fsync_parent_dir(final_path)?;
             Ok(())
         })();
 
@@ -687,6 +691,17 @@ impl BlobStore {
         );
         final_path.with_file_name(temp_name)
     }
+}
+
+/// Open the parent directory of `path` and fsync it so a preceding rename
+/// into that directory is durable. POSIX leaves the directory entry created
+/// by `rename` unflushed until the directory itself is synced; a power loss
+/// before that sync can lose the entry even though the file's bytes were
+/// flushed with `sync_all`.
+fn fsync_parent_dir(path: &Path) -> Result<(), StoreError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = File::open(parent).map_err(|e| StoreError::io_error(parent, e))?;
+    dir.sync_all().map_err(|e| StoreError::io_error(parent, e))
 }
 
 /// Remove `path`, then walk up the parent chain removing each empty
@@ -1888,5 +1903,22 @@ mod tests {
             temp_files.is_empty(),
             "No temp files should remain after successful write"
         );
+    }
+
+    #[test]
+    fn test_fsync_parent_dir_syncs_existing_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("entry");
+        fs::write(&file_path, b"data").unwrap();
+
+        assert!(fsync_parent_dir(&file_path).is_ok());
+    }
+
+    #[test]
+    fn test_fsync_parent_dir_errors_on_missing_parent() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("missing_dir").join("entry");
+
+        assert!(fsync_parent_dir(&file_path).is_err());
     }
 }

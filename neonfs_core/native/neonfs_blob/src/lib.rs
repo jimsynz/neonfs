@@ -905,6 +905,17 @@ fn filesystem_info(path: String) -> Result<(u64, u64, u64), String> {
     Ok((total_bytes, available_bytes, used_bytes))
 }
 
+/// Open `path` (a directory) and fsync it so directory-entry changes —
+/// such as a rename into it — are durable. The BEAM's `:file.open/2`
+/// refuses directories with `:eisdir`, so callers that need to flush a
+/// directory after an atomic rename route through this NIF.
+#[rustler::nif(schedule = "DirtyIo")]
+fn fsync_dir(path: String) -> Result<(), String> {
+    let dir = std::fs::File::open(&path).map_err(|e| format!("open '{}' failed: {}", path, e))?;
+    dir.sync_all()
+        .map_err(|e| format!("fsync '{}' failed: {}", path, e))
+}
+
 /// Look up a key in an index tree (#781) backed by the volume's
 /// BlobStore (#813). `root_hash` is a 32-byte chunk hash, or an
 /// empty binary for a tree that has never been written. `tier` is

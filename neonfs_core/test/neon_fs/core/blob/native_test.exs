@@ -319,6 +319,27 @@ defmodule NeonFS.Core.Blob.NativeTest do
     end
   end
 
+  describe "fsync_dir/1" do
+    @tag :tmp_dir
+    test "fsyncs an existing directory", %{tmp_dir: tmp_dir} do
+      assert {:ok, {}} = Native.fsync_dir(tmp_dir)
+    end
+
+    @tag :tmp_dir
+    test "fsyncs a directory after a rename into it", %{tmp_dir: tmp_dir} do
+      temp = Path.join(tmp_dir, "entry.tmp")
+      final = Path.join(tmp_dir, "entry")
+      File.write!(temp, "data")
+      :ok = File.rename(temp, final)
+
+      assert {:ok, {}} = Native.fsync_dir(tmp_dir)
+    end
+
+    test "returns error for a nonexistent directory" do
+      assert {:error, _reason} = Native.fsync_dir("/nonexistent/neonfs/dir")
+    end
+  end
+
   describe "resource cleanup" do
     @tag :tmp_dir
     test "store can be garbage collected", %{tmp_dir: tmp_dir} do

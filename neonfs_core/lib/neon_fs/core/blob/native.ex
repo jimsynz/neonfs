@@ -677,6 +677,20 @@ defmodule NeonFS.Core.Blob.Native do
           {:ok, {non_neg_integer(), non_neg_integer(), non_neg_integer()}} | {:error, String.t()}
   def filesystem_info(_path), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc """
+  Opens `path` (a directory) and fsyncs it so directory-entry changes —
+  such as a rename into it — are durable on disk.
+
+  The BEAM's `:file.open/2` refuses directories with `:eisdir`, so this NIF
+  is the path for flushing a directory after an atomic write-then-rename.
+
+  ## Returns
+    - `{:ok, {}}` - The directory was fsynced
+    - `{:error, reason}` - If the directory can't be opened or fsynced
+  """
+  @spec fsync_dir(String.t()) :: {:ok, {}} | {:error, String.t()}
+  def fsync_dir(_path), do: :erlang.nif_error(:nif_not_loaded)
+
   # Metadata namespace operations
 
   @doc """
