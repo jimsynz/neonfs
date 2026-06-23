@@ -57,6 +57,25 @@ pub enum DrSnapshotCommand {
         /// Snapshot ID (the timestamp directory under `/dr`)
         id: String,
     },
+
+    /// Export a snapshot off-cluster to a directory on the daemon's
+    /// filesystem (#1367) so it survives a bare-metal disaster — the
+    /// in-cluster copy is destroyed with `_system`.
+    Export {
+        /// Snapshot ID (the timestamp directory under `/dr`)
+        id: String,
+
+        /// Destination directory on the daemon's filesystem
+        #[arg(long)]
+        out: String,
+    },
+
+    /// Stage an exported snapshot back into a freshly-bootstrapped
+    /// cluster's `_system` volume (#1367), ready for `apply`.
+    Import {
+        /// Source directory produced by `dr snapshot export`
+        source: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -176,7 +195,95 @@ impl DrSnapshotCommand {
             DrSnapshotCommand::List => Self::list(format),
             DrSnapshotCommand::Show { id } => Self::show(id, format),
             DrSnapshotCommand::Apply { id } => Self::apply(id, format),
+            DrSnapshotCommand::Export { id, out } => Self::export(id, out, format),
+            DrSnapshotCommand::Import { source } => Self::import(source, format),
         }
+    }
+
+    fn export(id: &str, out: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_dr_snapshot_export",
+                vec![binary(id), binary(out)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let map = term_to_map(&unwrap_ok_tuple(result)?)?;
+        let dest = map
+            .get("dest")
+            .map(term_to_string)
+            .transpose()?
+            .unwrap_or_default();
+        let files = map
+            .get("file_count")
+            .map(term_to_u64)
+            .transpose()?
+            .unwrap_or(0);
+
+        match format {
+            OutputFormat::Json => {
+                println!(
+                    "{{\"id\":\"{}\",\"dest\":\"{}\",\"file_count\":{}}}",
+                    id, dest, files
+                )
+            }
+            OutputFormat::Table => {
+                println!("Exported snapshot {}", id);
+                println!("  Destination: {}", dest);
+                println!("  Files:       {}", files);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn import(source: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_dr_snapshot_import",
+                vec![binary(source)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let map = term_to_map(&unwrap_ok_tuple(result)?)?;
+        let id = map
+            .get("id")
+            .map(term_to_string)
+            .transpose()?
+            .unwrap_or_default();
+        let files = map
+            .get("file_count")
+            .map(term_to_u64)
+            .transpose()?
+            .unwrap_or(0);
+
+        match format {
+            OutputFormat::Json => {
+                println!("{{\"id\":\"{}\",\"file_count\":{}}}", id, files)
+            }
+            OutputFormat::Table => {
+                println!("Imported snapshot {}", id);
+                println!("  Files: {}", files);
+                println!();
+                println!("Apply it with: neonfs dr snapshot apply {}", id);
+            }
+        }
+
+        Ok(())
     }
 
     fn apply(id: &str, format: OutputFormat) -> Result<()> {
@@ -356,6 +463,12 @@ impl DrSnapshotCommand {
     }
 }
 
+fn binary(s: &str) -> Term {
+    Term::Binary(Binary {
+        bytes: s.as_bytes().to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +520,30 @@ mod tests {
     fn apply_requires_id() {
         let cli = TestCli::try_parse_from(["test", "snapshot", "apply"]);
         assert!(cli.is_err());
+    }
+
+    #[test]
+    fn parses_snapshot_export() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "snapshot",
+            "export",
+            "20260425T120000Z",
+            "--out",
+            "/tmp/dr",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn export_requires_out() {
+        let cli = TestCli::try_parse_from(["test", "snapshot", "export", "20260425T120000Z"]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn parses_snapshot_import() {
+        let cli = TestCli::try_parse_from(["test", "snapshot", "import", "/tmp/dr"]);
+        assert!(cli.is_ok());
     }
 }

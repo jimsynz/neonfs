@@ -180,6 +180,92 @@ defmodule NeonFS.Core.DRSnapshotTest do
     end
   end
 
+  describe "export/2 and import_snapshot/1 (#1367)" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+
+      master_key = :crypto.strong_rand_bytes(32) |> Base.encode64()
+      write_cluster_json(tmp_dir, master_key)
+
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+
+      {:ok, _vol} = VolumeRegistry.create_system_volume()
+
+      on_exit(fn -> cleanup_test_dirs() end)
+      :ok
+    end
+
+    test "round-trips a snapshot off-cluster and stages it back into _system",
+         %{tmp_dir: tmp_dir} do
+      :ok = SystemVolume.write("/tls/ca.crt", "fake-ca-cert-pem")
+
+      state = %{
+        version: 7,
+        chunks: %{"c1" => %{size: 8}},
+        files: %{"f1" => %{path: "/a", size: 3}},
+        stripes: %{},
+        volumes: %{"v1" => %{name: "data"}},
+        services: %{},
+        segment_assignments: %{},
+        encryption_keys: %{},
+        volume_acls: %{},
+        credentials: %{},
+        escalations: %{},
+        kv: %{}
+      }
+
+      id = "20260623T010101Z"
+      {:ok, _} = DRSnapshot.create(state: state, timestamp: id)
+
+      dest = Path.join(tmp_dir, "export-out")
+      assert {:ok, %{id: ^id, dest: ^dest, file_count: fc}} = DRSnapshot.export(id, dest)
+      assert fc > 0
+
+      # Exported tree on local disk mirrors the in-volume layout.
+      assert File.regular?(Path.join(dest, "manifest.json"))
+      assert File.regular?(Path.join(dest, "files.snapshot"))
+      assert File.regular?(Path.join(dest, "ca/ca.crt"))
+
+      # Wipe the in-volume snapshot so import genuinely recreates it
+      # (stands in for the post-disaster empty _system volume).
+      {:ok, snap} = DRSnapshot.get(id)
+      for f <- snap.manifest.files, do: SystemVolume.delete(f.path)
+      SystemVolume.delete("/dr/#{id}/manifest.json")
+      assert {:error, :not_found} = DRSnapshot.get(id)
+
+      # Import from the off-cluster copy reseeds it, ready for apply/1.
+      assert {:ok, %{id: ^id}} = DRSnapshot.import_snapshot(dest)
+      assert {:ok, restored} = DRSnapshot.get(id)
+      assert restored.manifest.state_version == 7
+
+      {:ok, content} = SystemVolume.read("/dr/#{id}/files.snapshot")
+      assert {:ok, [{"f1", %{path: "/a", size: 3}}]} = DRSnapshot.deserialise_index(content)
+    end
+
+    test "rejects an import whose file digest doesn't match the manifest",
+         %{tmp_dir: tmp_dir} do
+      state = %{version: 1, chunks: %{"c1" => %{size: 8}}, files: %{}, stripes: %{}, volumes: %{}}
+      id = "20260623T020202Z"
+      {:ok, _} = DRSnapshot.create(state: state, timestamp: id)
+
+      dest = Path.join(tmp_dir, "tamper-out")
+      {:ok, _} = DRSnapshot.export(id, dest)
+
+      # Corrupt a digest-verified file before staging it back.
+      File.write!(Path.join(dest, "chunks.snapshot"), "tampered")
+
+      assert {:error, {:digest_mismatch, "chunks.snapshot", _}} =
+               DRSnapshot.import_snapshot(dest)
+    end
+  end
+
   describe "create/1 against a real Ra state machine" do
     @describetag :integration_ra
 

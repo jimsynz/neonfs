@@ -1249,4 +1249,18 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_dr_snapshot_apply(String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_apply(id), to: DRHandler
+
+  @doc """
+  Exports a DR snapshot off-cluster to a filesystem path so it survives
+  a bare-metal disaster. Used by `neonfs dr snapshot export` (#1367).
+  """
+  @spec handle_dr_snapshot_export(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_dr_snapshot_export(id, dest_dir), to: DRHandler
+
+  @doc """
+  Stages an exported DR snapshot back into the `_system` volume. Used by
+  `neonfs dr snapshot import` (#1367).
+  """
+  @spec handle_dr_snapshot_import(String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_dr_snapshot_import(source_dir), to: DRHandler
 end
