@@ -26,9 +26,14 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
     retrievable via `NeonFS.Containerd.ContentServer.info/2` on
     the containerd peer.
 
+  A second test drives the full `ctr image pull` (which unpacks each
+  layer via the snapshotter, reading the blobs back through the proxy)
+  and captures the `ChunkReader` read-amplification telemetry (#1351)
+  off the containerd peer.
+
   ## What's deliberately NOT tested here
 
-  `ctr run --rm <image> echo hi` — needs a snapshotter, parked
+  `ctr run --rm <image> echo hi` — needs a container runtime, parked
   under #740. The skipped sub-test below has the assertion frame
   but is `@tag skip:` until that issue lands.
   """
@@ -38,7 +43,9 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
   alias Containerd.Services.Content.V1.{InfoRequest, InfoResponse}
   alias NeonFS.Containerd.ContentServer
   alias NeonFS.Integration.ContainerdDaemon
-  alias NeonFS.TestSupport.{ClusterCase, PeerCluster}
+  alias NeonFS.TestSupport.{ClusterCase, PeerCluster, TelemetryForwarder}
+
+  @chunk_fetched_event [:neonfs, :client, :chunk_reader, :chunk_fetched]
 
   @moduletag :requires_containerd
   @moduletag :requires_root
@@ -95,7 +102,63 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
       end
     end
 
-    @tag skip: "snapshotter integration parked under #740"
+    test "ctr image pull unpacks every layer and read amplification is observable (#1351)" do
+      cluster = start_cluster()
+      daemon = start_daemon(cluster)
+
+      # Forward node2's ChunkReader data-plane fetch telemetry back here.
+      # The unpack reads each layer blob through the proxy on node2, so the
+      # read-amplification pathology (#1350) shows up as these events.
+      tel_ref = make_ref()
+      test_pid = self()
+
+      :ok =
+        PeerCluster.rpc(cluster, :node2, TelemetryForwarder, :attach, [
+          test_pid,
+          tel_ref,
+          @chunk_fetched_event
+        ])
+
+      on_exit(fn ->
+        PeerCluster.rpc(cluster, :node2, TelemetryForwarder, :detach, [tel_ref])
+      end)
+
+      # `ctr image pull` (unlike `ctr content fetch`) unpacks each layer via
+      # the snapshotter, reading the blobs back through neonfs_containerd's
+      # proxy — exercising the `ChunkReader` read path under test.
+      {pull_out, pull_code} =
+        ContainerdDaemon.ctr(daemon, "test", ["image", "pull", "--plain-http", @image_ref])
+
+      assert pull_code == 0,
+             "ctr image pull (with unpack) failed (#{pull_code}):\n#{pull_out}"
+
+      # Every layer still lands in the dedicated volume.
+      for digest <- layer_digests_from_registry() do
+        assert %InfoResponse{info: %{digest: ^digest, size: size}} =
+                 PeerCluster.rpc(cluster, :node2, ContentServer, :info, [
+                   struct(InfoRequest, digest: digest),
+                   nil
+                 ])
+
+        assert size > 0, "layer #{digest} reported zero size"
+      end
+
+      fetches = drain_chunk_fetches(tel_ref)
+
+      assert fetches != [],
+             "expected ChunkReader data-plane fetches during unpack, observed none"
+
+      requested = Enum.sum(Enum.map(fetches, & &1.read_length))
+      fetched = Enum.sum(Enum.map(fetches, & &1.chunk_size))
+      amplification = if requested > 0, do: Float.round(fetched / requested, 2), else: 0.0
+
+      IO.puts(
+        "\n[#1351] containerd unpack read amplification: #{length(fetches)} data-plane " <>
+          "fetches, #{fetched} B fetched for #{requested} B returned (#{amplification}x)\n"
+      )
+    end
+
+    @tag skip: "container runtime integration parked under #740"
     test "ctr run starts the container after the pull" do
       cluster = start_cluster()
       daemon = start_daemon(cluster)
@@ -156,6 +219,19 @@ defmodule NeonFS.Integration.ContainerdImagePullTest do
     {:ok, daemon} = ContainerdDaemon.start(proxy_socket: socket_path)
     on_exit(fn -> ContainerdDaemon.stop(daemon) end)
     daemon
+  end
+
+  # Collect every forwarded `chunk_fetched` measurement already in the
+  # mailbox. The pull blocks for seconds while node2 emits these, so by the
+  # time it returns the (ordered, in-flight) dist messages have arrived — a
+  # zero-timeout drain is enough and avoids an arbitrary sleep.
+  defp drain_chunk_fetches(ref) do
+    receive do
+      {:telemetry_forwarded, ^ref, @chunk_fetched_event, measurements, _metadata} ->
+        [measurements | drain_chunk_fetches(ref)]
+    after
+      0 -> []
+    end
   end
 
   defp layer_digests_from_registry do

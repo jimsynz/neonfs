@@ -39,6 +39,19 @@ defmodule NeonFS.Client.ChunkReader do
   configured to that peer), the chunk is fetched via the per-chunk core
   RPC fallback so that callers on nodes without a data-plane pool still
   get correct results. All other data-plane errors propagate.
+
+  ## Telemetry
+
+  Each successful whole-chunk data-plane fetch emits
+  `[:neonfs, :client, :chunk_reader, :chunk_fetched]` with measurements
+  `%{read_length, chunk_size, duration}` and metadata
+  `%{volume, node, hash, tier}`. `read_length` is the bytes the caller
+  asked for from this chunk and `chunk_size` is the whole-chunk bytes
+  pulled over the data plane, so `chunk_size / read_length` is the
+  read-amplification factor and the event count is the data-plane RPC
+  count — the signal behind the small-window large-image-pull
+  pathology (#1350). `duration` is in `:native` time units. Cache hits
+  emit nothing: they cost no data-plane fetch.
   """
 
   require Logger
@@ -192,8 +205,11 @@ defmodule NeonFS.Client.ChunkReader do
 
     args = [hash: ref.hash, volume_id: drive_id, tier: tier]
 
+    start = System.monotonic_time()
+
     case Router.data_call(loc.node, :get_chunk, args, timeout: timeout) do
       {:ok, bytes} ->
+        emit_chunk_fetched(volume_name, ref, bytes, loc, tier, start)
         verify_and_accept(volume_name, bytes, loc, ref, rest, timeout)
 
       {:error, reason} ->
@@ -233,6 +249,21 @@ defmodule NeonFS.Client.ChunkReader do
 
       try_locations(volume_name, rest, ref, timeout, {:chunk_verify_failed, ref.hash})
     end
+  end
+
+  # Whole chunk pulled over the data plane but only `read_length` bytes are
+  # handed back: `chunk_size / read_length` is the amplification, the event
+  # count is the data-plane RPC count (#1350/#1351).
+  defp emit_chunk_fetched(volume_name, ref, bytes, loc, tier, start) do
+    :telemetry.execute(
+      [:neonfs, :client, :chunk_reader, :chunk_fetched],
+      %{
+        read_length: ref.read_length,
+        chunk_size: byte_size(bytes),
+        duration: System.monotonic_time() - start
+      },
+      %{volume: volume_name, node: loc.node, hash: ref.hash, tier: tier}
+    )
   end
 
   defp prefer_local(locations) do

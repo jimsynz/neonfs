@@ -800,6 +800,74 @@ defmodule NeonFS.Client.ChunkReaderTest do
     end
   end
 
+  describe "chunk_fetched telemetry (#1351)" do
+    test "emits read_length, whole-chunk size, timing, and chunk hash per data-plane fetch" do
+      chunk = String.duplicate("Z", 64)
+
+      refs = [
+        ref(content: chunk, original_size: 64, chunk_offset: 0, read_start: 8, read_length: 4)
+      ]
+
+      hash = Enum.at(refs, 0).hash
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: 64, chunks: refs}}
+      end)
+
+      expect(Router, :data_call, fn :node1@host, :get_chunk, _args, _opts -> {:ok, chunk} end)
+
+      ref_tel =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :client, :chunk_reader, :chunk_fetched]
+        ])
+
+      assert {:ok, "ZZZZ"} = ChunkReader.read_file("vol", "/amplified.txt")
+
+      assert_received {[:neonfs, :client, :chunk_reader, :chunk_fetched], ^ref_tel, measurements,
+                       metadata}
+
+      assert measurements.read_length == 4
+      assert measurements.chunk_size == 64
+      assert is_integer(measurements.duration)
+      assert metadata.hash == hash
+      assert metadata.node == :node1@host
+      assert metadata.volume == "vol"
+      assert metadata.tier == "hot"
+    end
+
+    test "a cache hit emits no chunk_fetched event" do
+      start_supervised!({NeonFS.Client.ChunkCache, max_bytes: 1_000_000})
+      bytes = "cached, not refetched"
+
+      refs = [
+        ref(
+          content: bytes,
+          original_size: byte_size(bytes),
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: byte_size(bytes)
+        )
+      ]
+
+      stub(Router, :call, fn NeonFS.Core, :read_file_refs, _ ->
+        {:ok, %{file_size: byte_size(bytes), chunks: refs}}
+      end)
+
+      expect(Router, :data_call, 1, fn _node, :get_chunk, _args, _opts -> {:ok, bytes} end)
+
+      ref_tel =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :client, :chunk_reader, :chunk_fetched]
+        ])
+
+      assert {:ok, ^bytes} = ChunkReader.read_file("vol", "/cached.txt", [])
+      assert_received {[:neonfs, :client, :chunk_reader, :chunk_fetched], ^ref_tel, _, _}
+
+      assert {:ok, ^bytes} = ChunkReader.read_file("vol", "/cached.txt", [])
+      refute_received {[:neonfs, :client, :chunk_reader, :chunk_fetched], ^ref_tel, _, _}
+    end
+  end
+
   describe "chunk cache (#1355)" do
     setup do
       start_supervised!({NeonFS.Client.ChunkCache, max_bytes: 1_000_000})
