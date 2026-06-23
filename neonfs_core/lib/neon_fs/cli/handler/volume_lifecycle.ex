@@ -273,6 +273,8 @@ defmodule NeonFS.CLI.Handler.VolumeLifecycle do
     Enum.flat_map(opts, fn
       {"passphrase", p} when is_binary(p) -> [passphrase: p]
       {:passphrase, p} when is_binary(p) -> [passphrase: p]
+      {"into_existing", true} -> [into_existing: true]
+      {:into_existing, true} -> [into_existing: true]
       _ -> []
     end)
   end

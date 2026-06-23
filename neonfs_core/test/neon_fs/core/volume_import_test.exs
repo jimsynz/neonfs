@@ -255,6 +255,59 @@ defmodule NeonFS.Core.VolumeImportTest do
     end
   end
 
+  describe "import_archive/3 — into_existing (#1368)" do
+    test "restores content into a pre-existing volume instead of creating one",
+         %{tmp_dir: tmp_dir} do
+      {:ok, src} = VolumeRegistry.create("ie-src", [])
+      {:ok, _} = WriteOperation.write_file_streamed(src.id, "/a.txt", ["aaa"])
+      {:ok, _} = WriteOperation.write_file_streamed(src.id, "/b.txt", ["bbb"])
+
+      tar = Path.join(tmp_dir, "ie.tar")
+      assert {:ok, _} = VolumeExport.export(src.name, tar)
+
+      # Pre-create the destination — stands in for DR snapshot apply
+      # having reseeded the volume record before its content is restored.
+      {:ok, dst} = VolumeRegistry.create("ie-dst", [])
+
+      assert {:ok, summary} = VolumeImport.import_archive(tar, "ie-dst", into_existing: true)
+      assert summary.volume_id == dst.id
+      assert summary.volume_name == "ie-dst"
+      assert summary.file_count == 2
+
+      {:ok, "aaa"} = read_file("ie-dst", "/a.txt")
+      {:ok, "bbb"} = read_file("ie-dst", "/b.txt")
+    end
+
+    test "errors when the into_existing target volume is absent", %{tmp_dir: tmp_dir} do
+      {:ok, src} = VolumeRegistry.create("ie-missing-src", [])
+      {:ok, _} = WriteOperation.write_file_streamed(src.id, "/x", ["x"])
+
+      tar = Path.join(tmp_dir, "ie-missing.tar")
+      assert {:ok, _} = VolumeExport.export(src.name, tar)
+
+      assert {:error, :not_found} =
+               VolumeImport.import_archive(tar, "no-such-volume", into_existing: true)
+    end
+
+    test "overwrites by path and leaves the target's other files in place",
+         %{tmp_dir: tmp_dir} do
+      {:ok, src} = VolumeRegistry.create("ie-merge-src", [])
+      {:ok, _} = WriteOperation.write_file_streamed(src.id, "/shared.txt", ["from-archive"])
+
+      tar = Path.join(tmp_dir, "ie-merge.tar")
+      assert {:ok, _} = VolumeExport.export(src.name, tar)
+
+      {:ok, dst} = VolumeRegistry.create("ie-merge-dst", [])
+      {:ok, _} = WriteOperation.write_file_streamed(dst.id, "/shared.txt", ["pre-existing"])
+      {:ok, _} = WriteOperation.write_file_streamed(dst.id, "/kept.txt", ["kept"])
+
+      assert {:ok, _} = VolumeImport.import_archive(tar, "ie-merge-dst", into_existing: true)
+
+      {:ok, "from-archive"} = read_file("ie-merge-dst", "/shared.txt")
+      {:ok, "kept"} = read_file("ie-merge-dst", "/kept.txt")
+    end
+  end
+
   defp read_file(volume_name, path) do
     {:ok, %{stream: stream}} = Core.read_file_stream(volume_name, path)
     {:ok, stream |> Enum.to_list() |> IO.iodata_to_binary()}
