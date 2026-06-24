@@ -547,10 +547,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
     cluster_name = Keyword.get(opts, :name, "test")
     volumes = Keyword.get(opts, :volumes, [])
 
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
-        cluster_name
-      ])
+    :ok = cluster_init_idempotent(cluster, :node1, cluster_name)
 
     {:ok, %{"token" => token}} =
       PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])
@@ -780,10 +777,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
     {core_peer, extra_core_peers, interface_peers} = split_core_and_interface_peers(cluster)
 
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, core_peer.name, NeonFS.CLI.Handler, :cluster_init, [
-        cluster_name
-      ])
+    :ok = cluster_init_idempotent(cluster, core_peer.name, cluster_name)
 
     :ok = wait_for_cluster_stable_on(cluster, core_peer.name)
 
@@ -969,10 +963,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
     cluster_name = Keyword.get(opts, :name, "test")
     volumes = Keyword.get(opts, :volumes, [])
 
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
-        cluster_name
-      ])
+    :ok = cluster_init_idempotent(cluster, :node1, cluster_name)
 
     :ok = wait_for_cluster_stable(cluster)
 
@@ -982,6 +973,30 @@ defmodule NeonFS.TestSupport.ClusterCase do
     end
 
     :ok
+  end
+
+  # `cluster_init` is not idempotent: on a slow or loaded runner the RPC can
+  # exceed its timeout while actually completing, after which
+  # `PeerCluster.rpc_until_ready/6` retries it and gets
+  # `{:error, "Cluster already initialised"}`. The cluster *is* initialised in
+  # that case — all these helpers need — so treat it as success rather than
+  # letting the retry's error blow up `setup_all` (#1388).
+  @spec cluster_init_idempotent(map(), atom(), String.t()) :: :ok
+  defp cluster_init_idempotent(cluster, node_name, cluster_name) do
+    cluster
+    |> PeerCluster.rpc_until_ready(node_name, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
+    |> handle_cluster_init_result(node_name)
+  end
+
+  @doc false
+  @spec handle_cluster_init_result(term(), atom()) :: :ok
+  def handle_cluster_init_result({:ok, _result}, _node_name), do: :ok
+
+  def handle_cluster_init_result({:error, %{message: "Cluster already initialised"}}, _node),
+    do: :ok
+
+  def handle_cluster_init_result(other, node_name) do
+    raise "cluster_init on #{node_name} failed: #{inspect(other)}"
   end
 
   @doc """
