@@ -7,10 +7,14 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
 
   @moduletag :tmp_dir
 
-  # Each property runs many synchronous compress/encrypt writes. The default
-  # 5s `GenServer.call` timeout is too tight on a heavily contended CI runner
-  # (#1132), so give every call generous headroom — the assertions are about
-  # correctness, not latency.
+  # Each property runs ~100 synchronous compress/encrypt writes. These finish
+  # in seconds locally but can exceed ExUnit's default 60s per-test timeout on
+  # a heavily contended CI runner, flaking the suite (#1394). Raise the
+  # per-test budget — the assertions are about correctness, not latency.
+  @moduletag timeout: 120_000
+
+  # The default 5s `GenServer.call` timeout is too tight on a heavily contended
+  # CI runner (#1132), so give every call generous headroom too.
   @call_timeout 30_000
 
   setup %{tmp_dir: tmp_dir} do
