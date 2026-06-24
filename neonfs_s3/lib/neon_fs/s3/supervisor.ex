@@ -30,10 +30,12 @@ defmodule NeonFS.S3.Supervisor do
   def init(_opts) do
     HealthCheck.register_checks()
 
+    # Registrar last so it terminates first on shutdown: it deregisters the
+    # service (stopping new client work) before the listener drains (#1386).
     children = [
-      {Registrar, metadata: registration_metadata(), type: :s3, name: NeonFS.Client.Registrar.S3},
       MultipartReaper,
-      listener_child_spec()
+      listener_child_spec(),
+      {Registrar, metadata: registration_metadata(), type: :s3, name: NeonFS.Client.Registrar.S3}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
