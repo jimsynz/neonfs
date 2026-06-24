@@ -17,6 +17,7 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
       encryption_keys: %{},
       volume_acls: %{},
       drives: %{},
+      drive_trust: %{},
       volume_roots: %{},
       snapshots: %{},
       redeemed_invites: %{},
@@ -47,8 +48,79 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 19" do
-      assert MetadataStateMachine.version() == 19
+    test "returns 20" do
+      assert MetadataStateMachine.version() == 20
+    end
+  end
+
+  describe "drive trust state (#1375)" do
+    test "absent drive defaults to :trusted" do
+      assert MetadataStateMachine.drive_trust(base_state(), :n1@host, "d1") == :trusted
+      assert MetadataStateMachine.unverified_drives(base_state()) == []
+    end
+
+    test "mark_drive_unverified records the {node, drive_id} key" do
+      assert {state, :ok, []} =
+               MetadataStateMachine.apply(
+                 %{},
+                 {:mark_drive_unverified, :n1@host, "d1"},
+                 base_state()
+               )
+
+      assert MetadataStateMachine.drive_trust(state, :n1@host, "d1") == :unverified
+      assert state.version == 1
+      assert MetadataStateMachine.unverified_drives(state) == [{:n1@host, "d1"}]
+    end
+
+    test "mark_drive_trusted clears the key (absence is the default)" do
+      {unverified, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:mark_drive_unverified, :n1@host, "d1"}, base_state())
+
+      assert {trusted, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:mark_drive_trusted, :n1@host, "d1"}, unverified)
+
+      assert MetadataStateMachine.drive_trust(trusted, :n1@host, "d1") == :trusted
+      assert trusted.drive_trust == %{}
+    end
+
+    test "mark_node_drives_unverified marks only that node's drives" do
+      state = %{
+        base_state()
+        | drives: %{
+            {:n1@host, "d1"} => %{drive_id: "d1", node: :n1@host},
+            {:n1@host, "d2"} => %{drive_id: "d2", node: :n1@host},
+            {:n2@host, "d3"} => %{drive_id: "d3", node: :n2@host}
+          }
+      }
+
+      assert {marked, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:mark_node_drives_unverified, :n1@host}, state)
+
+      assert MetadataStateMachine.drive_trust(marked, :n1@host, "d1") == :unverified
+      assert MetadataStateMachine.drive_trust(marked, :n1@host, "d2") == :unverified
+      assert MetadataStateMachine.drive_trust(marked, :n2@host, "d3") == :trusted
+    end
+
+    test "deregister_drive clears any trust state for the drive" do
+      state = %{
+        base_state()
+        | drives: %{{:n1@host, "d1"} => %{drive_id: "d1", node: :n1@host}},
+          drive_trust: %{{:n1@host, "d1"} => :unverified}
+      }
+
+      assert {after_dereg, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:deregister_drive, {:n1@host, "d1"}}, state)
+
+      assert MetadataStateMachine.get_drive_trust(after_dereg) == %{}
+    end
+
+    test "machine_version 19 -> 20 adds an empty trust map" do
+      old_state = Map.delete(base_state(), :drive_trust)
+
+      assert {migrated, :ok, []} =
+               MetadataStateMachine.apply(%{}, {:machine_version, 19, 20}, old_state)
+
+      assert MetadataStateMachine.get_drive_trust(migrated) == %{}
     end
   end
 
