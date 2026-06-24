@@ -242,6 +242,7 @@ defmodule NeonFS.NFS.ExportManager do
            bind: ip,
            port: port,
            programs: programs,
+           drain_timeout: drain_deadline_ms(),
            name: NeonFS.NFS.RPCServer
          ) do
       {:ok, pid} ->
@@ -252,6 +253,13 @@ defmodule NeonFS.NFS.ExportManager do
         Logger.error("Failed to start NFS server", reason: inspect(reason))
         {:error, {:nfs_bind_failed, reason}}
     end
+  end
+
+  # On shutdown the RPC listener lets in-flight RPCs settle for up to this
+  # long before connection processes are killed (#1383). Default leaves
+  # headroom under the systemd `TimeoutStopSec=30` budget.
+  defp drain_deadline_ms do
+    Application.get_env(:neonfs_nfs, :drain_deadline_ms, 25_000)
   end
 
   defp parse_bind_address(bind_address) do

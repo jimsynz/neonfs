@@ -13,6 +13,28 @@ defmodule NFSServer.RPC.ServerTest do
     def handle_call(_, _args, _auth, _ctx), do: :proc_unavail
   end
 
+  # Blocks mid-dispatch until the test releases it, so a request can be held
+  # in-flight while the server is asked to shut down (#1383).
+  defmodule SlowHandler do
+    @behaviour NFSServer.RPC.Handler
+
+    @impl true
+    def handle_call(1, args, _auth, _ctx) do
+      test_pid = :persistent_term.get({__MODULE__, :test_pid})
+      send(test_pid, {:handling, self()})
+
+      receive do
+        :proceed -> :ok
+      after
+        5_000 -> :ok
+      end
+
+      {:ok, args}
+    end
+
+    def handle_call(_, _args, _auth, _ctx), do: :proc_unavail
+  end
+
   setup do
     {:ok, pid} =
       start_supervised(
@@ -142,6 +164,40 @@ defmodule NFSServer.RPC.ServerTest do
       <<_::binary-size(24), reported_port::32>> = recv_message(sock)
       assert reported_port == port
 
+      :gen_tcp.close(sock)
+    end
+  end
+
+  describe "graceful drain on shutdown (#1383)" do
+    test "an in-flight RPC completes while the listener drains" do
+      :persistent_term.put({SlowHandler, :test_pid}, self())
+
+      {:ok, server} =
+        Server.start_link(
+          port: 0,
+          bind: "127.0.0.1",
+          programs: %{500_002 => %{1 => SlowHandler}},
+          drain_timeout: 5_000,
+          name: :"drain_test_#{System.unique_integer([:positive])}"
+        )
+
+      port = Server.port(server)
+      {:ok, sock} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+      :ok = :gen_tcp.send(sock, call_bytes(500_002, 1, 1, XDR.encode_uint(7)))
+
+      assert_receive {:handling, handler_pid}, 2_000
+
+      # Stop the server while the request is mid-dispatch. The stop blocks
+      # through the terminate drain, so run it off the test process.
+      stopper = Task.async(fn -> GenServer.stop(server, :normal, 10_000) end)
+
+      send(handler_pid, :proceed)
+
+      # The in-flight reply must still come back, not be cut by shutdown.
+      reply = recv_message(sock)
+      assert byte_size(reply) > 0
+
+      assert :ok = Task.await(stopper, 10_000)
       :gen_tcp.close(sock)
     end
   end
