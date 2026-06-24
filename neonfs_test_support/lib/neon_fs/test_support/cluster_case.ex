@@ -975,14 +975,20 @@ defmodule NeonFS.TestSupport.ClusterCase do
     :ok
   end
 
-  # `cluster_init` is not idempotent: on a slow or loaded runner the RPC can
-  # exceed its timeout while actually completing, after which
-  # `PeerCluster.rpc_until_ready/6` retries it and gets
-  # `{:error, "Cluster already initialised"}`. The cluster *is* initialised in
-  # that case — all these helpers need — so treat it as success rather than
-  # letting the retry's error blow up `setup_all` (#1388).
+  @doc """
+  Initialise the cluster on `node_name`, tolerating a retried `cluster_init`.
+
+  `cluster_init` is not idempotent: on a slow or loaded runner the RPC can
+  exceed its timeout while actually completing, after which
+  `PeerCluster.rpc_until_ready/6` retries it and gets
+  `{:error, "Cluster already initialised"}`. The cluster *is* initialised in
+  that case, so treat it as success rather than letting the retry's error blow
+  up `setup_all` (#1388). Tests that init the cluster directly in their own
+  `setup_all` should call this instead of matching `{:ok, _}` on
+  `rpc_until_ready(…, :cluster_init, …)` (#1392).
+  """
   @spec cluster_init_idempotent(map(), atom(), String.t()) :: :ok
-  defp cluster_init_idempotent(cluster, node_name, cluster_name) do
+  def cluster_init_idempotent(cluster, node_name, cluster_name) do
     cluster
     |> PeerCluster.rpc_until_ready(node_name, NeonFS.CLI.Handler, :cluster_init, [cluster_name])
     |> handle_cluster_init_result(node_name)

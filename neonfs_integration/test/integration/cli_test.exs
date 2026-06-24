@@ -8,8 +8,7 @@ defmodule NeonFS.Integration.CLITest do
   @cli_path Path.expand("../../../neonfs-cli/target/release/neonfs-cli", __DIR__)
 
   setup_all %{cluster: cluster} do
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+    :ok = cluster_init_idempotent(cluster, :node1, "test")
 
     :ok = wait_for_cluster_stable(cluster)
     %{}

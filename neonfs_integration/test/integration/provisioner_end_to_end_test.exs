@@ -29,10 +29,7 @@ defmodule NeonFS.Integration.ProvisionerEndToEndTest do
   @moduletag :integration
 
   setup %{cluster: cluster} do
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
-        "provisioner-e2e"
-      ])
+    :ok = cluster_init_idempotent(cluster, :node1, "provisioner-e2e")
 
     :ok = wait_for_cluster_stable(cluster)
 

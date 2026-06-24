@@ -535,8 +535,7 @@ defmodule NeonFS.Integration.DataTransferTest do
 
     test "joining node's data plane is discovered by existing nodes", %{cluster: cluster} do
       # Initialize a 2-node cluster first
-      {:ok, _} =
-        PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, ["test"])
+      :ok = cluster_init_idempotent(cluster, :node1, "test")
 
       {:ok, %{"token" => token}} =
         PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :create_invite, [3600])

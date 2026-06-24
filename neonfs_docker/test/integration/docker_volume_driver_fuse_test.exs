@@ -26,10 +26,7 @@ defmodule NeonFS.Docker.RealFuseIntegrationTest do
   @plugin_spec_dir "/etc/docker/plugins"
 
   setup_all %{cluster: cluster} do
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
-        "docker-fuse-test"
-      ])
+    :ok = cluster_init_idempotent(cluster, :node1, "docker-fuse-test")
 
     :ok = wait_for_cluster_stable(cluster)
     %{}
