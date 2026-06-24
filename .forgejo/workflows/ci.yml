@@ -298,6 +298,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
+      # `LiveListenerTest` builds the vfs_neonfs `wire_probe` binary via make
+      # during the suite, so the C toolchain must be present (#1400).
+      - name: Install C toolchain
+        run: apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
       - uses: actions/checkout@v6
 
       - name: Restore build cache
