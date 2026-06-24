@@ -35,10 +35,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
   @moduletag cluster_mode: :shared
 
   setup_all %{cluster: cluster} do
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
-        "unlink-while-open"
-      ])
+    :ok = cluster_init_idempotent(cluster, :node1, "unlink-while-open")
 
     :ok = wait_for_cluster_stable(cluster)
 

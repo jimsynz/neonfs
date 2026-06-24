@@ -33,10 +33,7 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
   @moduletag :integration
 
   setup %{cluster: cluster} do
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
-        "dr-recon"
-      ])
+    :ok = cluster_init_idempotent(cluster, :node1, "dr-recon")
 
     :ok = wait_for_cluster_stable(cluster)
 

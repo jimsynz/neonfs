@@ -17,10 +17,7 @@ defmodule NeonFS.Integration.SingleNodeMultiDriveReplicationTest do
   @moduletag :integration
 
   setup %{cluster: cluster} do
-    {:ok, _} =
-      PeerCluster.rpc_until_ready(cluster, :node1, NeonFS.CLI.Handler, :cluster_init, [
-        "multi-drive"
-      ])
+    :ok = cluster_init_idempotent(cluster, :node1, "multi-drive")
 
     :ok = wait_for_cluster_stable(cluster)
 
