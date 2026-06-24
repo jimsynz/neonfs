@@ -604,9 +604,25 @@ defmodule NeonFS.TestSupport.PeerCluster do
     min(@rpc_ready_backoff_ms * Integer.pow(2, retries_used), @rpc_ready_max_backoff_ms)
   end
 
-  defp transient_rpc_error?(:nodedown), do: true
-  defp transient_rpc_error?(:timeout), do: true
-  defp transient_rpc_error?(_reason), do: false
+  @doc false
+  # Classifies a `{:badrpc, reason}` reason as a transient bring-up failure
+  # worth retrying. During cluster startup (especially on a contended CI
+  # runner) a target node may be unreachable, an app/process may not have
+  # started yet, or an RPC may time out — all of which clear once the node
+  # settles. `:rpc.call` surfaces these in several shapes: bare atoms, tagged
+  # tuples (`{:timeout, …}` from a `GenServer.call` timeout), and `{:EXIT, …}`
+  # wrappers when the remote call exits. Match them all (#1396); anything else
+  # (e.g. a genuine `{:undef, …}` or `ArgumentError`) is a real error.
+  @spec transient_rpc_error?(term()) :: boolean()
+  def transient_rpc_error?(:nodedown), do: true
+  def transient_rpc_error?(:timeout), do: true
+  def transient_rpc_error?(:noconnection), do: true
+  def transient_rpc_error?(:noproc), do: true
+  def transient_rpc_error?({:nodedown, _}), do: true
+  def transient_rpc_error?({:timeout, _}), do: true
+  def transient_rpc_error?({:noproc, _}), do: true
+  def transient_rpc_error?({:EXIT, reason}), do: transient_rpc_error?(reason)
+  def transient_rpc_error?(_reason), do: false
 
   @doc """
   Get node info by name.
