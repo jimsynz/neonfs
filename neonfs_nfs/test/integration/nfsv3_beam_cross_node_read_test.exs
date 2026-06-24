@@ -234,18 +234,30 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
     end
 
     # Gate on the data plane actually being exercised before asserting on
-    # it (#1404). `init_mixed_role_cluster` waits for the pool to *exist*,
-    # but under CI contention the interface→core distribution link can
-    # flap, so reads fall back to per-chunk Erlang RPC — correct bytes, no
-    # conn-pool checkout — leaving the post-read telemetry assertion racy.
-    # Re-issue a single READ until a checkout fires so a transient flap
-    # self-heals; READs are idempotent.
+    # it (#1404). `init_mixed_role_cluster` brings the interface→core pool
+    # up, but the minutes-long volume create + write that follow give a
+    # contended CI runner time to flap the distribution link / drop the
+    # pool, after which reads fall back to per-chunk Erlang RPC — correct
+    # bytes, no conn-pool checkout. Repair the link + pool on each attempt
+    # (both idempotent) and re-issue a READ until a checkout fires, so a
+    # transient flap self-heals instead of leaving the telemetry assertion
+    # racy. READs are idempotent.
+    core_node = PeerCluster.get_node!(cluster, :node1).node
+    core_port = PeerCluster.rpc(cluster, :node1, NeonFS.Transport.Listener, :get_port, [])
+
     assert_eventually(
       fn ->
+        PeerCluster.connect_nodes(cluster)
+
+        PeerCluster.rpc(cluster, :node2, NeonFS.Transport.PoolManager, :ensure_pool, [
+          core_node,
+          {~c"127.0.0.1", core_port}
+        ])
+
         _ = read_chunk.(0)
         PeerCluster.rpc(cluster, :node2, BeamReadTestHooks, :checkout_peers, []) != []
       end,
-      timeout: 30_000
+      timeout: 60_000
     )
 
     # READ chunked across the file. Each per-call body must respect
