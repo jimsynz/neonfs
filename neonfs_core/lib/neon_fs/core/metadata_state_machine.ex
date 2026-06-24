@@ -93,6 +93,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:release_namespace_claims_for_holder, holder :: term()}
           | {:register_drive, entry :: drive_entry()}
           | {:deregister_drive, drive_id :: String.t()}
+          | {:mark_drive_unverified, node(), drive_id :: String.t()}
+          | {:mark_drive_trusted, node(), drive_id :: String.t()}
+          | {:mark_node_drives_unverified, node()}
           | {:register_volume_root, volume_id :: binary(), shard :: non_neg_integer(),
              entry :: volume_root_entry()}
           | {:update_volume_root, volume_id :: binary(), shard :: non_neg_integer(),
@@ -182,6 +185,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           namespace_claims: %{optional(String.t()) => namespace_claim()},
           namespace_claim_seq: non_neg_integer(),
           drives: %{optional(String.t()) => drive_entry()},
+          drive_trust: %{optional({node(), String.t()}) => :unverified},
           nodes: %{optional(node()) => node_entry()},
           volume_roots: %{
             optional(binary()) => %{optional(non_neg_integer()) => volume_root_entry()}
@@ -205,6 +209,20 @@ defmodule NeonFS.Core.MetadataStateMachine do
           on_disk_format_version: pos_integer(),
           registered_at: DateTime.t()
         }
+
+  @typedoc """
+  Per-drive trust state (#1375): the `{node, drive_id}` keys of drives
+  that are **present but not durable-yet** — a rebooted node mid-resync,
+  or a crash-recovered drive mid-scrub. Only `:unverified` drives are
+  stored; absence means `:trusted` (the default), so the map stays empty
+  in steady state and the mechanism is dormant until a producer (#1376
+  node return, #1380 crash marker) marks a drive.
+
+  Consumers (durability maths, read-verify — wired in a follow-up) treat
+  `:unverified` replicas as not counting toward `min_copies` and
+  hash-verify reads from them.
+  """
+  @type drive_trust :: %{optional({node(), String.t()}) => :unverified}
 
   @typedoc """
   First-class node lifecycle entry (#1323). `status` is the node's
@@ -333,6 +351,32 @@ defmodule NeonFS.Core.MetadataStateMachine do
   """
   @spec get_drive(state(), String.t()) :: drive_entry() | nil
   def get_drive(state, drive_id), do: Map.get(get_drives(state), drive_id)
+
+  @doc """
+  Returns the trust state of a single drive (#1375): `:unverified` if the
+  `{node, drive_id}` is present in the trust map, `:trusted` otherwise
+  (absence is the default).
+  """
+  @spec drive_trust(state(), node(), String.t()) :: :trusted | :unverified
+  def drive_trust(state, node, drive_id) do
+    case Map.get(get_drive_trust(state), {node, drive_id}) do
+      :unverified -> :unverified
+      _ -> :trusted
+    end
+  end
+
+  @doc """
+  Returns the raw drive-trust map — `{node, drive_id} => :unverified`.
+  Empty map for pre-v20 states. Only `:unverified` drives are present.
+  """
+  @spec get_drive_trust(state()) :: drive_trust()
+  def get_drive_trust(state), do: Map.get(state, :drive_trust, %{})
+
+  @doc """
+  Returns the `{node, drive_id}` keys of all currently-`:unverified` drives.
+  """
+  @spec unverified_drives(state()) :: [{node(), String.t()}]
+  def unverified_drives(state), do: Map.keys(get_drive_trust(state))
 
   @doc """
   Returns the node lifecycle table — `node => node_entry` (#1323).
@@ -562,6 +606,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       namespace_claims: %{},
       namespace_claim_seq: 0,
       drives: %{},
+      drive_trust: %{},
       nodes: %{},
       volume_roots: %{},
       snapshots: %{},
@@ -886,6 +931,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {Map.put_new(state, :generation, 0), :ok, []}
+  end
+
+  def apply(_meta, {:machine_version, 19, 20}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 19,
+      to: 20,
+      change: "add per-drive trust state map for present-but-not-durable replicas (#1375)"
+    )
+
+    {Map.put_new(state, :drive_trust, %{}), :ok, []}
   end
 
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
@@ -1791,14 +1848,58 @@ defmodule NeonFS.Core.MetadataStateMachine do
   end
 
   def apply(_meta, {:deregister_drive, {node, drive_id}}, state) do
-    state = ensure_bootstrap(state)
+    state = state |> ensure_bootstrap() |> ensure_drive_trust()
     new_drives = Map.delete(state.drives, {node, drive_id})
-    new_state = %{state | drives: new_drives, version: state.version + 1}
+    # A removed drive carries no trust state.
+    new_trust = Map.delete(get_drive_trust(state), {node, drive_id})
+
+    new_state = %{
+      state
+      | drives: new_drives,
+        drive_trust: new_trust,
+        version: state.version + 1
+    }
 
     :telemetry.execute(
       [:neonfs, :ra, :command, :deregister_drive],
       %{version: new_state.version},
       %{drive_id: drive_id, node: node}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:mark_drive_unverified, node, drive_id}, state) do
+    set_drive_trust(state, {node, drive_id}, :unverified)
+  end
+
+  def apply(_meta, {:mark_drive_trusted, node, drive_id}, state) do
+    set_drive_trust(state, {node, drive_id}, :trusted)
+  end
+
+  # "Node implies" (#1375): a returning node marks all of its known drives
+  # `:unverified` at once; each clears back to `:trusted` independently as
+  # it verifies. Drives are keyed `{node, drive_id}`, so we match on the
+  # node element.
+  def apply(_meta, {:mark_node_drives_unverified, node}, state) do
+    state = ensure_drive_trust(state)
+
+    node_drive_keys =
+      state.drives
+      |> Map.keys()
+      |> Enum.filter(fn {drive_node, _id} -> drive_node == node end)
+
+    new_trust =
+      Enum.reduce(node_drive_keys, state.drive_trust, fn key, acc ->
+        Map.put(acc, key, :unverified)
+      end)
+
+    new_state = %{state | drive_trust: new_trust, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :mark_node_drives_unverified],
+      %{version: new_state.version, drive_count: length(node_drive_keys)},
+      %{node: node}
     )
 
     {new_state, :ok, []}
@@ -2189,7 +2290,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 19
+  def version, do: 20
 
   @doc """
   Return the module to handle a specific state machine version.
@@ -2344,6 +2445,33 @@ defmodule NeonFS.Core.MetadataStateMachine do
     state
     |> Map.put_new(:drives, %{})
     |> Map.put_new(:volume_roots, %{})
+  end
+
+  defp ensure_drive_trust(%{drive_trust: _} = state), do: state
+  defp ensure_drive_trust(state), do: Map.put(state, :drive_trust, %{})
+
+  # Single-drive trust transition (#1375). `:unverified` stores the key;
+  # `:trusted` deletes it (absence is the default), so steady state is an
+  # empty map. Emits a from/to transition event for observability + tests.
+  defp set_drive_trust(state, {node, drive_id} = key, to) do
+    state = ensure_drive_trust(state)
+    from = drive_trust(state, node, drive_id)
+
+    new_trust =
+      case to do
+        :unverified -> Map.put(state.drive_trust, key, :unverified)
+        :trusted -> Map.delete(state.drive_trust, key)
+      end
+
+    new_state = %{state | drive_trust: new_trust, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :set_drive_trust],
+      %{version: new_state.version},
+      %{node: node, drive_id: drive_id, from: from, to: to}
+    )
+
+    {new_state, :ok, []}
   end
 
   # Returns the updated `volume_roots` map with `entry` set at
