@@ -42,6 +42,18 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @rpc_ready_backoff_ms 250
   @rpc_ready_max_backoff_ms 2_000
 
+  # `:application.ensure_all_started/1` on a freshly-spawned peer can come back
+  # `{:error, _}` (a supervised child's `init` timing out, a dependency not yet
+  # settled) when the runner is saturated. Swallowing that and proceeding left
+  # the cluster half-started, so a later `setup_all` RPC hit a not-yet-running
+  # process and crashed with `no process … application isn't started` (#1396).
+  # Gate bring-up on the apps actually starting, retrying the transient failure
+  # with the same widening backoff as the boot/rpc-ready retries before giving
+  # up.
+  @app_start_attempts 5
+  @app_start_backoff_ms 250
+  @app_start_max_backoff_ms 2_000
+
   @type node_info :: %{
           name: atom(),
           peer: pid(),
@@ -930,7 +942,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
     :ok
   end
 
-  defp start_application_on_peer(peer, node, app) do
+  defp start_application_on_peer(peer, node, app, attempts_left \\ @app_start_attempts) do
     # Under heavy load (e.g. full integration suite), application startup can
     # exceed the default 5s `:peer.call` timeout. 30s used to be enough, but
     # the shared CI runner now consistently exceeds it on the BEAM NFSv3
@@ -943,42 +955,72 @@ defmodule NeonFS.TestSupport.PeerCluster do
         {:ok, _} ->
           :ok
 
+        {:error, reason} when attempts_left > 1 ->
+          retry_app_start(peer, node, app, attempts_left, reason)
+
         {:error, reason} ->
-          Logger.warning("Failed to start #{app} on #{node}: #{inspect(reason)}")
+          dump_app_start_diagnostics(peer, node, app, started_at, :error, reason)
+          raise "failed to start #{app} on #{node}: #{inspect(reason)}"
       end
     catch
+      # `:inet_async, :timeout` and similar distribution-layer exits are the
+      # canonical CI flake (#606 / #647) and clear on a retry. Re-run the same
+      # widening-backoff retry as the `{:error, _}` path before giving up;
+      # anything still failing after the budget is exhausted dumps controller
+      # diagnostics (cheap; failure path only) and is re-raised with its
+      # original stacktrace.
+      kind, reason when attempts_left > 1 ->
+        if transient_boot_error?(reason) do
+          retry_app_start(peer, node, app, attempts_left, reason)
+        else
+          dump_app_start_diagnostics(peer, node, app, started_at, kind, reason)
+          :erlang.raise(kind, reason, __STACKTRACE__)
+        end
+
       kind, reason ->
-        # `:inet_async, :timeout` and similar distribution-layer exits
-        # are the canonical CI flake (#606 / #647). Capture diagnostic
-        # state on the *controller* before re-raising so the test log
-        # leaves a forensic trail — the next failure can be root-caused
-        # without needing a fresh repro. Cheap to capture; only fires
-        # on the failure path.
-        elapsed_ms = System.monotonic_time(:millisecond) - started_at
-
-        diagnostics = %{
-          peer_node: node,
-          app: app,
-          elapsed_ms: elapsed_ms,
-          kind: kind,
-          reason: inspect(reason),
-          controller_port_count: :erlang.system_info(:port_count),
-          controller_process_count: :erlang.system_info(:process_count),
-          controller_ets_count: length(:ets.all()),
-          controller_dist_buf_busy_limit: dist_buf_busy_limit(),
-          peer_node_alive: probe_peer(peer)
-        }
-
-        :telemetry.execute(
-          [:neonfs, :peer_cluster, :node, :start_failed],
-          %{elapsed_ms: elapsed_ms},
-          diagnostics
-        )
-
-        Logger.warning("Peer-cluster app start failed: #{inspect(diagnostics, pretty: true)}")
-
+        dump_app_start_diagnostics(peer, node, app, started_at, kind, reason)
         :erlang.raise(kind, reason, __STACKTRACE__)
     end
+  end
+
+  defp retry_app_start(peer, node, app, attempts_left, reason) do
+    Logger.warning(
+      "app #{app} start on #{node} failed transiently (#{inspect(reason)}), " <>
+        "retrying (#{attempts_left - 1} attempt(s) left)"
+    )
+
+    Process.sleep(app_start_backoff_ms(attempts_left))
+    start_application_on_peer(peer, node, app, attempts_left - 1)
+  end
+
+  defp app_start_backoff_ms(attempts_left) do
+    retries_used = @app_start_attempts - attempts_left
+    min(@app_start_backoff_ms * Integer.pow(2, retries_used), @app_start_max_backoff_ms)
+  end
+
+  defp dump_app_start_diagnostics(peer, node, app, started_at, kind, reason) do
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+    diagnostics = %{
+      peer_node: node,
+      app: app,
+      elapsed_ms: elapsed_ms,
+      kind: kind,
+      reason: inspect(reason),
+      controller_port_count: :erlang.system_info(:port_count),
+      controller_process_count: :erlang.system_info(:process_count),
+      controller_ets_count: length(:ets.all()),
+      controller_dist_buf_busy_limit: dist_buf_busy_limit(),
+      peer_node_alive: probe_peer(peer)
+    }
+
+    :telemetry.execute(
+      [:neonfs, :peer_cluster, :node, :start_failed],
+      %{elapsed_ms: elapsed_ms},
+      diagnostics
+    )
+
+    Logger.warning("Peer-cluster app start failed: #{inspect(diagnostics, pretty: true)}")
   end
 
   # Distribution-layer breadcrumb for the `:inet_async, :timeout`
