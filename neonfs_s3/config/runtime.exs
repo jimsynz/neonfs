@@ -9,6 +9,7 @@ if config_env() == :prod do
   s3_bind = System.get_env("NEONFS_S3_BIND", "0.0.0.0")
   s3_port = String.to_integer(System.get_env("NEONFS_S3_PORT", "8080"))
   s3_region = System.get_env("NEONFS_S3_REGION", "neonfs")
+  s3_drain_deadline_ms = String.to_integer(System.get_env("NEONFS_S3_DRAIN_DEADLINE_MS", "25000"))
 
   metrics_enabled = System.get_env("NEONFS_S3_METRICS", "false") == "true"
   metrics_port = String.to_integer(System.get_env("NEONFS_S3_METRICS_PORT", "9571"))
@@ -22,6 +23,7 @@ if config_env() == :prod do
 
   config :neonfs_s3,
     core_node: String.to_atom(core_node),
+    drain_deadline_ms: s3_drain_deadline_ms,
     metrics_bind: metrics_bind,
     metrics_enabled: metrics_enabled,
     metrics_port: metrics_port,

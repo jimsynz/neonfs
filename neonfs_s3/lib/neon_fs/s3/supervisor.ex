@@ -16,6 +16,11 @@ defmodule NeonFS.S3.Supervisor do
   alias NeonFS.Client.Registrar
   alias NeonFS.S3.{Backend, HealthCheck, HealthPlug, MultipartReaper}
 
+  # On shutdown ThousandIsland stops accepting new connections and drains
+  # in-flight requests for up to `shutdown_timeout`. The default leaves
+  # headroom under the systemd `TimeoutStopSec=30` budget (#1377).
+  @default_drain_deadline_ms 25_000
+
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -23,22 +28,35 @@ defmodule NeonFS.S3.Supervisor do
 
   @impl true
   def init(_opts) do
-    port = Application.get_env(:neonfs_s3, :s3_port, 8080)
-    bind = Application.get_env(:neonfs_s3, :s3_bind, "0.0.0.0")
-
     HealthCheck.register_checks()
 
     children = [
       {Registrar, metadata: registration_metadata(), type: :s3, name: NeonFS.Client.Registrar.S3},
       MultipartReaper,
-      {Bandit,
-       plug: {HealthPlug, backend: Backend},
-       port: port,
-       ip: parse_bind_address(bind),
-       scheme: :http}
+      listener_child_spec()
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  @doc false
+  @spec listener_child_spec() :: {Bandit, keyword()}
+  def listener_child_spec do
+    port = Application.get_env(:neonfs_s3, :s3_port, 8080)
+    bind = Application.get_env(:neonfs_s3, :s3_bind, "0.0.0.0")
+
+    {Bandit,
+     plug: {HealthPlug, backend: Backend},
+     port: port,
+     ip: parse_bind_address(bind),
+     scheme: :http,
+     thousand_island_options: [shutdown_timeout: drain_deadline_ms()]}
+  end
+
+  @doc false
+  @spec drain_deadline_ms() :: timeout()
+  def drain_deadline_ms do
+    Application.get_env(:neonfs_s3, :drain_deadline_ms, @default_drain_deadline_ms)
   end
 
   defp registration_metadata do

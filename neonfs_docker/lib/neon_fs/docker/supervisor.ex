@@ -30,6 +30,11 @@ defmodule NeonFS.Docker.Supervisor do
   # else holding the path).
   @skip_errors [:eacces, :enoent, :enotdir, :erofs]
 
+  # On shutdown ThousandIsland stops accepting new connections and drains
+  # in-flight requests for up to `shutdown_timeout`. The default leaves
+  # headroom under the systemd `TimeoutStopSec=30` budget (#1377).
+  @default_drain_deadline_ms 25_000
+
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
     Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -64,15 +69,30 @@ defmodule NeonFS.Docker.Supervisor do
       ]
   end
 
-  defp bandit_child_spec do
+  @doc false
+  @spec bandit_child_spec() :: {:ok, {Bandit, keyword()}} | {:skip, String.t()}
+  def bandit_child_spec do
     case Application.get_env(:neonfs_docker, :listener, :socket) do
       :socket ->
         socket_path = Application.get_env(:neonfs_docker, :socket_path, @default_socket_path)
         prepare_socket(socket_path)
 
       {:tcp, port} ->
-        {:ok, {Bandit, plug: Plug, scheme: :http, port: port, ip: :loopback}}
+        {:ok, {Bandit, bandit_options(scheme: :http, port: port, ip: :loopback)}}
     end
+  end
+
+  @doc false
+  @spec drain_deadline_ms() :: timeout()
+  def drain_deadline_ms do
+    Application.get_env(:neonfs_docker, :drain_deadline_ms, @default_drain_deadline_ms)
+  end
+
+  defp bandit_options(opts) do
+    Keyword.merge(
+      [plug: Plug, thousand_island_options: [shutdown_timeout: drain_deadline_ms()]],
+      opts
+    )
   end
 
   defp prepare_socket(socket_path) do
@@ -81,7 +101,7 @@ defmodule NeonFS.Docker.Supervisor do
     case File.mkdir_p(socket_dir) do
       :ok ->
         File.rm(socket_path)
-        {:ok, {Bandit, plug: Plug, scheme: :http, port: 0, ip: {:local, socket_path}}}
+        {:ok, {Bandit, bandit_options(scheme: :http, port: 0, ip: {:local, socket_path})}}
 
       {:error, reason} when reason in @skip_errors ->
         {:skip,

@@ -14,6 +14,11 @@ defmodule NeonFS.WebDAV.Supervisor do
   alias NeonFS.WebDAV.{Backend, HealthCheck, HealthPlug, LockStore}
   alias NeonFS.WebDAV.LockStore.{Cleaner, NamespaceHolder}
 
+  # On shutdown ThousandIsland stops accepting new connections and drains
+  # in-flight requests for up to `shutdown_timeout`. The default leaves
+  # headroom under the systemd `TimeoutStopSec=30` budget (#1377).
+  @default_drain_deadline_ms 25_000
+
   @doc "Starts the WebDAV supervisor."
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -22,9 +27,6 @@ defmodule NeonFS.WebDAV.Supervisor do
 
   @impl true
   def init(_opts) do
-    port = Application.get_env(:neonfs_webdav, :webdav_port, 8081)
-    bind = Application.get_env(:neonfs_webdav, :webdav_bind, "0.0.0.0")
-
     HealthCheck.register_checks()
 
     children = [
@@ -32,14 +34,30 @@ defmodule NeonFS.WebDAV.Supervisor do
       Cleaner,
       {Registrar,
        metadata: registration_metadata(), type: :webdav, name: NeonFS.Client.Registrar.WebDAV},
-      {Bandit,
-       plug: {HealthPlug, backend: Backend, lock_store: LockStore},
-       port: port,
-       ip: parse_bind_address(bind),
-       scheme: :http}
+      listener_child_spec()
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  @doc false
+  @spec listener_child_spec() :: {Bandit, keyword()}
+  def listener_child_spec do
+    port = Application.get_env(:neonfs_webdav, :webdav_port, 8081)
+    bind = Application.get_env(:neonfs_webdav, :webdav_bind, "0.0.0.0")
+
+    {Bandit,
+     plug: {HealthPlug, backend: Backend, lock_store: LockStore},
+     port: port,
+     ip: parse_bind_address(bind),
+     scheme: :http,
+     thousand_island_options: [shutdown_timeout: drain_deadline_ms()]}
+  end
+
+  @doc false
+  @spec drain_deadline_ms() :: timeout()
+  def drain_deadline_ms do
+    Application.get_env(:neonfs_webdav, :drain_deadline_ms, @default_drain_deadline_ms)
   end
 
   defp registration_metadata do

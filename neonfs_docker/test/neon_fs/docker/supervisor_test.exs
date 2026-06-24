@@ -118,6 +118,30 @@ defmodule NeonFS.Docker.SupervisorTest do
     assert decoded["Err"] == "volume not found"
   end
 
+  describe "bandit_child_spec/0 drain deadline" do
+    setup do
+      Application.put_env(:neonfs_docker, :listener, {:tcp, 0})
+      on_exit(fn -> Application.delete_env(:neonfs_docker, :listener) end)
+    end
+
+    test "wires the default drain deadline into the Bandit listener" do
+      Application.delete_env(:neonfs_docker, :drain_deadline_ms)
+
+      {:ok, {Bandit, opts}} = NeonFS.Docker.Supervisor.bandit_child_spec()
+
+      assert get_in(opts, [:thousand_island_options, :shutdown_timeout]) == 25_000
+    end
+
+    test "respects a configured drain deadline" do
+      Application.put_env(:neonfs_docker, :drain_deadline_ms, 12_000)
+      on_exit(fn -> Application.delete_env(:neonfs_docker, :drain_deadline_ms) end)
+
+      {:ok, {Bandit, opts}} = NeonFS.Docker.Supervisor.bandit_child_spec()
+
+      assert get_in(opts, [:thousand_island_options, :shutdown_timeout]) == 12_000
+    end
+  end
+
   defp post_json(socket_path, path, body, opts \\ []) do
     content_type = Keyword.get(opts, :content_type, "application/json")
 

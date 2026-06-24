@@ -9,6 +9,9 @@ if config_env() == :prod do
   webdav_bind = System.get_env("NEONFS_WEBDAV_BIND", "0.0.0.0")
   webdav_port = String.to_integer(System.get_env("NEONFS_WEBDAV_PORT", "8081"))
 
+  webdav_drain_deadline_ms =
+    String.to_integer(System.get_env("NEONFS_WEBDAV_DRAIN_DEADLINE_MS", "25000"))
+
   metrics_enabled = System.get_env("NEONFS_WEBDAV_METRICS", "false") == "true"
   metrics_port = String.to_integer(System.get_env("NEONFS_WEBDAV_METRICS_PORT", "9572"))
   metrics_bind = System.get_env("NEONFS_WEBDAV_METRICS_BIND", "0.0.0.0")
@@ -21,6 +24,7 @@ if config_env() == :prod do
 
   config :neonfs_webdav,
     core_node: String.to_atom(core_node),
+    drain_deadline_ms: webdav_drain_deadline_ms,
     metrics_bind: metrics_bind,
     metrics_enabled: metrics_enabled,
     metrics_port: metrics_port,
