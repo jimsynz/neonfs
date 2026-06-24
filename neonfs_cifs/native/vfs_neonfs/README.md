@@ -27,10 +27,18 @@ Needs a C compiler and Erlang on `PATH` (the `ei` headers/libs are discovered
 from the running Erlang install — no Samba required):
 
 ```sh
-make test   # builds the wire client + mock-responder harness and runs it
+make test         # builds the wire client + mock-responder harness and runs it
+make wire_probe   # builds the live-listener probe (driven by the ExUnit test)
 ```
 
-The harness (`test_wire.c`) pairs the client against a mock responder over a
-`socketpair`, driving every op's encode → frame → decode round-trip against
-canned ETF replies shaped like `NeonFS.CIFS.Handler`'s, asserting the decoded
-C structs and errno translations.
+The op-drive sequence lives once in `probe_ops.c` and is shared by both
+binaries so their canned contracts can't drift:
+
+- **`test_wire.c`** pairs the client against an in-process mock responder over a
+  `socketpair`, encoding canned ETF replies with `ei` on both sides — a pure-C
+  unit test of the client's own encode → frame → decode round-trip.
+- **`wire_probe.c`** connects to a live `NeonFS.CIFS.Listener` Unix socket
+  (passed as `argv[1]`) and runs the same sequence against the real Elixir
+  `term_to_binary` / `binary_to_term` path. It is launched by
+  `NeonFS.CIFS.LiveListenerTest`, which binds a listener with a canned-reply
+  handler (#1400).
