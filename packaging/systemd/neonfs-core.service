@@ -12,7 +12,11 @@ ExecStop=/usr/bin/neonfs-core-daemon stop
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
-TimeoutStopSec=30
+# Must exceed the in-flight drain deadline (~25s; see `:drain_deadline_ms` /
+# `NEONFS_*_DRAIN_DEADLINE_MS`) plus headroom for the core final-metadata
+# snapshot, else systemd SIGKILLs the BEAM mid-drain (#1385). Bump both
+# together if either changes.
+TimeoutStopSec=45
 
 EnvironmentFile=-/etc/neonfs/neonfs.conf
 
