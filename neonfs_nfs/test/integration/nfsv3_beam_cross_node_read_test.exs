@@ -221,6 +221,33 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
     {:ok, :ok, rest} = Types.decode_nfsstat3(lookup_body)
     {:ok, file_fh, _rest} = Types.decode_fhandle3(rest)
 
+    read_chunk = fn offset ->
+      args =
+        Types.encode_fhandle3(file_fh) <>
+          XDR.encode_uhyper(offset) <>
+          XDR.encode_uint(@chunk_max)
+
+      {:ok, body} =
+        PeerCluster.rpc(cluster, :node2, Handler, :handle_call, [6, args, @auth, ctx])
+
+      body
+    end
+
+    # Gate on the data plane actually being exercised before asserting on
+    # it (#1404). `init_mixed_role_cluster` waits for the pool to *exist*,
+    # but under CI contention the interface→core distribution link can
+    # flap, so reads fall back to per-chunk Erlang RPC — correct bytes, no
+    # conn-pool checkout — leaving the post-read telemetry assertion racy.
+    # Re-issue a single READ until a checkout fires so a transient flap
+    # self-heals; READs are idempotent.
+    assert_eventually(
+      fn ->
+        _ = read_chunk.(0)
+        PeerCluster.rpc(cluster, :node2, BeamReadTestHooks, :checkout_peers, []) != []
+      end,
+      timeout: 30_000
+    )
+
     # READ chunked across the file. Each per-call body must respect
     # the `count` cap and reassembled bytes must equal `payload`.
     reassembled =
@@ -228,15 +255,7 @@ defmodule NeonFS.Integration.NFSv3BeamCrossNodeReadTest do
       |> Stream.iterate(&(&1 + @chunk_max))
       |> Stream.take_while(&(&1 < @payload_size))
       |> Enum.map(fn offset ->
-        args =
-          Types.encode_fhandle3(file_fh) <>
-            XDR.encode_uhyper(offset) <>
-            XDR.encode_uint(@chunk_max)
-
-        {:ok, body} =
-          PeerCluster.rpc(cluster, :node2, Handler, :handle_call, [6, args, @auth, ctx])
-
-        flat = IO.iodata_to_binary(body)
+        flat = IO.iodata_to_binary(read_chunk.(offset))
 
         {:ok, :ok, rest} = Types.decode_nfsstat3(flat)
         {:ok, _attr, rest} = Types.decode_post_op_attr(rest)
