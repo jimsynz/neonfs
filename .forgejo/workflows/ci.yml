@@ -327,6 +327,23 @@ jobs:
         run: mix check
 
   # =========================================================================
+  # vfs_neonfs_wire - C client of the neonfs_cifs ETF protocol (#1169). Builds
+  # the wire client + mock-responder harness; needs only a C toolchain and the
+  # erl_interface (ei) headers from the Erlang install, not Samba.
+  # =========================================================================
+  vfs_neonfs_wire:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+    steps:
+      - name: Install C toolchain
+        run: apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v6
+      - name: Build + run wire harness
+        run: make -C neonfs_cifs/native/vfs_neonfs test
+
+  # =========================================================================
   # neonfs_csi - Kubernetes CSI driver (Elixir-only; gRPC over UDS via the
   # `grpc` + `protobuf` hex packages). The CSI v1 protobuf bindings under
   # `lib/csi/` are checked in (regenerate locally via `protoc-gen-elixir`).
