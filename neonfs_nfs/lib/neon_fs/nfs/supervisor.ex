@@ -20,9 +20,6 @@ defmodule NeonFS.NFS.Supervisor do
   @impl true
   def init(_opts) do
     children = [
-      # Service registration (unique name — each service registers its own)
-      {NeonFS.Client.Registrar,
-       metadata: registration_metadata(), type: :nfs, name: NeonFS.Client.Registrar.NFS},
       # Write throttle limits concurrent write pressure across all handlers
       NeonFS.NFS.WriteThrottle,
       # Inode table must start before the listener
@@ -32,7 +29,12 @@ defmodule NeonFS.NFS.Supervisor do
       # ExportManager starts the NFS listener and manages volume exports
       NeonFS.NFS.ExportManager,
       # NLM (Network Lock Manager) server for NFSv3 advisory locking
-      NeonFS.NFS.NLM.Server
+      NeonFS.NFS.NLM.Server,
+      # Service registration (unique name — each service registers its own).
+      # Last so it terminates first on shutdown, deregistering before the
+      # listener and NLM server stop (#1386).
+      {NeonFS.Client.Registrar,
+       metadata: registration_metadata(), type: :nfs, name: NeonFS.Client.Registrar.NFS}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

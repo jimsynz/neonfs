@@ -25,6 +25,12 @@ defmodule NeonFS.Client.Registrar do
 
   @impl true
   def init(opts) do
+    # Trap exits so `terminate/2` runs on a supervisor `:shutdown` and the
+    # service deregisters before the node goes away — otherwise an untrapped
+    # exit signal kills the process without deregistering, and the cluster
+    # only learns the node is gone when its registration TTL lapses (#1386).
+    Process.flag(:trap_exit, true)
+
     type = Keyword.fetch!(opts, :type)
     metadata = Keyword.get(opts, :metadata, %{})
 

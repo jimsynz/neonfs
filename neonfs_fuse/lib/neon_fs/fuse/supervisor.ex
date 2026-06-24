@@ -24,16 +24,21 @@ defmodule NeonFS.FUSE.Supervisor do
   def init(_opts) do
     children =
       [
-        # Service registration (unique name — each service registers its own)
-        {NeonFS.Client.Registrar,
-         metadata: registration_metadata(), type: :fuse, name: NeonFS.Client.Registrar.FUSE},
         # Inode table must start before handlers
         NeonFS.FUSE.InodeTable,
         # DynamicSupervisor for mount handlers
         NeonFS.FUSE.MountSupervisor,
         # MountManager coordinates mounts and starts handlers under MountSupervisor
         NeonFS.FUSE.MountManager
-      ] ++ metrics_children()
+      ] ++
+        metrics_children() ++
+        [
+          # Service registration (unique name — each service registers its own).
+          # Last so it terminates first on shutdown, deregistering before the
+          # rest of the tree stops (#1386).
+          {NeonFS.Client.Registrar,
+           metadata: registration_metadata(), type: :fuse, name: NeonFS.Client.Registrar.FUSE}
+        ]
 
     Supervisor.init(children, strategy: :one_for_one)
   end

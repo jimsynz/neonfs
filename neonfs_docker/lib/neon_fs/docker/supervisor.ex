@@ -47,9 +47,10 @@ defmodule NeonFS.Docker.Supervisor do
     children =
       case bandit_child_spec() do
         {:ok, listener} ->
-          [VolumeStore, MountTracker]
+          # Registrar last so it terminates first on shutdown: it deregisters
+          # the service before the listener drains (#1386).
+          [VolumeStore, MountTracker, listener]
           |> maybe_add_registrar(register?)
-          |> Kernel.++([listener])
 
         {:skip, message} ->
           Logger.warning("Docker volume plugin disabled: #{message}")

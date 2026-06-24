@@ -29,12 +29,14 @@ defmodule NeonFS.WebDAV.Supervisor do
   def init(_opts) do
     HealthCheck.register_checks()
 
+    # Registrar last so it terminates first on shutdown: it deregisters the
+    # service (stopping new client work) before the listener drains (#1386).
     children = [
       NamespaceHolder,
       Cleaner,
+      listener_child_spec(),
       {Registrar,
-       metadata: registration_metadata(), type: :webdav, name: NeonFS.Client.Registrar.WebDAV},
-      listener_child_spec()
+       metadata: registration_metadata(), type: :webdav, name: NeonFS.Client.Registrar.WebDAV}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)
