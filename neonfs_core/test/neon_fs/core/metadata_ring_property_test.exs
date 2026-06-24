@@ -2,6 +2,12 @@ defmodule NeonFS.Core.MetadataRingPropertyTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  # Each property rebuilds the ring across many cluster sizes (~100 runs).
+  # Fast locally, but can exceed ExUnit's default 60s per-test timeout on a
+  # heavily contended CI runner, flaking the suite (#1394). Raise the per-test
+  # budget — the assertions are about correctness, not latency.
+  @moduletag timeout: 120_000
+
   alias NeonFS.Core.MetadataRing
 
   # Generators
