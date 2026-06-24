@@ -41,7 +41,7 @@ defmodule NFSServer.RPC.Server do
 
   # On shutdown, in-flight RPCs are allowed to finish for up to this long
   # before connection processes are killed (#1383). Leaves headroom under
-  # the systemd `TimeoutStopSec=30` budget.
+  # the systemd `TimeoutStopSec=45` budget.
   @default_drain_timeout 25_000
 
   # How often an otherwise-idle connection (blocked in `recv`) wakes to

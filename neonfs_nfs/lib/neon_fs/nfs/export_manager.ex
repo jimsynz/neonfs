@@ -257,7 +257,7 @@ defmodule NeonFS.NFS.ExportManager do
 
   # On shutdown the RPC listener lets in-flight RPCs settle for up to this
   # long before connection processes are killed (#1383). Default leaves
-  # headroom under the systemd `TimeoutStopSec=30` budget.
+  # headroom under the systemd `TimeoutStopSec=45` budget (#1385).
   defp drain_deadline_ms do
     Application.get_env(:neonfs_nfs, :drain_deadline_ms, 25_000)
   end
