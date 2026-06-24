@@ -39,6 +39,15 @@ defmodule NFSServer.RPC.Server do
   @default_port 2049
   @default_bind "0.0.0.0"
 
+  # On shutdown, in-flight RPCs are allowed to finish for up to this long
+  # before connection processes are killed (#1383). Leaves headroom under
+  # the systemd `TimeoutStopSec=30` budget.
+  @default_drain_timeout 25_000
+
+  # How often an otherwise-idle connection (blocked in `recv`) wakes to
+  # notice that the server has started draining and should close.
+  @recv_poll_ms 500
+
   @typedoc "Per-connection state."
   @type conn_state :: %{
           socket: :gen_tcp.socket(),
@@ -72,6 +81,8 @@ defmodule NFSServer.RPC.Server do
     bind = Keyword.get(opts, :bind, @default_bind)
     programs = Keyword.fetch!(opts, :programs)
     portmap_mappings = Keyword.get(opts, :portmap_mappings, %{})
+    drain_timeout = Keyword.get(opts, :drain_timeout, @default_drain_timeout)
+    drain_flag = :atomics.new(1, signed: false)
 
     case open_listen_socket(bind, port) do
       {:ok, listen_socket, actual_port} ->
@@ -95,7 +106,7 @@ defmodule NFSServer.RPC.Server do
         {:ok, accept_supervisor} = Task.Supervisor.start_link()
 
         Task.Supervisor.start_child(accept_supervisor, fn ->
-          accept_loop(listen_socket, programs, portmap_mappings, accept_supervisor)
+          accept_loop(listen_socket, programs, portmap_mappings, accept_supervisor, drain_flag)
         end)
 
         Logger.info("NFSServer RPC listener started", port: actual_port, bind: bind)
@@ -107,7 +118,9 @@ defmodule NFSServer.RPC.Server do
            bind: bind,
            programs: programs,
            portmap_mappings: portmap_mappings,
-           accept_supervisor: accept_supervisor
+           accept_supervisor: accept_supervisor,
+           drain_flag: drain_flag,
+           drain_timeout: drain_timeout
          }}
 
       {:error, reason} ->
@@ -119,11 +132,47 @@ defmodule NFSServer.RPC.Server do
   def handle_call(:port, _from, state), do: {:reply, state.port, state}
 
   @impl true
-  def terminate(_reason, %{listen_socket: listen_socket}) do
-    :gen_tcp.close(listen_socket)
+  def terminate(_reason, state) do
+    # Signal draining, stop accepting new connections, then let in-flight
+    # RPCs settle before connection processes are killed (#1383).
+    :atomics.put(state.drain_flag, 1, 1)
+    :gen_tcp.close(state.listen_socket)
+    drain_connections(state)
     :ok
   rescue
     _ -> :ok
+  end
+
+  defp drain_connections(%{accept_supervisor: supervisor, drain_timeout: timeout}) do
+    refs =
+      supervisor
+      |> Task.Supervisor.children()
+      |> Enum.map(&Process.monitor/1)
+
+    deadline = System.monotonic_time(:millisecond) + timeout
+    drained = await_connection_exits(refs, deadline, 0)
+    remaining = length(refs) - drained
+
+    if remaining > 0 do
+      Logger.warning("NFSServer RPC shutdown drain timed out, #{remaining} connection(s) active")
+    else
+      Logger.debug("NFSServer RPC shutdown drained #{drained} connection(s)")
+    end
+
+    :ok
+  end
+
+  defp await_connection_exits([], _deadline, drained), do: drained
+
+  defp await_connection_exits(refs, deadline, drained) do
+    wait_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:DOWN, ref, :process, _pid, _reason} ->
+        await_connection_exits(List.delete(refs, ref), deadline, drained + 1)
+    after
+      wait_ms -> drained
+    end
   end
 
   # ——— Accept + connection loop ———————————————————————————————————
@@ -138,14 +187,14 @@ defmodule NFSServer.RPC.Server do
     end
   end
 
-  defp accept_loop(listen_socket, programs, portmap_mappings, supervisor) do
+  defp accept_loop(listen_socket, programs, portmap_mappings, supervisor, drain_flag) do
     case :gen_tcp.accept(listen_socket) do
       {:ok, client} ->
         Task.Supervisor.start_child(supervisor, fn ->
-          serve_connection(client, programs, portmap_mappings)
+          serve_connection(client, programs, portmap_mappings, drain_flag)
         end)
 
-        accept_loop(listen_socket, programs, portmap_mappings, supervisor)
+        accept_loop(listen_socket, programs, portmap_mappings, supervisor, drain_flag)
 
       {:error, :closed} ->
         :ok
@@ -156,13 +205,14 @@ defmodule NFSServer.RPC.Server do
     end
   end
 
-  defp serve_connection(socket, programs, portmap_mappings) do
+  defp serve_connection(socket, programs, portmap_mappings, drain_flag) do
     state = %{
       socket: socket,
       buffer: <<>>,
       programs: programs,
       portmap_mappings: portmap_mappings,
-      peer: peer_address(socket)
+      peer: peer_address(socket),
+      drain_flag: drain_flag
     }
 
     read_loop(state)
@@ -187,12 +237,22 @@ defmodule NFSServer.RPC.Server do
   end
 
   defp read_loop(state) do
-    case :gen_tcp.recv(state.socket, 0) do
+    case :gen_tcp.recv(state.socket, 0, @recv_poll_ms) do
       {:ok, data} ->
         state
         |> Map.update!(:buffer, &(&1 <> data))
         |> drain_messages()
         |> read_loop()
+
+      {:error, :timeout} ->
+        # Idle between requests. If the server is draining, close now so a
+        # graceful shutdown doesn't wait the full deadline on idle clients
+        # (#1383); otherwise keep waiting for the next request.
+        if draining?(state.drain_flag) do
+          :gen_tcp.close(state.socket)
+        else
+          read_loop(state)
+        end
 
       {:error, :closed} ->
         :ok
@@ -201,6 +261,8 @@ defmodule NFSServer.RPC.Server do
         :gen_tcp.close(state.socket)
     end
   end
+
+  defp draining?(drain_flag), do: :atomics.get(drain_flag, 1) == 1
 
   # Pull as many complete messages off the buffer as possible,
   # dispatch each one, and write its reply back.

@@ -26,6 +26,10 @@ if config_env() == :prod do
   metrics_port = String.to_integer(System.get_env("NEONFS_NFS_METRICS_PORT", "9570"))
   metrics_bind = System.get_env("NEONFS_NFS_METRICS_BIND", "0.0.0.0")
 
+  # How long the RPC listener lets in-flight RPCs settle on shutdown (#1383)
+  nfs_drain_deadline_ms =
+    String.to_integer(System.get_env("NEONFS_NFS_DRAIN_DEADLINE_MS", "25000"))
+
   # Client infrastructure — bootstrap against core node
   config :neonfs_client,
     bootstrap_nodes: [String.to_atom(core_node)]
@@ -35,6 +39,7 @@ if config_env() == :prod do
 
   config :neonfs_nfs,
     core_node: String.to_atom(core_node),
+    drain_deadline_ms: nfs_drain_deadline_ms,
     metrics_bind: metrics_bind,
     metrics_enabled: metrics_enabled,
     metrics_port: metrics_port,
