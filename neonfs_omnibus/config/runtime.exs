@@ -102,7 +102,9 @@ if config_env() == :prod do
   nfs_metrics_enabled = System.get_env("NEONFS_NFS_METRICS", "false") == "true"
   nfs_metrics_port = String.to_integer(System.get_env("NEONFS_NFS_METRICS_PORT", "9570"))
   nfs_metrics_bind = System.get_env("NEONFS_NFS_METRICS_BIND", "0.0.0.0")
-  nfs_drain_deadline_ms = String.to_integer(System.get_env("NEONFS_NFS_DRAIN_DEADLINE_MS", "25000"))
+
+  nfs_drain_deadline_ms =
+    String.to_integer(System.get_env("NEONFS_NFS_DRAIN_DEADLINE_MS", "25000"))
 
   config :neonfs_nfs,
     core_node: core_node,
