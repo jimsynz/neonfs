@@ -12,11 +12,21 @@ defmodule NeonFS.NFS.Filehandle do
       |   16  | volume_id  | NeonFS volume UUID, raw 128-bit form    |
       |    8  | fileid     | 64-bit `NeonFS.NFS.InodeTable` inode    |
       |    4  | generation | POSIX-like; bumps on delete + recreate. |
-      |   36  | reserved   | zero-filled, decodes to `:reserved`     |
+      |   32  | hmac       | HMAC-SHA256 over the 28-byte prefix     |
+      |    4  | reserved   | zero-filled, decodes to `:reserved`     |
 
-  Total: exactly 64 bytes. The reserved trailing bytes are forward-
-  compatibility padding — anything other than zeros today decodes as
-  `{:error, :stale}` so the handler can return `NFS3ERR_STALE`. Sub-
+  Total: exactly 64 bytes.
+
+  The 32-byte HMAC-SHA256 over the `volume_id|fileid|generation` prefix
+  (#1221) gives handles integrity: without it a client that learns volume
+  ids could forge handles for arbitrary inodes without mounting. `decode/1`
+  recomputes the HMAC and constant-time compares it, returning
+  `{:error, :stale}` (→ `NFS3ERR_STALE`) on mismatch. The key is per-cluster
+  and derived from the cluster `master_key`, so every NFS node behind a
+  load balancer signs and verifies identically (see `signing_key/0`).
+
+  The 4 reserved trailing bytes are forward-compatibility padding —
+  anything other than zeros today also decodes as `{:error, :stale}`. Sub-
   issue #532; cf. #284 (NFSv3 epic) and #113 (native-BEAM NFS epic).
 
   ## Why pack like this
@@ -40,12 +50,22 @@ defmodule NeonFS.NFS.Filehandle do
 
   import Bitwise, only: [<<<: 2]
 
+  alias NeonFS.Cluster.State
+
   @fhandle3_size 64
   @volume_id_bytes 16
   @fileid_bytes 8
   @generation_bytes 4
-  @reserved_bytes @fhandle3_size - @volume_id_bytes - @fileid_bytes - @generation_bytes
+  @signed_bytes @volume_id_bytes + @fileid_bytes + @generation_bytes
+  @hmac_bytes 32
+  @reserved_bytes @fhandle3_size - @signed_bytes - @hmac_bytes
   @padding <<0::size(@reserved_bytes * 8)>>
+
+  # Label that domain-separates the handle-signing key derivation from any
+  # other use of the cluster master_key (same `:crypto.mac` idiom as
+  # `NeonFS.Client.InviteCrypto`).
+  @signing_key_label "neonfs-nfs-handle-signing"
+  @signing_key_term {__MODULE__, :signing_key}
 
   @typedoc "Decoded view of a filehandle."
   @type t :: %{
@@ -64,8 +84,11 @@ defmodule NeonFS.NFS.Filehandle do
       when is_binary(volume_id) and byte_size(volume_id) == @volume_id_bytes and
              is_integer(fileid) and fileid >= 0 and fileid < 1 <<< 64 and
              is_integer(generation) and generation >= 0 and generation < 1 <<< 32 do
-    <<volume_id::binary-size(@volume_id_bytes), fileid::64-big-unsigned,
-      generation::32-big-unsigned, @padding::binary>>
+    signed =
+      <<volume_id::binary-size(@volume_id_bytes), fileid::64-big-unsigned,
+        generation::32-big-unsigned>>
+
+    signed <> handle_hmac(signed) <> @padding
   end
 
   @doc """
@@ -76,11 +99,18 @@ defmodule NeonFS.NFS.Filehandle do
   """
   @spec decode(binary()) :: {:ok, t()} | {:error, :stale}
   def decode(
-        <<volume_id::binary-size(@volume_id_bytes), fileid::64-big-unsigned,
-          generation::32-big-unsigned, reserved::binary-size(@reserved_bytes)>>
+        <<signed::binary-size(@signed_bytes), hmac::binary-size(@hmac_bytes),
+          reserved::binary-size(@reserved_bytes)>>
       )
       when reserved == @padding do
-    {:ok, %{volume_id: volume_id, fileid: fileid, generation: generation}}
+    if secure_compare(handle_hmac(signed), hmac) do
+      <<volume_id::binary-size(@volume_id_bytes), fileid::64-big-unsigned,
+        generation::32-big-unsigned>> = signed
+
+      {:ok, %{volume_id: volume_id, fileid: fileid, generation: generation}}
+    else
+      {:error, :stale}
+    end
   end
 
   def decode(_), do: {:error, :stale}
@@ -119,4 +149,48 @@ defmodule NeonFS.NFS.Filehandle do
   @doc "Returns the wire size of a filehandle (always 64 bytes)."
   @spec size() :: pos_integer()
   def size, do: @fhandle3_size
+
+  defp handle_hmac(signed), do: :crypto.mac(:hmac, :sha256, signing_key(), signed)
+
+  # The per-cluster handle-signing key. Derived locally on every NFS node
+  # from its `cluster.json` `master_key`, so handles minted on one node
+  # verify on another behind a load balancer — no shared-secret exchange,
+  # no RPC on the read hot path. Cached in `:persistent_term` after first
+  # use (verification runs up to twice per READ + once per READDIRPLUS
+  # entry). Tests pin a fixed key via the `:handle_signing_key` app env.
+  defp signing_key do
+    case Application.get_env(:neonfs_nfs, :handle_signing_key) do
+      key when is_binary(key) -> key
+      _ -> cached_signing_key()
+    end
+  end
+
+  defp cached_signing_key do
+    case :persistent_term.get(@signing_key_term, nil) do
+      nil ->
+        key = derive_signing_key()
+        :persistent_term.put(@signing_key_term, key)
+        key
+
+      key ->
+        key
+    end
+  end
+
+  defp derive_signing_key do
+    {:ok, %{master_key: master_key}} = State.load()
+    :crypto.mac(:hmac, :sha256, master_key, @signing_key_label)
+  end
+
+  # Constant-time comparison so a tampered handle can't be recovered byte
+  # by byte from verification timing.
+  defp secure_compare(a, b) when byte_size(a) != byte_size(b), do: false
+
+  defp secure_compare(a, b) do
+    a
+    |> :binary.bin_to_list()
+    |> Enum.zip(:binary.bin_to_list(b))
+    |> Enum.reduce(0, fn {x, y}, acc -> Bitwise.bor(acc, Bitwise.bxor(x, y)) end)
+    |> Kernel.==(0)
+  end
 end

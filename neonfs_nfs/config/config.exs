@@ -85,6 +85,11 @@ if Mix.env() == :test do
   config :neonfs_client, start_children?: false
   config :neonfs_nfs, start_supervisor: false
 
+  # Deterministic handle-signing key for tests (#1221) so
+  # `NeonFS.NFS.Filehandle` encode/decode work without a real cluster.json
+  # on disk. Production derives this from the cluster master_key.
+  config :neonfs_nfs, handle_signing_key: "neonfs-nfs-test-handle-signing-key"
+
   # Suppress log output during tests (ExUnit's capture_log handles test-specific logs)
   config :logger, level: :warning
 end
