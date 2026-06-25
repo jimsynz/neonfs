@@ -268,7 +268,7 @@ defmodule NeonFS.NFS.ExportManager do
   end
 
   defp nfs_bind_address do
-    host = Application.get_env(:neonfs_nfs, :bind_address, "0.0.0.0")
+    host = Application.get_env(:neonfs_nfs, :bind_address, "127.0.0.1")
     port = Application.get_env(:neonfs_nfs, :port, 2049)
     "#{host}:#{port}"
   end

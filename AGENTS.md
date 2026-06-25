@@ -332,16 +332,16 @@ Do not add intra-cluster authorisation checks expecting them to be a security co
 
 ### Listener Posture (interface defaults)
 
-Interface listeners bind **`0.0.0.0` (all interfaces)** by default, and the HTTP ones are **plain HTTP** — unencrypted and world-reachable unless the deployment restricts them:
+Interface listeners bind **`127.0.0.1` (loopback)** by default — private-by-default (#1225). The HTTP ones are still **plain HTTP** (unencrypted), so any deployment that widens the bind must also restrict/terminate TLS at the boundary:
 
-| Interface | App env (bind / port)                          | Default            | Transport |
-|-----------|------------------------------------------------|--------------------|-----------|
-| S3        | `:neonfs_s3` `:s3_bind` / `:s3_port`           | `0.0.0.0` / `8080` | plain HTTP |
-| WebDAV    | `:neonfs_webdav` `:webdav_bind` / `:webdav_port` | `0.0.0.0` / `8081` | plain HTTP |
-| NFSv3     | `:neonfs_nfs` `:bind_address` / `:port`        | `0.0.0.0` / `2049` | TCP        |
-| NLM       | `:neonfs_nfs` `:nlm_bind` / `:nlm_port`        | `0.0.0.0` / `4045` | TCP        |
+| Interface | App env (bind / port)                          | Default              | Transport |
+|-----------|------------------------------------------------|----------------------|-----------|
+| S3        | `:neonfs_s3` `:s3_bind` / `:s3_port`           | `127.0.0.1` / `8080` | plain HTTP |
+| WebDAV    | `:neonfs_webdav` `:webdav_bind` / `:webdav_port` | `127.0.0.1` / `8081` | plain HTTP |
+| NFSv3     | `:neonfs_nfs` `:bind_address` / `:port`        | `127.0.0.1` / `2049` | TCP        |
+| NLM       | `:neonfs_nfs` `:nlm_bind` / `:nlm_port`        | `127.0.0.1` / `4045` | TCP        |
 
-Deployment guidance: front the HTTP interfaces (S3, WebDAV) with a TLS-terminating reverse proxy or confine them to a trusted network; firewall the NFS/NLM ports. Override the bind env to `127.0.0.1` where only local access is intended. (Flipping the shipped defaults to loopback is tracked separately — it needs the test-rig, container images, and Helm chart to set binds explicitly first, else deployments break silently.)
+Override the bind env (`NEONFS_S3_BIND`, `NEONFS_WEBDAV_BIND`, `NEONFS_NFS_BIND`, `NEONFS_NLM_BIND`) to `0.0.0.0` (or a specific address) for multi-host access. The shipped **container images set `0.0.0.0`** so published images serve externally out of the box (`containers/Containerfile.{s3,webdav,nfs,omnibus}`); the systemd package ships commented loopback defaults (`packaging/systemd/neonfs.conf`). When widening: front the HTTP interfaces (S3, WebDAV) with a TLS-terminating reverse proxy or confine them to a trusted network, and firewall the NFS/NLM ports. (Metrics endpoints `:*_metrics_bind` still default to `0.0.0.0` — observability scrape targets, gated by the metrics-enabled flag.)
 
 ### Service Discovery
 

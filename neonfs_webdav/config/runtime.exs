@@ -6,7 +6,7 @@ if config_env() == :prod do
   node_name = System.get_env("RELEASE_NODE", "neonfs_webdav@localhost")
   core_node = System.get_env("NEONFS_CORE_NODE", "neonfs_core@localhost")
 
-  webdav_bind = System.get_env("NEONFS_WEBDAV_BIND", "0.0.0.0")
+  webdav_bind = System.get_env("NEONFS_WEBDAV_BIND", "127.0.0.1")
   webdav_port = String.to_integer(System.get_env("NEONFS_WEBDAV_PORT", "8081"))
 
   webdav_drain_deadline_ms =

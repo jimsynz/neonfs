@@ -97,7 +97,7 @@ if config_env() == :prod do
   config :neonfs_fuse, NeonFS.FUSE.MountManager, default_mount_options: []
 
   # NFS configuration
-  nfs_bind = System.get_env("NEONFS_NFS_BIND", "0.0.0.0")
+  nfs_bind = System.get_env("NEONFS_NFS_BIND", "127.0.0.1")
   nfs_port = String.to_integer(System.get_env("NEONFS_NFS_PORT", "2049"))
   nfs_metrics_enabled = System.get_env("NEONFS_NFS_METRICS", "false") == "true"
   nfs_metrics_port = String.to_integer(System.get_env("NEONFS_NFS_METRICS_PORT", "9570"))
@@ -117,7 +117,7 @@ if config_env() == :prod do
     node_name: node_name
 
   # S3 configuration
-  s3_bind = System.get_env("NEONFS_S3_BIND", "0.0.0.0")
+  s3_bind = System.get_env("NEONFS_S3_BIND", "127.0.0.1")
   s3_port = String.to_integer(System.get_env("NEONFS_S3_PORT", "8080"))
   s3_region = System.get_env("NEONFS_S3_REGION", "neonfs")
   s3_drain_deadline_ms = String.to_integer(System.get_env("NEONFS_S3_DRAIN_DEADLINE_MS", "25000"))

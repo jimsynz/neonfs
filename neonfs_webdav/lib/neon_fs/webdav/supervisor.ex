@@ -46,7 +46,7 @@ defmodule NeonFS.WebDAV.Supervisor do
   @spec listener_child_spec() :: {Bandit, keyword()}
   def listener_child_spec do
     port = Application.get_env(:neonfs_webdav, :webdav_port, 8081)
-    bind = Application.get_env(:neonfs_webdav, :webdav_bind, "0.0.0.0")
+    bind = Application.get_env(:neonfs_webdav, :webdav_bind, "127.0.0.1")
 
     {Bandit,
      plug: {HealthPlug, backend: Backend, lock_store: LockStore},
