@@ -210,7 +210,11 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
     {:ok, expected_inode} =
       PeerCluster.rpc(cluster, :node1, InodeTable, :allocate_inode, [volume, file_path])
 
-    {:ok, decoded} = Filehandle.decode(file_fh)
+    # Decode on the node that minted the handle: the HMAC (#1221) is keyed
+    # by that node's cluster master_key, which the test/controller node
+    # (no cluster.json) can't reproduce. In production every NFS node
+    # derives the same key, so cross-node verification holds.
+    {:ok, decoded} = PeerCluster.rpc(cluster, :node1, Filehandle, :decode, [file_fh])
     assert decoded.fileid == expected_inode
 
     # 6. READDIRPLUS on the volume root — file appears with right name + fileid.

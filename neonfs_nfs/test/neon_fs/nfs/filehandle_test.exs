@@ -39,13 +39,42 @@ defmodule NeonFS.NFS.FilehandleTest do
     end
 
     test "non-zero reserved bytes" do
-      # Pack a valid prefix then dirty the reserved trailer.
-      prefix = <<@volume_id::binary, @fileid::64, 0::32>>
-      # All zeros in reserved is fine; flip a single bit.
-      dirty = prefix <> <<0::35*8, 1>>
+      # A valid handle has zero-filled reserved trailing bytes; flip the
+      # last one.
+      <<head::binary-size(63), _last>> = Filehandle.encode(@volume_id, @fileid, @generation)
+      dirty = head <> <<1>>
 
       assert byte_size(dirty) == 64
       assert {:error, :stale} = Filehandle.decode(dirty)
+    end
+  end
+
+  describe "decode/1 rejects forged/tampered handles (#1221)" do
+    test "rejects a structurally-valid handle whose signed fields were tampered" do
+      <<prefix::binary-size(16), b, rest::binary>> =
+        Filehandle.encode(@volume_id, @fileid, @generation)
+
+      tampered = <<prefix::binary, Bitwise.bxor(b, 1), rest::binary>>
+
+      assert byte_size(tampered) == 64
+      assert {:error, :stale} = Filehandle.decode(tampered)
+    end
+
+    test "rejects a handle whose HMAC was tampered" do
+      # The HMAC occupies bytes 28..59; flip a bit at its first byte.
+      <<prefix::binary-size(28), b, rest::binary>> =
+        Filehandle.encode(@volume_id, @fileid, @generation)
+
+      tampered = <<prefix::binary, Bitwise.bxor(b, 1), rest::binary>>
+
+      assert {:error, :stale} = Filehandle.decode(tampered)
+    end
+
+    test "rejects a hand-forged handle with no valid HMAC" do
+      forged = <<@volume_id::binary, @fileid::64, @generation::32, 0::32*8, 0::4*8>>
+
+      assert byte_size(forged) == 64
+      assert {:error, :stale} = Filehandle.decode(forged)
     end
   end
 
