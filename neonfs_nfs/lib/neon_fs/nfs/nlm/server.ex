@@ -10,7 +10,7 @@ defmodule NeonFS.NFS.NLM.Server do
 
       config :neonfs_nfs,
         nlm_port: 4045,
-        nlm_bind: "0.0.0.0"
+        nlm_bind: "127.0.0.1"
 
   Clients connect using: `mount -t nfs -o vers=3,tcp,nlm_port=4045 host:/volume /mnt`
   """
@@ -167,7 +167,7 @@ defmodule NeonFS.NFS.NLM.Server do
   end
 
   defp nlm_bind_address do
-    Application.get_env(:neonfs_nfs, :nlm_bind, "0.0.0.0")
+    Application.get_env(:neonfs_nfs, :nlm_bind, "127.0.0.1")
   end
 
   defp parse_bind_address(address) when is_binary(address) do

@@ -45,7 +45,7 @@ defmodule NeonFS.S3.Supervisor do
   @spec listener_child_spec() :: {Bandit, keyword()}
   def listener_child_spec do
     port = Application.get_env(:neonfs_s3, :s3_port, 8080)
-    bind = Application.get_env(:neonfs_s3, :s3_bind, "0.0.0.0")
+    bind = Application.get_env(:neonfs_s3, :s3_bind, "127.0.0.1")
 
     {Bandit,
      plug: {HealthPlug, backend: Backend},

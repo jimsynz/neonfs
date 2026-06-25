@@ -54,6 +54,11 @@ EXPOSE 2049/tcp
 # set runner ENV
 ENV MIX_ENV="prod"
 
+# The app default binds are loopback (#1225); serve on all interfaces inside
+# the container and restrict at the deployment/network layer instead.
+ENV NEONFS_NFS_BIND="0.0.0.0"
+ENV NEONFS_NLM_BIND="0.0.0.0"
+
 # Only copy the final release from the build stage
 COPY --from=releaser --chown=nobody:root /workdir/neonfs_nfs/_build/${MIX_ENV}/rel/neonfs_nfs ./
 

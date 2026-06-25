@@ -6,7 +6,7 @@ if config_env() == :prod do
   node_name = System.get_env("RELEASE_NODE", "neonfs_s3@localhost")
   core_node = System.get_env("NEONFS_CORE_NODE", "neonfs_core@localhost")
 
-  s3_bind = System.get_env("NEONFS_S3_BIND", "0.0.0.0")
+  s3_bind = System.get_env("NEONFS_S3_BIND", "127.0.0.1")
   s3_port = String.to_integer(System.get_env("NEONFS_S3_PORT", "8080"))
   s3_region = System.get_env("NEONFS_S3_REGION", "neonfs")
   s3_drain_deadline_ms = String.to_integer(System.get_env("NEONFS_S3_DRAIN_DEADLINE_MS", "25000"))

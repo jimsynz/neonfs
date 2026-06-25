@@ -14,11 +14,11 @@ if config_env() == :prod do
   core_node = System.get_env("NEONFS_CORE_NODE", "neonfs_core@localhost")
 
   # NFS server bind address and port
-  nfs_bind = System.get_env("NEONFS_NFS_BIND", "0.0.0.0")
+  nfs_bind = System.get_env("NEONFS_NFS_BIND", "127.0.0.1")
   nfs_port = String.to_integer(System.get_env("NEONFS_NFS_PORT", "2049"))
 
   # NLM (Network Lock Manager) bind address and port
-  nlm_bind = System.get_env("NEONFS_NLM_BIND", "0.0.0.0")
+  nlm_bind = System.get_env("NEONFS_NLM_BIND", "127.0.0.1")
   nlm_port = String.to_integer(System.get_env("NEONFS_NLM_PORT", "4045"))
 
   # Metrics endpoint (disabled by default, set NEONFS_NFS_METRICS=true to enable)
