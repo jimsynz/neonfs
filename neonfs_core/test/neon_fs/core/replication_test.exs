@@ -2,7 +2,7 @@ defmodule NeonFS.Core.ReplicationTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core.{Drive, DriveRegistry, Replication, Volume}
+  alias NeonFS.Core.{Drive, DriveRegistry, DriveTrust, RaServer, Replication, Volume}
 
   @moduletag :tmp_dir
 
@@ -59,6 +59,25 @@ defmodule NeonFS.Core.ReplicationTest do
       # Only the single "default" drive exists, and it is excluded.
       assert {:ok, []} =
                Replication.select_replication_targets(5, :hot, [{Node.self(), "default"}])
+    end
+
+    test "excludes :unverified drives from placement (#1375)" do
+      # The module stops Ra; bring it up for this test so the DriveTrust
+      # facade can resolve the unverified set.
+      start_ra()
+      :ok = RaServer.init_cluster()
+
+      register_drive("hot1")
+      register_drive("hot2")
+      :ok = DriveTrust.mark_unverified(Node.self(), "hot1")
+
+      assert {:ok, targets} =
+               Replication.select_replication_targets(3, :hot, [{Node.self(), "default"}])
+
+      refute Enum.any?(targets, &(&1.drive_id == "hot1")),
+             "an :unverified drive must not be selected as a replication target"
+
+      assert Enum.any?(targets, &(&1.drive_id == "hot2"))
     end
 
     test "prefers a node that holds no copies over the node holding the primary" do

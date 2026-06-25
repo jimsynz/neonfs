@@ -11,7 +11,7 @@ defmodule NeonFS.Core.Replication do
   """
 
   alias NeonFS.Client.Router
-  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveRegistry}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveRegistry, DriveTrust}
 
   require Logger
 
@@ -124,11 +124,21 @@ defmodule NeonFS.Core.Replication do
     else
       copies_by_node = Enum.frequencies_by(exclude, fn {node, _drive_id} -> node end)
 
+      # Keep new replicas off drives that are present-but-not-durable-yet
+      # (#1375) — a returning node mid-resync or a crash-recovered drive
+      # mid-scrub. Fetch the (normally empty) unverified set once rather
+      # than querying per drive; a transient Ra hiccup degrades to "no
+      # exclusions" so placement never hard-fails on it.
+      unverified = MapSet.new(DriveTrust.unverified())
+
       targets =
         tier
         |> DriveRegistry.drives_for_tier()
         |> Enum.filter(&(&1.state == :active))
-        |> Enum.reject(&({&1.node, &1.id} in exclude))
+        |> Enum.reject(fn drive ->
+          {drive.node, drive.id} in exclude or
+            MapSet.member?(unverified, {drive.node, drive.id})
+        end)
         |> spread_across_nodes(copies_by_node)
         |> Enum.take(count)
         |> Enum.map(&%{node: &1.node, drive_id: &1.id})
