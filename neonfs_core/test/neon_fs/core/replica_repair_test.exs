@@ -9,9 +9,22 @@ defmodule NeonFS.Core.ReplicaRepairTest do
   use ExUnit.Case, async: false
   use Mimic
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex, ChunkMeta, ReplicaRepair, Replication, VolumeRegistry}
+  alias NeonFS.Core.{
+    BlobStore,
+    ChunkIndex,
+    ChunkMeta,
+    DriveTrust,
+    ReplicaRepair,
+    Replication,
+    VolumeRegistry
+  }
 
   setup :verify_on_exit!
+
+  setup do
+    stub(DriveTrust, :unverified, fn -> [] end)
+    :ok
+  end
 
   @volume_id "vol-1"
   @local Node.self()
@@ -118,6 +131,60 @@ defmodule NeonFS.Core.ReplicaRepairTest do
       assert {:ok, %{added: 0, removed: removed, errors: errors}} = result
       assert removed >= 1
       assert is_list(errors)
+    end
+
+    test "unverified replicas don't count toward durability; under-replication is repaired (#1375)" do
+      stub(VolumeRegistry, :get, fn _ -> {:ok, volume()} end)
+
+      stub(DriveTrust, :unverified, fn -> [{:n3, "default"}] end)
+
+      stub(ChunkIndex, :get_chunks_for_volume, fn _ ->
+        # Three physical copies, but n3's is :unverified — only two count,
+        # so the chunk is under-replicated against target 3.
+        [chunk("h1", [loc(@local), loc(:n2), loc(:n3)], 3)]
+      end)
+
+      expect(BlobStore, :read_chunk, fn "h1", "default" -> {:ok, "data"} end)
+
+      expect(Replication, :replicate_chunk, fn "h1", "data", _vol, opts ->
+        # Every existing physical drive — including the unverified one — is
+        # excluded so we don't re-place on a drive that already holds a copy.
+        assert {:n3, "default"} in opts[:exclude_drives]
+        {:ok, [loc(:n4)]}
+      end)
+
+      stub(ChunkIndex, :update_locations, fn _, _ -> :ok end)
+
+      assert {:ok, %{added: 1, removed: 0, errors: []}} =
+               ReplicaRepair.repair_volume(@volume_id)
+    end
+
+    test "over-replication drops only trusted excess, never an unverified copy (#1375)" do
+      stub(VolumeRegistry, :get, fn _ -> {:ok, volume()} end)
+
+      stub(DriveTrust, :unverified, fn -> [{:n5, "default"}] end)
+
+      stub(ChunkIndex, :get_chunks_for_volume, fn _ ->
+        # Four trusted copies + one unverified. Trusted count 4 > target 3,
+        # so exactly one trusted copy is dropped; the unverified copy stays.
+        [chunk("h1", [loc(@local), loc(:n2), loc(:n3), loc(:n4), loc(:n5)], 3)]
+      end)
+
+      reject(&Replication.replicate_chunk/4)
+
+      # Excess is picked from the trusted set, whose first entry is the
+      # local copy, so the delete dispatches via BlobStore locally.
+      expect(BlobStore, :delete_chunk, fn "h1", "default", _ -> {:ok, 1024} end)
+
+      stub(ChunkIndex, :update_locations, fn "h1", kept ->
+        assert {:n5, "default"} in Enum.map(kept, &{&1.node, &1.drive_id}),
+               "the unverified replica must never be dropped as excess"
+
+        :ok
+      end)
+
+      assert {:ok, %{added: 0, removed: removed}} = ReplicaRepair.repair_volume(@volume_id)
+      assert removed >= 1
     end
 
     test "exactly-replicated chunks are no-ops even mixed with under/over" do
