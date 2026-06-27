@@ -4,7 +4,9 @@ defmodule NeonFS.Core.ReplicaRepair do
   replica count to its target. Under-replicated chunks get fresh
   replicas via `Replication.replicate_chunk/4`; over-replicated
   chunks have the excess deleted via `BlobStore.delete_chunk/3`.
-  Exactly-replicated chunks are skipped.
+  Exactly-replicated chunks are skipped. Only `:trusted` replicas count
+  toward the target — `:unverified` ones (#1375) are excluded from the
+  durability maths.
 
   This is the data-plane primitive for the replica-repair worker
   (issue #687). The Job-runner integration, periodic scheduler,
@@ -36,7 +38,7 @@ defmodule NeonFS.Core.ReplicaRepair do
       Metadata: `chunk_hash`, `reason`.
   """
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex, Replication, VolumeRegistry}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveTrust, Replication, VolumeRegistry}
 
   @default_batch_size 100
   @rpc_timeout 30_000
@@ -68,11 +70,12 @@ defmodule NeonFS.Core.ReplicaRepair do
       total = length(chunks)
       batch = chunks |> Enum.drop(cursor) |> Enum.take(batch_size)
       next_cursor = if cursor + batch_size >= total, do: :done, else: cursor + batch_size
+      unverified = unverified_drives()
 
       result =
         batch
         |> Enum.reduce(%{added: 0, removed: 0, errors: []}, fn chunk, acc ->
-          reconcile_chunk(chunk, volume, acc)
+          reconcile_chunk(chunk, volume, unverified, acc)
         end)
         |> Map.put(:next_cursor, next_cursor)
 
@@ -99,11 +102,13 @@ defmodule NeonFS.Core.ReplicaRepair do
   def repair_chunks(volume_id, chunk_hashes)
       when is_binary(volume_id) and is_list(chunk_hashes) do
     with {:ok, volume} <- VolumeRegistry.get(volume_id) do
+      unverified = unverified_drives()
+
       result =
         chunk_hashes
         |> Enum.reduce(
           %{added: 0, removed: 0, errors: []},
-          &reduce_chunk(volume_id, volume, &1, &2)
+          &reduce_chunk(volume_id, volume, unverified, &1, &2)
         )
         |> Map.put(:next_cursor, :done)
 
@@ -111,9 +116,9 @@ defmodule NeonFS.Core.ReplicaRepair do
     end
   end
 
-  defp reduce_chunk(volume_id, volume, hash, acc) do
+  defp reduce_chunk(volume_id, volume, unverified, hash, acc) do
     case ChunkIndex.get(volume_id, hash) do
-      {:ok, chunk} -> reconcile_chunk(chunk, volume, acc)
+      {:ok, chunk} -> reconcile_chunk(chunk, volume, unverified, acc)
       {:error, reason} -> record_lookup_error(hash, reason, acc)
     end
   end
@@ -123,13 +128,21 @@ defmodule NeonFS.Core.ReplicaRepair do
     %{acc | errors: [{hash, reason} | acc.errors]}
   end
 
-  defp reconcile_chunk(%{target_replicas: target} = chunk, volume, acc) do
-    current = length(chunk.locations)
+  # Only `:trusted` replicas count toward durability (#1375). A
+  # present-but-not-durable-yet copy — a returning node mid-resync or a
+  # crash-recovered drive mid-scrub — is excluded from the count, so an
+  # under-replicated chunk isn't masked by an unverified replica, and an
+  # unverified copy is never deleted as "excess" while it's still being
+  # verified. The (normally empty) unverified set is fetched once per
+  # pass rather than per chunk.
+  defp reconcile_chunk(%{target_replicas: target} = chunk, volume, unverified, acc) do
+    durable = Enum.reject(chunk.locations, &MapSet.member?(unverified, {&1.node, &1.drive_id}))
+    current = length(durable)
 
     cond do
       current == target -> acc
       current < target -> add_replicas(chunk, volume, target - current, acc)
-      current > target -> drop_replicas(chunk, current - target, acc)
+      current > target -> drop_replicas(chunk, durable, current - target, acc)
     end
   end
 
@@ -164,8 +177,8 @@ defmodule NeonFS.Core.ReplicaRepair do
   # the caller; the actual added count derives from the locations diff.
   defp with_count_unused(acc, _count), do: acc
 
-  defp drop_replicas(chunk, count, acc) do
-    excess = pick_excess_replicas(chunk.locations, count)
+  defp drop_replicas(chunk, durable, count, acc) do
+    excess = pick_excess_replicas(durable, count)
     keeper_locations = chunk.locations -- excess
 
     Enum.reduce(excess, {acc, keeper_locations}, fn location, {inner_acc, kept} ->
@@ -190,6 +203,11 @@ defmodule NeonFS.Core.ReplicaRepair do
   # has the hooks for the inverse direction. Out of scope per
   # issue #687.
   defp pick_excess_replicas(locations, count), do: Enum.take(locations, count)
+
+  # The `{node, drive_id}` set of replicas that don't count toward
+  # durability. A transient Ra hiccup degrades to "none unverified" (see
+  # `DriveTrust.unverified/0`) so repair never hard-fails on it.
+  defp unverified_drives, do: MapSet.new(DriveTrust.unverified())
 
   defp source_chunk_data(chunk) do
     case Enum.find(chunk.locations, &(&1.node == Node.self())) do
