@@ -1,0 +1,21 @@
+# Advisories temporarily ignored by `mix deps.audit`.
+#
+# Each line is a `GHSA-...` id. Blank lines and lines starting with
+# `#` are skipped (mix_audit/lib/cli/audit.ex). Re-evaluate every
+# entry whenever the upstream package publishes a new release.
+#
+# -- hackney 1.25.0 (neonfs_s3, test-only via ex_aws) --
+# `hackney` is a `only: :test` dependency pulled in as ex_aws's HTTP
+# client for the S3 acceptance tests; it is never compiled into a
+# release. The advisories below all describe client-side request
+# construction flaws (CRLF/header injection, SSRF allow-list bypass,
+# missing TLS-upgrade timeout). In the test suite hackney only talks
+# to the in-process test S3 server over test-controlled hosts and
+# URLs, so none of these vectors apply. All four list `First patched
+# versions: 4.0.1`, and ex_aws constrains `~> 1.16`, so there is no
+# 1.x release to bump to. Tracked for removal under #1412 (drop the
+# hackney test dep / move ex_aws onto req).
+GHSA-gp9c-pm5m-5cxr
+GHSA-j9wq-vxxc-94wf
+GHSA-mp55-p8c9-rfw2
+GHSA-pj7v-xfvx-wmjq
