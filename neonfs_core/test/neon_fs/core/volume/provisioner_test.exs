@@ -60,6 +60,36 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
       assert segment.index_roots == %{file_index: nil, chunk_index: nil, stripe_index: nil}
     end
 
+    test "excludes drives on excluded (draining/maintenance) nodes from placement (#1376)" do
+      volume = sample_volume()
+
+      drives = [
+        drive("drv-1", :n1@h),
+        drive("drv-2", :n2@h),
+        drive("drv-3", :n3@h),
+        drive("drv-4", :n4@h)
+      ]
+
+      captured = capture_replicator()
+
+      _ =
+        Provisioner.provision(volume,
+          cluster_state_loader: fn -> {:ok, sample_cluster_state()} end,
+          drive_lister: fn -> {:ok, drives} end,
+          excluded_lister: fn -> MapSet.new([:n4@h]) end,
+          chunk_replicator: captured.module,
+          bootstrap_registrar: fn _ -> {:ok, :ok} end
+        )
+
+      [selected] = captured.drives.()
+      selected_nodes = Enum.map(selected, & &1.node)
+
+      refute :n4@h in selected_nodes,
+             "a replica must not be placed on an excluded node"
+
+      assert length(selected_nodes) == 3
+    end
+
     test "min_copies for :replicate matches durability.min_copies" do
       volume = %{sample_volume() | durability: %{type: :replicate, factor: 3, min_copies: 2}}
       captured = capture_replicator()
@@ -246,7 +276,7 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
   end
 
   defp capture_replicator do
-    {:ok, agent} = Agent.start_link(fn -> %{calls: [], opts: []} end)
+    {:ok, agent} = Agent.start_link(fn -> %{calls: [], opts: [], drives: []} end)
     name = String.to_atom("Elixir.NeonFS.Core.Volume.ProvisionerTest.CR#{:erlang.phash2(agent)}")
 
     # The stub module looks up the agent at compile time via :persistent_term —
@@ -262,7 +292,7 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
           agent = :persistent_term.get(@pt_key)
 
           Agent.update(agent, fn s ->
-            %{calls: [data | s.calls], opts: [opts | s.opts]}
+            %{calls: [data | s.calls], opts: [opts | s.opts], drives: [drives | s.drives]}
           end)
 
           {:ok, "captured-hash", %{successful: Enum.map(drives, & &1.drive_id), failed: []}}
@@ -274,7 +304,8 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
     %{
       module: name,
       calls: fn -> Agent.get(agent, & &1.calls) |> Enum.reverse() end,
-      opts: fn -> Agent.get(agent, & &1.opts) |> Enum.reverse() end
+      opts: fn -> Agent.get(agent, & &1.opts) |> Enum.reverse() end,
+      drives: fn -> Agent.get(agent, & &1.drives) |> Enum.reverse() end
     }
   end
 

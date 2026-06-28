@@ -1872,6 +1872,39 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
 
       assert MetadataStateMachine.draining_nodes(state) == MapSet.new([:a@host, :c@host])
     end
+
+    test "set_node_status accepts :maintenance (#1376)" do
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:set_node_status, :node1@host, :maintenance},
+          base_state()
+        )
+
+      assert MetadataStateMachine.get_node(state, :node1@host).status == :maintenance
+    end
+
+    test "maintenance_nodes returns only the maintenance set, distinct from draining (#1376)" do
+      state =
+        base_state()
+        |> apply_ok({:set_node_status, :a@host, :maintenance})
+        |> apply_ok({:set_node_status, :b@host, :draining})
+        |> apply_ok({:set_node_status, :c@host, :maintenance})
+
+      assert MetadataStateMachine.maintenance_nodes(state) == MapSet.new([:a@host, :c@host])
+      assert MetadataStateMachine.draining_nodes(state) == MapSet.new([:b@host])
+    end
+
+    test "excluded_nodes unions draining and maintenance, omitting active/joining (#1376)" do
+      state =
+        base_state()
+        |> apply_ok({:set_node_status, :a@host, :draining})
+        |> apply_ok({:set_node_status, :b@host, :maintenance})
+        |> apply_ok({:set_node_status, :c@host, :active})
+        |> apply_ok({:set_node_status, :d@host, :joining})
+
+      assert MetadataStateMachine.excluded_nodes(state) == MapSet.new([:a@host, :b@host])
+    end
   end
 
   describe "machine version migration 17 -> 18 (node lifecycle)" do

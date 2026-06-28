@@ -228,12 +228,15 @@ defmodule NeonFS.Core.MetadataStateMachine do
   First-class node lifecycle entry (#1323). `status` is the node's
   cluster-lifecycle state — distinct from reachability (net_kernel /
   Ra membership) and from per-service presence (`services`). Placement
-  and routing consumers exclude `:draining` nodes from *new* work
-  (replica/owner placement) while existing data stays put, so a node
-  can be drained before removal. Entries are upserted to `:active` when
-  a node first registers a service; `:draining` is set explicitly.
+  and routing consumers exclude `:draining` and `:maintenance` nodes
+  from *new* work (replica/owner placement) while existing data stays
+  put. `:draining` is decommission (evacuate then remove); `:maintenance`
+  is planned, temporary absence (#1376) — same new-work exclusion, but
+  no evacuation and no Ra `remove_member`. Entries are upserted to
+  `:active` when a node first registers a service; `:draining` and
+  `:maintenance` are set explicitly.
   """
-  @type node_status :: :joining | :active | :draining
+  @type node_status :: :joining | :active | :draining | :maintenance
   @type node_entry :: %{
           node: node(),
           status: node_status(),
@@ -394,11 +397,35 @@ defmodule NeonFS.Core.MetadataStateMachine do
 
   @doc """
   Returns the set of nodes currently in the `:draining` lifecycle state
-  (#1323). Placement consumers exclude these from new work.
+  (#1323). The decommission flow (evacuation, removal) keys off this
+  specifically; for new-work exclusion use `excluded_nodes/1`.
   """
   @spec draining_nodes(state()) :: MapSet.t(node())
   def draining_nodes(state) do
     for {node, %{status: :draining}} <- get_nodes(state), into: MapSet.new(), do: node
+  end
+
+  @doc """
+  Returns the set of nodes currently in the `:maintenance` lifecycle
+  state (#1376) — cordoned for planned, temporary absence.
+  """
+  @spec maintenance_nodes(state()) :: MapSet.t(node())
+  def maintenance_nodes(state) do
+    for {node, %{status: :maintenance}} <- get_nodes(state), into: MapSet.new(), do: node
+  end
+
+  @doc """
+  Returns the set of nodes excluded from *new* work — those in either
+  `:draining` or `:maintenance`. Placement and routing consumers use
+  this; an empty set on an unreadable table degrades to "place
+  anywhere".
+  """
+  @spec excluded_nodes(state()) :: MapSet.t(node())
+  def excluded_nodes(state) do
+    for {node, %{status: status}} <- get_nodes(state),
+        status in [:draining, :maintenance],
+        into: MapSet.new(),
+        do: node
   end
 
   @doc """

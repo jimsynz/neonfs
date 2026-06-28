@@ -38,6 +38,22 @@ defmodule NeonFS.Client.DiscoveryTest do
     end
   end
 
+  describe "deprioritised_core_nodes/0 (#1376)" do
+    test "returns core nodes marked :draining or :maintenance" do
+      online = ServiceInfo.new(:core_a@host, :core, status: :online)
+      draining = ServiceInfo.new(:core_b@host, :core, status: :draining)
+      maintenance = ServiceInfo.new(:core_c@host, :core, status: :maintenance)
+      :ets.insert(:neonfs_client_services, {{:by_type, :core}, [online, draining, maintenance]})
+
+      assert Discovery.deprioritised_core_nodes() ==
+               MapSet.new([:core_b@host, :core_c@host])
+    end
+
+    test "is empty when nothing is cached" do
+      assert Discovery.deprioritised_core_nodes() == MapSet.new()
+    end
+  end
+
   describe "refresh/0" do
     test "does not crash when no core connection exists" do
       Discovery.refresh()

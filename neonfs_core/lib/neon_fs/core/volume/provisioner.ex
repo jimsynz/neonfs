@@ -67,13 +67,13 @@ defmodule NeonFS.Core.Volume.Provisioner do
     drive_lister = Keyword.get(opts, :drive_lister, &default_drive_lister/0)
     chunk_replicator = Keyword.get(opts, :chunk_replicator, ChunkReplicator)
     bootstrap_registrar = Keyword.get(opts, :bootstrap_registrar, &default_bootstrap_registrar/1)
-    draining_lister = Keyword.get(opts, :draining_lister, &NodeRegistry.draining_nodes/0)
+    excluded_lister = Keyword.get(opts, :excluded_lister, &NodeRegistry.excluded_nodes/0)
 
     with {:ok, cluster_state} <- load_cluster_state(cluster_state_loader),
          {:ok, all_drives} <- list_drives(drive_lister),
          {:ok, replica_ids} <-
            DriveSelector.select_replicas(volume.durability, all_drives,
-             exclude_nodes: draining_lister.()
+             exclude_nodes: excluded_lister.()
            ),
          replica_drives = filter_drives(all_drives, replica_ids),
          segment = build_segment(volume, cluster_state),

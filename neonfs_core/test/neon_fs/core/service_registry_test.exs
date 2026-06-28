@@ -97,6 +97,17 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     assert entry.status == :draining
   end
 
+  test "list/0 stamps :maintenance on services whose node is cordoned (#1376)" do
+    :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+    :ok = NodeRegistry.set_status(Node.self(), :maintenance)
+
+    entry =
+      ServiceRegistry.list()
+      |> Enum.find(&(&1.node == Node.self() and &1.type == :core))
+
+    assert entry.status == :maintenance
+  end
+
   defp start_test_peer(name, dist_port, peer_ports_env) do
     code_paths =
       :code.get_path()

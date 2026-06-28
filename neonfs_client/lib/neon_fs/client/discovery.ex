@@ -51,6 +51,20 @@ defmodule NeonFS.Client.Discovery do
   end
 
   @doc """
+  Returns the set of core nodes routing should deprioritise — those
+  marked `:draining` (#1324) or `:maintenance` (#1376). Both are present
+  but not accepting new work; routing penalises rather than excludes
+  them so a cluster whose only reachable core node is off-duty still
+  works.
+  """
+  @spec deprioritised_core_nodes() :: MapSet.t(node())
+  def deprioritised_core_nodes do
+    list_by_type(:core)
+    |> Enum.filter(&(&1.status in [:draining, :maintenance]))
+    |> MapSet.new(& &1.node)
+  end
+
+  @doc """
   Returns services of the given type from cache.
   """
   @spec list_by_type(NeonFS.Client.ServiceType.t()) :: [ServiceInfo.t()]
