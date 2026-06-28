@@ -166,6 +166,52 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
     end
   end
 
+  @doc """
+  Cordons a node for planned, temporary absence (#1376): marks it
+  `:maintenance` so placement (`DriveSelector` / `Provisioner`) and
+  client routing (`CostFunction`) stop giving it new work — **without**
+  evacuating its drives or removing it from Ra. Use this before a
+  reboot / kernel upgrade / hardware swap, then `uncordon-node` (or, in
+  a later slice, auto-resume) once it is back.
+
+  Unlike `drain-node`, this never starts drive evacuation: the node is
+  expected to return with its data intact.
+
+  ## Returns
+  - `{:ok, %{node, status: "maintenance"}}`.
+  - `{:error, reason}` if the cluster isn't formed, the node can't be
+    resolved, or the lifecycle write fails.
+  """
+  @spec handle_cordon_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_cordon_node(node_name) when is_binary(node_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, target_node} <- resolve_target_node(node_name),
+         :ok <- NodeRegistry.set_status(target_node, :maintenance) do
+      {:ok, %{node: Atom.to_string(target_node), status: "maintenance"}}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Reverses a cordon: marks the node `:active` again (#1376) so placement
+  and routing resume giving it new work.
+  """
+  @spec handle_uncordon_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_uncordon_node(node_name) when is_binary(node_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, target_node} <- resolve_target_node(node_name),
+         :ok <- NodeRegistry.set_status(target_node, :active) do
+      {:ok, %{node: Atom.to_string(target_node), status: "active"}}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
   # Hands each of the node's drives to `DriveEvacuation`, collecting a
   # per-drive start result. Already-draining drives surface their error
   # rather than aborting the whole drain.
