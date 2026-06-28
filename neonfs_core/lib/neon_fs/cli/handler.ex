@@ -137,6 +137,20 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_undrain_node(node_name), to: ClusterRecoveryHandler
 
   @doc """
+  Cordons a node for planned maintenance (#1376): marks it `:maintenance`
+  (stopping new placement/routing work) without evacuating drives or
+  changing Ra membership.
+  """
+  @spec handle_cordon_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  defdelegate handle_cordon_node(node_name), to: ClusterRecoveryHandler
+
+  @doc """
+  Reverses a cordon — marks the node `:active` again (#1376).
+  """
+  @spec handle_uncordon_node(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  defdelegate handle_uncordon_node(node_name), to: ClusterRecoveryHandler
+
+  @doc """
   Runs the safety-gate pipeline for `neonfs cluster force-reset` and
   records the operator-acknowledged data-loss intent in the audit log.
 

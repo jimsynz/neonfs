@@ -221,6 +221,24 @@ pub enum ClusterCommand {
         node: String,
     },
 
+    /// Cordon a node for planned maintenance: mark it `maintenance` so
+    /// new placement and client routing avoid it, without evacuating
+    /// its drives or changing Ra membership.
+    ///
+    /// Use before a reboot / kernel upgrade / hardware swap, then
+    /// `uncordon-node` once it is back.
+    CordonNode {
+        /// Target node name (e.g. `neonfs_core@host2` or `host2`)
+        node: String,
+    },
+
+    /// Reverse a cordon: mark a node `active` again so placement and
+    /// routing resume giving it work.
+    UncordonNode {
+        /// Target node name (e.g. `neonfs_core@host2` or `host2`)
+        node: String,
+    },
+
     /// Rebuild the Ra quorum from a surviving minority after catastrophic
     /// membership loss.
     ///
@@ -413,6 +431,8 @@ impl ClusterCommand {
                 self.drain_node(node, !*no_evacuate, format)
             }
             ClusterCommand::UndrainNode { node } => self.undrain_node(node, format),
+            ClusterCommand::CordonNode { node } => self.cordon_node(node, format),
+            ClusterCommand::UncordonNode { node } => self.uncordon_node(node, format),
             ClusterCommand::ReconstructFromDisk {
                 yes,
                 overwrite_ra_state,
@@ -966,6 +986,44 @@ impl ClusterCommand {
             conn.call(
                 "Elixir.NeonFS.CLI.Handler",
                 "handle_undrain_node",
+                vec![Term::Binary(node_binary)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let status = NodeStatusResult::from_term(unwrap_ok_tuple(result)?)?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&status)?),
+            OutputFormat::Table => {
+                println!("✓ Node '{}' is now {}", status.node, status.status);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cordon_node(&self, node: &str, format: OutputFormat) -> Result<()> {
+        self.set_node_lifecycle(node, "handle_cordon_node", format)
+    }
+
+    fn uncordon_node(&self, node: &str, format: OutputFormat) -> Result<()> {
+        self.set_node_lifecycle(node, "handle_uncordon_node", format)
+    }
+
+    // Shared driver for the cordon/uncordon RPCs, which both take a node
+    // name and return a `{node, status}` map.
+    fn set_node_lifecycle(&self, node: &str, function: &str, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            let node_binary = Binary::from(node.as_bytes().to_vec());
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                function,
                 vec![Term::Binary(node_binary)],
             )
             .await

@@ -244,6 +244,48 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "node cordon / uncordon (#1376)" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_ra()
+      Handler.cluster_init("cordon-test-cluster")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "cordon marks the node :maintenance without evacuating" do
+      node_str = Atom.to_string(Node.self())
+
+      assert {:ok, result} = Handler.handle_cordon_node(node_str)
+      assert result.status == "maintenance"
+      assert NodeRegistry.status(Node.self()) == :maintenance
+    end
+
+    test "uncordon returns the node to :active" do
+      node_str = Atom.to_string(Node.self())
+
+      {:ok, _} = Handler.handle_cordon_node(node_str)
+      assert NodeRegistry.status(Node.self()) == :maintenance
+
+      assert {:ok, result} = Handler.handle_uncordon_node(node_str)
+      assert result.status == "active"
+      assert NodeRegistry.status(Node.self()) == :active
+    end
+  end
+
   describe "create_invite/1 without cluster" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)
