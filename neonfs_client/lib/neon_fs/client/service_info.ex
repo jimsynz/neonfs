@@ -8,7 +8,7 @@ defmodule NeonFS.Client.ServiceInfo do
 
   alias NeonFS.Client.ServiceType
 
-  @type status :: :online | :offline | :draining
+  @type status :: :online | :offline | :draining | :maintenance
 
   @type t :: %__MODULE__{
           node: node(),

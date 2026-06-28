@@ -101,11 +101,12 @@ defmodule NeonFS.Core.ServiceRegistry do
     case read_services() do
       {:ok, services_map} ->
         draining = NodeRegistry.draining_nodes()
+        maintenance = NodeRegistry.maintenance_nodes()
 
         services_map
         |> Map.values()
         |> Enum.map(&ServiceInfo.from_map/1)
-        |> Enum.map(&mark_draining(&1, draining))
+        |> Enum.map(&mark_lifecycle(&1, draining, maintenance))
         |> Enum.sort_by(&{&1.node, &1.type})
 
       {:error, _} ->
@@ -113,12 +114,16 @@ defmodule NeonFS.Core.ServiceRegistry do
     end
   end
 
-  # Stamp `status: :draining` on services whose node is in the draining
-  # lifecycle state (#1324), so the existing discovery RPC carries node
-  # lifecycle to clients without a new protocol. The client `CostFunction`
-  # deprioritises draining nodes when routing.
-  defp mark_draining(%ServiceInfo{node: node} = info, draining) do
-    if MapSet.member?(draining, node), do: %{info | status: :draining}, else: info
+  # Stamp the node's lifecycle status on its services (#1324, #1376), so
+  # the existing discovery RPC carries node lifecycle to clients without
+  # a new protocol. The client `CostFunction` deprioritises both
+  # `:draining` and `:maintenance` nodes when routing.
+  defp mark_lifecycle(%ServiceInfo{node: node} = info, draining, maintenance) do
+    cond do
+      MapSet.member?(draining, node) -> %{info | status: :draining}
+      MapSet.member?(maintenance, node) -> %{info | status: :maintenance}
+      true -> info
+    end
   end
 
   @doc """

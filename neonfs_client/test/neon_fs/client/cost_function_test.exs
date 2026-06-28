@@ -51,13 +51,13 @@ defmodule NeonFS.Client.CostFunctionTest do
     :sys.replace_state(CostFunction, fn state -> %{state | costs: costs} end)
   end
 
-  defp node_cost(node, total_cost, draining?) do
+  defp node_cost(node, total_cost, off_duty?) do
     %{
       node: node,
       latency_ms: 1,
       load_score: 0.0,
       queue_score: 0.0,
-      draining: draining?,
+      off_duty: off_duty?,
       total_cost: total_cost
     }
   end
