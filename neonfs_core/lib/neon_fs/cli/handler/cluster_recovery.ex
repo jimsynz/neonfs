@@ -16,6 +16,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
 
   alias NeonFS.Core.{
     AuditLog,
+    CordonStopCheck,
     DriveEvacuation,
     DriveManager,
     MetadataStateMachine,
@@ -210,6 +211,49 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
     else
       {:error, reason} -> {:error, wrap_error(reason)}
     end
+  end
+
+  @doc """
+  Read-only pre-shutdown safety check for stopping a cordoned node
+  (#1417). Reports whether taking the node offline would break Ra
+  quorum, strand a chunk (no trusted replica elsewhere), or drop a
+  chunk below its volume's `min_copies`. Does not mutate anything —
+  the caller (CLI) decides whether to proceed.
+
+  ## Returns
+  - `{:ok, %{node, safe: boolean, reasons: [%{kind, ...}]}}`.
+  - `{:error, reason}` if the cluster isn't formed or the node can't be
+    resolved.
+  """
+  @spec handle_cordon_stop_check(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_cordon_stop_check(node_name) when is_binary(node_name) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, target_node} <- resolve_target_node(node_name) do
+      result = CordonStopCheck.check(target_node)
+
+      {:ok,
+       %{
+         node: Atom.to_string(target_node),
+         safe: result.safe,
+         reasons: Enum.map(result.reasons, &serialise_reason/1)
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp serialise_reason(%{kind: :quorum, surviving: surviving, majority: majority}) do
+    %{kind: "quorum", surviving: surviving, majority: majority}
+  end
+
+  defp serialise_reason(%{kind: kind, chunks: chunks, sample: sample}) do
+    %{
+      kind: Atom.to_string(kind),
+      chunks: chunks,
+      sample: Enum.map(sample, &Base.encode16(&1, case: :lower))
+    }
   end
 
   # Hands each of the node's drives to `DriveEvacuation`, collecting a

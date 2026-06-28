@@ -151,6 +151,14 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_uncordon_node(node_name), to: ClusterRecoveryHandler
 
   @doc """
+  Read-only pre-shutdown safety check (#1417): reports whether stopping
+  a cordoned node would break quorum, strand a chunk, or drop one below
+  `min_copies`.
+  """
+  @spec handle_cordon_stop_check(String.t()) :: {:ok, map()} | {:error, Exception.t()}
+  defdelegate handle_cordon_stop_check(node_name), to: ClusterRecoveryHandler
+
+  @doc """
   Runs the safety-gate pipeline for `neonfs cluster force-reset` and
   records the operator-acknowledged data-loss intent in the audit log.
 

@@ -434,6 +434,81 @@ impl NodeStatusResult {
     }
 }
 
+/// `cluster cordon-stop-check` response (#1417)
+#[derive(Debug, Serialize)]
+pub struct CordonStopCheckResult {
+    pub node: String,
+    pub safe: bool,
+    pub reasons: Vec<CordonReason>,
+}
+
+/// One refusal reason within a cordon-stop check. Fields are populated
+/// per `kind` (`quorum` carries surviving/majority; `stranded` and
+/// `below_min_copies` carry chunks/sample).
+#[derive(Debug, Serialize)]
+pub struct CordonReason {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surviving: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub majority: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample: Option<Vec<String>>,
+}
+
+impl CordonStopCheckResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let reasons = match map.get("reasons") {
+            Some(list) => term_to_list(list)?
+                .into_iter()
+                .map(CordonReason::from_term)
+                .collect::<Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            safe: term_to_bool(map.get("safe").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'safe' field".to_string())
+            })?)?,
+            reasons,
+        })
+    }
+}
+
+impl CordonReason {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let sample = match map.get("sample") {
+            Some(list) => Some(
+                term_to_list(list)?
+                    .iter()
+                    .map(term_to_string)
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            None => None,
+        };
+
+        Ok(Self {
+            kind: term_to_string(map.get("kind").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'kind' field".to_string())
+            })?)?,
+            surviving: map.get("surviving").map(term_to_u64).transpose()?,
+            majority: map.get("majority").map(term_to_u64).transpose()?,
+            chunks: map.get("chunks").map(term_to_u64).transpose()?,
+            sample,
+        })
+    }
+}
+
 /// Volume information response
 #[derive(Debug, Serialize)]
 pub struct VolumeInfo {
