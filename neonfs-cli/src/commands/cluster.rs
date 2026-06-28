@@ -5,8 +5,8 @@ use crate::daemon::{resolve_join_target, DaemonConnection};
 use crate::error::{CliError, Result};
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
-    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus, DrainNodeResult,
-    NodeStatusResult, RemoveNodeResult,
+    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus,
+    CordonStopCheckResult, DrainNodeResult, NodeStatusResult, RemoveNodeResult,
 };
 use crate::term::{
     extract_error, term_to_i64, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple,
@@ -239,6 +239,23 @@ pub enum ClusterCommand {
         node: String,
     },
 
+    /// Check whether stopping a (cordoned) node is safe before taking it
+    /// offline for maintenance.
+    ///
+    /// Read-only: refuses (non-zero exit) if stopping the node would
+    /// break Ra quorum, strand a chunk (no trusted replica elsewhere),
+    /// or drop a chunk below its volume's `min_copies`. Gate your
+    /// `systemctl stop` on it. `--force` reports the findings but exits
+    /// zero anyway.
+    CordonStopCheck {
+        /// Target node name (e.g. `neonfs_core@host2` or `host2`)
+        node: String,
+
+        /// Exit zero even if the stop would be unsafe (still prints why).
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Rebuild the Ra quorum from a surviving minority after catastrophic
     /// membership loss.
     ///
@@ -433,6 +450,9 @@ impl ClusterCommand {
             ClusterCommand::UndrainNode { node } => self.undrain_node(node, format),
             ClusterCommand::CordonNode { node } => self.cordon_node(node, format),
             ClusterCommand::UncordonNode { node } => self.uncordon_node(node, format),
+            ClusterCommand::CordonStopCheck { node, force } => {
+                self.cordon_stop_check(node, *force, format)
+            }
             ClusterCommand::ReconstructFromDisk {
                 yes,
                 overwrite_ra_state,
@@ -1043,6 +1063,63 @@ impl ClusterCommand {
         }
 
         Ok(())
+    }
+
+    fn cordon_stop_check(&self, node: &str, force: bool, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            let node_binary = Binary::from(node.as_bytes().to_vec());
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_cordon_stop_check",
+                vec![Term::Binary(node_binary)],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let check = CordonStopCheckResult::from_term(unwrap_ok_tuple(result)?)?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&check)?),
+            OutputFormat::Table => {
+                if check.safe {
+                    println!("✓ Stopping '{}' is safe", check.node);
+                } else {
+                    println!("✗ Stopping '{}' is unsafe:", check.node);
+                    for reason in &check.reasons {
+                        match reason.kind.as_str() {
+                            "quorum" => println!(
+                                "  - quorum: only {} member(s) would survive (need {})",
+                                reason.surviving.unwrap_or(0),
+                                reason.majority.unwrap_or(0)
+                            ),
+                            "stranded" => println!(
+                                "  - stranded: {} chunk(s) have no trusted replica elsewhere",
+                                reason.chunks.unwrap_or(0)
+                            ),
+                            "below_min_copies" => println!(
+                                "  - below min_copies: {} chunk(s) would drop below their durability floor",
+                                reason.chunks.unwrap_or(0)
+                            ),
+                            other => println!("  - {}", other),
+                        }
+                    }
+                }
+            }
+        }
+
+        if check.safe || force {
+            Ok(())
+        } else {
+            Err(crate::error::CliError::RpcFailed(format!(
+                "stopping '{}' is unsafe (see reasons above); pass --force to override",
+                check.node
+            )))
+        }
     }
 
     fn force_reset(

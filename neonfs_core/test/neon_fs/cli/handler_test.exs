@@ -284,6 +284,15 @@ defmodule NeonFS.CLI.HandlerTest do
       assert result.status == "active"
       assert NodeRegistry.status(Node.self()) == :active
     end
+
+    test "cordon-stop-check refuses stopping the only member (quorum) (#1417)" do
+      node_str = Atom.to_string(Node.self())
+
+      assert {:ok, result} = Handler.handle_cordon_stop_check(node_str)
+      assert result.node == node_str
+      assert result.safe == false
+      assert Enum.any?(result.reasons, &(&1.kind == "quorum"))
+    end
   end
 
   describe "create_invite/1 without cluster" do
