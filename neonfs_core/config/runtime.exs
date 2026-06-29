@@ -53,6 +53,8 @@ if config_env() == :prod do
     ra_data_dir: "#{data_dir}/ra",
     snapshot_interval_ms:
       String.to_integer(System.get_env("NEONFS_SNAPSHOT_INTERVAL_MS", "30000")),
+    replica_repair_maintenance_grace_ms:
+      String.to_integer(System.get_env("NEONFS_MAINTENANCE_GRACE_MS", "1800000")),
     node_name: node_name,
     fuse_node: fuse_node
 

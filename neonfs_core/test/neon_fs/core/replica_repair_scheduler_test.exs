@@ -88,6 +88,14 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
     def set_volumes(vs), do: Agent.update(__MODULE__, fn s -> %{s | volumes: vs} end)
   end
 
+  defmodule MockNodeRegistry do
+    @moduledoc false
+    use Agent
+
+    def start_link(entry), do: Agent.start_link(fn -> entry end, name: __MODULE__)
+    def entry(_node), do: Agent.get(__MODULE__, & &1)
+  end
+
   defp make_volume(id), do: %{id: id, name: "vol-#{id}"}
 
   defp attach_telemetry(events) do
@@ -363,6 +371,79 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       _ = :sys.get_state(pid)
       refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
+    end
+
+    test "suppresses the repair trigger for a node cordoned within the grace window (#1416)" do
+      MockJobTracker.start_link()
+      MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
+      MockNodeRegistry.start_link(%{status: :maintenance, updated_at: DateTime.utc_now()})
+
+      ref =
+        attach_telemetry([
+          [:neonfs, :replica_repair_scheduler, :triggered],
+          [:neonfs, :replica_repair_scheduler, :maintenance_suppressed]
+        ])
+
+      {:ok, pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          membership_rate_limit_ms: 0,
+          maintenance_grace_ms: 1_800_000,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          node_registry_mod: MockNodeRegistry,
+          name: :"rr_sched_cordon_#{System.unique_integer([:positive])}"
+        )
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n2@host, type: :core}
+      )
+
+      _ = :sys.get_state(pid)
+
+      assert_receive {[:neonfs, :replica_repair_scheduler, :maintenance_suppressed], ^ref, %{},
+                      %{node: :n2@host}},
+                     1_000
+
+      refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
+    end
+
+    test "triggers normally for a node cordoned longer ago than the grace window (#1416)" do
+      MockJobTracker.start_link()
+      MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
+
+      # Cordoned two hours ago — past a 30-minute grace window.
+      stale = DateTime.add(DateTime.utc_now(), -7200, :second)
+      MockNodeRegistry.start_link(%{status: :maintenance, updated_at: stale})
+
+      ref = attach_telemetry([[:neonfs, :replica_repair_scheduler, :triggered]])
+
+      {:ok, pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          membership_rate_limit_ms: 0,
+          maintenance_grace_ms: 1_800_000,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          node_registry_mod: MockNodeRegistry,
+          name: :"rr_sched_cordon_stale_#{System.unique_integer([:positive])}"
+        )
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n2@host, type: :core}
+      )
+
+      _ = :sys.get_state(pid)
+
+      assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
+                      %{volume_id: _}},
+                     1_000
     end
 
     test "rate-limits repeated membership events within the configured window" do

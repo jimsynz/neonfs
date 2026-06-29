@@ -39,11 +39,20 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
   require Logger
 
   alias NeonFS.Core.Job.Runners.ReplicaRepair, as: ReplicaRepairRunner
-  alias NeonFS.Core.{JobTracker, VolumeRegistry}
+  alias NeonFS.Core.{JobTracker, NodeRegistry, VolumeRegistry}
 
   @default_check_interval_ms 3_600_000
   @default_volume_interval_seconds 86_400
   @default_membership_rate_limit_ms 60_000
+
+  # A cordoned (`:maintenance`) node's planned departure shouldn't fire a
+  # repair pass: its absence is expected and anti-entropy already skips
+  # unreachable peers, so the pass heals nothing — it just wastes a
+  # full-volume scan (#1416). Suppress the membership trigger for a
+  # cordoned node, but only within this window of its cordon so a
+  # forgotten cordon eventually resumes normal handling. Runtime-tunable
+  # via `:replica_repair_maintenance_grace_ms` (default 30 min).
+  @default_maintenance_grace_ms 1_800_000
 
   @telemetry_handler_id_prefix "neonfs-replica-repair-scheduler-membership"
 
@@ -100,6 +109,17 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
         Keyword.get(opts, :membership_rate_limit_ms, @default_membership_rate_limit_ms),
       job_tracker_mod: Keyword.get(opts, :job_tracker_mod, JobTracker),
       volume_registry_mod: Keyword.get(opts, :volume_registry_mod, VolumeRegistry),
+      node_registry_mod: Keyword.get(opts, :node_registry_mod, NodeRegistry),
+      maintenance_grace_ms:
+        Keyword.get(
+          opts,
+          :maintenance_grace_ms,
+          Application.get_env(
+            :neonfs_core,
+            :replica_repair_maintenance_grace_ms,
+            @default_maintenance_grace_ms
+          )
+        ),
       volume_repair_times: %{},
       last_membership_trigger_at: nil
     }
@@ -161,7 +181,21 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
   end
 
   @impl true
-  def handle_cast({:membership_event, _metadata}, state) do
+  def handle_cast({:membership_event, metadata}, state) do
+    if maintenance_suppressed?(metadata, state) do
+      :telemetry.execute(
+        [:neonfs, :replica_repair_scheduler, :maintenance_suppressed],
+        %{},
+        %{node: metadata[:node]}
+      )
+
+      {:noreply, state}
+    else
+      maybe_trigger_membership(state)
+    end
+  end
+
+  defp maybe_trigger_membership(state) do
     now_ms = System.monotonic_time(:millisecond)
 
     if rate_limited?(state, now_ms) do
@@ -339,6 +373,20 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
 
   defp rate_limited?(state, now_ms) do
     now_ms - state.last_membership_trigger_at < state.membership_rate_limit_ms
+  end
+
+  # True when the deregistering node is cordoned (`:maintenance`) and was
+  # cordoned within the grace window — its planned departure shouldn't
+  # fire a repair pass (#1416). A cordon older than the window falls
+  # through to normal handling so a forgotten cordon still self-heals.
+  defp maintenance_suppressed?(metadata, state) do
+    case metadata[:node] && state.node_registry_mod.entry(metadata[:node]) do
+      %{status: :maintenance, updated_at: %DateTime{} = cordoned_at} ->
+        DateTime.diff(DateTime.utc_now(), cordoned_at, :millisecond) <= state.maintenance_grace_ms
+
+      _ ->
+        false
+    end
   end
 
   defp telemetry_handler_id(name) do
