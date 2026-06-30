@@ -17,7 +17,7 @@ use crate::hash::Hash;
 use crate::index_tree::{IndexTree, TreeConfig};
 use crate::index_tree_blob_store::BlobStoreChunkStore;
 use crate::path::Tier;
-use crate::store::{BlobStore, ReadOptions, StoreConfig, WriteOptions};
+use crate::store::{BlobStore, DriveOpenState, ReadOptions, StoreConfig, WriteOptions};
 use rustler::{Binary, Env, NewBinary, Resource, ResourceArc};
 use std::sync::Mutex;
 
@@ -68,6 +68,40 @@ fn store_open(
         })),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Brings a drive up and reports whether it was cleanly shut down (#1425).
+///
+/// Reads the prior per-drive marker, classifies the drive (`true` = was
+/// cleanly closed by this same `node_id`; `false` = dirty / absent /
+/// foreign — needs verification), then stamps a fresh `dirty` marker
+/// durably. Call once after `store_open`, before serving the drive.
+///
+/// # Returns
+/// `{:ok, true}` if clean, `{:ok, false}` if unclean, or an error tuple.
+#[rustler::nif(schedule = "DirtyIo")]
+fn store_open_marker(
+    store: ResourceArc<BlobStoreResource>,
+    node_id: String,
+) -> Result<bool, String> {
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+
+    match store_guard.open_marker(&node_id) {
+        Ok(DriveOpenState::Clean) => Ok(true),
+        Ok(DriveOpenState::Unclean) => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Rewrites a drive's marker `clean` (#1425). Call on graceful shutdown
+/// so the next `store_open_marker` reports the drive clean.
+///
+/// # Returns
+/// `:ok` on success, or an error tuple.
+#[rustler::nif(schedule = "DirtyIo")]
+fn store_mark_clean(store: ResourceArc<BlobStoreResource>, node_id: String) -> Result<(), String> {
+    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    store_guard.mark_clean(&node_id).map_err(|e| e.to_string())
 }
 
 /// Writes a chunk to the blob store without compression.
