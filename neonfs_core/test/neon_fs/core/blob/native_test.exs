@@ -1050,39 +1050,39 @@ defmodule NeonFS.Core.Blob.NativeTest do
     end
   end
 
-  describe "drive clean/dirty marker (#1425)" do
-    test "fresh drive is unclean; graceful close makes the reopen clean", %{tmp_dir: tmp_dir} do
+  describe "drive clean/dirty marker (#1425/#1426)" do
+    test "fresh drive is :fresh; graceful close makes the reopen :clean", %{tmp_dir: tmp_dir} do
       store_dir = Path.join(tmp_dir, "marker_clean")
       {:ok, store} = Native.store_open(store_dir, 2)
 
-      # Never cleanly closed → unclean.
-      assert {:ok, false} = Native.store_open_marker(store, "node_a")
+      # Never stamped → fresh (brand-new drive), not dirty.
+      assert {:ok, :fresh} = Native.store_open_marker(store, "node_a")
 
       # Graceful close, then a fresh handle on the same dir reads clean.
       assert {:ok, {}} = Native.store_mark_clean(store, "node_a")
       {:ok, reopened} = Native.store_open(store_dir, 2)
-      assert {:ok, true} = Native.store_open_marker(reopened, "node_a")
+      assert {:ok, :clean} = Native.store_open_marker(reopened, "node_a")
     end
 
-    test "crash (no mark_clean) reopens unclean", %{tmp_dir: tmp_dir} do
+    test "crash (no mark_clean) reopens :dirty", %{tmp_dir: tmp_dir} do
       store_dir = Path.join(tmp_dir, "marker_crash")
       {:ok, store} = Native.store_open(store_dir, 2)
 
       # Open stamps dirty; without a mark_clean this models a crash.
-      assert {:ok, _} = Native.store_open_marker(store, "node_a")
+      assert {:ok, :fresh} = Native.store_open_marker(store, "node_a")
 
       {:ok, reopened} = Native.store_open(store_dir, 2)
-      assert {:ok, false} = Native.store_open_marker(reopened, "node_a")
+      assert {:ok, :dirty} = Native.store_open_marker(reopened, "node_a")
     end
 
     test "a different node can't trust another node's clean marker", %{tmp_dir: tmp_dir} do
       store_dir = Path.join(tmp_dir, "marker_foreign")
       {:ok, store} = Native.store_open(store_dir, 2)
-      assert {:ok, _} = Native.store_open_marker(store, "node_a")
+      assert {:ok, :fresh} = Native.store_open_marker(store, "node_a")
       assert {:ok, {}} = Native.store_mark_clean(store, "node_a")
 
       {:ok, reopened} = Native.store_open(store_dir, 2)
-      assert {:ok, false} = Native.store_open_marker(reopened, "node_b")
+      assert {:ok, :dirty} = Native.store_open_marker(reopened, "node_b")
     end
   end
 end
