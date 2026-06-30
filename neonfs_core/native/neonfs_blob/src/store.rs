@@ -209,6 +209,8 @@ impl BlobStore {
     }
 
     fn read_marker(&self) -> Option<DriveMarker> {
+        // audit:bounded — the marker is a tiny fixed superblock (four short
+        // lines), never file-sized; reading it whole is constant-size.
         let contents = fs::read_to_string(self.marker_path()).ok()?;
         let mut lines = contents.lines();
 
