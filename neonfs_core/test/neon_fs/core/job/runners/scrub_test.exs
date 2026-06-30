@@ -4,6 +4,7 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
   alias NeonFS.Core.{
     ChunkIndex,
+    DriveTrust,
     Job,
     KeyManager,
     RaServer,
@@ -164,6 +165,38 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
 
       {:complete, updated} = run_to_completion(Job.new(Scrub, %{drive_id: "default"}))
       assert updated.state.corruption_count > 0
+    end
+
+    test "a clean drive-scoped scrub clears the drive back to :trusted (#1427)" do
+      # DriveTrust is Ra-backed; the mock metadata layer doesn't serve it.
+      start_ra()
+      :ok = RaServer.init_cluster()
+
+      {:ok, vol} = VolumeRegistry.create("scrub-clear-trust", [])
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/ok.txt", ["healthy data"])
+
+      :ok = DriveTrust.mark_unverified(node(), "default")
+      assert DriveTrust.unverified?(node(), "default")
+
+      {:complete, _} = run_to_completion(Job.new(Scrub, %{drive_id: "default"}))
+
+      refute DriveTrust.unverified?(node(), "default")
+    end
+
+    test "a drive-scoped scrub that finds corruption leaves the drive :unverified (#1427)" do
+      start_ra()
+      :ok = RaServer.init_cluster()
+
+      {:ok, vol} = VolumeRegistry.create("scrub-keep-unverified", [])
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/bad.txt", ["will be corrupted"])
+
+      :ok = DriveTrust.mark_unverified(node(), "default")
+      Enum.each(ChunkIndex.list_by_drive(node(), "default"), &tamper_with_chunk/1)
+
+      {:complete, updated} = run_to_completion(Job.new(Scrub, %{drive_id: "default"}))
+      assert updated.state.corruption_count > 0
+
+      assert DriveTrust.unverified?(node(), "default")
     end
   end
 

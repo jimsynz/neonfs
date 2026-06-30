@@ -32,7 +32,7 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
 
   require Logger
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex, FileIndex, KeyManager}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveTrust, FileIndex, KeyManager}
   alias NeonFS.IO.{Operation, Scheduler}
 
   @default_batch_size 500
@@ -261,8 +261,31 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
         "#{encrypted_verified} encrypted, #{key_unavailable_count} key unavailable"
     )
 
+    maybe_clear_drive_trust(job, corruption_count, key_unavailable_count)
+
     {:complete, %{job | progress: %{job.progress | description: "Complete"}}}
   end
+
+  # A drive-scoped scrub (#1426) that found no corruption and left nothing
+  # unverifiable has fully re-verified the drive — clear it back to
+  # `:trusted` (#1375/#1427). Any corruption or key-unavailable (hence
+  # unverified) chunk leaves the drive `:unverified` for repair and a
+  # later re-scrub.
+  defp maybe_clear_drive_trust(%{params: %{drive_id: drive_id}}, 0, 0)
+       when is_binary(drive_id) do
+    case DriveTrust.mark_trusted(node(), drive_id) do
+      :ok ->
+        :telemetry.execute([:neonfs, :scrub, :drive_trusted], %{}, %{drive_id: drive_id})
+
+      {:error, reason} ->
+        Logger.warning("Scrub clean but could not clear drive to :trusted",
+          drive_id: drive_id,
+          reason: inspect(reason)
+        )
+    end
+  end
+
+  defp maybe_clear_drive_trust(_job, _corruption_count, _key_unavailable_count), do: :ok
 
   defp batch_size do
     Application.get_env(:neonfs_core, :scrub_batch_size, @default_batch_size)
