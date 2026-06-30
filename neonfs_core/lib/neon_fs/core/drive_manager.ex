@@ -18,14 +18,32 @@ defmodule NeonFS.Core.DriveManager do
   require Logger
 
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{BlobStore, Drive, DriveConfig, DriveRegistry, DriveState, RaSupervisor}
+
+  alias NeonFS.Core.{
+    BlobStore,
+    Drive,
+    DriveConfig,
+    DriveRegistry,
+    DriveState,
+    DriveTrust,
+    JobTracker,
+    RaServer,
+    RaSupervisor
+  }
+
   alias NeonFS.Core.Drive.Identity
+  alias NeonFS.Core.Job.Runners.Scrub
   alias NeonFS.Events.{Broadcaster, DriveAdded, DriveRemoved}
 
   @valid_tiers [:hot, :warm, :cold]
   @drive_state_supervisor NeonFS.Core.DriveStateSupervisor
   @bootstrap_register_attempts 5
   @default_bootstrap_register_backoff_ms 200
+
+  # A dirty drive's verification must wait for Ra to have a leader (the
+  # trust write is a Ra command). Retry the boot-time recovery until then.
+  @dirty_recovery_interval_ms 2_000
+  @dirty_recovery_max_retries 60
 
   ## Client API
 
@@ -159,6 +177,47 @@ defmodule NeonFS.Core.DriveManager do
     GenServer.call(__MODULE__, :list_drives)
   end
 
+  @doc """
+  Reacts to how a drive presented itself at open (#1426). A `:dirty`
+  drive (one that came back from an unclean shutdown) is marked
+  `:unverified` — so it stops counting toward `min_copies` and reads
+  verify-on-read (#1375) — and a drive-scoped scrub (#1429) is queued to
+  verify it at high priority; on a clean clear it returns to `:trusted`
+  (#1427). `:clean` and `:fresh` drives need nothing.
+
+  The `:mark_fn` and `:scrub_fn` deps are injectable for tests; they
+  default to `DriveTrust.mark_unverified/2` and a drive-scoped
+  `JobTracker` scrub.
+  """
+  @spec recover_drive(drive_id :: String.t(), :clean | :dirty | :fresh | nil, keyword()) :: :ok
+  def recover_drive(drive_id, open_state, opts \\ [])
+
+  def recover_drive(drive_id, :dirty, opts) do
+    mark_fn = Keyword.get(opts, :mark_fn, &DriveTrust.mark_unverified/2)
+    scrub_fn = Keyword.get(opts, :scrub_fn, &default_scrub/1)
+
+    case mark_fn.(Node.self(), drive_id) do
+      :ok ->
+        scrub_fn.(drive_id)
+
+        :telemetry.execute(
+          [:neonfs, :drive_manager, :dirty_drive_recovered],
+          %{},
+          %{drive_id: drive_id}
+        )
+
+      {:error, reason} ->
+        Logger.warning("Could not mark dirty drive :unverified; leaving for retry",
+          drive_id: drive_id,
+          reason: inspect(reason)
+        )
+    end
+
+    :ok
+  end
+
+  def recover_drive(_drive_id, _open_state, _opts), do: :ok
+
   ## Server Callbacks
 
   @impl true
@@ -170,7 +229,19 @@ defmodule NeonFS.Core.DriveManager do
 
     start_drive_state_children(drives, command_module)
 
-    {:ok, %{command_module: command_module}}
+    {:ok, %{command_module: command_module}, {:continue, :recover_dirty_drives}}
+  end
+
+  @impl true
+  def handle_continue(:recover_dirty_drives, state) do
+    attempt_dirty_drive_recovery(0)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:recover_dirty_drives, attempt}, state) do
+    attempt_dirty_drive_recovery(attempt)
+    {:noreply, state}
   end
 
   @impl true
@@ -188,6 +259,10 @@ defmodule NeonFS.Core.DriveManager do
           drive_id: drive.id,
           drive: drive_to_event_map(drive)
         })
+
+        # A drive added at runtime may itself be returning dirty (#1426) —
+        # Ra is already up here, so react immediately.
+        recover_drive(drive.id, Map.get(BlobStore.drive_open_states(), drive.id))
 
         {:reply, {:ok, drive_to_map(drive)}, state}
 
@@ -540,6 +615,47 @@ defmodule NeonFS.Core.DriveManager do
     Enum.each(drives, fn config ->
       start_single_drive_state(config, command_module)
     end)
+  end
+
+  # Marking a drive `:unverified` is a Ra command, so the boot-time
+  # reaction waits until Ra has a leader, then reacts to every drive that
+  # opened dirty. Retries on a fixed interval until Ra is ready or the
+  # retry budget runs out (#1426).
+  defp attempt_dirty_drive_recovery(attempt) do
+    cond do
+      RaServer.initialized?() ->
+        react_to_dirty_drives()
+
+      attempt < @dirty_recovery_max_retries ->
+        Process.send_after(
+          self(),
+          {:recover_dirty_drives, attempt + 1},
+          @dirty_recovery_interval_ms
+        )
+
+      true ->
+        Logger.warning("Ra not ready after #{attempt} attempts; skipping dirty-drive recovery")
+    end
+  end
+
+  defp react_to_dirty_drives do
+    BlobStore.drive_open_states()
+    |> Enum.each(fn {drive_id, open_state} -> recover_drive(drive_id, open_state) end)
+  rescue
+    # The storage layer may not be ready in a degraded boot — a missed
+    # reaction is recovered by the next scrub cadence, so don't crash.
+    error ->
+      Logger.warning("Dirty-drive recovery pass failed", reason: Exception.message(error))
+  end
+
+  defp default_scrub(drive_id) do
+    case JobTracker.create(Scrub, %{drive_id: drive_id}) do
+      {:ok, _job} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Could not queue drive scrub", drive_id: drive_id, reason: inspect(reason))
+    end
   end
 
   defp start_single_drive_state(config, command_module) do
