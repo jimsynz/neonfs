@@ -192,6 +192,19 @@ defmodule NeonFS.Core.BlobStore do
   defp normalise_tier(_), do: :hot
 
   @doc """
+  Returns how each open drive presented itself at open time (#1426):
+  `drive_id => :clean | :dirty | :fresh`. A `:dirty` drive came back
+  from an unclean shutdown and needs verification before being trusted;
+  `DriveManager` consumes this to mark such drives `:unverified`.
+  """
+  @spec drive_open_states(keyword()) :: %{optional(drive_id()) => :clean | :dirty | :fresh}
+  def drive_open_states(opts \\ []) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    timeout = Keyword.get(opts, :timeout, @default_call_timeout)
+    GenServer.call(server, :drive_open_states, timeout)
+  end
+
+  @doc """
   Reads a chunk from a specific drive in the blob store.
 
   ## Parameters
@@ -823,6 +836,9 @@ defmodule NeonFS.Core.BlobStore do
 
   @impl true
   def init(opts) do
+    # trap_exit so terminate/2 runs on graceful shutdown and can stamp
+    # each drive's marker clean (#1426).
+    Process.flag(:trap_exit, true)
     drives_config = Keyword.get(opts, :drives) || Application.get_env(:neonfs_core, :drives, [])
     prefix_depth = Keyword.get(opts, :prefix_depth, 2)
 
@@ -831,16 +847,33 @@ defmodule NeonFS.Core.BlobStore do
         "BlobStore starting with no drives — use DriveManager.add_drive/1 to add drives"
       )
 
-      {:ok, %{stores: %{}, drives: %{}, prefix_depth: prefix_depth}}
+      {:ok, %{stores: %{}, drives: %{}, drive_states: %{}, prefix_depth: prefix_depth}}
     else
       case open_all_stores(drives_config, prefix_depth) do
-        {:ok, stores, drives} ->
-          {:ok, %{stores: stores, drives: drives, prefix_depth: prefix_depth}}
+        {:ok, stores, drives, drive_states} ->
+          {:ok,
+           %{
+             stores: stores,
+             drives: drives,
+             drive_states: drive_states,
+             prefix_depth: prefix_depth
+           }}
 
         {:error, reason} ->
           {:stop, {:error, reason}}
       end
     end
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    # Graceful shutdown: stamp each open drive's marker clean so the next
+    # boot trusts it without re-verification (#1426).
+    Enum.each(state.stores, fn {_drive_id, handle} ->
+      Native.store_mark_clean(handle, node_id())
+    end)
+
+    :ok
   end
 
   @impl true
@@ -980,7 +1013,10 @@ defmodule NeonFS.Core.BlobStore do
         {:ok, handle} ->
           new_stores = Map.put(state.stores, drive.id, handle)
           new_drives = Map.put(state.drives, drive.id, drive)
-          {:reply, {:ok, drive.id}, %{state | stores: new_stores, drives: new_drives}}
+          new_states = Map.put(state.drive_states, drive.id, open_marker(handle))
+
+          {:reply, {:ok, drive.id},
+           %{state | stores: new_stores, drives: new_drives, drive_states: new_states}}
 
         {:error, reason} ->
           {:reply, {:error, reason}, state}
@@ -990,13 +1026,25 @@ defmodule NeonFS.Core.BlobStore do
 
   @impl true
   def handle_call({:close_store, drive_id}, _from, state) do
-    if Map.has_key?(state.stores, drive_id) do
-      new_stores = Map.delete(state.stores, drive_id)
-      new_drives = Map.delete(state.drives, drive_id)
-      {:reply, :ok, %{state | stores: new_stores, drives: new_drives}}
-    else
-      {:reply, {:error, :unknown_drive}, state}
+    case Map.fetch(state.stores, drive_id) do
+      {:ok, handle} ->
+        # Graceful drive removal — stamp the marker clean before dropping
+        # the handle (#1426).
+        Native.store_mark_clean(handle, node_id())
+        new_stores = Map.delete(state.stores, drive_id)
+        new_drives = Map.delete(state.drives, drive_id)
+        new_states = Map.delete(state.drive_states, drive_id)
+
+        {:reply, :ok, %{state | stores: new_stores, drives: new_drives, drive_states: new_states}}
+
+      :error ->
+        {:reply, {:error, :unknown_drive}, state}
     end
+  end
+
+  @impl true
+  def handle_call(:drive_open_states, _from, state) do
+    {:reply, state.drive_states, state}
   end
 
   @impl true
@@ -1139,13 +1187,26 @@ defmodule NeonFS.Core.BlobStore do
     if Enum.empty?(errors) do
       stores = Map.new(results, fn {:ok, id, handle, _} -> {id, handle} end)
       drives = Map.new(results, fn {:ok, id, _, config} -> {id, config} end)
-      {:ok, stores, drives}
+      drive_states = Map.new(results, fn {:ok, id, handle, _} -> {id, open_marker(handle)} end)
+      {:ok, stores, drives, drive_states}
     else
       [{:error, drive_id, reason} | _] = errors
       Logger.error("Failed to open store for drive", drive_id: drive_id, reason: inspect(reason))
       {:error, {:drive_open_failed, drive_id, reason}}
     end
   end
+
+  # Classifies the drive via its marker and stamps it dirty (#1425/#1426),
+  # degrading to `:fresh` if the marker can't be read so a transient
+  # marker error never wrongly flags a drive for verification.
+  defp open_marker(handle) do
+    case Native.store_open_marker(handle, node_id()) do
+      {:ok, state} when state in [:clean, :dirty, :fresh] -> state
+      _ -> :fresh
+    end
+  end
+
+  defp node_id, do: Atom.to_string(Node.self())
 
   defp normalize_drive_config(drive) when is_map(drive) do
     %{
