@@ -14,6 +14,29 @@ use rand::RngExt;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Filename of the per-drive clean/dirty superblock marker (#1425),
+/// stored at the root of the drive's base dir. Chunks live in sharded
+/// subdirectories, so a dotfile here never collides with chunk data.
+const DRIVE_MARKER_FILE: &str = ".neonfs_drive_state";
+
+/// Whether a drive was cleanly shut down before this open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveOpenState {
+    /// Last close was graceful — trust the drive immediately.
+    Clean,
+    /// Dirty / absent / foreign marker — the drive needs verification
+    /// before being trusted again (#1380).
+    Unclean,
+}
+
+/// Parsed contents of the drive marker file.
+struct DriveMarker {
+    state: String,
+    generation: u64,
+    node_id: String,
+}
 
 /// Configuration for a blob store.
 #[derive(Debug, Clone)]
@@ -151,6 +174,75 @@ impl BlobStore {
     /// Returns the base directory for this store.
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    /// Brings the drive up: reads the prior marker to classify the drive
+    /// as `Clean` (last shutdown was graceful, by this same node) or
+    /// `Unclean` (dirty / absent / written by a different node), then
+    /// stamps a fresh `dirty` marker — bumping the generation — durably
+    /// (fsync'd file + parent dir). Call once when opening the drive for
+    /// use; the returned state drives the #1380 verification scoping.
+    pub fn open_marker(&self, node_id: &str) -> Result<DriveOpenState, StoreError> {
+        let prior = self.read_marker();
+
+        let clean = matches!(&prior, Some(m) if m.state == "clean" && m.node_id == node_id);
+        let generation = prior.map(|m| m.generation.wrapping_add(1)).unwrap_or(0);
+
+        self.write_marker("dirty", generation, node_id)?;
+
+        Ok(if clean {
+            DriveOpenState::Clean
+        } else {
+            DriveOpenState::Unclean
+        })
+    }
+
+    /// Rewrites the marker `clean`. Call on graceful shutdown so the next
+    /// open trusts the drive without verification.
+    pub fn mark_clean(&self, node_id: &str) -> Result<(), StoreError> {
+        let generation = self.read_marker().map(|m| m.generation).unwrap_or(0);
+        self.write_marker("clean", generation, node_id)
+    }
+
+    fn marker_path(&self) -> PathBuf {
+        self.base_dir.join(DRIVE_MARKER_FILE)
+    }
+
+    fn read_marker(&self) -> Option<DriveMarker> {
+        // audit:bounded — the marker is a tiny fixed superblock (four short
+        // lines), never file-sized; reading it whole is constant-size.
+        let contents = fs::read_to_string(self.marker_path()).ok()?;
+        let mut lines = contents.lines();
+
+        Some(DriveMarker {
+            state: lines.next()?.to_string(),
+            generation: lines.next()?.parse().ok()?,
+            node_id: lines.next().unwrap_or("").to_string(),
+        })
+    }
+
+    fn write_marker(&self, state: &str, generation: u64, node_id: &str) -> Result<(), StoreError> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let body = format!("{state}\n{generation}\n{node_id}\n{timestamp}\n");
+        let path = self.marker_path();
+        let tmp = self.base_dir.join(format!("{DRIVE_MARKER_FILE}.tmp"));
+
+        // Atomic: write the temp file, fsync it, rename over the marker,
+        // then fsync the directory so the rename is durable — a power loss
+        // never leaves a half-written marker.
+        {
+            let mut file = File::create(&tmp).map_err(|e| StoreError::io_error(&tmp, e))?;
+            file.write_all(body.as_bytes())
+                .map_err(|e| StoreError::io_error(&tmp, e))?;
+            file.sync_all().map_err(|e| StoreError::io_error(&tmp, e))?;
+        }
+
+        fs::rename(&tmp, &path).map_err(|e| StoreError::io_error(&path, e))?;
+        fsync_parent_dir(&path)
     }
 
     /// Returns the configuration for this store.
@@ -762,6 +854,79 @@ mod tests {
         let config = StoreConfig { prefix_depth: 2 };
         let store = BlobStore::new(temp_dir.path(), config).unwrap();
         (store, temp_dir)
+    }
+
+    fn open_store(path: &Path) -> BlobStore {
+        BlobStore::new(path, StoreConfig { prefix_depth: 2 }).unwrap()
+    }
+
+    #[test]
+    fn test_drive_marker_fresh_drive_opens_unclean() {
+        let (store, _temp) = create_test_store();
+        // No marker exists yet — a never-stamped drive is unclean.
+        assert_eq!(
+            store.open_marker("node_a").unwrap(),
+            DriveOpenState::Unclean
+        );
+    }
+
+    #[test]
+    fn test_drive_marker_graceful_close_reopens_clean() {
+        let temp = TempDir::new().unwrap();
+
+        let first = open_store(temp.path());
+        assert_eq!(
+            first.open_marker("node_a").unwrap(),
+            DriveOpenState::Unclean
+        );
+        first.mark_clean("node_a").unwrap();
+
+        // Reopen (same dir, fresh handle) — the clean marker persists.
+        let second = open_store(temp.path());
+        assert_eq!(second.open_marker("node_a").unwrap(), DriveOpenState::Clean);
+    }
+
+    #[test]
+    fn test_drive_marker_crash_without_mark_clean_reopens_unclean() {
+        let temp = TempDir::new().unwrap();
+
+        // Open (stamps dirty) but never mark_clean — simulates a crash.
+        open_store(temp.path()).open_marker("node_a").unwrap();
+
+        let second = open_store(temp.path());
+        assert_eq!(
+            second.open_marker("node_a").unwrap(),
+            DriveOpenState::Unclean
+        );
+    }
+
+    #[test]
+    fn test_drive_marker_foreign_node_is_unclean() {
+        let temp = TempDir::new().unwrap();
+
+        let first = open_store(temp.path());
+        first.open_marker("node_a").unwrap();
+        first.mark_clean("node_a").unwrap();
+
+        // A different node opening the drive can't trust node_a's clean.
+        let second = open_store(temp.path());
+        assert_eq!(
+            second.open_marker("node_b").unwrap(),
+            DriveOpenState::Unclean
+        );
+    }
+
+    #[test]
+    fn test_drive_marker_generation_increments_per_open() {
+        let temp = TempDir::new().unwrap();
+
+        open_store(temp.path()).open_marker("node_a").unwrap();
+        let gen1 = open_store(temp.path()).read_marker().unwrap().generation;
+
+        open_store(temp.path()).open_marker("node_a").unwrap();
+        let gen2 = open_store(temp.path()).read_marker().unwrap().generation;
+
+        assert_eq!(gen2, gen1 + 1);
     }
 
     #[test]

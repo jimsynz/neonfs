@@ -73,6 +73,28 @@ defmodule NeonFS.Core.Blob.Native do
   def store_open(_base_dir, _prefix_depth), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Brings a drive up and reports whether it was cleanly shut down (#1425).
+
+  Reads the per-drive clean/dirty marker, classifies the drive, then
+  stamps a fresh `dirty` marker durably. Call once after `store_open/2`,
+  before serving the drive.
+
+  ## Returns
+    - `{:ok, true}` - the drive was cleanly closed by `node_id` last time
+    - `{:ok, false}` - dirty / absent / foreign marker — needs verification
+    - `{:error, reason}` - the marker could not be read/written
+  """
+  @spec store_open_marker(store(), String.t()) :: {:ok, boolean()} | {:error, String.t()}
+  def store_open_marker(_store, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Rewrites a drive's marker `clean` (#1425). Call on graceful shutdown so
+  the next `store_open_marker/2` reports the drive clean.
+  """
+  @spec store_mark_clean(store(), String.t()) :: {:ok, {}} | {:error, String.t()}
+  def store_mark_clean(_store, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Writes a chunk to the blob store.
 
   The chunk is written atomically using a write-then-rename pattern to prevent
