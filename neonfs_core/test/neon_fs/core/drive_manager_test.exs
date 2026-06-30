@@ -326,6 +326,43 @@ defmodule NeonFS.Core.DriveManagerTest do
     end
   end
 
+  describe "recover_drive/3 (#1426)" do
+    test "a :dirty drive is marked :unverified and a drive-scoped scrub is queued" do
+      test = self()
+      mark_fn = fn node, drive_id -> send(test, {:marked, node, drive_id}) && :ok end
+      scrub_fn = fn drive_id -> send(test, {:scrubbed, drive_id}) end
+
+      assert :ok =
+               DriveManager.recover_drive("d-dirty", :dirty, mark_fn: mark_fn, scrub_fn: scrub_fn)
+
+      assert_received {:marked, _node, "d-dirty"}
+      assert_received {:scrubbed, "d-dirty"}
+    end
+
+    test ":clean, :fresh and unknown drives are left untouched" do
+      test = self()
+      mark_fn = fn _node, _drive_id -> send(test, :marked) && :ok end
+      scrub_fn = fn _drive_id -> send(test, :scrubbed) end
+
+      for open_state <- [:clean, :fresh, nil] do
+        assert :ok =
+                 DriveManager.recover_drive("d", open_state, mark_fn: mark_fn, scrub_fn: scrub_fn)
+      end
+
+      refute_received :marked
+      refute_received :scrubbed
+    end
+
+    test "a failed mark skips the scrub (left for retry)" do
+      test = self()
+      mark_fn = fn _node, _drive_id -> {:error, :no_leader} end
+      scrub_fn = fn _drive_id -> send(test, :scrubbed) end
+
+      assert :ok = DriveManager.recover_drive("d", :dirty, mark_fn: mark_fn, scrub_fn: scrub_fn)
+      refute_received :scrubbed
+    end
+  end
+
   defp write_probe_works?(path) do
     probe = Path.join(path, ".write-probe-#{System.unique_integer([:positive])}")
 
