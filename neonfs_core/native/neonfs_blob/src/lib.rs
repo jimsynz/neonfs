@@ -18,8 +18,12 @@ use crate::index_tree::{IndexTree, TreeConfig};
 use crate::index_tree_blob_store::BlobStoreChunkStore;
 use crate::path::Tier;
 use crate::store::{BlobStore, DriveOpenState, ReadOptions, StoreConfig, WriteOptions};
-use rustler::{Binary, Env, NewBinary, Resource, ResourceArc};
+use rustler::{Atom, Binary, Env, NewBinary, Resource, ResourceArc};
 use std::sync::Mutex;
+
+mod marker_atoms {
+    rustler::atoms! { clean, dirty, fresh }
+}
 
 /// Resource wrapper for BlobStore to share across NIF calls.
 pub struct BlobStoreResource {
@@ -70,25 +74,27 @@ fn store_open(
     }
 }
 
-/// Brings a drive up and reports whether it was cleanly shut down (#1425).
+/// Brings a drive up and reports how it presented itself (#1425/#1426).
 ///
-/// Reads the prior per-drive marker, classifies the drive (`true` = was
-/// cleanly closed by this same `node_id`; `false` = dirty / absent /
-/// foreign — needs verification), then stamps a fresh `dirty` marker
+/// Reads the prior per-drive marker, classifies the drive (`:clean` = was
+/// cleanly closed by this same `node_id`; `:dirty` = a marker was present
+/// but not clean — crash / foreign / stale, needs verification; `:fresh`
+/// = no marker, a brand-new drive), then stamps a fresh `dirty` marker
 /// durably. Call once after `store_open`, before serving the drive.
 ///
 /// # Returns
-/// `{:ok, true}` if clean, `{:ok, false}` if unclean, or an error tuple.
+/// `{:ok, :clean | :dirty | :fresh}`, or an error tuple.
 #[rustler::nif(schedule = "DirtyIo")]
 fn store_open_marker(
     store: ResourceArc<BlobStoreResource>,
     node_id: String,
-) -> Result<bool, String> {
+) -> Result<Atom, String> {
     let store_guard = store.store.lock().map_err(|e| e.to_string())?;
 
     match store_guard.open_marker(&node_id) {
-        Ok(DriveOpenState::Clean) => Ok(true),
-        Ok(DriveOpenState::Unclean) => Ok(false),
+        Ok(DriveOpenState::Clean) => Ok(marker_atoms::clean()),
+        Ok(DriveOpenState::Dirty) => Ok(marker_atoms::dirty()),
+        Ok(DriveOpenState::Fresh) => Ok(marker_atoms::fresh()),
         Err(e) => Err(e.to_string()),
     }
 }
