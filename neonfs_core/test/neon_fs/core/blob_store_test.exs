@@ -641,6 +641,46 @@ defmodule NeonFS.Core.BlobStoreTest do
     end
   end
 
+  describe "drive clean/dirty lifecycle (#1426)" do
+    test "fresh drive is :fresh; a graceful shutdown reopens :clean", %{tmp_dir: tmp_dir} do
+      dir = Path.join(tmp_dir, "lifecycle_clean")
+      File.mkdir_p!(dir)
+      drives = [%{id: "default", path: dir, tier: :hot, capacity: 100_000_000}]
+
+      name1 = :"bs_clean_1_#{System.unique_integer([:positive])}"
+      {:ok, pid1} = BlobStore.start_link(drives: drives, prefix_depth: 2, name: name1)
+      assert %{"default" => :fresh} = BlobStore.drive_open_states(server: name1)
+
+      # Graceful stop runs terminate/2 → marks the drive clean.
+      :ok = GenServer.stop(pid1)
+
+      name2 = :"bs_clean_2_#{System.unique_integer([:positive])}"
+      {:ok, _pid2} = BlobStore.start_link(drives: drives, prefix_depth: 2, name: name2)
+      assert %{"default" => :clean} = BlobStore.drive_open_states(server: name2)
+    end
+
+    test "an unclean shutdown reopens :dirty", %{tmp_dir: tmp_dir} do
+      dir = Path.join(tmp_dir, "lifecycle_dirty")
+      File.mkdir_p!(dir)
+      drives = [%{id: "default", path: dir, tier: :hot, capacity: 100_000_000}]
+
+      name1 = :"bs_dirty_1_#{System.unique_integer([:positive])}"
+      {:ok, pid1} = BlobStore.start_link(drives: drives, prefix_depth: 2, name: name1)
+      assert %{"default" => :fresh} = BlobStore.drive_open_states(server: name1)
+
+      # Brutal kill skips terminate/2 — no mark_clean, simulating a crash.
+      # Unlink first so the :kill doesn't propagate to the test process.
+      Process.unlink(pid1)
+      ref = Process.monitor(pid1)
+      Process.exit(pid1, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid1, :killed}, 1_000
+
+      name2 = :"bs_dirty_2_#{System.unique_integer([:positive])}"
+      {:ok, _pid2} = BlobStore.start_link(drives: drives, prefix_depth: 2, name: name2)
+      assert %{"default" => :dirty} = BlobStore.drive_open_states(server: name2)
+    end
+  end
+
   ## Helper Functions
 
   defp test_server do
