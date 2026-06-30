@@ -53,6 +53,19 @@ defmodule NeonFS.Core.NodeRegistry do
   end
 
   @doc """
+  Returns `node`'s full lifecycle entry (`status` + `updated_at`), or
+  `nil` if it has never registered. `updated_at` is when the status was
+  last set — e.g. roughly when a node was cordoned.
+  """
+  @spec entry(node()) :: MetadataStateMachine.node_entry() | nil
+  def entry(node) do
+    case RaSupervisor.local_query(&MetadataStateMachine.get_node(&1, node)) do
+      {:ok, %{status: _} = entry} -> entry
+      _ -> nil
+    end
+  end
+
+  @doc """
   Whether `node` is currently draining.
   """
   @spec draining?(node()) :: boolean()
