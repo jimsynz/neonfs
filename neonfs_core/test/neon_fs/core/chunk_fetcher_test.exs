@@ -2,7 +2,9 @@ defmodule NeonFS.Core.ChunkFetcherTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
+  alias NeonFS.Core.Blob.Native
   alias NeonFS.Core.{BlobStore, ChunkCache, ChunkFetcher, ChunkIndex, ChunkMeta, VolumeRegistry}
+  alias NeonFS.Core.{DriveTrust, RaServer}
   alias NeonFS.Core.Volume
 
   @moduletag :tmp_dir
@@ -117,6 +119,46 @@ defmodule NeonFS.Core.ChunkFetcherTest do
       # Fetch with decompression
       assert {:ok, ^data, :local} =
                ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test", decompress: true)
+    end
+  end
+
+  describe "verify-on-read for :unverified drives (#1375)" do
+    setup do
+      start_ra()
+      :ok = RaServer.init_cluster()
+      :ok
+    end
+
+    test "forces hash verification when the serving drive is :unverified" do
+      data = "verify-on-read payload"
+      {:ok, hash, info} = BlobStore.write_chunk(data, "default", "hot")
+
+      ChunkIndex.put(%ChunkMeta{
+        volume_ids: MapSet.new(["vol-test"]),
+        hash: hash,
+        original_size: info.original_size,
+        stored_size: info.stored_size,
+        compression: String.to_atom(info.compression),
+        locations: [%{node: Node.self(), drive_id: "default", tier: :hot}],
+        target_replicas: 1,
+        commit_state: :committed
+      })
+
+      # Overwrite the stored bytes with garbage — the content no longer
+      # hashes to `hash`.
+      blob_dir = Application.get_env(:neonfs_core, :blob_store_base_dir)
+      {:ok, store} = Native.store_open(blob_dir, 2)
+      Native.store_write_chunk(store, hash, "corrupted garbage data", "hot")
+
+      # Trusted drive, no verify option: the corrupt bytes come back
+      # unchecked — proving verification is not otherwise forced.
+      assert {:ok, corrupt, :local} = ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test")
+      refute corrupt == data
+
+      # Mark the drive :unverified → reads must hash-verify → the
+      # corruption is caught instead of silently returned.
+      :ok = DriveTrust.mark_unverified(Node.self(), "default")
+      assert {:error, _} = ChunkFetcher.fetch_chunk(hash, volume_id: "vol-test")
     end
   end
 

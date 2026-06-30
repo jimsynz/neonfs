@@ -19,7 +19,16 @@ defmodule NeonFS.Core.ChunkFetcher do
   """
 
   alias NeonFS.Client.Router
-  alias NeonFS.Core.{BlobStore, ChunkAccessTracker, ChunkCache, ChunkIndex, DriveRegistry}
+
+  alias NeonFS.Core.{
+    BlobStore,
+    ChunkAccessTracker,
+    ChunkCache,
+    ChunkIndex,
+    DriveRegistry,
+    DriveTrust
+  }
+
   alias NeonFS.IO.{Operation, Scheduler}
   require Logger
 
@@ -171,20 +180,30 @@ defmodule NeonFS.Core.ChunkFetcher do
 
   defp fetch_from_storage(hash, start_time, opts) do
     exclude_nodes = Keyword.get(opts, :exclude_nodes, [])
+    # Fetch the (normally empty) present-but-not-durable-yet set once per
+    # read (#1375); each read attempt forces content-hash verification
+    # when it reads from a drive in this set. One local Ra query per
+    # fetch — measure before caching.
+    unverified = unverified_drives()
 
     if node() in exclude_nodes do
       # Skip local fetch entirely — go straight to remote
-      try_remote_fetch(hash, start_time, opts, :excluded)
+      try_remote_fetch(hash, start_time, opts, :excluded, unverified)
     else
-      fetch_from_local_then_remote(hash, start_time, opts)
+      fetch_from_local_then_remote(hash, start_time, opts, unverified)
     end
   end
 
-  defp fetch_from_local_then_remote(hash, start_time, opts) do
-    read_opts = build_read_opts(opts) |> with_compression_locator(hash, opts)
+  defp fetch_from_local_then_remote(hash, start_time, opts, unverified) do
     drive_id = Keyword.get(opts, :drive_id, "default")
     tier = Keyword.get(opts, :tier, "hot")
     volume_id = Keyword.get(opts, :volume_id, "_system")
+
+    read_opts =
+      opts
+      |> build_read_opts()
+      |> with_compression_locator(hash, opts)
+      |> verify_if_unverified(node(), drive_id, unverified)
 
     case try_local_fetch(hash, drive_id, tier, read_opts, volume_id) do
       {:ok, data} ->
@@ -206,7 +225,7 @@ defmodule NeonFS.Core.ChunkFetcher do
 
       {:error, local_reason} ->
         # Not found locally, try remote fetch
-        try_remote_fetch(hash, start_time, opts, local_reason)
+        try_remote_fetch(hash, start_time, opts, local_reason, unverified)
     end
   end
 
@@ -223,7 +242,7 @@ defmodule NeonFS.Core.ChunkFetcher do
     Scheduler.submit_sync(op)
   end
 
-  defp try_remote_fetch(hash, start_time, opts, local_reason) do
+  defp try_remote_fetch(hash, start_time, opts, local_reason, unverified) do
     read_opts = build_read_opts(opts) |> with_compression_locator(hash, opts)
     tier = Keyword.get(opts, :tier, "hot")
     cache_remote = Keyword.get(opts, :cache_remote, false)
@@ -249,7 +268,8 @@ defmodule NeonFS.Core.ChunkFetcher do
             read_opts,
             cache_remote,
             local_reason,
-            exclude_nodes
+            exclude_nodes,
+            unverified
           )
       end
 
@@ -281,7 +301,8 @@ defmodule NeonFS.Core.ChunkFetcher do
          read_opts,
          cache_remote,
          local_reason,
-         exclude_nodes
+         exclude_nodes,
+         unverified
        ) do
     # Filter out local node and any explicitly excluded nodes from locations
     excluded = [Node.self() | exclude_nodes] |> Enum.uniq()
@@ -302,12 +323,13 @@ defmodule NeonFS.Core.ChunkFetcher do
 
     # Try each location until one succeeds
     Enum.find_value(remote_locations, default_error, fn location ->
-      try_fetch_from_location(location, hash, tier, read_opts, cache_remote)
+      try_fetch_from_location(location, hash, tier, read_opts, cache_remote, unverified)
     end)
   end
 
-  defp try_fetch_from_location(location, hash, tier, read_opts, cache_remote) do
+  defp try_fetch_from_location(location, hash, tier, read_opts, cache_remote, unverified) do
     drive_id = Map.get(location, :drive_id, "default")
+    read_opts = verify_if_unverified(read_opts, location.node, drive_id, unverified)
 
     case read_remote_chunk(location.node, hash, drive_id, tier, read_opts) do
       {:ok, data} ->
@@ -380,6 +402,24 @@ defmodule NeonFS.Core.ChunkFetcher do
   defp drive_score(_hdd, :standby, _local?), do: 50
   defp drive_score(_hdd, _state, true), do: 20
   defp drive_score(_hdd, _state, false), do: 30
+
+  # The `{node, drive_id}` set of present-but-not-durable-yet replicas
+  # (#1375). Degrades to "none" on a transient Ra hiccup so reads never
+  # hard-fail on it; worst case is a missed verify, i.e. status quo.
+  defp unverified_drives, do: MapSet.new(DriveTrust.unverified())
+
+  # Force content-hash verification when reading from a drive that is
+  # `:unverified` — a crash-recovered or resyncing replica we don't trust
+  # yet. The BlobStore read reads from exactly `drive_id` (no sentinel
+  # resolution on the read path), so the same `{node, drive_id}` check
+  # applies to local and remote reads alike.
+  defp verify_if_unverified(read_opts, node, drive_id, unverified) do
+    if MapSet.member?(unverified, {node, drive_id}) do
+      Keyword.put(read_opts, :verify, true)
+    else
+      read_opts
+    end
+  end
 
   defp build_read_opts(opts) do
     base = [
