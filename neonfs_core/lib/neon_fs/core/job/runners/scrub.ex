@@ -9,6 +9,8 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
   ## Params
 
   - `:volume_id` (optional) — restrict scrubbing to a single volume's chunks
+  - `:drive_id` (optional) — restrict scrubbing to one local drive's chunks
+    (the scoped-verification path for a dirty-restart drive, #1380/#1426)
 
   ## Batch resumption
 
@@ -107,6 +109,7 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
   end
 
   defp list_chunks(%{volume_id: volume_id}), do: ChunkIndex.get_chunks_for_volume(volume_id)
+  defp list_chunks(%{drive_id: drive_id}), do: ChunkIndex.list_by_drive(node(), drive_id)
   defp list_chunks(_), do: ChunkIndex.list_all()
 
   defp filter_local(chunks) do

@@ -140,6 +140,33 @@ defmodule NeonFS.Core.Job.Runners.ScrubTest do
     end
   end
 
+  describe "step/1 — drive-scoped scrub (#1426)" do
+    test "scrubs only the named local drive's chunks" do
+      {:ok, vol} = VolumeRegistry.create("scrub-drive-scope", [])
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/d.txt", ["drive scoped data"])
+
+      # The test cluster writes to the "default" drive — a drive-scoped
+      # scrub there verifies the chunks.
+      {:complete, on_default} = run_to_completion(Job.new(Scrub, %{drive_id: "default"}))
+      assert on_default.progress.completed > 0
+      assert on_default.state.corruption_count == 0
+
+      # A drive holding none of this node's chunks scrubs nothing.
+      {:complete, on_ghost} = run_to_completion(Job.new(Scrub, %{drive_id: "ghost-drive"}))
+      assert on_ghost.progress.completed == 0
+    end
+
+    test "a drive-scoped scrub detects corruption on that drive" do
+      {:ok, vol} = VolumeRegistry.create("scrub-drive-corrupt", [])
+      {:ok, _file} = WriteOperation.write_file_streamed(vol.id, "/c.txt", ["corrupt me"])
+
+      Enum.each(ChunkIndex.list_by_drive(node(), "default"), &tamper_with_chunk/1)
+
+      {:complete, updated} = run_to_completion(Job.new(Scrub, %{drive_id: "default"}))
+      assert updated.state.corruption_count > 0
+    end
+  end
+
   describe "step/1 — encrypted chunk verification" do
     @test_master_key :crypto.strong_rand_bytes(32) |> Base.encode64()
 
