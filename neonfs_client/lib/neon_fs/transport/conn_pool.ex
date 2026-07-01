@@ -25,6 +25,13 @@ defmodule NeonFS.Transport.ConnPool do
   @default_checkout_timeout 30_000
   @default_recv_timeout 30_000
 
+  # `:ssl.connect/3` defaults to an `:infinity` connect timeout, so a worker
+  # connecting to a stale/half-open endpoint — e.g. a peer that restarted on
+  # a new data-plane port (#1450) — blocks forever, wedging the pool and any
+  # read that needs it. Bound it so a bad endpoint fails fast, letting the
+  # caller refresh the pool and retry.
+  @connect_timeout 5_000
+
   @type peer :: {:ssl.host(), :inet.port_number()}
 
   @doc """
@@ -109,7 +116,7 @@ defmodule NeonFS.Transport.ConnPool do
        host_charlist = if is_binary(host), do: String.to_charlist(host), else: host
        monotonic_start = System.monotonic_time()
 
-       case :ssl.connect(host_charlist, port, ssl_opts) do
+       case :ssl.connect(host_charlist, port, ssl_opts, @connect_timeout) do
          {:ok, socket} ->
            # Transfer controlling process to the pool before this Task exits,
            # otherwise the socket is closed when the Task terminates.
