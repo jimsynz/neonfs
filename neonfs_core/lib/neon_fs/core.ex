@@ -9,6 +9,7 @@ defmodule NeonFS.Core do
   """
 
   alias NeonFS.Core.Authorise
+  alias NeonFS.Core.ClusterMode
   alias NeonFS.Core.CommitChunks
   alias NeonFS.Core.CredentialManager
   alias NeonFS.Core.FileIndex
@@ -58,6 +59,19 @@ defmodule NeonFS.Core do
   @spec get_volume(String.t()) :: {:ok, NeonFS.Core.Volume.t()} | {:error, VolumeNotFound.t()}
   def get_volume(name) do
     resolve_volume(name)
+  end
+
+  @doc """
+  Whether the cluster is currently `:frozen` (#1378) — a coordinated
+  maintenance freeze during which new client writes are rejected so
+  in-flight writes can settle before a planned power-down.
+
+  Exposed on the RPC facade so interface nodes can surface a "read-only /
+  temporarily unavailable" response to their clients.
+  """
+  @spec cluster_frozen?() :: boolean()
+  def cluster_frozen? do
+    ClusterMode.frozen?()
   end
 
   @doc """
@@ -239,7 +253,8 @@ defmodule NeonFS.Core do
   @spec write_file_streamed(String.t(), String.t(), Enumerable.t(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
   def write_file_streamed(volume_name, path, stream, opts \\ []) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+    with :ok <- ensure_writable(),
+         {:ok, volume} <- resolve_volume(volume_name) do
       WriteOperation.write_file_streamed(volume.id, normalize_path(path), stream, opts)
     end
   end
@@ -256,7 +271,8 @@ defmodule NeonFS.Core do
   @spec write_file_at(String.t(), String.t(), non_neg_integer(), binary(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
   def write_file_at(volume_name, path, offset, data, opts \\ []) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+    with :ok <- ensure_writable(),
+         {:ok, volume} <- resolve_volume(volume_name) do
       WriteOperation.write_file_at(volume.id, normalize_path(path), offset, data, opts)
     end
   end
@@ -312,7 +328,8 @@ defmodule NeonFS.Core do
   @spec write_file_at_by_id(String.t(), binary(), non_neg_integer(), binary(), keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
   def write_file_at_by_id(volume_name, file_id, offset, data, opts \\ []) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+    with :ok <- ensure_writable(),
+         {:ok, volume} <- resolve_volume(volume_name) do
       WriteOperation.write_file_at_by_id(volume.id, file_id, offset, data, opts)
     end
   end
@@ -344,7 +361,8 @@ defmodule NeonFS.Core do
   @spec commit_chunks(String.t(), String.t(), [binary()], keyword()) ::
           {:ok, NeonFS.Core.FileMeta.t()} | {:error, term()}
   def commit_chunks(volume_name, path, chunk_hashes, opts \\ []) do
-    with {:ok, volume} <- resolve_volume(volume_name) do
+    with :ok <- ensure_writable(),
+         {:ok, volume} <- resolve_volume(volume_name) do
       CommitChunks.commit(volume.id, normalize_path(path), chunk_hashes, opts)
     end
   end
@@ -797,6 +815,15 @@ defmodule NeonFS.Core do
       {:ok, volume} -> {:ok, volume}
       {:error, :not_found} -> {:error, VolumeNotFound.exception(volume_name: volume_name)}
     end
+  end
+
+  # Rejects new client writes while the cluster is `:frozen` (#1378) so
+  # in-flight writes can settle before a planned power-down. Gates the
+  # external write RPCs only — internal operations (repair, rebalance,
+  # DR restore) call the `WriteOperation` / `CommitChunks` modules
+  # directly, not this facade, so they are unaffected.
+  defp ensure_writable do
+    if ClusterMode.frozen?(), do: {:error, :cluster_frozen}, else: :ok
   end
 
   defp lookup_file(volume_id, path) do

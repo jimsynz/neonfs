@@ -973,6 +973,18 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
                NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
     end
+
+    test "a frozen cluster maps to NFS3ERR_JUKEBOX (#1438)" do
+      pre = file_meta(%{size: 0})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] -> {:ok, pre}
+        NeonFS.Core, :write_file_at, _ -> {:error, :cluster_frozen}
+      end)
+
+      assert {:error, :jukebox, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+               NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
+    end
   end
 
   describe "commit/4" do
