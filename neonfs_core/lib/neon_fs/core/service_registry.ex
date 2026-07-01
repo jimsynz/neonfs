@@ -30,6 +30,15 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @core_probe_timeout_ms 1_000
 
+  # On boot the data-plane `Listener` may not have bound yet when we first
+  # self-register, so `build_self_metadata/0` yields no `:data_endpoint`
+  # and peers can't open a data-plane pool to us (#1450). The init/join
+  # flows call `refresh_self/0` once the Listener is up, but a plain
+  # auto-restart from persisted state runs neither — so we self-heal by
+  # re-registering until the endpoint is present.
+  @self_register_retry_ms 1_000
+  @self_register_max_retries 60
+
   ## Client API
 
   @doc """
@@ -211,6 +220,7 @@ defmodule NeonFS.Core.ServiceRegistry do
     metadata = build_self_metadata()
     info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
     new_state = do_register(info, state)
+    maybe_schedule_endpoint_retry(metadata, 0)
     {:noreply, new_state}
   end
 
@@ -294,9 +304,42 @@ defmodule NeonFS.Core.ServiceRegistry do
     {:noreply, state}
   end
 
+  def handle_info({:retry_register_self, attempt}, state) do
+    metadata = build_self_metadata()
+
+    new_state =
+      if Map.has_key?(metadata, :data_endpoint) do
+        info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
+
+        :telemetry.execute(
+          [:neonfs, :service_registry, :self_endpoint_registered],
+          %{attempt: attempt},
+          %{node: Node.self()}
+        )
+
+        do_register(info, state)
+      else
+        maybe_schedule_endpoint_retry(metadata, attempt)
+        state
+      end
+
+    {:noreply, new_state}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   ## Private helpers
+
+  # Keep retrying self-registration until the data-plane endpoint is
+  # available (Listener bound), so a node returning from a plain restart
+  # re-advertises `:data_endpoint` and peers can open a pool to it (#1450).
+  defp maybe_schedule_endpoint_retry(metadata, attempt) do
+    if not Map.has_key?(metadata, :data_endpoint) and attempt < @self_register_max_retries do
+      Process.send_after(self(), {:retry_register_self, attempt + 1}, @self_register_retry_ms)
+    end
+
+    :ok
+  end
 
   defp build_self_metadata do
     case Process.whereis(Listener) do
