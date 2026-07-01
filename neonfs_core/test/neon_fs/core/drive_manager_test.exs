@@ -3,7 +3,16 @@ defmodule NeonFS.Core.DriveManagerTest do
   use Mimic
 
   alias NeonFS.Cluster.State
-  alias NeonFS.Core.{BlobStore, DriveManager, DriveRegistry, RaSupervisor}
+
+  alias NeonFS.Core.{
+    BlobStore,
+    DriveManager,
+    DriveRegistry,
+    DriveTrust,
+    NodeRegistry,
+    RaSupervisor
+  }
+
   alias NeonFS.Core.Drive.Identity
 
   @moduletag :tmp_dir
@@ -323,6 +332,54 @@ defmodule NeonFS.Core.DriveManagerTest do
 
       {:ok, state_after} = State.load()
       refute Enum.any?(state_after.drives, fn d -> d["id"] == "to_persist_remove" end)
+    end
+  end
+
+  describe "auto-uncordon (#1420)" do
+    test "auto_uncordon?/2: a :maintenance node with no unverified drive resumes" do
+      assert DriveManager.auto_uncordon?(:maintenance, false)
+      refute DriveManager.auto_uncordon?(:maintenance, true)
+      refute DriveManager.auto_uncordon?(:active, false)
+      refute DriveManager.auto_uncordon?(:draining, false)
+      refute DriveManager.auto_uncordon?(nil, false)
+    end
+
+    test "a cordoned node whose drives are all trusted auto-uncordons on a trust-clear" do
+      dm = Process.whereis(DriveManager)
+      Mimic.allow(NodeRegistry, self(), dm)
+      Mimic.allow(DriveTrust, self(), dm)
+      test = self()
+
+      stub(NodeRegistry, :status, fn _node -> :maintenance end)
+      stub(DriveTrust, :unverified, fn -> [] end)
+
+      stub(NodeRegistry, :set_status, fn node, status ->
+        send(test, {:set_status, node, status}) && :ok
+      end)
+
+      GenServer.cast(dm, :maybe_auto_uncordon)
+      :sys.get_state(dm)
+
+      assert_received {:set_status, _node, :active}
+    end
+
+    test "a cordoned node with an unverified drive does not auto-uncordon" do
+      dm = Process.whereis(DriveManager)
+      Mimic.allow(NodeRegistry, self(), dm)
+      Mimic.allow(DriveTrust, self(), dm)
+      test = self()
+
+      stub(NodeRegistry, :status, fn _node -> :maintenance end)
+      stub(DriveTrust, :unverified, fn -> [{Node.self(), "default"}] end)
+
+      stub(NodeRegistry, :set_status, fn node, status ->
+        send(test, {:set_status, node, status}) && :ok
+      end)
+
+      GenServer.cast(dm, :maybe_auto_uncordon)
+      :sys.get_state(dm)
+
+      refute_received {:set_status, _node, :active}
     end
   end
 

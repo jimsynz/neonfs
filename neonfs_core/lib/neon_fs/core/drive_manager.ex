@@ -27,6 +27,7 @@ defmodule NeonFS.Core.DriveManager do
     DriveState,
     DriveTrust,
     JobTracker,
+    NodeRegistry,
     RaServer,
     RaSupervisor
   }
@@ -228,8 +229,15 @@ defmodule NeonFS.Core.DriveManager do
       Application.get_env(:neonfs_core, :drive_command_module, DriveCommand.Default)
 
     start_drive_state_children(drives, command_module)
+    attach_trust_telemetry()
 
     {:ok, %{command_module: command_module}, {:continue, :recover_dirty_drives}}
+  end
+
+  @impl true
+  def handle_cast(:maybe_auto_uncordon, state) do
+    attempt_auto_uncordon()
+    {:noreply, state}
   end
 
   @impl true
@@ -625,6 +633,9 @@ defmodule NeonFS.Core.DriveManager do
     cond do
       RaServer.initialized?() ->
         react_to_dirty_drives()
+        # If this node was cordoned and came back clean (or its drives have
+        # already cleared), resume immediately (#1420).
+        attempt_auto_uncordon()
 
       attempt < @dirty_recovery_max_retries ->
         Process.send_after(
@@ -636,6 +647,59 @@ defmodule NeonFS.Core.DriveManager do
       true ->
         Logger.warning("Ra not ready after #{attempt} attempts; skipping dirty-drive recovery")
     end
+  end
+
+  # Auto-uncordon (#1420): a node that was cordoned for maintenance
+  # resumes on its own once it's back and its drives are trusted again —
+  # zero operator step on the happy path. A clean reboot's drives are
+  # already `:trusted` (so it resumes immediately); a dirty one's drives
+  # clear once their scoped scrub passes (#1426/#1427), and the
+  # `set_drive_trust` telemetry re-drives this check as each clears.
+  defp attempt_auto_uncordon do
+    if auto_uncordon?(NodeRegistry.status(Node.self()), local_drive_unverified?()) do
+      case NodeRegistry.set_status(Node.self(), :active) do
+        :ok ->
+          :telemetry.execute([:neonfs, :drive_manager, :auto_uncordoned], %{}, %{
+            node: Node.self()
+          })
+
+        {:error, reason} ->
+          Logger.warning("Could not auto-uncordon node", reason: inspect(reason))
+      end
+    end
+  end
+
+  @doc false
+  # Pure decision: a `:maintenance` node with no still-`:unverified` local
+  # drive is caught up and can resume. Exposed for testing.
+  @spec auto_uncordon?(NodeRegistry.status() | nil, boolean()) :: boolean()
+  def auto_uncordon?(:maintenance, false), do: true
+  def auto_uncordon?(_status, _local_drive_unverified?), do: false
+
+  defp local_drive_unverified? do
+    Enum.any?(DriveTrust.unverified(), fn {node, _drive_id} -> node == Node.self() end)
+  end
+
+  @auto_uncordon_handler_id "neonfs-drive-manager-auto-uncordon"
+
+  # React to a local drive clearing back to `:trusted` (#1427) by
+  # re-checking whether this cordoned node can now resume (#1420). The
+  # captured pid makes a post-restart stale handler a harmless no-op (a
+  # cast to a dead pid is dropped); init re-attaches fresh.
+  defp attach_trust_telemetry do
+    pid = self()
+    :telemetry.detach(@auto_uncordon_handler_id)
+
+    :telemetry.attach(
+      @auto_uncordon_handler_id,
+      [:neonfs, :ra, :command, :set_drive_trust],
+      fn _event, _measurements, metadata, _config ->
+        if metadata[:to] == :trusted and metadata[:node] == node() do
+          GenServer.cast(pid, :maybe_auto_uncordon)
+        end
+      end,
+      nil
+    )
   end
 
   defp react_to_dirty_drives do
