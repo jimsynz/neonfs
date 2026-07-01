@@ -33,7 +33,12 @@ defmodule NeonFS.Integration.DRSnapshotSchedulerTest do
   @moduletag :integration
   @moduletag nodes: 3
 
-  @scheduler_name DRSnapshotScheduler
+  # A distinct name from the supervised `DRSnapshotScheduler` (#1448): this
+  # test mounts its own fast-interval instance with an injected create_fn,
+  # which would otherwise clash with the daily-interval one now started by
+  # the core supervisor. The supervised instance stays dormant (daily tick)
+  # during the sub-second test window.
+  @scheduler_name :dr_snapshot_scheduler_under_test
   @tick_event [:neonfs, :dr_snapshot_scheduler, :tick]
   @interval_ms 500
 

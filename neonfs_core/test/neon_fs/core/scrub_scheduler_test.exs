@@ -95,6 +95,15 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
     def recovering?, do: true
   end
 
+  # Injected into ticking tests so the tick's recovering-check doesn't call
+  # the real ClusterMode (a Ra query that adds latency when Ra isn't running
+  # in these unit tests, which can push a 50ms-interval tick past the 1000ms
+  # assert_receive under load).
+  defmodule NormalClusterMode do
+    @moduledoc false
+    def recovering?, do: false
+  end
+
   defp make_volume(id, scrub_interval \\ 2_592_000) do
     %{
       id: id,
@@ -148,7 +157,8 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
            name: :"scrub_sched_#{System.unique_integer([:positive])}",
            check_interval_ms: 50,
            job_tracker_mod: MockJobTracker,
-           volume_registry_mod: MockVolumeRegistry}
+           volume_registry_mod: MockVolumeRegistry,
+           cluster_mode_mod: NormalClusterMode}
         )
 
       assert is_pid(pid)
@@ -223,7 +233,8 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
          name: :"scrub_sched_skip_#{System.unique_integer([:positive])}",
          check_interval_ms: 50,
          job_tracker_mod: MockJobTracker,
-         volume_registry_mod: MockVolumeRegistry}
+         volume_registry_mod: MockVolumeRegistry,
+         cluster_mode_mod: NormalClusterMode}
       )
 
       # Wait for the first tick to complete
@@ -256,7 +267,8 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
          name: name,
          check_interval_ms: 50,
          job_tracker_mod: MockJobTracker,
-         volume_registry_mod: MockVolumeRegistry}
+         volume_registry_mod: MockVolumeRegistry,
+         cluster_mode_mod: NormalClusterMode}
       )
 
       # First tick will create jobs for both volumes (no last scrub time = always due)

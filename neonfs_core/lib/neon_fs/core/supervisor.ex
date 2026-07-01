@@ -249,6 +249,12 @@ defmodule NeonFS.Core.Supervisor do
           # above (#1437).
           NeonFS.Core.ClusterRecoveryMonitor,
 
+          # DRSnapshotScheduler takes periodic leader-only DR snapshots of
+          # the full Ra state to the system volume (#1448). Leader-gated and
+          # runtime-configurable (`:neonfs_core, DRSnapshotScheduler`); reads
+          # config itself, so no opts needed here.
+          NeonFS.Core.DRSnapshotScheduler,
+
           # Retention prunes old audit log files from the system volume
           NeonFS.Core.SystemVolume.Retention,
 
