@@ -24,6 +24,7 @@ defmodule NeonFS.Integration.FreezeThawTest do
 
   @moduletag timeout: 600_000
   @moduletag nodes: 3
+  @moduletag drives: 1
   @moduletag :integration
 
   setup %{cluster: cluster} do
@@ -97,6 +98,26 @@ defmodule NeonFS.Integration.FreezeThawTest do
     #    whole-cluster restart is a separate data-plane recovery concern
     #    (#1450) — out of scope for this coordination test.
     wait_for_read_path_ready(cluster)
+
+    # 6b. Every node re-registers its local drive after the cold restart —
+    #     `PeerCluster.build_restart_config` now carries `:drives` across
+    #     `restart_node` (part of #1450). Without it a restarted peer
+    #     manages no drives and can neither serve nor store chunks.
+    #     (Byte-level content read-back after a simultaneous restart is
+    #     still tracked in #1450 — a distinct per-node read-hang remains.)
+    for node_name <- [:node1, :node2, :node3] do
+      node = PeerCluster.get_node!(cluster, node_name).node
+
+      :ok =
+        wait_until(
+          fn ->
+            cluster
+            |> PeerCluster.rpc(node_name, NeonFS.Core.DriveRegistry, :list_drives, [])
+            |> Enum.any?(&(&1.node == node))
+          end,
+          timeout: 60_000
+        )
+    end
 
     # 7. The recovering lifecycle completes: a clean cycle has no dirty
     #    drives, so the monitor returns the cluster to :normal on its own.
