@@ -90,6 +90,11 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
     end
   end
 
+  defmodule RecoveringClusterMode do
+    @moduledoc false
+    def recovering?, do: true
+  end
+
   defp make_volume(id, scrub_interval \\ 2_592_000) do
     %{
       id: id,
@@ -160,6 +165,32 @@ defmodule NeonFS.Core.ScrubSchedulerTest do
 
       assert_received {[:neonfs, :scrub_scheduler, :triggered], ^ref, %{},
                        %{job_id: _, volume_id: "vol-1"}}
+    end
+
+    test "pauses routine scrubs while the cluster is `:recovering` (#1436)" do
+      MockVolumeRegistry.set_volumes([make_volume("vol-1")])
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :scrub_scheduler, :tick],
+          [:neonfs, :scrub_scheduler, :recovering_paused],
+          [:neonfs, :scrub_scheduler, :triggered]
+        ])
+
+      start_supervised!(
+        {ScrubScheduler,
+         name: :"scrub_sched_#{System.unique_integer([:positive])}",
+         check_interval_ms: 50,
+         job_tracker_mod: MockJobTracker,
+         volume_registry_mod: MockVolumeRegistry,
+         cluster_mode_mod: RecoveringClusterMode}
+      )
+
+      assert_receive {[:neonfs, :scrub_scheduler, :recovering_paused], ^ref, %{}, %{}}, 1_000
+      assert_receive {[:neonfs, :scrub_scheduler, :tick], ^ref, %{}, %{}}, 1_000
+
+      assert MockJobTracker.get_created() == []
+      refute_received {[:neonfs, :scrub_scheduler, :triggered], ^ref, _, _}
     end
 
     test "skips when a scrub job for the volume is already running" do
