@@ -57,6 +57,22 @@ defmodule NeonFS.Core.RaServer do
   end
 
   @doc """
+  Whether this node's Ra server auto-restarted from persisted on-disk
+  state on its current boot (as opposed to a fresh `init_cluster` founder
+  or an explicit `join_cluster`).
+
+  A `true` result means this node was previously part of a cluster and is
+  returning — the signal `NeonFS.Core.ClusterRecoveryMonitor` uses to tell
+  a cold whole-cluster reform from a first-time cluster formation (#1437).
+  """
+  @spec auto_restarted?() :: boolean()
+  def auto_restarted? do
+    GenServer.call(__MODULE__, :auto_restarted?)
+  catch
+    :exit, {:noproc, _} -> false
+  end
+
+  @doc """
   Reset the Ra server for testing purposes.
 
   Stops the Ra server if running, deletes its state, and resets
@@ -112,7 +128,8 @@ defmodule NeonFS.Core.RaServer do
   @impl true
   def init(opts) do
     # Use handle_continue to ensure Ra application is ready, but don't start the server
-    {:ok, %{opts: opts, status: :not_initialized, ra_pid: nil}, {:continue, :ensure_ra_ready}}
+    {:ok, %{opts: opts, status: :not_initialized, ra_pid: nil, auto_restarted: false},
+     {:continue, :ensure_ra_ready}}
   end
 
   @impl true
@@ -142,7 +159,7 @@ defmodule NeonFS.Core.RaServer do
     case try_auto_restart() do
       {:ok, status} ->
         Logger.info("Ra server auto-restarted from persisted state")
-        {:noreply, %{state | status: status}}
+        {:noreply, %{state | status: status, auto_restarted: true}}
 
       :no_persisted_state ->
         Logger.info("Ra system ready, waiting for cluster init or join")
@@ -154,6 +171,10 @@ defmodule NeonFS.Core.RaServer do
   def handle_call(:initialized?, _from, state) do
     initialized = state.status in [:running, :joined]
     {:reply, initialized, state}
+  end
+
+  def handle_call(:auto_restarted?, _from, state) do
+    {:reply, Map.get(state, :auto_restarted, false), state}
   end
 
   @impl true

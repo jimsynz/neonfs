@@ -244,6 +244,11 @@ defmodule NeonFS.Core.Supervisor do
           # ReplicaRepairScheduler creates periodic replica-repair jobs per volume
           {NeonFS.Core.ReplicaRepairScheduler, replica_repair_scheduler_opts()},
 
+          # ClusterRecoveryMonitor auto-detects a cold whole-cluster reform
+          # and drives the `:recovering` mode that gates the two schedulers
+          # above (#1437).
+          NeonFS.Core.ClusterRecoveryMonitor,
+
           # Retention prunes old audit log files from the system volume
           NeonFS.Core.SystemVolume.Retention,
 
