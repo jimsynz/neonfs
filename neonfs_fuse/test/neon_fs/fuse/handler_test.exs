@@ -414,6 +414,32 @@ defmodule NeonFS.FUSE.HandlerTest do
       assert_receive {:fuse_op_complete, 23, {"write_ok", %{"size" => 5}}}, 5_000
       assert_receive :write_by_id_called, 1_000
     end
+
+    test "a frozen cluster maps a write to EAGAIN (#1438)",
+         %{handler: handler, file_inode: file_inode} do
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol", "/data.txt"] ->
+          {:ok, %{id: "data-file-id", mode: 0o100644}}
+
+        _coord, :claim_pinned_for, [_, _, _] ->
+          {:ok, "ns-claim-frozen"}
+
+        NeonFS.Core, :write_file_at_by_id, ["vol-name", "data-file-id", 0, "bytes"] ->
+          {:error, :cluster_frozen}
+      end)
+
+      send(handler, {:fuse_op, 24, {"open", %{"ino" => file_inode}}})
+      assert_receive {:fuse_op_complete, 24, {"open_ok", %{"fh" => fh}}}, 5_000
+
+      send(
+        handler,
+        {:fuse_op, 25,
+         {"write", %{"ino" => file_inode, "offset" => 0, "data" => "bytes", "fh" => fh}}}
+      )
+
+      # errno(:eagain) == 11
+      assert_receive {:fuse_op_complete, 25, {"error", %{"errno" => 11}}}, 5_000
+    end
   end
 
   # Helper for the `O_EXCL` create tests: dispatches the two

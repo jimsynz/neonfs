@@ -593,6 +593,18 @@ defmodule NeonFS.WebDAV.BackendTest do
       assert {:error, %Davy.Error{code: :forbidden}} =
                Backend.put_content_stream(@auth, [], ["data"], %{})
     end
+
+    test "a frozen cluster maps a PUT to 423 Locked (#1438)" do
+      MockCore.create_volume("docs")
+
+      Application.put_env(:neonfs_webdav, :core_call_fn, fn
+        :write_file_streamed, _args -> {:error, :cluster_frozen}
+        function, args -> apply(MockCore, function, args)
+      end)
+
+      assert {:error, %Davy.Error{code: :locked}} =
+               Backend.put_content_stream(@auth, ["docs", "frozen.txt"], ["data"], %{})
+    end
   end
 
   # `If-None-Match: *` is the RFC 7232 conditional-create precondition

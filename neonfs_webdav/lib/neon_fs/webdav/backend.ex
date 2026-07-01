@@ -194,6 +194,12 @@ defmodule NeonFS.WebDAV.Backend do
            message: "If-None-Match: * precondition failed: target already exists"
          }}
 
+      # A frozen cluster (#1378) is temporarily refusing writes. Davy has
+      # no 503; `:locked` (423) is the closest "can't write right now"
+      # status until upstream 503 support lands.
+      {:error, :cluster_frozen} ->
+        {:error, %Davy.Error{code: :locked, message: "Cluster frozen for maintenance"}}
+
       {:error, _reason} ->
         {:error, internal_error()}
     end

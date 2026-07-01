@@ -2,6 +2,7 @@ defmodule NeonFS.Core.ClusterModeTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
+  alias NeonFS.Core
   alias NeonFS.Core.{ClusterMode, RaServer}
 
   @moduletag :tmp_dir
@@ -66,5 +67,26 @@ defmodule NeonFS.Core.ClusterModeTest do
     assert_receive {[:neonfs, :ra, :command, :set_cluster_mode], ^ref, %{},
                     %{from: :frozen, to: :recovering}},
                    1_000
+  end
+
+  describe "frozen write gate (#1438)" do
+    test "`NeonFS.Core` reflects the frozen mode via cluster_frozen?/0" do
+      refute Core.cluster_frozen?()
+      assert :ok = ClusterMode.set_mode(:frozen)
+      assert Core.cluster_frozen?()
+      assert :ok = ClusterMode.set_mode(:normal)
+      refute Core.cluster_frozen?()
+    end
+
+    test "write RPCs are rejected with :cluster_frozen while frozen" do
+      assert :ok = ClusterMode.set_mode(:frozen)
+
+      # The gate short-circuits before volume resolution, so no volume
+      # setup is needed — a frozen cluster refuses the write outright.
+      assert {:error, :cluster_frozen} = Core.write_file_at("any-vol", "/f", 0, "data", [])
+      assert {:error, :cluster_frozen} = Core.write_file_at_by_id("any-vol", "fid", 0, "d", [])
+      assert {:error, :cluster_frozen} = Core.write_file_streamed("any-vol", "/f", [], [])
+      assert {:error, :cluster_frozen} = Core.commit_chunks("any-vol", "/f", [], [])
+    end
   end
 end

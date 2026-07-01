@@ -511,6 +511,9 @@ defmodule NeonFS.NFS.NFSv3Backend do
   defp to_nfs_status(:is_directory), do: :isdir
   defp to_nfs_status(:not_supported), do: :notsupp
   defp to_nfs_status(:read_only), do: :rofs
+  # A frozen cluster (#1378) is a temporary maintenance pause: JUKEBOX
+  # tells the client to retry rather than surfacing a hard error.
+  defp to_nfs_status(:cluster_frozen), do: :jukebox
   defp to_nfs_status(:name_too_long), do: :nametoolong
   defp to_nfs_status(:not_empty), do: :notempty
   defp to_nfs_status(:cross_device), do: :xdev

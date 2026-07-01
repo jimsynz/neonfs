@@ -390,6 +390,7 @@ defmodule NeonFS.FUSE.Handler do
       {:error, %{class: :forbidden}} -> {{"error", %{"errno" => errno(:eacces)}}, state}
       {:error, %NeonFS.Error.AlreadyExists{}} -> {{"error", %{"errno" => errno(:eexist)}}, state}
       {:error, %NeonFS.Error.Conflict{}} -> {{"error", %{"errno" => errno(:eagain)}}, state}
+      {:error, :cluster_frozen} -> {{"error", %{"errno" => errno(:eagain)}}, state}
       {:error, reason} -> log_create_failure_and_eio(reason, state)
     end
   end
@@ -924,6 +925,9 @@ defmodule NeonFS.FUSE.Handler do
 
       {:error, %{class: :not_found}} ->
         {"error", %{"errno" => errno(:enoent)}}
+
+      {:error, :cluster_frozen} ->
+        {"error", %{"errno" => errno(:eagain)}}
 
       {:error, reason} ->
         Logger.warning("Write failed", reason: inspect(reason))
