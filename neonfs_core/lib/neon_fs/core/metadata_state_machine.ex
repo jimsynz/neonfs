@@ -52,6 +52,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:update_service_status, node(), atom()}
           | {:update_service_metrics, node(), map()}
           | {:set_node_status, node(), node_status()}
+          | {:set_cluster_mode, cluster_mode(), reason :: String.t() | nil}
           | {:put_stripe, stripe_data :: map()}
           | {:update_stripe, stripe_id :: binary(), updates :: map()}
           | {:delete_stripe, stripe_id :: binary()}
@@ -187,6 +188,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           drives: %{optional(String.t()) => drive_entry()},
           drive_trust: %{optional({node(), String.t()}) => :unverified},
           nodes: %{optional(node()) => node_entry()},
+          cluster_mode: cluster_mode_entry() | nil,
           volume_roots: %{
             optional(binary()) => %{optional(non_neg_integer()) => volume_root_entry()}
           },
@@ -241,6 +243,23 @@ defmodule NeonFS.Core.MetadataStateMachine do
           node: node(),
           status: node_status(),
           updated_at: DateTime.t()
+        }
+
+  @typedoc """
+  Whole-cluster lifecycle mode (#1378) — distinct from per-node status
+  (`node_status`). `:normal` is steady state; `:frozen` is a coordinated
+  maintenance freeze (client ingress cut, best-effort quiesce before a
+  planned power-down); `:recovering` is a reassembling cluster after a
+  freeze or an unplanned mass restart, during which failure-driven repair
+  is suppressed and verification throttled so a cold start doesn't trigger
+  a repair storm. Absence of an entry reads as `:normal`, so the mechanism
+  is dormant until something sets it.
+  """
+  @type cluster_mode :: :normal | :frozen | :recovering
+  @type cluster_mode_entry :: %{
+          mode: cluster_mode(),
+          updated_at: DateTime.t(),
+          reason: String.t() | nil
         }
 
   @typedoc """
@@ -394,6 +413,25 @@ defmodule NeonFS.Core.MetadataStateMachine do
   """
   @spec get_node(state(), node()) :: node_entry() | nil
   def get_node(state, node), do: Map.get(get_nodes(state), node)
+
+  @doc """
+  Returns the whole-cluster lifecycle mode (#1378), or `:normal` when
+  unset (a fresh cluster, or a pre-v21 state).
+  """
+  @spec get_cluster_mode(state()) :: cluster_mode()
+  def get_cluster_mode(state) do
+    case Map.get(state, :cluster_mode) do
+      %{mode: mode} -> mode
+      _ -> :normal
+    end
+  end
+
+  @doc """
+  Returns the full cluster-mode entry (`mode` + `updated_at` + `reason`),
+  or `nil` when the mode has never been set.
+  """
+  @spec get_cluster_mode_entry(state()) :: cluster_mode_entry() | nil
+  def get_cluster_mode_entry(state), do: Map.get(state, :cluster_mode)
 
   @doc """
   Returns the set of nodes currently in the `:draining` lifecycle state
@@ -635,6 +673,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
       drives: %{},
       drive_trust: %{},
       nodes: %{},
+      cluster_mode: nil,
       volume_roots: %{},
       snapshots: %{},
       redeemed_invites: %{},
@@ -972,6 +1011,18 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {Map.put_new(state, :drive_trust, %{}), :ok, []}
   end
 
+  def apply(_meta, {:machine_version, 20, 21}, state) do
+    require Logger
+
+    Logger.info("Ra machine version upgrade",
+      from: 20,
+      to: 21,
+      change: "add whole-cluster lifecycle mode for freeze/thaw + recovering (#1378)"
+    )
+
+    {Map.put_new(state, :cluster_mode, nil), :ok, []}
+  end
+
   def apply(_meta, {:machine_version, from_version, to_version}, state) do
     require Logger
     Logger.info("Ra machine version upgrade", from: from_version, to: to_version)
@@ -1212,6 +1263,20 @@ defmodule NeonFS.Core.MetadataStateMachine do
       [:neonfs, :ra, :command, :set_node_status],
       %{version: new_state.version},
       %{node: node, status: status}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  def apply(_meta, {:set_cluster_mode, mode, reason}, state) do
+    from = get_cluster_mode(state)
+    entry = %{mode: mode, updated_at: DateTime.utc_now(), reason: reason}
+    new_state = %{state | cluster_mode: entry, version: state.version + 1}
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :set_cluster_mode],
+      %{version: new_state.version},
+      %{from: from, to: mode, reason: reason}
     )
 
     {new_state, :ok, []}
@@ -2317,7 +2382,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
   Return the state machine version for upgrade/migration support.
   """
   @impl :ra_machine
-  def version, do: 20
+  def version, do: 21
 
   @doc """
   Return the module to handle a specific state machine version.

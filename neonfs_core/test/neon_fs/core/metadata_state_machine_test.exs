@@ -48,8 +48,8 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
   end
 
   describe "version/0" do
-    test "returns 20" do
-      assert MetadataStateMachine.version() == 20
+    test "returns 21" do
+      assert MetadataStateMachine.version() == 21
     end
   end
 
