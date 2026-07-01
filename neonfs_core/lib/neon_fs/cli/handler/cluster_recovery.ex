@@ -16,9 +16,11 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
 
   alias NeonFS.Core.{
     AuditLog,
+    ClusterMode,
     CordonStopCheck,
     DriveEvacuation,
     DriveManager,
+    DRSnapshotScheduler,
     MetadataStateMachine,
     NodeRegistry,
     RaServer,
@@ -242,6 +244,72 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
     else
       {:error, reason} -> {:error, wrap_error(reason)}
     end
+  end
+
+  @doc """
+  Freezes the whole cluster for a coordinated maintenance shutdown
+  (#1378): sets the cluster mode `:frozen` (cutting client write ingress
+  via the #1438 write-gate), lets in-flight writes settle for a bounded
+  window, then triggers a metadata DR snapshot. Reports ready-to-power-off
+  — the operator then stops interface nodes, then core nodes.
+
+  Best-effort quiesce (not write-fencing): Ra's own on-disk persistence is
+  the primary safety net across the power-cycle; the DR snapshot is
+  belt-and-braces and is leader-only, so it reports `:skipped` when this
+  handler runs on a follower.
+
+  `opts` (test injection): `:cluster_mode_mod`, `:snapshot_fn`, `:settle_ms`.
+  """
+  @spec handle_cluster_freeze(keyword()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_cluster_freeze(opts \\ []) do
+    set_cli_metadata()
+    cluster_mode_mod = Keyword.get(opts, :cluster_mode_mod, ClusterMode)
+    snapshot_fn = Keyword.get(opts, :snapshot_fn, &DRSnapshotScheduler.run_now/0)
+    settle_ms = Keyword.get(opts, :settle_ms, freeze_settle_ms())
+
+    with :ok <- require_cluster(),
+         :ok <- cluster_mode_mod.set_mode(:frozen, "cluster freeze") do
+      if settle_ms > 0, do: Process.sleep(settle_ms)
+
+      {:ok,
+       %{
+         status: "frozen",
+         settle_ms: settle_ms,
+         snapshot: describe_snapshot(snapshot_fn.())
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  @doc """
+  Thaws the cluster after a coordinated restart (#1378): sets the cluster
+  mode `:recovering` so failure-driven repair stays suppressed and
+  verification throttled (#1436) while the cluster reassembles. The
+  `ClusterRecoveryMonitor` (#1437) returns the mode to `:normal` once all
+  members are back and drives are trusted (or on its timeout backstop).
+
+  `opts` (test injection): `:cluster_mode_mod`.
+  """
+  @spec handle_cluster_thaw(keyword()) :: {:ok, map()} | {:error, Exception.t()}
+  def handle_cluster_thaw(opts \\ []) do
+    set_cli_metadata()
+    cluster_mode_mod = Keyword.get(opts, :cluster_mode_mod, ClusterMode)
+
+    with :ok <- require_cluster(),
+         :ok <- cluster_mode_mod.set_mode(:recovering, "cluster thaw") do
+      {:ok, %{status: "recovering"}}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
+  defp describe_snapshot({:ok, %{snapshot: :skipped}}), do: "skipped"
+  defp describe_snapshot({:ok, %{snapshot: _}}), do: "taken"
+  defp describe_snapshot(_), do: "unavailable"
+
+  defp freeze_settle_ms do
+    Application.get_env(:neonfs_core, :cluster_freeze_settle_ms, 5_000)
   end
 
   defp serialise_reason(%{kind: :quorum, surviving: surviving, majority: majority}) do

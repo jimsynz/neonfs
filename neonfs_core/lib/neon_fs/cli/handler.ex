@@ -159,6 +159,21 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_cordon_stop_check(node_name), to: ClusterRecoveryHandler
 
   @doc """
+  Freezes the whole cluster for a coordinated maintenance shutdown
+  (#1378): cuts write ingress, settles in-flight writes, snapshots
+  metadata, and reports ready-to-power-off.
+  """
+  @spec handle_cluster_freeze() :: {:ok, map()} | {:error, Exception.t()}
+  defdelegate handle_cluster_freeze(), to: ClusterRecoveryHandler
+
+  @doc """
+  Thaws the cluster after a coordinated restart (#1378): enters the
+  `:recovering` mode so repair stays suppressed while it reassembles.
+  """
+  @spec handle_cluster_thaw() :: {:ok, map()} | {:error, Exception.t()}
+  defdelegate handle_cluster_thaw(), to: ClusterRecoveryHandler
+
+  @doc """
   Runs the safety-gate pipeline for `neonfs cluster force-reset` and
   records the operator-acknowledged data-loss intent in the audit log.
 
