@@ -342,6 +342,15 @@ defmodule NeonFS.CLI.HandlerTest do
       assert result.snapshot == "taken"
     end
 
+    test "freeze succeeds (snapshot unavailable) when the DR scheduler isn't running" do
+      # Default snapshot path with no DRSnapshotScheduler process — a freeze
+      # must not crash on the best-effort snapshot step (#1440 regression).
+      assert {:ok, result} = ClusterRecovery.handle_cluster_freeze(settle_ms: 0)
+      assert result.status == "frozen"
+      assert result.snapshot == "unavailable"
+      assert ClusterMode.mode() == :frozen
+    end
+
     test "thaw sets the cluster :recovering" do
       assert {:ok, result} = Handler.handle_cluster_thaw()
       assert result.status == "recovering"
