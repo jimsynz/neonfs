@@ -264,7 +264,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   def handle_cluster_freeze(opts \\ []) do
     set_cli_metadata()
     cluster_mode_mod = Keyword.get(opts, :cluster_mode_mod, ClusterMode)
-    snapshot_fn = Keyword.get(opts, :snapshot_fn, &DRSnapshotScheduler.run_now/0)
+    snapshot_fn = Keyword.get(opts, :snapshot_fn, &default_snapshot/0)
     settle_ms = Keyword.get(opts, :settle_ms, freeze_settle_ms())
 
     with :ok <- require_cluster(),
@@ -275,7 +275,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
        %{
          status: "frozen",
          settle_ms: settle_ms,
-         snapshot: describe_snapshot(snapshot_fn.())
+         snapshot: safe_snapshot(snapshot_fn)
        }}
     else
       {:error, reason} -> {:error, wrap_error(reason)}
@@ -302,6 +302,27 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
     else
       {:error, reason} -> {:error, wrap_error(reason)}
     end
+  end
+
+  # The metadata DR snapshot is best-effort belt-and-braces — Ra's own
+  # on-disk persistence is the primary safety net across the power-cycle.
+  # A freeze must not fail because the snapshot is unavailable, so any
+  # error (the scheduler not running, a leader-only skip, an exit) degrades
+  # to "unavailable"/"skipped" and the freeze still succeeds.
+  defp default_snapshot do
+    if Process.whereis(DRSnapshotScheduler) do
+      DRSnapshotScheduler.run_now()
+    else
+      {:error, :not_running}
+    end
+  end
+
+  defp safe_snapshot(snapshot_fn) do
+    describe_snapshot(snapshot_fn.())
+  rescue
+    _ -> "unavailable"
+  catch
+    :exit, _ -> "unavailable"
   end
 
   defp describe_snapshot({:ok, %{snapshot: :skipped}}), do: "skipped"
