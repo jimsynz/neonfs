@@ -55,6 +55,8 @@ if config_env() == :prod do
       String.to_integer(System.get_env("NEONFS_SNAPSHOT_INTERVAL_MS", "30000")),
     replica_repair_maintenance_grace_ms:
       String.to_integer(System.get_env("NEONFS_MAINTENANCE_GRACE_MS", "1800000")),
+    cluster_recovery_timeout_ms:
+      String.to_integer(System.get_env("NEONFS_CLUSTER_RECOVERY_TIMEOUT_MS", "1800000")),
     node_name: node_name,
     fuse_node: fuse_node
 
