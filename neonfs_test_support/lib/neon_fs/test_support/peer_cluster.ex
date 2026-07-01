@@ -68,7 +68,8 @@ defmodule NeonFS.TestSupport.PeerCluster do
           id: String.t(),
           cookie: atom(),
           nodes: [node_info()],
-          data_dir: String.t()
+          data_dir: String.t(),
+          drives_fn: (atom(), String.t() -> [map()]) | nil
         }
 
   @doc """
@@ -377,7 +378,8 @@ defmodule NeonFS.TestSupport.PeerCluster do
       id: cluster_id,
       cookie: cookie,
       nodes: nodes,
-      data_dir: base_dir
+      data_dir: base_dir,
+      drives_fn: drives_fn
     }
   end
 
@@ -1257,6 +1259,27 @@ defmodule NeonFS.TestSupport.PeerCluster do
     {peer_opts, _dist_port} =
       build_peer_opts(peer_name, cluster.cookie, data_dir, old_info.dist_port)
 
+    core_config = [
+      data_dir: data_dir,
+      meta_dir: meta_dir,
+      blob_store_base_dir: Path.join(data_dir, "blobs"),
+      metrics_enabled: false,
+      ra_data_dir: String.to_charlist(ra_dir),
+      enable_ra: true,
+      quorum_timeout_ms: 15_000
+    ]
+
+    # Re-apply the node's drive config on restart. Without this, a
+    # restarted peer boots with `:drives = []` and `DriveManager` manages
+    # no drives, so it cannot serve or store chunks — invisible in a
+    # single-node/rolling restart (survivors serve the data) but fatal to a
+    # simultaneous whole-cluster restart (#1450).
+    core_config =
+      case Map.get(cluster, :drives_fn) do
+        nil -> core_config
+        drives_fn -> Keyword.put(core_config, :drives, drives_fn.(node_name, data_dir))
+      end
+
     app_config = [
       logger: [level: :warning],
       neonfs_client: [
@@ -1264,15 +1287,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         partition_recovery_debounce_ms: 200,
         service_list_fn: {NeonFS.Core.ServiceRegistry, :list, []}
       ],
-      neonfs_core: [
-        data_dir: data_dir,
-        meta_dir: meta_dir,
-        blob_store_base_dir: Path.join(data_dir, "blobs"),
-        metrics_enabled: false,
-        ra_data_dir: String.to_charlist(ra_dir),
-        enable_ra: true,
-        quorum_timeout_ms: 15_000
-      ],
+      neonfs_core: core_config,
       ra: [data_dir: String.to_charlist(ra_dir)]
     ]
 
