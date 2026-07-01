@@ -5,7 +5,7 @@ use crate::daemon::{resolve_join_target, DaemonConnection};
 use crate::error::{CliError, Result};
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::{
-    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterStatus,
+    CaInfo, CaRevokeResult, CertificateEntry, ClusterInitResult, ClusterModeResult, ClusterStatus,
     CordonStopCheckResult, DrainNodeResult, NodeStatusResult, RemoveNodeResult,
 };
 use crate::term::{
@@ -256,6 +256,21 @@ pub enum ClusterCommand {
         force: bool,
     },
 
+    /// Freeze the whole cluster for a coordinated maintenance shutdown.
+    ///
+    /// Cuts client write ingress (new writes are refused), lets in-flight
+    /// writes settle, and triggers a metadata snapshot — then reports
+    /// ready-to-power-off. Stop interface nodes first, then core nodes;
+    /// bring them back and run `cluster thaw`.
+    Freeze,
+
+    /// Thaw the cluster after a coordinated restart.
+    ///
+    /// Enters the `recovering` state so failure-driven repair stays
+    /// suppressed while the cluster reassembles; it returns to normal
+    /// automatically once all members are back and drives are verified.
+    Thaw,
+
     /// Rebuild the Ra quorum from a surviving minority after catastrophic
     /// membership loss.
     ///
@@ -453,6 +468,8 @@ impl ClusterCommand {
             ClusterCommand::CordonStopCheck { node, force } => {
                 self.cordon_stop_check(node, *force, format)
             }
+            ClusterCommand::Freeze => self.freeze(format),
+            ClusterCommand::Thaw => self.thaw(format),
             ClusterCommand::ReconstructFromDisk {
                 yes,
                 overwrite_ra_state,
@@ -1063,6 +1080,53 @@ impl ClusterCommand {
         }
 
         Ok(())
+    }
+
+    fn freeze(&self, format: OutputFormat) -> Result<()> {
+        let result = self.cluster_mode_call("handle_cluster_freeze")?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&result)?),
+            OutputFormat::Table => {
+                println!("✓ Cluster is now {}", result.status);
+                if let Some(snapshot) = &result.snapshot {
+                    println!("  metadata snapshot: {}", snapshot);
+                }
+                println!("  Safe to stop interface nodes, then core nodes.");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn thaw(&self, format: OutputFormat) -> Result<()> {
+        let result = self.cluster_mode_call("handle_cluster_thaw")?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&result)?),
+            OutputFormat::Table => {
+                println!("✓ Cluster is now {}", result.status);
+                println!("  Repair stays suppressed until the cluster has reassembled.");
+            }
+        }
+
+        Ok(())
+    }
+
+    // Shared driver for the cluster-wide freeze/thaw RPCs, which take no
+    // arguments and return a `{status, ...}` map.
+    fn cluster_mode_call(&self, function: &str) -> Result<ClusterModeResult> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", function, vec![])
+                .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        ClusterModeResult::from_term(unwrap_ok_tuple(result)?)
     }
 
     fn cordon_stop_check(&self, node: &str, force: bool, format: OutputFormat) -> Result<()> {
@@ -2194,6 +2258,26 @@ mod tests {
         if let Ok(parsed) = cli {
             assert!(matches!(parsed.command, ClusterCommand::RebalanceStatus));
         }
+    }
+
+    #[test]
+    fn test_freeze_and_thaw_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: ClusterCommand,
+        }
+
+        let freeze = TestCli::try_parse_from(["test", "freeze"]);
+        assert!(matches!(
+            freeze.map(|c| c.command),
+            Ok(ClusterCommand::Freeze)
+        ));
+
+        let thaw = TestCli::try_parse_from(["test", "thaw"]);
+        assert!(matches!(thaw.map(|c| c.command), Ok(ClusterCommand::Thaw)));
     }
 
     #[test]

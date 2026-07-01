@@ -6,9 +6,12 @@ defmodule NeonFS.CLI.HandlerTest do
   alias NeonFS.Client.ServiceInfo
   alias NeonFS.Cluster.State
 
+  alias NeonFS.CLI.Handler.ClusterRecovery
+
   alias NeonFS.Core.{
     AuditLog,
     CertificateAuthority,
+    ClusterMode,
     Drive,
     DriveRegistry,
     NodeRegistry,
@@ -292,6 +295,70 @@ defmodule NeonFS.CLI.HandlerTest do
       assert result.node == node_str
       assert result.safe == false
       assert Enum.any?(result.reasons, &(&1.kind == "quorum"))
+    end
+  end
+
+  describe "cluster freeze / thaw (#1439)" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_ra()
+      Handler.cluster_init("freeze-test-cluster")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "freeze sets the cluster :frozen and reports the snapshot outcome" do
+      assert {:ok, result} =
+               ClusterRecovery.handle_cluster_freeze(
+                 settle_ms: 0,
+                 snapshot_fn: fn -> {:ok, %{snapshot: :skipped, pruned: []}} end
+               )
+
+      assert result.status == "frozen"
+      assert result.snapshot == "skipped"
+      assert ClusterMode.mode() == :frozen
+    end
+
+    test "freeze reports a taken snapshot when one is produced" do
+      assert {:ok, result} =
+               ClusterRecovery.handle_cluster_freeze(
+                 settle_ms: 0,
+                 snapshot_fn: fn -> {:ok, %{snapshot: %{id: "snap-1"}, pruned: []}} end
+               )
+
+      assert result.snapshot == "taken"
+    end
+
+    test "thaw sets the cluster :recovering" do
+      assert {:ok, result} = Handler.handle_cluster_thaw()
+      assert result.status == "recovering"
+      assert ClusterMode.mode() == :recovering
+    end
+
+    test "a freeze then thaw leaves the cluster :recovering" do
+      {:ok, _} =
+        ClusterRecovery.handle_cluster_freeze(
+          settle_ms: 0,
+          snapshot_fn: fn -> {:ok, %{snapshot: :skipped, pruned: []}} end
+        )
+
+      assert ClusterMode.mode() == :frozen
+
+      assert {:ok, _} = Handler.handle_cluster_thaw()
+      assert ClusterMode.mode() == :recovering
     end
   end
 

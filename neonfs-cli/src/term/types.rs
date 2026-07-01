@@ -434,6 +434,32 @@ impl NodeStatusResult {
     }
 }
 
+/// `cluster freeze` / `cluster thaw` response (#1439). `snapshot` and
+/// `settle_ms` are only present for freeze.
+#[derive(Debug, Serialize)]
+pub struct ClusterModeResult {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settle_ms: Option<u64>,
+}
+
+impl ClusterModeResult {
+    /// Parse from Erlang term (map)
+    pub fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            status: term_to_string(map.get("status").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'status' field".to_string())
+            })?)?,
+            snapshot: map.get("snapshot").map(term_to_string).transpose()?,
+            settle_ms: map.get("settle_ms").map(term_to_u64).transpose()?,
+        })
+    }
+}
+
 /// `cluster cordon-stop-check` response (#1417)
 #[derive(Debug, Serialize)]
 pub struct CordonStopCheckResult {
