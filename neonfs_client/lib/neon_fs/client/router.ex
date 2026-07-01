@@ -74,13 +74,35 @@ defmodule NeonFS.Client.Router do
         message = build_data_message(operation, ref, args)
         execute_opts = [timeout: timeout, recv_timeout: timeout]
 
-        pool
-        |> ConnPool.execute(message, execute_opts)
-        |> normalise_data_response(ref)
+        try do
+          pool
+          |> ConnPool.execute(message, execute_opts)
+          |> normalise_data_response(ref)
+        rescue
+          error -> refresh_and_fail(node, error)
+        catch
+          :exit, reason -> refresh_and_fail(node, reason)
+        end
 
       {:error, :no_pool} ->
         {:error, :no_data_endpoint}
     end
+  end
+
+  # A pooled connection to `node` failed — most often a stale pool to a peer
+  # that restarted on a new (OS-assigned) data-plane port (#1450). Drop and
+  # refresh the peer's pool so the next call rebuilds it against the peer's
+  # current endpoint, and fail this call fast so the caller can retry rather
+  # than block on the dead connection.
+  defp refresh_and_fail(node, reason) do
+    PoolManager.refresh_peer(node)
+
+    Logger.debug("data_call failed; refreshed peer pool",
+      node: inspect(node),
+      reason: inspect(reason)
+    )
+
+    {:error, :data_call_failed}
   end
 
   @doc """

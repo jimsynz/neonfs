@@ -87,6 +87,17 @@ defmodule NeonFS.Transport.PoolManager do
   end
 
   @doc """
+  Drops `node`'s pool and re-syncs from discovery, so a failed `data_call`
+  to a peer that restarted on a new data-plane port immediately rebuilds
+  the pool against the peer's current endpoint rather than waiting up to a
+  full `discovery_refresh` interval (#1450). Fire-and-forget.
+  """
+  @spec refresh_peer(node()) :: :ok
+  def refresh_peer(node) do
+    GenServer.cast(__MODULE__, {:refresh_peer, node})
+  end
+
+  @doc """
   Returns a `{host, port}` tuple for advertising this node's data transfer endpoint.
 
   Address selection, in order:
@@ -163,6 +174,15 @@ defmodule NeonFS.Transport.PoolManager do
   def handle_call({:remove_pool, node}, _from, state) do
     state = do_remove_pool(node, state)
     {:reply, :ok, state}
+  end
+
+  @impl GenServer
+  def handle_cast({:refresh_peer, node}, state) do
+    # Drop the (likely stale) pool, then re-sync from discovery so the
+    # peer's current endpoint is picked up immediately (#1450).
+    state = do_remove_pool(node, state)
+    do_discovery_refresh(state)
+    {:noreply, state}
   end
 
   @impl GenServer
