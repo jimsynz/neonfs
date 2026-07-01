@@ -96,6 +96,16 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
     def entry(_node), do: Agent.get(__MODULE__, & &1)
   end
 
+  defmodule RecoveringClusterMode do
+    @moduledoc false
+    def recovering?, do: true
+  end
+
+  defmodule NormalClusterMode do
+    @moduledoc false
+    def recovering?, do: false
+  end
+
   defp make_volume(id), do: %{id: id, name: "vol-#{id}"}
 
   defp attach_telemetry(events) do
@@ -431,6 +441,72 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
           volume_registry_mod: MockVolumeRegistry,
           node_registry_mod: MockNodeRegistry,
           name: :"rr_sched_cordon_stale_#{System.unique_integer([:positive])}"
+        )
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n2@host, type: :core}
+      )
+
+      _ = :sys.get_state(pid)
+
+      assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
+                      %{volume_id: _}},
+                     1_000
+    end
+
+    test "suppresses the repair trigger cluster-wide while `:recovering` (#1436)" do
+      MockJobTracker.start_link()
+      MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
+
+      ref =
+        attach_telemetry([
+          [:neonfs, :replica_repair_scheduler, :triggered],
+          [:neonfs, :replica_repair_scheduler, :recovering_suppressed]
+        ])
+
+      {:ok, pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          membership_rate_limit_ms: 0,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          cluster_mode_mod: RecoveringClusterMode,
+          name: :"rr_sched_recovering_#{System.unique_integer([:positive])}"
+        )
+
+      :telemetry.execute(
+        [:neonfs, :service_registry, :service_deregistered],
+        %{},
+        %{node: :n2@host, type: :core}
+      )
+
+      _ = :sys.get_state(pid)
+
+      assert_receive {[:neonfs, :replica_repair_scheduler, :recovering_suppressed], ^ref, %{},
+                      %{node: :n2@host}},
+                     1_000
+
+      refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
+    end
+
+    test "triggers normally when the cluster is not recovering (#1436)" do
+      MockJobTracker.start_link()
+      MockVolumeRegistry.start_link(volumes: [make_volume("v1")])
+
+      ref = attach_telemetry([[:neonfs, :replica_repair_scheduler, :triggered]])
+
+      {:ok, pid} =
+        ReplicaRepairScheduler.start_link(
+          check_interval_ms: 60_000,
+          volume_interval_seconds: 1,
+          membership_rate_limit_ms: 0,
+          job_tracker_mod: MockJobTracker,
+          volume_registry_mod: MockVolumeRegistry,
+          cluster_mode_mod: NormalClusterMode,
+          name: :"rr_sched_not_recovering_#{System.unique_integer([:positive])}"
         )
 
       :telemetry.execute(

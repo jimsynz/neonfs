@@ -38,6 +38,7 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
   use GenServer
   require Logger
 
+  alias NeonFS.Core.ClusterMode
   alias NeonFS.Core.Job.Runners.ReplicaRepair, as: ReplicaRepairRunner
   alias NeonFS.Core.{JobTracker, NodeRegistry, VolumeRegistry}
 
@@ -110,6 +111,7 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
       job_tracker_mod: Keyword.get(opts, :job_tracker_mod, JobTracker),
       volume_registry_mod: Keyword.get(opts, :volume_registry_mod, VolumeRegistry),
       node_registry_mod: Keyword.get(opts, :node_registry_mod, NodeRegistry),
+      cluster_mode_mod: Keyword.get(opts, :cluster_mode_mod, ClusterMode),
       maintenance_grace_ms:
         Keyword.get(
           opts,
@@ -182,16 +184,27 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
 
   @impl true
   def handle_cast({:membership_event, metadata}, state) do
-    if maintenance_suppressed?(metadata, state) do
-      :telemetry.execute(
-        [:neonfs, :replica_repair_scheduler, :maintenance_suppressed],
-        %{},
-        %{node: metadata[:node]}
-      )
+    cond do
+      recovering_suppressed?(state) ->
+        :telemetry.execute(
+          [:neonfs, :replica_repair_scheduler, :recovering_suppressed],
+          %{},
+          %{node: metadata[:node]}
+        )
 
-      {:noreply, state}
-    else
-      maybe_trigger_membership(state)
+        {:noreply, state}
+
+      maintenance_suppressed?(metadata, state) ->
+        :telemetry.execute(
+          [:neonfs, :replica_repair_scheduler, :maintenance_suppressed],
+          %{},
+          %{node: metadata[:node]}
+        )
+
+        {:noreply, state}
+
+      true ->
+        maybe_trigger_membership(state)
     end
   end
 
@@ -374,6 +387,13 @@ defmodule NeonFS.Core.ReplicaRepairScheduler do
   defp rate_limited?(state, now_ms) do
     now_ms - state.last_membership_trigger_at < state.membership_rate_limit_ms
   end
+
+  # True while the whole cluster is `:recovering` (#1378) — reassembling
+  # after a freeze or an unplanned mass restart. A member vanishing during
+  # reassembly is expected, not a failure, so no failure-driven repair pass
+  # is triggered until the cluster returns to `:normal` (#1436). This
+  # cluster-wide gate takes precedence over the per-node maintenance check.
+  defp recovering_suppressed?(state), do: state.cluster_mode_mod.recovering?()
 
   # True when the deregistering node is cordoned (`:maintenance`) and was
   # cordoned within the grace window — its planned departure shouldn't

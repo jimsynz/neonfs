@@ -32,6 +32,7 @@ defmodule NeonFS.Core.ScrubScheduler do
   use GenServer
   require Logger
 
+  alias NeonFS.Core.ClusterMode
   alias NeonFS.Core.Job.Runners.Scrub
   alias NeonFS.Core.JobTracker
   alias NeonFS.Core.VolumeRegistry
@@ -84,6 +85,7 @@ defmodule NeonFS.Core.ScrubScheduler do
       check_interval_ms: Keyword.get(opts, :check_interval_ms, 3_600_000),
       job_tracker_mod: Keyword.get(opts, :job_tracker_mod, JobTracker),
       volume_registry_mod: Keyword.get(opts, :volume_registry_mod, VolumeRegistry),
+      cluster_mode_mod: Keyword.get(opts, :cluster_mode_mod, ClusterMode),
       volume_scrub_times: %{}
     }
 
@@ -128,7 +130,20 @@ defmodule NeonFS.Core.ScrubScheduler do
   @impl true
   def handle_info(:tick, state) do
     Logger.metadata(component: :scheduler, scheduler: :scrub)
-    state = check_all_volumes(state)
+
+    state =
+      if state.cluster_mode_mod.recovering?() do
+        # Routine, staleness-driven scrubs are deferrable: while the cluster
+        # is `:recovering` (#1378), pause them so verification doesn't
+        # saturate a reassembling cluster (#1436). Crash-recovery's
+        # drive-scoped scrub (#1426) is NOT gated here — it must proceed to
+        # clear drives back to `:trusted` and let the cluster exit recovering.
+        :telemetry.execute([:neonfs, :scrub_scheduler, :recovering_paused], %{}, %{})
+        state
+      else
+        check_all_volumes(state)
+      end
+
     schedule_tick(state)
     :telemetry.execute([:neonfs, :scrub_scheduler, :tick], %{}, %{})
     {:noreply, state}
