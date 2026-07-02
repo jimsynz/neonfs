@@ -12,11 +12,14 @@ defmodule NeonFS.Integration.FreezeThawTest do
   here we assert the coordination cycle as a whole: freeze cuts writes, the
   cluster auto-enters `:recovering` on the cold reform, reassembles from
   persisted state (no force-reset), the metadata layer is available on every
-  node afterwards, and the cluster returns to `:normal`.
+  node afterwards, the cluster returns to `:normal`, and the file written
+  before the freeze reads back byte-for-byte on every node afterwards.
 
-  Byte-level content read-back after a *simultaneous* whole-cluster cold
-  restart is a separate data-plane recovery concern tracked in #1450, and
-  is out of scope here.
+  Byte-level read-back after the cold reform exercises the data-plane recovery
+  path fixed in #1450: a restarted peer rebinds a new data-plane port, so a
+  fetcher's connection pool must re-point at the peer's current endpoint (and
+  fall back to distribution RPC while it does) rather than stall on the stale
+  one.
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
@@ -94,17 +97,13 @@ defmodule NeonFS.Integration.FreezeThawTest do
 
     # 6. Metadata survived the whole cycle: every node resolves the volume
     #    and its data-plane services (ChunkIndex) are back after the full
-    #    cold restart. Byte-level content read-back after a *simultaneous*
-    #    whole-cluster restart is a separate data-plane recovery concern
-    #    (#1450) — out of scope for this coordination test.
+    #    cold restart.
     wait_for_read_path_ready(cluster)
 
     # 6b. Every node re-registers its local drive after the cold restart —
     #     `PeerCluster.build_restart_config` now carries `:drives` across
     #     `restart_node` (part of #1450). Without it a restarted peer
     #     manages no drives and can neither serve nor store chunks.
-    #     (Byte-level content read-back after a simultaneous restart is
-    #     still tracked in #1450 — a distinct per-node read-hang remains.)
     for node_name <- [:node1, :node2, :node3] do
       node = PeerCluster.get_node!(cluster, node_name).node
 
@@ -119,7 +118,21 @@ defmodule NeonFS.Integration.FreezeThawTest do
         )
     end
 
-    # 7. The recovering lifecycle completes: a clean cycle has no dirty
+    # 7. Byte-level read-back (#1450): the file written before the freeze reads
+    #    back intact on every node after the cold reform. A restarted peer
+    #    rebinds a new data-plane port, so the fetcher re-points its pool at the
+    #    peer's current endpoint (falling back to distribution RPC meanwhile)
+    #    instead of stalling on the stale one. `wait_until` absorbs the brief
+    #    window where a not-yet-re-pointed pool degrades to RPC.
+    for node_name <- [:node1, :node2, :node3] do
+      :ok =
+        wait_until(
+          fn -> read_matches?(cluster, node_name, "/test.txt", "test data") end,
+          timeout: 120_000
+        )
+    end
+
+    # 8. The recovering lifecycle completes: a clean cycle has no dirty
     #    drives, so the monitor returns the cluster to :normal on its own.
     :ok =
       wait_until(
