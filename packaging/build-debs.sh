@@ -120,10 +120,10 @@ for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neon
     MIX_ENV=prod mix deps.get --only prod
     # Wipe the release tree (see above) AND the compiled local path-dep
     # artifacts. `mix release` reassembles from `_build/prod/lib` and does not
-    # reliably recompile sibling path deps (neonfs_*, fuse_server) after their
+    # reliably recompile sibling path deps (neonfs_*) after their
     # sources change, so an edited interface package can be packaged with a
     # stale beam. Hex deps stay cached.
-    rm -rf _build/prod/rel _build/prod/lib/neonfs_* _build/prod/lib/fuse_server
+    rm -rf _build/prod/rel _build/prod/lib/neonfs_*
     MIX_ENV=prod mix release --overwrite
 done
 

@@ -62,7 +62,6 @@ target "fuse" {
   ]
   contexts = {
     "client": "./neonfs_client"
-    "fuse_server": "./fuse_server"
     "src": "./neonfs_fuse"
     "base": "target:base"
     "cli": "target:cli"
@@ -185,7 +184,6 @@ target "omnibus" {
     "client": "./neonfs_client"
     "core": "./neonfs_core"
     "fuse": "./neonfs_fuse"
-    "fuse_server": "./fuse_server"
     "nfs": "./neonfs_nfs"
     "nfs_server": "./nfs_server"
     "s3": "./neonfs_s3"

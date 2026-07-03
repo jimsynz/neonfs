@@ -7,10 +7,10 @@ optionally encrypted storage.
 
 What makes it unusual: the FUSE protocol is spoken **natively on the
 BEAM**. There is no libfuse binding and no long-running native event
-loop — a minimal syscall NIF (from the standalone
-[`fuse_server`](../fuse_server/) library) obtains the `/dev/fuse` file
-descriptor via `fusermount3`, and from there frame parsing, dispatch,
-and replies are all Elixir processes under supervision.
+loop — a minimal syscall NIF (from the [`wick`](https://hex.pm/packages/wick)
+library) obtains the `/dev/fuse` file descriptor via `fusermount3`, and
+from there frame parsing, dispatch, and replies are all Elixir processes
+under supervision.
 
 This package depends on [`neonfs_client`](../neonfs_client/) only — it
 has **no dependency on `neonfs_core`**. All communication with core

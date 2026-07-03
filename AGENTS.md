@@ -59,7 +59,7 @@ git -c commit.gpgsign=false commit -m "commit message"
 |---------|---------|
 | `neonfs_client/` | Shared library every other package builds on: shared types (`Volume`, `FileMeta`), service discovery (`Connection`, `Discovery`, `CostFunction`), RPC routing (`Router`), chunk streaming over the TLS data plane (`ChunkReader`, `ChunkWriter`), KV access, service registration (`Registrar`). Pure library — no OTP application. |
 | `neonfs_core/` | Control plane and storage engine: blob storage NIFs (`native/neonfs_blob`), file/chunk/stripe indexes on leaderless quorum replication, Ra-backed service + volume registries, cluster CA, join flow, GC, scrub, repair, tiering. |
-| `neonfs_fuse/` | FUSE interface. `Session` owns the `/dev/fuse` fd; `Handler` translates ops into core RPCs; `MountManager` owns mount lifecycle. |
+| `neonfs_fuse/` | FUSE interface (FUSE transport + protocol codec via the `wick` hex library). `Session` owns the `/dev/fuse` fd; `Handler` translates ops into core RPCs; `MountManager` owns mount lifecycle. |
 | `neonfs_nfs/` | NFSv3 interface: `NFSServer.*.Backend` impls against `neonfs_client`, export lifecycle, inode table, metadata cache, NLM v4 locking. |
 | `neonfs_s3/` | S3-compatible HTTP interface (Bandit + `firkin`): backend, multipart store. |
 | `neonfs_webdav/` | WebDAV interface (Bandit + `davy`). |
@@ -70,7 +70,6 @@ git -c commit.gpgsign=false commit -m "commit message"
 | `neonfs_iam/` | IAM Ash domain — scaffold, resources land via #288/#290/#291/#292. |
 | `neonfs_omnibus/` | Single release bundling core + all shipped interfaces. |
 | `neonfs-cli/` | Rust CLI; speaks Erlang distribution (TLS) directly via `erl_dist`. |
-| `fuse_server/` | Standalone library: FUSE transport NIF + pure-Elixir protocol codec. |
 | `nfs_server/` | Standalone library: XDR, ONC RPC, MOUNT, NFSv3 against backend behaviours. |
 | `neonfs_test_support/` | Peer-cluster test scaffolding (`PeerCluster`, `ClusterCase`, …) shared by every package's integration tests. |
 | `neonfs_integration/` | Cross-node cluster-correctness test suite (formation, replication, partitions, failure recovery). Per-interface e2e tests live with their packages. |
@@ -83,7 +82,7 @@ Architecture and design documentation lives in the [wiki](https://harton.dev/pro
 neonfs_client  ← neonfs_core
 neonfs_client  ← every interface package (fuse, nfs, s3, webdav, docker,
                  containerd, csi, cifs, iam)
-fuse_server    ← neonfs_fuse          nfs_server  ← neonfs_nfs
+nfs_server     ← neonfs_nfs
 neonfs_core + interfaces              ← neonfs_omnibus
 neonfs_test_support (test-only)       ← all packages with peer-cluster tests
 all of the above                      ← neonfs_integration
@@ -181,7 +180,7 @@ Historical context:
 
 Release notes live in [`CHANGELOG.md`](CHANGELOG.md), generated from conventional commits.
 
-`git_ops` bumps the `version =` field in every Elixir `mix.exs` and every Rust `Cargo.toml` it tracks, but **does not** regenerate the four workspace `Cargo.lock` files (`fuse_server/`, `neonfs_core/`, `neonfs-cli/`, `neonfs_client/native/neonfs_chunker/`). After a release commit, run `cargo update -p <workspace-package>` in each workspace and commit the lockfile changes — otherwise the next clean checkout's first `cargo build` produces an uncommitted lockfile drift (`<pkg> v0.1.0 → v<new>`) that shows up in every subsequent `git status`.
+`git_ops` bumps the `version =` field in every Elixir `mix.exs` and every Rust `Cargo.toml` it tracks, but **does not** regenerate the three workspace `Cargo.lock` files (`neonfs_core/`, `neonfs-cli/`, `neonfs_client/native/neonfs_chunker/`). After a release commit, run `cargo update -p <workspace-package>` in each workspace and commit the lockfile changes — otherwise the next clean checkout's first `cargo build` produces an uncommitted lockfile drift (`<pkg> v0.1.0 → v<new>`) that shows up in every subsequent `git status`.
 
 ## Testing
 
@@ -247,7 +246,7 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 ## Module Naming
 
 - Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, `NeonFS.NFS.*`, `NeonFS.S3.*`, `NeonFS.WebDAV.*`, `NeonFS.Docker.*`, `NeonFS.Containerd.*`, `NeonFS.CSI.*`, `NeonFS.CIFS.*`, `NeonFS.IAM.*`, `NeonFS.Omnibus.*`, and `NeonFS.TestSupport.*`
-- The standalone protocol libraries use their own namespaces: `FuseServer.*` and `NFSServer.*`
+- The standalone protocol libraries use their own namespaces: the `wick` hex library provides `Wick.*` (FUSE); `nfs_server` provides `NFSServer.*`
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
 

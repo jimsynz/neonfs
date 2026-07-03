@@ -1,11 +1,11 @@
 defmodule NeonFS.FUSE.SessionTest do
   use ExUnit.Case, async: false
 
-  alias FuseServer.Native, as: FNative
-  alias FuseServer.Protocol
-  alias FuseServer.Protocol.{Attr, InHeader}
   alias NeonFS.FUSE.{InodeTable, Session}
   alias NeonFS.FUSE.SessionTest.StubHandler
+  alias Wick.Native, as: FNative
+  alias Wick.Protocol
+  alias Wick.Protocol.{Attr, InHeader}
 
   defmodule StubHandler do
     @moduledoc false

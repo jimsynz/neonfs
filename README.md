@@ -106,7 +106,6 @@ for the high-churn chunk, file, and stripe indexes.
 | [`neonfs_iam`](neonfs_iam/) | Identity and access management domain (scaffold — resources land incrementally) |
 | [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle: core + every interface in a single release |
 | [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster administration |
-| [`fuse_server`](fuse_server/) | Standalone library: FUSE transport and protocol codec on the BEAM |
 | [`nfs_server`](nfs_server/) | Standalone library: pure-Elixir NFSv3/ONC-RPC server |
 | [`neonfs_test_support`](neonfs_test_support/) | Shared peer-cluster test scaffolding |
 | [`neonfs_integration`](neonfs_integration/) | Multi-node cluster-correctness test suite |

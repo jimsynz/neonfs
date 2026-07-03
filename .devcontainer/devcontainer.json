@@ -6,7 +6,6 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/neonfs,type=bind,consistency=cached",
   "mounts": [
     "source=${devcontainerId}-build-root,target=/workspaces/neonfs/_build,type=volume",
-    "source=${devcontainerId}-build-fuse_server,target=/workspaces/neonfs/fuse_server/_build,type=volume",
     "source=${devcontainerId}-build-neonfs-cli,target=/workspaces/neonfs/neonfs-cli/_build,type=volume",
     "source=${devcontainerId}-build-neonfs_cifs,target=/workspaces/neonfs/neonfs_cifs/_build,type=volume",
     "source=${devcontainerId}-build-neonfs_client,target=/workspaces/neonfs/neonfs_client/_build,type=volume",

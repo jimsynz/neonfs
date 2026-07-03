@@ -12,7 +12,7 @@
 #
 # Run from a package's working directory (the same dir `mix deps.compile`
 # is invoked in). No-op when there is no `_build/` (cache miss) or when
-# the package has no path deps (neonfs_client, fuse_server, nfs_server).
+# the package has no path deps (neonfs_client, nfs_server).
 
 set -euo pipefail
 
