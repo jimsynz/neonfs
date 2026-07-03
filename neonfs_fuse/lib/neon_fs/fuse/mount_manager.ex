@@ -11,7 +11,7 @@ defmodule NeonFS.FUSE.MountManager do
   2. Verify volume exists in `VolumeRegistry`
   3. Start `MetadataCache` and `Handler` GenServers under the
      dynamic supervisor.
-  4. Open the FUSE fd via `FuseServer.Fusermount.mount/2` (the
+  4. Open the FUSE fd via `Wick.Fusermount.mount/2` (the
      `fusermount3` userspace helper) and start a
      `NeonFS.FUSE.Session` GenServer that owns the fd and dispatches
      incoming frames to the `Handler`.
@@ -32,8 +32,8 @@ defmodule NeonFS.FUSE.MountManager do
   use GenServer
   require Logger
 
-  alias FuseServer.Fusermount
   alias NeonFS.FUSE.{MetadataCache, MountInfo, MountSupervisor, Session}
+  alias Wick.Fusermount
 
   @type mount_id :: String.t()
 

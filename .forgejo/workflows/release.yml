@@ -231,8 +231,6 @@ jobs:
             neonfs_core/_build
             neonfs_core/target
             neonfs_core/priv/native
-            fuse_server/target
-            fuse_server/priv/native
             neonfs_fuse/deps
             neonfs_fuse/_build
             neonfs_fuse/target
@@ -341,8 +339,6 @@ jobs:
             neonfs_core/_build
             neonfs_core/target
             neonfs_core/priv/native
-            fuse_server/target
-            fuse_server/priv/native
             neonfs_fuse/deps
             neonfs_fuse/_build
             neonfs_fuse/target

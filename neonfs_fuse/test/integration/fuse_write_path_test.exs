@@ -19,9 +19,9 @@ defmodule NeonFS.FUSE.IntegrationTest.WritePathTest do
   @moduletag cluster_mode: :shared
   @moduletag :fuse
 
-  alias FuseServer.Fusermount
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.FUSE.{InodeTable, Session}
+  alias Wick.Fusermount
 
   setup_all %{cluster: cluster} do
     :ok = cluster_init_idempotent(cluster, :node1, "test")

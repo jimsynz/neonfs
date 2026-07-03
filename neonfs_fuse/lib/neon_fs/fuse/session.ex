@@ -6,14 +6,14 @@ defmodule NeonFS.FUSE.Session do
   This is the first end-to-end layer of the native-BEAM FUSE stack
   (issue #277): a single-mount GenServer that registers for
   `enif_select` notifications, decodes incoming kernel frames via
-  `FuseServer.Protocol`, dispatches to the existing Handler's business
+  `Wick.Protocol`, dispatches to the existing Handler's business
   logic, and writes the encoded reply back to the kernel.
 
   ## Lifecycle
 
     * `init/1` receives a `/dev/fuse` fd handle (from
-      `FuseServer.Fusermount.mount/2` in production, or
-      `FuseServer.Native.pipe_pair/0` in tests). It also receives a
+      `Wick.Fusermount.mount/2` in production, or
+      `Wick.Native.pipe_pair/0` in tests). It also receives a
       Handler pid configured to send `{:fuse_op_complete, id, reply}`
       messages back here (via `:test_notify`). Session arms a single
       read-readiness notification and waits for the kernel's `INIT`
@@ -57,10 +57,10 @@ defmodule NeonFS.FUSE.Session do
   use GenServer
   require Logger
 
-  alias FuseServer.Native, as: FNative
-  alias FuseServer.Protocol
-  alias FuseServer.Protocol.{Attr, Request, Response}
   alias NeonFS.FUSE.{Handler, InodeTable}
+  alias Wick.Native, as: FNative
+  alias Wick.Protocol
+  alias Wick.Protocol.{Attr, Request, Response}
 
   # Pinned kernel protocol version (libfuse 3.10+, Linux 5.4+).
   @kernel_major 7
@@ -102,7 +102,7 @@ defmodule NeonFS.FUSE.Session do
 
   # FUSE max_write — kernel sends WRITE requests up to
   # `sizeof(fuse_in_header) + sizeof(fuse_write_in) + max_write`
-  # bytes in one frame. `FuseServer.Native.read_frame/1` uses a
+  # bytes in one frame. `Wick.Native.read_frame/1` uses a
   # 128 KiB buffer, so the cap here must leave room for the 80-byte
   # request prefix. 64 KiB is the conservative libfuse-3.0 default
   # and avoids the EINVAL-on-INIT-reply that 128 KiB triggers when
@@ -166,7 +166,7 @@ defmodule NeonFS.FUSE.Session do
   Required options:
 
     * `:fd` — a `/dev/fuse` (or pipe-pair-read) handle from
-      `FuseServer.Native`. The handle's fd is closed when this process
+      `Wick.Native`. The handle's fd is closed when this process
       terminates and the resource refcount drops to zero.
     * `:volume` — volume id used by the Handler.
 
