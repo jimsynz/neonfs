@@ -11,7 +11,7 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
   use NeonFS.TestCase
 
   alias NeonFS.Client.Router
-  alias NeonFS.Core.{BlobStore, ChunkFetcher, ChunkIndex, ChunkMeta}
+  alias NeonFS.Core.{BlobStore, ChunkCache, ChunkFetcher, ChunkIndex, ChunkMeta}
   alias NeonFS.Transport.{PoolManager, PoolSupervisor, TLS}
 
   @moduletag :tmp_dir
@@ -203,6 +203,11 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
 
       start_supervised!({PoolManager, pm_opts})
 
+      case GenServer.whereis(ChunkCache) do
+        nil -> start_supervised!(ChunkCache, restart: :temporary)
+        _pid -> :ok
+      end
+
       {:ok, port: port, test_data: test_data, test_hash: test_hash, chunk_store: chunk_store}
     end
 
@@ -227,6 +232,47 @@ defmodule NeonFS.Core.ChunkFetcherDataPlaneTest do
                )
 
       assert data == ctx.test_data
+    end
+
+    test "caches a remotely-fetched chunk so the next read is a local hit", ctx do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :transport, :conn_pool, :worker_connected]
+        ])
+
+      fake_node = :cache_peer@host
+      endpoint = {~c"localhost", ctx.port}
+      {:ok, _pool} = PoolManager.ensure_pool(fake_node, endpoint)
+
+      assert_receive {[:neonfs, :transport, :conn_pool, :worker_connected], ^ref, _, _}, 5_000
+
+      volume_id = "vol-remote-cache"
+
+      chunk_meta = %ChunkMeta{
+        volume_ids: MapSet.new([volume_id]),
+        hash: ctx.test_hash,
+        original_size: byte_size(ctx.test_data),
+        stored_size: byte_size(ctx.test_data),
+        compression: :none,
+        locations: [%{node: fake_node, drive_id: "default", tier: :hot}],
+        target_replicas: 1,
+        commit_state: :committed
+      }
+
+      ChunkIndex.put(chunk_meta)
+      ChunkCache.invalidate(volume_id, ctx.test_hash)
+
+      assert ChunkCache.get(volume_id, ctx.test_hash) == :miss
+
+      assert {:ok, data, {:remote, ^fake_node}} =
+               ChunkFetcher.fetch_chunk(ctx.test_hash, volume_id: volume_id, tier: "hot")
+
+      assert data == ctx.test_data
+
+      # ChunkCache.put/4 is a cast; sync on the GenServer mailbox before asserting.
+      :sys.get_state(ChunkCache)
+
+      assert ChunkCache.get(volume_id, ctx.test_hash) == {:ok, ctx.test_data}
     end
 
     test "returns :not_found for missing chunk via data plane", ctx do

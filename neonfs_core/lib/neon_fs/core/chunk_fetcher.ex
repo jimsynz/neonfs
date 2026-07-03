@@ -168,15 +168,11 @@ defmodule NeonFS.Core.ChunkFetcher do
     []
     |> maybe_add_type(:transformed, decompress)
     |> maybe_add_type(:reconstructed, reconstructed)
-    |> maybe_add_remote_type(remote)
+    |> maybe_add_type(:remote, remote)
   end
 
   defp maybe_add_type(types, _type, false), do: types
   defp maybe_add_type(types, type, true), do: [type | types]
-
-  defp maybe_add_remote_type(types, false), do: types
-  defp maybe_add_remote_type([], true), do: []
-  defp maybe_add_remote_type(types, true), do: [:remote | types]
 
   defp fetch_from_storage(hash, start_time, opts) do
     exclude_nodes = Keyword.get(opts, :exclude_nodes, [])
