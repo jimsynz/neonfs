@@ -548,17 +548,7 @@ defmodule NeonFS.CSI.ControllerServer do
       ) do
     case lookup_volume(source_volume_id) do
       {:ok, volume} ->
-        case core_call(NeonFS.Core.Snapshot, :create, [volume.id, [name: name]]) do
-          {:ok, snap} ->
-            %CreateSnapshotResponse{
-              snapshot: csi_snapshot_from(snap, volume)
-            }
-
-          {:error, reason} ->
-            raise GRPC.RPCError,
-              status: :internal,
-              message: "create_snapshot failed: #{inspect(reason)}"
-        end
+        create_named_snapshot(volume, name)
 
       {:error, :not_found} ->
         raise GRPC.RPCError,
@@ -573,6 +563,49 @@ defmodule NeonFS.CSI.ControllerServer do
       {:error, reason} ->
         raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
     end
+  end
+
+  # CSI keys snapshot idempotency on the name: the same name against the
+  # same source returns the existing snapshot, while the same name against
+  # a different source is ALREADY_EXISTS.
+  defp create_named_snapshot(volume, name) do
+    case find_snapshot_by_name(name) do
+      {:ok, {snap, %{id: source_id} = snap_volume}} when source_id == volume.id ->
+        %CreateSnapshotResponse{snapshot: csi_snapshot_from(snap, snap_volume)}
+
+      {:ok, {_snap, _other_volume}} ->
+        raise GRPC.RPCError,
+          status: :already_exists,
+          message: "snapshot #{name} already exists for a different source volume"
+
+      :not_found ->
+        case core_call(NeonFS.Core.Snapshot, :create, [volume.id, [name: name]]) do
+          {:ok, snap} ->
+            %CreateSnapshotResponse{snapshot: csi_snapshot_from(snap, volume)}
+
+          {:error, reason} ->
+            raise GRPC.RPCError,
+              status: :internal,
+              message: "create_snapshot failed: #{inspect(reason)}"
+        end
+    end
+  end
+
+  # Scan every volume's snapshots for one carrying `name`. Snapshots are
+  # cheap pointer entries (no chunk data), so a full scan is acceptable —
+  # it mirrors the unfiltered ListSnapshots path. Returns the snapshot and
+  # the volume that owns it.
+  defp find_snapshot_by_name(name) do
+    {:ok, volumes} = core_call(NeonFS.Core, :list_volumes, [])
+
+    Enum.find_value(volumes, :not_found, fn volume ->
+      with {:ok, snapshots} <- core_call(NeonFS.Core.Snapshot, :list, [volume.id]),
+           %{} = snap <- Enum.find(snapshots, &(&1.name == name)) do
+        {:ok, {snap, volume}}
+      else
+        _ -> nil
+      end
+    end)
   end
 
   @doc """

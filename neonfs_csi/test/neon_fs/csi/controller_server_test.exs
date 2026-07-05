@@ -585,6 +585,12 @@ defmodule NeonFS.CSI.ControllerServerTest do
         NeonFS.Core, :get_volume, ["my-vol"] ->
           {:ok, sample_volume("my-vol", %{id: "vol-uuid-1"})}
 
+        NeonFS.Core, :list_volumes, [] ->
+          {:ok, [sample_volume("my-vol", %{id: "vol-uuid-1"})]}
+
+        NeonFS.Core.Snapshot, :list, ["vol-uuid-1"] ->
+          {:ok, []}
+
         NeonFS.Core.Snapshot, :create, ["vol-uuid-1", [name: "daily-snap"]] ->
           send(test_pid, :create_called)
 
@@ -635,6 +641,67 @@ defmodule NeonFS.CSI.ControllerServerTest do
       assert_raise GRPC.RPCError, ~r/name is required/, fn ->
         ControllerServer.create_snapshot(
           %CreateSnapshotRequest{source_volume_id: "vol", name: ""},
+          nil
+        )
+      end
+    end
+
+    test "is idempotent: same name + same source returns the existing snapshot" do
+      existing = %{
+        id: "snap-1",
+        volume_id: "vol-uuid-1",
+        name: "daily",
+        created_at: DateTime.from_unix!(0)
+      }
+
+      put_core(fn
+        NeonFS.Core, :get_volume, ["my-vol"] ->
+          {:ok, sample_volume("my-vol", %{id: "vol-uuid-1"})}
+
+        NeonFS.Core, :list_volumes, [] ->
+          {:ok, [sample_volume("my-vol", %{id: "vol-uuid-1"})]}
+
+        NeonFS.Core.Snapshot, :list, ["vol-uuid-1"] ->
+          {:ok, [existing]}
+
+        NeonFS.Core.Snapshot, :create, _ ->
+          flunk("Snapshot.create must not be called for an idempotent re-request")
+      end)
+
+      reply =
+        ControllerServer.create_snapshot(
+          %CreateSnapshotRequest{source_volume_id: "my-vol", name: "daily"},
+          nil
+        )
+
+      assert reply.snapshot.snapshot_id == "my-vol/snap-1"
+    end
+
+    test "raises ALREADY_EXISTS for the same name on a different source volume" do
+      existing = %{
+        id: "snap-1",
+        volume_id: "vol-a",
+        name: "daily",
+        created_at: DateTime.from_unix!(0)
+      }
+
+      put_core(fn
+        NeonFS.Core, :get_volume, ["vol-b"] ->
+          {:ok, sample_volume("vol-b", %{id: "vol-b"})}
+
+        NeonFS.Core, :list_volumes, [] ->
+          {:ok, [sample_volume("vol-a", %{id: "vol-a"}), sample_volume("vol-b", %{id: "vol-b"})]}
+
+        NeonFS.Core.Snapshot, :list, ["vol-a"] ->
+          {:ok, [existing]}
+
+        NeonFS.Core.Snapshot, :list, ["vol-b"] ->
+          {:ok, []}
+      end)
+
+      assert_raise GRPC.RPCError, ~r/already exists for a different source/, fn ->
+        ControllerServer.create_snapshot(
+          %CreateSnapshotRequest{source_volume_id: "vol-b", name: "daily"},
           nil
         )
       end

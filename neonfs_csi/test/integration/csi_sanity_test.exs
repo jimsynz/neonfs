@@ -16,11 +16,12 @@ defmodule NeonFS.CSI.CsiSanityTest do
     * **Node service** — needs a real FUSE mount on a kubelet host, the
       job of the full kind end-to-end test still outstanding on
       #319 / #995.
-    * **Three Controller specs (#1458)** — conformance gaps that need
-      real cluster state or a design decision (capacity-mismatch
-      idempotency, publish-to-nonexistent-node, snapshot-name
-      uniqueness). Skipped by precise description patterns below and
-      tracked in #1458; everything else gates conformance today.
+    * **Two Controller specs (#1458)** — conformance gaps that need real
+      cluster state or a design decision (capacity-mismatch idempotency
+      and publish-to-nonexistent-node, the latter entangled with the
+      `attachRequired: false` capability question). Skipped by precise
+      description patterns below and tracked in #1458; everything else
+      gates conformance today.
 
   Tagged `:requires_csi_sanity`; `test/test_helper.exs` excludes the tag
   unless a `csi-sanity` binary is found (on `PATH` or via the
@@ -43,8 +44,7 @@ defmodule NeonFS.CSI.CsiSanityTest do
   @skip_specs [
     "Node Service",
     "CreateVolume.*already existing name and different capacity",
-    "ControllerPublishVolume.*node does not exist",
-    "CreateSnapshot.*already existing name and different source volume"
+    "ControllerPublishVolume.*node does not exist"
   ]
 
   setup do
