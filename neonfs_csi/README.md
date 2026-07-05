@@ -21,11 +21,18 @@ Controller `Deployment` with provisioner/attacher/resizer sidecars and
 a Node `DaemonSet` with registrar and liveness-probe sidecars.
 
 Depends on [`neonfs_client`](../neonfs_client/) only — it has **no
-dependency on `neonfs_core`**. The remaining work on the epic
-([#244](https://harton.dev/project-neon/neonfs/issues/244)) is
-end-to-end test coverage on a kind/k3d cluster
+dependency on `neonfs_core`**.
+
+The Identity and Controller services are covered by the upstream
+[csi-sanity](https://github.com/kubernetes-csi/csi-test) conformance
+suite (`test/integration/csi_sanity_test.exs`, tagged
+`:requires_csi_sanity`). The remaining work on the epic
+([#244](https://harton.dev/project-neon/neonfs/issues/244)) is a full
+kind/k3d end-to-end test that provisions a PVC and reads data back
 ([#319](https://harton.dev/project-neon/neonfs/issues/319),
-[#995](https://harton.dev/project-neon/neonfs/issues/995)).
+[#995](https://harton.dev/project-neon/neonfs/issues/995)), plus the
+Controller conformance gaps csi-sanity surfaced
+([#1458](https://harton.dev/project-neon/neonfs/issues/1458)).
 
 ## Install
 

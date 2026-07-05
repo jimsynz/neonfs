@@ -378,6 +378,26 @@ jobs:
           mix deps.compile
           if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
+      # csi-sanity is the upstream CSI conformance suite (built from
+      # source with Go). When it's on PATH the neonfs_csi test suite
+      # picks up the `:requires_csi_sanity` conformance test; otherwise
+      # that test is excluded. Cache the built binary across runs.
+      - name: Cache csi-sanity
+        id: cache-csi-sanity
+        uses: actions/cache@v5
+        with:
+          path: /usr/local/bin/csi-sanity
+          key: csi-sanity-v5.4.0-${{ runner.arch }}
+
+      - name: Build csi-sanity
+        if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
+        run: |
+          GO_VERSION=1.23.6
+          ARCH=$(dpkg --print-architecture)
+          curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xz
+          GOBIN=/usr/local/bin /usr/local/go/bin/go install \
+            github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@v5.4.0
+
       - name: Check
         working-directory: neonfs_csi
         run: mix check
