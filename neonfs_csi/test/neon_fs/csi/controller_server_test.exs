@@ -67,6 +67,14 @@ defmodule NeonFS.CSI.ControllerServerTest do
     Map.merge(base, overrides)
   end
 
+  defp sample_capability do
+    %VolumeCapability{
+      access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}
+    }
+  end
+
+  defp caps, do: [sample_capability()]
+
   describe "ControllerGetCapabilities" do
     test "advertises CREATE_DELETE_VOLUME, PUBLISH_UNPUBLISH_VOLUME, LIST_VOLUMES, GET_CAPACITY" do
       reply =
@@ -95,7 +103,8 @@ defmodule NeonFS.CSI.ControllerServerTest do
       req = %CreateVolumeRequest{
         name: "pvc-1",
         capacity_range: %CapacityRange{required_bytes: 1024, limit_bytes: 0},
-        parameters: %{"replication_factor" => "3"}
+        parameters: %{"replication_factor" => "3"},
+        volume_capabilities: caps()
       }
 
       reply = ControllerServer.create_volume(req, nil)
@@ -110,7 +119,10 @@ defmodule NeonFS.CSI.ControllerServerTest do
       end)
 
       reply =
-        ControllerServer.create_volume(%CreateVolumeRequest{name: "pvc-2"}, nil)
+        ControllerServer.create_volume(
+          %CreateVolumeRequest{name: "pvc-2", volume_capabilities: caps()},
+          nil
+        )
 
       assert reply.volume.volume_id == "pvc-2"
     end
@@ -130,10 +142,17 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
       req = %CreateVolumeRequest{
         name: "pvc-3",
-        parameters: %{"replication_factor" => "2", "garbage" => "value"}
+        parameters: %{"replication_factor" => "2", "garbage" => "value"},
+        volume_capabilities: caps()
       }
 
       ControllerServer.create_volume(req, nil)
+    end
+
+    test "raises invalid_argument when no volume capabilities are provided" do
+      assert_raise GRPC.RPCError, ~r/volume_capabilities is required/, fn ->
+        ControllerServer.create_volume(%CreateVolumeRequest{name: "pvc-nocaps"}, nil)
+      end
     end
   end
 
@@ -173,12 +192,20 @@ defmodule NeonFS.CSI.ControllerServerTest do
       end)
 
       ControllerServer.controller_publish_volume(
-        %ControllerPublishVolumeRequest{volume_id: "pvc-y", node_id: "node-1"},
+        %ControllerPublishVolumeRequest{
+          volume_id: "pvc-y",
+          node_id: "node-1",
+          volume_capability: sample_capability()
+        },
         nil
       )
 
       ControllerServer.controller_publish_volume(
-        %ControllerPublishVolumeRequest{volume_id: "pvc-y", node_id: "node-2"},
+        %ControllerPublishVolumeRequest{
+          volume_id: "pvc-y",
+          node_id: "node-2",
+          volume_capability: sample_capability()
+        },
         nil
       )
 
@@ -231,7 +258,16 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
       assert_raise GRPC.RPCError, ~r/not found/, fn ->
         ControllerServer.validate_volume_capabilities(
-          %ValidateVolumeCapabilitiesRequest{volume_id: "ghost", volume_capabilities: []},
+          %ValidateVolumeCapabilitiesRequest{volume_id: "ghost", volume_capabilities: caps()},
+          nil
+        )
+      end
+    end
+
+    test "raises invalid_argument when no volume capabilities are provided" do
+      assert_raise GRPC.RPCError, ~r/volume_capabilities is required/, fn ->
+        ControllerServer.validate_volume_capabilities(
+          %ValidateVolumeCapabilitiesRequest{volume_id: "pvc-vc", volume_capabilities: []},
           nil
         )
       end
@@ -304,7 +340,11 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
     test "records the publish attachment" do
       ControllerServer.controller_publish_volume(
-        %ControllerPublishVolumeRequest{volume_id: "pvc-pub", node_id: "node-1"},
+        %ControllerPublishVolumeRequest{
+          volume_id: "pvc-pub",
+          node_id: "node-1",
+          volume_capability: sample_capability()
+        },
         nil
       )
 
@@ -318,7 +358,8 @@ defmodule NeonFS.CSI.ControllerServerTest do
           %ControllerPublishVolumeRequest{
             volume_id: "pvc-pub",
             node_id: "node-1",
-            readonly: true
+            readonly: true,
+            volume_capability: sample_capability()
           },
           nil
         )
@@ -331,7 +372,20 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
       assert_raise GRPC.RPCError, ~r/not found/, fn ->
         ControllerServer.controller_publish_volume(
-          %ControllerPublishVolumeRequest{volume_id: "ghost", node_id: "node-1"},
+          %ControllerPublishVolumeRequest{
+            volume_id: "ghost",
+            node_id: "node-1",
+            volume_capability: sample_capability()
+          },
+          nil
+        )
+      end
+    end
+
+    test "raises invalid_argument when no volume capability is provided" do
+      assert_raise GRPC.RPCError, ~r/volume_capability is required/, fn ->
+        ControllerServer.controller_publish_volume(
+          %ControllerPublishVolumeRequest{volume_id: "pvc-pub", node_id: "node-1"},
           nil
         )
       end
@@ -756,7 +810,11 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
       reply =
         ControllerServer.create_volume(
-          %CreateVolumeRequest{name: "new-vol", volume_content_source: source},
+          %CreateVolumeRequest{
+            name: "new-vol",
+            volume_content_source: source,
+            volume_capabilities: caps()
+          },
           nil
         )
 
@@ -782,21 +840,29 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
       reply =
         ControllerServer.create_volume(
-          %CreateVolumeRequest{name: "cloned-vol", volume_content_source: source},
+          %CreateVolumeRequest{
+            name: "cloned-vol",
+            volume_content_source: source,
+            volume_capabilities: caps()
+          },
           nil
         )
 
       assert reply.volume.volume_id == "cloned-vol"
     end
 
-    test "raises INVALID_ARGUMENT for a malformed CSI snapshot id" do
+    test "raises NOT_FOUND for an unresolvable CSI snapshot id" do
       source = %VolumeContentSource{
         type: {:snapshot, %VolumeContentSource.SnapshotSource{snapshot_id: "no-slash"}}
       }
 
-      assert_raise GRPC.RPCError, ~r/malformed snapshot id/, fn ->
+      assert_raise GRPC.RPCError, ~r/source snapshot no-slash not found/, fn ->
         ControllerServer.create_volume(
-          %CreateVolumeRequest{name: "v", volume_content_source: source},
+          %CreateVolumeRequest{
+            name: "v",
+            volume_content_source: source,
+            volume_capabilities: caps()
+          },
           nil
         )
       end
@@ -811,7 +877,11 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
       assert_raise GRPC.RPCError, ~r/source volume ghost not found/, fn ->
         ControllerServer.create_volume(
-          %CreateVolumeRequest{name: "v", volume_content_source: source},
+          %CreateVolumeRequest{
+            name: "v",
+            volume_content_source: source,
+            volume_capabilities: caps()
+          },
           nil
         )
       end
