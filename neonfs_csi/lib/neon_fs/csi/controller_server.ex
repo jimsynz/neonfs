@@ -144,11 +144,13 @@ defmodule NeonFS.CSI.ControllerServer do
         _stream
       )
       when is_binary(name) and name != "" and not is_nil(source) do
+    require_volume_capabilities!(req)
     create_volume_from_source(req, source)
   end
 
   def create_volume(%CreateVolumeRequest{name: name} = req, _stream)
       when is_binary(name) and name != "" do
+    require_volume_capabilities!(req)
     opts = parse_create_opts(req)
 
     case core_call(NeonFS.Core, :create_volume, [name, opts]) do
@@ -175,6 +177,17 @@ defmodule NeonFS.CSI.ControllerServer do
     raise GRPC.RPCError, status: :invalid_argument, message: "name is required"
   end
 
+  # CSI requires every CreateVolume to carry the access capabilities the
+  # CO needs. An empty set is INVALID_ARGUMENT, not a silently-created
+  # volume.
+  defp require_volume_capabilities!(%CreateVolumeRequest{volume_capabilities: caps})
+       when is_list(caps) and caps != [],
+       do: :ok
+
+  defp require_volume_capabilities!(%CreateVolumeRequest{}) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_capabilities is required"
+  end
+
   # CSI v1 CreateVolume with `VolumeContentSource` — the new volume's
   # content is sourced from either an existing snapshot or another
   # volume (clone). Both paths land on `Snapshot.promote/4`, which
@@ -187,9 +200,11 @@ defmodule NeonFS.CSI.ControllerServer do
         promote_into_new_volume(req, vol_name, snap_id)
 
       :error ->
+        # An id we can't resolve isn't one we issued — per CSI, a missing
+        # source snapshot is NOT_FOUND, not INVALID_ARGUMENT.
         raise GRPC.RPCError,
-          status: :invalid_argument,
-          message: "malformed snapshot id #{csi_snap_id}; expected \"<volume>/<snapshot>\""
+          status: :not_found,
+          message: "source snapshot #{csi_snap_id} not found"
     end
   end
 
@@ -308,6 +323,13 @@ defmodule NeonFS.CSI.ControllerServer do
   end
 
   def validate_volume_capabilities(
+        %ValidateVolumeCapabilitiesRequest{volume_capabilities: []},
+        _stream
+      ) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_capabilities is required"
+  end
+
+  def validate_volume_capabilities(
         %ValidateVolumeCapabilitiesRequest{
           volume_id: volume_id,
           volume_capabilities: caps
@@ -348,6 +370,7 @@ defmodule NeonFS.CSI.ControllerServer do
     {:ok, volumes} = core_call(NeonFS.Core, :list_volumes, [])
 
     sorted = Enum.sort_by(volumes, & &1.name)
+    validate_starting_token!(req.starting_token, sorted)
     paginated = paginate(sorted, req.starting_token, max(req.max_entries, 0))
 
     next_token =
@@ -402,6 +425,13 @@ defmodule NeonFS.CSI.ControllerServer do
         _stream
       ) do
     raise GRPC.RPCError, status: :invalid_argument, message: "node_id is required"
+  end
+
+  def controller_publish_volume(
+        %ControllerPublishVolumeRequest{volume_capability: nil},
+        _stream
+      ) do
+    raise GRPC.RPCError, status: :invalid_argument, message: "volume_capability is required"
   end
 
   def controller_publish_volume(
@@ -796,6 +826,19 @@ defmodule NeonFS.CSI.ControllerServer do
     do: true
 
   defp capability_supported?(_), do: false
+
+  # A non-empty `starting_token` must name a volume we know about (it's
+  # the name of the last entry from a prior page). An unrecognised token
+  # is ABORTED per the CSI ListVolumes contract.
+  defp validate_starting_token!("", _volumes), do: :ok
+
+  defp validate_starting_token!(token, volumes) do
+    if Enum.any?(volumes, &(&1.name == token)) do
+      :ok
+    else
+      raise GRPC.RPCError, status: :aborted, message: "invalid starting_token #{inspect(token)}"
+    end
+  end
 
   defp paginate(volumes, "", 0), do: %{entries: volumes, more?: false}
   defp paginate(volumes, "", max), do: take_page(volumes, max)

@@ -18,7 +18,14 @@ defmodule NeonFS.CSI.GRPCDrainTest do
   """
   use ExUnit.Case, async: false
 
-  alias Csi.V1.{CapacityRange, Controller, CreateVolumeRequest, CreateVolumeResponse}
+  alias Csi.V1.{
+    CapacityRange,
+    Controller,
+    CreateVolumeRequest,
+    CreateVolumeResponse,
+    VolumeCapability
+  }
+
   alias NeonFS.Core.Volume
 
   setup do
@@ -72,7 +79,10 @@ defmodule NeonFS.CSI.GRPCDrainTest do
 
     req = %CreateVolumeRequest{
       name: "pvc-drain",
-      capacity_range: %CapacityRange{required_bytes: 1024, limit_bytes: 0}
+      capacity_range: %CapacityRange{required_bytes: 1024, limit_bytes: 0},
+      volume_capabilities: [
+        %VolumeCapability{access_mode: %VolumeCapability.AccessMode{mode: :SINGLE_NODE_WRITER}}
+      ]
     }
 
     caller = Task.async(fn -> Controller.Stub.create_volume(channel, req) end)
