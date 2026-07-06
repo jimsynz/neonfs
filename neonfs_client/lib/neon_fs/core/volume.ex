@@ -72,6 +72,7 @@ defmodule NeonFS.Core.Volume do
           verification: verification_config(),
           encryption: VolumeEncryption.t(),
           metadata_consistency: metadata_consistency_config() | nil,
+          max_size: non_neg_integer() | nil,
           logical_size: non_neg_integer(),
           physical_size: non_neg_integer(),
           chunk_count: non_neg_integer(),
@@ -96,6 +97,7 @@ defmodule NeonFS.Core.Volume do
     :verification,
     :encryption,
     :metadata_consistency,
+    :max_size,
     :logical_size,
     :physical_size,
     :chunk_count,
@@ -140,6 +142,7 @@ defmodule NeonFS.Core.Volume do
       verification: Keyword.get(opts, :verification, default_verification()),
       encryption: Keyword.get(opts, :encryption, default_encryption()),
       metadata_consistency: Keyword.get(opts, :metadata_consistency),
+      max_size: Keyword.get(opts, :max_size),
       nfs_allowed_ips: Keyword.get(opts, :nfs_allowed_ips, []),
       nfs_root_squash: Keyword.get(opts, :nfs_root_squash, true),
       logical_size: 0,
@@ -324,6 +327,7 @@ defmodule NeonFS.Core.Volume do
   - Compression level must be 1-22 for zstd
   - Verification on_read must be one of: :always, :never, :sampling
   - Sampling rate must be 0.0-1.0 when on_read is :sampling
+  - max_size must be nil (unlimited) or a positive integer
   """
   @spec validate(t()) :: :ok | {:error, String.t()}
   def validate(%Volume{} = volume) do
@@ -340,10 +344,15 @@ defmodule NeonFS.Core.Volume do
          :ok <- validate_encryption(volume.encryption),
          :ok <- validate_nfs_export(volume.nfs_export),
          :ok <- validate_nfs_allowed_ips(volume.nfs_allowed_ips),
-         :ok <- validate_nfs_root_squash(volume.nfs_root_squash) do
+         :ok <- validate_nfs_root_squash(volume.nfs_root_squash),
+         :ok <- validate_max_size(volume.max_size) do
       validate_metadata_consistency(volume.metadata_consistency)
     end
   end
+
+  defp validate_max_size(nil), do: :ok
+  defp validate_max_size(bytes) when is_integer(bytes) and bytes > 0, do: :ok
+  defp validate_max_size(_), do: {:error, "max_size must be nil or a positive integer"}
 
   defp validate_system_field(%Volume{system: true, name: "_system"}), do: :ok
 
