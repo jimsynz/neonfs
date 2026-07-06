@@ -439,9 +439,29 @@ defmodule NeonFS.Core do
   end
 
   defp do_delete_file(volume_id, path) do
-    with {:ok, file} <- lookup_file(volume_id, path) do
-      delete_file_by_pin_state(file, pinned_claim_ids(volume_id, path))
+    with {:ok, file} <- lookup_file(volume_id, path),
+         :ok <- delete_file_by_pin_state(file, pinned_claim_ids(volume_id, path)) do
+      release_file_usage(file)
+      :ok
     end
+  end
+
+  # Frees the unlinked file's logical bytes from the volume counter
+  # (#1462). Unlink-while-open (mark_detached) frees the accounting too:
+  # the reconcile excludes detached tombstones, so the incremental path
+  # must match. Best-effort — the file is already gone, so a counter
+  # glitch (including a VolumeRegistry call timeout, which exits) must
+  # not fail the delete.
+  defp release_file_usage(%FileMeta{volume_id: volume_id, size: size, chunks: chunks}) do
+    _ =
+      VolumeRegistry.adjust_stats(volume_id,
+        logical_size: -size,
+        chunk_count: -length(chunks)
+      )
+
+    :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp delete_file_by_pin_state(file, []) do
@@ -554,9 +574,23 @@ defmodule NeonFS.Core do
     with {:ok, volume} <- resolve_volume(volume_name),
          :ok <-
            authorise_posix(uid, gids, :write, volume.id, {:file, volume.id, normalize_path(path)}),
-         {:ok, file} <- lookup_file(volume.id, normalize_path(path)) do
-      FileIndex.truncate(file.id, new_size, additional_updates)
+         {:ok, file} <- lookup_file(volume.id, normalize_path(path)),
+         {:ok, updated} <- FileIndex.truncate(file.id, new_size, additional_updates) do
+      adjust_logical_usage(volume.id, new_size - file.size)
+      {:ok, updated}
     end
+  end
+
+  # Accounts a truncation's logical-byte delta against the volume counter
+  # (#1462); the delta is negative for a shrink, positive for a sparse
+  # grow. Best-effort — the metadata change is already committed.
+  defp adjust_logical_usage(_volume_id, 0), do: :ok
+
+  defp adjust_logical_usage(volume_id, delta) do
+    _ = VolumeRegistry.adjust_stats(volume_id, logical_size: delta)
+    :ok
+  catch
+    :exit, _ -> :ok
   end
 
   @doc """

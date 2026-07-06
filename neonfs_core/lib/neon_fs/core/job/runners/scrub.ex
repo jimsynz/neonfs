@@ -32,7 +32,7 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
 
   require Logger
 
-  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveTrust, FileIndex, KeyManager}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveTrust, FileIndex, KeyManager, VolumeRegistry}
   alias NeonFS.IO.{Operation, Scheduler}
 
   @default_batch_size 500
@@ -262,9 +262,34 @@ defmodule NeonFS.Core.Job.Runners.Scrub do
     )
 
     maybe_clear_drive_trust(job, corruption_count, key_unavailable_count)
+    maybe_reconcile_volume_stats(job)
 
     {:complete, %{job | progress: %{job.progress | description: "Complete"}}}
   end
+
+  # A volume-scoped scrub has just walked the volume's chunks, so it's a
+  # natural point to reconcile the logical-size counter against the file
+  # index and correct any drift the incremental accounting accumulated
+  # (#1462). Best-effort — a reconcile failure must not fail the scrub.
+  defp maybe_reconcile_volume_stats(%{params: %{volume_id: volume_id}})
+       when is_binary(volume_id) do
+    case VolumeRegistry.reconcile_stats(volume_id) do
+      {:ok, _volume} ->
+        :telemetry.execute([:neonfs, :scrub, :stats_reconciled], %{}, %{volume_id: volume_id})
+
+      {:error, reason} ->
+        Logger.warning("Scrub could not reconcile volume stats",
+          volume_id: volume_id,
+          reason: inspect(reason)
+        )
+    end
+
+    :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp maybe_reconcile_volume_stats(_job), do: :ok
 
   # A drive-scoped scrub (#1426) that found no corruption and left nothing
   # unverifiable has fully re-verified the drive — clear it back to

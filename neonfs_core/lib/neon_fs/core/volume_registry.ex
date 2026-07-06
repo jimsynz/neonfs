@@ -199,6 +199,35 @@ defmodule NeonFS.Core.VolumeRegistry do
     GenServer.call(__MODULE__, {:update_stats, id, stats}, 30_000)
   end
 
+  @doc """
+  Atomically adjusts a volume's usage counters by the given deltas.
+
+  Unlike `update_stats/2` (a read-modify-write that loses concurrent
+  updates), this issues a single atomic Ra command, so simultaneous
+  writes to the same volume accumulate correctly. Deltas may be
+  negative (deletes, truncations); counters clamp at zero.
+
+  Accepts `:logical_size`, `:physical_size`, `:chunk_count` (defaulting
+  to `0`). Returns `{:ok, updated_volume}` or `{:error, :not_found}`.
+  """
+  @spec adjust_stats(volume_id(), keyword()) :: {:ok, Volume.t()} | {:error, term()}
+  def adjust_stats(id, deltas) do
+    GenServer.call(__MODULE__, {:adjust_stats, id, Map.new(deltas)}, 30_000)
+  end
+
+  @doc """
+  Recomputes a volume's usage counters from the file index and writes
+  the authoritative absolutes back through Ra, correcting any drift.
+
+  This is the reconcile backstop for the incremental counters (#1462):
+  a crash between a file-index write and the counter adjustment, or a
+  streamed overwrite, can leave `logical_size` out of step with reality.
+  """
+  @spec reconcile_stats(volume_id()) :: {:ok, Volume.t()} | {:error, term()}
+  def reconcile_stats(id) do
+    GenServer.call(__MODULE__, {:reconcile_stats, id}, 60_000)
+  end
+
   # Server callbacks
 
   @impl true
@@ -299,6 +328,18 @@ defmodule NeonFS.Core.VolumeRegistry do
   @impl true
   def handle_call({:update_stats, id, stats}, _from, state) do
     reply = do_update_stats(id, stats)
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:adjust_stats, id, deltas}, _from, state) do
+    reply = do_adjust_stats(id, deltas)
+    {:reply, reply, state}
+  end
+
+  @impl true
+  def handle_call({:reconcile_stats, id}, _from, state) do
+    reply = do_reconcile_stats(id)
     {:reply, reply, state}
   end
 
@@ -498,6 +539,75 @@ defmodule NeonFS.Core.VolumeRegistry do
   defp do_update_stats(id, stats) do
     with {:ok, volume} <- get(id),
          updated = Volume.update_stats(volume, stats),
+         :ok <- persist_volume(updated) do
+      {:ok, updated}
+    end
+  end
+
+  defp do_adjust_stats(id, deltas) do
+    case maybe_ra_command({:adjust_volume_stats, id, deltas}) do
+      {:ok, {:ok, volume_map}} ->
+        cache_and_return_volume(volume_map)
+
+      # The volume is known to the ETS cache but not (yet) to the Ra state
+      # machine — the pre-Ra single-node bootstrap case. Fall back to a
+      # read-modify-write that upserts through `persist_volume`, matching
+      # the old `update_stats` resilience. Serialised through this
+      # GenServer, so it's safe in the single-node mode where it applies.
+      {:ok, {:error, :not_found}} ->
+        adjust_stats_via_upsert(id, deltas)
+
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:error, %Unavailable{details: %{reason: :ra_not_available}}} ->
+        adjust_stats_via_upsert(id, deltas)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp adjust_stats_via_upsert(id, deltas) do
+    with {:ok, volume} <- get(id),
+         updated =
+           Volume.update_stats(volume,
+             logical_size: max(0, volume.logical_size + Map.get(deltas, :logical_size, 0)),
+             physical_size: max(0, volume.physical_size + Map.get(deltas, :physical_size, 0)),
+             chunk_count: max(0, volume.chunk_count + Map.get(deltas, :chunk_count, 0))
+           ),
+         :ok <- persist_volume(updated) do
+      {:ok, updated}
+    end
+  end
+
+  defp do_reconcile_stats(id) do
+    with {:ok, _volume} <- get(id),
+         {:ok, %{logical_size: logical}} <- FileIndex.volume_usage(id) do
+      absolutes = %{logical_size: logical}
+
+      case maybe_ra_command({:set_volume_stats, id, absolutes}) do
+        {:ok, {:ok, volume_map}} ->
+          cache_and_return_volume(volume_map)
+
+        {:ok, {:error, :not_found}} ->
+          set_stats_via_upsert(id, absolutes)
+
+        {:ok, {:error, reason}} ->
+          {:error, reason}
+
+        {:error, %Unavailable{details: %{reason: :ra_not_available}}} ->
+          set_stats_via_upsert(id, absolutes)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp set_stats_via_upsert(id, absolutes) do
+    with {:ok, volume} <- get(id),
+         updated = Volume.update_stats(volume, Keyword.new(absolutes)),
          :ok <- persist_volume(updated) do
       {:ok, updated}
     end
@@ -879,6 +989,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       compression: volume.compression,
       verification: volume.verification,
       encryption: encryption_to_map(volume.encryption),
+      max_size: volume.max_size,
       logical_size: volume.logical_size,
       physical_size: volume.physical_size,
       chunk_count: volume.chunk_count,
@@ -913,6 +1024,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       compression: volume_map.compression,
       verification: resolve_verification(volume_map.verification),
       encryption: map_to_encryption(volume_map[:encryption]),
+      max_size: volume_map[:max_size],
       logical_size: volume_map[:logical_size] || 0,
       physical_size: volume_map[:physical_size] || 0,
       chunk_count: volume_map[:chunk_count] || 0,

@@ -41,6 +41,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
           | {:remove_write_ref, hash :: binary(), write_id :: String.t()}
           | {:put_volume, volume_data :: map()}
           | {:delete_volume, volume_id :: binary()}
+          | {:adjust_volume_stats, volume_id :: binary(), deltas :: map()}
+          | {:set_volume_stats, volume_id :: binary(), absolutes :: map()}
           | {:put_file, file_meta :: map()}
           | {:update_file, file_id :: binary(), updates :: map()}
           | {:delete_file, file_id :: binary()}
@@ -1181,6 +1183,62 @@ defmodule NeonFS.Core.MetadataStateMachine do
     )
 
     {new_state, :ok, []}
+  end
+
+  # Atomic in-place adjustment of a volume's usage counters. Applying the
+  # delta inside the state machine (rather than a read-modify-write via
+  # `:put_volume`) is what makes concurrent writes to the same volume
+  # safe — two writers can't clobber each other's increment. Counters
+  # clamp at zero so a reconcile or an over-decrement can't drive them
+  # negative (#1462).
+  def apply(_meta, {:adjust_volume_stats, volume_id, deltas}, state) do
+    case Map.get(state.volumes, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      volume_data ->
+        adjusted =
+          volume_data
+          |> adjust_counter(:logical_size, deltas)
+          |> adjust_counter(:physical_size, deltas)
+          |> adjust_counter(:chunk_count, deltas)
+
+        new_state = %{
+          state
+          | volumes: Map.put(state.volumes, volume_id, adjusted),
+            version: state.version + 1
+        }
+
+        {new_state, {:ok, adjusted}, []}
+    end
+  end
+
+  # Reset a volume's usage counters to authoritative absolutes. Used by
+  # the scrub reconcile to correct drift accumulated across crashes or
+  # streamed overwrites (#1462). Only the counters present in `absolutes`
+  # are overwritten — reconcile can rebuild `logical_size` exactly (sum
+  # of file sizes) but not the dedup-aware `physical_size`/`chunk_count`,
+  # so it leaves those untouched.
+  def apply(_meta, {:set_volume_stats, volume_id, absolutes}, state) do
+    case Map.get(state.volumes, volume_id) do
+      nil ->
+        {state, {:error, :not_found}, []}
+
+      volume_data ->
+        updated =
+          volume_data
+          |> set_counter(:logical_size, absolutes)
+          |> set_counter(:physical_size, absolutes)
+          |> set_counter(:chunk_count, absolutes)
+
+        new_state = %{
+          state
+          | volumes: Map.put(state.volumes, volume_id, updated),
+            version: state.version + 1
+        }
+
+        {new_state, {:ok, updated}, []}
+    end
   end
 
   # File metadata commands (legacy — will move to quorum BlobStore in tasks 0086-0089)
@@ -2391,6 +2449,19 @@ defmodule NeonFS.Core.MetadataStateMachine do
   def which_module(_version), do: __MODULE__
 
   # Private helpers
+
+  defp adjust_counter(volume_data, key, deltas) do
+    delta = Map.get(deltas, key, 0)
+    current = Map.get(volume_data, key, 0)
+    Map.put(volume_data, key, max(0, current + delta))
+  end
+
+  defp set_counter(volume_data, key, absolutes) do
+    case Map.fetch(absolutes, key) do
+      {:ok, value} -> Map.put(volume_data, key, max(0, value))
+      :error -> volume_data
+    end
+  end
 
   defp put_in_intents(state, intent_id, intent) do
     %{state | intents: Map.put(state.intents, intent_id, intent)}

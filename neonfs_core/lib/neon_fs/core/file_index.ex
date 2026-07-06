@@ -470,6 +470,30 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
+  @doc """
+  Sums a volume's logical byte usage from the **authoritative** metadata
+  tree, excluding detached (unlinked-but-open) tombstones.
+
+  Backs the volume-stats reconcile (#1462): the incremental `logical_size`
+  counter can drift from reality across a crash or a streamed overwrite,
+  and this recomputes the exact figure the cap is enforced against.
+  """
+  @spec volume_usage(volume_id()) :: {:ok, %{logical_size: non_neg_integer()}} | {:error, term()}
+  def volume_usage(volume_id) do
+    case list_volume_authoritative(volume_id) do
+      {:ok, files} ->
+        logical =
+          files
+          |> Enum.reject(& &1.detached)
+          |> Enum.reduce(0, fn file, acc -> acc + file.size end)
+
+        {:ok, %{logical_size: logical}}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
   # The metadata tree is per-volume, so the range is already scoped — but
   # match `list_volume/1`'s contract and filter on `volume_id` defensively
   # (the `file:<id>` key carries no volume).

@@ -357,7 +357,8 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp do_write(%{durability: %{type: :erasure}} = volume, path, data, write_id, opts) do
-    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+    with :ok <- check_capacity(volume, byte_size(data)),
+         {:ok, enc_ctx} <- resolve_encryption(volume) do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
 
       case erasure_write(volume, path, data, write_ctx, opts) do
@@ -373,7 +374,8 @@ defmodule NeonFS.Core.WriteOperation do
   end
 
   defp do_write(volume, path, data, write_id, opts) do
-    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+    with :ok <- check_capacity(volume, byte_size(data)),
+         {:ok, enc_ctx} <- resolve_encryption(volume) do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
 
       with {:ok, chunks} <- chunk_and_store(data, volume, write_ctx, opts),
@@ -402,10 +404,11 @@ defmodule NeonFS.Core.WriteOperation do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx, streaming: true}
       strategy = resolve_chunk_strategy(opts)
       compression_config = Keyword.get(opts, :compression, volume.compression)
+      capacity = capacity_limit(volume, path)
 
       with {:ok, chunker} <- BlobStore.chunker_init(strategy),
            {:ok, chunks, total_bytes} <-
-             stream_chunks(stream, chunker, compression_config, volume, write_ctx),
+             stream_chunks(stream, chunker, compression_config, volume, write_ctx, capacity),
            {:ok, file_meta} <-
              create_file_metadata_with_size(volume.id, path, chunks, total_bytes, write_id, opts),
            :ok <- update_volume_stats_with_size(volume.id, total_bytes, chunks) do
@@ -420,28 +423,38 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp stream_chunks(stream, chunker, compression_config, volume, write_ctx) do
+  defp stream_chunks(stream, chunker, compression_config, volume, write_ctx, capacity) do
     init_acc = {:ok, [], 0}
 
     fed =
       Enum.reduce_while(stream, init_acc, fn segment, {:ok, acc, index} ->
         emitted = BlobStore.chunker_feed(chunker, segment)
-
-        case process_streamed_chunks(emitted, index, compression_config, volume, write_ctx) do
-          {:ok, processed} ->
-            {:cont, {:ok, acc ++ processed, index + length(processed)}}
-
-          {:error, _} = err ->
-            {:halt, err}
-        end
+        feed_batch(emitted, acc, index, compression_config, volume, write_ctx, capacity)
       end)
 
     with {:ok, acc, index} <- fed,
          tail = BlobStore.chunker_finish(chunker),
          {:ok, processed} <-
-           process_streamed_chunks(tail, index, compression_config, volume, write_ctx) do
-      all = acc ++ processed
-      {:ok, all, total_bytes_for_chunks(all)}
+           process_streamed_chunks(tail, index, compression_config, volume, write_ctx),
+         all = acc ++ processed,
+         total = total_bytes_for_chunks(all),
+         :ok <- within_capacity(capacity, total) do
+      {:ok, all, total}
+    end
+  end
+
+  # Processes one fed batch of chunks and halts the stream reduce as soon
+  # as the running total crosses the volume's cap — rather than buffering
+  # the whole stream first — so transient over-cap storage is bounded to
+  # roughly one chunk (#1462).
+  defp feed_batch(emitted, acc, index, compression_config, volume, write_ctx, capacity) do
+    with {:ok, processed} <-
+           process_streamed_chunks(emitted, index, compression_config, volume, write_ctx),
+         combined = acc ++ processed,
+         :ok <- within_capacity(capacity, total_bytes_for_chunks(combined)) do
+      {:cont, {:ok, combined, index + length(processed)}}
+    else
+      {:error, _} = err -> {:halt, err}
     end
   end
 
@@ -539,7 +552,10 @@ defmodule NeonFS.Core.WriteOperation do
          write_id,
          opts
        ) do
-    with {:ok, enc_ctx} <- resolve_encryption(volume) do
+    write_end = offset + byte_size(data)
+
+    with :ok <- check_capacity(volume, max(0, write_end - file_meta.size)),
+         {:ok, enc_ctx} <- resolve_encryption(volume) do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
       erasure_write_at(volume, file_meta, offset, data, write_ctx, opts)
     end
@@ -550,7 +566,8 @@ defmodule NeonFS.Core.WriteOperation do
     chunk_positions = build_chunk_info_list(file_meta.chunks, volume.id, 0, [])
     {prefix, affected, suffix} = partition_chunks(chunk_positions, offset, write_end)
 
-    with {:ok, enc_ctx} <- resolve_encryption(volume),
+    with :ok <- check_capacity(volume, max(0, write_end - file_meta.size)),
+         {:ok, enc_ctx} <- resolve_encryption(volume),
          write_ctx = %{write_id: write_id, enc_ctx: enc_ctx},
          {:ok, modified_data} <-
            splice_affected_chunks(affected, offset, data, write_end, volume.id),
@@ -1762,28 +1779,57 @@ defmodule NeonFS.Core.WriteOperation do
       :ok
   end
 
+  # Rejects a write that would push the volume past its `max_size` cap
+  # (#1462). `delta` is the additional logical bytes the write adds.
+  # A `nil` cap is unlimited. The check reads the (eventually-consistent)
+  # `logical_size` counter — a soft cap the atomic counter and the scrub
+  # reconcile keep close to reality.
+  defp check_capacity(%{max_size: nil}, _delta), do: :ok
+
+  defp check_capacity(%{max_size: max, logical_size: used}, delta)
+       when is_integer(max) do
+    if used + delta > max, do: {:error, :enospc}, else: :ok
+  end
+
+  # Streamed writes don't know their size up front, so the guard runs on
+  # a running total. The baseline subtracts an overwritten file's current
+  # size (its bytes are replaced, not added), so re-streaming a same-size
+  # object over an existing key isn't spuriously rejected.
+  defp capacity_limit(%{max_size: nil}, _path), do: :unlimited
+
+  defp capacity_limit(%{max_size: max, logical_size: used, id: volume_id}, path)
+       when is_integer(max) do
+    existing =
+      case FileIndex.get_by_path(volume_id, path) do
+        {:ok, %{size: size}} -> size
+        _ -> 0
+      end
+
+    {max, max(0, used - existing)}
+  end
+
+  defp within_capacity(:unlimited, _bytes), do: :ok
+
+  defp within_capacity({max, baseline}, bytes) do
+    if baseline + bytes > max, do: {:error, :enospc}, else: :ok
+  end
+
+  # Applies the write's usage as atomic deltas. `size` is the logical
+  # byte delta (full size for a new file, `new_size - old_size` for an
+  # overwrite via the offset path); the atomic Ra increment keeps
+  # concurrent writes to the same volume from clobbering each other's
+  # count (#1462).
   defp update_volume_stats_with_size(volume_id, size, chunks) do
-    case VolumeRegistry.get(volume_id) do
-      {:ok, volume} ->
-        new_chunks = Enum.filter(chunks, & &1.new)
-        new_logical_size = volume.logical_size + size
+    new_chunks = Enum.filter(chunks, & &1.new)
+    physical_delta = Enum.sum(Enum.map(new_chunks, & &1.stored_size))
 
-        new_physical_size =
-          volume.physical_size + Enum.sum(Enum.map(new_chunks, & &1.stored_size))
-
-        new_chunk_count = volume.chunk_count + length(new_chunks)
-
-        case VolumeRegistry.update_stats(volume_id,
-               logical_size: new_logical_size,
-               physical_size: new_physical_size,
-               chunk_count: new_chunk_count
-             ) do
-          {:ok, _updated} -> :ok
-          {:error, reason} -> {:error, {:stats_update_failed, reason}}
-        end
-
-      {:error, reason} ->
-        {:error, {:volume_lookup_failed, reason}}
+    case VolumeRegistry.adjust_stats(volume_id,
+           logical_size: size,
+           physical_size: physical_delta,
+           chunk_count: length(new_chunks)
+         ) do
+      {:ok, _updated} -> :ok
+      {:error, reason} -> {:error, {:stats_update_failed, reason}}
     end
   end
 
