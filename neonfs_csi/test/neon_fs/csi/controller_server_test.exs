@@ -92,8 +92,8 @@ defmodule NeonFS.CSI.ControllerServerTest do
     test "creates a NeonFS volume from the CSI request" do
       put_core(fn NeonFS.Core, :create_volume, [name, opts] ->
         assert name == "pvc-1"
-        assert opts == [replication_factor: 3]
-        {:ok, sample_volume("pvc-1")}
+        assert opts == [replication_factor: 3, max_size: 1024]
+        {:ok, sample_volume("pvc-1", %{max_size: 1024})}
       end)
 
       req = %CreateVolumeRequest{
@@ -149,6 +149,46 @@ defmodule NeonFS.CSI.ControllerServerTest do
       assert_raise GRPC.RPCError, ~r/volume_capabilities is required/, fn ->
         ControllerServer.create_volume(%CreateVolumeRequest{name: "pvc-nocaps"}, nil)
       end
+    end
+
+    test "raises ALREADY_EXISTS when the existing volume has a different capacity" do
+      put_core(fn
+        NeonFS.Core, :create_volume, _ ->
+          {:error, AlreadyExists.from_reason(:exists)}
+
+        NeonFS.Core, :get_volume, ["pvc-cap"] ->
+          {:ok, sample_volume("pvc-cap", %{max_size: 1024})}
+      end)
+
+      req = %CreateVolumeRequest{
+        name: "pvc-cap",
+        capacity_range: %CapacityRange{required_bytes: 2048, limit_bytes: 0},
+        volume_capabilities: caps()
+      }
+
+      assert_raise GRPC.RPCError, ~r/already exists with a different capacity/, fn ->
+        ControllerServer.create_volume(req, nil)
+      end
+    end
+
+    test "is idempotent when the existing volume has the same capacity" do
+      put_core(fn
+        NeonFS.Core, :create_volume, _ ->
+          {:error, AlreadyExists.from_reason(:exists)}
+
+        NeonFS.Core, :get_volume, ["pvc-cap"] ->
+          {:ok, sample_volume("pvc-cap", %{max_size: 2048})}
+      end)
+
+      req = %CreateVolumeRequest{
+        name: "pvc-cap",
+        capacity_range: %CapacityRange{required_bytes: 2048, limit_bytes: 0},
+        volume_capabilities: caps()
+      }
+
+      reply = ControllerServer.create_volume(req, nil)
+      assert reply.volume.volume_id == "pvc-cap"
+      assert reply.volume.capacity_bytes == 2048
     end
   end
 

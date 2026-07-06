@@ -11,15 +11,10 @@ defmodule NeonFS.CSI.CsiSanityTest do
   request/response shapes, error codes, idempotency, pagination — which
   the in-process unit tests don't check.
 
-  Two groups of specs are skipped, and both are tracked, not hidden:
-
-    * **Node service** — needs a real FUSE mount on a kubelet host, the
-      job of the full kind end-to-end test still outstanding on
-      #319 / #995.
-    * **One Controller spec (#1458)** — capacity-mismatch idempotency,
-      which needs a volume capacity model (blocked on #1462 / #1463).
-      Skipped by the precise description pattern below and tracked in
-      #1458; everything else gates conformance today.
+  Only the **Node service** specs are skipped — they need a real FUSE
+  mount on a kubelet host, the job of the full kind end-to-end test
+  still outstanding on #319 / #995. Every Identity and Controller spec
+  runs and gates conformance.
 
   Tagged `:requires_csi_sanity`; `test/test_helper.exs` excludes the tag
   unless a `csi-sanity` binary is found (on `PATH` or via the
@@ -36,12 +31,10 @@ defmodule NeonFS.CSI.CsiSanityTest do
   @moduletag timeout: 300_000
 
   # Ginkgo `--skip` regexes matched against each spec's full description.
-  # Node service is out of scope for a stubbed-core run; the rest are the
-  # driver conformance gaps tracked in #1458. Each pattern is anchored to
-  # its service so it can't over-match a passing spec.
+  # Node-service conformance needs a real mount target, which a
+  # stubbed-core run can't provide (see moduledoc).
   @skip_specs [
-    "Node Service",
-    "CreateVolume.*already existing name and different capacity"
+    "Node Service"
   ]
 
   setup do

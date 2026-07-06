@@ -124,20 +124,14 @@ defmodule NeonFS.CSI.ControllerServer do
   def create_volume(%CreateVolumeRequest{name: name} = req, _stream)
       when is_binary(name) and name != "" do
     require_volume_capabilities!(req)
-    opts = parse_create_opts(req)
+    opts = parse_create_opts(req) ++ max_size_opt(req)
 
     case core_call(NeonFS.Core, :create_volume, [name, opts]) do
       {:ok, volume} ->
         %CreateVolumeResponse{volume: csi_volume_from(volume, requested_capacity(req))}
 
       {:error, %NeonFS.Error.AlreadyExists{}} ->
-        case core_call(NeonFS.Core, :get_volume, [name]) do
-          {:ok, volume} ->
-            %CreateVolumeResponse{volume: csi_volume_from(volume, requested_capacity(req))}
-
-          _ ->
-            raise GRPC.RPCError, status: :already_exists, message: "volume #{name} exists"
-        end
+        existing_volume_response(name, req)
 
       {:error, reason} ->
         raise GRPC.RPCError,
@@ -148,6 +142,40 @@ defmodule NeonFS.CSI.ControllerServer do
 
   def create_volume(%CreateVolumeRequest{}, _stream) do
     raise GRPC.RPCError, status: :invalid_argument, message: "name is required"
+  end
+
+  # Idempotent create: a name collision returns the existing volume when
+  # the requested capacity is compatible, or ALREADY_EXISTS when the
+  # caller asked for a capacity the existing volume wasn't created with.
+  defp existing_volume_response(name, req) do
+    case core_call(NeonFS.Core, :get_volume, [name]) do
+      {:ok, volume} ->
+        requested = requested_capacity(req)
+
+        if capacity_compatible?(volume.max_size, requested) do
+          %CreateVolumeResponse{volume: csi_volume_from(volume, requested)}
+        else
+          raise GRPC.RPCError,
+            status: :already_exists,
+            message: "volume #{name} already exists with a different capacity"
+        end
+
+      _ ->
+        raise GRPC.RPCError, status: :already_exists, message: "volume #{name} exists"
+    end
+  end
+
+  # An unlimited volume (no max_size) or a request with no capacity
+  # constraint is always compatible; otherwise the sizes must match.
+  defp capacity_compatible?(_max_size, 0), do: true
+  defp capacity_compatible?(nil, _requested), do: true
+  defp capacity_compatible?(max_size, requested), do: max_size == requested
+
+  defp max_size_opt(req) do
+    case requested_capacity(req) do
+      0 -> []
+      bytes -> [max_size: bytes]
+    end
   end
 
   # CSI requires every CreateVolume to carry the access capabilities the
@@ -714,7 +742,7 @@ defmodule NeonFS.CSI.ControllerServer do
 
   defp csi_volume_from(volume, capacity) do
     %Volume{
-      capacity_bytes: capacity,
+      capacity_bytes: volume.max_size || capacity,
       volume_id: volume.name,
       volume_context: %{"volume_id" => volume.id}
     }

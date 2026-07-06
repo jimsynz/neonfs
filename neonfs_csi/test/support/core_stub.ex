@@ -27,7 +27,7 @@ defmodule NeonFS.CSI.TestSupport.CoreStub do
     fn module, function, args -> call(agent, module, function, args) end
   end
 
-  defp call(agent, NeonFS.Core, :create_volume, [name, _opts]) do
+  defp call(agent, NeonFS.Core, :create_volume, [name, opts]) do
     Agent.get_and_update(agent, fn state ->
       case Map.fetch(state.volumes, name) do
         {:ok, _existing} ->
@@ -35,7 +35,7 @@ defmodule NeonFS.CSI.TestSupport.CoreStub do
 
         :error ->
           {id, state} = next_id(state, "vol")
-          volume = build_volume(id, name)
+          volume = %{build_volume(id, name) | max_size: Keyword.get(opts, :max_size)}
           {{:ok, volume}, put_in(state.volumes[name], volume)}
       end
     end)
