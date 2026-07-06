@@ -64,8 +64,8 @@ parameters:
 ---
 # Source: neonfs-csi/templates/rbac.yaml
 # Controller-side RBAC: scoped to what the external sidecars need to
-# call from cluster-wide context (PVCs, PVs, StorageClasses, VolumeAttachments,
-# Events, CSINodes for topology, leases for sidecar leader election).
+# call from cluster-wide context (PVCs, PVs, StorageClasses, Events,
+# CSINodes for topology, leases for sidecar leader election).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -90,12 +90,6 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments/status"]
-    verbs: ["patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]
@@ -216,7 +210,7 @@ spec:
         - operator: Exists
       containers:
         - name: node-driver-registrar
-          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
           imagePullPolicy: IfNotPresent
           args:
             - --csi-address=$(ADDRESS)
@@ -233,7 +227,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
         - name: liveness-probe
-          image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.19.0
           imagePullPolicy: IfNotPresent
           args:
             - --csi-address=/csi/csi.sock
@@ -353,7 +347,7 @@ spec:
           operator: Exists
       containers:
         - name: csi-provisioner
-          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
           imagePullPolicy: IfNotPresent
           args:
             - --csi-address=$(ADDRESS)
@@ -367,21 +361,8 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /var/lib/csi/sockets/pluginproxy
-        - name: csi-attacher
-          image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
-          imagePullPolicy: IfNotPresent
-          args:
-            - --csi-address=$(ADDRESS)
-            - --leader-election=true
-            - --v=2
-          env:
-            - name: ADDRESS
-              value: /var/lib/csi/sockets/pluginproxy/csi.sock
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /var/lib/csi/sockets/pluginproxy
         - name: csi-resizer
-          image: registry.k8s.io/sig-storage/csi-resizer:v1.12.0
+          image: registry.k8s.io/sig-storage/csi-resizer:v2.2.0
           imagePullPolicy: IfNotPresent
           args:
             - --csi-address=$(ADDRESS)
@@ -394,7 +375,7 @@ spec:
             - name: socket-dir
               mountPath: /var/lib/csi/sockets/pluginproxy
         - name: liveness-probe
-          image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.19.0
           imagePullPolicy: IfNotPresent
           args:
             - --csi-address=$(ADDRESS)

@@ -12,8 +12,8 @@ defmodule NeonFS.CSI.ControllerServer do
   ## RPCs implemented
 
     * `ControllerGetCapabilities` — advertises
-      `CREATE_DELETE_VOLUME`, `PUBLISH_UNPUBLISH_VOLUME`,
-      `LIST_VOLUMES`, `GET_CAPACITY`.
+      `CREATE_DELETE_VOLUME`, `LIST_VOLUMES`, `GET_CAPACITY`,
+      `GET_VOLUME`, snapshot, and clone capabilities.
     * `CreateVolume` — maps to `NeonFS.Core.create_volume/2`.
       Honours `parameters` (`replication_factor`, `tier`) and the
       requested `capacity_range`.
@@ -25,25 +25,26 @@ defmodule NeonFS.CSI.ControllerServer do
       with CSI string-token pagination.
     * `GetCapacity` — cluster-wide via
       `NeonFS.Core.StorageMetrics.cluster_capacity/0`.
-    * `ControllerPublishVolume` / `ControllerUnpublishVolume` — track
-      `(volume_id, node_id)` publish state in a local ETS table that
-      the Node plugin consults during Stage.
     * `ControllerGetVolume` — returns the per-volume `Volume` plus a
-      `VolumeStatus` containing the current published-node ids and
-      a `VolumeCondition` rolled up from `NeonFS.Core.StorageMetrics`,
+      `VolumeCondition` rolled up from `NeonFS.Core.StorageMetrics`,
       `NeonFS.Core.ServiceRegistry`, and `NeonFS.Core.Escalation` via
       `NeonFS.CSI.VolumeHealth`.
 
-  Out of scope for this slice (snapshot RPCs, `ControllerExpandVolume`,
-  `ControllerModifyVolume`) — those gain capability-flag entries here
-  when their respective sub-issues land.
+  NeonFS is a distributed filesystem any node can mount, so the
+  `CSIDriver` sets `attachRequired: false` and this service does **not**
+  implement `ControllerPublishVolume` / `ControllerUnpublishVolume` —
+  Kubernetes never calls them, and the plugin doesn't advertise
+  `PUBLISH_UNPUBLISH_VOLUME`.
+
+  Out of scope (`ControllerExpandVolume`, `ControllerModifyVolume`) —
+  those gain capability-flag entries here when their respective
+  sub-issues land.
 
   ## Test injection
 
   All NeonFS RPCs route through `core_call/3`, which falls back to
   `NeonFS.Client.Router.call/3` unless `:core_call_fn` is set in the
-  application env. The publish table lives in ETS (`@table`); tests
-  reset it via `reset_publish_table/0`.
+  application env.
   """
 
   use GRPC.Server, service: Csi.V1.Controller.Service
@@ -53,11 +54,7 @@ defmodule NeonFS.CSI.ControllerServer do
     ControllerGetCapabilitiesResponse,
     ControllerGetVolumeRequest,
     ControllerGetVolumeResponse,
-    ControllerPublishVolumeRequest,
-    ControllerPublishVolumeResponse,
     ControllerServiceCapability,
-    ControllerUnpublishVolumeRequest,
-    ControllerUnpublishVolumeResponse,
     CreateSnapshotRequest,
     CreateSnapshotResponse,
     CreateVolumeRequest,
@@ -84,29 +81,6 @@ defmodule NeonFS.CSI.ControllerServer do
 
   import Bitwise, only: [<<<: 2]
 
-  @table :csi_published_volumes
-
-  @doc """
-  Initialise the ETS table backing the publish state. Called once by
-  the supervisor; idempotent.
-  """
-  @spec init_publish_table() :: :ok
-  def init_publish_table do
-    if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
-    end
-
-    :ok
-  end
-
-  @doc "Clears the publish table. Test-only convenience."
-  @spec reset_publish_table() :: :ok
-  def reset_publish_table do
-    init_publish_table()
-    :ets.delete_all_objects(@table)
-    :ok
-  end
-
   ## RPCs
 
   @doc "CSI `Controller.ControllerGetCapabilities` — declares the supported RPCs."
@@ -118,7 +92,6 @@ defmodule NeonFS.CSI.ControllerServer do
         Enum.map(
           [
             :CREATE_DELETE_VOLUME,
-            :PUBLISH_UNPUBLISH_VOLUME,
             :LIST_VOLUMES,
             :GET_CAPACITY,
             :GET_VOLUME,
@@ -291,7 +264,6 @@ defmodule NeonFS.CSI.ControllerServer do
   def delete_volume(%DeleteVolumeRequest{volume_id: volume_id}, _stream) do
     case core_call(NeonFS.Core, :delete_volume, [volume_id]) do
       :ok ->
-        :ets.match_delete(@table, {{volume_id, :_}, :_})
         %DeleteVolumeResponse{}
 
       {:error, :not_found} ->
@@ -407,88 +379,7 @@ defmodule NeonFS.CSI.ControllerServer do
   end
 
   @doc """
-  CSI `Controller.ControllerPublishVolume` — records a publish
-  attachment for `(volume_id, node_id)` in the local ETS table.
-  Idempotent on a re-publish for the same pair.
-  """
-  @spec controller_publish_volume(ControllerPublishVolumeRequest.t(), term()) ::
-          ControllerPublishVolumeResponse.t()
-  def controller_publish_volume(
-        %ControllerPublishVolumeRequest{volume_id: ""},
-        _stream
-      ) do
-    raise GRPC.RPCError, status: :invalid_argument, message: "volume_id is required"
-  end
-
-  def controller_publish_volume(
-        %ControllerPublishVolumeRequest{node_id: ""},
-        _stream
-      ) do
-    raise GRPC.RPCError, status: :invalid_argument, message: "node_id is required"
-  end
-
-  def controller_publish_volume(
-        %ControllerPublishVolumeRequest{volume_capability: nil},
-        _stream
-      ) do
-    raise GRPC.RPCError, status: :invalid_argument, message: "volume_capability is required"
-  end
-
-  def controller_publish_volume(
-        %ControllerPublishVolumeRequest{volume_id: vol_id, node_id: node_id, readonly: ro},
-        _stream
-      ) do
-    init_publish_table()
-
-    case core_call(NeonFS.Core, :get_volume, [vol_id]) do
-      {:ok, _volume} ->
-        publish_context = %{"readonly" => to_string(ro)}
-        :ets.insert(@table, {{vol_id, node_id}, publish_context})
-
-        %ControllerPublishVolumeResponse{publish_context: publish_context}
-
-      {:error, :not_found} ->
-        raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
-
-      {:error, %{class: :not_found}} ->
-        raise GRPC.RPCError, status: :not_found, message: "volume #{vol_id} not found"
-
-      {:error, reason} ->
-        raise GRPC.RPCError, status: :internal, message: "lookup failed: #{inspect(reason)}"
-    end
-  end
-
-  @doc """
-  CSI `Controller.ControllerUnpublishVolume` — clears the publish
-  attachment. Idempotent: unknown `(volume_id, node_id)` pairs
-  return success.
-  """
-  @spec controller_unpublish_volume(ControllerUnpublishVolumeRequest.t(), term()) ::
-          ControllerUnpublishVolumeResponse.t()
-  def controller_unpublish_volume(
-        %ControllerUnpublishVolumeRequest{volume_id: ""},
-        _stream
-      ) do
-    raise GRPC.RPCError, status: :invalid_argument, message: "volume_id is required"
-  end
-
-  def controller_unpublish_volume(
-        %ControllerUnpublishVolumeRequest{volume_id: vol_id, node_id: node_id},
-        _stream
-      ) do
-    init_publish_table()
-
-    case node_id do
-      "" -> :ets.match_delete(@table, {{vol_id, :_}, :_})
-      _ -> :ets.delete(@table, {vol_id, node_id})
-    end
-
-    %ControllerUnpublishVolumeResponse{}
-  end
-
-  @doc """
   CSI `Controller.ControllerGetVolume` — returns the volume plus a
-  `VolumeStatus` carrying the current published-node ids and a
   cluster-wide `VolumeCondition` derived from `NeonFS.CSI.VolumeHealth`.
 
   Raises `NOT_FOUND` if the volume is gone.
@@ -500,14 +391,11 @@ defmodule NeonFS.CSI.ControllerServer do
   end
 
   def controller_get_volume(%ControllerGetVolumeRequest{volume_id: vol_id}, _stream) do
-    init_publish_table()
-
     with {:ok, volume} <- core_call(NeonFS.Core, :get_volume, [vol_id]),
          {:ok, condition} <- VolumeHealth.controller_condition(vol_id) do
       %ControllerGetVolumeResponse{
         volume: csi_volume_from(volume, 0),
         status: %ControllerGetVolumeResponse.VolumeStatus{
-          published_node_ids: published_node_ids(vol_id),
           volume_condition: %VolumeCondition{
             abnormal: condition.abnormal,
             message: condition.message
@@ -830,12 +718,6 @@ defmodule NeonFS.CSI.ControllerServer do
       volume_id: volume.name,
       volume_context: %{"volume_id" => volume.id}
     }
-  end
-
-  defp published_node_ids(vol_id) do
-    @table
-    |> :ets.match({{vol_id, :"$1"}, :_})
-    |> List.flatten()
   end
 
   # Supported access modes mirror the NeonFS data plane: a single

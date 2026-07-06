@@ -16,12 +16,10 @@ defmodule NeonFS.CSI.CsiSanityTest do
     * **Node service** — needs a real FUSE mount on a kubelet host, the
       job of the full kind end-to-end test still outstanding on
       #319 / #995.
-    * **Two Controller specs (#1458)** — conformance gaps that need real
-      cluster state or a design decision (capacity-mismatch idempotency
-      and publish-to-nonexistent-node, the latter entangled with the
-      `attachRequired: false` capability question). Skipped by precise
-      description patterns below and tracked in #1458; everything else
-      gates conformance today.
+    * **One Controller spec (#1458)** — capacity-mismatch idempotency,
+      which needs a volume capacity model (blocked on #1462 / #1463).
+      Skipped by the precise description pattern below and tracked in
+      #1458; everything else gates conformance today.
 
   Tagged `:requires_csi_sanity`; `test/test_helper.exs` excludes the tag
   unless a `csi-sanity` binary is found (on `PATH` or via the
@@ -31,7 +29,7 @@ defmodule NeonFS.CSI.CsiSanityTest do
 
   use ExUnit.Case, async: false
 
-  alias NeonFS.CSI.{ControllerServer, NodeServer, VolumeHealth}
+  alias NeonFS.CSI.{NodeServer, VolumeHealth}
   alias NeonFS.CSI.TestSupport.CoreStub
 
   @moduletag :requires_csi_sanity
@@ -43,15 +41,12 @@ defmodule NeonFS.CSI.CsiSanityTest do
   # its service so it can't over-match a passing spec.
   @skip_specs [
     "Node Service",
-    "CreateVolume.*already existing name and different capacity",
-    "ControllerPublishVolume.*node does not exist"
+    "CreateVolume.*already existing name and different capacity"
   ]
 
   setup do
-    ControllerServer.init_publish_table()
     NodeServer.init_state_tables()
     VolumeHealth.init_table()
-    ControllerServer.reset_publish_table()
 
     {:ok, agent} = CoreStub.start_link()
     Application.put_env(:neonfs_csi, :core_call_fn, CoreStub.handler(agent))

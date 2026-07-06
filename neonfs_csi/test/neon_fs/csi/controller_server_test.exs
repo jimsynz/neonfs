@@ -7,9 +7,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
     CapacityRange,
     ControllerGetCapabilitiesRequest,
     ControllerGetVolumeRequest,
-    ControllerPublishVolumeRequest,
     ControllerServiceCapability,
-    ControllerUnpublishVolumeRequest,
     CreateSnapshotRequest,
     CreateVolumeRequest,
     DeleteSnapshotRequest,
@@ -27,12 +25,10 @@ defmodule NeonFS.CSI.ControllerServerTest do
   alias NeonFS.Error.AlreadyExists
 
   setup do
-    ControllerServer.reset_publish_table()
     VolumeHealth.reset_table()
 
     on_exit(fn ->
       Application.delete_env(:neonfs_csi, :core_call_fn)
-      ControllerServer.reset_publish_table()
       VolumeHealth.reset_table()
     end)
 
@@ -76,7 +72,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
   defp caps, do: [sample_capability()]
 
   describe "ControllerGetCapabilities" do
-    test "advertises CREATE_DELETE_VOLUME, PUBLISH_UNPUBLISH_VOLUME, LIST_VOLUMES, GET_CAPACITY" do
+    test "advertises CREATE_DELETE_VOLUME, LIST_VOLUMES, GET_CAPACITY" do
       reply =
         ControllerServer.controller_get_capabilities(%ControllerGetCapabilitiesRequest{}, nil)
 
@@ -86,9 +82,9 @@ defmodule NeonFS.CSI.ControllerServerTest do
         end)
 
       assert :CREATE_DELETE_VOLUME in types
-      assert :PUBLISH_UNPUBLISH_VOLUME in types
       assert :LIST_VOLUMES in types
       assert :GET_CAPACITY in types
+      refute :PUBLISH_UNPUBLISH_VOLUME in types
     end
   end
 
@@ -180,40 +176,6 @@ defmodule NeonFS.CSI.ControllerServerTest do
       assert_raise GRPC.RPCError, ~r/volume_id is required/, fn ->
         ControllerServer.delete_volume(%DeleteVolumeRequest{volume_id: ""}, nil)
       end
-    end
-
-    test "clears the publish table on successful delete" do
-      put_core(fn NeonFS.Core, :delete_volume, _ -> :ok end)
-
-      # Stage publish entries for two nodes.
-      Application.put_env(:neonfs_csi, :core_call_fn, fn
-        NeonFS.Core, :get_volume, _ -> {:ok, sample_volume("pvc-y")}
-        NeonFS.Core, :delete_volume, _ -> :ok
-      end)
-
-      ControllerServer.controller_publish_volume(
-        %ControllerPublishVolumeRequest{
-          volume_id: "pvc-y",
-          node_id: "node-1",
-          volume_capability: sample_capability()
-        },
-        nil
-      )
-
-      ControllerServer.controller_publish_volume(
-        %ControllerPublishVolumeRequest{
-          volume_id: "pvc-y",
-          node_id: "node-2",
-          volume_capability: sample_capability()
-        },
-        nil
-      )
-
-      assert :ets.match(:csi_published_volumes, {{"pvc-y", :_}, :_}) |> length() == 2
-
-      ControllerServer.delete_volume(%DeleteVolumeRequest{volume_id: "pvc-y"}, nil)
-
-      assert :ets.match(:csi_published_volumes, {{"pvc-y", :_}, :_}) == []
     end
   end
 
@@ -332,101 +294,6 @@ defmodule NeonFS.CSI.ControllerServerTest do
     end
   end
 
-  describe "ControllerPublishVolume" do
-    setup do
-      put_core(fn NeonFS.Core, :get_volume, _ -> {:ok, sample_volume("pvc-pub")} end)
-      :ok
-    end
-
-    test "records the publish attachment" do
-      ControllerServer.controller_publish_volume(
-        %ControllerPublishVolumeRequest{
-          volume_id: "pvc-pub",
-          node_id: "node-1",
-          volume_capability: sample_capability()
-        },
-        nil
-      )
-
-      assert [{{"pvc-pub", "node-1"}, _}] =
-               :ets.lookup(:csi_published_volumes, {"pvc-pub", "node-1"})
-    end
-
-    test "echoes a publish_context with the readonly flag" do
-      reply =
-        ControllerServer.controller_publish_volume(
-          %ControllerPublishVolumeRequest{
-            volume_id: "pvc-pub",
-            node_id: "node-1",
-            readonly: true,
-            volume_capability: sample_capability()
-          },
-          nil
-        )
-
-      assert reply.publish_context["readonly"] == "true"
-    end
-
-    test "raises not_found when the volume doesn't exist" do
-      put_core(fn NeonFS.Core, :get_volume, _ -> {:error, :not_found} end)
-
-      assert_raise GRPC.RPCError, ~r/not found/, fn ->
-        ControllerServer.controller_publish_volume(
-          %ControllerPublishVolumeRequest{
-            volume_id: "ghost",
-            node_id: "node-1",
-            volume_capability: sample_capability()
-          },
-          nil
-        )
-      end
-    end
-
-    test "raises invalid_argument when no volume capability is provided" do
-      assert_raise GRPC.RPCError, ~r/volume_capability is required/, fn ->
-        ControllerServer.controller_publish_volume(
-          %ControllerPublishVolumeRequest{volume_id: "pvc-pub", node_id: "node-1"},
-          nil
-        )
-      end
-    end
-  end
-
-  describe "ControllerUnpublishVolume" do
-    test "deletes the publish attachment for a single node" do
-      :ets.insert(:csi_published_volumes, {{"pvc", "node-1"}, %{}})
-      :ets.insert(:csi_published_volumes, {{"pvc", "node-2"}, %{}})
-
-      ControllerServer.controller_unpublish_volume(
-        %ControllerUnpublishVolumeRequest{volume_id: "pvc", node_id: "node-1"},
-        nil
-      )
-
-      assert :ets.lookup(:csi_published_volumes, {"pvc", "node-1"}) == []
-      assert [_] = :ets.lookup(:csi_published_volumes, {"pvc", "node-2"})
-    end
-
-    test "empty node_id clears all attachments for the volume" do
-      :ets.insert(:csi_published_volumes, {{"pvc", "node-1"}, %{}})
-      :ets.insert(:csi_published_volumes, {{"pvc", "node-2"}, %{}})
-
-      ControllerServer.controller_unpublish_volume(
-        %ControllerUnpublishVolumeRequest{volume_id: "pvc", node_id: ""},
-        nil
-      )
-
-      assert :ets.match(:csi_published_volumes, {{"pvc", :_}, :_}) == []
-    end
-
-    test "is idempotent on unknown attachments" do
-      assert %_{} =
-               ControllerServer.controller_unpublish_volume(
-                 %ControllerUnpublishVolumeRequest{volume_id: "ghost", node_id: "node-x"},
-                 nil
-               )
-    end
-  end
-
   describe "ControllerGetCapabilities advertises volume-condition capabilities" do
     test "includes GET_VOLUME and VOLUME_CONDITION" do
       reply =
@@ -516,31 +383,6 @@ defmodule NeonFS.CSI.ControllerServerTest do
 
       assert reply.status.volume_condition.abnormal == true
       assert reply.status.volume_condition.message =~ "critical escalations"
-    end
-
-    test "returns published_node_ids from the publish table" do
-      :ets.insert(:csi_published_volumes, {{"pvc", "node-a"}, %{}})
-      :ets.insert(:csi_published_volumes, {{"pvc", "node-b"}, %{}})
-
-      put_core(fn
-        NeonFS.Core, :get_volume, ["pvc"] ->
-          {:ok,
-           sample_volume("pvc", %{durability: %{type: :replicate, factor: 1, min_copies: 1}})}
-
-        NeonFS.Core.StorageMetrics, :cluster_capacity, [] ->
-          %{drives: [%{state: :active}], total_capacity: 100, total_used: 10}
-
-        NeonFS.Core.ServiceRegistry, :list_by_type, [:core] ->
-          [%{node: :n1}]
-
-        NeonFS.Core.Escalation, :list, _ ->
-          []
-      end)
-
-      reply =
-        ControllerServer.controller_get_volume(%ControllerGetVolumeRequest{volume_id: "pvc"}, nil)
-
-      assert Enum.sort(reply.status.published_node_ids) == ["node-a", "node-b"]
     end
 
     test "raises NOT_FOUND when the volume is gone" do
