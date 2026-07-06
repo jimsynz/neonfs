@@ -574,7 +574,8 @@ defmodule NeonFS.Core.VolumeRegistry do
            Volume.update_stats(volume,
              logical_size: max(0, volume.logical_size + Map.get(deltas, :logical_size, 0)),
              physical_size: max(0, volume.physical_size + Map.get(deltas, :physical_size, 0)),
-             chunk_count: max(0, volume.chunk_count + Map.get(deltas, :chunk_count, 0))
+             chunk_count: max(0, volume.chunk_count + Map.get(deltas, :chunk_count, 0)),
+             file_count: max(0, volume.file_count + Map.get(deltas, :file_count, 0))
            ),
          :ok <- persist_volume(updated) do
       {:ok, updated}
@@ -583,8 +584,8 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   defp do_reconcile_stats(id) do
     with {:ok, _volume} <- get(id),
-         {:ok, %{logical_size: logical}} <- FileIndex.volume_usage(id) do
-      absolutes = %{logical_size: logical}
+         {:ok, %{logical_size: logical, file_count: files}} <- FileIndex.volume_usage(id) do
+      absolutes = %{logical_size: logical, file_count: files}
 
       case maybe_ra_command({:set_volume_stats, id, absolutes}) do
         {:ok, {:ok, volume_map}} ->
@@ -690,6 +691,7 @@ defmodule NeonFS.Core.VolumeRegistry do
       logical_size: 0,
       physical_size: 0,
       chunk_count: 0,
+      file_count: 0,
       created_at: now,
       updated_at: now,
       system: true
@@ -990,9 +992,11 @@ defmodule NeonFS.Core.VolumeRegistry do
       verification: volume.verification,
       encryption: encryption_to_map(volume.encryption),
       max_size: volume.max_size,
+      max_files: volume.max_files,
       logical_size: volume.logical_size,
       physical_size: volume.physical_size,
       chunk_count: volume.chunk_count,
+      file_count: volume.file_count,
       created_at: volume.created_at,
       updated_at: volume.updated_at,
       system: volume.system
@@ -1025,12 +1029,20 @@ defmodule NeonFS.Core.VolumeRegistry do
       verification: resolve_verification(volume_map.verification),
       encryption: map_to_encryption(volume_map[:encryption]),
       max_size: volume_map[:max_size],
-      logical_size: volume_map[:logical_size] || 0,
-      physical_size: volume_map[:physical_size] || 0,
-      chunk_count: volume_map[:chunk_count] || 0,
+      max_files: volume_map[:max_files],
       created_at: volume_map.created_at,
       updated_at: volume_map.updated_at,
       system: volume_map[:system] || false
+    }
+    |> struct(usage_counters_from_map(volume_map))
+  end
+
+  defp usage_counters_from_map(volume_map) do
+    %{
+      logical_size: volume_map[:logical_size] || 0,
+      physical_size: volume_map[:physical_size] || 0,
+      chunk_count: volume_map[:chunk_count] || 0,
+      file_count: volume_map[:file_count] || 0
     }
   end
 

@@ -73,9 +73,11 @@ defmodule NeonFS.Core.Volume do
           encryption: VolumeEncryption.t(),
           metadata_consistency: metadata_consistency_config() | nil,
           max_size: non_neg_integer() | nil,
+          max_files: non_neg_integer() | nil,
           logical_size: non_neg_integer(),
           physical_size: non_neg_integer(),
           chunk_count: non_neg_integer(),
+          file_count: non_neg_integer(),
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
           system: boolean(),
@@ -98,9 +100,11 @@ defmodule NeonFS.Core.Volume do
     :encryption,
     :metadata_consistency,
     :max_size,
+    :max_files,
     :logical_size,
     :physical_size,
     :chunk_count,
+    :file_count,
     :created_at,
     :updated_at,
     atime_mode: :noatime,
@@ -143,11 +147,13 @@ defmodule NeonFS.Core.Volume do
       encryption: Keyword.get(opts, :encryption, default_encryption()),
       metadata_consistency: Keyword.get(opts, :metadata_consistency),
       max_size: Keyword.get(opts, :max_size),
+      max_files: Keyword.get(opts, :max_files),
       nfs_allowed_ips: Keyword.get(opts, :nfs_allowed_ips, []),
       nfs_root_squash: Keyword.get(opts, :nfs_root_squash, true),
       logical_size: 0,
       physical_size: 0,
       chunk_count: 0,
+      file_count: 0,
       created_at: now,
       updated_at: now
     }
@@ -284,6 +290,7 @@ defmodule NeonFS.Core.Volume do
       | logical_size: Keyword.get(opts, :logical_size, volume.logical_size),
         physical_size: Keyword.get(opts, :physical_size, volume.physical_size),
         chunk_count: Keyword.get(opts, :chunk_count, volume.chunk_count),
+        file_count: Keyword.get(opts, :file_count, volume.file_count),
         updated_at: DateTime.utc_now()
     }
   end
@@ -345,7 +352,8 @@ defmodule NeonFS.Core.Volume do
          :ok <- validate_nfs_export(volume.nfs_export),
          :ok <- validate_nfs_allowed_ips(volume.nfs_allowed_ips),
          :ok <- validate_nfs_root_squash(volume.nfs_root_squash),
-         :ok <- validate_max_size(volume.max_size) do
+         :ok <- validate_max_size(volume.max_size),
+         :ok <- validate_max_files(volume.max_files) do
       validate_metadata_consistency(volume.metadata_consistency)
     end
   end
@@ -353,6 +361,10 @@ defmodule NeonFS.Core.Volume do
   defp validate_max_size(nil), do: :ok
   defp validate_max_size(bytes) when is_integer(bytes) and bytes > 0, do: :ok
   defp validate_max_size(_), do: {:error, "max_size must be nil or a positive integer"}
+
+  defp validate_max_files(nil), do: :ok
+  defp validate_max_files(count) when is_integer(count) and count > 0, do: :ok
+  defp validate_max_files(_), do: {:error, "max_files must be nil or a positive integer"}
 
   defp validate_system_field(%Volume{system: true, name: "_system"}), do: :ok
 

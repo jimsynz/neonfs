@@ -456,7 +456,8 @@ defmodule NeonFS.Core do
     _ =
       VolumeRegistry.adjust_stats(volume_id,
         logical_size: -size,
-        chunk_count: -length(chunks)
+        chunk_count: -length(chunks),
+        file_count: -1
       )
 
     :ok

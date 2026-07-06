@@ -358,6 +358,7 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp do_write(%{durability: %{type: :erasure}} = volume, path, data, write_id, opts) do
     with :ok <- check_capacity(volume, byte_size(data)),
+         :ok <- check_file_quota(volume),
          {:ok, enc_ctx} <- resolve_encryption(volume) do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
 
@@ -375,12 +376,13 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp do_write(volume, path, data, write_id, opts) do
     with :ok <- check_capacity(volume, byte_size(data)),
+         :ok <- check_file_quota(volume),
          {:ok, enc_ctx} <- resolve_encryption(volume) do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx}
 
       with {:ok, chunks} <- chunk_and_store(data, volume, write_ctx, opts),
            {:ok, file_meta} <- create_file_metadata(volume.id, path, chunks, data, write_id, opts),
-           :ok <- update_volume_stats(volume.id, data, chunks) do
+           :ok <- update_volume_stats(volume.id, data, chunks, 1) do
         {:ok, file_meta}
       else
         {:error, _reason} = error ->
@@ -404,14 +406,17 @@ defmodule NeonFS.Core.WriteOperation do
       write_ctx = %{write_id: write_id, enc_ctx: enc_ctx, streaming: true}
       strategy = resolve_chunk_strategy(opts)
       compression_config = Keyword.get(opts, :compression, volume.compression)
-      capacity = capacity_limit(volume, path)
+      existing_size = existing_file_size(volume.id, path)
+      capacity = capacity_limit(volume, existing_size)
+      file_delta = if existing_size == nil, do: 1, else: 0
 
-      with {:ok, chunker} <- BlobStore.chunker_init(strategy),
+      with :ok <- check_file_quota_if_new(volume, existing_size),
+           {:ok, chunker} <- BlobStore.chunker_init(strategy),
            {:ok, chunks, total_bytes} <-
              stream_chunks(stream, chunker, compression_config, volume, write_ctx, capacity),
            {:ok, file_meta} <-
              create_file_metadata_with_size(volume.id, path, chunks, total_bytes, write_id, opts),
-           :ok <- update_volume_stats_with_size(volume.id, total_bytes, chunks) do
+           :ok <- update_volume_stats_with_size(volume.id, total_bytes, chunks, file_delta) do
         PendingWriteLog.clear(write_id)
         {:ok, file_meta}
       else
@@ -943,7 +948,7 @@ defmodule NeonFS.Core.WriteOperation do
              all_chunks,
              opts
            ),
-         :ok <- update_volume_stats(volume.id, data, all_chunks) do
+         :ok <- update_volume_stats(volume.id, data, all_chunks, 1) do
       {:ok, file_meta}
     end
   end
@@ -1759,8 +1764,8 @@ defmodule NeonFS.Core.WriteOperation do
     end
   end
 
-  defp update_volume_stats(volume_id, data, chunks) do
-    update_volume_stats_with_size(volume_id, byte_size(data), chunks)
+  defp update_volume_stats(volume_id, data, chunks, file_delta) do
+    update_volume_stats_with_size(volume_id, byte_size(data), chunks, file_delta)
   end
 
   # Best-effort stats update for the offset-write path: the file is already
@@ -1794,18 +1799,13 @@ defmodule NeonFS.Core.WriteOperation do
   # Streamed writes don't know their size up front, so the guard runs on
   # a running total. The baseline subtracts an overwritten file's current
   # size (its bytes are replaced, not added), so re-streaming a same-size
-  # object over an existing key isn't spuriously rejected.
-  defp capacity_limit(%{max_size: nil}, _path), do: :unlimited
+  # object over an existing key isn't spuriously rejected. `existing_size`
+  # is `nil` for a new path.
+  defp capacity_limit(%{max_size: nil}, _existing_size), do: :unlimited
 
-  defp capacity_limit(%{max_size: max, logical_size: used, id: volume_id}, path)
+  defp capacity_limit(%{max_size: max, logical_size: used}, existing_size)
        when is_integer(max) do
-    existing =
-      case FileIndex.get_by_path(volume_id, path) do
-        {:ok, %{size: size}} -> size
-        _ -> 0
-      end
-
-    {max, max(0, used - existing)}
+    {max, max(0, used - (existing_size || 0))}
   end
 
   defp within_capacity(:unlimited, _bytes), do: :ok
@@ -1814,19 +1814,42 @@ defmodule NeonFS.Core.WriteOperation do
     if baseline + bytes > max, do: {:error, :enospc}, else: :ok
   end
 
+  # Rejects the creation of a new file that would push the volume past its
+  # `max_files` quota (#1470). `nil` is unlimited. Like the byte cap, this
+  # reads the eventually-consistent `file_count` counter (kept close to
+  # reality by the atomic increment and the scrub reconcile).
+  defp check_file_quota(%{max_files: nil}), do: :ok
+
+  defp check_file_quota(%{max_files: max, file_count: count}) when is_integer(max) do
+    if count + 1 > max, do: {:error, :enospc}, else: :ok
+  end
+
+  # Only a *new* file consumes a file-count slot; overwriting an existing
+  # path (existing_size is an integer) leaves the count unchanged.
+  defp check_file_quota_if_new(_volume, existing_size) when is_integer(existing_size), do: :ok
+  defp check_file_quota_if_new(volume, nil), do: check_file_quota(volume)
+
+  defp existing_file_size(volume_id, path) do
+    case FileIndex.get_by_path(volume_id, path) do
+      {:ok, %{size: size}} -> size
+      _ -> nil
+    end
+  end
+
   # Applies the write's usage as atomic deltas. `size` is the logical
   # byte delta (full size for a new file, `new_size - old_size` for an
   # overwrite via the offset path); the atomic Ra increment keeps
   # concurrent writes to the same volume from clobbering each other's
   # count (#1462).
-  defp update_volume_stats_with_size(volume_id, size, chunks) do
+  defp update_volume_stats_with_size(volume_id, size, chunks, file_delta \\ 0) do
     new_chunks = Enum.filter(chunks, & &1.new)
     physical_delta = Enum.sum(Enum.map(new_chunks, & &1.stored_size))
 
     case VolumeRegistry.adjust_stats(volume_id,
            logical_size: size,
            physical_size: physical_delta,
-           chunk_count: length(new_chunks)
+           chunk_count: length(new_chunks),
+           file_count: file_delta
          ) do
       {:ok, _updated} -> :ok
       {:error, reason} -> {:error, {:stats_update_failed, reason}}

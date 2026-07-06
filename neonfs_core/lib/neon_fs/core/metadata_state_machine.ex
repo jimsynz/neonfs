@@ -1202,6 +1202,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           |> adjust_counter(:logical_size, deltas)
           |> adjust_counter(:physical_size, deltas)
           |> adjust_counter(:chunk_count, deltas)
+          |> adjust_counter(:file_count, deltas)
 
         new_state = %{
           state
@@ -1216,9 +1217,9 @@ defmodule NeonFS.Core.MetadataStateMachine do
   # Reset a volume's usage counters to authoritative absolutes. Used by
   # the scrub reconcile to correct drift accumulated across crashes or
   # streamed overwrites (#1462). Only the counters present in `absolutes`
-  # are overwritten — reconcile can rebuild `logical_size` exactly (sum
-  # of file sizes) but not the dedup-aware `physical_size`/`chunk_count`,
-  # so it leaves those untouched.
+  # are overwritten — reconcile can rebuild `logical_size` (sum of file
+  # sizes) and `file_count` (number of live files) exactly, but not the
+  # dedup-aware `physical_size`/`chunk_count`, so it leaves those untouched.
   def apply(_meta, {:set_volume_stats, volume_id, absolutes}, state) do
     case Map.get(state.volumes, volume_id) do
       nil ->
@@ -1230,6 +1231,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
           |> set_counter(:logical_size, absolutes)
           |> set_counter(:physical_size, absolutes)
           |> set_counter(:chunk_count, absolutes)
+          |> set_counter(:file_count, absolutes)
 
         new_state = %{
           state

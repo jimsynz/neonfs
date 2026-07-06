@@ -471,23 +471,26 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
-  Sums a volume's logical byte usage from the **authoritative** metadata
-  tree, excluding detached (unlinked-but-open) tombstones.
+  Sums a volume's logical byte usage and counts its live files from the
+  **authoritative** metadata tree, excluding detached (unlinked-but-open)
+  tombstones. The `file:` keyspace holds regular files only (directories
+  are `dir:` records), so the count is regular files.
 
-  Backs the volume-stats reconcile (#1462): the incremental `logical_size`
-  counter can drift from reality across a crash or a streamed overwrite,
-  and this recomputes the exact figure the cap is enforced against.
+  Backs the volume-stats reconcile (#1462, #1470): the incremental
+  `logical_size` / `file_count` counters can drift from reality across a
+  crash or a streamed overwrite, and this recomputes the exact figures
+  the caps are enforced against.
   """
-  @spec volume_usage(volume_id()) :: {:ok, %{logical_size: non_neg_integer()}} | {:error, term()}
+  @spec volume_usage(volume_id()) ::
+          {:ok, %{logical_size: non_neg_integer(), file_count: non_neg_integer()}}
+          | {:error, term()}
   def volume_usage(volume_id) do
     case list_volume_authoritative(volume_id) do
       {:ok, files} ->
-        logical =
-          files
-          |> Enum.reject(& &1.detached)
-          |> Enum.reduce(0, fn file, acc -> acc + file.size end)
+        live = Enum.reject(files, & &1.detached)
+        logical = Enum.reduce(live, 0, fn file, acc -> acc + file.size end)
 
-        {:ok, %{logical_size: logical}}
+        {:ok, %{logical_size: logical, file_count: length(live)}}
 
       {:error, _} = err ->
         err
