@@ -10,6 +10,7 @@ COPY --from=s3 mix.exs mix.lock /workdir/neonfs_s3/
 COPY --from=webdav mix.exs mix.lock /workdir/neonfs_webdav/
 COPY --from=docker mix.exs mix.lock /workdir/neonfs_docker/
 COPY --from=containerd mix.exs mix.lock /workdir/neonfs_containerd/
+COPY --from=cifs mix.exs mix.lock /workdir/neonfs_cifs/
 COPY --from=src mix.exs mix.lock /workdir/neonfs_omnibus/
 
 WORKDIR /workdir/neonfs_omnibus
@@ -28,6 +29,7 @@ COPY --from=s3 . /workdir/neonfs_s3
 COPY --from=webdav . /workdir/neonfs_webdav
 COPY --from=docker . /workdir/neonfs_docker
 COPY --from=containerd . /workdir/neonfs_containerd
+COPY --from=cifs . /workdir/neonfs_cifs
 COPY --from=src . /workdir/neonfs_omnibus
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \

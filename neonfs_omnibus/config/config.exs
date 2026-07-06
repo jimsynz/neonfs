@@ -25,6 +25,7 @@ if Mix.env() == :test do
   config :neonfs_s3, start_supervisor: false
   config :neonfs_docker, start_supervisor: false
   config :neonfs_containerd, start_supervisor: false
+  config :neonfs_cifs, start_supervisor: false
 end
 
 if Mix.env() in [:dev, :test] do

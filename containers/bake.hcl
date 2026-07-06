@@ -190,6 +190,7 @@ target "omnibus" {
     "webdav": "./neonfs_webdav"
     "docker": "./neonfs_docker"
     "containerd": "./neonfs_containerd"
+    "cifs": "./neonfs_cifs"
     "src": "./neonfs_omnibus"
     "base": "target:base"
     "cli": "target:cli"
