@@ -1,7 +1,7 @@
 {{- if .Values.rbac.create -}}
 # Controller-side RBAC: scoped to what the external sidecars need to
-# call from cluster-wide context (PVCs, PVs, StorageClasses, VolumeAttachments,
-# Events, CSINodes for topology, leases for sidecar leader election).
+# call from cluster-wide context (PVCs, PVs, StorageClasses, Events,
+# CSINodes for topology, leases for sidecar leader election).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -22,12 +22,6 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments"]
-    verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments/status"]
-    verbs: ["patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]

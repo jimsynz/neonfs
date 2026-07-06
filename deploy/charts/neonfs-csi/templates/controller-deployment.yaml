@@ -61,22 +61,6 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: {{ dir .Values.controller.socketPath }}
-        - name: csi-attacher
-          image: {{ .Values.sidecars.attacher.image }}
-          imagePullPolicy: {{ .Values.sidecars.attacher.pullPolicy }}
-          args:
-            - --csi-address=$(ADDRESS)
-            - --leader-election=true
-            - --v=2
-            {{- with .Values.sidecars.attacher.extraArgs }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
-          env:
-            - name: ADDRESS
-              value: {{ .Values.controller.socketPath }}
-          volumeMounts:
-            - name: socket-dir
-              mountPath: {{ dir .Values.controller.socketPath }}
         - name: csi-resizer
           image: {{ .Values.sidecars.resizer.image }}
           imagePullPolicy: {{ .Values.sidecars.resizer.pullPolicy }}

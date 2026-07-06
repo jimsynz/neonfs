@@ -40,7 +40,7 @@ helm install neonfs-csi ./deploy/charts/neonfs-csi \
 | Resource                 | Purpose                                                                 |
 |--------------------------|-------------------------------------------------------------------------|
 | `CSIDriver`              | Declares ownership of `neonfs.csi.harton.dev` to the kubelet.           |
-| `Deployment` (controller)| Plugin + `external-provisioner` / `external-attacher` / `external-resizer` sidecars. |
+| `Deployment` (controller)| Plugin + `external-provisioner` / `external-resizer` sidecars. |
 | `DaemonSet` (node)       | Plugin + `node-driver-registrar` + `livenessprobe` sidecars on every node. |
 | `ServiceAccount`         | One per role (controller, node).                                        |
 | `ClusterRole` + binding  | RBAC scoped to what each plugin actually needs.                         |
