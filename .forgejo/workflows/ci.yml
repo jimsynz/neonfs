@@ -344,6 +344,38 @@ jobs:
         run: make -C neonfs_cifs/native/vfs_neonfs test
 
   # =========================================================================
+  # vfs_neonfs - Samba VFS module (#1170). Builds `vfs_neonfs.so` against a
+  # pinned, in-tree Samba (VFS modules cannot be built out-of-tree). The
+  # Samba source + build tree is cached, so only the first run pays the full
+  # Samba build; later runs rebuild just the module. Kept a separate job so
+  # that cost doesn't ride on every other suite.
+  # =========================================================================
+  vfs_neonfs:
+    needs: resolve-versions
+    runs-on: docker
+    container:
+      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+    steps:
+      - name: Install Samba build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            curl python3-dev pkg-config gcc make perl bison flex \
+            libjansson-dev libgnutls28-dev libtasn1-6-dev libtasn1-bin \
+            libpopt-dev libbsd-dev libcap-dev libacl1-dev libblkid-dev \
+            libparse-yapp-perl zlib1g-dev libtirpc-dev liblmdb-dev
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v6
+      - name: Restore Samba build cache
+        uses: actions/cache@v5
+        with:
+          path: /samba-build
+          key: v1-vfs_neonfs-samba-4.24.3-${{ runner.arch }}
+          restore-keys: v1-vfs_neonfs-samba-4.24.3-
+      - name: Build vfs_neonfs.so against pinned Samba
+        run: WORKDIR=/samba-build SKIP_APT=1 bash neonfs_cifs/native/vfs_neonfs/build-in-tree.sh
+
+  # =========================================================================
   # neonfs_csi - Kubernetes CSI driver (Elixir-only; gRPC over UDS via the
   # `grpc` + `protobuf` hex packages). The CSI v1 protobuf bindings under
   # `lib/csi/` are checked in (regenerate locally via `protoc-gen-elixir`).

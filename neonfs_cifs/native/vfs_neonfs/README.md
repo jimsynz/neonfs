@@ -2,10 +2,35 @@
 
 The C side of the `vfs_neonfs.so` Samba VFS module for NeonFS.
 
-This directory holds the **protocol half** (#1169): a wire client that speaks
-the `neonfs_cifs` ETF protocol over a Unix domain socket, with no Samba
-dependency. The Samba VFS glue (`vfs_*` op callbacks against a pinned in-tree
-Samba) lands separately in #1170 and builds on this client.
+Two layers:
+
+- **Protocol half** (#1169): `wire.c` / `wire.h` — a wire client that speaks
+  the `neonfs_cifs` ETF protocol over a Unix domain socket, with no Samba
+  dependency. Unit-tested standalone via `make test` (see below).
+- **Samba VFS glue** (#1170): `vfs_neonfs.c` — implements Samba's
+  `struct vfs_fn_pointers` (the 20 "must implement" ops), each marshalling to
+  the wire client. Opaque per-open handles are held in the `files_struct` via
+  Samba's FSP extension mechanism; paths come from `smb_fname->base_name`.
+
+## Building the Samba module
+
+Samba VFS modules cannot be built out-of-tree, so `build-in-tree.sh` fetches a
+**pinned Samba release** (currently **4.24.3**, the latest stable series),
+drops `vfs_neonfs.c` + `wire.c` into `source3/modules/`, registers
+`erl_interface` (`ei`) as a link dependency, configures a minimal
+file-server-only build, and builds the `vfs_neonfs` target:
+
+```sh
+./build-in-tree.sh          # → .samba-build/samba-4.24.3/bin/modules/vfs/neonfs.so
+SAMBA_VERSION=4.24.3 WORKDIR=/some/cache SKIP_APT=1 ./build-in-tree.sh
+```
+
+Needs Erlang on `PATH` (the `ei` headers/libs come from the running install)
+plus a C toolchain; it `apt`-installs Samba's build deps unless `SKIP_APT=1`.
+CI runs this in the dedicated `vfs_neonfs` job with the Samba tree cached. To
+bump the pinned Samba, change `SAMBA_VERSION` and the CI cache key.
+
+Runtime behaviour against a real `smbd` (mounting, round-trips) is #386.
 
 ## Wire contract
 
