@@ -565,8 +565,42 @@ defmodule NeonFS.CSI.NodeServerTest do
 
       assert reply.volume_condition.abnormal == false
 
-      assert [%Csi.V1.VolumeUsage{used: 1_024, total: 1_024, available: 0, unit: :BYTES}] =
-               reply.usage
+      # Uncapped volume: both dimensions report total = used (available 0).
+      assert [
+               %Csi.V1.VolumeUsage{used: 1_024, total: 1_024, available: 0, unit: :BYTES},
+               %Csi.V1.VolumeUsage{used: 0, total: 0, available: 0, unit: :INODES}
+             ] = reply.usage
+    end
+
+    test "reports the quota as total for a capped volume", %{target: target} do
+      Application.put_env(:neonfs_csi, :core_call_fn, fn
+        NeonFS.Core, :get_volume, ["stats-vol"] ->
+          {:ok,
+           %Volume{
+             id: "vid-stats",
+             name: "stats-vol",
+             durability: %{type: :replicate, factor: 1, min_copies: 1},
+             logical_size: 400,
+             max_size: 1_000,
+             file_count: 3,
+             max_files: 10,
+             physical_size: 400,
+             chunk_count: 0,
+             created_at: DateTime.from_unix!(0),
+             updated_at: DateTime.from_unix!(0)
+           }}
+      end)
+
+      reply =
+        NodeServer.node_get_volume_stats(
+          %NodeGetVolumeStatsRequest{volume_id: "stats-vol", volume_path: target},
+          nil
+        )
+
+      assert [
+               %Csi.V1.VolumeUsage{used: 400, total: 1_000, available: 600, unit: :BYTES},
+               %Csi.V1.VolumeUsage{used: 3, total: 10, available: 7, unit: :INODES}
+             ] = reply.usage
     end
 
     test "reports abnormal=true when the probe path doesn't exist", %{target: target} do

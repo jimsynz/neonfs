@@ -395,24 +395,26 @@ defmodule NeonFS.CSI.NodeServer do
   defp volume_usage(vol_id) do
     case core_call(NeonFS.Core, :get_volume, [vol_id]) do
       {:ok, volume} ->
-        used = Map.get(volume, :logical_size, 0) || 0
-        # NeonFS volumes are not pre-sized; treat unknown total as
-        # `used` so kubelet's "available = total - used" arithmetic
-        # gives 0 rather than a misleading negative number.
-        total = used
-
         [
-          %VolumeUsage{
-            available: max(total - used, 0),
-            total: total,
-            used: used,
-            unit: :BYTES
-          }
+          usage_entry(:BYTES, Map.get(volume, :logical_size, 0) || 0, Map.get(volume, :max_size)),
+          usage_entry(:INODES, Map.get(volume, :file_count, 0) || 0, Map.get(volume, :max_files))
         ]
 
       _ ->
         []
     end
+  end
+
+  # A capped volume reports its quota as `total`, so kubelet shows real
+  # remaining space (`available = total - used`). A thin volume has no
+  # ceiling, so `total = used` → `available = 0` rather than a misleading
+  # negative from the `total - used` arithmetic (#1476).
+  defp usage_entry(unit, used, nil) do
+    %VolumeUsage{available: 0, total: used, used: used, unit: unit}
+  end
+
+  defp usage_entry(unit, used, max) when is_integer(max) do
+    %VolumeUsage{available: max(max - used, 0), total: max, used: used, unit: unit}
   end
 
   defp core_call(module, function, args) do
