@@ -12,6 +12,12 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
   alias NeonFS.Core.Job.Runners.ReplicaRepair, as: Runner
   alias NeonFS.Core.ReplicaRepairScheduler
 
+  # The scheduler emits its telemetry after a GenServer round-trip plus
+  # (for membership events) a debounce/lookup, so a 1s `assert_receive`
+  # window flakes on a loaded CI runner (#1475). Wait generously — the
+  # events still arrive well under this when the box is idle.
+  @recv_timeout 5_000
+
   defmodule MockJobTracker do
     @moduledoc false
     use Agent
@@ -140,7 +146,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair, :tick], ^ref, %{},
                       %{volumes_checked: 2, jobs_queued: 2}},
-                     1_000
+                     @recv_timeout
 
       created = MockJobTracker.get_created()
       assert length(created) == 2
@@ -182,7 +188,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair, :tick], ^ref, %{},
                       %{volumes_checked: 1, jobs_queued: 0}},
-                     1_000
+                     @recv_timeout
 
       assert MockJobTracker.get_created() == []
     end
@@ -216,7 +222,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair_scheduler, :skipped], ^ref, %{},
                       %{reason: :already_running, volume_id: "v1"}},
-                     1_000
+                     @recv_timeout
 
       assert MockJobTracker.get_created() == []
     end
@@ -350,11 +356,11 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
       # Two `:triggered` events expected — one per volume.
       assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
                       %{volume_id: _}},
-                     1_000
+                     @recv_timeout
 
       assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
                       %{volume_id: _}},
-                     1_000
+                     @recv_timeout
     end
 
     test "ignores deregister events for non-core services (e.g. :nfs)" do
@@ -416,7 +422,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair_scheduler, :maintenance_suppressed], ^ref, %{},
                       %{node: :n2@host}},
-                     1_000
+                     @recv_timeout
 
       refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
     end
@@ -453,7 +459,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
                       %{volume_id: _}},
-                     1_000
+                     @recv_timeout
     end
 
     test "suppresses the repair trigger cluster-wide while `:recovering` (#1436)" do
@@ -487,7 +493,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair_scheduler, :recovering_suppressed], ^ref, %{},
                       %{node: :n2@host}},
-                     1_000
+                     @recv_timeout
 
       refute_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, _, _}, 200
     end
@@ -519,7 +525,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair_scheduler, :triggered], ^ref, %{},
                       %{volume_id: _}},
-                     1_000
+                     @recv_timeout
     end
 
     test "rate-limits repeated membership events within the configured window" do
@@ -557,7 +563,7 @@ defmodule NeonFS.Core.ReplicaRepairSchedulerTest do
 
       assert_receive {[:neonfs, :replica_repair_scheduler, :membership_rate_limited], ^ref, %{},
                       %{}},
-                     1_000
+                     @recv_timeout
     end
   end
 
