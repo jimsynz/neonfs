@@ -543,6 +543,11 @@ pub struct VolumeInfo {
     pub logical_size: u64,
     pub physical_size: u64,
     pub chunk_count: u64,
+    pub file_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_files: Option<u64>,
     pub durability_type: String,
     pub durability_factor: u64,
     pub encryption_mode: String,
@@ -596,6 +601,16 @@ impl VolumeInfo {
             chunk_count: term_to_u64(map.get("chunk_count").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'chunk_count' field".to_string())
             })?)?,
+            // `file_count` is absent from older core nodes; default to 0.
+            file_count: map
+                .get("file_count")
+                .map(term_to_u64)
+                .transpose()?
+                .unwrap_or(0),
+            // Quotas are omitted from the term when unlimited (nil), so an
+            // absent key decodes as `None` = no limit.
+            max_size: map.get("max_size").map(term_to_u64).transpose()?,
+            max_files: map.get("max_files").map(term_to_u64).transpose()?,
             durability_type: term_to_string(durability.get("type").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'type' field in durability".to_string())
             })?)?,
@@ -626,6 +641,15 @@ impl VolumeInfo {
         } else {
             format!("{} B", bytes)
         }
+    }
+
+    /// Format `used` against a quota `max` as a whole-number percentage.
+    pub fn usage_percent(used: u64, max: u64) -> String {
+        if max == 0 {
+            return "n/a".to_string();
+        }
+
+        format!("{:.0}%", (used as f64 / max as f64) * 100.0)
     }
 
     /// Format durability as string (e.g., "replicate:3")
@@ -1286,6 +1310,9 @@ mod tests {
             logical_size: 0,
             physical_size: 0,
             chunk_count: 0,
+            file_count: 0,
+            max_size: None,
+            max_files: None,
             durability_type: "replicate".to_string(),
             durability_factor: 3,
             encryption_mode: "none".to_string(),

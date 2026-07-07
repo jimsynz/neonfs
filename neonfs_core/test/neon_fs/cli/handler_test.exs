@@ -581,6 +581,26 @@ defmodule NeonFS.CLI.HandlerTest do
       assert {:ok, found} = Handler.get_volume(vol.name)
       assert is_map(found)
     end
+
+    test "includes file_count and omits unlimited quotas", %{volume: vol} do
+      assert {:ok, found} = Handler.get_volume(vol.name)
+      assert found.file_count == 0
+      refute Map.has_key?(found, :max_size)
+      refute Map.has_key?(found, :max_files)
+    end
+
+    test "includes quota fields when the volume is capped" do
+      {:ok, vol} =
+        VolumeRegistry.create("quota-#{:rand.uniform(999_999)}",
+          max_size: 1000,
+          max_files: 5
+        )
+
+      assert {:ok, found} = Handler.get_volume(vol.name)
+      assert found.max_size == 1000
+      assert found.max_files == 5
+      assert found.file_count == 0
+    end
   end
 
   describe "delete_volume/1" do

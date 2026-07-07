@@ -36,7 +36,8 @@ defmodule NeonFS.Core.Telemetry do
       read_write_metrics() ++
       repair_metrics() ++
       replication_metrics() ++
-      storage_metrics()
+      storage_metrics() ++
+      volume_metrics()
   end
 
   # -- Cache metrics ----------------------------------------------------------
@@ -479,6 +480,35 @@ defmodule NeonFS.Core.Telemetry do
         event_name: [:neonfs, :tiering_manager, :evaluation],
         measurement: :demotions,
         description: "Demotions in latest tiering evaluation"
+      )
+    ]
+  end
+
+  defp volume_metrics do
+    [
+      last_value("neonfs.volume.logical_bytes",
+        event_name: [:neonfs, :volume, :usage],
+        measurement: :logical_bytes,
+        tags: [:volume_id, :name],
+        description: "Logical bytes stored in the volume"
+      ),
+      last_value("neonfs.volume.file_count",
+        event_name: [:neonfs, :volume, :usage],
+        measurement: :file_count,
+        tags: [:volume_id, :name],
+        description: "Number of files in the volume"
+      ),
+      last_value("neonfs.volume.max_bytes",
+        event_name: [:neonfs, :volume, :usage],
+        measurement: :max_bytes,
+        tags: [:volume_id, :name],
+        description: "Volume byte quota (0 = unlimited)"
+      ),
+      last_value("neonfs.volume.max_files",
+        event_name: [:neonfs, :volume, :usage],
+        measurement: :max_files,
+        tags: [:volume_id, :name],
+        description: "Volume file-count quota (0 = unlimited)"
       )
     ]
   end

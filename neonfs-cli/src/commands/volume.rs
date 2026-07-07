@@ -847,14 +847,23 @@ impl VolumeCommand {
                 let mut tbl = table::Table::new(vec![
                     "NAME".to_string(),
                     "SIZE".to_string(),
+                    "USAGE".to_string(),
+                    "FILES".to_string(),
                     "CHUNKS".to_string(),
                     "DURABILITY".to_string(),
                     "ENCRYPTION".to_string(),
                 ]);
                 for vol in &volumes {
+                    let usage = match vol.max_size {
+                        Some(max) => VolumeInfo::usage_percent(vol.logical_size, max),
+                        None => "-".to_string(),
+                    };
+
                     tbl.add_row(vec![
                         vol.name.clone(),
                         VolumeInfo::format_size(vol.logical_size),
+                        usage,
+                        vol.file_count.to_string(),
                         vol.chunk_count.to_string(),
                         vol.durability_string(),
                         vol.encryption_mode.clone(),
@@ -1629,11 +1638,32 @@ impl VolumeCommand {
                     "Logical Size".to_string(),
                     VolumeInfo::format_size(volume.logical_size),
                 ]);
+                if let Some(max) = volume.max_size {
+                    tbl.add_row(vec![
+                        "Size Quota".to_string(),
+                        format!(
+                            "{} ({} used)",
+                            VolumeInfo::format_size(max),
+                            VolumeInfo::usage_percent(volume.logical_size, max)
+                        ),
+                    ]);
+                }
                 tbl.add_row(vec![
                     "Physical Size".to_string(),
                     VolumeInfo::format_size(volume.physical_size),
                 ]);
                 tbl.add_row(vec!["Chunks".to_string(), volume.chunk_count.to_string()]);
+                tbl.add_row(vec!["Files".to_string(), volume.file_count.to_string()]);
+                if let Some(max) = volume.max_files {
+                    tbl.add_row(vec![
+                        "File Quota".to_string(),
+                        format!(
+                            "{} ({} used)",
+                            max,
+                            VolumeInfo::usage_percent(volume.file_count, max)
+                        ),
+                    ]);
+                }
                 tbl.add_row(vec!["Durability".to_string(), volume.durability_string()]);
                 tbl.add_row(vec![
                     "Encryption".to_string(),

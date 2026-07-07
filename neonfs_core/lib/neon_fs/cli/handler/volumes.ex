@@ -345,10 +345,19 @@ defmodule NeonFS.CLI.Handler.Volumes do
       logical_size: volume.logical_size,
       physical_size: volume.physical_size,
       chunk_count: volume.chunk_count,
+      file_count: volume.file_count,
       created_at: DateTime.to_iso8601(volume.created_at),
       updated_at: DateTime.to_iso8601(volume.updated_at)
     }
+    |> put_quota(:max_size, volume.max_size)
+    |> put_quota(:max_files, volume.max_files)
   end
+
+  # A `nil` quota (unlimited) is omitted rather than encoded as the atom
+  # `nil`, so the CLI decodes the key's absence as "no limit" without
+  # needing to special-case the ETF atom.
+  defp put_quota(map, _key, nil), do: map
+  defp put_quota(map, key, value), do: Map.put(map, key, value)
 
   defp parse_encryption_opt(opts) do
     case Keyword.get(opts, :encryption) do

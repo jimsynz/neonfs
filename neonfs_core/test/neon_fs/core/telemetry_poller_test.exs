@@ -17,6 +17,7 @@ defmodule NeonFS.Core.TelemetryPollerTest do
           [:neonfs, :cluster, :ra],
           [:neonfs, :storage, :drive_state],
           [:neonfs, :storage, :utilisation],
+          [:neonfs, :volume, :usage],
           [:neonfs, :worker, :queue_depth]
         ],
         fn event, measurements, metadata, pid ->
@@ -35,13 +36,15 @@ defmodule NeonFS.Core.TelemetryPollerTest do
           chunk_cache_mod: __MODULE__.MockChunkCache,
           ra_mod: __MODULE__.MockRa,
           ra_supervisor_mod: __MODULE__.MockRaSupervisor,
-          storage_metrics_mod: __MODULE__.MockStorageMetrics
+          storage_metrics_mod: __MODULE__.MockStorageMetrics,
+          volume_registry_mod: __MODULE__.MockVolumeRegistry
         ]
 
       TelemetryPoller.measure_storage(opts)
       TelemetryPoller.measure_cache(opts)
       TelemetryPoller.measure_cluster(opts)
       TelemetryPoller.measure_worker(opts)
+      TelemetryPoller.measure_volumes(opts)
 
       events = drain_events([])
 
@@ -64,6 +67,16 @@ defmodule NeonFS.Core.TelemetryPollerTest do
       assert event_emitted?(events, [:neonfs, :worker, :queue_depth], &(&1.count == 1))
       assert event_emitted?(events, [:neonfs, :worker, :queue_depth], &(&1.count == 2))
       assert event_emitted?(events, [:neonfs, :worker, :queue_depth], &(&1.count == 3))
+
+      assert event_emitted?(events, [:neonfs, :volume, :usage], fn measurements ->
+               measurements.logical_bytes == 500 and measurements.file_count == 3 and
+                 measurements.max_bytes == 1000 and measurements.max_files == 10
+             end)
+
+      # An unlimited volume reports quota 0.
+      assert event_emitted?(events, [:neonfs, :volume, :usage], fn measurements ->
+               measurements.max_bytes == 0 and measurements.max_files == 0
+             end)
     end
 
     test "survives when queried subsystem is down" do
@@ -154,6 +167,29 @@ defmodule NeonFS.Core.TelemetryPollerTest do
           }
         ]
       }
+    end
+  end
+
+  defmodule MockVolumeRegistry do
+    def list do
+      [
+        %{
+          id: "v1",
+          name: "capped",
+          logical_size: 500,
+          file_count: 3,
+          max_size: 1000,
+          max_files: 10
+        },
+        %{
+          id: "v2",
+          name: "unlimited",
+          logical_size: 42,
+          file_count: 1,
+          max_size: nil,
+          max_files: nil
+        }
+      ]
     end
   end
 

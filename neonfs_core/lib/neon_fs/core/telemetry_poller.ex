@@ -22,7 +22,8 @@ defmodule NeonFS.Core.TelemetryPoller do
         :ra_mod,
         :ra_supervisor_mod,
         :storage_metrics_mod,
-        :telemetry_mod
+        :telemetry_mod,
+        :volume_registry_mod
       ])
 
     Application.put_env(:neonfs_core, :telemetry_poller_runtime_opts, runtime_opts)
@@ -148,6 +149,33 @@ defmodule NeonFS.Core.TelemetryPoller do
     end)
   end
 
+  @doc false
+  @spec measure_volumes() :: :ok
+  def measure_volumes, do: measure_volumes(runtime_opts())
+
+  @spec measure_volumes(keyword()) :: :ok
+  def measure_volumes(opts) do
+    with_measurement(fn ->
+      volume_registry_mod = Keyword.get(opts, :volume_registry_mod, NeonFS.Core.VolumeRegistry)
+      telemetry_mod = Keyword.get(opts, :telemetry_mod, :telemetry)
+
+      Enum.each(volume_registry_mod.list(), fn volume ->
+        telemetry_mod.execute(
+          [:neonfs, :volume, :usage],
+          %{
+            logical_bytes: volume.logical_size,
+            file_count: volume.file_count,
+            # A `nil` cap (unlimited) reports 0 — quotas validate as
+            # positive, so 0 unambiguously means "no limit".
+            max_bytes: volume.max_size || 0,
+            max_files: volume.max_files || 0
+          },
+          %{volume_id: volume.id, name: volume.name}
+        )
+      end)
+    end)
+  end
+
   defp cache_entry_count(chunk_cache_mod) do
     if function_exported?(chunk_cache_mod, :entry_count, 0) do
       chunk_cache_mod.entry_count()
@@ -171,7 +199,8 @@ defmodule NeonFS.Core.TelemetryPoller do
       {__MODULE__, :measure_storage, []},
       {__MODULE__, :measure_cache, []},
       {__MODULE__, :measure_cluster, []},
-      {__MODULE__, :measure_worker, []}
+      {__MODULE__, :measure_worker, []},
+      {__MODULE__, :measure_volumes, []}
     ]
   end
 
