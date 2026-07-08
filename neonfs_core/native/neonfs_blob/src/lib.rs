@@ -55,28 +55,42 @@ fn blob_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// The value produced by an async blob read, encoded into the completion
-/// message as the `:ok` payload.
-enum ReadReply {
+/// The `:ok` payload of an async blob NIF completion, built in the reply env.
+/// One variant per reply shape across the async blob NIFs (#1484/#1485).
+enum BlobReply {
+    /// `{:ok, {}}` — an operation with no return value (e.g. plain write).
+    Unit,
+    /// `{:ok, binary}` — chunk data.
     Data(Vec<u8>),
-    Exists(bool),
+    /// `{:ok, boolean}` — an existence check.
+    Bool(bool),
+    /// `{:ok, integer}` — a byte count (chunk size, bytes freed).
     Size(u64),
+    /// `{:ok, {original_size, stored_size, compression, encryption_algorithm,
+    /// nonce}}` — the codec metadata returned by a compressed/encrypted write.
+    WriteInfo {
+        original_size: usize,
+        stored_size: usize,
+        compression: String,
+        encryption_algorithm: String,
+        nonce: Vec<u8>,
+    },
 }
 
-/// Submits a blocking blob-store read to the tokio blocking pool and delivers
-/// its result to the calling process as a `{request_ref, {:ok, value}}` or
-/// `{request_ref, {:error, reason}}` message. `request_ref` is the caller's own
-/// `make_ref/0`, echoed back so the caller's selective `receive` matches only
-/// its reply — and, being created immediately before the `receive`, lets the
-/// BEAM skip the process mailbox backlog (important because every chunk read
-/// runs inside the single `BlobStore` GenServer).
+/// Submits a blocking blob-store operation to the tokio blocking pool and
+/// delivers its result to the calling process as a `{request_ref, {:ok, value}}`
+/// or `{request_ref, {:error, reason}}` message. `request_ref` is the caller's
+/// own `make_ref/0`, echoed back so the caller's selective `receive` matches
+/// only its reply — and, being created immediately before the `receive`, lets
+/// the BEAM skip the process mailbox backlog (important because blob ops run
+/// inside the single `BlobStore` GenServer).
 ///
 /// The submit NIF returns immediately, freeing its scheduler. `catch_unwind`
 /// guarantees a completion is always sent even if `work` panics, so the
 /// caller's `receive` can never hang.
-fn submit_read<'a, F>(store: Arc<BlobStore>, env: Env<'a>, request_ref: Term<'a>, work: F) -> Atom
+fn submit_blob<'a, F>(store: Arc<BlobStore>, env: Env<'a>, request_ref: Term<'a>, work: F) -> Atom
 where
-    F: FnOnce(&BlobStore) -> Result<ReadReply, String> + Send + 'static,
+    F: FnOnce(&BlobStore) -> Result<BlobReply, String> + Send + 'static,
 {
     let pid = env.pid();
     let reply_env = OwnedEnv::new();
@@ -84,33 +98,54 @@ where
 
     blob_runtime().spawn_blocking(move || {
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| work(&store)))
-            .unwrap_or_else(|_| Err("blob read task panicked".to_string()));
+            .unwrap_or_else(|_| Err("blob task panicked".to_string()));
 
         let mut reply_env = reply_env;
         let _ = reply_env.send_and_clear(&pid, |env| {
-            encode_read_reply(env, saved_ref.load(env), result)
+            encode_blob_reply(env, saved_ref.load(env), result)
         });
     });
 
     rustler::types::atom::ok()
 }
 
-fn encode_read_reply<'a>(
+fn encode_blob_reply<'a>(
     env: Env<'a>,
     request_ref: Term<'a>,
-    result: Result<ReadReply, String>,
+    result: Result<BlobReply, String>,
 ) -> Term<'a> {
+    let ok = rustler::types::atom::ok();
     match result {
-        Ok(ReadReply::Data(data)) => {
+        Ok(BlobReply::Unit) => (request_ref, (ok, ())).encode(env),
+        Ok(BlobReply::Data(data)) => {
             let mut binary = NewBinary::new(env, data.len());
             binary.copy_from_slice(&data);
             let binary: Binary = binary.into();
-            (request_ref, (rustler::types::atom::ok(), binary)).encode(env)
+            (request_ref, (ok, binary)).encode(env)
         }
-        Ok(ReadReply::Exists(exists)) => {
-            (request_ref, (rustler::types::atom::ok(), exists)).encode(env)
+        Ok(BlobReply::Bool(value)) => (request_ref, (ok, value)).encode(env),
+        Ok(BlobReply::Size(value)) => (request_ref, (ok, value)).encode(env),
+        Ok(BlobReply::WriteInfo {
+            original_size,
+            stored_size,
+            compression,
+            encryption_algorithm,
+            nonce,
+        }) => {
+            let mut nonce_binary = NewBinary::new(env, nonce.len());
+            if !nonce.is_empty() {
+                nonce_binary.copy_from_slice(&nonce);
+            }
+            let nonce_binary: Binary = nonce_binary.into();
+            let info = (
+                original_size,
+                stored_size,
+                compression,
+                encryption_algorithm,
+                nonce_binary,
+            );
+            (request_ref, (ok, info)).encode(env)
         }
-        Ok(ReadReply::Size(size)) => (request_ref, (rustler::types::atom::ok(), size)).encode(env),
         Err(reason) => (request_ref, (rustler::types::atom::error(), reason)).encode(env),
     }
 }
@@ -204,21 +239,31 @@ fn store_mark_clean(store: ResourceArc<BlobStoreResource>, node_id: String) -> R
 /// * `tier` - Storage tier ("hot", "warm", or "cold").
 ///
 /// # Returns
-/// `:ok` on success, or an error tuple.
-#[rustler::nif(schedule = "DirtyIo")]
-fn store_write_chunk(
+/// `:ok`; the outcome arrives as a
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1485).
+///
+/// `data` is a single chunk (bounded by the volume's chunk size), copied into
+/// an owned buffer for the blocking task — the working set never scales with
+/// file size.
+#[rustler::nif]
+fn store_write_chunk_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    hash_bytes: Binary,
-    data: Binary,
+    request_ref: Term<'a>,
+    hash_bytes: Binary<'a>,
+    data: Binary<'a>,
     tier: String,
-) -> Result<(), String> {
-    let hash = parse_hash(&hash_bytes)?;
-    let tier = parse_tier(&tier)?;
-
-    let store = &store.store;
-    store
-        .write_chunk(&hash, data.as_slice(), tier)
-        .map_err(|e| e.to_string())
+) -> Atom {
+    let hash_bytes = hash_bytes.as_slice().to_vec();
+    let data = data.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let hash = hash_from_bytes(&hash_bytes)?;
+        let tier = parse_tier(&tier)?;
+        store
+            .write_chunk(&hash, &data, tier)
+            .map(|()| BlobReply::Unit)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Writes a chunk to the blob store with optional compression and encryption.
@@ -229,61 +274,57 @@ fn store_write_chunk(
 /// * `hash` - 32-byte binary hash of the original (uncompressed) chunk data.
 /// * `data` - Binary data to write.
 /// * `tier` - Storage tier ("hot", "warm", or "cold").
-/// * `compression` - Compression type: "none" or "zstd".
-/// * `compression_level` - Compression level (1-19, used for zstd only).
-/// * `key_binary` - 32-byte AES-256 key, or empty binary for no encryption.
-/// * `nonce_binary` - 12-byte nonce, or empty binary for no encryption.
+/// * `codec` - `(compression, compression_level, key, nonce)` locator, as on
+///   the read path; empty key/nonce mean no encryption.
 ///
 /// # Returns
-/// A tuple of (original_size, stored_size, compression, encryption_algorithm, nonce).
-#[rustler::nif(schedule = "DirtyIo")]
-#[allow(clippy::too_many_arguments)]
-fn store_write_chunk_compressed<'a>(
+/// `:ok`; the codec metadata arrives as a `{request_ref, {:ok, {original_size,
+/// stored_size, compression, encryption_algorithm, nonce}} | {:error, reason}}`
+/// message. `data` is a single chunk, copied into an owned buffer for the
+/// blocking task — the working set never scales with file size.
+#[rustler::nif]
+fn store_write_chunk_compressed_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    hash_bytes: Binary,
-    data: Binary,
+    request_ref: Term<'a>,
+    hash_bytes: Binary<'a>,
+    data: Binary<'a>,
     tier: String,
-    compression: String,
-    compression_level: i32,
-    key_binary: Binary,
-    nonce_binary: Binary,
-) -> Result<(usize, usize, String, String, Binary<'a>), String> {
-    let hash = parse_hash(&hash_bytes)?;
-    let tier = parse_tier(&tier)?;
-    let compression = parse_compression(&compression, compression_level)?;
-    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
+    codec: CodecLocator<'a>,
+) -> Atom {
+    let hash_bytes = hash_bytes.as_slice().to_vec();
+    let data = data.as_slice().to_vec();
+    let (compression, compression_level, key_binary, nonce_binary) = codec;
+    let key_binary = key_binary.as_slice().to_vec();
+    let nonce_binary = nonce_binary.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let hash = hash_from_bytes(&hash_bytes)?;
+        let tier = parse_tier(&tier)?;
+        let compression = parse_compression(&compression, compression_level)?;
+        let encryption = encryption_from_bytes(&key_binary, &nonce_binary)?;
 
-    let options = WriteOptions {
-        compression: Some(compression),
-        encryption,
-    };
+        let options = WriteOptions {
+            compression: Some(compression),
+            encryption,
+        };
 
-    let store = &store.store;
-    let chunk_info = store
-        .write_chunk_with_options(&hash, data.as_slice(), tier, &options)
-        .map_err(|e| e.to_string())?;
+        let chunk_info = store
+            .write_chunk_with_options(&hash, &data, tier, &options)
+            .map_err(|e| e.to_string())?;
 
-    let compression_str = match chunk_info.compression {
-        Compression::None => "none".to_string(),
-        Compression::Zstd { level } => format!("zstd:{}", level),
-    };
+        let compression = match chunk_info.compression {
+            Compression::None => "none".to_string(),
+            Compression::Zstd { level } => format!("zstd:{}", level),
+        };
 
-    let encryption_algorithm = chunk_info.encryption_algorithm.unwrap_or_default();
-
-    let nonce_bytes = chunk_info.encryption_nonce.unwrap_or_default();
-    let mut nonce_out = NewBinary::new(env, nonce_bytes.len());
-    if !nonce_bytes.is_empty() {
-        nonce_out.copy_from_slice(&nonce_bytes);
-    }
-
-    Ok((
-        chunk_info.original_size,
-        chunk_info.stored_size,
-        compression_str,
-        encryption_algorithm,
-        nonce_out.into(),
-    ))
+        Ok(BlobReply::WriteInfo {
+            original_size: chunk_info.original_size,
+            stored_size: chunk_info.stored_size,
+            compression,
+            encryption_algorithm: chunk_info.encryption_algorithm.unwrap_or_default(),
+            nonce: chunk_info.encryption_nonce.unwrap_or_default(),
+        })
+    })
 }
 
 /// Reads a chunk from the blob store without verification or decompression.
@@ -306,12 +347,12 @@ fn store_read_chunk_submit<'a>(
     tier: String,
 ) -> Atom {
     let hash_bytes = hash_bytes.as_slice().to_vec();
-    submit_read(store.store.clone(), env, request_ref, move |store| {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
         let hash = hash_from_bytes(&hash_bytes)?;
         let tier = parse_tier(&tier)?;
         store
             .read_chunk(&hash, tier)
-            .map(ReadReply::Data)
+            .map(BlobReply::Data)
             .map_err(|e| e.to_string())
     })
 }
@@ -339,7 +380,7 @@ fn store_read_chunk_verified_submit<'a>(
     verify: bool,
 ) -> Atom {
     let hash_bytes = hash_bytes.as_slice().to_vec();
-    submit_read(store.store.clone(), env, request_ref, move |store| {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
         let hash = hash_from_bytes(&hash_bytes)?;
         let tier = parse_tier(&tier)?;
 
@@ -352,7 +393,7 @@ fn store_read_chunk_verified_submit<'a>(
 
         store
             .read_chunk_with_options(&hash, tier, &options)
-            .map(ReadReply::Data)
+            .map(BlobReply::Data)
             .map_err(|e| e.to_string())
     })
 }
@@ -395,7 +436,7 @@ fn store_read_chunk_with_options_submit<'a>(
     let (compression, compression_level, key, nonce) = codec;
     let key = key.as_slice().to_vec();
     let nonce = nonce.as_slice().to_vec();
-    submit_read(store.store.clone(), env, request_ref, move |store| {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
         let hash = hash_from_bytes(&hash_bytes)?;
         let tier = parse_tier(&tier)?;
         let compression = parse_optional_compression(&compression, compression_level)?;
@@ -410,7 +451,7 @@ fn store_read_chunk_with_options_submit<'a>(
 
         store
             .read_chunk_with_options(&hash, tier, &options)
-            .map(ReadReply::Data)
+            .map(BlobReply::Data)
             .map_err(|e| e.to_string())
     })
 }
@@ -423,46 +464,60 @@ fn store_read_chunk_with_options_submit<'a>(
 /// * `tier` - Storage tier ("hot", "warm", or "cold").
 ///
 /// # Returns
-/// `{:ok, bytes_freed}` on success, or an error tuple.
+/// `:ok`; the bytes freed arrive as a
+/// `{request_ref, {:ok, bytes_freed} | {:error, reason}}` message (#1485).
 #[allow(clippy::too_many_arguments)]
-#[rustler::nif(schedule = "DirtyIo")]
-fn store_delete_chunk(
+#[rustler::nif]
+fn store_delete_chunk_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    hash_bytes: Binary,
+    request_ref: Term<'a>,
+    hash_bytes: Binary<'a>,
     tier: String,
     compression: String,
     compression_level: i32,
-    key_binary: Binary,
-    nonce_binary: Binary,
-) -> Result<u64, String> {
-    let hash = parse_hash(&hash_bytes)?;
-    let tier = parse_tier(&tier)?;
-    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
-    let compression = parse_optional_compression(&compression, compression_level)?;
+    key_binary: Binary<'a>,
+    nonce_binary: Binary<'a>,
+) -> Atom {
+    let hash_bytes = hash_bytes.as_slice().to_vec();
+    let key_binary = key_binary.as_slice().to_vec();
+    let nonce_binary = nonce_binary.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let hash = hash_from_bytes(&hash_bytes)?;
+        let tier = parse_tier(&tier)?;
+        let encryption = encryption_from_bytes(&key_binary, &nonce_binary)?;
+        let compression = parse_optional_compression(&compression, compression_level)?;
 
-    let store = &store.store;
-    store
-        .delete_chunk(&hash, tier, compression.as_ref(), encryption.as_ref())
-        .map_err(|e| e.to_string())
+        store
+            .delete_chunk(&hash, tier, compression.as_ref(), encryption.as_ref())
+            .map(BlobReply::Size)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Deletes every codec variant of a chunk at a tier.
 ///
 /// Intended for orphan cleanup paths that don't track codec settings.
-/// Returns the total bytes freed across all variants.
-#[rustler::nif(schedule = "DirtyIo")]
-fn store_delete_chunk_any_codec(
+///
+/// Returns `:ok`; the total bytes freed across all variants arrive as a
+/// `{request_ref, {:ok, bytes_freed} | {:error, reason}}` message.
+#[rustler::nif]
+fn store_delete_chunk_any_codec_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    hash_bytes: Binary,
+    request_ref: Term<'a>,
+    hash_bytes: Binary<'a>,
     tier: String,
-) -> Result<u64, String> {
-    let hash = parse_hash(&hash_bytes)?;
-    let tier = parse_tier(&tier)?;
-
-    let store = &store.store;
-    store
-        .delete_chunk_any_codec(&hash, tier)
-        .map_err(|e| e.to_string())
+) -> Atom {
+    let hash_bytes = hash_bytes.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let hash = hash_from_bytes(&hash_bytes)?;
+        let tier = parse_tier(&tier)?;
+        store
+            .delete_chunk_any_codec(&hash, tier)
+            .map(BlobReply::Size)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Checks if a specific codec variant of a chunk exists in the blob store.
@@ -485,13 +540,13 @@ fn store_chunk_exists_submit<'a>(
     let hash_bytes = hash_bytes.as_slice().to_vec();
     let key_binary = key_binary.as_slice().to_vec();
     let nonce_binary = nonce_binary.as_slice().to_vec();
-    submit_read(store.store.clone(), env, request_ref, move |store| {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
         let hash = hash_from_bytes(&hash_bytes)?;
         let tier = parse_tier(&tier)?;
         let encryption = encryption_from_bytes(&key_binary, &nonce_binary)?;
         let compression = parse_optional_compression(&compression, compression_level)?;
 
-        Ok(ReadReply::Exists(store.chunk_exists(
+        Ok(BlobReply::Bool(store.chunk_exists(
             &hash,
             tier,
             compression.as_ref(),
@@ -513,12 +568,12 @@ fn store_chunk_exists_any_codec_submit<'a>(
     tier: String,
 ) -> Atom {
     let hash_bytes = hash_bytes.as_slice().to_vec();
-    submit_read(store.store.clone(), env, request_ref, move |store| {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
         let hash = hash_from_bytes(&hash_bytes)?;
         let tier = parse_tier(&tier)?;
         store
             .chunk_exists_any_codec(&hash, tier)
-            .map(ReadReply::Exists)
+            .map(BlobReply::Bool)
             .map_err(|e| e.to_string())
     })
 }
@@ -538,12 +593,12 @@ fn store_chunk_any_codec_size_submit<'a>(
     tier: String,
 ) -> Atom {
     let hash_bytes = hash_bytes.as_slice().to_vec();
-    submit_read(store.store.clone(), env, request_ref, move |store| {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
         let hash = hash_from_bytes(&hash_bytes)?;
         let tier = parse_tier(&tier)?;
         store
             .chunk_any_codec_size(&hash, tier)
-            .map(|opt| ReadReply::Size(opt.unwrap_or(0)))
+            .map(|opt| BlobReply::Size(opt.unwrap_or(0)))
             .map_err(|e| e.to_string())
     })
 }
