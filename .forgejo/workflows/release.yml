@@ -11,6 +11,7 @@ jobs:
   # =========================================================================
   resolve-versions:
     runs-on: docker
+    timeout-minutes: 60
     container:
       image: harton.dev/james/workflows/ci-base:latest
     outputs:
@@ -32,6 +33,7 @@ jobs:
 
   containers-amd64:
     runs-on: amd64
+    timeout-minutes: 60
     container:
       image: docker:29-dind
       options: --privileged
@@ -80,6 +82,7 @@ jobs:
 
   containers-arm64:
     runs-on: arm64
+    timeout-minutes: 60
     container:
       image: docker:29-dind
       options: --privileged
@@ -128,6 +131,7 @@ jobs:
 
   containers-manifest:
     runs-on: amd64
+    timeout-minutes: 60
     needs: [containers-amd64, containers-arm64]
     container:
       image: docker:29-dind
@@ -189,6 +193,7 @@ jobs:
   debs-amd64:
     needs: resolve-versions
     runs-on: amd64
+    timeout-minutes: 60
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
@@ -297,6 +302,7 @@ jobs:
   debs-arm64:
     needs: resolve-versions
     runs-on: arm64
+    timeout-minutes: 60
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
@@ -404,6 +410,7 @@ jobs:
 
   debs-upload:
     runs-on: docker
+    timeout-minutes: 60
     needs: [debs-amd64, debs-arm64]
     container:
       image: harton.dev/james/workflows/ci-base:latest
@@ -433,6 +440,7 @@ jobs:
 
   forgejo-release:
     runs-on: docker
+    timeout-minutes: 60
     needs: [containers-manifest, debs-upload]
     container:
       image: harton.dev/james/workflows/ci-base:latest
