@@ -55,8 +55,16 @@ fn blob_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// A drive's clean/dirty classification, carried through the async reply so
+/// the `:clean | :dirty | :fresh` atom is built in the reply env (#1486).
+enum DriveMarker {
+    Clean,
+    Dirty,
+    Fresh,
+}
+
 /// The `:ok` payload of an async blob NIF completion, built in the reply env.
-/// One variant per reply shape across the async blob NIFs (#1484/#1485).
+/// One variant per reply shape across the async blob NIFs (#1484/#1485/#1486).
 enum BlobReply {
     /// `{:ok, {}}` — an operation with no return value (e.g. plain write).
     Unit,
@@ -64,8 +72,12 @@ enum BlobReply {
     Data(Vec<u8>),
     /// `{:ok, boolean}` — an existence check.
     Bool(bool),
-    /// `{:ok, integer}` — a byte count (chunk size, bytes freed).
+    /// `{:ok, integer}` — a byte count (chunk size, bytes freed, stored size).
     Size(u64),
+    /// `{:ok, :clean | :dirty | :fresh}` — a drive open-marker classification.
+    Marker(DriveMarker),
+    /// `{:ok, {total, available, used}}` — filesystem capacity in bytes.
+    IntTriple(u64, u64, u64),
     /// `{:ok, {original_size, stored_size, compression, encryption_algorithm,
     /// nonce}}` — the codec metadata returned by a compressed/encrypted write.
     WriteInfo {
@@ -77,27 +89,27 @@ enum BlobReply {
     },
 }
 
-/// Submits a blocking blob-store operation to the tokio blocking pool and
-/// delivers its result to the calling process as a `{request_ref, {:ok, value}}`
-/// or `{request_ref, {:error, reason}}` message. `request_ref` is the caller's
-/// own `make_ref/0`, echoed back so the caller's selective `receive` matches
-/// only its reply — and, being created immediately before the `receive`, lets
-/// the BEAM skip the process mailbox backlog (important because blob ops run
-/// inside the single `BlobStore` GenServer).
+/// Runs `produce` on the tokio blocking pool and delivers its result to the
+/// calling process as a `{request_ref, {:ok, value}}` or `{request_ref,
+/// {:error, reason}}` message. `request_ref` is the caller's own `make_ref/0`,
+/// echoed back so the caller's selective `receive` matches only its reply —
+/// and, being created immediately before the `receive`, lets the BEAM skip the
+/// process mailbox backlog (important because blob ops run inside the single
+/// `BlobStore` GenServer).
 ///
 /// The submit NIF returns immediately, freeing its scheduler. `catch_unwind`
-/// guarantees a completion is always sent even if `work` panics, so the
+/// guarantees a completion is always sent even if `produce` panics, so the
 /// caller's `receive` can never hang.
-fn submit_blob<'a, F>(store: Arc<BlobStore>, env: Env<'a>, request_ref: Term<'a>, work: F) -> Atom
+fn spawn_reply<F>(env: Env<'_>, request_ref: Term<'_>, produce: F) -> Atom
 where
-    F: FnOnce(&BlobStore) -> Result<BlobReply, String> + Send + 'static,
+    F: FnOnce() -> Result<BlobReply, String> + Send + 'static,
 {
     let pid = env.pid();
     let reply_env = OwnedEnv::new();
     let saved_ref = reply_env.save(request_ref);
 
     blob_runtime().spawn_blocking(move || {
-        let result = std::panic::catch_unwind(AssertUnwindSafe(|| work(&store)))
+        let result = std::panic::catch_unwind(AssertUnwindSafe(produce))
             .unwrap_or_else(|_| Err("blob task panicked".to_string()));
 
         let mut reply_env = reply_env;
@@ -107,6 +119,16 @@ where
     });
 
     rustler::types::atom::ok()
+}
+
+/// Convenience wrapper over [`spawn_reply`] for the store-backed NIFs: hands the
+/// blocking `work` a shared `&BlobStore` that outlives the caller's resource
+/// reference.
+fn submit_blob<F>(store: Arc<BlobStore>, env: Env<'_>, request_ref: Term<'_>, work: F) -> Atom
+where
+    F: FnOnce(&BlobStore) -> Result<BlobReply, String> + Send + 'static,
+{
+    spawn_reply(env, request_ref, move || work(&store))
 }
 
 fn encode_blob_reply<'a>(
@@ -125,6 +147,15 @@ fn encode_blob_reply<'a>(
         }
         Ok(BlobReply::Bool(value)) => (request_ref, (ok, value)).encode(env),
         Ok(BlobReply::Size(value)) => (request_ref, (ok, value)).encode(env),
+        Ok(BlobReply::Marker(marker)) => {
+            let marker = match marker {
+                DriveMarker::Clean => marker_atoms::clean(),
+                DriveMarker::Dirty => marker_atoms::dirty(),
+                DriveMarker::Fresh => marker_atoms::fresh(),
+            };
+            (request_ref, (ok, marker)).encode(env)
+        }
+        Ok(BlobReply::IntTriple(a, b, c)) => (request_ref, (ok, (a, b, c))).encode(env),
         Ok(BlobReply::WriteInfo {
             original_size,
             stored_size,
@@ -203,31 +234,46 @@ fn store_open(
 /// durably. Call once after `store_open`, before serving the drive.
 ///
 /// # Returns
-/// `{:ok, :clean | :dirty | :fresh}`, or an error tuple.
-#[rustler::nif(schedule = "DirtyIo")]
-fn store_open_marker(
+/// `:ok`; the classification arrives as a
+/// `{request_ref, {:ok, :clean | :dirty | :fresh} | {:error, reason}}` message.
+#[rustler::nif]
+fn store_open_marker_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
+    request_ref: Term<'a>,
     node_id: String,
-) -> Result<Atom, String> {
-    let store = &store.store;
-
-    match store.open_marker(&node_id) {
-        Ok(DriveOpenState::Clean) => Ok(marker_atoms::clean()),
-        Ok(DriveOpenState::Dirty) => Ok(marker_atoms::dirty()),
-        Ok(DriveOpenState::Fresh) => Ok(marker_atoms::fresh()),
-        Err(e) => Err(e.to_string()),
-    }
+) -> Atom {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        store
+            .open_marker(&node_id)
+            .map(|state| match state {
+                DriveOpenState::Clean => BlobReply::Marker(DriveMarker::Clean),
+                DriveOpenState::Dirty => BlobReply::Marker(DriveMarker::Dirty),
+                DriveOpenState::Fresh => BlobReply::Marker(DriveMarker::Fresh),
+            })
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Rewrites a drive's marker `clean` (#1425). Call on graceful shutdown
 /// so the next `store_open_marker` reports the drive clean.
 ///
 /// # Returns
-/// `:ok` on success, or an error tuple.
-#[rustler::nif(schedule = "DirtyIo")]
-fn store_mark_clean(store: ResourceArc<BlobStoreResource>, node_id: String) -> Result<(), String> {
-    let store = &store.store;
-    store.mark_clean(&node_id).map_err(|e| e.to_string())
+/// `:ok`; the outcome arrives as a
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message.
+#[rustler::nif]
+fn store_mark_clean_submit<'a>(
+    env: Env<'a>,
+    store: ResourceArc<BlobStoreResource>,
+    request_ref: Term<'a>,
+    node_id: String,
+) -> Atom {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        store
+            .mark_clean(&node_id)
+            .map(|()| BlobReply::Unit)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Writes a chunk to the blob store without compression.
@@ -614,30 +660,38 @@ fn store_chunk_any_codec_size_submit<'a>(
 /// * `from_tier` - Source storage tier ("hot", "warm", or "cold").
 /// * `to_tier` - Destination storage tier ("hot", "warm", or "cold").
 ///
+/// * `codec` - `(compression, compression_level, key, nonce)` locator; empty
+///   key/nonce mean no encryption.
+///
 /// # Returns
-/// `:ok` on success, or an error tuple.
-#[allow(clippy::too_many_arguments)]
-#[rustler::nif(schedule = "DirtyIo")]
-fn store_migrate_chunk(
+/// `:ok`; the outcome arrives as a
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1486).
+#[rustler::nif]
+fn store_migrate_chunk_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    hash_bytes: Binary,
+    request_ref: Term<'a>,
+    hash_bytes: Binary<'a>,
     from_tier: String,
     to_tier: String,
-    compression: String,
-    compression_level: i32,
-    key_binary: Binary,
-    nonce_binary: Binary,
-) -> Result<(), String> {
-    let hash = parse_hash(&hash_bytes)?;
-    let from = parse_tier(&from_tier)?;
-    let to = parse_tier(&to_tier)?;
-    let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
-    let compression = parse_optional_compression(&compression, compression_level)?;
+    codec: CodecLocator<'a>,
+) -> Atom {
+    let hash_bytes = hash_bytes.as_slice().to_vec();
+    let (compression, compression_level, key, nonce) = codec;
+    let key = key.as_slice().to_vec();
+    let nonce = nonce.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let hash = hash_from_bytes(&hash_bytes)?;
+        let from = parse_tier(&from_tier)?;
+        let to = parse_tier(&to_tier)?;
+        let encryption = encryption_from_bytes(&key, &nonce)?;
+        let compression = parse_optional_compression(&compression, compression_level)?;
 
-    let store = &store.store;
-    store
-        .migrate_chunk(&hash, from, to, compression.as_ref(), encryption.as_ref())
-        .map_err(|e| e.to_string())
+        store
+            .migrate_chunk(&hash, from, to, compression.as_ref(), encryption.as_ref())
+            .map(|()| BlobReply::Unit)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Re-encrypts a chunk in place: decrypts with old key/nonce, re-encrypts
@@ -653,28 +707,38 @@ fn store_migrate_chunk(
 /// * `new_nonce` - 12-byte nonce for new encryption.
 ///
 /// # Returns
-/// The stored size of the re-encrypted chunk, or an error tuple.
-#[rustler::nif(schedule = "DirtyIo")]
-fn store_reencrypt_chunk(
+/// `:ok`; the stored size of the re-encrypted chunk arrives as a
+/// `{request_ref, {:ok, size} | {:error, reason}}` message (#1486).
+#[allow(clippy::too_many_arguments)]
+#[rustler::nif]
+fn store_reencrypt_chunk_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    hash_bytes: Binary,
+    request_ref: Term<'a>,
+    hash_bytes: Binary<'a>,
     tier: String,
     compression: (String, i32),
-    old_enc: (Binary, Binary),
-    new_enc: (Binary, Binary),
-) -> Result<usize, String> {
-    let hash = parse_hash(&hash_bytes)?;
-    let tier = parse_tier(&tier)?;
+    old_enc: (Binary<'a>, Binary<'a>),
+    new_enc: (Binary<'a>, Binary<'a>),
+) -> Atom {
+    let hash_bytes = hash_bytes.as_slice().to_vec();
     let (comp_str, comp_level) = compression;
-    let compression = parse_optional_compression(&comp_str, comp_level)?;
+    let old_key = old_enc.0.as_slice().to_vec();
+    let old_nonce = old_enc.1.as_slice().to_vec();
+    let new_key = new_enc.0.as_slice().to_vec();
+    let new_nonce = new_enc.1.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let hash = hash_from_bytes(&hash_bytes)?;
+        let tier = parse_tier(&tier)?;
+        let compression = parse_optional_compression(&comp_str, comp_level)?;
+        let old_params = required_encryption_from_bytes(&old_key, &old_nonce)?;
+        let new_params = required_encryption_from_bytes(&new_key, &new_nonce)?;
 
-    let old_params = parse_required_encryption_params(&old_enc.0, &old_enc.1)?;
-    let new_params = parse_required_encryption_params(&new_enc.0, &new_enc.1)?;
-
-    let store = &store.store;
-    store
-        .reencrypt_chunk(&hash, tier, compression.as_ref(), &old_params, &new_params)
-        .map_err(|e| e.to_string())
+        store
+            .reencrypt_chunk(&hash, tier, compression.as_ref(), &old_params, &new_params)
+            .map(|size| BlobReply::Size(size as u64))
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Parses a 32-byte binary into a Hash.
@@ -737,15 +801,6 @@ fn parse_optional_compression(
     }
 }
 
-/// Parses optional encryption parameters from key and nonce binaries.
-/// Empty binaries mean no encryption. Returns None for no encryption.
-fn parse_encryption_params(
-    key_binary: &Binary,
-    nonce_binary: &Binary,
-) -> Result<Option<EncryptionParams>, String> {
-    encryption_from_bytes(key_binary.as_slice(), nonce_binary.as_slice())
-}
-
 /// Slice-based encryption-param parse, callable from an async blob task where
 /// the caller's key/nonce `Binary`s have been copied into owned buffers.
 /// Empty key and nonce mean no encryption.
@@ -758,12 +813,11 @@ fn encryption_from_bytes(key: &[u8], nonce: &[u8]) -> Result<Option<EncryptionPa
         .map_err(|e| e.to_string())
 }
 
-/// Parses required encryption parameters (non-empty key and nonce).
-fn parse_required_encryption_params(
-    key_binary: &Binary,
-    nonce_binary: &Binary,
-) -> Result<EncryptionParams, String> {
-    EncryptionParams::new(key_binary.as_slice(), nonce_binary.as_slice()).map_err(|e| e.to_string())
+/// Slice-based required-encryption parse (non-empty key and nonce), callable
+/// from an async blob task where the key/nonce have been copied into owned
+/// buffers (#1486).
+fn required_encryption_from_bytes(key: &[u8], nonce: &[u8]) -> Result<EncryptionParams, String> {
+    EncryptionParams::new(key, nonce).map_err(|e| e.to_string())
 }
 
 /// Chunk result as returned to Elixir.
@@ -1097,42 +1151,57 @@ fn metadata_list_segment<'a>(
 /// Uses `statvfs()` to query the filesystem containing `path`.
 ///
 /// # Returns
-/// A tuple of `(total_bytes, available_bytes, used_bytes)`.
-#[rustler::nif(schedule = "DirtyIo")]
-fn filesystem_info(path: String) -> Result<(u64, u64, u64), String> {
-    use std::ffi::CString;
-    use std::mem::MaybeUninit;
+/// `:ok`; the capacity arrives as a `{request_ref, {:ok, {total_bytes,
+/// available_bytes, used_bytes}} | {:error, reason}}` message (#1486).
+#[rustler::nif]
+fn filesystem_info_submit<'a>(env: Env<'a>, request_ref: Term<'a>, path: String) -> Atom {
+    spawn_reply(env, request_ref, move || {
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
 
-    let c_path = CString::new(path.as_bytes()).map_err(|e| e.to_string())?;
+        let c_path = CString::new(path.as_bytes()).map_err(|e| e.to_string())?;
 
-    let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+        let mut stat = MaybeUninit::<libc::statvfs>::uninit();
 
-    let result = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+        let result = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
 
-    if result != 0 {
-        let errno = std::io::Error::last_os_error();
-        return Err(format!("statvfs failed for '{}': {}", path, errno));
-    }
+        if result != 0 {
+            let errno = std::io::Error::last_os_error();
+            return Err(format!("statvfs failed for '{}': {}", path, errno));
+        }
 
-    let stat = unsafe { stat.assume_init() };
+        let stat = unsafe { stat.assume_init() };
 
-    let block_size = stat.f_frsize;
-    let total_bytes = stat.f_blocks * block_size;
-    let available_bytes = stat.f_bavail * block_size;
-    let used_bytes = total_bytes.saturating_sub(stat.f_bfree * block_size);
+        let block_size = stat.f_frsize;
+        let total_bytes = stat.f_blocks * block_size;
+        let available_bytes = stat.f_bavail * block_size;
+        let used_bytes = total_bytes.saturating_sub(stat.f_bfree * block_size);
 
-    Ok((total_bytes, available_bytes, used_bytes))
+        Ok(BlobReply::IntTriple(
+            total_bytes,
+            available_bytes,
+            used_bytes,
+        ))
+    })
 }
 
 /// Open `path` (a directory) and fsync it so directory-entry changes —
 /// such as a rename into it — are durable. The BEAM's `:file.open/2`
 /// refuses directories with `:eisdir`, so callers that need to flush a
 /// directory after an atomic rename route through this NIF.
-#[rustler::nif(schedule = "DirtyIo")]
-fn fsync_dir(path: String) -> Result<(), String> {
-    let dir = std::fs::File::open(&path).map_err(|e| format!("open '{}' failed: {}", path, e))?;
-    dir.sync_all()
-        .map_err(|e| format!("fsync '{}' failed: {}", path, e))
+///
+/// # Returns
+/// `:ok`; the outcome arrives as a
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1486).
+#[rustler::nif]
+fn fsync_dir_submit<'a>(env: Env<'a>, request_ref: Term<'a>, path: String) -> Atom {
+    spawn_reply(env, request_ref, move || {
+        let dir =
+            std::fs::File::open(&path).map_err(|e| format!("open '{}' failed: {}", path, e))?;
+        dir.sync_all()
+            .map(|()| BlobReply::Unit)
+            .map_err(|e| format!("fsync '{}' failed: {}", path, e))
+    })
 }
 
 /// Look up a key in an index tree (#781) backed by the volume's
