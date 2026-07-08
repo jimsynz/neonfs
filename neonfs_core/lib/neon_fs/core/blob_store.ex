@@ -764,8 +764,6 @@ defmodule NeonFS.Core.BlobStore do
       * `{:fixed, size}` - Split into fixed-size chunks
       * `{:fastcdc, avg_size}` - Use content-defined chunking
       * `:auto` - Automatically select based on data length
-    * `opts` - Optional keyword list:
-      * `:server` - GenServer name, defaults to `__MODULE__`
 
   ## Returns
 
@@ -773,16 +771,23 @@ defmodule NeonFS.Core.BlobStore do
       `{data, hash, offset, size}`
     * `{:error, reason}` - On failure
 
+  Chunking is a stateless `DirtyCpu` NIF, so it runs directly in the caller
+  process — it does not route through the `BlobStore` GenServer (#1491).
   """
-  @spec chunk_data(binary(), chunk_strategy, keyword()) ::
+  @spec chunk_data(binary(), chunk_strategy) ::
           {:ok, [chunk_result]} | {:error, String.t()}
         when chunk_strategy:
                :auto | {:single} | {:fixed, pos_integer()} | {:fastcdc, pos_integer()},
              chunk_result: {binary(), chunk_hash(), non_neg_integer(), non_neg_integer()}
-  def chunk_data(data, strategy, opts \\ []) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:chunk_data, data, strategy}, @default_call_timeout)
+  def chunk_data(data, strategy) do
+    {strategy_str, param} = chunk_strategy_args(data, strategy)
+    Native.chunk_data(data, strategy_str, param)
   end
+
+  defp chunk_strategy_args(data, :auto), do: Native.auto_chunk_strategy(byte_size(data))
+  defp chunk_strategy_args(_data, {:single}), do: {"single", 0}
+  defp chunk_strategy_args(_data, {:fixed, size}), do: {"fixed", size}
+  defp chunk_strategy_args(_data, {:fastcdc, avg_size}), do: {"fastcdc", avg_size}
 
   @typedoc """
   Opaque handle to an incremental chunker; pass it to `chunker_feed/2` and
@@ -1078,27 +1083,6 @@ defmodule NeonFS.Core.BlobStore do
         target_path = blob_target_path(target_drive.path, blob, state.prefix_depth)
         {:reply, do_migrate_blob_file(blob, target_path), state}
     end
-  end
-
-  @impl true
-  def handle_call({:chunk_data, data, strategy}, _from, state) do
-    {strategy_str, param} =
-      case strategy do
-        :auto ->
-          Native.auto_chunk_strategy(byte_size(data))
-
-        {:single} ->
-          {"single", 0}
-
-        {:fixed, size} ->
-          {"fixed", size}
-
-        {:fastcdc, avg_size} ->
-          {"fastcdc", avg_size}
-      end
-
-    result = Native.chunk_data(data, strategy_str, param)
-    {:reply, result, state}
   end
 
   ## Private: Store lookup
