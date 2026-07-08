@@ -341,11 +341,11 @@ defmodule NeonFS.Core.TierMigration do
   defp cleanup_delete_opts(volume_id, chunk_hash) do
     case ChunkIndex.lookup_by_hash(chunk_hash) do
       {:ok, chunk_meta} ->
-        BlobStore.codec_opts_for_chunk(chunk_meta)
+        BlobStore.Codec.opts_for_chunk(chunk_meta)
 
       :not_found ->
         case ChunkIndex.get(volume_id, chunk_hash) do
-          {:ok, chunk_meta} -> BlobStore.codec_opts_for_chunk(chunk_meta)
+          {:ok, chunk_meta} -> BlobStore.Codec.opts_for_chunk(chunk_meta)
           _ -> []
         end
     end

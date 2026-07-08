@@ -369,7 +369,7 @@ defmodule NeonFS.Core.GarbageCollector do
 
   defp delete_chunk_from_storage(%{locations: locations, hash: hash} = chunk_meta)
        when is_list(locations) and locations != [] do
-    delete_opts = BlobStore.codec_opts_for_chunk(chunk_meta)
+    delete_opts = BlobStore.Codec.opts_for_chunk(chunk_meta)
 
     results =
       Enum.map(locations, fn location ->
@@ -394,7 +394,7 @@ defmodule NeonFS.Core.GarbageCollector do
   end
 
   defp delete_chunk_from_storage(%{hash: hash} = chunk_meta) do
-    case delete_from_all_drives(hash, BlobStore.codec_opts_for_chunk(chunk_meta)) do
+    case delete_from_all_drives(hash, BlobStore.Codec.opts_for_chunk(chunk_meta)) do
       :ok ->
         :ok
 

@@ -275,7 +275,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
     ChunkIndex.update_locations(chunk.hash, updated_locations)
 
-    delete_opts = BlobStore.codec_opts_for_chunk(chunk)
+    delete_opts = BlobStore.Codec.opts_for_chunk(chunk)
 
     delete_result =
       if node == Node.self() do
