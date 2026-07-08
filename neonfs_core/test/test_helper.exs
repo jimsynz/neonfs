@@ -27,4 +27,7 @@ Mimic.copy(NeonFS.Core.VolumeRegistry)
 Mimic.copy(NeonFS.Core.Volume.MetadataReader)
 Mimic.copy(NeonFS.Core.RaSupervisor)
 
-ExUnit.start(capture_log: true)
+# Exclude `:benchmark` tests by default (e.g. #1481's blob-NIF throughput
+# baseline) — they print throughput numbers and take a while. Run one with
+# `mix test path/to/bench_test.exs --include benchmark`.
+ExUnit.start(capture_log: true, exclude: [:benchmark])
