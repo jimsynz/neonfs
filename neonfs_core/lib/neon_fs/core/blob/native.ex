@@ -149,7 +149,18 @@ defmodule NeonFS.Core.Blob.Native do
 
   """
   @spec store_read_chunk(store(), hash(), tier()) :: {:ok, binary()} | {:error, String.t()}
-  def store_read_chunk(_store, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
+  def store_read_chunk(store, hash, tier) do
+    ref = make_ref()
+    store_read_chunk_submit(store, ref, hash, tier)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_read_chunk_submit(store(), reference(), hash(), tier()) :: :ok
+  def store_read_chunk_submit(_store, _ref, _hash, _tier), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Reads a chunk from the blob store with optional verification.
@@ -181,7 +192,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec store_read_chunk_verified(store(), hash(), tier(), boolean()) ::
           {:ok, binary()} | {:error, String.t()}
-  def store_read_chunk_verified(_store, _hash, _tier, _verify),
+  def store_read_chunk_verified(store, hash, tier, verify) do
+    ref = make_ref()
+    store_read_chunk_verified_submit(store, ref, hash, tier, verify)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_read_chunk_verified_submit(store(), reference(), hash(), tier(), boolean()) :: :ok
+  def store_read_chunk_verified_submit(_store, _ref, _hash, _tier, _verify),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -247,8 +269,29 @@ defmodule NeonFS.Core.Blob.Native do
           binary()
         ) ::
           {:ok, boolean()} | {:error, String.t()}
-  def store_chunk_exists(
+  def store_chunk_exists(store, hash, tier, compression, compression_level, key, nonce) do
+    ref = make_ref()
+    store_chunk_exists_submit(store, ref, hash, tier, compression, compression_level, key, nonce)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_chunk_exists_submit(
+          store(),
+          reference(),
+          hash(),
+          tier(),
+          compression(),
+          integer(),
+          binary(),
+          binary()
+        ) :: :ok
+  def store_chunk_exists_submit(
         _store,
+        _ref,
         _hash,
         _tier,
         _compression,
@@ -263,7 +306,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec store_chunk_exists_any_codec(store(), hash(), tier()) ::
           {:ok, boolean()} | {:error, String.t()}
-  def store_chunk_exists_any_codec(_store, _hash, _tier),
+  def store_chunk_exists_any_codec(store, hash, tier) do
+    ref = make_ref()
+    store_chunk_exists_any_codec_submit(store, ref, hash, tier)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_chunk_exists_any_codec_submit(store(), reference(), hash(), tier()) :: :ok
+  def store_chunk_exists_any_codec_submit(_store, _ref, _hash, _tier),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -274,7 +328,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec store_chunk_any_codec_size(store(), hash(), tier()) ::
           {:ok, non_neg_integer()} | {:error, String.t()}
-  def store_chunk_any_codec_size(_store, _hash, _tier),
+  def store_chunk_any_codec_size(store, hash, tier) do
+    ref = make_ref()
+    store_chunk_any_codec_size_submit(store, ref, hash, tier)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_chunk_any_codec_size_submit(store(), reference(), hash(), tier()) :: :ok
+  def store_chunk_any_codec_size_submit(_store, _ref, _hash, _tier),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -422,8 +487,35 @@ defmodule NeonFS.Core.Blob.Native do
           codec_locator()
         ) ::
           {:ok, binary()} | {:error, String.t()}
-  def store_read_chunk_with_options(_store, _hash, _tier, _verify, _decompress, _codec),
-    do: :erlang.nif_error(:nif_not_loaded)
+  def store_read_chunk_with_options(store, hash, tier, verify, decompress, codec) do
+    ref = make_ref()
+    store_read_chunk_with_options_submit(store, ref, hash, tier, verify, decompress, codec)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_read_chunk_with_options_submit(
+          store(),
+          reference(),
+          hash(),
+          tier(),
+          boolean(),
+          boolean(),
+          codec_locator()
+        ) :: :ok
+  def store_read_chunk_with_options_submit(
+        _store,
+        _ref,
+        _hash,
+        _tier,
+        _verify,
+        _decompress,
+        _codec
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Re-encrypts a chunk in place: decrypts with old key/nonce, re-encrypts with
