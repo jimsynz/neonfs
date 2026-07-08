@@ -366,7 +366,7 @@ defmodule NeonFS.Core.BlobStoreTest do
     test "single strategy for small data", %{store: _store} do
       data = "small data"
 
-      assert {:ok, chunks} = BlobStore.chunk_data(data, {:single}, server: test_server())
+      assert {:ok, chunks} = BlobStore.chunk_data(data, {:single})
       assert length(chunks) == 1
 
       [{chunk_data, hash, offset, size}] = chunks
@@ -381,11 +381,11 @@ defmodule NeonFS.Core.BlobStoreTest do
       small_data = String.duplicate("x", 1000)
 
       assert {:ok, [_single_chunk]} =
-               BlobStore.chunk_data(small_data, :auto, server: test_server())
+               BlobStore.chunk_data(small_data, :auto)
 
       # Medium data (64KB - 1MB) should use fixed strategy
       medium_data = String.duplicate("x", 100_000)
-      assert {:ok, chunks} = BlobStore.chunk_data(medium_data, :auto, server: test_server())
+      assert {:ok, chunks} = BlobStore.chunk_data(medium_data, :auto)
       # Fixed 256KB chunks means 100KB should be 1 chunk
       assert chunks != []
 
@@ -393,7 +393,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       large_data = String.duplicate("x", 2_000_000)
 
       assert {:ok, [_first | _rest] = chunks} =
-               BlobStore.chunk_data(large_data, :auto, server: test_server())
+               BlobStore.chunk_data(large_data, :auto)
 
       assert chunks != [] and chunks != [_first]
     end
@@ -403,7 +403,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       chunk_size = 1024
 
       assert {:ok, [_first | _rest] = chunks} =
-               BlobStore.chunk_data(data, {:fixed, chunk_size}, server: test_server())
+               BlobStore.chunk_data(data, {:fixed, chunk_size})
 
       # Verify reconstruction
       reconstructed =
@@ -418,7 +418,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       data = String.duplicate("content defined chunking ", 10_000)
 
       assert {:ok, chunks} =
-               BlobStore.chunk_data(data, {:fastcdc, 256 * 1024}, server: test_server())
+               BlobStore.chunk_data(data, {:fastcdc, 256 * 1024})
 
       assert chunks != []
 
@@ -441,7 +441,7 @@ defmodule NeonFS.Core.BlobStoreTest do
       data = ""
 
       # Empty data may return empty list or single empty chunk depending on strategy
-      assert {:ok, chunks} = BlobStore.chunk_data(data, :auto, server: test_server())
+      assert {:ok, chunks} = BlobStore.chunk_data(data, :auto)
 
       # If chunks are returned, verify they're valid
       for {chunk_data, hash, offset, size} <- chunks do
