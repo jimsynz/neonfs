@@ -123,7 +123,19 @@ defmodule NeonFS.Core.Blob.Native do
 
   """
   @spec store_write_chunk(store(), hash(), binary(), tier()) :: {:ok, {}} | {:error, String.t()}
-  def store_write_chunk(_store, _hash, _data, _tier), do: :erlang.nif_error(:nif_not_loaded)
+  def store_write_chunk(store, hash, data, tier) do
+    ref = make_ref()
+    store_write_chunk_submit(store, ref, hash, data, tier)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_write_chunk_submit(store(), reference(), hash(), binary(), tier()) :: :ok
+  def store_write_chunk_submit(_store, _ref, _hash, _data, _tier),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Reads a chunk from the blob store.
@@ -232,8 +244,29 @@ defmodule NeonFS.Core.Blob.Native do
           binary()
         ) ::
           {:ok, non_neg_integer()} | {:error, String.t()}
-  def store_delete_chunk(
+  def store_delete_chunk(store, hash, tier, compression, compression_level, key, nonce) do
+    ref = make_ref()
+    store_delete_chunk_submit(store, ref, hash, tier, compression, compression_level, key, nonce)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_delete_chunk_submit(
+          store(),
+          reference(),
+          hash(),
+          tier(),
+          compression(),
+          integer(),
+          binary(),
+          binary()
+        ) :: :ok
+  def store_delete_chunk_submit(
         _store,
+        _ref,
         _hash,
         _tier,
         _compression,
@@ -251,7 +284,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec store_delete_chunk_any_codec(store(), hash(), tier()) ::
           {:ok, non_neg_integer()} | {:error, String.t()}
-  def store_delete_chunk_any_codec(_store, _hash, _tier),
+  def store_delete_chunk_any_codec(store, hash, tier) do
+    ref = make_ref()
+    store_delete_chunk_any_codec_submit(store, ref, hash, tier)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_delete_chunk_any_codec_submit(store(), reference(), hash(), tier()) :: :ok
+  def store_delete_chunk_any_codec_submit(_store, _ref, _hash, _tier),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -420,17 +464,34 @@ defmodule NeonFS.Core.Blob.Native do
           binary(),
           binary()
         ) :: {:ok, encryption_info()} | {:error, String.t()}
-  def store_write_chunk_compressed(
-        _store,
-        _hash,
-        _data,
-        _tier,
-        _compression,
-        _compression_level,
-        _key,
-        _nonce
-      ),
-      do: :erlang.nif_error(:nif_not_loaded)
+  def store_write_chunk_compressed(store, hash, data, tier, compression, level, key, nonce) do
+    ref = make_ref()
+
+    store_write_chunk_compressed_submit(
+      store,
+      ref,
+      hash,
+      data,
+      tier,
+      {compression, level, key, nonce}
+    )
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_write_chunk_compressed_submit(
+          store(),
+          reference(),
+          hash(),
+          binary(),
+          tier(),
+          codec_locator()
+        ) :: :ok
+  def store_write_chunk_compressed_submit(_store, _ref, _hash, _data, _tier, _codec),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Reads a chunk from the blob store with optional verification, decompression,
