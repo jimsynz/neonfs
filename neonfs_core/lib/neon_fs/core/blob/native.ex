@@ -88,14 +88,36 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec store_open_marker(store(), String.t()) ::
           {:ok, :clean | :dirty | :fresh} | {:error, String.t()}
-  def store_open_marker(_store, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+  def store_open_marker(store, node_id) do
+    ref = make_ref()
+    store_open_marker_submit(store, ref, node_id)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_open_marker_submit(store(), reference(), String.t()) :: :ok
+  def store_open_marker_submit(_store, _ref, _node_id), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Rewrites a drive's marker `clean` (#1425). Call on graceful shutdown so
   the next `store_open_marker/2` reports the drive clean.
   """
   @spec store_mark_clean(store(), String.t()) :: {:ok, {}} | {:error, String.t()}
-  def store_mark_clean(_store, _node_id), do: :erlang.nif_error(:nif_not_loaded)
+  def store_mark_clean(store, node_id) do
+    ref = make_ref()
+    store_mark_clean_submit(store, ref, node_id)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_mark_clean_submit(store(), reference(), String.t()) :: :ok
+  def store_mark_clean_submit(_store, _ref, _node_id), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Writes a chunk to the blob store.
@@ -403,17 +425,34 @@ defmodule NeonFS.Core.Blob.Native do
           binary()
         ) ::
           {:ok, {}} | {:error, String.t()}
-  def store_migrate_chunk(
-        _store,
-        _hash,
-        _from_tier,
-        _to_tier,
-        _compression,
-        _compression_level,
-        _key,
-        _nonce
-      ),
-      do: :erlang.nif_error(:nif_not_loaded)
+  def store_migrate_chunk(store, hash, from_tier, to_tier, compression, level, key, nonce) do
+    ref = make_ref()
+
+    store_migrate_chunk_submit(
+      store,
+      ref,
+      hash,
+      from_tier,
+      to_tier,
+      {compression, level, key, nonce}
+    )
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_migrate_chunk_submit(
+          store(),
+          reference(),
+          hash(),
+          tier(),
+          tier(),
+          codec_locator()
+        ) :: :ok
+  def store_migrate_chunk_submit(_store, _ref, _hash, _from_tier, _to_tier, _codec),
+    do: :erlang.nif_error(:nif_not_loaded)
 
   @type chunk_info :: {non_neg_integer(), non_neg_integer(), compression()}
 
@@ -607,8 +646,28 @@ defmodule NeonFS.Core.Blob.Native do
           {binary(), binary()},
           {binary(), binary()}
         ) :: {:ok, non_neg_integer()} | {:error, String.t()}
-  def store_reencrypt_chunk(
+  def store_reencrypt_chunk(store, hash, tier, compression, old_enc, new_enc) do
+    ref = make_ref()
+    store_reencrypt_chunk_submit(store, ref, hash, tier, compression, old_enc, new_enc)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec store_reencrypt_chunk_submit(
+          store(),
+          reference(),
+          hash(),
+          tier(),
+          {compression(), integer()},
+          {binary(), binary()},
+          {binary(), binary()}
+        ) :: :ok
+  def store_reencrypt_chunk_submit(
         _store,
+        _ref,
         _hash,
         _tier,
         _compression,
@@ -853,7 +912,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec filesystem_info(String.t()) ::
           {:ok, {non_neg_integer(), non_neg_integer(), non_neg_integer()}} | {:error, String.t()}
-  def filesystem_info(_path), do: :erlang.nif_error(:nif_not_loaded)
+  def filesystem_info(path) do
+    ref = make_ref()
+    filesystem_info_submit(ref, path)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec filesystem_info_submit(reference(), String.t()) :: :ok
+  def filesystem_info_submit(_ref, _path), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Opens `path` (a directory) and fsyncs it so directory-entry changes —
@@ -867,7 +937,18 @@ defmodule NeonFS.Core.Blob.Native do
     - `{:error, reason}` - If the directory can't be opened or fsynced
   """
   @spec fsync_dir(String.t()) :: {:ok, {}} | {:error, String.t()}
-  def fsync_dir(_path), do: :erlang.nif_error(:nif_not_loaded)
+  def fsync_dir(path) do
+    ref = make_ref()
+    fsync_dir_submit(ref, path)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec fsync_dir_submit(reference(), String.t()) :: :ok
+  def fsync_dir_submit(_ref, _path), do: :erlang.nif_error(:nif_not_loaded)
 
   # Metadata namespace operations
 
