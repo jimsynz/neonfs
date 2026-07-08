@@ -1757,7 +1757,7 @@ defmodule NeonFS.Core.WriteOperation do
     case meta.locations do
       [location | _] ->
         drive_id = Map.get(location, :drive_id, "default")
-        BlobStore.delete_chunk(meta.hash, drive_id, BlobStore.codec_opts_for_chunk(meta))
+        BlobStore.delete_chunk(meta.hash, drive_id, BlobStore.Codec.opts_for_chunk(meta))
 
       [] ->
         :ok

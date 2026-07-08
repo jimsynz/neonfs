@@ -53,6 +53,7 @@ defmodule NeonFS.Core.BlobStore do
   require Logger
 
   alias NeonFS.Core.Blob.Native
+  alias NeonFS.Core.BlobStore.Codec
   alias NeonFS.Core.Drive
   alias NeonFS.Core.DriveRegistry
   alias NeonFS.Core.DriveState
@@ -977,7 +978,7 @@ defmodule NeonFS.Core.BlobStore do
       ) do
     case get_store(state, drive_id) do
       {:ok, store} ->
-        compression = codec_compression_args(codec_opts)
+        compression = Codec.compression_args(codec_opts)
 
         result =
           Native.store_reencrypt_chunk(
@@ -1098,66 +1099,6 @@ defmodule NeonFS.Core.BlobStore do
 
     result = Native.chunk_data(data, strategy_str, param)
     {:reply, result, state}
-  end
-
-  ## Codec helpers
-
-  @doc """
-  Extracts codec opts from a `ChunkMeta`-shaped map so delete/migrate/read
-  calls resolve to the correct on-disk variant. Handles both `:none`/`:zstd`
-  atoms and `"zstd:3"`-style strings on the compression field.
-  """
-  @spec codec_opts_for_chunk(map()) :: keyword()
-  def codec_opts_for_chunk(chunk_meta) when is_map(chunk_meta) do
-    compression =
-      case Map.get(chunk_meta, :compression) do
-        nil -> []
-        :none -> [compression: :none]
-        :zstd -> [compression: :zstd]
-        other -> [compression: other]
-      end
-
-    case Map.get(chunk_meta, :crypto) do
-      %{nonce: nonce} when is_binary(nonce) ->
-        # The key is not part of the codec suffix — only the nonce is. The
-        # NIF uses (key, nonce) emptiness to detect unencrypted reads, so
-        # pass a zero-bytes placeholder to keep the "encrypted" branch
-        # active for callers that only need to locate the file (delete,
-        # chunk_exists, migrate).
-        compression ++ [key: <<0::256>>, nonce: nonce]
-
-      _ ->
-        compression
-    end
-  end
-
-  @doc false
-  @spec codec_compression_args(keyword()) :: {String.t(), integer()}
-  def codec_compression_args(opts) do
-    normalise_compression(Keyword.get(opts, :compression), opts)
-  end
-
-  defp normalise_compression(nil, _opts), do: {"", 0}
-  defp normalise_compression("", _opts), do: {"", 0}
-  defp normalise_compression(:none, _opts), do: {"none", 0}
-  defp normalise_compression("none", _opts), do: {"none", 0}
-  defp normalise_compression(:zstd, opts), do: {"zstd", default_zstd_level(opts)}
-  defp normalise_compression("zstd", opts), do: {"zstd", default_zstd_level(opts)}
-  defp normalise_compression({:zstd, level}, _opts), do: {"zstd", level}
-
-  defp normalise_compression("zstd:" <> level_str, opts),
-    do: {"zstd", parse_level(level_str, opts)}
-
-  defp normalise_compression(value, opts) when is_atom(value),
-    do: normalise_compression(Atom.to_string(value), opts)
-
-  defp default_zstd_level(opts), do: Keyword.get(opts, :compression_level, 3)
-
-  defp parse_level(level_str, opts) do
-    case Integer.parse(level_str) do
-      {level, ""} -> level
-      _ -> default_zstd_level(opts)
-    end
   end
 
   ## Private: Store lookup
@@ -1329,7 +1270,7 @@ defmodule NeonFS.Core.BlobStore do
       metadata
     )
 
-    {comp_str, comp_level} = codec_compression_args(codec_opts)
+    {comp_str, comp_level} = Codec.compression_args(codec_opts)
     locator = {comp_str, comp_level, key, nonce}
 
     result =
@@ -1459,7 +1400,7 @@ defmodule NeonFS.Core.BlobStore do
   end
 
   defp try_delete_from_tiers(store, hash, codec_opts) do
-    {comp_str, comp_level} = codec_compression_args(codec_opts)
+    {comp_str, comp_level} = Codec.compression_args(codec_opts)
     key = Keyword.get(codec_opts, :key, <<>>)
     nonce = Keyword.get(codec_opts, :nonce, <<>>)
 
@@ -1636,7 +1577,7 @@ defmodule NeonFS.Core.BlobStore do
       metadata
     )
 
-    {comp_str, comp_level} = codec_compression_args(codec_opts)
+    {comp_str, comp_level} = Codec.compression_args(codec_opts)
     key = Keyword.get(codec_opts, :key, <<>>)
     nonce = Keyword.get(codec_opts, :nonce, <<>>)
 
