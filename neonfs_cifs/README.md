@@ -2,9 +2,9 @@
 
 CIFS/SMB access to NeonFS — native Windows and macOS file shares
 backed by the cluster, via a Samba VFS module. **In progress**: the
-Elixir side is implemented; the Samba-side C shim and packaging are
-still to come (see the
-[#116 epic](https://harton.dev/project-neon/neonfs/issues/116)).
+Elixir side and the Samba-side `vfs_neonfs.so` C shim are implemented
+and CI-tested; packaging and the end-to-end test are still to come
+(see the [#116 epic](https://harton.dev/project-neon/neonfs/issues/116)).
 
 ## How it will fit together
 
@@ -26,10 +26,14 @@ cluster. The framing is 4-byte big-endian length-prefixed ETF
 - A per-connection handle table — synthetic 64-bit tokens mapping to
   NeonFS volume + path, so the C shim can present POSIX-style fds.
 
+## What's built alongside this package
+
+- `vfs_neonfs.so` C shim and in-tree pinned-Samba build, CI-tested
+  ([#384](https://harton.dev/project-neon/neonfs/issues/384); see
+  [`native/vfs_neonfs/`](native/vfs_neonfs/))
+
 ## What's outstanding
 
-- `vfs_neonfs.so` C shim and in-tree Samba build
-  ([#384](https://harton.dev/project-neon/neonfs/issues/384))
 - Container image, Debian package, omnibus integration
   ([#385](https://harton.dev/project-neon/neonfs/issues/385))
 - End-to-end test against a real `smbd`

@@ -50,7 +50,7 @@ as Rustler NIFs. Each side does what it is best at.
 | Docker / Podman volume plugin | Container volumes backed by the cluster | Shipped |
 | containerd content store | Image layers stored as NeonFS objects | Shipped |
 | Kubernetes CSI | Persistent volumes via Helm chart | Shipped — kind/k3d end-to-end test outstanding ([#319](https://harton.dev/project-neon/neonfs/issues/319)) |
-| CIFS/SMB (Samba VFS) | Native Windows/macOS shares | In progress ([#116](https://harton.dev/project-neon/neonfs/issues/116)) |
+| CIFS/SMB (Samba VFS) | Native Windows/macOS shares | In progress — `vfs_neonfs.so` C shim + Elixir bridge built and CI-tested; packaging ([#385](https://harton.dev/project-neon/neonfs/issues/385)) and end-to-end `smbd` test ([#386](https://harton.dev/project-neon/neonfs/issues/386)) outstanding ([#116](https://harton.dev/project-neon/neonfs/issues/116)) |
 
 File locks taken over one protocol are honoured by the others — a
 quorum-backed distributed lock manager is shared across all interfaces.
@@ -102,7 +102,7 @@ for the high-churn chunk, file, and stripe indexes.
 | [`neonfs_docker`](neonfs_docker/) | Docker / Podman VolumeDriver plugin |
 | [`neonfs_containerd`](neonfs_containerd/) | containerd content-store gRPC plugin |
 | [`neonfs_csi`](neonfs_csi/) | Kubernetes CSI driver (with [Helm chart](deploy/charts/neonfs-csi/)) |
-| [`neonfs_cifs`](neonfs_cifs/) | Samba VFS module backend (in progress) |
+| [`neonfs_cifs`](neonfs_cifs/) | Samba VFS module backend — `vfs_neonfs.so` C shim + Elixir bridge (packaging and end-to-end test in progress) |
 | [`neonfs_iam`](neonfs_iam/) | Identity and access management domain (scaffold — resources land incrementally) |
 | [`neonfs_omnibus`](neonfs_omnibus/) | All-in-one bundle: core + every interface in a single release |
 | [`neonfs-cli`](neonfs-cli/) | Rust command-line interface for cluster administration |
