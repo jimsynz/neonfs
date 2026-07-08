@@ -74,6 +74,18 @@ enum BlobReply {
     Bool(bool),
     /// `{:ok, integer}` — a byte count (chunk size, bytes freed, stored size).
     Size(u64),
+    /// `{:ok, nil | binary}` — an index-tree lookup (`nil` = absent/tombstoned).
+    OptionalData(Option<Vec<u8>>),
+    /// `{:ok, [binary, ...]}` — a list of hashes (metadata segment, tree chunks).
+    BinaryList(Vec<Vec<u8>>),
+    /// `{:ok, [{key, value}, ...]}` — an index-tree range query.
+    Pairs(Vec<(Vec<u8>, Vec<u8>)>),
+    /// `{:ok, {new_root_hash, [{chunk_hash, chunk_bytes}, ...]}}` — a
+    /// copy-on-write index-tree mutation and the node chunks it wrote.
+    TreeUpdate {
+        root: Vec<u8>,
+        written: Vec<(Vec<u8>, Vec<u8>)>,
+    },
     /// `{:ok, :clean | :dirty | :fresh}` — a drive open-marker classification.
     Marker(DriveMarker),
     /// `{:ok, {total, available, used}}` — filesystem capacity in bytes.
@@ -147,6 +159,32 @@ fn encode_blob_reply<'a>(
         }
         Ok(BlobReply::Bool(value)) => (request_ref, (ok, value)).encode(env),
         Ok(BlobReply::Size(value)) => (request_ref, (ok, value)).encode(env),
+        Ok(BlobReply::OptionalData(value)) => {
+            let value = value.map(|bytes| vec_to_binary(env, &bytes));
+            (request_ref, (ok, value)).encode(env)
+        }
+        Ok(BlobReply::BinaryList(items)) => {
+            let list: Vec<Binary> = items
+                .iter()
+                .map(|bytes| vec_to_binary(env, bytes))
+                .collect();
+            (request_ref, (ok, list)).encode(env)
+        }
+        Ok(BlobReply::Pairs(pairs)) => {
+            let list: Vec<(Binary, Binary)> = pairs
+                .iter()
+                .map(|(k, v)| (vec_to_binary(env, k), vec_to_binary(env, v)))
+                .collect();
+            (request_ref, (ok, list)).encode(env)
+        }
+        Ok(BlobReply::TreeUpdate { root, written }) => {
+            let root = vec_to_binary(env, &root);
+            let written: Vec<(Binary, Binary)> = written
+                .iter()
+                .map(|(h, b)| (vec_to_binary(env, h), vec_to_binary(env, b)))
+                .collect();
+            (request_ref, (ok, (root, written))).encode(env)
+        }
         Ok(BlobReply::Marker(marker)) => {
             let marker = match marker {
                 DriveMarker::Clean => marker_atoms::clean(),
@@ -741,11 +779,6 @@ fn store_reencrypt_chunk_submit<'a>(
     })
 }
 
-/// Parses a 32-byte binary into a Hash.
-fn parse_hash(hash_bytes: &Binary) -> Result<Hash, String> {
-    hash_from_bytes(hash_bytes.as_slice())
-}
-
 /// Slice-based hash parse, callable from an async blob task where the caller's
 /// `Binary` has already been copied into an owned buffer (#1484).
 fn hash_from_bytes(bytes: &[u8]) -> Result<Hash, String> {
@@ -1056,19 +1089,27 @@ fn erasure_decode<'a>(
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
 /// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
 /// * `data` - Binary metadata to write.
-#[rustler::nif(schedule = "DirtyIo")]
-fn metadata_write(
+///
+/// Returns `:ok`; the outcome arrives as a
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message (#1486).
+#[rustler::nif]
+fn metadata_write_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
+    request_ref: Term<'a>,
     segment_id_hex: String,
-    key_hash_bytes: Binary,
-    data: Binary,
-) -> Result<(), String> {
-    let key_hash = parse_hash(&key_hash_bytes)?;
-
-    let store = &store.store;
-    store
-        .write_metadata(&segment_id_hex, &key_hash, data.as_slice())
-        .map_err(|e| e.to_string())
+    key_hash_bytes: Binary<'a>,
+    data: Binary<'a>,
+) -> Atom {
+    let key_hash_bytes = key_hash_bytes.as_slice().to_vec();
+    let data = data.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let key_hash = hash_from_bytes(&key_hash_bytes)?;
+        store
+            .write_metadata(&segment_id_hex, &key_hash, &data)
+            .map(|()| BlobReply::Unit)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Reads metadata from the blob store's metadata namespace.
@@ -1078,23 +1119,25 @@ fn metadata_write(
 /// * `store` - Resource reference to the blob store.
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
 /// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
-#[rustler::nif(schedule = "DirtyIo")]
-fn metadata_read<'a>(
+///
+/// Returns `:ok`; the metadata arrives as a
+/// `{request_ref, {:ok, binary} | {:error, reason}}` message.
+#[rustler::nif]
+fn metadata_read_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
+    request_ref: Term<'a>,
     segment_id_hex: String,
-    key_hash_bytes: Binary,
-) -> Result<Binary<'a>, String> {
-    let key_hash = parse_hash(&key_hash_bytes)?;
-
-    let store = &store.store;
-    let data = store
-        .read_metadata(&segment_id_hex, &key_hash)
-        .map_err(|e| e.to_string())?;
-
-    let mut output = NewBinary::new(env, data.len());
-    output.copy_from_slice(&data);
-    Ok(output.into())
+    key_hash_bytes: Binary<'a>,
+) -> Atom {
+    let key_hash_bytes = key_hash_bytes.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let key_hash = hash_from_bytes(&key_hash_bytes)?;
+        store
+            .read_metadata(&segment_id_hex, &key_hash)
+            .map(BlobReply::Data)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Deletes metadata from the blob store's metadata namespace.
@@ -1103,18 +1146,25 @@ fn metadata_read<'a>(
 /// * `store` - Resource reference to the blob store.
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
 /// * `key_hash_bytes` - 32-byte binary hash of the metadata key.
-#[rustler::nif(schedule = "DirtyIo")]
-fn metadata_delete(
+///
+/// Returns `:ok`; the outcome arrives as a
+/// `{request_ref, {:ok, {}} | {:error, reason}}` message.
+#[rustler::nif]
+fn metadata_delete_submit<'a>(
+    env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
+    request_ref: Term<'a>,
     segment_id_hex: String,
-    key_hash_bytes: Binary,
-) -> Result<(), String> {
-    let key_hash = parse_hash(&key_hash_bytes)?;
-
-    let store = &store.store;
-    store
-        .delete_metadata(&segment_id_hex, &key_hash)
-        .map_err(|e| e.to_string())
+    key_hash_bytes: Binary<'a>,
+) -> Atom {
+    let key_hash_bytes = key_hash_bytes.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let key_hash = hash_from_bytes(&key_hash_bytes)?;
+        store
+            .delete_metadata(&segment_id_hex, &key_hash)
+            .map(|()| BlobReply::Unit)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Lists all metadata key hashes in a segment.
@@ -1123,27 +1173,24 @@ fn metadata_delete(
 /// * `env` - Rustler environment.
 /// * `store` - Resource reference to the blob store.
 /// * `segment_id_hex` - 64-char hex string identifying the metadata segment.
-#[rustler::nif(schedule = "DirtyIo")]
-fn metadata_list_segment<'a>(
+///
+/// Returns `:ok`; the key hashes arrive as a
+/// `{request_ref, {:ok, [binary, ...]} | {:error, reason}}` message.
+#[rustler::nif]
+fn metadata_list_segment_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
+    request_ref: Term<'a>,
     segment_id_hex: String,
-) -> Result<Vec<Binary<'a>>, String> {
-    let store = &store.store;
-    let hashes = store
-        .list_metadata_segment(&segment_id_hex)
-        .map_err(|e| e.to_string())?;
-
-    let result: Vec<Binary<'a>> = hashes
-        .into_iter()
-        .map(|hash| {
-            let mut bin = NewBinary::new(env, 32);
-            bin.copy_from_slice(hash.as_bytes());
-            bin.into()
-        })
-        .collect();
-
-    Ok(result)
+) -> Atom {
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        store
+            .list_metadata_segment(&segment_id_hex)
+            .map(|hashes| {
+                BlobReply::BinaryList(hashes.iter().map(|hash| hash.as_bytes().to_vec()).collect())
+            })
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Returns filesystem capacity information for the given path.
@@ -1209,32 +1256,29 @@ fn fsync_dir_submit<'a>(env: Env<'a>, request_ref: Term<'a>, path: String) -> At
 /// empty binary for a tree that has never been written. `tier` is
 /// the storage tier the tree's nodes live in (typically "hot").
 ///
-/// Returns `{:ok, value}` (with `value` either a binary or `nil`)
-/// or `{:error, reason}`. `nil` means the key is absent or
-/// tombstoned.
-#[rustler::nif(schedule = "DirtyIo")]
-fn index_tree_get<'a>(
+/// Returns `:ok`; the value arrives as a `{request_ref, {:ok, binary | nil} |
+/// {:error, reason}}` message (`nil` = absent or tombstoned).
+#[rustler::nif]
+fn index_tree_get_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    root_hash: Binary,
+    request_ref: Term<'a>,
+    root_hash: Binary<'a>,
     tier: String,
-    key: Binary,
-) -> Result<Option<Binary<'a>>, String> {
-    let parsed_tier = parse_tier(&tier)?;
-    let store = &store.store;
+    key: Binary<'a>,
+) -> Atom {
+    let root_hash = root_hash.as_slice().to_vec();
+    let key = key.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let parsed_tier = parse_tier(&tier)?;
+        let adapter = BlobStoreChunkStore::new(store, parsed_tier);
+        let tree = IndexTree::new(adapter, TreeConfig::default());
+        let root = optional_root_from_bytes(&root_hash)?;
 
-    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
-    let tree = IndexTree::new(adapter, TreeConfig::default());
-
-    let root = parse_optional_root(&root_hash)?;
-
-    match tree
-        .get(root.as_ref(), key.as_slice())
-        .map_err(|e| e.to_string())?
-    {
-        None => Ok(None),
-        Some(value) => Ok(Some(vec_to_binary(env, &value))),
-    }
+        tree.get(root.as_ref(), &key)
+            .map(BlobReply::OptionalData)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Range query in an index tree (#781). `start_key` / `end_key`
@@ -1242,34 +1286,31 @@ fn index_tree_get<'a>(
 /// side means "open-ended" in that direction. Tombstones are
 /// filtered out.
 ///
-/// Returns `{:ok, [{key, value}, ...]}` in ascending key order, or
-/// `{:error, reason}`.
-#[rustler::nif(schedule = "DirtyIo")]
-fn index_tree_range<'a>(
+/// Returns `:ok`; the entries arrive as a `{request_ref, {:ok, [{key, value},
+/// ...]} | {:error, reason}}` message, in ascending key order.
+#[rustler::nif]
+fn index_tree_range_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    root_hash: Binary,
+    request_ref: Term<'a>,
+    root_hash: Binary<'a>,
     tier: String,
-    start_key: Binary,
-    end_key: Binary,
-) -> Result<Vec<(Binary<'a>, Binary<'a>)>, String> {
-    let parsed_tier = parse_tier(&tier)?;
-    let store = &store.store;
+    start_key: Binary<'a>,
+    end_key: Binary<'a>,
+) -> Atom {
+    let root_hash = root_hash.as_slice().to_vec();
+    let start_key = start_key.as_slice().to_vec();
+    let end_key = end_key.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let parsed_tier = parse_tier(&tier)?;
+        let adapter = BlobStoreChunkStore::new(store, parsed_tier);
+        let tree = IndexTree::new(adapter, TreeConfig::default());
+        let root = optional_root_from_bytes(&root_hash)?;
 
-    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
-    let tree = IndexTree::new(adapter, TreeConfig::default());
-
-    let root = parse_optional_root(&root_hash)?;
-
-    let entries = tree
-        .range(root.as_ref(), start_key.as_slice(), end_key.as_slice())
-        .map_err(|e| e.to_string())?;
-
-    let mut out = Vec::with_capacity(entries.len());
-    for (k, v) in entries {
-        out.push((vec_to_binary(env, &k), vec_to_binary(env, &v)));
-    }
-    Ok(out)
+        tree.range(root.as_ref(), &start_key, &end_key)
+            .map(BlobReply::Pairs)
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// Insert or replace `key`'s value in an index tree (#781) backed
@@ -1277,67 +1318,73 @@ fn index_tree_range<'a>(
 /// new tree. The IndexTree is copy-on-write — every put produces a
 /// new root chunk plus the rewritten leaf→root path.
 ///
-/// Returns `{new_root_hash, [{chunk_hash, chunk_bytes}]}` — the new
-/// root plus the copy-on-write node chunks this op wrote, so the
-/// caller can replicate them to the volume's other metadata drives
-/// (#903).
-#[rustler::nif(schedule = "DirtyIo")]
-fn index_tree_put<'a>(
+/// Returns `:ok`; the result arrives as a `{request_ref, {:ok, {new_root_hash,
+/// [{chunk_hash, chunk_bytes}, ...]}} | {:error, reason}}` message — the new
+/// root plus the copy-on-write node chunks this op wrote, so the caller can
+/// replicate them to the volume's other metadata drives (#903).
+#[rustler::nif]
+fn index_tree_put_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    root_hash: Binary,
+    request_ref: Term<'a>,
+    root_hash: Binary<'a>,
     tier: String,
-    key: Binary,
-    value: Binary,
-) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
-    let parsed_tier = parse_tier(&tier)?;
-    let store = &store.store;
+    key: Binary<'a>,
+    value: Binary<'a>,
+) -> Atom {
+    let root_hash = root_hash.as_slice().to_vec();
+    let key = key.as_slice().to_vec();
+    let value = value.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let parsed_tier = parse_tier(&tier)?;
+        let adapter = BlobStoreChunkStore::new(store, parsed_tier);
+        let mut tree = IndexTree::new(adapter, TreeConfig::default());
+        let root = optional_root_from_bytes(&root_hash)?;
 
-    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
-    let mut tree = IndexTree::new(adapter, TreeConfig::default());
+        let new_root = tree
+            .put(root.as_ref(), key, value)
+            .map_err(|e| e.to_string())?;
 
-    let root = parse_optional_root(&root_hash)?;
-
-    let new_root = tree
-        .put(
-            root.as_ref(),
-            key.as_slice().to_vec(),
-            value.as_slice().to_vec(),
-        )
-        .map_err(|e| e.to_string())?;
-
-    let written = written_nodes_to_binaries(env, tree.store.take_written());
-    Ok((vec_to_binary(env, new_root.as_bytes()), written))
+        Ok(BlobReply::TreeUpdate {
+            root: new_root.as_bytes().to_vec(),
+            written: written_to_owned(tree.store.take_written()),
+        })
+    })
 }
 
 /// Tombstone `key` in an index tree. Even on a never-written tree
 /// (`root_hash == <<>>`) this writes a tombstone so anti-entropy
 /// can replicate the delete.
 ///
-/// Returns `{new_root_hash, [{chunk_hash, chunk_bytes}]}` — see
+/// Returns `:ok`; the result arrives as a `{request_ref, {:ok, {new_root_hash,
+/// [{chunk_hash, chunk_bytes}, ...]}} | {:error, reason}}` message — see
 /// `index_tree_put`.
-#[rustler::nif(schedule = "DirtyIo")]
-fn index_tree_delete<'a>(
+#[rustler::nif]
+fn index_tree_delete_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    root_hash: Binary,
+    request_ref: Term<'a>,
+    root_hash: Binary<'a>,
     tier: String,
-    key: Binary,
-) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
-    let parsed_tier = parse_tier(&tier)?;
-    let store = &store.store;
+    key: Binary<'a>,
+) -> Atom {
+    let root_hash = root_hash.as_slice().to_vec();
+    let key = key.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let parsed_tier = parse_tier(&tier)?;
+        let adapter = BlobStoreChunkStore::new(store, parsed_tier);
+        let mut tree = IndexTree::new(adapter, TreeConfig::default());
+        let root = optional_root_from_bytes(&root_hash)?;
 
-    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
-    let mut tree = IndexTree::new(adapter, TreeConfig::default());
+        let new_root = tree
+            .delete(root.as_ref(), &key)
+            .map_err(|e| e.to_string())?;
 
-    let root = parse_optional_root(&root_hash)?;
-
-    let new_root = tree
-        .delete(root.as_ref(), key.as_slice())
-        .map_err(|e| e.to_string())?;
-
-    let written = written_nodes_to_binaries(env, tree.store.take_written());
-    Ok((vec_to_binary(env, new_root.as_bytes()), written))
+        Ok(BlobReply::TreeUpdate {
+            root: new_root.as_bytes().to_vec(),
+            written: written_to_owned(tree.store.take_written()),
+        })
+    })
 }
 
 /// Reap tombstones whose `deleted_at` is older than
@@ -1348,61 +1395,58 @@ fn index_tree_delete<'a>(
 ///
 /// Errors if the input root_hash is `<<>>` — there's nothing to
 /// purge from a tree that was never written.
-#[rustler::nif(schedule = "DirtyIo")]
-fn index_tree_purge_tombstones<'a>(
+///
+/// Returns `:ok`; the result arrives as a `{request_ref, {:ok, {new_root_hash,
+/// [{chunk_hash, chunk_bytes}, ...]}} | {:error, reason}}` message — see
+/// `index_tree_put`.
+#[rustler::nif]
+fn index_tree_purge_tombstones_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    root_hash: Binary,
+    request_ref: Term<'a>,
+    root_hash: Binary<'a>,
     tier: String,
     before_unix_nanos: u64,
-) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
-    if root_hash.is_empty() {
-        return Err("cannot purge tombstones on an empty tree (root_hash is <<>>)".to_string());
-    }
+) -> Atom {
+    let root_hash = root_hash.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        if root_hash.is_empty() {
+            return Err("cannot purge tombstones on an empty tree (root_hash is <<>>)".to_string());
+        }
 
-    let parsed_tier = parse_tier(&tier)?;
-    let store = &store.store;
+        let parsed_tier = parse_tier(&tier)?;
+        let adapter = BlobStoreChunkStore::new(store, parsed_tier);
+        let mut tree = IndexTree::new(adapter, TreeConfig::default());
+        let root = hash_from_bytes(&root_hash)?;
+        let before = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(before_unix_nanos);
 
-    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
-    let mut tree = IndexTree::new(adapter, TreeConfig::default());
+        let new_root = tree
+            .purge_tombstones(&root, before)
+            .map_err(|e| e.to_string())?;
 
-    let root = parse_hash(&root_hash)?;
-
-    let before = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(before_unix_nanos);
-
-    let new_root = tree
-        .purge_tombstones(&root, before)
-        .map_err(|e| e.to_string())?;
-
-    let written = written_nodes_to_binaries(env, tree.store.take_written());
-    Ok((vec_to_binary(env, new_root.as_bytes()), written))
+        Ok(BlobReply::TreeUpdate {
+            root: new_root.as_bytes().to_vec(),
+            written: written_to_owned(tree.store.take_written()),
+        })
+    })
 }
 
-/// Encodes the adapter's drained write set as `[{hash, bytes}]`
-/// binaries for the return to Elixir.
-fn written_nodes_to_binaries<'a>(
-    env: Env<'a>,
-    written: Vec<(crate::hash::Hash, Vec<u8>)>,
-) -> Vec<(Binary<'a>, Binary<'a>)> {
+/// Converts the adapter's drained write set into owned `(hash, bytes)` pairs
+/// for delivery to Elixir from the async task (#1486).
+fn written_to_owned(written: Vec<(crate::hash::Hash, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8>)> {
     written
         .into_iter()
-        .map(|(hash, bytes)| {
-            (
-                vec_to_binary(env, hash.as_bytes()),
-                vec_to_binary(env, &bytes),
-            )
-        })
+        .map(|(hash, bytes)| (hash.as_bytes().to_vec(), bytes))
         .collect()
 }
 
-/// Parses a 0-byte or 32-byte binary into `Option<Hash>`. The
-/// 0-byte form represents a never-written tree (the IndexTree's
-/// `None` root).
-fn parse_optional_root(root_hash: &Binary) -> Result<Option<Hash>, String> {
+/// Parses a 0-byte or 32-byte slice into `Option<Hash>`. The 0-byte form
+/// represents a never-written tree (the IndexTree's `None` root).
+fn optional_root_from_bytes(root_hash: &[u8]) -> Result<Option<Hash>, String> {
     if root_hash.is_empty() {
         Ok(None)
     } else {
-        parse_hash(root_hash).map(Some)
+        hash_from_bytes(root_hash).map(Some)
     }
 }
 
@@ -1416,30 +1460,27 @@ fn vec_to_binary<'a>(env: Env<'a>, bytes: &[u8]) -> Binary<'a> {
 /// internal-page chunks and leaf-page chunks. Empty `root_hash`
 /// returns `{:ok, []}`. Used by the per-volume anti-entropy runner
 /// (#955) so index-tree pages are enumerated alongside data chunks.
-#[rustler::nif(schedule = "DirtyIo")]
-fn index_tree_list_referenced_chunks<'a>(
+#[rustler::nif]
+fn index_tree_list_referenced_chunks_submit<'a>(
     env: Env<'a>,
     store: ResourceArc<BlobStoreResource>,
-    root_hash: Binary,
+    request_ref: Term<'a>,
+    root_hash: Binary<'a>,
     tier: String,
-) -> Result<Vec<Binary<'a>>, String> {
-    let parsed_tier = parse_tier(&tier)?;
-    let store = &store.store;
+) -> Atom {
+    let root_hash = root_hash.as_slice().to_vec();
+    submit_blob(store.store.clone(), env, request_ref, move |store| {
+        let parsed_tier = parse_tier(&tier)?;
+        let adapter = BlobStoreChunkStore::new(store, parsed_tier);
+        let tree = IndexTree::new(adapter, TreeConfig::default());
+        let root = optional_root_from_bytes(&root_hash)?;
 
-    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
-    let tree = IndexTree::new(adapter, TreeConfig::default());
-
-    let root = parse_optional_root(&root_hash)?;
-
-    let hashes = tree
-        .list_referenced_chunks(root.as_ref())
-        .map_err(|e| e.to_string())?;
-
-    let mut out = Vec::with_capacity(hashes.len());
-    for hash in hashes {
-        out.push(vec_to_binary(env, hash.as_bytes()));
-    }
-    Ok(out)
+        tree.list_referenced_chunks(root.as_ref())
+            .map(|hashes| {
+                BlobReply::BinaryList(hashes.iter().map(|h| h.as_bytes().to_vec()).collect())
+            })
+            .map_err(|e| e.to_string())
+    })
 }
 
 rustler::init!("Elixir.NeonFS.Core.Blob.Native");
