@@ -949,6 +949,36 @@ mod tests {
     }
 
     #[test]
+    fn test_concurrent_reads_and_writes_from_multiple_threads() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let (store, _temp) = create_test_store();
+        let store = Arc::new(store);
+
+        let shared = b"shared chunk read concurrently";
+        let shared_hash = sha256(shared);
+        store.write_chunk(&shared_hash, shared, Tier::Hot).unwrap();
+
+        let handles: Vec<_> = (0..16u8)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    let data = vec![i; 4096 + i as usize];
+                    let hash = sha256(&data);
+                    store.write_chunk(&hash, &data, Tier::Hot).unwrap();
+                    assert_eq!(store.read_chunk(&hash, Tier::Hot).unwrap(), data);
+                    assert_eq!(store.read_chunk(&shared_hash, Tier::Hot).unwrap(), shared);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
     fn test_read_nonexistent_chunk_returns_error() {
         let (store, _temp) = create_test_store();
         let hash = sha256(b"nonexistent");
