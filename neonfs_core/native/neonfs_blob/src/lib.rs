@@ -26,8 +26,13 @@ mod marker_atoms {
 }
 
 /// Resource wrapper for BlobStore to share across NIF calls.
+///
+/// `BlobStore`'s methods all take `&self` and its only mutable state is the
+/// filesystem itself, so the resource shares it unsynchronised across every
+/// NIF call — concurrent calls to the same drive run in parallel on the dirty
+/// schedulers rather than serialising on a lock (#1479).
 pub struct BlobStoreResource {
-    store: Mutex<BlobStore>,
+    store: BlobStore,
 }
 
 #[rustler::resource_impl]
@@ -67,9 +72,7 @@ fn store_open(
     let config = StoreConfig { prefix_depth };
 
     match BlobStore::new(&base_dir, config) {
-        Ok(store) => Ok(ResourceArc::new(BlobStoreResource {
-            store: Mutex::new(store),
-        })),
+        Ok(store) => Ok(ResourceArc::new(BlobStoreResource { store })),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -89,9 +92,9 @@ fn store_open_marker(
     store: ResourceArc<BlobStoreResource>,
     node_id: String,
 ) -> Result<Atom, String> {
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let store = &store.store;
 
-    match store_guard.open_marker(&node_id) {
+    match store.open_marker(&node_id) {
         Ok(DriveOpenState::Clean) => Ok(marker_atoms::clean()),
         Ok(DriveOpenState::Dirty) => Ok(marker_atoms::dirty()),
         Ok(DriveOpenState::Fresh) => Ok(marker_atoms::fresh()),
@@ -106,8 +109,8 @@ fn store_open_marker(
 /// `:ok` on success, or an error tuple.
 #[rustler::nif(schedule = "DirtyIo")]
 fn store_mark_clean(store: ResourceArc<BlobStoreResource>, node_id: String) -> Result<(), String> {
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard.mark_clean(&node_id).map_err(|e| e.to_string())
+    let store = &store.store;
+    store.mark_clean(&node_id).map_err(|e| e.to_string())
 }
 
 /// Writes a chunk to the blob store without compression.
@@ -130,8 +133,8 @@ fn store_write_chunk(
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .write_chunk(&hash, data.as_slice(), tier)
         .map_err(|e| e.to_string())
 }
@@ -174,8 +177,8 @@ fn store_write_chunk_compressed<'a>(
         encryption,
     };
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    let chunk_info = store_guard
+    let store = &store.store;
+    let chunk_info = store
         .write_chunk_with_options(&hash, data.as_slice(), tier, &options)
         .map_err(|e| e.to_string())?;
 
@@ -221,10 +224,8 @@ fn store_read_chunk<'a>(
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    let data = store_guard
-        .read_chunk(&hash, tier)
-        .map_err(|e| e.to_string())?;
+    let store = &store.store;
+    let data = store.read_chunk(&hash, tier).map_err(|e| e.to_string())?;
 
     let mut output = NewBinary::new(env, data.len());
     output.copy_from_slice(&data);
@@ -261,8 +262,8 @@ fn store_read_chunk_verified<'a>(
         encryption: None,
     };
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    let data = store_guard
+    let store = &store.store;
+    let data = store
         .read_chunk_with_options(&hash, tier, &options)
         .map_err(|e| e.to_string())?;
 
@@ -322,8 +323,8 @@ fn store_read_chunk_with_options<'a>(
         encryption,
     };
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    let data = store_guard
+    let store = &store.store;
+    let data = store
         .read_chunk_with_options(&hash, tier, &options)
         .map_err(|e| e.to_string())?;
 
@@ -357,8 +358,8 @@ fn store_delete_chunk(
     let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
     let compression = parse_optional_compression(&compression, compression_level)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .delete_chunk(&hash, tier, compression.as_ref(), encryption.as_ref())
         .map_err(|e| e.to_string())
 }
@@ -376,8 +377,8 @@ fn store_delete_chunk_any_codec(
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .delete_chunk_any_codec(&hash, tier)
         .map_err(|e| e.to_string())
 }
@@ -399,8 +400,8 @@ fn store_chunk_exists(
     let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
     let compression = parse_optional_compression(&compression, compression_level)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    Ok(store_guard.chunk_exists(&hash, tier, compression.as_ref(), encryption.as_ref()))
+    let store = &store.store;
+    Ok(store.chunk_exists(&hash, tier, compression.as_ref(), encryption.as_ref()))
 }
 
 /// Checks whether any codec variant of a chunk exists at a tier.
@@ -413,8 +414,8 @@ fn store_chunk_exists_any_codec(
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .chunk_exists_any_codec(&hash, tier)
         .map_err(|e| e.to_string())
 }
@@ -431,8 +432,8 @@ fn store_chunk_any_codec_size(
     let hash = parse_hash(&hash_bytes)?;
     let tier = parse_tier(&tier)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .chunk_any_codec_size(&hash, tier)
         .map(|opt| opt.unwrap_or(0))
         .map_err(|e| e.to_string())
@@ -469,8 +470,8 @@ fn store_migrate_chunk(
     let encryption = parse_encryption_params(&key_binary, &nonce_binary)?;
     let compression = parse_optional_compression(&compression, compression_level)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .migrate_chunk(&hash, from, to, compression.as_ref(), encryption.as_ref())
         .map_err(|e| e.to_string())
 }
@@ -506,8 +507,8 @@ fn store_reencrypt_chunk(
     let old_params = parse_required_encryption_params(&old_enc.0, &old_enc.1)?;
     let new_params = parse_required_encryption_params(&new_enc.0, &new_enc.1)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .reencrypt_chunk(&hash, tier, compression.as_ref(), &old_params, &new_params)
         .map_err(|e| e.to_string())
 }
@@ -832,8 +833,8 @@ fn metadata_write(
 ) -> Result<(), String> {
     let key_hash = parse_hash(&key_hash_bytes)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .write_metadata(&segment_id_hex, &key_hash, data.as_slice())
         .map_err(|e| e.to_string())
 }
@@ -854,8 +855,8 @@ fn metadata_read<'a>(
 ) -> Result<Binary<'a>, String> {
     let key_hash = parse_hash(&key_hash_bytes)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    let data = store_guard
+    let store = &store.store;
+    let data = store
         .read_metadata(&segment_id_hex, &key_hash)
         .map_err(|e| e.to_string())?;
 
@@ -878,8 +879,8 @@ fn metadata_delete(
 ) -> Result<(), String> {
     let key_hash = parse_hash(&key_hash_bytes)?;
 
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    store_guard
+    let store = &store.store;
+    store
         .delete_metadata(&segment_id_hex, &key_hash)
         .map_err(|e| e.to_string())
 }
@@ -896,8 +897,8 @@ fn metadata_list_segment<'a>(
     store: ResourceArc<BlobStoreResource>,
     segment_id_hex: String,
 ) -> Result<Vec<Binary<'a>>, String> {
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
-    let hashes = store_guard
+    let store = &store.store;
+    let hashes = store
         .list_metadata_segment(&segment_id_hex)
         .map_err(|e| e.to_string())?;
 
@@ -973,9 +974,9 @@ fn index_tree_get<'a>(
     key: Binary,
 ) -> Result<Option<Binary<'a>>, String> {
     let parsed_tier = parse_tier(&tier)?;
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let store = &store.store;
 
-    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
     let tree = IndexTree::new(adapter, TreeConfig::default());
 
     let root = parse_optional_root(&root_hash)?;
@@ -1006,9 +1007,9 @@ fn index_tree_range<'a>(
     end_key: Binary,
 ) -> Result<Vec<(Binary<'a>, Binary<'a>)>, String> {
     let parsed_tier = parse_tier(&tier)?;
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let store = &store.store;
 
-    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
     let tree = IndexTree::new(adapter, TreeConfig::default());
 
     let root = parse_optional_root(&root_hash)?;
@@ -1043,9 +1044,9 @@ fn index_tree_put<'a>(
     value: Binary,
 ) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
     let parsed_tier = parse_tier(&tier)?;
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let store = &store.store;
 
-    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
     let mut tree = IndexTree::new(adapter, TreeConfig::default());
 
     let root = parse_optional_root(&root_hash)?;
@@ -1077,9 +1078,9 @@ fn index_tree_delete<'a>(
     key: Binary,
 ) -> Result<(Binary<'a>, Vec<(Binary<'a>, Binary<'a>)>), String> {
     let parsed_tier = parse_tier(&tier)?;
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let store = &store.store;
 
-    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
     let mut tree = IndexTree::new(adapter, TreeConfig::default());
 
     let root = parse_optional_root(&root_hash)?;
@@ -1113,9 +1114,9 @@ fn index_tree_purge_tombstones<'a>(
     }
 
     let parsed_tier = parse_tier(&tier)?;
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let store = &store.store;
 
-    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
     let mut tree = IndexTree::new(adapter, TreeConfig::default());
 
     let root = parse_hash(&root_hash)?;
@@ -1176,9 +1177,9 @@ fn index_tree_list_referenced_chunks<'a>(
     tier: String,
 ) -> Result<Vec<Binary<'a>>, String> {
     let parsed_tier = parse_tier(&tier)?;
-    let store_guard = store.store.lock().map_err(|e| e.to_string())?;
+    let store = &store.store;
 
-    let adapter = BlobStoreChunkStore::new(&store_guard, parsed_tier);
+    let adapter = BlobStoreChunkStore::new(store, parsed_tier);
     let tree = IndexTree::new(adapter, TreeConfig::default());
 
     let root = parse_optional_root(&root_hash)?;
