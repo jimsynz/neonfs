@@ -969,7 +969,18 @@ defmodule NeonFS.Core.Blob.Native do
     - `{:error, reason}` - If the write fails
   """
   @spec metadata_write(store(), String.t(), hash(), binary()) :: {:ok, {}} | {:error, String.t()}
-  def metadata_write(_store, _segment_id_hex, _key_hash, _data),
+  def metadata_write(store, segment_id_hex, key_hash, data) do
+    ref = make_ref()
+    metadata_write_submit(store, ref, segment_id_hex, key_hash, data)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec metadata_write_submit(store(), reference(), String.t(), hash(), binary()) :: :ok
+  def metadata_write_submit(_store, _ref, _segment_id_hex, _key_hash, _data),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -985,7 +996,18 @@ defmodule NeonFS.Core.Blob.Native do
     - `{:error, reason}` - If the key does not exist or read fails
   """
   @spec metadata_read(store(), String.t(), hash()) :: {:ok, binary()} | {:error, String.t()}
-  def metadata_read(_store, _segment_id_hex, _key_hash),
+  def metadata_read(store, segment_id_hex, key_hash) do
+    ref = make_ref()
+    metadata_read_submit(store, ref, segment_id_hex, key_hash)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec metadata_read_submit(store(), reference(), String.t(), hash()) :: :ok
+  def metadata_read_submit(_store, _ref, _segment_id_hex, _key_hash),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1001,7 +1023,18 @@ defmodule NeonFS.Core.Blob.Native do
     - `{:error, reason}` - If the key does not exist or delete fails
   """
   @spec metadata_delete(store(), String.t(), hash()) :: {:ok, {}} | {:error, String.t()}
-  def metadata_delete(_store, _segment_id_hex, _key_hash),
+  def metadata_delete(store, segment_id_hex, key_hash) do
+    ref = make_ref()
+    metadata_delete_submit(store, ref, segment_id_hex, key_hash)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec metadata_delete_submit(store(), reference(), String.t(), hash()) :: :ok
+  def metadata_delete_submit(_store, _ref, _segment_id_hex, _key_hash),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1019,7 +1052,18 @@ defmodule NeonFS.Core.Blob.Native do
     - `{:error, reason}` - If the listing fails
   """
   @spec metadata_list_segment(store(), String.t()) :: {:ok, [hash()]} | {:error, String.t()}
-  def metadata_list_segment(_store, _segment_id_hex),
+  def metadata_list_segment(store, segment_id_hex) do
+    ref = make_ref()
+    metadata_list_segment_submit(store, ref, segment_id_hex)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec metadata_list_segment_submit(store(), reference(), String.t()) :: :ok
+  def metadata_list_segment_submit(_store, _ref, _segment_id_hex),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1043,7 +1087,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec index_tree_get(store(), binary(), tier(), binary()) ::
           {:ok, binary() | nil} | {:error, String.t()}
-  def index_tree_get(_store, _root_hash, _tier, _key),
+  def index_tree_get(store, root_hash, tier, key) do
+    ref = make_ref()
+    index_tree_get_submit(store, ref, root_hash, tier, key)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec index_tree_get_submit(store(), reference(), binary(), tier(), binary()) :: :ok
+  def index_tree_get_submit(_store, _ref, _root_hash, _tier, _key),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1060,7 +1115,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec index_tree_range(store(), binary(), tier(), binary(), binary()) ::
           {:ok, [{binary(), binary()}]} | {:error, String.t()}
-  def index_tree_range(_store, _root_hash, _tier, _start_key, _end_key),
+  def index_tree_range(store, root_hash, tier, start_key, end_key) do
+    ref = make_ref()
+    index_tree_range_submit(store, ref, root_hash, tier, start_key, end_key)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec index_tree_range_submit(store(), reference(), binary(), tier(), binary(), binary()) :: :ok
+  def index_tree_range_submit(_store, _ref, _root_hash, _tier, _start_key, _end_key),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1083,7 +1149,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec index_tree_put(store(), binary(), tier(), binary(), binary()) ::
           {:ok, {binary(), [{binary(), binary()}]}} | {:error, String.t()}
-  def index_tree_put(_store, _root_hash, _tier, _key, _value),
+  def index_tree_put(store, root_hash, tier, key, value) do
+    ref = make_ref()
+    index_tree_put_submit(store, ref, root_hash, tier, key, value)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec index_tree_put_submit(store(), reference(), binary(), tier(), binary(), binary()) :: :ok
+  def index_tree_put_submit(_store, _ref, _root_hash, _tier, _key, _value),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1099,7 +1176,18 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec index_tree_delete(store(), binary(), tier(), binary()) ::
           {:ok, {binary(), [{binary(), binary()}]}} | {:error, String.t()}
-  def index_tree_delete(_store, _root_hash, _tier, _key),
+  def index_tree_delete(store, root_hash, tier, key) do
+    ref = make_ref()
+    index_tree_delete_submit(store, ref, root_hash, tier, key)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec index_tree_delete_submit(store(), reference(), binary(), tier(), binary()) :: :ok
+  def index_tree_delete_submit(_store, _ref, _root_hash, _tier, _key),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1120,7 +1208,24 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec index_tree_purge_tombstones(store(), binary(), tier(), non_neg_integer()) ::
           {:ok, {binary(), [{binary(), binary()}]}} | {:error, String.t()}
-  def index_tree_purge_tombstones(_store, _root_hash, _tier, _before_unix_nanos),
+  def index_tree_purge_tombstones(store, root_hash, tier, before_unix_nanos) do
+    ref = make_ref()
+    index_tree_purge_tombstones_submit(store, ref, root_hash, tier, before_unix_nanos)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec index_tree_purge_tombstones_submit(
+          store(),
+          reference(),
+          binary(),
+          tier(),
+          non_neg_integer()
+        ) :: :ok
+  def index_tree_purge_tombstones_submit(_store, _ref, _root_hash, _tier, _before_unix_nanos),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
@@ -1140,6 +1245,17 @@ defmodule NeonFS.Core.Blob.Native do
   """
   @spec index_tree_list_referenced_chunks(store(), binary(), tier()) ::
           {:ok, [binary()]} | {:error, String.t()}
-  def index_tree_list_referenced_chunks(_store, _root_hash, _tier),
+  def index_tree_list_referenced_chunks(store, root_hash, tier) do
+    ref = make_ref()
+    index_tree_list_referenced_chunks_submit(store, ref, root_hash, tier)
+
+    receive do
+      {^ref, reply} -> reply
+    end
+  end
+
+  @doc false
+  @spec index_tree_list_referenced_chunks_submit(store(), reference(), binary(), tier()) :: :ok
+  def index_tree_list_referenced_chunks_submit(_store, _ref, _root_hash, _tier),
     do: :erlang.nif_error(:nif_not_loaded)
 end
