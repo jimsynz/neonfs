@@ -19,6 +19,8 @@ defmodule NeonFS.Client do
     delete_file
     mkdir
     rename_file
+    sync_file
+    sync_file_by_id
     truncate_file
     update_file_meta
     write_file_at
@@ -57,6 +59,30 @@ defmodule NeonFS.Client do
       {:error, _} = error -> error
       other -> {:error, {:unexpected, other}}
     end
+  end
+
+  @doc """
+  Interface-agnostic `fsync`/`sync`/COMMIT durability barrier: blocks until
+  every chunk of the file at `path` on `volume_name` has at least the
+  volume's `min_copies` durable replicas (#1500 / #1502).
+
+  Every interface (FUSE fsync/flush, NFS COMMIT, CIFS fsync) calls this one
+  entry point so the barrier has identical semantics everywhere. RPCs to
+  `NeonFS.Core.sync_file/2` via the root-holder route.
+  """
+  @spec sync_file(String.t(), String.t()) :: :ok | {:error, term()}
+  def sync_file(volume_name, path) do
+    core_call(NeonFS.Core, :sync_file, [volume_name, path])
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `sync_file/2` for handle-based callers
+  (FUSE / NFSv4 fd holders) whose file may have been detached by another
+  peer. RPCs to `NeonFS.Core.sync_file_by_id/2`.
+  """
+  @spec sync_file_by_id(String.t(), binary()) :: :ok | {:error, term()}
+  def sync_file_by_id(volume_name, file_id) do
+    core_call(NeonFS.Core, :sync_file_by_id, [volume_name, file_id])
   end
 
   @doc """

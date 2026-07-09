@@ -935,6 +935,25 @@ defmodule NeonFS.FUSE.Handler do
     end
   end
 
+  # `FSYNC` / `FLUSH` / `FSYNCDIR` durability barrier (#1502): drive the
+  # shared `sync_file` barrier for the fd's file so its chunks reach the
+  # volume's `min_copies` durable replicas before we ack. Keyed by the
+  # tracked `file_id` so it works across an unlink-while-open. An untracked
+  # `fh` — a directory (`fsyncdir` uses `fh = 0`) or a synthesised handle —
+  # holds no chunk data, so there is nothing to make durable: reply ok.
+  defp handle_operation({"fsync", %{"fh" => fh}}, state) do
+    case Map.get(state.fh_table, fh) do
+      %{file_id: file_id} ->
+        case NeonFS.Client.sync_file_by_id(state.volume_name, file_id) do
+          :ok -> {"ok", %{}}
+          {:error, reason} -> {"error", %{"errno" => sync_errno(reason)}}
+        end
+
+      nil ->
+        {"ok", %{}}
+    end
+  end
+
   # Handle readdir operation: list directory contents
   defp handle_operation({"readdir", params}, state) do
     ino = params["ino"]
@@ -1677,6 +1696,12 @@ defmodule NeonFS.FUSE.Handler do
   defp core_call(module, function, args) do
     NeonFS.Client.core_call(module, function, args)
   end
+
+  # A failed durability barrier maps to EIO — the synced data could not be
+  # made durable to `min_copies`. A file that vanished under the fd is ENOENT.
+  defp sync_errno(:file_not_found), do: errno(:enoent)
+  defp sync_errno(%{class: :not_found}), do: errno(:enoent)
+  defp sync_errno(_reason), do: errno(:eio)
 
   # Volume-scoped metadata WRITES through id-keyed core APIs
   # (`WriteOperation` / `FileIndex`) go to a node holding the volume's root
