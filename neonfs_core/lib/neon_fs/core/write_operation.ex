@@ -47,6 +47,7 @@ defmodule NeonFS.Core.WriteOperation do
     AlreadyExists,
     Conflict,
     FileNotFound,
+    QuorumUnavailable,
     Unavailable,
     Unsupported,
     VolumeNotFound
@@ -1559,17 +1560,20 @@ defmodule NeonFS.Core.WriteOperation do
       chunk_meta =
         build_chunk_meta(hash, size, chunk_info, drive.id, volume, write_ctx.write_id, crypto)
 
-      case ChunkIndex.put(chunk_meta) do
-        :ok ->
-          maybe_replicate_chunk(hash, data, volume, tier, drive.id)
-          build_chunk_result(hash, offset, size, chunk_info, index)
-
-        {:error, reason} ->
-          {:error, {:chunk_index_failed, reason}}
+      with :ok <- put_chunk_meta(chunk_meta),
+           :ok <- maybe_replicate_chunk(hash, data, volume, tier, drive.id) do
+        build_chunk_result(hash, offset, size, chunk_info, index)
       end
     else
       {:error, %{class: :unavailable}} = error -> error
       {:error, reason} -> {:error, {:chunk_write_failed, reason}}
+    end
+  end
+
+  defp put_chunk_meta(chunk_meta) do
+    case ChunkIndex.put(chunk_meta) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:chunk_index_failed, reason}}
     end
   end
 
@@ -1617,14 +1621,45 @@ defmodule NeonFS.Core.WriteOperation do
 
   defp maybe_replicate_chunk(hash, data, volume, tier, local_drive_id) do
     if volume.durability.factor > 1 do
-      case Replication.replicate_chunk(hash, data, volume,
-             tier: tier,
-             local_drive_id: local_drive_id
-           ) do
-        {:ok, _locations} -> :ok
-        {:error, reason} -> Logger.warning("Chunk replication failed", reason: reason)
-      end
+      hash
+      |> Replication.replicate_chunk(data, volume, tier: tier, local_drive_id: local_drive_id)
+      |> handle_replication_result(volume.write_ack, volume.durability.min_copies)
+    else
+      :ok
     end
+  end
+
+  # `write_ack: :local` promises only a durable local copy on ack; the
+  # extra replicas are best-effort background work, so a shortfall there is
+  # logged, not fatal. `:quorum` / `:all` promise `min_copies` durable on
+  # ack — failing to reach it must fail the write rather than silently
+  # under-replicate while reporting success (#1501). The count check catches
+  # both a quorum that couldn't ack and `replicate_chunk`'s no-targets
+  # short-circuit (which returns just the local copy regardless of ack).
+  defp handle_replication_result({:ok, locations}, write_ack, min_copies)
+       when write_ack != :local and length(locations) < min_copies do
+    {:error,
+     QuorumUnavailable.exception(
+       operation: :chunk_write,
+       required: min_copies,
+       available: length(locations)
+     )}
+  end
+
+  defp handle_replication_result({:ok, _locations}, _write_ack, _min_copies), do: :ok
+
+  defp handle_replication_result({:error, reason}, :local, _min_copies) do
+    Logger.warning("Background chunk replication failed", reason: inspect(reason))
+    :ok
+  end
+
+  defp handle_replication_result({:error, reason}, _write_ack, min_copies) do
+    {:error,
+     QuorumUnavailable.exception(
+       operation: :chunk_write,
+       required: min_copies,
+       failed: [reason]
+     )}
   end
 
   defp build_chunk_result(hash, offset, size, chunk_info, index) do
