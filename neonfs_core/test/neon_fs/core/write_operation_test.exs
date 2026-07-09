@@ -14,7 +14,7 @@ defmodule NeonFS.Core.WriteOperationTest do
     WriteOperation
   }
 
-  alias NeonFS.Error.{AlreadyExists, Unsupported, VolumeNotFound}
+  alias NeonFS.Error.{AlreadyExists, QuorumUnavailable, Unsupported, VolumeNotFound}
 
   @moduletag :tmp_dir
 
@@ -397,6 +397,69 @@ defmodule NeonFS.Core.WriteOperationTest do
       assert after_write.logical_size == before.logical_size + byte_size("appended-data")
       assert after_write.chunk_count >= before.chunk_count
       assert after_write.physical_size > 0
+    end
+  end
+
+  # #1501: a `write_ack: :quorum` / `:all` volume promises `min_copies`
+  # durable replicas on ack. With only the single default drive registered
+  # in this test env, a `factor: 2` volume can never place a second replica,
+  # so those writes must fail rather than report success while holding one
+  # copy. `:local` deliberately acks after the local copy (background best
+  # effort), so it still succeeds.
+  describe "write-ack durability contract (#1501)" do
+    test "quorum write fails when min_copies cannot be met" do
+      vol_name = "quorum-#{:rand.uniform(999_999)}"
+
+      {:ok, volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :replicate, factor: 2, min_copies: 2},
+          write_ack: :quorum
+        )
+
+      assert {:error, %QuorumUnavailable{}} =
+               WriteOperation.write_file_at(volume.id, "/q.txt", 0, "data")
+
+      # No committed file entry claims the under-replicated chunk.
+      assert {:error, :not_found} = FileIndex.get_by_path(volume.id, "/q.txt")
+    end
+
+    test "all-ack write fails when a replica cannot be placed" do
+      vol_name = "all-#{:rand.uniform(999_999)}"
+
+      {:ok, volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :replicate, factor: 2, min_copies: 2},
+          write_ack: :all
+        )
+
+      assert {:error, %QuorumUnavailable{}} =
+               WriteOperation.write_file_at(volume.id, "/a.txt", 0, "data")
+
+      assert {:error, :not_found} = FileIndex.get_by_path(volume.id, "/a.txt")
+    end
+
+    test "local write_ack still succeeds with only the local copy" do
+      vol_name = "local-#{:rand.uniform(999_999)}"
+
+      {:ok, volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :replicate, factor: 2, min_copies: 2},
+          write_ack: :local
+        )
+
+      assert {:ok, file_meta} = WriteOperation.write_file_at(volume.id, "/l.txt", 0, "data")
+      assert file_meta.path == "/l.txt"
+    end
+
+    test "single-replica volume writes succeed without replication" do
+      vol_name = "single-#{:rand.uniform(999_999)}"
+
+      {:ok, volume} =
+        VolumeRegistry.create(vol_name,
+          durability: %{type: :replicate, factor: 1, min_copies: 1}
+        )
+
+      assert {:ok, _} = WriteOperation.write_file_at(volume.id, "/s.txt", 0, "data")
     end
   end
 
