@@ -28,7 +28,6 @@ Mimic.copy(NeonFS.Core.ReplicaRepair)
 Mimic.copy(NeonFS.Core.VolumeRegistry)
 Mimic.copy(NeonFS.Core.Volume.MetadataReader)
 Mimic.copy(NeonFS.Core.RaSupervisor)
-Mimic.copy(NeonFS.Client.Router)
 
 # Exclude `:benchmark` tests by default (e.g. #1481's blob-NIF throughput
 # baseline) — they print throughput numbers and take a while. Run one with
