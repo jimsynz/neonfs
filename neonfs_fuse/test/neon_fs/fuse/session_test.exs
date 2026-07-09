@@ -740,38 +740,44 @@ defmodule NeonFS.FUSE.SessionTest do
 
   # ——— Cache flushers + FALLOCATE (#577) ————————————————————————————
 
-  describe "FLUSH / FSYNC / FSYNCDIR (no-op success)" do
+  describe "FLUSH / FSYNC / FSYNCDIR (shared sync_file barrier, #1502)" do
     setup do
       ctx = setup_session()
       _ = handshake!(ctx)
+      # All three opcodes now enqueue a single "fsync" op to the Handler,
+      # which drives the shared `sync_file` durability barrier and replies.
+      :ok = StubHandler.set_replies(ctx.handler, %{"fsync" => {"ok", %{}}})
+      send(ctx.handler, {:set_session, ctx.session})
       ctx
     end
 
-    test "FLUSH replies success without invoking the handler", ctx do
+    test "FLUSH enqueues the barrier op for the fd and replies success", ctx do
       # `fuse_flush_in`: fh (8) + unused (4) + padding (4) + lock_owner (8) = 24
       header = build_in_header(opcode: opcode(:flush), len: 40 + 24, unique: 201, nodeid: 7)
-      body = <<0::little-64, 0::little-32, 0::little-32, 0::little-64>>
+      body = <<3::little-64, 0::little-32, 0::little-32, 0::little-64>>
 
       :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
 
       assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
       assert out.error == 0
       assert out.unique == 201
+      assert [{"fsync", %{"fh" => 3}}] = StubHandler.received_ops(ctx.handler)
     end
 
-    test "FSYNC replies success", ctx do
+    test "FSYNC enqueues the barrier op for the fd and replies success", ctx do
       # `fuse_fsync_in`: fh (8) + flags (4) + pad (4) = 16
       header = build_in_header(opcode: opcode(:fsync), len: 40 + 16, unique: 202, nodeid: 7)
-      body = <<0::little-64, 0::little-32, 0::little-32>>
+      body = <<5::little-64, 0::little-32, 0::little-32>>
 
       :ok = FNative.write_frame(ctx.kernel_fd, header <> body)
 
       assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
       assert out.error == 0
       assert out.unique == 202
+      assert [{"fsync", %{"fh" => 5}}] = StubHandler.received_ops(ctx.handler)
     end
 
-    test "FSYNCDIR replies success", ctx do
+    test "FSYNCDIR (fh=0, a directory) enqueues the barrier op and replies success", ctx do
       header = build_in_header(opcode: opcode(:fsyncdir), len: 40 + 16, unique: 203, nodeid: 7)
       body = <<0::little-64, 0::little-32, 0::little-32>>
 
@@ -780,6 +786,7 @@ defmodule NeonFS.FUSE.SessionTest do
       assert {:ok, out, <<>>} = receive_response(ctx.kernel_fd)
       assert out.error == 0
       assert out.unique == 203
+      assert [{"fsync", %{"fh" => 0}}] = StubHandler.received_ops(ctx.handler)
     end
   end
 

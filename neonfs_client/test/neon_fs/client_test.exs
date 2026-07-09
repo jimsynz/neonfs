@@ -46,4 +46,24 @@ defmodule NeonFS.ClientTest do
                Client.core_call(NeonFS.Core, :delete_file, [])
     end
   end
+
+  describe "sync_file/2 durability barrier (#1502)" do
+    test "sync_file routes to NeonFS.Core.sync_file on the root holder" do
+      stub(Router, :volume_metadata_call, fn vol, mod, fun, args ->
+        {:root, vol, mod, fun, args}
+      end)
+
+      assert {:root, "vol", NeonFS.Core, :sync_file, ["vol", "/f.txt"]} =
+               Client.sync_file("vol", "/f.txt")
+    end
+
+    test "sync_file_by_id routes to NeonFS.Core.sync_file_by_id on the root holder" do
+      stub(Router, :volume_metadata_call, fn vol, mod, fun, args ->
+        {:root, vol, mod, fun, args}
+      end)
+
+      assert {:root, "vol", NeonFS.Core, :sync_file_by_id, ["vol", "file-1"]} =
+               Client.sync_file_by_id("vol", "file-1")
+    end
+  end
 end

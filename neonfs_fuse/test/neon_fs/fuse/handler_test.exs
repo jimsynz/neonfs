@@ -442,6 +442,56 @@ defmodule NeonFS.FUSE.HandlerTest do
     end
   end
 
+  describe "fsync barrier (#1502)" do
+    setup do
+      handler = start_supervised!({Handler, volume: "vol", test_notify: self()})
+      Mimic.allow(NeonFS.Client, self(), handler)
+      {:ok, handler: handler}
+    end
+
+    test "an untracked fh (fsyncdir / directory, fh=0) replies ok without the barrier",
+         %{handler: handler} do
+      reject(&NeonFS.Client.sync_file_by_id/2)
+
+      send(handler, {:fuse_op, 30, {"fsync", %{"fh" => 0}}})
+      assert_receive {:fuse_op_complete, 30, {"ok", %{}}}, 5_000
+    end
+
+    test "a tracked fh drives Client.sync_file_by_id for the fd's file_id",
+         %{handler: handler} do
+      :sys.replace_state(handler, fn state ->
+        %{
+          state
+          | fh_table:
+              Map.put(state.fh_table, 7, %{file_id: "file-1", claim_id: nil, path: "/f.txt"})
+        }
+      end)
+
+      expect(NeonFS.Client, :sync_file_by_id, fn "vol", "file-1" -> :ok end)
+
+      send(handler, {:fuse_op, 31, {"fsync", %{"fh" => 7}}})
+      assert_receive {:fuse_op_complete, 31, {"ok", %{}}}, 5_000
+    end
+
+    test "a barrier failure maps to EIO", %{handler: handler} do
+      :sys.replace_state(handler, fn state ->
+        %{
+          state
+          | fh_table:
+              Map.put(state.fh_table, 8, %{file_id: "file-2", claim_id: nil, path: "/g.txt"})
+        }
+      end)
+
+      expect(NeonFS.Client, :sync_file_by_id, fn "vol", "file-2" ->
+        {:error, {:under_replicated, 1, 2}}
+      end)
+
+      send(handler, {:fuse_op, 32, {"fsync", %{"fh" => 8}}})
+      # errno(:eio) == 5
+      assert_receive {:fuse_op_complete, 32, {"error", %{"errno" => 5}}}, 5_000
+    end
+  end
+
   # Helper for the `O_EXCL` create tests: dispatches the two
   # `core_call/3` invocations the new pin-on-create path makes —
   # the `WriteOperation.write_file_at` that creates the file, and

@@ -579,26 +579,27 @@ defmodule NeonFS.FUSE.Session do
 
   # ——— Cache flushers + FALLOCATE (#577) ————————————————————————————
 
-  # `FLUSH` is a close-time advisory the kernel emits after every
-  # `close(2)`. NeonFS commits writes synchronously at the chunk-write
-  # boundary, so there's nothing buffered to flush — reply success
-  # immediately without involving Handler.
-  defp handle_opcode(:flush, header, %Request.Flush{}, state) do
-    write_reply(state.fd, header.unique, %Response.Empty{}, 0)
-    emit_opcode_telemetry(:flush, :ok, state)
-    state
+  # `FLUSH` (close-time) and `FSYNC` (op 20) both run the shared `sync_file`
+  # durability barrier for the fd's file: they block until the file's
+  # outstanding chunk placements reach the volume's `min_copies` durable
+  # replicas (#1502). A committed write is disk-durable locally, but on a
+  # `write_ack: :local` volume the extra replicas are placed in the
+  # background — so the barrier is what makes a read (or a cold restart)
+  # immediately after fsync/close see durable data. Enqueue to the Handler,
+  # which resolves the fd's `file_id` and drives `Client.sync_file`.
+  defp handle_opcode(:flush, header, %Request.Flush{fh: fh}, state) do
+    enqueue(:flush, header.unique, {"fsync", %{"fh" => fh}}, state)
   end
 
-  # `FSYNC` (op 20) and `FSYNCDIR` (op 30) carry the same wire layout
-  # and the same answer here: every committed write is already
-  # persistent (Ra-replicated metadata + chunk replicas), so there's
-  # no per-fd buffer to fsync. Reply success.
-  defp handle_opcode(:fsync, header, %Request.Fsync{}, state) do
-    reply_empty_ok(state, header.unique, :fsync)
+  defp handle_opcode(:fsync, header, %Request.Fsync{fh: fh}, state) do
+    enqueue(:fsync, header.unique, {"fsync", %{"fh" => fh}}, state)
   end
 
-  defp handle_opcode(:fsyncdir, header, %Request.FsyncDir{}, state) do
-    reply_empty_ok(state, header.unique, :fsyncdir)
+  # `FSYNCDIR` (op 30) targets a directory, opened with `fh = 0`. Directories
+  # hold no chunk data, so the Handler's `fsync` clause replies ok for any
+  # untracked fh — routed through the same op for a single code path.
+  defp handle_opcode(:fsyncdir, header, %Request.FsyncDir{fh: fh}, state) do
+    enqueue(:fsyncdir, header.unique, {"fsync", %{"fh" => fh}}, state)
   end
 
   # `FALLOCATE` is optional per RFC. NeonFS chunks-on-write so sparse
@@ -746,12 +747,6 @@ defmodule NeonFS.FUSE.Session do
      }}
   end
 
-  defp reply_empty_ok(state, kernel_unique, opcode) do
-    write_reply(state.fd, kernel_unique, %Response.Empty{}, 0)
-    emit_opcode_telemetry(opcode, :ok, state)
-    state
-  end
-
   ## Handler reply translation
 
   defp handle_handler_reply(:lookup, kernel_unique, {"lookup_ok", payload}, state) do
@@ -838,7 +833,18 @@ defmodule NeonFS.FUSE.Session do
   end
 
   defp handle_handler_reply(kind, kernel_unique, {"ok", _}, state)
-       when kind in [:unlink, :rmdir, :rename, :setxattr, :removexattr, :setlk, :setlkw] do
+       when kind in [
+              :unlink,
+              :rmdir,
+              :rename,
+              :setxattr,
+              :removexattr,
+              :setlk,
+              :setlkw,
+              :fsync,
+              :fsyncdir,
+              :flush
+            ] do
     write_reply(state.fd, kernel_unique, %Response.Empty{}, 0)
     emit_opcode_telemetry(kind, :ok, state)
     state

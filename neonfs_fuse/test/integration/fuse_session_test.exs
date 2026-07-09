@@ -135,6 +135,30 @@ defmodule NeonFS.FUSE.IntegrationTest.SessionTest do
     end
   end
 
+  describe "real-FUSE fsync barrier (#1502)" do
+    # `dd conv=fsync` writes the file then calls `fsync(2)` on the fd before
+    # closing it, so this drives the FUSE WRITE → FSYNC → FLUSH opcodes
+    # end-to-end through /dev/fuse. On this single-node factor-1 volume the
+    # `sync_file` barrier is a no-op (one copy is already durable), so the
+    # value here is proving the new fsync/flush opcode wiring survives a real
+    # kernel round-trip; multi-replica durability across a cold restart is
+    # covered by `NeonFS.Integration.SyncDurabilityTest` at the core layer.
+    test "dd conv=fsync writes, fsyncs, and reads back through the mount",
+         %{mount_point: mp} do
+      target = Path.join(mp, "fsync-test.bin")
+
+      {_out, 0} =
+        System.cmd(
+          "dd",
+          ["if=/dev/zero", "of=#{target}", "bs=1024", "count=4", "conv=fsync"],
+          stderr_to_stdout: true
+        )
+
+      {size, 0} = System.cmd("stat", ["-c", "%s", target], stderr_to_stdout: true)
+      assert String.trim(size) == "4096"
+    end
+  end
+
   describe "real-FUSE xattr round-trip (#671)" do
     # Tagged so `test_helper.exs` can exclude these on hosts where
     # the `attr` package's `setfattr` / `getfattr` aren't installed.
