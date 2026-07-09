@@ -18,6 +18,7 @@ defmodule NeonFS.Core do
   alias NeonFS.Core.NamespaceCoordinator
   alias NeonFS.Core.RaSupervisor
   alias NeonFS.Core.ReadOperation
+  alias NeonFS.Core.SyncOperation
   alias NeonFS.Core.VolumeRegistry
   alias NeonFS.Core.WriteOperation
   alias NeonFS.Error.{Conflict, FileNotFound, Invalid, NotFound, Unavailable, VolumeNotFound}
@@ -331,6 +332,43 @@ defmodule NeonFS.Core do
     with :ok <- ensure_writable(),
          {:ok, volume} <- resolve_volume(volume_name) do
       WriteOperation.write_file_at_by_id(volume.id, file_id, offset, data, opts)
+    end
+  end
+
+  @doc """
+  Durability barrier for `path` — blocks until every chunk of the file
+  has at least the volume's `min_copies` durable replicas, driving
+  synchronous replication for any shortfall (#1500).
+
+  This is the core mechanism behind `fsync`/`sync`/COMMIT across the
+  interface layer (wired in #1502). On a `write_ack: :local` volume the
+  extra replicas are placed by a fire-and-forget background task after
+  the write acks; this barrier forces them to complete so a read — or a
+  whole-cluster restart — immediately after the sync sees durable data.
+
+  Erasure-coded volumes return `:ok` immediately: their shards are
+  written synchronously on the write path.
+
+  Returns `:ok` once every chunk meets `min_copies`, or
+  `{:error, {:under_replicated, have, want}}` for the first chunk that
+  cannot reach it.
+  """
+  @spec sync_file(String.t(), String.t()) :: :ok | {:error, term()}
+  def sync_file(volume_name, path) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      SyncOperation.sync_file(volume.id, normalize_path(path))
+    end
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `sync_file/2`. FUSE / NFSv4 fd holders
+  sync through a cached handle whose file may have been detached by
+  another peer (#638); resolving by id keeps a `:detached` file syncable.
+  """
+  @spec sync_file_by_id(String.t(), binary()) :: :ok | {:error, term()}
+  def sync_file_by_id(volume_name, file_id) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      SyncOperation.sync_file_by_id(volume.id, file_id)
     end
   end
 

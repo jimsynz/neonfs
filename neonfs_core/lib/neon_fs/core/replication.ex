@@ -147,7 +147,104 @@ defmodule NeonFS.Core.Replication do
     end
   end
 
+  @doc """
+  Synchronously ensures `chunk_hash` has at least the volume's
+  `min_copies` durable replicas, driving replication for any shortfall
+  regardless of the volume's `write_ack` policy.
+
+  This is the per-chunk primitive behind the `sync_file` durability
+  barrier (#1500). `replicate_chunk/4`'s `:local` path is
+  fire-and-forget — it returns after the local copy before the extra
+  replicas land — so it cannot be used to *wait* for durability. This
+  function always blocks until `min_copies` durable replicas exist or
+  the placement fails.
+
+  Only `:trusted` replicas count toward `min_copies` (#1375): a
+  present-but-unverified copy — a returning node mid-resync or a
+  crash-recovered drive mid-scrub — is ignored so the barrier is not
+  satisfied by a replica still being verified.
+
+  Returns `:ok` once `min_copies` durable replicas exist, or
+  `{:error, {:under_replicated, have, want}}` when the cluster cannot
+  place enough copies right now.
+  """
+  @spec ensure_min_copies(binary(), NeonFS.Core.Volume.t()) :: :ok | {:error, term()}
+  def ensure_min_copies(chunk_hash, volume) do
+    min_copies = volume.durability.min_copies
+
+    with {:ok, chunk} <- ChunkIndex.get(volume.id, chunk_hash) do
+      durable = durable_locations(chunk.locations)
+
+      if length(durable) >= min_copies do
+        :ok
+      else
+        replicate_shortfall(chunk, volume, min_copies - length(durable))
+      end
+    end
+  end
+
   # Private Functions
+
+  defp replicate_shortfall(chunk, volume, needed) do
+    tier = chunk_tier(chunk, volume)
+    existing = Enum.map(chunk.locations, &{&1.node, &1.drive_id})
+
+    with {:ok, data} <- source_chunk_data(chunk),
+         {:ok, targets} <- select_replication_targets(needed, tier, existing) do
+      new_locations =
+        for {:ok, location} <- replicate_to_targets(chunk.hash, data, tier, targets),
+            do: location
+
+      unless new_locations == [] do
+        add_locations_to_chunk(volume.id, chunk.hash, new_locations)
+      end
+
+      verify_min_copies(chunk.hash, volume)
+    end
+  end
+
+  defp verify_min_copies(chunk_hash, volume) do
+    min_copies = volume.durability.min_copies
+
+    with {:ok, chunk} <- ChunkIndex.get(volume.id, chunk_hash) do
+      have = length(durable_locations(chunk.locations))
+
+      if have >= min_copies do
+        :ok
+      else
+        {:error, {:under_replicated, have, min_copies}}
+      end
+    end
+  end
+
+  defp durable_locations(locations) do
+    unverified = MapSet.new(DriveTrust.unverified())
+    Enum.reject(locations, &MapSet.member?(unverified, {&1.node, &1.drive_id}))
+  end
+
+  defp chunk_tier(%{locations: [%{tier: tier} | _]}, _volume), do: tier
+  defp chunk_tier(_chunk, volume), do: volume.tiering.initial_tier
+
+  defp source_chunk_data(%{locations: []}), do: {:error, :no_replicas}
+
+  defp source_chunk_data(chunk) do
+    case Enum.find(chunk.locations, &(&1.node == Node.self())) do
+      nil ->
+        [first | _] = chunk.locations
+        remote_read_chunk(first.node, chunk.hash, first.drive_id)
+
+      local ->
+        BlobStore.read_chunk(chunk.hash, local.drive_id)
+    end
+  end
+
+  defp remote_read_chunk(node, hash, drive_id) do
+    case :rpc.call(node, BlobStore, :read_chunk, [hash, drive_id, []], 30_000) do
+      {:ok, _data} = ok -> ok
+      {:error, _reason} = err -> err
+      {:badrpc, reason} -> {:error, {:badrpc, reason}}
+    end
+  end
 
   # Round-robins drives across nodes so successive replicas prefer
   # distinct failure domains. Node buckets are ordered by how many copies
