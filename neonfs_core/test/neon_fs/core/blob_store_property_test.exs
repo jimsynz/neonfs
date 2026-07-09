@@ -20,13 +20,17 @@ defmodule NeonFS.Core.BlobStorePropertyTest do
   setup %{tmp_dir: tmp_dir} do
     File.mkdir_p!(tmp_dir)
 
+    # Register the tmp-dir cleanup *before* start_supervised so it runs
+    # *after* the BlobStore is stopped (on_exit callbacks fire LIFO). If it
+    # ran first, `File.rm_rf!` would race the still-alive server flushing
+    # chunks into the directory and fail with `:eexist` (#1507).
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
     server = :"blob_prop_#{System.unique_integer([:positive, :monotonic])}"
     drives = [%{id: "default", path: tmp_dir, tier: :hot, capacity: 100_000_000}]
 
     {:ok, _pid} =
       start_supervised({BlobStore, drives: drives, prefix_depth: 2, name: server})
-
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
     %{server: server}
   end

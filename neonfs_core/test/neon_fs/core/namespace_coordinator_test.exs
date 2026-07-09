@@ -7,6 +7,13 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
   @moduletag :tmp_dir
 
+  # These `assert_receive`s wait on spawned processes acquiring a claim via a
+  # GenServer call. The default 100ms is far too tight, and even a one-second
+  # budget flaked when a contended CI runner took ~2× normal to schedule the
+  # spawned process (#1507). Size the readiness budget for a loaded runner —
+  # the assertions are about ordering, not latency.
+  @receive_timeout 5_000
+
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
 
@@ -166,14 +173,14 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive {:claimed, _claim_id}, 1_000
+      assert_receive {:claimed, _claim_id}, @receive_timeout
 
       # While the holder is alive, the claim blocks a competing claim.
       assert {:error, %Conflict{}} =
                NamespaceCoordinator.claim_path(server, "/lifetime", :exclusive)
 
       send(holder, :exit)
-      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, @receive_timeout
 
       # The coordinator's :DOWN handler runs in its own mailbox; sync
       # the GenServer to make sure the release command has run before
@@ -269,14 +276,14 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive {:claimed, _}, 1_000
+      assert_receive {:claimed, _}, @receive_timeout
 
       # While the holder is alive, the path is pinned.
       assert {:error, %AlreadyExists{}} =
                NamespaceCoordinator.claim_create(server, "/dying-create")
 
       send(holder, :exit)
-      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, @receive_timeout
       :sys.get_state(server)
 
       assert {:ok, _} = NamespaceCoordinator.claim_create(server, "/dying-create")
@@ -389,13 +396,13 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive {:claimed, _}, 1_000
+      assert_receive {:claimed, _}, @receive_timeout
 
       # Pin visible while holder is alive.
       assert {:ok, [_]} = NamespaceCoordinator.claims_for_path(server, "/dying-pin")
 
       send(holder, :exit)
-      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, @receive_timeout
       :sys.get_state(server)
 
       assert {:ok, []} = NamespaceCoordinator.claims_for_path(server, "/dying-pin")
@@ -518,13 +525,13 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive {:claimed, _}, 1_000
+      assert_receive {:claimed, _}, @receive_timeout
 
       assert {:error, %Conflict{}} =
                NamespaceCoordinator.claim_path(server, "/h-src", :exclusive)
 
       send(holder, :exit)
-      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, @receive_timeout
       :sys.get_state(server)
 
       assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/h-src", :exclusive)
@@ -560,7 +567,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive :ready, 1_000
+      assert_receive :ready, @receive_timeout
 
       {:ok, claim_id} =
         NamespaceCoordinator.claim_subtree_for(server, "/explicit", :exclusive, holder)
@@ -571,7 +578,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
                NamespaceCoordinator.claim_path(server, "/explicit/x", :exclusive)
 
       send(holder, :exit)
-      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, @receive_timeout
       :sys.get_state(server)
 
       assert {:ok, _} = NamespaceCoordinator.claim_path(server, "/explicit/x", :exclusive)
@@ -611,7 +618,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       assert_receive {[:neonfs, :ra, :command, :release_namespace_claim], ^ref, %{released: 1},
                       meta},
-                     1_000
+                     @receive_timeout
 
       assert meta.claim_id == claim_id
       assert meta.claim_path == "/release-meta"
@@ -630,7 +637,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       assert_receive {[:neonfs, :ra, :command, :release_namespace_claim], ^ref, %{released: 0},
                       meta},
-                     1_000
+                     @receive_timeout
 
       assert meta.claim_id == "ns-claim-never-existed"
       assert meta.claim_path == nil
@@ -652,7 +659,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       assert_receive {[:neonfs, :ra, :command, :release_namespace_claim], ^ref, %{released: 1},
                       %{claim_type: :pinned}},
-                     1_000
+                     @receive_timeout
     end
 
     test "release_namespace_claims_for_holder emits released_claim_ids and holder",
@@ -675,16 +682,16 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive {:claimed, expected_ids}, 1_000
+      assert_receive {:claimed, expected_ids}, @receive_timeout
 
       send(holder, :exit)
-      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, 1_000
+      assert_receive {:DOWN, ^monitor_ref, :process, ^holder, _}, @receive_timeout
       # Sync the coordinator so the bulk-release Ra command has fired.
       :sys.get_state(server)
 
       assert_receive {[:neonfs, :ra, :command, :release_namespace_claims_for_holder], ^ref,
                       %{released: 2}, meta},
-                     1_000
+                     @receive_timeout
 
       assert ^holder = meta.holder
       assert is_list(meta.released_claim_ids)
@@ -840,10 +847,10 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive :claimed, 1_000
+      assert_receive :claimed, @receive_timeout
       ref = Process.monitor(holder)
       send(holder, :stop)
-      assert_receive {:DOWN, ^ref, :process, ^holder, _}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^holder, _}, @receive_timeout
 
       # Coordinator processes the DOWN asynchronously; poll briefly
       # until the bulk release replicates.
@@ -922,7 +929,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive {:held, held_id}, 1_000
+      assert_receive {:held, held_id}, @receive_timeout
 
       # Waiter is the test process — it'll receive the signal.
       assert {:wait, token} =
@@ -936,7 +943,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       send(holder_a, :release)
 
-      assert_receive {:byte_range_acquired, ^token, claim_id}, 1_000
+      assert_receive {:byte_range_acquired, ^token, claim_id}, @receive_timeout
       refute claim_id == held_id
 
       :ok = NamespaceCoordinator.release(server, claim_id)
@@ -964,7 +971,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive :held, 1_000
+      assert_receive :held, @receive_timeout
 
       # Two waiters — A then B. The first to register should win
       # the retry race when the holder releases.
@@ -991,7 +998,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
 
       # Wait for A to register its waiter before spawning B, so the FIFO
       # order under test is deterministic (was a fixed `Process.sleep`, #1208).
-      assert_receive :a_queued, 2_000
+      assert_receive :a_queued, @receive_timeout
 
       task_b =
         Task.async(fn ->
@@ -1015,7 +1022,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
         end)
 
       # Both waiters are now registered (A before B); release the holder.
-      assert_receive :b_queued, 2_000
+      assert_receive :b_queued, @receive_timeout
       send(holder, :release)
 
       result_a = Task.await(task_a, 3_000)
@@ -1057,7 +1064,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive :held, 1_000
+      assert_receive :held, @receive_timeout
 
       assert {:wait, token} =
                NamespaceCoordinator.claim_byte_range_wait_for(
@@ -1104,7 +1111,7 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive :held, 1_000
+      assert_receive :held, @receive_timeout
 
       waiter =
         spawn(fn ->
@@ -1124,11 +1131,11 @@ defmodule NeonFS.Core.NamespaceCoordinatorTest do
           end
         end)
 
-      assert_receive :waiter_queued, 1_000
+      assert_receive :waiter_queued, @receive_timeout
 
       ref = Process.monitor(waiter)
       send(waiter, :exit)
-      assert_receive {:DOWN, ^ref, :process, ^waiter, _}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^waiter, _}, @receive_timeout
 
       # Coordinator processes the DOWN asynchronously; give it a tick.
       :sys.get_state(server)
