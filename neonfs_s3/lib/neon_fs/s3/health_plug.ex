@@ -37,7 +37,7 @@ defmodule NeonFS.S3.HealthPlug do
 
     case status.status do
       :ok ->
-        Firkin.Plug.call(conn, opts.inner)
+        forward(conn, opts)
 
       _degraded_or_unavailable when conn.method in @write_methods ->
         reason = status.reason
@@ -50,8 +50,21 @@ defmodule NeonFS.S3.HealthPlug do
       _degraded_or_unavailable ->
         conn
         |> Plug.Conn.put_resp_header("x-neonfs-status", status.reason)
-        |> Firkin.Plug.call(opts.inner)
+        |> forward(opts)
     end
+  end
+
+  # A write reaching a `:frozen` cluster (#1378) surfaces as a raised
+  # ClusterFrozenError from the backend; return the same 503 + Retry-After
+  # as proactive degraded-mode gating.
+  defp forward(conn, opts) do
+    Firkin.Plug.call(conn, opts.inner)
+  rescue
+    NeonFS.S3.ClusterFrozenError ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "30")
+      |> Plug.Conn.put_resp_header("x-neonfs-status", "frozen")
+      |> Plug.Conn.send_resp(503, "")
   end
 
   defp cluster_status(%{core_nodes_fn: fun}) when is_function(fun, 0) do

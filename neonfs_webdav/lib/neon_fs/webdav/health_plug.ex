@@ -58,7 +58,7 @@ defmodule NeonFS.WebDAV.HealthPlug do
 
     case status.status do
       :ok ->
-        Davy.Plug.call(conn, opts.inner)
+        forward(conn, opts)
 
       _degraded_or_unavailable when conn.method in @write_methods ->
         reason = status.reason
@@ -71,8 +71,21 @@ defmodule NeonFS.WebDAV.HealthPlug do
       _degraded_or_unavailable ->
         conn
         |> Plug.Conn.put_resp_header("x-neonfs-status", status.reason)
-        |> Davy.Plug.call(opts.inner)
+        |> forward(opts)
     end
+  end
+
+  # A write reaching a `:frozen` cluster (#1378) surfaces as a raised
+  # ClusterFrozenError from the backend; return the same 503 + Retry-After
+  # as proactive degraded-mode gating.
+  defp forward(conn, opts) do
+    Davy.Plug.call(conn, opts.inner)
+  rescue
+    NeonFS.WebDAV.ClusterFrozenError ->
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "30")
+      |> Plug.Conn.put_resp_header("x-neonfs-status", "frozen")
+      |> Plug.Conn.send_resp(503, "")
   end
 
   defp capture_if_none_match(conn) do

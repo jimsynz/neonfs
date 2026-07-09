@@ -185,6 +185,18 @@ defmodule NeonFS.S3.BackendTest do
       assert String.length(etag) == 32
     end
 
+    test "a frozen cluster raises ClusterFrozenError (503) on PUT (#1443)" do
+      Backend.create_bucket(@ctx, "my-bucket")
+
+      Application.put_env(:neonfs_s3, :commit_refs_fn, fn _bucket, _key, _refs, _opts ->
+        {:error, :cluster_frozen}
+      end)
+
+      assert_raise NeonFS.S3.ClusterFrozenError, fn ->
+        Backend.put_object(@ctx, "my-bucket", "frozen.txt", "data", %Firkin.PutOpts{})
+      end
+    end
+
     test "etag is the content MD5 and is consistent across put/get/head (#1037)" do
       Backend.create_bucket(@ctx, "my-bucket")
       body = "hello from integration test"

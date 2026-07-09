@@ -594,7 +594,7 @@ defmodule NeonFS.WebDAV.BackendTest do
                Backend.put_content_stream(@auth, [], ["data"], %{})
     end
 
-    test "a frozen cluster maps a PUT to 423 Locked (#1438)" do
+    test "a frozen cluster raises ClusterFrozenError (503) on PUT (#1443)" do
       MockCore.create_volume("docs")
 
       Application.put_env(:neonfs_webdav, :core_call_fn, fn
@@ -602,8 +602,9 @@ defmodule NeonFS.WebDAV.BackendTest do
         function, args -> apply(MockCore, function, args)
       end)
 
-      assert {:error, %Davy.Error{code: :locked}} =
-               Backend.put_content_stream(@auth, ["docs", "frozen.txt"], ["data"], %{})
+      assert_raise NeonFS.WebDAV.ClusterFrozenError, fn ->
+        Backend.put_content_stream(@auth, ["docs", "frozen.txt"], ["data"], %{})
+      end
     end
   end
 

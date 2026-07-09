@@ -926,6 +926,8 @@ defmodule NeonFS.S3.Backend do
     "/.neonfs-multipart/#{upload_id}/part-#{part_number}"
   end
 
+  defp internal_error(:cluster_frozen), do: raise(NeonFS.S3.ClusterFrozenError)
+
   defp internal_error(reason) do
     Logger.error("S3 backend error", reason: inspect(reason))
     %Firkin.Error{code: :internal_error}

@@ -122,6 +122,16 @@ defmodule NeonFS.WebDAV.HealthPlugTest do
   # `put_content_stream/4`, so HealthPlug captures the header into the
   # process dictionary before delegating, and `Backend` reads the
   # captured flag back when assembling write_opts. See sub-issue #593.
+  describe "frozen cluster (#1443)" do
+    test "a write raising ClusterFrozenError returns 503 with retry-after" do
+      conn = call_health(:put, "/docs/frozen.txt", healthy_fn())
+
+      assert conn.status == 503
+      assert get_resp_header(conn, "retry-after") == "30"
+      assert get_resp_header(conn, "x-neonfs-status") == "frozen"
+    end
+  end
+
   describe "If-None-Match: * capture" do
     setup do
       key = HealthPlug.if_none_match_star_key()
@@ -224,6 +234,10 @@ defmodule NeonFS.WebDAV.HealthPlugTest do
 
     @impl true
     def put_content(_auth, path, _body, _opts) do
+      if List.last(path) == "frozen.txt" do
+        raise NeonFS.WebDAV.ClusterFrozenError
+      end
+
       {:ok, %Davy.Resource{path: path, type: :file, etag: "new-etag", content_length: 4}}
     end
 
