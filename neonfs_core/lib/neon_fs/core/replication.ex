@@ -11,7 +11,7 @@ defmodule NeonFS.Core.Replication do
   """
 
   alias NeonFS.Client.Router
-  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveRegistry, DriveTrust}
+  alias NeonFS.Core.{BlobStore, ChunkIndex, DriveRegistry, DriveTrust, PlacementBarrier}
 
   require Logger
 
@@ -308,7 +308,7 @@ defmodule NeonFS.Core.Replication do
   end
 
   defp spawn_background_replication(chunk_hash, chunk_data, tier, targets, volume_id) do
-    Task.start(fn ->
+    PlacementBarrier.run(fn ->
       Logger.debug("Starting background replication", chunk_hash: Base.encode16(chunk_hash))
 
       results = replicate_to_targets(chunk_hash, chunk_data, tier, targets)

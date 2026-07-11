@@ -20,6 +20,13 @@ defmodule NeonFS.Integration.FreezeThawTest do
   fetcher's connection pool must re-point at the peer's current endpoint (and
   fall back to distribution RPC while it does) rather than stall on the stale
   one.
+
+  The pre-freeze data uses a `write_ack: :local`, `factor: 3` volume whose
+  extra replicas are placed by fire-and-forget background tasks. The file is
+  written and the cluster frozen *without* first establishing readability on
+  every node: freeze drains those outstanding placements before powering off
+  (#1504), so the write survives the cold cycle without the old #1440
+  pre-freeze wait-loop.
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
@@ -144,7 +151,16 @@ defmodule NeonFS.Integration.FreezeThawTest do
   # ─── Setup helpers (mirrors partition_restart_test.exs) ──────────────
 
   defp init_cluster_with_data(cluster) do
-    :ok = init_multi_node_cluster(cluster, volumes: [{"test-volume", %{}}])
+    # A `write_ack: :local` volume with factor > 1 acks the write once the
+    # primary copy is local and places the extra replicas in the background
+    # (#1504). We deliberately do NOT establish readability on every node
+    # before freezing — freeze must drain those outstanding placements
+    # itself so the pre-freeze readability workaround (the old #1440
+    # wait-loop) is no longer needed for the file to survive the cold cycle.
+    :ok =
+      init_multi_node_cluster(cluster,
+        volumes: [{"test-volume", %{durability: %{type: :replicate, factor: 3, min_copies: 2}}}]
+      )
 
     {:ok, _} =
       PeerCluster.rpc(cluster, :node1, NeonFS.TestHelpers, :write_file_from_binary, [
@@ -152,14 +168,6 @@ defmodule NeonFS.Integration.FreezeThawTest do
         "/test.txt",
         "test data"
       ])
-
-    for node_name <- [:node1, :node2, :node3] do
-      :ok =
-        wait_until(
-          fn -> read_matches?(cluster, node_name, "/test.txt", "test data") end,
-          timeout: 30_000
-        )
-    end
 
     :ok
   end

@@ -332,6 +332,29 @@ defmodule NeonFS.CLI.HandlerTest do
       assert ClusterMode.mode() == :frozen
     end
 
+    test "freeze drains outstanding placements and reports the count" do
+      assert {:ok, result} =
+               ClusterRecovery.handle_cluster_freeze(
+                 settle_ms: 0,
+                 drain_fn: fn _timeout -> %{drained: 2, remaining: 0, timed_out: false} end,
+                 snapshot_fn: fn -> {:ok, %{snapshot: :skipped, pruned: []}} end
+               )
+
+      assert result.drained == 2
+      assert result.drain_timed_out == false
+    end
+
+    test "freeze reports drain_timed_out when placements can't drain in time" do
+      assert {:ok, result} =
+               ClusterRecovery.handle_cluster_freeze(
+                 settle_ms: 0,
+                 drain_fn: fn _timeout -> %{drained: 0, remaining: 1, timed_out: true} end,
+                 snapshot_fn: fn -> {:ok, %{snapshot: :skipped, pruned: []}} end
+               )
+
+      assert result.drain_timed_out == true
+    end
+
     test "freeze reports a taken snapshot when one is produced" do
       assert {:ok, result} =
                ClusterRecovery.handle_cluster_freeze(

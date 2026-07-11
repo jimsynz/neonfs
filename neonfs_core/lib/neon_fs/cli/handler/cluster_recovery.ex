@@ -23,6 +23,7 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
     DRSnapshotScheduler,
     MetadataStateMachine,
     NodeRegistry,
+    PlacementBarrier,
     RaServer,
     RaSupervisor,
     ServiceRegistry
@@ -249,32 +250,42 @@ defmodule NeonFS.CLI.Handler.ClusterRecovery do
   @doc """
   Freezes the whole cluster for a coordinated maintenance shutdown
   (#1378): sets the cluster mode `:frozen` (cutting client write ingress
-  via the #1438 write-gate), lets in-flight writes settle for a bounded
-  window, then triggers a metadata DR snapshot. Reports ready-to-power-off
-  — the operator then stops interface nodes, then core nodes.
+  via the #1438 write-gate), drains outstanding background chunk placements
+  cluster-wide so every acknowledged write reaches its `min_copies` replica
+  set (#1504), then triggers a metadata DR snapshot. Reports
+  ready-to-power-off — the operator then stops interface nodes, then core
+  nodes.
 
-  Best-effort quiesce (not write-fencing): Ra's own on-disk persistence is
-  the primary safety net across the power-cycle; the DR snapshot is
-  belt-and-braces and is leader-only, so it reports `:skipped` when this
-  handler runs on a follower.
+  Setting `:frozen` first stops new write ingress, so the outstanding
+  placement set only shrinks while the drain runs. The drain is bounded by
+  the settle window (`settle_ms`) so a hung placement — e.g. a dead target
+  drive — can't wedge the freeze; a bounded-out drain still transitions the
+  cluster (Ra's own on-disk persistence is the primary safety net) and
+  reports the unfinished count.
 
-  `opts` (test injection): `:cluster_mode_mod`, `:snapshot_fn`, `:settle_ms`.
+  The DR snapshot is belt-and-braces and is leader-only, so it reports
+  `:skipped` when this handler runs on a follower.
+
+  `opts` (test injection): `:cluster_mode_mod`, `:snapshot_fn`, `:settle_ms`,
+  `:drain_fn`.
   """
   @spec handle_cluster_freeze(keyword()) :: {:ok, map()} | {:error, Exception.t()}
   def handle_cluster_freeze(opts \\ []) do
     set_cli_metadata()
     cluster_mode_mod = Keyword.get(opts, :cluster_mode_mod, ClusterMode)
     snapshot_fn = Keyword.get(opts, :snapshot_fn, &default_snapshot/0)
+    drain_fn = Keyword.get(opts, :drain_fn, &PlacementBarrier.drain_cluster/1)
     settle_ms = Keyword.get(opts, :settle_ms, freeze_settle_ms())
 
     with :ok <- require_cluster(),
          :ok <- cluster_mode_mod.set_mode(:frozen, "cluster freeze") do
-      if settle_ms > 0, do: Process.sleep(settle_ms)
+      drain = drain_fn.(settle_ms)
 
       {:ok,
        %{
          status: "frozen",
-         settle_ms: settle_ms,
+         drained: drain.drained,
+         drain_timed_out: drain.timed_out,
          snapshot: safe_snapshot(snapshot_fn)
        }}
     else

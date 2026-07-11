@@ -157,6 +157,10 @@ defmodule NeonFS.Core.Supervisor do
           # Task.Supervisor for background work crash isolation
           {Task.Supervisor, name: NeonFS.Core.BackgroundTaskSupervisor},
 
+          # Task.Supervisor whose children are the outstanding background
+          # chunk placements a cluster freeze drains before powering off (#1504)
+          {Task.Supervisor, name: NeonFS.Core.PlacementTaskSupervisor},
+
           # BackgroundWorker provides priority queues and rate limiting
           NeonFS.Core.BackgroundWorker,
 
