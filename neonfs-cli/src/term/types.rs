@@ -434,15 +434,19 @@ impl NodeStatusResult {
     }
 }
 
-/// `cluster freeze` / `cluster thaw` response (#1439). `snapshot` and
-/// `settle_ms` are only present for freeze.
+/// `cluster freeze` / `cluster thaw` response (#1439). `snapshot`,
+/// `drained` and `drain_timed_out` are only present for freeze: freeze
+/// drains outstanding background chunk placements before powering off
+/// (#1504), reporting how many it drained and whether it bounded out.
 #[derive(Debug, Serialize)]
 pub struct ClusterModeResult {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub settle_ms: Option<u64>,
+    pub drained: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain_timed_out: Option<bool>,
 }
 
 impl ClusterModeResult {
@@ -455,7 +459,8 @@ impl ClusterModeResult {
                 CliError::TermConversionError("Missing 'status' field".to_string())
             })?)?,
             snapshot: map.get("snapshot").map(term_to_string).transpose()?,
-            settle_ms: map.get("settle_ms").map(term_to_u64).transpose()?,
+            drained: map.get("drained").map(term_to_u64).transpose()?,
+            drain_timed_out: map.get("drain_timed_out").map(term_to_bool).transpose()?,
         })
     }
 }

@@ -1089,6 +1089,16 @@ impl ClusterCommand {
             OutputFormat::Json => println!("{}", json::format(&result)?),
             OutputFormat::Table => {
                 println!("✓ Cluster is now {}", result.status);
+                if let Some(drained) = result.drained {
+                    if result.drain_timed_out == Some(true) {
+                        println!(
+                            "  drained {} placement(s); some did not finish within the settle window",
+                            drained
+                        );
+                    } else {
+                        println!("  drained {} outstanding placement(s)", drained);
+                    }
+                }
                 if let Some(snapshot) = &result.snapshot {
                     println!("  metadata snapshot: {}", snapshot);
                 }
