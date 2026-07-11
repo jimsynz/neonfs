@@ -14,8 +14,10 @@ defmodule NeonFS.CLI.Handler.DRRestoreTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
-  alias NeonFS.Core
+  alias NeonFS.CLI.Handler
   alias NeonFS.CLI.Handler.DR
+  alias NeonFS.Core
+  alias NeonFS.Core.WriteOperation
 
   @moduletag :tmp_dir
 
@@ -44,7 +46,7 @@ defmodule NeonFS.CLI.Handler.DRRestoreTest do
     {:ok, _} = DR.handle_dr_snapshot_export(snapshot.id, source)
 
     {:ok, _} =
-      NeonFS.CLI.Handler.handle_backup_create(
+      Handler.handle_backup_create(
         "payroll",
         Path.join([source, "volumes", "payroll.backup"])
       )
@@ -73,7 +75,7 @@ defmodule NeonFS.CLI.Handler.DRRestoreTest do
     {:ok, _} = DR.handle_dr_snapshot_export(snapshot.id, source)
 
     {:ok, _} =
-      NeonFS.CLI.Handler.handle_backup_create(
+      Handler.handle_backup_create(
         "archived",
         Path.join([source, "volumes", "archived.backup"])
       )
@@ -95,7 +97,7 @@ defmodule NeonFS.CLI.Handler.DRRestoreTest do
     {:ok, _} = DR.handle_dr_snapshot_export(snapshot.id, source)
 
     archive = Path.join(source, "catalogued.tar")
-    {:ok, _} = NeonFS.CLI.Handler.handle_backup_create("catalogued", archive)
+    {:ok, _} = Handler.handle_backup_create("catalogued", archive)
 
     catalogue = Path.join(source, "catalogue.json")
     File.write!(catalogue, Jason.encode!(%{"catalogued" => "catalogued.tar"}))
@@ -127,7 +129,7 @@ defmodule NeonFS.CLI.Handler.DRRestoreTest do
   end
 
   defp write_file(volume_id, path, content) do
-    NeonFS.Core.WriteOperation.write_file_streamed(volume_id, path, [content])
+    WriteOperation.write_file_streamed(volume_id, path, [content])
   end
 
   defp read_file(volume_name, path) do
