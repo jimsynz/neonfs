@@ -884,20 +884,19 @@ defmodule NeonFS.NFS.NFSv3Backend do
 
     case core_call(NeonFS.Core, :write_file_at, [vol_name, path, offset, data, write_opts]) do
       {:ok, %FileMeta{} = post_meta} ->
-        # NeonFS' `write_file_at` is FileIndex-quorum-replicated and
-        # synchronous — every committed write is durable, so we
-        # always report `:file_sync` regardless of the client's
-        # `requested_stable` hint. RFC 1813 permits stronger
-        # guarantees than asked.
-        _ = requested_stable
+        case write_commit_level(vol_name, path, requested_stable) do
+          {:ok, committed} ->
+            {:ok,
+             %{
+               wcc: %WccData{before: pre_wcc, after: fattr_from_meta(post_meta)},
+               count: byte_size(data),
+               committed: committed,
+               verf: writeverf()
+             }}
 
-        {:ok,
-         %{
-           wcc: %WccData{before: pre_wcc, after: fattr_from_meta(post_meta)},
-           count: byte_size(data),
-           committed: :file_sync,
-           verf: writeverf()
-         }}
+          {:error, _reason} ->
+            {:error, :io, %WccData{before: pre_wcc, after: fattr_from_meta(post_meta)}}
+        end
 
       {:error, %{class: :forbidden}} ->
         {:error, :acces, %WccData{before: pre_wcc, after: nil}}
@@ -910,18 +909,52 @@ defmodule NeonFS.NFS.NFSv3Backend do
     end
   end
 
+  # RFC 1813 §3.3.7 `committed` — the achieved stability, which must be at
+  # least what the client requested. `write_ack: :quorum`/`:all` volumes
+  # block to `min_copies` on ack (#1501/#1506), so they're `:file_sync`. A
+  # `write_ack: :local` volume acks after one local copy: an UNSTABLE write
+  # reports `:unstable` (the client COMMITs → `sync_file` barrier → #1509),
+  # while a DATA_SYNC/FILE_SYNC request — which we may not answer with a
+  # weaker level — runs the barrier inline and reports `:file_sync`, or
+  # fails the WRITE if the barrier can't reach `min_copies` right now.
+  defp write_commit_level(vol_name, path, requested_stable) do
+    cond do
+      export_write_ack(vol_name) in [:quorum, :all] ->
+        {:ok, :file_sync}
+
+      requested_stable in [:data_sync, :file_sync] ->
+        with :ok <- core_call(NeonFS.Core, :sync_file, [vol_name, path]), do: {:ok, :file_sync}
+
+      true ->
+        {:ok, :unstable}
+    end
+  end
+
+  # The volume's `write_ack`, read from the locally-mirrored export record
+  # (`ExportManager`, resynced on volume events) so the hot WRITE path takes
+  # no per-write `get_volume` RPC (#1509). Defaults to the volume default
+  # `:local` when the export isn't cached.
+  defp export_write_ack(vol_name) do
+    case get_export(vol_name) do
+      {:ok, %{write_ack: ack}} when ack in [:local, :quorum, :all] -> ack
+      _ -> :local
+    end
+  end
+
   @impl true
   def commit(fh, _offset, _count, _auth, ctx) do
     case resolve_meta(fh, [], peer(ctx)) do
-      {:ok, _vol_name, _path, meta} ->
-        # FileIndex quorum-writes are already on stable storage
-        # before WRITE returns (see `c:write/6` above), so COMMIT is
-        # a metadata-only flush. Return the per-instance writeverf3.
-        {:ok,
-         %{
-           wcc: %WccData{before: wcc_attr_from_meta(meta), after: fattr_from_meta(meta)},
-           verf: writeverf()
-         }}
+      {:ok, vol_name, path, meta} ->
+        # RFC 1813 §3.3.21: flush the file's writes to stable storage. The
+        # shared `sync_file` barrier blocks until every chunk has the
+        # volume's `min_copies` durable replicas (#1509) — the durability
+        # `write_ack: :local` writes reported as `:unstable` defer to here.
+        wcc = %WccData{before: wcc_attr_from_meta(meta), after: fattr_from_meta(meta)}
+
+        case core_call(NeonFS.Core, :sync_file, [vol_name, path]) do
+          :ok -> {:ok, %{wcc: wcc, verf: writeverf()}}
+          {:error, _reason} -> {:error, :io, wcc}
+        end
 
       {:error, status} ->
         {:error, to_nfs_status(status), %WccData{before: nil, after: nil}}

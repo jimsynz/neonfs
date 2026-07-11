@@ -17,11 +17,11 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
   ## What's exercised
 
     1. CREATE a regular file via proc 8 (UNCHECKED).
-    2. WRITE multi-MiB across multiple chunks with mixed
-       `UNSTABLE` / `FILE_SYNC` stability bits. The BEAM backend
-       always reports `:file_sync` regardless of the request.
-    3. COMMIT; assert the returned `writeverf3` is stable across
-       repeated calls within the same VM.
+    2. WRITE multi-MiB across multiple chunks. On the `write_ack:
+       :local` test volume the backend reports `:unstable` (#1509), so
+       the client must COMMIT to reach durability.
+    3. COMMIT; it drives the shared `sync_file` barrier and returns a
+       `writeverf3` stable across repeated calls within the same VM.
     4. READ back; assert byte-identity against the source payload.
        This is the cross-cutting check — exercises both the read
        path from #587-#589 and the write path landing here.
@@ -186,9 +186,12 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
     written = byte_size(payload)
     {:ok, ^written, rest} = XDR.decode_uint(rest)
 
-    # Backend always reports `:file_sync` regardless of the
-    # client's hint — FileIndex quorum-writes are durable.
-    {:ok, :file_sync, rest} = Types.decode_stable_how(rest)
+    # The test volume is `write_ack: :local` (the peer-cluster default),
+    # so an UNSTABLE WRITE honestly reports `:unstable` (#1509): the extra
+    # replicas are placed in the background, and the client must COMMIT to
+    # reach `min_copies` durability. (A `write_ack: :quorum`/`:all` volume
+    # would report `:file_sync` here — covered in the backend unit tests.)
+    {:ok, :unstable, rest} = Types.decode_stable_how(rest)
     {:ok, _verf, _} = Types.decode_writeverf3(rest)
 
     # ——— Step 3: COMMIT (verf stability) —————————————————————————
