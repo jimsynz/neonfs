@@ -27,6 +27,29 @@ pub enum DrCommand {
         #[command(subcommand)]
         command: DrSnapshotCommand,
     },
+
+    /// Full-cluster restore (#1005): stage + apply an exported DR
+    /// snapshot, then restore each volume's content from its backup
+    /// archive. Run this on a freshly-bootstrapped single node
+    /// (`neonfs cluster init`); reattach the remaining nodes with
+    /// `neonfs cluster join` afterwards.
+    Restore {
+        /// Source directory produced by `dr snapshot export`, holding the
+        /// snapshot plus (by default) `volumes/<name>.backup` archives.
+        #[arg(long)]
+        source: String,
+
+        /// Optional JSON catalogue `{"<volume>": "<archive-path>"}`
+        /// pinning where each volume's backup archive lives. Relative
+        /// paths resolve against `--source`; the catalogue is
+        /// authoritative, so omitted volumes are left as empty shells.
+        #[arg(long)]
+        catalogue: Option<String>,
+
+        /// Passphrase for encrypted backup archives (#1004).
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
 }
 
 /// Snapshot subcommand variants
@@ -124,6 +147,108 @@ impl DrRestoreResult {
 }
 
 #[derive(Debug, Serialize)]
+struct DrVolumeRestore {
+    name: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive: Option<String>,
+    files: u64,
+    bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl DrVolumeRestore {
+    fn from_term(term: &Term) -> Result<Self> {
+        let map = term_to_map(term)?;
+        Ok(Self {
+            name: map
+                .get("name")
+                .map(term_to_string)
+                .transpose()?
+                .unwrap_or_default(),
+            status: map
+                .get("status")
+                .map(term_to_string)
+                .transpose()?
+                .unwrap_or_default(),
+            archive: map.get("archive").map(term_to_string).transpose()?,
+            files: map
+                .get("files")
+                .and_then(|t| term_to_u64(t).ok())
+                .unwrap_or(0),
+            bytes: map
+                .get("bytes")
+                .and_then(|t| term_to_u64(t).ok())
+                .unwrap_or(0),
+            reason: map.get("reason").map(term_to_string).transpose()?,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DrFullRestoreResult {
+    snapshot_id: String,
+    generation: u64,
+    restored: BTreeMap<String, u64>,
+    volumes: Vec<DrVolumeRestore>,
+    volumes_restored: u64,
+    volumes_failed: u64,
+}
+
+impl DrFullRestoreResult {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let snapshot_id = term_to_string(map.get("snapshot_id").ok_or_else(|| {
+            CliError::TermConversionError("Missing 'snapshot_id' field".to_string())
+        })?)?;
+
+        let generation = map
+            .get("generation")
+            .and_then(|t| term_to_u64(t).ok())
+            .unwrap_or(0);
+
+        let restored = map
+            .get("restored")
+            .and_then(|t| term_to_map(t).ok())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| term_to_u64(v).ok().map(|n| (k.clone(), n)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let volumes = map
+            .get("volumes")
+            .map(term_to_list)
+            .transpose()?
+            .unwrap_or_default()
+            .iter()
+            .map(DrVolumeRestore::from_term)
+            .collect::<Result<Vec<_>>>()?;
+
+        let volumes_restored = map
+            .get("volumes_restored")
+            .and_then(|t| term_to_u64(t).ok())
+            .unwrap_or(0);
+        let volumes_failed = map
+            .get("volumes_failed")
+            .and_then(|t| term_to_u64(t).ok())
+            .unwrap_or(0);
+
+        Ok(Self {
+            snapshot_id,
+            generation,
+            restored,
+            volumes,
+            volumes_restored,
+            volumes_failed,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct DrSnapshotEntry {
     id: String,
     path: String,
@@ -184,7 +309,78 @@ impl DrCommand {
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
             DrCommand::Snapshot { command } => command.execute(format),
+            DrCommand::Restore {
+                source,
+                catalogue,
+                passphrase,
+            } => Self::restore(source, catalogue.as_deref(), passphrase.as_deref(), format),
         }
+    }
+
+    fn restore(
+        source: &str,
+        catalogue: Option<&str>,
+        passphrase: Option<&str>,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let mut opts = vec![];
+        if let Some(catalogue) = catalogue {
+            opts.push((binary("catalogue"), binary(catalogue)));
+        }
+        if let Some(passphrase) = passphrase {
+            opts.push((binary("passphrase"), binary(passphrase)));
+        }
+        let opts_term = Term::Map(Map {
+            map: opts.into_iter().collect(),
+        });
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_dr_restore",
+                vec![binary(source), opts_term],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let restore = DrFullRestoreResult::from_term(unwrap_ok_tuple(result)?)?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&restore)?),
+            OutputFormat::Table => {
+                println!("Restored cluster from snapshot {}", restore.snapshot_id);
+                println!("  Cluster generation: {}", restore.generation);
+                println!(
+                    "  Volumes restored:   {} ({} failed)",
+                    restore.volumes_restored, restore.volumes_failed
+                );
+                for volume in &restore.volumes {
+                    match volume.status.as_str() {
+                        "restored" => println!(
+                            "    ✓ {:<24} {} file(s), {} byte(s)",
+                            volume.name, volume.files, volume.bytes
+                        ),
+                        "skipped" => println!(
+                            "    - {:<24} skipped ({})",
+                            volume.name,
+                            volume.reason.as_deref().unwrap_or("no archive")
+                        ),
+                        _ => println!(
+                            "    ✗ {:<24} failed ({})",
+                            volume.name,
+                            volume.reason.as_deref().unwrap_or("unknown")
+                        ),
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -545,5 +741,32 @@ mod tests {
     fn parses_snapshot_import() {
         let cli = TestCli::try_parse_from(["test", "snapshot", "import", "/tmp/dr"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn parses_restore_with_source_only() {
+        let cli = TestCli::try_parse_from(["test", "restore", "--source", "/tmp/dr"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn parses_restore_with_catalogue_and_passphrase() {
+        let cli = TestCli::try_parse_from([
+            "test",
+            "restore",
+            "--source",
+            "/tmp/dr",
+            "--catalogue",
+            "/tmp/dr/catalogue.json",
+            "--passphrase",
+            "hunter2",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn restore_requires_source() {
+        let cli = TestCli::try_parse_from(["test", "restore"]);
+        assert!(cli.is_err());
     }
 }
