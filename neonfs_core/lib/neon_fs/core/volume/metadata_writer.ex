@@ -297,6 +297,13 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   @cas_backoff_max_ms 250
   @remote_write_timeout 30_000
 
+  # Ra command timeout for the volume-root CAS commit. `RaSupervisor.command`
+  # defaults to 5s, which is too tight when the metadata layer is under a
+  # burst of concurrent commits — e.g. a DR restore writing many files'
+  # metadata while the cluster is otherwise busy (#1515) — so a healthy
+  # leader spuriously times out. Matches the module's `@remote_write_timeout`.
+  @bootstrap_command_timeout 30_000
+
   # A metadata write needs the volume's root segment, but it can only be read
   # and CAS-updated from a node that holds a replica of it. When the local node
   # has none, the resolve step fails with `{:no_local_replica, drive_locations}`
@@ -809,7 +816,7 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   defp default_bootstrap_registrar(command) do
-    case RaSupervisor.command(command) do
+    case RaSupervisor.command(command, @bootstrap_command_timeout) do
       # `:ra.process_command` wraps the state machine's reply in `{:ok,
       # Reply, Leader}` even when that reply is itself an error — so a
       # `:cas_update_volume_root` that the state machine *rejected* with
