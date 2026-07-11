@@ -77,6 +77,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     Application.put_env(:neonfs_nfs, :core_call_fn, handler)
   end
 
+  defp put_export(attrs) do
+    Application.put_env(:neonfs_nfs, :get_export_fn, fn _vol -> {:ok, attrs} end)
+  end
+
   defp file_meta(overrides \\ %{}) do
     base = %FileMeta{
       id: "file-1",
@@ -932,11 +936,13 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       :ok
     end
 
-    test "writes the bytes and reports :file_sync regardless of the requested hint" do
+    test "a write_ack: :local volume reports :unstable so the client COMMITs (#1509)" do
       pre = file_meta(%{size: 0})
       post = file_meta(%{size: 11})
       data = "hello-write"
       test_pid = self()
+
+      put_export(%{write_ack: :local})
 
       put_core(fn
         NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
@@ -947,12 +953,74 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
           {:ok, post}
       end)
 
-      assert {:ok, %{wcc: wcc, count: 11, committed: :file_sync, verf: verf}} =
+      assert {:ok, %{wcc: wcc, count: 11, committed: :unstable, verf: verf}} =
                NFSv3Backend.write(valid_fh(), 0, data, :unstable, :auth, %{})
 
       assert byte_size(verf) == 8
       assert %NFSServer.NFSv3.Types.WccData{before: %_{size: 0}, after: %Fattr3{size: 11}} = wcc
       assert_received :write_called
+    end
+
+    test "a write_ack: :quorum volume reports :file_sync without a COMMIT barrier (#1509)" do
+      test_pid = self()
+      put_export(%{write_ack: :quorum})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
+          {:ok, file_meta(%{size: 0})}
+
+        NeonFS.Core, :write_file_at, _ ->
+          {:ok, file_meta(%{size: 1})}
+
+        NeonFS.Core, :sync_file, _ ->
+          send(test_pid, :synced) && :ok
+      end)
+
+      assert {:ok, %{committed: :file_sync}} =
+               NFSv3Backend.write(valid_fh(), 0, "x", :unstable, :auth, %{})
+
+      refute_received :synced
+    end
+
+    test "a FILE_SYNC request on a :local volume runs the barrier inline (#1509)" do
+      test_pid = self()
+      put_export(%{write_ack: :local})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
+          {:ok, file_meta(%{size: 0})}
+
+        NeonFS.Core, :write_file_at, _ ->
+          {:ok, file_meta(%{size: 1})}
+
+        NeonFS.Core, :sync_file, [@volume_name, @file_path] ->
+          send(test_pid, :synced) && :ok
+      end)
+
+      assert {:ok, %{committed: :file_sync}} =
+               NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
+
+      assert_received :synced
+    end
+
+    test "a FILE_SYNC request fails with :io when the barrier can't reach min_copies (#1509)" do
+      # RFC 1813 §3.3.7: achieved stability must be >= requested, so a
+      # FILE_SYNC write we can't make durable errors rather than downgrading.
+      put_export(%{write_ack: :local})
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] ->
+          {:ok, file_meta(%{size: 0})}
+
+        NeonFS.Core, :write_file_at, _ ->
+          {:ok, file_meta(%{size: 1})}
+
+        NeonFS.Core, :sync_file, _ ->
+          {:error, {:under_replicated, 1, 2}}
+      end)
+
+      assert {:error, :io, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
     end
 
     test "returns NFS3ERR_NOSPC + parent wcc when core surfaces it" do
@@ -993,11 +1061,13 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       :ok
     end
 
-    test "returns wcc + per-instance verf without re-writing data" do
+    test "runs the sync_file barrier and returns wcc + per-instance verf, no re-write (#1509)" do
       meta = file_meta()
+      test_pid = self()
 
       put_core(fn
         NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] -> {:ok, meta}
+        NeonFS.Core, :sync_file, [@volume_name, @file_path] -> send(test_pid, :synced) && :ok
         NeonFS.Core, :write_file_at, _ -> flunk("commit must not write")
       end)
 
@@ -1005,12 +1075,28 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
                NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
 
       assert byte_size(verf) == 8
+      assert_received :synced
+    end
+
+    test "maps a barrier failure to NFS3ERR_IO + wcc (#1509)" do
+      meta = file_meta()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] -> {:ok, meta}
+        NeonFS.Core, :sync_file, _ -> {:error, {:under_replicated, 1, 2}}
+      end)
+
+      assert {:error, :io, %NFSServer.NFSv3.Types.WccData{}} =
+               NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
     end
 
     test "verf is stable across calls within the same VM" do
       meta = file_meta()
 
-      put_core(fn _, :get_file_meta, _ -> {:ok, meta} end)
+      put_core(fn
+        _, :get_file_meta, _ -> {:ok, meta}
+        NeonFS.Core, :sync_file, _ -> :ok
+      end)
 
       {:ok, %{verf: v1}} = NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
       {:ok, %{verf: v2}} = NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
