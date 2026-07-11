@@ -1300,4 +1300,12 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_dr_snapshot_import(String.t()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_dr_snapshot_import(source_dir), to: DRHandler
+
+  @doc """
+  Full-cluster restore: stage + apply a DR snapshot, then restore each
+  volume's content from its backup archive. Used by `neonfs dr restore`
+  (#1005).
+  """
+  @spec handle_dr_restore(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_dr_restore(source_dir, opts \\ %{}), to: DRHandler
 end

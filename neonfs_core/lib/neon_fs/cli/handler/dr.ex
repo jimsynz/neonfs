@@ -2,15 +2,17 @@ defmodule NeonFS.CLI.Handler.DR do
   @moduledoc """
   CLI command handlers for disaster-recovery snapshots: create, list,
   and show the cluster-state DR snapshots in the `_system` volume's
-  `/dr` directory (#324).
+  `/dr` directory (#324), plus the full-cluster `dr restore`
+  orchestration (#1005).
 
   Extracted from `NeonFS.CLI.Handler` (#1203). `NeonFS.CLI.Handler`
-  delegates its `handle_dr_snapshot_*` RPC entry points here.
+  delegates its `handle_dr_snapshot_*` and `handle_dr_restore` RPC entry
+  points here.
   """
 
   import NeonFS.CLI.Handler.Common
 
-  alias NeonFS.Core.{AuditLog, DRSnapshot}
+  alias NeonFS.Core.{AuditLog, Backup, DRSnapshot, VolumeRegistry}
   alias NeonFS.Error.NotFound
 
   @doc """
@@ -156,7 +158,131 @@ defmodule NeonFS.CLI.Handler.DR do
     end
   end
 
+  @doc """
+  Full-cluster restore (#1005): stage the DR snapshot exported at
+  `source_dir` back into the freshly-bootstrapped `_system` volume, apply
+  its cluster-wide metadata (recreating every volume's shell and the
+  cluster CA / credentials / keys), then restore each volume's content
+  from its backup archive into that shell.
+
+  This drives steps 2–3 of the bare-metal runbook; the operator does
+  step 1 (`neonfs cluster init` on a fresh node) and step 4
+  (`neonfs cluster join` for the remaining nodes) around it.
+
+  `opts`:
+    * `"catalogue"` — path to a JSON object `{"<volume>": "<archive>"}`
+      pinning where each volume's backup archive lives. Relative archive
+      paths resolve against `source_dir`; the catalogue is authoritative,
+      so volumes it omits are left as empty shells. Without a catalogue,
+      each volume's archive is expected at
+      `<source_dir>/volumes/<volume>.backup`.
+    * `"passphrase"` — passphrase for encrypted backup archives (#1004).
+
+  Best-effort per volume: a volume whose archive is missing or fails to
+  restore is reported in the result rather than aborting the whole
+  restore, so one pass recovers everything recoverable.
+  """
+  @spec handle_dr_restore(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def handle_dr_restore(source_dir, opts \\ %{}) when is_binary(source_dir) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster(),
+         {:ok, catalogue} <- load_catalogue(Map.get(opts, "catalogue"), source_dir),
+         {:ok, %{id: snapshot_id}} <- DRSnapshot.import_snapshot(source_dir),
+         {:ok, %{restored: counts, generation: generation}} <- DRSnapshot.restore(snapshot_id) do
+      volume_results = restore_volumes(source_dir, catalogue, opts)
+
+      AuditLog.log_event(
+        event_type: :dr_restored,
+        actor_uid: 0,
+        resource: snapshot_id,
+        details: %{generation: generation, volumes: length(volume_results)}
+      )
+
+      {:ok,
+       %{
+         snapshot_id: snapshot_id,
+         generation: generation,
+         restored: counts,
+         volumes: volume_results,
+         volumes_restored: Enum.count(volume_results, &(&1.status == "restored")),
+         volumes_failed: Enum.count(volume_results, &(&1.status == "failed"))
+       }}
+    else
+      {:error, reason} -> {:error, wrap_error(reason)}
+    end
+  end
+
   # Private
+
+  defp restore_volumes(source_dir, catalogue, opts) do
+    restore_opts = backup_restore_opts(opts)
+
+    VolumeRegistry.list()
+    |> Enum.map(fn volume ->
+      case archive_for(volume.name, catalogue, source_dir) do
+        {:ok, archive} -> restore_one_volume(volume.name, archive, restore_opts)
+        :none -> %{name: volume.name, status: "skipped", reason: "no backup archive"}
+      end
+    end)
+  end
+
+  defp restore_one_volume(name, archive, restore_opts) do
+    case Backup.restore(archive, name, [{:into_existing, true} | restore_opts]) do
+      {:ok, summary} ->
+        %{
+          name: name,
+          status: "restored",
+          archive: archive,
+          files: summary.file_count,
+          bytes: summary.byte_count
+        }
+
+      {:error, reason} ->
+        %{name: name, status: "failed", archive: archive, reason: inspect(reason)}
+    end
+  end
+
+  defp archive_for(name, catalogue, _source_dir) when is_map(catalogue) do
+    case Map.fetch(catalogue, name) do
+      {:ok, archive} -> {:ok, archive}
+      :error -> :none
+    end
+  end
+
+  defp archive_for(name, nil, source_dir) do
+    archive = Path.join([source_dir, "volumes", "#{name}.backup"])
+    if File.exists?(archive), do: {:ok, archive}, else: :none
+  end
+
+  defp load_catalogue(nil, _source_dir), do: {:ok, nil}
+
+  defp load_catalogue(path, source_dir) when is_binary(path) do
+    with {:ok, raw} <- File.read(path),
+         {:ok, map} when is_map(map) <- Jason.decode(raw) do
+      {:ok, Map.new(map, fn {name, archive} -> {name, resolve_archive(archive, source_dir)} end)}
+    else
+      {:ok, _non_object} ->
+        {:error, {:invalid_catalogue, "catalogue must be a JSON object of volume => archive"}}
+
+      {:error, %Jason.DecodeError{}} ->
+        {:error, {:invalid_catalogue, "catalogue is not valid JSON"}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_archive(archive, source_dir) do
+    if Path.type(archive) == :absolute, do: archive, else: Path.join(source_dir, archive)
+  end
+
+  defp backup_restore_opts(opts) do
+    case Map.get(opts, "passphrase") do
+      passphrase when is_binary(passphrase) and passphrase != "" -> [passphrase: passphrase]
+      _ -> []
+    end
+  end
 
   defp dr_snapshot_to_serialisable(%{id: id, path: path, manifest: manifest}) do
     %{
