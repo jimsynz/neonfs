@@ -58,6 +58,7 @@ defmodule NeonFS.CIFS.LiveListenerTest do
       do: {{:ok, %{written: byte_size(data)}}, state}
 
     defp reply_for({:ftruncate, _}, state), do: {{:ok, %{}}, state}
+    defp reply_for({:fsync, %{"handle" => _}}, state), do: {{:ok, %{}}, state}
 
     defp reply_for({:fdopendir, %{"path" => _}}, state), do: {{:ok, %{handle: 42}}, state}
 

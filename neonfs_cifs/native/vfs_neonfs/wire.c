@@ -533,6 +533,17 @@ int nw_ftruncate(nw_conn *conn, uint64_t handle, uint64_t size) {
   return call_void(conn, &x);
 }
 
+int nw_fsync(nw_conn *conn, uint64_t handle) {
+  ei_x_buff x;
+  if (req_open(&x, "fsync", 1) != 0 ||
+      put_int(&x, "handle", (long long)handle) != 0) {
+    ei_x_free(&x);
+    errno = EPROTO;
+    return -1;
+  }
+  return call_void(conn, &x);
+}
+
 int nw_fdopendir(nw_conn *conn, const char *path, uint64_t *handle_out) {
   ei_x_buff x;
   if (req_open(&x, "fdopendir", 1) != 0 || put_str(&x, "path", path) != 0) {

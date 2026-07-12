@@ -97,6 +97,7 @@ int nw_pread(nw_conn *conn, uint64_t handle, int64_t offset, uint64_t size,
 int nw_pwrite(nw_conn *conn, uint64_t handle, int64_t offset,
               const uint8_t *data, size_t len, uint64_t *written_out);
 int nw_ftruncate(nw_conn *conn, uint64_t handle, uint64_t size);
+int nw_fsync(nw_conn *conn, uint64_t handle);
 
 /* Directories */
 int nw_fdopendir(nw_conn *conn, const char *path, uint64_t *handle_out);

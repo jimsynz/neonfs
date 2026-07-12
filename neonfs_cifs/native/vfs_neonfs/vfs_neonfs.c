@@ -17,6 +17,7 @@
 #include "includes.h"
 #include "smbd/smbd.h"
 #include "system/filesys.h"
+#include "lib/util/tevent_unix.h"
 
 #include "wire.h"
 
@@ -345,6 +346,70 @@ static int neonfs_fntimes(struct vfs_handle_struct *handle,
 			  (int64_t)ft->mtime.tv_sec);
 }
 
+/* ---- durability ---- */
+
+/*
+ * Samba 4.x has no synchronous fsync VFS op; fsync is expressed through the
+ * async tevent send/recv pair. The neonfs_cifs `fsync` barrier is itself a
+ * blocking RPC (it waits for the file's chunks to reach `min_copies` durable
+ * replicas — #1500/#1502), so we run it inline and post an already-completed
+ * request rather than deferring to a worker.
+ */
+struct neonfs_fsync_state {
+	int ret;
+	struct vfs_aio_state vfs_aio_state;
+};
+
+static struct tevent_req *neonfs_fsync_send(struct vfs_handle_struct *handle,
+					    TALLOC_CTX *mem_ctx,
+					    struct tevent_context *ev,
+					    struct files_struct *fsp)
+{
+	struct tevent_req *req = NULL;
+	struct neonfs_fsync_state *state = NULL;
+	struct neonfs_config *cfg = neonfs_cfg(handle);
+	struct neonfs_fh *fh = neonfs_fh_get(handle, fsp);
+
+	req = tevent_req_create(mem_ctx, &state, struct neonfs_fsync_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->vfs_aio_state = (struct vfs_aio_state){0};
+
+	if (cfg == NULL || fh == NULL) {
+		state->ret = -1;
+		state->vfs_aio_state.error = EBADF;
+		tevent_req_error(req, EBADF);
+		return tevent_req_post(req, ev);
+	}
+
+	if (nw_fsync(&cfg->conn, fh->handle) != 0) {
+		state->ret = -1;
+		state->vfs_aio_state.error = errno;
+		tevent_req_error(req, errno);
+		return tevent_req_post(req, ev);
+	}
+
+	state->ret = 0;
+	tevent_req_done(req);
+	return tevent_req_post(req, ev);
+}
+
+static int neonfs_fsync_recv(struct tevent_req *req,
+			     struct vfs_aio_state *vfs_aio_state)
+{
+	struct neonfs_fsync_state *state =
+		tevent_req_data(req, struct neonfs_fsync_state);
+
+	if (tevent_req_is_unix_error(req, &vfs_aio_state->error)) {
+		tevent_req_received(req);
+		return -1;
+	}
+	*vfs_aio_state = state->vfs_aio_state;
+	tevent_req_received(req);
+	return state->ret;
+}
+
 /* ---- directories ---- */
 
 static DIR *neonfs_fdopendir(struct vfs_handle_struct *handle,
@@ -508,6 +573,8 @@ static struct vfs_fn_pointers vfs_neonfs_fns = {
 	.pread_fn = neonfs_pread,
 	.pwrite_fn = neonfs_pwrite,
 	.ftruncate_fn = neonfs_ftruncate,
+	.fsync_send_fn = neonfs_fsync_send,
+	.fsync_recv_fn = neonfs_fsync_recv,
 	.fchmod_fn = neonfs_fchmod,
 	.fchown_fn = neonfs_fchown,
 	.fntimes_fn = neonfs_fntimes,

@@ -22,6 +22,7 @@ defmodule NeonFS.CIFS.Handler do
   | Lifecycle   | `connect`, `disconnect`                                              |
   | Metadata    | `stat`, `lstat`, `fstat`, `fchmod`, `fchown`, `fntimes`              |
   | File I/O    | `openat`, `close`, `pread`, `pwrite`, `ftruncate`                    |
+  | Durability  | `fsync`                                                             |
   | Directories | `fdopendir`, `readdir`, `closedir`, `mkdirat`                        |
   | Mutations   | `unlinkat`, `renameat`                                               |
   | Filesystem  | `disk_free`, `fstatvfs`                                              |
@@ -29,6 +30,12 @@ defmodule NeonFS.CIFS.Handler do
   Anything outside this set surfaces as `{:error, :enosys}`. The
   follow-up sub-issue (#280-equivalent for Samba) covers xattrs,
   locks, and async I/O.
+
+  `fsync` (#1503) resolves the open handle to its `{volume, path}` and
+  drives the shared `NeonFS.Client.sync_file/2` durability barrier, so
+  a CIFS `SMB2_FLUSH` blocks until the file's chunks reach the volume's
+  `min_copies` durable replicas — identical semantics to FUSE fsync and
+  NFS COMMIT (#1455).
 
   [issue-116]: https://harton.dev/project-neon/neonfs/issues/116
   """
@@ -169,6 +176,19 @@ defmodule NeonFS.CIFS.Handler do
       {:ok, {volume, path, _flags}} ->
         case core_call(NeonFS.Core.WriteOperation, :write_file_at, [volume, path, offset, data]) do
           {:ok, _file} -> {{:ok, %{written: byte_size(data)}}, state}
+          {:error, reason} -> {{:error, errno_for(reason)}, state}
+        end
+
+      :error ->
+        {{:error, :ebadf}, state}
+    end
+  end
+
+  defp do_handle(:fsync, %{"handle" => handle}, state) do
+    case Map.fetch(state.files, handle) do
+      {:ok, {volume, path, _flags}} ->
+        case NeonFS.Client.sync_file(volume, path) do
+          :ok -> {{:ok, %{}}, state}
           {:error, reason} -> {{:error, errno_for(reason)}, state}
         end
 

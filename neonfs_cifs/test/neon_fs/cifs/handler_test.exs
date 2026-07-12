@@ -304,6 +304,29 @@ defmodule NeonFS.CIFS.HandlerTest do
       {reply, _} = Handler.handle({:ftruncate, %{"handle" => handle, "size" => 0}}, state)
       assert {:ok, %{}} == reply
     end
+
+    test "fsync drives the shared sync_file barrier for the open handle" do
+      {handle, state} = open_file(connected(), "/p")
+
+      expect(NeonFS.Client, :sync_file, fn "vol-a", "/p" -> :ok end)
+
+      {reply, _} = Handler.handle({:fsync, %{"handle" => handle}}, state)
+      assert {:ok, %{}} == reply
+    end
+
+    test "fsync maps a barrier failure to an errno" do
+      {handle, state} = open_file(connected(), "/p")
+
+      expect(NeonFS.Client, :sync_file, fn "vol-a", "/p" -> {:error, :io_error} end)
+
+      {reply, _} = Handler.handle({:fsync, %{"handle" => handle}}, state)
+      assert {:error, :eio} == reply
+    end
+
+    test "fsync on an unknown handle is :ebadf" do
+      {reply, _} = Handler.handle({:fsync, %{"handle" => 9999}}, connected())
+      assert {:error, :ebadf} == reply
+    end
   end
 
   describe "directories" do

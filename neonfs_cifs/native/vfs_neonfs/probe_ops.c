@@ -56,6 +56,7 @@ int nw_probe_run(nw_conn *conn) {
   PCHECK(written == 5, "pwrite.written");
 
   PCHECK(nw_ftruncate(conn, handle, 100) == 0, "ftruncate");
+  PCHECK(nw_fsync(conn, handle) == 0, "fsync");
   PCHECK(nw_close(conn, handle) == 0, "close");
 
   PCHECK(nw_fdopendir(conn, "/dir", &handle) == 0, "fdopendir");
