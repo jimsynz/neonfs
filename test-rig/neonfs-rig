@@ -108,8 +108,34 @@ bench_stage_webdav() {
 # printed summary. Interfaces it can't set up are logged and skipped. Requires a
 # cluster from `up` first.
 cmd_bench() {
-  node_running 1 || die "no running cluster — bring one up first with './neonfs-rig up'"
+  # `--rev <sha>`: check out, build, and boot a specific revision before
+  # benchmarking, so each manual `git bisect` step over an auto-raised
+  # regression's range (#1524) is a single command (#1525). The original ref is
+  # restored on exit. Auto-bisecting full-VM benchmarks is too slow, so bisect
+  # stays manual — this just makes each step one command.
+  local rev=""
+  if [ "${1:-}" = "--rev" ]; then
+    rev="${2:-}"
+    shift 2 || true
+    [ -n "${rev}" ] || die "--rev requires a commit-ish (e.g. './neonfs-rig bench --rev <sha>')"
+  fi
+
   command -v mix >/dev/null 2>&1 || die "mix (Elixir) not found on the rig host — needed to run the benchee harness"
+
+  if [ -n "${rev}" ]; then
+    local orig
+    orig="$(git -C "${REPO_ROOT}" symbolic-ref --quiet --short HEAD || git -C "${REPO_ROOT}" rev-parse HEAD)"
+    # shellcheck disable=SC2064
+    trap "git -C '${REPO_ROOT}' checkout --quiet '${orig}'" EXIT
+    log "bench --rev: checking out '${rev}' (was '${orig}')"
+    git -C "${REPO_ROOT}" checkout --quiet "${rev}" \
+      || die "checkout '${rev}' failed (a clean working tree is required)"
+    log "rebooting the rig on '${rev}' (fresh build)"
+    cmd_clean
+    cmd_up
+  else
+    node_running 1 || die "no running cluster — bring one up first with './neonfs-rig up' (or pass '--rev <sha>')"
+  fi
 
   # ACCEPT_VOL must be set before sourcing so acceptance.sh's derived mount
   # paths (FUSE_MNT/NFS_MNT) follow the bench volume.
@@ -237,7 +263,7 @@ Commands:
   boot               Boot + provision VMs only (skip cluster init)
   init               Initialise/join the cluster on already-provisioned VMs
   iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token (#1163)
-  bench              Run the benchee benchmark suite against the running cluster (test-rig/bench)
+  bench [--rev <sha>]  Run the benchee suite against the running cluster; --rev checks out/builds/boots that revision first (for bisect)
   bench-matrix       Boot/bench/teardown across the standard cluster-config matrix (baseline/durable/spread)
   status             Show VM and cluster status
   ssh <n> [cmd...]   SSH into node <n> (default 1)

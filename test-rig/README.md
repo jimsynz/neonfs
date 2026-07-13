@@ -206,6 +206,18 @@ project under `bench/` that runs on the rig host (needs Elixir/`mix`).
 ./neonfs-rig bench         # set up each interface, then benchmark
 ```
 
+To benchmark a **specific revision** — e.g. stepping through the bisect range in
+an auto-raised regression issue — pass `--rev`, which checks out, builds, and
+boots that revision first (restoring your original ref afterwards), then emits
+the same SHA-stamped results:
+
+```bash
+./neonfs-rig bench --rev <sha>   # no `up` needed; boots the revision itself
+```
+
+Auto-bisecting full-VM benchmarks is too slow, so bisect stays manual — `--rev`
+just makes each step one command.
+
 The wrapper sets up every **file-serving interface** it can on the running
 cluster — FUSE, NFS, S3, WebDAV (reusing the acceptance suite's mount/credential
 setup) — and runs the canonical operation set against each, driven the way
