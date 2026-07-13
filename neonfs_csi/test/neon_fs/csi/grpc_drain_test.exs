@@ -3,7 +3,7 @@ defmodule NeonFS.CSI.GRPCDrainTest do
   Asserts the CSI gRPC endpoint drains an in-flight call on graceful
   shutdown rather than cutting it (#1384).
 
-  grpc (0.11, over ranch) already grants in-flight calls up to ranch's
+  grpc_server (1.0, cowboy over ranch) already grants in-flight calls up to ranch's
   connection-drain window (~5s) when the listener terminates: ranch's
   `terminate/2` gracefully shuts down active connections. This test
   pins that behaviour end to end against the real `Endpoint` over a
@@ -34,8 +34,6 @@ defmodule NeonFS.CSI.GRPCDrainTest do
         System.tmp_dir!(),
         "neonfs_csi_drain_#{System.unique_integer([:positive])}.sock"
       )
-
-    start_supervised!({GRPC.Client.Supervisor, []})
 
     on_exit(fn ->
       Application.delete_env(:neonfs_csi, :core_call_fn)

@@ -59,7 +59,8 @@ defmodule NeonFS.CSI.MixProject do
 
   defp deps do
     [
-      {:grpc, "~> 0.9"},
+      {:grpc, "~> 1.0"},
+      {:grpc_server, "~> 1.0"},
       {:neonfs_client, path: "../neonfs_client"},
       {:protobuf, "~> 0.17"},
 
@@ -70,6 +71,7 @@ defmodule NeonFS.CSI.MixProject do
       {:ex_check, "~> 0.16", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.40", only: [:dev, :test], runtime: false},
       {:git_ops, "~> 2.4", only: [:dev, :test], runtime: false},
+      {:gun, "~> 2.4", only: [:test]},
       {:mimic, "~> 2.0", only: [:test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false}
     ]

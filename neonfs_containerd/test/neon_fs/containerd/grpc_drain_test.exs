@@ -3,7 +3,7 @@ defmodule NeonFS.Containerd.GRPCDrainTest do
   Asserts the containerd content-store gRPC endpoint drains an
   in-flight call on graceful shutdown rather than cutting it (#1384).
 
-  grpc (0.11, over ranch) already grants in-flight calls up to ranch's
+  grpc_server (1.0, cowboy over ranch) already grants in-flight calls up to ranch's
   connection-drain window (~5s) when the listener terminates: ranch's
   `terminate/2` gracefully shuts down active connections. This test
   pins that behaviour end to end against the real `Endpoint` over a
@@ -29,8 +29,6 @@ defmodule NeonFS.Containerd.GRPCDrainTest do
         System.tmp_dir!(),
         "neonfs_containerd_drain_#{System.unique_integer([:positive])}.sock"
       )
-
-    start_supervised!({GRPC.Client.Supervisor, []})
 
     Application.put_env(:neonfs_containerd, :listener, :socket)
     Application.put_env(:neonfs_containerd, :socket_path, socket_path)
