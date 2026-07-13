@@ -213,8 +213,9 @@ cmd_bench() {
   local big_mib="${BENCH_BIG_MIB:-64}"
 
   if ! node_cli 1 "volume list" 2>/dev/null | grep -qE "^${ACCEPT_VOL}[[:space:]]"; then
-    log "creating bench volume '${ACCEPT_VOL}' (replicas ${REPLICAS})"
-    node_cli 1 "volume create ${ACCEPT_VOL} --replicas ${REPLICAS}" >/dev/null
+    log "creating bench volume '${ACCEPT_VOL}' (replicas ${REPLICAS}, compression ${COMPRESSION}, encryption ${ENCRYPTION})"
+    node_cli 1 "volume create ${ACCEPT_VOL} --replicas ${REPLICAS} $(codec_create_flags)" >/dev/null
+    apply_initial_tier 1 "${ACCEPT_VOL}"
   fi
 
   log "staging ${big_mib}MiB source file on node 1"
@@ -226,6 +227,7 @@ cmd_bench() {
     "BENCH_BIG_SIZE=$((big_mib * 1048576))" "BENCH_SHA=${sha}"
     "BENCH_NODES=${NODES}" "BENCH_REPLICAS=${REPLICAS}" "BENCH_DRIVES_PER_NODE=${DRIVES_PER_NODE}"
     "BENCH_CONFIG_LABEL=${BENCH_CONFIG_LABEL:-}"
+    "BENCH_COMPRESSION=${COMPRESSION}" "BENCH_ENCRYPTION=${ENCRYPTION}" "BENCH_TIER=${INITIAL_TIER:-}"
   )
 
   if bench_setup_fuse; then e+=("BENCH_FUSE_MOUNT=${FUSE_MNT}"); log "interface fuse: ready (${FUSE_MNT})"; else warn "interface fuse: unavailable — skipping"; fi

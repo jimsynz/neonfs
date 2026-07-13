@@ -31,6 +31,13 @@ VOLUME_NAME="${VOLUME_NAME:-test}"
 # Default replication factor tracks the node count so `volume create` is
 # satisfiable without --allow-under-replicated.
 REPLICAS="${REPLICAS:-${NODES}}"
+# Codec/tiering knobs (#1497) applied to volumes the rig creates. compression +
+# encryption are `volume create` flags; tiering is a post-create `volume update`
+# (no create flag). Erasure has no CLI create flag yet (tracked separately), so
+# it isn't a rig knob.
+COMPRESSION="${COMPRESSION:-zstd}"
+ENCRYPTION="${ENCRYPTION:-none}"
+INITIAL_TIER="${INITIAL_TIER:-}"
 
 VERSION="$(grep -m1 '@version "' "${REPO_ROOT}/neonfs_omnibus/mix.exs" | sed -E 's/.*"([^"]+)".*/\1/')"
 
@@ -404,8 +411,22 @@ cluster_bootstrap() {
     add_extra_drives "$i"
   done
 
-  log "creating volume '${VOLUME_NAME}' (replicas ${REPLICAS})"
-  node_cli 1 "volume create '${VOLUME_NAME}' --replicas ${REPLICAS}"
+  log "creating volume '${VOLUME_NAME}' (replicas ${REPLICAS}, compression ${COMPRESSION}, encryption ${ENCRYPTION})"
+  node_cli 1 "volume create '${VOLUME_NAME}' --replicas ${REPLICAS} $(codec_create_flags)"
+  apply_initial_tier 1 "${VOLUME_NAME}"
+}
+
+# Volume codec flags (#1497) for `volume create`. Tiering is applied separately
+# via `apply_initial_tier` because `initial_tier` is a `volume update` field.
+codec_create_flags() {
+  printf -- '--compression %s --encryption %s' "${COMPRESSION}" "${ENCRYPTION}"
+}
+
+apply_initial_tier() {
+  local node="$1" vol="$2"
+  [ -n "${INITIAL_TIER}" ] || return 0
+  node_cli "${node}" "volume update '${vol}' --initial-tier ${INITIAL_TIER}" >/dev/null 2>&1 \
+    || warn "failed to set initial tier '${INITIAL_TIER}' on '${vol}'"
 }
 
 add_extra_drives() {

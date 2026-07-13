@@ -58,6 +58,7 @@ defmodule NeonFS.Bench do
 
     ==== neonfs-rig bench #{if config.config_label != "", do: "[#{config.config_label}] ", else: ""}====
       sha=#{config.sha} nodes=#{config.nodes} replicas=#{config.replicas} drives_per_node=#{config.drives_per_node}
+      compression=#{label_or(config.compression)} encryption=#{label_or(config.encryption)} tier=#{label_or(config.tier)}
       interfaces=#{Enum.map_join(config.interfaces, ",", & &1.name)}
       big_file=#{mib(config.big_size)}MiB small=#{config.file_count}×#{config.file_size}B  →  #{config.out_dir}
     """)
@@ -334,6 +335,9 @@ defmodule NeonFS.Bench do
       nodes: config.nodes,
       replicas: config.replicas,
       drives_per_node: config.drives_per_node,
+      compression: config.compression,
+      encryption: config.encryption,
+      tier: config.tier,
       big_size: config.big_size,
       file_count: config.file_count,
       file_size: config.file_size,
@@ -360,6 +364,9 @@ defmodule NeonFS.Bench do
       nodes: int("BENCH_NODES", 1),
       replicas: int("BENCH_REPLICAS", 1),
       drives_per_node: int("BENCH_DRIVES_PER_NODE", 2),
+      compression: env("BENCH_COMPRESSION", ""),
+      encryption: env("BENCH_ENCRYPTION", ""),
+      tier: env("BENCH_TIER", ""),
       big_size: int("BENCH_BIG_SIZE", 64 * 1_048_576),
       file_count: int("BENCH_FILE_COUNT", 100),
       file_size: int("BENCH_FILE_SIZE", 4096),
@@ -423,4 +430,7 @@ defmodule NeonFS.Bench do
   defp mib(bytes), do: div(bytes, 1_048_576)
 
   defp fmt(n), do: :erlang.float_to_binary(n / 1, decimals: 1)
+
+  defp label_or(""), do: "(default)"
+  defp label_or(v), do: v
 end
