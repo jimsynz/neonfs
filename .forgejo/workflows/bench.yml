@@ -1,0 +1,61 @@
+name: bench
+
+# Full-VM QEMU benchmarks are slow and load-sensitive, so they run off the PR
+# path — weekly on a schedule, or on demand — never as a PR-gating job (#1523).
+on:
+  schedule:
+    # Weekly, Monday 03:00 UTC.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  bench:
+    # The rig needs QEMU + /dev/kvm (TCG is ~10x slower), so it can't run on the
+    # containerised `docker` runners. `jeb` is the KVM-capable bare-metal runner.
+    runs-on: jeb
+    # The standard config matrix (baseline/durable/spread) runs serially — the
+    # rig is sequential, no competing VMs — so allow plenty of wall time.
+    timeout-minutes: 720
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install rig prerequisites
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils cloud-image-utils
+          if ! command -v nfpm >/dev/null 2>&1; then
+            curl -fsSL -o /tmp/nfpm.tgz \
+              https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
+            sudo tar -C /usr/local/bin -xzf /tmp/nfpm.tgz nfpm
+          fi
+
+      - name: Provision toolchain from .tool-versions
+        run: |
+          asdf install
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Run benchmark matrix
+        run: |
+          export PATH="$PWD/resources/scripts:$PATH"
+          cd test-rig
+          ./neonfs-rig bench-matrix
+
+      - name: Tear down rig state
+        if: always()
+        run: |
+          cd test-rig
+          ./neonfs-rig clean || true
+
+      - name: Upload SHA-stamped benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ github.sha }}
+          path: test-rig/bench/results/**
+          # Must exceed the regression-gate comparison window (#1524: weekly ×
+          # ~4-run rolling window ≈ 5 weeks). 90 days is comfortably over.
+          retention-days: 90
+          if-no-files-found: error
