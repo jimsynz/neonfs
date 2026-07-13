@@ -31,6 +31,12 @@ pub enum VolumeCommand {
         #[arg(long, default_value = "none")]
         encryption: String,
 
+        /// Durability scheme: `replicate:N` or `erasure:D:P`. Overrides
+        /// `--replicas` for the durability config; defaults to
+        /// `replicate:<replicas>` when omitted.
+        #[arg(long)]
+        durability: Option<String>,
+
         /// Scrub interval in seconds (time between full integrity scans)
         #[arg(long)]
         scrub_interval: Option<u64>,
@@ -391,6 +397,7 @@ impl VolumeCommand {
                 replicas,
                 compression,
                 encryption,
+                durability,
                 scrub_interval,
                 atime_mode,
                 allow_under_replicated,
@@ -399,6 +406,7 @@ impl VolumeCommand {
                 *replicas,
                 compression,
                 encryption,
+                durability.as_deref(),
                 *scrub_interval,
                 atime_mode.as_deref(),
                 *allow_under_replicated,
@@ -875,6 +883,79 @@ impl VolumeCommand {
         Ok(())
     }
 
+    fn durability_err() -> crate::error::CliError {
+        crate::error::CliError::InvalidArgument(
+            "Invalid --durability value; use 'replicate:N' or 'erasure:D:P'".to_string(),
+        )
+    }
+
+    /// Default replicate durability map derived from `--replicas`.
+    fn replicate_map(replicas: u32) -> Term {
+        Term::Map(Map {
+            map: HashMap::from([
+                (
+                    Term::Atom(Atom::from("type")),
+                    Term::Atom(Atom::from("replicate")),
+                ),
+                (
+                    Term::Atom(Atom::from("factor")),
+                    Term::FixInteger(FixInteger::from(replicas as i32)),
+                ),
+                (
+                    Term::Atom(Atom::from("min_copies")),
+                    Term::FixInteger(FixInteger::from(std::cmp::min(replicas, 2) as i32)),
+                ),
+            ]),
+        })
+    }
+
+    /// Build a durability config map from a `replicate:N` / `erasure:D:P` spec,
+    /// mirroring the daemon's `parse_durability/1` format (which re-validates).
+    fn durability_map_from_spec(spec: &str) -> Result<Term> {
+        if let Some(rest) = spec.strip_prefix("replicate:") {
+            let n: u32 = rest
+                .parse()
+                .ok()
+                .filter(|&n| n >= 1)
+                .ok_or_else(Self::durability_err)?;
+            Ok(Self::replicate_map(n))
+        } else if let Some(rest) = spec.strip_prefix("erasure:") {
+            match rest.split(':').collect::<Vec<_>>().as_slice() {
+                [d_str, p_str] => {
+                    let d: u32 = d_str
+                        .parse()
+                        .ok()
+                        .filter(|&d| d >= 1)
+                        .ok_or_else(Self::durability_err)?;
+                    let p: u32 = p_str
+                        .parse()
+                        .ok()
+                        .filter(|&p| p >= 1)
+                        .ok_or_else(Self::durability_err)?;
+                    Ok(Term::Map(Map {
+                        map: HashMap::from([
+                            (
+                                Term::Atom(Atom::from("type")),
+                                Term::Atom(Atom::from("erasure")),
+                            ),
+                            (
+                                Term::Atom(Atom::from("data_chunks")),
+                                Term::FixInteger(FixInteger::from(d as i32)),
+                            ),
+                            (
+                                Term::Atom(Atom::from("parity_chunks")),
+                                Term::FixInteger(FixInteger::from(p as i32)),
+                            ),
+                        ]),
+                    }))
+                }
+                _ => Err(Self::durability_err()),
+            }
+        } else {
+            Err(Self::durability_err())
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create(
         &self,
@@ -882,6 +963,7 @@ impl VolumeCommand {
         replicas: u32,
         compression: &str,
         encryption: &str,
+        durability: Option<&str>,
         scrub_interval: Option<u64>,
         atime_mode: Option<&str>,
         allow_under_replicated: bool,
@@ -903,22 +985,12 @@ impl VolumeCommand {
             bytes: name.as_bytes().to_vec(),
         });
 
-        let durability_map = Term::Map(Map {
-            map: HashMap::from([
-                (
-                    Term::Atom(Atom::from("type")),
-                    Term::Atom(Atom::from("replicate")),
-                ),
-                (
-                    Term::Atom(Atom::from("factor")),
-                    Term::FixInteger(FixInteger::from(replicas as i32)),
-                ),
-                (
-                    Term::Atom(Atom::from("min_copies")),
-                    Term::FixInteger(FixInteger::from(std::cmp::min(replicas, 2) as i32)),
-                ),
-            ]),
-        });
+        // `--durability` (if given) determines the scheme; otherwise default to
+        // `replicate:<replicas>`. The daemon re-validates the resulting map.
+        let durability_map = match durability {
+            Some(spec) => Self::durability_map_from_spec(spec)?,
+            None => Self::replicate_map(replicas),
+        };
 
         let compression_map = Term::Map(Map {
             map: HashMap::from([
@@ -2191,6 +2263,80 @@ fn parse_duration_ms(input: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn map_entries(term: &Term) -> &HashMap<Term, Term> {
+        match term {
+            Term::Map(m) => &m.map,
+            other => panic!("expected Term::Map, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn durability_map_from_spec_replicate() {
+        let m = VolumeCommand::durability_map_from_spec("replicate:5").unwrap();
+        let entries = map_entries(&m);
+        assert_eq!(
+            entries.get(&Term::Atom(Atom::from("type"))),
+            Some(&Term::Atom(Atom::from("replicate")))
+        );
+        assert_eq!(
+            entries.get(&Term::Atom(Atom::from("factor"))),
+            Some(&Term::FixInteger(FixInteger::from(5)))
+        );
+    }
+
+    #[test]
+    fn durability_map_from_spec_erasure() {
+        let m = VolumeCommand::durability_map_from_spec("erasure:4:2").unwrap();
+        let entries = map_entries(&m);
+        assert_eq!(
+            entries.get(&Term::Atom(Atom::from("type"))),
+            Some(&Term::Atom(Atom::from("erasure")))
+        );
+        assert_eq!(
+            entries.get(&Term::Atom(Atom::from("data_chunks"))),
+            Some(&Term::FixInteger(FixInteger::from(4)))
+        );
+        assert_eq!(
+            entries.get(&Term::Atom(Atom::from("parity_chunks"))),
+            Some(&Term::FixInteger(FixInteger::from(2)))
+        );
+    }
+
+    #[test]
+    fn durability_map_from_spec_rejects_invalid() {
+        for bad in [
+            "bogus",
+            "erasure:4",
+            "erasure:0:2",
+            "erasure:4:0",
+            "replicate:0",
+            "replicate:x",
+        ] {
+            assert!(
+                VolumeCommand::durability_map_from_spec(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn create_accepts_durability_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: VolumeCommand,
+        }
+
+        assert!(
+            TestCli::try_parse_from(["test", "create", "v", "--durability", "erasure:4:2"]).is_ok()
+        );
+        assert!(
+            TestCli::try_parse_from(["test", "create", "v", "--durability", "replicate:3"]).is_ok()
+        );
+    }
 
     #[test]
     fn test_parse_duration_ms_units() {
