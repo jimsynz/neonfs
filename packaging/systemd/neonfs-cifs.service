@@ -1,0 +1,39 @@
+[Unit]
+Description=NeonFS CIFS/SMB bridge (Samba VFS backend)
+After=network.target smbd.service
+Wants=network.target
+Documentation=https://neonfs.dev/docs
+
+[Service]
+Type=notify
+User=neonfs
+Group=neonfs
+ExecStart=/usr/bin/neonfs-cifs-daemon start
+ExecStop=/usr/bin/neonfs-cifs-daemon stop
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+# Must exceed the in-flight drain deadline (~25s; see `:drain_deadline_ms` /
+# `NEONFS_*_DRAIN_DEADLINE_MS`) plus headroom, else systemd SIGKILLs the BEAM
+# mid-drain (#1385). Bump both together if either changes.
+TimeoutStopSec=45
+
+EnvironmentFile=-/etc/neonfs/neonfs.conf
+EnvironmentFile=-/etc/neonfs/cifs.conf
+
+RuntimeDirectory=neonfs
+StateDirectory=neonfs
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# /var/lib/neonfs holds the TLS material shared with the core daemon. The
+# bridge socket lives under /run/neonfs (covered by RuntimeDirectory); the
+# Samba vfs_neonfs.so shim (loaded by smbd) dials it via
+# `neonfs:socket = /run/neonfs/cifs.sock` in smb.conf.
+ReadWritePaths=/var/lib/neonfs
+
+[Install]
+WantedBy=multi-user.target

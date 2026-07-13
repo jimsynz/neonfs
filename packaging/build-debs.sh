@@ -114,7 +114,11 @@ cargo build --release
 # materialised under the old vsn. That's how `neonfs_blob.so` ended up
 # missing from `neonfs_core-0.2.3/priv/native/` in the omnibus deb (#746).
 # Wipe `_build/prod/rel/` before every release so each build starts clean.
-for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
+# neonfs_cifs is opt-in (NEONFS_BUILD_CIFS=1): its Samba VFS module needs a
+# heavy, root/apt-requiring in-tree Samba build (#1527), which callers like the
+# test-rig's `ensure_debs` neither need nor can run unprivileged. The release
+# pipeline builds it via its own path.
+for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_omnibus ${NEONFS_BUILD_CIFS:+neonfs_cifs}; do
     echo "==> Building ${component} release..."
     cd "${REPO_ROOT}/${component}"
     MIX_ENV=prod mix deps.get --only prod
@@ -126,6 +130,20 @@ for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neon
     rm -rf _build/prod/rel _build/prod/lib/neonfs_*
     MIX_ENV=prod mix release --overwrite
 done
+
+# Step 2b: Build the Samba VFS module (neonfs.so) for the neonfs-cifs deb,
+# against the target distro's Samba (see packaging/build-vfs-module.sh, #1527).
+# Opt-in — see the NEONFS_BUILD_CIFS note above.
+if [ -n "${NEONFS_BUILD_CIFS:-}" ]; then
+    echo "==> Building Samba VFS module (neonfs.so) for neonfs-cifs..."
+    case "${ARCH}" in
+        amd64) SAMBA_VFS_TRIPLET="x86_64-linux-gnu" ;;
+        arm64) SAMBA_VFS_TRIPLET="aarch64-linux-gnu" ;;
+        *) echo "Error: no Samba VFS multiarch triplet for ARCH=${ARCH}" >&2; exit 1 ;;
+    esac
+    VFS_SO_SRC="$(bash "${REPO_ROOT}/packaging/build-vfs-module.sh")"
+    export SAMBA_VFS_TRIPLET VFS_SO_SRC
+fi
 
 # Step 3: Package with nfpm
 # nfpm resolves relative paths (../systemd/, ../scripts/) from CWD,
@@ -139,7 +157,7 @@ cleanup_generated_configs() {
 }
 trap cleanup_generated_configs EXIT
 
-for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-omnibus; do
+for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-omnibus ${NEONFS_BUILD_CIFS:+neonfs-cifs}; do
     echo "    ${config}..."
     envsubst < "${config}.yaml" > ".generated-${config}.yaml"
     nfpm package \
