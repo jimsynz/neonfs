@@ -1,0 +1,87 @@
+FROM base AS deps
+
+# Copy only lockfiles and project config to cache the deps.get layer
+COPY --from=client mix.exs mix.lock /workdir/neonfs_client/
+COPY --from=src mix.exs mix.lock /workdir/neonfs_cifs/
+
+WORKDIR /workdir/neonfs_cifs
+RUN mix deps.get
+
+FROM deps AS releaser
+ENV MIX_ENV=prod
+
+# Now copy the full source for compilation
+COPY --from=client . /workdir/neonfs_client
+COPY --from=src . /workdir/neonfs_cifs
+
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    mix compile && mix release --overwrite
+
+# The Samba VFS module (`neonfs.so`) can't be built out-of-tree, so
+# build-in-tree.sh fetches pinned Samba 4.24.3, drops the module + wire
+# client into source3/modules/, and builds just the vfs_neonfs target.
+# Mirrors the dedicated `vfs_neonfs` CI job. Heavy + network-fetching, so
+# it's validated at release rather than on PR CI.
+FROM base AS vfs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl python3-dev pkg-config gcc make perl bison flex \
+    libjansson-dev libgnutls28-dev libtasn1-6-dev libtasn1-bin \
+    libpopt-dev libbsd-dev libcap-dev libacl1-dev libblkid-dev \
+    libparse-yapp-perl zlib1g-dev libtirpc-dev liblmdb-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=src native/vfs_neonfs /workdir/vfs_neonfs
+RUN WORKDIR=/samba-build SKIP_APT=1 bash /workdir/vfs_neonfs/build-in-tree.sh \
+  && install -D "$(find /samba-build -name neonfs.so -path '*modules/vfs*' | head -1)" /out/neonfs.so
+
+FROM debian:trixie-20260610
+
+LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="neonfs-cifs" \
+      org.opencontainers.image.description="NeonFS Samba VFS bridge for CIFS/SMB access"
+
+RUN apt-get update -y && \
+  apt-get install -y libstdc++6 openssl libssl3t64 libncurses6 locales ca-certificates \
+  && apt-get clean && rm -f /var/lib/apt/lists/*_*
+
+# Set the locale
+RUN sed -i '/en_NZ.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
+
+ENV LANG=en_NZ.UTF-8
+ENV LANGUAGE=en_NZ:en
+ENV LC_ALL=en_NZ.UTF-8
+
+WORKDIR "/app"
+RUN chown nobody /app
+
+# Persistent state (TLS material). The Samba `vfs_neonfs.so` shim dials the
+# bridge over a Unix socket under /run/neonfs (default cifs.sock) — that
+# directory is bind-mounted so the smbd sidecar shares it without joining
+# the whole image network.
+RUN mkdir -p /var/lib/neonfs && chown -R nobody:nogroup /var/lib/neonfs
+RUN mkdir -p /run/neonfs && chown -R nobody:nogroup /run/neonfs
+
+VOLUME ["/var/lib/neonfs", "/run/neonfs"]
+
+# set runner ENV
+ENV MIX_ENV="prod"
+
+# Only copy the final release from the build stage
+COPY --from=releaser --chown=nobody:root /workdir/neonfs_cifs/_build/${MIX_ENV}/rel/neonfs_cifs ./
+
+COPY --from=cli --chown=nobody:root /bin/neonfs /app/bin
+
+# The Samba VFS module for the smbd sidecar to load. Ship it into the smbd
+# container's VFS module directory (e.g. an initContainer copy or a shared
+# volume) so `vfs objects = neonfs` resolves against this build.
+COPY --from=vfs --chown=nobody:root /out/neonfs.so /app/vfs/neonfs.so
+
+USER nobody
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+  CMD ["/app/bin/neonfs", "node", "status", "--json"]
+
+CMD ["/app/bin/neonfs_cifs", "start"]
