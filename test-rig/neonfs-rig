@@ -132,6 +132,7 @@ cmd_bench() {
     "BENCH_RIG=${RIG_ROOT}/neonfs-rig" "BENCH_NODE=1" "BENCH_VOLUME=${ACCEPT_VOL}"
     "BENCH_BIG_SIZE=$((big_mib * 1048576))" "BENCH_SHA=${sha}"
     "BENCH_NODES=${NODES}" "BENCH_REPLICAS=${REPLICAS}" "BENCH_DRIVES_PER_NODE=${DRIVES_PER_NODE}"
+    "BENCH_CONFIG_LABEL=${BENCH_CONFIG_LABEL:-}"
   )
 
   if bench_setup_fuse; then e+=("BENCH_FUSE_MOUNT=${FUSE_MNT}"); log "interface fuse: ready (${FUSE_MNT})"; else warn "interface fuse: unavailable — skipping"; fi
@@ -151,6 +152,36 @@ cmd_bench() {
   mix deps.get --quiet
   log "running benchee harness (sha ${sha}, ${NODES} node(s), replicas ${REPLICAS})"
   env "${e[@]}" mix run -e "NeonFS.Bench.run()"
+}
+
+# Standard cluster-config benchmark matrix (#1522). Each config is a full
+# boot → bench → teardown cycle (node counts differ), reusing up/bench/down.
+# Every run is tagged with its config label (recorded in meta.json and the
+# result dir name), on top of the NODES/REPLICAS the foundation already stamps.
+# DRIVES_PER_NODE stays at its default; codec/tiering axes are out of scope
+# (deferred #1497).
+cmd_bench_matrix() {
+  command -v mix >/dev/null 2>&1 || die "mix (Elixir) not found on the rig host — needed to run the benchee harness"
+
+  # label NODES REPLICAS
+  local -a configs=(
+    "baseline 1 1"
+    "durable 3 3"
+    "spread 3 1"
+  )
+
+  local cfg label
+  for cfg in "${configs[@]}"; do
+    read -r label NODES REPLICAS <<<"${cfg}"
+    export NODES REPLICAS
+    log "=== matrix config '${label}' (NODES=${NODES} REPLICAS=${REPLICAS}) ==="
+    cmd_clean
+    cmd_up
+    BENCH_CONFIG_LABEL="${label}" cmd_bench
+  done
+
+  cmd_down
+  log "matrix complete — per-config results under ${RIG_ROOT}/bench/results/ (config_label in meta.json)"
 }
 
 cmd_ssh() {
@@ -207,6 +238,7 @@ Commands:
   init               Initialise/join the cluster on already-provisioned VMs
   iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token (#1163)
   bench              Run the benchee benchmark suite against the running cluster (test-rig/bench)
+  bench-matrix       Boot/bench/teardown across the standard cluster-config matrix (baseline/durable/spread)
   status             Show VM and cluster status
   ssh <n> [cmd...]   SSH into node <n> (default 1)
   cli <n> -- <args>  Run the neonfs CLI on node <n>, e.g. cli 1 -- volume list
@@ -236,6 +268,7 @@ main() {
     init)   cmd_init "$@" ;;
     iface-join) cmd_iface_join "$@" ;;
     bench)  cmd_bench "$@" ;;
+    bench-matrix) cmd_bench_matrix "$@" ;;
     status) cmd_status "$@" ;;
     ssh)    cmd_ssh "$@" ;;
     cli)    cmd_cli "$@" ;;

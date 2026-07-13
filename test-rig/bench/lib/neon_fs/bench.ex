@@ -48,7 +48,7 @@ defmodule NeonFS.Bench do
 
     IO.puts("""
 
-    ==== neonfs-rig bench ====
+    ==== neonfs-rig bench #{if config.config_label != "", do: "[#{config.config_label}] ", else: ""}====
       sha=#{config.sha} nodes=#{config.nodes} replicas=#{config.replicas} drives_per_node=#{config.drives_per_node}
       interfaces=#{Enum.map_join(config.interfaces, ",", & &1.name)}
       big_file=#{mib(config.big_size)}MiB small=#{config.file_count}×#{config.file_size}B  →  #{config.out_dir}
@@ -259,6 +259,7 @@ defmodule NeonFS.Bench do
   defp write_metadata(config) do
     meta = %{
       sha: config.sha,
+      config_label: config.config_label,
       interfaces: Enum.map(config.interfaces, & &1.name),
       nodes: config.nodes,
       replicas: config.replicas,
@@ -278,9 +279,12 @@ defmodule NeonFS.Bench do
     sha = env("BENCH_SHA", "unknown")
     base_out = env("BENCH_OUT", Path.expand("../../results", __DIR__))
     stamp = DateTime.utc_now() |> DateTime.to_iso8601() |> String.replace(":", "")
+    label = env("BENCH_CONFIG_LABEL", "")
+    dir_prefix = if label == "", do: sha, else: "#{sha}-#{label}"
 
     %{
       sha: sha,
+      config_label: label,
       node: env("BENCH_NODE", "1"),
       interfaces: interfaces(),
       nodes: int("BENCH_NODES", 1),
@@ -291,7 +295,7 @@ defmodule NeonFS.Bench do
       file_size: int("BENCH_FILE_SIZE", 4096),
       time: int("BENCH_TIME", 5),
       warmup: int("BENCH_WARMUP", 2),
-      out_dir: Path.join(base_out, "#{sha}-#{stamp}")
+      out_dir: Path.join(base_out, "#{dir_prefix}-#{stamp}")
     }
   end
 
