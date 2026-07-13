@@ -26,8 +26,16 @@ defmodule NeonFS.Bench do
   directly comparable, and flow through the shared SHA-/config-stamped
   output from the foundation slice.
 
-  Container-runtime interfaces (Docker volume, containerd content store)
-  are a distinct, per-op-spawn workload tracked separately under #1309.
+  The **container-runtime interfaces** (#1533) are a distinct workload driven
+  the way `acceptance.sh` exercises them, against a warm daemon the wrapper
+  starts (so container/daemon-spawn cost isn't in the measured op):
+
+    * `docker` — file I/O inside a warm busybox container with the NeonFS
+      volume attached (`seq_write`/`seq_read`/`small_files`; its data path is
+      FUSE underneath, so `stat_list`/`range_read` would duplicate FUSE);
+    * `containerd` — blob ingest (`seq_write`, a fresh unique blob each time)
+      and get (`seq_read`) against a warm throwaway containerd wired to the
+      NeonFS content proxy; a content store has no small-file/listing/range op.
 
   The wrapper exports, for each interface it prepared, an availability
   flag plus its connection details (mount path, S3 flags, WebDAV auth) and
@@ -213,6 +221,68 @@ defmodule NeonFS.Bench do
     "curl -sf #{iface.auth} -r 0-4095 #{iface.base}/#{iface.vol}/#{@big_file} -o /dev/null"
   end
 
+  # Docker volume (#1533): file I/O inside a warm busybox container with the
+  # NeonFS volume attached at /data (the wrapper started it, so container-spawn
+  # cost isn't in the measured op). The volume's data path is FUSE underneath,
+  # so only the attach + write/read/metadata ops are benchmarked; stat/range
+  # duplicate the FUSE numbers and are skipped.
+  defp command(%{kind: :docker} = iface, :seq_write, config) do
+    docker_exec(
+      "dd if=/dev/zero of=/data/w bs=1M count=#{mib(config.big_size)} conv=fsync 2>/dev/null",
+      iface
+    )
+  end
+
+  defp command(%{kind: :docker} = iface, :seq_read, _config) do
+    docker_exec("dd if=/data/#{@big_file} of=/dev/null bs=1M 2>/dev/null", iface)
+  end
+
+  defp command(%{kind: :docker} = iface, :small_files, config) do
+    n = config.file_count
+
+    docker_exec(
+      """
+      d=/data/.bench; rm -rf "$d"; mkdir -p "$d"
+      pl=$(head -c #{config.file_size} /dev/zero | tr '\\0' a)
+      i=0; while [ $i -lt #{n} ]; do printf '%s' "$pl" > "$d/f$i"; i=$((i+1)); done
+      i=0; while [ $i -lt #{n} ]; do cat "$d/f$i" >/dev/null; i=$((i+1)); done
+      i=0; while [ $i -lt #{n} ]; do rm "$d/f$i"; i=$((i+1)); done
+      rmdir "$d"
+      """,
+      iface
+    )
+  end
+
+  defp command(%{kind: :docker}, op, _config) when op in [:stat_list, :range_read],
+    do: :unsupported
+
+  # containerd content store (#1533): blob ingest/get throughput against a warm
+  # throwaway containerd wired to the NeonFS content proxy (started by the
+  # wrapper). seq_write ingests a fresh unique blob (content-addressed, so it
+  # must differ each invocation to measure real ingest, not a dedup hit);
+  # seq_read gets the pre-staged blob. A content store has no small-file /
+  # dir-listing / range analogue.
+  defp command(%{kind: :containerd} = iface, :seq_write, config) do
+    piped(
+      """
+      dd if=/dev/urandom of=/tmp/neonfs_ctr_blob bs=1M count=#{mib(config.big_size)} 2>/dev/null
+      d="sha256:$(sha256sum /tmp/neonfs_ctr_blob | awk '{print $1}')"
+      ctr --address #{iface.grpc} --namespace #{iface.ns} content ingest --expected-digest "$d" "ref-$$-$RANDOM" < /tmp/neonfs_ctr_blob
+      """,
+      "sudo bash"
+    )
+  end
+
+  defp command(%{kind: :containerd} = iface, :seq_read, _config) do
+    "sudo ctr --address #{iface.grpc} --namespace #{iface.ns} content get #{iface.digest} > /dev/null 2>&1"
+  end
+
+  defp command(%{kind: :containerd}, op, _config)
+       when op in [:small_files, :stat_list, :range_read],
+       do: :unsupported
+
+  defp docker_exec(script, iface), do: piped(script, "sudo docker exec -i #{iface.container} sh")
+
   defp host_big_file, do: "/tmp/#{@big_file}"
 
   # Run `script` remotely as the mount's owning user. The script is
@@ -317,6 +387,16 @@ defmodule NeonFS.Bench do
         auth: a,
         base: env("BENCH_DAV_BASE", ""),
         vol: env("BENCH_VOLUME", "bench")
+      }
+    end)
+    |> add_if("BENCH_DOCKER_CONTAINER", fn c -> %{name: "docker", kind: :docker, container: c} end)
+    |> add_if("BENCH_CONTAINERD_GRPC", fn g ->
+      %{
+        name: "containerd",
+        kind: :containerd,
+        grpc: g,
+        ns: env("BENCH_CONTAINERD_NS", "bench"),
+        digest: env("BENCH_CONTAINERD_DIGEST", "")
       }
     end)
     |> Enum.reverse()
