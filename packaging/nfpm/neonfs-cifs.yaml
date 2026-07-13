@@ -1,0 +1,55 @@
+name: neonfs-cifs
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+section: net
+priority: optional
+maintainer: "James Harton <james@harton.dev>"
+description: "NeonFS CIFS/SMB bridge (Samba VFS backend)"
+vendor: "harton.dev"
+homepage: "https://harton.dev/project-neon/neonfs"
+license: "Apache-2.0"
+
+depends:
+  - neonfs-common (= ${VERSION})
+  - neonfs-cli (= ${VERSION})
+  - libstdc++6
+  - openssl
+  - libssl3t64
+  - libncurses6
+  - ca-certificates
+  # The shipped neonfs.so is a Samba VFS module built against this release's
+  # Samba; samba-vfs-modules provides the ABI-matching smbd + the VFS dir.
+  - samba-vfs-modules
+
+conflicts:
+  - neonfs-omnibus
+
+contents:
+  - src: "${BUILD_DIR}/neonfs_cifs/_build/prod/rel/neonfs_cifs/"
+    dst: /usr/lib/neonfs/cifs/
+    type: tree
+
+  # Samba VFS module. On-disk name is `neonfs.so` (matches `vfs objects =
+  # neonfs`); installed into the distro's multiarch VFS module dir so the
+  # host smbd finds it. Built against this Debian release's Samba (#1527).
+  - src: "${VFS_SO_SRC}"
+    dst: "/usr/lib/${SAMBA_VFS_TRIPLET}/samba/vfs/neonfs.so"
+    file_info:
+      mode: 0644
+
+  - src: ../systemd/neonfs-cifs.service
+    dst: /usr/lib/systemd/system/neonfs-cifs.service
+
+  - src: ../systemd/neonfs-cifs-daemon
+    dst: /usr/bin/neonfs-cifs-daemon
+    file_info:
+      mode: 0755
+
+  - src: ../systemd/neonfs-cifs.conf
+    dst: /etc/neonfs/cifs.conf
+    type: config|noreplace
+
+scripts:
+  postinstall: ../scripts/post-install.sh
+  preremove: ../scripts/pre-remove.sh

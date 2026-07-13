@@ -34,10 +34,36 @@ cluster. The framing is 4-byte big-endian length-prefixed ETF
 
 ## What's outstanding
 
-- Container image, Debian package, omnibus integration
-  ([#385](https://harton.dev/project-neon/neonfs/issues/385))
 - End-to-end test against a real `smbd`
   ([#386](https://harton.dev/project-neon/neonfs/issues/386))
+
+Container image ([#1528](https://harton.dev/project-neon/neonfs/issues/1528)),
+Debian package ([#1527](https://harton.dev/project-neon/neonfs/issues/1527)),
+and omnibus integration ([#1468](https://harton.dev/project-neon/neonfs/issues/1468))
+have landed.
+
+## Debian package
+
+The `neonfs-cifs` deb ships the Elixir bridge (a systemd `notify` service,
+socket at `/run/neonfs/cifs.sock`) **and** the compiled Samba VFS module at
+`/usr/lib/<arch>-linux-gnu/samba/vfs/neonfs.so`. Because a Samba VFS module is
+ABI-locked to the Samba version it was built against, the deb builds the module
+against the **target Debian release's** Samba (discovered at build time), and
+`depends: samba-vfs-modules` so the ABI-matching `smbd` is present (#1527).
+
+After installing the deb, wire an SMB share to a NeonFS volume in
+`/etc/samba/smb.conf`:
+
+```ini
+[myvolume]
+  vfs objects = neonfs
+  neonfs:socket = /run/neonfs/cifs.sock
+  neonfs:volume = myvolume
+  read only = no
+```
+
+then `systemctl enable --now neonfs-cifs` and `systemctl restart smbd`. The
+same snippet is shipped as a reference in `/etc/neonfs/cifs.conf`.
 
 ## Building and testing
 

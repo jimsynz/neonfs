@@ -1,0 +1,92 @@
+#!/bin/bash
+# NeonFS CIFS bridge daemon wrapper script
+# Provides systemd-compatible start/stop commands for the neonfs_cifs release.
+# The Samba `vfs_neonfs` module (neonfs.so) connects to the socket this daemon
+# listens on; smbd is a separate service the operator configures (see the
+# sample smb.conf in /etc/neonfs/cifs.conf).
+
+set -e
+
+# Source shared TLS distribution functions
+. "${NEONFS_TLS_COMMON:-/usr/lib/neonfs/neonfs-tls-common.sh}"
+
+# Default paths (can be overridden by environment variables)
+RELEASE_ROOT="${RELEASE_ROOT:-/usr/lib/neonfs/cifs}"
+RELEASE_NAME="${RELEASE_NAME:-neonfs_cifs}"
+NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
+DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname)"
+RELEASE_NODE="${NEONFS_CIFS_NODE:-${RELEASE_NODE:-neonfs_cifs@${DEFAULT_HOST}}}"
+NEONFS_CORE_NODE="${NEONFS_CORE_NODE:-neonfs_core@${DEFAULT_HOST}}"
+# Exported so the release's env.sh sees the wrapper's choices (#1141)
+export NEONFS_DATA_DIR RELEASE_NODE NEONFS_CORE_NODE
+# Unix socket the Samba vfs_neonfs.so shim dials (matches runtime.exs default).
+NEONFS_CIFS_SOCKET="${NEONFS_CIFS_SOCKET:-/run/neonfs/cifs.sock}"
+export NEONFS_CIFS_SOCKET
+
+# Generate and persist the Erlang distribution port
+ensure_dist_port() {
+    local port_file="${NEONFS_DATA_DIR}/meta/dist_port"
+    mkdir -p "${NEONFS_DATA_DIR}/meta"
+
+    if [ -n "${NEONFS_DIST_PORT}" ]; then
+        echo "${NEONFS_DIST_PORT}" > "${port_file}"
+    elif [ -f "${port_file}" ]; then
+        export NEONFS_DIST_PORT=$(cat "${port_file}")
+    else
+        export NEONFS_DIST_PORT=$((49152 + RANDOM % 16383))
+        echo "${NEONFS_DIST_PORT}" > "${port_file}"
+    fi
+}
+
+# Write runtime information for CLI discovery
+write_runtime_info() {
+    local runtime_dir="${RUNTIME_DIR:-/run/neonfs}"
+    mkdir -p "${runtime_dir}"
+
+    echo "${RELEASE_NODE}" > "${runtime_dir}/cifs_node_name"
+    echo "${NEONFS_CORE_NODE}" > "${runtime_dir}/core_node_name"
+    echo "${NEONFS_DIST_PORT}" > "${runtime_dir}/dist_port"
+    echo $$ > "${runtime_dir}/cifs.pid"
+
+    # Set ownership if running as root
+    if [ "$EUID" -eq 0 ]; then
+        chown -R neonfs:neonfs "${runtime_dir}"
+    fi
+}
+
+# Start the daemon
+start_daemon() {
+    ensure_dist_port
+    ensure_local_tls
+    write_runtime_info
+
+    # Start the release in foreground mode (systemd will manage daemonization)
+    exec "${RELEASE_ROOT}/bin/${RELEASE_NAME}" start
+}
+
+# Stop the daemon gracefully
+stop_daemon() {
+    "${RELEASE_ROOT}/bin/${RELEASE_NAME}" stop
+}
+
+# Get daemon status
+status_daemon() {
+    "${RELEASE_ROOT}/bin/${RELEASE_NAME}" pid
+}
+
+# Main command dispatcher
+case "$1" in
+    start)
+        start_daemon
+        ;;
+    stop)
+        stop_daemon
+        ;;
+    status)
+        status_daemon
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac

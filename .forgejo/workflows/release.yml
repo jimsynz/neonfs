@@ -250,8 +250,13 @@ jobs:
             neonfs_webdav/_build
             neonfs_docker/deps
             neonfs_docker/_build
+            neonfs_containerd/deps
+            neonfs_containerd/_build
+            neonfs_cifs/deps
+            neonfs_cifs/_build
             neonfs_omnibus/deps
             neonfs_omnibus/_build
+            .samba-build
           key: v2-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
           restore-keys: v2-release-amd64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
 
@@ -271,7 +276,7 @@ jobs:
           # is left empty (which is how `neonfs_blob.so` ended up missing
           # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
           # Wipe `_build/prod/rel/` before every release.
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_omnibus; do
             cd "$component"
             mix deps.get --only prod
             MIX_ENV=prod mix compile
@@ -286,8 +291,13 @@ jobs:
           export VERSION ARCH=amd64 BUILD_DIR="$FORGEJO_WORKSPACE"
           mkdir -p dist
 
+          # Samba VFS module (neonfs.so) for neonfs-cifs, built against the
+          # target distro's Samba (#1527). Sets VFS_SO_SRC for the nfpm config.
+          export SAMBA_VFS_TRIPLET=x86_64-linux-gnu
+          VFS_SO_SRC="$(bash packaging/build-vfs-module.sh)"; export VFS_SO_SRC
+
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"
@@ -359,8 +369,13 @@ jobs:
             neonfs_webdav/_build
             neonfs_docker/deps
             neonfs_docker/_build
+            neonfs_containerd/deps
+            neonfs_containerd/_build
+            neonfs_cifs/deps
+            neonfs_cifs/_build
             neonfs_omnibus/deps
             neonfs_omnibus/_build
+            .samba-build
           key: v2-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('**/mix.lock', '**/Cargo.lock') }}
           restore-keys: v2-release-arm64-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-
 
@@ -380,7 +395,7 @@ jobs:
           # is left empty (which is how `neonfs_blob.so` ended up missing
           # from `neonfs_core-0.2.3/priv/native/` in the omnibus deb, #746).
           # Wipe `_build/prod/rel/` before every release.
-          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_omnibus; do
+          for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_cifs neonfs_omnibus; do
             cd "$component"
             mix deps.get --only prod
             MIX_ENV=prod mix compile
@@ -395,8 +410,13 @@ jobs:
           export VERSION ARCH=arm64 BUILD_DIR="$FORGEJO_WORKSPACE"
           mkdir -p dist
 
+          # Samba VFS module (neonfs.so) for neonfs-cifs, built against the
+          # target distro's Samba (#1527). Sets VFS_SO_SRC for the nfpm config.
+          export SAMBA_VFS_TRIPLET=aarch64-linux-gnu
+          VFS_SO_SRC="$(bash packaging/build-vfs-module.sh)"; export VFS_SO_SRC
+
           cd packaging/nfpm
-          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-omnibus; do
+          for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-omnibus; do
             envsubst < "${config}.yaml" > ".generated-${config}.yaml"
             nfpm package --config ".generated-${config}.yaml" --packager deb --target "$FORGEJO_WORKSPACE/dist/"
             rm -f ".generated-${config}.yaml"
