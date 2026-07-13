@@ -160,29 +160,4 @@ defmodule NeonFS.Integration.CommitChunksTest do
     wait_for_data_plane(cluster)
     :ok
   end
-
-  defp wait_for_data_plane(cluster) do
-    node_names = Enum.map(cluster.nodes, & &1.name)
-
-    assert_eventually timeout: 30_000 do
-      Enum.all?(node_names, fn node_name ->
-        node_has_all_peer_pools?(cluster, node_name)
-      end)
-    end
-  end
-
-  defp node_has_all_peer_pools?(cluster, node_name) do
-    other_nodes =
-      cluster.nodes
-      |> Enum.map(& &1.name)
-      |> List.delete(node_name)
-      |> Enum.map(&PeerCluster.get_node!(cluster, &1).node)
-
-    Enum.all?(other_nodes, fn peer_node ->
-      match?(
-        {:ok, _pool},
-        PeerCluster.rpc(cluster, node_name, NeonFS.Transport.PoolManager, :get_pool, [peer_node])
-      )
-    end)
-  end
 end

@@ -609,30 +609,6 @@ defmodule NeonFS.Integration.DataTransferTest do
     :ok
   end
 
-  defp wait_for_data_plane(cluster) do
-    # Pools are created eagerly during activate_data_plane (broadcast + create_peer_pools),
-    # so they should be available almost immediately. Allow some time for TLS handshakes.
-    assert_eventually timeout: 30_000 do
-      Enum.all?([:node1, :node2, :node3], fn node_name ->
-        node_has_all_peer_pools?(cluster, node_name)
-      end)
-    end
-  end
-
-  defp node_has_all_peer_pools?(cluster, node_name) do
-    other_nodes =
-      [:node1, :node2, :node3]
-      |> List.delete(node_name)
-      |> Enum.map(&PeerCluster.get_node!(cluster, &1).node)
-
-    Enum.all?(other_nodes, fn peer_node ->
-      match?(
-        {:ok, _pool},
-        PeerCluster.rpc(cluster, node_name, NeonFS.Transport.PoolManager, :get_pool, [peer_node])
-      )
-    end)
-  end
-
   defp sync_data_endpoints(cluster) do
     # Ensure every node's ServiceRegistry knows about every other node's
     # data_endpoint. Needed after late joins when broadcast may not have

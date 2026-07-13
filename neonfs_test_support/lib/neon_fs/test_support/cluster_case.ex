@@ -952,6 +952,41 @@ defmodule NeonFS.TestSupport.ClusterCase do
   end
 
   @doc """
+  Wait until every node has an outbound data-transfer pool to every other
+  node — the full data-plane mesh.
+
+  Default timeout 60s. The mesh comes up as `PoolManager` discovery cycles
+  reconcile peers, which can exceed 30s on a loaded CI runner; a tighter
+  bound spuriously invalidates the `setup_all` of data-plane tests (#1532).
+  """
+  @spec wait_for_data_plane(map(), keyword()) :: :ok
+  def wait_for_data_plane(cluster, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 60_000)
+    node_names = Enum.map(cluster.nodes, & &1.name)
+
+    :ok =
+      wait_until(
+        fn -> Enum.all?(node_names, &node_has_all_peer_pools?(cluster, &1)) end,
+        timeout: timeout
+      )
+  end
+
+  defp node_has_all_peer_pools?(cluster, node_name) do
+    other_nodes =
+      cluster.nodes
+      |> Enum.map(& &1.name)
+      |> List.delete(node_name)
+      |> Enum.map(&PeerCluster.get_node!(cluster, &1).node)
+
+    Enum.all?(other_nodes, fn peer_node ->
+      match?(
+        {:ok, _pool},
+        PeerCluster.rpc(cluster, node_name, NeonFS.Transport.PoolManager, :get_pool, [peer_node])
+      )
+    end)
+  end
+
+  @doc """
   Initialise a single-node cluster and optionally create volumes.
 
   ## Options
