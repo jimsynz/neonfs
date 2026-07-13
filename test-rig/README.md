@@ -94,6 +94,7 @@ falling back to TCG otherwise.
 | `ssh <n> [cmd...]` | SSH into node `<n>` (default 1) |
 | `cli <n> -- <args>` | Run the `neonfs` CLI on node `<n>` |
 | `bench` | Run the benchee benchmark suite against the running cluster (see below) |
+| `bench-matrix` | Boot/bench/teardown across the standard cluster-config matrix (see below) |
 | `down` | Stop all VMs, keep their disks |
 | `clean` | Stop all VMs and delete runtime state (disks, seeds, ssh key) |
 
@@ -221,6 +222,28 @@ skipped. Per `(interface, operation)`:
 
 Container-runtime interfaces (Docker volume, containerd content store) are a
 distinct, per-op-spawn workload tracked separately under #1309.
+
+### Cluster-config matrix
+
+`./neonfs-rig bench-matrix` makes cluster configuration a benchmark axis: it
+runs the suite across the standard set of cluster shapes, each a full
+boot → bench → teardown cycle, so profiles are comparable across
+configurations. Every run is tagged with its config label (in `meta.json` and
+the result-dir name), on top of the `NODES`/`REPLICAS`/`DRIVES_PER_NODE` the
+foundation already stamps.
+
+| Config | `NODES` | `REPLICAS` | Purpose |
+| --- | --- | --- | --- |
+| `baseline` | 1 | 1 | floor — interface + core overhead, no remote placement |
+| `durable` | 3 | 3 | realistic quorum-write config |
+| `spread` | 3 | 1 | isolates remote-placement cost from replication cost |
+
+```bash
+./neonfs-rig bench-matrix   # no `up` needed — it boots/tears down each config itself
+```
+
+Erasure/compression/encryption/tiering are not rig env knobs yet, so they're not
+matrix axes (deferred follow-up #1497).
 
 Every run writes its artifacts under `bench/results/<sha>-<timestamp>/`,
 **stamped with the commit SHA and cluster config** it was produced from:
