@@ -143,7 +143,14 @@ if [ -n "${NEONFS_BUILD_CIFS:-}" ]; then
     esac
     VFS_SO_SRC="$(bash "${REPO_ROOT}/packaging/build-vfs-module.sh")"
     export SAMBA_VFS_TRIPLET VFS_SO_SRC
+    # The omnibus deb ships the same module (see neonfs-omnibus.yaml's
+    # ${OMNIBUS_VFS_CONTENT} placeholder); populate it with the built .so.
+    OMNIBUS_VFS_CONTENT=$(printf '  - src: "%s"\n    dst: "/usr/lib/%s/samba/vfs/neonfs.so"\n    file_info:\n      mode: 0644' "${VFS_SO_SRC}" "${SAMBA_VFS_TRIPLET}")
 fi
+
+# Always exported so envsubst substitutes neonfs-omnibus.yaml's placeholder to
+# nothing when the VFS module wasn't built (rather than leaving it literal).
+export OMNIBUS_VFS_CONTENT="${OMNIBUS_VFS_CONTENT:-}"
 
 # Step 3: Package with nfpm
 # nfpm resolves relative paths (../systemd/, ../scripts/) from CWD,

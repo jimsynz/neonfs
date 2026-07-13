@@ -21,6 +21,9 @@ depends:
   - libfuse3-4
   - fuse3
   - nfs-common
+  # The shipped neonfs.so is a Samba VFS module built against this release's
+  # Samba; samba-vfs-modules provides the ABI-matching smbd + the VFS dir.
+  - samba-vfs-modules
 
 conflicts:
   - neonfs-core
@@ -28,11 +31,20 @@ conflicts:
   - neonfs-nfs
   - neonfs-s3
   - neonfs-webdav
+  - neonfs-cifs
 
 contents:
   - src: "${BUILD_DIR}/neonfs_omnibus/_build/prod/rel/neonfs_omnibus/"
     dst: /usr/lib/neonfs/omnibus/
     type: tree
+
+  # Samba VFS module for a co-located smbd (same on-disk name and multiarch
+  # path as the standalone neonfs-cifs deb). Built against this Debian
+  # release's Samba (#1527). The build substitutes the OMNIBUS_VFS_CONTENT
+  # placeholder below with the module's content entry only when the module was
+  # compiled — empty otherwise (e.g. the test-rig's unprivileged deb build,
+  # which skips the heavy in-tree Samba build).
+${OMNIBUS_VFS_CONTENT}
 
   - src: ../systemd/neonfs-omnibus.service
     dst: /usr/lib/systemd/system/neonfs-omnibus.service

@@ -65,6 +65,23 @@ After installing the deb, wire an SMB share to a NeonFS volume in
 then `systemctl enable --now neonfs-cifs` and `systemctl restart smbd`. The
 same snippet is shipped as a reference in `/etc/neonfs/cifs.conf`.
 
+## Omnibus deployment
+
+The `neonfs-omnibus` deb and container image serve CIFS too (the bridge runs
+in-process; see [#1546](https://harton.dev/project-neon/neonfs/issues/1546)).
+`neonfs-omnibus` and `neonfs-cifs` are mutually exclusive — install one or the
+other, not both.
+
+- **Omnibus deb** — ships the Samba module at the same multiarch path,
+  `/usr/lib/<arch>-linux-gnu/samba/vfs/neonfs.so`, and `depends:
+  samba-vfs-modules`. Set the bridge socket via `NEONFS_CIFS_SOCKET` in
+  `/etc/neonfs/neonfs.conf` (default `/run/neonfs/cifs.sock`), then wire the
+  same `smb.conf` share as above and `systemctl restart smbd`.
+- **Omnibus image** — ships the module at `/app/vfs/neonfs.so` for a
+  co-located/sidecar `smbd` to load (copy it into the smbd container's VFS
+  module dir, or share it via a volume), and exposes the bridge socket under
+  the `/run/neonfs` volume.
+
 ## Building and testing
 
 ```bash

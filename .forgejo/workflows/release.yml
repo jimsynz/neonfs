@@ -295,6 +295,10 @@ jobs:
           # target distro's Samba (#1527). Sets VFS_SO_SRC for the nfpm config.
           export SAMBA_VFS_TRIPLET=x86_64-linux-gnu
           VFS_SO_SRC="$(bash packaging/build-vfs-module.sh)"; export VFS_SO_SRC
+          # The omnibus deb ships the same module via neonfs-omnibus.yaml's
+          # ${OMNIBUS_VFS_CONTENT} placeholder (#1546).
+          OMNIBUS_VFS_CONTENT=$(printf '  - src: "%s"\n    dst: "/usr/lib/%s/samba/vfs/neonfs.so"\n    file_info:\n      mode: 0644' "$VFS_SO_SRC" "$SAMBA_VFS_TRIPLET")
+          export OMNIBUS_VFS_CONTENT
 
           cd packaging/nfpm
           for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-omnibus; do
@@ -414,6 +418,10 @@ jobs:
           # target distro's Samba (#1527). Sets VFS_SO_SRC for the nfpm config.
           export SAMBA_VFS_TRIPLET=aarch64-linux-gnu
           VFS_SO_SRC="$(bash packaging/build-vfs-module.sh)"; export VFS_SO_SRC
+          # The omnibus deb ships the same module via neonfs-omnibus.yaml's
+          # ${OMNIBUS_VFS_CONTENT} placeholder (#1546).
+          OMNIBUS_VFS_CONTENT=$(printf '  - src: "%s"\n    dst: "/usr/lib/%s/samba/vfs/neonfs.so"\n    file_info:\n      mode: 0644' "$VFS_SO_SRC" "$SAMBA_VFS_TRIPLET")
+          export OMNIBUS_VFS_CONTENT
 
           cd packaging/nfpm
           for config in neonfs-cli neonfs-common neonfs-core neonfs-fuse neonfs-nfs neonfs-s3 neonfs-webdav neonfs-docker neonfs-containerd neonfs-cifs neonfs-omnibus; do
