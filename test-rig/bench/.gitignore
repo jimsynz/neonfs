@@ -1,0 +1,6 @@
+# Compiled artefacts and fetched deps — reproducible from mix.exs/mix.lock.
+/_build/
+/deps/
+# Benchmark result artefacts (SHA-stamped output dirs).
+/results/
+erl_crash.dump
