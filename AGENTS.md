@@ -297,7 +297,7 @@ If a particular failing job needs deeper inspection, get the `target_url` from `
 
 ## Container Building
 
-Build containers for local testing (single-arch, loaded locally). Targets live in `containers/bake.hcl` (`base`, `core`, `fuse`, `nfs`, `s3`, `webdav`, `docker`, `csi`, `containerd`, `omnibus`, `cli`):
+Build containers for local testing (single-arch, loaded locally). Targets live in `containers/bake.hcl` (`base`, `core`, `fuse`, `nfs`, `s3`, `webdav`, `docker`, `csi`, `containerd`, `cifs`, `omnibus`, `cli`):
 ```bash
 PLATFORMS='linux/amd64' docker buildx bake -f containers/bake.hcl --load core fuse nfs cli
 ```
