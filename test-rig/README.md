@@ -202,31 +202,44 @@ project under `bench/` that runs on the rig host (needs Elixir/`mix`).
 
 ```bash
 ./neonfs-rig up            # bring a cluster up first
-./neonfs-rig bench         # ensure a FUSE-mounted bench volume, then benchmark
+./neonfs-rig bench         # set up each interface, then benchmark
 ```
 
-This foundational slice (#1520) ships one vertical-slice scenario — a small-file
-create/write/read/delete lifecycle against the FUSE interface — to prove the
-harness end-to-end. The canonical cross-interface op set is #1521.
+The wrapper sets up every **file-serving interface** it can on the running
+cluster — FUSE, NFS, S3, WebDAV (reusing the acceptance suite's mount/credential
+setup) — and runs the canonical operation set against each, driven the way
+`lib/acceptance.sh` exercises it. Interfaces it can't set up are logged and
+skipped. Per `(interface, operation)`:
 
-Every run writes its artifacts under
-`bench/results/<sha>-<timestamp>/`, **stamped with the commit SHA and cluster
-config** it was produced from:
+| Operation | Reported | Notes |
+| --- | --- | --- |
+| `seq_write` | MB/s | large-file streaming write (`dd`/`PUT`, bounded buffer) |
+| `seq_read` | MB/s | large-file streaming read |
+| `small_files` | files/s | create/write/read/delete a batch — metadata-heavy |
+| `stat_list` | ms/op | stat/HEAD + directory/bucket listing |
+| `range_read` | ms/op | small random range read (skipped for S3 — `s3cmd` has no range GET) |
+
+Container-runtime interfaces (Docker volume, containerd content store) are a
+distinct, per-op-spawn workload tracked separately under #1309.
+
+Every run writes its artifacts under `bench/results/<sha>-<timestamp>/`,
+**stamped with the commit SHA and cluster config** it was produced from:
 
 - `<sha>.json` / `<sha>.csv` — benchee's machine-readable output;
 - `<sha>.html` — the benchee HTML report;
-- `meta.json` — SHA, interface, `NODES`/`REPLICAS`/`DRIVES_PER_NODE`, file
-  count/size, and timestamp;
+- `meta.json` — SHA, interfaces, `NODES`/`REPLICAS`/`DRIVES_PER_NODE`, big-file
+  size, small-file count/size, and timestamp;
 
-plus a printed batches/files/ops-per-second summary.
+plus a printed per-`interface/op` summary.
 
 Knobs (environment variables, in addition to the cluster ones above):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `BENCH_VOLUME` | `bench` | Volume created + FUSE-mounted for the run |
-| `BENCH_FILE_COUNT` | `200` | Files per benchmarked batch |
-| `BENCH_FILE_SIZE` | `4096` | Bytes per file |
+| `BENCH_VOLUME` | `bench` | Volume created + mounted/exported for the run |
+| `BENCH_BIG_MIB` | `64` | Large-file size (MiB) for seq/range ops |
+| `BENCH_FILE_COUNT` | `100` | Small files per benchmarked batch |
+| `BENCH_FILE_SIZE` | `4096` | Bytes per small file |
 | `BENCH_TIME` | `5` | benchee measurement time (seconds) |
 | `BENCH_WARMUP` | `2` | benchee warmup time (seconds) |
 | `BENCH_OUT` | `bench/results` | Output directory root |
