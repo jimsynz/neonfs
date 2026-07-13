@@ -60,6 +60,7 @@ defmodule NeonFS.CIFS.MixProject do
 
   defp deps do
     [
+      {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
       {:thousand_island, "~> 1.0"},
 
