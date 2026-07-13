@@ -135,4 +135,13 @@ if config_env() == :prod do
     region: s3_region,
     s3_bind: s3_bind,
     s3_port: s3_port
+
+  # CIFS configuration — the Samba `vfs_neonfs.so` module (loaded by a
+  # co-located smbd) dials the bridge over this Unix socket.
+  cifs_socket = System.get_env("NEONFS_CIFS_SOCKET", "/run/neonfs/cifs.sock")
+
+  config :neonfs_cifs,
+    core_node: core_node,
+    node_name: node_name,
+    socket_path: cifs_socket
 end
