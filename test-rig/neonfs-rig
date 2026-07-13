@@ -66,42 +66,91 @@ cmd_iface_join() {
   iface_join_scenario
 }
 
-# Benchee benchmark harness (#1520). Ensures a FUSE-mounted bench volume on
-# the running cluster, then runs the Elixir/benchee suite in test-rig/bench,
-# which drives ops over the rig's own SSH path and writes SHA-/config-stamped
-# JSON/CSV/HTML + a printed summary. Requires a cluster from `up` first.
+BENCH_BIG_FILE="neonfs_bench_big"
+BENCH_SCRATCH=".neonfs_bench"
+
+# Per-interface bench setup. Each brings the interface up (idempotently),
+# pre-stages the large source file so read/stat/range ops have a target, and
+# returns 0 only when the interface is ready to benchmark. Mirrors the drive
+# path test-rig/lib/acceptance.sh uses for each interface.
+bench_setup_fuse() {
+  volume_present "${ACCEPT_VOL}" || return 1
+  if ! node_ssh 1 "grep -q ' ${FUSE_MNT} ' /proc/mounts" 2>/dev/null; then
+    node_ssh 1 "sudo install -d -o neonfs -g neonfs ${FUSE_MNT}" >/dev/null 2>&1 || return 1
+    node_cli 1 "fuse mount ${ACCEPT_VOL} ${FUSE_MNT}" >/dev/null 2>&1 || return 1
+  fi
+  node_ssh 1 "sudo -u neonfs bash -c 'mkdir -p ${FUSE_MNT}/${BENCH_SCRATCH} && cp -f /tmp/${BENCH_BIG_FILE} ${FUSE_MNT}/${BENCH_BIG_FILE}'" >/dev/null 2>&1
+}
+
+bench_setup_nfs() {
+  volume_present "${ACCEPT_VOL}" || return 1
+  node_cli 1 "nfs export ${ACCEPT_VOL}" >/dev/null 2>&1 || true
+  if ! node_ssh 1 "mount | grep -q '${NFS_MNT}'" 2>/dev/null; then
+    node_ssh 1 "sudo mkdir -p ${NFS_MNT} && sudo mount -t nfs -o nfsvers=3,proto=tcp,nolock,port=2049,mountport=2049 127.0.0.1:/${ACCEPT_VOL} ${NFS_MNT}" >/dev/null 2>&1 || return 1
+  fi
+  node_ssh 1 "sudo bash -c 'mkdir -p ${NFS_MNT}/${BENCH_SCRATCH} && cp -f /tmp/${BENCH_BIG_FILE} ${NFS_MNT}/${BENCH_BIG_FILE}'" >/dev/null 2>&1
+}
+
+bench_stage_s3() {
+  node_ssh 1 "command -v s3cmd >/dev/null 2>&1" 2>/dev/null || return 1
+  node_ssh 1 "s3cmd ${S3_FLAGS} put /tmp/${BENCH_BIG_FILE} s3://${ACCEPT_VOL}/${BENCH_BIG_FILE}" >/dev/null 2>&1
+}
+
+bench_stage_webdav() {
+  node_ssh 1 "curl -sf ${DAV_AUTH} -T /tmp/${BENCH_BIG_FILE} ${DAV_BASE}/${ACCEPT_VOL}/${BENCH_BIG_FILE} -o /dev/null" >/dev/null 2>&1
+}
+
+# Benchee benchmark harness (#1520 foundation, #1521 canonical op set). Sets up
+# every file-serving interface it can (FUSE, NFS, S3, WebDAV) on the running
+# cluster — reusing acceptance.sh's credential/mount setup — then runs the
+# Elixir/benchee suite in test-rig/bench, which drives the canonical op set over
+# the rig's own SSH path and writes SHA-/config-stamped JSON/CSV/HTML + a
+# printed summary. Interfaces it can't set up are logged and skipped. Requires a
+# cluster from `up` first.
 cmd_bench() {
   node_running 1 || die "no running cluster — bring one up first with './neonfs-rig up'"
   command -v mix >/dev/null 2>&1 || die "mix (Elixir) not found on the rig host — needed to run the benchee harness"
 
-  local vol="${BENCH_VOLUME:-bench}"
-  local mnt="/mnt/${vol}-fuse"
+  # ACCEPT_VOL must be set before sourcing so acceptance.sh's derived mount
+  # paths (FUSE_MNT/NFS_MNT) follow the bench volume.
+  export ACCEPT_VOL="${BENCH_VOLUME:-bench}"
+  # shellcheck source=lib/acceptance.sh
+  source "${RIG_ROOT}/lib/acceptance.sh"
 
-  if ! node_cli 1 "volume list" 2>/dev/null | grep -qE "^${vol}[[:space:]]"; then
-    log "creating bench volume '${vol}' (replicas ${REPLICAS})"
-    node_cli 1 "volume create ${vol} --replicas ${REPLICAS}" >/dev/null
+  local big_mib="${BENCH_BIG_MIB:-64}"
+
+  if ! node_cli 1 "volume list" 2>/dev/null | grep -qE "^${ACCEPT_VOL}[[:space:]]"; then
+    log "creating bench volume '${ACCEPT_VOL}' (replicas ${REPLICAS})"
+    node_cli 1 "volume create ${ACCEPT_VOL} --replicas ${REPLICAS}" >/dev/null
   fi
 
-  if ! node_ssh 1 "grep -q ' ${mnt} ' /proc/mounts" 2>/dev/null; then
-    log "mounting '${vol}' at ${mnt} (FUSE)"
-    node_ssh 1 "sudo install -d -o neonfs -g neonfs ${mnt}" 2>/dev/null || true
-    node_cli 1 "fuse mount ${vol} ${mnt}" >/dev/null
-  fi
+  log "staging ${big_mib}MiB source file on node 1"
+  node_ssh 1 "dd if=/dev/zero of=/tmp/${BENCH_BIG_FILE} bs=1M count=${big_mib} 2>/dev/null"
 
   local sha; sha="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  local -a e=(
+    "BENCH_RIG=${RIG_ROOT}/neonfs-rig" "BENCH_NODE=1" "BENCH_VOLUME=${ACCEPT_VOL}"
+    "BENCH_BIG_SIZE=$((big_mib * 1048576))" "BENCH_SHA=${sha}"
+    "BENCH_NODES=${NODES}" "BENCH_REPLICAS=${REPLICAS}" "BENCH_DRIVES_PER_NODE=${DRIVES_PER_NODE}"
+  )
 
-  log "running benchee harness (sha ${sha}, ${NODES} node(s), replicas ${REPLICAS})"
+  if bench_setup_fuse; then e+=("BENCH_FUSE_MOUNT=${FUSE_MNT}"); log "interface fuse: ready (${FUSE_MNT})"; else warn "interface fuse: unavailable — skipping"; fi
+  if bench_setup_nfs;  then e+=("BENCH_NFS_MOUNT=${NFS_MNT}");   log "interface nfs: ready (${NFS_MNT})";  else warn "interface nfs: unavailable — skipping";  fi
+
+  # S3 and WebDAV share one credential (acceptance.sh's s_s3_setup sets
+  # S3_FLAGS + DAV_AUTH). s3cmd has no byte-range GET, so s3/range_read is
+  # reported as a no-op.
+  if s_s3_setup >/dev/null 2>&1 && [ -n "${S3_FLAGS}" ]; then
+    if bench_stage_s3;     then e+=("BENCH_S3_FLAGS=${S3_FLAGS}"); log "interface s3: ready"; else warn "interface s3: staging failed — skipping"; fi
+    if bench_stage_webdav; then e+=("BENCH_DAV_AUTH=${DAV_AUTH}" "BENCH_DAV_BASE=${DAV_BASE}"); log "interface webdav: ready"; else warn "interface webdav: staging failed — skipping"; fi
+  else
+    warn "interface s3/webdav: credential setup failed — skipping both"
+  fi
+
   cd "${RIG_ROOT}/bench"
   mix deps.get --quiet
-  BENCH_RIG="${RIG_ROOT}/neonfs-rig" \
-  BENCH_NODE=1 \
-  BENCH_MOUNT="${mnt}" \
-  BENCH_INTERFACE=fuse \
-  BENCH_SHA="${sha}" \
-  BENCH_NODES="${NODES}" \
-  BENCH_REPLICAS="${REPLICAS}" \
-  BENCH_DRIVES_PER_NODE="${DRIVES_PER_NODE}" \
-    mix run -e "NeonFS.Bench.run()"
+  log "running benchee harness (sha ${sha}, ${NODES} node(s), replicas ${REPLICAS})"
+  env "${e[@]}" mix run -e "NeonFS.Bench.run()"
 }
 
 cmd_ssh() {
