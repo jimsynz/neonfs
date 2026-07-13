@@ -100,6 +100,73 @@ bench_stage_webdav() {
   node_ssh 1 "curl -sf ${DAV_AUTH} -T /tmp/${BENCH_BIG_FILE} ${DAV_BASE}/${ACCEPT_VOL}/${BENCH_BIG_FILE} -o /dev/null" >/dev/null 2>&1
 }
 
+BENCH_DOCKER_CONTAINER="neonfs-bench"
+BENCH_DOCKER_VOL="bench_docker"
+
+# Warm Docker container with a NeonFS volume attached at /data (#1533). Started
+# once here so the benchmarked ops (docker exec) don't pay container-spawn cost.
+bench_setup_docker() {
+  node_ssh 1 "command -v docker >/dev/null 2>&1 && sudo test -S ${DOCKER_SOCK}" 2>/dev/null || return 1
+  node_ssh 1 "sudo systemctl is-active --quiet docker || sudo systemctl start docker" 2>/dev/null || true
+  node_ssh 1 "test -f /etc/docker/plugins/neonfs.spec" 2>/dev/null || return 1
+  node_ssh 1 "sudo docker pull busybox:latest >/dev/null 2>&1" || return 1
+  node_ssh 1 "sudo docker volume inspect ${BENCH_DOCKER_VOL} >/dev/null 2>&1 || sudo docker volume create -d neonfs --opt durability=1 ${BENCH_DOCKER_VOL} >/dev/null" || return 1
+  node_ssh 1 "sudo docker rm -f ${BENCH_DOCKER_CONTAINER} >/dev/null 2>&1 || true
+    sudo docker run -d --name ${BENCH_DOCKER_CONTAINER} -v ${BENCH_DOCKER_VOL}:/data busybox sleep infinity >/dev/null" || return 1
+  node_ssh 1 "sudo docker exec ${BENCH_DOCKER_CONTAINER} dd if=/dev/zero of=/data/${BENCH_BIG_FILE} bs=1M count=${big_mib} 2>/dev/null" || return 1
+}
+
+# Warm throwaway containerd wired to the NeonFS content proxy (#1533), mirroring
+# acceptance.sh's s_containerd_content config but kept running (PID recorded for
+# teardown). Pre-stages a blob and echoes "<grpc-socket>\t<digest>".
+bench_setup_containerd() {
+  node_ssh 1 "command -v containerd >/dev/null 2>&1 && command -v ctr >/dev/null 2>&1 && sudo test -S ${CONTAINERD_SOCK}" 2>/dev/null || return 1
+  node_cli 1 "volume list" 2>/dev/null | grep -qE "^${CONTAINERD_VOL}[[:space:]]" \
+    || node_cli 1 "volume create ${CONTAINERD_VOL} --replicas ${REPLICAS}" >/dev/null 2>&1 || true
+
+  local out
+  out=$(node_ssh 1 "sudo bash -s ${CONTAINERD_SOCK} ${big_mib}" <<'REMOTE'
+set -e
+PROXY_SOCK="$1"; BIG_MIB="$2"
+TMP=/tmp/neonfs-bench-ctrd
+rm -rf "$TMP"; mkdir -p "$TMP/root" "$TMP/state"
+GRPC="$TMP/containerd.sock"
+cat > "$TMP/config.toml" <<CFG
+version = 2
+root = "$TMP/root"
+state = "$TMP/state"
+disabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.content.v1.content"]
+[grpc]
+address = "$GRPC"
+[ttrpc]
+address = "$GRPC.ttrpc"
+[proxy_plugins]
+  [proxy_plugins.neonfs]
+  type = "content"
+  address = "$PROXY_SOCK"
+CFG
+nohup containerd --config "$TMP/config.toml" > "$TMP/containerd.log" 2>&1 &
+echo $! > "$TMP/pid"
+for _ in $(seq 1 50); do [ -S "$GRPC" ] && break; sleep 0.2; done
+[ -S "$GRPC" ] || { echo "containerd grpc never came up" >&2; tail -20 "$TMP/containerd.log" >&2; exit 1; }
+dd if=/dev/urandom of="$TMP/blob" bs=1M count="$BIG_MIB" 2>/dev/null
+D="sha256:$(sha256sum "$TMP/blob" | awk '{print $1}')"
+ctr --address "$GRPC" --namespace bench content ingest --expected-digest "$D" prestage < "$TMP/blob" >/dev/null
+printf '%s\t%s\n' "$GRPC" "$D"
+REMOTE
+) || return 1
+
+  BENCH_CONTAINERD_GRPC=$(echo "${out}" | tail -1 | cut -f1)
+  BENCH_CONTAINERD_DIGEST=$(echo "${out}" | tail -1 | cut -f2)
+  [ -n "${BENCH_CONTAINERD_GRPC}" ] && [ -n "${BENCH_CONTAINERD_DIGEST}" ]
+}
+
+# Best-effort teardown of the warm container-runtime daemons (#1533).
+bench_teardown_containers() {
+  node_ssh 1 "sudo docker rm -f ${BENCH_DOCKER_CONTAINER} >/dev/null 2>&1 || true" 2>/dev/null || true
+  node_ssh 1 "[ -f /tmp/neonfs-bench-ctrd/pid ] && sudo kill \$(cat /tmp/neonfs-bench-ctrd/pid) 2>/dev/null || true; sudo rm -rf /tmp/neonfs-bench-ctrd" 2>/dev/null || true
+}
+
 # Benchee benchmark harness (#1520 foundation, #1521 canonical op set). Sets up
 # every file-serving interface it can (FUSE, NFS, S3, WebDAV) on the running
 # cluster — reusing acceptance.sh's credential/mount setup — then runs the
@@ -174,10 +241,16 @@ cmd_bench() {
     warn "interface s3/webdav: credential setup failed — skipping both"
   fi
 
+  if bench_setup_docker; then e+=("BENCH_DOCKER_CONTAINER=${BENCH_DOCKER_CONTAINER}"); log "interface docker: ready"; else warn "interface docker: unavailable — skipping"; fi
+  if bench_setup_containerd; then e+=("BENCH_CONTAINERD_GRPC=${BENCH_CONTAINERD_GRPC}" "BENCH_CONTAINERD_DIGEST=${BENCH_CONTAINERD_DIGEST}"); log "interface containerd: ready"; else warn "interface containerd: unavailable — skipping"; fi
+
   cd "${RIG_ROOT}/bench"
   mix deps.get --quiet
   log "running benchee harness (sha ${sha}, ${NODES} node(s), replicas ${REPLICAS})"
-  env "${e[@]}" mix run -e "NeonFS.Bench.run()"
+  local rc=0
+  env "${e[@]}" mix run -e "NeonFS.Bench.run()" || rc=$?
+  bench_teardown_containers
+  return "${rc}"
 }
 
 # Standard cluster-config benchmark matrix (#1522). Each config is a full

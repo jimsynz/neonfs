@@ -220,9 +220,10 @@ just makes each step one command.
 
 The wrapper sets up every **file-serving interface** it can on the running
 cluster — FUSE, NFS, S3, WebDAV (reusing the acceptance suite's mount/credential
-setup) — and runs the canonical operation set against each, driven the way
-`lib/acceptance.sh` exercises it. Interfaces it can't set up are logged and
-skipped. Per `(interface, operation)`:
+setup), plus the container-runtime interfaces Docker and containerd — and runs
+the applicable operation set against each, driven the way `lib/acceptance.sh`
+exercises it. Interfaces it can't set up are logged and skipped. Per
+`(interface, operation)`:
 
 | Operation | Reported | Notes |
 | --- | --- | --- |
@@ -232,8 +233,14 @@ skipped. Per `(interface, operation)`:
 | `stat_list` | ms/op | stat/HEAD + directory/bucket listing |
 | `range_read` | ms/op | small random range read (skipped for S3 — `s3cmd` has no range GET) |
 
-Container-runtime interfaces (Docker volume, containerd content store) are a
-distinct, per-op-spawn workload tracked separately under #1309.
+The **container-runtime** interfaces (#1533) run a reduced set against a warm
+daemon the wrapper starts (so container/daemon-spawn cost isn't in the measured
+op): **docker** benchmarks `seq_write`/`seq_read`/`small_files` via `docker
+exec` inside a warm busybox container with the NeonFS volume attached (its data
+path is FUSE underneath, so `stat_list`/`range_read` are skipped); **containerd**
+benchmarks blob ingest (`seq_write`, a fresh unique blob each time) and get
+(`seq_read`) against a warm throwaway containerd wired to the NeonFS content
+proxy. Both skip (logged) when their runtime or plugin socket is absent.
 
 ### Cluster-config matrix
 
