@@ -113,6 +113,9 @@ All knobs are environment variables (defaults in parentheses):
 | `REPLICAS` | `=NODES` | Replication factor for the system volume and the created volume |
 | `CLUSTER_NAME` | `rig` | Cluster name |
 | `VOLUME_NAME` | `test` | Name of the volume created at the end of `up` |
+| `COMPRESSION` | `zstd` | Compression for volumes the rig creates (`zstd`/`none`) |
+| `ENCRYPTION` | `none` | Encryption mode (`none`/`server-side`) |
+| `INITIAL_TIER` | _(unset)_ | Initial storage tier (`hot`/`warm`/`cold`); applied via `volume update` post-create |
 | `DIST_PORT` | `9100` | Pinned Erlang distribution port (`NEONFS_DIST_PORT`) |
 | `SSH_BASE_PORT` | `2230` | Host port for node `n` SSH is `SSH_BASE_PORT + n` |
 
@@ -261,8 +264,13 @@ foundation already stamps.
 ./neonfs-rig bench-matrix   # no `up` needed — it boots/tears down each config itself
 ```
 
-Erasure/compression/encryption/tiering are not rig env knobs yet, so they're not
-matrix axes (deferred follow-up #1497).
+**Codec/tiering axes (#1497):** the `COMPRESSION`, `ENCRYPTION`, and
+`INITIAL_TIER` env knobs (see Configuration) are applied to the volumes the rig
+creates and recorded in every result's `meta.json`, so a codec/tiering axis is
+swept by re-running with the knob set (e.g. `COMPRESSION=none ./neonfs-rig
+bench-matrix` vs the default `zstd`) and comparing the stamped results. Erasure
+coding has no `volume create` CLI flag yet, so it isn't a rig knob (tracked
+separately).
 
 ### Scheduled runs
 
