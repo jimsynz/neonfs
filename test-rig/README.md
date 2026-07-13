@@ -252,6 +252,15 @@ matrix axes (deferred follow-up #1497).
 SHA-stamped results as a `bench-<sha>` artifact. It is **never** a PR-gating
 job — full-VM benchmarks are too slow and load-sensitive to gate PRs.
 
+Each run also applies a **regression gate**
+(`NeonFS.Bench.Regression`): it fetches the last ~4 runs' artifacts, and per
+`(config, interface, op)` flags any metric that moved the wrong way by **> 10%
+and > 2σ** vs the rolling-window median (throughput/rate `ips` dropping,
+latency rising). On a regression it opens an issue carrying the metric, the
+median + σ, and a bounded `git bisect` range (`<oldest-in-window>..<current>`).
+A regression opens an issue rather than failing the run — bisect stays manual
+(`bench --rev`, #1525).
+
 Every run writes its artifacts under `bench/results/<sha>-<timestamp>/`,
 **stamped with the commit SHA and cluster config** it was produced from:
 

@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils cloud-image-utils
+            qemu-system-x86 qemu-utils cloud-image-utils jq unzip
           if ! command -v nfpm >/dev/null 2>&1; then
             curl -fsSL -o /tmp/nfpm.tgz \
               https://github.com/goreleaser/nfpm/releases/download/v2.46.3/nfpm_2.46.3_Linux_x86_64.tar.gz
@@ -42,6 +42,43 @@ jobs:
           export PATH="$PWD/resources/scripts:$PATH"
           cd test-rig
           ./neonfs-rig bench-matrix
+
+      # Regression gate (#1524): compare this run against the rolling window of
+      # the last ~4 runs' artifacts (median). Fetched before this run's own
+      # artifact is uploaded, so the window is strictly prior runs.
+      - name: Fetch rolling window of prior bench artifacts
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/window"
+          api="${{ github.server_url }}/api/v1/repos/${{ github.repository }}/actions/artifacts"
+          curl -sf -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" "$api" \
+            | jq -r '(.artifacts // .) | map(select(.name | startswith("bench-"))) | sort_by(.created_at) | reverse | .[0:4] | .[] | "\(.name)\t\(.archive_download_url)"' \
+            > /tmp/window-artifacts.tsv || true
+          while IFS=$'\t' read -r name url; do
+            [ -n "$url" ] || continue
+            curl -sf -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" -o "/tmp/${name}.zip" "$url" || continue
+            unzip -q -o "/tmp/${name}.zip" -d "$GITHUB_WORKSPACE/window/${name}" || true
+          done < /tmp/window-artifacts.tsv
+          echo "window runs downloaded: $(find "$GITHUB_WORKSPACE/window" -name meta.json | wc -l)"
+
+      - name: Regression gate
+        run: |
+          cd test-rig/bench
+          mix deps.get --quiet
+          BENCH_CURRENT_DIR="$GITHUB_WORKSPACE/test-rig/bench/results" \
+          BENCH_WINDOW_DIRS="$GITHUB_WORKSPACE/window" \
+          BENCH_REGRESSION_REPORT="$GITHUB_WORKSPACE/regression.md" \
+            mix run -e "NeonFS.Bench.Regression.main()"
+
+      - name: Open regression issue
+        if: ${{ hashFiles('regression.md') != '' }}
+        run: |
+          title="benchmark regression detected ($(date -u +%Y-%m-%d))"
+          curl -sf -X POST \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/issues" \
+            -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg t "$title" --rawfile b "$GITHUB_WORKSPACE/regression.md" '{title: $t, body: $b}')" \
+            > /dev/null
 
       - name: Tear down rig state
         if: always()
