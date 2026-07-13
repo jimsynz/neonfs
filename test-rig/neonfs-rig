@@ -66,6 +66,44 @@ cmd_iface_join() {
   iface_join_scenario
 }
 
+# Benchee benchmark harness (#1520). Ensures a FUSE-mounted bench volume on
+# the running cluster, then runs the Elixir/benchee suite in test-rig/bench,
+# which drives ops over the rig's own SSH path and writes SHA-/config-stamped
+# JSON/CSV/HTML + a printed summary. Requires a cluster from `up` first.
+cmd_bench() {
+  node_running 1 || die "no running cluster — bring one up first with './neonfs-rig up'"
+  command -v mix >/dev/null 2>&1 || die "mix (Elixir) not found on the rig host — needed to run the benchee harness"
+
+  local vol="${BENCH_VOLUME:-bench}"
+  local mnt="/mnt/${vol}-fuse"
+
+  if ! node_cli 1 "volume list" 2>/dev/null | grep -qE "^${vol}[[:space:]]"; then
+    log "creating bench volume '${vol}' (replicas ${REPLICAS})"
+    node_cli 1 "volume create ${vol} --replicas ${REPLICAS}" >/dev/null
+  fi
+
+  if ! node_ssh 1 "grep -q ' ${mnt} ' /proc/mounts" 2>/dev/null; then
+    log "mounting '${vol}' at ${mnt} (FUSE)"
+    node_ssh 1 "sudo install -d -o neonfs -g neonfs ${mnt}" 2>/dev/null || true
+    node_cli 1 "fuse mount ${vol} ${mnt}" >/dev/null
+  fi
+
+  local sha; sha="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+  log "running benchee harness (sha ${sha}, ${NODES} node(s), replicas ${REPLICAS})"
+  cd "${RIG_ROOT}/bench"
+  mix deps.get --quiet
+  BENCH_RIG="${RIG_ROOT}/neonfs-rig" \
+  BENCH_NODE=1 \
+  BENCH_MOUNT="${mnt}" \
+  BENCH_INTERFACE=fuse \
+  BENCH_SHA="${sha}" \
+  BENCH_NODES="${NODES}" \
+  BENCH_REPLICAS="${REPLICAS}" \
+  BENCH_DRIVES_PER_NODE="${DRIVES_PER_NODE}" \
+    mix run -e "NeonFS.Bench.run()"
+}
+
 cmd_ssh() {
   local i="${1:-1}"; shift || true
   node_ssh "$i" "$@"
@@ -119,6 +157,7 @@ Commands:
   boot               Boot + provision VMs only (skip cluster init)
   init               Initialise/join the cluster on already-provisioned VMs
   iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token (#1163)
+  bench              Run the benchee benchmark suite against the running cluster (test-rig/bench)
   status             Show VM and cluster status
   ssh <n> [cmd...]   SSH into node <n> (default 1)
   cli <n> -- <args>  Run the neonfs CLI on node <n>, e.g. cli 1 -- volume list
@@ -147,6 +186,7 @@ main() {
     boot)   cmd_boot "$@" ;;
     init)   cmd_init "$@" ;;
     iface-join) cmd_iface_join "$@" ;;
+    bench)  cmd_bench "$@" ;;
     status) cmd_status "$@" ;;
     ssh)    cmd_ssh "$@" ;;
     cli)    cmd_cli "$@" ;;

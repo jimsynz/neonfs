@@ -93,6 +93,7 @@ falling back to TCG otherwise.
 | `status` | Show VM state plus `cluster status` / `volume list` from node 1 |
 | `ssh <n> [cmd...]` | SSH into node `<n>` (default 1) |
 | `cli <n> -- <args>` | Run the `neonfs` CLI on node `<n>` |
+| `bench` | Run the benchee benchmark suite against the running cluster (see below) |
 | `down` | Stop all VMs, keep their disks |
 | `clean` | Stop all VMs and delete runtime state (disks, seeds, ssh key) |
 
@@ -191,14 +192,56 @@ in `multi` mode the replication step exercises multi-node formation (issues
 #1032 / #1033). Steps whose preconditions aren't met (e.g. replication on a
 single node, or a volume that failed to create) are reported `SKIP`.
 
+## Benchmarks
+
+`./neonfs-rig bench` runs a [benchee](https://hex.pm/packages/benchee)-based
+benchmark suite against a **running** cluster, driving real interface clients
+over the rig's own SSH path — so it measures the packaged, distributed,
+TLS-data-plane path rather than in-BEAM code paths. The harness is a small mix
+project under `bench/` that runs on the rig host (needs Elixir/`mix`).
+
+```bash
+./neonfs-rig up            # bring a cluster up first
+./neonfs-rig bench         # ensure a FUSE-mounted bench volume, then benchmark
+```
+
+This foundational slice (#1520) ships one vertical-slice scenario — a small-file
+create/write/read/delete lifecycle against the FUSE interface — to prove the
+harness end-to-end. The canonical cross-interface op set is #1521.
+
+Every run writes its artifacts under
+`bench/results/<sha>-<timestamp>/`, **stamped with the commit SHA and cluster
+config** it was produced from:
+
+- `<sha>.json` / `<sha>.csv` — benchee's machine-readable output;
+- `<sha>.html` — the benchee HTML report;
+- `meta.json` — SHA, interface, `NODES`/`REPLICAS`/`DRIVES_PER_NODE`, file
+  count/size, and timestamp;
+
+plus a printed batches/files/ops-per-second summary.
+
+Knobs (environment variables, in addition to the cluster ones above):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BENCH_VOLUME` | `bench` | Volume created + FUSE-mounted for the run |
+| `BENCH_FILE_COUNT` | `200` | Files per benchmarked batch |
+| `BENCH_FILE_SIZE` | `4096` | Bytes per file |
+| `BENCH_TIME` | `5` | benchee measurement time (seconds) |
+| `BENCH_WARMUP` | `2` | benchee warmup time (seconds) |
+| `BENCH_OUT` | `bench/results` | Output directory root |
+
 ## Layout
 
 ```
 test-rig/
-├── neonfs-rig            # cluster lifecycle dispatcher (up/down/ssh/cli/...)
+├── neonfs-rig            # cluster lifecycle dispatcher (up/down/ssh/cli/bench/...)
 ├── acceptance            # acceptance test suite (single | multi)
 ├── lib/rig.sh            # configuration + helpers
 ├── lib/acceptance.sh     # acceptance step definitions + harness
+├── bench/                # benchee benchmark harness (mix project, runs on the rig host)
+│   ├── mix.exs
+│   └── lib/neon_fs/bench.ex
 ├── README.md
 └── .cache/               # (gitignored) base images, built .debs, per-cluster runtime
     ├── images/
