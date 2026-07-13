@@ -245,6 +245,13 @@ foundation already stamps.
 Erasure/compression/encryption/tiering are not rig env knobs yet, so they're not
 matrix axes (deferred follow-up #1497).
 
+### Scheduled runs
+
+`.forgejo/workflows/bench.yml` runs `bench-matrix` weekly (and on
+`workflow_dispatch`) on the KVM-capable `jeb` runner, uploading the
+SHA-stamped results as a `bench-<sha>` artifact. It is **never** a PR-gating
+job — full-VM benchmarks are too slow and load-sensitive to gate PRs.
+
 Every run writes its artifacts under `bench/results/<sha>-<timestamp>/`,
 **stamped with the commit SHA and cluster config** it was produced from:
 
