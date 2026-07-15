@@ -103,13 +103,12 @@ defmodule NeonFS.CIFS.HandlerTest do
       assert {:error, :ebadf} == reply
     end
 
-    test "fchmod routes through update_mode" do
+    test "fchmod updates the mode via FileIndex.update by id" do
       {handle, state} = open_file(connected(), "/p")
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex,
-                                           :update_mode,
-                                           ["vol-a", "/p", 0o600] ->
-        {:ok, %{}}
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/p"] -> {:ok, %{id: "fid"}}
+        NeonFS.Core.FileIndex, :update, ["fid", [mode: 0o600]] -> {:ok, %{}}
       end)
 
       {reply, _} =
@@ -130,19 +129,25 @@ defmodule NeonFS.CIFS.HandlerTest do
       assert {:error, :enosys} == reply
     end
 
-    test "fntimes routes atime+mtime through update_times" do
+    test "fntimes updates atime+mtime via FileIndex.update by id" do
       {handle, state} = open_file(connected(), "/p")
 
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex,
-                                           :update_times,
-                                           ["vol-a", "/p", 100, 200] ->
-        {:ok, %{}}
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/p"] ->
+          {:ok, %{id: "fid"}}
+
+        NeonFS.Core.FileIndex, :update, ["fid", updates] ->
+          send(self(), {:times, updates})
+          {:ok, %{}}
       end)
 
       {reply, _} =
         Handler.handle({:fntimes, %{"handle" => handle, "atime" => 100, "mtime" => 200}}, state)
 
       assert {:ok, %{}} == reply
+      assert_received {:times, updates}
+      assert Keyword.get(updates, :accessed_at) == DateTime.from_unix!(100)
+      assert Keyword.get(updates, :modified_at) == DateTime.from_unix!(200)
     end
   end
 
@@ -335,8 +340,8 @@ defmodule NeonFS.CIFS.HandlerTest do
         NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/dir"] ->
           {:ok, %{path: "/dir", mode: 0o040755}}
 
-        NeonFS.Core.FileIndex, :list_directory, ["vol-a", "/dir"] ->
-          {:ok, [{"a.txt", "/dir/a.txt", 0o100644}, {"b.txt", "/dir/b.txt", 0o100644}]}
+        NeonFS.Core.FileIndex, :list_dir, ["vol-a", "/dir"] ->
+          {:ok, %{"a.txt" => %{type: :file, id: "1"}, "b.txt" => %{type: :file, id: "2"}}}
       end)
 
       {{:ok, %{handle: handle}}, state} =
@@ -360,10 +365,10 @@ defmodule NeonFS.CIFS.HandlerTest do
       refute Map.has_key?(state.dirs, handle)
     end
 
-    test "mkdirat routes through create_directory" do
+    test "mkdirat creates a directory via write_file_at with the S_IFDIR bit" do
       stub(NeonFS.Client, :core_call, fn NeonFS.Core.WriteOperation,
-                                         :create_directory,
-                                         ["vol-a", "/d", 0o755] ->
+                                         :write_file_at,
+                                         ["vol-a", "/d", 0, <<>>, [mode: 0o40755]] ->
         {:ok, %{}}
       end)
 
@@ -373,48 +378,45 @@ defmodule NeonFS.CIFS.HandlerTest do
   end
 
   describe "mutations" do
-    test "unlinkat routes through delete_file" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core.WriteOperation,
-                                         :delete_file,
-                                         ["vol-a", "/x"] ->
-        :ok
+    test "unlinkat resolves the path then deletes by id" do
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/x"] -> {:ok, %{id: "xid"}}
+        NeonFS.Core.FileIndex, :delete, ["xid"] -> :ok
       end)
 
       {reply, _} = Handler.handle({:unlinkat, %{"path" => "/x"}}, connected())
       assert {:ok, %{}} == reply
     end
 
-    test "renameat routes through rename" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core.WriteOperation,
+    test "renameat splits into {parent, name} and calls FileIndex.rename" do
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex,
                                          :rename,
-                                         ["vol-a", "/a", "/b"] ->
+                                         ["vol-a", "/dir", "a", "b"] ->
         :ok
       end)
 
       {reply, _} =
-        Handler.handle({:renameat, %{"old_path" => "/a", "new_path" => "/b"}}, connected())
+        Handler.handle(
+          {:renameat, %{"old_path" => "/dir/a", "new_path" => "/dir/b"}},
+          connected()
+        )
 
       assert {:ok, %{}} == reply
     end
   end
 
   describe "filesystem" do
-    test "disk_free routes through Volume.stats" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core.Volume, :stats, ["vol-a"] ->
-        {:ok, %{total_bytes: 1_000, free_bytes: 600, available_bytes: 500}}
-      end)
-
+    test "disk_free reports a synthetic (non-zero) capacity" do
       {reply, _} = Handler.handle({:disk_free, %{}}, connected())
-      assert {:ok, %{total_bytes: 1_000, free_bytes: 600, available_bytes: 500}} == reply
+
+      assert {:ok, %{total_bytes: total, free_bytes: free, available_bytes: avail}} = reply
+      assert total > 0 and free > 0 and avail > 0
     end
 
-    test "fstatvfs returns the same shape" do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core.Volume, :stats, ["vol-a"] ->
-        {:ok, %{total_bytes: 8, free_bytes: 4, available_bytes: 4}}
-      end)
-
+    test "fstatvfs reports the same synthetic capacity" do
       {reply, _} = Handler.handle({:fstatvfs, %{}}, connected())
-      assert {:ok, %{total_bytes: 8}} = reply
+      assert {:ok, %{total_bytes: total}} = reply
+      assert total > 0
     end
   end
 
@@ -449,9 +451,10 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
 
     test "rename normalises both operands" do
-      expect(NeonFS.Client, :core_call, fn NeonFS.Core.WriteOperation,
+      # "d/old.txt" → "/d/old.txt", split to parent "/d" + names.
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex,
                                            :rename,
-                                           ["vol-a", "/d/old.txt", "/d/new.txt"] ->
+                                           ["vol-a", "/d", "old.txt", "new.txt"] ->
         :ok
       end)
 
