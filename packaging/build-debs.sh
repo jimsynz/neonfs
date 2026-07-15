@@ -131,26 +131,15 @@ for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neon
     MIX_ENV=prod mix release --overwrite
 done
 
-# Step 2b: Build the Samba VFS module (neonfs.so) for the neonfs-cifs deb,
-# against the target distro's Samba (see packaging/build-vfs-module.sh, #1527).
-# Opt-in — see the NEONFS_BUILD_CIFS note above.
+# Step 2b: Build the samba-vfs-neonfs Debian package — the Samba VFS module,
+# built from the distro's own samba source so it loads in the host smbd (a
+# bespoke build links against the wrong private-lib symbol versions; #1548).
+# neonfs-cifs / neonfs-omnibus `Depends: samba-vfs-neonfs`. Opt-in — see the
+# NEONFS_BUILD_CIFS note above.
 if [ -n "${NEONFS_BUILD_CIFS:-}" ]; then
-    echo "==> Building Samba VFS module (neonfs.so) for neonfs-cifs..."
-    case "${ARCH}" in
-        amd64) SAMBA_VFS_TRIPLET="x86_64-linux-gnu" ;;
-        arm64) SAMBA_VFS_TRIPLET="aarch64-linux-gnu" ;;
-        *) echo "Error: no Samba VFS multiarch triplet for ARCH=${ARCH}" >&2; exit 1 ;;
-    esac
-    VFS_SO_SRC="$(bash "${REPO_ROOT}/packaging/build-vfs-module.sh")"
-    export SAMBA_VFS_TRIPLET VFS_SO_SRC
-    # The omnibus deb ships the same module (see neonfs-omnibus.yaml's
-    # ${OMNIBUS_VFS_CONTENT} placeholder); populate it with the built .so.
-    OMNIBUS_VFS_CONTENT=$(printf '  - src: "%s"\n    dst: "/usr/lib/%s/samba/vfs/neonfs.so"\n    file_info:\n      mode: 0644' "${VFS_SO_SRC}" "${SAMBA_VFS_TRIPLET}")
+    echo "==> Building samba-vfs-neonfs.deb..."
+    OUT_DIR="${OUT_DIR}" bash "${REPO_ROOT}/packaging/build-vfs-deb.sh" >/dev/null
 fi
-
-# Always exported so envsubst substitutes neonfs-omnibus.yaml's placeholder to
-# nothing when the VFS module wasn't built (rather than leaving it literal).
-export OMNIBUS_VFS_CONTENT="${OMNIBUS_VFS_CONTENT:-}"
 
 # Step 3: Package with nfpm
 # nfpm resolves relative paths (../systemd/, ../scripts/) from CWD,

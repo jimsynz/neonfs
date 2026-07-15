@@ -14,21 +14,28 @@ Two layers:
 
 ## Building the Samba module
 
-Samba VFS modules cannot be built out-of-tree, so `build-in-tree.sh` fetches a
-**pinned Samba release** (currently **4.24.3**, the latest stable series),
-drops `vfs_neonfs.c` + `wire.c` into `source3/modules/`, registers
-`erl_interface` (`ei`) as a link dependency, configures a minimal
-file-server-only build, and builds the `vfs_neonfs` target:
+Samba VFS modules cannot be built out-of-tree, and the module must ABI- **and
+symbol-version-**match the host `smbd` (a bespoke `./configure` produces a
+`SAMBA_<upstream>_PRIVATE_SAMBA` symbol version the distro's `samba-libs`
+doesn't provide, so `smbd` refuses to load it — #1548). So
+[`packaging/build-vfs-deb.sh`](../../../packaging/build-vfs-deb.sh) builds it
+inside the distro's **own** Samba source (`apt-get source samba`) as the
+**`samba-vfs-neonfs`** Debian package — the same way Debian builds
+`samba-vfs-ceph`. It drops `vfs_neonfs.c` + `wire.c` into `source3/modules/`,
+registers `erl_interface` (`ei`) as a link dependency, adds `vfs_neonfs` to
+`--with-shared-modules`, adds a `samba-vfs-neonfs` binary package
+(`Depends: samba (= exact version)`), and builds via the distro's
+`debian/rules`:
 
 ```sh
-./build-in-tree.sh          # → .samba-build/samba-4.24.3/bin/modules/vfs/neonfs.so
-SAMBA_VERSION=4.24.3 WORKDIR=/some/cache SKIP_APT=1 ./build-in-tree.sh
+OUT_DIR=./dist bash packaging/build-vfs-deb.sh   # → dist/samba-vfs-neonfs_<samba-ver>_<arch>.deb
 ```
 
-Needs Erlang on `PATH` (the `ei` headers/libs come from the running install)
-plus a C toolchain; it `apt`-installs Samba's build deps unless `SKIP_APT=1`.
-CI runs this in the dedicated `vfs_neonfs` job with the Samba tree cached. To
-bump the pinned Samba, change `SAMBA_VERSION` and the CI cache key.
+Needs Erlang on `PATH` (the `ei` headers/libs come from the running install and
+are linked statically) plus a C toolchain, and must run where apt resolves
+`samba` to the target release's version. `neonfs-cifs` and `neonfs-omnibus`
+`Depends: samba-vfs-neonfs`. CI builds it in the dedicated `vfs_neonfs` job with
+the Samba source tree cached.
 
 Runtime behaviour against a real `smbd` (mounting, round-trips) is #386.
 

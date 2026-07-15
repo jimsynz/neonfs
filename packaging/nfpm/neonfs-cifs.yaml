@@ -18,9 +18,10 @@ depends:
   - libssl3t64
   - libncurses6
   - ca-certificates
-  # The shipped neonfs.so is a Samba VFS module built against this release's
-  # Samba; samba-vfs-modules provides the ABI-matching smbd + the VFS dir.
-  - samba-vfs-modules
+  # The Samba VFS module ships in its own package (built from the distro samba
+  # source so it loads in the host smbd — #1548); it pulls in the ABI-matching
+  # samba as its own dependency.
+  - samba-vfs-neonfs
 
 conflicts:
   - neonfs-omnibus
@@ -29,14 +30,6 @@ contents:
   - src: "${BUILD_DIR}/neonfs_cifs/_build/prod/rel/neonfs_cifs/"
     dst: /usr/lib/neonfs/cifs/
     type: tree
-
-  # Samba VFS module. On-disk name is `neonfs.so` (matches `vfs objects =
-  # neonfs`); installed into the distro's multiarch VFS module dir so the
-  # host smbd finds it. Built against this Debian release's Samba (#1527).
-  - src: "${VFS_SO_SRC}"
-    dst: "/usr/lib/${SAMBA_VFS_TRIPLET}/samba/vfs/neonfs.so"
-    file_info:
-      mode: 0644
 
   - src: ../systemd/neonfs-cifs.service
     dst: /usr/lib/systemd/system/neonfs-cifs.service

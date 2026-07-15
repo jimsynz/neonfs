@@ -39,22 +39,20 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/workdir/neonfs_nfs/target \
     mix compile && mix release --overwrite
 
-# The Samba VFS module (`neonfs.so`) can't be built out-of-tree, so
-# build-in-tree.sh fetches pinned Samba, drops the module + wire client into
-# source3/modules/, and builds just the vfs_neonfs target. Mirrors the
-# dedicated `vfs_neonfs` CI job and Containerfile.cifs. Heavy +
-# network-fetching, so it's validated at release rather than on PR CI.
+# The Samba VFS module (`neonfs.so`) can't be built out-of-tree and must ABI +
+# symbol-version match the host smbd, so build-vfs-deb.sh builds it inside the
+# distro's own samba source (`apt-get source samba`) as the samba-vfs-neonfs
+# deb (#1548); we then extract neonfs.so for a co-located/sidecar smbd to load
+# (the sidecar's samba must match this build). Mirrors the dedicated
+# `vfs_neonfs` CI job and Containerfile.cifs. Heavy + network-fetching, so
+# it's validated at release rather than on PR CI.
 FROM base AS vfs
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl python3-dev pkg-config gcc make perl bison flex \
-    libjansson-dev libgnutls28-dev libtasn1-6-dev libtasn1-bin \
-    libpopt-dev libbsd-dev libcap-dev libacl1-dev libblkid-dev \
-    libparse-yapp-perl zlib1g-dev libtirpc-dev liblmdb-dev \
-  && rm -rf /var/lib/apt/lists/*
-
 COPY --from=cifs native/vfs_neonfs /workdir/vfs_neonfs
-RUN WORKDIR=/samba-build SKIP_APT=1 bash /workdir/vfs_neonfs/build-in-tree.sh \
-  && install -D "$(find /samba-build -name neonfs.so -path '*modules/vfs*' | head -1)" /out/neonfs.so
+COPY --from=packaging build-vfs-deb.sh /workdir/build-vfs-deb.sh
+RUN NATIVE=/workdir/vfs_neonfs OUT_DIR=/out WORKDIR=/samba-build \
+      bash /workdir/build-vfs-deb.sh \
+  && dpkg-deb -x /out/samba-vfs-neonfs_*.deb /tmp/vfsx \
+  && install -D "$(find /tmp/vfsx -name neonfs.so -path '*vfs*' | head -1)" /out/neonfs.so
 
 FROM debian:trixie-20260610
 

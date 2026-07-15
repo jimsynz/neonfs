@@ -45,11 +45,13 @@ have landed.
 ## Debian package
 
 The `neonfs-cifs` deb ships the Elixir bridge (a systemd `notify` service,
-socket at `/run/neonfs/cifs.sock`) **and** the compiled Samba VFS module at
-`/usr/lib/<arch>-linux-gnu/samba/vfs/neonfs.so`. Because a Samba VFS module is
-ABI-locked to the Samba version it was built against, the deb builds the module
-against the **target Debian release's** Samba (discovered at build time), and
-`depends: samba-vfs-modules` so the ABI-matching `smbd` is present (#1527).
+socket at `/run/neonfs/cifs.sock`) and `depends: samba-vfs-neonfs`, a separate
+package carrying the compiled Samba VFS module at
+`/usr/lib/<arch>-linux-gnu/samba/vfs/neonfs.so`. A Samba VFS module is ABI- and
+symbol-version-locked to the Samba it was built against, so `samba-vfs-neonfs`
+is built from the **distro's own Samba source** (`apt-get source samba`, the
+same way Debian builds `samba-vfs-ceph`) and `depends: samba (= exact version)`
+— guaranteeing it loads in the host `smbd` (#1548, superseding #1527).
 
 After installing the deb, wire an SMB share to a NeonFS volume in
 `/etc/samba/smb.conf`:
@@ -72,9 +74,9 @@ in-process; see [#1546](https://harton.dev/project-neon/neonfs/issues/1546)).
 `neonfs-omnibus` and `neonfs-cifs` are mutually exclusive — install one or the
 other, not both.
 
-- **Omnibus deb** — ships the Samba module at the same multiarch path,
-  `/usr/lib/<arch>-linux-gnu/samba/vfs/neonfs.so`, and `depends:
-  samba-vfs-modules`. Set the bridge socket via `NEONFS_CIFS_SOCKET` in
+- **Omnibus deb** — `depends: samba-vfs-neonfs` (the same VFS-module package
+  the standalone `neonfs-cifs` deb uses). Set the bridge socket via
+  `NEONFS_CIFS_SOCKET` in
   `/etc/neonfs/neonfs.conf` (default `/run/neonfs/cifs.sock`), then wire the
   same `smb.conf` share as above and `systemctl restart smbd`.
 - **Omnibus image** — ships the module at `/app/vfs/neonfs.so` for a

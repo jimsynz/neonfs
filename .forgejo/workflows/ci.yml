@@ -352,11 +352,12 @@ jobs:
         run: make -C neonfs_cifs/native/vfs_neonfs test
 
   # =========================================================================
-  # vfs_neonfs - Samba VFS module (#1170). Builds `vfs_neonfs.so` against a
-  # pinned, in-tree Samba (VFS modules cannot be built out-of-tree). The
-  # Samba source + build tree is cached, so only the first run pays the full
-  # Samba build; later runs rebuild just the module. Kept a separate job so
-  # that cost doesn't ride on every other suite.
+  # vfs_neonfs - Samba VFS module (#1170). Builds the samba-vfs-neonfs .deb from
+  # the distro's own samba source (VFS modules can't be built out-of-tree and
+  # must ABI + symbol-version match the host smbd — #1548). The samba source +
+  # build tree is cached, so only the first run pays the full Samba build; later
+  # runs relink just the module and repackage. Kept a separate job so that cost
+  # doesn't ride on every other suite. (Load/round-trip testing is #386.)
   # =========================================================================
   vfs_neonfs:
     needs: resolve-versions
@@ -365,27 +366,18 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - name: Install Samba build dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            curl python3-dev pkg-config gcc make perl bison flex \
-            libjansson-dev libgnutls28-dev libtasn1-6-dev libtasn1-bin \
-            libpopt-dev libbsd-dev libcap-dev libacl1-dev libblkid-dev \
-            libparse-yapp-perl zlib1g-dev libtirpc-dev liblmdb-dev
-          rm -rf /var/lib/apt/lists/*
       - uses: actions/checkout@v6
       - name: Restore Samba build cache
         uses: actions/cache@v5
         with:
-          path: /samba-build
+          path: .samba-build
           # No cross-arch restore-keys fallback: the build tree is
           # architecture-specific (restoring an x64 tree onto arm64 fails
           # linking with "incompatible architecture"). Match the exact,
           # arch-qualified key only.
-          key: v2-vfs_neonfs-samba-4.24.3-${{ runner.arch }}
-      - name: Build vfs_neonfs.so against pinned Samba
-        run: WORKDIR=/samba-build SKIP_APT=1 bash neonfs_cifs/native/vfs_neonfs/build-in-tree.sh
+          key: v4-vfs_neonfs-samba-deb-${{ runner.arch }}
+      - name: Build samba-vfs-neonfs.deb
+        run: OUT_DIR="$(mktemp -d)" bash packaging/build-vfs-deb.sh
 
   # =========================================================================
   # neonfs_csi - Kubernetes CSI driver (Elixir-only; gRPC over UDS via the

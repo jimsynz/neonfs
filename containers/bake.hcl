@@ -181,6 +181,7 @@ target "cifs" {
     "ghcr.io/jimsynz/neonfs/cifs:${TAG}"
   ]
   contexts = {
+    "packaging": "./packaging"
     "client": "./neonfs_client"
     "src": "./neonfs_cifs"
     "base": "target:base"
@@ -198,6 +199,7 @@ target "omnibus" {
     "ghcr.io/jimsynz/neonfs/omnibus:${TAG}"
   ]
   contexts = {
+    "packaging": "./packaging"
     "client": "./neonfs_client"
     "core": "./neonfs_core"
     "fuse": "./neonfs_fuse"
