@@ -418,6 +418,64 @@ defmodule NeonFS.CIFS.HandlerTest do
     end
   end
 
+  describe "path normalisation (#1550)" do
+    test "the share root '.' maps to the volume root '/'" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/"] ->
+        {:ok, %{size: 0, mode: 0o40777, accessed_at: 1, modified_at: 1, changed_at: 1}}
+      end)
+
+      {reply, _} = Handler.handle({:stat, %{"path" => "."}}, connected())
+      assert {:ok, %{stat: %{kind: :directory}}} = reply
+    end
+
+    test "share-relative entries gain a leading slash" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex,
+                                           :get_by_path,
+                                           ["vol-a", "/d/a.txt"] ->
+        {:ok, %{size: 3, mode: 0o100644, accessed_at: 1, modified_at: 1, changed_at: 1}}
+      end)
+
+      {reply, _} = Handler.handle({:stat, %{"path" => "d/a.txt"}}, connected())
+      assert {:ok, %{stat: %{kind: :file}}} = reply
+    end
+
+    test "opendir on the root '.' lists the volume root" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex, :get_by_path, ["vol-a", "/"] ->
+        {:ok, %{size: 0, mode: 0o40777}}
+      end)
+
+      {reply, _} = Handler.handle({:fdopendir, %{"path" => "."}}, connected())
+      assert {:ok, %{handle: _}} = reply
+    end
+
+    test "rename normalises both operands" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core.WriteOperation,
+                                           :rename,
+                                           ["vol-a", "/d/old.txt", "/d/new.txt"] ->
+        :ok
+      end)
+
+      {reply, _} =
+        Handler.handle(
+          {:renameat, %{"old_path" => "d/old.txt", "new_path" => "d/new.txt"}},
+          connected()
+        )
+
+      assert {:ok, %{}} == reply
+    end
+
+    test "already-absolute paths are left unchanged" do
+      expect(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex,
+                                           :get_by_path,
+                                           ["vol-a", "/foo"] ->
+        {:ok, %{size: 0, mode: 0o100644}}
+      end)
+
+      {reply, _} = Handler.handle({:stat, %{"path" => "/foo"}}, connected())
+      assert {:ok, %{stat: _}} = reply
+    end
+  end
+
   describe "unknown operations" do
     test "unknown op returns :enosys" do
       {reply, _} = Handler.handle({:flock, %{}}, connected())

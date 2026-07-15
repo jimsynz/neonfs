@@ -62,8 +62,31 @@ defmodule NeonFS.CIFS.Handler do
   caller frames + sends) and the new connection state.
   """
   @spec handle({atom(), map()}, state()) :: {reply(), state()}
-  def handle({op, args}, state) when is_atom(op) and is_map(args), do: do_handle(op, args, state)
+  def handle({op, args}, state) when is_atom(op) and is_map(args),
+    do: do_handle(op, normalise_paths(args), state)
+
   def handle(_, state), do: {{:error, :einval}, state}
+
+  # Samba hands the VFS share-relative paths: the share root as "." and entries
+  # without a leading slash (`d`, `d/a.txt`). NeonFS core uses absolute paths
+  # rooted at "/", so normalise every path argument at ingress — otherwise the
+  # share root resolves to `get_by_path(volume, ".")`, which core can't map to
+  # the volume root, and every operation fails with OBJECT_PATH_NOT_FOUND
+  # (#1550). smbd canonicalises "." / ".." segments before the VFS sees them,
+  # so only the root "." and a missing leading slash need handling.
+  @path_keys ~w(path old_path new_path)
+  defp normalise_paths(args) do
+    Enum.reduce(@path_keys, args, fn key, acc ->
+      case acc do
+        %{^key => p} when is_binary(p) -> Map.put(acc, key, to_core_path(p))
+        _ -> acc
+      end
+    end)
+  end
+
+  defp to_core_path(p) when p in [".", ""], do: "/"
+  defp to_core_path("/" <> _ = p), do: p
+  defp to_core_path(p), do: "/" <> p
 
   ## Lifecycle
 
