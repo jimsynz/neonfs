@@ -156,9 +156,9 @@ peer's distribution port through the `--via host:9568` join handshake.
 
 `./acceptance` drives a **running** cluster through the full acceptance matrix —
 cluster/drives/volume checks, FUSE, NFS, S3 and WebDAV operations,
-cross-interface consistency, container-runtime integration, and (multi-node)
-replication — reporting `PASS`/`FAIL`/`SKIP` per step and exiting non-zero if any
-step fails.
+cross-interface consistency, container-runtime integration, CIFS/SMB, and
+(multi-node) replication — reporting `PASS`/`FAIL`/`SKIP` per step and exiting
+non-zero if any step fails.
 
 The container-runtime steps exercise NeonFS as backing storage for Docker and
 containerd:
@@ -176,6 +176,32 @@ containerd:
 Both steps `SKIP` rather than `FAIL` where their prerequisites are absent
 (Docker/containerd not installed, the plugin socket not deployed, or no registry
 connectivity to pull the test image).
+
+The CIFS/SMB steps exercise NeonFS through a real Samba server loading the
+`neonfs.so` VFS module the omnibus package ships:
+
+- **CIFS/SMB share** — `samba`/`smbclient` are apt-installed on the node (the
+  omnibus deb ships only the ABI-matched VFS module and the `samba-vfs-modules`
+  dependency), then a minimal `/etc/samba/smb.conf` wires an SMB share to
+  `${ACCEPT_VOL}` via `vfs objects = neonfs` pointed at the in-process CIFS
+  bridge socket (`/run/neonfs/cifs.sock`), and `smbd` is restarted.
+- **CIFS/SMB operations** — `smbclient` writes a file, reads it back and asserts
+  the contents match, then round-trips `allinfo` (stat), `ls` (readdir),
+  `rename`, `del` and `rmdir`.
+
+The Samba VFS module is **opt-in at deb-build time** — building it drives an
+in-tree Samba compile, so a default `./neonfs-rig up` omits it and the CIFS
+steps `SKIP`. To exercise CIFS, build the omnibus with the module:
+
+```bash
+NEONFS_BUILD_CIFS=1 ./neonfs-rig clean     # discard the CIFS-less deb, if any
+NEONFS_BUILD_CIFS=1 ./neonfs-rig up
+./acceptance single
+```
+
+With the module present the share step `FAIL`s only on real runtime defects (the
+bridge socket missing, `smbd` failing to serve the share); the ops step `SKIP`s
+when the share never came up.
 
 ```bash
 ./neonfs-rig up            # bring a single-node cluster up first

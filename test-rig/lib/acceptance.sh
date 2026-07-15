@@ -15,6 +15,9 @@ CONSISTENCY_TIMEOUT="${CONSISTENCY_TIMEOUT:-25}"
 
 # S3 credentials captured during the s3 step.
 S3_KEY="" ; S3_SECRET="" ; S3_FLAGS=""
+
+# Set by s_cifs_share once smbd + vfs_neonfs serve the share; gates s_cifs_ops.
+CIFS_READY=0
 S3_HOST="127.0.0.1:8080"
 DAV_BASE="http://127.0.0.1:8081"
 
@@ -25,6 +28,14 @@ DOCKER_VOL="${DOCKER_VOL:-accept_docker}"
 # Volume the containerd content-store plugin stores blobs in
 # (:neonfs_containerd, :volume — default "containerd").
 CONTAINERD_VOL="${CONTAINERD_VOL:-containerd}"
+
+# CIFS/SMB: the omnibus daemon ships the Samba VFS module (neonfs.so) and runs
+# the CIFS bridge in-process, exposing the ETF socket below. smbd and smbclient
+# come from apt (samba/smbclient); the VFS module is ABI-matched to the
+# release's Samba (#1527). See neonfs_cifs/README.md.
+CIFS_SOCK="${CIFS_SOCK:-/run/neonfs/cifs.sock}"
+CIFS_USER="${CIFS_USER:-neonfs}"
+CIFS_PASS="${CIFS_PASS:-neonfs-rig}"
 
 # --- harness ---------------------------------------------------------------
 
@@ -292,6 +303,94 @@ echo "content round-trip OK (${DIGEST})"
 REMOTE
 }
 
+# Configure a co-located smbd to serve ${ACCEPT_VOL} through vfs_neonfs, dialing
+# the in-process omnibus CIFS bridge. smbd/smbclient are apt-installed here (the
+# omnibus deb only ships the ABI-matched VFS module + samba-vfs-modules dep).
+s_cifs_share() {
+  volume_ready || { echo "  ${ACCEPT_VOL} missing" >&2; return 77; }
+  # The Samba VFS module is opt-in at deb-build time (NEONFS_BUILD_CIFS=1, so a
+  # default `up` skips the heavy in-tree Samba build). Absent module = CIFS was
+  # not built into this omnibus, so skip rather than fail.
+  node_ssh 1 "ls /usr/lib/*/samba/vfs/neonfs.so >/dev/null 2>&1" 2>/dev/null \
+    || { echo "  Samba VFS module neonfs.so not installed — rebuild the omnibus with NEONFS_BUILD_CIFS=1 to exercise CIFS" >&2; return 77; }
+  node_ssh 1 "sudo test -S ${CIFS_SOCK}" 2>/dev/null \
+    || { echo "  CIFS bridge socket ${CIFS_SOCK} absent — omnibus CIFS bridge not running" >&2; return 1; }
+
+  node_ssh 1 "sudo bash -s ${ACCEPT_VOL} ${CIFS_SOCK} ${CIFS_USER} ${CIFS_PASS}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+SHARE="$1"; SOCK="$2"; SMBUSER="$3"; SMBPASS="$4"
+
+if ! { command -v smbd >/dev/null 2>&1 && command -v smbclient >/dev/null 2>&1; }; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q samba smbclient >/dev/null 2>&1 || true
+fi
+command -v smbd >/dev/null 2>&1 || { echo "smbd unavailable after 'apt-get install samba'"; exit 1; }
+command -v smbclient >/dev/null 2>&1 || { echo "smbclient unavailable after 'apt-get install smbclient'"; exit 1; }
+
+cat > /etc/samba/smb.conf <<CONF
+[global]
+   workgroup = WORKGROUP
+   security = user
+   server min protocol = SMB2
+   log level = 1
+
+[${SHARE}]
+   path = /
+   read only = no
+   vfs objects = neonfs
+   neonfs:socket = ${SOCK}
+   neonfs:volume = ${SHARE}
+CONF
+
+testparm -s >/dev/null 2>&1 || { echo "smb.conf failed testparm validation"; testparm -s 2>&1 | tail -5; exit 1; }
+
+printf '%s\n%s\n' "${SMBPASS}" "${SMBPASS}" | smbpasswd -s -a "${SMBUSER}" >/dev/null
+
+systemctl restart smbd
+
+for _ in $(seq 1 30); do
+  if smbclient "//127.0.0.1/${SHARE}" -U "${SMBUSER}%${SMBPASS}" -c ls >/dev/null 2>&1; then
+    echo "share ${SHARE} reachable via smbd + vfs_neonfs"
+    exit 0
+  fi
+  sleep 1
+done
+echo "share ${SHARE} not reachable via smbclient after smbd restart"
+smbclient "//127.0.0.1/${SHARE}" -U "${SMBUSER}%${SMBPASS}" -c ls 2>&1 | tail -10 || true
+journalctl -u smbd -n 20 --no-pager 2>&1 | tail -20 || true
+exit 1
+REMOTE
+  local rc=$?
+  [ "${rc}" -eq 0 ] && CIFS_READY=1
+  return "${rc}"
+}
+
+s_cifs_ops() {
+  [ "${CIFS_READY}" = 1 ] || { echo "  CIFS share not established — skipping ops" >&2; return 77; }
+  node_ssh 1 "sudo bash -s ${ACCEPT_VOL} ${CIFS_USER} ${CIFS_PASS} ${TAG}" 2>&1 <<'REMOTE' | sed 's/^/  /' >&2
+set -e
+SHARE="$1"; SMBUSER="$2"; SMBPASS="$3"; TAG="$4"
+DIR="cifs_${TAG}"
+SRC="$(mktemp)"; OUT="$(mktemp)"
+trap 'rm -f "${SRC}" "${OUT}"' EXIT
+echo cifs-content > "${SRC}"
+
+smb() { smbclient "//127.0.0.1/${SHARE}" -U "${SMBUSER}%${SMBPASS}" "$@"; }
+
+smb -c "mkdir ${DIR}"
+smb -c "put ${SRC} ${DIR}/c.txt"
+smb -c "allinfo ${DIR}/c.txt" >/dev/null                                  # stat
+smb -c "cd ${DIR}; ls" | grep -q "c.txt"                                  # readdir
+smb -c "get ${DIR}/c.txt ${OUT}"
+[ "$(cat "${OUT}")" = cifs-content ]                                      # content round-trip
+smb -c "rename ${DIR}/c.txt ${DIR}/c2.txt"
+smb -c "cd ${DIR}; ls" | grep -q "c2.txt"
+smb -c "del ${DIR}/c2.txt"
+if smb -c "cd ${DIR}; ls" | grep -q "c2.txt"; then echo "delete left c2.txt behind"; exit 1; fi
+smb -c "rmdir ${DIR}"
+echo "cifs round-trip OK (mkdir/put/stat/readdir/get/rename/delete/rmdir)"
+REMOTE
+}
+
 # Cross-interface: write via FUSE, must be visible via S3 and WebDAV (and NFS).
 s_cross_consistency() {
   [ -n "${S3_KEY}" ] || return 77
@@ -363,6 +462,7 @@ acceptance_cleanup() {
   [ "${KEEP:-0}" = 1 ] && return 0
   node_ssh 1 "sudo umount ${NFS_MNT} 2>/dev/null; sudo timeout 20 neonfs fuse unmount ${FUSE_MNT} 2>/dev/null" >/dev/null 2>&1 || true
   node_ssh 1 "command -v docker >/dev/null 2>&1 && sudo docker volume rm ${DOCKER_VOL} >/dev/null 2>&1" >/dev/null 2>&1 || true
+  node_ssh 1 "command -v smbd >/dev/null 2>&1 && sudo systemctl stop smbd 2>/dev/null" >/dev/null 2>&1 || true
 }
 
 # --- driver ----------------------------------------------------------------
@@ -386,6 +486,8 @@ acceptance_run() {
   step "WebDAV operations (PUT/GET)"                s_webdav_ops
   step "Docker volume attach (create -d neonfs + run -v)" s_docker_volume_attach
   step "containerd content store (ingest/get via ctr)"    s_containerd_content
+  step "CIFS/SMB share (smbd + vfs_neonfs)"          s_cifs_share
+  step "CIFS/SMB operations (smbclient round-trip)"  s_cifs_ops
   step "volume show reflects stored data"           s_volume_stats
   step "FUSE unmount does not wedge control plane"  s_fuse_unmount_resilience
   step "replication across nodes"                   s_replication
