@@ -339,6 +339,7 @@ cat > /etc/samba/smb.conf <<CONF
    vfs objects = neonfs
    neonfs:socket = ${SOCK}
    neonfs:volume = ${SHARE}
+   admin users = ${SMBUSER}
 CONF
 
 testparm -s >/dev/null 2>&1 || { echo "smb.conf failed testparm validation"; testparm -s 2>&1 | tail -5; exit 1; }
