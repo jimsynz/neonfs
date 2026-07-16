@@ -62,10 +62,38 @@ After installing the deb, wire an SMB share to a NeonFS volume in
   neonfs:socket = /run/neonfs/cifs.sock
   neonfs:volume = myvolume
   read only = no
+  admin users = neonfs
 ```
 
 then `systemctl enable --now neonfs-cifs` and `systemctl restart smbd`. The
 same snippet is shipped as a reference in `/etc/neonfs/cifs.conf`.
+
+## Share ownership and permissions
+
+NeonFS does not model POSIX uid/gid ownership — the VFS `fchown` is `:enosys`
+([#135](https://harton.dev/project-neon/neonfs/issues/135)) and access control
+rides on IAM/ACLs, not file-mode bits. The volume root reports a fixed
+`uid=0, gid=0, mode=0o40755`, so an SMB client authenticating as any non-root
+user falls into POSIX "other", which `0o40755` grants only `r-x`. smbd applies
+that check itself — in its own NT-ACL/POSIX access layer, before it ever calls
+the VFS — and refuses a create in the share root with
+`NT_STATUS_ACCESS_DENIED`.
+
+The trust boundary for a NeonFS share is the bridge socket plus the share's own
+SMB authentication, **not** smbd's POSIX layer, so the share tells smbd to skip
+that check for authenticated principals via `admin users`:
+
+```ini
+admin users = neonfs
+```
+
+List the SMB principal(s) that connect to the share (e.g. the user in
+`smbpasswd`). `admin users` grants them share-admin (root-equivalent) access,
+bypassing the POSIX permission check while still requiring authentication to
+Samba. This matches how NeonFS treats every interface: the interface node is
+fully trusted once connected, and external access is gated at the interface's
+own auth layer (here, Samba's `security = user`) rather than by POSIX mode bits
+the backend does not maintain.
 
 ## Omnibus deployment
 
