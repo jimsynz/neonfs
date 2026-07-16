@@ -122,10 +122,7 @@ defmodule NeonFS.CIFS.Handler do
        when is_integer(mode) do
     case Map.fetch(state.files, handle) do
       {:ok, {volume, path, _flags}} ->
-        case core_call(NeonFS.Core.FileIndex, :update_mode, [volume, path, mode]) do
-          {:ok, _} -> {{:ok, %{}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
+        {update_meta(volume, path, mode: mode), state}
 
       :error ->
         {{:error, :ebadf}, state}
@@ -144,10 +141,12 @@ defmodule NeonFS.CIFS.Handler do
        when is_integer(atime) and is_integer(mtime) do
     case Map.fetch(state.files, handle) do
       {:ok, {volume, path, _flags}} ->
-        case core_call(NeonFS.Core.FileIndex, :update_times, [volume, path, atime, mtime]) do
-          {:ok, _} -> {{:ok, %{}}, state}
-          {:error, reason} -> {{:error, errno_for(reason)}, state}
-        end
+        updates = [
+          accessed_at: DateTime.from_unix!(atime),
+          modified_at: DateTime.from_unix!(mtime)
+        ]
+
+        {update_meta(volume, path, updates), state}
 
       :error ->
         {{:error, :ebadf}, state}
@@ -264,12 +263,23 @@ defmodule NeonFS.CIFS.Handler do
     end
   end
 
+  # Directories are created the way the FUSE backend does — a zero-byte
+  # `write_file_at` with the `S_IFDIR` bit set in the mode — rather than
+  # `FileIndex.mkdir/3` (which the interface backends don't use).
+  @s_ifdir 0o40000
   defp do_handle(:mkdirat, %{"path" => path} = args, state) do
-    mode = Map.get(args, "mode", 0o755)
+    dir_mode = Bitwise.bor(Map.get(args, "mode", 0o755), @s_ifdir)
 
     with_volume(state, fn volume, state ->
-      case core_call(NeonFS.Core.WriteOperation, :create_directory, [volume, path, mode]) do
+      case core_call(NeonFS.Core.WriteOperation, :write_file_at, [
+             volume,
+             path,
+             0,
+             <<>>,
+             [mode: dir_mode]
+           ]) do
         {:ok, _} -> {{:ok, %{}}, state}
+        :ok -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
     end)
@@ -277,19 +287,28 @@ defmodule NeonFS.CIFS.Handler do
 
   ## Mutations
 
+  # Deletes go by file id: resolve the path to its FileMeta, then delete by id
+  # (`FileIndex.delete/1`), mirroring the FUSE/NFS backends.
   defp do_handle(:unlinkat, %{"path" => path}, state) do
     with_volume(state, fn volume, state ->
-      case core_call(NeonFS.Core.WriteOperation, :delete_file, [volume, path]) do
-        :ok -> {{:ok, %{}}, state}
-        {:ok, _} -> {{:ok, %{}}, state}
+      with {:ok, %{id: id}} <- core_call(NeonFS.Core.FileIndex, :get_by_path, [volume, path]),
+           :ok <- normalise_ok(core_call(NeonFS.Core.FileIndex, :delete, [id])) do
+        {{:ok, %{}}, state}
+      else
         {:error, reason} -> {{:error, errno_for(reason)}, state}
       end
     end)
   end
 
+  # NeonFS splits rename into `FileIndex.rename/4` (same parent) and
+  # `FileIndex.move/4` (across parents), so decompose the absolute old/new
+  # paths into {parent, name} and dispatch the way the FUSE backend does.
   defp do_handle(:renameat, %{"old_path" => old, "new_path" => new}, state) do
     with_volume(state, fn volume, state ->
-      case core_call(NeonFS.Core.WriteOperation, :rename, [volume, old, new]) do
+      {old_parent, old_name} = split_path(old)
+      {new_parent, new_name} = split_path(new)
+
+      case rename_dispatch(volume, old_parent, old_name, new_parent, new_name) do
         :ok -> {{:ok, %{}}, state}
         {:ok, _} -> {{:ok, %{}}, state}
         {:error, reason} -> {{:error, errno_for(reason)}, state}
@@ -299,20 +318,20 @@ defmodule NeonFS.CIFS.Handler do
 
   ## Filesystem
 
+  # NeonFS volumes are logically unbounded (capacity is a property of the
+  # cluster's drives, not the volume), so report a large synthetic capacity —
+  # enough that SMB clients don't refuse writes against a "full" share. The
+  # FUSE backend punts on statfs the same way. Accurate per-volume/cluster
+  # accounting is a follow-up (#1554-class work), not a correctness blocker.
+  @synthetic_capacity 1024 * 1024 * 1024 * 1024 * 1024
   defp do_handle(:disk_free, _args, state) do
-    with_volume(state, fn volume, state ->
-      case core_call(NeonFS.Core.Volume, :stats, [volume]) do
-        {:ok, stats} ->
-          {{:ok,
-            %{
-              total_bytes: Map.get(stats, :total_bytes, 0),
-              free_bytes: Map.get(stats, :free_bytes, 0),
-              available_bytes: Map.get(stats, :available_bytes, 0)
-            }}, state}
-
-        {:error, reason} ->
-          {{:error, errno_for(reason)}, state}
-      end
+    with_volume(state, fn _volume, state ->
+      {{:ok,
+        %{
+          total_bytes: @synthetic_capacity,
+          free_bytes: @synthetic_capacity,
+          available_bytes: @synthetic_capacity
+        }}, state}
     end)
   end
 
@@ -336,10 +355,25 @@ defmodule NeonFS.CIFS.Handler do
   end
 
   defp readdir_step({volume, path, cursor}, handle, state) do
-    case core_call(NeonFS.Core.FileIndex, :list_directory, [volume, path]) do
-      {:ok, entries} -> readdir_advance(entries, cursor, volume, path, handle, state)
-      {:error, reason} -> {{:error, errno_for(reason)}, state}
+    case core_call(NeonFS.Core.FileIndex, :list_dir, [volume, path]) do
+      {:ok, children} ->
+        readdir_advance(dir_entries(children), cursor, volume, path, handle, state)
+
+      {:error, reason} ->
+        {{:error, errno_for(reason)}, state}
     end
+  end
+
+  # `FileIndex.list_dir/2` returns `%{name => %{type: :file | :dir, id: id}}`.
+  # Flatten to name-sorted `{name, path, mode}` tuples (a stable cursor order)
+  # so `entry_term/1` and `kind_of/1` translate them unchanged.
+  defp dir_entries(children) when is_map(children) do
+    children
+    |> Enum.sort_by(fn {name, _} -> name end)
+    |> Enum.map(fn {name, info} ->
+      mode = if info[:type] == :dir, do: 0o40755, else: 0o100644
+      {name, name, mode}
+    end)
   end
 
   defp readdir_advance(entries, cursor, volume, path, handle, state) do
@@ -359,6 +393,47 @@ defmodule NeonFS.CIFS.Handler do
       {:error, reason} -> {{:error, errno_for(reason)}, state}
     end
   end
+
+  # Metadata updates (mode, times) go by file id: resolve the path to its
+  # FileMeta, then `FileIndex.update/2` — the same path the FUSE/NFS setattr
+  # handlers take. Returns a bare reply (no state); callers pair it with state.
+  defp update_meta(volume, path, updates) do
+    with {:ok, %{id: id}} <- core_call(NeonFS.Core.FileIndex, :get_by_path, [volume, path]),
+         reply when reply in [:ok] <-
+           normalise_ok(core_call(NeonFS.Core.FileIndex, :update, [id, updates])) do
+      {:ok, %{}}
+    else
+      {:error, reason} -> {:error, errno_for(reason)}
+    end
+  end
+
+  # NeonFS splits rename by parent: same parent → `FileIndex.rename/4`; same
+  # name across parents → `FileIndex.move/4`; otherwise move then rename.
+  defp rename_dispatch(volume, old_parent, old_name, new_parent, new_name)
+       when old_parent == new_parent do
+    core_call(NeonFS.Core.FileIndex, :rename, [volume, old_parent, old_name, new_name])
+  end
+
+  defp rename_dispatch(volume, old_parent, name, new_parent, new_name)
+       when name == new_name do
+    core_call(NeonFS.Core.FileIndex, :move, [volume, old_parent, new_parent, name])
+  end
+
+  defp rename_dispatch(volume, old_parent, old_name, new_parent, new_name) do
+    with :ok <-
+           normalise_ok(
+             core_call(NeonFS.Core.FileIndex, :move, [volume, old_parent, new_parent, old_name])
+           ) do
+      core_call(NeonFS.Core.FileIndex, :rename, [volume, new_parent, old_name, new_name])
+    end
+  end
+
+  # "/d/a.txt" → {"/d", "a.txt"}; "/a.txt" → {"/", "a.txt"}.
+  defp split_path(path), do: {Path.dirname(path), Path.basename(path)}
+
+  defp normalise_ok(:ok), do: :ok
+  defp normalise_ok({:ok, _}), do: :ok
+  defp normalise_ok(other), do: other
 
   # `O_CREAT` (0o100) plus `O_EXCL` (0o200) → exclusive create. Plain
   # `O_CREAT` → create if missing. Anything else is open-existing
