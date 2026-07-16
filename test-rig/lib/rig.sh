@@ -263,17 +263,19 @@ provision_node() {
   log "installing neonfs_omnibus on node ${i}"
 
   node_ssh "$i" "sudo mkdir -p /tmp/debs && sudo chown rig:rig /tmp/debs"
+  # samba-vfs-neonfs is a hard dependency of neonfs-omnibus (#1551); its version
+  # tracks the distro Samba, not ${VERSION}, so glob it and ship it too when the
+  # CIFS build produced it — otherwise apt can't satisfy the omnibus dependency.
+  local vfs_deb; vfs_deb="$(ls -t "${DEB_DIR}"/samba-vfs-neonfs_*.deb 2>/dev/null | head -1 || true)"
   node_scp "$i" \
     "${DEB_DIR}/neonfs-common_${VERSION}_amd64.deb" \
     "${DEB_DIR}/neonfs-cli_${VERSION}_amd64.deb" \
     "${DEB_DIR}/neonfs-omnibus_${VERSION}_amd64.deb" \
+    ${vfs_deb:+"${vfs_deb}"} \
     "rig@127.0.0.1:/tmp/debs/"
 
   node_ssh "$i" "sudo apt-get update -qq"
-  node_ssh "$i" "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
-    /tmp/debs/neonfs-common_${VERSION}_amd64.deb \
-    /tmp/debs/neonfs-cli_${VERSION}_amd64.deb \
-    /tmp/debs/neonfs-omnibus_${VERSION}_amd64.deb"
+  node_ssh "$i" "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q /tmp/debs/*.deb"
 
   node_ssh "$i" "sudo systemctl stop neonfs-omnibus"
   node_ssh "$i" "sudo install -d -m 0755 /etc/neonfs"
