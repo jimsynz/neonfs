@@ -1,6 +1,7 @@
 .claude
 .envrc
 .mcp.json
+.samba-build/
 erl_crash.dump
 .elixir_ls
 _build/
