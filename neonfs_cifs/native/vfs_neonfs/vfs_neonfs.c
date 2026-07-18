@@ -10,8 +10,12 @@
  * Handle model (like vfs_ceph_new): the Elixir side mints opaque uint64
  * handles for open files/dirs; we stash them in the files_struct via Samba's
  * FSP extension mechanism, and report a fake (debug-only) fd back to the VFS
- * layer. Paths come straight from `smb_fname->base_name` (share-relative);
- * the neonfs_cifs Handler resolves them within the volume.
+ * layer. Path-based ops send `smb_fname->base_name` (share-relative) to the
+ * neonfs_cifs Handler, which resolves it within the volume. The `*at` hooks
+ * first rebuild the full share-relative path from `dirfsp` + the relative
+ * `base_name` via `full_path_from_dirfsp_atname()` (the idiom fully-virtual
+ * modules like vfs_glusterfs use), since smbd supplies `base_name` relative
+ * to the parent `dirfsp`, not the share root.
  */
 
 #include "includes.h"
@@ -210,6 +214,7 @@ static int neonfs_openat(struct vfs_handle_struct *handle,
 			 const struct vfs_open_how *how)
 {
 	struct neonfs_config *cfg = neonfs_cfg(handle);
+	struct smb_filename *full_fname = NULL;
 	struct neonfs_fh *fh = NULL;
 	uint64_t nwh = 0;
 
@@ -222,10 +227,18 @@ static int neonfs_openat(struct vfs_handle_struct *handle,
 		return -1;
 	}
 
-	if (nw_openat(&cfg->conn, smb_fname->base_name, (int32_t)how->flags,
-		      (uint32_t)how->mode, &nwh) != 0) {
+	full_fname = full_path_from_dirfsp_atname(talloc_tos(), dirfsp,
+						  smb_fname);
+	if (full_fname == NULL) {
 		return -1;
 	}
+
+	if (nw_openat(&cfg->conn, full_fname->base_name, (int32_t)how->flags,
+		      (uint32_t)how->mode, &nwh) != 0) {
+		TALLOC_FREE(full_fname);
+		return -1;
+	}
+	TALLOC_FREE(full_fname);
 
 	fh = VFS_ADD_FSP_EXTENSION(handle, fsp, struct neonfs_fh, NULL);
 	if (fh == NULL) {
@@ -495,12 +508,22 @@ static int neonfs_mkdirat(struct vfs_handle_struct *handle,
 			  const struct smb_filename *smb_fname, mode_t mode)
 {
 	struct neonfs_config *cfg = neonfs_cfg(handle);
+	struct smb_filename *full_fname = NULL;
+	int ret;
 
 	if (cfg == NULL) {
 		errno = EBADF;
 		return -1;
 	}
-	return nw_mkdirat(&cfg->conn, smb_fname->base_name, (uint32_t)mode);
+
+	full_fname = full_path_from_dirfsp_atname(talloc_tos(), dirfsp,
+						  smb_fname);
+	if (full_fname == NULL) {
+		return -1;
+	}
+	ret = nw_mkdirat(&cfg->conn, full_fname->base_name, (uint32_t)mode);
+	TALLOC_FREE(full_fname);
+	return ret;
 }
 
 /* ---- mutations ---- */
@@ -510,12 +533,22 @@ static int neonfs_unlinkat(struct vfs_handle_struct *handle,
 			   const struct smb_filename *smb_fname, int flags)
 {
 	struct neonfs_config *cfg = neonfs_cfg(handle);
+	struct smb_filename *full_fname = NULL;
+	int ret;
 
 	if (cfg == NULL) {
 		errno = EBADF;
 		return -1;
 	}
-	return nw_unlinkat(&cfg->conn, smb_fname->base_name);
+
+	full_fname = full_path_from_dirfsp_atname(talloc_tos(), dirfsp,
+						  smb_fname);
+	if (full_fname == NULL) {
+		return -1;
+	}
+	ret = nw_unlinkat(&cfg->conn, full_fname->base_name);
+	TALLOC_FREE(full_fname);
+	return ret;
 }
 
 static int neonfs_renameat(struct vfs_handle_struct *handle,
@@ -526,13 +559,32 @@ static int neonfs_renameat(struct vfs_handle_struct *handle,
 			   const struct vfs_rename_how *how)
 {
 	struct neonfs_config *cfg = neonfs_cfg(handle);
+	struct smb_filename *full_fname_src = NULL;
+	struct smb_filename *full_fname_dst = NULL;
+	int ret;
 
 	if (cfg == NULL) {
 		errno = EBADF;
 		return -1;
 	}
-	return nw_renameat(&cfg->conn, smb_fname_src->base_name,
-			   smb_fname_dst->base_name);
+
+	full_fname_src = full_path_from_dirfsp_atname(talloc_tos(), srcdir_fsp,
+						      smb_fname_src);
+	if (full_fname_src == NULL) {
+		return -1;
+	}
+	full_fname_dst = full_path_from_dirfsp_atname(talloc_tos(), dstdir_fsp,
+						      smb_fname_dst);
+	if (full_fname_dst == NULL) {
+		TALLOC_FREE(full_fname_src);
+		return -1;
+	}
+
+	ret = nw_renameat(&cfg->conn, full_fname_src->base_name,
+			  full_fname_dst->base_name);
+	TALLOC_FREE(full_fname_src);
+	TALLOC_FREE(full_fname_dst);
+	return ret;
 }
 
 /* ---- filesystem ---- */
