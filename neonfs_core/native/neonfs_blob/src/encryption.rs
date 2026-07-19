@@ -65,10 +65,10 @@ impl EncryptionParams {
 /// Returns ciphertext with the 128-bit authentication tag appended.
 /// The output is `data.len() + 16` bytes.
 pub fn encrypt(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, EncryptionError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&params.key));
-    let nonce = Nonce::from_slice(&params.nonce);
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(params.key));
+    let nonce = Nonce::from(params.nonce);
     cipher
-        .encrypt(nonce, data)
+        .encrypt(&nonce, data)
         .map_err(|_| EncryptionError::EncryptionFailed)
 }
 
@@ -80,10 +80,10 @@ pub fn decrypt(
     ciphertext_with_tag: &[u8],
     params: &EncryptionParams,
 ) -> Result<Vec<u8>, EncryptionError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&params.key));
-    let nonce = Nonce::from_slice(&params.nonce);
+    let cipher = Aes256Gcm::new(&Key::<Aes256Gcm>::from(params.key));
+    let nonce = Nonce::from(params.nonce);
     cipher
-        .decrypt(nonce, ciphertext_with_tag)
+        .decrypt(&nonce, ciphertext_with_tag)
         .map_err(|_| EncryptionError::AuthenticationFailed)
 }
 

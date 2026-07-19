@@ -96,7 +96,7 @@ defmodule NeonFS.S3.MixProject do
       # `[:dev, :test]` (not just `:test`) to match the env `git_ops`
       # declares for its transitive `req` dep — a narrower `:only` fails
       # the mix.exs consistency check (same gotcha as `jason` below).
-      {:req, "~> 0.5", only: [:dev, :test]},
+      {:req, "~> 0.6", only: [:dev, :test]},
       # `:only` dropped because `rustler` — pulled in transitively via
       # neonfs_client's chunker NIF (#449) — declares jason as a
       # runtime dep. Narrower `:only` bounds here fail the mix.exs

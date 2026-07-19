@@ -20,7 +20,7 @@ jobs:
       rust: ${{ steps.parse.outputs.rust }}
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: parse
         run: |
           ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
@@ -42,7 +42,7 @@ jobs:
       - name: Install checkout dependencies
         run: apk add --no-cache nodejs git
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Start Docker daemon
         run: |
@@ -91,7 +91,7 @@ jobs:
       - name: Install checkout dependencies
         run: apk add --no-cache nodejs git
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Start Docker daemon
         run: |
@@ -199,7 +199,7 @@ jobs:
       options: --privileged
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -211,12 +211,12 @@ jobs:
       - name: Install nfpm
         run: |
           # renovate: datasource=github-releases depName=goreleaser/nfpm
-          NFPM_VERSION=v2.46.3
+          NFPM_VERSION=v2.47.0
           curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz" \
             | tar xz -C /usr/local/bin nfpm
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # `priv/native/` is where Rustler copies the freshly-built `.so`.
           # If we cache `_build/` without it, a partial cache restore can
@@ -318,7 +318,7 @@ jobs:
       options: --privileged
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -330,12 +330,12 @@ jobs:
       - name: Install nfpm
         run: |
           # renovate: datasource=github-releases depName=goreleaser/nfpm
-          NFPM_VERSION=v2.46.3
+          NFPM_VERSION=v2.47.0
           curl -sfL "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_arm64.tar.gz" \
             | tar xz -C /usr/local/bin nfpm
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # `priv/native/` is where Rustler copies the freshly-built `.so`.
           # If we cache `_build/` without it, a partial cache restore can
@@ -466,7 +466,7 @@ jobs:
       image: harton.dev/james/workflows/ci-base:latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download amd64 .deb artifacts
         uses: actions/download-artifact@v8

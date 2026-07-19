@@ -54,7 +54,7 @@ RUN NATIVE=/workdir/vfs_neonfs OUT_DIR=/out WORKDIR=/samba-build \
   && dpkg-deb -x /out/samba-vfs-neonfs_*.deb /tmp/vfsx \
   && install -D "$(find /tmp/vfsx -name neonfs.so -path '*vfs*' | head -1)" /out/neonfs.so
 
-FROM debian:trixie-20260610
+FROM debian:13
 
 LABEL org.opencontainers.image.source="https://harton.dev/project-neon/neonfs" \
       org.opencontainers.image.url="https://harton.dev/project-neon/neonfs" \

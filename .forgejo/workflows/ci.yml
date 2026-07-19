@@ -29,7 +29,7 @@ jobs:
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
       rust_image: ${{ steps.parse.outputs.rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: parse
         run: |
           ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
@@ -51,7 +51,7 @@ jobs:
     container:
       image: harton.dev/james/workflows/ci-base:latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check for whole-file buffering patterns
         run: bash scripts/check_buffering.sh
 
@@ -66,10 +66,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -102,10 +102,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -146,10 +146,10 @@ jobs:
       - name: Install FUSE dependencies
         run: apt-get update && apt-get install -y --no-install-recommends libfuse3-dev fuse3 && rm -rf /var/lib/apt/lists/*
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -208,10 +208,10 @@ jobs:
             docker.io docker-cli iptables libfuse3-dev fuse3
           rm -rf /var/lib/apt/lists/*
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -305,10 +305,10 @@ jobs:
       # during the suite, so the C toolchain must be present (#1400).
       - name: Install C toolchain
         run: apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -347,7 +347,7 @@ jobs:
     steps:
       - name: Install C toolchain
         run: apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build + run wire harness
         run: make -C neonfs_cifs/native/vfs_neonfs test
 
@@ -366,9 +366,9 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Restore Samba build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .samba-build
           # No cross-arch restore-keys fallback: the build tree is
@@ -391,10 +391,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -421,7 +421,7 @@ jobs:
       # that test is excluded. Cache the built binary across runs.
       - name: Cache csi-sanity
         id: cache-csi-sanity
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: /usr/local/bin/csi-sanity
           key: csi-sanity-v5.4.0-${{ runner.arch }}
@@ -453,10 +453,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -491,10 +491,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -533,10 +533,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             nfs_server/deps
@@ -568,10 +568,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -609,10 +609,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -652,10 +652,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -690,10 +690,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs-cli/target
@@ -744,10 +744,10 @@ jobs:
             e2fsprogs mount containerd skopeo
           rm -rf /var/lib/apt/lists/*
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
@@ -812,10 +812,10 @@ jobs:
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             neonfs_client/deps
