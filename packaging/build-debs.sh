@@ -148,6 +148,11 @@ echo "==> Packaging .deb files..."
 
 cd "${SCRIPT_DIR}/nfpm"
 
+# The omnibus depends on samba-vfs-neonfs only when built with CIFS support —
+# that package is opt-in (NEONFS_BUILD_CIFS=1) and isn't produced otherwise, so
+# an unconditional dependency makes a default omnibus uninstallable (#1559).
+export OMNIBUS_SAMBA_VFS_DEPENDS="${NEONFS_BUILD_CIFS:+  - samba-vfs-neonfs}"
+
 cleanup_generated_configs() {
     rm -f "${SCRIPT_DIR}"/nfpm/.generated-*.yaml
 }
