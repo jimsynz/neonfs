@@ -289,6 +289,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           export VERSION ARCH=amd64 BUILD_DIR="$FORGEJO_WORKSPACE"
+          # Release always builds the Samba VFS deb, so the omnibus depends on it (#1559).
+          export OMNIBUS_SAMBA_VFS_DEPENDS="  - samba-vfs-neonfs"
           mkdir -p dist
 
           # Build the samba-vfs-neonfs deb — the Samba VFS module, from the
@@ -408,6 +410,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           export VERSION ARCH=arm64 BUILD_DIR="$FORGEJO_WORKSPACE"
+          # Release always builds the Samba VFS deb, so the omnibus depends on it (#1559).
+          export OMNIBUS_SAMBA_VFS_DEPENDS="  - samba-vfs-neonfs"
           mkdir -p dist
 
           # Build the samba-vfs-neonfs deb — the Samba VFS module, from the

@@ -23,8 +23,12 @@ depends:
   - nfs-common
   # The Samba VFS module ships in its own package (built from the distro samba
   # source so it loads in the host smbd — #1548); it pulls in the ABI-matching
-  # samba as its own dependency.
-  - samba-vfs-neonfs
+  # samba as its own dependency. Gated on the CIFS build: samba-vfs-neonfs is only
+  # produced when NEONFS_BUILD_CIFS=1, so an unconditional dependency would make a
+  # default (non-CIFS) omnibus uninstallable (#1559). The build sets
+  # OMNIBUS_SAMBA_VFS_DEPENDS to the `- samba-vfs-neonfs` line when CIFS is built,
+  # and leaves it empty otherwise.
+${OMNIBUS_SAMBA_VFS_DEPENDS}
 
 conflicts:
   - neonfs-core
