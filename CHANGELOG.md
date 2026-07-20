@@ -5,6 +5,203 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.5.0](https://harton.dev/project-neon/neonfs/compare/v0.4.2...v0.5.0) (2026-07-20)
+### Breaking Changes:
+
+* csi: drop ControllerPublish/Unpublish (attachRequired: false) (#1464) by James Harton
+
+* s3,webdav,nfs: default interface binds to loopback (#1407) by James Harton
+
+
+
+### Bug Fixes:
+
+* test-support: retry transient `:eaddrinuse` in peer-port allocation (#1571) by James Harton
+
+* packaging: gate omnibus `samba-vfs-neonfs` dependency on the CIFS build (#1569) by James Harton
+
+* cifs: resolve `*at` paths against `dirfsp` in the VFS shim (#1564) by James Harton
+
+* packaging: gitignore `.samba-build/` VFS build cache (#1562) by James Harton
+
+* test-rig: install samba-vfs-neonfs so the omnibus deb resolves (#1561) by James Harton
+
+* cifs: make the neonfs SMB share writable out of the box (#1557) by James Harton
+
+* cifs: reconcile the bridge Handler with the real core API (#1556) by James Harton
+
+* cifs: map the Samba share root "." to the NeonFS volume root (#1553) by James Harton
+
+* cifs,packaging: build the Samba VFS module as a distro-sourced samba-vfs-neonfs deb (#1551) by James Harton
+
+* test: de-flake the peer-cluster data-plane mesh wait (#1535) by James Harton
+
+* deps: update all dependencies (#1519) by Renovate Bot
+
+* core: widen the volume-root CAS Ra command timeout so bulk writes don't spuriously time out (#1516) by James Harton
+
+* core: fail `write_ack: :quorum`/`:all` writes that can't reach min_copies (#1506) by James Harton
+
+* csi: enforce CSI snapshot name idempotency in CreateSnapshot (#1461) by James Harton
+
+* csi: CSI-spec input validation and error codes in the controller (#1460) by James Harton
+
+* core: reliable cross-node reads after a whole-cluster restart (#1450) (#1453) by James Harton
+
+* core: supervise DRSnapshotScheduler so scheduled DR snapshots run (#1451) by James Harton
+
+* nfs: gate cross-node read conn-pool assertion on data-plane use (#1405) by James Harton
+
+* test-support: retry transient peer app-start failures during cluster bring-up (#1399) by James Harton
+
+* test-support: retry tuple-form and process-not-ready RPC failures (#1398) by James Harton
+
+* test-support: route direct cluster_init sites through idempotent helper (#1393) by James Harton
+
+* test-support: make cluster_init idempotent under rpc_until_ready retries (#1389) by James Harton
+
+* core: fsync parent directory after atomic rename in blob store and DETS snapshot (#1381) by James Harton
+
+* cli,core: route `fuse mount` to a FUSE node on the client's host (#1371) by James Harton
+
+* client: per-node byte-bounded LRU read-chunk cache (#1366) by James Harton
+
+* containerd: reclaim stalled write sessions via scheduled sweep (#1365) by James Harton
+
+* core,fuse: prefer the local node when routing FUSE mounts (#1360) by James Harton
+
+* core: survive booting before the network is up (#1357) by James Harton
+
+* client: fail loud on mid-stream chunk fetch failures (#1353) (#1356) by James Harton
+
+* default cluster join `--via` to the metrics port 9568 (#1347) by James Harton
+
+### Improvements:
+
+* packaging: make omnibus `samba-vfs-neonfs` a Recommends (#1572) by James Harton
+
+* omnibus,cifs: ship the Samba VFS module + CIFS runtime config in the omnibus image and deb (#1547) by James Harton
+
+* cifs,packaging: Debian package for neonfs_cifs (#1545) by James Harton
+
+* cli: add `volume create --durability` for erasure-coded volumes (#1544) by James Harton
+
+* test-rig: expose compression/encryption/tiering as env knobs + benchmark axes (#1543) by James Harton
+
+* test-rig: Docker + containerd benchmark scenarios (#1541) by James Harton
+
+* test-rig: `neonfs-rig bench --rev <sha>` mode for manual git bisect (#1539) by James Harton
+
+* test-rig,ci: benchmark regression gate + auto-raised issue (rolling-window median) (#1538) by James Harton
+
+* test-rig: cluster-config matrix as a benchmark axis (#1536) by James Harton
+
+* test-rig: canonical benchmark op set across file-serving interfaces (#1534) by James Harton
+
+* test-rig: benchee bench harness foundation (#1531) by James Harton
+
+* cifs,ci: container image for neonfs_cifs (#1530) by James Harton
+
+* cifs: production readiness â runtime.exs, systemd notify_ready, health checks (#1529) by James Harton
+
+* cifs: add an fsync VFS op wired to the shared `sync_file` barrier (#1517) by James Harton
+
+* nfs: wire NFS COMMIT + WRITE `:unstable` to the shared `sync_file` barrier (#1514) by James Harton
+
+* cli,core: `neonfs dr restore` â full-cluster restore from DR snapshot + backups (#1513) by James Harton
+
+* core: drain outstanding placements on freeze before power-off (#1511) by James Harton
+
+* client,fuse: shared `sync_file` barrier + wire FUSE fsync/flush (#1510) by James Harton
+
+* core: `sync_file` durability barrier (#1505) by James Harton
+
+* s3,webdav: return HTTP 503 for frozen-cluster writes (#1443) (#1498) by James Harton
+
+* core: run chunk_data in the caller, not the BlobStore GenServer (#1493) by James Harton
+
+* core: async tokio-backed metadata and index-tree blob NIFs (#1490) by James Harton
+
+* core: async tokio-backed maintenance blob NIFs (#1489) by James Harton
+
+* core: async tokio-backed chunk write and delete blob NIFs (#1488) by James Harton
+
+* core: async tokio-backed chunk-read blob NIFs (#1487) by James Harton
+
+* core: share BlobStore across NIF calls instead of Mutex (#1482) by James Harton
+
+* csi: report quota-based usage via NodeGetVolumeStats (#1478) by James Harton
+
+* cli,core: report volume usage and quotas via CLI and metrics (#1474) by James Harton
+
+* core: enforce optional per-volume file-count quota (max_files) (#1473) by James Harton
+
+* core: enforce optional per-volume max_size on write (#1462) (#1469) by James Harton
+
+* omnibus: bundle the neonfs_cifs Samba bridge (#1468) by James Harton
+
+* cifs: `vfs_neonfs.so` Samba VFS glue + in-tree pinned-Samba build (#1466) by James Harton
+
+* core,csi: store optional volume max_size + CSI capacity idempotency (#1465) by James Harton
+
+* core: cache remotely-fetched chunks on the read path (#1457) by James Harton
+
+* test-support: preserve drive config across PeerCluster.restart_node (#1452) by James Harton
+
+* core,cli: `cluster freeze` / `cluster thaw` orchestration + CLI (#1446) by James Harton
+
+* core: auto-detect + auto-exit the cluster :recovering state (#1445) by James Harton
+
+* core,nfs,fuse,webdav: reject client writes while cluster is frozen (#1444) by James Harton
+
+* core: suppress repair + pause routine scrubs while cluster is recovering (#1442) by James Harton
+
+* core: cluster lifecycle mode in the Ra state machine (#1441) by James Harton
+
+* core: auto-uncordon a returning node once its drives are trusted (#1434) by James Harton
+
+* core: clear a drive to :trusted when its scoped scrub completes clean (#1433) by James Harton
+
+* core: react to a dirty drive on open â mark :unverified + scrub (#1432) by James Harton
+
+* core: drive marker lifecycle in BlobStore (#1431) by James Harton
+
+* core: distinguish a fresh drive from a dirty one in the marker (#1430) by James Harton
+
+* core: drive-scoped scrub mode (#1429) by James Harton
+
+* core: per-drive clean/dirty superblock marker (Rust) (#1428) by James Harton
+
+* core: verify-on-read for :unverified replicas (#1424) by James Harton
+
+* core: suppress repair trigger for a cordoned node's planned departure (#1423) by James Harton
+
+* core,cli: pre-shutdown safety check for stopping a cordoned node (#1422) by James Harton
+
+* core,cli: cluster cordon-node / uncordon-node commands (#1421) by James Harton
+
+* core,client: :maintenance cordon node lifecycle state + routing/placement exclusion (#1419) by James Harton
+
+* core: exclude unverified replicas from repair durability maths (#1409) by James Harton
+
+* core: exclude unverified drives from replica placement (#1408) by James Harton
+
+* nfs: HMAC-bound NFSv3 file handles (#1406) by James Harton
+
+* core: per-drive trust-state mechanism for not-durable-yet replicas (#1403) by James Harton
+
+* cifs: vfs_neonfs ETF wire client in C with mock-responder harness (#1401) by James Harton
+
+* nfs: graceful drain of the RPC listener on shutdown (#1391) by James Harton
+
+* client: deregister service on shutdown via Registrar trap_exit (#1390) by James Harton
+
+* s3,webdav,docker: configurable graceful drain deadline for Bandit listeners (#1387) by James Harton
+
+* core,cli: off-cluster DR snapshot export/import (#1370) by James Harton
+
+* core,cli: restore a backup into an existing volume (#1369) by James Harton
+
 ## [v0.4.2](https://harton.dev/project-neon/neonfs/compare/v0.4.1...v0.4.2) (2026-06-21)
 
 
