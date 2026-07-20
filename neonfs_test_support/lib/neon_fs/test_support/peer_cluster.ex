@@ -54,6 +54,12 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @app_start_backoff_ms 250
   @app_start_max_backoff_ms 2_000
 
+  # Ephemeral-port allocation can transiently fail with `:eaddrinuse` when the
+  # suite has exhausted the OS ephemeral range; retry with a short flat backoff
+  # (up to ~5s) before giving up (#1570).
+  @peer_port_attempts 50
+  @peer_port_backoff_ms 100
+
   @type node_info :: %{
           name: atom(),
           peer: pid(),
@@ -1126,14 +1132,32 @@ defmodule NeonFS.TestSupport.PeerCluster do
     end
   end
 
-  defp allocate_peer_port do
+  @doc false
+  @spec allocate_peer_port() :: :inet.port_number()
+  def allocate_peer_port, do: allocate_peer_port(@peer_port_attempts)
+
+  defp allocate_peer_port(attempts_remaining) do
     # Bind-and-release to get a guaranteed free port from the OS.
     # This avoids collisions with ports still in TIME_WAIT from
     # previous test clusters that haven't fully released yet.
-    {:ok, socket} = :gen_tcp.listen(0, reuseaddr: true)
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
+    #
+    # Under the full suite's heavy peer-node churn the OS ephemeral range can be
+    # momentarily exhausted, so `:gen_tcp.listen(0, ...)` returns `:eaddrinuse`.
+    # Retry with a short backoff rather than crashing the whole `setup_all` on a
+    # transient failure (#1570).
+    case :gen_tcp.listen(0, reuseaddr: true) do
+      {:ok, socket} ->
+        {:ok, port} = :inet.port(socket)
+        :gen_tcp.close(socket)
+        port
+
+      {:error, :eaddrinuse} when attempts_remaining > 0 ->
+        Process.sleep(@peer_port_backoff_ms)
+        allocate_peer_port(attempts_remaining - 1)
+
+      {:error, reason} ->
+        raise "PeerCluster could not allocate an ephemeral peer port: #{inspect(reason)}"
+    end
   end
 
   defp build_code_paths do
