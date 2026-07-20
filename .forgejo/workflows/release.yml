@@ -33,7 +33,7 @@ jobs:
 
   containers-amd64:
     runs-on: amd64
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
       image: docker:29-dind
       options: --privileged
@@ -82,7 +82,7 @@ jobs:
 
   containers-arm64:
     runs-on: arm64
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
       image: docker:29-dind
       options: --privileged
@@ -193,7 +193,7 @@ jobs:
   debs-amd64:
     needs: resolve-versions
     runs-on: amd64
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
@@ -304,7 +304,7 @@ jobs:
           done
 
       - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v5
         with:
           name: debs-amd64
           path: dist/*.deb
@@ -312,7 +312,7 @@ jobs:
   debs-arm64:
     needs: resolve-versions
     runs-on: arm64
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
       image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
       options: --privileged
@@ -423,7 +423,7 @@ jobs:
           done
 
       - name: Upload .deb artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v5
         with:
           name: debs-arm64
           path: dist/*.deb
