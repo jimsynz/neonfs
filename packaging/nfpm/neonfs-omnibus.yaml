@@ -21,14 +21,14 @@ depends:
   - libfuse3-4
   - fuse3
   - nfs-common
-  # The Samba VFS module ships in its own package (built from the distro samba
-  # source so it loads in the host smbd — #1548); it pulls in the ABI-matching
-  # samba as its own dependency. Gated on the CIFS build: samba-vfs-neonfs is only
-  # produced when NEONFS_BUILD_CIFS=1, so an unconditional dependency would make a
-  # default (non-CIFS) omnibus uninstallable (#1559). The build sets
-  # OMNIBUS_SAMBA_VFS_DEPENDS to the `- samba-vfs-neonfs` line when CIFS is built,
-  # and leaves it empty otherwise.
-${OMNIBUS_SAMBA_VFS_DEPENDS}
+
+# The Samba VFS module (#1548) is an optional capability: it's loaded by an
+# external smbd, not the omnibus node, which runs every other interface without
+# it. So it's a Recommends, not a Depends — apt pulls it in by default when the
+# package is available (CIFS builds), and silently skips it otherwise, keeping a
+# default (non-CIFS) omnibus installable (#1559).
+recommends:
+  - samba-vfs-neonfs
 
 conflicts:
   - neonfs-core
