@@ -32,4 +32,17 @@ defmodule NeonFS.TestSupport.PeerClusterTest do
       refute PeerCluster.transient_rpc_error?(%ArgumentError{message: "bad"})
     end
   end
+
+  describe "allocate_peer_port/0 (#1570)" do
+    test "returns a usable, free ephemeral port" do
+      port = PeerCluster.allocate_peer_port()
+
+      assert is_integer(port) and port > 0
+
+      # The returned port must actually be bindable — the whole point of the
+      # bind-and-release dance is to hand back a port nothing else holds.
+      {:ok, socket} = :gen_tcp.listen(port, [])
+      :gen_tcp.close(socket)
+    end
+  end
 end
