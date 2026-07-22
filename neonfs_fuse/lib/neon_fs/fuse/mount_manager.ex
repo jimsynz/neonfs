@@ -444,7 +444,9 @@ defmodule NeonFS.FUSE.MountManager do
     "mount_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
   end
 
-  defp build_mount_options(opts) do
+  @doc false
+  @spec build_mount_options(keyword()) :: [String.t()]
+  def build_mount_options(opts) do
     mount_opts = []
 
     mount_opts =

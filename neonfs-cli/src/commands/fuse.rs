@@ -6,7 +6,7 @@ use crate::output::{json, table, OutputFormat};
 use crate::term::types::MountInfo;
 use crate::term::{extract_error, term_to_list, unwrap_ok_tuple};
 use clap::Subcommand;
-use eetf::{Binary, Map, Term};
+use eetf::{Atom, Binary, Map, Term};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -26,6 +26,19 @@ pub enum FuseCommand {
 
         /// Mount point path
         mountpoint: String,
+
+        /// Let any user access the mount (FUSE `allow_other`). The daemon
+        /// runs as the `neonfs` user, so without this the mount is
+        /// inaccessible even to root. Requires `user_allow_other` in
+        /// `/etc/fuse.conf` when the daemon is not root.
+        #[arg(long)]
+        allow_other: bool,
+
+        /// Let root — and only root — access the mount (FUSE `allow_root`).
+        /// Tighter than `--allow-other`. Requires `user_allow_other` in
+        /// `/etc/fuse.conf` when the daemon is not root.
+        #[arg(long, conflicts_with = "allow_other")]
+        allow_root: bool,
     },
 
     /// Unmount a volume
@@ -42,13 +55,25 @@ impl FuseCommand {
     /// Execute the FUSE command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            FuseCommand::Mount { volume, mountpoint } => self.mount(volume, mountpoint, format),
+            FuseCommand::Mount {
+                volume,
+                mountpoint,
+                allow_other,
+                allow_root,
+            } => self.mount(volume, mountpoint, *allow_other, *allow_root, format),
             FuseCommand::Unmount { mountpoint } => self.unmount(mountpoint, format),
             FuseCommand::List => self.list(format),
         }
     }
 
-    fn mount(&self, volume: &str, mountpoint: &str, format: OutputFormat) -> Result<()> {
+    fn mount(
+        &self,
+        volume: &str,
+        mountpoint: &str,
+        allow_other: bool,
+        allow_root: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
         preflight_check_mountpoint(mountpoint)?;
 
         let volume_term = Term::Binary(Binary {
@@ -58,21 +83,7 @@ impl FuseCommand {
             bytes: mountpoint.as_bytes().to_vec(),
         });
 
-        // Tell the daemon which host the operator is on so it routes the
-        // mount to a co-located FUSE node — the mount point only exists
-        // here, even when the RPC lands on a core node elsewhere (#1359).
-        let mut options = HashMap::new();
-        if let Some(host) = local_hostname() {
-            options.insert(
-                Term::Binary(Binary {
-                    bytes: b"host".to_vec(),
-                }),
-                Term::Binary(Binary {
-                    bytes: host.into_bytes(),
-                }),
-            );
-        }
-        let options_term = Term::Map(Map { map: options });
+        let options_term = build_mount_options(local_hostname(), allow_other, allow_root);
 
         let result = smol::block_on(async {
             let mut conn = DaemonConnection::connect().await?;
@@ -308,6 +319,39 @@ fn warn_if_not_empty(path: &Path, mountpoint: &str) {
     }
 }
 
+/// Builds the mount `options` map sent to the daemon.
+///
+/// * `host` — the operator's hostname (from `local_hostname`), so the daemon
+///   routes the mount to a co-located FUSE node; the mount point only exists
+///   here, even when the RPC lands on a core node elsewhere (#1359).
+/// * `allow_other` / `allow_root` — FUSE access options threaded through to
+///   `MountManager.build_mount_options/1` (#1574). Sent as ETF `true` atoms so
+///   the core-side `Map.get(opts, "allow_other")` check sees a boolean.
+///
+/// Absent/`false` keys are omitted rather than encoded as `false`, matching how
+/// the daemon defaults them off.
+fn build_mount_options(host: Option<String>, allow_other: bool, allow_root: bool) -> Term {
+    let mut options = HashMap::new();
+
+    if let Some(host) = host {
+        options.insert(binary("host"), binary(&host));
+    }
+    if allow_other {
+        options.insert(binary("allow_other"), Term::Atom(Atom::from("true")));
+    }
+    if allow_root {
+        options.insert(binary("allow_root"), Term::Atom(Atom::from("true")));
+    }
+
+    Term::Map(Map { map: options })
+}
+
+fn binary(value: &str) -> Term {
+    Term::Binary(Binary {
+        bytes: value.as_bytes().to_vec(),
+    })
+}
+
 /// The host's name, for matching against the `@host` of cluster node
 /// names so a mount lands on a co-located FUSE node (#1359). `None` when
 /// the syscall fails or the name isn't valid UTF-8 — the daemon then
@@ -360,6 +404,63 @@ mod tests {
             assert!(!host.is_empty());
             assert!(!host.contains('\0'));
         }
+    }
+
+    fn options_map(term: &Term) -> HashMap<String, Term> {
+        match term {
+            Term::Map(Map { map }) => map
+                .iter()
+                .map(|(k, v)| match k {
+                    Term::Binary(Binary { bytes }) => {
+                        (String::from_utf8(bytes.clone()).unwrap(), v.clone())
+                    }
+                    other => panic!("expected binary key, got {:?}", other),
+                })
+                .collect(),
+            other => panic!("expected map, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_mount_options_omits_flags_when_false() {
+        let map = options_map(&build_mount_options(None, false, false));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn build_mount_options_encodes_allow_other_as_true_atom() {
+        let map = options_map(&build_mount_options(None, true, false));
+        assert_eq!(
+            map.get("allow_other"),
+            Some(&Term::Atom(Atom::from("true")))
+        );
+        assert!(!map.contains_key("allow_root"));
+    }
+
+    #[test]
+    fn build_mount_options_encodes_allow_root_as_true_atom() {
+        let map = options_map(&build_mount_options(None, false, true));
+        assert_eq!(map.get("allow_root"), Some(&Term::Atom(Atom::from("true"))));
+        assert!(!map.contains_key("allow_other"));
+    }
+
+    #[test]
+    fn build_mount_options_keeps_host_alongside_flags() {
+        let map = options_map(&build_mount_options(
+            Some("myhost".to_string()),
+            true,
+            false,
+        ));
+        assert_eq!(
+            map.get("host"),
+            Some(&Term::Binary(Binary {
+                bytes: b"myhost".to_vec()
+            }))
+        );
+        assert_eq!(
+            map.get("allow_other"),
+            Some(&Term::Atom(Atom::from("true")))
+        );
     }
 
     #[test]

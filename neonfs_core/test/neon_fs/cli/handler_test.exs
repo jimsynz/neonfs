@@ -43,8 +43,9 @@ defmodule NeonFS.CLI.HandlerTest do
     @moduledoc false
 
     @doc false
-    def call(node, NeonFS.FUSE.MountManager, :mount, _args, _timeout) do
+    def call(node, NeonFS.FUSE.MountManager, :mount, [_volume, _mount_point, opts], _timeout) do
       Agent.update(:fuse_routing_rpc_calls, &[{:mount, node} | &1])
+      Agent.update(:fuse_routing_rpc_calls, &[{:mount_opts, opts} | &1])
       {:ok, "mount_stub_id"}
     end
 
@@ -62,6 +63,13 @@ defmodule NeonFS.CLI.HandlerTest do
   end
 
   @moduletag :tmp_dir
+
+  defp mount_opts_from(calls) do
+    Enum.find_value(calls, [], fn
+      {:mount_opts, opts} -> opts
+      _ -> false
+    end)
+  end
 
   # Reset Ra state between ALL tests in this module to ensure isolation
   setup do
@@ -1011,6 +1019,33 @@ defmodule NeonFS.CLI.HandlerTest do
       calls = Agent.get(:fuse_routing_rpc_calls, & &1)
       assert {:mount, Node.self()} in calls
       refute Enum.any?(calls, fn {_op, node} -> node == :neonfs_fuse@remote end)
+    end
+
+    test "forwards allow_other / allow_root flags to the FUSE node (#1574)" do
+      start_supervised!(%{
+        id: :local_mount_manager,
+        start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
+      })
+
+      assert {:ok, _info} =
+               Handler.mount("stub-vol", "/mnt/stub", %{"allow_other" => true})
+
+      opts = mount_opts_from(Agent.get(:fuse_routing_rpc_calls, & &1))
+      assert Keyword.get(opts, :allow_other) == true
+      refute Keyword.has_key?(opts, :allow_root)
+    end
+
+    test "omits mount flags when not requested (#1574)" do
+      start_supervised!(%{
+        id: :local_mount_manager,
+        start: {Agent, :start_link, [fn -> nil end, [name: NeonFS.FUSE.MountManager]]}
+      })
+
+      assert {:ok, _info} = Handler.mount("stub-vol", "/mnt/stub", %{})
+
+      opts = mount_opts_from(Agent.get(:fuse_routing_rpc_calls, & &1))
+      refute Keyword.has_key?(opts, :allow_other)
+      refute Keyword.has_key?(opts, :allow_root)
     end
   end
 
