@@ -8,7 +8,8 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     ChunkMeta,
     DriveEvacuation,
     DriveRegistry,
-    Job
+    Job,
+    VolumeRegistry
   }
 
   alias NeonFS.Core.Job.Runners.DriveEvacuation, as: EvacuationRunner
@@ -160,6 +161,46 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       {:continue, updated_job} = EvacuationRunner.step(job)
 
       assert updated_job.progress.completed >= 0
+    end
+
+    test "classifies chunks via authoritative metadata when the ETS cache is cold (#1573)" do
+      ensure_cluster_state()
+
+      {:ok, volume} =
+        VolumeRegistry.create("evac-cold-cache-vol",
+          durability: %{type: :replicate, factor: 1, min_copies: 1}
+        )
+
+      data = "cold cache chunk that must migrate as a tracked chunk"
+      {:ok, hash, _info} = BlobStore.write_chunk(data, "drive1", "hot")
+
+      chunk =
+        ChunkMeta.new(volume.id, hash, byte_size(data), byte_size(data))
+        |> ChunkMeta.add_location(%{node: node(), drive_id: "drive1", tier: :hot})
+
+      ChunkIndex.put(chunk)
+
+      # Simulate a post-restart cold ETS cache: the authoritative per-volume
+      # tree still holds the chunk, but the local materialisation is empty —
+      # the exact condition that made evacuation misclassify real chunks as
+      # untracked blobs and move them without rewriting `chunk.locations`.
+      :ets.delete_all_objects(:chunk_index)
+
+      job =
+        %{
+          Job.new(EvacuationRunner, %{node: node(), drive_id: "drive1", total_chunks: 1})
+          | status: :running
+        }
+
+      {:continue, _updated} = EvacuationRunner.step(job)
+
+      # It moved as a TRACKED chunk: authoritative locations now point at the
+      # target drive, not the evacuated one. The pre-fix cold-ETS path copied
+      # it byte-for-byte as "untracked" and left `locations` on drive1.
+      {:ok, migrated} = ChunkIndex.get(volume.id, hash)
+      drive_ids = Enum.map(migrated.locations, & &1.drive_id)
+      assert "drive2" in drive_ids
+      refute "drive1" in drive_ids
     end
 
     test "completes when no chunks remain" do

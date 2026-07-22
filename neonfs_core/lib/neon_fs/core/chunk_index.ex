@@ -134,6 +134,32 @@ defmodule NeonFS.Core.ChunkIndex do
   end
 
   @doc """
+  Authoritatively lists every chunk's metadata stored in `volume_id`'s
+  `chunk_index` tree, decoded from the per-volume metadata path rather
+  than the local ETS materialisation.
+
+  Unlike `lookup_by_hash/1` (local ETS only), this reads the cluster
+  truth, so it is correct after a restart when the ETS cache is empty.
+  Drive evacuation classifies on-disk blobs against this (#1573): the
+  cold-ETS `lookup_by_hash/1` misclassified real data chunks as untracked
+  blobs and migrated them byte-for-byte without updating `chunk.locations`,
+  orphaning them once the drained drive was wiped and re-added.
+
+  Each decoded chunk is written through to the local ETS materialisation
+  (as `get/2` does), so ETS-backed follow-ups on the same chunks —
+  `update_locations/2` during migration — see them even on a cold cache.
+  """
+  @spec list_volume_chunks(binary()) :: {:ok, [ChunkMeta.t()]} | {:error, term()}
+  def list_volume_chunks(volume_id) when is_binary(volume_id) do
+    {start_key, end_key} = chunk_key_range()
+
+    case MetadataReader.range(volume_id, :chunk_index, start_key, end_key, metadata_reader_opts()) do
+      {:ok, raw_entries} -> {:ok, decode_chunk_entries(raw_entries)}
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
   Returns all chunks associated with a volume.
 
   Resolves chunks through FileIndex: gets all files for the volume, collects
@@ -619,6 +645,24 @@ defmodule NeonFS.Core.ChunkIndex do
 
   defp chunk_key(hash) when is_binary(hash) do
     @chunk_key_prefix <> Base.encode16(hash)
+  end
+
+  # Half-open `[start, end)` covering every `chunk:`-prefixed key, so a
+  # range scan returns the whole `chunk_index` keyspace.
+  defp chunk_key_range do
+    size = byte_size(@chunk_key_prefix) - 1
+    <<head::binary-size(^size), last>> = @chunk_key_prefix
+    {@chunk_key_prefix, head <> <<last + 1>>}
+  end
+
+  defp decode_chunk_entries(raw_entries) do
+    for {_key, bytes} <- raw_entries,
+        {:ok, value} <- [MetadataValue.decode(bytes)],
+        %ChunkMeta{hash: hash} = chunk <- [storable_map_to_chunk(value)] do
+      warmed = merge_local_only_fields(chunk, hash)
+      :ets.insert(:chunk_index, {hash, warmed})
+      warmed
+    end
   end
 
   # Private — Serialisation
