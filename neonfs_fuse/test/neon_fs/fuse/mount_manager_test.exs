@@ -5,6 +5,26 @@ defmodule NeonFS.FUSE.MountManagerTest do
 
   @moduletag :tmp_dir
 
+  describe "build_mount_options/1 (issue #1574)" do
+    test "defaults to auto_unmount only" do
+      assert MountManager.build_mount_options([]) == ["auto_unmount"]
+    end
+
+    test "adds allow_other when requested" do
+      assert "allow_other" in MountManager.build_mount_options(allow_other: true)
+    end
+
+    test "adds allow_root when requested" do
+      assert "allow_root" in MountManager.build_mount_options(allow_root: true)
+    end
+
+    test "omits allow_other and allow_root by default" do
+      opts = MountManager.build_mount_options([])
+      refute "allow_other" in opts
+      refute "allow_root" in opts
+    end
+  end
+
   describe "diagnose_fusermount_no_fd/2 (issue #756)" do
     test "reports a missing mount point", %{tmp_dir: tmp_dir} do
       missing = Path.join(tmp_dir, "does-not-exist")

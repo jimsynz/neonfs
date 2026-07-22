@@ -24,7 +24,6 @@ defmodule NeonFS.CLI.Handler.MountRouting do
 
   import NeonFS.CLI.Handler.Common
 
-  alias NeonFS.CLI.Handler.Volumes
   alias NeonFS.Core.{ServiceRegistry, VolumeRegistry}
   alias NeonFS.Error.{NotFound, Unavailable, VolumeNotFound}
 
@@ -42,7 +41,9 @@ defmodule NeonFS.CLI.Handler.MountRouting do
   - `mount_point` - Mount point path (string)
   - `options` - Mount options map. A `"host"` entry (the CLI's own
     hostname) routes the mount to a FUSE node on that host (#1359); it is
-    consumed here and not forwarded to the FUSE node.
+    consumed here and not forwarded to the FUSE node. `"allow_other"` /
+    `"allow_root"` booleans are forwarded to the FUSE node's
+    `MountManager` to widen mount access (#1574).
 
   ## Returns
   - `{:ok, map}` - Mount info as map
@@ -56,7 +57,7 @@ defmodule NeonFS.CLI.Handler.MountRouting do
 
     with :ok <- require_cluster(),
          {:ok, fuse_node} <- get_fuse_node(client_host),
-         opts = Volumes.map_to_opts(mount_options),
+         opts = fuse_mount_opts(mount_options),
          {:ok, mount_id} <- rpc_mount(fuse_node, volume_name, mount_point, opts),
          {:ok, mount_info} <- rpc_get_mount(fuse_node, mount_id) do
       {:ok, mount_info_to_map(mount_info, fuse_node)}
@@ -378,6 +379,24 @@ defmodule NeonFS.CLI.Handler.MountRouting do
       {host, rest} when is_binary(host) and host != "" -> {host, rest}
       {_absent_or_blank, rest} -> {nil, rest}
     end
+  end
+
+  # Whitelist the known FUSE mount flags into the keyword opts forwarded to
+  # the FUSE node's `MountManager` (#1574). The generic string→atom coercion
+  # can't be used here: `:allow_other` / `:allow_root` are only referenced in
+  # the FUSE app, so on a core-only node they aren't in the atom table and
+  # `String.to_existing_atom/1` would raise — silently dropping the flags.
+  # Naming the atoms here keeps them deterministically resolvable on core.
+  @fuse_mount_flags [:allow_other, :allow_root]
+
+  defp fuse_mount_opts(options) do
+    Enum.reduce(@fuse_mount_flags, [], fn flag, acc ->
+      if Map.get(options, Atom.to_string(flag)) == true do
+        [{flag, true} | acc]
+      else
+        acc
+      end
+    end)
   end
 
   # Get the NFS node and verify it's reachable
