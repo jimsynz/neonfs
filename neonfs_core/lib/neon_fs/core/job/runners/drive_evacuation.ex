@@ -65,8 +65,8 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     node = job.params.node
     drive_id = job.params.drive_id
 
+    {tracked, job} = tracked_chunks(job, node, drive_id)
     remaining = list_remaining_blobs(node, drive_id)
-    tracked = tracked_chunks_on_drive(node, drive_id)
 
     case prioritise_blobs(remaining, tracked) do
       [] ->
@@ -77,6 +77,28 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     end
   end
 
+  # The authoritative `hash => ChunkMeta` set of on-drive chunks, scanned
+  # from every volume's `chunk_index` tree ONCE per evacuation and cached in
+  # the job's persisted state (#1578). Deriving it per batch re-scans every
+  # volume's chunk tree O(chunks/batch_size) times over an evacuation. It is
+  # safe to cache:
+  # the drive is `:draining` (no new writes land on it), a migrated chunk's
+  # blob is gone from disk so it never reappears in `list_remaining_blobs/2`
+  # (a stale cache entry is simply never consulted), and after a restart the
+  # persisted cache is still valid for whatever remains on disk. Building it
+  # on the first step — before any blob has moved — also means the tree walk
+  # sees a complete, fully-readable tree.
+  defp tracked_chunks(job, node, drive_id) do
+    case Map.get(job.state, :tracked_chunks) do
+      nil ->
+        tracked = tracked_chunks_on_drive(node, drive_id)
+        {tracked, %{job | state: Map.put(job.state, :tracked_chunks, tracked)}}
+
+      %{} = tracked ->
+        {tracked, job}
+    end
+  end
+
   # Tracked data chunks must move before untracked blobs (per-volume
   # index-tree pages, root segments). Migrating a tracked chunk calls
   # `ChunkIndex.update_locations/2`, which writes to the volume's index
@@ -84,10 +106,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   # the root segment chunk. If the root segment has already been migrated
   # off the evacuating drive (the volume's `drive_locations` is only
   # rewritten at `finalise_evacuation/1`), that resolve fails and every
-  # subsequent tracked-chunk migration fails too. Ordering tracked-first
-  # also keeps the authoritative `chunk_index` scan readable: while any
-  # tracked chunk remains, no tree page has moved, so the tree walk in
-  # `tracked_chunks_on_drive/2` still resolves.
+  # subsequent tracked-chunk migration fails too.
   defp prioritise_blobs(blobs, tracked) do
     {tracked_blobs, untracked} =
       Enum.split_with(blobs, fn blob -> Map.has_key?(tracked, blob.hash) end)
@@ -99,13 +118,12 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   end
 
   # Builds the authoritative `hash => ChunkMeta` map of data chunks that
-  # still have a location on the evacuating drive, read from every volume's
+  # have a location on the evacuating drive, read from every volume's
   # `chunk_index` tree (#1573). This replaces the cold-ETS
   # `ChunkIndex.lookup_by_hash/1` classification, which returned `:not_found`
-  # for real chunks after a restart. A volume whose tree can't be read
-  # (mid-evacuation, its pages already moved) contributes nothing — by then
-  # its data chunks are already migrated, so the empty contribution is
-  # correct rather than a misclassification.
+  # for real chunks after a restart. Called once per evacuation (its result
+  # is cached, see `tracked_chunks/3`), before any blob has moved, so every
+  # volume's tree is complete and readable.
   defp tracked_chunks_on_drive(node, drive_id) do
     all_volume_ids()
     |> Enum.flat_map(&volume_chunks_on_drive(&1, node, drive_id))
@@ -408,6 +426,10 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   defp finalise_evacuation(job) do
     node = job.params.node
     drive_id = job.params.drive_id
+
+    # The evacuation is finishing — drop the cached tracked-chunk set so the
+    # completed job record doesn't carry it around (#1578).
+    job = %{job | state: Map.delete(job.state, :tracked_chunks)}
 
     rewrite_drive_locations(job)
 

@@ -203,6 +203,63 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       refute "drive1" in drive_ids
     end
 
+    test "caches the authoritative tracked-chunk set in job state (#1578)" do
+      ensure_cluster_state()
+
+      {:ok, volume} =
+        VolumeRegistry.create("evac-cache-vol",
+          durability: %{type: :replicate, factor: 1, min_copies: 1}
+        )
+
+      data = "chunk whose tracked classification is cached across batches"
+      {:ok, hash, _info} = BlobStore.write_chunk(data, "drive1", "hot")
+
+      chunk =
+        ChunkMeta.new(volume.id, hash, byte_size(data), byte_size(data))
+        |> ChunkMeta.add_location(%{node: node(), drive_id: "drive1", tier: :hot})
+
+      ChunkIndex.put(chunk)
+
+      job =
+        %{
+          Job.new(EvacuationRunner, %{node: node(), drive_id: "drive1", total_chunks: 1})
+          | status: :running
+        }
+
+      {:continue, updated} = EvacuationRunner.step(job)
+
+      assert Map.has_key?(updated.state.tracked_chunks, hash)
+    end
+
+    test "reuses the cached tracked set instead of rescanning (#1578)" do
+      # No volume is registered, so a fresh scan would find no volumes and
+      # classify the on-disk chunk as untracked. Seeding the cache proves the
+      # step honours it rather than rescanning: the chunk migrates as tracked
+      # (locations rewritten to the target drive).
+      data = "on-disk chunk classified purely from the seeded cache"
+      {:ok, hash, _info} = BlobStore.write_chunk(data, "drive1", "hot")
+
+      seeded =
+        ChunkMeta.new("vol-seeded", hash, byte_size(data), byte_size(data))
+        |> ChunkMeta.add_location(%{node: node(), drive_id: "drive1", tier: :hot})
+
+      ChunkIndex.put(seeded)
+
+      job =
+        %{
+          Job.new(EvacuationRunner, %{node: node(), drive_id: "drive1", total_chunks: 1})
+          | status: :running,
+            state: %{tracked_chunks: %{hash => seeded}}
+        }
+
+      {:continue, _updated} = EvacuationRunner.step(job)
+
+      {:ok, migrated} = ChunkIndex.get("vol-seeded", hash)
+      drive_ids = Enum.map(migrated.locations, & &1.drive_id)
+      assert "drive2" in drive_ids
+      refute "drive1" in drive_ids
+    end
+
     test "completes when no chunks remain" do
       # No chunks on drive1
       job =
