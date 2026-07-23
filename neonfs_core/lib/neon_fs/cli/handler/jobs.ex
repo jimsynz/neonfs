@@ -218,24 +218,44 @@ defmodule NeonFS.CLI.Handler.Jobs do
   defp parse_job_type_filter(opts, nil), do: opts
 
   defp parse_job_type_filter(opts, type_label) when is_binary(type_label) do
-    # Find runner module by label
-    # We search known runners; extensible as new runners are added
-    known_runners = [
-      NeonFS.Core.Job.Runners.ClusterRebalance,
-      NeonFS.Core.Job.Runners.DriveEvacuation,
-      NeonFS.Core.Job.Runners.GarbageCollection,
-      NeonFS.Core.Job.Runners.KeyRotation,
-      NeonFS.Core.Job.Runners.Scrub,
-      NeonFS.Core.Job.Runners.VolumeAntiEntropy
-    ]
-
-    case Enum.find(known_runners, fn mod -> mod.label() == type_label end) do
+    case runner_for_label(type_label) do
       nil -> opts
       mod -> Keyword.put(opts, :type, mod)
     end
   end
 
   defp parse_job_type_filter(opts, _), do: opts
+
+  @doc false
+  @spec runner_for_label(String.t()) :: module() | nil
+  def runner_for_label(label) when is_binary(label) do
+    Enum.find(job_runners(), fn mod -> mod.label() == label end)
+  end
+
+  # Discovered from the application's module list rather than a
+  # hand-maintained list that silently drifts out of sync (#1580 —
+  # `ReplicaRepair` was missing, so `job list --type replica-repair`
+  # returned nothing).
+  @doc false
+  @spec job_runners() :: [module()]
+  def job_runners do
+    case :application.get_key(:neonfs_core, :modules) do
+      {:ok, modules} -> Enum.filter(modules, &job_runner?/1)
+      _ -> []
+    end
+  end
+
+  defp job_runner?(module) do
+    NeonFS.Core.Job.Runner in module_behaviours(module)
+  rescue
+    _ -> false
+  end
+
+  defp module_behaviours(module) do
+    module.module_info(:attributes)
+    |> Keyword.get_values(:behaviour)
+    |> List.flatten()
+  end
 
   # Private — worker status
 
