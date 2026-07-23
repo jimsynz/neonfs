@@ -59,6 +59,10 @@ pub enum DriveCommand {
         /// Node where the drive is located (default: local node)
         #[arg(long)]
         node: Option<String>,
+
+        /// Block until the evacuation job finishes; exits non-zero on failure.
+        #[arg(long)]
+        wait: bool,
     },
 }
 
@@ -74,9 +78,11 @@ impl DriveCommand {
             } => self.add(path, tier, capacity, id.as_deref(), format),
             DriveCommand::Remove { drive_id, force } => self.remove(drive_id, *force, format),
             DriveCommand::List { node } => self.list(node.as_deref(), format),
-            DriveCommand::Evacuate { drive_id, node } => {
-                self.evacuate(drive_id, node.as_deref(), format)
-            }
+            DriveCommand::Evacuate {
+                drive_id,
+                node,
+                wait,
+            } => self.evacuate(drive_id, node.as_deref(), *wait, format),
         }
     }
 
@@ -291,7 +297,13 @@ impl DriveCommand {
         Ok(())
     }
 
-    fn evacuate(&self, drive_id: &str, node: Option<&str>, format: OutputFormat) -> Result<()> {
+    fn evacuate(
+        &self,
+        drive_id: &str,
+        node: Option<&str>,
+        wait: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
         let node_name = match node {
             Some(n) => n.to_string(),
             None => {
@@ -356,6 +368,11 @@ impl DriveCommand {
             .get("id")
             .map(|t| term_to_string(t).unwrap_or_default())
             .unwrap_or_default();
+
+        if wait {
+            return crate::commands::job::wait_and_report(&job_id, format);
+        }
+
         let total = job_map
             .get("progress_total")
             .and_then(extract_integer)
@@ -467,22 +484,38 @@ mod tests {
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                DriveCommand::Evacuate { drive_id, node } => {
+                DriveCommand::Evacuate {
+                    drive_id,
+                    node,
+                    wait,
+                } => {
                     assert_eq!(drive_id, "nvme0");
                     assert!(node.is_none());
+                    assert!(!wait);
                 }
                 _ => panic!("Expected Evacuate variant"),
             }
         }
 
-        let cli =
-            TestCli::try_parse_from(["test", "evacuate", "sata0", "--node", "neonfs-core@host1"]);
+        let cli = TestCli::try_parse_from([
+            "test",
+            "evacuate",
+            "sata0",
+            "--node",
+            "neonfs-core@host1",
+            "--wait",
+        ]);
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                DriveCommand::Evacuate { drive_id, node } => {
+                DriveCommand::Evacuate {
+                    drive_id,
+                    node,
+                    wait,
+                } => {
                     assert_eq!(drive_id, "sata0");
                     assert_eq!(node.as_deref(), Some("neonfs-core@host1"));
+                    assert!(wait);
                 }
                 _ => panic!("Expected Evacuate variant"),
             }

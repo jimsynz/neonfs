@@ -722,6 +722,10 @@ pub struct RotationStatus {
     pub total_chunks: u64,
     pub migrated: u64,
     pub started_at: String,
+    /// Job id of the `KeyRotationRunner` job driving this rotation, so
+    /// `volume rotate-key --wait` can block on it (#1575). Empty on the
+    /// `rotation_status` response, which doesn't carry it.
+    pub job_id: String,
 }
 
 impl RotationStatus {
@@ -754,6 +758,12 @@ impl RotationStatus {
             .and_then(|t| term_to_string(t).ok())
             .unwrap_or_default();
 
+        let job_id = map
+            .get("job_id")
+            .and_then(|t| term_to_string(t).ok())
+            .filter(|s| s != "nil")
+            .unwrap_or_default();
+
         Ok(Self {
             from_version: term_to_u64(map.get("from_version").ok_or_else(|| {
                 CliError::TermConversionError("Missing 'from_version' field".to_string())
@@ -764,6 +774,7 @@ impl RotationStatus {
             total_chunks,
             migrated,
             started_at,
+            job_id,
         })
     }
 }
@@ -1199,6 +1210,18 @@ impl JobInfo {
             format!("{} — {}", base, self.progress_description)
         }
     }
+
+    /// Whether the job has reached a terminal state (mirrors
+    /// `NeonFS.Core.Job.terminal?/1`): no further transitions will occur.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.status.as_str(), "completed" | "failed" | "cancelled")
+    }
+
+    /// Whether the job finished unsuccessfully — drives the CLI exit code
+    /// when waiting on a job.
+    pub fn is_failure(&self) -> bool {
+        matches!(self.status.as_str(), "failed" | "cancelled")
+    }
 }
 
 #[cfg(test)]
@@ -1335,6 +1358,7 @@ mod tests {
             total_chunks: 100,
             migrated: 50,
             started_at: "2026-01-01T00:00:00Z".to_string(),
+            job_id: "job_abc".to_string(),
         };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["from_version"], 1);

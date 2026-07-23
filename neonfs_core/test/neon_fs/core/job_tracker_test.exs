@@ -189,6 +189,18 @@ defmodule NeonFS.Core.JobTrackerTest do
     end
   end
 
+  describe "get_cluster/1" do
+    test "resolves a local job without fanning out" do
+      {:ok, job} = JobTracker.create(TestRunner, %{total: 1})
+      assert {:ok, resolved} = JobTracker.get_cluster(job.id)
+      assert resolved.id == job.id
+    end
+
+    test "returns not_found when no core node has the job" do
+      assert {:error, :not_found} = JobTracker.get_cluster("nonexistent")
+    end
+  end
+
   describe "list/1" do
     test "lists all jobs" do
       {:ok, _} = JobTracker.create(TestRunner, %{total: 100})

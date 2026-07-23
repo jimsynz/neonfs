@@ -16,6 +16,10 @@ pub enum GcCommand {
         /// Restrict collection to a specific volume
         #[arg(long)]
         volume: Option<String>,
+
+        /// Block until the GC job finishes; exits non-zero on failure.
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Show recent GC job history
@@ -26,12 +30,12 @@ impl GcCommand {
     /// Execute the GC command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            GcCommand::Collect { volume } => self.collect(volume.as_deref(), format),
+            GcCommand::Collect { volume, wait } => self.collect(volume.as_deref(), *wait, format),
             GcCommand::Status => self.status(format),
         }
     }
 
-    fn collect(&self, volume: Option<&str>, format: OutputFormat) -> Result<()> {
+    fn collect(&self, volume: Option<&str>, wait: bool, format: OutputFormat) -> Result<()> {
         let mut opts_entries = vec![];
         if let Some(vol) = volume {
             opts_entries.push((
@@ -68,6 +72,10 @@ impl GcCommand {
             .get("id")
             .map(|t| term_to_string(t).unwrap_or_default())
             .unwrap_or_default();
+
+        if wait {
+            return crate::commands::job::wait_and_report(&job_id, format);
+        }
 
         let volume_display = volume.unwrap_or("all");
 
@@ -156,8 +164,9 @@ mod tests {
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                GcCommand::Collect { volume } => {
+                GcCommand::Collect { volume, wait } => {
                     assert!(volume.is_none());
+                    assert!(!wait);
                 }
                 _ => panic!("Expected Collect variant"),
             }
@@ -174,12 +183,13 @@ mod tests {
             command: GcCommand,
         }
 
-        let cli = TestCli::try_parse_from(["test", "collect", "--volume", "myvol"]);
+        let cli = TestCli::try_parse_from(["test", "collect", "--volume", "myvol", "--wait"]);
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                GcCommand::Collect { volume } => {
+                GcCommand::Collect { volume, wait } => {
                     assert_eq!(volume.as_deref(), Some("myvol"));
+                    assert!(wait);
                 }
                 _ => panic!("Expected Collect variant"),
             }

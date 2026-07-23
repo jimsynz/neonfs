@@ -169,6 +169,10 @@ pub enum ClusterCommand {
         /// Chunks per migration batch
         #[arg(long, default_value = "50")]
         batch_size: String,
+
+        /// Block until the rebalance job finishes; exits non-zero on failure.
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Show status of an active rebalance operation
@@ -454,7 +458,8 @@ impl ClusterCommand {
                 tier,
                 threshold,
                 batch_size,
-            } => self.rebalance(tier.as_deref(), threshold, batch_size, format),
+                wait,
+            } => self.rebalance(tier.as_deref(), threshold, batch_size, *wait, format),
             ClusterCommand::RebalanceStatus => self.rebalance_status(format),
             ClusterCommand::Repair { command } => command.execute(format),
             ClusterCommand::Status => self.status(format),
@@ -737,6 +742,7 @@ impl ClusterCommand {
         tier: Option<&str>,
         threshold: &str,
         batch_size: &str,
+        wait: bool,
         format: OutputFormat,
     ) -> Result<()> {
         let mut opts_entries = vec![
@@ -818,6 +824,11 @@ impl ClusterCommand {
             .get("id")
             .map(|t| term_to_string(t).unwrap_or_default())
             .unwrap_or_default();
+
+        if wait {
+            return crate::commands::job::wait_and_report(&job_id, format);
+        }
+
         let total = job_map
             .get("progress_total")
             .and_then(extract_integer)
@@ -2204,10 +2215,12 @@ mod tests {
                     tier,
                     threshold,
                     batch_size,
+                    wait,
                 } => {
                     assert!(tier.is_none());
                     assert_eq!(threshold, "0.10");
                     assert_eq!(batch_size, "50");
+                    assert!(!wait);
                 }
                 _ => panic!("Expected Rebalance variant"),
             }
@@ -2235,6 +2248,7 @@ mod tests {
             "0.05",
             "--batch-size",
             "100",
+            "--wait",
         ]);
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
@@ -2243,10 +2257,12 @@ mod tests {
                     tier,
                     threshold,
                     batch_size,
+                    wait,
                 } => {
                     assert_eq!(tier.as_deref(), Some("warm"));
                     assert_eq!(threshold, "0.05");
                     assert_eq!(batch_size, "100");
+                    assert!(wait);
                 }
                 _ => panic!("Expected Rebalance variant"),
             }
