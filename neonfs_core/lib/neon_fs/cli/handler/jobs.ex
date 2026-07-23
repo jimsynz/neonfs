@@ -53,7 +53,7 @@ defmodule NeonFS.CLI.Handler.Jobs do
     set_cli_metadata()
 
     with :ok <- require_cluster() do
-      case JobTracker.get(job_id) do
+      case JobTracker.get_cluster(job_id) do
         {:ok, job} -> {:ok, job_to_map(job)}
         {:error, :not_found} -> {:error, NotFound.exception(message: "Job not found: #{job_id}")}
       end

@@ -28,6 +28,11 @@ pub enum RepairCommand {
         /// flag, queues a pass for every volume in the registry.
         #[arg(long)]
         volume: Option<String>,
+
+        /// Block until every queued repair job finishes; exits non-zero if
+        /// any of them failed.
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Show recent replica-repair job history
@@ -42,12 +47,12 @@ impl RepairCommand {
     /// Execute the repair command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            RepairCommand::Start { volume } => self.start(volume.as_deref(), format),
+            RepairCommand::Start { volume, wait } => self.start(volume.as_deref(), *wait, format),
             RepairCommand::Status { volume } => self.status(volume.as_deref(), format),
         }
     }
 
-    fn start(&self, volume: Option<&str>, format: OutputFormat) -> Result<()> {
+    fn start(&self, volume: Option<&str>, wait: bool, format: OutputFormat) -> Result<()> {
         let opts_term = build_volume_opts(volume);
 
         let result = smol::block_on(async {
@@ -72,6 +77,10 @@ impl RepairCommand {
             .filter_map(|t| term_to_map(t).ok())
             .filter_map(|m| m.get("id").and_then(|v| term_to_string(v).ok()))
             .collect();
+
+        if wait {
+            return crate::commands::job::wait_and_report_many(&job_ids, format);
+        }
 
         let volume_display = volume.unwrap_or("all");
 
@@ -188,16 +197,22 @@ mod tests {
     fn test_repair_start_no_volume() {
         let cli = TestCli::try_parse_from(["test", "start"]).unwrap();
         match cli.command {
-            RepairCommand::Start { volume } => assert!(volume.is_none()),
+            RepairCommand::Start { volume, wait } => {
+                assert!(volume.is_none());
+                assert!(!wait);
+            }
             _ => panic!("Expected Start variant"),
         }
     }
 
     #[test]
     fn test_repair_start_with_volume() {
-        let cli = TestCli::try_parse_from(["test", "start", "--volume", "foo"]).unwrap();
+        let cli = TestCli::try_parse_from(["test", "start", "--volume", "foo", "--wait"]).unwrap();
         match cli.command {
-            RepairCommand::Start { volume } => assert_eq!(volume.as_deref(), Some("foo")),
+            RepairCommand::Start { volume, wait } => {
+                assert_eq!(volume.as_deref(), Some("foo"));
+                assert!(wait);
+            }
             _ => panic!("Expected Start variant"),
         }
     }

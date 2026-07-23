@@ -75,6 +75,10 @@ pub enum VolumeCommand {
     RotateKey {
         /// Volume name
         name: String,
+
+        /// Block until the key-rotation job finishes; exits non-zero on failure.
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Show key rotation progress for a volume
@@ -183,6 +187,10 @@ pub enum VolumeCommand {
         #[arg(long, conflicts_with = "interval")]
         now: bool,
 
+        /// With --now, block until the GC job finishes; exits non-zero on failure.
+        #[arg(long, requires = "now")]
+        wait: bool,
+
         /// New GC cadence (e.g. `24h`, `30m`). Stored in the
         /// volume's `RootSegment.schedules.gc.interval_ms`.
         #[arg(long)]
@@ -207,6 +215,10 @@ pub enum VolumeCommand {
         #[arg(long, conflicts_with = "interval")]
         now: bool,
 
+        /// With --now, block until the scrub job finishes; exits non-zero on failure.
+        #[arg(long, requires = "now")]
+        wait: bool,
+
         /// New scrub cadence (e.g. `7d`, `24h`).
         #[arg(long)]
         interval: Option<String>,
@@ -229,6 +241,10 @@ pub enum VolumeCommand {
         /// Trigger an immediate anti-entropy job for the volume.
         #[arg(long, conflicts_with = "interval")]
         now: bool,
+
+        /// With --now, block until the anti-entropy job finishes; exits non-zero on failure.
+        #[arg(long, requires = "now")]
+        wait: bool,
 
         /// New anti-entropy cadence (e.g. `1h`, `30m`).
         #[arg(long)]
@@ -414,7 +430,7 @@ impl VolumeCommand {
             ),
             VolumeCommand::Delete { name, force } => self.delete(name, *force, format),
             VolumeCommand::List { all } => self.list(*all, format),
-            VolumeCommand::RotateKey { name } => self.rotate_key(name, format),
+            VolumeCommand::RotateKey { name, wait } => self.rotate_key(name, *wait, format),
             VolumeCommand::RotationStatus { name } => self.rotation_status(name, format),
             VolumeCommand::Show { name } => self.show(name, format),
             VolumeCommand::Update {
@@ -458,18 +474,21 @@ impl VolumeCommand {
             VolumeCommand::Gc {
                 name,
                 now,
+                wait,
                 interval,
-            } => self.gc(name, *now, interval.as_deref(), format),
+            } => self.gc(name, *now, *wait, interval.as_deref(), format),
             VolumeCommand::Scrub {
                 name,
                 now,
+                wait,
                 interval,
-            } => self.scrub(name, *now, interval.as_deref(), format),
+            } => self.scrub(name, *now, *wait, interval.as_deref(), format),
             VolumeCommand::AntiEntropy {
                 name,
                 now,
+                wait,
                 interval,
-            } => self.anti_entropy(name, *now, interval.as_deref(), format),
+            } => self.anti_entropy(name, *now, *wait, interval.as_deref(), format),
             VolumeCommand::Snapshot { command } => command.execute(format),
             VolumeCommand::Promote {
                 source,
@@ -1130,17 +1149,18 @@ impl VolumeCommand {
         &self,
         name: &str,
         now: bool,
+        wait: bool,
         interval: Option<&str>,
         format: OutputFormat,
     ) -> Result<()> {
         match (now, interval) {
-            (true, _) => self.gc_now(name, format),
+            (true, _) => self.gc_now(name, wait, format),
             (false, Some(d)) => self.gc_set_interval(name, d, format),
             (false, None) => self.gc_status(name, format),
         }
     }
 
-    fn gc_now(&self, name: &str, format: OutputFormat) -> Result<()> {
+    fn gc_now(&self, name: &str, wait: bool, format: OutputFormat) -> Result<()> {
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
@@ -1166,6 +1186,10 @@ impl VolumeCommand {
             .get("id")
             .map(|t| term_to_string(t).unwrap_or_default())
             .unwrap_or_default();
+
+        if wait {
+            return crate::commands::job::wait_and_report(&job_id, format);
+        }
 
         match format {
             OutputFormat::Json => {
@@ -1313,17 +1337,18 @@ impl VolumeCommand {
         &self,
         name: &str,
         now: bool,
+        wait: bool,
         interval: Option<&str>,
         format: OutputFormat,
     ) -> Result<()> {
         match (now, interval) {
-            (true, _) => self.scrub_now(name, format),
+            (true, _) => self.scrub_now(name, wait, format),
             (false, Some(d)) => self.scrub_set_interval(name, d, format),
             (false, None) => self.scrub_status(name, format),
         }
     }
 
-    fn scrub_now(&self, name: &str, format: OutputFormat) -> Result<()> {
+    fn scrub_now(&self, name: &str, wait: bool, format: OutputFormat) -> Result<()> {
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
@@ -1349,6 +1374,10 @@ impl VolumeCommand {
             .get("id")
             .map(|t| term_to_string(t).unwrap_or_default())
             .unwrap_or_default();
+
+        if wait {
+            return crate::commands::job::wait_and_report(&job_id, format);
+        }
 
         match format {
             OutputFormat::Json => {
@@ -1496,17 +1525,18 @@ impl VolumeCommand {
         &self,
         name: &str,
         now: bool,
+        wait: bool,
         interval: Option<&str>,
         format: OutputFormat,
     ) -> Result<()> {
         match (now, interval) {
-            (true, _) => self.anti_entropy_now(name, format),
+            (true, _) => self.anti_entropy_now(name, wait, format),
             (false, Some(d)) => self.anti_entropy_set_interval(name, d, format),
             (false, None) => self.anti_entropy_status(name, format),
         }
     }
 
-    fn anti_entropy_now(&self, name: &str, format: OutputFormat) -> Result<()> {
+    fn anti_entropy_now(&self, name: &str, wait: bool, format: OutputFormat) -> Result<()> {
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
@@ -1532,6 +1562,10 @@ impl VolumeCommand {
             .get("id")
             .map(|t| term_to_string(t).unwrap_or_default())
             .unwrap_or_default();
+
+        if wait {
+            return crate::commands::job::wait_and_report(&job_id, format);
+        }
 
         match format {
             OutputFormat::Json => {
@@ -1884,7 +1918,7 @@ impl VolumeCommand {
         Ok(())
     }
 
-    fn rotate_key(&self, name: &str, format: OutputFormat) -> Result<()> {
+    fn rotate_key(&self, name: &str, wait: bool, format: OutputFormat) -> Result<()> {
         let name_term = Term::Binary(Binary {
             bytes: name.as_bytes().to_vec(),
         });
@@ -1905,6 +1939,10 @@ impl VolumeCommand {
 
         let data = unwrap_ok_tuple(result)?;
         let status = RotationStatus::from_term(data)?;
+
+        if wait {
+            return crate::commands::job::wait_and_report(&status.job_id, format);
+        }
 
         match format {
             OutputFormat::Json => {

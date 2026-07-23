@@ -16,6 +16,10 @@ pub enum ScrubCommand {
         /// Restrict scrubbing to a specific volume
         #[arg(long)]
         volume: Option<String>,
+
+        /// Block until the scrub job finishes; exits non-zero on failure.
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Show recent scrub job history
@@ -26,12 +30,12 @@ impl ScrubCommand {
     /// Execute the scrub command
     pub fn execute(&self, format: OutputFormat) -> Result<()> {
         match self {
-            ScrubCommand::Start { volume } => self.start(volume.as_deref(), format),
+            ScrubCommand::Start { volume, wait } => self.start(volume.as_deref(), *wait, format),
             ScrubCommand::Status => self.status(format),
         }
     }
 
-    fn start(&self, volume: Option<&str>, format: OutputFormat) -> Result<()> {
+    fn start(&self, volume: Option<&str>, wait: bool, format: OutputFormat) -> Result<()> {
         let mut opts_entries = vec![];
         if let Some(vol) = volume {
             opts_entries.push((
@@ -68,6 +72,10 @@ impl ScrubCommand {
             .get("id")
             .map(|t| term_to_string(t).unwrap_or_default())
             .unwrap_or_default();
+
+        if wait {
+            return crate::commands::job::wait_and_report(&job_id, format);
+        }
 
         let volume_display = volume.unwrap_or("all");
 
@@ -156,8 +164,9 @@ mod tests {
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                ScrubCommand::Start { volume } => {
+                ScrubCommand::Start { volume, wait } => {
                     assert!(volume.is_none());
+                    assert!(!wait);
                 }
                 _ => panic!("Expected Start variant"),
             }
@@ -174,12 +183,13 @@ mod tests {
             command: ScrubCommand,
         }
 
-        let cli = TestCli::try_parse_from(["test", "start", "--volume", "myvol"]);
+        let cli = TestCli::try_parse_from(["test", "start", "--volume", "myvol", "--wait"]);
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
             match parsed.command {
-                ScrubCommand::Start { volume } => {
+                ScrubCommand::Start { volume, wait } => {
                     assert_eq!(volume.as_deref(), Some("myvol"));
+                    assert!(wait);
                 }
                 _ => panic!("Expected Start variant"),
             }

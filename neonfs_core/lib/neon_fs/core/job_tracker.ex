@@ -82,6 +82,34 @@ defmodule NeonFS.Core.JobTracker do
   end
 
   @doc """
+  Gets a job by ID from anywhere in the cluster.
+
+  A job runs — and its `Job` record is persisted — only on the core node
+  that owns it, so a local `get/1` on the node a CLI happens to be
+  connected to returns `:not_found` for a job owned by a peer. This checks
+  the local DETS first, then fans out to the other connected core nodes
+  (mirroring `list_cluster/1`), so `neonfs job show` / `--wait` resolve a
+  job regardless of which core the CLI reached (#1575).
+  """
+  @spec get_cluster(String.t()) :: {:ok, Job.t()} | {:error, :not_found}
+  def get_cluster(job_id) when is_binary(job_id) do
+    case get(job_id) do
+      {:ok, job} -> {:ok, job}
+      {:error, :not_found} -> get_from_remote_cores(job_id)
+    end
+  end
+
+  defp get_from_remote_cores(job_id) do
+    ServiceRegistry.connected_nodes_by_type(:core)
+    |> Enum.find_value({:error, :not_found}, fn node ->
+      case safe_remote_get(node, job_id) do
+        {:ok, job} -> {:ok, job}
+        _ -> nil
+      end
+    end)
+  end
+
+  @doc """
   Lists jobs with optional filters.
 
   ## Filters
@@ -480,6 +508,12 @@ defmodule NeonFS.Core.JobTracker do
     :erpc.call(node, __MODULE__, :list, [filters], 5_000)
   catch
     _, _ -> []
+  end
+
+  defp safe_remote_get(node, job_id) do
+    :erpc.call(node, __MODULE__, :get, [job_id], 5_000)
+  catch
+    _, _ -> {:error, :not_found}
   end
 
   # Private — Telemetry
