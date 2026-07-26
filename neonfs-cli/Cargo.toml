@@ -48,4 +48,4 @@ tempfile = "3"
 # Serialise tests that mutate process-global state (env vars). `cargo
 # test` parallelises within a binary; without this annotation, tests
 # that `set_var`/`remove_var` race against concurrent readers (#987).
-serial_test = "3"
+serial_test = "4"
