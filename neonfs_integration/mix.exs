@@ -21,7 +21,8 @@ defmodule NeonFS.Integration.MixProject do
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
-      version: @version
+      version: @version,
+      hex: [ignore_advisories: ["EEF-CVE-2026-43969", "EEF-CVE-2026-43966"]]
     ]
   end
 

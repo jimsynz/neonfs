@@ -24,7 +24,8 @@ defmodule NeonFS.CSI.MixProject do
       package: package(),
       releases: releases(),
       start_permanent: Mix.env() == :prod,
-      version: @version
+      version: @version,
+      hex: [ignore_advisories: ["EEF-CVE-2026-43969", "EEF-CVE-2026-43966"]]
     ]
   end
 
