@@ -1093,7 +1093,18 @@ defmodule NeonFS.Core.ReadOperation do
   defp fetch_single_chunk(hash, should_verify, volume_id) do
     case ChunkIndex.get(volume_id, hash) do
       {:ok, chunk_meta} ->
-        fetch_chunk_data(chunk_meta, should_verify, volume_id)
+        case fetch_chunk_data(chunk_meta, should_verify, volume_id) do
+          {:ok, _data} = result ->
+            result
+
+          {:error, _reason} = fetch_error ->
+            retry_fetch_with_refreshed_metadata(
+              chunk_meta,
+              should_verify,
+              volume_id,
+              fetch_error
+            )
+        end
 
       {:error, :not_found} ->
         {:error,
@@ -1102,6 +1113,30 @@ defmodule NeonFS.Core.ReadOperation do
            volume_id: volume_id
          )}
     end
+  end
+
+  defp retry_fetch_with_refreshed_metadata(
+         chunk_meta,
+         should_verify,
+         volume_id,
+         fetch_error
+       ) do
+    case ChunkIndex.get(volume_id, chunk_meta.hash) do
+      {:ok, refreshed_meta} ->
+        if fetch_metadata_changed?(chunk_meta, refreshed_meta) do
+          fetch_chunk_data(refreshed_meta, should_verify, volume_id)
+        else
+          fetch_error
+        end
+
+      {:error, _reason} ->
+        fetch_error
+    end
+  end
+
+  defp fetch_metadata_changed?(old_meta, new_meta) do
+    fields = [:crypto, :compression, :locations, :original_size, :stored_size]
+    Map.take(old_meta, fields) != Map.take(new_meta, fields)
   end
 
   defp fetch_chunk_data(chunk_meta, should_verify, volume_id) do

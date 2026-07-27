@@ -668,7 +668,11 @@ defmodule NeonFS.Core.ReadOperationTest do
   end
 
   describe "encrypted read path" do
+    use Mimic
+
     @test_master_key :crypto.strong_rand_bytes(32) |> Base.encode64()
+
+    setup :verify_on_exit!
 
     setup %{tmp_dir: tmp_dir} do
       # Set up encryption infrastructure: Ra + cluster.json with master key
@@ -749,6 +753,88 @@ defmodule NeonFS.Core.ReadOperationTest do
 
       assert {:ok, read_v2} = ReadOperation.read_file(volume.id, "/v2.txt")
       assert read_v2 == data_v2
+    end
+
+    test "retries a failed fetch when key rotation changes chunk metadata", %{
+      enc_volume: volume
+    } do
+      data = "Data read across a key-rotation metadata race"
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/rotation-race.txt", [data])
+
+      [chunk_hash] = file_meta.chunks
+      {:ok, old_meta} = ChunkIndex.get(volume.id, chunk_hash)
+      {:ok, old_key} = KeyManager.get_volume_key(volume.id, 1)
+
+      {:ok, 2} = KeyManager.rotate_volume_key(volume.id)
+      {:ok, new_key} = KeyManager.get_volume_key(volume.id, 2)
+
+      new_nonce = :crypto.strong_rand_bytes(12)
+      new_meta = %{old_meta | crypto: %{old_meta.crypto | key_version: 2, nonce: new_nonce}}
+      metadata_calls = :counters.new(1, [:atomics])
+      volume_id = volume.id
+
+      Mimic.expect(ChunkIndex, :get, 3, fn ^volume_id, ^chunk_hash ->
+        :counters.add(metadata_calls, 1, 1)
+
+        case :counters.get(metadata_calls, 1) do
+          3 -> {:ok, new_meta}
+          _ -> {:ok, old_meta}
+        end
+      end)
+
+      fetch_calls = :counters.new(1, [:atomics])
+      stale_fetch_error = {:local_read_failed, "chunk not found: stale encrypted variant"}
+
+      Mimic.expect(NeonFS.Core.ChunkFetcher, :fetch_chunk, 2, fn ^chunk_hash, opts ->
+        :counters.add(fetch_calls, 1, 1)
+
+        case :counters.get(fetch_calls, 1) do
+          1 ->
+            assert Keyword.fetch!(opts, :key) == old_key
+            assert Keyword.fetch!(opts, :nonce) == old_meta.crypto.nonce
+            {:error, stale_fetch_error}
+
+          2 ->
+            assert Keyword.fetch!(opts, :key) == new_key
+            assert Keyword.fetch!(opts, :nonce) == new_nonce
+            {:ok, data, :local}
+        end
+      end)
+
+      assert {:ok, ^data} = ReadOperation.read_file(volume.id, "/rotation-race.txt")
+    end
+
+    test "returns the original fetch error when refreshed metadata is unchanged", %{
+      enc_volume: volume
+    } do
+      data = "Data whose metadata remains unchanged"
+
+      {:ok, file_meta} =
+        WriteOperation.write_file_streamed(volume.id, "/unchanged-meta.txt", [data])
+
+      [chunk_hash] = file_meta.chunks
+      {:ok, chunk_meta} = ChunkIndex.get(volume.id, chunk_hash)
+      {:ok, key} = KeyManager.get_volume_key(volume.id, 1)
+      volume_id = volume.id
+      stale_fetch_error = {:local_read_failed, "chunk not found: stale encrypted variant"}
+
+      Mimic.expect(ChunkIndex, :get, 3, fn ^volume_id, ^chunk_hash ->
+        {:ok, chunk_meta}
+      end)
+
+      Mimic.expect(NeonFS.Core.ChunkFetcher, :fetch_chunk, fn ^chunk_hash, opts ->
+        assert Keyword.fetch!(opts, :key) == key
+        assert Keyword.fetch!(opts, :nonce) == chunk_meta.crypto.nonce
+        {:error, stale_fetch_error}
+      end)
+
+      assert {:error,
+              %Internal{
+                message: "{:local_read_failed, \"chunk not found: stale encrypted variant\"}",
+                details: %{chunk_hash: ^chunk_hash}
+              }} = ReadOperation.read_file(volume.id, "/unchanged-meta.txt")
     end
 
     test "tampered ciphertext returns decryption error", %{enc_volume: volume} do

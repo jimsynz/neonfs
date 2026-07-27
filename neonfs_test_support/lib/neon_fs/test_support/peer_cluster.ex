@@ -20,13 +20,9 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   require Logger
 
-  # On a loaded CI runner the peer dist-channel bring-up intermittently fails
-  # with a transient error (`:tcp_closed`, `{:inet_async, :timeout}`) that
-  # succeeds on a retry. Without a retry a single transient boot failure fails
-  # the whole test module in `setup_all`/`setup` (#1071). Late in a long run
-  # (hundreds of cluster setups) the runner can be saturated enough that the
-  # bring-up times out across several consecutive attempts, so the budget is
-  # generous and the backoff widens exponentially up to a cap (#1280).
+  # OTP 28's TCP control-channel accept has a fixed 60s timeout that loaded CI
+  # runners can exceed. Keep the bounded backoff, but retry `connection: 0`
+  # peers over standard I/O so subsequent attempts avoid the same path (#1584).
   @peer_boot_attempts 5
   @peer_boot_backoff_ms 250
   @peer_boot_max_backoff_ms 2_000
@@ -165,8 +161,13 @@ defmodule NeonFS.TestSupport.PeerCluster do
     )
 
     Process.sleep(boot_backoff_ms(attempts_left))
-    peer_start_with_retry(peer_opts, attempts_left - 1)
+    peer_start_with_retry(retry_peer_opts(peer_opts), attempts_left - 1)
   end
+
+  defp retry_peer_opts(%{connection: 0} = peer_opts),
+    do: %{peer_opts | connection: :standard_io}
+
+  defp retry_peer_opts(peer_opts), do: peer_opts
 
   # Widen the wait as attempts are consumed so a runner under sustained load
   # near the end of a long run gets progressively more breathing room before
