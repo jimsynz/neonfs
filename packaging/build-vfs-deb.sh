@@ -14,10 +14,11 @@
 # with the distro's `debian/rules` via dpkg-buildpackage. The module then links
 # and symbol-versions exactly like the distro's own VFS modules.
 #
-# Must run where apt resolves `samba` to the target release's version (the deb
-# targets Debian trixie). Requires: apt (deb-src is enabled here), a C
-# toolchain, and Erlang on PATH (the ei headers/libs for the ETF wire client
-# are discovered from the running Erlang install and linked statically).
+# The build environment must resolve `samba` to the target release's version
+# (the deb targets Debian trixie) and provide the project's Erlang version for
+# the statically-linked ei client. Non-root local invocations therefore rerun
+# automatically in the same versioned Debian image used by CI; CI/release
+# containers already run as root and execute the build directly.
 #
 # Places samba-vfs-neonfs_*.deb in OUT_DIR and prints the main .deb path.
 set -euo pipefail
@@ -32,7 +33,46 @@ WORKDIR="${WORKDIR:-${REPO_ROOT}/.samba-build}"
 ERL="${ERL:-erl}"
 
 log() { echo "$@" >&2; }
-SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+
+run_in_build_container() {
+  local elixir_version erlang_version rust_version image host_uid host_gid
+
+  command -v docker >/dev/null 2>&1 || {
+    log "docker is required for a non-root samba-vfs-neonfs build"
+    exit 2
+  }
+
+  elixir_version="$(awk '/^elixir/ {print $2}' "${REPO_ROOT}/.tool-versions")"
+  erlang_version="$(awk '/^erlang/ {print $2}' "${REPO_ROOT}/.tool-versions")"
+  rust_version="$(awk '/^rust/ {print $2}' "${REPO_ROOT}/.tool-versions")"
+  image="harton.dev/james/workflows/elixir-rust:${elixir_version}-erlang-${erlang_version}-rust-${rust_version}"
+  host_uid="$(id -u)"
+  host_gid="$(id -g)"
+
+  mkdir -p "${WORKDIR}" "${OUT_DIR}"
+  NATIVE="$(cd "${NATIVE}" && pwd)"
+  OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
+  WORKDIR="$(cd "${WORKDIR}" && pwd)"
+  log "==> building in ${image}"
+
+  docker run --rm \
+    -v "${REPO_ROOT}:/workspaces/neonfs:ro" \
+    -v "${NATIVE}:/native:ro" \
+    -v "${OUT_DIR}:/out" \
+    -v "${WORKDIR}:/workspaces/neonfs/.samba-build" \
+    -e NATIVE=/native \
+    -e OUT_DIR=/out \
+    -e WORKDIR=/workspaces/neonfs/.samba-build \
+    -e HOST_UID="${host_uid}" \
+    -e HOST_GID="${host_gid}" \
+    "${image}" \
+    bash -c 'status=0; bash /workspaces/neonfs/packaging/build-vfs-deb.sh || status=$?; chown -R "${HOST_UID}:${HOST_GID}" /out /workspaces/neonfs/.samba-build; exit "${status}"'
+}
+
+if [ "$(id -u)" -ne 0 ]; then
+  run_in_build_container
+  exit $?
+fi
 
 EI_DIR="$("$ERL" -noshell -eval 'io:format("~ts",[code:lib_dir(erl_interface)]),halt().' 2>/dev/null || true)"
 [ -f "${EI_DIR}/include/ei.h" ] || { log "erl_interface not found (need Erlang with ei on PATH; ERL=${ERL})"; exit 2; }
@@ -42,14 +82,14 @@ enable_deb_src() {
   for f in /etc/apt/sources.list.d/*.sources; do
     [ -f "$f" ] || continue
     if grep -qE '^Types:' "$f" && ! grep -qE '^Types:.* deb-src' "$f"; then
-      $SUDO sed -i -E 's/^(Types:.*)$/\1 deb-src/' "$f"
+      sed -i -E 's/^(Types:.*)$/\1 deb-src/' "$f"
     fi
   done
   for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
     [ -f "$f" ] || continue
     if grep -qE '^deb ' "$f" && ! grep -qE '^deb-src ' "$f"; then
       extra="$(sed -nE 's/^deb (.*)/deb-src \1/p' "$f")"
-      [ -n "$extra" ] && printf '%s\n' "$extra" | $SUDO tee -a "$f" >/dev/null
+      [ -n "$extra" ] && printf '%s\n' "$extra" | tee -a "$f" >/dev/null
     fi
   done
 }
@@ -61,9 +101,9 @@ mkdir -p "${WORKDIR}" "${OUT_DIR}"
 # in a fresh container that has none of them installed.
 log "==> enabling deb-src + installing the samba build toolchain"
 enable_deb_src
-$SUDO apt-get update -qq
-$SUDO apt-get install -y --no-install-recommends dpkg-dev >/dev/null
-$SUDO apt-get build-dep -y samba >/dev/null
+apt-get update -qq
+apt-get install -y --no-install-recommends dpkg-dev >/dev/null
+apt-get build-dep -y samba >/dev/null
 
 # Reuse a cached source tree only if it still matches the distro's samba (a
 # stale tree would build against the wrong private-symbol version). Otherwise
@@ -94,12 +134,14 @@ python3 - "${SRC}/source3/wscript" "${EI_DIR}" <<'PY'
 import sys
 ws, ei = sys.argv[1], sys.argv[2]
 s = open(ws).read()
-if "LIBPATH_EI_NEONFS" not in s:
-    needle = "def configure(conf):\n"
-    i = s.find(needle) + len(needle)
-    s = s[:i] + ("    conf.env.append_value('LIBPATH', '%s/lib')  # LIBPATH_EI_NEONFS\n"
-                 "    conf.CHECK_LIB('ei', shlib=False)\n" % ei) + s[i:]
-    open(ws, "w").write(s)
+s = "".join(line for line in s.splitlines(keepends=True)
+            if "LIBPATH_EI_NEONFS" not in line
+            and "conf.CHECK_LIB('ei', shlib=False)" not in line)
+needle = "def configure(conf):\n"
+i = s.find(needle) + len(needle)
+s = s[:i] + ("    conf.env.append_value('LIBPATH', '%s/lib')  # LIBPATH_EI_NEONFS\n"
+             "    conf.CHECK_LIB('ei', shlib=False)\n" % ei) + s[i:]
+open(ws, "w").write(s)
 PY
 
 # --- register the module (idempotent) ---
@@ -121,9 +163,17 @@ s += ("\nbld.SAMBA3_MODULE('vfs_neonfs',\n"
 open(wsb, "w").write(s)
 PY
 
-# --- build vfs_neonfs as a shared module ---
-grep -q ',vfs_neonfs' debian/rules 2>/dev/null || \
-  sed -i 's/--with-shared-modules=vfs_dfs_samba4,vfs_nfs4acl_xattr,auth_samba4/&,vfs_neonfs/' "${SRC}/debian/rules"
+# --- build vfs_neonfs as a shared module (and repair previously cached trees) ---
+python3 - "${SRC}/debian/rules" <<'PY'
+import sys
+rules = sys.argv[1]
+s = open(rules).read().replace(",vfs_neonfs", "")
+needle = "--with-shared-modules=vfs_dfs_samba4,vfs_nfs4acl_xattr,auth_samba4"
+if needle not in s:
+    raise SystemExit("Samba shared-module configuration not found")
+s = s.replace(needle, needle + ",vfs_neonfs", 1)
+open(rules, "w").write(s)
+PY
 
 # --- new binary package (mirrors samba-vfs-ceph) ---
 if ! grep -q '^Package: samba-vfs-neonfs' "${SRC}/debian/control"; then
@@ -150,10 +200,10 @@ if [ "${fresh}" = 1 ]; then
   log "==> dpkg-buildpackage (clean build — first run)"
   DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -uc -us
 else
-  # Cached tree: force the module (and only it) to relink, keep the rest of the
-  # samba build, and skip the clean step so the cache is actually reused.
+  # Cached tree: reconfigure for the current versioned Erlang image, force the
+  # module to relink, and skip the clean step so compiled Samba objects remain.
   log "==> dpkg-buildpackage -nc (incremental — cached tree)"
-  rm -f bin/built.stamp
+  rm -f bin/configured.stamp bin/built.stamp
   DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -b -nc -uc -us
 fi
 

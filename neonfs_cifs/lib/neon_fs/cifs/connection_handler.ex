@@ -15,9 +15,9 @@ defmodule NeonFS.CIFS.ConnectionHandler do
       ops.
     * `:files` — `%{handle => {volume, path, flags}}` for open
       files. Cleared on `close` and (defensively) on `disconnect`.
-    * `:dirs` — `%{handle => {volume, path, cursor}}` for open
-      directories. The cursor is opaque to the C shim — the handler
-      uses it to advance through `readdir` calls.
+    * `:dirs` — `%{handle => remaining_entries}` for open
+      directories: the snapshot taken at `fdopendir`, consumed one
+      entry per `readdir` call.
 
   The frame format is 4-byte big-endian length prefix + ETF — see
   `NeonFS.CIFS.Listener`. Each request decodes to a

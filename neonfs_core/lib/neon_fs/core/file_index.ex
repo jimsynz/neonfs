@@ -48,6 +48,7 @@ defmodule NeonFS.Core.FileIndex do
 
   alias NeonFS.Events.{
     DirCreated,
+    DirDeleted,
     DirRenamed,
     FileContentUpdated,
     FileCreated,
@@ -409,6 +410,21 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  Removes an empty directory.
+
+  Directories carry no FileMeta, so `delete/1` (which resolves the
+  FileMeta by id) cannot remove them: rmdir works by path instead,
+  deleting the child dirent and the `dir:` record in one staged batch.
+  Returns `{:error, :not_found}` when the path names no directory,
+  `{:error, :not_a_directory}` when it names a file, and
+  `{:error, :directory_not_empty}` when children remain.
+  """
+  @spec rmdir(volume_id(), path()) :: :ok | {:error, term()}
+  def rmdir(volume_id, path) do
+    GenServer.call(__MODULE__, {:rmdir, volume_id, path}, 15_000)
+  end
+
+  @doc """
   Ensures a root directory entry exists for the given volume.
   """
   @spec ensure_root_dir(volume_id()) :: :ok | {:error, term()}
@@ -620,12 +636,25 @@ defmodule NeonFS.Core.FileIndex do
 
   @impl true
   def handle_call({:rename, volume_id, parent_path, old_name, new_name}, from, state) do
-    stage_or_reply(plan_rename(volume_id, parent_path, old_name, new_name), from, state)
+    stage_or_reply(
+      plan_rename(volume_id, parent_path, old_name, new_name, state.pending_files),
+      from,
+      state
+    )
   end
 
   @impl true
   def handle_call({:move, volume_id, source_dir, dest_dir, name}, from, state) do
-    stage_or_reply(plan_move(volume_id, source_dir, dest_dir, name), from, state)
+    stage_or_reply(
+      plan_move(volume_id, source_dir, dest_dir, name, state.pending_files),
+      from,
+      state
+    )
+  end
+
+  @impl true
+  def handle_call({:rmdir, volume_id, path}, from, state) do
+    stage_or_reply(plan_rmdir(volume_id, path), from, state)
   end
 
   @impl true
@@ -1053,30 +1082,71 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
+  ## Private — Rmdir
+
+  defp plan_rmdir(_volume_id, "/"), do: {:now, {:error, :forbidden}}
+
+  defp plan_rmdir(volume_id, path) do
+    normalized = FileMeta.normalize_path(path)
+    {parent_path, name} = split_path(normalized)
+
+    with {:ok, child} <- read_dirent(volume_id, parent_path, name),
+         :ok <- require_dir_entry(child),
+         :ok <- require_empty_dir(volume_id, normalized) do
+      mutations = [
+        dirent_delete_mutation(volume_id, parent_path, name),
+        dir_record_delete_mutation(volume_id, normalized)
+      ]
+
+      on_commit = fn ->
+        safe_broadcast(volume_id, %DirDeleted{volume_id: volume_id, path: normalized})
+      end
+
+      {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok}
+    else
+      {:error, reason} -> {:now, {:error, reason}}
+    end
+  end
+
+  defp require_dir_entry(%{type: :dir}), do: :ok
+  defp require_dir_entry(_other), do: {:error, :not_a_directory}
+
+  defp require_empty_dir(volume_id, path) do
+    case list_dirents(volume_id, path) do
+      {:ok, children} when map_size(children) == 0 -> :ok
+      {:ok, _children} -> {:error, :directory_not_empty}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   ## Private — Rename (within same directory)
 
   # A dirent is per-child, so a rename is a delete-old + put-new pair.
   # Both writes land in one batch commit (atomic root flip); the
   # directory intent gives cross-node mutual exclusion (same conflict
   # key as `move`).
-  defp plan_rename(volume_id, parent_path, old_name, new_name) do
+  defp plan_rename(volume_id, parent_path, old_name, new_name, overlay) do
     normalized = FileMeta.normalize_path(parent_path)
 
     with {:ok, child} <- read_dirent(volume_id, normalized, old_name),
          :ok <- check_rename_target(volume_id, normalized, old_name, new_name),
+         {:ok, updated_file} <-
+           file_at_new_path(volume_id, child, Path.join(normalized, new_name), overlay),
          {:ok, intent_id} <- try_acquire_intent(rename_intent(volume_id, normalized)) do
       mutations =
         [
           dirent_put_mutation(volume_id, normalized, new_name, child.type, child.id)
           | rename_delete_mutations(volume_id, normalized, old_name, new_name)
-        ]
+        ] ++ file_path_mutations(updated_file)
 
       on_commit = fn ->
         complete_intent(intent_id)
+        materialise_file_path(updated_file)
         broadcast_rename_event(volume_id, child, normalized, old_name, new_name)
       end
 
-      {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok}
+      {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok,
+       file_path_effect(updated_file)}
     else
       {:error, reason} -> {:now, {:error, reason}}
     end
@@ -1108,7 +1178,7 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Move (across directories)
 
-  defp plan_move(volume_id, source_dir, dest_dir, name) do
+  defp plan_move(volume_id, source_dir, dest_dir, name, overlay) do
     source_normalized = FileMeta.normalize_path(source_dir)
     dest_normalized = FileMeta.normalize_path(dest_dir)
 
@@ -1126,21 +1196,54 @@ defmodule NeonFS.Core.FileIndex do
       )
 
     with {:ok, child} <- read_dirent(volume_id, source_normalized, name),
+         {:ok, updated_file} <-
+           file_at_new_path(volume_id, child, Path.join(dest_normalized, name), overlay),
          {:ok, intent_id} <- try_acquire_intent(intent) do
-      mutations = [
-        dirent_put_mutation(volume_id, dest_normalized, name, child.type, child.id),
-        dirent_delete_mutation(volume_id, source_normalized, name)
-      ]
+      mutations =
+        [
+          dirent_put_mutation(volume_id, dest_normalized, name, child.type, child.id),
+          dirent_delete_mutation(volume_id, source_normalized, name)
+        ] ++ file_path_mutations(updated_file)
 
       on_commit = fn ->
         complete_intent(intent_id)
+        materialise_file_path(updated_file)
         broadcast_move_event(volume_id, child, source_normalized, dest_normalized, name)
       end
 
-      {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok}
+      {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok,
+       file_path_effect(updated_file)}
     else
       {:error, reason} -> {:now, {:error, reason}}
     end
+  end
+
+  defp file_at_new_path(volume_id, %{type: :file, id: file_id}, path, overlay) do
+    with {:ok, file} <- fetch_file_for_path_change(volume_id, file_id, overlay) do
+      {:ok, FileMeta.update(file, path: path, modified_at: file.modified_at)}
+    end
+  end
+
+  defp file_at_new_path(_volume_id, _child, _path, _overlay), do: {:ok, nil}
+
+  defp fetch_file_for_path_change(volume_id, file_id, overlay) do
+    case Map.fetch(overlay, file_id) do
+      {:ok, :deleted} -> {:error, :not_found}
+      {:ok, %FileMeta{} = file} -> {:ok, file}
+      :error -> get(volume_id, file_id)
+    end
+  end
+
+  defp file_path_effect(nil), do: nil
+  defp file_path_effect(%FileMeta{} = file), do: {:put, file}
+
+  defp file_path_mutations(nil), do: []
+  defp file_path_mutations(%FileMeta{} = file), do: [file_put_mutation(file)]
+
+  defp materialise_file_path(nil), do: :ok
+
+  defp materialise_file_path(%FileMeta{} = file) do
+    :ets.insert(:file_index_by_id, {file.id, file})
   end
 
   ## Private — Root directory
@@ -1172,6 +1275,10 @@ defmodule NeonFS.Core.FileIndex do
   defp dir_record_mutation(%DirectoryEntry{} = entry) do
     {:put, :file_index, dir_key(entry.volume_id, entry.parent_path),
      MetadataValue.encode(DirectoryEntry.to_storable_map(entry))}
+  end
+
+  defp dir_record_delete_mutation(volume_id, path) do
+    {:delete, :file_index, dir_key(volume_id, path)}
   end
 
   defp dirent_put_mutation(volume_id, dir_path, name, type, id) do

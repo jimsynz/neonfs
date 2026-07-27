@@ -78,7 +78,16 @@ defmodule NeonFS.CIFS.LiveListenerTest do
     defp reply_for({:fstatvfs, _}, state), do: {{:ok, statvfs()}, state}
 
     defp stat do
-      %{size: 1234, mode: 0o100644, atime: 111, mtime: 222, ctime: 333, kind: :file}
+      %{
+        dev: 0xFEDCBA9876543210,
+        ino: 0x957C881D9661B59D,
+        size: 1234,
+        mode: 0o100644,
+        atime: 111,
+        mtime: 222,
+        ctime: 333,
+        kind: :file
+      }
     end
 
     defp statvfs, do: %{total_bytes: 1000, free_bytes: 400, available_bytes: 300}

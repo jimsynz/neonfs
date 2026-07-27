@@ -514,10 +514,10 @@ defmodule NeonFS.Core do
     end
   end
 
+  # Directories carry no FileMeta, so the by-id `FileIndex.delete/1`
+  # path can't remove them — `rmdir/2` works by path instead (#1555).
   defp do_delete(volume_id, path) do
-    with {:ok, file} <- FileIndex.get_by_path(volume_id, path) do
-      FileIndex.delete(file.id)
-    end
+    FileIndex.rmdir(volume_id, path)
   end
 
   defp peek_path_type(volume_id, path) do

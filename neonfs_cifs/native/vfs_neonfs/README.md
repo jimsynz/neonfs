@@ -31,11 +31,11 @@ registers `erl_interface` (`ei`) as a link dependency, adds `vfs_neonfs` to
 OUT_DIR=./dist bash packaging/build-vfs-deb.sh   # → dist/samba-vfs-neonfs_<samba-ver>_<arch>.deb
 ```
 
-Needs Erlang on `PATH` (the `ei` headers/libs come from the running install and
-are linked statically) plus a C toolchain, and must run where apt resolves
-`samba` to the target release's version. `neonfs-cifs` and `neonfs-omnibus`
-`Depends: samba-vfs-neonfs`. CI builds it in the dedicated `vfs_neonfs` job with
-the Samba source tree cached.
+For a non-root local invocation the script runs the build in the versioned
+Debian `elixir-rust` image selected by `.tool-versions`, matching the dedicated
+`vfs_neonfs` CI job's Erlang and Samba environment without installing host
+packages. Root invocations, including CI and release containers, build directly.
+The Samba source tree is cached under `.samba-build` in either case.
 
 Runtime behaviour against a real `smbd` (mounting, round-trips) is #386.
 

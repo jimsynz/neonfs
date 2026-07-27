@@ -29,6 +29,8 @@ int nw_probe_run(nw_conn *conn) {
   PCHECK(nw_connect(conn, "vol1") == 0, "connect");
 
   PCHECK(nw_stat(conn, "/a.txt", &st) == 0, "stat");
+  PCHECK(st.dev == UINT64_C(0xfedcba9876543210), "stat.dev");
+  PCHECK(st.ino == UINT64_C(0x957c881d9661b59d), "stat.ino");
   PCHECK(st.size == 1234, "stat.size");
   PCHECK(st.mode == 0100644, "stat.mode");
   PCHECK(st.atime == 111 && st.mtime == 222 && st.ctime == 333, "stat.times");

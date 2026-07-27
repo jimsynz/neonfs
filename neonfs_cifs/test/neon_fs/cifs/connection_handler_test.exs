@@ -4,6 +4,9 @@ defmodule NeonFS.CIFS.ConnectionHandlerTest do
 
   alias NeonFS.CIFS.Listener
 
+  @file_id "019dc5d8-4000-7000-8000-000000000001"
+  @volume_id "019dc5d8-3fcf-7d13-b4fa-832c4390b0a0"
+
   setup :set_mimic_global
   setup :verify_on_exit!
 
@@ -17,10 +20,18 @@ defmodule NeonFS.CIFS.ConnectionHandlerTest do
 
   describe "end-to-end framed ETF round-trip" do
     test "connect then stat round-trips through the listener", %{port: port} do
-      stub(NeonFS.Client, :core_call, fn NeonFS.Core.FileIndex,
-                                         :get_by_path,
-                                         ["vol-a", "/hello"] ->
-        {:ok, %{size: 5, mode: 0o100644, accessed_at: 1, modified_at: 2, changed_at: 3}}
+      stub(NeonFS.Client, :core_call, fn NeonFS.Core, :get_file_meta, ["vol-a", "/hello"] ->
+        {:ok,
+         %{
+           id: @file_id,
+           volume_id: @volume_id,
+           path: "/hello",
+           size: 5,
+           mode: 0o100644,
+           accessed_at: 1,
+           modified_at: 2,
+           changed_at: 3
+         }}
       end)
 
       {:ok, sock} =
@@ -36,6 +47,8 @@ defmodule NeonFS.CIFS.ConnectionHandlerTest do
       assert {:ok,
               %{
                 stat: %{
+                  dev: 0x6AD05F36A5D262B7,
+                  ino: 0x957C881D9661B59D,
                   size: 5,
                   mode: 0o100644,
                   atime: 1,

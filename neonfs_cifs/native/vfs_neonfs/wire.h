@@ -41,6 +41,8 @@ typedef enum {
 
 /* Decoded `stat` payload (`%{stat: %{...}}`). */
 typedef struct {
+  uint64_t dev;
+  uint64_t ino;
   uint64_t size;
   uint32_t mode;
   int64_t atime;

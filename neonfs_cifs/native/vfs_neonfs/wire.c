@@ -298,6 +298,8 @@ static int do_stat(nw_conn *conn, const char *op, const char *path,
   int inner = 0;
   char key[MAXATOMLEN + 1];
   int i;
+  int saw_dev = 0;
+  int saw_ino = 0;
 
   if (req_open(&x, op, 1) != 0 ||
       (by_handle ? put_int(&x, "handle", (long long)handle)
@@ -325,25 +327,48 @@ static int do_stat(nw_conn *conn, const char *op, const char *path,
 
   memset(out, 0, sizeof(*out));
   for (i = 0; i < inner; i++) {
-    long long n = 0;
     if (ei_decode_atom(buf, &idx, key) != 0) goto bad;
     if (strcmp(key, "kind") == 0) {
       if (decode_kind(buf, &idx, &out->kind) != 0) goto bad;
       continue;
     }
-    if (ei_decode_longlong(buf, &idx, &n) != 0) goto bad;
-    if (strcmp(key, "size") == 0)
-      out->size = (uint64_t)n;
-    else if (strcmp(key, "mode") == 0)
-      out->mode = (uint32_t)n;
-    else if (strcmp(key, "atime") == 0)
-      out->atime = n;
-    else if (strcmp(key, "mtime") == 0)
-      out->mtime = n;
-    else if (strcmp(key, "ctime") == 0)
-      out->ctime = n;
+
+    if (strcmp(key, "dev") == 0 || strcmp(key, "ino") == 0 ||
+        strcmp(key, "size") == 0 || strcmp(key, "mode") == 0) {
+      unsigned long long n = 0;
+      if (ei_decode_ulonglong(buf, &idx, &n) != 0) goto bad;
+      if (strcmp(key, "dev") == 0) {
+        out->dev = (uint64_t)n;
+        saw_dev = 1;
+      } else if (strcmp(key, "ino") == 0) {
+        out->ino = (uint64_t)n;
+        saw_ino = 1;
+      } else if (strcmp(key, "size") == 0) {
+        out->size = (uint64_t)n;
+      } else {
+        if (n > UINT32_MAX) goto bad;
+        out->mode = (uint32_t)n;
+      }
+      continue;
+    }
+
+    if (strcmp(key, "atime") == 0 || strcmp(key, "mtime") == 0 ||
+        strcmp(key, "ctime") == 0) {
+      long long n = 0;
+      if (ei_decode_longlong(buf, &idx, &n) != 0) goto bad;
+      if (strcmp(key, "atime") == 0)
+        out->atime = n;
+      else if (strcmp(key, "mtime") == 0)
+        out->mtime = n;
+      else
+        out->ctime = n;
+      continue;
+    }
+
+    goto bad;
   }
 
+  if (!saw_dev || !saw_ino || out->dev == 0 || out->ino == 0) goto bad;
   free(buf);
   return 0;
 

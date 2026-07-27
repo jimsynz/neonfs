@@ -623,7 +623,7 @@ defmodule NeonFS.CoreTest do
       {:ok, _} = Core.write_file_streamed(vol_name, "/old-name.txt", ["data"])
       assert :ok = Core.rename_file(vol_name, "/old-name.txt", "/new-name.txt")
       assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/old-name.txt")
-      assert {:ok, _} = Core.get_file_meta(vol_name, "/new-name.txt")
+      assert {:ok, %{path: "/new-name.txt"}} = Core.get_file_meta(vol_name, "/new-name.txt")
     end
 
     test "moves file to different directory", %{volume_name: vol_name} do
@@ -633,7 +633,7 @@ defmodule NeonFS.CoreTest do
 
       assert :ok = Core.rename_file(vol_name, "/src/file.txt", "/dst/file.txt")
       assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/src/file.txt")
-      assert {:ok, _} = Core.get_file_meta(vol_name, "/dst/file.txt")
+      assert {:ok, %{path: "/dst/file.txt"}} = Core.get_file_meta(vol_name, "/dst/file.txt")
     end
 
     test "moves and renames file", %{volume_name: vol_name} do
@@ -643,7 +643,7 @@ defmodule NeonFS.CoreTest do
 
       assert :ok = Core.rename_file(vol_name, "/from/original.txt", "/to/renamed.txt")
       assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/from/original.txt")
-      assert {:ok, _} = Core.get_file_meta(vol_name, "/to/renamed.txt")
+      assert {:ok, %{path: "/to/renamed.txt"}} = Core.get_file_meta(vol_name, "/to/renamed.txt")
     end
 
     test "returns error for nonexistent volume" do

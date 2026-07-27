@@ -39,6 +39,7 @@ struct neonfs_fh {
 	uint64_t handle;    /* opaque handle minted by neonfs_cifs */
 	struct dirent *de;  /* readdir scratch entry */
 	int fd;             /* debug-only fake fd reported to the VFS layer */
+	int open_flags;     /* how->flags at open, toggled by our fcntl_fn */
 	bool is_dir;
 };
 
@@ -142,6 +143,8 @@ static mode_t neonfs_kind_mode(nw_kind kind)
 static void neonfs_fill_stat(SMB_STRUCT_STAT *dst, const nw_stat_t *src)
 {
 	ZERO_STRUCTP(dst);
+	dst->st_ex_dev = (dev_t)src->dev;
+	dst->st_ex_ino = (ino_t)src->ino;
 	dst->st_ex_size = (off_t)src->size;
 	dst->st_ex_mode = (mode_t)src->mode | neonfs_kind_mode(src->kind);
 	dst->st_ex_nlink = 1;
@@ -249,7 +252,38 @@ static int neonfs_openat(struct vfs_handle_struct *handle,
 	fh->handle = nwh;
 	fh->is_dir = false;
 	fh->fd = neonfs_next_fd(cfg);
+	fh->open_flags = (int)how->flags;
 	return fh->fd;
+}
+
+/*
+ * smbd round-trips fcntl(F_GETFL/F_SETFL) on the fsp's fd — e.g.
+ * vfs_set_blocking() after an O_NONBLOCK open (open.c open_file) — and
+ * the default fcntl_fn would operate on our fake fd and fail the whole
+ * open with EBADF/NT_STATUS_INVALID_HANDLE. NeonFS handles have no
+ * kernel flag state (every op is a synchronous RPC), so track the flags
+ * here: F_GETFL reads them back, F_SETFL just records the toggle.
+ */
+static int neonfs_fcntl(struct vfs_handle_struct *handle,
+			struct files_struct *fsp, int cmd, va_list ap)
+{
+	struct neonfs_fh *fh = neonfs_fh_get(handle, fsp);
+
+	if (fh == NULL) {
+		errno = EBADF;
+		return -1;
+	}
+
+	switch (cmd) {
+	case F_GETFL:
+		return fh->open_flags;
+	case F_SETFL:
+		fh->open_flags = va_arg(ap, int);
+		return 0;
+	default:
+		errno = ENOSYS;
+		return -1;
+	}
 }
 
 static int neonfs_close(struct vfs_handle_struct *handle,
@@ -304,6 +338,88 @@ static ssize_t neonfs_pwrite(struct vfs_handle_struct *handle,
 		return -1;
 	}
 	return (ssize_t)written;
+}
+
+/*
+ * SMB2 reads/writes always go through the async tevent send/recv pair
+ * (smb2_aio.c); the default vfswrap implementations operate on the
+ * fsp's fd, which for us is fake — every SMB2 I/O would fail with
+ * EBADF/NT_STATUS_INVALID_HANDLE. Our ops are synchronous RPCs, so
+ * (like the fsync pair below) run them inline and post an
+ * already-completed request.
+ */
+struct neonfs_rw_state {
+	ssize_t ret;
+	struct vfs_aio_state vfs_aio_state;
+};
+
+static void neonfs_rw_done(struct tevent_req *req,
+			   struct neonfs_rw_state *state, ssize_t ret)
+{
+	if (ret < 0) {
+		state->ret = -1;
+		state->vfs_aio_state.error = errno;
+		tevent_req_error(req, errno);
+		return;
+	}
+	state->ret = ret;
+	tevent_req_done(req);
+}
+
+static struct tevent_req *neonfs_pread_send(struct vfs_handle_struct *handle,
+					    TALLOC_CTX *mem_ctx,
+					    struct tevent_context *ev,
+					    struct files_struct *fsp, void *data,
+					    size_t n, off_t offset)
+{
+	struct tevent_req *req = NULL;
+	struct neonfs_rw_state *state = NULL;
+
+	req = tevent_req_create(mem_ctx, &state, struct neonfs_rw_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->vfs_aio_state = (struct vfs_aio_state){0};
+
+	neonfs_rw_done(req, state,
+		       neonfs_pread(handle, fsp, data, n, offset));
+	return tevent_req_post(req, ev);
+}
+
+static ssize_t neonfs_rw_recv(struct tevent_req *req,
+			      struct vfs_aio_state *vfs_aio_state)
+{
+	struct neonfs_rw_state *state =
+		tevent_req_data(req, struct neonfs_rw_state);
+
+	if (tevent_req_is_unix_error(req, &vfs_aio_state->error)) {
+		tevent_req_received(req);
+		return -1;
+	}
+	*vfs_aio_state = state->vfs_aio_state;
+	tevent_req_received(req);
+	return state->ret;
+}
+
+static struct tevent_req *neonfs_pwrite_send(struct vfs_handle_struct *handle,
+					     TALLOC_CTX *mem_ctx,
+					     struct tevent_context *ev,
+					     struct files_struct *fsp,
+					     const void *data, size_t n,
+					     off_t offset)
+{
+	struct tevent_req *req = NULL;
+	struct neonfs_rw_state *state = NULL;
+
+	req = tevent_req_create(mem_ctx, &state, struct neonfs_rw_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->vfs_aio_state = (struct vfs_aio_state){0};
+
+	neonfs_rw_done(req, state,
+		       neonfs_pwrite(handle, fsp, data, n, offset));
+	return tevent_req_post(req, ev);
 }
 
 static int neonfs_ftruncate(struct vfs_handle_struct *handle,
@@ -450,6 +566,7 @@ static DIR *neonfs_fdopendir(struct vfs_handle_struct *handle,
 	fh->handle = nwh;
 	fh->is_dir = true;
 	fh->fd = neonfs_next_fd(cfg);
+	fh->open_flags = O_RDONLY | O_DIRECTORY;
 	return (DIR *)fh;
 }
 
@@ -621,9 +738,14 @@ static struct vfs_fn_pointers vfs_neonfs_fns = {
 	.lstat_fn = neonfs_lstat,
 	.fstat_fn = neonfs_fstat,
 	.openat_fn = neonfs_openat,
+	.fcntl_fn = neonfs_fcntl,
 	.close_fn = neonfs_close,
 	.pread_fn = neonfs_pread,
+	.pread_send_fn = neonfs_pread_send,
+	.pread_recv_fn = neonfs_rw_recv,
 	.pwrite_fn = neonfs_pwrite,
+	.pwrite_send_fn = neonfs_pwrite_send,
+	.pwrite_recv_fn = neonfs_rw_recv,
 	.ftruncate_fn = neonfs_ftruncate,
 	.fsync_send_fn = neonfs_fsync_send,
 	.fsync_recv_fn = neonfs_fsync_recv,

@@ -710,13 +710,38 @@ defmodule NeonFS.Core.FileIndexTest do
 
   describe "rename/4" do
     test "renames within directory" do
-      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/old.txt"))
+      {:ok, file} = FileIndex.create(FileMeta.new("vol1", "/old.txt"))
 
       assert :ok = FileIndex.rename("vol1", "/", "old.txt", "new.txt")
 
       assert {:ok, children} = FileIndex.list_dir("vol1", "/")
       assert Map.has_key?(children, "new.txt")
       refute Map.has_key?(children, "old.txt")
+      assert {:ok, renamed} = FileIndex.get("vol1", file.id)
+      assert renamed.path == "/new.txt"
+      assert renamed.modified_at == file.modified_at
+      assert {:ok, %{path: "/new.txt"}} = FileIndex.get_by_path("vol1", "/new.txt")
+    end
+
+    test "preserves a file update staged earlier in the same batch" do
+      {:ok, file} = FileIndex.create(FileMeta.new("vol1", "/old.txt"))
+      server = Process.whereis(FileIndex)
+      update_tag = make_ref()
+      rename_tag = make_ref()
+
+      :sys.suspend(server)
+      send(server, {:"$gen_call", {self(), update_tag}, {:update, file.id, [size: 42]}})
+
+      send(
+        server,
+        {:"$gen_call", {self(), rename_tag}, {:rename, "vol1", "/", "old.txt", "new.txt"}}
+      )
+
+      :sys.resume(server)
+
+      assert_receive {^update_tag, {:ok, %{size: 42}}}
+      assert_receive {^rename_tag, :ok}
+      assert {:ok, %{path: "/new.txt", size: 42}} = FileIndex.get("vol1", file.id)
     end
 
     test "returns error for non-existent source name" do
@@ -738,7 +763,7 @@ defmodule NeonFS.Core.FileIndexTest do
     test "moves file across directories" do
       {:ok, _} = FileIndex.mkdir("vol1", "/src")
       {:ok, _} = FileIndex.mkdir("vol1", "/dest")
-      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/src/file.txt"))
+      {:ok, file} = FileIndex.create(FileMeta.new("vol1", "/src/file.txt"))
 
       assert :ok = FileIndex.move("vol1", "/src", "/dest", "file.txt")
 
@@ -749,6 +774,8 @@ defmodule NeonFS.Core.FileIndexTest do
       # Should be in destination
       assert {:ok, dest_children} = FileIndex.list_dir("vol1", "/dest")
       assert Map.has_key?(dest_children, "file.txt")
+      assert {:ok, %{path: "/dest/file.txt"}} = FileIndex.get("vol1", file.id)
+      assert {:ok, %{path: "/dest/file.txt"}} = FileIndex.get_by_path("vol1", "/dest/file.txt")
     end
 
     test "returns error if source doesn't contain the item" do
@@ -756,6 +783,61 @@ defmodule NeonFS.Core.FileIndexTest do
       {:ok, _} = FileIndex.mkdir("vol1", "/dest")
 
       assert {:error, :not_found} = FileIndex.move("vol1", "/src", "/dest", "nope.txt")
+    end
+  end
+
+  describe "rmdir/2" do
+    test "removes an empty directory from the parent listing" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/documents")
+
+      assert :ok = FileIndex.rmdir("vol1", "/documents")
+
+      assert {:ok, children} = FileIndex.list_dir("vol1", "/")
+      refute Map.has_key?(children, "documents")
+    end
+
+    test "removed directory no longer resolves by path" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/documents")
+      assert {:ok, _meta} = FileIndex.get_by_path("vol1", "/documents")
+
+      assert :ok = FileIndex.rmdir("vol1", "/documents")
+
+      assert {:error, :not_found} = FileIndex.get_by_path("vol1", "/documents")
+    end
+
+    test "refuses to remove a non-empty directory" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/documents")
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/documents/a.txt"))
+
+      assert {:error, :directory_not_empty} = FileIndex.rmdir("vol1", "/documents")
+
+      assert {:ok, children} = FileIndex.list_dir("vol1", "/")
+      assert Map.has_key?(children, "documents")
+    end
+
+    test "returns :not_a_directory for a file path" do
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/a.txt"))
+
+      assert {:error, :not_a_directory} = FileIndex.rmdir("vol1", "/a.txt")
+    end
+
+    test "returns :not_found for a missing path" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/documents")
+
+      assert {:error, :not_found} = FileIndex.rmdir("vol1", "/nope")
+    end
+
+    test "refuses to remove the volume root" do
+      assert {:error, :forbidden} = FileIndex.rmdir("vol1", "/")
+    end
+
+    test "a directory can be recreated after removal" do
+      {:ok, _} = FileIndex.mkdir("vol1", "/documents")
+      assert :ok = FileIndex.rmdir("vol1", "/documents")
+
+      assert {:ok, _dir} = FileIndex.mkdir("vol1", "/documents")
+      assert {:ok, children} = FileIndex.list_dir("vol1", "/")
+      assert Map.has_key?(children, "documents")
     end
   end
 

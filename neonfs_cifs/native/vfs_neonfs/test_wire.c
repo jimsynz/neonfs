@@ -181,7 +181,11 @@ static void reply_stat(ei_x_buff *x) {
   ei_x_encode_atom(x, "ok");
   ei_x_encode_map_header(x, 1);
   ei_x_encode_atom(x, "stat");
-  ei_x_encode_map_header(x, 6);
+  ei_x_encode_map_header(x, 8);
+  ei_x_encode_atom(x, "dev");
+  ei_x_encode_ulonglong(x, UINT64_C(0xfedcba9876543210));
+  ei_x_encode_atom(x, "ino");
+  ei_x_encode_ulonglong(x, UINT64_C(0x957c881d9661b59d));
   ei_x_encode_atom(x, "size");
   ei_x_encode_longlong(x, 1234);
   ei_x_encode_atom(x, "mode");
