@@ -196,7 +196,7 @@ For other label IDs: `fj-token` then `curl -H "Authorization: token $(fj-token)"
 
 ## Quality Requirements
 
-- **Before every commit**, run `mix check --no-retry` from the repository root. This runs checks across all subprojects. The build MUST pass in every subproject before committing — changes to shared code (e.g. `neonfs_client` types, state machine versions, new supervisor children) frequently break downstream packages.
+- **Before every commit**, run `resources/scripts/neonfs-each mix check --no-retry`. This runs checks across all subprojects. The build MUST pass in every subproject before committing — changes to shared code (e.g. `neonfs_client` types, state machine versions, new supervisor children) frequently break downstream packages.
 - Do NOT commit broken code.
 - Keep changes focused and minimal.
 - Follow existing code patterns — look at recent PRs in the same area.

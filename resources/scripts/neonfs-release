@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Cut a workspace release with git_ops. The git_ops tooling lives in its
+# own Mix project under resources/release/ (so the repository root doesn't
+# need one); this wrapper runs `mix git_ops.release` from there.
+#
+# Usage: neonfs-release [git_ops.release args...]
+
+set -euo pipefail
+
+release_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../release" && pwd)"
+cd "$release_dir"
+mix deps.get
+exec mix git_ops.release "$@"

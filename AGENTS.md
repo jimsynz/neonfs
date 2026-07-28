@@ -14,9 +14,9 @@ NeonFS is experimental. **There are no production clusters.** Do not preserve ba
 
 ## Build Commands
 
-### Elixir (from repository root or individual packages)
+### Elixir (from individual package directories)
 ```bash
-mix check --no-retry           # Run all checks in all subprojects (from root)
+mix check --no-retry           # Run all checks for this package
 mix compile                    # Compile Elixir + Rustler NIFs
 mix test                       # Run ExUnit tests
 mix test path/to/test.exs      # Run specific test file
@@ -25,6 +25,12 @@ mix format                     # Format code
 mix format --check-formatted   # Check formatting
 mix credo --strict             # Code style checker
 mix dialyzer                   # Static type analysis
+```
+
+There is no Mix project at the repository root. To run a task in every subproject, use the fan-out script:
+```bash
+resources/scripts/neonfs-each mix check --no-retry   # All checks in all subprojects
+resources/scripts/neonfs-each mix deps.get           # Fetch deps everywhere
 ```
 
 ### Pre-Commit Checks
@@ -180,6 +186,8 @@ Historical context:
 
 Release notes live in [`CHANGELOG.md`](CHANGELOG.md), generated from conventional commits.
 
+Releases are cut with `resources/scripts/neonfs-release`, which runs `mix git_ops.release` in the release tooling project at `resources/release/` (the repository root has no Mix project).
+
 `git_ops` bumps the `version =` field in every Elixir `mix.exs` and every Rust `Cargo.toml` it tracks, but **does not** regenerate the three workspace `Cargo.lock` files (`neonfs_core/`, `neonfs-cli/`, `neonfs_client/native/neonfs_chunker/`). After a release commit, run `cargo update -p <workspace-package>` in each workspace and commit the lockfile changes — otherwise the next clean checkout's first `cargo build` produces an uncommitted lockfile drift (`<pkg> v0.1.0 → v<new>`) that shows up in every subsequent `git status`.
 
 ## Testing
@@ -202,9 +210,9 @@ mix test                       # All Elixir tests
 cargo test                     # Rust tests
 ```
 
-**Test suite performance:** The full check suite (`mix check --no-retry`) takes several minutes, and the integration tests (`neonfs_integration`) alone can take 6+ minutes. **Save test output to a file and grep it** rather than re-running the suite each time you need to inspect results:
+**Test suite performance:** The full check suite (`resources/scripts/neonfs-each mix check --no-retry`) takes several minutes, and the integration tests (`neonfs_integration`) alone can take 6+ minutes. **Save test output to a file and grep it** rather than re-running the suite each time you need to inspect results:
 ```bash
-mix check --no-retry 2>&1 | tee /tmp/neonfs_check.txt
+resources/scripts/neonfs-each mix check --no-retry 2>&1 | tee /tmp/neonfs_check.txt
 grep -E 'failure|FAILED|✕' /tmp/neonfs_check.txt
 ```
 Run individual test files first to iterate quickly before running the full suite.
@@ -412,7 +420,7 @@ Handle the `{:ok, {}}` case explicitly when expecting simple `:ok`.
 
 Before declaring any implementation phase complete:
 
-1. **Run the full test suite**: `mix check --no-retry` from the repository root (runs checks in all subprojects)
+1. **Run the full test suite**: `resources/scripts/neonfs-each mix check --no-retry` (runs checks in all subprojects)
 2. **All integration tests must pass** - the neonfs_integration package spawns real peer nodes to test multi-node scenarios
 3. **Verify inter-service communication works**:
    - CLI → Core (via Erlang distribution)

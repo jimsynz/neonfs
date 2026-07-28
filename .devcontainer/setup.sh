@@ -16,7 +16,7 @@ fi
 set -euo pipefail
 
 echo "==> Claiming _build volume mounts for $(id -un)"
-sudo chown "$(id -u):$(id -g)" _build */_build
+sudo chown "$(id -u):$(id -g)" */_build
 
 PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$PATH"
 REQUIRED_PLUGINS=$(cat .tool-versions | cut -d \  -f 1)
@@ -41,6 +41,6 @@ mix local.hex --force
 mix local.rebar --force
 
 echo "==> Fetching dependencies..."
-mix deps.get
+resources/scripts/neonfs-each mix deps.get
 
 echo "==> Setup complete!"
