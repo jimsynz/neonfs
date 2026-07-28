@@ -15,7 +15,9 @@ env:
 jobs:
   # ==========================================================================
   # Resolve tool versions from .tool-versions (so all jobs use the same
-  # images) and load the package matrix from .forgejo/ci-matrix.json.
+  # images) and compute which jobs this change needs: the package matrix is
+  # .forgejo/ci-matrix.json filtered by resources/scripts/ci-affected
+  # against the PR's changed files (pushes to main always run everything).
   #
   # Matrix entry schema (JSON has no comments, so it's documented here):
   #   name         package directory, also the job display name
@@ -42,9 +44,16 @@ jobs:
       elixir_image: ${{ steps.parse.outputs.elixir_image }}
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
       rust_image: ${{ steps.parse.outputs.rust_image }}
-      packages: ${{ steps.parse.outputs.packages }}
+      packages: ${{ steps.affected.outputs.packages }}
+      run_integration: ${{ steps.affected.outputs.run_integration }}
+      run_cli: ${{ steps.affected.outputs.run_cli }}
+      run_wire: ${{ steps.affected.outputs.run_wire }}
+      run_vfs: ${{ steps.affected.outputs.run_vfs }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # ci-affected diffs against the PR base, which needs history.
+          fetch-depth: 0
       - id: parse
         run: |
           ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
@@ -56,11 +65,16 @@ jobs:
           echo "elixir_image=harton.dev/james/workflows/elixir:${ELIXIR}-erlang-${ERLANG}" >> "$GITHUB_OUTPUT"
           echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
           echo "rust_image=harton.dev/james/workflows/rust:${RUST}" >> "$GITHUB_OUTPUT"
-          {
-            echo 'packages<<NEONFS_CI_MATRIX'
-            cat .forgejo/ci-matrix.json
-            echo 'NEONFS_CI_MATRIX'
-          } >> "$GITHUB_OUTPUT"
+      - id: affected
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            git diff --name-only "${BASE}...HEAD" \
+              | tee /dev/stderr \
+              | resources/scripts/ci-affected >> "$GITHUB_OUTPUT"
+          else
+            resources/scripts/ci-affected --all >> "$GITHUB_OUTPUT"
+          fi
 
   # =========================================================================
   # buffering-check - Guard against whole-file buffering regressions (#254)
@@ -83,6 +97,7 @@ jobs:
   package:
     name: ${{ matrix.pkg.name }}
     needs: setup
+    if: needs.setup.outputs.packages != '[]'
     runs-on: docker
     timeout-minutes: 60
     strategy:
@@ -217,6 +232,7 @@ jobs:
   # =========================================================================
   vfs_neonfs_wire:
     needs: setup
+    if: needs.setup.outputs.run_wire == 'true'
     runs-on: docker
     timeout-minutes: 60
     container:
@@ -238,6 +254,7 @@ jobs:
   # =========================================================================
   vfs_neonfs:
     needs: setup
+    if: needs.setup.outputs.run_vfs == 'true'
     runs-on: docker
     timeout-minutes: 60
     container:
@@ -261,6 +278,7 @@ jobs:
   # =========================================================================
   neonfs-cli:
     needs: setup
+    if: needs.setup.outputs.run_cli == 'true'
     runs-on: docker
     timeout-minutes: 60
     container:
@@ -298,6 +316,7 @@ jobs:
   # =========================================================================
   neonfs_integration:
     needs: setup
+    if: needs.setup.outputs.run_integration == 'true'
     runs-on: amd64
     timeout-minutes: 60
     container:
@@ -387,6 +406,7 @@ jobs:
   # =========================================================================
   canary:
     needs:
+      - setup
       - buffering-check
       - package
       - vfs_neonfs_wire
