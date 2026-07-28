@@ -274,12 +274,15 @@ jobs:
   # build tree is cached, so only the first run pays the full Samba build; later
   # runs relink just the module and repackage. Kept a separate job so that cost
   # doesn't ride on every other suite. (Load/round-trip testing is #386.)
+  # The vfs-cache-warm workflow rebuilds the cache on a schedule after
+  # eviction; the raised timeout covers the cold-build case so it finishes
+  # instead of flaking (#1565).
   # =========================================================================
   vfs_neonfs:
     needs: setup
     if: needs.setup.outputs.run_vfs == 'true'
     runs-on: docker
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
     steps:
