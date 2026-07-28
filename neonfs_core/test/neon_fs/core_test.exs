@@ -184,6 +184,121 @@ defmodule NeonFS.CoreTest do
     end
   end
 
+  # The metadata half of the by-ID facade (#1606 of #1590) — `stat`,
+  # `fchmod`/`fchown`/`futimens` and `ftruncate` served from an
+  # immutable handle rather than a path that may have moved.
+  describe "get_file_meta_by_id/3" do
+    test "returns metadata keyed by file_id", %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/meta-by-id.txt", ["abc"])
+
+      assert {:ok, %{id: ^id, path: "/meta-by-id.txt", size: 3}} =
+               Core.get_file_meta_by_id(vol_name, id)
+    end
+
+    test "still resolves a detached file", %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/meta-detached.txt", ["abc"])
+      :ok = mark_detached_directly(id)
+
+      assert {:error, %FileNotFound{}} = Core.get_file_meta(vol_name, "/meta-detached.txt")
+      assert {:ok, %{id: ^id, detached: true}} = Core.get_file_meta_by_id(vol_name, id)
+    end
+
+    test "returns :wrong_volume for a file_id from another volume",
+         %{volume_name: vol_name} do
+      other = "other-meta-vol-#{:rand.uniform(999_999)}"
+      {:ok, _} = VolumeRegistry.create(other, [])
+      {:ok, %{id: id}} = Core.write_file_streamed(other, "/sister.txt", ["x"])
+
+      assert {:error, :wrong_volume} = Core.get_file_meta_by_id(vol_name, id)
+    end
+
+    test "returns FileNotFound for an unknown file_id", %{volume_name: vol_name} do
+      assert {:error, %FileNotFound{}} = Core.get_file_meta_by_id(vol_name, "nonexistent-id")
+    end
+
+    test "returns error for a nonexistent volume" do
+      assert {:error, %VolumeNotFound{}} = Core.get_file_meta_by_id("no-such-volume", "any-id")
+    end
+
+    test "holds a non-root identity to the file's POSIX mode",
+         %{volume_name: vol_name} do
+      {:ok, %{id: id}} =
+        Core.write_file_streamed(vol_name, "/private.txt", ["secret"], uid: 0, mode: 0o600)
+
+      assert {:error, %PermissionDenied{}} =
+               Core.get_file_meta_by_id(vol_name, id, uid: 1000, gids: [1000])
+    end
+  end
+
+  describe "update_file_meta_by_id/4" do
+    test "updates fields keyed by file_id", %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/chmod-by-id.txt", ["abc"])
+
+      assert {:ok, %{mode: 0o100600}} =
+               Core.update_file_meta_by_id(vol_name, id, mode: 0o100600)
+
+      assert {:ok, %{mode: 0o100600}} = Core.get_file_meta_by_id(vol_name, id)
+    end
+
+    test "updates a detached file", %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/chmod-detached.txt", ["abc"])
+      :ok = mark_detached_directly(id)
+
+      assert {:ok, %{detached: true, uid: 4242}} =
+               Core.update_file_meta_by_id(vol_name, id, uid: 4242)
+    end
+
+    test "returns :wrong_volume for a file_id from another volume",
+         %{volume_name: vol_name} do
+      other = "other-update-vol-#{:rand.uniform(999_999)}"
+      {:ok, _} = VolumeRegistry.create(other, [])
+      {:ok, %{id: id}} = Core.write_file_streamed(other, "/sister.txt", ["x"])
+
+      assert {:error, :wrong_volume} = Core.update_file_meta_by_id(vol_name, id, uid: 1)
+    end
+
+    test "returns FileNotFound for an unknown file_id", %{volume_name: vol_name} do
+      assert {:error, %FileNotFound{}} =
+               Core.update_file_meta_by_id(vol_name, "nonexistent-id", uid: 1)
+    end
+  end
+
+  describe "truncate_file_by_id/5" do
+    test "shrinks a file keyed by file_id", %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/trunc-by-id.txt", ["0123456789"])
+
+      assert {:ok, %{size: 4}} = Core.truncate_file_by_id(vol_name, id, 4)
+      assert {:ok, "0123"} = Core.read_file_by_id(vol_name, id)
+    end
+
+    test "applies additional updates in the same write", %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/trunc-updates.txt", ["0123456789"])
+
+      assert {:ok, %{size: 2, mode: 0o100640}} =
+               Core.truncate_file_by_id(vol_name, id, 2, mode: 0o100640)
+    end
+
+    test "truncates a detached file", %{volume_name: vol_name} do
+      {:ok, %{id: id}} = Core.write_file_streamed(vol_name, "/trunc-detached.txt", ["0123456789"])
+      :ok = mark_detached_directly(id)
+
+      assert {:ok, %{detached: true, size: 3}} = Core.truncate_file_by_id(vol_name, id, 3)
+    end
+
+    test "returns :wrong_volume for a file_id from another volume",
+         %{volume_name: vol_name} do
+      other = "other-trunc-vol-#{:rand.uniform(999_999)}"
+      {:ok, _} = VolumeRegistry.create(other, [])
+      {:ok, %{id: id}} = Core.write_file_streamed(other, "/sister.txt", ["xyz"])
+
+      assert {:error, :wrong_volume} = Core.truncate_file_by_id(vol_name, id, 1)
+    end
+
+    test "returns FileNotFound for an unknown file_id", %{volume_name: vol_name} do
+      assert {:error, %FileNotFound{}} = Core.truncate_file_by_id(vol_name, "nonexistent-id", 0)
+    end
+  end
+
   describe "read_file_refs_by_id/3" do
     test "returns file refs keyed by file_id", %{volume_name: vol_name} do
       {:ok, %{id: id}} =
