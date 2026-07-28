@@ -19,6 +19,7 @@ defmodule NeonFS.Core.DriveEvacuation do
     DriveRegistry,
     DriveState,
     JobTracker,
+    ReplicaAudit,
     StorageMetrics
   }
 
@@ -30,18 +31,31 @@ defmodule NeonFS.Core.DriveEvacuation do
   Pre-flight checks:
   1. Drive exists
   2. Drive is not already draining
-  3. Standby drives are spun up
-  4. Sufficient cluster-wide capacity to absorb the evacuating drive
+  3. No volume depends on this drive for its last copies
+     (`ReplicaAudit.guard_removal/3`) — before anything with a side
+     effect, so a refusal leaves the drive untouched
+  4. Standby drives are spun up
+  5. Sufficient cluster-wide capacity to absorb the evacuating drive
 
   Target drive selection prefers a drive on the same tier as the source,
   and falls back to any tier when none is available — evacuation must
   succeed even if no same-tier drive exists on the cluster.
+
+  ## Options
+
+    * `:force` - proceed even though the drive holds a volume's last
+      copies (default `false`). Evacuation relocates rather than
+      abandons, so success preserves the copy count; what `--force`
+      accepts is the window in which a failure has no fallback — the
+      #1573 shape. It never overrides `_system` being left with no
+      surviving copy.
   """
   @spec start_evacuation(node(), String.t(), keyword()) ::
           {:ok, NeonFS.Core.Job.t()} | {:error, term()}
-  def start_evacuation(node, drive_id, _opts \\ []) do
+  def start_evacuation(node, drive_id, opts \\ []) do
     with {:ok, drive} <- get_drive(node, drive_id),
          :ok <- check_not_draining(drive),
+         :ok <- guard_replicas(node, drive_id, opts),
          :ok <- ensure_drive_active(node, drive),
          :ok <- check_capacity(node, drive),
          :ok <- set_draining(node, drive_id),
@@ -109,6 +123,13 @@ defmodule NeonFS.Core.DriveEvacuation do
     do: {:error, :already_draining}
 
   defp check_not_draining(_drive), do: :ok
+
+  defp guard_replicas(node, drive_id, opts) do
+    ReplicaAudit.guard_removal(node, drive_id,
+      force: Keyword.get(opts, :force, false),
+      operation: "Evacuating"
+    )
+  end
 
   defp ensure_drive_active(node, %{state: :standby, id: drive_id}) do
     if node == Node.self() do

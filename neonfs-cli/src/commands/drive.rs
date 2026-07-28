@@ -1,12 +1,16 @@
 //! Drive management commands
 
 use crate::daemon::DaemonConnection;
-use crate::error::Result;
+use crate::error::{CliError, Result};
 use crate::output::{json, table, OutputFormat};
 use crate::term::types::DriveInfo;
-use crate::term::{extract_error, term_to_list, term_to_map, term_to_string, unwrap_ok_tuple};
+use crate::term::{
+    extract_error, term_to_bool, term_to_list, term_to_map, term_to_string, term_to_u64,
+    unwrap_ok_tuple,
+};
 use clap::Subcommand;
 use eetf::{Atom, Binary, Map, Term};
+use serde::Serialize;
 
 /// Drive management subcommands
 #[derive(Debug, Subcommand)]
@@ -63,7 +67,16 @@ pub enum DriveCommand {
         /// Block until the evacuation job finishes; exits non-zero on failure.
         #[arg(long)]
         wait: bool,
+
+        /// Start even though this drive holds a volume's last copies.
+        /// Cannot override the `_system` volume being left with none.
+        #[arg(long)]
+        force: bool,
     },
+
+    /// Show replication health: under-replicated volumes and drives
+    /// holding the sole copy of anything
+    Replicas,
 }
 
 impl DriveCommand {
@@ -82,7 +95,9 @@ impl DriveCommand {
                 drive_id,
                 node,
                 wait,
-            } => self.evacuate(drive_id, node.as_deref(), *wait, format),
+                force,
+            } => self.evacuate(drive_id, node.as_deref(), *wait, *force, format),
+            DriveCommand::Replicas => self.replicas(format),
         }
     }
 
@@ -302,6 +317,7 @@ impl DriveCommand {
         drive_id: &str,
         node: Option<&str>,
         wait: bool,
+        force: bool,
         format: OutputFormat,
     ) -> Result<()> {
         let node_name = match node {
@@ -332,7 +348,14 @@ impl DriveCommand {
             bytes: drive_id.as_bytes().to_vec(),
         });
         let opts_term = Term::Map(Map {
-            map: std::collections::HashMap::new(),
+            map: [(
+                Term::Binary(Binary {
+                    bytes: b"force".to_vec(),
+                }),
+                Term::Atom(Atom::from(if force { "true" } else { "false" })),
+            )]
+            .into_iter()
+            .collect(),
         });
 
         let result = smol::block_on(async {
@@ -399,6 +422,184 @@ impl DriveCommand {
         }
         Ok(())
     }
+
+    fn replicas(&self, format: OutputFormat) -> Result<()> {
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call("Elixir.NeonFS.CLI.Handler", "handle_replica_status", vec![])
+                .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let report = ReplicaReport::from_term(unwrap_ok_tuple(result)?)?;
+
+        match format {
+            OutputFormat::Json => println!("{}", json::format(&report)?),
+            OutputFormat::Table => report.print_table()?,
+        }
+
+        Ok(())
+    }
+}
+
+/// Per-volume replication health as reported by `handle_replica_status`.
+#[derive(Debug, Serialize)]
+struct VolumeReplication {
+    volume_name: String,
+    system: bool,
+    min_copies: u64,
+    chunk_count: u64,
+    below_min_copies: u64,
+    zero_copies: u64,
+    least_copies: u64,
+}
+
+impl VolumeReplication {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            volume_name: term_to_string(map.get("volume_name").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'volume_name' field".to_string())
+            })?)?,
+            system: map
+                .get("system")
+                .and_then(|t| term_to_bool(t).ok())
+                .unwrap_or(false),
+            min_copies: field_u64(&map, "min_copies"),
+            chunk_count: field_u64(&map, "chunk_count"),
+            below_min_copies: field_u64(&map, "below_min_copies"),
+            zero_copies: field_u64(&map, "zero_copies"),
+            least_copies: field_u64(&map, "least_copies"),
+        })
+    }
+}
+
+/// A drive that is the only holder of at least one chunk.
+#[derive(Debug, Serialize)]
+struct SoleCopyDrive {
+    node: String,
+    drive_id: String,
+    chunk_count: u64,
+}
+
+impl SoleCopyDrive {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        Ok(Self {
+            node: term_to_string(map.get("node").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'node' field".to_string())
+            })?)?,
+            drive_id: term_to_string(map.get("drive_id").ok_or_else(|| {
+                CliError::TermConversionError("Missing 'drive_id' field".to_string())
+            })?)?,
+            chunk_count: field_u64(&map, "chunk_count"),
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReplicaReport {
+    volumes: Vec<VolumeReplication>,
+    sole_copy_drives: Vec<SoleCopyDrive>,
+}
+
+impl ReplicaReport {
+    fn from_term(term: Term) -> Result<Self> {
+        let map = term_to_map(&term)?;
+
+        let volumes = match map.get("volumes") {
+            Some(term) => term_to_list(term)?
+                .into_iter()
+                .map(VolumeReplication::from_term)
+                .collect::<Result<Vec<_>>>()?,
+            None => vec![],
+        };
+
+        let sole_copy_drives = match map.get("sole_copy_drives") {
+            Some(term) => term_to_list(term)?
+                .into_iter()
+                .map(SoleCopyDrive::from_term)
+                .collect::<Result<Vec<_>>>()?,
+            None => vec![],
+        };
+
+        Ok(Self {
+            volumes,
+            sole_copy_drives,
+        })
+    }
+
+    fn print_table(&self) -> Result<()> {
+        let mut tbl = table::Table::new(vec![
+            "VOLUME".to_string(),
+            "MIN COPIES".to_string(),
+            "CHUNKS".to_string(),
+            "BELOW MIN".to_string(),
+            "ZERO COPIES".to_string(),
+            "FEWEST".to_string(),
+        ]);
+
+        for volume in &self.volumes {
+            tbl.add_row(vec![
+                if volume.system {
+                    format!("{} (system)", volume.volume_name)
+                } else {
+                    volume.volume_name.clone()
+                },
+                volume.min_copies.to_string(),
+                volume.chunk_count.to_string(),
+                volume.below_min_copies.to_string(),
+                volume.zero_copies.to_string(),
+                volume.least_copies.to_string(),
+            ]);
+        }
+
+        print!("{}", tbl.render()?);
+
+        let under: Vec<&VolumeReplication> = self
+            .volumes
+            .iter()
+            .filter(|v| v.below_min_copies > 0)
+            .collect();
+
+        if under.is_empty() {
+            println!("\nAll volumes meet their min_copies floor.");
+        } else {
+            println!("\n{} volume(s) under-replicated:", under.len());
+            for volume in under {
+                println!(
+                    "  {} — {} chunk(s) below min_copies {} (fewest {})",
+                    volume.volume_name,
+                    volume.below_min_copies,
+                    volume.min_copies,
+                    volume.least_copies
+                );
+            }
+        }
+
+        if self.sole_copy_drives.is_empty() {
+            println!("No drive holds the sole copy of any chunk.");
+        } else {
+            println!("\nDrives holding sole copies (loss here loses data):");
+            for drive in &self.sole_copy_drives {
+                println!(
+                    "  {} on {} — {} chunk(s)",
+                    drive.drive_id, drive.node, drive.chunk_count
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn field_u64(map: &std::collections::HashMap<String, Term>, key: &str) -> u64 {
+    map.get(key).and_then(|t| term_to_u64(t).ok()).unwrap_or(0)
 }
 
 fn extract_integer(term: &Term) -> Option<i64> {
@@ -488,10 +689,12 @@ mod tests {
                     drive_id,
                     node,
                     wait,
+                    force,
                 } => {
                     assert_eq!(drive_id, "nvme0");
                     assert!(node.is_none());
                     assert!(!wait);
+                    assert!(!force);
                 }
                 _ => panic!("Expected Evacuate variant"),
             }
@@ -504,6 +707,7 @@ mod tests {
             "--node",
             "neonfs-core@host1",
             "--wait",
+            "--force",
         ]);
         assert!(cli.is_ok());
         if let Ok(parsed) = cli {
@@ -512,13 +716,107 @@ mod tests {
                     drive_id,
                     node,
                     wait,
+                    force,
                 } => {
                     assert_eq!(drive_id, "sata0");
                     assert_eq!(node.as_deref(), Some("neonfs-core@host1"));
                     assert!(wait);
+                    assert!(force);
                 }
                 _ => panic!("Expected Evacuate variant"),
             }
         }
+    }
+
+    #[test]
+    fn test_replicas_command_parsing() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            command: DriveCommand,
+        }
+
+        let cli = TestCli::try_parse_from(["test", "replicas"]);
+        assert!(cli.is_ok());
+        if let Ok(parsed) = cli {
+            assert!(matches!(parsed.command, DriveCommand::Replicas));
+        }
+    }
+
+    #[test]
+    fn test_replica_report_from_term() {
+        use eetf::FixInteger;
+
+        fn binary(value: &str) -> Term {
+            Term::Binary(Binary {
+                bytes: value.as_bytes().to_vec(),
+            })
+        }
+
+        fn integer(value: i32) -> Term {
+            Term::FixInteger(FixInteger { value })
+        }
+
+        let volume = Term::Map(Map {
+            map: [
+                (binary("volume_name"), binary("_system")),
+                (binary("system"), Term::Atom(Atom::from("true"))),
+                (binary("min_copies"), integer(2)),
+                (binary("chunk_count"), integer(9)),
+                (binary("below_min_copies"), integer(4)),
+                (binary("zero_copies"), integer(0)),
+                (binary("least_copies"), integer(1)),
+            ]
+            .into_iter()
+            .collect(),
+        });
+
+        let sole_copy = Term::Map(Map {
+            map: [
+                (binary("node"), binary("neonfs_core@host1")),
+                (binary("drive_id"), binary("nvme0")),
+                (binary("chunk_count"), integer(4)),
+            ]
+            .into_iter()
+            .collect(),
+        });
+
+        let report = Term::Map(Map {
+            map: [
+                (binary("volumes"), Term::List(vec![volume].into())),
+                (
+                    binary("sole_copy_drives"),
+                    Term::List(vec![sole_copy].into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        });
+
+        let parsed = ReplicaReport::from_term(report).expect("report parses");
+
+        assert_eq!(parsed.volumes.len(), 1);
+        assert_eq!(parsed.volumes[0].volume_name, "_system");
+        assert!(parsed.volumes[0].system);
+        assert_eq!(parsed.volumes[0].below_min_copies, 4);
+        assert_eq!(parsed.volumes[0].least_copies, 1);
+
+        assert_eq!(parsed.sole_copy_drives.len(), 1);
+        assert_eq!(parsed.sole_copy_drives[0].drive_id, "nvme0");
+        assert_eq!(parsed.sole_copy_drives[0].chunk_count, 4);
+    }
+
+    #[test]
+    fn test_replica_report_defaults_missing_sections() {
+        let report = Term::Map(Map {
+            map: std::collections::HashMap::new(),
+        });
+
+        let parsed = ReplicaReport::from_term(report).expect("empty report parses");
+
+        assert!(parsed.volumes.is_empty());
+        assert!(parsed.sole_copy_drives.is_empty());
     }
 }

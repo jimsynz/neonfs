@@ -6,6 +6,8 @@ defmodule NeonFS.Core.DriveManagerTest do
 
   alias NeonFS.Core.{
     BlobStore,
+    ChunkIndex,
+    ChunkMeta,
     DriveManager,
     DriveRegistry,
     DriveTrust,
@@ -15,6 +17,7 @@ defmodule NeonFS.Core.DriveManagerTest do
   }
 
   alias NeonFS.Core.Drive.Identity
+  alias NeonFS.Error.ReplicaGuard
 
   @moduletag :tmp_dir
 
@@ -60,6 +63,15 @@ defmodule NeonFS.Core.DriveManagerTest do
 
     # Start DriveManager
     start_supervised!(DriveManager)
+
+    # No VolumeRegistry here, so the #1618 replica guard would read an
+    # absent ETS table. An empty volume list is the honest model for this
+    # setup: drives exist, volumes don't, so nothing is at risk. The guard
+    # runs inside the GenServer, so the stub needs allowing through to it.
+    manager = Process.whereis(DriveManager)
+    stub(VolumeRegistry, :list, fn _opts -> [] end)
+    Mimic.allow(VolumeRegistry, self(), manager)
+    Mimic.allow(ChunkIndex, self(), manager)
 
     on_exit(fn ->
       File.rm_rf!(tmp_dir)
@@ -442,6 +454,78 @@ defmodule NeonFS.Core.DriveManagerTest do
 
       {:ok, state_after} = State.load()
       refute Enum.any?(state_after.drives, fn d -> d["id"] == "to_persist_remove" end)
+    end
+  end
+
+  describe "remove_drive/2 replica guard (#1618)" do
+    setup %{tmp_dir: tmp_dir} do
+      new_path = Path.join(tmp_dir, "sole_copy")
+      File.mkdir_p!(new_path)
+      {:ok, _} = DriveManager.add_drive(%{id: "sole_copy", path: new_path, tier: "hot"})
+      %{drive_id: "sole_copy"}
+    end
+
+    defp stub_sole_copy_volume(volume_name, min_copies, drive_id, opts \\ []) do
+      stub(VolumeRegistry, :list, fn _opts ->
+        [
+          %{
+            id: "vol-guard",
+            name: volume_name,
+            system: Keyword.get(opts, :system, false),
+            durability: %{type: :replicate, factor: 2, min_copies: min_copies}
+          }
+        ]
+      end)
+
+      stub(ChunkIndex, :list_volume_chunks, fn "vol-guard" ->
+        {:ok,
+         [
+           %ChunkMeta{
+             hash: "guarded",
+             original_size: 1,
+             stored_size: 1,
+             compression: :none,
+             crypto: nil,
+             locations: [%{node: Node.self(), drive_id: drive_id, tier: :hot}],
+             target_replicas: 2,
+             commit_state: :committed,
+             active_write_refs: MapSet.new(),
+             volume_ids: MapSet.new(["vol-guard"]),
+             created_at: DateTime.utc_now()
+           }
+         ]}
+      end)
+    end
+
+    test "refuses removal of a drive holding a volume's only copy", %{drive_id: drive_id} do
+      stub_sole_copy_volume("data", 2, drive_id)
+
+      assert {:error, %ReplicaGuard{reason: :below_min_copies}} =
+               DriveManager.remove_drive(drive_id)
+
+      assert Enum.any?(DriveManager.list_drives(), &(&1.id == drive_id))
+    end
+
+    test "force removes it anyway", %{drive_id: drive_id} do
+      stub_sole_copy_volume("data", 2, drive_id)
+
+      assert :ok = DriveManager.remove_drive(drive_id, force: true)
+      refute Enum.any?(DriveManager.list_drives(), &(&1.id == drive_id))
+    end
+
+    test "force cannot remove the last copy of _system", %{drive_id: drive_id} do
+      stub_sole_copy_volume("_system", 1, drive_id, system: true)
+
+      assert {:error, %ReplicaGuard{reason: :system_zero_copies}} =
+               DriveManager.remove_drive(drive_id, force: true)
+
+      assert Enum.any?(DriveManager.list_drives(), &(&1.id == drive_id))
+    end
+
+    test "a drive no volume depends on is still removable", %{drive_id: drive_id} do
+      stub_sole_copy_volume("data", 2, "some_other_drive")
+
+      assert :ok = DriveManager.remove_drive(drive_id)
     end
   end
 

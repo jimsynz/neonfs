@@ -344,6 +344,34 @@ neonfs drive list --node node-2
 
 Shows each drive's tier, capacity, current usage, and state (healthy, evacuating, failed).
 
+### Checking replication health
+
+```bash
+neonfs drive replicas
+```
+
+Lists every volume against its `min_copies` floor and names the drives
+that hold the sole copy of at least one chunk. Run it before retiring
+hardware: those drives are the ones whose loss costs data.
+
+Both `drive evacuate` and `drive remove` run this query as a pre-flight
+and refuse when the operation would drop a volume below `min_copies`. A
+chunk that is already short of copies *elsewhere* does not block the
+operation — the guard asks what this removal changes, not what repair
+still owes.
+
+`--force` overrides the refusal, with one exception: a removal that would
+leave the cluster-critical `_system` volume with no surviving copy is
+refused outright and cannot be forced. `_system` holds the cluster CA
+key, cluster identity, serial and CRL; losing it is unrecoverable. Its
+replication factor scales with the drive count (up to 3), so the right
+response is to wait for re-replication — visible in `drive replicas` —
+rather than to look for a way around the guard.
+
+Under-replication also emits telemetry
+(`[:neonfs, :replica_audit, :under_replicated]`) whenever the audit runs,
+so it can be alerted on.
+
 ### Evacuating a drive
 
 Graceful removal — copy all chunks on the drive to other drives in the same tier, then mark the drive empty:
