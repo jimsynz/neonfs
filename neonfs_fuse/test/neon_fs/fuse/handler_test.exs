@@ -204,7 +204,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       handler: handler,
       parent_inode: parent_inode
     } do
-      # `:exists` short-circuits before claim_pinned_for_path runs, so a single
+      # `:exists` short-circuits before the pin runs, so a single
       # `expect` on the write path (routed via write_call_by_id since #1087)
       # still suffices.
       expect(NeonFS.Client, :write_call_by_id, fn _volume_id,
@@ -259,9 +259,9 @@ defmodule NeonFS.FUSE.HandlerTest do
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/handle.txt"] ->
           {:ok, %{id: "file-handle-id", mode: 0o100644}}
 
-        _coord, :claim_pinned_for, [_, key, holder] ->
-          send(test_pid, {:pin_call, key, holder})
-          {:ok, "ns-claim-open"}
+        NeonFS.Core, :pin_file, [volume_name, file_path, holder] ->
+          send(test_pid, {:pin_call, volume_name, file_path, holder})
+          {:ok, %{file_id: "file-handle-id", claim_id: "ns-claim-open", file: %{}}}
       end)
 
       send(handler, {:fuse_op, 10, {"open", %{"ino" => file_inode}}})
@@ -269,7 +269,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       assert_receive {:fuse_op_complete, 10, {"open_ok", %{"fh" => fh}}}, 5_000
       assert is_integer(fh) and fh >= 1
 
-      assert_receive {:pin_call, "vol:vol:/handle.txt", ^handler}, 1_000
+      assert_receive {:pin_call, "vol", "/handle.txt", ^handler}, 1_000
     end
 
     test "release drops the fh entry and releases the pin",
@@ -280,10 +280,10 @@ defmodule NeonFS.FUSE.HandlerTest do
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/handle.txt"] ->
           {:ok, %{id: "file-handle-id", mode: 0o100644}}
 
-        _coord, :claim_pinned_for, [_, _key, _holder] ->
-          {:ok, "ns-claim-release"}
+        NeonFS.Core, :pin_file, [_volume_name, _path, _holder] ->
+          {:ok, %{file_id: "file-handle-id", claim_id: "ns-claim-release", file: %{}}}
 
-        _coord, :release, [_, "ns-claim-release"] ->
+        NeonFS.Core, :unpin_file, ["ns-claim-release"] ->
           send(test_pid, {:released, "ns-claim-release"})
           :ok
       end)
@@ -309,7 +309,7 @@ defmodule NeonFS.FUSE.HandlerTest do
       # (handler synthesises the root metadata); confirm no
       # `claim_pinned_for` is called for directory opens.
       stub(NeonFS.Client, :core_call, fn
-        _coord, :claim_pinned_for, [_, _, _] ->
+        NeonFS.Core, :pin_file, [_, _, _] ->
           flunk("directory open must not claim a pin")
 
         _, _, _ ->
@@ -326,7 +326,7 @@ defmodule NeonFS.FUSE.HandlerTest do
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/handle.txt"] ->
           {:ok, %{id: "file-coord-down", mode: 0o100644}}
 
-        _coord, :claim_pinned_for, [_, _key, _holder] ->
+        NeonFS.Core, :pin_file, [_volume_name, _path, _holder] ->
           {:error, :coordinator_unavailable}
       end)
 
@@ -366,8 +366,8 @@ defmodule NeonFS.FUSE.HandlerTest do
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/data.txt"] ->
           {:ok, %{id: "data-file-id", mode: 0o100644}}
 
-        _coord, :claim_pinned_for, [_, _, _] ->
-          {:ok, "ns-claim-read"}
+        NeonFS.Core, :pin_file, [_, _, _] ->
+          {:ok, %{file_id: "data-file-id", claim_id: "ns-claim-read", file: %{}}}
 
         NeonFS.Core, :read_file_by_id, ["vol-name", "data-file-id", _opts] ->
           send(test_pid, :read_by_id_called)
@@ -394,8 +394,8 @@ defmodule NeonFS.FUSE.HandlerTest do
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/data.txt"] ->
           {:ok, %{id: "data-file-id", mode: 0o100644}}
 
-        _coord, :claim_pinned_for, [_, _, _] ->
-          {:ok, "ns-claim-write"}
+        NeonFS.Core, :pin_file, [_, _, _] ->
+          {:ok, %{file_id: "data-file-id", claim_id: "ns-claim-write", file: %{}}}
 
         NeonFS.Core, :write_file_at_by_id, ["vol-name", "data-file-id", 0, "bytes"] ->
           send(test_pid, :write_by_id_called)
@@ -421,8 +421,8 @@ defmodule NeonFS.FUSE.HandlerTest do
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/data.txt"] ->
           {:ok, %{id: "data-file-id", mode: 0o100644}}
 
-        _coord, :claim_pinned_for, [_, _, _] ->
-          {:ok, "ns-claim-frozen"}
+        NeonFS.Core, :pin_file, [_, _, _] ->
+          {:ok, %{file_id: "data-file-id", claim_id: "ns-claim-frozen", file: %{}}}
 
         NeonFS.Core, :write_file_at_by_id, ["vol-name", "data-file-id", 0, "bytes"] ->
           {:error, :cluster_frozen}
@@ -493,15 +493,15 @@ defmodule NeonFS.FUSE.HandlerTest do
   end
 
   # Helper for the `O_EXCL` create tests: dispatches the two
-  # `core_call/3` invocations the new pin-on-create path makes —
-  # the `WriteOperation.write_file_at` that creates the file, and
-  # the `NamespaceCoordinator.claim_pinned_for` that pins it
-  # (#651). Forwards the write opts to the test process so the
-  # caller can assert on `:create_only`.
-  # Only `claim_pinned_for` reaches `core_call/3` now — `write_file_at` routes
+  # `core_call/3` invocations the pin-on-create path makes — the
+  # `WriteOperation.write_file_at` that creates the file, and the
+  # `Core.pin_file` that pins it by identity (#651, #1605). Forwards
+  # the write opts to the test process so the caller can assert on
+  # `:create_only`.
+  # Only `pin_file` reaches `core_call/3` now — `write_file_at` routes
   # through `write_call_by_id/4` since #1087 (see `create_test_write_call/6`).
-  defp create_test_core_call(_coordinator, :claim_pinned_for, [_, _, _], _test_pid, _file_id) do
-    {:ok, "ns-claim-stub"}
+  defp create_test_core_call(NeonFS.Core, :pin_file, [_, _, _], _test_pid, file_id) do
+    {:ok, %{file_id: file_id, claim_id: "ns-claim-stub", file: %{}}}
   end
 
   defp create_test_write_call(

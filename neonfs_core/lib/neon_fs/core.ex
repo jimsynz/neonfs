@@ -406,6 +406,50 @@ defmodule NeonFS.Core do
   end
 
   @doc """
+  Pins a file by identity so an open handle survives rename and unlink
+  (#1605 of #1590).
+
+  Resolves `path` to a `file_id` and takes a `:pinned` namespace claim
+  keyed by `{volume_id, file_id}` rather than by path, so:
+
+    * renaming the file does not strand the pin on the old name, and
+    * unlinking the file — under whichever name it currently has —
+      sees the pin and tombstones the `FileMeta` instead of hard-
+      deleting its chunks.
+
+  `holder` is the pid whose death releases the pin (the coordinator's
+  holder-DOWN bulk release is the crash safety net). Interface nodes
+  calling over RPC must pass a long-lived pid on their own node — the
+  RPC handler process dies the moment the call returns.
+
+  Returns the resolved `file_id` alongside the claim id; callers hold
+  both for the life of the handle and pass the claim id to
+  `unpin_file/1` on close.
+  """
+  @spec pin_file(String.t(), String.t(), pid()) ::
+          {:ok, %{file_id: binary(), claim_id: String.t(), file: FileMeta.t()}}
+          | {:error, term()}
+  def pin_file(volume_name, path, holder \\ self()) when is_pid(holder) do
+    with {:ok, volume} <- resolve_volume(volume_name) do
+      normalized = normalize_path(path)
+
+      with_namespace_claim(:path, :shared, volume.id, normalized, fn ->
+        acquire_pin(volume.id, normalized, holder)
+      end)
+    end
+  end
+
+  @doc """
+  Releases a pin taken by `pin_file/3`. Idempotent — releasing an
+  unknown or already-released claim id is `:ok`.
+  """
+  @spec unpin_file(String.t()) :: :ok
+  def unpin_file(claim_id) when is_binary(claim_id) do
+    safe_release(claim_id)
+    :ok
+  end
+
+  @doc """
   Deletes a file or directory from a volume by path.
 
   Acquires a `NeonFS.Core.NamespaceCoordinator` subtree claim on the
@@ -414,6 +458,13 @@ defmodule NeonFS.Core do
   empty-directory check, which would otherwise race against creates
   inside the target) serialise across interface nodes. See sub-issue
   #305.
+
+  A file held open anywhere in the cluster (a `:pinned` claim on its
+  identity, see `pin_file/3`) is tombstoned rather than hard-deleted.
+  When the pin state cannot be established — the coordinator is
+  unreachable or its Ra query fails — the delete fails with a
+  `class: :unavailable` error rather than assuming "no pins" and
+  discarding a live handle's chunks (#1605).
 
   Honours `:uid` / `:gids` opts for `:write` authorisation (default
   uid 0 bypasses), so an NFS REMOVE/RMDIR is held to the volume ACL.
@@ -446,29 +497,49 @@ defmodule NeonFS.Core do
     end
   end
 
-  # Files take a `:shared :path` claim so an open handle's `:pinned`
-  # claim doesn't block delete — the file unlinks but keeps its
-  # chunks reachable by `file_id` until the last pin releases (POSIX
-  # unlink-while-open, #643 of #638). Concurrent renames / mkdir /
-  # rmdir on the same path still serialise because they hold
-  # `:exclusive :*`. Directories keep the historical
-  # `:exclusive :subtree` claim — no pin support for dirs.
+  # Files take a `:shared :path` claim, directories the historical
+  # `:exclusive :subtree` one. Pins no longer live on the path key
+  # (they are keyed by file identity since #1605), so the shared
+  # scope is what keeps an unlink compatible with the other shared
+  # path holders — WebDAV shared locks, FUSE `LOCK_SH` flocks —
+  # exactly as POSIX expects. Concurrent renames / mkdir / rmdir
+  # still serialise because they hold `:exclusive :*`.
   #
   # Missing paths short-circuit to `:not_found` without acquiring any
-  # claim. That keeps the historical surface intact and, importantly,
-  # doesn't block on a stranded `:pinned` claim left over from a
-  # detached file at the same path (which would otherwise turn a
-  # repeat delete into a `:busy`).
-  defp do_delete_dispatch(volume_id, path) do
+  # claim, so a repeat delete of a detached file is `:not_found`
+  # rather than a claim round-trip.
+  #
+  # `peek_path_type/2` only picks which claim to take; the delete
+  # itself re-resolves the path *inside* the claim and acts on that
+  # single resolution. If a concurrent rename swapped a file for a
+  # directory (or vice versa) while we waited for the claim, the
+  # resolution disagrees with the claim we hold — drop it and
+  # re-dispatch rather than deleting a directory down the file path.
+  @delete_dispatch_attempts 2
+
+  defp do_delete_dispatch(volume_id, path, attempts \\ @delete_dispatch_attempts)
+
+  defp do_delete_dispatch(volume_id, path, attempts) when attempts > 0 do
+    case dispatch_delete_once(volume_id, path) do
+      :retry -> do_delete_dispatch(volume_id, path, attempts - 1)
+      result -> result
+    end
+  end
+
+  defp do_delete_dispatch(_volume_id, _path, _attempts) do
+    {:error, Conflict.from_reason(:busy)}
+  end
+
+  defp dispatch_delete_once(volume_id, path) do
     case peek_path_type(volume_id, path) do
       :file ->
         with_namespace_claim(:path, :shared, volume_id, path, fn ->
-          do_delete_file(volume_id, path)
+          delete_file_under_claim(volume_id, path)
         end)
 
       :dir ->
         with_namespace_claim(:subtree, volume_id, path, fn ->
-          do_delete(volume_id, path)
+          delete_dir_under_claim(volume_id, path)
         end)
 
       :not_found ->
@@ -476,9 +547,41 @@ defmodule NeonFS.Core do
     end
   end
 
-  defp do_delete_file(volume_id, path) do
-    with {:ok, file} <- lookup_file(volume_id, path),
-         :ok <- delete_file_by_pin_state(file, pinned_claim_ids(volume_id, path)) do
+  defp delete_file_under_claim(volume_id, path) do
+    case lookup_file(volume_id, path) do
+      {:ok, %FileMeta{} = file} -> delete_resolved_file(volume_id, file)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp delete_resolved_file(volume_id, file) do
+    if directory?(file) do
+      :retry
+    else
+      do_delete_file(volume_id, file)
+    end
+  end
+
+  defp delete_dir_under_claim(volume_id, path) do
+    case peek_path_type(volume_id, path) do
+      :dir -> do_delete(volume_id, path)
+      :file -> :retry
+      :not_found -> {:error, FileNotFound.exception(file_path: path, volume_id: volume_id)}
+    end
+  end
+
+  # The pin query and the delete it decides must be atomic against a
+  # concurrent `pin_file/3` — otherwise a pin taken between the two
+  # is invisible to the tombstone snapshot and its file is hard-
+  # deleted under the open handle. Both sides serialise on an
+  # `:exclusive` claim over the identity's pin-lock key.
+  defp do_delete_file(volume_id, %FileMeta{} = file) do
+    with_pin_lock(volume_id, file.id, fn -> delete_by_pin_state(volume_id, file) end)
+  end
+
+  defp delete_by_pin_state(volume_id, %FileMeta{} = file) do
+    with {:ok, pin_ids} <- pinned_claim_ids(volume_id, file.id),
+         :ok <- apply_delete(file, pin_ids) do
       release_file_usage(file)
       :ok
     end
@@ -503,11 +606,11 @@ defmodule NeonFS.Core do
     :exit, _ -> :ok
   end
 
-  defp delete_file_by_pin_state(file, []) do
+  defp apply_delete(file, []) do
     FileIndex.delete(file.id)
   end
 
-  defp delete_file_by_pin_state(file, [_ | _] = pin_ids) do
+  defp apply_delete(file, [_ | _] = pin_ids) do
     case FileIndex.mark_detached(file.id, pin_ids) do
       {:ok, _detached} -> :ok
       {:error, _} = err -> err
@@ -522,23 +625,79 @@ defmodule NeonFS.Core do
 
   defp peek_path_type(volume_id, path) do
     case FileIndex.get_by_path(volume_id, path) do
-      {:ok, %FileMeta{mode: mode}} ->
-        if (mode &&& 0o040000) == 0o040000, do: :dir, else: :file
+      {:ok, %FileMeta{} = file} ->
+        if directory?(file), do: :dir, else: :file
 
       _ ->
         :not_found
     end
   end
 
-  defp pinned_claim_ids(volume_id, path) do
-    key = volume_scoped_path(volume_id, path)
+  defp directory?(%FileMeta{mode: mode}), do: (mode &&& 0o040000) == 0o040000
 
-    case NamespaceCoordinator.claims_for_path(key) do
-      {:ok, claims} -> Enum.map(claims, &elem(&1, 0))
-      _ -> []
+  # An unreachable coordinator is *not* "no pins" — it is an unknown
+  # pin state, and hard-deleting on an unknown pin state is how an
+  # open handle loses its chunks. Surface it so the caller retries or
+  # fails the unlink (#1605).
+  defp pinned_claim_ids(volume_id, file_id) do
+    case NamespaceCoordinator.consistent_claims_for_path(pin_key(volume_id, file_id)) do
+      {:ok, claims} -> {:ok, Enum.map(claims, &elem(&1, 0))}
+      {:error, reason} -> {:error, reason}
     end
   catch
-    :exit, _ -> []
+    :exit, _ -> {:error, Unavailable.from_reason(:coordinator_unavailable)}
+  end
+
+  # Runs `fun` holding the identity's pin-lock claim, the mutual
+  # exclusion between taking a pin and acting on the pin set. The
+  # lock key is disjoint from both the path key and the pin key, so
+  # holding it never conflicts with the pins it guards, with a
+  # rename, or with an advisory lock on the same file.
+  defp with_pin_lock(volume_id, file_id, fun) do
+    case safe_claim(:path, :exclusive, pin_lock_key(volume_id, file_id)) do
+      {:ok, claim_id} ->
+        try do
+          fun.()
+        after
+          safe_release(claim_id)
+        end
+
+      {:error, %Conflict{}} ->
+        {:error, Conflict.from_reason(:busy)}
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  # Resolution and pin acquisition are separated by a coordinator
+  # round-trip, so a delete can complete in between. The pin lock
+  # keeps the delete's "query pins then act" indivisible, and the
+  # post-claim re-read catches the case where the delete finished
+  # before we took the lock: the pin is dropped and the open fails
+  # ENOENT, which is what POSIX permits for an open racing an unlink.
+  defp acquire_pin(volume_id, path, holder) do
+    with {:ok, file} <- lookup_file(volume_id, path) do
+      with_pin_lock(volume_id, file.id, fn -> claim_pin(volume_id, file, holder) end)
+    end
+  end
+
+  defp claim_pin(volume_id, %FileMeta{} = file, holder) do
+    with {:ok, claim_id} <- safe_claim_pinned(pin_key(volume_id, file.id), holder),
+         :ok <- ensure_indexed(volume_id, file, claim_id) do
+      {:ok, %{file_id: file.id, claim_id: claim_id, file: file}}
+    end
+  end
+
+  defp ensure_indexed(volume_id, %FileMeta{id: file_id, path: path}, claim_id) do
+    case FileIndex.get(volume_id, file_id) do
+      {:ok, %FileMeta{}} ->
+        :ok
+
+      _ ->
+        safe_release(claim_id)
+        {:error, FileNotFound.exception(file_path: path, volume_id: volume_id)}
+    end
   end
 
   @doc """
@@ -841,6 +1000,12 @@ defmodule NeonFS.Core do
     :exit, _ -> {:error, Unavailable.from_reason(:coordinator_unavailable)}
   end
 
+  defp safe_claim_pinned(key, holder) do
+    NamespaceCoordinator.claim_pinned_for(NamespaceCoordinator, key, holder)
+  catch
+    :exit, _ -> {:error, Unavailable.from_reason(:coordinator_unavailable)}
+  end
+
   defp safe_claim_rename(src_key, dst_key) do
     NamespaceCoordinator.claim_rename(src_key, dst_key)
   catch
@@ -861,6 +1026,17 @@ defmodule NeonFS.Core do
 
   defp volume_scoped_path(volume_id, path) when is_binary(volume_id) and is_binary(path) do
     "vol:" <> volume_id <> ":" <> path
+  end
+
+  # Pins and their lock live in key namespaces of their own so a
+  # rename — which claims both path keys exclusively — never
+  # conflicts with a pinned handle on the file it is renaming.
+  defp pin_key(volume_id, file_id) when is_binary(volume_id) and is_binary(file_id) do
+    "vol:" <> volume_id <> ":id:" <> file_id
+  end
+
+  defp pin_lock_key(volume_id, file_id) when is_binary(volume_id) and is_binary(file_id) do
+    "vol:" <> volume_id <> ":pinlock:" <> file_id
   end
 
   defp do_rename(volume_id, src_path, dest_path) do

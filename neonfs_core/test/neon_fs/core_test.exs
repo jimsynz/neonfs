@@ -228,7 +228,22 @@ defmodule NeonFS.CoreTest do
     end
   end
 
+  # Stands in for the long-lived interface-node process an open handle
+  # belongs to — the coordinator monitors it and bulk-releases its pins
+  # when it dies.
+  defp start_pin_holder do
+    start_supervised!(
+      %{id: {:pin_holder, System.unique_integer()}, start: {Agent, :start_link, [fn -> nil end]}},
+      restart: :temporary
+    )
+  end
+
   describe "delete_file/2" do
+    setup do
+      start_namespace_coordination()
+      :ok
+    end
+
     test "deletes a file", %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/to-delete.txt", ["data"])
       assert :ok = Core.delete_file(vol_name, "/to-delete.txt")
@@ -269,6 +284,8 @@ defmodule NeonFS.CoreTest do
 
     test "a non-root uid can populate the world-writable volume root (#1339)",
          %{volume_name: vol_name} do
+      start_namespace_coordination()
+
       assert {:ok, _} = Core.mkdir(vol_name, "/client-dir", uid: 1000, gids: [1000])
 
       assert {:ok, _} =
@@ -542,10 +559,10 @@ defmodule NeonFS.CoreTest do
     end
 
     # File delete (POSIX unlink-while-open, #643 of #638) takes a
-    # `:shared :path` claim so a live `:pinned` claim on the same
-    # path doesn't block delete — instead, delete tombstones the
-    # FileMeta in-place so open handles keep working until they
-    # close.
+    # `:shared :path` claim so it coexists with the other shared
+    # holders of the path. Pins live on the file's identity (#1605),
+    # so delete asks the coordinator "is this file_id held open?" and
+    # tombstones the FileMeta in-place when it is.
     test "file delete with no pins runs the full-delete path",
          %{volume_name: vol_name} do
       {:ok, %{id: id, volume_id: volume_id}} =
@@ -559,15 +576,12 @@ defmodule NeonFS.CoreTest do
 
     test "file delete with a live pin tombstones the FileMeta in place",
          %{volume_name: vol_name, volume_id: volume_id} do
-      {:ok, %{id: file_id}} =
-        Core.write_file_streamed(vol_name, "/pinned.txt", ["data"])
+      {:ok, _} = Core.write_file_streamed(vol_name, "/pinned.txt", ["data"])
 
-      key = "vol:" <> volume_id <> ":/pinned.txt"
+      holder = start_pin_holder()
 
-      holder = start_supervised!(%{id: :pin_holder, start: {Agent, :start_link, [fn -> nil end]}})
-
-      {:ok, pin_id} =
-        NamespaceCoordinator.claim_pinned_for(NamespaceCoordinator, key, holder)
+      {:ok, %{file_id: file_id, claim_id: pin_id}} =
+        Core.pin_file(vol_name, "/pinned.txt", holder)
 
       try do
         assert :ok = Core.delete_file(vol_name, "/pinned.txt")
@@ -581,24 +595,71 @@ defmodule NeonFS.CoreTest do
 
         assert pin_id in pin_ids
       after
-        # Releasing the pin doesn't auto-GC yet (#644). Manual cleanup.
-        :ok = NamespaceCoordinator.release(NamespaceCoordinator, pin_id)
+        :ok = Core.unpin_file(pin_id)
       end
     end
 
-    test "file delete is idempotent on an already-detached file",
+    # The whole point of keying pins by identity: a pinned file can
+    # still be renamed, and unlinking it under its *new* name finds
+    # the pin the handle took under the old one (#1605).
+    test "a pinned file renamed then unlinked detaches rather than hard-deletes",
          %{volume_name: vol_name, volume_id: volume_id} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/before-rename.txt", ["data"])
+
+      holder = start_pin_holder()
+
+      {:ok, %{file_id: file_id, claim_id: pin_id}} =
+        Core.pin_file(vol_name, "/before-rename.txt", holder)
+
+      try do
+        assert :ok = Core.rename_file(vol_name, "/before-rename.txt", "/after-rename.txt")
+        assert :ok = Core.delete_file(vol_name, "/after-rename.txt")
+
+        assert {:ok, %{detached: true, pinned_claim_ids: pin_ids}} =
+                 FileIndex.get(volume_id, file_id)
+
+        assert pin_id in pin_ids
+      after
+        :ok = Core.unpin_file(pin_id)
+      end
+    end
+
+    test "pinning a path that was already unlinked fails rather than pinning a ghost",
+         %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/gone.txt", ["data"])
+      :ok = Core.delete_file(vol_name, "/gone.txt")
+
+      assert {:error, %FileNotFound{}} = Core.pin_file(vol_name, "/gone.txt", start_pin_holder())
+    end
+
+    # An unreachable coordinator leaves the pin state unknown. Deleting
+    # on an unknown pin state is what discards an open handle's chunks,
+    # so the unlink fails instead (#1605).
+    test "file delete fails loudly when the coordinator is down",
+         %{volume_name: vol_name} do
+      {:ok, _} = Core.write_file_streamed(vol_name, "/coordinator-down.txt", ["data"])
+
+      :ok = stop_supervised!(NamespaceCoordinator)
+
+      assert {:error, %{class: :unavailable}} =
+               Core.delete_file(vol_name, "/coordinator-down.txt")
+
+      assert {:ok, _} = Core.get_file_meta(vol_name, "/coordinator-down.txt")
+    end
+
+    test "file delete is idempotent on an already-detached file",
+         %{volume_name: vol_name} do
       {:ok, _} = Core.write_file_streamed(vol_name, "/dup-delete.txt", ["data"])
 
-      key = "vol:" <> volume_id <> ":/dup-delete.txt"
-      holder = start_supervised!(%{id: :pin_holder, start: {Agent, :start_link, [fn -> nil end]}})
-      {:ok, pin_id} = NamespaceCoordinator.claim_pinned_for(NamespaceCoordinator, key, holder)
+      holder = start_pin_holder()
+
+      {:ok, %{claim_id: pin_id}} = Core.pin_file(vol_name, "/dup-delete.txt", holder)
 
       try do
         assert :ok = Core.delete_file(vol_name, "/dup-delete.txt")
         assert {:error, %FileNotFound{}} = Core.delete_file(vol_name, "/dup-delete.txt")
       after
-        :ok = NamespaceCoordinator.release(NamespaceCoordinator, pin_id)
+        :ok = Core.unpin_file(pin_id)
       end
     end
 

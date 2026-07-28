@@ -215,7 +215,23 @@ defmodule NeonFS.Core.NamespaceCoordinator do
   @spec claims_for_path(GenServer.server(), String.t()) ::
           {:ok, [{claim_id(), MetadataStateMachine.namespace_claim()}]} | {:error, term()}
   def claims_for_path(server \\ __MODULE__, path) when is_binary(path) do
-    GenServer.call(server, {:claims_for_path, path, :pinned})
+    GenServer.call(server, {:claims_for_path, path, :pinned, :local})
+  end
+
+  @doc """
+  Linearisable counterpart to `claims_for_path/2`, served by the Ra
+  leader rather than the local replica.
+
+  A pin taken through one core node is visible to a local read on
+  another only once that node has applied the entry. `delete_file`
+  decides whether to tombstone or hard-delete from this answer, so it
+  cannot afford the follower's lag — a pin it fails to see costs an
+  open handle its chunks (#1605).
+  """
+  @spec consistent_claims_for_path(GenServer.server(), String.t()) ::
+          {:ok, [{claim_id(), MetadataStateMachine.namespace_claim()}]} | {:error, term()}
+  def consistent_claims_for_path(server \\ __MODULE__, path) when is_binary(path) do
+    GenServer.call(server, {:claims_for_path, path, :pinned, :consistent})
   end
 
   @typedoc """
@@ -531,20 +547,8 @@ defmodule NeonFS.Core.NamespaceCoordinator do
     end
   end
 
-  def handle_call({:claims_for_path, path, type}, _from, state) do
-    result =
-      try do
-        case RaSupervisor.local_query(
-               &MetadataStateMachine.list_namespace_claims_at(&1, path, type)
-             ) do
-          {:ok, claims} -> {:ok, claims}
-          {:error, _} = err -> err
-        end
-      catch
-        :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
-      end
-
-    {:reply, result, state}
+  def handle_call({:claims_for_path, path, type, consistency}, _from, state) do
+    {:reply, read_claims_at(path, type, consistency), state}
   end
 
   def handle_call({:claim_byte_range, path, range, scope, holder}, _from, state) do
@@ -1095,6 +1099,20 @@ defmodule NeonFS.Core.NamespaceCoordinator do
 
     %{state | holders: holders}
   end
+
+  defp read_claims_at(path, type, consistency) do
+    query = &MetadataStateMachine.list_namespace_claims_at(&1, path, type)
+
+    case run_claim_query(query, consistency) do
+      {:ok, claims} -> {:ok, claims}
+      {:error, _} = err -> err
+    end
+  catch
+    :exit, _ -> {:error, Unavailable.from_reason(:ra_not_available)}
+  end
+
+  defp run_claim_query(query, :local), do: RaSupervisor.local_query(query)
+  defp run_claim_query(query, :consistent), do: RaSupervisor.query(query)
 
   defp ra_command(cmd) do
     case RaSupervisor.command(cmd) do

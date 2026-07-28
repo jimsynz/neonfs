@@ -37,6 +37,7 @@ defmodule NeonFS.TestCase do
     DriveRegistry,
     MetadataRing,
     MetadataStateMachine,
+    NamespaceCoordinator,
     RaServer,
     RaSupervisor,
     VolumeRegistry
@@ -877,6 +878,31 @@ defmodule NeonFS.TestCase do
     case :ets.whereis(table) do
       :undefined -> :ok
       ref -> :ets.delete(ref)
+    end
+  end
+
+  @doc """
+  Starts the namespace-coordination stack: a named node, Ra, an
+  initialised cluster, and the `NamespaceCoordinator` GenServer.
+
+  Required by any test that deletes a file through `NeonFS.Core` —
+  since #1605 an unlink refuses to run when it can't establish the
+  file's pin state, and an absent coordinator is exactly that.
+  """
+  def start_namespace_coordination do
+    ensure_ra_running()
+    start_supervised!(NamespaceCoordinator)
+  end
+
+  defp ensure_ra_running do
+    case Process.whereis(RaSupervisor) do
+      nil ->
+        ensure_node_named()
+        start_ra()
+        :ok = RaServer.init_cluster()
+
+      _pid ->
+        :ok
     end
   end
 

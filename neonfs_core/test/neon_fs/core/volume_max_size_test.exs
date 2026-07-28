@@ -16,6 +16,7 @@ defmodule NeonFS.Core.VolumeMaxSizeTest do
     start_stripe_index()
     start_volume_registry()
     ensure_chunk_access_tracker()
+    start_namespace_coordination()
 
     on_exit(fn -> cleanup_test_dirs() end)
 
