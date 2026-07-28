@@ -19,6 +19,13 @@ defmodule NeonFS.Client.ChunkReader do
   safe for interface nodes to serve arbitrarily large files without
   co-locating a core node (issue #207).
 
+  Each has a `_by_id` sibling (`read_file_by_id/3`,
+  `read_file_stream_by_id/3`) for callers holding an immutable file id
+  rather than a path — an open FUSE handle or SMB fd whose name may have
+  been renamed away or unlinked (#1607). Both forms share one pipeline:
+  only the three calls back to core (refs, whole-file read, metadata)
+  differ, so every fallback below applies identically to either.
+
   Chunks that require server-side processing (decompression or decryption)
   cannot be read through the raw-bytes data plane — the bytes would arrive
   opaque. For those chunks this helper falls back to a bounded
@@ -89,14 +96,36 @@ defmodule NeonFS.Client.ChunkReader do
   @spec read_file(String.t(), String.t(), read_opts()) ::
           {:ok, binary()} | {:error, term()}
   def read_file(volume_name, path, opts \\ []) do
+    do_read(volume_name, {:path, path}, opts)
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `read_file/3` (#1607 of #1590).
+
+  For callers holding an immutable handle — a FUSE `fh`, an SMB open —
+  whose path may have been renamed or unlinked since it was opened. A
+  detached file has no path to resolve, so the path-based read would
+  404 while the handle's chunks are still perfectly readable.
+
+  Every fallback the path-based version has is preserved: per-chunk
+  core RPC for chunks needing server-side processing, buffered
+  fallback, and per-stripe fallback for degraded erasure reads.
+  """
+  @spec read_file_by_id(String.t(), binary(), read_opts()) ::
+          {:ok, binary()} | {:error, term()}
+  def read_file_by_id(volume_name, file_id, opts \\ []) do
+    do_read(volume_name, {:id, file_id}, opts)
+  end
+
+  defp do_read(volume_name, target, opts) do
     refs_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
 
-    case Router.call(NeonFS.Core, :read_file_refs, [volume_name, path, refs_opts]) do
+    case refs_call(volume_name, target, refs_opts) do
       {:ok, %{chunks: chunks} = result} ->
-        dispatch_read(chunks, result.file_size, volume_name, path, opts)
+        dispatch_read(chunks, result.file_size, volume_name, target, opts)
 
       {:error, :stripe_refs_unsupported} ->
-        fallback_read(volume_name, path, opts)
+        fallback_read(volume_name, target, opts)
 
       {:error, _} = error ->
         error
@@ -129,27 +158,66 @@ defmodule NeonFS.Client.ChunkReader do
   """
   @spec read_file_stream(String.t(), String.t(), read_opts()) :: stream_result()
   def read_file_stream(volume_name, path, opts \\ []) do
+    do_read_stream(volume_name, {:path, path}, opts)
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `read_file_stream/3` (#1607 of #1590).
+
+  Same laziness guarantee: chunks are pulled as the stream is consumed,
+  so the working set stays at chunk granularity no matter how large the
+  file is. Same node-locality constraint too — a `Stream.t()` does not
+  survive Erlang distribution, so build and consume it on one node.
+  """
+  @spec read_file_stream_by_id(String.t(), binary(), read_opts()) :: stream_result()
+  def read_file_stream_by_id(volume_name, file_id, opts \\ []) do
+    do_read_stream(volume_name, {:id, file_id}, opts)
+  end
+
+  defp do_read_stream(volume_name, target, opts) do
     refs_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
 
-    case Router.call(NeonFS.Core, :read_file_refs, [volume_name, path, refs_opts]) do
+    case refs_call(volume_name, target, refs_opts) do
       {:ok, %{chunks: chunks, file_size: file_size}} ->
-        stream = build_chunk_stream(chunks, volume_name, path, opts)
+        stream = build_chunk_stream(chunks, volume_name, target, opts)
         {:ok, %{stream: stream, file_size: file_size}}
 
       {:error, :stripe_refs_unsupported} ->
-        fallback_stream(volume_name, path, opts)
+        fallback_stream(volume_name, target, opts)
 
       {:error, _} = error ->
         error
     end
   end
 
-  defp dispatch_read(chunks, file_size, volume_name, path, opts) do
+  # How a file is addressed when a fetch has to go back to core: by
+  # path, or by the immutable id an open handle holds. Everything
+  # between the two entry points and these three calls is shared —
+  # the chunk pipeline neither knows nor cares which it is.
+  defp refs_call(volume_name, {:path, path}, opts),
+    do: Router.call(NeonFS.Core, :read_file_refs, [volume_name, path, opts])
+
+  defp refs_call(volume_name, {:id, file_id}, opts),
+    do: Router.call(NeonFS.Core, :read_file_refs_by_id, [volume_name, file_id, opts])
+
+  defp core_read(volume_name, {:path, path}, opts),
+    do: Router.call(NeonFS.Core, :read_file, [volume_name, path, opts])
+
+  defp core_read(volume_name, {:id, file_id}, opts),
+    do: Router.call(NeonFS.Core, :read_file_by_id, [volume_name, file_id, opts])
+
+  defp meta_call(volume_name, {:path, path}, opts),
+    do: Router.call(NeonFS.Core, :get_file_meta, [volume_name, path, opts])
+
+  defp meta_call(volume_name, {:id, file_id}, opts),
+    do: Router.call(NeonFS.Core, :get_file_meta_by_id, [volume_name, file_id, opts])
+
+  defp dispatch_read(chunks, file_size, volume_name, target, opts) do
     if Enum.any?(chunks, &needs_server_processing?/1) do
-      fallback_read(volume_name, path, opts)
+      fallback_read(volume_name, target, opts)
     else
       case assemble(chunks, file_size, volume_name, opts) do
-        {:error, :no_data_endpoint} -> fallback_read(volume_name, path, opts)
+        {:error, :no_data_endpoint} -> fallback_read(volume_name, target, opts)
         other -> other
       end
     end
@@ -281,12 +349,12 @@ defmodule NeonFS.Client.ChunkReader do
     compression != :none or encrypted
   end
 
-  defp fallback_read(volume_name, path, opts) do
+  defp fallback_read(volume_name, target, opts) do
     forward_opts = Keyword.take(opts, [:offset, :length, :uid, :gids])
-    Router.call(NeonFS.Core, :read_file, [volume_name, path, forward_opts])
+    core_read(volume_name, target, forward_opts)
   end
 
-  defp build_chunk_stream(chunks, volume_name, path, opts) do
+  defp build_chunk_stream(chunks, volume_name, target, opts) do
     timeout = Keyword.get(opts, :timeout, @default_chunk_timeout)
     exclude = Keyword.get(opts, :exclude_nodes, [])
 
@@ -295,7 +363,7 @@ defmodule NeonFS.Client.ChunkReader do
         nil
 
       [ref | rest] ->
-        case stream_fetch_chunk(ref, volume_name, path, exclude, timeout) do
+        case stream_fetch_chunk(ref, volume_name, target, exclude, timeout) do
           {:ok, bytes} ->
             {bytes, rest}
 
@@ -305,16 +373,16 @@ defmodule NeonFS.Client.ChunkReader do
     end)
   end
 
-  defp stream_fetch_chunk(ref, volume_name, path, exclude, timeout) do
+  defp stream_fetch_chunk(ref, volume_name, target, exclude, timeout) do
     if needs_server_processing?(ref) do
-      stream_fetch_via_core(ref, volume_name, path)
+      stream_fetch_via_core(ref, volume_name, target)
     else
       case fetch_chunk_bytes(volume_name, ref, exclude, timeout) do
         {:ok, bytes} ->
           {:ok, binary_part(bytes, ref.read_start, ref.read_length)}
 
         {:error, :no_data_endpoint} ->
-          stream_fetch_via_core(ref, volume_name, path)
+          stream_fetch_via_core(ref, volume_name, target)
 
         {:error, _} = err ->
           err
@@ -322,31 +390,31 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp stream_fetch_via_core(ref, volume_name, path) do
+  defp stream_fetch_via_core(ref, volume_name, target) do
     offset = ref.chunk_offset + ref.read_start
     length = ref.read_length
 
-    Router.call(NeonFS.Core, :read_file, [volume_name, path, [offset: offset, length: length]])
+    core_read(volume_name, target, offset: offset, length: length)
   end
 
-  defp fallback_stream(volume_name, path, opts) do
+  defp fallback_stream(volume_name, target, opts) do
     meta_opts = Keyword.take(opts, [:uid, :gids])
 
-    case Router.call(NeonFS.Core, :get_file_meta, [volume_name, path, meta_opts]) do
+    case meta_call(volume_name, target, meta_opts) do
       {:ok, %{stripes: stripes} = meta} when is_list(stripes) ->
         {:ok,
-         %{stream: stripe_fallback_stream(meta, volume_name, path, opts), file_size: meta.size}}
+         %{stream: stripe_fallback_stream(meta, volume_name, target, opts), file_size: meta.size}}
 
       {:ok, meta} ->
-        buffered_fallback_stream(meta, volume_name, path, opts)
+        buffered_fallback_stream(meta, volume_name, target, opts)
 
       {:error, _} = err ->
         err
     end
   end
 
-  defp buffered_fallback_stream(meta, volume_name, path, opts) do
-    with {:ok, bytes} <- fallback_read(volume_name, path, opts) do
+  defp buffered_fallback_stream(meta, volume_name, target, opts) do
+    with {:ok, bytes} <- fallback_read(volume_name, target, opts) do
       stream =
         Stream.unfold(bytes, fn
           <<>> -> nil
@@ -357,7 +425,7 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp stripe_fallback_stream(meta, volume_name, path, opts) do
+  defp stripe_fallback_stream(meta, volume_name, target, opts) do
     offset = Keyword.get(opts, :offset, 0)
     length = Keyword.get(opts, :length, :all)
     end_byte = compute_end_byte(meta.size, offset, length)
@@ -370,7 +438,7 @@ defmodule NeonFS.Client.ChunkReader do
         |> Enum.map(&stripe_segment(&1, offset, end_byte))
         |> Enum.reject(&is_nil/1)
 
-      Stream.unfold(segments, &pull_stripe_segment(&1, volume_name, path))
+      Stream.unfold(segments, &pull_stripe_segment(&1, volume_name, target))
     end
   end
 
@@ -384,16 +452,12 @@ defmodule NeonFS.Client.ChunkReader do
     end
   end
 
-  defp pull_stripe_segment([], _volume_name, _path), do: nil
+  defp pull_stripe_segment([], _volume_name, _target), do: nil
 
-  defp pull_stripe_segment([%{offset: offset, length: length} | rest], volume_name, path) do
-    case Router.call(NeonFS.Core, :read_file, [
-           volume_name,
-           path,
-           [offset: offset, length: length]
-         ]) do
+  defp pull_stripe_segment([%{offset: offset, length: length} | rest], volume_name, target) do
+    case core_read(volume_name, target, offset: offset, length: length) do
       {:ok, <<>>} ->
-        pull_stripe_segment(rest, volume_name, path)
+        pull_stripe_segment(rest, volume_name, target)
 
       {:ok, bytes} ->
         {bytes, rest}
