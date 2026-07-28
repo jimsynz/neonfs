@@ -70,10 +70,7 @@ defmodule NeonFS.NFS.MixProject do
       {:bandit, "~> 1.5"},
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
-      # Extracted from the monorepo (#1621); the `extracted/nfs_server`
-      # branch is a staging home until the standalone repo exists.
-      {:nfs_server,
-       git: "https://harton.dev/project-neon/neonfs.git", branch: "extracted/nfs_server"},
+      {:nfs_server, git: "https://harton.dev/project-neon/nfs_server.git", branch: "main"},
       {:plug, "~> 1.15"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 
