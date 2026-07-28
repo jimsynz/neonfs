@@ -76,7 +76,6 @@ git -c commit.gpgsign=false commit -m "commit message"
 | `neonfs_iam/` | IAM Ash domain — scaffold, resources land via #288/#290/#291/#292. |
 | `neonfs_omnibus/` | Single release bundling core + all shipped interfaces. |
 | `neonfs-cli/` | Rust CLI; speaks Erlang distribution (TLS) directly via `erl_dist`. |
-| `nfs_server/` | Standalone library: XDR, ONC RPC, MOUNT, NFSv3 against backend behaviours. |
 | `neonfs_test_support/` | Peer-cluster test scaffolding (`PeerCluster`, `ClusterCase`, …) shared by every package's integration tests. |
 | `neonfs_integration/` | Cross-node cluster-correctness test suite (formation, replication, partitions, failure recovery). Per-interface e2e tests live with their packages. |
 
@@ -88,7 +87,6 @@ Architecture and design documentation lives in the [wiki](https://harton.dev/pro
 neonfs_client  ← neonfs_core
 neonfs_client  ← every interface package (fuse, nfs, s3, webdav, docker,
                  containerd, csi, cifs, iam)
-nfs_server     ← neonfs_nfs
 neonfs_core + interfaces              ← neonfs_omnibus
 neonfs_test_support (test-only)       ← all packages with peer-cluster tests
 all of the above                      ← neonfs_integration
@@ -254,7 +252,7 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 ## Module Naming
 
 - Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, `NeonFS.NFS.*`, `NeonFS.S3.*`, `NeonFS.WebDAV.*`, `NeonFS.Docker.*`, `NeonFS.Containerd.*`, `NeonFS.CSI.*`, `NeonFS.CIFS.*`, `NeonFS.IAM.*`, `NeonFS.Omnibus.*`, and `NeonFS.TestSupport.*`
-- The standalone protocol libraries use their own namespaces: the `wick` hex library provides `Wick.*` (FUSE); `nfs_server` provides `NFSServer.*`
+- The standalone protocol libraries use their own namespaces: the `wick` hex library provides `Wick.*` (FUSE); the external `nfs_server` library provides `NFSServer.*`
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
 

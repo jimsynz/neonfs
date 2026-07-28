@@ -23,7 +23,6 @@ neonfs/
 ├── neonfs_omnibus/         # All-in-one bundle (core + interfaces)
 ├── neonfs_integration/     # Peer-based multi-node integration tests
 ├── neonfs-cli/             # Rust CLI (`neonfs` binary)
-├── nfs_server/             # Standalone NFS server process (native BEAM NFS stack)
 ├── packaging/              # nfpm configs, systemd units, postinst scripts
 ├── containers/             # Dockerfiles and bake.hcl
 └── docs/                   # Guides (this file, user/operator, deployment, orchestration, etc.)

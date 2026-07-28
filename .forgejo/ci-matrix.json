@@ -55,12 +55,6 @@
     "lockfiles": "neonfs_nfs/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock neonfs_core/Cargo.lock"
   },
   {
-    "name": "nfs_server",
-    "image": "elixir",
-    "cache_paths": "nfs_server/deps\nnfs_server/_build",
-    "lockfiles": "nfs_server/mix.lock"
-  },
-  {
     "name": "neonfs_s3",
     "image": "elixir_rust",
     "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_s3/deps\nneonfs_s3/_build",
