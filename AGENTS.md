@@ -256,6 +256,12 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
 
+## CI Structure
+
+`.forgejo/workflows/ci.yml` runs one `package` job per entry in `.forgejo/ci-matrix.json` (a dynamic matrix), plus bespoke jobs for `neonfs_integration`, `neonfs-cli`, `vfs_neonfs_wire`, and `vfs_neonfs`. `resources/scripts/ci-affected` filters the matrix and gates the bespoke jobs by a PR's changed paths; the `canary` job aggregates everything into the single required check.
+
+**When adding a package**: add a `ci-matrix.json` entry (schema documented at the top of `ci.yml`) and a path rule in `ci-affected`. **When adding a sibling or test-only dependency**: update the corresponding `ci-affected` rule and, if build artefacts are shared, the entry's `cache_paths`/`lockfiles`. Lockfiles listed in an entry must exist — the job fails on missing ones rather than silently weakening the cache key.
+
 ## Forgejo
 
 This repository is hosted on a Forgejo instance at `harton.dev`. Use the `fj` CLI (not `gh`) for the simple read operations it handles well:
