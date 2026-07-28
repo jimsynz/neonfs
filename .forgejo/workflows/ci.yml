@@ -14,9 +14,28 @@ env:
 
 jobs:
   # ==========================================================================
-  # Resolve tool versions from .tool-versions so all jobs use the same images
+  # Resolve tool versions from .tool-versions (so all jobs use the same
+  # images) and compute which jobs this change needs: the package matrix is
+  # .forgejo/ci-matrix.json filtered by resources/scripts/ci-affected
+  # against the PR's changed files (pushes to main always run everything).
+  #
+  # Matrix entry schema (JSON has no comments, so it's documented here):
+  #   name         package directory, also the job display name
+  #   apt          optional extra apt packages to install first
+  #   dind         optional; true starts a Docker daemon for e2e tests
+  #   csi_sanity   optional; true installs the csi-sanity conformance binary
+  #   cache_paths  newline-separated actions/cache paths (own artefacts plus
+  #                any sibling path-dep artefacts the build compiles)
+  #   lockfiles    space-separated lockfiles hashed into the cache key; every
+  #                listed file must exist (the job fails on a missing one, so
+  #                stale entries can't silently degrade the key)
+  #
+  # Only the package *names* travel through the matrix (keeping job names
+  # readable); each job reads the rest of its entry from the checked-out
+  # table. Container options can't be read in-job, so the two privileged
+  # packages are special-cased on the package job's container.
   # ==========================================================================
-  resolve-versions:
+  setup:
     runs-on: docker
     timeout-minutes: 60
     container:
@@ -28,8 +47,16 @@ jobs:
       elixir_image: ${{ steps.parse.outputs.elixir_image }}
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
       rust_image: ${{ steps.parse.outputs.rust_image }}
+      packages: ${{ steps.affected.outputs.packages }}
+      run_integration: ${{ steps.affected.outputs.run_integration }}
+      run_cli: ${{ steps.affected.outputs.run_cli }}
+      run_wire: ${{ steps.affected.outputs.run_wire }}
+      run_vfs: ${{ steps.affected.outputs.run_vfs }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # ci-affected diffs against the PR base, which needs history.
+          fetch-depth: 0
       - id: parse
         run: |
           ELIXIR=$(awk '/^elixir/ {print $2}' .tool-versions)
@@ -41,6 +68,16 @@ jobs:
           echo "elixir_image=harton.dev/james/workflows/elixir:${ELIXIR}-erlang-${ERLANG}" >> "$GITHUB_OUTPUT"
           echo "elixir_rust_image=harton.dev/james/workflows/elixir-rust:${ELIXIR}-erlang-${ERLANG}-rust-${RUST}" >> "$GITHUB_OUTPUT"
           echo "rust_image=harton.dev/james/workflows/rust:${RUST}" >> "$GITHUB_OUTPUT"
+      - id: affected
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            git diff --name-only "${BASE}...HEAD" \
+              | tee /dev/stderr \
+              | resources/scripts/ci-affected >> "$GITHUB_OUTPUT"
+          else
+            resources/scripts/ci-affected --all >> "$GITHUB_OUTPUT"
+          fi
 
   # =========================================================================
   # buffering-check - Guard against whole-file buffering regressions (#254)
@@ -56,185 +93,111 @@ jobs:
         run: bash scripts/check_buffering.sh
 
   # =========================================================================
-  # neonfs_client - Elixir shared types, service discovery, and the
-  # neonfs_chunker NIF (interface-side chunker, #449).
+  # package - one job per entry in .forgejo/ci-matrix.json. The standard
+  # shape is cache → build → mix check; the optional steps (apt packages,
+  # dind, csi-sanity) are switched on per-entry by matrix fields.
   # =========================================================================
-  neonfs_client:
-    needs: resolve-versions
+  package:
+    needs: setup
+    if: needs.setup.outputs.packages != '[]'
     runs-on: docker
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJSON(needs.setup.outputs.packages) }}
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
+      # Container options can't be loaded from the table in-job, so the
+      # privileged packages are special-cased here: neonfs_fuse mounts
+      # /dev/fuse for real mounts, neonfs_docker runs dind.
+      options: ${{ matrix.pkg == 'neonfs_fuse' && '--privileged --device /dev/fuse' || (matrix.pkg == 'neonfs_docker' && '--privileged') || '' }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Load ci-matrix.json entry
+        id: meta
+        run: |
+          entry=$(jq -c --arg name "${{ matrix.pkg }}" '.[] | select(.name == $name)' .forgejo/ci-matrix.json)
+          if [ -z "$entry" ]; then
+            echo "no ci-matrix.json entry for ${{ matrix.pkg }}" >&2
+            exit 1
+          fi
+          {
+            echo "apt=$(jq -r '.apt // ""' <<<"$entry")"
+            echo "dind=$(jq -r '.dind // false' <<<"$entry")"
+            echo "csi_sanity=$(jq -r '.csi_sanity // false' <<<"$entry")"
+            echo "lockfiles=$(jq -r '.lockfiles' <<<"$entry")"
+            echo 'cache_paths<<NEONFS_CACHE_PATHS'
+            jq -r '.cache_paths' <<<"$entry"
+            echo 'NEONFS_CACHE_PATHS'
+          } >> "$GITHUB_OUTPUT"
+
+      # Package-specific system deps, e.g. libfuse3 for the FUSE NIF
+      # (wick), build-essential for neonfs_cifs's wire_probe (#1400), the
+      # Docker daemon for the VolumeDriver e2e (#312 — note Debian Trixie
+      # ships the CLI in a separate `docker-cli` package, which
+      # --no-install-recommends won't pull in implicitly).
+      - name: Install extra system packages
+        if: steps.meta.outputs.apt != ''
+        run: apt-get update && apt-get install -y --no-install-recommends ${{ steps.meta.outputs.apt }} && rm -rf /var/lib/apt/lists/*
+
+      - name: Hash lockfiles
+        id: lockhash
+        run: |
+          for f in ${{ steps.meta.outputs.lockfiles }}; do
+            if [ ! -f "$f" ]; then
+              echo "ci-matrix.json lists a lockfile that does not exist: $f" >&2
+              exit 1
+            fi
+          done
+          echo "hash=$(cat ${{ steps.meta.outputs.lockfiles }} | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Restore build cache
         uses: actions/cache@v6
         with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-          key: v3-build-neonfs_client-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_client/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_client-${{ runner.arch }}-
+          path: ${{ steps.meta.outputs.cache_paths }}
+          key: v6-build-${{ matrix.pkg }}-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ steps.lockhash.outputs.hash }}
+          restore-keys: v6-build-${{ matrix.pkg }}-${{ runner.arch }}-
 
       - name: Build
-        working-directory: neonfs_client
+        working-directory: ${{ matrix.pkg }}
         run: |
           bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
-          mix deps.get
+          # A transient hex registry timeout shouldn't fail the job.
+          for attempt in 1 2 3; do
+            mix deps.get && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "mix deps.get failed (attempt ${attempt}); retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
           mix deps.compile
           if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
-      - name: Check
-        working-directory: neonfs_client
-        run: mix check
-
-  # =========================================================================
-  # neonfs_core - Elixir + Rustler NIFs
-  # =========================================================================
-  neonfs_core:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
+      # csi-sanity is the upstream CSI conformance suite (built from
+      # source with Go). When it's on PATH the neonfs_csi test suite
+      # picks up the `:requires_csi_sanity` conformance test; otherwise
+      # that test is excluded. Cache the built binary across runs.
+      - name: Cache csi-sanity
+        if: steps.meta.outputs.csi_sanity == 'true'
+        id: cache-csi-sanity
         uses: actions/cache@v6
         with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/deps
-            neonfs_core/_build
-            neonfs_core/target
-            neonfs_core/priv/native
-          key: v4-build-neonfs_core-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_core/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_core-${{ runner.arch }}-
+          path: /usr/local/bin/csi-sanity
+          key: csi-sanity-v5.4.0-${{ runner.arch }}
 
-      - name: Build
-        working-directory: neonfs_core
+      - name: Build csi-sanity
+        if: steps.meta.outputs.csi_sanity == 'true' && steps.cache-csi-sanity.outputs.cache-hit != 'true'
         run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_core
-        run: mix check
-
-  # =========================================================================
-  # neonfs_fuse - Elixir + Rustler NIFs
-  # =========================================================================
-  neonfs_fuse:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-      options: --privileged --device /dev/fuse
-    steps:
-      - name: Install FUSE dependencies
-        run: apt-get update && apt-get install -y --no-install-recommends libfuse3-dev fuse3 && rm -rf /var/lib/apt/lists/*
-
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs_fuse/deps
-            neonfs_fuse/_build
-            neonfs_fuse/target
-            neonfs_fuse/priv/native
-          key: v4-build-neonfs_fuse-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_fuse/mix.lock', 'neonfs_fuse/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_fuse-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_fuse
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_fuse
-        run: mix check
-
-  # =========================================================================
-  # neonfs_docker - Docker VolumeDriver plugin. Transitively pulls the
-  # neonfs_chunker NIF through its neonfs_client dep (#449).
-  # =========================================================================
-  neonfs_docker:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-      options: --privileged
-    steps:
-      - name: Install Docker daemon dependencies
-        run: |
-          # Debian Trixie split docker.io: the daemon (`dockerd`) ships
-          # in `docker.io`, but the `docker` CLI binary moved to a
-          # separate `docker-cli` package which is only pulled in via
-          # Recommends. With `--no-install-recommends` we have to ask
-          # for it explicitly or the e2e test sees `dockerd` running
-          # but no `docker` on PATH.
-          #
-          # fuse3/libfuse3-dev back the real-FUSE Mount/Unmount e2e
-          # (#387): the test drives the actual NeonFS.FUSE.MountManager,
-          # whose wick NIF needs libfuse to build and fusermount3
-          # to mount.
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            docker.io docker-cli iptables libfuse3-dev fuse3
-          rm -rf /var/lib/apt/lists/*
-
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs_docker/deps
-            neonfs_docker/_build
-          key: v5-build-neonfs_docker-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_docker/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v5-build-neonfs_docker-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_docker
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
+          GO_VERSION=1.23.6
+          ARCH=$(dpkg --print-architecture)
+          curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xz
+          GOBIN=/usr/local/bin /usr/local/go/bin/go install \
+            github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@v5.4.0
 
       - name: Start Docker daemon (dind for the VolumeDriver e2e test, #312)
+        if: steps.meta.outputs.dind == 'true'
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
@@ -265,6 +228,7 @@ jobs:
           exit 1
 
       - name: Pre-pull e2e test images
+        if: steps.meta.outputs.dind == 'true'
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
@@ -287,50 +251,7 @@ jobs:
           exit 1
 
       - name: Check
-        working-directory: neonfs_docker
-        run: mix check
-
-  # =========================================================================
-  # neonfs_cifs - Samba VFS module backend (Elixir-only; UDS + ETF over
-  # `vfs_neonfs.so`; pulls the chunker NIF through its neonfs_client dep).
-  # =========================================================================
-  neonfs_cifs:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      # `LiveListenerTest` builds the vfs_neonfs `wire_probe` binary via make
-      # during the suite, so the C toolchain must be present (#1400).
-      - name: Install C toolchain
-        run: apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_cifs/deps
-            neonfs_cifs/_build
-          key: v3-build-neonfs_cifs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_cifs/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_cifs-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_cifs
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_cifs
+        working-directory: ${{ matrix.pkg }}
         run: mix check
 
   # =========================================================================
@@ -339,11 +260,12 @@ jobs:
   # erl_interface (ei) headers from the Erlang install, not Samba.
   # =========================================================================
   vfs_neonfs_wire:
-    needs: resolve-versions
+    needs: setup
+    if: needs.setup.outputs.run_wire == 'true'
     runs-on: docker
     timeout-minutes: 60
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
     steps:
       - name: Install C toolchain
         run: apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
@@ -358,13 +280,17 @@ jobs:
   # build tree is cached, so only the first run pays the full Samba build; later
   # runs relink just the module and repackage. Kept a separate job so that cost
   # doesn't ride on every other suite. (Load/round-trip testing is #386.)
+  # The vfs-cache-warm workflow rebuilds the cache on a schedule after
+  # eviction; the raised timeout covers the cold-build case so it finishes
+  # instead of flaking (#1565).
   # =========================================================================
   vfs_neonfs:
-    needs: resolve-versions
+    needs: setup
+    if: needs.setup.outputs.run_vfs == 'true'
     runs-on: docker
-    timeout-minutes: 60
+    timeout-minutes: 120
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
     steps:
       - uses: actions/checkout@v7
       - name: Restore Samba build cache
@@ -380,315 +306,15 @@ jobs:
         run: OUT_DIR="$(mktemp -d)" bash packaging/build-vfs-deb.sh
 
   # =========================================================================
-  # neonfs_csi - Kubernetes CSI driver (Elixir-only; gRPC over UDS via the
-  # `grpc` + `protobuf` hex packages). The CSI v1 protobuf bindings under
-  # `lib/csi/` are checked in (regenerate locally via `protoc-gen-elixir`).
-  # =========================================================================
-  neonfs_csi:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_csi/deps
-            neonfs_csi/_build
-          key: v3-build-neonfs_csi-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_csi/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_csi-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_csi
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      # csi-sanity is the upstream CSI conformance suite (built from
-      # source with Go). When it's on PATH the neonfs_csi test suite
-      # picks up the `:requires_csi_sanity` conformance test; otherwise
-      # that test is excluded. Cache the built binary across runs.
-      - name: Cache csi-sanity
-        id: cache-csi-sanity
-        uses: actions/cache@v6
-        with:
-          path: /usr/local/bin/csi-sanity
-          key: csi-sanity-v5.4.0-${{ runner.arch }}
-
-      - name: Build csi-sanity
-        if: steps.cache-csi-sanity.outputs.cache-hit != 'true'
-        run: |
-          GO_VERSION=1.23.6
-          ARCH=$(dpkg --print-architecture)
-          curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xz
-          GOBIN=/usr/local/bin /usr/local/go/bin/go install \
-            github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@v5.4.0
-
-      - name: Check
-        working-directory: neonfs_csi
-        run: mix check
-
-  # =========================================================================
-  # neonfs_containerd - containerd content store plugin (Elixir-only; gRPC
-  # over UDS via the `grpc` + `protobuf` hex packages). The
-  # `containerd.services.content.v1` and `grpc.health.v1` protobuf bindings
-  # under `lib/containerd/` are checked in (regenerate locally via
-  # `protoc-gen-elixir`).
-  # =========================================================================
-  neonfs_containerd:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_containerd/deps
-            neonfs_containerd/_build
-          key: v3-build-neonfs_containerd-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_containerd/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_containerd-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_containerd
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_containerd
-        run: mix check
-
-  # =========================================================================
-  # neonfs_nfs - Elixir + Rustler NIFs (NFSv3 server)
-  # =========================================================================
-  neonfs_nfs:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs_nfs/deps
-            neonfs_nfs/_build
-            neonfs_nfs/target
-            neonfs_nfs/priv/native
-          key: v4-build-neonfs_nfs-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_nfs/mix.lock', 'neonfs_nfs/native/neonfs_nfs/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_nfs-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_nfs
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_nfs
-        run: mix check
-
-  # =========================================================================
-  # nfs_server - Standalone NFSv3/XDR server library (pure Elixir)
-  # =========================================================================
-  nfs_server:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            nfs_server/deps
-            nfs_server/_build
-          key: v3-build-nfs_server-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ hashFiles('nfs_server/mix.lock') }}
-          restore-keys: v3-build-nfs_server-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: nfs_server
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: nfs_server
-        run: mix check
-
-  # =========================================================================
-  # neonfs_s3 - S3-compatible API interface. Transitively pulls the
-  # neonfs_chunker NIF through its neonfs_client dep (#449).
-  # =========================================================================
-  neonfs_s3:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/target
-            neonfs_core/priv/native
-            neonfs_s3/deps
-            neonfs_s3/_build
-          key: v5-build-neonfs_s3-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_s3/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v5-build-neonfs_s3-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_s3
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_s3
-        run: mix check
-
-  # =========================================================================
-  # neonfs_webdav - WebDAV interface. Transitively pulls the
-  # neonfs_chunker NIF through its neonfs_client dep (#449).
-  # =========================================================================
-  neonfs_webdav:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_core/target
-            neonfs_core/priv/native
-            webdav_server/deps
-            webdav_server/_build
-            neonfs_webdav/deps
-            neonfs_webdav/_build
-          key: v4-build-neonfs_webdav-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_webdav/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock', 'neonfs_core/Cargo.lock') }}
-          restore-keys: v4-build-neonfs_webdav-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_webdav
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_webdav
-        run: mix check
-
-  # =========================================================================
-  # neonfs_iam - IAM package (Ash resources). Transitively pulls the
-  # neonfs_chunker NIF through its neonfs_client dep (#449).
-  # =========================================================================
-  neonfs_iam:
-    needs: resolve-versions
-    runs-on: docker
-    timeout-minutes: 60
-    container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_client/native/neonfs_chunker/target
-            neonfs_client/priv/native
-            neonfs_iam/deps
-            neonfs_iam/_build
-          key: v3-build-neonfs_iam-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_iam/mix.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_iam-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_iam
-        run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_iam
-        run: mix check
-
-  # =========================================================================
   # neonfs-cli - Rust CLI
   # =========================================================================
   neonfs-cli:
-    needs: resolve-versions
+    needs: setup
+    if: needs.setup.outputs.run_cli == 'true'
     runs-on: docker
     timeout-minutes: 60
     container:
-      image: ${{ needs.resolve-versions.outputs.rust_image }}
+      image: ${{ needs.setup.outputs.rust_image }}
     steps:
       - uses: actions/checkout@v7
 
@@ -697,7 +323,7 @@ jobs:
         with:
           path: |
             neonfs-cli/target
-          key: v3-build-neonfs-cli-${{ runner.arch }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs-cli/Cargo.lock') }}
+          key: v3-build-neonfs-cli-${{ runner.arch }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs-cli/Cargo.lock') }}
           restore-keys: v3-build-neonfs-cli-${{ runner.arch }}-
 
       - name: Build
@@ -715,14 +341,18 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   # =========================================================================
-  # neonfs_integration - Integration tests
+  # neonfs_integration - Integration tests. Stays outside the package matrix:
+  # it needs the amd64 runner pool, a registry service sidecar (which is
+  # job-level and can't be switched per matrix entry), loop devices, and
+  # containerd.
   # =========================================================================
   neonfs_integration:
-    needs: resolve-versions
+    needs: setup
+    if: needs.setup.outputs.run_integration == 'true'
     runs-on: amd64
     timeout-minutes: 60
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
       options: --privileged
     services:
       # Local registry for `containerd_image_pull_test.exs` (#728).
@@ -756,19 +386,23 @@ jobs:
             neonfs_client/priv/native
             neonfs_integration/deps
             neonfs_integration/_build
-            neonfs_integration/target
-            neonfs_integration/priv/native
             neonfs_core/target
             neonfs_core/priv/native
-          key: v5-build-neonfs_integration-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
-          restore-keys: v5-build-neonfs_integration-${{ runner.arch }}-
+          key: v6-build-neonfs_integration-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ hashFiles('neonfs_integration/mix.lock', 'neonfs_core/Cargo.lock', 'neonfs_client/native/neonfs_chunker/Cargo.lock') }}
+          restore-keys: v6-build-neonfs_integration-${{ runner.arch }}-
 
       - name: Build
         working-directory: neonfs_integration
         run: |
           bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
-          mix deps.get
+          # A transient hex registry timeout shouldn't fail the job.
+          for attempt in 1 2 3; do
+            mix deps.get && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "mix deps.get failed (attempt ${attempt}); retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
           mix deps.compile
           mix compile
           if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
@@ -803,37 +437,33 @@ jobs:
         run: mix check
 
   # =========================================================================
-  # neonfs_omnibus - Elixir + Rustler NIFs (contains core, nfs, fuse, etc)
+  # canary - single aggregation gate. Fails if any needed job failed or was
+  # cancelled; succeeds when every job succeeded or was skipped (skipped is
+  # allowed so path-filtered runs still pass). Branch protection can require
+  # just this check.
   # =========================================================================
-  neonfs_omnibus:
-    needs: resolve-versions
+  canary:
+    needs:
+      - setup
+      - buffering-check
+      - package
+      - vfs_neonfs_wire
+      - vfs_neonfs
+      - neonfs-cli
+      - neonfs_integration
+    if: always()
     runs-on: docker
-    timeout-minutes: 60
+    timeout-minutes: 10
     container:
-      image: ${{ needs.resolve-versions.outputs.elixir_rust_image }}
+      image: harton.dev/james/workflows/ci-base:latest
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Restore build cache
-        uses: actions/cache@v6
-        with:
-          path: |
-            neonfs_client/deps
-            neonfs_client/_build
-            neonfs_omnibus/deps
-            neonfs_omnibus/_build
-          key: v3-build-neonfs_omnibus-${{ runner.arch }}-${{ needs.resolve-versions.outputs.elixir }}-${{ needs.resolve-versions.outputs.rust }}-${{ hashFiles('neonfs_omnibus/mix.lock', 'neonfs_omnibus/native/neonfs_omnibus/Cargo.lock') }}
-          restore-keys: v3-build-neonfs_omnibus-${{ runner.arch }}-
-
-      - name: Build
-        working-directory: neonfs_omnibus
+      - name: Check all required jobs passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          bash ../resources/scripts/ci-scrub-path-deps
-          mix local.hex --force && mix local.rebar --force
-          mix deps.get
-          mix deps.compile
-          if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
-
-      - name: Check
-        working-directory: neonfs_omnibus
-        run: mix check
+          echo "$NEEDS"
+          if echo "$NEEDS" | grep -qE '"result": *"(failure|cancelled)"'; then
+            echo "One or more required jobs failed or were cancelled."
+            exit 1
+          fi
+          echo "All required jobs succeeded (or were skipped)."

@@ -23,7 +23,6 @@ neonfs/
 ├── neonfs_omnibus/         # All-in-one bundle (core + interfaces)
 ├── neonfs_integration/     # Peer-based multi-node integration tests
 ├── neonfs-cli/             # Rust CLI (`neonfs` binary)
-├── nfs_server/             # Standalone NFS server process (native BEAM NFS stack)
 ├── packaging/              # nfpm configs, systemd units, postinst scripts
 ├── containers/             # Dockerfiles and bake.hcl
 └── docs/                   # Guides (this file, user/operator, deployment, orchestration, etc.)
@@ -149,10 +148,10 @@ NeonFS runs tests at four layers, from cheapest to most expensive:
 3. **NIF boundary tests** — Elixir calling Rust NIFs, verifying Rustler encoding round-trips.
 4. **Integration tests** — `neonfs_integration/` spawns real BEAM peers via `:peer.start_link`, exercising multi-node scenarios.
 
-Run everything from the repo root:
+Run everything from the repo root (there is no root Mix project — the script fans out to each subproject):
 
 ```bash
-mix check --no-retry       # all checks across all subprojects
+resources/scripts/neonfs-each mix check --no-retry   # all checks across all subprojects
 ```
 
 Run just one package's tests:

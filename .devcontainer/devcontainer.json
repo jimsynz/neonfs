@@ -5,7 +5,6 @@
   "workspaceFolder": "/workspaces/neonfs",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/neonfs,type=bind,consistency=cached",
   "mounts": [
-    "source=${devcontainerId}-build-root,target=/workspaces/neonfs/_build,type=volume",
     "source=${devcontainerId}-build-neonfs-cli,target=/workspaces/neonfs/neonfs-cli/_build,type=volume",
     "source=${devcontainerId}-build-neonfs_cifs,target=/workspaces/neonfs/neonfs_cifs/_build,type=volume",
     "source=${devcontainerId}-build-neonfs_client,target=/workspaces/neonfs/neonfs_client/_build,type=volume",
@@ -20,8 +19,7 @@
     "source=${devcontainerId}-build-neonfs_omnibus,target=/workspaces/neonfs/neonfs_omnibus/_build,type=volume",
     "source=${devcontainerId}-build-neonfs_s3,target=/workspaces/neonfs/neonfs_s3/_build,type=volume",
     "source=${devcontainerId}-build-neonfs_test_support,target=/workspaces/neonfs/neonfs_test_support/_build,type=volume",
-    "source=${devcontainerId}-build-neonfs_webdav,target=/workspaces/neonfs/neonfs_webdav/_build,type=volume",
-    "source=${devcontainerId}-build-nfs_server,target=/workspaces/neonfs/nfs_server/_build,type=volume"
+    "source=${devcontainerId}-build-neonfs_webdav,target=/workspaces/neonfs/neonfs_webdav/_build,type=volume"
   ],
   "containerEnv": {
     "ERL_ZFLAGS": "+Q 65536"

@@ -70,7 +70,7 @@ defmodule NeonFS.NFS.MixProject do
       {:bandit, "~> 1.5"},
       {:logger_json, "~> 7.0"},
       {:neonfs_client, path: "../neonfs_client"},
-      {:nfs_server, path: "../nfs_server"},
+      {:nfs_server, git: "https://harton.dev/project-neon/nfs_server.git", branch: "main"},
       {:plug, "~> 1.15"},
       {:telemetry_metrics_prometheus_core, "~> 1.2"},
 

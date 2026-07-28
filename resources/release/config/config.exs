@@ -1,5 +1,7 @@
 import Config
 
+repo_root = Path.expand("../../..", __DIR__)
+
 cargo_version_replace = fn version ->
   version = String.trim_leading(version, "v")
   "version = \"#{version}\"\n"
@@ -7,13 +9,15 @@ end
 
 config :git_ops,
   mix_project: Mix.Project.get!(),
-  changelog_file: "CHANGELOG.md",
+  changelog_file: Path.join(repo_root, "CHANGELOG.md"),
   github_handle_lookup?: false,
   repository_url: "https://harton.dev/project-neon/neonfs",
   version_tag_prefix: "v",
-  managed_files: "**/{mix.exs,README.md,Cargo.toml}"
+  managed_files:
+    repo_root
+    |> Path.join("**/{mix.exs,README.md,Cargo.toml}")
     |> Path.wildcard()
-    |> Enum.reject(&String.contains?(&1, "/deps/"))
+    |> Enum.reject(&String.contains?(&1, ["/deps/", "/_build/", "/target/"]))
     |> Enum.uniq()
     |> Enum.map(fn path ->
       cond do

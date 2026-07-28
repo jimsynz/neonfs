@@ -79,7 +79,6 @@ target "nfs" {
   ]
   contexts = {
     "client": "./neonfs_client"
-    "nfs_server": "./nfs_server"
     "src": "./neonfs_nfs"
     "base": "target:base"
     "cli": "target:cli"
@@ -204,7 +203,6 @@ target "omnibus" {
     "core": "./neonfs_core"
     "fuse": "./neonfs_fuse"
     "nfs": "./neonfs_nfs"
-    "nfs_server": "./nfs_server"
     "s3": "./neonfs_s3"
     "webdav": "./neonfs_webdav"
     "docker": "./neonfs_docker"

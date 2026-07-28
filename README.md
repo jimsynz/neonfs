@@ -194,8 +194,9 @@ copy of your data.
 
 - **Bugs and feature requests** — [open an issue](https://harton.dev/project-neon/neonfs/issues).
 - **Contributing** — start with the [developer guide](docs/developer-guide.md),
-  then build with `mix deps.get && mix compile` and run the full check
-  suite with `mix check --no-retry` (needs Elixir 1.19 / OTP 28 and
+  then build with `resources/scripts/neonfs-each mix deps.get` and run the
+  full check suite with `resources/scripts/neonfs-each mix check --no-retry`
+  (needs Elixir 1.19 / OTP 28 and
   Rust 1.93 — all pinned in `.tool-versions`, so `asdf install` or
   `mise install` fetches them).
 - **Release notes** — [CHANGELOG.md](CHANGELOG.md), generated from

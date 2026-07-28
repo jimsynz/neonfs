@@ -1,0 +1,67 @@
+[
+  {
+    "name": "neonfs_client",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native",
+    "lockfiles": "neonfs_client/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  },
+  {
+    "name": "neonfs_core",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/deps\nneonfs_core/_build\nneonfs_core/target\nneonfs_core/priv/native",
+    "lockfiles": "neonfs_core/mix.lock neonfs_core/Cargo.lock neonfs_client/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  },
+  {
+    "name": "neonfs_fuse",
+    "apt": "libfuse3-dev fuse3",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_fuse/deps\nneonfs_fuse/_build",
+    "lockfiles": "neonfs_fuse/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock neonfs_core/Cargo.lock"
+  },
+  {
+    "name": "neonfs_docker",
+    "apt": "docker.io docker-cli iptables libfuse3-dev fuse3",
+    "dind": true,
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_docker/deps\nneonfs_docker/_build",
+    "lockfiles": "neonfs_docker/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock neonfs_core/Cargo.lock"
+  },
+  {
+    "name": "neonfs_cifs",
+    "apt": "build-essential",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_cifs/deps\nneonfs_cifs/_build",
+    "lockfiles": "neonfs_cifs/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  },
+  {
+    "name": "neonfs_csi",
+    "csi_sanity": true,
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_csi/deps\nneonfs_csi/_build",
+    "lockfiles": "neonfs_csi/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  },
+  {
+    "name": "neonfs_containerd",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_containerd/deps\nneonfs_containerd/_build",
+    "lockfiles": "neonfs_containerd/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  },
+  {
+    "name": "neonfs_nfs",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_nfs/deps\nneonfs_nfs/_build",
+    "lockfiles": "neonfs_nfs/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock neonfs_core/Cargo.lock"
+  },
+  {
+    "name": "neonfs_s3",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_s3/deps\nneonfs_s3/_build",
+    "lockfiles": "neonfs_s3/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock neonfs_core/Cargo.lock"
+  },
+  {
+    "name": "neonfs_webdav",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_webdav/deps\nneonfs_webdav/_build",
+    "lockfiles": "neonfs_webdav/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock neonfs_core/Cargo.lock"
+  },
+  {
+    "name": "neonfs_iam",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_iam/deps\nneonfs_iam/_build",
+    "lockfiles": "neonfs_iam/mix.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  },
+  {
+    "name": "neonfs_omnibus",
+    "cache_paths": "neonfs_client/deps\nneonfs_client/_build\nneonfs_client/native/neonfs_chunker/target\nneonfs_client/priv/native\nneonfs_core/target\nneonfs_core/priv/native\nneonfs_omnibus/deps\nneonfs_omnibus/_build",
+    "lockfiles": "neonfs_omnibus/mix.lock neonfs_core/Cargo.lock neonfs_client/native/neonfs_chunker/Cargo.lock"
+  }
+]

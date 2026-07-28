@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Run a command in every subproject — each top-level directory containing
+# a `mix.exs`. Replaces the root Mix project's dynamic-alias fan-out.
+#
+# Usage:
+#   neonfs-each mix check --no-retry
+#   neonfs-each mix deps.get
+#
+# Runs sequentially with output streamed. A failure doesn't stop the run;
+# the failed subprojects are listed at the end and the exit code is
+# non-zero if any failed.
+
+set -euo pipefail
+shopt -s nullglob
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: neonfs-each <command> [args...]" >&2
+  exit 64
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+failures=()
+for mixfile in "$repo_root"/*/mix.exs; do
+  project="$(dirname "$mixfile")"
+  name="$(basename "$project")"
+  printf '\n==> %s\n' "$name"
+  if ! (cd "$project" && "$@"); then
+    failures+=("$name")
+  fi
+done
+
+if [ "${#failures[@]}" -gt 0 ]; then
+  printf '\nFailed in: %s\n' "${failures[*]}" >&2
+  exit 1
+fi

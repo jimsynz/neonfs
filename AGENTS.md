@@ -14,9 +14,9 @@ NeonFS is experimental. **There are no production clusters.** Do not preserve ba
 
 ## Build Commands
 
-### Elixir (from repository root or individual packages)
+### Elixir (from individual package directories)
 ```bash
-mix check --no-retry           # Run all checks in all subprojects (from root)
+mix check --no-retry           # Run all checks for this package
 mix compile                    # Compile Elixir + Rustler NIFs
 mix test                       # Run ExUnit tests
 mix test path/to/test.exs      # Run specific test file
@@ -25,6 +25,12 @@ mix format                     # Format code
 mix format --check-formatted   # Check formatting
 mix credo --strict             # Code style checker
 mix dialyzer                   # Static type analysis
+```
+
+There is no Mix project at the repository root. To run a task in every subproject, use the fan-out script:
+```bash
+resources/scripts/neonfs-each mix check --no-retry   # All checks in all subprojects
+resources/scripts/neonfs-each mix deps.get           # Fetch deps everywhere
 ```
 
 ### Pre-Commit Checks
@@ -70,7 +76,6 @@ git -c commit.gpgsign=false commit -m "commit message"
 | `neonfs_iam/` | IAM Ash domain — scaffold, resources land via #288/#290/#291/#292. |
 | `neonfs_omnibus/` | Single release bundling core + all shipped interfaces. |
 | `neonfs-cli/` | Rust CLI; speaks Erlang distribution (TLS) directly via `erl_dist`. |
-| `nfs_server/` | Standalone library: XDR, ONC RPC, MOUNT, NFSv3 against backend behaviours. |
 | `neonfs_test_support/` | Peer-cluster test scaffolding (`PeerCluster`, `ClusterCase`, …) shared by every package's integration tests. |
 | `neonfs_integration/` | Cross-node cluster-correctness test suite (formation, replication, partitions, failure recovery). Per-interface e2e tests live with their packages. |
 
@@ -82,7 +87,6 @@ Architecture and design documentation lives in the [wiki](https://harton.dev/pro
 neonfs_client  ← neonfs_core
 neonfs_client  ← every interface package (fuse, nfs, s3, webdav, docker,
                  containerd, csi, cifs, iam)
-nfs_server     ← neonfs_nfs
 neonfs_core + interfaces              ← neonfs_omnibus
 neonfs_test_support (test-only)       ← all packages with peer-cluster tests
 all of the above                      ← neonfs_integration
@@ -180,6 +184,8 @@ Historical context:
 
 Release notes live in [`CHANGELOG.md`](CHANGELOG.md), generated from conventional commits.
 
+Releases are cut with `resources/scripts/neonfs-release`, which runs `mix git_ops.release` in the release tooling project at `resources/release/` (the repository root has no Mix project).
+
 `git_ops` bumps the `version =` field in every Elixir `mix.exs` and every Rust `Cargo.toml` it tracks, but **does not** regenerate the three workspace `Cargo.lock` files (`neonfs_core/`, `neonfs-cli/`, `neonfs_client/native/neonfs_chunker/`). After a release commit, run `cargo update -p <workspace-package>` in each workspace and commit the lockfile changes — otherwise the next clean checkout's first `cargo build` produces an uncommitted lockfile drift (`<pkg> v0.1.0 → v<new>`) that shows up in every subsequent `git status`.
 
 ## Testing
@@ -202,9 +208,9 @@ mix test                       # All Elixir tests
 cargo test                     # Rust tests
 ```
 
-**Test suite performance:** The full check suite (`mix check --no-retry`) takes several minutes, and the integration tests (`neonfs_integration`) alone can take 6+ minutes. **Save test output to a file and grep it** rather than re-running the suite each time you need to inspect results:
+**Test suite performance:** The full check suite (`resources/scripts/neonfs-each mix check --no-retry`) takes several minutes, and the integration tests (`neonfs_integration`) alone can take 6+ minutes. **Save test output to a file and grep it** rather than re-running the suite each time you need to inspect results:
 ```bash
-mix check --no-retry 2>&1 | tee /tmp/neonfs_check.txt
+resources/scripts/neonfs-each mix check --no-retry 2>&1 | tee /tmp/neonfs_check.txt
 grep -E 'failure|FAILED|✕' /tmp/neonfs_check.txt
 ```
 Run individual test files first to iterate quickly before running the full suite.
@@ -246,9 +252,15 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 ## Module Naming
 
 - Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, `NeonFS.NFS.*`, `NeonFS.S3.*`, `NeonFS.WebDAV.*`, `NeonFS.Docker.*`, `NeonFS.Containerd.*`, `NeonFS.CSI.*`, `NeonFS.CIFS.*`, `NeonFS.IAM.*`, `NeonFS.Omnibus.*`, and `NeonFS.TestSupport.*`
-- The standalone protocol libraries use their own namespaces: the `wick` hex library provides `Wick.*` (FUSE); `nfs_server` provides `NFSServer.*`
+- The standalone protocol libraries use their own namespaces: the `wick` hex library provides `Wick.*` (FUSE); the external `nfs_server` library provides `NFSServer.*`
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
+
+## CI Structure
+
+`.forgejo/workflows/ci.yml` runs one `package` job per entry in `.forgejo/ci-matrix.json` (a dynamic matrix), plus bespoke jobs for `neonfs_integration`, `neonfs-cli`, `vfs_neonfs_wire`, and `vfs_neonfs`. `resources/scripts/ci-affected` filters the matrix and gates the bespoke jobs by a PR's changed paths; the `canary` job aggregates everything into the single required check.
+
+**When adding a package**: add a `ci-matrix.json` entry (schema documented at the top of `ci.yml`) and a path rule in `ci-affected`. **When adding a sibling or test-only dependency**: update the corresponding `ci-affected` rule and, if build artefacts are shared, the entry's `cache_paths`/`lockfiles`. Lockfiles listed in an entry must exist — the job fails on missing ones rather than silently weakening the cache key.
 
 ## Forgejo
 
@@ -412,7 +424,7 @@ Handle the `{:ok, {}}` case explicitly when expecting simple `:ok`.
 
 Before declaring any implementation phase complete:
 
-1. **Run the full test suite**: `mix check --no-retry` from the repository root (runs checks in all subprojects)
+1. **Run the full test suite**: `resources/scripts/neonfs-each mix check --no-retry` (runs checks in all subprojects)
 2. **All integration tests must pass** - the neonfs_integration package spawns real peer nodes to test multi-node scenarios
 3. **Verify inter-service communication works**:
    - CLI → Core (via Erlang distribution)
