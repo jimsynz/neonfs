@@ -188,6 +188,31 @@ defmodule NeonFS.Core.RaTest do
     end
   end
 
+  # `NeonFS.TestCase.stop_ra/0` bounces the `:ra` application to wipe
+  # its global ETS/dets state between cases, so a reset can land while
+  # Ra's dets-backed directory is closed. The server the reset wants
+  # gone went with the application — that must read as "already clean",
+  # not as a crash that takes the caller's test with it (#1611).
+  describe "reset! with the :ra application stopped" do
+    setup do
+      :ok = Application.stop(:ra)
+      on_exit(fn -> {:ok, _} = Application.ensure_all_started(:ra) end)
+      :ok
+    end
+
+    test "returns :ok instead of crashing the server" do
+      assert :ok = RaServer.reset!()
+      assert Process.alive?(Process.whereis(RaServer))
+    end
+
+    test "leaves the server resettable once :ra is back" do
+      :ok = RaServer.reset!()
+      {:ok, _} = Application.ensure_all_started(:ra)
+
+      assert :ok = RaServer.reset!()
+    end
+  end
+
   describe "telemetry events" do
     test "put command emits telemetry" do
       # Use a unique key to avoid test pollution from previous tests
