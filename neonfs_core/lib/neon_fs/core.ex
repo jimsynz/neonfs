@@ -779,6 +779,83 @@ defmodule NeonFS.Core do
     end
   end
 
+  @doc """
+  `file_id`-keyed counterpart to `get_file_meta/3`.
+
+  Serves `stat` on an open handle without re-resolving its path — the
+  path may have been renamed or unlinked since the handle was opened,
+  and a `:detached` file has no path at all (#1606 of #1590).
+
+  Returns `{:error, :wrong_volume}` when the id resolves into a
+  different volume than `volume_name`.
+  """
+  @spec get_file_meta_by_id(String.t(), binary(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, FileNotFound.t() | term()}
+  def get_file_meta_by_id(volume_name, file_id, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, file} <- lookup_file_by_id(volume.id, file_id),
+         :ok <- authorise_file(opts, :read, volume.id, file) do
+      {:ok, file}
+    end
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `update_file_meta/4` — `fchmod`,
+  `fchown` and `futimens` on an open handle (#1606 of #1590).
+  """
+  @spec update_file_meta_by_id(String.t(), binary(), keyword(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, FileNotFound.t() | term()}
+  def update_file_meta_by_id(volume_name, file_id, updates, opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, file} <- lookup_file_by_id(volume.id, file_id),
+         :ok <- authorise_file(opts, :write, volume.id, file) do
+      FileIndex.update(file.id, updates)
+    end
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `truncate_file/5` — `ftruncate` on an
+  open handle (#1606 of #1590).
+  """
+  @spec truncate_file_by_id(String.t(), binary(), non_neg_integer(), keyword(), keyword()) ::
+          {:ok, FileMeta.t()} | {:error, FileNotFound.t() | term()}
+  def truncate_file_by_id(volume_name, file_id, new_size, additional_updates \\ [], opts \\ []) do
+    with {:ok, volume} <- resolve_volume(volume_name),
+         {:ok, file} <- lookup_file_by_id(volume.id, file_id),
+         :ok <- authorise_file(opts, :write, volume.id, file),
+         {:ok, updated} <- FileIndex.truncate(file.id, new_size, additional_updates) do
+      adjust_logical_usage(volume.id, new_size - file.size)
+      {:ok, updated}
+    end
+  end
+
+  # By-ID callers authorise against the resolved record's own path, so
+  # the check lands on the same POSIX resource its path-based sibling
+  # would use. Resolution therefore has to happen first — the reverse
+  # of the path-based order.
+  defp authorise_file(opts, action, volume_id, %FileMeta{path: path}) do
+    authorise_posix(
+      Keyword.get(opts, :uid, 0),
+      Keyword.get(opts, :gids, []),
+      action,
+      volume_id,
+      {:file, volume_id, path}
+    )
+  end
+
+  defp lookup_file_by_id(volume_id, file_id) do
+    case FileIndex.get_in_volume(volume_id, file_id) do
+      {:ok, file} ->
+        {:ok, file}
+
+      {:error, :wrong_volume} ->
+        {:error, :wrong_volume}
+
+      {:error, :not_found} ->
+        {:error, FileNotFound.exception(file_path: "<id:#{file_id}>", volume_id: volume_id)}
+    end
+  end
+
   # Accounts a truncation's logical-byte delta against the volume counter
   # (#1462); the delta is negative for a shrink, positive for a sparse
   # grow. Best-effort — the metadata change is already committed.

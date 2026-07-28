@@ -22,7 +22,9 @@ defmodule NeonFS.Client do
     sync_file
     sync_file_by_id
     truncate_file
+    truncate_file_by_id
     update_file_meta
+    update_file_meta_by_id
     write_file_at
     write_file_at_by_id
     write_file_streamed
@@ -83,6 +85,42 @@ defmodule NeonFS.Client do
   @spec sync_file_by_id(String.t(), binary()) :: :ok | {:error, term()}
   def sync_file_by_id(volume_name, file_id) do
     core_call(NeonFS.Core, :sync_file_by_id, [volume_name, file_id])
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `NeonFS.Core.get_file_meta/3` — `stat`
+  through an open handle whose path may have been renamed or unlinked
+  (#1606).
+  """
+  @spec get_file_meta_by_id(String.t(), binary(), keyword()) :: {:ok, map()} | {:error, term()}
+  def get_file_meta_by_id(volume_name, file_id, opts \\ []) do
+    core_call(NeonFS.Core, :get_file_meta_by_id, [volume_name, file_id, opts])
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `NeonFS.Core.update_file_meta/4` —
+  `fchmod` / `fchown` / `futimens` through an open handle (#1606).
+  """
+  @spec update_file_meta_by_id(String.t(), binary(), keyword(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def update_file_meta_by_id(volume_name, file_id, updates, opts \\ []) do
+    core_call(NeonFS.Core, :update_file_meta_by_id, [volume_name, file_id, updates, opts])
+  end
+
+  @doc """
+  `file_id`-keyed counterpart to `NeonFS.Core.truncate_file/5` —
+  `ftruncate` through an open handle (#1606).
+  """
+  @spec truncate_file_by_id(String.t(), binary(), non_neg_integer(), keyword(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def truncate_file_by_id(volume_name, file_id, new_size, additional_updates \\ [], opts \\ []) do
+    core_call(NeonFS.Core, :truncate_file_by_id, [
+      volume_name,
+      file_id,
+      new_size,
+      additional_updates,
+      opts
+    ])
   end
 
   @doc """

@@ -66,4 +66,38 @@ defmodule NeonFS.ClientTest do
                Client.sync_file_by_id("vol", "file-1")
     end
   end
+
+  # By-ID metadata facade (#1606). The two mutating calls carry the
+  # volume name first so they route to a root holder like their
+  # path-based siblings; `stat` stays cost-based.
+  describe "by-id metadata pass-throughs (#1606)" do
+    test "get_file_meta_by_id routes via cost-based Router.call" do
+      stub(Router, :call, fn mod, fun, args -> {:cost_based, mod, fun, args} end)
+
+      assert {:cost_based, NeonFS.Core, :get_file_meta_by_id, ["vol", "file-1", []]} =
+               Client.get_file_meta_by_id("vol", "file-1")
+
+      assert {:cost_based, NeonFS.Core, :get_file_meta_by_id, ["vol", "file-1", [uid: 1000]]} =
+               Client.get_file_meta_by_id("vol", "file-1", uid: 1000)
+    end
+
+    test "update_file_meta_by_id routes to the root holder" do
+      stub(Router, :volume_metadata_call, fn vol, mod, fun, args ->
+        {:root, vol, mod, fun, args}
+      end)
+
+      assert {:root, "vol", NeonFS.Core, :update_file_meta_by_id,
+              ["vol", "file-1", [mode: 0o100600], []]} =
+               Client.update_file_meta_by_id("vol", "file-1", mode: 0o100600)
+    end
+
+    test "truncate_file_by_id routes to the root holder" do
+      stub(Router, :volume_metadata_call, fn vol, mod, fun, args ->
+        {:root, vol, mod, fun, args}
+      end)
+
+      assert {:root, "vol", NeonFS.Core, :truncate_file_by_id, ["vol", "file-1", 42, [], []]} =
+               Client.truncate_file_by_id("vol", "file-1", 42)
+    end
+  end
 end

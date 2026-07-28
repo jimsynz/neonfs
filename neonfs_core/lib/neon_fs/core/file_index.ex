@@ -143,6 +143,25 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  Retrieves a file by `file_id`, rejecting one that resolves into a
+  different volume.
+
+  Every by-ID entry point needs this check: a `file_id` arrives from a
+  caller holding a long-lived handle, and nothing about the id itself
+  says which volume issued it. Returns `{:error, :wrong_volume}` rather
+  than metadata the caller has no business reading.
+  """
+  @spec get_in_volume(volume_id(), file_id()) ::
+          {:ok, FileMeta.t()} | {:error, :not_found | :wrong_volume}
+  def get_in_volume(volume_id, file_id) do
+    case get(volume_id, file_id) do
+      {:ok, %FileMeta{volume_id: ^volume_id} = file} -> {:ok, file}
+      {:ok, %FileMeta{}} -> {:error, :wrong_volume}
+      {:error, :not_found} -> {:error, :not_found}
+    end
+  end
+
+  @doc """
   Retrieves a file by volume ID and path.
 
   Parses the path into parent_path + name, reads the child's `dirent:`

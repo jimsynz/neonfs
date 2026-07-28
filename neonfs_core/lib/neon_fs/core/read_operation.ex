@@ -1060,11 +1060,11 @@ defmodule NeonFS.Core.ReadOperation do
   # Verifies the resolved FileMeta belongs to the requested volume so
   # a stale `file_id` from another volume can't slip through.
   defp get_file_by_id(volume_id, file_id) do
-    case FileIndex.get(volume_id, file_id) do
-      {:ok, %{volume_id: ^volume_id} = file_meta} ->
+    case FileIndex.get_in_volume(volume_id, file_id) do
+      {:ok, file_meta} ->
         {:ok, file_meta}
 
-      {:ok, _other_volume_meta} ->
+      {:error, :wrong_volume} ->
         {:error, :wrong_volume}
 
       {:error, :not_found} ->
