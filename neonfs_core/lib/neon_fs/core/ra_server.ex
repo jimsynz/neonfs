@@ -186,13 +186,13 @@ defmodule NeonFS.Core.RaServer do
     Logger.info("Resetting Ra server for testing")
 
     # Always attempt to stop, even if we think it's not running
-    case :ra.stop_server(:default, server_id) do
+    case tolerate_ra_down(fn -> :ra.stop_server(:default, server_id) end) do
       :ok -> Logger.debug("Stopped Ra server")
       {:error, reason} -> Logger.debug("Could not stop Ra server", reason: inspect(reason))
     end
 
     # Always attempt to delete, to clear Ra's registry
-    case :ra.force_delete_server(:default, server_id) do
+    case tolerate_ra_down(fn -> :ra.force_delete_server(:default, server_id) end) do
       :ok ->
         Logger.debug("Deleted Ra server state")
 
@@ -417,19 +417,21 @@ defmodule NeonFS.Core.RaServer do
   @impl true
   def terminate(_reason, state) do
     # Only try to stop if we successfully started the Ra server
-    if state.status in [:running, :joined] do
-      server_id = {@cluster_name, Node.self()}
-
-      case :ra.stop_server(:default, server_id) do
-        :ok ->
-          Logger.info("Ra server stopped successfully")
-
-        {:error, reason} ->
-          Logger.warning("Failed to stop Ra server", reason: inspect(reason))
-      end
-    end
+    if state.status in [:running, :joined], do: stop_local_ra_server()
 
     :ok
+  end
+
+  defp stop_local_ra_server do
+    server_id = {@cluster_name, Node.self()}
+
+    case tolerate_ra_down(fn -> :ra.stop_server(:default, server_id) end) do
+      :ok ->
+        Logger.info("Ra server stopped successfully")
+
+      {:error, reason} ->
+        Logger.warning("Failed to stop Ra server", reason: inspect(reason))
+    end
   end
 
   # Ensure Ra application is started (system readiness checked via handle_continue/handle_info)
@@ -635,13 +637,33 @@ defmodule NeonFS.Core.RaServer do
 
   # Poll until Ra's directory no longer holds a pid for this server.
   # Used after force_delete_server to avoid racing the next start_server call.
+  # Ra's server directory lives in dets tables owned by the `:ra`
+  # application. Touching them after it has stopped — the test helper
+  # bounces `:ra` between cases, and on node shutdown OTP can stop it
+  # before this supervision tree — raises inside Ra itself:
+  # `:ra.stop_server/2` has no `try` clause for the
+  # `{:error, {:badrpc, {:EXIT, {:badarg, …}}}}` a closed dets produces,
+  # so the exception escapes and kills this GenServer along with
+  # whoever called it. A server that went down with its application is
+  # already in the state these calls are trying to reach (#1611).
+  defp tolerate_ra_down(fun) do
+    fun.()
+  rescue
+    error -> {:error, {:ra_unavailable, error}}
+  catch
+    :exit, reason -> {:error, {:ra_unavailable, reason}}
+  end
+
   defp wait_for_ra_cleanup(server_id, attempts \\ 0) do
     {_name, node} = server_id
     sanitized = node |> to_string() |> String.replace(~r/[@\.]/, "_")
     uid = "neonfs_meta_#{sanitized}"
 
-    case :ra_directory.pid_of(:default, uid) do
+    case tolerate_ra_down(fn -> :ra_directory.pid_of(:default, uid) end) do
       :undefined ->
+        :ok
+
+      {:error, _ra_down} ->
         :ok
 
       _pid when attempts >= 50 ->
