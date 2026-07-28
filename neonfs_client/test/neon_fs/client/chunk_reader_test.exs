@@ -899,4 +899,222 @@ defmodule NeonFS.Client.ChunkReaderTest do
       assert {:ok, ^bytes} = ChunkReader.read_file("vol", "/cached.txt", [])
     end
   end
+
+  # By-ID entry points (#1607 of #1590). The pipeline is shared with the
+  # path-based siblings — what these assert is that every route back to
+  # core uses the by-ID call, so a handle whose path was renamed away or
+  # unlinked still reads.
+  describe "read_file_by_id/3" do
+    test "assembles bytes over the data plane, resolving refs by file_id" do
+      bytes = "bytes behind an open handle"
+
+      refs = [
+        ref(
+          content: bytes,
+          original_size: byte_size(bytes),
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: byte_size(bytes)
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, ["vol", "file-1", []] ->
+        {:ok, %{file_size: byte_size(bytes), chunks: refs}}
+      end)
+
+      expect(Router, :data_call, fn :node1@host, :get_chunk, _args, _opts -> {:ok, bytes} end)
+
+      assert {:ok, ^bytes} = ChunkReader.read_file_by_id("vol", "file-1")
+    end
+
+    test "falls back to the by-ID core read for chunks needing server processing" do
+      refs = [
+        ref(
+          seed: :zipped,
+          original_size: 10,
+          chunk_offset: 0,
+          read_start: 0,
+          read_length: 10,
+          compression: :zstd
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:ok, %{file_size: 10, chunks: refs}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_by_id, ["vol", "file-1", opts] ->
+        assert opts[:offset] == 3
+        assert opts[:length] == 4
+        {:ok, "abcd"}
+      end)
+
+      assert {:ok, "abcd"} =
+               ChunkReader.read_file_by_id("vol", "file-1", offset: 3, length: 4)
+    end
+
+    test "falls back to the by-ID core read when no data endpoint is reachable" do
+      refs = [
+        ref(seed: :remote, original_size: 4, chunk_offset: 0, read_start: 0, read_length: 4)
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:ok, %{file_size: 4, chunks: refs}}
+      end)
+
+      expect(Router, :data_call, fn _node, :get_chunk, _args, _opts ->
+        {:error, :no_data_endpoint}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_by_id, ["vol", "file-1", _opts] ->
+        {:ok, "wxyz"}
+      end)
+
+      assert {:ok, "wxyz"} = ChunkReader.read_file_by_id("vol", "file-1")
+    end
+
+    test "propagates a refs error instead of returning an empty read" do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:error, %{class: :not_found}}
+      end)
+
+      assert {:error, %{class: :not_found}} = ChunkReader.read_file_by_id("vol", "gone-id")
+    end
+  end
+
+  describe "read_file_stream_by_id/3" do
+    test "pulls one chunk per element rather than the whole file up front" do
+      chunks = for n <- 1..3, do: String.duplicate(<<?A + n>>, 10)
+
+      refs =
+        chunks
+        |> Enum.with_index()
+        |> Enum.map(fn {content, i} ->
+          ref(
+            content: content,
+            original_size: 10,
+            chunk_offset: i * 10,
+            read_start: 0,
+            read_length: 10
+          )
+        end)
+
+      {:ok, fetches} = Agent.start_link(fn -> 0 end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, ["vol", "file-1", []] ->
+        {:ok, %{file_size: 30, chunks: refs}}
+      end)
+
+      stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
+        Agent.update(fetches, &(&1 + 1))
+        {:ok, Enum.find(chunks, &(content_hash(&1) == args[:hash]))}
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 30}} =
+               ChunkReader.read_file_stream_by_id("vol", "file-1")
+
+      # Nothing fetched until the stream is consumed, then exactly one
+      # chunk per element taken — the working set never spans the file.
+      assert Agent.get(fetches, & &1) == 0
+      assert Enum.take(stream, 1) == [Enum.at(chunks, 0)]
+      assert Agent.get(fetches, & &1) == 1
+
+      assert Enum.to_list(stream) == chunks
+    end
+
+    test "fetches server-processed chunks through the by-ID core read" do
+      refs = [
+        ref(
+          seed: :crypted,
+          original_size: 8,
+          chunk_offset: 16,
+          read_start: 2,
+          read_length: 4,
+          encrypted: true
+        )
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:ok, %{file_size: 24, chunks: refs}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_by_id, ["vol", "file-1", opts] ->
+        assert opts[:offset] == 18
+        assert opts[:length] == 4
+        {:ok, "plai"}
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream_by_id("vol", "file-1")
+      assert Enum.into(stream, <<>>) == "plai"
+    end
+
+    test "walks stripes one at a time on a degraded erasure read" do
+      stripes = [
+        %{stripe_id: "s1", byte_range: {0, 100}},
+        %{stripe_id: "s2", byte_range: {100, 150}}
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta_by_id, ["vol", "file-1" | _] ->
+        {:ok, %{size: 150, stripes: stripes}}
+      end)
+
+      expect(Router, :call, 2, fn NeonFS.Core, :read_file_by_id, ["vol", "file-1", opts] ->
+        case {opts[:offset], opts[:length]} do
+          {0, 100} -> {:ok, String.duplicate("A", 100)}
+          {100, 50} -> {:ok, String.duplicate("B", 50)}
+        end
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 150}} =
+               ChunkReader.read_file_stream_by_id("vol", "file-1")
+
+      assert Enum.to_list(stream) == [String.duplicate("A", 100), String.duplicate("B", 50)]
+    end
+
+    test "buffers through the by-ID core read when the file has no stripes" do
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:error, :stripe_refs_unsupported}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :get_file_meta_by_id, _ ->
+        {:ok, %{size: 5, stripes: nil}}
+      end)
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_by_id, ["vol", "file-1", _opts] ->
+        {:ok, "plain"}
+      end)
+
+      assert {:ok, %{stream: stream, file_size: 5}} =
+               ChunkReader.read_file_stream_by_id("vol", "file-1")
+
+      assert Enum.into(stream, <<>>) == "plain"
+    end
+
+    test "raises StreamError mid-stream rather than truncating the read" do
+      refs = [
+        ref(content: "abcd", original_size: 4, chunk_offset: 0, read_start: 0, read_length: 4),
+        ref(seed: :bad, original_size: 4, chunk_offset: 4, read_start: 0, read_length: 4)
+      ]
+
+      expect(Router, :call, fn NeonFS.Core, :read_file_refs_by_id, _ ->
+        {:ok, %{file_size: 8, chunks: refs}}
+      end)
+
+      stub(Router, :data_call, fn _node, :get_chunk, args, _opts ->
+        cond do
+          args[:hash] == content_hash("abcd") -> {:ok, "abcd"}
+          args[:hash] == fake_hash(:bad) -> {:error, :connection_refused}
+        end
+      end)
+
+      assert {:ok, %{stream: stream}} = ChunkReader.read_file_stream_by_id("vol", "file-1")
+
+      assert ["abcd"] = Enum.take(stream, 1)
+      assert_raise ChunkReader.StreamError, fn -> Enum.to_list(stream) end
+    end
+  end
 end
