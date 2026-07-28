@@ -165,7 +165,13 @@ jobs:
         run: |
           bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
-          mix deps.get
+          # A transient hex registry timeout shouldn't fail the job.
+          for attempt in 1 2 3; do
+            mix deps.get && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "mix deps.get failed (attempt ${attempt}); retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
           mix deps.compile
           if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
 
@@ -390,7 +396,13 @@ jobs:
         run: |
           bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
-          mix deps.get
+          # A transient hex registry timeout shouldn't fail the job.
+          for attempt in 1 2 3; do
+            mix deps.get && break
+            [ "$attempt" = 3 ] && exit 1
+            echo "mix deps.get failed (attempt ${attempt}); retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
           mix deps.compile
           mix compile
           if grep -qs dialyxir mix.exs; then mix dialyzer --plt --force-check; fi
