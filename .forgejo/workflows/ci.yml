@@ -21,9 +21,7 @@ jobs:
   #
   # Matrix entry schema (JSON has no comments, so it's documented here):
   #   name         package directory, also the job display name
-  #   image        "elixir" or "elixir_rust" — which CI image the job runs in
   #   apt          optional extra apt packages to install first
-  #   opts         optional container options (e.g. --privileged)
   #   dind         optional; true starts a Docker daemon for e2e tests
   #   csi_sanity   optional; true installs the csi-sanity conformance binary
   #   cache_paths  newline-separated actions/cache paths (own artefacts plus
@@ -31,6 +29,11 @@ jobs:
   #   lockfiles    space-separated lockfiles hashed into the cache key; every
   #                listed file must exist (the job fails on a missing one, so
   #                stale entries can't silently degrade the key)
+  #
+  # Only the package *names* travel through the matrix (keeping job names
+  # readable); each job reads the rest of its entry from the checked-out
+  # table. Container options can't be read in-job, so the two privileged
+  # packages are special-cased on the package job's container.
   # ==========================================================================
   setup:
     runs-on: docker
@@ -95,7 +98,6 @@ jobs:
   # dind, csi-sanity) are switched on per-entry by matrix fields.
   # =========================================================================
   package:
-    name: ${{ matrix.pkg.name }}
     needs: setup
     if: needs.setup.outputs.packages != '[]'
     runs-on: docker
@@ -105,40 +107,61 @@ jobs:
       matrix:
         pkg: ${{ fromJSON(needs.setup.outputs.packages) }}
     container:
-      image: ${{ matrix.pkg.image == 'elixir' && needs.setup.outputs.elixir_image || needs.setup.outputs.elixir_rust_image }}
-      options: ${{ matrix.pkg.opts }}
+      image: ${{ needs.setup.outputs.elixir_rust_image }}
+      # Container options can't be loaded from the table in-job, so the
+      # privileged packages are special-cased here: neonfs_fuse mounts
+      # /dev/fuse for real mounts, neonfs_docker runs dind.
+      options: ${{ matrix.pkg == 'neonfs_fuse' && '--privileged --device /dev/fuse' || (matrix.pkg == 'neonfs_docker' && '--privileged') || '' }}
     steps:
+      - uses: actions/checkout@v7
+
+      - name: Load ci-matrix.json entry
+        id: meta
+        run: |
+          entry=$(jq -c --arg name "${{ matrix.pkg }}" '.[] | select(.name == $name)' .forgejo/ci-matrix.json)
+          if [ -z "$entry" ]; then
+            echo "no ci-matrix.json entry for ${{ matrix.pkg }}" >&2
+            exit 1
+          fi
+          {
+            echo "apt=$(jq -r '.apt // ""' <<<"$entry")"
+            echo "dind=$(jq -r '.dind // false' <<<"$entry")"
+            echo "csi_sanity=$(jq -r '.csi_sanity // false' <<<"$entry")"
+            echo "lockfiles=$(jq -r '.lockfiles' <<<"$entry")"
+            echo 'cache_paths<<NEONFS_CACHE_PATHS'
+            jq -r '.cache_paths' <<<"$entry"
+            echo 'NEONFS_CACHE_PATHS'
+          } >> "$GITHUB_OUTPUT"
+
       # Package-specific system deps, e.g. libfuse3 for the FUSE NIF
       # (wick), build-essential for neonfs_cifs's wire_probe (#1400), the
       # Docker daemon for the VolumeDriver e2e (#312 — note Debian Trixie
       # ships the CLI in a separate `docker-cli` package, which
       # --no-install-recommends won't pull in implicitly).
       - name: Install extra system packages
-        if: matrix.pkg.apt != ''
-        run: apt-get update && apt-get install -y --no-install-recommends ${{ matrix.pkg.apt }} && rm -rf /var/lib/apt/lists/*
-
-      - uses: actions/checkout@v7
+        if: steps.meta.outputs.apt != ''
+        run: apt-get update && apt-get install -y --no-install-recommends ${{ steps.meta.outputs.apt }} && rm -rf /var/lib/apt/lists/*
 
       - name: Hash lockfiles
         id: lockhash
         run: |
-          for f in ${{ matrix.pkg.lockfiles }}; do
+          for f in ${{ steps.meta.outputs.lockfiles }}; do
             if [ ! -f "$f" ]; then
               echo "ci-matrix.json lists a lockfile that does not exist: $f" >&2
               exit 1
             fi
           done
-          echo "hash=$(cat ${{ matrix.pkg.lockfiles }} | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "hash=$(cat ${{ steps.meta.outputs.lockfiles }} | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Restore build cache
         uses: actions/cache@v6
         with:
-          path: ${{ matrix.pkg.cache_paths }}
-          key: v6-build-${{ matrix.pkg.name }}-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ steps.lockhash.outputs.hash }}
-          restore-keys: v6-build-${{ matrix.pkg.name }}-${{ runner.arch }}-
+          path: ${{ steps.meta.outputs.cache_paths }}
+          key: v6-build-${{ matrix.pkg }}-${{ runner.arch }}-${{ needs.setup.outputs.elixir }}-${{ needs.setup.outputs.rust }}-${{ steps.lockhash.outputs.hash }}
+          restore-keys: v6-build-${{ matrix.pkg }}-${{ runner.arch }}-
 
       - name: Build
-        working-directory: ${{ matrix.pkg.name }}
+        working-directory: ${{ matrix.pkg }}
         run: |
           bash ../resources/scripts/ci-scrub-path-deps
           mix local.hex --force && mix local.rebar --force
@@ -151,7 +174,7 @@ jobs:
       # picks up the `:requires_csi_sanity` conformance test; otherwise
       # that test is excluded. Cache the built binary across runs.
       - name: Cache csi-sanity
-        if: matrix.pkg.csi_sanity
+        if: steps.meta.outputs.csi_sanity == 'true'
         id: cache-csi-sanity
         uses: actions/cache@v6
         with:
@@ -159,7 +182,7 @@ jobs:
           key: csi-sanity-v5.4.0-${{ runner.arch }}
 
       - name: Build csi-sanity
-        if: matrix.pkg.csi_sanity && steps.cache-csi-sanity.outputs.cache-hit != 'true'
+        if: steps.meta.outputs.csi_sanity == 'true' && steps.cache-csi-sanity.outputs.cache-hit != 'true'
         run: |
           GO_VERSION=1.23.6
           ARCH=$(dpkg --print-architecture)
@@ -168,7 +191,7 @@ jobs:
             github.com/kubernetes-csi/csi-test/v5/cmd/csi-sanity@v5.4.0
 
       - name: Start Docker daemon (dind for the VolumeDriver e2e test, #312)
-        if: matrix.pkg.dind
+        if: steps.meta.outputs.dind == 'true'
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
@@ -199,7 +222,7 @@ jobs:
           exit 1
 
       - name: Pre-pull e2e test images
-        if: matrix.pkg.dind
+        if: steps.meta.outputs.dind == 'true'
         env:
           DOCKER_HOST: unix:///var/run/docker.sock
         run: |
@@ -222,7 +245,7 @@ jobs:
           exit 1
 
       - name: Check
-        working-directory: ${{ matrix.pkg.name }}
+        working-directory: ${{ matrix.pkg }}
         run: mix check
 
   # =========================================================================

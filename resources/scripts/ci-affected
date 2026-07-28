@@ -3,7 +3,7 @@
 # (one per line, as from `git diff --name-only`) and emits GITHUB_OUTPUT
 # lines:
 #
-#   packages=<JSON subset of .forgejo/ci-matrix.json for the package job>
+#   packages=<JSON array of package names from .forgejo/ci-matrix.json>
 #   run_integration=true|false
 #   run_cli=true|false
 #   run_wire=true|false
@@ -100,7 +100,7 @@ else
 fi
 
 if $run_all; then
-  echo "packages=$(jq -c . "$matrix_file")"
+  echo "packages=$(jq -c '[.[].name]' "$matrix_file")"
   echo "run_integration=true"
   echo "run_cli=true"
   echo "run_wire=true"
@@ -114,7 +114,7 @@ elif [ "${#affected[@]}" -eq 0 ]; then
 else
   names=$(printf '%s\n' "${!affected[@]}" | jq -R . | jq -cs .)
   echo "packages=$(jq -c --argjson names "$names" \
-    '[.[] | select(.name as $n | $names | index($n))]' "$matrix_file")"
+    '[.[].name | select(. as $n | $names | index($n))]' "$matrix_file")"
   echo "run_integration=$run_integration"
   echo "run_cli=$run_cli"
   echo "run_wire=$run_wire"
