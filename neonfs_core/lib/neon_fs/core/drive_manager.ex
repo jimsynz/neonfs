@@ -27,9 +27,11 @@ defmodule NeonFS.Core.DriveManager do
     DriveState,
     DriveTrust,
     JobTracker,
+    MetadataStateMachine,
     NodeRegistry,
     RaServer,
-    RaSupervisor
+    RaSupervisor,
+    VolumeRegistry
   }
 
   alias NeonFS.Core.Drive.Identity
@@ -39,6 +41,7 @@ defmodule NeonFS.Core.DriveManager do
   @valid_tiers [:hot, :warm, :cold]
   @drive_state_supervisor NeonFS.Core.DriveStateSupervisor
   @bootstrap_register_attempts 5
+  @system_volume_factor_cap 3
   @default_bootstrap_register_backoff_ms 200
 
   # A dirty drive's verification must wait for Ra to have a leader (the
@@ -152,6 +155,8 @@ defmodule NeonFS.Core.DriveManager do
   def register_local_drives_in_bootstrap do
     DriveRegistry.drives_for_node(Node.self())
     |> Enum.each(&register_drive_in_bootstrap_layer/1)
+
+    scale_system_volume_to_drive_count()
   end
 
   @doc """
@@ -246,6 +251,14 @@ defmodule NeonFS.Core.DriveManager do
     {:noreply, state}
   end
 
+  # Runs after the `add_drive` reply so the caller isn't charged a
+  # cluster-wide volume write on top of its own 60 s budget.
+  @impl true
+  def handle_continue(:scale_system_volume, state) do
+    scale_system_volume_to_drive_count()
+    {:noreply, state}
+  end
+
   @impl true
   def handle_info({:recover_dirty_drives, attempt}, state) do
     attempt_dirty_drive_recovery(attempt)
@@ -272,7 +285,7 @@ defmodule NeonFS.Core.DriveManager do
         # Ra is already up here, so react immediately.
         recover_drive(drive.id, Map.get(BlobStore.drive_open_states(), drive.id))
 
-        {:reply, {:ok, drive_to_map(drive)}, state}
+        {:reply, {:ok, drive_to_map(drive)}, state, {:continue, :scale_system_volume}}
 
       {:error, _reason} = error ->
         {:reply, error, state}
@@ -349,6 +362,63 @@ defmodule NeonFS.Core.DriveManager do
   # Still best-effort after the retries are exhausted — the ETS write
   # is the source of truth and anti-entropy / #809 reconciles — but the
   # give-up is surfaced via telemetry rather than a silent single-shot.
+  # Cluster-critical data — the CA key, cluster identity, serial and CRL —
+  # lives on `_system`, whose replication factor used to track core-node
+  # count alone. A single-core cluster therefore kept exactly one copy of
+  # it however many drives were attached, so "add a drive for resilience"
+  # bought none for the data whose loss is unrecoverable (#1617, the
+  # enabling condition behind #1573). Raise the factor with the drive
+  # count instead, capped at 3 — past that the extra copies cost more
+  # than they buy for a volume this small.
+  #
+  # Only `_system`: auto-raising a user's factor-1 volume would change
+  # durability they chose explicitly and multiply their space usage
+  # unasked. Never lowers either — `adjust_system_volume_replication/1`
+  # ignores anything at or below the current factor, so losing a drive
+  # leaves the target where it was for repair to satisfy.
+  #
+  # Best-effort: a drive is registered whether or not this succeeds, and
+  # it runs before `_system` exists during `cluster init` (drives are
+  # registered first), where `:not_found` is the expected answer.
+  defp scale_system_volume_to_drive_count do
+    with {:ok, count} when count > 1 <- cluster_drive_count() do
+      apply_system_volume_factor(min(count, @system_volume_factor_cap))
+    end
+
+    :ok
+  end
+
+  defp apply_system_volume_factor(factor) do
+    case VolumeRegistry.adjust_system_volume_replication(factor) do
+      {:ok, volume} ->
+        Logger.info("System volume replication target tracks drive count",
+          factor: volume.durability.factor
+        )
+
+      {:error, reason} ->
+        Logger.debug("Skipped system volume replication adjustment", reason: inspect(reason))
+    end
+  catch
+    :exit, reason ->
+      Logger.debug("Volume registry unavailable for replication adjustment",
+        reason: inspect(reason)
+      )
+  end
+
+  # The count must be cluster-wide and current: `DriveRegistry`'s ETS is a
+  # polled cache that under-counts remote drives, and a local Ra query can
+  # miss the registration we just committed through the leader. A
+  # consistent query costs one round trip on an operation that happens
+  # once per drive.
+  defp cluster_drive_count do
+    case RaSupervisor.query(&MetadataStateMachine.get_drives/1) do
+      {:ok, drives} when is_map(drives) -> {:ok, map_size(drives)}
+      other -> other
+    end
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
   defp register_drive_in_bootstrap_layer(%Drive{} = drive) do
     case current_cluster_id() do
       {:ok, cluster_id} ->

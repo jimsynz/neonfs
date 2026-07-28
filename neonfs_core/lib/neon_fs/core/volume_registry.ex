@@ -38,7 +38,12 @@ defmodule NeonFS.Core.VolumeRegistry do
   # Client API
 
   @doc """
-  Adjusts the system volume replication factor to match cluster size.
+  Raises the system volume replication factor towards `new_cluster_size`.
+
+  Only ever raises: a request at or below the current factor is a no-op
+  returning the unchanged volume. Losing a core node or a drive must not
+  quietly reduce the durability of cluster-critical data — the surviving
+  copies stay the target and repair re-places the missing one (#1617).
 
   The adjustment persists the volume through Ra, so the call budget
   reflects a cluster-wide replicated write on a busy system — not a
@@ -387,15 +392,24 @@ defmodule NeonFS.Core.VolumeRegistry do
 
   defp do_adjust_system_volume_replication(new_size) do
     with {:ok, volume} <- get_by_name(@system_volume_name) do
-      current = volume.durability
-      new_min = min(new_size, current.min_copies)
-      updated_durability = %{current | factor: new_size, min_copies: new_min}
-      updated = %{volume | durability: updated_durability, updated_at: DateTime.utc_now()}
+      raise_system_volume_factor(volume, new_size)
+    end
+  end
 
-      case persist_volume(updated) do
-        :ok -> {:ok, updated}
-        error -> error
-      end
+  defp raise_system_volume_factor(%Volume{durability: %{factor: factor}} = volume, new_size)
+       when new_size <= factor do
+    {:ok, volume}
+  end
+
+  defp raise_system_volume_factor(volume, new_size) do
+    current = volume.durability
+    new_min = min(new_size, current.min_copies)
+    updated_durability = %{current | factor: new_size, min_copies: new_min}
+    updated = %{volume | durability: updated_durability, updated_at: DateTime.utc_now()}
+
+    case persist_volume(updated) do
+      :ok -> {:ok, updated}
+      error -> error
     end
   end
 

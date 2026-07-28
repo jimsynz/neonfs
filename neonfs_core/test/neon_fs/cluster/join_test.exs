@@ -98,9 +98,6 @@ defmodule NeonFS.Cluster.JoinTest do
 
       {:ok, vol3} = VolumeRegistry.adjust_system_volume_replication(3)
       assert vol3.durability.factor == 3
-
-      # Reset for test isolation
-      VolumeRegistry.adjust_system_volume_replication(1)
     end
   end
 

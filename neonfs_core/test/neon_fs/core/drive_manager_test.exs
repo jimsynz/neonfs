@@ -10,7 +10,8 @@ defmodule NeonFS.Core.DriveManagerTest do
     DriveRegistry,
     DriveTrust,
     NodeRegistry,
-    RaSupervisor
+    RaSupervisor,
+    VolumeRegistry
   }
 
   alias NeonFS.Core.Drive.Identity
@@ -109,6 +110,115 @@ defmodule NeonFS.Core.DriveManagerTest do
       assert_receive {[:neonfs, :drive_manager, :bootstrap_register_failed], ^ref, %{attempts: 5},
                       %{drive_id: "default"}},
                      1_000
+    end
+  end
+
+  # Cluster-critical data lives on `_system`, whose factor used to track
+  # core-node count alone — so drives bought capacity and no redundancy
+  # for the CA key (#1617). These assert the drive-count scaling, its cap,
+  # and that it stays best-effort.
+  describe "system volume replication scaling (#1617)" do
+    setup do
+      {:ok, requested} = Agent.start_link(fn -> [] end)
+
+      stub(VolumeRegistry, :adjust_system_volume_replication, fn factor ->
+        Agent.update(requested, &[factor | &1])
+        {:ok, %NeonFS.Core.Volume{durability: %{type: :replicate, factor: factor, min_copies: 1}}}
+      end)
+
+      stub(RaSupervisor, :command, fn {:register_drive, _entry} -> {:ok, :ok, :leader@node} end)
+
+      # `add_drive/1` does its work inside the DriveManager GenServer, and
+      # Mimic stubs are process-local — without this the GenServer calls the
+      # real modules and the stubs above only cover the test process.
+      manager = Process.whereis(DriveManager)
+      Mimic.allow(RaSupervisor, self(), manager)
+      Mimic.allow(VolumeRegistry, self(), manager)
+
+      %{requested: requested}
+    end
+
+    defp drive_map(count) do
+      Map.new(1..count, fn n -> {"d#{n}", %{drive_id: "d#{n}", node: Node.self()}} end)
+    end
+
+    test "raises the factor to the cluster-wide drive count", %{requested: requested} do
+      stub(RaSupervisor, :query, fn _fun -> {:ok, drive_map(2)} end)
+
+      assert :ok = DriveManager.register_local_drives_in_bootstrap()
+      assert Agent.get(requested, & &1) == [2]
+    end
+
+    test "caps the factor at 3 however many drives exist", %{requested: requested} do
+      stub(RaSupervisor, :query, fn _fun -> {:ok, drive_map(7)} end)
+
+      assert :ok = DriveManager.register_local_drives_in_bootstrap()
+      assert Agent.get(requested, & &1) == [3]
+    end
+
+    test "leaves a single-drive cluster alone", %{requested: requested} do
+      stub(RaSupervisor, :query, fn _fun -> {:ok, drive_map(1)} end)
+
+      assert :ok = DriveManager.register_local_drives_in_bootstrap()
+      assert Agent.get(requested, & &1) == []
+    end
+
+    test "adding a drive at runtime scales the factor too", %{
+      requested: requested,
+      tmp_dir: tmp_dir
+    } do
+      stub(RaSupervisor, :query, fn _fun -> {:ok, drive_map(2)} end)
+
+      new_path = Path.join(tmp_dir, "scaling_drive")
+      File.mkdir_p!(new_path)
+
+      assert {:ok, _drive} =
+               DriveManager.add_drive(%{id: "scale1", path: new_path, tier: "hot", capacity: "0"})
+
+      # The adjustment runs in a `handle_continue` after the reply, so
+      # synchronise on the GenServer's mailbox rather than sleeping.
+      :sys.get_state(DriveManager)
+      assert Agent.get(requested, & &1) == [2]
+    end
+
+    test "a drive is still registered when the volume write fails", %{tmp_dir: tmp_dir} do
+      stub(RaSupervisor, :query, fn _fun -> {:ok, drive_map(2)} end)
+
+      stub(VolumeRegistry, :adjust_system_volume_replication, fn _factor ->
+        {:error, :not_found}
+      end)
+
+      new_path = Path.join(tmp_dir, "resilient_drive")
+      File.mkdir_p!(new_path)
+
+      assert {:ok, _drive} =
+               DriveManager.add_drive(%{id: "resil1", path: new_path, tier: "hot", capacity: "0"})
+
+      :sys.get_state(DriveManager)
+      assert Enum.any?(DriveManager.list_drives(), &(&1.id == "resil1"))
+    end
+
+    test "an unreachable volume registry does not take the drive add down", %{tmp_dir: tmp_dir} do
+      stub(RaSupervisor, :query, fn _fun -> {:ok, drive_map(2)} end)
+
+      stub(VolumeRegistry, :adjust_system_volume_replication, fn factor ->
+        exit({:timeout, {GenServer, :call, [VolumeRegistry, {:adjust, factor}, 30_000]}})
+      end)
+
+      new_path = Path.join(tmp_dir, "exiting_drive")
+      File.mkdir_p!(new_path)
+
+      assert {:ok, _drive} =
+               DriveManager.add_drive(%{id: "exit1", path: new_path, tier: "hot", capacity: "0"})
+
+      assert Process.alive?(Process.whereis(DriveManager))
+    end
+
+    test "an unavailable Ra drive count skips the adjustment", %{requested: requested} do
+      stub(RaSupervisor, :query, fn _fun -> {:error, :noproc} end)
+
+      assert :ok = DriveManager.register_local_drives_in_bootstrap()
+      assert Agent.get(requested, & &1) == []
     end
   end
 
