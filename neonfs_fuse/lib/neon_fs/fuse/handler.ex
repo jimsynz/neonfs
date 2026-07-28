@@ -334,14 +334,15 @@ defmodule NeonFS.FUSE.Handler do
 
   # Open lifecycle (POSIX unlink-while-open, sub-issue #651 of #639).
   #
-  # `open`: resolve inode → path → file_id, claim a `:pinned`
-  # namespace claim with this GenServer's pid as holder, allocate a
+  # `open`: resolve inode → path, pin the file by identity through
+  # `Core.pin_file/3` with this GenServer's pid as holder, allocate a
   # monotonic `fh`, and remember `{file_id, claim_id, path}` so
   # later `read` / `write` can route through the file_id (which
   # works for detached files — #638) and so `release` can drop the
-  # claim. The Genserver pid is the holder, which means the
-  # coordinator's existing holder-DOWN bulk release is the safety
-  # net for FUSE-peer crashes.
+  # claim. The pin is keyed by `{volume_id, file_id}` (#1605), so a
+  # rename doesn't strand it on the old name. The GenServer pid is
+  # the holder, which means the coordinator's existing holder-DOWN
+  # bulk release is the safety net for FUSE-peer crashes.
   defp handle_stateful({"open", params}, state) do
     ino = params["ino"]
 
@@ -364,8 +365,8 @@ defmodule NeonFS.FUSE.Handler do
   # #303 routes this through `WriteOperation`'s `create_only: true`
   # (#592), which in turn uses the namespace coordinator's
   # `claim_create` primitive (#591). After creation we additionally
-  # claim a `:pinned` claim against the new path so the open-handle
-  # half of the unlink-while-open story (#651) holds.
+  # pin the new file by identity so the open-handle half of the
+  # unlink-while-open story (#651) holds.
   defp handle_stateful({"create", params}, state) do
     parent = params["parent"]
     name = params["name"]
@@ -379,8 +380,8 @@ defmodule NeonFS.FUSE.Handler do
          {:ok, file_meta} <- create_empty_file(volume_id, child_path, write_opts),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
       claim_id =
-        case claim_pinned_for_path(volume_id, child_path, state) do
-          {:ok, id} -> id
+        case pin_file(child_path, state) do
+          {:ok, %{claim_id: id}} -> id
           {:error, _} -> nil
         end
 
@@ -415,7 +416,7 @@ defmodule NeonFS.FUSE.Handler do
         {{"ok", %{}}, %{state | fh_table: table}}
 
       {%{claim_id: claim_id}, table} ->
-        release_pin_quietly(state.coordinator_module, claim_id)
+        unpin_quietly(claim_id)
         {{"ok", %{}}, %{state | fh_table: table}}
     end
   end
@@ -725,10 +726,13 @@ defmodule NeonFS.FUSE.Handler do
     {{"open_ok", %{"fh" => 0}}, state}
   end
 
-  defp open_dispatch(%{id: file_id}, volume_id, path, state) do
-    case claim_pinned_for_path(volume_id, path, state) do
-      {:ok, claim_id} -> open_ok(file_id, claim_id, path, state)
-      {:error, _reason} -> open_ok(file_id, nil, path, state)
+  defp open_dispatch(%{id: file_id}, _volume_id, path, state) do
+    case pin_file(path, state) do
+      {:ok, %{file_id: pinned_id, claim_id: claim_id}} ->
+        open_ok(pinned_id, claim_id, path, state)
+
+      {:error, _reason} ->
+        open_ok(file_id, nil, path, state)
     end
   end
 
@@ -761,20 +765,24 @@ defmodule NeonFS.FUSE.Handler do
     {{"error", %{"errno" => errno(:eio)}}, state}
   end
 
-  # Calls into the namespace coordinator on a core node. Returns the
-  # claim id on success. On any failure (coordinator unreachable,
-  # claim conflict, etc.) we surface the error to the caller so they
-  # can map it to an errno.
-  defp claim_pinned_for_path(volume_id, path, state) do
-    key = volume_scoped_path(volume_id, path)
-
-    core_call(state.coordinator_module, :claim_pinned_for, [
-      state.coordinator_module,
-      key,
-      self()
-    ])
+  # Pins the open handle by file identity (#1605) — core resolves the
+  # path and takes the claim under namespace coordination, so a
+  # rename can't strand the pin on the old name. This GenServer's pid
+  # is the holder, which keeps the coordinator's holder-DOWN bulk
+  # release as the crash safety net. On any failure (core or
+  # coordinator unreachable, claim conflict) we surface the error so
+  # the caller can decide — `open` degrades to an unpinned handle.
+  defp pin_file(path, state) do
+    core_call(NeonFS.Core, :pin_file, [state.volume_name, path, self()])
   catch
     :exit, _ -> {:error, :coordinator_unavailable}
+  end
+
+  defp unpin_quietly(claim_id) do
+    core_call(NeonFS.Core, :unpin_file, [claim_id])
+    :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp release_pin_quietly(coordinator, claim_id) do
@@ -788,8 +796,6 @@ defmodule NeonFS.FUSE.Handler do
   catch
     :exit, _ -> :ok
   end
-
-  defp volume_scoped_path(volume_id, path), do: "vol:" <> volume_id <> ":" <> path
 
   defp emit_fuse_telemetry({op_name, _params}, reply, duration, volume) do
     result = if match?({"error", _}, reply), do: :error, else: :ok

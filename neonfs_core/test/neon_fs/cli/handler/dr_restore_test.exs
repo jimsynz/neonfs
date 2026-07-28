@@ -25,6 +25,7 @@ defmodule NeonFS.CLI.Handler.DRRestoreTest do
 
   setup %{tmp_dir: tmp_dir} do
     {:ok, _cluster_id} = start_provisioned_cluster(tmp_dir)
+    start_namespace_coordination()
 
     on_exit(fn ->
       stop_ra()

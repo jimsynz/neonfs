@@ -21,7 +21,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
   use NeonFS.TestSupport.ClusterCase, async: false
 
-  alias NeonFS.Core.{FileIndex, NamespaceCoordinator}
+  alias NeonFS.Core.FileIndex
 
   @moduletag timeout: 180_000
   @moduletag :integration
@@ -44,14 +44,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
     # Pin on node1 — same shape as a FUSE peer holding an open fd.
     holder = start_holder(cluster, :node1)
-    key = "vol:" <> vol_id <> ":" <> path
-
-    {:ok, pin_id} =
-      PeerCluster.rpc(cluster, :node1, NamespaceCoordinator, :claim_pinned_for, [
-        NamespaceCoordinator,
-        key,
-        holder
-      ])
+    {:ok, %{claim_id: pin_id}} = pin(cluster, :node1, volume, path, holder)
 
     try do
       # Delete from node2 (path coordination is cluster-wide).
@@ -74,7 +67,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
       # via the namespace coordinator's existing path; the
       # `DetachedFileGC` handler on every core node decrements its
       # local copy and purges when the list empties.
-      :ok = PeerCluster.rpc(cluster, :node1, NamespaceCoordinator, :release, [pin_id])
+      :ok = PeerCluster.rpc(cluster, :node1, NeonFS.Core, :unpin_file, [pin_id])
 
       # Wait for the GC to converge across all nodes — the telemetry
       # fires on Ra command commit, which replicates asynchronously.
@@ -98,21 +91,9 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
 
     holder1 = start_holder(cluster, :node1)
     holder2 = start_holder(cluster, :node2)
-    key = "vol:" <> vol_id <> ":" <> path
 
-    {:ok, pin1} =
-      PeerCluster.rpc(cluster, :node1, NamespaceCoordinator, :claim_pinned_for, [
-        NamespaceCoordinator,
-        key,
-        holder1
-      ])
-
-    {:ok, pin2} =
-      PeerCluster.rpc(cluster, :node2, NamespaceCoordinator, :claim_pinned_for, [
-        NamespaceCoordinator,
-        key,
-        holder2
-      ])
+    {:ok, %{claim_id: pin1}} = pin(cluster, :node1, volume, path, holder1)
+    {:ok, %{claim_id: pin2}} = pin(cluster, :node2, volume, path, holder2)
 
     try do
       :ok = PeerCluster.rpc(cluster, :node1, NeonFS.Core, :delete_file, [volume, path])
@@ -124,7 +105,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
       assert pin1 in snapshot and pin2 in snapshot
 
       # Release one pin — file remains detached because pin2 still holds.
-      :ok = PeerCluster.rpc(cluster, :node1, NamespaceCoordinator, :release, [pin1])
+      :ok = PeerCluster.rpc(cluster, :node1, NeonFS.Core, :unpin_file, [pin1])
 
       assert :ok =
                wait_until(
@@ -138,7 +119,7 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
                )
 
       # Release the second pin — file purged.
-      :ok = PeerCluster.rpc(cluster, :node2, NamespaceCoordinator, :release, [pin2])
+      :ok = PeerCluster.rpc(cluster, :node2, NeonFS.Core, :unpin_file, [pin2])
 
       assert :ok =
                wait_until(fn -> file_gone_everywhere?(cluster, vol_id, file_id) end,
@@ -150,7 +131,50 @@ defmodule NeonFS.Integration.DetachedFileGCTest do
     end
   end
 
+  # Pins are keyed by file identity (#1605), so the name a handle was
+  # opened under stops mattering the moment it is taken: rename on one
+  # node, unlink from a third, and the pin taken on the first still
+  # tombstones the file instead of losing its chunks.
+  test "rename on node2 then unlink on node3 detaches the file pinned on node1",
+       %{cluster: cluster} do
+    volume = unique_volume("dgc-rename")
+    {:ok, _} = PeerCluster.rpc(cluster, :node1, NeonFS.Core, :create_volume, [volume])
+
+    path = "/opened-as.bin"
+    renamed = "/renamed-to.bin"
+    file_id = write_file_and_get_id(cluster, :node1, volume, path)
+    vol_id = volume_id(cluster, volume)
+
+    holder = start_holder(cluster, :node1)
+    {:ok, %{file_id: ^file_id, claim_id: pin_id}} = pin(cluster, :node1, volume, path, holder)
+
+    try do
+      :ok =
+        PeerCluster.rpc(cluster, :node2, NeonFS.Core, :rename_file, [volume, path, renamed])
+
+      :ok = PeerCluster.rpc(cluster, :node3, NeonFS.Core, :delete_file, [volume, renamed])
+
+      assert {:ok, %{detached: true, pinned_claim_ids: ids}} =
+               PeerCluster.rpc(cluster, :node2, FileIndex, :get, [vol_id, file_id])
+
+      assert pin_id in ids
+
+      :ok = PeerCluster.rpc(cluster, :node1, NeonFS.Core, :unpin_file, [pin_id])
+
+      assert :ok =
+               wait_until(fn -> file_gone_everywhere?(cluster, vol_id, file_id) end,
+                 timeout: 5_000
+               )
+    after
+      Agent.stop(holder, :normal, 1_000)
+    end
+  end
+
   ## Helpers
+
+  defp pin(cluster, node_name, volume, path, holder) do
+    PeerCluster.rpc(cluster, node_name, NeonFS.Core, :pin_file, [volume, path, holder])
+  end
 
   defp unique_volume(prefix) do
     "#{prefix}-#{System.unique_integer([:positive])}"
