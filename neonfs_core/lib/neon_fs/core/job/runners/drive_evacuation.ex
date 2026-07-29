@@ -28,8 +28,13 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   Once the drive is empty, the runner walks every Ra-replicated volume root
   and rewrites any `drive_locations` entry that points at the evacuating
-  drive, swapping it for the local target drive. Only then is the source
-  drive deregistered.
+  drive, swapping it for the local target drive.
+
+  Deregistration then requires all three of: every volume root rewritten,
+  the filesystem drained, and no volume's authoritative `chunk_index`
+  tree still naming the drive (#1628). Any of them failing fails the job
+  — the reason shows in `neonfs job show` — and leaves the drive
+  `:draining` rather than throwing away copies something still points at.
 
   Resume-after-restart is idempotent: `list_drive_blobs/2` reads the
   current filesystem state, so already-evacuated blobs don't reappear.
@@ -48,6 +53,7 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     DriveRegistry,
     MetadataStateMachine,
     RaSupervisor,
+    ReplicaAudit,
     TierMigration,
     VolumeRegistry
   }
@@ -423,6 +429,23 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
 
   ## Private — Completion
 
+  # Deregistering a drive throws away every copy it still holds, so
+  # finalisation has to establish that it holds nothing anyone depends on
+  # — not merely that its filesystem looks empty (#1628).
+  #
+  # An empty filesystem is a weaker claim than it appears. The
+  # `drive_locations` rewrite immediately above it is best-effort per
+  # volume, so a failed `:update_volume_root` used to log a warning and
+  # let deregistration proceed with a volume root still pointing at the
+  # drive. And a migration that reported success while leaving
+  # `chunk.locations` stale — the #1573 shape — also passes an
+  # empty-filesystem check.
+  #
+  # All three conditions must hold, and none of them may be skipped on
+  # error: every root rewritten, the filesystem drained, and no volume
+  # still referencing the drive in its authoritative chunk metadata. A
+  # failure fails the *job* (so `neonfs job show` carries the reason) and
+  # leaves the drive `:draining` for the operator to retry or investigate.
   defp finalise_evacuation(job) do
     node = job.params.node
     drive_id = job.params.drive_id
@@ -431,53 +454,119 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
     # completed job record doesn't carry it around (#1578).
     job = %{job | state: Map.delete(job.state, :tracked_chunks)}
 
-    rewrite_drive_locations(job)
+    with :ok <- rewrite_drive_locations(job),
+         :ok <- verify_drive_empty(node, drive_id),
+         :ok <- verify_no_remaining_references(node, drive_id) do
+      deregister_drive(node, drive_id)
 
-    # Verify drive is truly empty
-    has_data =
-      if node == Node.self() do
-        BlobStore.drive_has_data?(drive_id)
-      else
-        case :rpc.call(node, BlobStore, :drive_has_data?, [drive_id], 10_000) do
-          {:ok, result} -> result
-          {:badrpc, _} -> true
-        end
-      end
+      :telemetry.execute(
+        [:neonfs, :evacuation, :completed],
+        %{},
+        %{drive_id: drive_id, node: node}
+      )
 
-    case has_data do
-      {:ok, false} ->
-        deregister_drive(node, drive_id)
+      Logger.info("Evacuation completed, drive deregistered",
+        drive_id: drive_id,
+        node: node
+      )
 
-        :telemetry.execute(
-          [:neonfs, :evacuation, :completed],
-          %{},
-          %{drive_id: drive_id, node: node}
-        )
-
-        Logger.info("Evacuation completed, drive deregistered",
-          drive_id: drive_id,
-          node: node
-        )
-
-        {:complete,
-         %{job | progress: %{job.progress | description: "Complete — drive deregistered"}}}
-
-      {:ok, true} ->
-        Logger.warning("Evacuation finished but drive still has data, leaving as draining",
-          drive_id: drive_id
-        )
-
-        {:complete, %{job | progress: %{job.progress | description: "Complete — data remains"}}}
-
-      _ ->
-        # Treat unexpected results defensively
-        Logger.warning("Could not verify drive is empty, leaving as draining",
-          drive_id: drive_id
-        )
-
-        {:complete, %{job | progress: %{job.progress | description: "Complete — unverified"}}}
+      {:complete,
+       %{job | progress: %{job.progress | description: "Complete — drive deregistered"}}}
+    else
+      {:error, reason} -> incomplete(job, node, drive_id, reason)
     end
   end
+
+  defp incomplete(job, node, drive_id, reason) do
+    :telemetry.execute(
+      [:neonfs, :evacuation, :finalisation_refused],
+      %{},
+      %{drive_id: drive_id, node: node, reason: describe_reason(reason)}
+    )
+
+    Logger.warning("Evacuation drained but the drive is not safe to deregister",
+      drive_id: drive_id,
+      node: node,
+      reason: inspect(reason)
+    )
+
+    updated = %{
+      job
+      | progress: %{job.progress | description: "Drained — not deregistered: #{describe(reason)}"}
+    }
+
+    {:error, reason, updated}
+  end
+
+  defp verify_drive_empty(node, drive_id) do
+    case drive_has_data(node, drive_id) do
+      {:ok, false} -> :ok
+      {:ok, true} -> {:error, {:drive_not_empty, drive_id}}
+      {:error, reason} -> {:error, {:drive_emptiness_unverified, reason}}
+    end
+  end
+
+  # Both branches must yield the same shape. They did not: the remote arm
+  # unwrapped `{:ok, bool}` to a bare boolean, which then matched neither
+  # `{:ok, false}` nor `{:ok, true}` at the callsite, so evacuating a
+  # drive on any node but this one always fell through to "unverified"
+  # and never deregistered.
+  defp drive_has_data(node, drive_id) when node == node(), do: BlobStore.drive_has_data?(drive_id)
+
+  defp drive_has_data(node, drive_id) do
+    case :rpc.call(node, BlobStore, :drive_has_data?, [drive_id], 10_000) do
+      {:ok, _} = ok -> ok
+      {:error, _} = error -> error
+      {:badrpc, reason} -> {:error, {:rpc_error, reason}}
+      other -> {:error, {:unexpected, other}}
+    end
+  end
+
+  # The authoritative post-condition: after a drain, no volume's
+  # `chunk_index` tree should name this drive. `ReplicaAudit` reads those
+  # trees rather than the cold `ChunkIndex` ETS cache, which is empty
+  # after a restart and would report every drive as unreferenced.
+  defp verify_no_remaining_references(node, drive_id) do
+    case ReplicaAudit.removal_impact(node, drive_id) do
+      {:ok, impacts} ->
+        case Enum.filter(impacts, &(&1.chunks_on_drive > 0)) do
+          [] -> :ok
+          remaining -> {:error, {:chunks_still_referenced, summarise(remaining)}}
+        end
+
+      {:error, reason} ->
+        {:error, {:references_unverified, reason}}
+    end
+  end
+
+  defp summarise(volumes) do
+    Enum.map(volumes, fn volume ->
+      %{
+        volume_id: volume.volume_id,
+        volume_name: volume.volume_name,
+        chunks_on_drive: volume.chunks_on_drive,
+        zero_copies: volume.zero_copies
+      }
+    end)
+  end
+
+  # Total over the reasons `finalise_evacuation/1`'s chain can produce —
+  # this string is what the operator reads in `neonfs job show`, so a
+  # reason without a sentence here would surface as raw `inspect` output.
+  defp describe({:drive_not_empty, _}), do: "blobs remain on disk"
+  defp describe({:drive_emptiness_unverified, _}), do: "could not verify the drive is empty"
+  defp describe({:volume_roots_not_rewritten, _}), do: "volume roots still point at this drive"
+  defp describe({:volume_roots_unreadable, _}), do: "could not read the volume roots"
+  defp describe({:references_unverified, _}), do: "could not verify remaining references"
+
+  defp describe({:chunks_still_referenced, volumes}) do
+    "chunks still reference this drive in " <>
+      Enum.map_join(volumes, ", ", &"#{&1.volume_name} (#{&1.chunks_on_drive})")
+  end
+
+  # Telemetry carries just the tag, so a dashboard can group refusals by
+  # kind without the payload. Every reason is a `{tag, detail}` pair.
+  defp describe_reason({tag, _detail}), do: tag
 
   ## Private — `drive_locations` rewrite
 
@@ -487,43 +576,57 @@ defmodule NeonFS.Core.Job.Runners.DriveEvacuation do
   # a same-node replacement drive. Without this step, the next
   # `MetadataReader` walk for an affected volume would try to read tree
   # pages from a drive that no longer exists.
+  #
+  # Every rewrite must succeed. This used to be best-effort per volume —
+  # a failed `:update_volume_root` logged a warning and the walk carried
+  # on — which let finalisation deregister a drive that a volume root
+  # still named (#1628). A failure now aborts finalisation with the
+  # offending volumes attached.
   defp rewrite_drive_locations(job) do
     evac_node = job.params.node
     evac_drive = job.params.drive_id
 
-    volume_roots =
-      case RaSupervisor.local_query(&MetadataStateMachine.get_volume_roots/1) do
-        {:ok, map} when is_map(map) -> map
-        _ -> %{}
-      end
+    case RaSupervisor.local_query(&MetadataStateMachine.get_volume_roots/1) do
+      {:ok, roots} when is_map(roots) -> rewrite_all_roots(roots, evac_node, evac_drive)
+      {:error, reason} -> {:error, {:volume_roots_unreadable, reason}}
+      other -> {:error, {:volume_roots_unreadable, other}}
+    end
+  end
 
-    Enum.each(volume_roots, fn {volume_id, shards} ->
-      Enum.each(shards, fn {shard, entry} ->
-        maybe_rewrite_volume(volume_id, shard, entry, evac_node, evac_drive)
-      end)
-    end)
+  defp rewrite_all_roots(volume_roots, evac_node, evac_drive) do
+    failures =
+      for {volume_id, shards} <- volume_roots,
+          {shard, entry} <- shards,
+          {:error, reason} <-
+            [maybe_rewrite_volume(volume_id, shard, entry, evac_node, evac_drive)],
+          do: %{volume_id: volume_id, shard: shard, reason: reason}
+
+    case failures do
+      [] ->
+        :ok
+
+      _ ->
+        Enum.each(failures, fn failure ->
+          Logger.warning("Failed to rewrite drive_locations for volume",
+            volume_id: failure.volume_id,
+            shard: failure.shard,
+            drive_id: evac_drive,
+            reason: inspect(failure.reason)
+          )
+        end)
+
+        {:error, {:volume_roots_not_rewritten, failures}}
+    end
   end
 
   defp maybe_rewrite_volume(volume_id, shard, entry, evac_node, evac_drive) do
     drive_locations = Map.get(entry, :drive_locations, [])
 
     if contains_location?(drive_locations, evac_node, evac_drive) do
-      log_rewrite_result(
-        volume_id,
-        evac_drive,
-        rewrite_one(volume_id, shard, entry, drive_locations, evac_node, evac_drive)
-      )
+      rewrite_one(volume_id, shard, entry, drive_locations, evac_node, evac_drive)
+    else
+      :ok
     end
-  end
-
-  defp log_rewrite_result(_volume_id, _evac_drive, :ok), do: :ok
-
-  defp log_rewrite_result(volume_id, evac_drive, {:error, reason}) do
-    Logger.warning("Failed to rewrite drive_locations for volume",
-      volume_id: volume_id,
-      drive_id: evac_drive,
-      reason: inspect(reason)
-    )
   end
 
   defp contains_location?(locations, node, drive_id) do
