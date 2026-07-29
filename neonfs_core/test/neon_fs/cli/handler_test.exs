@@ -255,6 +255,57 @@ defmodule NeonFS.CLI.HandlerTest do
     end
   end
 
+  describe "handle_replica_status/0 (#1618)" do
+    setup %{tmp_dir: tmp_dir} do
+      configure_test_dirs(tmp_dir)
+      stop_ra()
+      start_drive_registry()
+      start_blob_store()
+      start_chunk_index()
+      start_file_index()
+      start_stripe_index()
+      start_volume_registry()
+      ensure_chunk_access_tracker()
+      start_ra()
+      Handler.cluster_init("replica-status-cluster")
+
+      on_exit(fn ->
+        stop_ra()
+        cleanup_test_dirs()
+      end)
+
+      :ok
+    end
+
+    test "reports every volume, flagging the system one" do
+      assert {:ok, report} = Handler.handle_replica_status()
+
+      system =
+        Enum.find(report.volumes, &(&1.volume_name == "_system")) ||
+          flunk("_system missing from #{inspect(Enum.map(report.volumes, & &1.volume_name))}")
+
+      assert system.system == true
+      assert system.min_copies >= 1
+      assert is_integer(system.chunk_count)
+      assert is_integer(system.below_min_copies)
+      assert is_integer(system.least_copies)
+    end
+
+    test "serialises sole-copy drives with string node names" do
+      assert {:ok, report} = Handler.handle_replica_status()
+
+      Enum.each(report.sole_copy_drives, fn drive ->
+        assert is_binary(drive.node)
+        assert is_binary(drive.drive_id)
+        assert is_integer(drive.chunk_count)
+      end)
+
+      # A single-drive cluster holds `_system`'s only copies, so the drive
+      # it lives on must be surfaced as a sole-copy holder.
+      assert report.sole_copy_drives != []
+    end
+  end
+
   describe "node cordon / uncordon (#1376)" do
     setup %{tmp_dir: tmp_dir} do
       configure_test_dirs(tmp_dir)

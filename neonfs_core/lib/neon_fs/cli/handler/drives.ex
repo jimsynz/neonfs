@@ -14,7 +14,14 @@ defmodule NeonFS.CLI.Handler.Drives do
 
   import NeonFS.CLI.Handler.Common
 
-  alias NeonFS.Core.{ClusterRebalance, DriveEvacuation, DriveManager, StorageMetrics}
+  alias NeonFS.Core.{
+    ClusterRebalance,
+    DriveEvacuation,
+    DriveManager,
+    ReplicaAudit,
+    StorageMetrics
+  }
+
   alias NeonFS.Error.NotFound
 
   @doc """
@@ -68,18 +75,52 @@ defmodule NeonFS.CLI.Handler.Drives do
   @doc """
   Starts evacuation of all data from a drive (prefers a same-tier
   target, falls back to any tier).
+
+  `opts` accepts `"force"` to override a below-`min_copies` replica
+  finding (#1618).
   """
   @spec handle_evacuate_drive(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
-  def handle_evacuate_drive(node_name, drive_id, _opts \\ %{})
+  def handle_evacuate_drive(node_name, drive_id, opts \\ %{})
       when is_binary(node_name) and is_binary(drive_id) do
     set_cli_metadata()
 
     with :ok <- require_cluster() do
       node = String.to_atom(node_name)
 
-      case DriveEvacuation.start_evacuation(node, drive_id) do
+      case DriveEvacuation.start_evacuation(node, drive_id, force: truthy?(opts, "force")) do
         {:ok, job} -> {:ok, job_to_map(job)}
         {:error, reason} -> {:error, wrap_error(reason)}
+      end
+    end
+  end
+
+  @doc """
+  Reports replication health: which volumes sit below their `min_copies`
+  floor, and which drives hold the sole copy of anything (#1618).
+  """
+  @spec handle_replica_status() :: {:ok, map()} | {:error, term()}
+  def handle_replica_status do
+    set_cli_metadata()
+
+    with :ok <- require_cluster() do
+      case ReplicaAudit.audit() do
+        {:ok, report} ->
+          {:ok,
+           %{
+             volumes: Enum.map(report.volumes, &serialise_volume_replication/1),
+             under_replicated: Enum.map(report.under_replicated, & &1.volume_name),
+             sole_copy_drives:
+               Enum.map(report.sole_copy_drives, fn drive ->
+                 %{
+                   node: Atom.to_string(drive.node),
+                   drive_id: drive.drive_id,
+                   chunk_count: drive.chunk_count
+                 }
+               end)
+           }}
+
+        {:error, reason} ->
+          {:error, wrap_error(reason)}
       end
     end
   end
@@ -193,6 +234,25 @@ defmodule NeonFS.CLI.Handler.Drives do
   end
 
   # Private
+
+  # The CLI sends booleans as ETF atoms, but a JSON-ish caller may send
+  # the string form.
+  defp truthy?(opts, key) do
+    Map.get(opts, key) in [true, "true"]
+  end
+
+  defp serialise_volume_replication(volume) do
+    %{
+      volume_id: volume.volume_id,
+      volume_name: volume.volume_name,
+      system: volume.system?,
+      min_copies: volume.min_copies,
+      chunk_count: volume.chunk_count,
+      below_min_copies: volume.below_min_copies,
+      zero_copies: volume.zero_copies,
+      least_copies: volume.least_copies
+    }
+  end
 
   defp parse_tier_opt(opts, nil), do: opts
 

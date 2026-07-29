@@ -13,6 +13,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
   }
 
   alias NeonFS.Core.Job.Runners.DriveEvacuation, as: EvacuationRunner
+  alias NeonFS.Error.ReplicaGuard
 
   @moduletag :tmp_dir
 
@@ -118,6 +119,91 @@ defmodule NeonFS.Core.DriveEvacuationTest do
 
       DriveRegistry.update_usage("drive1", 0)
       DriveRegistry.update_state("drive1", :active)
+    end
+  end
+
+  describe "replica guard (#1618)" do
+    setup do
+      # A single-copy chunk pinned to drive1, so evacuating drive1 would
+      # leave the volume with no fallback if the migration failed.
+      Mimic.stub(VolumeRegistry, :list, fn _opts ->
+        [
+          %{
+            id: "vol-guard",
+            name: "guarded",
+            system: false,
+            durability: %{type: :replicate, factor: 2, min_copies: 2}
+          }
+        ]
+      end)
+
+      Mimic.stub(ChunkIndex, :list_volume_chunks, fn "vol-guard" ->
+        {:ok,
+         [
+           %ChunkMeta{
+             hash: "guarded",
+             original_size: 1,
+             stored_size: 1,
+             compression: :none,
+             crypto: nil,
+             locations: [%{node: node(), drive_id: "drive1", tier: :hot}],
+             target_replicas: 2,
+             commit_state: :committed,
+             active_write_refs: MapSet.new(),
+             volume_ids: MapSet.new(["vol-guard"]),
+             created_at: DateTime.utc_now()
+           }
+         ]}
+      end)
+
+      :ok
+    end
+
+    test "allows evacuating a sole-copy drive when there is somewhere to move it" do
+      # The canonical case: a factor-1 volume being moved off a drive
+      # before it is retired. Evacuation relocates, so the copy count
+      # survives — refusing here would break the operation's whole point.
+      result = DriveEvacuation.start_evacuation(node(), "drive1")
+
+      refute match?({:error, %ReplicaGuard{}}, result)
+    end
+
+    test "refuses when no drive remains to relocate onto, leaving the drive active" do
+      DriveRegistry.update_state("drive2", :draining)
+
+      assert {:error, %ReplicaGuard{reason: :below_min_copies}} =
+               DriveEvacuation.start_evacuation(node(), "drive1")
+
+      {:ok, drive} = DriveRegistry.get_drive(node(), "drive1")
+      assert drive.state == :active
+    end
+
+    test "force gets past the no-target guard" do
+      DriveRegistry.update_state("drive2", :draining)
+
+      # The guard is the only thing being asserted here — job creation may
+      # still fail on this fixture, but it must not fail on the guard.
+      result = DriveEvacuation.start_evacuation(node(), "drive1", force: true)
+
+      refute match?({:error, %ReplicaGuard{}}, result)
+    end
+
+    test "_system with nowhere to go is refused even with force" do
+      DriveRegistry.update_state("drive2", :draining)
+
+      Mimic.stub(VolumeRegistry, :list, fn _opts ->
+        [
+          %{
+            id: "vol-guard",
+            name: "_system",
+            system: true,
+            durability: %{type: :replicate, factor: 1, min_copies: 1}
+          }
+        ]
+      end)
+
+      assert {:error, %ReplicaGuard{reason: :system_zero_copies}} =
+               DriveEvacuation.start_evacuation(node(), "drive1", force: true)
     end
   end
 

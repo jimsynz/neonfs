@@ -705,6 +705,7 @@ defmodule NeonFS.CLI.Handler do
   ## Parameters
   - `node_name` - Node name string (e.g. "neonfs-core@host")
   - `drive_id` - Drive identifier
+  - `opts` - `"force"` overrides a below-`min_copies` replica finding
 
   ## Returns
   - `{:ok, map}` - Job info map
@@ -712,6 +713,16 @@ defmodule NeonFS.CLI.Handler do
   """
   @spec handle_evacuate_drive(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   defdelegate handle_evacuate_drive(node_name, drive_id, opts \\ %{}), to: DrivesHandler
+
+  @doc """
+  Reports replication health across every volume.
+
+  ## Returns
+  - `{:ok, map}` - `volumes`, `under_replicated`, and `sole_copy_drives`
+  - `{:error, reason}` - Error tuple
+  """
+  @spec handle_replica_status() :: {:ok, map()} | {:error, term()}
+  defdelegate handle_replica_status(), to: DrivesHandler
 
   @doc """
   Returns the evacuation status for a drive.

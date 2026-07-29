@@ -31,6 +31,7 @@ defmodule NeonFS.Core.DriveManager do
     NodeRegistry,
     RaServer,
     RaSupervisor,
+    ReplicaAudit,
     VolumeRegistry
   }
 
@@ -95,15 +96,19 @@ defmodule NeonFS.Core.DriveManager do
   @doc """
   Removes a drive at runtime.
 
-  Checks for data on the drive. If data exists and `:force` is not set,
-  returns `{:error, :drive_has_data}`. Otherwise closes the BlobStore handle,
+  Refuses when the removal would drop a volume below its `min_copies`
+  (`NeonFS.Core.ReplicaAudit.guard_removal/3`), then checks for data on
+  the drive: if data exists and `:force` is not set, returns
+  `{:error, :drive_has_data}`. Otherwise closes the BlobStore handle,
   deregisters from DriveRegistry, stops DriveState, and persists to cluster.json.
 
   ## Parameters
 
     * `drive_id` - Drive identifier to remove
     * `opts` - Optional keyword list:
-      * `:force` - Skip data check (default: `false`)
+      * `:force` - Skip the data check and override a below-`min_copies`
+        replica finding (default: `false`). Never overrides `_system`
+        being left with no surviving copy.
 
   ## Returns
 
@@ -623,6 +628,7 @@ defmodule NeonFS.Core.DriveManager do
 
     with {:ok, _drive} <- get_local_drive(drive_id),
          :ok <- check_drive_data(drive_id, force),
+         :ok <- check_critical_replicas(drive_id, force),
          :ok <- BlobStore.close_store(drive_id, timeout: :infinity),
          :ok <- DriveRegistry.deregister_drive(drive_id, timeout: :infinity),
          :ok <- stop_drive_state(drive_id) do
@@ -637,6 +643,22 @@ defmodule NeonFS.Core.DriveManager do
       {:ok, drive} -> {:ok, drive}
       {:error, :not_found} -> {:error, {:unknown_drive, drive_id}}
     end
+  end
+
+  # Removal abandons whatever is on the drive, so it is guarded on what
+  # would survive rather than on `drive_has_data?` alone (#1618). `:force`
+  # reaches the guard rather than skipping it: it overrides a
+  # below-`min_copies` finding, but not `_system` being left with no
+  # surviving copy.
+  #
+  # Runs *after* `check_drive_data/2` so an unforced removal of a drive
+  # with data still answers `:drive_has_data` — the CLI turns that into
+  # "run `drive evacuate` first", which is the right advice and better
+  # than a replica diagnostic. The guard's own case is the force path,
+  # where the data check is skipped and abandoning the last copies is
+  # exactly what the operator is about to do.
+  defp check_critical_replicas(drive_id, force) do
+    ReplicaAudit.guard_removal(Node.self(), drive_id, force: force, operation: "Removing")
   end
 
   defp check_drive_data(_drive_id, true = _force), do: :ok

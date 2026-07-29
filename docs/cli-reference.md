@@ -417,6 +417,7 @@ Commands:
   remove    Remove a drive from this node
   list      List all drives across the cluster
   evacuate  Evacuate all data from a drive (graceful removal)
+  replicas  Show replication health: under-replicated volumes and drives holding the sole copy of anything
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -486,10 +487,42 @@ Arguments:
 Options:
       --node <NODE>      Node where the drive is located (default: local node)
       --output <OUTPUT>  Output format (json or table) [default: table]
-      --any-tier         Allow migration to any tier (default: same tier only)
+      --wait             Block until the evacuation job finishes; exits non-zero on failure
+      --force            Start even though this drive holds a volume's last copies and there is nowhere to relocate them
       --json             Enable JSON output (shorthand for --output json)
   -h, --help             Print help
 ```
+
+### `neonfs drive replicas`
+
+```
+Show replication health: under-replicated volumes and drives holding the sole copy of anything
+
+Usage: neonfs-cli drive replicas [OPTIONS]
+
+Options:
+      --output <OUTPUT>  Output format (json or table) [default: table]
+      --json             Enable JSON output (shorthand for --output json)
+  -h, --help             Print help
+```
+
+Lists every volume with its `min_copies` floor, how many of its chunks
+sit below that floor, and the fewest surviving copies any chunk has,
+followed by the drives that hold the sole copy of at least one chunk.
+Those drives are the ones whose loss costs data, so check this before
+retiring hardware.
+
+The same query backs the pre-flight guard on `drive remove`, which
+refuses when the removal would drop a volume below `min_copies`.
+`drive evacuate` is gated only when no drive remains to relocate onto —
+evacuation moves the data rather than giving it up, so it does not lose
+copies when it has somewhere to put them.
+
+`--force` overrides the refusal, with one exception: leaving the
+cluster-critical `_system` volume with no surviving copy is refused
+outright, because `_system` holds the cluster CA key and its loss is
+unrecoverable. Add a drive or wait for re-replication (visible here)
+rather than forcing.
 
 ## `neonfs escalation`
 
