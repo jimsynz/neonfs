@@ -72,6 +72,12 @@ defmodule NeonFS.Core.FileIndex do
   @default_max_batch_size 128
   @default_max_batch_delay_ms 5
 
+  # Headroom over the slowest thing a flush waits on. The staged mutation
+  # still has to reach a flush and get its reply back, so matching
+  # `ShardCommitter.commit_timeout/0` exactly would leave a caller giving
+  # up in the same instant the worker succeeds.
+  @mutation_call_margin_ms 10_000
+
   ## Client API
 
   @doc """
@@ -89,6 +95,26 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @doc """
+  How long a mutating client call waits for its flush to reply.
+
+  Every mutation here stages into a windowed flush that commits through
+  `NeonFS.Core.ShardCommitter`, so this **must exceed**
+  `ShardCommitter.commit_timeout/0` — otherwise the caller abandons work
+  the worker is still legitimately doing, and a slow-but-successful commit
+  surfaces to the caller as a timeout.
+
+  It used to be a hard-coded 10–15 s against a 30 s commit timeout, which
+  is that inversion: `ShardCommitter`'s own comment states the intent
+  ("generous enough … so the FileIndex-side call doesn't give up before
+  the worker does") while every caller here contradicted it. Under a
+  loaded runner that surfaced as
+  `{:timeout, {GenServer, :call, [FileIndex, {:create_committing_chunks, …}]}}`
+  (#1630). Deriving it keeps the two from drifting apart again.
+  """
+  @spec mutation_call_timeout() :: pos_integer()
+  def mutation_call_timeout, do: ShardCommitter.commit_timeout() + @mutation_call_margin_ms
+
+  @doc """
   Creates a new file metadata entry.
 
   Uses IntentLog for cross-segment atomicity (FileMeta + child dirent).
@@ -97,7 +123,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec create(FileMeta.t()) :: {:ok, FileMeta.t()} | {:error, term()}
   def create(%FileMeta{} = file) do
-    GenServer.call(__MODULE__, {:create, file}, 15_000)
+    GenServer.call(__MODULE__, {:create, file}, mutation_call_timeout())
   end
 
   @doc """
@@ -125,7 +151,7 @@ defmodule NeonFS.Core.FileIndex do
     GenServer.call(
       __MODULE__,
       {:create_committing_chunks, file, write_id, chunk_hashes, opts},
-      15_000
+      mutation_call_timeout()
     )
   end
 
@@ -209,7 +235,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec update(file_id(), keyword()) :: {:ok, FileMeta.t()} | {:error, term()}
   def update(file_id, updates) do
-    GenServer.call(__MODULE__, {:update, file_id, updates}, 10_000)
+    GenServer.call(__MODULE__, {:update, file_id, updates}, mutation_call_timeout())
   end
 
   @doc """
@@ -225,7 +251,7 @@ defmodule NeonFS.Core.FileIndex do
     GenServer.call(
       __MODULE__,
       {:update_committing_chunks, file_id, updates, write_id, chunk_hashes},
-      15_000
+      mutation_call_timeout()
     )
   end
 
@@ -246,7 +272,11 @@ defmodule NeonFS.Core.FileIndex do
   @spec truncate(file_id(), non_neg_integer(), keyword()) ::
           {:ok, FileMeta.t()} | {:error, term()}
   def truncate(file_id, new_size, additional_updates \\ []) do
-    GenServer.call(__MODULE__, {:truncate, file_id, new_size, additional_updates}, 10_000)
+    GenServer.call(
+      __MODULE__,
+      {:truncate, file_id, new_size, additional_updates},
+      mutation_call_timeout()
+    )
   end
 
   @doc """
@@ -257,7 +287,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec touch(file_id()) :: {:ok, FileMeta.t()} | {:error, term()}
   def touch(file_id) do
-    GenServer.call(__MODULE__, {:touch, file_id}, 10_000)
+    GenServer.call(__MODULE__, {:touch, file_id}, mutation_call_timeout())
   end
 
   @doc """
@@ -268,7 +298,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec delete(file_id()) :: :ok | {:error, term()}
   def delete(file_id) do
-    GenServer.call(__MODULE__, {:delete, file_id}, 15_000)
+    GenServer.call(__MODULE__, {:delete, file_id}, mutation_call_timeout())
   end
 
   @doc """
@@ -287,7 +317,11 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec mark_detached(file_id(), [String.t()]) :: {:ok, FileMeta.t()} | {:error, term()}
   def mark_detached(file_id, pinned_claim_ids) when is_list(pinned_claim_ids) do
-    GenServer.call(__MODULE__, {:mark_detached, file_id, pinned_claim_ids}, 15_000)
+    GenServer.call(
+      __MODULE__,
+      {:mark_detached, file_id, pinned_claim_ids},
+      mutation_call_timeout()
+    )
   end
 
   @doc """
@@ -303,7 +337,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec decrement_pin(file_id(), String.t()) :: :ok | {:error, term()}
   def decrement_pin(file_id, claim_id) when is_binary(file_id) and is_binary(claim_id) do
-    GenServer.call(__MODULE__, {:decrement_pin, file_id, claim_id}, 15_000)
+    GenServer.call(__MODULE__, {:decrement_pin, file_id, claim_id}, mutation_call_timeout())
   end
 
   @doc """
@@ -316,7 +350,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec purge_detached(file_id()) :: :ok | {:error, term()}
   def purge_detached(file_id) when is_binary(file_id) do
-    GenServer.call(__MODULE__, {:purge_detached, file_id}, 15_000)
+    GenServer.call(__MODULE__, {:purge_detached, file_id}, mutation_call_timeout())
   end
 
   @doc """
@@ -404,7 +438,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec mkdir(volume_id(), path(), keyword()) :: {:ok, DirectoryEntry.t()} | {:error, term()}
   def mkdir(volume_id, path, opts \\ []) do
-    GenServer.call(__MODULE__, {:mkdir, volume_id, path, opts}, 10_000)
+    GenServer.call(__MODULE__, {:mkdir, volume_id, path, opts}, mutation_call_timeout())
   end
 
   @doc """
@@ -415,7 +449,11 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec rename(volume_id(), path(), String.t(), String.t()) :: :ok | {:error, term()}
   def rename(volume_id, parent_path, old_name, new_name) do
-    GenServer.call(__MODULE__, {:rename, volume_id, parent_path, old_name, new_name}, 10_000)
+    GenServer.call(
+      __MODULE__,
+      {:rename, volume_id, parent_path, old_name, new_name},
+      mutation_call_timeout()
+    )
   end
 
   @doc """
@@ -425,7 +463,11 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec move(volume_id(), path(), path(), String.t()) :: :ok | {:error, term()}
   def move(volume_id, source_dir, dest_dir, name) do
-    GenServer.call(__MODULE__, {:move, volume_id, source_dir, dest_dir, name}, 15_000)
+    GenServer.call(
+      __MODULE__,
+      {:move, volume_id, source_dir, dest_dir, name},
+      mutation_call_timeout()
+    )
   end
 
   @doc """
@@ -440,7 +482,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec rmdir(volume_id(), path()) :: :ok | {:error, term()}
   def rmdir(volume_id, path) do
-    GenServer.call(__MODULE__, {:rmdir, volume_id, path}, 15_000)
+    GenServer.call(__MODULE__, {:rmdir, volume_id, path}, mutation_call_timeout())
   end
 
   @doc """
@@ -448,7 +490,7 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec ensure_root_dir(volume_id()) :: :ok | {:error, term()}
   def ensure_root_dir(volume_id) do
-    GenServer.call(__MODULE__, {:ensure_root_dir, volume_id}, 10_000)
+    GenServer.call(__MODULE__, {:ensure_root_dir, volume_id}, mutation_call_timeout())
   end
 
   @doc """
