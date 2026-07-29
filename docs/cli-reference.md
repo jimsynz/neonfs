@@ -488,7 +488,7 @@ Options:
       --node <NODE>      Node where the drive is located (default: local node)
       --output <OUTPUT>  Output format (json or table) [default: table]
       --wait             Block until the evacuation job finishes; exits non-zero on failure
-      --force            Start even though this drive holds a volume's last copies
+      --force            Start even though this drive holds a volume's last copies and there is nowhere to relocate them
       --json             Enable JSON output (shorthand for --output json)
   -h, --help             Print help
 ```
@@ -512,13 +512,17 @@ followed by the drives that hold the sole copy of at least one chunk.
 Those drives are the ones whose loss costs data, so check this before
 retiring hardware.
 
-The same query backs the pre-flight guard on `drive evacuate` and
-`drive remove`: both refuse when the operation would drop a volume below
-`min_copies`. `--force` overrides that, with one exception — a removal
-that would leave the cluster-critical `_system` volume with no surviving
-copy is refused outright, because `_system` holds the cluster CA key and
-its loss is unrecoverable. Wait for re-replication (visible here) rather
-than forcing.
+The same query backs the pre-flight guard on `drive remove`, which
+refuses when the removal would drop a volume below `min_copies`.
+`drive evacuate` is gated only when no drive remains to relocate onto —
+evacuation moves the data rather than giving it up, so it does not lose
+copies when it has somewhere to put them.
+
+`--force` overrides the refusal, with one exception: leaving the
+cluster-critical `_system` volume with no surviving copy is refused
+outright, because `_system` holds the cluster CA key and its loss is
+unrecoverable. Add a drive or wait for re-replication (visible here)
+rather than forcing.
 
 ## `neonfs escalation`
 

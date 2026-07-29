@@ -354,19 +354,25 @@ Lists every volume against its `min_copies` floor and names the drives
 that hold the sole copy of at least one chunk. Run it before retiring
 hardware: those drives are the ones whose loss costs data.
 
-Both `drive evacuate` and `drive remove` run this query as a pre-flight
-and refuse when the operation would drop a volume below `min_copies`. A
-chunk that is already short of copies *elsewhere* does not block the
-operation — the guard asks what this removal changes, not what repair
-still owes.
+`drive remove` runs this query as a pre-flight and refuses when the
+removal would drop a volume below `min_copies`. A chunk that is already
+short of copies *elsewhere* does not block the removal — the guard asks
+what this operation changes, not what repair still owes.
 
-`--force` overrides the refusal, with one exception: a removal that would
-leave the cluster-critical `_system` volume with no surviving copy is
-refused outright and cannot be forced. `_system` holds the cluster CA
-key, cluster identity, serial and CRL; losing it is unrecoverable. Its
+`drive evacuate` is gated more narrowly, because evacuation *moves* the
+data rather than giving it up: a successful evacuation preserves the copy
+count, so moving a `factor: 1` volume off a drive before retiring it —
+the reason evacuation exists — is not blocked. The guard applies only
+when no drive remains to relocate onto, which is the one way evacuation
+itself loses copies.
+
+`--force` overrides the refusal, with one exception: leaving the
+cluster-critical `_system` volume with no surviving copy is refused
+outright and cannot be forced. `_system` holds the cluster CA key,
+cluster identity, serial and CRL; losing it is unrecoverable. Its
 replication factor scales with the drive count (up to 3), so the right
-response is to wait for re-replication — visible in `drive replicas` —
-rather than to look for a way around the guard.
+response is to add a drive or wait for re-replication — visible in
+`drive replicas` — rather than to look for a way around the guard.
 
 Under-replication also emits telemetry
 (`[:neonfs, :replica_audit, :under_replicated]`) whenever the audit runs,

@@ -627,8 +627,8 @@ defmodule NeonFS.Core.DriveManager do
     force = Keyword.get(opts, :force, false)
 
     with {:ok, _drive} <- get_local_drive(drive_id),
-         :ok <- check_critical_replicas(drive_id, force),
          :ok <- check_drive_data(drive_id, force),
+         :ok <- check_critical_replicas(drive_id, force),
          :ok <- BlobStore.close_store(drive_id, timeout: :infinity),
          :ok <- DriveRegistry.deregister_drive(drive_id, timeout: :infinity),
          :ok <- stop_drive_state(drive_id) do
@@ -650,6 +650,13 @@ defmodule NeonFS.Core.DriveManager do
   # reaches the guard rather than skipping it: it overrides a
   # below-`min_copies` finding, but not `_system` being left with no
   # surviving copy.
+  #
+  # Runs *after* `check_drive_data/2` so an unforced removal of a drive
+  # with data still answers `:drive_has_data` — the CLI turns that into
+  # "run `drive evacuate` first", which is the right advice and better
+  # than a replica diagnostic. The guard's own case is the force path,
+  # where the data check is skipped and abandoning the last copies is
+  # exactly what the operator is about to do.
   defp check_critical_replicas(drive_id, force) do
     ReplicaAudit.guard_removal(Node.self(), drive_id, force: force, operation: "Removing")
   end

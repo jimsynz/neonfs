@@ -31,8 +31,9 @@ defmodule NeonFS.Core.DriveEvacuation do
   Pre-flight checks:
   1. Drive exists
   2. Drive is not already draining
-  3. No volume depends on this drive for its last copies
-     (`ReplicaAudit.guard_removal/3`) — before anything with a side
+  3. If — and only if — no drive remains to relocate onto, no volume
+     depends on this drive for its last copies
+     (`ReplicaAudit.guard_removal/3`). Runs before anything with a side
      effect, so a refusal leaves the drive untouched
   4. Standby drives are spun up
   5. Sufficient cluster-wide capacity to absorb the evacuating drive
@@ -43,12 +44,11 @@ defmodule NeonFS.Core.DriveEvacuation do
 
   ## Options
 
-    * `:force` - proceed even though the drive holds a volume's last
-      copies (default `false`). Evacuation relocates rather than
-      abandons, so success preserves the copy count; what `--force`
-      accepts is the window in which a failure has no fallback — the
-      #1573 shape. It never overrides `_system` being left with no
-      surviving copy.
+    * `:force` - start even though this drive holds a volume's last
+      copies and there is nowhere to relocate them (default `false`).
+      Only reachable in that no-target case — with a target, evacuation
+      preserves the copy count and is not gated. Never overrides
+      `_system` being left with no surviving copy.
   """
   @spec start_evacuation(node(), String.t(), keyword()) ::
           {:ok, NeonFS.Core.Job.t()} | {:error, term()}
@@ -124,11 +124,39 @@ defmodule NeonFS.Core.DriveEvacuation do
 
   defp check_not_draining(_drive), do: :ok
 
+  # Evacuation *relocates*; removal abandons. With somewhere to move the
+  # data, evacuation preserves the copy count — that is the whole point of
+  # the operation — so guarding it on "what if this drive vanished" would
+  # refuse the canonical case: moving a `factor: 1` volume off a drive
+  # before retiring it, which is precisely what an operator reaches for
+  # evacuation to do.
+  #
+  # What evacuation cannot survive is having nowhere to put the data. The
+  # blobs stay stranded on a draining drive, and finalisation's
+  # filesystem-empty check is not what will catch that (#1628). So the
+  # replica guard runs only when no target drive exists — which is also
+  # the case where `_system` would be stranded, and where its
+  # unforceable refusal has to hold.
+  #
+  # Target availability is read from the same source the runner's
+  # `select_target_drive/2` uses, so the guard agrees with what the
+  # evacuation would actually attempt.
   defp guard_replicas(node, drive_id, opts) do
-    ReplicaAudit.guard_removal(node, drive_id,
-      force: Keyword.get(opts, :force, false),
-      operation: "Evacuating"
-    )
+    if relocation_target?(node, drive_id) do
+      :ok
+    else
+      ReplicaAudit.guard_removal(node, drive_id,
+        force: Keyword.get(opts, :force, false),
+        operation: "Evacuating"
+      )
+    end
+  end
+
+  defp relocation_target?(evac_node, evac_drive_id) do
+    Enum.any?(DriveRegistry.list_drives(), fn drive ->
+      drive.state != :draining and
+        not (drive.node == evac_node and drive.id == evac_drive_id)
+    end)
   end
 
   defp ensure_drive_active(node, %{state: :standby, id: drive_id}) do

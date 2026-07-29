@@ -9,11 +9,12 @@ defmodule NeonFS.Core.ReplicaAudit do
     * `audit/0` reports the volumes that are currently under-replicated
       and the drives that hold a sole copy of something — the state an
       operator otherwise only discovers during an incident.
-    * `guard_removal/3` is the pre-flight for `drive evacuate` and
-      `drive remove`. It refuses when the drive's disappearance would put
-      any volume under `min_copies`, with `--force` as the escape hatch,
-      and refuses unconditionally when the cluster-critical `_system`
-      volume would be left with no surviving copy at all.
+    * `guard_removal/3` is the pre-flight for `drive remove` and, in the
+      narrower case below, `drive evacuate`. It refuses when the drive's
+      disappearance would put any volume under `min_copies`, with
+      `--force` as the escape hatch, and refuses unconditionally when the
+      cluster-critical `_system` volume would be left with no surviving
+      copy at all.
 
   Nothing stopped either operation before this: evacuation finalisation
   deregisters a drive on a filesystem-empty check, and
@@ -23,14 +24,19 @@ defmodule NeonFS.Core.ReplicaAudit do
   `_system` with the drive count, and this guard stops an operator (or a
   future bug) from spending the redundancy that buys.
 
-  ## Why the guard applies to evacuation too
+  ## Removal abandons; evacuation relocates
 
-  Evacuation *relocates* rather than abandons, so a successful evacuation
-  preserves copy counts. What it cannot promise is success: a
-  mid-evacuation failure on a drive that held the only copy has no
-  fallback, which is exactly the #1573 shape. The query is therefore the
-  same for both operations — "what if this drive disappeared" — and
-  `--force` is how an operator says they accept that window.
+  "What if this drive disappeared" is the right question for `drive
+  remove`, where the data on it genuinely is given up. It is the wrong
+  question for `drive evacuate`, which moves the data first: a successful
+  evacuation preserves the copy count, so gating it on this query would
+  refuse the canonical case — moving a `factor: 1` volume off a drive
+  before retiring it, which is what evacuation is *for*.
+
+  `DriveEvacuation.start_evacuation/3` therefore consults this guard only
+  when no drive remains to relocate onto, which is the one way evacuation
+  itself drops copies. Callers pick the semantics by choosing whether to
+  ask.
 
   ## Reads the authoritative tree, not the ETS cache
 

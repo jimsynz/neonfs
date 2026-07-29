@@ -68,8 +68,9 @@ pub enum DriveCommand {
         #[arg(long)]
         wait: bool,
 
-        /// Start even though this drive holds a volume's last copies.
-        /// Cannot override the `_system` volume being left with none.
+        /// Start even though this drive holds a volume's last copies and
+        /// there is nowhere to relocate them. Cannot override the
+        /// `_system` volume being left with none.
         #[arg(long)]
         force: bool,
     },
