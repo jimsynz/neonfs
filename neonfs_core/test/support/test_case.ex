@@ -392,6 +392,11 @@ defmodule NeonFS.TestCase do
         shared_metadata_index_opts()
       end
 
+    # The real conflict lease needs Ra and fails closed without it (#1631);
+    # index unit tests inject an always-granting stub unless they are
+    # specifically exercising lease behaviour.
+    opts = Keyword.put_new(opts, :intent_log, NeonFS.TestSupport.StubIntentLog)
+
     stop_if_running(NeonFS.Core.FileIndex)
     cleanup_ets_table(:file_index_by_id)
 

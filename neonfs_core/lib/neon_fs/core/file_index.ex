@@ -560,6 +560,17 @@ defmodule NeonFS.Core.FileIndex do
 
     :persistent_term.put({__MODULE__, :metadata_writer_opts}, metadata_writer_opts)
 
+    # The conflict lease is injectable for the same reason the reader and
+    # writer are: a `FileIndex` unit test exercises index behaviour, not
+    # clustering, and standing up Ra per test to obtain a lease costs far
+    # more than it proves. Production uses the real `IntentLog`, which
+    # fails closed when Ra is unavailable (#1631).
+    :persistent_term.put(
+      {__MODULE__, :intent_log},
+      Keyword.get(opts, :intent_log) ||
+        :persistent_term.get({__MODULE__, :intent_log}, IntentLog)
+    )
+
     state = %{
       pending: %{},
       pending_count: 0,
@@ -743,7 +754,7 @@ defmodule NeonFS.Core.FileIndex do
         params: %{volume_id: file.volume_id, path: file.path, file_id: file.id}
       )
 
-    with {:ok, intent_id} <- try_acquire_intent(intent),
+    with {:ok, intent_id} <- intent_log().try_acquire(intent),
          {:ok, ancestor_muts} <- ancestor_mutations(file.volume_id, parent_path) do
       mutations =
         ancestor_muts ++
@@ -909,7 +920,7 @@ defmodule NeonFS.Core.FileIndex do
         params: %{file_id: file_id, volume_id: file.volume_id, path: file.path}
       )
 
-    case try_acquire_intent(intent) do
+    case intent_log().try_acquire(intent) do
       {:ok, intent_id} ->
         mutations = [
           file_delete_mutation(file),
@@ -982,7 +993,7 @@ defmodule NeonFS.Core.FileIndex do
         params: %{file_id: file.id, volume_id: file.volume_id, path: file.path}
       )
 
-    case try_acquire_intent(intent) do
+    case intent_log().try_acquire(intent) do
       {:ok, intent_id} ->
         mutations = [
           file_put_mutation(detached_file),
@@ -1151,7 +1162,7 @@ defmodule NeonFS.Core.FileIndex do
          :ok <- check_rename_target(volume_id, normalized, old_name, new_name),
          {:ok, updated_file} <-
            file_at_new_path(volume_id, child, Path.join(normalized, new_name), overlay),
-         {:ok, intent_id} <- try_acquire_intent(rename_intent(volume_id, normalized)) do
+         {:ok, intent_id} <- intent_log().try_acquire(rename_intent(volume_id, normalized)) do
       mutations =
         [
           dirent_put_mutation(volume_id, normalized, new_name, child.type, child.id)
@@ -1217,7 +1228,7 @@ defmodule NeonFS.Core.FileIndex do
     with {:ok, child} <- read_dirent(volume_id, source_normalized, name),
          {:ok, updated_file} <-
            file_at_new_path(volume_id, child, Path.join(dest_normalized, name), overlay),
-         {:ok, intent_id} <- try_acquire_intent(intent) do
+         {:ok, intent_id} <- intent_log().try_acquire(intent) do
       mutations =
         [
           dirent_put_mutation(volume_id, dest_normalized, name, child.type, child.id),
@@ -1676,27 +1687,33 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — IntentLog helpers
 
-  defp try_acquire_intent(intent) do
-    case IntentLog.try_acquire(intent) do
-      {:ok, intent_id} -> {:ok, intent_id}
-      {:error, %{class: :unavailable}} -> {:ok, intent.id}
-      {:error, reason} -> {:error, reason}
+  # Releasing the lease is a *post-commit* effect: it runs from an
+  # `on_commit` closure inside the flush, after the mutation is already
+  # durable. Failing the operation retroactively is not an option, and
+  # crashing the committer would strand the rest of the batch — so this
+  # absorbs the failure. What it must not do is absorb it *silently*: an
+  # unreleased lease blocks the next writer on that conflict key until its
+  # TTL expires, and an operator seeing that stall deserves a log line
+  # naming the cause (#1631).
+  defp complete_intent(intent_id) do
+    case intent_log().complete(intent_id) do
+      :ok -> :ok
+      {:error, reason} -> warn_lease_not_released(intent_id, reason)
     end
   rescue
-    _ -> {:ok, intent.id}
+    error -> warn_lease_not_released(intent_id, error)
   catch
-    :exit, _ -> {:ok, intent.id}
+    :exit, reason -> warn_lease_not_released(intent_id, reason)
   end
 
-  defp complete_intent(intent_id) do
-    case IntentLog.complete(intent_id) do
-      :ok -> :ok
-      {:error, _} -> :ok
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
+  defp warn_lease_not_released(intent_id, reason) do
+    Logger.warning(
+      "Intent lease not released; it will block its conflict key until the TTL expires",
+      intent_id: intent_id,
+      reason: inspect(reason)
+    )
+
+    :ok
   end
 
   ## Private — Event broadcasting
@@ -1971,5 +1988,9 @@ defmodule NeonFS.Core.FileIndex do
 
   defp metadata_reader_opts do
     :persistent_term.get({__MODULE__, :metadata_reader_opts}, [])
+  end
+
+  defp intent_log do
+    :persistent_term.get({__MODULE__, :intent_log}, IntentLog)
   end
 end

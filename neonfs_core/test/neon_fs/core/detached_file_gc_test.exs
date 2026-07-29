@@ -27,7 +27,9 @@ defmodule NeonFS.Core.DetachedFileGCTest do
 
     start_supervised!(
       {NeonFS.Core.FileIndex,
-       metadata_reader_opts: metadata_reader_opts, metadata_writer_opts: metadata_writer_opts},
+       metadata_reader_opts: metadata_reader_opts,
+       metadata_writer_opts: metadata_writer_opts,
+       intent_log: NeonFS.TestSupport.StubIntentLog},
       restart: :temporary
     )
 
