@@ -48,6 +48,7 @@ jobs:
       elixir_rust_image: ${{ steps.parse.outputs.elixir_rust_image }}
       rust_image: ${{ steps.parse.outputs.rust_image }}
       packages: ${{ steps.affected.outputs.packages }}
+      package_matrix: ${{ steps.affected.outputs.package_matrix }}
       run_integration: ${{ steps.affected.outputs.run_integration }}
       run_cli: ${{ steps.affected.outputs.run_cli }}
       run_wire: ${{ steps.affected.outputs.run_wire }}
@@ -70,13 +71,35 @@ jobs:
           echo "rust_image=harton.dev/james/workflows/rust:${RUST}" >> "$GITHUB_OUTPUT"
       - id: affected
         run: |
+          # Outside the checkout, so nothing downstream sees a stray file.
+          AFFECTED="$(mktemp)"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
             git diff --name-only "${BASE}...HEAD" \
               | tee /dev/stderr \
-              | resources/scripts/ci-affected >> "$GITHUB_OUTPUT"
+              | resources/scripts/ci-affected > "$AFFECTED"
           else
-            resources/scripts/ci-affected --all >> "$GITHUB_OUTPUT"
+            resources/scripts/ci-affected --all > "$AFFECTED"
+          fi
+          cat "$AFFECTED" >> "$GITHUB_OUTPUT"
+
+          # The `package` matrix must never expand to zero instances.
+          # Forgejo instantiates a job with a false `if` (see vfs_neonfs)
+          # and that skipped job satisfies `needs`, but a matrix over an
+          # empty list creates *no job at all* — so `needs: package`
+          # becomes unsatisfiable and `canary` sits at "Blocked by
+          # required conditions" forever, which is exactly what a
+          # `neonfs-cli`-only or docs-only change hit (#1641).
+          #
+          # Feed the matrix a single placeholder in that case. `package`
+          # keeps its own `if` on the real `packages` output, so the
+          # placeholder job is created and immediately skipped; it never
+          # builds anything.
+          PACKAGES=$(sed -n 's/^packages=//p' "$AFFECTED")
+          if [ "$PACKAGES" = "[]" ]; then
+            echo 'package_matrix=["none"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "package_matrix=${PACKAGES}" >> "$GITHUB_OUTPUT"
           fi
 
   # =========================================================================
@@ -105,7 +128,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pkg: ${{ fromJSON(needs.setup.outputs.packages) }}
+        # Never `packages` directly — an empty matrix creates no job and
+        # deadlocks `canary` (#1641). `package_matrix` is the same list
+        # with a placeholder substituted when it would be empty, and the
+        # `if` above skips the job in exactly that case.
+        pkg: ${{ fromJSON(needs.setup.outputs.package_matrix) }}
     container:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
       # Container options can't be loaded from the table in-job, so the

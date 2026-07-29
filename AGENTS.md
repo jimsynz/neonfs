@@ -262,6 +262,8 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 
 **When adding a package**: add a `ci-matrix.json` entry (schema documented at the top of `ci.yml`) and a path rule in `ci-affected`. **When adding a sibling or test-only dependency**: update the corresponding `ci-affected` rule and, if build artefacts are shared, the entry's `cache_paths`/`lockfiles`. Lockfiles listed in an entry must exist — the job fails on missing ones rather than silently weakening the cache key.
 
+**A matrix job that `canary` depends on must never expand to zero instances.** Forgejo instantiates a job whose `if` is false, and that skipped job satisfies `needs` — but a matrix over an empty list creates no job at all, so `needs` on it is unsatisfiable and `canary` sits at "Blocked by required conditions" indefinitely, leaving the PR unmergeable. This is why `package` matrixes over `setup`'s `package_matrix` output (the affected list, or a single placeholder when that list would be empty) rather than over `packages` directly, and why the job keeps its own `if` on `packages`. It bit `neonfs-cli`-only and docs-only changes (#1641).
+
 ## Forgejo
 
 This repository is hosted on a Forgejo instance at `harton.dev`. Use the `fj` CLI (not `gh`) for the simple read operations it handles well:
