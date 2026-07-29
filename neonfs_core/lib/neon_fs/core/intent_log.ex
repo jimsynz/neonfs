@@ -1,14 +1,24 @@
 defmodule NeonFS.Core.IntentLog do
   @moduledoc """
-  Provides crash-safe transaction coordination for cross-segment metadata operations.
+  A cluster-wide **conflict lease** for metadata operations: at most one
+  writer holds a given conflict key at a time.
 
-  The intent log uses Ra for exclusive intent acquisition (check-and-set on
-  conflict keys) and supports TTL-based leases with extension for long-running
-  operations. It solves two problems:
+  Acquisition is a Ra check-and-set on the conflict key, with a TTL-based
+  lease that long-running operations can extend.
 
-  - **Cross-segment atomicity**: operations spanning multiple segments (e.g., file
-    create = FileMeta + DirectoryEntry) are recorded as a single intent.
-  - **Concurrent writer detection**: only one writer per file at a time.
+  ## What this is not
+
+  This log does **not** make a cross-segment operation atomic, despite
+  earlier documentation here claiming it did. It records an operation, its
+  conflict key, its parameters and a TTL — and nothing else. It stores no
+  participant shards, no expected or new roots, no mutation payload, no
+  commit decision and no per-participant progress, so it cannot finish or
+  abort an interrupted operation. Expiry releases the conflict key and
+  leaves any partial commit durable, and there is no reconciler.
+
+  Cross-shard atomicity comes from consensus instead — a single Ra command
+  that validates every participating shard's expected root and flips them
+  all or none (#1589). Treat this module as concurrency control only.
 
   ## Conflict Key Types
 
@@ -52,6 +62,14 @@ defmodule NeonFS.Core.IntentLog do
 
   If an existing intent's TTL has expired, the new intent takes over
   (expired intent marked as `:expired`).
+
+  **Fails closed.** When Ra is unavailable this returns
+  `{:error, %NeonFS.Error.Unavailable{}}` — it does not report success.
+  A caller that treats unavailability as acquisition proceeds with nothing
+  serialising it against a concurrent writer on another node, which is
+  exactly the situation a lease exists to prevent and exactly when it is
+  most likely (#1631). Callers decide what to do without the lease; they
+  must not be told they hold one.
   """
   @spec try_acquire(Intent.t()) ::
           {:ok, binary()} | {:error, Conflict.t()} | {:error, term()}

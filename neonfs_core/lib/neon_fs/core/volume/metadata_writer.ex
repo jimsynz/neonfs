@@ -160,8 +160,14 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   flip — collapses same-shard mutations into one consensus round.
   Within a shard, mutations apply in list order, threading the per-kind
   tree root forward (last-write-wins for the same key). A stale-pointer
-  CAS conflict retries that shard's batch. Across shards there is no
-  atomicity — IntentLog provides the cross-segment crash guarantee.
+  CAS conflict retries that shard's batch.
+
+  **Across shards there is no atomicity, and nothing currently supplies
+  it.** `IntentLog` was documented as providing the cross-segment crash
+  guarantee; it does not — it is a conflict lease and carries none of the
+  participant state a commit protocol would need. A partial cross-shard
+  commit is therefore durable today. #1632 replaces the per-shard flips
+  with a single Ra command over a checked root set.
 
   `mutations` is a list of `{:put, kind, key, value}` /
   `{:delete, kind, key}`. An empty list is a no-op.
@@ -436,9 +442,10 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
 
   # Mutations are grouped by the shard their key belongs to (#1307); each
   # shard's group commits to its own root in one CAS. A cross-shard batch
-  # is therefore several independent CAS flips — IntentLog provides the
-  # cross-segment crash atomicity the single-flip case used to give for
-  # free. Returns `%{shard => new_root_chunk_hash}`.
+  # is therefore several independent CAS flips, and the single-flip
+  # atomicity that split lost has not been replaced — `IntentLog` was
+  # believed to cover it but only leases the conflict key (#1631). See
+  # #1632. Returns `%{shard => new_root_chunk_hash}`.
   defp local_apply_batch(volume_id, mutations, opts) do
     mutations
     |> Enum.group_by(&Shard.for_key(mutation_key(&1)))
