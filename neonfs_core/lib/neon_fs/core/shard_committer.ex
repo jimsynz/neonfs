@@ -24,6 +24,17 @@ defmodule NeonFS.Core.ShardCommitter do
   @commit_timeout 30_000
 
   @doc """
+  How long a commit may take before the worker itself gives up.
+
+  This bounds the slowest thing a `FileIndex` flush waits on, so every
+  `FileIndex` client call that can trigger a flush must allow strictly
+  more than this — see `NeonFS.Core.FileIndex.mutation_call_timeout/0`.
+  Exposed rather than duplicated so the two cannot drift (#1630).
+  """
+  @spec commit_timeout() :: pos_integer()
+  def commit_timeout, do: @commit_timeout
+
+  @doc """
   Child spec for the `PartitionSupervisor` that owns the stateless worker
   pool. Add this to a supervision tree (workers are started and routed by
   `PartitionSupervisor`).
