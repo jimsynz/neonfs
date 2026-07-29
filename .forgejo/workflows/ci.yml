@@ -377,7 +377,14 @@ jobs:
     needs: setup
     if: needs.setup.outputs.run_integration == 'true'
     runs-on: amd64
-    timeout-minutes: 60
+    # Observed 35–48 minutes across a single day, and a run killed at
+    # exactly 60 with no test failure (#1643) — the old budget sat inside
+    # the spread, so a pass depended on runner load rather than on the
+    # diff. Headroom over the worst completed run, not an open-ended
+    # limit: a genuinely wedged suite must still fail. The real fix is
+    # sharding the suite (#1623); this only stops it failing for a reason
+    # unrelated to the change under test.
+    timeout-minutes: 90
     container:
       image: ${{ needs.setup.outputs.elixir_rust_image }}
       options: --privileged
