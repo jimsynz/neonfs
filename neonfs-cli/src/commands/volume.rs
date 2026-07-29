@@ -251,7 +251,7 @@ pub enum VolumeCommand {
         interval: Option<String>,
     },
 
-    /// Manage per-volume snapshots (#962 / epic #959).
+    /// Manage per-volume snapshots.
     ///
     /// A snapshot is a frozen pointer to the volume's current root
     /// chunk. Create is O(1); chunks shared with the live head share
@@ -261,7 +261,7 @@ pub enum VolumeCommand {
         command: SnapshotCommand,
     },
 
-    /// Promote a snapshot to a brand-new top-level volume (#964).
+    /// Promote a snapshot to a brand-new top-level volume.
     ///
     /// The new volume points at the snapshot's root chunk — no bytes
     /// are copied. Both volumes pin the same content-addressed chunk
@@ -280,7 +280,7 @@ pub enum VolumeCommand {
         new_name: String,
     },
 
-    /// Export a volume as a portable tarball (#965 / #992).
+    /// Export a volume as a portable tarball.
     ///
     /// Without `--snapshot`, exports the live root. With
     /// `--snapshot <id>`, walks the snapshot's frozen tree instead
@@ -310,7 +310,7 @@ pub enum VolumeCommand {
         include_system_xattrs: bool,
     },
 
-    /// Import a volume from a previously-exported tarball (#966).
+    /// Import a volume from a previously-exported tarball.
     ///
     /// Creates a new volume named `--as <new-volume-name>` populated
     /// from the export. The input path is on the daemon's
@@ -325,7 +325,7 @@ pub enum VolumeCommand {
         new_name: String,
     },
 
-    /// Rollback a volume's live root to a snapshot (#963).
+    /// Rollback a volume's live root to a snapshot.
     ///
     /// Destructive in the general case: chunks reachable from the
     /// current live root but not from any remaining snapshot become

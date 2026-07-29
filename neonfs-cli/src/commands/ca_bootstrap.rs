@@ -1,23 +1,23 @@
-//! Emergency CA bootstrap helpers (#503).
+//! Emergency CA bootstrap helpers.
 //!
 //! Slice ordering (for future edits to this module):
 //!
-//!   - **B.1** (#503) — Tarball validation: open backup, enumerate
+//!   - **B.1** — Tarball validation: open backup, enumerate
 //!     entries, confirm required members present, parse CA subject,
 //!     compare against local `cluster.json`.
-//!   - **B.2a** (#516) — Atomic on-disk install of validated members
+//!   - **B.2a** — Atomic on-disk install of validated members
 //!     to `$NEONFS_TLS_DIR/` via stage + fsync + rename.
-//!   - **B.2b.1** (#518) — Live-service refusal: TCP probe on the
+//!   - **B.2b.1** — Live-service refusal: TCP probe on the
 //!     distribution port read from `/run/neonfs/dist_port`. Refuses
 //!     the bootstrap if the daemon appears to be running.
-//!   - **B.2b.2** (#518) — Node cert regeneration: after install,
+//!   - **B.2b.2** — Node cert regeneration: after install,
 //!     generate a fresh ECDSA P-256 keypair, build a cert with
 //!     subject `/O=NeonFS/CN=neonfs_core@<host>` + SAN `[hostname]` +
 //!     extended key usage `ServerAuth + ClientAuth`, sign with the
 //!     installed CA key via rcgen, atomically write `node.crt` +
 //!     `node.key` + bumped `serial` to `$NEONFS_TLS_DIR/`.
 //!
-//!   - **B.2b.3** (#518) — `--new-key` fresh-CA generation: when the
+//!   - **B.2b.3** — `--new-key` fresh-CA generation: when the
 //!     operator has no usable backup, mint a brand new CA keypair +
 //!     self-signed CA cert + empty CRL via rcgen, advance the serial
 //!     counter past any value the previous CA might have issued, and
@@ -25,7 +25,7 @@
 //!     install step and [`regenerate_node_cert`] for the post-install
 //!     node cert.
 //!
-//!   - **B.2b.4** (#518) — Audit-log emission: append a single
+//!   - **B.2b.4** — Audit-log emission: append a single
 //!     `cluster_ca_emergency_bootstrap_completed` JSONL line to
 //!     `$NEONFS_DATA_DIR/audit/emergency-bootstrap.log` after a
 //!     successful install. Captures cluster id, source, before/after

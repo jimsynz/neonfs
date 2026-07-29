@@ -28,7 +28,7 @@ pub enum DrCommand {
         command: DrSnapshotCommand,
     },
 
-    /// Full-cluster restore (#1005): stage + apply an exported DR
+    /// Full-cluster restore: stage + apply an exported DR
     /// snapshot, then restore each volume's content from its backup
     /// archive. Run this on a freshly-bootstrapped single node
     /// (`neonfs cluster init`); reattach the remaining nodes with
@@ -46,7 +46,7 @@ pub enum DrCommand {
         #[arg(long)]
         catalogue: Option<String>,
 
-        /// Passphrase for encrypted backup archives (#1004).
+        /// Passphrase for encrypted backup archives.
         #[arg(long)]
         passphrase: Option<String>,
     },
@@ -72,7 +72,7 @@ pub enum DrSnapshotCommand {
     },
 
     /// Apply a snapshot's cluster-wide metadata back into live Ra
-    /// state (#1005). Overlays the eight cluster-wide keyspaces
+    /// state. Overlays the eight cluster-wide keyspaces
     /// (volumes, services, encryption keys, ACLs, segment
     /// assignments, credentials, escalations, KV); per-volume content
     /// is restored separately via `backup restore`.
@@ -82,7 +82,7 @@ pub enum DrSnapshotCommand {
     },
 
     /// Export a snapshot off-cluster to a directory on the daemon's
-    /// filesystem (#1367) so it survives a bare-metal disaster — the
+    /// filesystem so it survives a bare-metal disaster — the
     /// in-cluster copy is destroyed with `_system`.
     Export {
         /// Snapshot ID (the timestamp directory under `/dr`)
@@ -94,7 +94,7 @@ pub enum DrSnapshotCommand {
     },
 
     /// Stage an exported snapshot back into a freshly-bootstrapped
-    /// cluster's `_system` volume (#1367), ready for `apply`.
+    /// cluster's `_system` volume, ready for `apply`.
     Import {
         /// Source directory produced by `dr snapshot export`
         source: String,

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// How long to wait for a node to finish joining after it restarts TLS
-/// distribution in the background (#1033). Generous to tolerate slow/emulated
+/// distribution in the background. Generous to tolerate slow/emulated
 /// hosts; the common case completes in a second or two.
 const JOIN_VALIDATE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -52,7 +52,7 @@ async fn await_cluster_running(timeout: Duration, format: OutputFormat) -> Resul
 
 /// Reconnect to an interface daemon (its distribution may be mid-restart)
 /// and wait until its persisted cluster state exists — the join's async
-/// finalize writes `cluster.json` once the node has joined (#1162).
+/// finalize writes `cluster.json` once the node has joined.
 /// Interface nodes don't serve `cluster_status`, so this is their join
 /// confirmation.
 async fn await_state_persisted(node: &str, timeout: Duration) -> Result<()> {
@@ -178,7 +178,7 @@ pub enum ClusterCommand {
     /// Show status of an active rebalance operation
     RebalanceStatus,
 
-    /// Replica-count repair (#687)
+    /// Replica-count repair
     Repair {
         #[command(subcommand)]
         command: RepairCommand,
@@ -281,7 +281,7 @@ pub enum ClusterCommand {
     /// This is a dangerous, last-resort operation. Every safety gate is
     /// evaluated before any mutation is attempted; a full audit entry is
     /// written once all gates pass. The Ra state mutation itself lands
-    /// separately (see #473) — for now the command exits with a
+    /// separately — for now the command exits with a
     /// "not yet implemented" error after the audit entry is recorded.
     ForceReset {
         /// Surviving node to keep in the rebuilt quorum. Repeatable and
@@ -305,7 +305,7 @@ pub enum ClusterCommand {
     },
 
     /// Rebuild the bootstrap-layer Ra state from on-disk volume data
-    /// (per-volume metadata epic, #788).
+    ///.
     ///
     /// Use this when Ra logs are unrecoverable but the underlying
     /// volume data (drive identity files + root segment chunks) is
@@ -352,7 +352,7 @@ pub enum CaCommand {
 
     /// Drive the cluster CA rotation lifecycle.
     ///
-    /// With no flags: runs the full orchestrator (#926) — stage a new
+    /// With no flags: runs the full orchestrator — stage a new
     /// incoming CA, walk the cluster reissuing every node's cert, and
     /// distribute the dual-CA bundle. Without `--no-wait`, the
     /// rotation **stops** before finalizing so the dual-CA grace
@@ -414,12 +414,8 @@ pub enum CaCommand {
     /// (`--from-backup`) or generate a fresh CA (`--new-key`, which
     /// invalidates every cached cert signed by the outgoing CA).
     ///
-    /// This slice (see issue #502) establishes the CLI surface plus the
-    /// flag-level safety gates — mutually exclusive source selection and
-    /// the `--yes-i-accept-data-loss` acknowledgement. The live-service
-    /// check, tarball structural validation, foreign-CA refusal, audit-log
-    /// entry, and actual CA install + node cert regeneration ship in
-    /// follow-ups (#503, #504).
+    /// Enforces flag-level safety gates: mutually exclusive source
+    /// selection and the `--yes-i-accept-data-loss` acknowledgement.
     EmergencyBootstrap {
         /// Path to an off-cluster CA backup tarball. Mutually exclusive
         /// with `--new-key`.
@@ -1860,9 +1856,9 @@ impl<'a> EmergencyBootstrapSource<'a> {
 ///   1. Exactly one of `--from-backup` / `--new-key` is set.
 ///   2. `--yes-i-accept-data-loss` is present when `--new-key` is used.
 ///
-/// Returns the resolved source on success. Downstream checks (live
-/// daemon refusal, tarball validation, foreign-CA match) are intentionally
-/// out of scope for this slice — see #503.
+/// Returns the resolved source on success. Downstream checks — live
+/// daemon refusal, tarball validation, foreign-CA match — happen later
+/// in the install path, not here.
 fn validate_emergency_bootstrap_flags(
     from_backup: Option<&std::path::Path>,
     new_key: bool,

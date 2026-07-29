@@ -200,7 +200,7 @@ impl FuseCommand {
     }
 }
 
-/// Pre-flight checks for `fuse mount` (issue #757).
+/// Pre-flight checks for `fuse mount`.
 ///
 /// Catch the most common operator mistakes locally — before the round
 /// trip to the daemon — and produce a specific error message rather
@@ -323,9 +323,9 @@ fn warn_if_not_empty(path: &Path, mountpoint: &str) {
 ///
 /// * `host` — the operator's hostname (from `local_hostname`), so the daemon
 ///   routes the mount to a co-located FUSE node; the mount point only exists
-///   here, even when the RPC lands on a core node elsewhere (#1359).
+///   here, even when the RPC lands on a core node elsewhere.
 /// * `allow_other` / `allow_root` — FUSE access options threaded through to
-///   `MountManager.build_mount_options/1` (#1574). Sent as ETF `true` atoms so
+///   `MountManager.build_mount_options/1`. Sent as ETF `true` atoms so
 ///   the core-side `Map.get(opts, "allow_other")` check sees a boolean.
 ///
 /// Absent/`false` keys are omitted rather than encoded as `false`, matching how
@@ -353,7 +353,7 @@ fn binary(value: &str) -> Term {
 }
 
 /// The host's name, for matching against the `@host` of cluster node
-/// names so a mount lands on a co-located FUSE node (#1359). `None` when
+/// names so a mount lands on a co-located FUSE node. `None` when
 /// the syscall fails or the name isn't valid UTF-8 — the daemon then
 /// falls back to its default FUSE discovery chain.
 fn local_hostname() -> Option<String> {

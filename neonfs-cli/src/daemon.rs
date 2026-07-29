@@ -16,7 +16,7 @@ use crate::tls;
 use std::time::{Duration, Instant};
 
 /// The daemon is briefly unreachable while it restarts TLS distribution to load
-/// a new cluster cert (just after `cluster init`/`join`, #1033). Retry
+/// a new cluster cert (just after `cluster init`/`join`). Retry
 /// connection failures for this long so commands issued in that window don't
 /// spuriously fail.
 const CONNECT_RETRY_WINDOW: Duration = Duration::from_secs(8);
@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 /// The cluster-wide constant cookie. Distribution security comes from
-/// mutual TLS (cluster-CA-issued certificates), not the cookie (#1136).
+/// mutual TLS (cluster-CA-issued certificates), not the cookie.
 const CONSTANT_COOKIE: &str = "neonfs";
 
 /// Default daemon node name (last resort fallback)
@@ -167,7 +167,7 @@ pub struct DaemonConnection {
     ref_counter: u32,
 }
 
-/// The local daemon a `cluster join` should target (#1162).
+/// The local daemon a `cluster join` should target.
 pub struct JoinTarget {
     /// Erlang node name of the daemon to drive.
     pub node: String,

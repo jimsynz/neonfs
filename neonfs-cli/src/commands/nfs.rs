@@ -42,7 +42,7 @@ pub enum NfsCommand {
     ///
     /// Runs `mount.nfs` in the CLI process so the kernel checks the
     /// **caller's** permissions on the mountpoint (not the daemon's
-    /// service-user identity — see #847). Typically requires
+    /// service-user identity). Typically requires
     /// privileges to invoke `mount(2)`; run with `sudo` when the
     /// caller isn't already root.
     Mount {

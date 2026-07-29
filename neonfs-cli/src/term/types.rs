@@ -353,7 +353,7 @@ impl RemoveNodeResult {
     }
 }
 
-/// `cluster drain-node` response (#1325)
+/// `cluster drain-node` response
 #[derive(Debug, Serialize)]
 pub struct DrainNodeResult {
     pub node: String,
@@ -411,7 +411,7 @@ impl DrainedDrive {
     }
 }
 
-/// `cluster undrain-node` response (#1325)
+/// `cluster undrain-node` response
 #[derive(Debug, Serialize)]
 pub struct NodeStatusResult {
     pub node: String,
@@ -434,10 +434,10 @@ impl NodeStatusResult {
     }
 }
 
-/// `cluster freeze` / `cluster thaw` response (#1439). `snapshot`,
+/// `cluster freeze` / `cluster thaw` response. `snapshot`,
 /// `drained` and `drain_timed_out` are only present for freeze: freeze
 /// drains outstanding background chunk placements before powering off
-/// (#1504), reporting how many it drained and whether it bounded out.
+///, reporting how many it drained and whether it bounded out.
 #[derive(Debug, Serialize)]
 pub struct ClusterModeResult {
     pub status: String,
@@ -465,7 +465,7 @@ impl ClusterModeResult {
     }
 }
 
-/// `cluster cordon-stop-check` response (#1417)
+/// `cluster cordon-stop-check` response
 #[derive(Debug, Serialize)]
 pub struct CordonStopCheckResult {
     pub node: String,
@@ -723,7 +723,7 @@ pub struct RotationStatus {
     pub migrated: u64,
     pub started_at: String,
     /// Job id of the `KeyRotationRunner` job driving this rotation, so
-    /// `volume rotate-key --wait` can block on it (#1575). Empty on the
+    /// `volume rotate-key --wait` can block on it. Empty on the
     /// `rotation_status` response, which doesn't carry it.
     pub job_id: String,
 }

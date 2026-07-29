@@ -1,6 +1,6 @@
 //! `neonfs backup create | list | restore` — operator-facing
 //! orchestration over the snapshot + export + import primitives
-//! (#968).
+//!.
 
 use clap::{Subcommand, ValueEnum};
 use eetf::{Atom, List, Map, Term};
@@ -13,7 +13,7 @@ use crate::term::{
     extract_error, term_to_list, term_to_map, term_to_string, term_to_u64, unwrap_ok_tuple,
 };
 
-/// Where the wrap key comes from for an encrypted backup (#1004).
+/// Where the wrap key comes from for an encrypted backup.
 /// Only `passphrase` is supported in this slice; `kms` / `pubkey` are
 /// tracked as separate sub-issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -32,8 +32,8 @@ pub enum KeySource {
 /// peeks at the manifest of an existing export without unpacking
 /// the body.
 ///
-/// All paths are on the daemon's filesystem. Cross-cluster restore
-/// remains tracked in #248.
+/// All paths are on the daemon's filesystem. Cross-cluster restore is
+/// not supported.
 #[derive(Debug, Subcommand)]
 pub enum BackupCommand {
     /// Take a snapshot, export it to the destination, then drop
@@ -54,12 +54,12 @@ pub enum BackupCommand {
 
         /// Make this an incremental backup against a prior archive:
         /// files unchanged since that archive are carried by
-        /// reference rather than re-shipped (#1003). The prior
+        /// reference rather than re-shipped. The prior
         /// archive's path on the daemon's filesystem.
         #[arg(long = "incremental-from")]
         incremental_from: Option<String>,
 
-        /// Encrypt the archive at rest (#1004). The wrap key comes
+        /// Encrypt the archive at rest. The wrap key comes
         /// from the named source.
         #[arg(long = "encrypt-with")]
         encrypt_with: Option<KeySource>,
@@ -89,11 +89,11 @@ pub enum BackupCommand {
         from: String,
 
         /// Incremental archives to replay onto `--from`, oldest
-        /// first, comma-separated (#1003). Omit for a plain restore.
+        /// first, comma-separated. Omit for a plain restore.
         #[arg(long, value_delimiter = ',')]
         chain: Vec<String>,
 
-        /// Decrypt an encrypted archive (#1004), using the named key
+        /// Decrypt an encrypted archive, using the named key
         /// source. Must match what `create --encrypt-with` used.
         #[arg(long = "decrypt-with")]
         decrypt_with: Option<KeySource>,
@@ -107,7 +107,7 @@ pub enum BackupCommand {
         new_name: String,
 
         /// Restore into the existing volume named by `--as` instead of
-        /// creating a new one (#1368). The volume must already exist;
+        /// creating a new one. The volume must already exist;
         /// files overwrite by path. Used for full-cluster DR restore.
         #[arg(long = "into-existing")]
         into_existing: bool,

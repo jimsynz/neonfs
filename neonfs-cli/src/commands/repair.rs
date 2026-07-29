@@ -1,9 +1,8 @@
-//! Replica-count repair commands (#709)
+//! Replica-count repair commands
 //!
-//! Operator-facing surface for `NeonFS.Core.ReplicaRepair` (the
-//! data-plane primitive landed in #706 and wrapped by the JobTracker
-//! runner + scheduler in #707 / #708). Mirrors the `scrub` command
-//! shape, with two differences:
+//! Operator-facing surface for `NeonFS.Core.ReplicaRepair`, driven
+//! through its JobTracker runner and scheduler. Mirrors the `scrub`
+//! command shape, with two differences:
 //!
 //! 1. `start` returns a *list* of jobs (one per volume in scope),
 //!    not a single map — the no-`--volume` form fans out across

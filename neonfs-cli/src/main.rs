@@ -50,7 +50,7 @@ enum Commands {
         command: AuditCommand,
     },
 
-    /// Backup orchestration (snapshot + export + import) (#968)
+    /// Backup orchestration (snapshot + export + import)
     Backup {
         #[command(subcommand)]
         command: BackupCommand,
