@@ -75,6 +75,7 @@ defmodule NeonFS.Core.ReplicaAudit do
           system?: boolean(),
           min_copies: pos_integer(),
           chunk_count: non_neg_integer(),
+          chunks_on_drive: non_neg_integer(),
           below_min_copies: non_neg_integer(),
           zero_copies: non_neg_integer(),
           least_copies: non_neg_integer()
@@ -140,6 +141,12 @@ defmodule NeonFS.Core.ReplicaAudit do
   repair's outstanding work, not something this operation makes worse.
   `least_copies` is the fewest surviving copies across *all* the volume's
   chunks, so it still shows the worst case the operation leaves behind.
+
+  `chunks_on_drive` counts what the drive actually holds, regardless of
+  how many other copies exist. Evacuation finalisation uses it as the
+  post-condition of a completed drain: a successful evacuation leaves the
+  drive referenced by nothing, so any non-zero count means metadata was
+  not fully rewritten and the drive must not be deregistered (#1628).
   """
   @spec removal_impact(node(), String.t()) :: {:ok, [volume_replication()]} | {:error, term()}
   def removal_impact(node, drive_id) when is_atom(node) and is_binary(drive_id) do
@@ -340,13 +347,14 @@ defmodule NeonFS.Core.ReplicaAudit do
       system?: Map.get(volume, :system, false),
       min_copies: min_copies,
       chunk_count: counts.chunk_count,
+      chunks_on_drive: counts.on_drive,
       below_min_copies: counts.below,
       zero_copies: counts.zero,
       least_copies: counts.least || min_copies
     }
   end
 
-  defp empty_counts, do: %{chunk_count: 0, below: 0, zero: 0, least: nil}
+  defp empty_counts, do: %{chunk_count: 0, on_drive: 0, below: 0, zero: 0, least: nil}
 
   # A chunk this drive does not hold is unaffected by its loss, even when
   # it is already short of copies — the guard's question is what this
@@ -357,19 +365,28 @@ defmodule NeonFS.Core.ReplicaAudit do
   # backlog itself.
   defp count_chunk(chunk, acc, min_copies, candidate) do
     surviving = surviving_copies(chunk, candidate)
+    on_drive? = affected?(chunk, candidate)
 
     acc = %{
       acc
       | chunk_count: acc.chunk_count + 1,
-        least: min_or(acc.least, surviving)
+        least: min_or(acc.least, surviving),
+        on_drive: acc.on_drive + on_drive_increment(on_drive?, candidate)
     }
 
-    if affected?(chunk, candidate) and surviving < min_copies do
+    if on_drive? and surviving < min_copies do
       %{acc | below: acc.below + 1, zero: acc.zero + if(surviving == 0, do: 1, else: 0)}
     else
       acc
     end
   end
+
+  # `chunks_on_drive` counts chunks the candidate actually holds, so it is
+  # only meaningful when there is a candidate — `audit/0` treats every
+  # chunk as "affected" and would otherwise report the whole volume.
+  defp on_drive_increment(_on_drive?, nil), do: 0
+  defp on_drive_increment(true, _candidate), do: 1
+  defp on_drive_increment(false, _candidate), do: 0
 
   defp affected?(_chunk, nil), do: true
 

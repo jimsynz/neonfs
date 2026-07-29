@@ -9,6 +9,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     DriveEvacuation,
     DriveRegistry,
     Job,
+    RaSupervisor,
     VolumeRegistry
   }
 
@@ -347,18 +348,14 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     end
 
     test "completes when no chunks remain" do
-      # No chunks on drive1
-      job =
-        Job.new(EvacuationRunner, %{
-          node: node(),
-          drive_id: "drive1",
-          total_chunks: 0
-        })
+      # Finalisation verifies against Ra (#1628); with no volume roots to
+      # rewrite and nothing referencing the drive, all three checks pass.
+      Mimic.stub(RaSupervisor, :local_query, fn _fun -> {:ok, %{}} end)
 
-      job = %{job | status: :running}
+      job = drained_job("drive1")
 
-      # Should complete immediately. The completion logic tries to deregister
-      # via DriveManager which may not be running, so wrap in try/catch.
+      # The completion logic tries to deregister via DriveManager which may
+      # not be running, so wrap in try/catch.
       result =
         try do
           EvacuationRunner.step(job)
@@ -429,6 +426,90 @@ defmodule NeonFS.Core.DriveEvacuationTest do
       assert EvacuationRunner.normalise_evac_reason({:rpc_error, :nodedown}) == "rpc error"
       assert EvacuationRunner.normalise_evac_reason(nil) == "unknown error"
     end
+  end
+
+  describe "finalisation safety (#1628)" do
+    test "a volume root that could not be rewritten blocks deregistration" do
+      # A root still naming drive1, and a Ra command that rejects the rewrite.
+      Mimic.stub(RaSupervisor, :local_query, fn _fun ->
+        {:ok,
+         %{
+           "vol-stuck" => %{
+             0 => %{
+               drive_locations: [%{node: node(), drive_id: "drive1"}],
+               durability_cache: %{type: :replicate, factor: 1, min_copies: 1}
+             }
+           }
+         }}
+      end)
+
+      Mimic.stub(RaSupervisor, :command, fn _command -> {:error, :noproc} end)
+
+      assert {:error, {:volume_roots_not_rewritten, [failure]}, updated} =
+               EvacuationRunner.step(drained_job("drive1"))
+
+      assert failure.volume_id == "vol-stuck"
+      assert updated.progress.description =~ "volume roots still point at this drive"
+
+      # Still registered — the drive was not thrown away.
+      assert {:ok, _} = DriveRegistry.get_drive(node(), "drive1")
+    end
+
+    test "a stale chunk.locations entry blocks deregistration" do
+      # Nothing to rewrite, drive is empty on disk, but a volume's
+      # authoritative chunk metadata still names it — the #1573 shape.
+      Mimic.stub(RaSupervisor, :local_query, fn _fun -> {:ok, %{}} end)
+
+      Mimic.stub(VolumeRegistry, :list, fn _opts ->
+        [
+          %{
+            id: "vol-stale",
+            name: "stale",
+            system: false,
+            durability: %{type: :replicate, factor: 2, min_copies: 2}
+          }
+        ]
+      end)
+
+      Mimic.stub(ChunkIndex, :list_volume_chunks, fn "vol-stale" ->
+        {:ok,
+         [
+           ChunkMeta.new("vol-stale", "orphan-hash", 4, 4)
+           |> ChunkMeta.add_location(%{node: node(), drive_id: "drive1", tier: :hot})
+           |> ChunkMeta.add_location(%{node: node(), drive_id: "drive2", tier: :hot})
+         ]}
+      end)
+
+      assert {:error, {:chunks_still_referenced, [volume]}, updated} =
+               EvacuationRunner.step(drained_job("drive1"))
+
+      assert volume.volume_name == "stale"
+      assert volume.chunks_on_drive == 1
+      assert updated.progress.description =~ "chunks still reference this drive in stale (1)"
+
+      assert {:ok, _} = DriveRegistry.get_drive(node(), "drive1")
+    end
+
+    test "an unreadable volume-root query refuses rather than assuming nothing to rewrite" do
+      Mimic.stub(RaSupervisor, :local_query, fn _fun -> {:error, :noproc} end)
+
+      assert {:error, {:volume_roots_unreadable, :noproc}, updated} =
+               EvacuationRunner.step(drained_job("drive1"))
+
+      assert updated.progress.description =~ "could not read the volume roots"
+      assert {:ok, _} = DriveRegistry.get_drive(node(), "drive1")
+    end
+  end
+
+  defp drained_job(drive_id) do
+    job =
+      Job.new(EvacuationRunner, %{
+        node: node(),
+        drive_id: drive_id,
+        total_chunks: 0
+      })
+
+    %{job | status: :running}
   end
 
   defp job_with_unmigratable_chunk do
