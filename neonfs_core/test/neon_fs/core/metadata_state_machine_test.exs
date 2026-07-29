@@ -1581,6 +1581,99 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
+  describe "cas_update_volume_roots command (atomic publication of a checked root set)" do
+    setup do
+      shards = %{
+        0 => root_entry(<<1>>),
+        1 => root_entry(<<2>>),
+        2 => root_entry(<<3>>)
+      }
+
+      %{state: %{base_state() | volume_roots: %{"vol-1" => shards}}}
+    end
+
+    test "flips every shard in one log entry when all expectations match", %{state: state} do
+      roots = %{
+        0 => {<<1>>, %{root_chunk_hash: <<10>>}},
+        1 => {<<2>>, %{root_chunk_hash: <<20>>}}
+      }
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+
+      assert state.volume_roots["vol-1"][0].root_chunk_hash == <<10>>
+      assert state.volume_roots["vol-1"][1].root_chunk_hash == <<20>>
+      # Untouched participants keep their pointer.
+      assert state.volume_roots["vol-1"][2].root_chunk_hash == <<3>>
+      # One log entry, one version bump — not one per shard.
+      assert state.version == 1
+    end
+
+    test "merges into each participant rather than replacing it", %{state: state} do
+      roots = %{0 => {<<1>>, %{root_chunk_hash: <<10>>, durability_cache: %{type: :replicate}}}}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+
+      entry = state.volume_roots["vol-1"][0]
+      assert entry.volume_id == "vol-1"
+      assert entry.durability_cache == %{type: :replicate}
+    end
+
+    test "rejects the whole set when any expectation is stale, flipping nothing", %{state: state} do
+      roots = %{
+        0 => {<<1>>, %{root_chunk_hash: <<10>>}},
+        1 => {<<99>>, %{root_chunk_hash: <<20>>}}
+      }
+
+      {after_state, {:error, {:stale_pointer, info}}, []} =
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+
+      assert info[:shard] == 1
+      assert info[:expected] == <<99>>
+      assert info[:actual] == <<2>>
+
+      # The shard whose expectation *did* match must not have been published.
+      assert after_state.volume_roots["vol-1"][0].root_chunk_hash == <<1>>
+      assert after_state.volume_roots["vol-1"][1].root_chunk_hash == <<2>>
+      assert after_state.version == 0
+    end
+
+    test "rejects the whole set when a participant is unregistered", %{state: state} do
+      roots = %{
+        0 => {<<1>>, %{root_chunk_hash: <<10>>}},
+        7 => {<<>>, %{root_chunk_hash: <<70>>}}
+      }
+
+      {after_state, {:error, {:not_found, 7}}, []} =
+        MetadataStateMachine.apply(%{}, {:cas_update_volume_roots, "vol-1", roots}, state)
+
+      assert after_state.volume_roots["vol-1"][0].root_chunk_hash == <<1>>
+      assert after_state.version == 0
+    end
+
+    test "rejects an unknown volume_id" do
+      roots = %{0 => {<<1>>, %{root_chunk_hash: <<10>>}}}
+
+      {_state, {:error, {:not_found, 0}}, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:cas_update_volume_roots, "missing", roots},
+          base_state()
+        )
+    end
+
+    defp root_entry(hash) do
+      %{
+        volume_id: "vol-1",
+        root_chunk_hash: hash,
+        drive_locations: [],
+        durability_cache: %{},
+        updated_at: DateTime.utc_now()
+      }
+    end
+  end
+
   describe "machine version migration 12 -> 13 (bootstrap layer)" do
     test "adds drives and volume_roots tables to existing state" do
       old_state = %{

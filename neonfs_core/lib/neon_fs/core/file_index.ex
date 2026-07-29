@@ -22,9 +22,11 @@ defmodule NeonFS.Core.FileIndex do
   ## Cross-Segment Operations
 
   File creation and deletion span two writes (the FileMeta and the child's
-  `dirent:` entry) and use the IntentLog for crash-safe atomicity. Renames
-  and moves also span two dirent writes (drop old, add new) and take the
-  directory intent for cross-node mutual exclusion.
+  `dirent:` entry); renames and moves span two dirent writes (drop old, add
+  new). Those keys usually land on different shards, so atomicity comes from
+  the flush publishing every participating shard's root in one Ra command —
+  see `Volume.MetadataWriter.apply_batch/3`. The IntentLog those operations
+  take is cross-node mutual exclusion only, not a commit protocol.
   """
 
   use GenServer
@@ -37,10 +39,10 @@ defmodule NeonFS.Core.FileIndex do
     FileMeta,
     Intent,
     IntentLog,
-    ShardCommitter
+    VolumeCommitter
   }
 
-  alias NeonFS.Core.Volume.{MetadataReader, MetadataValue, Shard}
+  alias NeonFS.Core.Volume.{MetadataReader, MetadataValue}
 
   alias NeonFS.Error.{AlreadyExists, Conflict}
 
@@ -74,7 +76,7 @@ defmodule NeonFS.Core.FileIndex do
 
   # Headroom over the slowest thing a flush waits on. The staged mutation
   # still has to reach a flush and get its reply back, so matching
-  # `ShardCommitter.commit_timeout/0` exactly would leave a caller giving
+  # `VolumeCommitter.commit_timeout/0` exactly would leave a caller giving
   # up in the same instant the worker succeeds.
   @mutation_call_margin_ms 10_000
 
@@ -98,21 +100,21 @@ defmodule NeonFS.Core.FileIndex do
   How long a mutating client call waits for its flush to reply.
 
   Every mutation here stages into a windowed flush that commits through
-  `NeonFS.Core.ShardCommitter`, so this **must exceed**
-  `ShardCommitter.commit_timeout/0` — otherwise the caller abandons work
+  `NeonFS.Core.VolumeCommitter`, so this **must exceed**
+  `VolumeCommitter.commit_timeout/0` — otherwise the caller abandons work
   the worker is still legitimately doing, and a slow-but-successful commit
   surfaces to the caller as a timeout.
 
   It used to be a hard-coded 10–15 s against a 30 s commit timeout, which
-  is that inversion: `ShardCommitter`'s own comment states the intent
+  is that inversion: the committer's own comment states the intent
   ("generous enough … so the FileIndex-side call doesn't give up before
   the worker does") while every caller here contradicted it. Under a
   loaded runner that surfaced as
-  `{:timeout, {GenServer, :call, [FileIndex, {:create_committing_chunks, …}]}}`
-  (#1630). Deriving it keeps the two from drifting apart again.
+  `{:timeout, {GenServer, :call, [FileIndex, {:create_committing_chunks, …}]}}`.
+  Deriving it keeps the two from drifting apart again.
   """
   @spec mutation_call_timeout() :: pos_integer()
-  def mutation_call_timeout, do: ShardCommitter.commit_timeout() + @mutation_call_margin_ms
+  def mutation_call_timeout, do: VolumeCommitter.commit_timeout() + @mutation_call_margin_ms
 
   @doc """
   Creates a new file metadata entry.
@@ -1528,61 +1530,26 @@ defmodule NeonFS.Core.FileIndex do
     %{state | pending: %{}, pending_count: 0, pending_files: %{}}
   end
 
-  # Group the volume batch's mutations by shard and commit each shard
-  # through its `ShardCommitter` worker concurrently (#1308): distinct
-  # shards commit in parallel, the same shard always on one writer. Then
-  # reply each op by whether every shard it touched committed.
+  # Commit the whole volume batch as one atomic publication: every shard the
+  # batch touched is checked and flipped in a single consensus round, so the
+  # batch is the atomic unit and there is one outcome to report. Callers that
+  # shared this flush window therefore share its fate on infrastructure
+  # failure, and retry independently.
   defp commit_volume_batch(volume_id, txns) do
-    writer_opts = metadata_writer_opts()
+    mutations = Enum.flat_map(txns, & &1.mutations)
+    result = VolumeCommitter.commit(volume_id, mutations, metadata_writer_opts())
 
-    by_shard =
-      txns
-      |> Enum.flat_map(& &1.mutations)
-      |> Enum.group_by(&Shard.for_key(mutation_key(&1)))
-
-    shard_results = commit_shards(volume_id, by_shard, writer_opts)
-
-    Enum.each(txns, &reply_after_commit(&1, shard_results))
+    Enum.each(txns, &reply_after_commit(&1, result))
   end
 
-  defp commit_shards(volume_id, by_shard, writer_opts) do
-    by_shard
-    |> Task.async_stream(
-      fn {shard, mutations} ->
-        {shard, ShardCommitter.commit(volume_id, shard, mutations, writer_opts)}
-      end,
-      max_concurrency: max(map_size(by_shard), 1),
-      timeout: :infinity,
-      ordered: false
-    )
-    |> Enum.reduce(%{}, fn {:ok, {shard, result}}, acc -> Map.put(acc, shard, result) end)
+  defp reply_after_commit(txn, {:ok, _roots}) do
+    txn.on_commit.()
+    GenServer.reply(txn.from, txn.reply)
   end
 
-  defp reply_after_commit(txn, shard_results) do
-    shards = txn.mutations |> Enum.map(&Shard.for_key(mutation_key(&1))) |> Enum.uniq()
-
-    case first_shard_error(shards, shard_results) do
-      nil ->
-        txn.on_commit.()
-        GenServer.reply(txn.from, txn.reply)
-
-      {:error, reason} ->
-        GenServer.reply(txn.from, txn.on_abort.(reason))
-    end
+  defp reply_after_commit(txn, {:error, reason}) do
+    GenServer.reply(txn.from, txn.on_abort.(reason))
   end
-
-  defp first_shard_error(shards, shard_results) do
-    Enum.find_value(shards, fn shard ->
-      case Map.get(shard_results, shard) do
-        {:error, _} = err -> err
-        _ -> nil
-      end
-    end)
-  end
-
-  defp mutation_key({:put, _kind, key, _value}), do: key
-  defp mutation_key({:delete, _kind, key}), do: key
-  defp mutation_key({:merge, _kind, key, _fields}), do: key
 
   defp arm_timer(%{timer: nil} = state) do
     %{state | timer: Process.send_after(self(), :flush_batch, state.max_batch_delay_ms)}

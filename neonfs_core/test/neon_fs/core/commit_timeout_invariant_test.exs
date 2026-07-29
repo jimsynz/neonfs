@@ -1,28 +1,28 @@
 defmodule NeonFS.Core.CommitTimeoutInvariantTest do
   @moduledoc """
-  A mutating `FileIndex` call must outlast the commit it waits on (#1630).
+  A mutating `FileIndex` call must outlast the commit it waits on.
 
   Every mutation stages into a windowed flush that commits through
-  `ShardCommitter`. If the client call gives up first, a slow-but-
+  `VolumeCommitter`. If the client call gives up first, a slow-but-
   successful commit is reported to the caller as a timeout while the write
   goes on to land — which is how `NFSv3BeamPeakRSSTest` failed with
   `{:timeout, {GenServer, :call, [FileIndex, {:create_committing_chunks, …}]}}`
   under a loaded runner.
 
-  `ShardCommitter`'s `@commit_timeout` comment already asserted this
+  The committer's `@commit_timeout` comment already asserted this
   ordering; nothing enforced it, and the two had drifted to 30 s versus
   10–15 s. This test is the enforcement.
   """
 
   use ExUnit.Case, async: true
 
-  alias NeonFS.Core.{FileIndex, ShardCommitter}
+  alias NeonFS.Core.{FileIndex, VolumeCommitter}
 
   test "a mutating call outlasts the commit it waits on" do
-    assert FileIndex.mutation_call_timeout() > ShardCommitter.commit_timeout(),
+    assert FileIndex.mutation_call_timeout() > VolumeCommitter.commit_timeout(),
            """
            FileIndex.mutation_call_timeout/0 (#{FileIndex.mutation_call_timeout()}ms) must exceed \
-           ShardCommitter.commit_timeout/0 (#{ShardCommitter.commit_timeout()}ms), or a caller \
+           VolumeCommitter.commit_timeout/0 (#{VolumeCommitter.commit_timeout()}ms), or a caller \
            abandons a commit that is still running and a successful write reports as a timeout.
            """
   end
