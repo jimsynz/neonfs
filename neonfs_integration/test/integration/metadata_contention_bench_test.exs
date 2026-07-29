@@ -4,8 +4,8 @@ defmodule NeonFS.Integration.MetadataContentionBenchTest do
   YAGNI gate for shard placement / owner-routing (#1306).
 
   The #1292 throughput benchmark runs single-node, so all concurrency is
-  serialised by one node's per-`{volume, shard}` `ShardCommitter` (#1308)
-  and never produces cross-node `:cas_update_volume_root` conflicts. The
+  serialised by one node's per-volume `VolumeCommitter` and never produces
+  cross-node root-set conflicts. The
   question #1306 hangs on is the *cross-node* case: when writers on
   several core nodes hit the same volume concurrently, each node's
   committer independently CAS-flips the Ra bootstrap pointer for a shard,
@@ -21,7 +21,7 @@ defmodule NeonFS.Integration.MetadataContentionBenchTest do
   burst of `@file_count` creates into one `replicate:3` volume:
 
     * **cross-node** — writes spread round-robin across all nodes.
-    * **single-node** — all writes via one node (the `ShardCommitter`
+    * **single-node** — all writes via one node (the `VolumeCommitter`
       serialises these; baseline for "no cross-node CAS races").
 
   The contrast in `cas_retries/create` is the signal: if 64-way sharding

@@ -159,8 +159,8 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
         {:delete, :file_index, "k3"}
       ]
 
-      # All keys hash to the same shard at count 1, so they commit
-      # together as one shard batch → `%{shard => root}`.
+      # All keys hash to the same shard at count 1, so the batch has a
+      # single participant → `%{shard => root}`.
       assert {:ok, roots} = MetadataWriter.apply_batch("vol-1", mutations, opts)
       assert map_size(roots) == 1
 
@@ -200,22 +200,6 @@ defmodule NeonFS.Core.Volume.MetadataWriterTest do
 
       assert :ets.lookup(capture.tree_calls, :put) == []
       assert :ets.lookup(capture.bootstrap_calls, :bootstrap) == []
-    end
-  end
-
-  describe "apply_shard_batch/4 (#1308)" do
-    test "commits one shard's mutations with a single CAS" do
-      capture = build_capture()
-      opts = build_opts(capture: capture)
-
-      mutations = [{:put, :file_index, "k1", "v1"}, {:delete, :file_index, "k2"}]
-
-      assert {:ok, "new-root-hash"} =
-               MetadataWriter.apply_shard_batch("vol-1", 0, mutations, opts)
-
-      assert length(:ets.lookup(capture.tree_calls, :put)) == 1
-      assert length(:ets.lookup(capture.tree_calls, :delete)) == 1
-      assert length(:ets.lookup(capture.bootstrap_calls, :bootstrap)) == 1
     end
   end
 

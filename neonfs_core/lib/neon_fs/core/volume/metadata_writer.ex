@@ -149,28 +149,31 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
   end
 
   @doc """
-  Apply a list of index-tree mutations, grouped by the shard their keys
-  belong to (#1307). Each shard's group is one CoW tree rebuild + one
-  metadata-chunk replication + one `:cas_update_volume_root` flip against
-  that shard's root. Returns `%{shard => root_chunk_hash}` for the shards
-  touched.
+  Apply a list of index-tree mutations as **one atomic publication**,
+  however many shards their keys span. Returns
+  `%{shard => root_chunk_hash}` for the shards touched.
 
-  This is the transaction primitive (#1295): a caller that would
-  otherwise issue several `put/5` / `delete/4` calls — each its own root
-  flip — collapses same-shard mutations into one consensus round.
-  Within a shard, mutations apply in list order, threading the per-kind
-  tree root forward (last-write-wins for the same key). A stale-pointer
-  CAS conflict retries that shard's batch.
+  This is the transaction primitive: a caller that would otherwise issue
+  several `put/5` / `delete/4` calls — each its own root flip — collapses
+  the whole set into one consensus round. Within a shard, mutations apply
+  in list order, threading the per-kind tree root forward (last-write-wins
+  for the same key).
 
-  **Across shards there is no atomicity, and nothing currently supplies
-  it.** `IntentLog` was documented as providing the cross-segment crash
-  guarantee; it does not — it is a conflict lease and carries none of the
-  participant state a commit protocol would need. A partial cross-shard
-  commit is therefore durable today. #1632 replaces the per-shard flips
-  with a single Ra command over a checked root set.
+  Each shard's segment is rebuilt and replicated independently, and those
+  rebuilds run concurrently because they are the I/O-bound part. The
+  resulting roots are then published by a single
+  `:cas_update_volume_roots` command carrying every participant's expected
+  previous hash: the state machine checks all of them before flipping any,
+  so the batch commits on every shard or on none. A stale expectation on
+  any shard rebuilds the whole set and retries.
+
+  A crash between replication and the command leaks replicated-but-
+  unreferenced chunks, which is GC debt rather than a visible partial
+  state.
 
   `mutations` is a list of `{:put, kind, key, value}` /
-  `{:delete, kind, key}`. An empty list is a no-op.
+  `{:delete, kind, key}` / `{:merge, kind, key, fields}`. An empty list is
+  a no-op.
   """
   @spec apply_batch(binary(), [mutation()], keyword()) ::
           {:ok, %{optional(non_neg_integer()) => binary()}} | write_error()
@@ -182,28 +185,6 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
       fn -> local_apply_batch(volume_id, mutations, opts) end,
       fn node, remote_opts ->
         remote_call(node, opts, :apply_batch, [volume_id, mutations, remote_opts])
-      end
-    )
-  end
-
-  @doc """
-  Commit a batch of mutations that all belong to a single `shard` as one
-  root-CAS on that shard's segment (#1308). Returns the shard's new
-  `root_chunk_hash`. The caller is responsible for routing only that
-  shard's keys here — the per-`{volume, shard}` `ShardCommitter` is the
-  single writer, so concurrent shards commit in parallel without
-  contending on one root pointer.
-  """
-  @spec apply_shard_batch(binary(), non_neg_integer(), [mutation()], keyword()) ::
-          {:ok, binary()} | write_error()
-  def apply_shard_batch(volume_id, shard, mutations, opts \\ [])
-      when is_binary(volume_id) and is_integer(shard) and is_list(mutations) do
-    with_remote_fallback(
-      volume_id,
-      opts,
-      fn -> local_apply_shard_batch(volume_id, shard, mutations, opts) end,
-      fn node, remote_opts ->
-        remote_call(node, opts, :apply_shard_batch, [volume_id, shard, mutations, remote_opts])
       end
     )
   end
@@ -429,48 +410,71 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
     end
   end
 
-  # Batch variant of `apply_index_op/4`: applies a list of mutations
-  # across (possibly several) index kinds against one resolved segment,
-  # then a single segment build + replicate + CAS. Reuses the same
-  # stale-pointer retry / backoff as the single-op path.
-  defp local_apply_shard_batch(volume_id, shard, mutations, opts) do
-    retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
-    do_apply_batch(volume_id, shard, mutations, opts, retries_left)
-  end
-
   defp local_apply_batch(_volume_id, [], _opts), do: {:ok, %{}}
 
-  # Mutations are grouped by the shard their key belongs to (#1307); each
-  # shard's group commits to its own root in one CAS. A cross-shard batch
-  # is therefore several independent CAS flips, and the single-flip
-  # atomicity that split lost has not been replaced — `IntentLog` was
-  # believed to cover it but only leases the conflict key (#1631). See
-  # #1632. Returns `%{shard => new_root_chunk_hash}`.
   defp local_apply_batch(volume_id, mutations, opts) do
-    mutations
-    |> Enum.group_by(&Shard.for_key(mutation_key(&1)))
-    |> Enum.reduce_while({:ok, %{}}, fn {shard, shard_mutations}, {:ok, acc} ->
-      retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
+    by_shard = Enum.group_by(mutations, &Shard.for_key(mutation_key(&1)))
+    opts = Keyword.put(opts, :volume_id, volume_id)
+    retries_left = Keyword.get(opts, :cas_retries, @default_cas_retries)
 
-      case do_apply_batch(volume_id, shard, shard_mutations, opts, retries_left) do
-        {:ok, root} -> {:cont, {:ok, Map.put(acc, shard, root)}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
+    do_apply_batch(volume_id, by_shard, opts, retries_left)
   end
 
   defp mutation_key({:put, _kind, key, _value}), do: key
   defp mutation_key({:delete, _kind, key}), do: key
   defp mutation_key({:merge, _kind, key, _fields}), do: key
 
-  defp do_apply_batch(_volume_id, _shard, _mutations, _opts, retries_left)
-       when retries_left < 0 do
+  defp do_apply_batch(_volume_id, _by_shard, _opts, retries_left) when retries_left < 0 do
     {:error, {:cas_retries_exhausted, %{}}}
   end
 
-  defp do_apply_batch(volume_id, shard, mutations, opts, retries_left) do
-    opts = Keyword.put(opts, :volume_id, volume_id)
+  # Prepare every participating shard, then publish them together. A stale
+  # expectation on any one of them invalidates the whole set — the segments
+  # were built against roots that have since moved — so the retry rebuilds
+  # all of them rather than patching up the loser.
+  defp do_apply_batch(volume_id, by_shard, opts, retries_left) do
+    with {:ok, prepared} <- prepare_shards(volume_id, by_shard, opts) do
+      case publish_root_set(volume_id, prepared, opts) do
+        {:ok, _} ->
+          {:ok, Map.new(prepared, fn {shard, %{new_root: root}} -> {shard, root} end)}
 
+        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
+          cas_backoff(opts, retries_left)
+          do_apply_batch(volume_id, by_shard, opts, retries_left - 1)
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  # The expensive half of a commit — CoW tree rebuild, segment encode, and
+  # tree-node + segment replication — is per-shard and I/O bound, so it runs
+  # concurrently across the shards the batch touches. Only the publication is
+  # serialised, into the one consensus round. The first shard to fail halts
+  # the stream; anything already replicated orphans to GC, exactly as a
+  # failed single-shard write does.
+  defp prepare_shards(volume_id, by_shard, opts) do
+    by_shard
+    |> Task.async_stream(
+      fn {shard, mutations} -> {shard, prepare_shard(volume_id, shard, mutations, opts)} end,
+      max_concurrency: max(map_size(by_shard), 1),
+      timeout: :infinity,
+      ordered: false
+    )
+    |> Enum.reduce_while({:ok, %{}}, &collect_prepared/2)
+  end
+
+  defp collect_prepared({:ok, {shard, {:ok, prepared}}}, {:ok, acc}) do
+    {:cont, {:ok, Map.put(acc, shard, prepared)}}
+  end
+
+  defp collect_prepared({:ok, {_shard, {:error, _} = err}}, {:ok, _acc}), do: {:halt, err}
+
+  # Everything a shard's publication needs, without touching the bootstrap
+  # pointer: the root the segment was built against, the root it should
+  # become, and the bootstrap-entry fields that go with it.
+  defp prepare_shard(volume_id, shard, mutations, opts) do
     with {:ok, segment, root_entry} <- resolve_or_provision(volume_id, shard, opts),
          store = pick_store_handle(root_entry, opts),
          {:ok, updated_roots, written_nodes} <-
@@ -480,28 +484,21 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
          {:ok, replica_drives} <- pick_replica_drives(root_entry, opts),
          :ok <-
            replicate_tree_nodes(written_nodes, replica_drives, advanced_segment.durability, opts),
-         {:ok, new_root_chunk_hash} <-
+         {:ok, new_root} <-
            replicate_metadata_chunk(encoded, replica_drives, advanced_segment.durability, opts) do
-      case update_bootstrap(
-             volume_id,
-             shard,
-             root_entry.root_chunk_hash,
-             new_root_chunk_hash,
-             replica_drives,
-             advanced_segment,
-             opts
-           ) do
-        {:ok, _} ->
-          {:ok, new_root_chunk_hash}
-
-        {:error, {:bootstrap_update_failed, {:stale_pointer, _info}}} ->
-          cas_backoff(opts, retries_left)
-          do_apply_batch(volume_id, shard, mutations, opts, retries_left - 1)
-
-        {:error, _} = err ->
-          err
-      end
+      {:ok,
+       %{
+         expected: root_entry.root_chunk_hash,
+         new_root: new_root,
+         updates: bootstrap_updates(new_root, replica_drives, advanced_segment)
+       }}
     end
+  end
+
+  defp publish_root_set(volume_id, prepared, opts) do
+    roots = Map.new(prepared, fn {shard, p} -> {shard, {p.expected, p.updates}} end)
+
+    submit_bootstrap_command({:cas_update_volume_roots, volume_id, roots}, opts)
   end
 
   # Apply each mutation against the working per-kind tree root, threading
@@ -803,16 +800,24 @@ defmodule NeonFS.Core.Volume.MetadataWriter do
          segment,
          opts
        ) do
-    bootstrap_registrar = Keyword.get(opts, :bootstrap_registrar, &default_bootstrap_registrar/1)
+    updates = bootstrap_updates(new_root_chunk_hash, replica_drives, segment)
 
-    update_payload = %{
+    submit_bootstrap_command(
+      {:cas_update_volume_root, volume_id, shard, expected_previous_hash, updates},
+      opts
+    )
+  end
+
+  defp bootstrap_updates(new_root_chunk_hash, replica_drives, segment) do
+    %{
       root_chunk_hash: new_root_chunk_hash,
       drive_locations: Enum.map(replica_drives, &%{node: &1.node, drive_id: &1.drive_id}),
       durability_cache: segment.durability
     }
+  end
 
-    command =
-      {:cas_update_volume_root, volume_id, shard, expected_previous_hash, update_payload}
+  defp submit_bootstrap_command(command, opts) do
+    bootstrap_registrar = Keyword.get(opts, :bootstrap_registrar, &default_bootstrap_registrar/1)
 
     case bootstrap_registrar.(command) do
       :ok -> {:ok, :updated}

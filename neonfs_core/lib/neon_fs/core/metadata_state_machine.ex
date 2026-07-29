@@ -105,6 +105,7 @@ defmodule NeonFS.Core.MetadataStateMachine do
              updates :: map()}
           | {:cas_update_volume_root, volume_id :: binary(), shard :: non_neg_integer(),
              expected_previous_hash :: binary(), updates :: map()}
+          | {:cas_update_volume_roots, volume_id :: binary(), roots :: checked_root_set()}
           | {:unregister_volume_root, volume_id :: binary()}
           | {:put_snapshot, entry :: snapshot_entry()}
           | {:delete_snapshot, volume_id :: binary(), snapshot_id :: binary()}
@@ -279,6 +280,16 @@ defmodule NeonFS.Core.MetadataStateMachine do
           drive_locations: [%{node: node(), drive_id: String.t()}],
           durability_cache: map(),
           updated_at: DateTime.t()
+        }
+
+  @typedoc """
+  Every shard a single logical metadata operation publishes, as
+  `shard => {expected_previous_hash, updates}`. The expectations are all
+  checked before any update is applied, so `:cas_update_volume_roots`
+  either publishes the whole set or rejects it.
+  """
+  @type checked_root_set :: %{
+          optional(non_neg_integer()) => {binary(), map()}
         }
 
   @typedoc """
@@ -2141,6 +2152,30 @@ defmodule NeonFS.Core.MetadataStateMachine do
     end
   end
 
+  # A logical metadata operation that spans several shards publishes all of
+  # their roots here, in one log entry: every expectation is checked before
+  # any flip is applied, so a linearisable reader observes the complete
+  # pre-operation state or the complete post-operation state and never a
+  # subset of the participants. Rejecting the whole command on the first
+  # stale expectation is what makes the batch the atomic unit — the writer
+  # rebuilds every participant's segment and retries.
+  #
+  # The command is purely additive and changes no state shape, so it needs
+  # no machine-version bump. A bump would not help the only case that could
+  # care — a member still running code without this clause — because Ra
+  # applies whatever is in the log regardless of the negotiated version, and
+  # gating emission on the effective version would mean keeping the
+  # non-atomic per-shard path alive. This repository supports no
+  # mixed-version clusters, so the version stays where it is.
+  def apply(_meta, {:cas_update_volume_roots, volume_id, roots}, state) do
+    state = ensure_bootstrap(state)
+
+    case check_root_set(state, volume_id, roots) do
+      :ok -> publish_root_set(state, volume_id, roots)
+      {:error, reason} -> reject_root_set(state, volume_id, reason)
+    end
+  end
+
   def apply(_meta, {:unregister_volume_root, volume_id}, state) do
     state = ensure_bootstrap(state)
     new_roots = Map.delete(state.volume_roots, volume_id)
@@ -2644,6 +2679,60 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp put_shard(state, volume_id, shard, entry) do
     shards = Map.get(state.volume_roots, volume_id, %{})
     Map.put(state.volume_roots, volume_id, Map.put(shards, shard, entry))
+  end
+
+  defp check_root_set(state, volume_id, roots) do
+    Enum.reduce_while(roots, :ok, fn {shard, {expected, _updates}}, :ok ->
+      case get_volume_root(state, volume_id, shard) do
+        nil ->
+          {:halt, {:error, {:not_found, shard}}}
+
+        %{root_chunk_hash: ^expected} ->
+          {:cont, :ok}
+
+        %{root_chunk_hash: actual} ->
+          {:halt, {:error, {:stale_pointer, shard: shard, expected: expected, actual: actual}}}
+      end
+    end)
+  end
+
+  defp publish_root_set(state, volume_id, roots) do
+    now = DateTime.utc_now()
+    flip = &flip_shard(&2, &1, now)
+
+    shards = Enum.reduce(roots, get_volume_shards(state, volume_id), flip)
+
+    new_state = %{
+      state
+      | volume_roots: Map.put(state.volume_roots, volume_id, shards),
+        version: state.version + 1
+    }
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :cas_update_volume_roots],
+      %{version: new_state.version, shard_count: map_size(roots)},
+      %{volume_id: volume_id, shards: Map.keys(roots)}
+    )
+
+    {new_state, :ok, []}
+  end
+
+  # Merges rather than replaces, so a participant keeps the entry fields the
+  # publication doesn't carry. `check_root_set/3` has already proved the
+  # shard is registered.
+  defp flip_shard(shards, {shard, {_expected, updates}}, now) do
+    merged = Map.merge(Map.fetch!(shards, shard), Map.put(updates, :updated_at, now))
+    Map.put(shards, shard, merged)
+  end
+
+  defp reject_root_set(state, volume_id, reason) do
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :cas_update_volume_roots_rejected],
+      %{version: state.version},
+      %{volume_id: volume_id, reason: reason}
+    )
+
+    {state, {:error, reason}, []}
   end
 
   defp apply_namespace_claim(type, path, scope, holder, state) do
