@@ -23,9 +23,20 @@ defmodule NeonFS.TestSupport.PeerCluster do
   # OTP 28's TCP control-channel accept has a fixed 60s timeout that loaded CI
   # runners can exceed. Keep the bounded backoff, but retry `connection: 0`
   # peers over standard I/O so subsequent attempts avoid the same path (#1584).
-  @peer_boot_attempts 5
+  #
+  # Budget sized from the `:spawn` phase telemetry rather than guessed. Two
+  # runs hours apart reported 405ms and 430ms mean boot across 236 and 237
+  # nodes, so boot is normally fast and **stable across a run** — there is no
+  # accumulating slowdown to hide, and the failures are rare transient
+  # stalls. The old budget of 5 attempts backing off 250·2ⁿ capped at 2s gave
+  # a total retry window of 5.5s (500+1000+2000+2000), around 13× the mean,
+  # which a loaded runner exceeded often enough to fail four suites across two
+  # packages in one day (#1636). Widening to 8 attempts and a 5s ceiling gives
+  # 22.5s (500+1000+2000+4000+5000+5000+5000), ~55× the mean, while still
+  # failing a genuinely dead boot rather than hanging.
+  @peer_boot_attempts 8
   @peer_boot_backoff_ms 250
-  @peer_boot_max_backoff_ms 2_000
+  @peer_boot_max_backoff_ms 5_000
 
   # The first RPCs a `setup_all`/`setup` issues against a freshly-spawned peer
   # (`cluster_init`, `create_invite`, `join_cluster_rpc`) intermittently come
