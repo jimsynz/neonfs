@@ -1,6 +1,7 @@
 defmodule NeonFS.Core.SnapshotTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
+  use Mimic
 
   alias NeonFS.Core.{MetadataStateMachine, RaServer, RaSupervisor, Snapshot, VolumeRegistry}
 
@@ -32,6 +33,32 @@ defmodule NeonFS.Core.SnapshotTest do
 
     {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, volume_id, 0, entry})
     :ok
+  end
+
+  # Multi-shard variant: a restore spans every shard the snapshot recorded,
+  # so shard count 1 cannot distinguish publishing them together from
+  # publishing them one at a time.
+  defp register_volume_shards(volume_id, hashes_by_shard) do
+    Enum.each(hashes_by_shard, fn {shard, hash} ->
+      entry = %{
+        volume_id: volume_id,
+        root_chunk_hash: hash,
+        drive_locations: [],
+        durability_cache: %{},
+        updated_at: DateTime.utc_now()
+      }
+
+      {:ok, :ok, _leader} = RaSupervisor.command({:register_volume_root, volume_id, shard, entry})
+    end)
+  end
+
+  defp live_shard_hashes(volume_id) do
+    {:ok, shards} =
+      RaSupervisor.local_query(fn state ->
+        MetadataStateMachine.get_volume_shards(state, volume_id)
+      end)
+
+    Map.new(shards, fn {shard, entry} -> {shard, entry.root_chunk_hash} end)
   end
 
   describe "create/2" do
@@ -393,6 +420,49 @@ defmodule NeonFS.Core.SnapshotTest do
       # The only snapshot has root <<0xAA>>; it doesn't cover <<0xBB>>.
       assert {:error, :unreferenced_chunks} =
                Snapshot.restore("vol-self", target.id)
+    end
+  end
+
+  describe "restore/3 across shards" do
+    test "restores every shard, including ones the live volume never moved" do
+      frozen = %{0 => <<0xA0>>, 1 => <<0xA1>>, 2 => <<0xA2>>}
+      register_volume_shards("vol-multi", frozen)
+      {:ok, target} = Snapshot.create("vol-multi", name: "target")
+
+      # Advance two of the three shards, then snapshot the result so the
+      # live state is covered and the restore isn't refused as destructive.
+      register_volume_shards("vol-multi", %{0 => <<0xB0>>, 2 => <<0xB2>>})
+      {:ok, _cover} = Snapshot.create("vol-multi", name: "cover")
+
+      assert {:ok, result} = Snapshot.restore("vol-multi", target.id)
+      assert result.new_root == frozen
+      assert live_shard_hashes("vol-multi") == frozen
+    end
+
+    test "a shard root that moved after the read rejects the whole restore" do
+      register_volume_shards("vol-stale", %{0 => <<0xA0>>, 1 => <<0xA1>>})
+      {:ok, target} = Snapshot.create("vol-stale", name: "target")
+
+      register_volume_shards("vol-stale", %{0 => <<0xB0>>, 1 => <<0xB1>>})
+      live = live_shard_hashes("vol-stale")
+
+      # Shard 0's expectation is current; shard 1's is a root that has since
+      # been overwritten. That is the shape of a write landing between the
+      # read of the live roots and the swap.
+      stub(RaSupervisor, :query, fn _fun ->
+        {:ok, %{0 => %{root_chunk_hash: <<0xB0>>}, 1 => %{root_chunk_hash: <<0xA1>>}}}
+      end)
+
+      assert {:error, {:stale_pointer, info}} =
+               Snapshot.restore("vol-stale", target.id, force: true)
+
+      # The load-bearing assertion: shard 0's expectation *did* match, so
+      # publishing shard by shard flips it and leaves the volume mixing a
+      # snapshot root with a live one.
+      assert live_shard_hashes("vol-stale") == live
+
+      # And the rejection names which shard was stale.
+      assert info[:shard] == 1
     end
   end
 end

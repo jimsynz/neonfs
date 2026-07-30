@@ -171,9 +171,11 @@ defmodule NeonFS.Core.Snapshot do
     * `{:error, :unreferenced_chunks}` — current live root isn't
       covered by any other snapshot and neither `:safe` nor `:force`
       was supplied.
-    * Any error from Ra (`{:error, {:stale_pointer, ...}}` if the
-      live root advanced between the read and the CAS, `{:error,
-      :timeout}`, …) or from `Snapshot.create/2` when `:safe` is set.
+    * Any error from Ra or from `Snapshot.create/2` when `:safe` is set.
+      `{:error, {:stale_pointer, shard: _, expected: _, actual: _}}` means
+      a write advanced one of the volume's shard roots between the read and
+      the swap; the restore was rejected whole, so no shard was flipped and
+      it is safe to retry from a fresh read.
   """
   @spec restore(binary(), binary(), keyword()) ::
           {:ok,
@@ -255,25 +257,19 @@ defmodule NeonFS.Core.Snapshot do
   defp ensure_safe_to_restore(:uncovered, _safe?, true), do: :ok
   defp ensure_safe_to_restore(:uncovered, false, false), do: {:error, :unreferenced_chunks}
 
-  # Restore swaps every shard's live root to the snapshot's frozen root,
-  # CAS-guarded per shard against the live hash read for that shard.
+  # Restore swaps every shard's live root to the snapshot's frozen root in
+  # one command: each shard's expectation is the live hash read for it, and
+  # the state machine checks them all before flipping any. A restore is one
+  # logical operation over the whole volume, so publishing it shard by shard
+  # would let a rejection or a crash leave the volume at a mixture of
+  # snapshot and live roots — a state that never existed.
   defp swap_volume_roots(volume_id, current_root_hashes, new_root_hashes) do
-    Enum.reduce_while(new_root_hashes, :ok, fn {shard, new_hash}, :ok ->
-      expected = Map.fetch!(current_root_hashes, shard)
+    roots =
+      Map.new(new_root_hashes, fn {shard, new_hash} ->
+        {shard, {Map.fetch!(current_root_hashes, shard), %{root_chunk_hash: new_hash}}}
+      end)
 
-      case swap_one_root(volume_id, shard, expected, new_hash) do
-        :ok -> {:cont, :ok}
-        err -> {:halt, err}
-      end
-    end)
-  end
-
-  defp swap_one_root(volume_id, shard, expected_previous_hash, new_root_chunk_hash) do
-    cmd =
-      {:cas_update_volume_root, volume_id, shard, expected_previous_hash,
-       %{root_chunk_hash: new_root_chunk_hash}}
-
-    case RaSupervisor.command(cmd) do
+    case RaSupervisor.command({:cas_update_volume_roots, volume_id, roots}) do
       {:ok, :ok, _leader} -> :ok
       {:ok, {:error, _} = err, _leader} -> err
       {:error, _} = err -> err
