@@ -30,4 +30,34 @@ defmodule NeonFS.TestSupport.ClusterCaseTest do
       end
     end
   end
+
+  describe "raise_incomplete_registration/4" do
+    test "names the services that never registered" do
+      assert_raise RuntimeError, ~r/missing: +\[s3: :node2@localhost\]/, fn ->
+        ClusterCase.raise_incomplete_registration(
+          :node1,
+          [{:s3, :node2@localhost}],
+          [{:core, :node1@localhost}],
+          30_000
+        )
+      end
+    end
+
+    test "reports what did register, so a partial formation is distinguishable" do
+      assert_raise RuntimeError, ~r/registered: \[core: :node1@localhost\]/, fn ->
+        ClusterCase.raise_incomplete_registration(
+          :node1,
+          [{:webdav, :node3@localhost}],
+          [{:core, :node1@localhost}],
+          30_000
+        )
+      end
+    end
+
+    test "attributes the failure to formation rather than to the caller's assertion" do
+      assert_raise RuntimeError, ~r/Cluster formation did not complete/, fn ->
+        ClusterCase.raise_incomplete_registration(:node1, [{:nfs, :node2@localhost}], [], 1_000)
+      end
+    end
+  end
 end

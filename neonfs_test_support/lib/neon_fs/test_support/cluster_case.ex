@@ -799,6 +799,21 @@ defmodule NeonFS.TestSupport.ClusterCase do
         ])
     end
 
+    # `join_cluster_rpc/3` returning `{:ok, _}` does not mean the joining
+    # service is registered cluster-wide — `ServiceRegistry.register/1` replies
+    # `:ok` even when its Ra command fails. Gate the rest of setup on the
+    # registrations actually committing, so a cluster that never finished
+    # forming fails here, naming that, instead of surfacing later as an
+    # interface error the test's assertions misattribute.
+    :ok =
+      wait_for_service_registration(
+        cluster,
+        core_peer.name,
+        for peer <- interface_peers do
+          {service_type_for_apps(peer.applications), peer.node}
+        end
+      )
+
     # Each interface peer needs a data-plane pool to *every* core node,
     # not just the bootstrap core — with `factor > 1` durability the
     # client ships replicas to multiple core drives, so a single pool
@@ -949,6 +964,73 @@ defmodule NeonFS.TestSupport.ClusterCase do
         end,
         timeout: timeout
       )
+  end
+
+  @doc """
+  Wait until each `{type, node}` in `expected` is visible in `core_node_name`'s
+  service registry. Default timeout 30s.
+
+  `NeonFS.Core.ServiceRegistry.list/0` reads the Ra state machine, so an entry
+  only appears once the `:register_service` command has committed — which is
+  precisely what a half-formed cluster loses. `ServiceRegistry.register/1`
+  reports `:ok` even when that command fails, so nothing upstream of here
+  notices; `NeonFS.Client.Registrar` re-issues it every 5s, so waiting also
+  rides out a single lost command.
+
+  Raises naming the services that never arrived, rather than returning and
+  letting a later assertion fail on a downstream symptom — a backend error or
+  an empty read — that says nothing about formation.
+  """
+  @spec wait_for_service_registration(map(), atom(), [{atom(), node()}], keyword()) :: :ok
+  def wait_for_service_registration(cluster, core_node_name, expected, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 30_000)
+
+    case wait_until(fn -> missing_registrations(cluster, core_node_name, expected) == [] end,
+           timeout: timeout
+         ) do
+      :ok ->
+        :ok
+
+      {:error, :timeout} ->
+        raise_incomplete_registration(
+          core_node_name,
+          missing_registrations(cluster, core_node_name, expected),
+          registered_services(cluster, core_node_name),
+          timeout
+        )
+    end
+  end
+
+  @doc """
+  Raise the report `wait_for_service_registration/4` produces on timeout.
+
+  Public so the message stays under test without standing up a cluster.
+  """
+  @spec raise_incomplete_registration(atom(), [{atom(), node()}], [{atom(), node()}], timeout()) ::
+          no_return()
+  def raise_incomplete_registration(core_node_name, missing, registered, timeout) do
+    raise """
+    Cluster formation did not complete: service registrations never reached \
+    #{core_node_name}'s registry within #{timeout}ms.
+
+    missing:    #{inspect(missing)}
+    registered: #{inspect(registered)}
+
+    ServiceRegistry.list/0 reads the Ra state machine, so a missing entry means \
+    the :register_service command never committed.
+    """
+  end
+
+  defp missing_registrations(cluster, core_node_name, expected) do
+    registered = registered_services(cluster, core_node_name)
+    Enum.reject(expected, &(&1 in registered))
+  end
+
+  defp registered_services(cluster, core_node_name) do
+    case PeerCluster.rpc(cluster, core_node_name, NeonFS.Core.ServiceRegistry, :list, []) do
+      services when is_list(services) -> Enum.map(services, &{&1.type, &1.node})
+      _unreachable -> []
+    end
   end
 
   @doc """
