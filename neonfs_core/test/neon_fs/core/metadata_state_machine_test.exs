@@ -1581,6 +1581,53 @@ defmodule NeonFS.Core.MetadataStateMachineTest do
     end
   end
 
+  describe "register_volume_roots command (atomic registration of a shard set)" do
+    test "registers every shard in one log entry" do
+      entries = %{0 => root_entry(<<1>>), 1 => root_entry(<<2>>), 2 => root_entry(<<3>>)}
+
+      {state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:register_volume_roots, "vol-1", entries},
+          base_state()
+        )
+
+      assert map_size(state.volume_roots["vol-1"]) == 3
+      assert state.volume_roots["vol-1"][2].root_chunk_hash == <<3>>
+      # One entry, one bump — not one per shard.
+      assert state.version == 1
+    end
+
+    test "refuses a volume that already has roots, leaving them untouched" do
+      state = %{base_state() | volume_roots: %{"vol-1" => %{0 => root_entry(<<0xAA>>)}}}
+
+      fresh = %{0 => root_entry(<<0xEE>>), 1 => root_entry(<<0xEE>>)}
+
+      {after_state, {:error, {:already_registered, [0]}}, []} =
+        MetadataStateMachine.apply(%{}, {:register_volume_roots, "vol-1", fresh}, state)
+
+      # The live pointer survives. Overwriting it would strand the volume's
+      # index trees behind a freshly built empty segment.
+      assert after_state.volume_roots["vol-1"][0].root_chunk_hash == <<0xAA>>
+      refute Map.has_key?(after_state.volume_roots["vol-1"], 1)
+      assert after_state.version == 0
+    end
+
+    test "another volume's roots don't block registration" do
+      state = %{base_state() | volume_roots: %{"vol-other" => %{0 => root_entry(<<0xAA>>)}}}
+
+      {after_state, :ok, []} =
+        MetadataStateMachine.apply(
+          %{},
+          {:register_volume_roots, "vol-1", %{0 => root_entry(<<1>>)}},
+          state
+        )
+
+      assert after_state.volume_roots["vol-1"][0].root_chunk_hash == <<1>>
+      assert after_state.volume_roots["vol-other"][0].root_chunk_hash == <<0xAA>>
+    end
+  end
+
   describe "cas_update_volume_roots command (atomic publication of a checked root set)" do
     setup do
       shards = %{

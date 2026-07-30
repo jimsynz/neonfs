@@ -15,8 +15,9 @@ defmodule NeonFS.Core.Volume.Provisioner do
      write through #785 will allocate them via copy-on-write.
   5. Encode the segment and replicate the chunk via
      `Volume.ChunkReplicator` (#804).
-  6. Submit `:register_volume_root` to Ra so the bootstrap layer
-     knows where the root lives.
+  6. Submit `:register_volume_roots` to Ra so the bootstrap layer knows
+     where every shard's root lives — one command for the whole set, so
+     the volume is either provisioned or it is not.
 
   Each external dependency (cluster state load, Ra query / command,
   chunk replicator) is injectable via opts so unit tests can drive
@@ -36,6 +37,7 @@ defmodule NeonFS.Core.Volume.Provisioner do
           {:error, {:cluster_state_unavailable, term()}}
           | {:error, {:drive_query_failed, term()}}
           | {:error, Splode.Error.t()}
+          | {:error, :already_registered}
           | {:error, {:bootstrap_register_failed, term()}}
 
   @doc """
@@ -48,7 +50,16 @@ defmodule NeonFS.Core.Volume.Provisioner do
   - bootstrap-layer drive query failed → `{:error, {:drive_query_failed, _}}`
   - fewer drives available than the durability's minimum, or a
     chunk-write quorum failure → `{:error, %NeonFS.Error.QuorumUnavailable{}}`
-  - Ra `:register_volume_root` rejected → `{:error, {:bootstrap_register_failed, _}}`
+  - the volume already has a registered shard set → `{:error, :already_registered}`
+  - Ra `:register_volume_roots` rejected for any other reason →
+    `{:error, {:bootstrap_register_failed, _}}`
+
+  `:already_registered` means someone else provisioned this volume first, so
+  this call's freshly built segment was **not** published — the live shards
+  still point at the volume's real metadata, and the chunk this call
+  replicated orphans to GC. It is a refusal rather than an overwrite because a
+  re-provision builds an *empty* segment: publishing it would strand the
+  volume's index trees.
 
   The caller is responsible for rolling back the volume's
   registration in `VolumeRegistry` on any of these — leftover
@@ -89,14 +100,23 @@ defmodule NeonFS.Core.Volume.Provisioner do
 
   # Each shard starts with an identical empty root segment, so they all
   # share the one content-addressed chunk just replicated; register that
-  # hash under every shard key (#1307). Shards diverge as writes land.
+  # hash under every shard key. Shards diverge as writes land.
+  #
+  # One command for the whole set: a volume is provisioned or it is not, and a
+  # sweep of per-shard commands could leave it half-known to the cluster. The
+  # state machine also refuses to overwrite an existing set, so a concurrent
+  # or repeated provision cannot repoint a live volume's shards at a freshly
+  # built empty segment — that loser's chunk simply orphans to GC.
   defp register_all_shards(registrar, volume_id, entry) do
-    Enum.reduce_while(Shard.all(), :ok, fn shard, :ok ->
-      case register_root(registrar, volume_id, shard, entry) do
-        {:ok, _} -> {:cont, :ok}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
+    entries = Map.new(Shard.all(), &{&1, entry})
+
+    case registrar.({:register_volume_roots, volume_id, entries}) do
+      :ok -> :ok
+      {:ok, _} -> :ok
+      {:error, {:already_registered, _shards}} -> {:error, :already_registered}
+      {:error, reason} -> {:error, {:bootstrap_register_failed, reason}}
+      other -> {:error, {:bootstrap_register_failed, other}}
+    end
   end
 
   ## Internals
@@ -112,14 +132,21 @@ defmodule NeonFS.Core.Volume.Provisioner do
 
   # Normalises `RaSupervisor.command/1`'s `{:ok, result, leader}` reply
   # shape into the simpler `:ok | {:ok, _} | {:error, _}` contract
-  # `register_root/2` matches against. Without this wrapper the
-  # 3-tuple slipped through `register_root/2`'s `other -> ` clause and
+  # `register_all_shards/3` matches against. Without this wrapper the
+  # 3-tuple slipped through that function's `other -> ` clause and
   # surfaced as `{:bootstrap_register_failed, {:ok, :ok, leader}}` for
   # every successful Ra commit, which broke `create_volume/2` whenever
   # the cluster had at least one drive registered. Mirrors the same
   # wrapper in `Deprovisioner` and `MetadataWriter`.
+  #
+  # The inner-error clause is what keeps a *rejected* registration from
+  # reading as success: `:ra.process_command/3` wraps a state-machine error
+  # in `{:ok, Reply, Leader}`, so an `:already_registered` refusal arrives
+  # here looking like a committed command. The old `:register_volume_root`
+  # could not fail, which is why this only matters now.
   defp default_bootstrap_registrar(command) do
     case RaSupervisor.command(command) do
+      {:ok, {:error, reason}, _leader} -> {:error, reason}
       {:ok, result, _leader} -> {:ok, result}
       {:error, _} = err -> err
       other -> {:error, other}
@@ -172,14 +199,5 @@ defmodule NeonFS.Core.Volume.Provisioner do
       durability_cache: volume.durability,
       updated_at: DateTime.utc_now()
     }
-  end
-
-  defp register_root(registrar, volume_id, shard, entry) do
-    case registrar.({:register_volume_root, volume_id, shard, entry}) do
-      :ok -> {:ok, :registered}
-      {:ok, _} = ok -> ok
-      {:error, reason} -> {:error, {:bootstrap_register_failed, reason}}
-      other -> {:error, {:bootstrap_register_failed, other}}
-    end
   end
 end
