@@ -11,6 +11,14 @@ env:
   # enormous RLIMIT_NOFILE (~1e9), which OTP uses to size the port table
   # and allocates ~1.6 GB per VM before user code runs.
   ERL_ZFLAGS: "+Q 65536"
+  # Run `mix check`'s tools one at a time. Runners are concurrency-1, so
+  # nothing else competes for the machine — but `mix check` parallelises
+  # itself, and a peer-cluster ex_unit suite sharing a runner with dialyzer
+  # and cargo is enough to time out post-boot Ra round trips. Those surface
+  # as assertion failures in whichever test was unlucky, on diffs that
+  # cannot have caused them. Read by every `.check.exs`; unset locally, so
+  # developer runs stay parallel.
+  NEONFS_CHECK_PARALLEL: "false"
 
 jobs:
   # ==========================================================================
