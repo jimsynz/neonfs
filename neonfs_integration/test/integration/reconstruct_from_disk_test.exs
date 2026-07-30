@@ -129,6 +129,15 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
           :crypto.strong_rand_bytes(64)
         ])
 
+      # The write acking does not mean the volume's metadata has stopped
+      # moving. Async chunk replication calls `ChunkIndex.update_locations/2`
+      # afterwards, which is itself a metadata write and advances whichever
+      # shard holds that chunk's key. Snapshotting before it lands makes the
+      # comparison below race: reconstruction reads the *newer* segment off
+      # disk and faithfully restores a root the snapshot never saw, so the
+      # test fails while reconstruction is behaving correctly.
+      :ok = await_chunk_locations_settled(cluster, "recon-apply-a", "/f.bin")
+
       pre_a = shard_hashes(cluster, volume_id_a)
       pre_b = shard_hashes(cluster, volume_id_b)
       # The write diverged at least one shard from the shared empty root.
@@ -185,6 +194,40 @@ defmodule NeonFS.Integration.ReconstructFromDiskTest do
 
     {volume_id, get_in(volume_roots(cluster), [volume_id])}
   end
+
+  # Waits until every chunk of `path` records its full replica set, which is
+  # the last metadata write the volume owes for that file. Once each chunk's
+  # `locations` is complete there is no further `update_locations/2` to land,
+  # so the shard roots hold still and a snapshot of them is meaningful.
+  defp await_chunk_locations_settled(cluster, volume_name, path) do
+    wait_until(
+      fn ->
+        with {:ok, meta} <-
+               PeerCluster.rpc(cluster, :node1, NeonFS.Core, :get_file_meta, [volume_name, path]),
+             {:ok, volume} <-
+               PeerCluster.rpc(cluster, :node1, NeonFS.Core.VolumeRegistry, :get_by_name, [
+                 volume_name
+               ]) do
+          Enum.all?(meta.chunks, &chunk_fully_placed?(cluster, volume, &1))
+        else
+          _ -> false
+        end
+      end,
+      timeout: 30_000
+    )
+  end
+
+  defp chunk_fully_placed?(cluster, volume, chunk_ref) do
+    hash = chunk_hash(chunk_ref)
+
+    case PeerCluster.rpc(cluster, :node1, NeonFS.Core.ChunkIndex, :get, [volume.id, hash]) do
+      {:ok, chunk} -> length(chunk.locations) >= volume.durability.factor
+      _ -> false
+    end
+  end
+
+  defp chunk_hash(%{hash: hash}), do: hash
+  defp chunk_hash(hash) when is_binary(hash), do: hash
 
   defp shard_hashes(cluster, volume_id) do
     volume_roots(cluster)
