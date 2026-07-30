@@ -328,25 +328,34 @@ defmodule NeonFS.Core.Snapshot do
     Keyword.merge(inherited, overrides)
   end
 
+  # A promoted volume's shard set is registered in one command, for the same
+  # reason provisioning's is: the new volume either exists in the bootstrap
+  # layer with every shard pointing into the snapshot's chunk graph, or it does
+  # not exist there at all. A per-shard sweep could leave a volume that
+  # `VolumeRegistry` knows about but whose later shards resolve to nothing.
   defp register_promoted_root(new_volume, root_chunk_hashes, source_shards) do
-    Enum.reduce_while(root_chunk_hashes, :ok, fn {shard, hash}, :ok ->
-      source_entry = Map.fetch!(source_shards, shard)
+    durability_cache = build_durability_cache(new_volume)
 
-      entry = %{
-        volume_id: new_volume.id,
-        root_chunk_hash: hash,
-        drive_locations: source_entry.drive_locations,
-        durability_cache: build_durability_cache(new_volume),
-        updated_at: DateTime.utc_now()
-      }
+    entries =
+      Map.new(root_chunk_hashes, fn {shard, hash} ->
+        source_entry = Map.fetch!(source_shards, shard)
 
-      case RaSupervisor.command({:register_volume_root, new_volume.id, shard, entry}) do
-        {:ok, :ok, _leader} -> {:cont, :ok}
-        {:ok, {:error, _} = err, _leader} -> {:halt, err}
-        {:error, _} = err -> {:halt, err}
-        {:timeout, _} -> {:halt, {:error, :timeout}}
-      end
-    end)
+        {shard,
+         %{
+           volume_id: new_volume.id,
+           root_chunk_hash: hash,
+           drive_locations: source_entry.drive_locations,
+           durability_cache: durability_cache,
+           updated_at: DateTime.utc_now()
+         }}
+      end)
+
+    case RaSupervisor.command({:register_volume_roots, new_volume.id, entries}) do
+      {:ok, :ok, _leader} -> :ok
+      {:ok, {:error, _} = err, _leader} -> err
+      {:error, _} = err -> err
+      {:timeout, _} -> {:error, :timeout}
+    end
   end
 
   defp build_durability_cache(%{durability: %{type: :replicate} = d}) do

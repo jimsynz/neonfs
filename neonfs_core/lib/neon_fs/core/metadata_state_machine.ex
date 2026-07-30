@@ -105,6 +105,8 @@ defmodule NeonFS.Core.MetadataStateMachine do
              updates :: map()}
           | {:cas_update_volume_root, volume_id :: binary(), shard :: non_neg_integer(),
              expected_previous_hash :: binary(), updates :: map()}
+          | {:register_volume_roots, volume_id :: binary(),
+             entries :: %{optional(non_neg_integer()) => volume_root_entry()}}
           | {:cas_update_volume_roots, volume_id :: binary(), roots :: checked_root_set()}
           | {:unregister_volume_root, volume_id :: binary()}
           | {:put_snapshot, entry :: snapshot_entry()}
@@ -2087,6 +2089,28 @@ defmodule NeonFS.Core.MetadataStateMachine do
     {new_state, :ok, []}
   end
 
+  # Brings a volume's whole shard set into the bootstrap layer in one log
+  # entry. Provisioning creates every shard at once, so registering them one
+  # command at a time leaves a volume half-known to the cluster if the caller
+  # dies mid-sweep — and "some shards registered" is indistinguishable from
+  # "never provisioned", so recovery re-provisions rather than finishing.
+  #
+  # Refuses when the volume already has roots, rather than overwriting them.
+  # A re-provision builds a *fresh* empty segment, so an unconditional put
+  # would point every shard at an empty tree and orphan the live one — losing
+  # the volume's metadata rather than merely duplicating work.
+  def apply(_meta, {:register_volume_roots, volume_id, entries}, state) do
+    state = ensure_bootstrap(state)
+
+    case get_volume_shards(state, volume_id) do
+      existing when map_size(existing) > 0 ->
+        {state, {:error, {:already_registered, Map.keys(existing)}}, []}
+
+      _empty ->
+        register_shard_set(state, volume_id, entries)
+    end
+  end
+
   def apply(_meta, {:update_volume_root, volume_id, shard, updates}, state) do
     state = ensure_bootstrap(state)
 
@@ -2679,6 +2703,22 @@ defmodule NeonFS.Core.MetadataStateMachine do
   defp put_shard(state, volume_id, shard, entry) do
     shards = Map.get(state.volume_roots, volume_id, %{})
     Map.put(state.volume_roots, volume_id, Map.put(shards, shard, entry))
+  end
+
+  defp register_shard_set(state, volume_id, entries) do
+    new_state = %{
+      state
+      | volume_roots: Map.put(state.volume_roots, volume_id, entries),
+        version: state.version + 1
+    }
+
+    :telemetry.execute(
+      [:neonfs, :ra, :command, :register_volume_roots],
+      %{version: new_state.version, shard_count: map_size(entries)},
+      %{volume_id: volume_id}
+    )
+
+    {new_state, :ok, []}
   end
 
   defp check_root_set(state, volume_id, roots) do

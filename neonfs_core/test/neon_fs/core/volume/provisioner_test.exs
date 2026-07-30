@@ -5,6 +5,7 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
   alias NeonFS.Core.Volume
   alias NeonFS.Core.Volume.Provisioner
   alias NeonFS.Core.Volume.RootSegment
+  alias NeonFS.Core.Volume.Shard
   alias NeonFS.Error.QuorumUnavailable
 
   describe "provision/2" do
@@ -28,15 +29,37 @@ defmodule NeonFS.Core.Volume.ProvisionerTest do
                  bootstrap_registrar: capture_registrar(registered_commands)
                )
 
+      # One command for the whole shard set, not one per shard: a volume is
+      # provisioned or it is not.
       [{:cmd, command}] = :ets.lookup(registered_commands, :cmd)
 
-      {:register_volume_root, volume_id, 0, entry} = command
+      {:register_volume_roots, volume_id, entries} = command
       assert volume_id == volume.id
+      assert Map.keys(entries) |> Enum.sort() == Enum.sort(Shard.all())
+
+      entry = entries[0]
       assert entry.volume_id == volume.id
       assert entry.root_chunk_hash == "hash-bytes"
       assert entry.durability_cache == volume.durability
       assert length(entry.drive_locations) == volume.durability.factor
       assert %DateTime{} = entry.updated_at
+    end
+
+    test "an already-registered volume is refused, not overwritten" do
+      volume = sample_volume()
+      drives = [drive("drv-1", :n1@h), drive("drv-2", :n2@h), drive("drv-3", :n3@h)]
+
+      # The shape `:register_volume_roots` rejects with when the volume already
+      # has roots, as the state machine returns it through the registrar.
+      refusing_registrar = fn _command -> {:error, {:already_registered, [0, 1]}} end
+
+      assert {:error, :already_registered} =
+               Provisioner.provision(volume,
+                 cluster_state_loader: fn -> {:ok, sample_cluster_state()} end,
+                 drive_lister: fn -> {:ok, drives} end,
+                 chunk_replicator: stub_replicator("hash-bytes"),
+                 bootstrap_registrar: refusing_registrar
+               )
     end
 
     test "decodable root segment is what gets replicated" do
