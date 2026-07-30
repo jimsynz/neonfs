@@ -912,9 +912,32 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts RaSupervisor (which includes RaServer).
+  Starts RaSupervisor (which includes RaServer), and tears it down when the
+  test ends.
 
   Requires a named Erlang node. Call `ensure_node_named/0` first if needed.
+
+  The `on_exit` teardown is load-bearing, not tidiness. `start_supervised!`
+  stops *our* supervisor, but the Ra server is registered in the global `:ra`
+  `:default` system and outlives it — so without an explicit delete a module
+  that starts Ra leaves one running, still holding everything it wrote. Any
+  later module that does **not** start Ra then inherits it, which is not a
+  state it was written against: reads that should fall back to local ETS get
+  served by a foreign Ra instead. That is how drives registered by one test
+  turned up in another's replica selection and failed volume provisioning
+  against a drive `BlobStore` had never opened.
+
+  Teardown deletes the server and its data directory rather than calling
+  `stop_ra/0`, deliberately. `stop_ra/0` also bounces the whole `:ra`
+  application, and doing that on the way out as well as the way in doubles a
+  global restart that every other Ra-dependent test is exposed to — enough
+  churn to time out a `NamespaceCoordinator` claim on a loaded runner.
+  Deleting the leaked server is what actually fixes the isolation; bouncing
+  the application is not needed for it.
+
+  Several tests carry a defensive `stop_ra()` in their own setup for this
+  reason. Those are now belt-and-braces rather than the only thing standing
+  between two modules.
   """
   def start_ra do
     if Node.self() == :nonode@nohost do
@@ -934,7 +957,17 @@ defmodule NeonFS.TestCase do
     # the global Ra :default system that persists across tests
     RaServer.reset!()
 
+    on_exit(&discard_ra_server/0)
+
     result
+  end
+
+  # The narrow half of `stop_ra/0`: drop the server the test registered in the
+  # `:default` system and its on-disk state, leaving the `:ra` application
+  # alone. See `start_ra/0`'s note on why the application bounce is excluded.
+  defp discard_ra_server do
+    cleanup_ra_from_default_system()
+    cleanup_ra_directories()
   end
 
   @doc """
