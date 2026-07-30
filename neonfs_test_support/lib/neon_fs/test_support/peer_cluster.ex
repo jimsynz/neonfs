@@ -20,20 +20,18 @@ defmodule NeonFS.TestSupport.PeerCluster do
 
   require Logger
 
-  # OTP 28's TCP control-channel accept has a fixed 60s timeout that loaded CI
-  # runners can exceed. Keep the bounded backoff, but retry `connection: 0`
-  # peers over standard I/O so subsequent attempts avoid the same path (#1584).
+  # The retry budget is a guard against transient boot failures, not against a
+  # slow one: backoff is time *between* attempts and cannot shorten an attempt.
+  # That is why the control channel is standard I/O (see `build_peer_opts/4`) —
+  # a TCP control channel gives each individual attempt a 60s ceiling that no
+  # budget can help with.
   #
-  # Budget sized from the `:spawn` phase telemetry rather than guessed. Two
-  # runs hours apart reported 405ms and 430ms mean boot across 236 and 237
-  # nodes, so boot is normally fast and **stable across a run** — there is no
-  # accumulating slowdown to hide, and the failures are rare transient
-  # stalls. The old budget of 5 attempts backing off 250·2ⁿ capped at 2s gave
-  # a total retry window of 5.5s (500+1000+2000+2000), around 13× the mean,
-  # which a loaded runner exceeded often enough to fail four suites across two
-  # packages in one day (#1636). Widening to 8 attempts and a 5s ceiling gives
-  # 22.5s (500+1000+2000+4000+5000+5000+5000), ~55× the mean, while still
-  # failing a genuinely dead boot rather than hanging.
+  # Sized from the `:spawn` phase telemetry rather than guessed. Two runs hours
+  # apart reported 405ms and 430ms mean boot across 236 and 237 nodes, so boot
+  # is normally fast and stable across a run — there is no accumulating
+  # slowdown to hide. 8 attempts backing off 250·2ⁿ capped at 5s gives a
+  # 22.5s retry window (500+1000+2000+4000+5000+5000+5000), ~55× the mean,
+  # while still failing a genuinely dead boot rather than hanging.
   @peer_boot_attempts 8
   @peer_boot_backoff_ms 250
   @peer_boot_max_backoff_ms 5_000
@@ -99,7 +97,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
         :peer.call(peer, Logger, :configure, [[level: :warning]])
         :peer.call(peer, :logger, :set_primary_config, [:level, :warning])
 
-        # Use :peer.call since nodes aren't connected yet (connection: 0)
+        # Use :peer.call since nodes aren't connected over distribution yet
         span_apply_config(peer, node, app_config)
         span_start_applications(peer, node, applications)
 
@@ -113,8 +111,7 @@ defmodule NeonFS.TestSupport.PeerCluster do
   defp span_peer_spawn(peer_opts) do
     :telemetry.span([:neonfs, :peer_cluster, :node, :spawn], %{}, fn ->
       # `:peer.start/1` rather than `start_link/1` (#910). With the
-      # link in place, a peer dying during dist-channel bring-up
-      # (the canonical `{:inet_async, :timeout}` flake) propagates an
+      # link in place, a peer dying during bring-up propagates an
       # EXIT signal to the test process and crashes setup_all/setup
       # with no actionable stacktrace. With `start/1` + a monitor,
       # the peer death surfaces only via subsequent `:peer.call/_`
@@ -146,12 +143,11 @@ defmodule NeonFS.TestSupport.PeerCluster do
         end
     end
   catch
-    # `:peer.start/1` exits (via `:proc_lib.stop`) with the peer's
-    # termination reason rather than returning `{:error, _}` when the
-    # distribution-channel bring-up times out — the `{:inet_async,
-    # :timeout}` flake under runner load surfaces here as an exit, not a
-    # return value, so the `{:error, _}` retry above never sees it and
-    # `setup_all`/`setup` crashes. Route transient exits through the same
+    # `:peer.start/1` exits rather than returning `{:error, _}` for every
+    # boot failure that is not an argument error: `wait_boot` expiring
+    # exits `:timeout`, and a peer that dies mid-boot exits
+    # `{:boot_failed, reason}`. Those escape the `{:error, _}` retry above
+    # and crash `setup_all`/`setup`. Route transient exits through the same
     # retry; re-raise anything genuinely fatal with its original
     # stacktrace.
     :exit, reason ->
@@ -172,13 +168,8 @@ defmodule NeonFS.TestSupport.PeerCluster do
     )
 
     Process.sleep(boot_backoff_ms(attempts_left))
-    peer_start_with_retry(retry_peer_opts(peer_opts), attempts_left - 1)
+    peer_start_with_retry(peer_opts, attempts_left - 1)
   end
-
-  defp retry_peer_opts(%{connection: 0} = peer_opts),
-    do: %{peer_opts | connection: :standard_io}
-
-  defp retry_peer_opts(peer_opts), do: peer_opts
 
   # Widen the wait as attempts are consumed so a runner under sustained load
   # near the end of a long run gets progressively more breathing room before
@@ -876,8 +867,9 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @doc """
   Connect all peer nodes to each other for Erlang distribution.
 
-  This must be called after starting nodes with `connection: 0` to enable
-  normal RPC communication between them.
+  Peers are started with an alternative control channel and so do not
+  auto-connect over distribution; this must be called to enable normal RPC
+  communication between them.
   """
   @spec connect_nodes(cluster()) :: :ok
   def connect_nodes(cluster) do
@@ -1112,9 +1104,22 @@ defmodule NeonFS.TestSupport.PeerCluster do
        host: ~c"localhost",
        args: args,
        env: env,
-       # Use 0 (no auto-connection) to avoid DETS table name conflicts during startup
-       # We'll connect nodes manually after Ra has initialized
-       connection: 0,
+       # An alternative control channel, so the peer does not auto-connect to
+       # the origin over distribution — Ra initialises on each node in
+       # isolation and `connect_nodes/1` wires the mesh afterwards, which is
+       # what keeps DETS table names from colliding during startup.
+       #
+       # Standard I/O rather than a TCP port: with a port the origin listens
+       # and waits for the peer to dial back, and OTP hard-codes that accept
+       # at 60s (`ACCEPT_TIMEOUT` in `peer.erl`). A saturated runner that
+       # overruns it burns a minute and then fails boot with
+       # `{:inet_async, :timeout}` — the dominant cause of red CI on
+       # otherwise-clean PRs, and one a retry budget cannot fix because
+       # backoff only lengthens the gaps between attempts. Standard I/O
+       # opens no listen socket, so the ceiling does not exist. It also ties
+       # peer lifetime to the origin's port instead of `-detached`, so an
+       # abandoned peer cannot outlive the suite.
+       connection: :standard_io,
        # Default wait_boot is 15s which is too short on slow CI runners
        wait_boot: 60_000
      }, dist_port}
