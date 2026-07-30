@@ -912,9 +912,24 @@ defmodule NeonFS.TestCase do
   end
 
   @doc """
-  Starts RaSupervisor (which includes RaServer).
+  Starts RaSupervisor (which includes RaServer), and tears it down when the
+  test ends.
 
   Requires a named Erlang node. Call `ensure_node_named/0` first if needed.
+
+  The `on_exit` teardown is load-bearing, not tidiness. `start_supervised!`
+  stops *our* supervisor, but a Ra server is registered in the global `:ra`
+  `:default` system and outlives it — so without the explicit `stop_ra/0` a
+  module that starts Ra leaves one running, still holding everything it wrote.
+  Any later module that does **not** start Ra then inherits it, which is not a
+  state it was written against: reads that should fall back to local ETS get
+  served by a foreign Ra instead. That is how drives registered by one test
+  turned up in another's replica selection and failed volume provisioning
+  against a drive `BlobStore` had never opened.
+
+  Several tests carry a defensive `stop_ra()` in their own setup for this
+  reason. Those are now belt-and-braces rather than the only thing standing
+  between two modules.
   """
   def start_ra do
     if Node.self() == :nonode@nohost do
@@ -933,6 +948,8 @@ defmodule NeonFS.TestCase do
     # Reset Ra state AFTER starting to clear any accumulated data from
     # the global Ra :default system that persists across tests
     RaServer.reset!()
+
+    on_exit(&stop_ra/0)
 
     result
   end
