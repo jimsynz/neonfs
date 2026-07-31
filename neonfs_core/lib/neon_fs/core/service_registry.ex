@@ -30,17 +30,21 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @core_probe_timeout_ms 1_000
 
-  # Ra writes get the same budget as every other command in this module
-  # (`maybe_ra_command/2`'s default) rather than the 500ms they used to, which
-  # was an order of magnitude tighter than both that default and the 10s
-  # `GenServer.call` budget of the callers whose result now depends on it —
-  # under load it was the first thing to give, and a caller told its
-  # registration succeeded had no way to learn otherwise.
-  @ra_write_timeout_ms 5_000
-
-  # Shutdown is the exception: `terminate/2`'s deregistration is best-effort
-  # and must not delay the supervisor's exit, so it keeps a short deadline.
-  @ra_shutdown_write_timeout_ms 500
+  # Deliberately an order of magnitude tighter than `maybe_ra_command/2`'s
+  # 5s default, because the budget that constrains a registration is not
+  # `register/1`'s own 10s `GenServer.call` — it is the enclosing operation's.
+  # `Cluster.Join.join_cluster_rpc/3` registers the joining service as one step
+  # among many inside a single RPC whose callers bound the whole join (the test
+  # harness at 30s), and node boot self-registers on the way up. Spending 5s
+  # here on a write that is going to fail anyway pushes those over their
+  # budgets; raising it to 5s reproducibly timed out the join RPC in CI, and
+  # the caller then retried a join that had already landed.
+  #
+  # The cost of the short deadline is a write reported as failed that Ra later
+  # commits. That is acceptable because every caller treats a registration
+  # failure as retryable, not fatal: `NeonFS.Client.Registrar` re-issues every
+  # 5s, and the self-registration paths log and are re-driven.
+  @ra_write_timeout_ms 500
 
   # On boot the data-plane `Listener` may not have bound yet when we first
   # self-register, so `build_self_metadata/0` yields no `:data_endpoint`
@@ -247,7 +251,7 @@ defmodule NeonFS.Core.ServiceRegistry do
 
     command = {:deregister_service, Node.self(), :core}
 
-    case write_result(maybe_ra_command(command, @ra_shutdown_write_timeout_ms)) do
+    case write_result(maybe_ra_command(command, @ra_write_timeout_ms)) do
       :ok ->
         :ok
 
