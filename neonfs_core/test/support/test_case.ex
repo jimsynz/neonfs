@@ -40,6 +40,7 @@ defmodule NeonFS.TestCase do
     NamespaceCoordinator,
     RaServer,
     RaSupervisor,
+    ServiceRegistry,
     VolumeRegistry
   }
 
@@ -690,6 +691,50 @@ defmodule NeonFS.TestCase do
       {NeonFS.Core.StripeIndex, opts},
       restart: :temporary
     )
+  end
+
+  @doc """
+  Registers a service, retrying the transient failure the registry's write
+  deadline is documented to produce.
+
+  `ServiceRegistry`'s `@ra_write_timeout_ms` is deliberately 500ms, and the
+  comment justifying it says the cost is "a write reported as failed that Ra
+  later commits", acceptable "because every caller treats a registration
+  failure as retryable, not fatal". A test that writes `:ok = register(...)`
+  as *setup* is the one caller treating it as fatal, and on a loaded runner
+  it fails for a reason that has nothing to do with what the test is about.
+
+  Use this wherever a registration is a precondition. Where the return value
+  of `register/1` is itself the subject — the `"a failed Ra write"` cases —
+  keep asserting on it exactly.
+  """
+  @spec register_service!(struct(), keyword()) :: :ok
+  def register_service!(info, opts \\ []) do
+    deadline_at = System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout, 5_000)
+    do_register_service!(info, deadline_at, 25)
+  end
+
+  # The backoff is a genuine retry interval, not a synchronisation sleep:
+  # there is no event to wait on, because the operation being retried is a Ra
+  # write whose deadline already elapsed. Spinning would just add load to the
+  # thing that is already slow. Same shape as
+  # `NeonFS.TestSupport.ClusterCase.wait_until/2`, which cannot be reused here
+  # — `neonfs_test_support` depends on `neonfs_core`, so the dependency cannot
+  # run the other way (#1664).
+  defp do_register_service!(info, deadline_at, interval) do
+    case ServiceRegistry.register(info) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        if System.monotonic_time(:millisecond) < deadline_at do
+          Process.sleep(interval)
+          do_register_service!(info, deadline_at, min(interval * 2, 250))
+        else
+          raise "registering #{inspect(info.type)} for #{inspect(info.node)} " <>
+                  "kept failing: #{inspect(reason)}"
+        end
+    end
   end
 
   @doc """
