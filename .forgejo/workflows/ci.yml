@@ -111,9 +111,12 @@ jobs:
           fi
 
   # =========================================================================
-  # buffering-check - Guard against whole-file buffering regressions (#254)
+  # static-checks - repo-wide greps for shapes that compile but are wrong.
+  # Cheap enough to share one job rather than pay container startup each.
+  #   - whole-file buffering regressions (#254)
+  #   - Logger formatter misconfiguration (#1670)
   # =========================================================================
-  buffering-check:
+  static-checks:
     runs-on: docker
     timeout-minutes: 60
     container:
@@ -122,6 +125,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check for whole-file buffering patterns
         run: bash scripts/check_buffering.sh
+      - name: Check Logger formatter configuration
+        run: bash scripts/check_logger_formatter.sh
 
   # =========================================================================
   # package - one job per entry in .forgejo/ci-matrix.json. The standard
@@ -487,7 +492,7 @@ jobs:
   canary:
     needs:
       - setup
-      - buffering-check
+      - static-checks
       - package
       - vfs_neonfs_wire
       - vfs_neonfs
