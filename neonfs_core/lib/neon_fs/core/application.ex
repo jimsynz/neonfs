@@ -96,6 +96,7 @@ defmodule NeonFS.Core.Application do
         load_gc_config(state.gc)
         load_metrics_config(state.metrics)
         load_peer_config(state)
+        load_replica_audit_config(state.replica_audit)
         load_scrub_config(state.scrub)
         load_worker_config(state.worker)
 
@@ -172,6 +173,19 @@ defmodule NeonFS.Core.Application do
   end
 
   defp load_metrics_config(_), do: :ok
+
+  defp load_replica_audit_config(audit_config)
+       when is_map(audit_config) and audit_config != %{} do
+    if interval = audit_config["interval_ms"],
+      do: Application.put_env(:neonfs_core, :replica_audit_interval_ms, interval)
+
+    if is_boolean(audit_config["enabled"]),
+      do: Application.put_env(:neonfs_core, :replica_audit_enabled, audit_config["enabled"])
+
+    Logger.info("Loaded replica audit config from cluster.json")
+  end
+
+  defp load_replica_audit_config(_), do: :ok
 
   defp load_scrub_config(scrub_config) when is_map(scrub_config) and scrub_config != %{} do
     if interval = scrub_config["check_interval_ms"],

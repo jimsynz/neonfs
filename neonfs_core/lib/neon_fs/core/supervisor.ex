@@ -248,6 +248,11 @@ defmodule NeonFS.Core.Supervisor do
           # ReplicaRepairScheduler creates periodic replica-repair jobs per volume
           {NeonFS.Core.ReplicaRepairScheduler, replica_repair_scheduler_opts()},
 
+          # ReplicaAuditScheduler re-drives `ReplicaAudit.audit/0` so its
+          # under-replication telemetry has a series between operator-initiated
+          # runs — an alert nobody triggers is not an alert.
+          {NeonFS.Core.ReplicaAuditScheduler, replica_audit_scheduler_opts()},
+
           # ClusterRecoveryMonitor auto-detects a cold whole-cluster reform
           # and drives the `:recovering` mode that gates the two schedulers
           # above (#1437).
@@ -335,6 +340,16 @@ defmodule NeonFS.Core.Supervisor do
   defp scrub_scheduler_opts do
     [
       check_interval_ms: Application.get_env(:neonfs_core, :scrub_check_interval_ms, 3_600_000)
+    ]
+  end
+
+  # Both read their own defaults when the key is absent, so passing nothing
+  # here would be equivalent — they are listed to keep the knobs discoverable
+  # alongside the other schedulers'.
+  defp replica_audit_scheduler_opts do
+    [
+      interval_ms: Application.get_env(:neonfs_core, :replica_audit_interval_ms, 3_600_000),
+      enabled: Application.get_env(:neonfs_core, :replica_audit_enabled, true)
     ]
   end
 
