@@ -1,19 +1,27 @@
 defmodule NeonFS.FUSE.LoggerConfigTest do
   use ExUnit.Case, async: true
 
-  # `Logger.Formatter.format/2` only matches a `%Logger.Formatter{}` struct, and
-  # `Logger.App` passes the `:default_handler` `:formatter` value through to
-  # `:logger` untouched. A keyword list there compiles, boots, and then raises on
-  # every format attempt — surfacing as `FORMATTER CRASH` with all metadata
-  # dropped, only on logs emitted outside `capture_log`.
-  test "the default handler's formatter is built with Logger.Formatter.new/1" do
-    formatter = Application.fetch_env!(:logger, :default_handler)[:formatter]
+  # Setting both `:default_formatter` and `:default_handler` is how this
+  # package has gone wrong twice. The handler's formatter wins, so the
+  # `:default_formatter` list — the one Credo's MissedMetadataKeyInLoggerConfig
+  # check reads — becomes decorative, and a key present there but missing from
+  # the handler's copy is dropped at render while Credo reports it configured.
+  # It is also where the keyword-list formatter shape kept reappearing:
+  # `Logger.App` normalises `:default_formatter` into a `%Logger.Formatter{}`
+  # but passes a `:default_handler` `:formatter` through to `:logger` untouched,
+  # so a keyword list there boots fine and then raises on every format attempt.
+  #
+  # One source of truth removes both failures at once.
+  test "the formatter has one source of truth" do
+    refute Application.get_env(:logger, :default_handler)[:formatter],
+           "`:default_formatter` alone configures the default handler — setting " <>
+             "`:default_handler` as well silently overrides it and reintroduces the drift"
 
-    assert {Logger.Formatter, %Logger.Formatter{}} = formatter
+    assert Application.fetch_env!(:logger, :default_formatter)[:metadata]
   end
 
-  test "the configured formatter renders a message with its metadata" do
-    {mod, config} = Application.fetch_env!(:logger, :default_handler)[:formatter]
+  test "the declared metadata keys survive a render" do
+    {mod, config} = Logger.Formatter.new(Application.fetch_env!(:logger, :default_formatter))
 
     event = %{
       level: :warning,

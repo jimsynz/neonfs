@@ -1,5 +1,13 @@
 import Config
 
+# Custom metadata keys for structured logging (NeonFS.Core.Log).
+#
+# `:default_formatter` is the only place these belong. Logger normalises it into
+# the default handler's formatter, and Credo's MissedMetadataKeyInLoggerConfig
+# check reads it. Do not also set `:default_handler` here: it silently wins,
+# leaving this list decorative, so a key declared here and missing from that
+# copy is dropped at render while Credo reports it configured. Production still
+# overrides the handler from runtime.exs with LoggerJSON.Formatters.Basic.
 config :logger, :default_formatter,
   metadata: [
     :bucket,
@@ -15,24 +23,6 @@ config :logger, :default_formatter,
     :request_id,
     :upload_id
   ]
-
-config :logger, :default_handler,
-  formatter:
-    Logger.Formatter.new(
-      metadata: [
-        :bucket,
-        :component,
-        :core_node,
-        :key,
-        :module,
-        :node_name,
-        :operation,
-        :port,
-        :reason,
-        :request_id,
-        :upload_id
-      ]
-    )
 
 if Mix.env() in [:dev, :test] do
   config :git_ops,

@@ -1,8 +1,13 @@
 import Config
 
-# Register custom metadata keys for structured logging (NeonFS.Core.Log).
-# In production, runtime.exs overrides the handler with LoggerJSON.Formatters.Basic.
-# The :default_formatter config is also read by Credo's MissedMetadataKeyInLoggerConfig check.
+# Custom metadata keys for structured logging (NeonFS.Core.Log).
+#
+# `:default_formatter` is the only place these belong. Logger normalises it into
+# the default handler's formatter, and Credo's MissedMetadataKeyInLoggerConfig
+# check reads it. Do not also set `:default_handler` here: it silently wins,
+# leaving this list decorative, so a key declared here and missing from that
+# copy is dropped at render while Credo reports it configured. Production still
+# overrides the handler from runtime.exs with LoggerJSON.Formatters.Basic.
 config :logger, :default_formatter,
   metadata: [
     :attempt,
@@ -40,47 +45,6 @@ config :logger, :default_formatter,
     :work_id,
     :work_label
   ]
-
-config :logger, :default_handler,
-  formatter:
-    Logger.Formatter.new(
-      metadata: [
-        :attempt,
-        :atime_mode,
-        :bytes,
-        :chunk_hash,
-        :claim_id,
-        :component,
-        :core_node,
-        :count,
-        :days_remaining,
-        :file_path,
-        :internal_id,
-        :kind,
-        :mount_id,
-        :mount_point,
-        :new_expiry,
-        :node,
-        :node_name,
-        :num_acceptors,
-        :old_expiry,
-        :opcode,
-        :operation,
-        :port,
-        :reason,
-        :reply,
-        :request_id,
-        :retry_minutes,
-        :root_inode,
-        :scheduler,
-        :threshold,
-        :volume,
-        :volume_id,
-        :volume_name,
-        :work_id,
-        :work_label
-      ]
-    )
 
 if Mix.env() in [:dev, :test] do
   config :git_ops,
