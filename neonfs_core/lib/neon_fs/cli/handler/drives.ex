@@ -95,6 +95,41 @@ defmodule NeonFS.CLI.Handler.Drives do
   end
 
   @doc """
+  Returns a `:draining` drive to `:active` so it can serve writes and be
+  evacuated again (#1634).
+  """
+  @spec handle_resume_drive(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def handle_resume_drive(node_name, drive_id)
+      when is_binary(node_name) and is_binary(drive_id) do
+    set_cli_metadata()
+
+    with :ok <- require_cluster() do
+      # The two expected refusals get their own wording: `wrap_error/1` would
+      # otherwise `inspect/1` the tuple and hand the operator
+      # `"{:not_draining, :active}"`, which says what happened but not what to
+      # do about it.
+      case DriveEvacuation.resume_drive(String.to_atom(node_name), drive_id) do
+        {:ok, result} ->
+          {:ok, Map.update!(result, :node, &Atom.to_string/1)}
+
+        {:error, {:not_draining, state}} ->
+          {:error,
+           wrap_error("drive '#{drive_id}' is #{state}, not draining — nothing to resume")}
+
+        {:error, {:evacuation_running, job_id}} ->
+          {:error,
+           wrap_error(
+             "evacuation job #{job_id} is still running for drive '#{drive_id}'; " <>
+               "wait for it to finish or cancel it first"
+           )}
+
+        {:error, reason} ->
+          {:error, wrap_error(reason)}
+      end
+    end
+  end
+
+  @doc """
   Reports replication health: which volumes sit below their `min_copies`
   floor, and which drives hold the sole copy of anything (#1618).
   """

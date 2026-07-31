@@ -715,6 +715,12 @@ defmodule NeonFS.CLI.Handler do
   defdelegate handle_evacuate_drive(node_name, drive_id, opts \\ %{}), to: DrivesHandler
 
   @doc """
+  Returns a `:draining` drive to `:active`.
+  """
+  @spec handle_resume_drive(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate handle_resume_drive(node_name, drive_id), to: DrivesHandler
+
+  @doc """
   Reports replication health across every volume.
 
   ## Returns
