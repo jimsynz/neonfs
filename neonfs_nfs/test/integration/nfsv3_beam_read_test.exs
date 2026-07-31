@@ -4,7 +4,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
   (sub-issue #587 of #533, itself part of #284 / #113).
 
   Boots a 3-node cluster, writes a multi-chunk file via `NeonFS.Core`,
-  then drives `NFSServer.NFSv3.Handler.handle_call/4` directly on
+  then drives `Tahr.NFSv3.Handler.handle_call/4` directly on
   `:node1` with the live `NeonFS.NFS.NFSv3Backend`. No socket, no
   `ExportManager` — production wiring through ExportManager is tracked
   under #286 and lands separately. This is the foundation slice; the
@@ -34,9 +34,9 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
   alias NeonFS.NFS.{Filehandle, InodeTable}
   alias NeonFS.NFS.IntegrationTest.BeamReadTestHooks
   alias NeonFS.TestSupport.PeerCluster
-  alias NFSServer.NFSv3.{Handler, Types}
-  alias NFSServer.RPC.Auth
-  alias NFSServer.XDR
+  alias Tahr.NFSv3.{Handler, Types}
+  alias Tahr.RPC.Auth
+  alias Tahr.XDR
 
   @moduletag timeout: 300_000
   @moduletag :integration
@@ -268,7 +268,7 @@ defmodule NeonFS.Integration.NFSv3BeamReadTest do
     PeerCluster.rpc(cluster, :node1, Handler, :handle_call, [proc, args, @auth, ctx])
   end
 
-  # Same shape as the helper in `NFSServer.NFSv3.HandlerTest` —
+  # Same shape as the helper in `Tahr.NFSv3.HandlerTest` —
   # READDIRPLUS entries carry `(fileid, name, cookie, post_op_attr,
   # post_op_fh3)`.
   defp decode_readdirplus_chain(binary), do: do_decode_readdirplus(binary, [])

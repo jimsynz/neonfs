@@ -34,9 +34,9 @@ defmodule NeonFS.Integration.NFSv3BeamPeakRSSTest do
 
   alias NeonFS.NFS.{Filehandle, InodeTable}
   alias NeonFS.TestSupport.{ClusterCase, PeerCluster}
-  alias NFSServer.NFSv3.{Handler, Types}
-  alias NFSServer.RPC.Auth
-  alias NFSServer.XDR
+  alias Tahr.NFSv3.{Handler, Types}
+  alias Tahr.RPC.Auth
+  alias Tahr.XDR
 
   @moduletag timeout: 300_000
   @moduletag :integration

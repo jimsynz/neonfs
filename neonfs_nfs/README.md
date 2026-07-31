@@ -6,7 +6,7 @@ the consuming machine: point `mount -t nfs` at a NeonFS NFS node and go.
 
 The server is **pure Elixir** from the wire up — XDR codec, ONC RPC,
 MOUNT, and the NFSv3 procedures come from the standalone
-[`nfs_server`](https://harton.dev/project-neon/nfs_server) library, with NLM v4 advisory locking
+[`tahr`](https://hex.pm/packages/tahr) library, with NLM v4 advisory locking
 implemented here. No kernel NFS server, no native code. Locks taken
 over NFS are held in the
 cluster-wide distributed lock manager, so they are honoured by FUSE,

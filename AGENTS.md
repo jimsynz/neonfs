@@ -252,7 +252,7 @@ Always consult these before implementing (all live in the [wiki](https://harton.
 ## Module Naming
 
 - Top-level: `NeonFS.Client.*`, `NeonFS.Core.*`, `NeonFS.FUSE.*`, `NeonFS.NFS.*`, `NeonFS.S3.*`, `NeonFS.WebDAV.*`, `NeonFS.Docker.*`, `NeonFS.Containerd.*`, `NeonFS.CSI.*`, `NeonFS.CIFS.*`, `NeonFS.IAM.*`, `NeonFS.Omnibus.*`, and `NeonFS.TestSupport.*`
-- The standalone protocol libraries use their own namespaces: the `wick` hex library provides `Wick.*` (FUSE); the external `nfs_server` library provides `NFSServer.*`
+- The standalone protocol libraries use their own namespaces: the `wick` hex library provides `Wick.*` (FUSE); the `tahr` hex library provides `Tahr.*` (NFSv3/ONC-RPC)
 - File paths use underscore: `NeonFS.Core` → `lib/neon_fs/core.ex`
 - Type specs required on all public Elixir functions (for Dialyzer)
 

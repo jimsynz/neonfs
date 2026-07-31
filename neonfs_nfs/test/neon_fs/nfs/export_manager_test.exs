@@ -106,9 +106,9 @@ defmodule NeonFS.NFS.ExportManagerTest do
     assert [%{volume_name: "photos"}] = ExportManager.list_exports()
   end
 
-  # The native-BEAM stack starts an `NFSServer.RPC.Server` listener
+  # The native-BEAM stack starts an `Tahr.RPC.Server` listener
   # under `ExportManager`. (NIF cutover landed in #657 of #286.)
-  test "starts an NFSServer.RPC.Server listener" do
+  test "starts an Tahr.RPC.Server listener" do
     state = :sys.get_state(ExportManager)
     assert is_pid(state.nfs_server)
     assert Process.alive?(state.nfs_server)

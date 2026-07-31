@@ -4,8 +4,8 @@ defmodule NeonFS.NFS.Application do
 
   Starts the NFS supervision tree and handles graceful shutdown.
 
-  The NFSv3 stack is the native-BEAM `NFSServer.NFSv3.Handler` bound
-  to `NeonFS.NFS.NFSv3Backend` plus `NFSServer.Mount.Handler` bound
+  The NFSv3 stack is the native-BEAM `Tahr.NFSv3.Handler` bound
+  to `NeonFS.NFS.NFSv3Backend` plus `Tahr.Mount.Handler` bound
   to `NeonFS.NFS.MountBackend`. The legacy `nfs3_server` NIF was
   removed in sub-issue #657 of #286.
   """
@@ -13,7 +13,7 @@ defmodule NeonFS.NFS.Application do
   use Application
 
   alias NeonFS.NFS.{HealthCheck, NFSv3Backend, Supervisor}
-  alias NFSServer.NFSv3.Handler, as: NFSv3Handler
+  alias Tahr.NFSv3.Handler, as: NFSv3Handler
 
   @doc """
   Build the bound NFSv3 handler module for the BEAM stack — the same

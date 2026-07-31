@@ -1,6 +1,6 @@
 defmodule NeonFS.NFS.MountBackend do
   @moduledoc """
-  `NFSServer.Mount.Backend` implementation backed by `ExportManager`.
+  `Tahr.Mount.Backend` implementation backed by `ExportManager`.
 
   Resolves MOUNT3 requests against currently-published NeonFS volume
   exports. The synthetic root (`"/"`) and per-volume roots
@@ -17,12 +17,12 @@ defmodule NeonFS.NFS.MountBackend do
   recognises. Sub-issue #656 of #286.
   """
 
-  @behaviour NFSServer.Mount.Backend
+  @behaviour Tahr.Mount.Backend
 
   require Logger
 
   alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable, IpAllowList}
-  alias NFSServer.Mount.Types.ExportNode
+  alias Tahr.Mount.Types.ExportNode
 
   @synthetic_root_volume_id <<0::128>>
   @synthetic_root_fileid 1

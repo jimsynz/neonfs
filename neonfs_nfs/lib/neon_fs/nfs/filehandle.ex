@@ -3,7 +3,7 @@ defmodule NeonFS.NFS.Filehandle do
   Packing and unpacking for NFSv3 file handles produced by
   `NeonFS.NFS.NFSv3Backend`.
 
-  The handler-side type `NFSServer.NFSv3.Types.fhandle3()` is an opaque
+  The handler-side type `Tahr.NFSv3.Types.fhandle3()` is an opaque
   variable-length binary capped at 64 bytes (RFC 1813 §2.5). This
   module gives that binary a stable internal layout:
 

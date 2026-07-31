@@ -1,6 +1,6 @@
 defmodule NeonFS.NFS.NFSv3Backend do
   @moduledoc """
-  `NFSServer.NFSv3.Backend` implementation that delegates to NeonFS
+  `Tahr.NFSv3.Backend` implementation that delegates to NeonFS
   via `NeonFS.Client.Router` for metadata and `NeonFS.Client.ChunkReader`
   for streaming reads.
 
@@ -40,13 +40,13 @@ defmodule NeonFS.NFS.NFSv3Backend do
   and `NeonFS.NFS.InodeTable.get_path/1` respectively.
   """
 
-  @behaviour NFSServer.NFSv3.Backend
+  @behaviour Tahr.NFSv3.Backend
 
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Core.FileMeta
   alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable, IpAllowList}
-  alias NFSServer.NFSv3.Types.{Fattr3, Nfstime3, Sattr3, Specdata3, WccAttr, WccData}
-  alias NFSServer.RPC.Auth
+  alias Tahr.NFSv3.Types.{Fattr3, Nfstime3, Sattr3, Specdata3, WccAttr, WccData}
+  alias Tahr.RPC.Auth
 
   import Bitwise, only: [<<<: 2, band: 2]
 
@@ -483,7 +483,7 @@ defmodule NeonFS.NFS.NFSv3Backend do
   end
 
   # NFSv3 wire-status atoms — the keys of `@stat_codes` in
-  # `nfs_server/lib/nfs_server/nfsv3/types.ex`. Any error atom returned
+  # `tahr/lib/tahr/nfsv3/types.ex`. Any error atom returned
   # from this backend MUST belong to this set or the dispatcher's
   # `Map.fetch!` will crash mid-response (issue #760).
   @nfsstat3_atoms ~w[

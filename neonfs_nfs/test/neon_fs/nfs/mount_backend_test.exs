@@ -4,7 +4,7 @@ defmodule NeonFS.NFS.MountBackendTest do
   use Mimic
 
   alias NeonFS.NFS.{Filehandle, InodeTable, MountBackend}
-  alias NFSServer.Mount.Types.ExportNode
+  alias Tahr.Mount.Types.ExportNode
 
   @volume_id "01234567-89ab-7cde-bf01-23456789abcd"
 

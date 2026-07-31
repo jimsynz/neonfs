@@ -35,9 +35,9 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
 
   alias NeonFS.NFS.{Filehandle, InodeTable}
   alias NeonFS.TestSupport.{ClusterCase, PeerCluster}
-  alias NFSServer.NFSv3.{Handler, Types}
-  alias NFSServer.RPC.Auth
-  alias NFSServer.XDR
+  alias Tahr.NFSv3.{Handler, Types}
+  alias Tahr.RPC.Auth
+  alias Tahr.XDR
 
   @moduletag timeout: 300_000
   @moduletag :integration
@@ -250,7 +250,7 @@ defmodule NeonFS.Integration.NFSv3BeamWriteTest do
 
     # ——— Step 5: SETATTR (set mtime via set_to_client_time) ————
 
-    new_mtime = %NFSServer.NFSv3.Types.Nfstime3{seconds: 1_700_000_000, nseconds: 0}
+    new_mtime = %Tahr.NFSv3.Types.Nfstime3{seconds: 1_700_000_000, nseconds: 0}
     sattr = %Types.Sattr3{mtime: {:client, new_mtime}}
 
     setattr_args =

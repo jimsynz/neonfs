@@ -15,7 +15,7 @@ defmodule NeonFS.NFS.ExportManager do
   ## Server Lifecycle
 
   1. ExportManager starts, reads bind address from config
-  2. Starts an `NFSServer.RPC.Server` listener bound to the BEAM
+  2. Starts an `Tahr.RPC.Server` listener bound to the BEAM
      NFSv3 + Mount handler programs.
   3. Mirrors the cluster export set (resync + events)
   4. On shutdown, stops the listener
@@ -35,8 +35,8 @@ defmodule NeonFS.NFS.ExportManager do
   alias NeonFS.Events.{VolumeCreated, VolumeDeleted, VolumeUpdated}
   alias NeonFS.NFS.Application, as: NFSApp
   alias NeonFS.NFS.{ExportInfo, MetadataCache}
-  alias NFSServer.Mount.Handler, as: MountHandler
-  alias NFSServer.RPC.Server, as: RPCServer
+  alias Tahr.Mount.Handler, as: MountHandler
+  alias Tahr.RPC.Server, as: RPCServer
 
   defmodule State do
     @moduledoc false
@@ -223,7 +223,7 @@ defmodule NeonFS.NFS.ExportManager do
     %{state | resync_timer: Process.send_after(self(), :resync, interval)}
   end
 
-  # Start the native-BEAM NFSv3 + Mount listener (`NFSServer.RPC.Server`).
+  # Start the native-BEAM NFSv3 + Mount listener (`Tahr.RPC.Server`).
   # Each TCP connection gets its own accept-loop process; the handler
   # modules dispatch statelessly from there. No per-connection
   # GenServer to monitor.

@@ -6,8 +6,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
   alias NeonFS.Core.FileMeta
   alias NeonFS.Error.{AlreadyExists, Invalid, PermissionDenied}
   alias NeonFS.NFS.{Filehandle, NFSv3Backend}
-  alias NFSServer.NFSv3.Types.Fattr3
-  alias NFSServer.RPC.Auth
+  alias Tahr.NFSv3.Types.Fattr3
+  alias Tahr.RPC.Auth
 
   @volume_id_uuid "019dc5d8-3fcf-7d13-b4fa-832c4390b0a0"
   @volume_id_bin Filehandle.volume_uuid_to_binary(@volume_id_uuid) |> elem(1)
@@ -236,8 +236,8 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       auth = %Auth.Sys{uid: 1000, gid: 50, gids: [50]}
       dir_fh = Filehandle.encode(@volume_id_bin, dir_inode)
 
-      assert {:error, :acces, %NFSServer.NFSv3.Types.WccData{}} =
-               NFSv3Backend.mkdir(dir_fh, "new", %NFSServer.NFSv3.Types.Sattr3{}, auth, %{})
+      assert {:error, :acces, %Tahr.NFSv3.Types.WccData{}} =
+               NFSv3Backend.mkdir(dir_fh, "new", %Tahr.NFSv3.Types.Sattr3{}, auth, %{})
     end
   end
 
@@ -277,11 +277,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       put_inode_table(%{dir_inode => {@volume_name, "/parent"}})
       dir_fh = Filehandle.encode(@volume_id_bin, dir_inode)
 
-      assert {:error, :acces, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :acces, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.mkdir(
                  dir_fh,
                  "new",
-                 %NFSServer.NFSv3.Types.Sattr3{},
+                 %Tahr.NFSv3.Types.Sattr3{},
                  :auth,
                  %{peer: {192, 168, 1, 1}}
                )
@@ -500,9 +500,9 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xDEAD_DEAD_DEAD_DEAD)
 
-      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o644}
+      sattr = %Tahr.NFSv3.Types.Sattr3{mode: 0o644}
 
-      assert {:ok, child_fh, %Fattr3{type: :reg}, %NFSServer.NFSv3.Types.WccData{before: pre_wcc}} =
+      assert {:ok, child_fh, %Fattr3{type: :reg}, %Tahr.NFSv3.Types.WccData{before: pre_wcc}} =
                NFSv3Backend.create(dir_fh, "new.txt", {:unchecked, sattr}, :auth, %{})
 
       assert byte_size(child_fh) == Filehandle.size()
@@ -526,7 +526,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xDEAD_DEAD_DEAD_DEAD)
 
-      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600, uid: 42, gid: 100}
+      sattr = %Tahr.NFSv3.Types.Sattr3{mode: 0o600, uid: 42, gid: 100}
 
       assert {:ok, _, _, _} =
                NFSv3Backend.create(dir_fh, "owned.txt", {:unchecked, sattr}, :auth, %{})
@@ -569,7 +569,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
                NFSv3Backend.create(
                  dir_fh,
                  "mine.txt",
-                 {:unchecked, %NFSServer.NFSv3.Types.Sattr3{}},
+                 {:unchecked, %Tahr.NFSv3.Types.Sattr3{}},
                  auth,
                  %{}
                )
@@ -598,11 +598,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       dir_fh = Filehandle.encode(@volume_id_bin, 0xDEAD_DEAD_DEAD_DEAD)
       auth = %Auth.Sys{uid: 1000, gid: 50, gids: [50]}
 
-      assert {:error, :acces, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :acces, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.create(
                  dir_fh,
                  "denied.txt",
-                 {:unchecked, %NFSServer.NFSv3.Types.Sattr3{}},
+                 {:unchecked, %Tahr.NFSv3.Types.Sattr3{}},
                  auth,
                  %{}
                )
@@ -628,11 +628,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xCAFE_CAFE_CAFE_CAFE)
 
-      assert {:error, :exist, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :exist, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.create(
                  dir_fh,
                  "already.txt",
-                 {:guarded, %NFSServer.NFSv3.Types.Sattr3{}},
+                 {:guarded, %Tahr.NFSv3.Types.Sattr3{}},
                  :auth,
                  %{}
                )
@@ -655,7 +655,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
                NFSv3Backend.create(
                  dir_fh,
                  "fresh.txt",
-                 {:guarded, %NFSServer.NFSv3.Types.Sattr3{}},
+                 {:guarded, %Tahr.NFSv3.Types.Sattr3{}},
                  :auth,
                  %{}
                )
@@ -729,7 +729,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xBEEF_BEEF_BEEF_BEEF)
 
-      assert {:error, :exist, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :exist, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.create(dir_fh, "excl.txt", {:exclusive, retry_verf}, :auth, %{})
     end
   end
@@ -760,11 +760,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xFEED_FEED_FEED_FEED)
 
-      assert {:ok, _fh, %Fattr3{type: :lnk}, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:ok, _fh, %Fattr3{type: :lnk}, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.symlink(
                  dir_fh,
                  "link.txt",
-                 %NFSServer.NFSv3.Types.Sattr3{mode: 0o777},
+                 %Tahr.NFSv3.Types.Sattr3{mode: 0o777},
                  target,
                  :auth,
                  %{}
@@ -790,12 +790,12 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xFEED_FEED_FEED_FEED)
 
-      assert {:error, :notsupp, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+      assert {:error, :notsupp, %Tahr.NFSv3.Types.WccData{before: %_{}}} =
                NFSv3Backend.mknod(dir_fh, "fifo", :auth, %{})
     end
 
     test "stale fhandle returns :stale + empty wcc_data" do
-      assert {:error, :stale, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+      assert {:error, :stale, %Tahr.NFSv3.Types.WccData{before: nil, after: nil}} =
                NFSv3Backend.mknod(<<0::8>>, "x", :auth, %{})
     end
   end
@@ -816,7 +816,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       file_fh = Filehandle.encode(@volume_id_bin, @file_inode)
       link_dir_fh = Filehandle.encode(@volume_id_bin, 0xFEED_FEED_FEED_FEED)
 
-      assert {:error, :notsupp, nil, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+      assert {:error, :notsupp, nil, %Tahr.NFSv3.Types.WccData{before: %_{}}} =
                NFSv3Backend.link(file_fh, link_dir_fh, "alias", :auth, %{})
     end
 
@@ -855,7 +855,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)
 
-      assert {:ok, %NFSServer.NFSv3.Types.WccData{}, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:ok, %Tahr.NFSv3.Types.WccData{}, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.rename(from_fh, "old.txt", from_fh, "new.txt", :auth, %{})
 
       assert_received :rename_called
@@ -904,7 +904,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)
 
-      assert {:error, :inval, %NFSServer.NFSv3.Types.WccData{}, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :inval, %Tahr.NFSv3.Types.WccData{}, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.rename(from_fh, "a", from_fh, "a/b", :auth, %{})
     end
 
@@ -918,7 +918,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       from_fh = Filehandle.encode(@volume_id_bin, 0xD00D_D00D_D00D_D00D)
 
-      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{}, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :noent, %Tahr.NFSv3.Types.WccData{}, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.rename(from_fh, "missing.txt", from_fh, "new.txt", :auth, %{})
     end
 
@@ -957,7 +957,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
                NFSv3Backend.write(valid_fh(), 0, data, :unstable, :auth, %{})
 
       assert byte_size(verf) == 8
-      assert %NFSServer.NFSv3.Types.WccData{before: %_{size: 0}, after: %Fattr3{size: 11}} = wcc
+      assert %Tahr.NFSv3.Types.WccData{before: %_{size: 0}, after: %Fattr3{size: 11}} = wcc
       assert_received :write_called
     end
 
@@ -1019,7 +1019,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
           {:error, {:under_replicated, 1, 2}}
       end)
 
-      assert {:error, :io, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :io, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
     end
 
@@ -1031,14 +1031,14 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
         NeonFS.Core, :write_file_at, _ -> {:error, :nospc}
       end)
 
-      assert {:error, :nospc, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+      assert {:error, :nospc, %Tahr.NFSv3.Types.WccData{before: %_{}}} =
                NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
     end
 
     test "stale fhandle returns :stale + empty wcc" do
       put_core(fn _, :get_file_meta, _ -> {:error, :not_found} end)
 
-      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+      assert {:error, :noent, %Tahr.NFSv3.Types.WccData{before: nil, after: nil}} =
                NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
     end
 
@@ -1050,7 +1050,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
         NeonFS.Core, :write_file_at, _ -> {:error, :cluster_frozen}
       end)
 
-      assert {:error, :jukebox, %NFSServer.NFSv3.Types.WccData{before: %_{}}} =
+      assert {:error, :jukebox, %Tahr.NFSv3.Types.WccData{before: %_{}}} =
                NFSv3Backend.write(valid_fh(), 0, "x", :file_sync, :auth, %{})
     end
   end
@@ -1071,7 +1071,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
         NeonFS.Core, :write_file_at, _ -> flunk("commit must not write")
       end)
 
-      assert {:ok, %{wcc: %NFSServer.NFSv3.Types.WccData{}, verf: verf}} =
+      assert {:ok, %{wcc: %Tahr.NFSv3.Types.WccData{}, verf: verf}} =
                NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
 
       assert byte_size(verf) == 8
@@ -1086,7 +1086,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
         NeonFS.Core, :sync_file, _ -> {:error, {:under_replicated, 1, 2}}
       end)
 
-      assert {:error, :io, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :io, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
     end
 
@@ -1127,7 +1127,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
     test "stale fhandle returns :stale + empty wcc" do
       put_core(fn _, :get_file_meta, _ -> {:error, :not_found} end)
 
-      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+      assert {:error, :noent, %Tahr.NFSv3.Types.WccData{before: nil, after: nil}} =
                NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
     end
   end
@@ -1153,11 +1153,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xA000_A000_A000_A000)
 
-      assert {:ok, child_fh, %Fattr3{type: :dir}, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:ok, child_fh, %Fattr3{type: :dir}, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.mkdir(
                  dir_fh,
                  "newdir",
-                 %NFSServer.NFSv3.Types.Sattr3{mode: 0o755},
+                 %Tahr.NFSv3.Types.Sattr3{mode: 0o755},
                  :auth,
                  %{}
                )
@@ -1178,11 +1178,11 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xA000_A000_A000_A000)
 
-      assert {:error, :exist, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :exist, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.mkdir(
                  dir_fh,
                  "exists",
-                 %NFSServer.NFSv3.Types.Sattr3{},
+                 %Tahr.NFSv3.Types.Sattr3{},
                  :auth,
                  %{}
                )
@@ -1205,7 +1205,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xB000_B000_B000_B000)
 
-      assert {:ok, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:ok, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.remove(dir_fh, "doomed.txt", :auth, %{})
     end
 
@@ -1222,7 +1222,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xB000_B000_B000_B000)
 
-      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :noent, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.remove(dir_fh, "missing.txt", :auth, %{})
     end
   end
@@ -1247,7 +1247,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xC000_C000_C000_C000)
 
-      assert {:ok, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:ok, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.rmdir(dir_fh, "emptydir", :auth, %{})
     end
 
@@ -1272,7 +1272,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xC000_C000_C000_C000)
 
-      assert {:error, :notempty, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :notempty, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.rmdir(dir_fh, "full", :auth, %{})
     end
 
@@ -1290,7 +1290,7 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       dir_fh = Filehandle.encode(@volume_id_bin, 0xC000_C000_C000_C000)
 
-      assert {:error, :notdir, %NFSServer.NFSv3.Types.WccData{}} =
+      assert {:error, :notdir, %Tahr.NFSv3.Types.WccData{}} =
                NFSv3Backend.rmdir(dir_fh, "regular.txt", :auth, %{})
     end
   end
@@ -1317,9 +1317,9 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
           {:ok, post}
       end)
 
-      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600}
+      sattr = %Tahr.NFSv3.Types.Sattr3{mode: 0o600}
 
-      assert {:ok, %NFSServer.NFSv3.Types.WccData{before: pre_wcc, after: post_attr}} =
+      assert {:ok, %Tahr.NFSv3.Types.WccData{before: pre_wcc, after: post_attr}} =
                NFSv3Backend.setattr(valid_fh(), sattr, nil, :auth, %{})
 
       assert pre_wcc.size == 12
@@ -1346,9 +1346,9 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
           {:ok, post}
       end)
 
-      sattr = %NFSServer.NFSv3.Types.Sattr3{size: 100, mode: 0o640}
+      sattr = %Tahr.NFSv3.Types.Sattr3{size: 100, mode: 0o640}
 
-      assert {:ok, %NFSServer.NFSv3.Types.WccData{after: post_attr}} =
+      assert {:ok, %Tahr.NFSv3.Types.WccData{after: post_attr}} =
                NFSv3Backend.setattr(valid_fh(), sattr, nil, :auth, %{})
 
       assert post_attr.size == 100
@@ -1371,11 +1371,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
 
       # `pre.changed_at` is unix-second 4; supply a guard ctime of
       # second 99 so it definitely doesn't match.
-      guard = %NFSServer.NFSv3.Types.Nfstime3{seconds: 99, nseconds: 0}
-      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600}
+      guard = %Tahr.NFSv3.Types.Nfstime3{seconds: 99, nseconds: 0}
+      sattr = %Tahr.NFSv3.Types.Sattr3{mode: 0o600}
 
-      assert {:error, :not_sync,
-              %NFSServer.NFSv3.Types.WccData{before: pre_wcc, after: %Fattr3{}}} =
+      assert {:error, :not_sync, %Tahr.NFSv3.Types.WccData{before: pre_wcc, after: %Fattr3{}}} =
                NFSv3Backend.setattr(valid_fh(), sattr, guard, :auth, %{})
 
       assert pre_wcc.ctime.seconds == 4
@@ -1392,10 +1391,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
       end)
 
       # pre.changed_at = unix(4), so guard {4, 0} matches.
-      guard = %NFSServer.NFSv3.Types.Nfstime3{seconds: 4, nseconds: 0}
-      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o700}
+      guard = %Tahr.NFSv3.Types.Nfstime3{seconds: 4, nseconds: 0}
+      sattr = %Tahr.NFSv3.Types.Sattr3{mode: 0o700}
 
-      assert {:ok, %NFSServer.NFSv3.Types.WccData{after: post_attr}} =
+      assert {:ok, %Tahr.NFSv3.Types.WccData{after: post_attr}} =
                NFSv3Backend.setattr(valid_fh(), sattr, guard, :auth, %{})
 
       assert post_attr.mode == 0o700
@@ -1406,9 +1405,9 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
         NeonFS.Core, :get_file_meta, _ -> {:error, :not_found}
       end)
 
-      sattr = %NFSServer.NFSv3.Types.Sattr3{mode: 0o600}
+      sattr = %Tahr.NFSv3.Types.Sattr3{mode: 0o600}
 
-      assert {:error, :noent, %NFSServer.NFSv3.Types.WccData{before: nil, after: nil}} =
+      assert {:error, :noent, %Tahr.NFSv3.Types.WccData{before: nil, after: nil}} =
                NFSv3Backend.setattr(valid_fh(), sattr, nil, :auth, %{})
     end
 
@@ -1428,10 +1427,10 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
           flunk("truncate_file should not be called for no-op SETATTR")
       end)
 
-      assert {:ok, %NFSServer.NFSv3.Types.WccData{before: %_{}, after: %Fattr3{}}} =
+      assert {:ok, %Tahr.NFSv3.Types.WccData{before: %_{}, after: %Fattr3{}}} =
                NFSv3Backend.setattr(
                  valid_fh(),
-                 %NFSServer.NFSv3.Types.Sattr3{},
+                 %Tahr.NFSv3.Types.Sattr3{},
                  nil,
                  :auth,
                  %{}
