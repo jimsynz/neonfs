@@ -46,6 +46,7 @@ defmodule NeonFS.Cluster.State do
           ra_cluster_members: [atom()],
           node_type: atom(),
           gc: map(),
+          replica_audit: map(),
           scrub: map(),
           startup_peer_timeout: pos_integer(),
           worker: map()
@@ -67,6 +68,7 @@ defmodule NeonFS.Cluster.State do
     peer_sync_interval: 30_000,
     ra_cluster_members: [],
     node_type: :core,
+    replica_audit: %{},
     scrub: %{},
     startup_peer_timeout: 30_000,
     worker: %{}
@@ -186,6 +188,7 @@ defmodule NeonFS.Cluster.State do
       "peer_connect_timeout" => state.peer_connect_timeout,
       "peer_sync_interval" => state.peer_sync_interval,
       "gc" => serialise_map_config(state.gc),
+      "replica_audit" => serialise_map_config(state.replica_audit),
       "scrub" => serialise_map_config(state.scrub),
       "startup_peer_timeout" => state.startup_peer_timeout,
       "worker" => serialise_worker_config(state.worker)
@@ -310,18 +313,36 @@ defmodule NeonFS.Cluster.State do
     _ -> {:error, :invalid_json}
   end
 
+  # Split along the same line the serialiser draws: the per-subsystem map
+  # sections all default to `%{}` and round-trip through
+  # `serialise_map_config/1`, while the scalars each carry their own
+  # default. Keeping them together grew past the complexity limit as
+  # subsystems were added, and would again.
   defp merge_config_fields(state, data) do
+    state
+    |> merge_section_configs(data)
+    |> merge_scalar_configs(data)
+  end
+
+  defp merge_section_configs(state, data) do
     %{
       state
       | gc: data["gc"] || %{},
         metrics: data["metrics"] || %{},
-        min_peers_for_operation: data["min_peers_for_operation"] || 1,
+        replica_audit: data["replica_audit"] || %{},
+        scrub: data["scrub"] || %{},
+        worker: data["worker"] || %{}
+    }
+  end
+
+  defp merge_scalar_configs(state, data) do
+    %{
+      state
+      | min_peers_for_operation: data["min_peers_for_operation"] || 1,
         node_type: parse_node_type(data["node_type"]),
         peer_connect_timeout: data["peer_connect_timeout"] || 10_000,
         peer_sync_interval: data["peer_sync_interval"] || 30_000,
-        scrub: data["scrub"] || %{},
-        startup_peer_timeout: data["startup_peer_timeout"] || 30_000,
-        worker: data["worker"] || %{}
+        startup_peer_timeout: data["startup_peer_timeout"] || 30_000
     }
   end
 
