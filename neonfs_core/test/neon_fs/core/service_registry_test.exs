@@ -2,10 +2,15 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
 
+  require Logger
+
   alias NeonFS.Client.ServiceInfo
   alias NeonFS.Core.{NodeRegistry, RaServer, ServiceRegistry}
 
   @moduletag :tmp_dir
+
+  @peer_boot_attempts 5
+  @peer_boot_backoff_ms 500
 
   setup %{tmp_dir: tmp_dir} do
     configure_test_dirs(tmp_dir)
@@ -117,22 +122,77 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       [~c"-start_epmd", ~c"false", ~c"-epmd_module", ~c"Elixir.NeonFS.Epmd"] ++ code_paths
 
     env = [
-      {~c"NEONFS_DIST_PORT", ~c"#{dist_port}"},
-      {~c"NEONFS_PEER_PORTS", to_charlist(peer_ports_env)}
+      {~c"NEONFS_DIST_PORT", Integer.to_charlist(dist_port)},
+      {~c"NEONFS_PEER_PORTS", String.to_charlist(peer_ports_env)}
     ]
 
-    {:ok, peer, node} =
-      :peer.start_link(%{
-        name: name,
-        host: ~c"localhost",
-        args: args,
-        env: env,
-        connection: 0,
-        wait_boot: 30_000
-      })
+    peer_opts = %{
+      name: name,
+      host: ~c"localhost",
+      args: args,
+      env: env,
+      # Standard I/O rather than a TCP control port: with a port the origin
+      # listens and waits for the peer to dial back, and OTP hard-codes that
+      # accept at 60s (`ACCEPT_TIMEOUT` in `peer.erl`). A saturated runner
+      # that overruns it burns a minute and then fails boot with
+      # `{:inet_async, :timeout}`, which no retry budget can avoid because
+      # backoff only lengthens the gaps between attempts. Standard I/O opens
+      # no listen socket, so the ceiling does not exist, and peer lifetime is
+      # tied to the origin's port so an abandoned peer cannot outlive the run.
+      connection: :standard_io,
+      wait_boot: 60_000
+    }
+
+    {:ok, peer, node} = start_peer_with_retry(peer_opts, @peer_boot_attempts)
 
     {peer, node}
   end
+
+  # `:peer.start/1` rather than `start_link/1`: a linked peer dying during
+  # bring-up propagates an EXIT to the test process and fails the whole
+  # module. `safe_stop_peer/1` in `on_exit` still bounds peer lifetime.
+  defp start_peer_with_retry(peer_opts, attempts_left) do
+    case :peer.start(peer_opts) do
+      {:ok, peer, node} ->
+        {:ok, peer, node}
+
+      {:error, reason} = error ->
+        if retry_boot?(attempts_left, reason) do
+          backoff_and_retry_boot(peer_opts, attempts_left, reason)
+        else
+          error
+        end
+    end
+  catch
+    # `:peer.start/1` exits rather than returning `{:error, _}` for every boot
+    # failure that is not an argument error: `wait_boot` expiring exits
+    # `:timeout`, and a peer that dies mid-boot exits `{:boot_failed, reason}`.
+    :exit, reason ->
+      if retry_boot?(attempts_left, reason) do
+        backoff_and_retry_boot(peer_opts, attempts_left, reason)
+      else
+        :erlang.raise(:exit, reason, __STACKTRACE__)
+      end
+  end
+
+  defp retry_boot?(attempts_left, reason),
+    do: attempts_left > 1 and transient_boot_error?(reason)
+
+  defp backoff_and_retry_boot(peer_opts, attempts_left, reason) do
+    Logger.warning(
+      "peer boot failed transiently (#{inspect(reason)}), " <>
+        "retrying (#{attempts_left - 1} attempt(s) left)"
+    )
+
+    Process.sleep(@peer_boot_backoff_ms * Integer.pow(2, @peer_boot_attempts - attempts_left))
+    start_peer_with_retry(peer_opts, attempts_left - 1)
+  end
+
+  defp transient_boot_error?({:boot_failed, reason}), do: transient_boot_error?(reason)
+  defp transient_boot_error?(:timeout), do: true
+  defp transient_boot_error?(:tcp_closed), do: true
+  defp transient_boot_error?({:inet_async, :timeout}), do: true
+  defp transient_boot_error?(_reason), do: false
 
   defp allocate_port do
     {:ok, socket} = :gen_tcp.listen(0, reuseaddr: true)
