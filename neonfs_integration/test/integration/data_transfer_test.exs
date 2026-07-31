@@ -542,11 +542,7 @@ defmodule NeonFS.Integration.DataTransferTest do
 
       node1_atom = PeerCluster.get_node!(cluster, :node1) |> Map.get(:node)
 
-      {:ok, _} =
-        PeerCluster.rpc_until_ready(cluster, :node2, NeonFS.Cluster.Join, :join_cluster_rpc, [
-          token,
-          node1_atom
-        ])
+      :ok = join_cluster_idempotent(cluster, :node2, [token, node1_atom])
 
       wait_for_cluster_stable(cluster)
 
@@ -565,11 +561,7 @@ defmodule NeonFS.Integration.DataTransferTest do
       wait_for_pool(cluster, :node1, node2_info.node)
 
       # Now join node3 — this should activate its data plane
-      {:ok, _} =
-        PeerCluster.rpc_until_ready(cluster, :node3, NeonFS.Cluster.Join, :join_cluster_rpc, [
-          token,
-          node1_atom
-        ])
+      :ok = join_cluster_idempotent(cluster, :node3, [token, node1_atom])
 
       wait_for_cluster_stable(cluster)
       rebuild_quorum_rings(cluster)

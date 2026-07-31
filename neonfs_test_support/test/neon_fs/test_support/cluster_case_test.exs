@@ -31,6 +31,34 @@ defmodule NeonFS.TestSupport.ClusterCaseTest do
     end
   end
 
+  describe "handle_join_result/2" do
+    test "accepts a successful join" do
+      assert :ok = ClusterCase.handle_join_result({:ok, %{cluster_name: "test"}}, :node2)
+    end
+
+    test "treats an already-joined node as success" do
+      # `rpc_until_ready/6` retries a transient `:timeout`, and a join that got
+      # as far as writing `cluster.json` has already succeeded — the retry is
+      # refused by `validate_not_in_cluster/0`. Failing here would report a
+      # formation failure for a cluster that formed.
+      assert :ok = ClusterCase.handle_join_result({:error, :already_in_cluster}, :node2)
+    end
+
+    test "raises on a genuine join rejection" do
+      genuine = {:error, {:join_rejected, :invalid_token}}
+
+      assert_raise RuntimeError, ~r/join_cluster_rpc on node2 failed/, fn ->
+        ClusterCase.handle_join_result(genuine, :node2)
+      end
+    end
+
+    test "raises on a terminal badrpc result" do
+      assert_raise RuntimeError, ~r/join_cluster_rpc on node3 failed/, fn ->
+        ClusterCase.handle_join_result({:badrpc, :nodedown}, :node3)
+      end
+    end
+  end
+
   describe "raise_incomplete_registration/4" do
     test "names the services that never registered" do
       assert_raise RuntimeError, ~r/missing: +\[s3: :node2@localhost\]/, fn ->

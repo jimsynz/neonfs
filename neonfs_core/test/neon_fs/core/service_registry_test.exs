@@ -1,11 +1,12 @@
 defmodule NeonFS.Core.ServiceRegistryTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
+  use Mimic
 
   require Logger
 
   alias NeonFS.Client.ServiceInfo
-  alias NeonFS.Core.{NodeRegistry, RaServer, ServiceRegistry}
+  alias NeonFS.Core.{NodeRegistry, RaServer, RaSupervisor, ServiceRegistry}
 
   @moduletag :tmp_dir
 
@@ -100,6 +101,49 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       |> Enum.find(&(&1.node == Node.self() and &1.type == :core))
 
     assert entry.status == :draining
+  end
+
+  describe "a failed Ra write" do
+    setup do
+      Mimic.allow(RaSupervisor, self(), Process.whereis(ServiceRegistry))
+      :ok
+    end
+
+    test "register/1 reports it to the caller instead of replying :ok" do
+      stub(RaSupervisor, :command, fn _cmd, _timeout -> {:timeout, Node.self()} end)
+
+      assert {:error, :timeout} =
+               ServiceRegistry.register(ServiceInfo.new(:unreplicated@localhost, :nfs))
+    end
+
+    test "deregister/2 reports it to the caller instead of replying :ok" do
+      stub(RaSupervisor, :command, fn _cmd, _timeout -> {:error, :ra_unavailable} end)
+
+      assert {:error, :ra_unavailable} =
+               ServiceRegistry.deregister(:unreplicated@localhost, :nfs)
+    end
+
+    # `:ra.process_command/3` answers `{:ok, Reply, Leader}` once the command
+    # commits, whatever `Reply` is — so a state-machine rejection arrives under
+    # an outer `:ok` and matching only that tag reports a phantom success.
+    test "register/1 reports a state-machine rejection nested inside an :ok" do
+      stub(RaSupervisor, :command, fn _cmd, _timeout ->
+        {:ok, {:error, :rejected_by_machine}, Node.self()}
+      end)
+
+      assert {:error, :rejected_by_machine} =
+               ServiceRegistry.register(ServiceInfo.new(:unreplicated@localhost, :nfs))
+    end
+
+    test "the registry survives it and keeps answering" do
+      stub(RaSupervisor, :command, fn _cmd, _timeout -> {:timeout, Node.self()} end)
+
+      assert {:error, :timeout} =
+               ServiceRegistry.register(ServiceInfo.new(:unreplicated@localhost, :nfs))
+
+      assert Process.alive?(Process.whereis(ServiceRegistry))
+      assert is_list(ServiceRegistry.list())
+    end
   end
 
   test "list/0 stamps :maintenance on services whose node is cordoned (#1376)" do

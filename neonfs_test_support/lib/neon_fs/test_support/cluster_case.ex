@@ -558,11 +558,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
     for node_name <- node_names do
       # Use the direct RPC join flow (not HTTP) since test nodes don't run
       # the metrics HTTP server. This calls accept_join on node1 directly.
-      {:ok, _} =
-        PeerCluster.rpc_until_ready(cluster, node_name, NeonFS.Cluster.Join, :join_cluster_rpc, [
-          token,
-          node1_atom
-        ])
+      :ok = join_cluster_idempotent(cluster, node_name, [token, node1_atom])
 
       :ok = wait_for_cluster_stable(cluster)
     end
@@ -791,20 +787,15 @@ defmodule NeonFS.TestSupport.ClusterCase do
     for peer <- interface_peers do
       type = service_type_for_apps(peer.applications)
 
-      {:ok, _} =
-        PeerCluster.rpc_until_ready(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
-          token,
-          core_peer.node,
-          type
-        ])
+      :ok = join_cluster_idempotent(cluster, peer.name, [token, core_peer.node, type])
     end
 
     # `join_cluster_rpc/3` returning `{:ok, _}` does not mean the joining
-    # service is registered cluster-wide — `ServiceRegistry.register/1` replies
-    # `:ok` even when its Ra command fails. Gate the rest of setup on the
-    # registrations actually committing, so a cluster that never finished
-    # forming fails here, naming that, instead of surfacing later as an
-    # interface error the test's assertions misattribute.
+    # service is registered cluster-wide: the join's own `register_service/3`
+    # only logs a failed registration, so the join succeeds regardless. Gate
+    # the rest of setup on the registrations actually committing, so a cluster
+    # that never finished forming fails here, naming that, instead of
+    # surfacing later as an interface error the test's assertions misattribute.
     :ok =
       wait_for_service_registration(
         cluster,
@@ -867,11 +858,7 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
   defp join_extra_core_peers(cluster, core_peer, extra_core_peers, token) do
     for peer <- extra_core_peers do
-      {:ok, _} =
-        PeerCluster.rpc_until_ready(cluster, peer.name, NeonFS.Cluster.Join, :join_cluster_rpc, [
-          token,
-          core_peer.node
-        ])
+      :ok = join_cluster_idempotent(cluster, peer.name, [token, core_peer.node])
 
       :ok = wait_for_cluster_stable_on(cluster, core_peer.name)
     end
@@ -972,10 +959,10 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
   `NeonFS.Core.ServiceRegistry.list/0` reads the Ra state machine, so an entry
   only appears once the `:register_service` command has committed — which is
-  precisely what a half-formed cluster loses. `ServiceRegistry.register/1`
-  reports `:ok` even when that command fails, so nothing upstream of here
-  notices; `NeonFS.Client.Registrar` re-issues it every 5s, so waiting also
-  rides out a single lost command.
+  precisely what a half-formed cluster loses. The join flow logs a failed
+  registration rather than failing the join, so nothing upstream of here
+  refuses to proceed; `NeonFS.Client.Registrar` re-issues it every 5s, so
+  waiting also rides out a single lost command.
 
   Raises naming the services that never arrived, rather than returning and
   letting a later assertion fail on a downstream symptom — a backend error or
@@ -1120,6 +1107,30 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
   def handle_cluster_init_result(other, node_name) do
     raise "cluster_init on #{node_name} failed: #{inspect(other)}"
+  end
+
+  @doc false
+  @spec join_cluster_idempotent(map(), atom(), [term()]) :: :ok
+  def join_cluster_idempotent(cluster, node_name, args) do
+    cluster
+    |> PeerCluster.rpc_until_ready(node_name, NeonFS.Cluster.Join, :join_cluster_rpc, args)
+    |> handle_join_result(node_name)
+  end
+
+  @doc false
+  @spec handle_join_result(term(), atom()) :: :ok
+  def handle_join_result({:ok, _result}, _node_name), do: :ok
+
+  # `rpc_until_ready/6` retries a `:timeout`, and a join far enough along to
+  # have written `cluster.json` has already succeeded — `validate_not_in_cluster/0`
+  # then refuses the retry. The join it refuses is this one. Without this
+  # clause the retry fails the `{:ok, _}` match and takes down `setup_all`,
+  # reporting a formation failure for a cluster that formed. Same shape, and
+  # same reason, as `cluster_init`'s "already initialised" above.
+  def handle_join_result({:error, :already_in_cluster}, _node_name), do: :ok
+
+  def handle_join_result(other, node_name) do
+    raise "join_cluster_rpc on #{node_name} failed: #{inspect(other)}"
   end
 
   @doc """

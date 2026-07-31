@@ -30,6 +30,22 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @core_probe_timeout_ms 1_000
 
+  # Deliberately an order of magnitude tighter than `maybe_ra_command/2`'s
+  # 5s default, because the budget that constrains a registration is not
+  # `register/1`'s own 10s `GenServer.call` — it is the enclosing operation's.
+  # `Cluster.Join.join_cluster_rpc/3` registers the joining service as one step
+  # among many inside a single RPC whose callers bound the whole join (the test
+  # harness at 30s), and node boot self-registers on the way up. Spending 5s
+  # here on a write that is going to fail anyway pushes those over their
+  # budgets; raising it to 5s reproducibly timed out the join RPC in CI, and
+  # the caller then retried a join that had already landed.
+  #
+  # The cost of the short deadline is a write reported as failed that Ra later
+  # commits. That is acceptable because every caller treats a registration
+  # failure as retryable, not fatal: `NeonFS.Client.Registrar` re-issues every
+  # 5s, and the self-registration paths log and are re-driven.
+  @ra_write_timeout_ms 500
+
   # On boot the data-plane `Listener` may not have bound yet when we first
   # self-register, so `build_self_metadata/0` yields no `:data_endpoint`
   # and peers can't open a data-plane pool to us (#1450). The init/join
@@ -181,6 +197,11 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @doc """
   Registers a service in the cluster.
+
+  Returns `{:error, reason}` when the registration could not be replicated,
+  so a caller is never told a service is visible cluster-wide when it is not.
+  A cluster whose Ra server has not been initialised yet is not a failure —
+  there is nowhere to write and nothing to be visible to.
   """
   @spec register(ServiceInfo.t()) :: :ok | {:error, term()}
   def register(%ServiceInfo{} = info) do
@@ -219,7 +240,7 @@ defmodule NeonFS.Core.ServiceRegistry do
   def handle_continue(:register_self, state) do
     metadata = build_self_metadata()
     info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
-    new_state = do_register(info, state)
+    new_state = register_and_log(info, state)
     maybe_schedule_endpoint_retry(metadata, 0)
     {:noreply, new_state}
   end
@@ -228,11 +249,10 @@ defmodule NeonFS.Core.ServiceRegistry do
   def terminate(_reason, _state) do
     Logger.info("ServiceRegistry shutting down, deregistering core service")
 
-    case maybe_ra_command({:deregister_service, Node.self(), :core}, 500) do
-      {:ok, :ok} ->
-        :ok
+    command = {:deregister_service, Node.self(), :core}
 
-      {:error, :ra_not_available} ->
+    case write_result(maybe_ra_command(command, @ra_write_timeout_ms)) do
+      :ok ->
         :ok
 
       {:error, reason} ->
@@ -246,20 +266,20 @@ defmodule NeonFS.Core.ServiceRegistry do
   def handle_cast(:refresh_self, state) do
     metadata = build_self_metadata()
     info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
-    new_state = do_register(info, state)
+    new_state = register_and_log(info, state)
     {:noreply, new_state}
   end
 
   @impl true
   def handle_call({:register, info}, _from, state) do
-    new_state = do_register(info, state)
-    {:reply, :ok, new_state}
+    {result, new_state} = do_register(info, state)
+    {:reply, result, new_state}
   end
 
   @impl true
   def handle_call({:deregister, node, type}, _from, state) do
-    {:ok, new_state} = do_deregister(node, type, state)
-    {:reply, :ok, new_state}
+    {result, new_state} = do_deregister(node, type, state)
+    {:reply, result, new_state}
   end
 
   @impl true
@@ -287,15 +307,13 @@ defmodule NeonFS.Core.ServiceRegistry do
   @impl true
   def handle_info({:nodedown, node, _info}, state) do
     Logger.debug("Service node down, deregistering", node: node)
-    {_, new_state} = do_deregister(node, nil, state)
-    {:noreply, new_state}
+    {:noreply, deregister_and_log(node, nil, state)}
   end
 
   @impl true
   def handle_info({:nodedown, node}, state) do
     Logger.debug("Service node down, deregistering", node: node)
-    {_, new_state} = do_deregister(node, nil, state)
-    {:noreply, new_state}
+    {:noreply, deregister_and_log(node, nil, state)}
   end
 
   @impl true
@@ -317,7 +335,7 @@ defmodule NeonFS.Core.ServiceRegistry do
           %{node: Node.self()}
         )
 
-        do_register(info, state)
+        register_and_log(info, state)
       else
         maybe_schedule_endpoint_retry(metadata, attempt)
         state
@@ -394,14 +412,40 @@ defmodule NeonFS.Core.ServiceRegistry do
   defp do_register(info, state) do
     info_map = ServiceInfo.to_map(info)
 
-    case maybe_ra_command({:register_service, info_map}, 500) do
-      {:ok, :ok} -> :ok
-      {:error, :ra_not_available} -> :ok
-      {:error, reason} -> Logger.warning("Ra register_service failed", reason: reason)
+    result =
+      {:register_service, info_map}
+      |> maybe_ra_command(@ra_write_timeout_ms)
+      |> write_result()
+
+    {result, maybe_monitor_node(info.node, state)}
+  end
+
+  # For the self-registration paths, where no caller is waiting on the result,
+  # a failure is only reportable as a log line. The `:register_self` continue
+  # and `:retry_register_self` timer both re-register, so this is recoverable.
+  defp register_and_log(info, state) do
+    {result, new_state} = do_register(info, state)
+
+    case result do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Ra register_service failed", reason: inspect(reason))
     end
 
-    maybe_monitor_node(info.node, state)
+    new_state
   end
+
+  defp write_result({:ok, :ok}), do: :ok
+
+  # Ra not being initialised is not a write failure: before `cluster init`
+  # there is no cluster to be visible to and nowhere to write, which is how
+  # every read in this module treats it too.
+  defp write_result({:error, :ra_not_available}), do: :ok
+  defp write_result({:error, reason}), do: {:error, reason}
+
+  # The state machine only ever replies `:ok` to these commands. Answering
+  # rather than raising keeps a future reply shape from taking down a
+  # GenServer the whole cluster's discovery depends on.
+  defp write_result({:ok, unexpected}), do: {:error, {:unexpected_reply, unexpected}}
 
   defp maybe_monitor_node(node, state) do
     # Only set up a node monitor if the node is currently connected.
@@ -428,11 +472,10 @@ defmodule NeonFS.Core.ServiceRegistry do
   defp do_deregister(node, type, state) do
     command = if type, do: {:deregister_service, node, type}, else: {:deregister_service, node}
 
-    case maybe_ra_command(command, 500) do
-      {:ok, :ok} -> :ok
-      {:error, :ra_not_available} -> :ok
-      {:error, reason} -> Logger.warning("Ra deregister_service failed", reason: reason)
-    end
+    result =
+      command
+      |> maybe_ra_command(@ra_write_timeout_ms)
+      |> write_result()
 
     # Membership-change observers (e.g. `ReplicaRepairScheduler` from
     # #708) attach to this telemetry event to react to nodes leaving
@@ -464,15 +507,28 @@ defmodule NeonFS.Core.ServiceRegistry do
           %{state | monitors: new_monitors}
       end
 
-    {:ok, state}
+    {result, state}
+  end
+
+  # The nodedown-driven deregistration has no caller to answer, and the entry
+  # it is cleaning up belongs to a node that has already gone — a failure here
+  # leaves a stale registration that the departed node's own re-registration
+  # (or the next nodedown) resolves.
+  defp deregister_and_log(node, type, state) do
+    {result, new_state} = do_deregister(node, type, state)
+
+    case result do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Ra deregister_service failed", reason: inspect(reason))
+    end
+
+    new_state
   end
 
   defp do_update_metrics(node, metrics) do
-    case maybe_ra_command({:update_service_metrics, node, metrics}) do
-      {:ok, :ok} -> :ok
-      {:error, :ra_not_available} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+    {:update_service_metrics, node, metrics}
+    |> maybe_ra_command(@ra_write_timeout_ms)
+    |> write_result()
   end
 
   defp read_service(node, type) do
@@ -487,7 +543,7 @@ defmodule NeonFS.Core.ServiceRegistry do
     :exit, _ -> {:error, :ra_not_available}
   end
 
-  defp maybe_ra_command(cmd, timeout \\ 5000) do
+  defp maybe_ra_command(cmd, timeout) do
     if RaServer.initialized?() do
       maybe_ra_command_impl(cmd, timeout)
     else
@@ -497,6 +553,13 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   defp maybe_ra_command_impl(cmd, timeout) do
     case RaSupervisor.command(cmd, timeout) do
+      # `:ra.process_command/3` answers `{:ok, Reply, Leader}` once the command
+      # commits, whatever `Reply` is — so a state-machine rejection arrives
+      # under an outer `:ok`. This clause must precede the generic one or the
+      # rejection reads as a success.
+      {:ok, {:error, reason}, _leader} ->
+        {:error, reason}
+
       {:ok, result, _leader} ->
         {:ok, result}
 
