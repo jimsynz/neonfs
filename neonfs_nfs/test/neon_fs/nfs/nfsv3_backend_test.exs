@@ -1090,6 +1090,26 @@ defmodule NeonFS.NFS.NFSv3BackendTest do
                NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
     end
 
+    # `NFS3ERR_IO` is the only status RFC 1813 offers for a failed flush, so
+    # short-of-replicas, node-unreachable and timeout all reach the client
+    # identically. The log is the only place the difference survives.
+    test "logs the cause the NFS3ERR_IO status cannot carry" do
+      meta = file_meta()
+
+      put_core(fn
+        NeonFS.Core, :get_file_meta, [@volume_name, @file_path | _] -> {:ok, meta}
+        NeonFS.Core, :sync_file, _ -> {:error, {:under_replicated, 1, 2}}
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :io, _wcc} = NFSv3Backend.commit(valid_fh(), 0, 0, :auth, %{})
+        end)
+
+      assert log =~ "under_replicated"
+      assert log =~ @volume_name
+    end
+
     test "verf is stable across calls within the same VM" do
       meta = file_meta()
 

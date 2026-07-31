@@ -19,6 +19,8 @@ defmodule NeonFS.NFS.MountBackend do
 
   @behaviour NFSServer.Mount.Backend
 
+  require Logger
+
   alias NeonFS.NFS.{ExportManager, Filehandle, InodeTable, IpAllowList}
   alias NFSServer.Mount.Types.ExportNode
 
@@ -56,7 +58,17 @@ defmodule NeonFS.NFS.MountBackend do
       {:error, :not_found} ->
         {:error, :noent}
 
-      {:error, _} ->
+      # `:serverfault` is what the client gets for every cause that is not
+      # "no such export", so the reason has to be logged or a failing mount
+      # is indistinguishable from any other. An operator debugging a mount
+      # that will not come up has only this line to go on.
+      {:error, reason} ->
+        Logger.warning("NFS mount export lookup failed",
+          operation: :mount_resolve,
+          volume_name: volume_name,
+          reason: inspect(reason)
+        )
+
         {:error, :serverfault}
     end
   end

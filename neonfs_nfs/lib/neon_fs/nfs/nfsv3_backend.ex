@@ -952,8 +952,22 @@ defmodule NeonFS.NFS.NFSv3Backend do
         wcc = %WccData{before: wcc_attr_from_meta(meta), after: fattr_from_meta(meta)}
 
         case core_call(NeonFS.Core, :sync_file, [vol_name, path]) do
-          :ok -> {:ok, %{wcc: wcc, verf: writeverf()}}
-          {:error, _reason} -> {:error, :io, wcc}
+          :ok ->
+            {:ok, %{wcc: wcc, verf: writeverf()}}
+
+          # `NFS3ERR_IO` is the only status RFC 1813 gives us for "the flush
+          # did not happen", so every cause — short of replicas, node
+          # unreachable, timeout — reaches the client as the same code. Log
+          # the reason or it is gone: the client sees a generic I/O error and
+          # nothing else records what the barrier actually failed on.
+          {:error, reason} ->
+            Logger.warning("NFS COMMIT failed to sync file",
+              operation: :commit,
+              volume_name: vol_name,
+              reason: inspect(reason)
+            )
+
+            {:error, :io, wcc}
         end
 
       {:error, status} ->

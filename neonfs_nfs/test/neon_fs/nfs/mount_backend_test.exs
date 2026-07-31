@@ -119,6 +119,22 @@ defmodule NeonFS.NFS.MountBackendTest do
     test "non-rooted path returns :inval" do
       assert {:error, :inval} = MountBackend.resolve("not-a-path", %{})
     end
+
+    # `:serverfault` is what every cause other than "no such export" reaches
+    # the client as, so an operator debugging a mount that will not come up
+    # has only the log line to distinguish them.
+    test "logs the cause behind a :serverfault" do
+      stop_supervised!(NeonFS.NFS.ExportManager)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :serverfault} =
+                   MountBackend.resolve("/photos", %{peer: {127, 0, 0, 1}})
+        end)
+
+      assert log =~ "coordinator_unavailable"
+      assert log =~ "photos"
+    end
   end
 
   describe "list_exports/1" do
