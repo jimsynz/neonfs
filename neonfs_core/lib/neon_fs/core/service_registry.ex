@@ -60,8 +60,23 @@ defmodule NeonFS.Core.ServiceRegistry do
   # flows call `refresh_self/0` once the Listener is up, but a plain
   # auto-restart from persisted state runs neither — so we self-heal by
   # re-registering until the endpoint is present.
-  @self_register_retry_ms 1_000
-  @self_register_max_retries 60
+  # Unbounded, because "the Listener has not bound" has no attempt count at
+  # which giving up is the better answer: the node stays registered, so no
+  # client reports it unreachable, but no peer can open a data-plane pool to
+  # it — silent and permanent, which is the worst pair. It used to stop after
+  # 60 tries.
+  #
+  # Retrying forever is affordable because a tick that finds no endpoint does
+  # not write. `build_self_metadata/0` is a local check; only the tick that
+  # finds an endpoint issues a Ra command. The old chain re-registered on
+  # every tick, so a slow Listener cost 60 Ra writes per boot.
+  @endpoint_retry_initial_ms 1_000
+  @endpoint_retry_max_ms 30_000
+  @endpoint_retry_max_doublings 5
+
+  # Ticks before saying so out loud. At the backoff above this is roughly a
+  # minute in — the point at which the old code silently gave up.
+  @endpoint_missing_warn_after 6
 
   # A `:register_service` command that fails is a separate problem from a
   # missing endpoint, and needs its own retry: until it commits, this node is
@@ -362,6 +377,10 @@ defmodule NeonFS.Core.ServiceRegistry do
     {:noreply, heal_self_registration(state)}
   end
 
+  def handle_info({:retry_register_self, :endpoint, attempt}, state) do
+    {:noreply, poll_for_endpoint(state, attempt)}
+  end
+
   def handle_info({:retry_register_self, _cause, attempt}, state) do
     {:noreply, self_register(state, attempt)}
   end
@@ -433,26 +452,67 @@ defmodule NeonFS.Core.ServiceRegistry do
     %{new_state | retry_pending?: cause != :none}
   end
 
-  # The two causes stay distinct because they mean different things and want
-  # different budgets. `:endpoint` says the registration landed but advertises
-  # no data-plane endpoint, because the `Listener` had not bound yet — bounded,
-  # since a Listener that has not come up in a minute is not coming up.
-  # `:write` says the command did not commit at all — unbounded.
+  # An endpoint tick is a *poll*, not a re-registration. The registration
+  # already landed — it just advertised no `:data_endpoint` because the
+  # `Listener` had not bound yet — so there is nothing new to say until one
+  # exists. Writing anyway is what made the old bounded chain expensive
+  # enough to need a bound.
   #
-  # Conflating them was the defect: the retry condition was endpoint-presence
-  # alone, so a node whose `Listener` was already bound stopped retrying
-  # immediately, whether or not the registration that then went out landed.
+  # Once the endpoint appears, hand off to `self_register/2`, which writes it
+  # and ends the chain.
+  defp poll_for_endpoint(state, attempt) do
+    metadata = build_self_metadata()
+
+    if Map.has_key?(metadata, :data_endpoint) do
+      self_register(state, attempt)
+    else
+      warn_endpoint_missing(attempt)
+      schedule_self_register_retry(:endpoint, attempt)
+      %{state | retry_pending?: true}
+    end
+  end
+
+  # The old chain went quiet here. Say it instead — a node nobody can open a
+  # data-plane pool to looks healthy from every other angle, so this line is
+  # the only signal an operator gets.
+  defp warn_endpoint_missing(attempt) when attempt == @endpoint_missing_warn_after do
+    Logger.warning(
+      "Data-plane listener still has not bound; peers cannot open a pool to this node",
+      attempt: attempt
+    )
+
+    :telemetry.execute(
+      [:neonfs, :service_registry, :self_endpoint_missing],
+      %{attempt: attempt},
+      %{node: Node.self()}
+    )
+  end
+
+  defp warn_endpoint_missing(_attempt), do: :ok
+
+  # The two causes are distinct and are checked in this order.
   #
-  # Order matters. Endpoint retries re-issue the write anyway, so while one is
-  # scheduled it subsumes a write retry; only once those are exhausted (or the
-  # endpoint is present) does a failed write get its own chain.
+  # `:write` — the command did not commit. Unbounded, with backoff: until it
+  # lands this node is absent from every registry and clients report "all core
+  # nodes unreachable". Every tick reissues the write.
+  #
+  # `:endpoint` — the registration committed but advertises no data-plane
+  # endpoint, because the `Listener` had not bound yet. Also unbounded, but
+  # every tick is a *local* poll and only the one that finds an endpoint
+  # writes.
+  #
+  # A failed write is checked first because an endpoint tick no longer
+  # reissues it. Ordering these the other way round would leave a node whose
+  # write failed *and* whose Listener is slow polling forever without ever
+  # retrying the registration — unregistered, and quietly so.
   defp next_retry_cause(metadata, result, attempt)
 
-  defp next_retry_cause(metadata, _result, attempt)
-       when not is_map_key(metadata, :data_endpoint) and attempt < @self_register_max_retries,
+  defp next_retry_cause(_metadata, {:error, _reason}, _attempt), do: :write
+
+  defp next_retry_cause(metadata, :ok, _attempt)
+       when not is_map_key(metadata, :data_endpoint),
        do: :endpoint
 
-  defp next_retry_cause(_metadata, {:error, _reason}, _attempt), do: :write
   defp next_retry_cause(_metadata, :ok, _attempt), do: :none
 
   defp schedule_self_register_retry(:none, _attempt), do: :ok
@@ -471,7 +531,12 @@ defmodule NeonFS.Core.ServiceRegistry do
     :ok
   end
 
-  defp retry_delay(:endpoint, _attempt), do: @self_register_retry_ms
+  defp retry_delay(:endpoint, attempt) do
+    min(
+      @endpoint_retry_initial_ms * 2 ** min(attempt, @endpoint_retry_max_doublings),
+      @endpoint_retry_max_ms
+    )
+  end
 
   defp retry_delay(:write, attempt) do
     min(

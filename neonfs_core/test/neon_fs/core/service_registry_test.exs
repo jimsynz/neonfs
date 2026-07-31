@@ -341,6 +341,71 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     end
   end
 
+  # The endpoint chain used to stop after 60 tries, leaving the node
+  # registered but with no `:data_endpoint` for the rest of its uptime — no
+  # client reports it unreachable, and no peer can open a data-plane pool to
+  # it (#1674).
+  describe "the data-plane endpoint retry" do
+    test "keeps polling well past the old 60-attempt bound" do
+      registry = Process.whereis(ServiceRegistry)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :service_registry, :self_register_retry_scheduled]
+        ])
+
+      send(registry, {:retry_register_self, :endpoint, 500})
+
+      assert_receive {[:neonfs, :service_registry, :self_register_retry_scheduled], ^ref,
+                      %{attempt: 500}, %{cause: :endpoint}},
+                     2_000
+    end
+
+    # Retrying forever is only affordable because a tick that finds no
+    # endpoint issues no Ra command. The old chain wrote on every tick.
+    test "a poll that finds no endpoint issues no Ra write" do
+      registry = Process.whereis(ServiceRegistry)
+      Mimic.allow(RaSupervisor, self(), registry)
+
+      {:ok, writes} = Agent.start_link(fn -> 0 end)
+
+      stub(RaSupervisor, :command, fn
+        {:register_service, _info} = cmd, timeout ->
+          Agent.update(writes, &(&1 + 1))
+          Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+
+        cmd, timeout ->
+          Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+      end)
+
+      send(registry, {:retry_register_self, :endpoint, 1})
+      :sys.get_state(registry)
+
+      assert Agent.get(writes, & &1) == 0,
+             "nothing has changed since the last registration, so there is nothing to say"
+    end
+
+    # An endpoint tick no longer reissues the write, so a node whose write
+    # failed *and* whose Listener is slow must still retry the write — else it
+    # polls forever while unregistered.
+    test "a failed write is retried even while the endpoint is still missing" do
+      registry = Process.whereis(ServiceRegistry)
+      Mimic.allow(RaSupervisor, self(), registry)
+      stub(RaSupervisor, :command, fn _cmd, _timeout -> {:timeout, Node.self()} end)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :service_registry, :self_register_retry_scheduled]
+        ])
+
+      ServiceRegistry.refresh_self()
+
+      assert_receive {[:neonfs, :service_registry, :self_register_retry_scheduled], ^ref, _m,
+                      %{cause: :write}},
+                     2_000
+    end
+  end
+
   # The `Listener` is not part of this suite's fixture, so the registry booted
   # without a data-plane endpoint and the chain it started is already running.
   test "a self-registration with no data-plane endpoint retries for the endpoint" do
