@@ -28,6 +28,7 @@ Mimic.copy(NeonFS.Core.ReplicaRepair)
 Mimic.copy(NeonFS.Core.VolumeRegistry)
 Mimic.copy(NeonFS.Core.Volume.MetadataReader)
 Mimic.copy(NeonFS.Core.RaSupervisor)
+Mimic.copy(NeonFS.Core.StripeIndex)
 Mimic.copy(NeonFS.Transport.Listener)
 Mimic.copy(NeonFS.Transport.PoolManager)
 
