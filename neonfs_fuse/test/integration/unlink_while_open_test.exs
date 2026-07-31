@@ -26,6 +26,8 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
   """
   use NeonFS.TestSupport.ClusterCase, async: false
 
+  import NeonFS.FUSE.TestSupport.HandlerOp, only: [op_timeout: 0]
+
   alias NeonFS.Client.{Connection, CostFunction, Discovery, Router}
   alias NeonFS.Core.FileIndex
   alias NeonFS.FUSE.{Handler, InodeTable}
@@ -113,7 +115,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
 
       assert_receive {:fuse_op_complete, 1,
                       {"entry_ok", %{"ino" => file_inode, "fh" => create_fh}}},
-                     5_000
+                     op_timeout()
 
       assert is_integer(create_fh) and create_fh >= 1
 
@@ -123,7 +125,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
          {"write", %{"ino" => file_inode, "offset" => 0, "data" => payload, "fh" => create_fh}}}
       )
 
-      assert_receive {:fuse_op_complete, 2, {"write_ok", %{"size" => size}}}, 5_000
+      assert_receive {:fuse_op_complete, 2, {"write_ok", %{"size" => size}}}, op_timeout()
       assert size == byte_size(payload)
 
       # Capture the file_id off the wire — Core's RPC returns a
@@ -138,7 +140,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
       # `open` pins. (The `release` later drops the open's pin; the
       # create's pin hangs on until the GenServer dies.)
       send(handler, {:fuse_op, 3, {"open", %{"ino" => file_inode}}})
-      assert_receive {:fuse_op_complete, 3, {"open_ok", %{"fh" => read_fh}}}, 5_000
+      assert_receive {:fuse_op_complete, 3, {"open_ok", %{"fh" => read_fh}}}, op_timeout()
       assert read_fh != create_fh
 
       # ── Step 3: read via the open fh — sanity check.
@@ -148,7 +150,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
          {"read", %{"ino" => file_inode, "offset" => 0, "size" => 1024, "fh" => read_fh}}}
       )
 
-      assert_receive {:fuse_op_complete, 4, {"read_ok", %{"data" => ^payload}}}, 5_000
+      assert_receive {:fuse_op_complete, 4, {"read_ok", %{"data" => ^payload}}}, op_timeout()
 
       # ── Step 4: from "node3" (i.e. directly via Core RPC, simulating
       # an unlink issued by another FUSE peer), delete the file.
@@ -167,7 +169,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
          {"read", %{"ino" => file_inode, "offset" => 0, "size" => 1024, "fh" => read_fh}}}
       )
 
-      assert_receive {:fuse_op_complete, 5, {"read_ok", %{"data" => ^payload}}}, 5_000
+      assert_receive {:fuse_op_complete, 5, {"read_ok", %{"data" => ^payload}}}, op_timeout()
 
       # ── Step 5c: a fresh `open` of the same path MUST see ENOENT —
       # the file is detached (no directory entry). This is the
@@ -177,13 +179,13 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
         {:fuse_op, 6, {"lookup", %{"parent" => parent_inode, "name" => file_name}}}
       )
 
-      assert_receive {:fuse_op_complete, 6, {"error", %{"errno" => 2}}}, 5_000
+      assert_receive {:fuse_op_complete, 6, {"error", %{"errno" => 2}}}, op_timeout()
 
       # ── Step 6: release the read fh. The handler drops its
       # `:pinned` claim. `create_fh` still holds another pin, so
       # the file remains detached but reachable by id.
       send(handler, {:fuse_op, 7, {"release", %{"fh" => read_fh}}})
-      assert_receive {:fuse_op_complete, 7, {"ok", %{}}}, 5_000
+      assert_receive {:fuse_op_complete, 7, {"ok", %{}}}, op_timeout()
 
       # File still exists by id (create_fh's pin is alive).
       assert {:ok, %{detached: true, id: ^file_id}} =
@@ -192,7 +194,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
       # ── Step 7: release the create fh too — last pin drops, GC
       # fires through the release-telemetry handler.
       send(handler, {:fuse_op, 8, {"release", %{"fh" => create_fh}}})
-      assert_receive {:fuse_op_complete, 8, {"ok", %{}}}, 5_000
+      assert_receive {:fuse_op_complete, 8, {"ok", %{}}}, op_timeout()
 
       # Wait for the pin-release telemetry to propagate across Ra
       # commit + DetachedFileGC handler. Local poll suffices —
@@ -205,7 +207,7 @@ defmodule NeonFS.FUSE.IntegrationTest.UnlinkWhileOpenTest do
                      Router.call(FileIndex, :get, [volume_id, file_id])
                    )
                  end,
-                 timeout: 5_000
+                 timeout: op_timeout()
                )
     end
   end

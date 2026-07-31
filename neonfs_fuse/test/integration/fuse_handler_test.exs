@@ -11,14 +11,12 @@ defmodule NeonFS.FUSE.IntegrationTest.HandlerTest do
   @moduletag nodes: 1
   @moduletag cluster_mode: :shared
 
-  # Per-op completion deadline. Core-side writes go through Ra and the
-  # blob store, which can take well over the old 5 s on a loaded CI
-  # runner (#1157); the deadline only bounds latency — a wrong reply
-  # still fails the pattern match.
-  @op_timeout 15_000
+  import NeonFS.FUSE.TestSupport.HandlerOp, only: [op_timeout: 0]
 
   alias NeonFS.Client.{Connection, CostFunction, Discovery}
   alias NeonFS.FUSE.{Handler, InodeTable}
+
+  @op_timeout op_timeout()
 
   setup_all %{cluster: cluster} do
     :ok = cluster_init_idempotent(cluster, :node1, "test")
