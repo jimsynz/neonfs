@@ -51,9 +51,9 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     Node.connect(core_node)
     Node.connect(nfs_node)
 
-    :ok = ServiceRegistry.register(ServiceInfo.new(core_node, :core))
-    :ok = ServiceRegistry.register(ServiceInfo.new(nfs_node, :nfs))
-    :ok = ServiceRegistry.register(ServiceInfo.new(:neonfs_core_disconnected@localhost, :core))
+    register_service!(ServiceInfo.new(core_node, :core))
+    register_service!(ServiceInfo.new(nfs_node, :nfs))
+    register_service!(ServiceInfo.new(:neonfs_core_disconnected@localhost, :core))
 
     assert ServiceRegistry.connected_nodes_by_type(:core) == [core_node]
     assert ServiceRegistry.connected_nodes_by_type(:nfs) == [nfs_node]
@@ -62,8 +62,8 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   test "stores multiple services for the same node independently" do
     shared_node = :shared_services@localhost
 
-    :ok = ServiceRegistry.register(ServiceInfo.new(shared_node, :core))
-    :ok = ServiceRegistry.register(ServiceInfo.new(shared_node, :nfs))
+    register_service!(ServiceInfo.new(shared_node, :core))
+    register_service!(ServiceInfo.new(shared_node, :nfs))
 
     assert {:ok, core_service} = ServiceRegistry.get(shared_node, :core)
     assert {:ok, nfs_service} = ServiceRegistry.get(shared_node, :nfs)
@@ -78,7 +78,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   end
 
   test "ignores a nodedown for the local node and keeps its services registered" do
-    :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+    register_service!(ServiceInfo.new(Node.self(), :core))
     assert {:ok, _} = ServiceRegistry.get(Node.self(), :core)
 
     send(
@@ -94,7 +94,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   end
 
   test "list/0 stamps :draining on services whose node is draining (#1324)" do
-    :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+    register_service!(ServiceInfo.new(Node.self(), :core))
     :ok = NodeRegistry.set_status(Node.self(), :draining)
 
     entry =
@@ -134,6 +134,34 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
       assert {:error, :rejected_by_machine} =
                ServiceRegistry.register(ServiceInfo.new(:unreplicated@localhost, :nfs))
+    end
+
+    # The counterpart to the four above: those assert that a caller *is* told
+    # the write failed, this asserts the test suite's own setup does not treat
+    # that as fatal. The 500ms `@ra_write_timeout_ms` is documented to report
+    # a failure for a write Ra later commits, so a hard `:ok =` in setup fails
+    # on a loaded runner for a reason unrelated to the test.
+    test "register_service!/1 rides out a transient failure" do
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+      stub(RaSupervisor, :command, fn cmd, timeout ->
+        case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+          0 -> {:timeout, Node.self()}
+          _ -> Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+        end
+      end)
+
+      assert :ok = register_service!(ServiceInfo.new(:retried@localhost, :nfs))
+      assert {:ok, _} = ServiceRegistry.get(:retried@localhost, :nfs)
+      assert Agent.get(attempts, & &1) > 1, "the first attempt must actually have failed"
+    end
+
+    test "register_service!/1 still raises when the write never lands" do
+      stub(RaSupervisor, :command, fn _cmd, _timeout -> {:timeout, Node.self()} end)
+
+      assert_raise RuntimeError, ~r/kept failing/, fn ->
+        register_service!(ServiceInfo.new(:doomed@localhost, :nfs), timeout: 100)
+      end
     end
 
     test "the registry survives it and keeps answering" do
@@ -330,7 +358,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
   end
 
   test "list/0 stamps :maintenance on services whose node is cordoned (#1376)" do
-    :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+    register_service!(ServiceInfo.new(Node.self(), :core))
     :ok = NodeRegistry.set_status(Node.self(), :maintenance)
 
     entry =

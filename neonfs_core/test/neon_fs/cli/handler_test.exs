@@ -1003,7 +1003,7 @@ defmodule NeonFS.CLI.HandlerTest do
 
       # A FUSE service on another node — present so the test proves which
       # candidate routing actually selects, not just that local works.
-      :ok = ServiceRegistry.register(ServiceInfo.new(:neonfs_fuse@remote, :fuse))
+      register_service!(ServiceInfo.new(:neonfs_fuse@remote, :fuse))
 
       Application.put_env(:neonfs_core, :fuse_rpc_mod, FuseRoutingRPCStub)
 
@@ -1491,8 +1491,8 @@ defmodule NeonFS.CLI.HandlerTest do
 
     test "renders an unreachable registered node as offline instead of crashing (#1138)" do
       unreachable = :neonfs_core_unreachable@localhost
-      :ok = ServiceRegistry.register(ServiceInfo.new(unreachable, :core))
-      :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
+      register_service!(ServiceInfo.new(unreachable, :core))
+      register_service!(ServiceInfo.new(Node.self(), :core))
 
       assert {:ok, nodes} = Handler.handle_node_list()
 
