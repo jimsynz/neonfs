@@ -298,19 +298,8 @@ defmodule NeonFS.Integration.DriveSpaceTest do
           [node_atom, "drive_a", [any_tier: true]]
         )
 
-      # Wait for evacuation to complete (120s for slow CI runners)
-      assert_eventually timeout: 120_000 do
-        case PeerCluster.rpc(
-               cluster,
-               :node1,
-               NeonFS.Core.DriveEvacuation,
-               :evacuation_status,
-               ["drive_a"]
-             ) do
-          {:ok, %{status: :completed}} -> true
-          _ -> false
-        end
-      end
+      # 120s for slow CI runners
+      await_evacuation!(cluster, "drive_a", 120_000)
 
       # Verify drive_a has no chunks
       chunks_a =
@@ -394,6 +383,44 @@ defmodule NeonFS.Integration.DriveSpaceTest do
         data
       ])
     end
+  end
+
+  # Waits for the evacuation job to reach *any* terminal state, then asserts
+  # it was the one we wanted.
+  #
+  # Polling for `%{status: :completed}` alone treats a job that already failed
+  # as one still running, so the wait burns its whole budget and reports
+  # "condition not met within 120000ms" — while the job recorded both a status
+  # and, in `progress.description`, the error that caused it. That cost a full
+  # CI cycle and a wrong diagnosis on #1683 before anyone read the job log.
+  defp await_evacuation!(cluster, drive_id, timeout) do
+    wait_until(fn -> terminal_evacuation?(cluster, drive_id) end, timeout: timeout)
+
+    case evacuation_status(cluster, drive_id) do
+      {:ok, %{status: :completed}} ->
+        :ok
+
+      {:ok, %{status: status, progress: progress}} ->
+        detail = Map.get(progress || %{}, :description, "(no description recorded)")
+
+        flunk(
+          "Evacuation of #{drive_id} ended as #{inspect(status)}, expected :completed. #{detail}"
+        )
+
+      other ->
+        flunk("Evacuation of #{drive_id} never reached a terminal state: #{inspect(other)}")
+    end
+  end
+
+  defp terminal_evacuation?(cluster, drive_id) do
+    case evacuation_status(cluster, drive_id) do
+      {:ok, %{status: status}} -> status in [:completed, :failed, :cancelled]
+      _ -> false
+    end
+  end
+
+  defp evacuation_status(cluster, drive_id) do
+    PeerCluster.rpc(cluster, :node1, NeonFS.Core.DriveEvacuation, :evacuation_status, [drive_id])
   end
 
   defp wait_for_clean_peers do
