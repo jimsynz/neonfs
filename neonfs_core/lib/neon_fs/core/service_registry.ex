@@ -16,8 +16,16 @@ defmodule NeonFS.Core.ServiceRegistry do
   The GenServer remains in the supervision tree because it still owns:
   self-registration on startup (`handle_continue(:register_self, …)`),
   re-registration on data-plane endpoint changes (`refresh_self/0`),
-  node-down monitoring via `:net_kernel.monitor_nodes/2`, and
+  node-down monitoring via `:net_kernel.monitor_nodes/2`, a periodic
+  check that this node's own `:core` entry is still present, and
   best-effort deregistration of the local core service on shutdown.
+
+  That periodic check is what gives a core node the resilience an
+  interface node gets from `NeonFS.Client.Registrar`'s unconditional
+  re-registration: this node is not the only writer of its own entry, so
+  retrying its own failed writes is not enough. It polls a local Ra query
+  every `:service_registry_self_heal_interval` milliseconds (default
+  5,000) and writes only when the entry is missing.
   """
 
   use GenServer
@@ -70,6 +78,19 @@ defmodule NeonFS.Core.ServiceRegistry do
   @write_retry_initial_ms 500
   @write_retry_max_ms 30_000
   @write_retry_max_doublings 8
+
+  # Retrying our own failed writes is not enough, because we are not the only
+  # writer of our registration: a peer that sees us go down deregisters every
+  # service on this node, and nothing puts it back. An interface node survives
+  # that because `NeonFS.Client.Registrar` re-registers unconditionally every
+  # 5s; a core node had no equivalent, so a transient split left it absent from
+  # every registry — including its own — for the rest of its uptime.
+  #
+  # This is the missing heartbeat, but conditional rather than unconditional:
+  # the check is a local Ra query, and a write only goes out when this node is
+  # actually missing. In the steady state that costs no Raft log entries at
+  # all, which an unconditional re-register at `Registrar`'s cadence would not.
+  @self_heal_interval_ms 5_000
 
   ## Client API
 
@@ -249,11 +270,12 @@ defmodule NeonFS.Core.ServiceRegistry do
   def init(_opts) do
     Process.flag(:trap_exit, true)
     :net_kernel.monitor_nodes(true, node_type: :visible)
-    {:ok, %{monitors: %{}}, {:continue, :register_self}}
+    {:ok, %{monitors: %{}, retry_pending?: false}, {:continue, :register_self}}
   end
 
   @impl true
   def handle_continue(:register_self, state) do
+    schedule_self_heal()
     {:noreply, self_register(state, 0)}
   end
 
@@ -325,10 +347,19 @@ defmodule NeonFS.Core.ServiceRegistry do
     {:noreply, deregister_and_log(node, nil, state)}
   end
 
+  # Nothing to do here. It's tempting to re-register on nodeup, since a peer's
+  # nodedown is what deregistered us — but that only covers the heal, and it
+  # races the very deregistration it is meant to undo (the peer's command can
+  # commit after the link is back). `:self_heal` covers every cause, including
+  # that ordering, so this stays empty.
   @impl true
   def handle_info({:nodeup, _node, _info}, state) do
-    # State lives in Ra — no local restore needed on nodeup.
     {:noreply, state}
+  end
+
+  def handle_info(:self_heal, state) do
+    schedule_self_heal()
+    {:noreply, heal_self_registration(state)}
   end
 
   def handle_info({:retry_register_self, _cause, attempt}, state) do
@@ -338,6 +369,52 @@ defmodule NeonFS.Core.ServiceRegistry do
   def handle_info(_msg, state), do: {:noreply, state}
 
   ## Private helpers
+
+  defp schedule_self_heal do
+    interval =
+      Application.get_env(
+        :neonfs_core,
+        :service_registry_self_heal_interval,
+        @self_heal_interval_ms
+      )
+
+    Process.send_after(self(), :self_heal, interval)
+    :ok
+  end
+
+  # A self-registration already in flight re-writes the record on its own
+  # schedule, so healing on top of it would start a second retry chain — and a
+  # third five seconds later, since the node stays absent while they run.
+  defp heal_self_registration(%{retry_pending?: true} = state), do: state
+
+  # An uninitialised Ra answers a local query from an empty state machine, so
+  # "absent" reads the same as "there is no cluster yet". Writes are no-ops in
+  # that state, so healing would do nothing but log once every interval.
+  #
+  # Only the *absence* of the registration is worth acting on. Metadata drift
+  # is not: `refresh_self/0` owns that, and re-writing on every difference
+  # would fight `update_metrics/2`, which writes fields this process does not
+  # know about.
+  defp heal_self_registration(state) do
+    with true <- RaServer.initialized?(),
+         {:ok, nil} <- read_service(Node.self(), :core) do
+      reassert_self_registration(state)
+    else
+      _ -> state
+    end
+  end
+
+  defp reassert_self_registration(state) do
+    Logger.warning("Core service missing from the registry, re-registering")
+
+    :telemetry.execute(
+      [:neonfs, :service_registry, :self_registration_healed],
+      %{},
+      %{node: Node.self()}
+    )
+
+    self_register(state, 0)
+  end
 
   # The one path that registers this node's own `:core` service. No caller is
   # waiting on the result, so a failure is only reportable — which is why it
@@ -350,11 +427,10 @@ defmodule NeonFS.Core.ServiceRegistry do
 
     report_self_registration(result, metadata, attempt)
 
-    metadata
-    |> next_retry_cause(result, attempt)
-    |> schedule_self_register_retry(attempt)
+    cause = next_retry_cause(metadata, result, attempt)
+    schedule_self_register_retry(cause, attempt)
 
-    new_state
+    %{new_state | retry_pending?: cause != :none}
   end
 
   # The two causes stay distinct because they mean different things and want
