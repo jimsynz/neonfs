@@ -55,6 +55,22 @@ defmodule NeonFS.Core.ServiceRegistry do
   @self_register_retry_ms 1_000
   @self_register_max_retries 60
 
+  # A `:register_service` command that fails is a separate problem from a
+  # missing endpoint, and needs its own retry: until it commits, this node is
+  # absent from every other node's registry and clients report "all core nodes
+  # unreachable". Nothing else re-drives it — an interface node re-registers
+  # through `NeonFS.Client.Registrar` every 5s, but a core node has no
+  # heartbeat, and `refresh_self/0` runs only from `cluster init` and the join
+  # flow, neither of which happens on a plain restart.
+  #
+  # So the attempt count is unbounded; there is no number at which an
+  # undiscoverable core node is the better outcome. What's bounded is the
+  # delay, which backs off to a ceiling so a node that has been failing for
+  # minutes stops hammering Ra at boot cadence.
+  @write_retry_initial_ms 500
+  @write_retry_max_ms 30_000
+  @write_retry_max_doublings 8
+
   ## Client API
 
   @doc """
@@ -238,11 +254,7 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @impl true
   def handle_continue(:register_self, state) do
-    metadata = build_self_metadata()
-    info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
-    new_state = register_and_log(info, state)
-    maybe_schedule_endpoint_retry(metadata, 0)
-    {:noreply, new_state}
+    {:noreply, self_register(state, 0)}
   end
 
   @impl true
@@ -264,10 +276,7 @@ defmodule NeonFS.Core.ServiceRegistry do
 
   @impl true
   def handle_cast(:refresh_self, state) do
-    metadata = build_self_metadata()
-    info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
-    new_state = register_and_log(info, state)
-    {:noreply, new_state}
+    {:noreply, self_register(state, 0)}
   end
 
   @impl true
@@ -322,41 +331,98 @@ defmodule NeonFS.Core.ServiceRegistry do
     {:noreply, state}
   end
 
-  def handle_info({:retry_register_self, attempt}, state) do
-    metadata = build_self_metadata()
-
-    new_state =
-      if Map.has_key?(metadata, :data_endpoint) do
-        info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
-
-        :telemetry.execute(
-          [:neonfs, :service_registry, :self_endpoint_registered],
-          %{attempt: attempt},
-          %{node: Node.self()}
-        )
-
-        register_and_log(info, state)
-      else
-        maybe_schedule_endpoint_retry(metadata, attempt)
-        state
-      end
-
-    {:noreply, new_state}
+  def handle_info({:retry_register_self, _cause, attempt}, state) do
+    {:noreply, self_register(state, attempt)}
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
   ## Private helpers
 
-  # Keep retrying self-registration until the data-plane endpoint is
-  # available (Listener bound), so a node returning from a plain restart
-  # re-advertises `:data_endpoint` and peers can open a pool to it (#1450).
-  defp maybe_schedule_endpoint_retry(metadata, attempt) do
-    if not Map.has_key?(metadata, :data_endpoint) and attempt < @self_register_max_retries do
-      Process.send_after(self(), {:retry_register_self, attempt + 1}, @self_register_retry_ms)
-    end
+  # The one path that registers this node's own `:core` service. No caller is
+  # waiting on the result, so a failure is only reportable — which is why it
+  # has to schedule its own next attempt rather than assume something else
+  # will.
+  defp self_register(state, attempt) do
+    metadata = build_self_metadata()
+    info = ServiceInfo.new(Node.self(), :core, metadata: metadata)
+    {result, new_state} = do_register(info, state)
+
+    report_self_registration(result, metadata, attempt)
+
+    metadata
+    |> next_retry_cause(result, attempt)
+    |> schedule_self_register_retry(attempt)
+
+    new_state
+  end
+
+  # The two causes stay distinct because they mean different things and want
+  # different budgets. `:endpoint` says the registration landed but advertises
+  # no data-plane endpoint, because the `Listener` had not bound yet — bounded,
+  # since a Listener that has not come up in a minute is not coming up.
+  # `:write` says the command did not commit at all — unbounded.
+  #
+  # Conflating them was the defect: the retry condition was endpoint-presence
+  # alone, so a node whose `Listener` was already bound stopped retrying
+  # immediately, whether or not the registration that then went out landed.
+  #
+  # Order matters. Endpoint retries re-issue the write anyway, so while one is
+  # scheduled it subsumes a write retry; only once those are exhausted (or the
+  # endpoint is present) does a failed write get its own chain.
+  defp next_retry_cause(metadata, result, attempt)
+
+  defp next_retry_cause(metadata, _result, attempt)
+       when not is_map_key(metadata, :data_endpoint) and attempt < @self_register_max_retries,
+       do: :endpoint
+
+  defp next_retry_cause(_metadata, {:error, _reason}, _attempt), do: :write
+  defp next_retry_cause(_metadata, :ok, _attempt), do: :none
+
+  defp schedule_self_register_retry(:none, _attempt), do: :ok
+
+  defp schedule_self_register_retry(cause, attempt) do
+    delay = retry_delay(cause, attempt)
+
+    :telemetry.execute(
+      [:neonfs, :service_registry, :self_register_retry_scheduled],
+      %{attempt: attempt, delay_ms: delay},
+      %{node: Node.self(), cause: cause}
+    )
+
+    Process.send_after(self(), {:retry_register_self, cause, attempt + 1}, delay)
 
     :ok
+  end
+
+  defp retry_delay(:endpoint, _attempt), do: @self_register_retry_ms
+
+  defp retry_delay(:write, attempt) do
+    min(
+      @write_retry_initial_ms * 2 ** min(attempt, @write_retry_max_doublings),
+      @write_retry_max_ms
+    )
+  end
+
+  defp report_self_registration({:error, reason}, _metadata, attempt) do
+    Logger.warning("Core self-registration failed, will retry",
+      reason: inspect(reason),
+      attempt: attempt
+    )
+
+    :telemetry.execute(
+      [:neonfs, :service_registry, :self_registration_failed],
+      %{attempt: attempt},
+      %{node: Node.self(), reason: reason}
+    )
+  end
+
+  defp report_self_registration(:ok, metadata, attempt) do
+    :telemetry.execute(
+      [:neonfs, :service_registry, :self_registered],
+      %{attempt: attempt},
+      %{node: Node.self(), data_endpoint: Map.get(metadata, :data_endpoint)}
+    )
   end
 
   defp build_self_metadata do
@@ -418,20 +484,6 @@ defmodule NeonFS.Core.ServiceRegistry do
       |> write_result()
 
     {result, maybe_monitor_node(info.node, state)}
-  end
-
-  # For the self-registration paths, where no caller is waiting on the result,
-  # a failure is only reportable as a log line. The `:register_self` continue
-  # and `:retry_register_self` timer both re-register, so this is recoverable.
-  defp register_and_log(info, state) do
-    {result, new_state} = do_register(info, state)
-
-    case result do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("Ra register_service failed", reason: inspect(reason))
-    end
-
-    new_state
   end
 
   defp write_result({:ok, :ok}), do: :ok

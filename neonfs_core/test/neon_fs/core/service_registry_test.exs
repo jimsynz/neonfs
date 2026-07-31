@@ -7,6 +7,7 @@ defmodule NeonFS.Core.ServiceRegistryTest do
 
   alias NeonFS.Client.ServiceInfo
   alias NeonFS.Core.{NodeRegistry, RaServer, RaSupervisor, ServiceRegistry}
+  alias NeonFS.Transport.{Listener, PoolManager}
 
   @moduletag :tmp_dir
 
@@ -146,6 +147,110 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     end
   end
 
+  describe "self-registration whose Ra write fails" do
+    setup do
+      registry = Process.whereis(ServiceRegistry)
+
+      for mod <- [RaSupervisor, Listener, PoolManager], do: Mimic.allow(mod, self(), registry)
+
+      # `build_self_metadata/0` gates on a live `Listener` before it asks for a
+      # port, so without a stand-in every attempt looks like the endpoint case
+      # and masks the write case this exercises.
+      listener = spawn(fn -> receive do: (:stop -> :ok) end)
+      Process.register(listener, Listener)
+      on_exit(fn -> Process.exit(listener, :kill) end)
+
+      stub(Listener, :get_port, fn -> 4001 end)
+      stub(PoolManager, :advertise_endpoint, fn port -> "127.0.0.1:#{port}" end)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :service_registry, :self_registered],
+          [:neonfs, :service_registry, :self_registration_failed],
+          [:neonfs, :service_registry, :self_register_retry_scheduled]
+        ])
+
+      # The boot registration found no `Listener` and left an endpoint-retry
+      # chain ticking once a second. Now that the stand-in is up, its next tick
+      # registers with an endpoint and the chain stops. Wait for that, then drop
+      # what it emitted on the way — `assert_receive` matches selectively, so a
+      # leftover would satisfy an assertion below without the test having caused
+      # it.
+      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, _measurements,
+                      %{data_endpoint: "127.0.0.1:4001"}},
+                     5_000
+
+      flush_telemetry(ref)
+
+      %{ref: ref}
+    end
+
+    test "is retried until it commits, and the node ends up registered", %{ref: ref} do
+      :ok = ServiceRegistry.deregister(Node.self(), :core)
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+      # Fail the first `:register_service` only, then hand every later command
+      # to the real Ra write — so a passing test means the retry genuinely
+      # landed in the state machine, not just that it was attempted.
+      stub(RaSupervisor, :command, fn
+        {:register_service, _info} = cmd, timeout ->
+          case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+            0 -> {:timeout, Node.self()}
+            _ -> Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+          end
+
+        cmd, timeout ->
+          Mimic.call_original(RaSupervisor, :command, [cmd, timeout])
+      end)
+
+      ServiceRegistry.refresh_self()
+
+      assert_receive {[:neonfs, :service_registry, :self_registration_failed], ^ref,
+                      %{attempt: 0}, %{reason: :timeout}},
+                     1_000
+
+      assert_receive {[:neonfs, :service_registry, :self_register_retry_scheduled], ^ref,
+                      %{attempt: 0}, %{cause: :write}},
+                     1_000
+
+      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, %{attempt: 1}, _meta},
+                     5_000
+
+      assert {:ok, info} = ServiceRegistry.get(Node.self(), :core)
+      assert info.metadata.data_endpoint == "127.0.0.1:4001"
+    end
+
+    test "is reported as a write retry, never as an endpoint one", %{ref: ref} do
+      stub(RaSupervisor, :command, fn _cmd, _timeout -> {:timeout, Node.self()} end)
+
+      ServiceRegistry.refresh_self()
+
+      assert_receive {[:neonfs, :service_registry, :self_register_retry_scheduled], ^ref, _m,
+                      %{cause: cause}},
+                     1_000
+
+      assert cause == :write,
+             "a registration that committed without an endpoint and one that never " <>
+               "committed need different retry budgets, so they must not share a cause"
+    end
+  end
+
+  # The `Listener` is not part of this suite's fixture, so the registry booted
+  # without a data-plane endpoint and the chain it started is already running.
+  test "a self-registration with no data-plane endpoint retries for the endpoint" do
+    refute Process.whereis(Listener),
+           "this test needs `build_self_metadata/0` to yield no endpoint"
+
+    ref =
+      :telemetry_test.attach_event_handlers(self(), [
+        [:neonfs, :service_registry, :self_register_retry_scheduled]
+      ])
+
+    assert_receive {[:neonfs, :service_registry, :self_register_retry_scheduled], ^ref, _m,
+                    %{cause: :endpoint}},
+                   2_000
+  end
+
   test "list/0 stamps :maintenance on services whose node is cordoned (#1376)" do
     :ok = ServiceRegistry.register(ServiceInfo.new(Node.self(), :core))
     :ok = NodeRegistry.set_status(Node.self(), :maintenance)
@@ -155,6 +260,14 @@ defmodule NeonFS.Core.ServiceRegistryTest do
       |> Enum.find(&(&1.node == Node.self() and &1.type == :core))
 
     assert entry.status == :maintenance
+  end
+
+  defp flush_telemetry(ref) do
+    receive do
+      {_event, ^ref, _measurements, _metadata} -> flush_telemetry(ref)
+    after
+      0 -> :ok
+    end
   end
 
   defp start_test_peer(name, dist_port, peer_ports_env) do
