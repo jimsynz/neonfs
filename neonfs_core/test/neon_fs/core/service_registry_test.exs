@@ -235,6 +235,84 @@ defmodule NeonFS.Core.ServiceRegistryTest do
     end
   end
 
+  describe "a core service deregistered by someone else" do
+    setup do
+      registry = Process.whereis(ServiceRegistry)
+
+      for mod <- [Listener, PoolManager], do: Mimic.allow(mod, self(), registry)
+
+      # Without an endpoint the boot registration leaves a retry chain running,
+      # and the self-heal defers to it. Give it one so the chain terminates and
+      # the heal is the only thing acting.
+      listener = spawn(fn -> receive do: (:stop -> :ok) end)
+      Process.register(listener, Listener)
+      on_exit(fn -> Process.exit(listener, :kill) end)
+
+      stub(Listener, :get_port, fn -> 4001 end)
+      stub(PoolManager, :advertise_endpoint, fn port -> "127.0.0.1:#{port}" end)
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:neonfs, :service_registry, :self_registered],
+          [:neonfs, :service_registry, :self_registration_healed]
+        ])
+
+      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, _m,
+                      %{data_endpoint: "127.0.0.1:4001"}},
+                     5_000
+
+      # Shorten the interval and tick once, so the chain the assertions wait on
+      # reschedules itself at the test cadence. The heal under test still comes
+      # from a real timer, not from a `send/2` in the test body.
+      Application.put_env(:neonfs_core, :service_registry_self_heal_interval, 100)
+
+      on_exit(fn ->
+        Application.delete_env(:neonfs_core, :service_registry_self_heal_interval)
+      end)
+
+      send(registry, :self_heal)
+
+      flush_telemetry(ref)
+
+      %{ref: ref}
+    end
+
+    test "re-registers itself, the way a peer's nodedown leaves it", %{ref: ref} do
+      # What a peer does on `{:nodedown, this_node}`: drop every service the
+      # node had. The node itself has no reason to notice — its own last
+      # registration succeeded.
+      :ok = ServiceRegistry.deregister(Node.self(), :core)
+      assert {:error, :not_found} = ServiceRegistry.get(Node.self(), :core)
+
+      assert_receive {[:neonfs, :service_registry, :self_registration_healed], ^ref, _m, _meta},
+                     5_000
+
+      # The heal event announces the decision; the registration it drives lands
+      # after it, so the read has to wait for that instead.
+      assert_receive {[:neonfs, :service_registry, :self_registered], ^ref, _m2, _meta2}, 5_000
+
+      assert {:ok, info} = ServiceRegistry.get(Node.self(), :core)
+      assert info.metadata.data_endpoint == "127.0.0.1:4001"
+    end
+
+    test "is left alone while a self-registration retry is already in flight", %{ref: ref} do
+      registry = Process.whereis(ServiceRegistry)
+      Mimic.allow(RaSupervisor, self(), registry)
+      stub(RaSupervisor, :command, fn _cmd, _timeout -> {:timeout, Node.self()} end)
+
+      # Put a retry chain in flight, then drive the heal directly. Each heal
+      # that acted here would start another chain, and the node stays absent
+      # while they run, so the timers would compound every interval.
+      ServiceRegistry.refresh_self()
+      assert %{retry_pending?: true} = :sys.get_state(registry)
+
+      send(registry, :self_heal)
+      :sys.get_state(registry)
+
+      refute_received {[:neonfs, :service_registry, :self_registration_healed], ^ref, _m, _meta}
+    end
+  end
+
   # The `Listener` is not part of this suite's fixture, so the registry booted
   # without a data-plane endpoint and the chain it started is already running.
   test "a self-registration with no data-plane endpoint retries for the endpoint" do
