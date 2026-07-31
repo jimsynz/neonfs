@@ -248,7 +248,31 @@ defmodule NeonFS.Core.TierMigration do
     end
   end
 
+  # `ChunkIndex.update_locations/2` is a `GenServer.call`, so an index that is
+  # unresponsive or gone **exits** rather than returning an error. Uncaught,
+  # that kills the migration process outright — after the target copy has been
+  # written and verified, and before `cleanup_source/1` — so the `with` below
+  # never reaches its rollback and the caller learns nothing beyond a dead
+  # task. That is what `DriveSpaceTest`'s tier-eviction case has been doing
+  # while reporting green.
+  #
+  # Catching turns it into an ordinary `{:error, _}`: rollback removes the
+  # now-unreferenced target copy, the source is left intact because
+  # `cleanup_source/1` is downstream of this step, and the caller gets a
+  # reason it can act on.
   defp update_metadata(params) do
+    do_update_metadata(params)
+  catch
+    :exit, reason ->
+      Logger.warning("Migration metadata update failed",
+        chunk_hash: inspect(params.chunk_hash),
+        reason: inspect(reason)
+      )
+
+      {:error, {:metadata_update_failed, reason}}
+  end
+
+  defp do_update_metadata(params) do
     chunk_index = NeonFS.Core.ChunkIndex
 
     case Map.get(params, :chunk_meta) || lookup_chunk_meta(params) do
@@ -312,6 +336,27 @@ defmodule NeonFS.Core.TierMigration do
     end
   end
 
+  # A same-drive tier move has nothing safely rollback-able. `delete_chunk/3`
+  # is keyed by `{hash, drive}` with no tier, so deleting the "target copy"
+  # here would take the source copy with it — turning a failed migration into
+  # data loss. Leaving the target-tier blob costs an unreferenced chunk, which
+  # is GC's existing business; the referenced source copy survives.
+  #
+  # Previously unreachable for the metadata-update failure, because that
+  # exited before the `with`'s rollback could run. Making that an error
+  # exposed it.
+  defp rollback_copy(
+         %{source_node: node, source_drive: drive, target_node: node, target_drive: drive} =
+           params
+       ) do
+    Logger.debug("Skipping rollback of a same-drive tier move; source and target share a path",
+      chunk_hash: inspect(params.chunk_hash),
+      drive_id: drive
+    )
+
+    :ok
+  end
+
   defp rollback_copy(params) do
     blob_store = NeonFS.Core.BlobStore
 
@@ -365,7 +410,32 @@ defmodule NeonFS.Core.TierMigration do
     end
   end
 
+  # The other way an unavailable `ChunkIndex` reaches this module. Its ETS
+  # read *raises* `ArgumentError` when the table is gone, rather than exiting
+  # like the `GenServer.call` in `update_metadata/1` — so both have to be
+  # handled, and neither is caught by the other's clause. Answering `nil` puts
+  # it on the existing "no metadata" path instead of taking the caller down.
   defp lookup_chunk_meta(params) do
+    do_lookup_chunk_meta(params)
+  rescue
+    error ->
+      Logger.warning("Chunk metadata lookup failed during migration",
+        chunk_hash: inspect(params.chunk_hash),
+        reason: inspect(error)
+      )
+
+      nil
+  catch
+    :exit, reason ->
+      Logger.warning("Chunk metadata lookup failed during migration",
+        chunk_hash: inspect(params.chunk_hash),
+        reason: inspect(reason)
+      )
+
+      nil
+  end
+
+  defp do_lookup_chunk_meta(params) do
     case ChunkIndex.lookup_by_hash(params.chunk_hash) do
       {:ok, %ChunkMeta{} = meta} ->
         meta

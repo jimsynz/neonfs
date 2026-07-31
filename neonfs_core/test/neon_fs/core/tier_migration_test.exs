@@ -1,6 +1,7 @@
 defmodule NeonFS.Core.TierMigrationTest do
   use ExUnit.Case, async: false
   use NeonFS.TestCase
+  use Mimic
 
   alias NeonFS.Core.BlobStore
   alias NeonFS.Core.ChunkIndex
@@ -162,6 +163,40 @@ defmodule NeonFS.Core.TierMigrationTest do
              end)
 
       # Lock should be released
+      refute LockTable.locked?(hash)
+    end
+
+    # The sequence CI actually hits: the index answers the lookup, then its
+    # `update_locations/2` call — a `GenServer.call` — exits. Uncaught, that
+    # killed the migration outright, after the target copy was written and
+    # verified and before `cleanup_source/1`, so the `with`'s rollback never
+    # ran and the caller saw only a dead task. `DriveSpaceTest`'s
+    # tier-eviction case has been doing this while reporting green (#1693).
+    test "an exiting ChunkIndex update fails the migration instead of killing it",
+         %{chunk_hash: hash} do
+      Mimic.stub(ChunkIndex, :update_locations, fn _hash, _locations ->
+        exit({:timeout, {GenServer, :call, [ChunkIndex, :update_locations, 10_000]}})
+      end)
+
+      params = %{
+        chunk_hash: hash,
+        source_drive: "default",
+        source_node: Node.self(),
+        source_tier: :hot,
+        target_drive: "default",
+        target_node: Node.self(),
+        target_tier: :warm
+      }
+
+      assert {:error, {:metadata_update_failed, _reason}} = TierMigration.run_migration(params)
+
+      # The source survives — `cleanup_source/1` is downstream of the failure,
+      # so a failed metadata update cannot strand the chunk. (What rollback
+      # does with the target copy is not asserted here: source and target are
+      # the same drive in this fixture, so the two are not separable.)
+      assert {:ok, _} =
+               BlobStore.read_chunk_with_options(hash, "default", "hot", verify: true)
+
       refute LockTable.locked?(hash)
     end
   end
