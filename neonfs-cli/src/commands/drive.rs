@@ -75,6 +75,21 @@ pub enum DriveCommand {
         force: bool,
     },
 
+    /// Return a draining drive to active.
+    ///
+    /// An evacuation that ends without finalising — a failed migration, a
+    /// failed finalisation check, a node restart mid-drain — leaves the drive
+    /// draining. It still serves reads, but takes no new writes and refuses a
+    /// retry with `already_draining`. This puts it back.
+    Resume {
+        /// Drive identifier
+        drive_id: String,
+
+        /// Node where the drive is located (default: local node)
+        #[arg(long)]
+        node: Option<String>,
+    },
+
     /// Show replication health: under-replicated volumes and drives
     /// holding the sole copy of anything
     Replicas,
@@ -98,6 +113,9 @@ impl DriveCommand {
                 wait,
                 force,
             } => self.evacuate(drive_id, node.as_deref(), *wait, *force, format),
+            DriveCommand::Resume { drive_id, node } => {
+                self.resume(drive_id, node.as_deref(), format)
+            }
             DriveCommand::Replicas => self.replicas(format),
         }
     }
@@ -313,16 +331,11 @@ impl DriveCommand {
         Ok(())
     }
 
-    fn evacuate(
-        &self,
-        drive_id: &str,
-        node: Option<&str>,
-        wait: bool,
-        force: bool,
-        format: OutputFormat,
-    ) -> Result<()> {
-        let node_name = match node {
-            Some(n) => n.to_string(),
+    /// Resolves the target node, defaulting to the local node when the
+    /// caller did not pass `--node`. Shared by `evacuate` and `resume`.
+    fn resolve_node(node: Option<&str>) -> Result<String> {
+        match node {
+            Some(n) => Ok(n.to_string()),
             None => {
                 let status = smol::block_on(async {
                     let mut conn = DaemonConnection::connect().await?;
@@ -332,15 +345,70 @@ impl DriveCommand {
                 let status_data = unwrap_ok_tuple(status)?;
                 let status_map = term_to_map(&status_data)?;
                 match status_map.get("node") {
-                    Some(term) => term_to_string(term)?,
-                    None => {
-                        return Err(crate::error::CliError::RpcError(
-                            "Could not determine local node name".to_string(),
-                        ))
-                    }
+                    Some(term) => term_to_string(term),
+                    None => Err(crate::error::CliError::RpcError(
+                        "Could not determine local node name".to_string(),
+                    )),
                 }
             }
-        };
+        }
+    }
+
+    fn resume(&self, drive_id: &str, node: Option<&str>, format: OutputFormat) -> Result<()> {
+        let node_name = Self::resolve_node(node)?;
+
+        let result = smol::block_on(async {
+            let mut conn = DaemonConnection::connect().await?;
+            conn.call(
+                "Elixir.NeonFS.CLI.Handler",
+                "handle_resume_drive",
+                vec![
+                    Term::Binary(Binary {
+                        bytes: node_name.as_bytes().to_vec(),
+                    }),
+                    Term::Binary(Binary {
+                        bytes: drive_id.as_bytes().to_vec(),
+                    }),
+                ],
+            )
+            .await
+        })?;
+
+        if let Some(err) = extract_error(&result) {
+            return Err(err);
+        }
+
+        let _ = unwrap_ok_tuple(result)?;
+
+        match format {
+            OutputFormat::Json => {
+                let response = serde_json::json!({
+                    "status": "resumed",
+                    "drive_id": drive_id,
+                    "node": node_name,
+                });
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            _ => {
+                println!(
+                    "Drive '{}' on {} resumed (now active).",
+                    drive_id, node_name
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn evacuate(
+        &self,
+        drive_id: &str,
+        node: Option<&str>,
+        wait: bool,
+        force: bool,
+        format: OutputFormat,
+    ) -> Result<()> {
+        let node_name = Self::resolve_node(node)?;
 
         let node_term = Term::Binary(Binary {
             bytes: node_name.as_bytes().to_vec(),

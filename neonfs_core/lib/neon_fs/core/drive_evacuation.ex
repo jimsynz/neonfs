@@ -119,6 +119,64 @@ defmodule NeonFS.Core.DriveEvacuation do
     end
   end
 
+  @doc """
+  Returns a `:draining` drive to `:active`.
+
+  A drive is left draining whenever an evacuation ends without finalising —
+  a failed migration, a failed finalisation check, a node restart mid-drain.
+  Until now the only caller of `restore_active/2` was the runner's
+  `on_cancel/1`, which a terminal job never reaches (`JobTracker` answers
+  `:already_terminal`), so the drive stayed draining with no way back: still
+  serving reads, excluded from `select_target_drive/2`, and refusing a retry
+  with `:already_draining`.
+
+  Refuses while an evacuation job for the drive is still running — resuming
+  underneath a live drain would race the runner's own target selection.
+  Refuses on a drive that is not draining, since there is nothing to undo
+  and silently succeeding would hide a typo'd drive id.
+  """
+  @spec resume_drive(node(), String.t()) :: {:ok, map()} | {:error, term()}
+  def resume_drive(node, drive_id) when is_atom(node) and is_binary(drive_id) do
+    with {:ok, drive} <- get_drive(node, drive_id),
+         :ok <- check_draining(drive),
+         :ok <- check_no_running_evacuation(drive_id),
+         _ <- restore_active(node, drive_id),
+         :ok <- confirm_active(node, drive_id) do
+      Logger.info("Resumed drive from draining", drive_id: drive_id, node: node)
+
+      :telemetry.execute(
+        [:neonfs, :evacuation, :resumed],
+        %{},
+        %{drive_id: drive_id, node: node}
+      )
+
+      {:ok, %{drive_id: drive_id, node: node, state: :active}}
+    end
+  end
+
+  defp check_draining(%{state: :draining}), do: :ok
+  defp check_draining(%{state: state}), do: {:error, {:not_draining, state}}
+
+  # `restore_active/2` rescues everything to `:ok` — right for its
+  # best-effort `on_cancel/1` caller, wrong for an operator who needs to know
+  # whether the drive is usable again. Re-read rather than trust the reply.
+  defp confirm_active(node, drive_id) do
+    case get_drive(node, drive_id) do
+      {:ok, %{state: :active}} -> :ok
+      {:ok, %{state: state}} -> {:error, {:resume_failed, state}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp check_no_running_evacuation(drive_id) do
+    JobTracker.list(status: :running, type: EvacuationRunner)
+    |> Enum.find(fn job -> job.params[:drive_id] == drive_id end)
+    |> case do
+      nil -> :ok
+      job -> {:error, {:evacuation_running, job.id}}
+    end
+  end
+
   defp check_not_draining(%{state: :draining}),
     do: {:error, :already_draining}
 

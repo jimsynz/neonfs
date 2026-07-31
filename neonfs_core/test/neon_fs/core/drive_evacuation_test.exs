@@ -9,6 +9,7 @@ defmodule NeonFS.Core.DriveEvacuationTest do
     DriveEvacuation,
     DriveRegistry,
     Job,
+    JobTracker,
     RaSupervisor,
     VolumeRegistry
   }
@@ -550,6 +551,72 @@ defmodule NeonFS.Core.DriveEvacuationTest do
 
       {:ok, drive} = DriveRegistry.get_drive(node(), "drive1")
       assert drive.state == :active
+    end
+  end
+
+  # A drive left `:draining` had no way back: `restore_active/2` existed but
+  # its only caller was `on_cancel/1`, which a terminal job never reaches
+  # (`JobTracker` answers `:already_terminal`). The drive kept serving reads,
+  # took no writes, and refused a retry with `:already_draining` (#1634).
+  describe "resume_drive/2" do
+    test "returns a draining drive to active" do
+      DriveRegistry.update_state("drive1", :draining)
+
+      assert {:ok, %{drive_id: "drive1", state: :active}} =
+               DriveEvacuation.resume_drive(node(), "drive1")
+
+      assert {:ok, %{state: :active}} = DriveRegistry.get_drive(node(), "drive1")
+    end
+
+    test "a resumed drive is selectable as a migration target again" do
+      DriveRegistry.update_state("drive1", :draining)
+      DriveRegistry.update_state("drive2", :draining)
+
+      assert {:error, _} = DriveRegistry.select_drive(:hot)
+
+      {:ok, _} = DriveEvacuation.resume_drive(node(), "drive1")
+
+      assert {:ok, %{id: "drive1"}} = DriveRegistry.select_drive(:hot)
+    end
+
+    test "retrying an evacuation is possible once the drive is resumed" do
+      DriveRegistry.update_state("drive1", :draining)
+
+      assert {:error, :already_draining} =
+               DriveEvacuation.start_evacuation(node(), "drive1", force: true)
+
+      {:ok, _} = DriveEvacuation.resume_drive(node(), "drive1")
+
+      # Not asserting the evacuation succeeds — only that the drive is no
+      # longer refused before the attempt begins.
+      refute match?(
+               {:error, :already_draining},
+               DriveEvacuation.start_evacuation(node(), "drive1", force: true)
+             )
+    end
+
+    test "refuses while an evacuation for that drive is still running" do
+      DriveRegistry.update_state("drive1", :draining)
+
+      {:ok, job} =
+        JobTracker.create(EvacuationRunner, %{node: node(), drive_id: "drive1", total_chunks: 0})
+
+      # Resuming underneath a live drain would race the runner's own target
+      # selection.
+      assert {:error, {:evacuation_running, job_id}} =
+               DriveEvacuation.resume_drive(node(), "drive1")
+
+      assert job_id == job.id
+      assert {:ok, %{state: :draining}} = DriveRegistry.get_drive(node(), "drive1")
+    end
+
+    test "refuses a drive that is not draining" do
+      assert {:error, {:not_draining, :active}} =
+               DriveEvacuation.resume_drive(node(), "drive1")
+    end
+
+    test "reports an unknown drive rather than reporting success" do
+      assert {:error, _} = DriveEvacuation.resume_drive(node(), "no-such-drive")
     end
   end
 
