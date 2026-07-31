@@ -19,6 +19,8 @@ defmodule NeonFS.WebDAV.Backend do
 
   @behaviour Davy.Backend
 
+  require Logger
+
   alias NeonFS.Client.ChunkReader
   alias NeonFS.Client.ChunkWriter
   alias NeonFS.Client.Discovery
@@ -64,8 +66,8 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, %{class: :not_found}} ->
         {:error, %Davy.Error{code: :not_found}}
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:resolve_volume, reason)}
     end
   end
 
@@ -82,8 +84,8 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, %{class: :not_found}} ->
         resolve_missing_or_lock_null(path, volume_name, rest)
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:resolve, reason)}
     end
   end
 
@@ -123,7 +125,7 @@ defmodule NeonFS.WebDAV.Backend do
 
     case call_core(:update_file_meta, [volume_name, file_path, [metadata: new_metadata]]) do
       {:ok, _updated} -> :ok
-      {:error, _reason} -> {:error, internal_error()}
+      {:error, reason} -> {:error, internal_error(:set_properties, reason)}
     end
   end
 
@@ -148,8 +150,8 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, %{class: :not_found}} ->
         {:error, %Davy.Error{code: :not_found}}
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:get_content, reason)}
     end
   end
 
@@ -197,8 +199,8 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, :cluster_frozen} ->
         raise NeonFS.WebDAV.ClusterFrozenError
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:put_content_stream, reason)}
     end
   end
 
@@ -321,7 +323,7 @@ defmodule NeonFS.WebDAV.Backend do
       :ok -> :ok
       {:error, :not_found} -> :ok
       {:error, %{class: :not_found}} -> :ok
-      {:error, _reason} -> {:error, internal_error()}
+      {:error, reason} -> {:error, internal_error(:delete, reason)}
     end
   end
 
@@ -343,7 +345,7 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, %Davy.Error{}} = err -> err
       {:error, :not_found} -> {:error, %Davy.Error{code: :not_found}}
       {:error, %{class: :not_found}} -> {:error, %Davy.Error{code: :not_found}}
-      {:error, _reason} -> {:error, internal_error()}
+      {:error, reason} -> {:error, internal_error(:copy, reason)}
     end
   end
 
@@ -381,15 +383,15 @@ defmodule NeonFS.WebDAV.Backend do
           {:error, :already_exists} ->
             {:error, %Davy.Error{code: :method_not_allowed}}
 
-          {:error, _reason} ->
-            {:error, internal_error()}
+          {:error, reason} ->
+            {:error, internal_error(:create_collection, reason)}
         end
 
       {:error, :not_found} ->
         {:error, %Davy.Error{code: :conflict, message: "Volume not found"}}
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:create_collection, reason)}
     end
   end
 
@@ -409,8 +411,8 @@ defmodule NeonFS.WebDAV.Backend do
 
         {:ok, resources}
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:get_members, reason)}
     end
   end
 
@@ -454,8 +456,8 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, %{class: :not_found}} ->
         {:error, %Davy.Error{code: :not_found}}
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:move, reason)}
     end
   end
 
@@ -583,8 +585,8 @@ defmodule NeonFS.WebDAV.Backend do
       {:error, :not_found} ->
         {:ok, []}
 
-      {:error, _reason} ->
-        {:error, internal_error()}
+      {:error, reason} ->
+        {:error, internal_error(:list_dir_members, reason)}
     end
   end
 
@@ -684,7 +686,26 @@ defmodule NeonFS.WebDAV.Backend do
   defp metadata_opts(%{metadata: md}) when is_map(md) and md != %{}, do: [metadata: md]
   defp metadata_opts(_meta), do: []
 
-  defp internal_error do
-    %Davy.Error{code: :bad_request, message: "Internal error"}
+  # The catch-all for a core error this backend has no specific mapping for.
+  #
+  # It must log. Every one of these sites reduces a real cause — a timeout, an
+  # unreachable node, a rejected commit — to one indistinguishable struct, and
+  # a caller that gets it back has no way to find out what happened. Three
+  # recorded occurrences of the peak-RSS upload flake were undiagnosable for
+  # exactly that reason: the assertion reported the struct and nothing, in any
+  # log, said why.
+  #
+  # It is also a 500, not a 400. These are our failures, not malformed
+  # requests, and the distinction is what tells a WebDAV client whether
+  # retrying is worth anything. `Davy.Error.status_code/1` has no
+  # `:internal_server_error` entry and falls back to 500 for unknown codes,
+  # which is the status we want.
+  defp internal_error(operation, reason) do
+    Logger.warning("WebDAV backend operation failed",
+      operation: operation,
+      reason: inspect(reason)
+    )
+
+    %Davy.Error{code: :internal_server_error, message: "Internal error"}
   end
 end

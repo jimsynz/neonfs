@@ -427,7 +427,11 @@ defmodule NeonFS.WebDAV.BackendTest do
                Backend.get_content(@auth, resource, %{})
     end
 
-    test "maps other ChunkReader errors to bad_request" do
+    # `:no_available_locations` is a cluster failure, not a malformed request,
+    # and the difference is exactly what tells a client whether retrying is
+    # worth anything. `Davy.Error.status_code/1` has no `:internal_server_error`
+    # entry and falls back to 500 for unknown codes.
+    test "maps other ChunkReader errors to a 500, not a client error" do
       MockCore.create_volume("docs")
       MockCore.write_file("docs", "/exists.txt", "hi")
       {:ok, resource} = Backend.resolve(@auth, ["docs", "exists.txt"])
@@ -436,8 +440,29 @@ defmodule NeonFS.WebDAV.BackendTest do
         {:error, :no_available_locations}
       end)
 
-      assert {:error, %Davy.Error{code: :bad_request}} =
-               Backend.get_content(@auth, resource, %{})
+      assert {:error, %Davy.Error{code: code}} = Backend.get_content(@auth, resource, %{})
+      assert Davy.Error.status_code(code) == 500
+    end
+
+    test "logs the cause it would otherwise discard" do
+      MockCore.create_volume("docs")
+      MockCore.write_file("docs", "/exists.txt", "hi")
+      {:ok, resource} = Backend.resolve(@auth, ["docs", "exists.txt"])
+
+      expect(ChunkReader, :read_file_stream, fn _, _, _ ->
+        {:error, :no_available_locations}
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, %Davy.Error{}} = Backend.get_content(@auth, resource, %{})
+        end)
+
+      assert log =~ "no_available_locations",
+             "the generic Davy.Error is indistinguishable between causes, so the " <>
+               "cause has to reach a log or the failure is undiagnosable"
+
+      assert log =~ "get_content"
     end
 
     test "a chunk failure mid-body raises rather than truncating the response (#1353)" do
