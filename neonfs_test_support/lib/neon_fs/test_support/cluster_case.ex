@@ -800,11 +800,11 @@ defmodule NeonFS.TestSupport.ClusterCase do
     end
 
     # `join_cluster_rpc/3` returning `{:ok, _}` does not mean the joining
-    # service is registered cluster-wide — `ServiceRegistry.register/1` replies
-    # `:ok` even when its Ra command fails. Gate the rest of setup on the
-    # registrations actually committing, so a cluster that never finished
-    # forming fails here, naming that, instead of surfacing later as an
-    # interface error the test's assertions misattribute.
+    # service is registered cluster-wide: the join's own `register_service/3`
+    # only logs a failed registration, so the join succeeds regardless. Gate
+    # the rest of setup on the registrations actually committing, so a cluster
+    # that never finished forming fails here, naming that, instead of
+    # surfacing later as an interface error the test's assertions misattribute.
     :ok =
       wait_for_service_registration(
         cluster,
@@ -972,10 +972,10 @@ defmodule NeonFS.TestSupport.ClusterCase do
 
   `NeonFS.Core.ServiceRegistry.list/0` reads the Ra state machine, so an entry
   only appears once the `:register_service` command has committed — which is
-  precisely what a half-formed cluster loses. `ServiceRegistry.register/1`
-  reports `:ok` even when that command fails, so nothing upstream of here
-  notices; `NeonFS.Client.Registrar` re-issues it every 5s, so waiting also
-  rides out a single lost command.
+  precisely what a half-formed cluster loses. The join flow logs a failed
+  registration rather than failing the join, so nothing upstream of here
+  refuses to proceed; `NeonFS.Client.Registrar` re-issues it every 5s, so
+  waiting also rides out a single lost command.
 
   Raises naming the services that never arrived, rather than returning and
   letting a later assertion fail on a downstream symptom — a backend error or
