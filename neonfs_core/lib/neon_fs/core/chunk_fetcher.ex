@@ -484,14 +484,15 @@ defmodule NeonFS.Core.ChunkFetcher do
         Logger.info("No data endpoint, falling back to distribution RPC for read", node: node)
         rpc_read_chunk(node, hash, drive_id, tier, read_opts)
 
-      {:error, :data_call_failed} ->
+      {:error, {:data_call_failed, reason}} ->
         # The pooled data-plane connection failed — typically a stale pool to a
         # peer that restarted on a new data-plane port (#1450). `data_call` has
         # already triggered a pool refresh; serve this read over distribution
         # RPC so it stays correct while the pool rebuilds. Essential for
         # single-replica volumes, where this node is the only location.
         Logger.info("Data-plane call failed, falling back to distribution RPC for read",
-          node: node
+          node: node,
+          reason: inspect(reason)
         )
 
         rpc_read_chunk(node, hash, drive_id, tier, read_opts)

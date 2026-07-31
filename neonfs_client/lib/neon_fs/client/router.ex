@@ -94,15 +94,22 @@ defmodule NeonFS.Client.Router do
   # refresh the peer's pool so the next call rebuilds it against the peer's
   # current endpoint, and fail this call fast so the caller can retry rather
   # than block on the dead connection.
+  #
+  # The reason travels in the error term, and the log line is a warning
+  # rather than a debug. It used to be neither: callers got a bare
+  # `:data_call_failed` and the cause sat below the default log level, so a
+  # write that aborted here reached the operator as "Internal error" with
+  # nothing anywhere saying what broke. Five recorded occurrences of the
+  # peak-RSS upload flake got no further than this atom.
   defp refresh_and_fail(node, reason) do
     PoolManager.refresh_peer(node)
 
-    Logger.debug("data_call failed; refreshed peer pool",
+    Logger.warning("Data-plane call failed; refreshed peer pool",
       node: inspect(node),
       reason: inspect(reason)
     )
 
-    {:error, :data_call_failed}
+    {:error, {:data_call_failed, reason}}
   end
 
   @doc """

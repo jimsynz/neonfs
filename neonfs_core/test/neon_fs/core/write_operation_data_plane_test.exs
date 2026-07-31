@@ -249,6 +249,41 @@ defmodule NeonFS.Core.WriteOperationDataPlaneTest do
                  timeout: 15_000
                )
     end
+
+    # The reason used to be dropped here: callers got a bare
+    # `:data_call_failed` and the cause was logged at debug, so a write that
+    # aborted on a broken pool surfaced to the operator as "Internal error"
+    # with nothing anywhere saying what broke (#1653).
+    test "a failed data-plane call carries the reason to its caller", ctx do
+      dead_port = free_port()
+      fake_node = :dead_peer@host
+      {:ok, _pool} = PoolManager.ensure_pool(fake_node, {~c"localhost", dead_port})
+
+      assert {:error, {:data_call_failed, reason}} =
+               Router.data_call(
+                 fake_node,
+                 :put_chunk,
+                 [
+                   hash: Native.compute_hash("x"),
+                   volume_id: "default",
+                   write_id: nil,
+                   tier: "hot",
+                   data: "x"
+                 ],
+                 timeout: 2_000
+               )
+
+      refute reason == nil, "the whole point is that the cause reaches the caller"
+      _ = ctx
+    end
+  end
+
+  # A port nothing is listening on, so the pool's connect fails.
+  defp free_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false])
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 
   # Echo server
