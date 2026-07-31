@@ -14,7 +14,7 @@ defmodule NeonFS.Core.ReplicaAuditTest do
   use ExUnit.Case, async: false
   use Mimic
 
-  alias NeonFS.Core.{ChunkIndex, ChunkMeta, ReplicaAudit, VolumeRegistry}
+  alias NeonFS.Core.{ChunkIndex, ChunkMeta, ReplicaAudit, Stripe, StripeIndex, VolumeRegistry}
   alias NeonFS.Error.ReplicaGuard
 
   setup :verify_on_exit!
@@ -56,8 +56,22 @@ defmodule NeonFS.Core.ReplicaAuditTest do
     }
   end
 
+  defp stripe(id, volume_id, shard_hashes, opts \\ []) do
+    %Stripe{
+      id: id,
+      volume_id: volume_id,
+      config: %{
+        data_chunks: Keyword.get(opts, :data_chunks, 4),
+        parity_chunks: Keyword.get(opts, :parity_chunks, 2),
+        chunk_size: 4
+      },
+      chunks: shard_hashes
+    }
+  end
+
   # `chunks` maps volume id => chunk list, or volume id => {:error, reason}.
-  defp stub_cluster(volumes, chunks) do
+  # `stripes` maps volume id => stripe list; a volume absent from it has none.
+  defp stub_cluster(volumes, chunks, stripes \\ %{}) do
     stub(VolumeRegistry, :list, fn _opts -> volumes end)
 
     stub(ChunkIndex, :list_volume_chunks, fn volume_id ->
@@ -67,6 +81,8 @@ defmodule NeonFS.Core.ReplicaAuditTest do
         :error -> {:ok, []}
       end
     end)
+
+    stub(StripeIndex, :list_by_volume, fn volume_id -> Map.get(stripes, volume_id, []) end)
   end
 
   describe "removal_impact/2" do
@@ -151,7 +167,7 @@ defmodule NeonFS.Core.ReplicaAuditTest do
                ReplicaAudit.removal_impact(@node_a, "nvme0")
     end
 
-    test "erasure volumes are audited against a one-copy-per-shard floor" do
+    test "erasure volumes still report shards that would reach zero copies" do
       stub_cluster([erasure_volume("v1", "archive")], %{
         "v1" => [chunk("shard1", [{@node_a, "nvme0"}])]
       })
@@ -160,6 +176,142 @@ defmodule NeonFS.Core.ReplicaAuditTest do
 
       assert impact.min_copies == 1
       assert impact.zero_copies == 1
+    end
+
+    # The two counts answer different questions and an operator needs both:
+    # a shard at zero copies is repair backlog, a stripe below its
+    # reconstruction threshold is data already gone.
+    test "erasure volumes report shard loss and stripe loss separately" do
+      shards = for i <- 1..6, do: "shard#{i}"
+
+      stub_cluster(
+        [erasure_volume("v1", "archive")],
+        %{"v1" => Enum.map(shards, &chunk(&1, [{@node_a, "nvme0"}]))},
+        %{"v1" => [stripe("s1", "v1", shards)]}
+      )
+
+      {:ok, [impact]} = ReplicaAudit.removal_impact(@node_a, "nvme0")
+
+      assert impact.erasure?
+      assert impact.zero_copies == 6, "every shard loses its only copy"
+      assert impact.stripe_count == 1
+      assert impact.stripes_at_risk == 1
+      assert impact.stripes_lost == 1
+    end
+  end
+
+  # A 4+2 stripe survives losing up to 2 shards. The old per-shard floor
+  # refused any removal that took a shard to zero copies, which is the
+  # ordinary case erasure is built for, and stayed quiet about the removal
+  # that took a stripe past its parity budget.
+  describe "guard_removal/3 on erasure volumes" do
+    test "allows a removal that stays within the parity budget" do
+      shards = for i <- 1..6, do: "shard#{i}"
+
+      # Two shards on the candidate drive, four elsewhere — 4 survive, which
+      # is exactly `data_chunks`, so the stripe still reconstructs.
+      chunks =
+        Enum.map(Enum.take(shards, 2), &chunk(&1, [{@node_a, "nvme0"}])) ++
+          Enum.map(Enum.drop(shards, 2), &chunk(&1, [{@node_b, "nvme1"}]))
+
+      stub_cluster(
+        [erasure_volume("v1", "archive")],
+        %{"v1" => chunks},
+        %{"v1" => [stripe("s1", "v1", shards)]}
+      )
+
+      assert :ok = ReplicaAudit.guard_removal(@node_a, "nvme0"),
+             "losing 2 of 6 shards in a 4+2 stripe is exactly what parity is for"
+    end
+
+    test "refuses a removal that takes a stripe past its parity budget" do
+      shards = for i <- 1..6, do: "shard#{i}"
+
+      # Three on the candidate drive — only 3 survive, one short of the 4
+      # reconstruction needs.
+      chunks =
+        Enum.map(Enum.take(shards, 3), &chunk(&1, [{@node_a, "nvme0"}])) ++
+          Enum.map(Enum.drop(shards, 3), &chunk(&1, [{@node_b, "nvme1"}]))
+
+      stub_cluster(
+        [erasure_volume("v1", "archive")],
+        %{"v1" => chunks},
+        %{"v1" => [stripe("s1", "v1", shards)]}
+      )
+
+      assert {:error, %ReplicaGuard{} = error} = ReplicaAudit.guard_removal(@node_a, "nvme0")
+      assert [%{volume_name: "archive", stripes_at_risk: 1}] = error.at_risk
+    end
+
+    # Pre-existing damage is repair's backlog, not this operation's doing —
+    # the same rule the per-chunk counters follow. A stripe already past its
+    # parity budget must not block every future drive operation.
+    test "does not refuse for a stripe that was already unreconstructible" do
+      shards = for i <- 1..6, do: "shard#{i}"
+
+      # Shards 1-3 are gone from the index entirely, so only 3 remain against
+      # the 4 reconstruction needs — already broken before anything is removed.
+      # Shard 4 sits on the candidate drive but also on nvme9.
+      chunks = [
+        chunk("shard4", [{@node_a, "nvme0"}, {@node_a, "nvme9"}]),
+        chunk("shard5", [{@node_b, "nvme1"}]),
+        chunk("shard6", [{@node_b, "nvme1"}])
+      ]
+
+      stub_cluster(
+        [erasure_volume("v1", "archive")],
+        %{"v1" => chunks},
+        %{"v1" => [stripe("s1", "v1", shards)]}
+      )
+
+      {:ok, [impact]} = ReplicaAudit.removal_impact(@node_a, "nvme0")
+
+      assert impact.stripes_at_risk == 0,
+             "the stripe was below threshold before this drive was considered"
+
+      assert :ok = ReplicaAudit.guard_removal(@node_a, "nvme0")
+    end
+
+    # `audit/0` passes no candidate, so the same counters describe the
+    # backlog rather than an operation's effect.
+    test "audit/0 reports a currently unreconstructible stripe" do
+      shards = for i <- 1..6, do: "shard#{i}"
+
+      chunks = [
+        chunk("shard5", [{@node_b, "nvme1"}]),
+        chunk("shard6", [{@node_b, "nvme1"}])
+      ]
+
+      stub_cluster(
+        [erasure_volume("v1", "archive")],
+        %{"v1" => chunks},
+        %{"v1" => [stripe("s1", "v1", shards)]}
+      )
+
+      assert {:ok, report} = ReplicaAudit.audit()
+      assert [%{volume_name: "archive", stripes_at_risk: 1}] = report.under_replicated
+    end
+
+    test "a mixed replicate and erasure cluster decides each volume on its own terms" do
+      shards = for i <- 1..6, do: "shard#{i}"
+
+      erasure_chunks =
+        Enum.map(Enum.take(shards, 2), &chunk(&1, [{@node_a, "nvme0"}])) ++
+          Enum.map(Enum.drop(shards, 2), &chunk(&1, [{@node_b, "nvme1"}]))
+
+      stub_cluster(
+        [volume("v1", "data", 2), erasure_volume("v2", "archive")],
+        %{
+          "v1" => [chunk("h1", [{@node_a, "nvme0"}, {@node_b, "nvme1"}])],
+          "v2" => erasure_chunks
+        },
+        %{"v2" => [stripe("s1", "v2", shards)]}
+      )
+
+      assert {:error, %ReplicaGuard{} = error} = ReplicaAudit.guard_removal(@node_a, "nvme0")
+
+      assert [%{volume_name: "data"}] = error.at_risk,
+             "the replicated volume is below min_copies; the erasure one is within parity"
     end
   end
 

@@ -58,15 +58,30 @@ defmodule NeonFS.Core.ReplicaAudit do
 
   Erasure durability has no `min_copies` — each stripe shard is normally
   a single chunk with a single copy, and losing up to `parity_chunks` of
-  them is recoverable by reconstruction. This audit models the per-chunk
-  floor only (one copy), so it flags a shard that would reach zero copies
-  but does not decide whether the stripe could still be rebuilt. See
-  #1626 for stripe-level accounting.
+  them is recoverable by reconstruction. So the question a per-chunk floor
+  asks — "would any shard reach zero copies" — is the wrong one twice
+  over: it refuses removals that erasure exists to survive, and it misses
+  the removal that takes a stripe *past* its parity budget while every
+  shard it does not hold still shows a copy elsewhere.
+
+  For erasure volumes the guard therefore decides on **stripes**, not
+  shards. A stripe survives while at least `data_chunks` of its shards do,
+  because that is what reconstruction needs; below that it is
+  unreconstructible, and at zero surviving shards there is nothing left to
+  rebuild from. Shard counts are still reported — `below_min_copies` and
+  `zero_copies` keep their per-chunk meaning — because "shards to repair"
+  and "stripes that cannot be rebuilt" are different operator problems and
+  a report that conflated them would hide the first behind the second.
+
+  The shard list comes from `StripeIndex`, not from grouping the chunk
+  index by `stripe_id`: a shard whose chunk record is gone entirely is
+  absent from the latter, and counting only the shards that still exist
+  would score a half-destroyed stripe as intact.
   """
 
   require Logger
 
-  alias NeonFS.Core.{ChunkIndex, VolumeRegistry}
+  alias NeonFS.Core.{ChunkIndex, StripeIndex, VolumeRegistry}
   alias NeonFS.Error.ReplicaGuard
 
   @type volume_replication :: %{
@@ -78,7 +93,11 @@ defmodule NeonFS.Core.ReplicaAudit do
           chunks_on_drive: non_neg_integer(),
           below_min_copies: non_neg_integer(),
           zero_copies: non_neg_integer(),
-          least_copies: non_neg_integer()
+          least_copies: non_neg_integer(),
+          erasure?: boolean(),
+          stripe_count: non_neg_integer(),
+          stripes_at_risk: non_neg_integer(),
+          stripes_lost: non_neg_integer()
         }
 
   @type sole_copy_drive :: %{
@@ -98,9 +117,16 @@ defmodule NeonFS.Core.ReplicaAudit do
   included.
 
   `:volumes` covers all of them; `:under_replicated` is the subset with at
-  least one chunk below `min_copies`; `:sole_copy_drives` lists the drives
-  that are the only holder of at least one chunk, worst first — those are
-  the drives whose loss costs data.
+  least one chunk below `min_copies`, or — for an erasure volume — at
+  least one stripe already below the shards reconstruction needs;
+  `:sole_copy_drives` lists the drives that are the only holder of at
+  least one chunk, worst first — those are the drives whose loss costs
+  data.
+
+  An erasure volume can appear here for either reason, and they are not
+  the same problem: shards below one copy are repair backlog, while a
+  stripe below its reconstruction threshold is data that is already
+  unrecoverable. The per-volume event carries both counts.
 
   Emits `[:neonfs, :replica_audit, :under_replicated]` per affected volume
   so the condition can be alerted on rather than discovered during an
@@ -109,7 +135,9 @@ defmodule NeonFS.Core.ReplicaAudit do
   @spec audit() :: {:ok, report()} | {:error, term()}
   def audit do
     with {:ok, %{volumes: volumes, sole_copies: sole_copies}} <- scan(nil) do
-      under_replicated = Enum.filter(volumes, &(&1.below_min_copies > 0))
+      under_replicated =
+        Enum.filter(volumes, &(&1.below_min_copies > 0 or &1.stripes_at_risk > 0))
+
       Enum.each(under_replicated, &emit_under_replicated/1)
 
       report = %{
@@ -184,8 +212,8 @@ defmodule NeonFS.Core.ReplicaAudit do
   ## Private — policy
 
   defp decide(volumes, node, drive_id, force, operation) do
-    at_risk = volumes |> Enum.filter(&(&1.below_min_copies > 0)) |> Enum.map(&to_risk/1)
-    system_zero? = Enum.any?(at_risk, &(&1.system? and &1.zero_copies > 0))
+    at_risk = volumes |> Enum.filter(&at_risk?/1) |> Enum.map(&to_risk/1)
+    system_zero? = Enum.any?(at_risk, &(&1.system? and unrecoverable_count(&1) > 0))
 
     cond do
       system_zero? ->
@@ -259,6 +287,18 @@ defmodule NeonFS.Core.ReplicaAudit do
     :ok
   end
 
+  # An erasure volume is at risk when a stripe would fall below the shards
+  # reconstruction needs — not when a shard would reach zero copies, which
+  # is the ordinary case erasure is built to survive.
+  defp at_risk?(%{erasure?: true} = volume), do: volume.stripes_at_risk > 0
+  defp at_risk?(volume), do: volume.below_min_copies > 0
+
+  # What "nothing survives" means differs by durability, and only this
+  # answer is beyond `--force` for `_system`: a replicated chunk with no
+  # copies left, or a stripe that cannot be rebuilt.
+  defp unrecoverable_count(%{erasure?: true} = volume), do: volume.stripes_at_risk
+  defp unrecoverable_count(volume), do: volume.zero_copies
+
   defp to_risk(volume) do
     Map.take(volume, [
       :volume_name,
@@ -266,7 +306,11 @@ defmodule NeonFS.Core.ReplicaAudit do
       :min_copies,
       :below_min_copies,
       :zero_copies,
-      :least_copies
+      :least_copies,
+      :erasure?,
+      :stripe_count,
+      :stripes_at_risk,
+      :stripes_lost
     ])
   end
 
@@ -313,17 +357,100 @@ defmodule NeonFS.Core.ReplicaAudit do
   defp summarise_volume(volume, candidate) do
     case list_chunks(volume.id) do
       {:ok, chunks} ->
-        {:ok, fold_chunks(volume, chunks, candidate), sole_copies(chunks, candidate)}
+        with {:ok, stripes} <- stripe_summary(volume, chunks, candidate) do
+          summary = volume |> fold_chunks(chunks, candidate) |> Map.merge(stripes)
+          {:ok, summary, sole_copies(chunks, candidate)}
+        end
 
       # No bootstrap pointer: provisioning is deferred until the cluster
       # has drives enough for the volume's durability, so there is nothing
       # stored yet and nothing at risk.
       {:error, :not_found} ->
-        {:ok, fold_chunks(volume, [], candidate), %{}}
+        {:ok, Map.merge(fold_chunks(volume, [], candidate), no_stripes()), %{}}
 
       {:error, reason} ->
         {:error, {:volume_unreadable, volume.id, reason}}
     end
+  end
+
+  defp no_stripes, do: %{erasure?: false, stripe_count: 0, stripes_at_risk: 0, stripes_lost: 0}
+
+  defp stripe_summary(
+         %{durability: %{type: :erasure, data_chunks: data_chunks}} = volume,
+         chunks,
+         candidate
+       ) do
+    with {:ok, stripes} <- list_stripes(volume.id) do
+      before = surviving_shards_by_hash(chunks, nil)
+      remaining = surviving_shards_by_hash(chunks, candidate)
+
+      counts =
+        Enum.reduce(stripes, %{at_risk: 0, lost: 0}, fn stripe, acc ->
+          needed = shards_needed(stripe, data_chunks)
+          survived_before = count_surviving(stripe, before)
+          survives_after = count_surviving(stripe, remaining)
+
+          %{
+            at_risk:
+              acc.at_risk +
+                count_if(newly?(candidate, survived_before >= needed, survives_after < needed)),
+            lost:
+              acc.lost +
+                count_if(newly?(candidate, survived_before > 0, survives_after == 0))
+          }
+        end)
+
+      {:ok,
+       %{
+         erasure?: true,
+         stripe_count: length(stripes),
+         stripes_at_risk: counts.at_risk,
+         stripes_lost: counts.lost
+       }}
+    end
+  end
+
+  defp stripe_summary(_volume, _chunks, _candidate), do: {:ok, no_stripes()}
+
+  defp count_if(true), do: 1
+  defp count_if(false), do: 0
+
+  # `audit/0` has no candidate and describes the state as it stands, so the
+  # "after" condition alone is the answer.
+  defp newly?(nil, _healthy_before?, bad_after?), do: bad_after?
+
+  # With a candidate, report what the operation *changes* — the same rule
+  # the chunk counters follow. A stripe already past its parity budget is
+  # repair's backlog, and counting it against every candidate drive would
+  # block all drive maintenance while any stripe was damaged.
+  defp newly?(_candidate, healthy_before?, bad_after?), do: healthy_before? and bad_after?
+
+  defp count_surviving(stripe, survivors),
+    do: Enum.count(stripe.chunks, &Map.get(survivors, &1, false))
+
+  # Prefer the stripe's own config: a volume's erasure parameters can be
+  # changed after stripes were written with the old ones, and a stripe is
+  # reconstructible on the terms it was encoded under.
+  defp shards_needed(%{config: %{data_chunks: data_chunks}}, _volume_default)
+       when is_integer(data_chunks),
+       do: data_chunks
+
+  defp shards_needed(_stripe, volume_default), do: volume_default
+
+  # A shard survives if its chunk still has a copy somewhere other than
+  # the candidate drive. A shard the chunk index has no record of at all
+  # is absent from this map and counts as not surviving.
+  defp surviving_shards_by_hash(chunks, candidate) do
+    Map.new(chunks, fn chunk -> {chunk.hash, surviving_copies(chunk, candidate) > 0} end)
+  end
+
+  # Same reasoning as `list_volumes/0` and `list_chunks/1`.
+  defp list_stripes(volume_id) do
+    {:ok, StripeIndex.list_by_volume(volume_id)}
+  rescue
+    error -> {:error, {:stripe_index_unavailable, error}}
+  catch
+    :exit, reason -> {:error, {:stripe_index_unavailable, reason}}
   end
 
   # Same reasoning as `list_volumes/0`: an absent index subsystem is an
@@ -441,13 +568,17 @@ defmodule NeonFS.Core.ReplicaAudit do
         below_min_copies: volume.below_min_copies,
         zero_copies: volume.zero_copies,
         least_copies: volume.least_copies,
-        chunk_count: volume.chunk_count
+        chunk_count: volume.chunk_count,
+        stripe_count: volume.stripe_count,
+        stripes_at_risk: volume.stripes_at_risk,
+        stripes_lost: volume.stripes_lost
       },
       %{
         volume_id: volume.volume_id,
         volume_name: volume.volume_name,
         min_copies: volume.min_copies,
-        system?: volume.system?
+        system?: volume.system?,
+        erasure?: volume.erasure?
       }
     )
   end
