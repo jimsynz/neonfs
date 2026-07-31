@@ -380,10 +380,23 @@ defmodule NeonFS.Core.DriveManager do
   # ignores anything at or below the current factor, so losing a drive
   # leaves the target where it was for repair to satisfy.
   #
-  # Best-effort: a drive is registered whether or not this succeeds, and
-  # it runs before `_system` exists during `cluster init` (drives are
-  # registered first), where `:not_found` is the expected answer.
-  defp scale_system_volume_to_drive_count do
+  # Best-effort: a drive is registered whether or not this succeeds. During
+  # `cluster init` the drives are registered before the volume exists, so
+  # that call finds `:not_found`; `Cluster.Init` calls this again once the
+  # volume is there.
+  @doc """
+  Raises the `_system` volume's replication factor to the cluster's drive
+  count, capped at #{@system_volume_factor_cap}.
+
+  Invoked after a drive is registered, and once by `cluster init` after the
+  volume exists — during init the drives are registered first, so the
+  registration-time call finds no volume to raise.
+
+  Best-effort and raise-only: it never lowers the factor, and it reports
+  `:ok` whether or not the adjustment landed.
+  """
+  @spec scale_system_volume_to_drive_count() :: :ok
+  def scale_system_volume_to_drive_count do
     with {:ok, count} when count > 1 <- cluster_drive_count() do
       apply_system_volume_factor(min(count, @system_volume_factor_cap))
     end
