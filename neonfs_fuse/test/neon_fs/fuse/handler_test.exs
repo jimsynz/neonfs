@@ -230,6 +230,42 @@ defmodule NeonFS.FUSE.HandlerTest do
       # errno(:eexist) == 17.
       assert_receive {:fuse_op_complete, 3, {"error", %{"errno" => 17}}}, 5_000
     end
+
+    # Same rule as `open`: a handle whose pin was refused claims
+    # unlink-while-open semantics it does not have.
+    test "a create whose pin is refused fails with EIO", %{
+      handler: handler,
+      parent_inode: parent_inode
+    } do
+      test_pid = self()
+
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core, :pin_file, [_, _, _] -> {:error, :coordinator_unavailable}
+      end)
+
+      stub(
+        NeonFS.Client,
+        :write_call_by_id,
+        &create_test_write_call(&1, &2, &3, &4, test_pid, "file-unpinnable")
+      )
+
+      send(
+        handler,
+        {:fuse_op, 4,
+         {"create",
+          %{
+            "parent" => parent_inode,
+            "name" => "unpinnable.txt",
+            "mode" => 0o644,
+            "flags" => @o_creat
+          }}}
+      )
+
+      assert_receive {:fuse_op_complete, 4, {"error", %{"errno" => 5}}}, 5_000
+
+      assert :sys.get_state(handler).fh_table == %{},
+             "a refused create must not leave a handle behind"
+    end
   end
 
   # POSIX unlink-while-open pin lifecycle (sub-issue #651 of #639).
@@ -320,7 +356,11 @@ defmodule NeonFS.FUSE.HandlerTest do
       assert_receive {:fuse_op_complete, 14, {"open_ok", %{"fh" => 0}}}, 5_000
     end
 
-    test "open succeeds without a pin if the coordinator is unreachable",
+    # An unpinned handle is indistinguishable from a pinned one downstream,
+    # but the delete side reads the pin set and acts on it as authoritative
+    # — so handing one back means a live fd whose file can be hard-deleted
+    # under it. Failing the open keeps the two halves in agreement.
+    test "open fails with EIO if the file cannot be pinned",
          %{handler: handler, file_inode: file_inode} do
       stub(NeonFS.Client, :core_call, fn
         NeonFS.Core.FileIndex, :get_by_path, ["vol", "/handle.txt"] ->
@@ -332,16 +372,24 @@ defmodule NeonFS.FUSE.HandlerTest do
 
       send(handler, {:fuse_op, 15, {"open", %{"ino" => file_inode}}})
 
-      # Open still returns OK — pinning is best-effort. The
-      # unlink-while-open guarantee is absent for this fd, but
-      # everything else works.
-      assert_receive {:fuse_op_complete, 15, {"open_ok", %{"fh" => fh}}}, 5_000
-      assert is_integer(fh)
+      assert_receive {:fuse_op_complete, 15, {"error", %{"errno" => errno}}}, 5_000
+      assert errno == 5, "expected EIO"
+    end
 
-      # The `release` for an open-without-pin doesn't try to
-      # release a nil claim.
-      send(handler, {:fuse_op, 16, {"release", %{"fh" => fh}}})
-      assert_receive {:fuse_op_complete, 16, {"ok", %{}}}, 5_000
+    test "a failed open allocates no file handle", %{handler: handler, file_inode: file_inode} do
+      stub(NeonFS.Client, :core_call, fn
+        NeonFS.Core.FileIndex, :get_by_path, ["vol", "/handle.txt"] ->
+          {:ok, %{id: "file-coord-down", mode: 0o100644}}
+
+        NeonFS.Core, :pin_file, [_volume_name, _path, _holder] ->
+          {:error, :coordinator_unavailable}
+      end)
+
+      send(handler, {:fuse_op, 17, {"open", %{"ino" => file_inode}}})
+      assert_receive {:fuse_op_complete, 17, {"error", %{}}}, 5_000
+
+      assert :sys.get_state(handler).fh_table == %{},
+             "a refused open must not leave an entry behind for a later release to drop"
     end
   end
 

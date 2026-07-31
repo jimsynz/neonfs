@@ -379,13 +379,7 @@ defmodule NeonFS.FUSE.Handler do
          child_path <- build_child_path(parent_path, name),
          {:ok, file_meta} <- create_empty_file(volume_id, child_path, write_opts),
          {:ok, inode} <- InodeTable.allocate_inode(volume_id, child_path) do
-      claim_id =
-        case pin_file(child_path, state) do
-          {:ok, %{claim_id: id}} -> id
-          {:error, _} -> nil
-        end
-
-      create_ok(file_meta, claim_id, child_path, inode, state)
+      create_pinned(file_meta, child_path, inode, state)
     else
       {:error, :forbidden} -> {{"error", %{"errno" => errno(:eacces)}}, state}
       {:error, %{class: :forbidden}} -> {{"error", %{"errno" => errno(:eacces)}}, state}
@@ -726,13 +720,26 @@ defmodule NeonFS.FUSE.Handler do
     {{"open_ok", %{"fh" => 0}}, state}
   end
 
-  defp open_dispatch(%{id: file_id}, _volume_id, path, state) do
+  # The pin is not best-effort. A handle with `claim_id: nil` looks
+  # identical to a pinned one everywhere downstream, but the delete side
+  # reads the pin set and treats it as authoritative — so an unpinned
+  # handle is a file that can be hard-deleted out from under a live fd.
+  # Failing the open keeps both halves agreeing that the pin set means
+  # what it says. The cost is that regular-file opens fail while the
+  # coordinator is unreachable, which is what deletes, renames and
+  # creates already do.
+  defp open_dispatch(%{id: _file_id}, _volume_id, path, state) do
     case pin_file(path, state) do
       {:ok, %{file_id: pinned_id, claim_id: claim_id}} ->
         open_ok(pinned_id, claim_id, path, state)
 
-      {:error, _reason} ->
-        open_ok(file_id, nil, path, state)
+      {:error, reason} ->
+        Logger.warning("Open failed: could not pin file",
+          file_path: path,
+          reason: inspect(reason)
+        )
+
+        {{"error", %{"errno" => errno(:eio)}}, state}
     end
   end
 
@@ -746,6 +753,27 @@ defmodule NeonFS.FUSE.Handler do
     }
 
     {{"open_ok", %{"fh" => fh}}, new_state}
+  end
+
+  # Same rule as `open_dispatch/4`: no pin, no handle. The file is left
+  # in place rather than rolled back — undoing it means going through the
+  # delete path, which needs the same coordinator that just refused the
+  # pin, so a rollback attempt would usually fail too and could fail
+  # halfway. A retry finds an empty file and opens it, which is a better
+  # outcome than a half-removed one.
+  defp create_pinned(file_meta, path, inode, state) do
+    case pin_file(path, state) do
+      {:ok, %{claim_id: claim_id}} ->
+        create_ok(file_meta, claim_id, path, inode, state)
+
+      {:error, reason} ->
+        Logger.warning("Create failed: could not pin new file",
+          file_path: path,
+          reason: inspect(reason)
+        )
+
+        {{"error", %{"errno" => errno(:eio)}}, state}
+    end
   end
 
   defp create_ok(%{id: file_id, size: size}, claim_id, path, inode, state) do
@@ -770,8 +798,9 @@ defmodule NeonFS.FUSE.Handler do
   # rename can't strand the pin on the old name. This GenServer's pid
   # is the holder, which keeps the coordinator's holder-DOWN bulk
   # release as the crash safety net. On any failure (core or
-  # coordinator unreachable, claim conflict) we surface the error so
-  # the caller can decide — `open` degrades to an unpinned handle.
+  # coordinator unreachable, claim conflict) we surface the error, and
+  # both `open` and `create` fail the operation rather than handing back
+  # a handle with no pin behind it.
   defp pin_file(path, state) do
     core_call(NeonFS.Core, :pin_file, [state.volume_name, path, self()])
   catch
