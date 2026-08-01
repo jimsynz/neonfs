@@ -1,7 +1,7 @@
 defmodule NeonFS.S3.MultipartReaper do
   @moduledoc """
   Periodically sweeps abandoned multipart uploads from the cluster KV
-  store (#1181).
+  store.
 
   Multipart bookkeeping lives in the Ra-backed KV store, so an upload a
   client never completes or aborts would otherwise accumulate in cluster

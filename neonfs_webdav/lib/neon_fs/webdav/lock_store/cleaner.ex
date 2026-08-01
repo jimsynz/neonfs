@@ -8,8 +8,8 @@ defmodule NeonFS.WebDAV.LockStore.Cleaner do
   removes expired entries so the index stays bounded.
 
   Entries that hold a `NeonFS.Core.NamespaceCoordinator` claim
-  (`Depth: infinity` collection locks and lock-null reservations per
-  #302) have the claim released on the coordinator before the KV entry
+  (`Depth: infinity` collection locks and lock-null reservations) have
+  the claim released on the coordinator before the KV entry
   is deleted, so the claim doesn't outlive the WebDAV-side TTL. The
   coordinator's holder-pid `:DOWN` cleanup is the durable backstop;
   this sweep is the cooperative path.

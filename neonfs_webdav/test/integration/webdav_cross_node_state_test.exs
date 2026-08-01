@@ -1,6 +1,6 @@
 defmodule NeonFS.WebDAV.CrossNodeStateTest do
   @moduledoc """
-  Cluster-shared WebDAV gateway state (#1178): the lock-token index
+  Cluster-shared WebDAV gateway state: the lock-token index
   lives in the Ra-backed cluster KV store and dead properties live in
   core file metadata, so a load balancer can route a WebDAV session's
   requests to any gateway node.

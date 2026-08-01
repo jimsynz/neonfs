@@ -23,7 +23,7 @@ defmodule NeonFS.S3.Backend do
   # Internal FileMeta.metadata key holding the object's content MD5, which is
   # returned as the S3 ETag. Stored at write time (the MD5 is computed while the
   # body streams) so HEAD/GET return the same value without re-reading the
-  # object. Not exposed as S3 user metadata. (#1037)
+  # object. Not exposed as S3 user metadata.
   @etag_metadata_key "neonfs:content-md5"
 
   # Credential lookup
@@ -169,7 +169,7 @@ defmodule NeonFS.S3.Backend do
   # and stores the ETag in the write itself. The streaming path tracks the MD5
   # as the body flows through the write (bounded working set — the object is
   # never buffered), so the MD5 is only known afterwards and is persisted in a
-  # follow-up metadata update. (#1037)
+  # follow-up metadata update.
   defp write_with_etag(bucket, key, body, write_opts, writer) when is_binary(body) do
     etag = Base.encode16(:crypto.hash(:md5, body), case: :lower)
 
@@ -421,7 +421,7 @@ defmodule NeonFS.S3.Backend do
 
   # The S3 ETag of a completed multipart upload is the hex MD5 of the
   # concatenated raw part MD5s, suffixed with "-<part count>". Each part's ETag
-  # is the hex MD5 of that part's content (see `record_part/5`). (#1037)
+  # is the hex MD5 of that part's content (see `record_part/5`).
   defp multipart_etag(sorted_parts) do
     raw =
       for {_num, part} <- sorted_parts, into: <<>> do
@@ -529,8 +529,8 @@ defmodule NeonFS.S3.Backend do
     # it runs. Best-effort `ChunkWriter` abort callbacks are not
     # invoked here because the refs have already escaped to the
     # `MultipartStore`; we'd need the writer's in-flight state to
-    # do that safely. The interface-side `PendingWriteLog` deferred
-    # in #450 is the long-term home for tracked aborts.
+    # do that safely. The deferred interface-side `PendingWriteLog` is
+    # the long-term home for tracked aborts.
     case MultipartStore.get_meta(upload_id) do
       {:ok, _upload} ->
         MultipartStore.delete(upload_id)
@@ -612,7 +612,7 @@ defmodule NeonFS.S3.Backend do
 
   defp call_core(function, args) do
     case Application.get_env(:neonfs_s3, :core_call_fn) do
-      # core_call/3 routes volume-scoped metadata writes to a root holder (#1076).
+      # core_call/3 routes volume-scoped metadata writes to a root holder.
       nil -> NeonFS.Client.core_call(NeonFS.Core, function, args)
       fun when is_function(fun, 2) -> fun.(function, args)
     end
@@ -626,7 +626,7 @@ defmodule NeonFS.S3.Backend do
   # upload size.
   #
   # Returns the FileMeta on success, matching the shape of the
-  # `call_core(:write_file_at, …)` it replaced (#411).
+  # `call_core(:write_file_at, …)` it replaced.
   #
   # Unit tests inject `:write_via_chunk_writer_fn` to route around the
   # real ChunkWriter / Router machinery — same shape as
@@ -759,7 +759,7 @@ defmodule NeonFS.S3.Backend do
   defp meta_content_type(%{content_type: ct}) when is_binary(ct), do: ct
   defp meta_content_type(_meta), do: "application/octet-stream"
 
-  # GET/HEAD ETag resolution (#1037). The content MD5 is stored at write
+  # GET/HEAD ETag resolution. The content MD5 is stored at write
   # time only on the S3 PUT path; an object written through another
   # interface (FUSE/NFS) has none, so compute it lazily here — stream the
   # content once, hash it, and cache the result back into FileMeta so

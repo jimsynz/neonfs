@@ -1,8 +1,7 @@
 defmodule NeonFS.CSI.VolumeHealth do
   @moduledoc """
   CSI v1.3+ `VolumeCondition` computation for the `ControllerGetVolume`
-  and `NodeGetVolumeStats` RPCs (sub-issue #316 of the CSI driver epic
-  #244).
+  and `NodeGetVolumeStats` RPCs.
 
   The CSI spec exposes a single `VolumeCondition` payload:
 

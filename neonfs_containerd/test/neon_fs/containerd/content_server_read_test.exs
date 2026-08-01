@@ -1,6 +1,6 @@
 defmodule NeonFS.Containerd.ContentServerReadTest do
   @moduledoc """
-  Tests for the `Read` server-streaming RPC (#549). Exercises the
+  Tests for the `Read` server-streaming RPC. Exercises the
   digest → path resolution, the stub-driven chunk stream, the
   per-frame size cap, and the gRPC error mapping. Goes through the
   refactored `stream_blob/4` entry point so the tests don't need a
@@ -114,7 +114,7 @@ defmodule NeonFS.Containerd.ContentServerReadTest do
   end
 
   describe "mid-stream failure" do
-    test "a chunk fetch failure partway through aborts the RPC with INTERNAL (#1353)" do
+    test "a chunk fetch failure partway through aborts the RPC with INTERNAL" do
       raising_stream =
         Stream.unfold(:start, fn
           :start -> {"alpha", :boom}

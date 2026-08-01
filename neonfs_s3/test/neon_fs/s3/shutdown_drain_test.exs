@@ -1,6 +1,6 @@
 defmodule NeonFS.S3.ShutdownDrainTest do
   @moduledoc """
-  Exercises the Bandit/ThousandIsland drain that #1382 configures via
+  Exercises the Bandit/ThousandIsland drain configured via
   `thousand_island_options[:shutdown_timeout]`: on shutdown the listener
   stops accepting new connections but lets an in-flight request finish
   within the drain deadline rather than being cut.

@@ -2,15 +2,15 @@ defmodule NeonFS.Containerd.ContentServer do
   @moduledoc """
   Skeleton gRPC handler for `containerd.services.content.v1.Content`.
 
-  This is the package-scaffold slice (#548). Most RPCs return
+  This is the package-scaffold slice. Most RPCs return
   `GRPC.RPCError{status: :unimplemented}` with a pointer to the
   sub-issue that will land them. Two RPCs return real (empty)
   responses so containerd's plugin-probing handshake succeeds:
 
-    * `Status` — the in-progress write tracker (#552). Returning
+    * `Status` — the in-progress write tracker. Returning
       `{:ok, empty}` on an unknown ref is the same shape containerd
       sees when no upload is active for that ref.
-    * `ListStatuses` — the in-progress listing (#552). Empty list is
+    * `ListStatuses` — the in-progress listing. Empty list is
       what containerd expects when there are no active writes.
 
   The remaining RPCs raise the standard gRPC `UNIMPLEMENTED` status
@@ -124,7 +124,7 @@ defmodule NeonFS.Containerd.ContentServer do
   @doc """
   `Info` RPC. Resolves the digest, looks up the FileMeta, and
   returns the containerd `Info` view (size, timestamps, labels
-  extracted from xattrs per the design call in #547).
+  extracted from xattrs).
   """
   @spec info(InfoRequest.t(), GRPC.Server.Stream.t()) :: InfoResponse.t()
   def info(%InfoRequest{digest: digest}, _stream) do
@@ -281,7 +281,7 @@ defmodule NeonFS.Containerd.ContentServer do
   @doc """
   `Read` server-streaming RPC. Resolves the digest to a path under
   the configured content-store volume (sharded `sha256/<ab>/<cd>/<rest>`
-  per the layout decision in #547), opens a chunk stream via
+  per the volume layout), opens a chunk stream via
   `NeonFS.Client.ChunkReader.read_file_stream/3`, and emits
   `ReadContentResponse` frames carrying ≤ 64 KiB of `data` each.
 
@@ -417,12 +417,12 @@ defmodule NeonFS.Containerd.ContentServer do
   bidi-stream disconnects (containerd reuses the same ref to
   resume). On `COMMIT` the session verifies the running SHA-256
   hash equals `expected` and atomically lands the chunks at the
-  canonical `sha256/<ab>/<cd>/<rest>` path (the layout decision in
-  #547). A digest mismatch surfaces as `INVALID_ARGUMENT` and the
+  canonical `sha256/<ab>/<cd>/<rest>` path. A digest mismatch surfaces
+  as `INVALID_ARGUMENT` and the
   partial chunks orphan to core-side GC.
 
   This handler does **not** support the `Abort` action — that's a
-  separate `Abort` RPC under #552.
+  separate `Abort` RPC.
   """
   @spec write(Enumerable.t(), GRPC.Server.Stream.t()) :: any()
   def write(request_stream, stream) do
@@ -459,7 +459,7 @@ defmodule NeonFS.Containerd.ContentServer do
   # Without this the WRITE frame's empty ref would route to a
   # different (unbound) session, which would either crash on the
   # `_writes/` path or get torn down with `failed_precondition` —
-  # exactly the failure mode #741 was reporting.
+  # exactly the failure mode being guarded against.
   defp bind_ref(%WriteContentRequest{ref: ref} = req, %{bound_ref: nil} = state)
        when ref != "" do
     {req, %{state | bound_ref: ref}}
@@ -673,7 +673,7 @@ defmodule NeonFS.Containerd.ContentServer do
   # Per-frame telemetry for the bidi `Write` stream — captures the
   # request action / ref / declared offset / data size and the
   # response action / offset (or error). Surfaces the offset-leak
-  # pattern from #741 (response offset advancing by more than the
+  # pattern (response offset advancing by more than the
   # request data size, or stale state surviving across refs).
   #
   # Event metadata is intentionally rich — debugging containerd
@@ -739,7 +739,7 @@ defmodule NeonFS.Containerd.ContentServer do
 
   @doc """
   `Abort` RPC. Same semantics as `WriteContentRequest{action: ABORT}`
-  from #550, exposed as a separate RPC so a client that has already
+  shared with the write path, exposed as a separate RPC so a client that has already
   closed its bidi-stream can still cancel. Returns `Empty` on
   success, `NOT_FOUND` if no session is registered for the ref.
   """

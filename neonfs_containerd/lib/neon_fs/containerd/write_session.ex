@@ -8,7 +8,7 @@ defmodule NeonFS.Containerd.WriteSession do
       handed in via `feed/2`.
     * A `Task` running `NeonFS.Client.ChunkWriter.write_file_stream/4`
       against the partial-write path (`_writes/<ref>` per the volume
-      layout decision in #547). The task pulls binary segments from a
+      layout). The task pulls binary segments from a
       process inbox the session feeds.
     * Bookkeeping for `started_at`, `updated_at`, `offset`, `total`,
       `expected` so STAT requests can return the canonical state and
@@ -26,8 +26,8 @@ defmodule NeonFS.Containerd.WriteSession do
      path. On any failure best-effort aborts the chunks via the
      ChunkWriter abort hook.
   4. `abort/1` halts the inbox stream and cleans up. Used when the
-     containerd `Abort` RPC fires (sub-issue #552 — for now this is
-     the failure-cleanup path used by `commit/2` on digest mismatch).
+     containerd `Abort` RPC fires; for now this is the
+     failure-cleanup path used by `commit/2` on digest mismatch.
 
   Resume: the GenServer outlives any single bidi-stream connection
   via the registry. A reconnect with the same `ref` finds the running

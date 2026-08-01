@@ -121,8 +121,8 @@ defmodule NeonFS.WebDAV.HealthPlugTest do
   # Davy.Plug doesn't pass conn through to the backend's
   # `put_content_stream/4`, so HealthPlug captures the header into the
   # process dictionary before delegating, and `Backend` reads the
-  # captured flag back when assembling write_opts. See sub-issue #593.
-  describe "frozen cluster (#1443)" do
+  # captured flag back when assembling write_opts.
+  describe "frozen cluster" do
     test "a write raising ClusterFrozenError returns 503 with retry-after" do
       conn = call_health(:put, "/docs/frozen.txt", healthy_fn())
 

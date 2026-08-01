@@ -10,10 +10,9 @@ defmodule NeonFS.CSI.IdentityServer do
       `neonfs.csi.harton.dev` reverse-DNS string Kubernetes uses to
       identify the driver in its registry.
     * `GetPluginCapabilities` — declares which optional CSI
-      capabilities the plugin supports. The first slice declares
-      `CONTROLLER_SERVICE` (the next sub-issue, #314, lands the real
-      handlers behind it). `VOLUME_ACCESSIBILITY_CONSTRAINTS` is
-      not yet supported.
+      capabilities the plugin supports. Declares
+      `CONTROLLER_SERVICE`; `VOLUME_ACCESSIBILITY_CONSTRAINTS` is not
+      yet supported.
     * `Probe` — health check. Returns `ready: true` when the cluster
       service registry can reach a core node, `ready: false`
       otherwise. The kubelet polls this every few seconds — the body
@@ -92,7 +91,7 @@ defmodule NeonFS.CSI.IdentityServer do
   # CreateVolume / DeleteVolume to us. Node mode advertises no
   # plugin-level capabilities (Node service is implicit when the
   # kubelet talks to us via the Node socket). Both will gain
-  # `VOLUME_ACCESSIBILITY_CONSTRAINTS` once #316 lands.
+  # `VOLUME_ACCESSIBILITY_CONSTRAINTS` once topology is supported.
   defp capabilities_for(:controller) do
     [
       %PluginCapability{

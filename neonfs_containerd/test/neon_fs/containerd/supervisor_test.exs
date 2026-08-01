@@ -52,7 +52,7 @@ defmodule NeonFS.Containerd.SupervisorTest do
     assert children == []
   end
 
-  describe "log_grpc_exception?/1 (#952)" do
+  describe "log_grpc_exception?/1" do
     test "drops :not_found RPCError exceptions" do
       # `GRPC.RPCError.exception(:not_found)` resolves the atom to the
       # integer status code (5) via GRPC.Status — the struct stores

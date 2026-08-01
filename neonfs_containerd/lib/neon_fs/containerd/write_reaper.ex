@@ -8,7 +8,7 @@ defmodule NeonFS.Containerd.WriteReaper do
   or retried pull whose stream simply stops — leaves its session (and
   the `ChunkWriter` task it owns) running indefinitely. Nothing else
   calls `WriteSession.abort_stale/1`, so without this reaper those
-  sessions leak (#1354).
+  sessions leak.
 
   The reaper sweeps on a fixed interval, aborting every session whose
   `updated_at` is older than the configured max age. Active sessions —

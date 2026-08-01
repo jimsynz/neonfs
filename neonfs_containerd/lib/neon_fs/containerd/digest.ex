@@ -3,7 +3,7 @@ defmodule NeonFS.Containerd.Digest do
   Helpers for translating containerd digest strings to NeonFS volume
   paths.
 
-  Layout decision (#547): sharded `sha256/<ab>/<cd>/<rest>`. Matches
+  Layout decision: sharded `sha256/<ab>/<cd>/<rest>`. Matches
   containerd local-store convention, friendly to large blob counts,
   avoids enumerating a flat directory with millions of entries.
 

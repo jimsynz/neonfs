@@ -1,6 +1,6 @@
 defmodule NeonFS.WebDAV.ClusterFrozenError do
   @moduledoc """
-  Raised when a write is attempted while the cluster is `:frozen` (#1378).
+  Raised when a write is attempted while the cluster is `:frozen`.
 
   `HealthPlug` rescues it and returns `503 Service Unavailable` with a
   `Retry-After` hint. The `Plug.Exception` implementation gives the same

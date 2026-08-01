@@ -95,7 +95,7 @@ defmodule NeonFS.Docker.PlugTest do
       assert decode(conn) == %{"Err" => ""}
 
       # `core_create_fn` now receives the typed kw list — strings have
-      # been coerced (atime_mode → atom). #583.
+      # been coerced (atime_mode → atom).
       assert_received {:core_create_called, "vol-b", parsed}
       assert Keyword.get(parsed, :owner) == "alice"
       assert Keyword.get(parsed, :atime_mode) == :relatime

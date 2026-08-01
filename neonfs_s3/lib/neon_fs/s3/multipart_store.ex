@@ -1,6 +1,6 @@
 defmodule NeonFS.S3.MultipartStore do
   @moduledoc """
-  Cluster-shared bookkeeping for in-progress multipart uploads (#1177).
+  Cluster-shared bookkeeping for in-progress multipart uploads.
 
   Upload state lives in the Ra-backed cluster KV store (via
   `NeonFS.Client.KV`), not in node-local memory, so a load balancer can
@@ -141,7 +141,7 @@ defmodule NeonFS.S3.MultipartStore do
 
   Abandoned uploads — never completed, never aborted — would otherwise
   persist in cluster state (and every Ra snapshot) indefinitely, since
-  the bookkeeping moved off node-local ETS into the KV store (#1181). The
+  the bookkeeping moved off node-local ETS into the KV store. The
   shipped part chunks are orphan-reaped by core GC; only this bookkeeping
   needs sweeping. Idempotent, so it's safe to run from every S3 node.
   """

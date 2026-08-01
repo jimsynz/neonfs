@@ -15,7 +15,7 @@ defmodule NeonFS.WebDAV.HealthPlug do
   `put_content_stream/4`. We capture the `If-None-Match` request
   header here (each Bandit request runs in its own process, so the
   process dictionary is request-scoped) and `Backend.put_content_stream/4`
-  reads it back when assembling write_opts. See sub-issue #593.
+  reads it back when assembling write_opts.
   """
 
   @behaviour Plug
@@ -75,7 +75,7 @@ defmodule NeonFS.WebDAV.HealthPlug do
     end
   end
 
-  # A write reaching a `:frozen` cluster (#1378) surfaces as a raised
+  # A write reaching a `:frozen` cluster surfaces as a raised
   # ClusterFrozenError from the backend; return the same 503 + Retry-After
   # as proactive degraded-mode gating.
   defp forward(conn, opts) do

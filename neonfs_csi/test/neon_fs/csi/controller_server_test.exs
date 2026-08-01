@@ -443,7 +443,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
     end
   end
 
-  describe "ControllerGetCapabilities — snapshot capabilities (#967)" do
+  describe "ControllerGetCapabilities — snapshot capabilities" do
     test "advertises CREATE_DELETE_SNAPSHOT, LIST_SNAPSHOTS, and CLONE_VOLUME" do
       reply =
         ControllerServer.controller_get_capabilities(%ControllerGetCapabilitiesRequest{}, nil)
@@ -743,7 +743,7 @@ defmodule NeonFS.CSI.ControllerServerTest do
     end
   end
 
-  describe "CreateVolume from VolumeContentSource (#967)" do
+  describe "CreateVolume from VolumeContentSource" do
     test "promotes a snapshot into a new volume when source is a snapshot" do
       put_core(fn
         NeonFS.Core, :get_volume, ["src-vol"] ->

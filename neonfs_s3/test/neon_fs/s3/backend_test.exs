@@ -185,7 +185,7 @@ defmodule NeonFS.S3.BackendTest do
       assert String.length(etag) == 32
     end
 
-    test "a frozen cluster raises ClusterFrozenError (503) on PUT (#1443)" do
+    test "a frozen cluster raises ClusterFrozenError (503) on PUT" do
       Backend.create_bucket(@ctx, "my-bucket")
 
       Application.put_env(:neonfs_s3, :commit_refs_fn, fn _bucket, _key, _refs, _opts ->
@@ -197,7 +197,7 @@ defmodule NeonFS.S3.BackendTest do
       end
     end
 
-    test "etag is the content MD5 and is consistent across put/get/head (#1037)" do
+    test "etag is the content MD5 and is consistent across put/get/head" do
       Backend.create_bucket(@ctx, "my-bucket")
       body = "hello from integration test"
       expected = :crypto.hash(:md5, body) |> Base.encode16(case: :lower)
@@ -212,7 +212,7 @@ defmodule NeonFS.S3.BackendTest do
       assert object.etag == expected
     end
 
-    test "streaming put etag is the content MD5 and consistent on head (#1037)" do
+    test "streaming put etag is the content MD5 and consistent on head" do
       Backend.create_bucket(@ctx, "my-bucket")
       body = "streamed content for etag verification"
       expected = :crypto.hash(:md5, body) |> Base.encode16(case: :lower)
@@ -275,7 +275,7 @@ defmodule NeonFS.S3.BackendTest do
       assert is_binary(object.etag)
     end
 
-    test "a chunk failure mid-body raises rather than truncating the object (#1353)" do
+    test "a chunk failure mid-body raises rather than truncating the object" do
       Backend.create_bucket(@ctx, "my-bucket")
       Backend.put_object(@ctx, "my-bucket", "trunc.bin", "stored content", %Firkin.PutOpts{})
 
@@ -365,7 +365,7 @@ defmodule NeonFS.S3.BackendTest do
     end
   end
 
-  describe "ETag for files written via other interfaces (#1037)" do
+  describe "ETag for files written via other interfaces" do
     test "GET computes the content MD5 lazily and caches it back" do
       Backend.create_bucket(@ctx, "my-bucket")
       # No metadata → simulates a FUSE/NFS write (no stored content-md5).
@@ -510,7 +510,7 @@ defmodule NeonFS.S3.BackendTest do
                Backend.list_objects_v2(@ctx, "missing", %Firkin.ListOpts{})
     end
 
-    test "a prefix that exactly equals an object key returns that object (#1034)" do
+    test "a prefix that exactly equals an object key returns that object" do
       Backend.create_bucket(@ctx, "my-bucket")
       Backend.put_object(@ctx, "my-bucket", "exact.txt", "x", %Firkin.PutOpts{})
       Backend.put_object(@ctx, "my-bucket", "other.txt", "y", %Firkin.PutOpts{})

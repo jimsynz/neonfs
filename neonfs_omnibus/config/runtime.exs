@@ -24,19 +24,19 @@ if config_env() == :prod do
 
   # Address peers should use to reach this node's data plane. Defaults to the
   # node's distribution address; override here for multi-homed/hostname-named
-  # hosts where auto-detection would pick the wrong NIC (#1040).
+  # hosts where auto-detection would pick the wrong NIC.
   if advertise = System.get_env("NEONFS_DATA_ADVERTISE_ADDR") do
     config :neonfs_client, :data_transfer, advertise: advertise
   end
 
-  # Per-node whole-chunk read cache cap (#1355). Bounds total cached bytes,
+  # Per-node whole-chunk read cache cap. Bounds total cached bytes,
   # not entry count, so the working set never scales with file size.
   config :neonfs_client, :chunk_cache,
     max_bytes: String.to_integer(System.get_env("NEONFS_CHUNK_CACHE_MAX_BYTES", "134217728"))
 
   # Core configuration
   #
-  # Fresh installs come up with no drives configured (#754). Operators
+  # Fresh installs come up with no drives configured. Operators
   # run `neonfs drive add ...` after `cluster init` to register
   # production storage; the daemon refuses writes until at least one
   # drive is registered.

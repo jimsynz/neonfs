@@ -1,7 +1,7 @@
 defmodule NeonFS.Containerd.WriteReaperTest do
   @moduledoc """
   Tests that `WriteReaper` periodically sweeps stalled `WriteSession`s
-  via `WriteSession.abort_stale/1` (#1354). The session registry /
+  via `WriteSession.abort_stale/1`. The session registry /
   supervisor are started globally in `test_helper.exs`; each test
   starts its own reaper with a tight interval so the sweep fires
   promptly, and ages a session's `updated_at` into the past so the

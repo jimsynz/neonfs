@@ -1,7 +1,7 @@
 defmodule NeonFS.S3.IntegrationTest.MixedRoleDataPlaneTest do
   @moduledoc """
-  Smoke test for `NeonFS.TestSupport.ClusterCase.init_mixed_role_cluster/2`
-  (#524).
+  Smoke test for
+  `NeonFS.TestSupport.ClusterCase.init_mixed_role_cluster/2`.
 
   Spawns a 2-peer cluster — one `:neonfs_core`, one `:neonfs_s3` —
   initialises the mixed-role data plane (cluster_init on the core peer,
@@ -20,9 +20,9 @@ defmodule NeonFS.S3.IntegrationTest.MixedRoleDataPlaneTest do
     * `NeonFS.Core.read_file/2` on the core peer reads the bytes back
       identically to what was streamed in.
 
-  This is the prerequisite the parent `#499` peak-RSS test needs before
-  it can land — substantive RSS bounds and cross-interface readback
-  (S3-write-then-WebDAV-read) are out of scope here. Uses plain
+  Substantive RSS bounds and cross-interface readback
+  (S3-write-then-WebDAV-read) are out of scope here; they live with the
+  peak-RSS tests. Uses plain
   `ExUnit.Case` rather than `ClusterCase` because the per-test default
   cluster setup would conflict with the mixed-role spawn.
   """

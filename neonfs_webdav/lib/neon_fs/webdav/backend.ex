@@ -187,8 +187,8 @@ defmodule NeonFS.WebDAV.Backend do
         {:error, %Davy.Error{code: :conflict, message: "Volume not found"}}
 
       # `:exists` from `WriteOperation` with `create_only: true` is the
-      # RFC 7232 `If-None-Match: *` precondition failure (sub-issue #593
-      # of #303). Davy maps `:precondition_failed` to HTTP 412.
+      # RFC 7232 `If-None-Match: *` precondition failure. Davy maps
+      # `:precondition_failed` to HTTP 412.
       {:error, %NeonFS.Error.AlreadyExists{}} ->
         {:error,
          %Davy.Error{
@@ -215,7 +215,7 @@ defmodule NeonFS.WebDAV.Backend do
         # chunk to core over the TLS data plane, then finalise with
         # a metadata-only `commit_chunks/4` RPC. No whole-file
         # buffering — peak memory is bounded by the chunker's max
-        # chunk size, not the upload size. See #412.
+        # chunk size, not the upload size.
         write_via_chunk_writer(volume_name, file_path, stream, write_opts)
 
       other ->
@@ -473,7 +473,7 @@ defmodule NeonFS.WebDAV.Backend do
 
   defp call_core(function, args) do
     case Application.get_env(:neonfs_webdav, :core_call_fn) do
-      # core_call/3 routes volume-scoped metadata writes to a root holder (#1076).
+      # core_call/3 routes volume-scoped metadata writes to a root holder.
       nil -> NeonFS.Client.core_call(NeonFS.Core, function, args)
       fun when is_function(fun, 2) -> fun.(function, args)
     end

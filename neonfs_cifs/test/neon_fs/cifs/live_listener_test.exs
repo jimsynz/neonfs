@@ -1,7 +1,7 @@
 defmodule NeonFS.CIFS.LiveListenerTest do
   @moduledoc """
   Drives the C `vfs_neonfs` wire client (`native/vfs_neonfs/wire_probe`)
-  against a live `NeonFS.CIFS.Listener` over a Unix socket (#1400).
+  against a live `NeonFS.CIFS.Listener` over a Unix socket.
 
   The C-only `test_wire` harness encodes replies with `erl_interface`
   (`ei`) on both sides; this test instead exercises the real Elixir

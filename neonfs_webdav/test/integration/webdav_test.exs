@@ -357,7 +357,7 @@ defmodule NeonFS.WebDAV.IntegrationTest do
     # The root segment fans out via `ChunkReplicator`, but the leaf
     # / interior tree chunks themselves are still single-drive,
     # leaving peer nodes with a valid root pointer that resolves to
-    # tree nodes they don't have on disk. Tracked in #903.
+    # tree nodes they don't have on disk.
     @tag :skip
     test "data written via WebDAV is readable from another core node", %{
       cluster: cluster,
@@ -399,7 +399,7 @@ defmodule NeonFS.WebDAV.IntegrationTest do
   end
 
   describe "cross-node large upload" do
-    # Regression guard for #412 — the cross-node PUT fallback no
+    # Regression guard — the cross-node PUT fallback no
     # longer drains the request body to a single binary before
     # writing. Uploading a payload larger than the chunker's default
     # chunk size forces multiple `ChunkWriter` chunks through the

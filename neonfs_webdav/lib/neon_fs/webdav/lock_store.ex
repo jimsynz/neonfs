@@ -18,8 +18,7 @@ defmodule NeonFS.WebDAV.LockStore do
   from WebDAV node A is visible to node B's next claim attempt.
   Lock-null resources are visible in PROPFIND but return 404 on GET.
   When a PUT creates the real file, the namespace claim is released
-  and a DLM lock is taken on the actual file ID. Issue #226 / sub-issue
-  #302.
+  and a DLM lock is taken on the actual file ID.
 
   ## Collection locks (`Depth: infinity`)
 
@@ -30,14 +29,14 @@ defmodule NeonFS.WebDAV.LockStore do
   `NeonFS.Core.NamespaceCoordinator` subtree claim alongside the DLM
   byte-range lock; this is replicated across every core node via Ra,
   so a `Depth: infinity` lock on `/docs` taken from WebDAV node A is
-  visible to node B's next claim attempt. Issue #226 / sub-issue #301.
+  visible to node B's next claim attempt.
 
   The claim's holder is `NeonFS.WebDAV.LockStore.NamespaceHolder` —
   one stable pid per WebDAV node. Coordinator-side cleanup runs when
   the holder dies (WebDAV node crash / disconnect), so stale subtree
   claims don't outlive the node that took them.
 
-  ## Cluster-shared token index (#1178)
+  ## Cluster-shared token index
 
   The token → lock-state index lives in the Ra-backed cluster KV store
   under `webdav_lock:<token>` keys, so a load balancer can route a

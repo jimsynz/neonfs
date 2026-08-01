@@ -32,7 +32,7 @@ defmodule NeonFS.Docker.Supervisor do
 
   # On shutdown ThousandIsland stops accepting new connections and drains
   # in-flight requests for up to `shutdown_timeout`. The default leaves
-  # headroom under the systemd `TimeoutStopSec=45` budget (#1377, #1385).
+  # headroom under the systemd `TimeoutStopSec=45` budget.
   @default_drain_deadline_ms 25_000
 
   @spec start_link(keyword()) :: Supervisor.on_start()
@@ -48,7 +48,7 @@ defmodule NeonFS.Docker.Supervisor do
       case bandit_child_spec() do
         {:ok, listener} ->
           # Registrar last so it terminates first on shutdown: it deregisters
-          # the service before the listener drains (#1386).
+          # the service before the listener drains.
           [VolumeStore, MountTracker, listener]
           |> maybe_add_registrar(register?)
 

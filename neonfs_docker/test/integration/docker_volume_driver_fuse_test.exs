@@ -1,7 +1,7 @@
 defmodule NeonFS.Docker.RealFuseIntegrationTest do
   @moduledoc """
-  Real-FUSE end-to-end test for the VolumeDriver Mount/Unmount plumbing
-  (#387).
+  Real-FUSE end-to-end test for the VolumeDriver Mount/Unmount
+  plumbing.
 
   Unlike `docker_volume_driver_test.exs` — which stubs the mount with a
   plain directory to test the plugin's HTTP plumbing — this test wires

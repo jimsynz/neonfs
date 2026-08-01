@@ -16,7 +16,7 @@ defmodule NeonFS.WebDAV.Supervisor do
 
   # On shutdown ThousandIsland stops accepting new connections and drains
   # in-flight requests for up to `shutdown_timeout`. The default leaves
-  # headroom under the systemd `TimeoutStopSec=45` budget (#1377, #1385).
+  # headroom under the systemd `TimeoutStopSec=45` budget.
   @default_drain_deadline_ms 25_000
 
   @doc "Starts the WebDAV supervisor."
@@ -30,7 +30,7 @@ defmodule NeonFS.WebDAV.Supervisor do
     HealthCheck.register_checks()
 
     # Registrar last so it terminates first on shutdown: it deregisters the
-    # service (stopping new client work) before the listener drains (#1386).
+    # service (stopping new client work) before the listener drains.
     children = [
       NamespaceHolder,
       Cleaner,

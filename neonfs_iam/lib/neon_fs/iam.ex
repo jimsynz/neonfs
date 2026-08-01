@@ -7,7 +7,7 @@ defmodule NeonFS.IAM do
   surface consumed by `NeonFS.Core.Authorise` and the protocol bridges.
 
   No resources are registered yet; they land in subsequent slices of the
-  IAM epic (see #288, #290, #291, #292).
+  IAM epic.
   """
 
   use Ash.Domain

@@ -3,8 +3,8 @@ defmodule NeonFS.Containerd.Metadata do
   Helpers for translating between NeonFS `FileMeta` and containerd
   `Containerd.Services.Content.V1.Info` shapes.
 
-  Labels live in the `xattrs` map of the FileMeta — the design call
-  in #547 (POSIX xattrs via the surface from #671 / #676). The
+  Labels live in the `xattrs` map of the FileMeta, carried as POSIX
+  xattrs. The
   containerd label namespace is unprefixed in the protobuf (`labels:
   map<string, string>`), so this module wraps and unwraps with a
   fixed `containerd.io/` xattr prefix to keep containerd's labels

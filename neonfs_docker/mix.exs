@@ -73,7 +73,7 @@ defmodule NeonFS.Docker.MixProject do
       {:igniter, "~> 0.8", only: [:dev, :test]},
       {:mimic, "~> 2.0", only: [:test]},
       {:mix_audit, "~> 2.0", only: [:dev, :test], runtime: false},
-      # Test-only: the real-FUSE Mount/Unmount e2e (#387) drives the
+      # Test-only: the real-FUSE Mount/Unmount e2e drives the
       # actual `NeonFS.FUSE.MountManager` the plugin targets at runtime
       # in the co-located deployment. `runtime: false` keeps the FUSE
       # application from auto-starting; the test starts the pieces it
