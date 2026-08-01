@@ -59,11 +59,21 @@ defmodule NeonFS.TestSupport.PeerCluster do
   @app_start_backoff_ms 250
   @app_start_max_backoff_ms 2_000
 
-  # Ephemeral-port allocation can transiently fail with `:eaddrinuse` when the
-  # suite has exhausted the OS ephemeral range; retry with a short flat backoff
-  # (up to ~5s) before giving up (#1570).
-  @peer_port_attempts 50
-  @peer_port_backoff_ms 100
+  # Peer ports come from a fixed band below the kernel's ephemeral range, and
+  # are never chosen by binding.
+  #
+  # `net.ipv4.ip_local_port_range` starts at 32768, so nothing below that is
+  # ever handed out by the kernel as a source port. That matters because these
+  # numbers are assigned here and bound by a peer VM some time later: drawing
+  # them from the ephemeral range meant the kernel could give the same port to
+  # an outgoing connection in between.
+  #
+  # Bands are 3000 wide and keyed off `MIX_TEST_PARTITION`, so sharded suites
+  # running side by side on one host cannot overlap. Within a band each VM
+  # starts at its own offset, derived from the OS pid, so two unsharded suites
+  # on one host are very unlikely to collide either.
+  @peer_port_band_floor 20_000
+  @peer_port_band_width 3_000
 
   @type node_info :: %{
           name: atom(),
@@ -1149,32 +1159,87 @@ defmodule NeonFS.TestSupport.PeerCluster do
     end
   end
 
-  @doc false
+  @doc """
+  Assigns a port for a peer to listen on.
+
+  Hands back a number from this VM's band without binding anything. Callers
+  assign a port here and a peer binds it later, so a probe proves nothing
+  about the moment that matters — and probing by binding port 0 was actively
+  harmful, because it drew from the very range the kernel assigns outgoing
+  connections from.
+
+  Binding also could not be made reliable. The kernel refuses `SO_REUSEADDR`
+  reuse while selecting a port automatically — relaxed only by
+  `net.ipv4.ip_autobind_reuse`, which is off by default — so every port held
+  in `TIME_WAIT` is unavailable to `bind(0)`. Under this suite's connection
+  churn that surfaced as `:eaddrinuse` while tens of thousands of ports sat
+  idle.
+
+  A port in the band that something else already holds surfaces as the peer
+  failing to bind, which names itself. That is a better failure than silently
+  racing the kernel for a port.
+  """
   @spec allocate_peer_port() :: :inet.port_number()
-  def allocate_peer_port, do: allocate_peer_port(@peer_port_attempts)
+  def allocate_peer_port do
+    band_floor() + rem(band_start() + next_port_offset(), @peer_port_band_width)
+  end
 
-  defp allocate_peer_port(attempts_remaining) do
-    # Bind-and-release to get a guaranteed free port from the OS.
-    # This avoids collisions with ports still in TIME_WAIT from
-    # previous test clusters that haven't fully released yet.
-    #
-    # Under the full suite's heavy peer-node churn the OS ephemeral range can be
-    # momentarily exhausted, so `:gen_tcp.listen(0, ...)` returns `:eaddrinuse`.
-    # Retry with a short backoff rather than crashing the whole `setup_all` on a
-    # transient failure (#1570).
-    case :gen_tcp.listen(0, reuseaddr: true) do
-      {:ok, socket} ->
-        {:ok, port} = :inet.port(socket)
-        :gen_tcp.close(socket)
-        port
+  defp band_floor do
+    partition =
+      case System.get_env("MIX_TEST_PARTITION") do
+        nil -> 1
+        value -> String.to_integer(value)
+      end
 
-      {:error, :eaddrinuse} when attempts_remaining > 0 ->
-        Process.sleep(@peer_port_backoff_ms)
-        allocate_peer_port(attempts_remaining - 1)
+    @peer_port_band_floor + (partition - 1) * @peer_port_band_width
+  end
 
-      {:error, reason} ->
-        raise "PeerCluster could not allocate an ephemeral peer port: #{inspect(reason)}"
+  # Fixed per VM, so two suites sharing a host start in different places.
+  defp band_start do
+    case :persistent_term.get({__MODULE__, :band_start}, nil) do
+      nil ->
+        start = rem(String.to_integer(System.pid()) * 7, @peer_port_band_width)
+        :persistent_term.put({__MODULE__, :band_start}, start)
+        start
+
+      start ->
+        start
     end
+  end
+
+  # A dedicated counter, not `rem(unique_integer(...), width)`. `unique_integer`
+  # is shared with every other caller in the VM, so its values jump by however
+  # much other code consumed in between — and two allocations separated by a
+  # multiple of the band width alias onto the same port. Interleaving
+  # allocations with unrelated `unique_integer` calls, as a real suite does,
+  # produced 13 duplicates in 400. Duplicate ports mean two peers are told to
+  # listen on one, which surfaces far away as cluster timeouts and dead
+  # data-plane calls.
+  defp next_port_offset do
+    :atomics.add_get(port_counter(), 1, 1)
+  end
+
+  defp port_counter do
+    case :persistent_term.get({__MODULE__, :port_counter}, nil) do
+      nil -> install_port_counter()
+      counter -> counter
+    end
+  end
+
+  # Racing initialisers would each install their own counter and hand out the
+  # same low offsets twice, so installation happens once under a lock.
+  defp install_port_counter do
+    :global.trans({{__MODULE__, :port_counter}, self()}, fn ->
+      case :persistent_term.get({__MODULE__, :port_counter}, nil) do
+        nil ->
+          counter = :atomics.new(1, signed: false)
+          :persistent_term.put({__MODULE__, :port_counter}, counter)
+          counter
+
+        counter ->
+          counter
+      end
+    end)
   end
 
   defp build_code_paths do

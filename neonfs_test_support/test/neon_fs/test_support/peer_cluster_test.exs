@@ -33,15 +33,39 @@ defmodule NeonFS.TestSupport.PeerClusterTest do
     end
   end
 
-  describe "allocate_peer_port/0 (#1570)" do
-    test "returns a usable, free ephemeral port" do
+  describe "allocate_peer_port/0" do
+    test "assigns from below the kernel's ephemeral range" do
+      {:ok, range} = File.read("/proc/sys/net/ipv4/ip_local_port_range")
+      [ephemeral_floor, _ceiling] = range |> String.split() |> Enum.map(&String.to_integer/1)
+
       port = PeerCluster.allocate_peer_port()
 
-      assert is_integer(port) and port > 0
+      # The kernel never auto-assigns below this floor, so a port handed out
+      # here cannot be taken by an outgoing connection before the peer that
+      # was given it gets around to binding.
+      assert port < ephemeral_floor
+    end
 
-      # The returned port must actually be bindable — the whole point of the
-      # bind-and-release dance is to hand back a port nothing else holds.
-      {:ok, socket} = :gen_tcp.listen(port, [])
+    # Interleaved with unrelated `unique_integer` traffic, which is how a real
+    # suite calls this. Back-to-back allocations cannot catch the failure this
+    # guards: deriving the offset from the VM-wide `unique_integer` counter
+    # aliases two allocations onto one port whenever they are separated by a
+    # multiple of the band width, and only intervening consumers create gaps
+    # that large. The naive version produced 13 duplicates in 400.
+    test "never repeats a port, even with other unique_integer consumers interleaved" do
+      ports =
+        for _ <- 1..400 do
+          for _ <- 1..:rand.uniform(40), do: System.unique_integer([:positive, :monotonic])
+          PeerCluster.allocate_peer_port()
+        end
+
+      assert length(Enum.uniq(ports)) == length(ports)
+    end
+
+    test "assigns something bindable" do
+      port = PeerCluster.allocate_peer_port()
+
+      assert {:ok, socket} = :gen_tcp.listen(port, [])
       :gen_tcp.close(socket)
     end
   end
