@@ -1129,10 +1129,12 @@ defmodule NeonFS.Core do
       src_name == dest_name ->
         FileIndex.move(volume_id, src_dir, dest_dir, src_name)
 
+      # Both the directory and the basename change. Published as one
+      # transition: a `move` followed by a `rename` would leave the file in
+      # the destination directory under its old basename between the two, and
+      # a concurrent reader can observe that intermediate path (#1608).
       true ->
-        with :ok <- FileIndex.move(volume_id, src_dir, dest_dir, src_name) do
-          FileIndex.rename(volume_id, dest_dir, src_name, dest_name)
-        end
+        FileIndex.move_rename(volume_id, src_dir, dest_dir, src_name, dest_name)
     end
   end
 
