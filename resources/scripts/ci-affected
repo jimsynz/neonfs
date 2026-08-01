@@ -64,7 +64,7 @@ classify() {
     # source package and `vfs_neonfs_wire` runs a C harness; neither compiles
     # Elixir, and the contract they implement lives in `neonfs_cifs/native/`,
     # which has its own rule. Marking them here cost every neonfs_client PR an
-    # hour on the Samba build for no coverage (#1690).
+    # hour on the Samba build for no coverage.
     neonfs_client/*) all_packages=true; mark integration cli ;;
 
     # test_support's build dep on core puts core on every consumer's path.

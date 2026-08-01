@@ -1,13 +1,12 @@
 defmodule NeonFS.Bench do
   @moduledoc """
   Benchee-based benchmark harness for a running NeonFS test-rig cluster
-  (#1520 foundation; #1521 canonical op set).
 
   Runs on the rig host and drives real interface clients over SSH against
   a cluster booted by `neonfs-rig up` — measuring the packaged,
   distributed, TLS-data-plane path, not in-BEAM code paths.
 
-  ## Canonical operation set (#1521)
+  ## Canonical operation set
 
   For each **file-serving interface** the `neonfs-rig bench` wrapper has set
   up (FUSE, NFS, S3, WebDAV), the suite runs the canonical operations, each
@@ -26,7 +25,7 @@ defmodule NeonFS.Bench do
   directly comparable, and flow through the shared SHA-/config-stamped
   output from the foundation slice.
 
-  The **container-runtime interfaces** (#1533) are a distinct workload driven
+  The **container-runtime interfaces** are a distinct workload driven
   the way `acceptance.sh` exercises them, against a warm daemon the wrapper
   starts (so container/daemon-spawn cost isn't in the measured op):
 
@@ -222,7 +221,7 @@ defmodule NeonFS.Bench do
     "curl -sf #{iface.auth} -r 0-4095 #{iface.base}/#{iface.vol}/#{@big_file} -o /dev/null"
   end
 
-  # Docker volume (#1533): file I/O inside a warm busybox container with the
+  # Docker volume: file I/O inside a warm busybox container with the
   # NeonFS volume attached at /data (the wrapper started it, so container-spawn
   # cost isn't in the measured op). The volume's data path is FUSE underneath,
   # so only the attach + write/read/metadata ops are benchmarked; stat/range
@@ -257,7 +256,7 @@ defmodule NeonFS.Bench do
   defp command(%{kind: :docker}, op, _config) when op in [:stat_list, :range_read],
     do: :unsupported
 
-  # containerd content store (#1533): blob ingest/get throughput against a warm
+  # containerd content store: blob ingest/get throughput against a warm
   # throwaway containerd wired to the NeonFS content proxy (started by the
   # wrapper). seq_write ingests a fresh unique blob (content-addressed, so it
   # must differ each invocation to measure real ingest, not a dedup hit);

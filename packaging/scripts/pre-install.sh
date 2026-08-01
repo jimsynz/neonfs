@@ -20,7 +20,7 @@ if ! getent passwd neonfs >/dev/null 2>&1; then
 fi
 
 # Create base directories. The release creates blobs/ and ra/ itself;
-# meta/ must exist before first boot for the dist_port file (#1141).
+# meta/ must exist before first boot for the dist_port file.
 mkdir -p /var/lib/neonfs/meta
 mkdir -p /run/neonfs
 mkdir -p /etc/neonfs

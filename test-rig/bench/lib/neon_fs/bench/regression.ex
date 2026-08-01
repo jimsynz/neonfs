@@ -1,6 +1,6 @@
 defmodule NeonFS.Bench.Regression do
   @moduledoc """
-  Rolling-window regression gate for the scheduled benchmark suite (#1524).
+  Rolling-window regression gate for the scheduled benchmark suite.
 
   Compares the freshest benchee run against the **median** of a rolling
   window of the last few runs (rather than a committed baseline or the single
@@ -19,7 +19,7 @@ defmodule NeonFS.Bench.Regression do
   On regression it emits a Markdown issue body carrying the config, the
   regressed metric, its current value, the window median + σ, and a bounded
   `git bisect` range (`<oldest-run-in-window-sha>..<current-sha>`) — each run
-  is SHA-stamped (#1520/#1523), and bisect stays manual (#1525).
+  is SHA-stamped, and bisect stays manual.
   """
 
   @pct_threshold 0.10
@@ -227,7 +227,7 @@ defmodule NeonFS.Bench.Regression do
 
     ```
     git bisect start #{current_sha} #{oldest_sha}
-    git bisect run test-rig/neonfs-rig bench --rev HEAD   # see #1525
+    git bisect run test-rig/neonfs-rig bench --rev HEAD
     ```
 
     Bisect stays manual — full-VM benchmarks are too slow to auto-bisect.

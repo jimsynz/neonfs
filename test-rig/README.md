@@ -28,7 +28,7 @@ Multi-node:
 NODES=3 ./neonfs-rig up         # 3 core nodes, replicas=3
 ```
 
-Standalone interface-node join (#1163 — the #1139 acceptance):
+Standalone interface-node join:
 
 ```bash
 ./neonfs-rig up                 # bring up a cluster first
@@ -217,9 +217,9 @@ propagation isn't mistaken for inconsistency. CLI calls are wrapped in
 `CLI_TIMEOUT` (default 45 s). `KEEP=1` leaves the test mounts in place.
 
 The suite is intended to fail loudly on real defects. Against the current build
-it reports the cross-interface consistency failures (issue #1034) as `FAIL`, and
-in `multi` mode the replication step exercises multi-node formation (issues
-#1032 / #1033). Steps whose preconditions aren't met (e.g. replication on a
+it reports the cross-interface consistency failures as `FAIL`, and in `multi`
+mode the replication step exercises multi-node formation. Steps whose
+preconditions aren't met (e.g. replication on a
 single node, or a volume that failed to create) are reported `SKIP`.
 
 ## Benchmarks
@@ -262,7 +262,7 @@ exercises it. Interfaces it can't set up are logged and skipped. Per
 | `stat_list` | ms/op | stat/HEAD + directory/bucket listing |
 | `range_read` | ms/op | small random range read (skipped for S3 — `s3cmd` has no range GET) |
 
-The **container-runtime** interfaces (#1533) run a reduced set against a warm
+The **container-runtime** interfaces run a reduced set against a warm
 daemon the wrapper starts (so container/daemon-spawn cost isn't in the measured
 op): **docker** benchmarks `seq_write`/`seq_read`/`small_files` via `docker
 exec` inside a warm busybox container with the NeonFS volume attached (its data
@@ -290,7 +290,7 @@ foundation already stamps.
 ./neonfs-rig bench-matrix   # no `up` needed — it boots/tears down each config itself
 ```
 
-**Codec/tiering axes (#1497):** the `COMPRESSION`, `ENCRYPTION`, and
+**Codec/tiering axes:** the `COMPRESSION`, `ENCRYPTION`, and
 `INITIAL_TIER` env knobs (see Configuration) are applied to the volumes the rig
 creates and recorded in every result's `meta.json`, so a codec/tiering axis is
 swept by re-running with the knob set (e.g. `COMPRESSION=none ./neonfs-rig
@@ -312,7 +312,7 @@ and > 2σ** vs the rolling-window median (throughput/rate `ips` dropping,
 latency rising). On a regression it opens an issue carrying the metric, the
 median + σ, and a bounded `git bisect` range (`<oldest-in-window>..<current>`).
 A regression opens an issue rather than failing the run — bisect stays manual
-(`bench --rev`, #1525).
+(`bench --rev`).
 
 Every run writes its artifacts under `bench/results/<sha>-<timestamp>/`,
 **stamped with the commit SHA and cluster config** it was produced from:

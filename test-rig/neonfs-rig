@@ -44,7 +44,7 @@ cmd_boot() {
 
 cmd_init() { cluster_bootstrap; }
 
-# Standalone interface-node join acceptance (#1163): boot an extra VM with
+# Standalone interface-node join acceptance: boot an extra VM with
 # only neonfs-common + neonfs-cli + neonfs-nfs, join it to the running
 # cluster with an invite token, and verify registration + NFS serving +
 # daemon-restart survivability. Requires a cluster from `up` first.
@@ -103,7 +103,7 @@ bench_stage_webdav() {
 BENCH_DOCKER_CONTAINER="neonfs-bench"
 BENCH_DOCKER_VOL="bench_docker"
 
-# Warm Docker container with a NeonFS volume attached at /data (#1533). Started
+# Warm Docker container with a NeonFS volume attached at /data. Started
 # once here so the benchmarked ops (docker exec) don't pay container-spawn cost.
 bench_setup_docker() {
   node_ssh 1 "command -v docker >/dev/null 2>&1 && sudo test -S ${DOCKER_SOCK}" 2>/dev/null || return 1
@@ -116,7 +116,7 @@ bench_setup_docker() {
   node_ssh 1 "sudo docker exec ${BENCH_DOCKER_CONTAINER} dd if=/dev/zero of=/data/${BENCH_BIG_FILE} bs=1M count=${big_mib} 2>/dev/null" || return 1
 }
 
-# Warm throwaway containerd wired to the NeonFS content proxy (#1533), mirroring
+# Warm throwaway containerd wired to the NeonFS content proxy, mirroring
 # acceptance.sh's s_containerd_content config but kept running (PID recorded for
 # teardown). Pre-stages a blob and echoes "<grpc-socket>\t<digest>".
 bench_setup_containerd() {
@@ -161,13 +161,13 @@ REMOTE
   [ -n "${BENCH_CONTAINERD_GRPC}" ] && [ -n "${BENCH_CONTAINERD_DIGEST}" ]
 }
 
-# Best-effort teardown of the warm container-runtime daemons (#1533).
+# Best-effort teardown of the warm container-runtime daemons.
 bench_teardown_containers() {
   node_ssh 1 "sudo docker rm -f ${BENCH_DOCKER_CONTAINER} >/dev/null 2>&1 || true" 2>/dev/null || true
   node_ssh 1 "[ -f /tmp/neonfs-bench-ctrd/pid ] && sudo kill \$(cat /tmp/neonfs-bench-ctrd/pid) 2>/dev/null || true; sudo rm -rf /tmp/neonfs-bench-ctrd" 2>/dev/null || true
 }
 
-# Benchee benchmark harness (#1520 foundation, #1521 canonical op set). Sets up
+# Benchee benchmark harness. Sets up
 # every file-serving interface it can (FUSE, NFS, S3, WebDAV) on the running
 # cluster — reusing acceptance.sh's credential/mount setup — then runs the
 # Elixir/benchee suite in test-rig/bench, which drives the canonical op set over
@@ -177,7 +177,7 @@ bench_teardown_containers() {
 cmd_bench() {
   # `--rev <sha>`: check out, build, and boot a specific revision before
   # benchmarking, so each manual `git bisect` step over an auto-raised
-  # regression's range (#1524) is a single command (#1525). The original ref is
+  # regression's range is a single command. The original ref is
   # restored on exit. Auto-bisecting full-VM benchmarks is too slow, so bisect
   # stays manual — this just makes each step one command.
   local rev=""
@@ -255,12 +255,11 @@ cmd_bench() {
   return "${rc}"
 }
 
-# Standard cluster-config benchmark matrix (#1522). Each config is a full
+# Standard cluster-config benchmark matrix. Each config is a full
 # boot → bench → teardown cycle (node counts differ), reusing up/bench/down.
 # Every run is tagged with its config label (recorded in meta.json and the
 # result dir name), on top of the NODES/REPLICAS the foundation already stamps.
-# DRIVES_PER_NODE stays at its default; codec/tiering axes are out of scope
-# (deferred #1497).
+# DRIVES_PER_NODE stays at its default; codec/tiering axes are out of scope.
 cmd_bench_matrix() {
   command -v mix >/dev/null 2>&1 || die "mix (Elixir) not found on the rig host — needed to run the benchee harness"
 
@@ -337,7 +336,7 @@ Commands:
   up                 Boot NODES VMs, install neonfs_omnibus, form a cluster, create a volume
   boot               Boot + provision VMs only (skip cluster init)
   init               Initialise/join the cluster on already-provisioned VMs
-  iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token (#1163)
+  iface-join         Boot an interface-only VM (neonfs-nfs) and join it via invite token
   bench [--rev <sha>]  Run the benchee suite against the running cluster; --rev checks out/builds/boots that revision first (for bisect)
   bench-matrix       Boot/bench/teardown across the standard cluster-config matrix (baseline/durable/spread)
   status             Show VM and cluster status

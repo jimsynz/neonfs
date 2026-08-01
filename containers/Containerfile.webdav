@@ -49,7 +49,7 @@ EXPOSE 8081/tcp
 # set runner ENV
 ENV MIX_ENV="prod"
 
-# The app default bind is loopback (#1225); serve on all interfaces inside
+# The app default bind is loopback; serve on all interfaces inside
 # the container and restrict at the deployment/network layer instead.
 ENV NEONFS_WEBDAV_BIND="0.0.0.0"
 

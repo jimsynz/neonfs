@@ -14,7 +14,7 @@ RestartSec=5
 TimeoutStartSec=60
 # Must exceed the in-flight drain deadline (~25s; see `:drain_deadline_ms` /
 # `NEONFS_*_DRAIN_DEADLINE_MS`) plus headroom for the core final-metadata
-# snapshot, else systemd SIGKILLs the BEAM mid-drain (#1385). Bump both
+# snapshot, else systemd SIGKILLs the BEAM mid-drain. Bump both
 # together if either changes.
 TimeoutStopSec=45
 
@@ -34,7 +34,7 @@ ReadWritePaths=/var/lib/neonfs
 # The default mount-namespace propagation under PrivateTmp/ProtectSystem/
 # ProtectHome is slave, so any host mounts that resolve via this unit
 # need bidirectional propagation. `shared` makes the unit's mount view
-# escape to the host namespace. (#758)
+# escape to the host namespace.
 MountFlags=shared
 
 [Install]

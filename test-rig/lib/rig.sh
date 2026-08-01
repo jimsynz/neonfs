@@ -31,7 +31,7 @@ VOLUME_NAME="${VOLUME_NAME:-test}"
 # Default replication factor tracks the node count so `volume create` is
 # satisfiable without --allow-under-replicated.
 REPLICAS="${REPLICAS:-${NODES}}"
-# Codec/tiering knobs (#1497) applied to volumes the rig creates. compression +
+# Codec/tiering knobs applied to volumes the rig creates. compression +
 # encryption are `volume create` flags; tiering is a post-create `volume update`
 # (no create flag). Erasure has no CLI create flag yet (tracked separately), so
 # it isn't a rig knob.
@@ -263,7 +263,7 @@ provision_node() {
   log "installing neonfs_omnibus on node ${i}"
 
   node_ssh "$i" "sudo mkdir -p /tmp/debs && sudo chown rig:rig /tmp/debs"
-  # samba-vfs-neonfs is a hard dependency of neonfs-omnibus (#1551); its version
+  # samba-vfs-neonfs is a hard dependency of neonfs-omnibus; its version
   # tracks the distro Samba, not ${VERSION}, so glob it and ship it too when the
   # CIFS build produced it — otherwise apt can't satisfy the omnibus dependency.
   local vfs_deb; vfs_deb="$(ls -t "${DEB_DIR}"/samba-vfs-neonfs_*.deb 2>/dev/null | head -1 || true)"
@@ -302,7 +302,7 @@ wait_daemon() {
   warn "neonfs daemon on node ${i} not answering CLI yet (continuing)"
 }
 
-# --- standalone interface node (#1163) --------------------------------------
+# --- standalone interface node ----------------------------------------------
 
 # Fixed index for the interface-only VM so it never collides with core
 # nodes (which count up from 1).
@@ -312,8 +312,8 @@ iface_erl() { echo "neonfs_nfs@$(node_ip "$1")"; }
 
 # Install only neonfs-common + neonfs-cli + neonfs-nfs — no core, no
 # omnibus. NEONFS_CORE_NODE deliberately points at the remote core: the
-# pre-join CLI must not be able to authenticate there (#1139), proving
-# `cluster join` drives the local interface daemon instead (#1162).
+# pre-join CLI must not be able to authenticate there, proving
+# `cluster join` drives the local interface daemon instead.
 provision_iface_node() {
   local i="$1" ip; ip="$(node_ip "$i")"
   log "installing neonfs-nfs (interface-only) on node ${i}"
@@ -344,7 +344,7 @@ EOF
   log "interface daemon started on node ${i} ($(iface_erl "$i"))"
 }
 
-# The #1139 acceptance: the interface node joins with an invite token,
+# The acceptance: the interface node joins with an invite token,
 # shows up in `node list` as an nfs service, serves the NFS port, and
 # survives a daemon restart with no manual intervention.
 iface_join_scenario() {
@@ -358,7 +358,7 @@ iface_join_scenario() {
 
   iface_assert_serving "registered and serving after join"
 
-  log "restarting the interface daemon (restart survivability, #1136/#1137)"
+  log "restarting the interface daemon (restart survivability)"
   node_ssh "$i" "sudo systemctl restart neonfs-nfs"
 
   iface_assert_serving "registered and serving after restart"
@@ -397,7 +397,7 @@ cluster_bootstrap() {
   log "initialising cluster '${CLUSTER_NAME}' on node 1"
   node_cli 1 "cluster init --name '${CLUSTER_NAME}' --drive /mnt/neonfs/drive1 --system-replicas 1"
   # `cluster init` restarts the node to bring the cluster TLS config into effect
-  # (#1051), so it briefly drops out. Wait for it to come back before issuing
+  # so it briefly drops out. Wait for it to come back before issuing
   # any further CLI commands, otherwise they hit the node mid-restart.
   wait_init_restart 1
   add_extra_drives 1
@@ -418,7 +418,7 @@ cluster_bootstrap() {
   apply_initial_tier 1 "${VOLUME_NAME}"
 }
 
-# Volume codec flags (#1497) for `volume create`. Tiering is applied separately
+# Volume codec flags for `volume create`. Tiering is applied separately
 # via `apply_initial_tier` because `initial_tier` is a `volume update` field.
 codec_create_flags() {
   printf -- '--compression %s --encryption %s' "${COMPRESSION}" "${ENCRYPTION}"
@@ -438,7 +438,7 @@ add_extra_drives() {
   done
 }
 
-# `cluster init` triggers a full node restart (#1051). Wait for the node to drop
+# `cluster init` triggers a full node restart. Wait for the node to drop
 # out (restart started) and then recover, so subsequent CLI commands don't race
 # the reboot.
 wait_init_restart() {

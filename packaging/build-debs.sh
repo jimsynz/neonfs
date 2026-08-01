@@ -112,10 +112,10 @@ cargo build --release
 # accumulate alongside the new ones, and in some cases the new
 # `lib/<app>-<new_vsn>/priv/` is left empty because `priv/` was already
 # materialised under the old vsn. That's how `neonfs_blob.so` ended up
-# missing from `neonfs_core-0.2.3/priv/native/` in the omnibus deb (#746).
+# missing from `neonfs_core-0.2.3/priv/native/` in the omnibus deb.
 # Wipe `_build/prod/rel/` before every release so each build starts clean.
 # neonfs_cifs is opt-in (NEONFS_BUILD_CIFS=1): its Samba VFS module needs a
-# heavy, root/apt-requiring in-tree Samba build (#1527), which callers like the
+# heavy, root/apt-requiring in-tree Samba build, which callers like the
 # test-rig's `ensure_debs` neither need nor can run unprivileged. The release
 # pipeline builds it via its own path.
 for component in neonfs_core neonfs_fuse neonfs_nfs neonfs_s3 neonfs_webdav neonfs_docker neonfs_containerd neonfs_omnibus ${NEONFS_BUILD_CIFS:+neonfs_cifs}; do
@@ -133,7 +133,7 @@ done
 
 # Step 2b: Build the samba-vfs-neonfs Debian package — the Samba VFS module,
 # built from the distro's own samba source so it loads in the host smbd (a
-# bespoke build links against the wrong private-lib symbol versions; #1548).
+# bespoke build links against the wrong private-lib symbol versions).
 # neonfs-cifs / neonfs-omnibus `Depends: samba-vfs-neonfs`. Opt-in — see the
 # NEONFS_BUILD_CIFS note above.
 if [ -n "${NEONFS_BUILD_CIFS:-}" ]; then

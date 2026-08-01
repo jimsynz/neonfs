@@ -17,7 +17,7 @@ NEONFS_DATA_DIR="${NEONFS_DATA_DIR:-/var/lib/neonfs}"
 DEFAULT_HOST="$(hostname -f 2>/dev/null || hostname)"
 RELEASE_NODE="${NEONFS_CIFS_NODE:-${RELEASE_NODE:-neonfs_cifs@${DEFAULT_HOST}}}"
 NEONFS_CORE_NODE="${NEONFS_CORE_NODE:-neonfs_core@${DEFAULT_HOST}}"
-# Exported so the release's env.sh sees the wrapper's choices (#1141)
+# Exported so the release's env.sh sees the wrapper's choices
 export NEONFS_DATA_DIR RELEASE_NODE NEONFS_CORE_NODE
 # Unix socket the Samba vfs_neonfs.so shim dials (matches runtime.exs default).
 NEONFS_CIFS_SOCKET="${NEONFS_CIFS_SOCKET:-/run/neonfs/cifs.sock}"
