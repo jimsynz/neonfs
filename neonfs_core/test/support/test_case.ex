@@ -904,7 +904,15 @@ defmodule NeonFS.TestCase do
     receive do: ({:DOWN, ^ref, :process, ^pid, _} -> :ok), after: (5000 -> :ok)
   end
 
-  defp ensure_events_infrastructure do
+  @doc """
+  Starts `:pg`, the events `Registry` and the `Relay` if they are not already
+  running. Safe to call more than once.
+
+  Public because a test that only needs to observe events — asserting on a
+  broadcast rather than on stored state — should not have to start a
+  `VolumeRegistry` it does not otherwise use just to get the registry up.
+  """
+  def ensure_events_infrastructure do
     try do
       start_supervised!(%{id: :pg_neonfs_events, start: {:pg, :start_link, [:neonfs_events]}})
     rescue

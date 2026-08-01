@@ -465,9 +465,29 @@ defmodule NeonFS.Core.FileIndex do
   """
   @spec move(volume_id(), path(), path(), String.t()) :: :ok | {:error, term()}
   def move(volume_id, source_dir, dest_dir, name) do
+    move_rename(volume_id, source_dir, dest_dir, name, name)
+  end
+
+  @doc """
+  Moves a file or directory across directories *and* renames it, publishing
+  one `FileMeta.path` transition.
+
+  Doing this as `move/4` then `rename/4` leaves the file in the destination
+  directory under its old basename between the two publications, and any
+  concurrent reader — another interface node's `list_dir`, a scrub pass, a
+  range scan — can observe that intermediate path. It is a state the caller
+  never asked for (#1608).
+
+  With `dest_name == name` this is exactly `move/4`; the destination check
+  is a no-op for equal names, so plain moves keep their existing behaviour
+  of not testing the target.
+  """
+  @spec move_rename(volume_id(), path(), path(), String.t(), String.t()) ::
+          :ok | {:error, term()}
+  def move_rename(volume_id, source_dir, dest_dir, name, dest_name) do
     GenServer.call(
       __MODULE__,
-      {:move, volume_id, source_dir, dest_dir, name},
+      {:move_rename, volume_id, source_dir, dest_dir, name, dest_name},
       mutation_call_timeout()
     )
   end
@@ -718,9 +738,13 @@ defmodule NeonFS.Core.FileIndex do
   end
 
   @impl true
-  def handle_call({:move, volume_id, source_dir, dest_dir, name}, from, state) do
+  def handle_call(
+        {:move_rename, volume_id, source_dir, dest_dir, name, dest_name},
+        from,
+        state
+      ) do
     stage_or_reply(
-      plan_move(volume_id, source_dir, dest_dir, name, state.pending_files),
+      plan_move(volume_id, source_dir, dest_dir, name, dest_name, state.pending_files),
       from,
       state
     )
@@ -1252,7 +1276,15 @@ defmodule NeonFS.Core.FileIndex do
 
   ## Private — Move (across directories)
 
-  defp plan_move(volume_id, source_dir, dest_dir, name, overlay) do
+  # `dest_name` differing from `name` is the combined move-and-rename. It
+  # publishes one `FileMeta.path` transition — old full path to new full
+  # path — rather than the `move` then `rename` pair that left the file
+  # briefly in the destination directory under its old basename (#1608).
+  #
+  # The dirent pair keeps writing the new key before deleting the old, so a
+  # crash leaves a recoverable duplicate rather than a vanished entry (the
+  # per-entry index-key pattern from #1294).
+  defp plan_move(volume_id, source_dir, dest_dir, name, dest_name, overlay) do
     source_normalized = FileMeta.normalize_path(source_dir)
     dest_normalized = FileMeta.normalize_path(dest_dir)
 
@@ -1270,19 +1302,28 @@ defmodule NeonFS.Core.FileIndex do
       )
 
     with {:ok, child} <- read_dirent(volume_id, source_normalized, name),
+         :ok <- check_rename_target(volume_id, dest_normalized, name, dest_name),
          {:ok, updated_file} <-
-           file_at_new_path(volume_id, child, Path.join(dest_normalized, name), overlay),
+           file_at_new_path(volume_id, child, Path.join(dest_normalized, dest_name), overlay),
          {:ok, intent_id} <- intent_log().try_acquire(intent) do
       mutations =
         [
-          dirent_put_mutation(volume_id, dest_normalized, name, child.type, child.id),
+          dirent_put_mutation(volume_id, dest_normalized, dest_name, child.type, child.id),
           dirent_delete_mutation(volume_id, source_normalized, name)
         ] ++ file_path_mutations(updated_file)
 
       on_commit = fn ->
         complete_intent(intent_id)
         materialise_file_path(updated_file)
-        broadcast_move_event(volume_id, child, source_normalized, dest_normalized, name)
+
+        broadcast_move_event(
+          volume_id,
+          child,
+          source_normalized,
+          dest_normalized,
+          name,
+          dest_name
+        )
       end
 
       {:stage, volume_id, mutations, on_commit, default_on_abort(), :ok,
@@ -1761,9 +1802,9 @@ defmodule NeonFS.Core.FileIndex do
     end
   end
 
-  defp broadcast_move_event(volume_id, child, source_dir, dest_dir, name) do
+  defp broadcast_move_event(volume_id, child, source_dir, dest_dir, name, dest_name) do
     old_path = join_path(source_dir, name)
-    new_path = join_path(dest_dir, name)
+    new_path = join_path(dest_dir, dest_name)
 
     case child.type do
       :file ->

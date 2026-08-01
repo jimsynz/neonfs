@@ -6,6 +6,7 @@ defmodule NeonFS.Core.FileIndexTest do
 
   alias NeonFS.Core.{ChunkIndex, ChunkMeta, DirectoryEntry, FileIndex, FileMeta}
   alias NeonFS.Error.{AlreadyExists, InvalidPath, QuorumUnavailable}
+  alias NeonFS.Events.FileRenamed
 
   @moduletag :tmp_dir
 
@@ -785,6 +786,79 @@ defmodule NeonFS.Core.FileIndexTest do
       {:ok, _} = FileIndex.mkdir("vol1", "/dest")
 
       assert {:error, :not_found} = FileIndex.move("vol1", "/src", "/dest", "nope.txt")
+    end
+  end
+
+  # A rename changing both the directory and the basename used to run as a
+  # `move` then a `rename`, leaving the file in the destination directory
+  # under its old basename in between — a path the caller never asked for and
+  # that a concurrent reader could observe (#1608).
+  describe "move_rename/5" do
+    setup do
+      ensure_events_infrastructure()
+      {:ok, _} = FileIndex.mkdir("vol1", "/src")
+      {:ok, _} = FileIndex.mkdir("vol1", "/dest")
+      {:ok, moved} = FileIndex.create(FileMeta.new("vol1", "/src/old.txt"))
+      %{moved: moved}
+    end
+
+    # The property is "one publication", so count publications rather than
+    # racing a poller against them. A poller is the obvious test and a bad
+    # one: the two-step sequence completed faster than it could sample, so it
+    # passed against the old code too.
+    #
+    # Each published transition broadcasts one `FileRenamed`. The old
+    # `move` + `rename` pair emitted two — `/src/old.txt` -> `/dest/old.txt`
+    # then `/dest/old.txt` -> `/dest/new.txt`, the middle value being the
+    # intermediate nobody asked for.
+    test "publishes exactly one path transition, straight to the final path", %{moved: moved} do
+      NeonFS.Events.subscribe("vol1")
+
+      assert :ok = FileIndex.move_rename("vol1", "/src", "/dest", "old.txt", "new.txt")
+
+      assert_receive {:neonfs_event, %{event: %FileRenamed{} = event}}, 2_000
+      assert event.file_id == moved.id
+      assert event.old_path == "/src/old.txt"
+      assert event.new_path == "/dest/new.txt"
+
+      refute_receive {:neonfs_event, %{event: %FileRenamed{}}}, 200
+    end
+
+    test "the intermediate path never resolves", %{moved: moved} do
+      assert :ok = FileIndex.move_rename("vol1", "/src", "/dest", "old.txt", "new.txt")
+
+      assert {:error, :not_found} = FileIndex.get_by_path("vol1", "/dest/old.txt")
+      assert {:error, :not_found} = FileIndex.get_by_path("vol1", "/src/old.txt")
+      assert {:ok, %{id: id}} = FileIndex.get_by_path("vol1", "/dest/new.txt")
+      assert id == moved.id
+    end
+
+    test "the dirent moves and renames in one step" do
+      assert :ok = FileIndex.move_rename("vol1", "/src", "/dest", "old.txt", "new.txt")
+
+      assert {:ok, src_children} = FileIndex.list_dir("vol1", "/src")
+      refute Map.has_key?(src_children, "old.txt")
+
+      assert {:ok, dest_children} = FileIndex.list_dir("vol1", "/dest")
+      assert Map.has_key?(dest_children, "new.txt")
+      refute Map.has_key?(dest_children, "old.txt")
+    end
+
+    test "refuses when the destination name is taken" do
+      {:ok, _} = FileIndex.create(FileMeta.new("vol1", "/dest/new.txt"))
+
+      assert {:error, %AlreadyExists{}} =
+               FileIndex.move_rename("vol1", "/src", "/dest", "old.txt", "new.txt")
+
+      # The source is untouched by the refusal.
+      assert {:ok, %{path: "/src/old.txt"}} = FileIndex.get_by_path("vol1", "/src/old.txt")
+    end
+
+    # `move/4` is `move_rename/5` with equal names, and its destination check
+    # is a no-op for those — so plain moves keep not testing the target.
+    test "an equal-name relocation behaves exactly like move/4", %{moved: moved} do
+      assert :ok = FileIndex.move_rename("vol1", "/src", "/dest", "old.txt", "old.txt")
+      assert {:ok, %{path: "/dest/old.txt"}} = FileIndex.get("vol1", moved.id)
     end
   end
 
